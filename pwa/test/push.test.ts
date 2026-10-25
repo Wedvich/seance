@@ -47,6 +47,7 @@ function subscription(
   key: string,
   calls: Calls,
   local: boolean | Error = true,
+  onGone: () => void = () => {},
 ): PushSubscriptionLike {
   return {
     endpoint,
@@ -56,6 +57,7 @@ function subscription(
     unsubscribe: () => {
       calls.order.push("unsubscribe");
       calls.unsubscribed.push(endpoint);
+      if (local === true) onGone();
       return local instanceof Error ? Promise.reject(local) : Promise.resolve(local);
     },
   };
@@ -69,6 +71,8 @@ function harness(opts: {
   settings?: PushSettingsReading | StoreRefusal | null | Error;
   reply?: PushSubscribeReply | null | Error;
   manager?: Error;
+  /** `getSubscription()` rejects with this. */
+  getFails?: Error;
   /** What the existing subscription's `unsubscribe()` answers. */
   local?: boolean | Error;
   unsubscribeReply?: PushUnsubscribeReply | null | Error;
@@ -83,10 +87,13 @@ function harness(opts: {
     optedOut: [],
     order: [],
   };
-  const existing =
+  // What the browser holds now: an unsubscribe that works empties it, a subscribe fills it.
+  let held: PushSubscriptionLike | null =
     opts.existing === undefined
       ? null
-      : subscription(opts.existing.endpoint, opts.existing.key, calls, opts.local ?? true);
+      : subscription(opts.existing.endpoint, opts.existing.key, calls, opts.local ?? true, () => {
+          held = null;
+        });
   let optedOut = opts.optedOut ?? false;
   const settings = opts.settings === undefined ? { publicKey: PUBLIC_KEY, subscribed: false } : opts.settings;
   const reply = opts.reply === undefined ? { endpoint: ENDPOINT } : opts.reply;
@@ -126,12 +133,13 @@ function harness(opts: {
       return Promise.resolve({
         getSubscription: () => {
           calls.order.push("get");
-          return Promise.resolve(existing);
+          return opts.getFails === undefined ? Promise.resolve(held) : Promise.reject(opts.getFails);
         },
         subscribe: (options) => {
           calls.order.push("subscribe");
           calls.subscribed.push(options.applicationServerKey);
-          return Promise.resolve(subscription(opts.made ?? ENDPOINT, PUBLIC_KEY, calls));
+          held = subscription(opts.made ?? ENDPOINT, PUBLIC_KEY, calls);
+          return Promise.resolve(held);
         },
       });
     },
@@ -355,6 +363,24 @@ describe("resyncPush", () => {
     expect(await resyncPush(client, env)).toBeNull();
     expect(calls.order).toEqual([]);
   });
+
+  test("a turn-off that lands while it prepares wins: nothing is subscribed", async () => {
+    const { client, env, calls } = harness({
+      existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
+      settings: { publicKey: PUBLIC_KEY, subscribed: false },
+    });
+    const slow: PushClient = {
+      ...client,
+      pushSettings: async (endpoint) => {
+        const reading = await client.pushSettings(endpoint);
+        env.setOptedOut(true);
+        return reading;
+      },
+    };
+    expect(await resyncPush(slow, env)).toBeNull();
+    expect(calls.sent).toEqual([]);
+    expect(calls.subscribed).toEqual([]);
+  });
 });
 
 describe("disablePush", () => {
@@ -386,12 +412,17 @@ describe("disablePush", () => {
       new RequestFailure("timeout", "no answer"),
       { ok: false, code: "not_ready", message: "raw" },
       { ok: false, code: "settings_unavailable", message: "raw" },
-      null,
     ] as const) {
       // oxlint-disable-next-line no-await-in-loop -- one harness per case
       const note = await offWith(reply);
       expect(note).toContain("Couldn't tell the scheduler leader");
       expect(note).not.toContain("older version");
+    }
+    // Answers the app cannot read, or that echo another endpoint, are not "couldn't tell" and not a removal either.
+    for (const reply of [null, { endpoint: "https://fcm.googleapis.com/fcm/send/other" }]) {
+      // oxlint-disable-next-line no-await-in-loop -- one harness per case
+      const note = await offWith(reply);
+      expect(note).toContain("Couldn't read the scheduler leader's answer");
     }
   });
 
@@ -421,11 +452,47 @@ describe("disablePush", () => {
       message: "This browser couldn't turn push off. Try again.",
       retryable: true,
     });
-    // Still marked off: a reload must not subscribe it again while it is half turned off.
-    expect(neither.calls.optedOut).toEqual([true]);
+    // Nothing was turned off, so the person is not opted out of the re-sync.
+    expect(neither.calls.optedOut).toEqual([true, false]);
+    expect(neither.env.optedOut()).toBe(false);
 
     const stuck = harness({ manager: new PushTimeout() });
     expect(messageOf(await disablePush(stuck.client, stuck.env))).toContain("service worker");
+    expect(stuck.env.optedOut()).toBe(false);
+
+    const unreadable = harness({ getFails: new Error("storage gone") });
+    expect(messageOf(await disablePush(unreadable.client, unreadable.env))).toContain("couldn't turn push off");
+    expect(unreadable.env.optedOut()).toBe(false);
+
+    // A failed retry must not drop a turn-off that already stood.
+    const already = harness({ optedOut: true, getFails: new Error("storage gone") });
+    await disablePush(already.client, already.env);
+    expect(already.env.optedOut()).toBe(true);
+  });
+
+  test("off, inspected and enabled again on one browser: it subscribes anew and the re-sync is back", async () => {
+    const { client, env, calls } = harness({
+      existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
+      settings: { publicKey: PUBLIC_KEY, subscribed: true },
+    });
+    expect(await disablePush(client, env)).toEqual({ kind: "disabled", note: null });
+    const inspection = await inspectPush(client, env);
+    if (inspection.kind !== "off") throw new Error(`expected off, got ${inspection.kind}`);
+    expect(calls.subscribed).toEqual([]);
+    expect(await enablePush(client, env, inspection.prepared)).toEqual({ kind: "enabled" });
+    expect(calls.subscribed).toEqual([fromBase64Url(PUBLIC_KEY)]);
+    expect(calls.sent).toEqual([{ endpoint: ENDPOINT, keys: KEYS }]);
+    expect(env.optedOut()).toBe(false);
+  });
+
+  test("an inspection that finds the browser on drops a stale turn-off", async () => {
+    const { client, env } = harness({
+      optedOut: true,
+      existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
+      settings: { publicKey: PUBLIC_KEY, subscribed: true },
+    });
+    expect(await inspectPush(client, env)).toEqual({ kind: "on" });
+    expect(env.optedOut()).toBe(false);
   });
 
   test("turning it on again clears the turn-off, so the re-sync is back", async () => {

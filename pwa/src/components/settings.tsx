@@ -169,7 +169,7 @@ function NotificationsCard(props: { push: PushClient }): JSX.Element {
   const [view, setView] = useState<PushView>(initialPushView);
   // What `inspectPush` read ahead of the click: the key and the push manager, so the click subscribes at once.
   const prepared = useRef<PushPrepared | null>(null);
-  // What the last turn-off left behind: the leader still holding this browser's slot. Cleared by the next click.
+  // What the last turn-off left behind: the leader still holding this browser's slot. Cleared by the next click or retry.
   const [note, setNote] = useState<string | null>(null);
   const checking = view.kind === "checking";
   // "On" is what this browser really holds, so permission alone never shows it: the browser is asked.
@@ -211,11 +211,16 @@ function NotificationsCard(props: { push: PushClient }): JSX.Element {
           return;
         }
         setNote(outcome.note);
-        setView({ kind: "checking" });
+        // The turn-off worked, so a failing read is still "off": Enable prepares after the prompt when it has nothing ready.
+        void inspectPush(push, browserPushEnv).then((result) => {
+          prepared.current = result.kind === "off" ? result.prepared : null;
+          setView({ kind: result.kind === "on" ? "on" : "off" });
+        });
       });
   };
   const retry = (): void => {
     if (view.kind !== "failed") return;
+    setNote(null);
     if (view.retry === "inspect") setView({ kind: "checking" });
     else if (view.retry === "disable") disable();
     else enable();

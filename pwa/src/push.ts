@@ -131,6 +131,8 @@ const UNREADABLE = "Couldn't read the scheduler's answer. Update seanced and the
 const NOT_UNSUBSCRIBED = "This browser couldn't turn push off. Try again.";
 const SLOT_KEPT_OLDER =
   "The scheduler leader is on an older version, so it keeps this browser's slot until the push service reports it gone.";
+const SLOT_UNREADABLE =
+  "Couldn't read the scheduler leader's answer, so it may keep this browser's slot until the push service reports it gone. Update seanced and the app to matching versions.";
 const SLOT_KEPT =
   "Couldn't tell the scheduler leader, so it keeps this browser's slot until the push service reports it gone.";
 
@@ -209,7 +211,7 @@ async function subscribeWith(client: PushClient, prepared: PushPrepared): Promis
   return { kind: "enabled" };
 }
 
-async function guarded(work: () => Promise<PushOutcome>): Promise<PushOutcome> {
+async function guarded<T>(work: () => Promise<T>): Promise<T | PushFailure> {
   try {
     return await work();
   } catch (err) {
@@ -226,7 +228,12 @@ export async function inspectPush(client: PushClient, env: PushEnv): Promise<Pus
   try {
     const prepared = await prepare(client, env);
     if ("kind" in prepared) return prepared;
-    return prepared.held && env.permission() === "granted" ? { kind: "on" } : { kind: "off", prepared };
+    if (prepared.held && env.permission() === "granted") {
+      // A browser proven on is not turned off: a stale flag (a turn-off that did not finish) must not keep the re-sync away.
+      env.setOptedOut(false);
+      return { kind: "on" };
+    }
+    return { kind: "off", prepared };
   } catch (err) {
     return failureOf(err);
   }
@@ -269,7 +276,10 @@ export async function resyncPush(client: PushClient, env: PushEnv): Promise<Push
   if (env.permission() !== "granted" || env.optedOut()) return null;
   return guarded(async () => {
     const prepared = await prepare(client, env);
-    return "kind" in prepared ? prepared : subscribeWith(client, prepared);
+    if ("kind" in prepared) return prepared;
+    // A Turn off can land while `prepare` waits (a not_ready retry, a slow service worker): read the flag again.
+    if (env.optedOut()) return null;
+    return subscribeWith(client, prepared);
   });
 }
 
@@ -277,8 +287,9 @@ export async function resyncPush(client: PushClient, env: PushEnv): Promise<Push
 async function freeSlot(client: PushClient, endpoint: string): Promise<string | null> {
   try {
     const reply = await client.pushUnsubscribe({ endpoint });
-    if (reply === null) return SLOT_KEPT;
-    if (!("ok" in reply)) return null;
+    if (reply === null) return SLOT_UNREADABLE;
+    // An echo of another endpoint is not an answer about this one.
+    if (!("ok" in reply)) return reply.endpoint === endpoint ? null : SLOT_UNREADABLE;
     // The endpoint passed `pushEndpoint` here, so `invalid_request` can only be a leader that predates the op.
     return reply.code === "invalid_request" ? SLOT_KEPT_OLDER : SLOT_KEPT;
   } catch {
@@ -290,16 +301,23 @@ async function freeSlot(client: PushClient, endpoint: string): Promise<string | 
  * The card's Turn off: unsubscribe this browser, then ask the leader to drop its endpoint.
  * The local unsubscribe goes first because it is what stops pushes here and needs no leader;
  * the op only frees the slot, and an endpoint it could not remove is pruned at the push
- * service's next 404/410. Marks the browser turned off before anything can fail, so the next
- * load's re-sync does not subscribe it again. Never rejects.
+ * service's next 404/410. Marks the browser turned off before anything can fail, so a re-sync in
+ * flight or on the next load does not subscribe it again, and puts the mark back when the
+ * turn-off failed with nothing changed. Never rejects.
  */
 export async function disablePush(client: PushClient, env: PushEnv): Promise<PushOffOutcome> {
+  const wasOptedOut = env.optedOut();
   env.setOptedOut(true);
+  // The browser still pushes, so the person has not opted out of the re-sync.
+  const unchanged = (message: string): PushFailure => {
+    env.setOptedOut(wasOptedOut);
+    return failure(message, true);
+  };
   let existing: PushSubscriptionLike | null;
   try {
     existing = await (await env.manager()).getSubscription();
   } catch (err) {
-    return failure(err instanceof PushTimeout ? WORKER_NOT_READY : NOT_UNSUBSCRIBED, true);
+    return unchanged(err instanceof PushTimeout ? WORKER_NOT_READY : NOT_UNSUBSCRIBED);
   }
   if (existing === null) return { kind: "disabled", note: null };
   const endpoint = pushEndpoint(existing.endpoint);
@@ -313,7 +331,7 @@ export async function disablePush(client: PushClient, env: PushEnv): Promise<Pus
   const note = endpoint === null ? null : await freeSlot(client, endpoint);
   // A browser that kept its subscription is still off once the leader dropped the endpoint: nothing sends to it.
   if (unsubscribed || (endpoint !== null && note === null)) return { kind: "disabled", note };
-  return failure(NOT_UNSUBSCRIBED, true);
+  return unchanged(NOT_UNSUBSCRIBED);
 }
 
 /** What `watchResync` needs of the app: whether a leader is verified now, and a nudge on every change. */
