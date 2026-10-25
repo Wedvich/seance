@@ -50,7 +50,11 @@ export class AccountCache {
       const listing = await this.#client.listAccounts();
       if (listing?.ok === true) records = listing.accounts.map((entry) => entry.record);
     } catch (err) {
-      if (!(err instanceof RequestFailure)) throw err;
+      if (!(err instanceof RequestFailure)) {
+        // A rejected promise left in `#pending` would poison every read of this generation.
+        if (generation === this.#generation) this.#pending = null;
+        throw err;
+      }
     }
     if (generation !== this.#generation) return records;
     this.#pending = null;

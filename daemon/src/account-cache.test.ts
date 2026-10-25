@@ -56,6 +56,9 @@ describe("AccountCache", () => {
   test("anything but a request failure still throws", async () => {
     const { relay, cache } = cached();
     relay.accounts = new Error("bug");
-    expect(cache.read()).rejects.toThrow("bug");
+    await expect(cache.read()).rejects.toThrow("bug");
+    // The rejection is not kept: a later read lists again.
+    relay.accounts = RECORDS;
+    expect(await cache.read()).toEqual(RECORDS);
   });
 });
