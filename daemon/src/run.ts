@@ -1,6 +1,7 @@
 import {
   CAPABILITIES,
   ENVELOPE_MAX_CT_LENGTH,
+  FLEET_QUOTA_INTERVAL_MS,
   importPsk,
   ReplayGuard,
   STATUS_INTERVAL_MS,
@@ -26,6 +27,7 @@ import { exclaveInfoEqual, scanExclaves, tagExclaves, type ExclaveScan } from ".
 import { appRelayClient } from "./app-relay.ts";
 import type { BranchStateDeps } from "./branch-state.ts";
 import { createHandler, createLocalOps, type HandlerContext } from "./handlers.ts";
+import { createFleetQuotaWriter, newestReadings } from "./fleet-quota.ts";
 import { createLeader, type Leader, type QueueStore } from "./leader.ts";
 import { startLocalSocket } from "./local-socket.ts";
 import { log } from "./log.ts";
@@ -119,6 +121,8 @@ export interface RunOpts {
   readonly httpFetch?: Fetch;
   /** The host telemetry samples; defaults to `hostProbe`. */
   readonly probe?: HostProbe;
+  /** Tests only: the fleet quota writer's cadence, `FLEET_QUOTA_INTERVAL_MS` in production. */
+  readonly fleetQuota?: { readonly intervalMs?: number };
 }
 
 export interface SelfUpdateOpts {
@@ -368,6 +372,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       intervalMs: opts.telemetryIntervalMs ?? STATUS_INTERVAL_MS,
       connected: () => client.connected,
       send: (snapshot, current) => client.sendStatus(snapshot, current),
+      // Late-bound: the writer is built after the loop it reads.
+      onSample: () => fleetQuota.sampled(),
     },
   );
 
@@ -376,7 +382,13 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   const leader = createLeader({
     selfDeviceId: state.deviceId,
     createRelay: (term, onEvent) =>
-      appRelayClient(config, key, (line) => log.info(line), { term, onEvent, guard: schedulerGuard }),
+      appRelayClient(
+        config,
+        key,
+        (line) => log.info(line),
+        { term, onEvent, guard: schedulerGuard },
+        FLEET_QUOTA_INTERVAL_MS,
+      ),
     local: createLocalOps(handlerCtx, "leader"),
     // Late-bound: the client below is built after the leader it hands frames to.
     reply: (to, response) => client.reply(to, response),
@@ -394,6 +406,18 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     prStatus: opts.leader?.prStatus ?? {},
   });
 
+  // Over this daemon's own socket, which `quota:` needs registered, not fenced.
+  // Late-bound to the client like the leader; started once the client is.
+  const fleetQuota = createFleetQuotaWriter({
+    leg: { store: (frame) => client.store(frame) },
+    key,
+    deviceId: state.deviceId,
+    observations: () => newestReadings(status.latest(), registered.scan, registered.exclaves.info),
+    ready: () => client.registered,
+    now,
+    ...(opts.fleetQuota?.intervalMs === undefined ? {} : { intervalMs: opts.fleetQuota.intervalMs }),
+  });
+
   const client = new RelayClient({
     url: config.relayUrl,
     bearerToken: config.bearerToken,
@@ -409,6 +433,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     onRegister: (info): void => {
       registered = candidates.get(info) ?? registered;
       status.sampleNow();
+      fleetQuota.registered();
     },
     onConnect: (): void => {
       updateRuntime(true);
@@ -472,6 +497,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       `psk ${await pskFingerprint(resolved.psk)} (${resolved.source})`,
   );
   client.start();
+  fleetQuota.start();
   // The first sample waits for no socket: history starts with the process.
   status.sampleNow();
 
@@ -526,6 +552,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     stop: (): void => {
       stopped = true;
       status.stop();
+      fleetQuota.stop();
       handlerCtx.backend.stop?.();
       capabilities.stop();
       // Its leg, timer and loop go with the handle too, before the client it hears terms on.

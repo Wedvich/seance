@@ -641,7 +641,8 @@ export interface StoreChangedFrame {
  *
  * M4's three: `account` (`AccountRecord`, sealed to `"app"` by `sealAccountRecord`,
  * shared/src/account-record.ts), `quota` (`FleetQuotaRecord`, sealed to `"app"` by
- * daemons; shape only, no writer so far) and `settings` (`SettingsRecord`, sealed to
+ * each daemon's fleet quota writer, `daemon/src/fleet-quota.ts`, and opened only
+ * through `openFleetQuotaRecord`) and `settings` (`SettingsRecord`, sealed to
  * SCHEDULER_ID by the leader; shape only, no writer so far).
  */
 export const AT_REST_OPS = {
@@ -2073,6 +2074,21 @@ export interface AccountRecord extends VersionBound {
   /** Null once cleared: `account:` refuses deletes (decided #8), so a clear is an overwrite. */
   readonly alias: string | null;
 }
+
+/**
+ * How far past now a quota stamp may sit. Readers take the newest observation
+ * per account, so one far-future stamp would pin that account's quota until
+ * the clock caught up: the daemon caps a cached `fetchedAtMs` at this, and a
+ * fleet quota writer replaces a stored entry stamped past it.
+ */
+export const QUOTA_CLOCK_SKEW_MS = 60_000;
+
+/**
+ * Fleet quota record cadence: how often a daemon offers its newest readings,
+ * and how often an app that reads the record re-reads it (no `store-changed`
+ * reaches apps for `quota:`).
+ */
+export const FLEET_QUOTA_INTERVAL_MS = 5 * 60_000;
 
 /** One account's quota observation without its exclave index — what a `QuotaObservation` is once it leaves its status. */
 export type QuotaReading = Omit<QuotaObservation, "x">;

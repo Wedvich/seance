@@ -11,12 +11,13 @@ import {
   type Candidate,
   type Decision,
   type ExclaveInfo,
+  type FleetQuotaEntry,
   type Machine,
   type MachineStatus,
   type NewestQuota,
   type PauseHold,
   type QuotaBasis,
-  type QuotaObservation,
+  type QuotaReading,
   type Reason,
   type RepoEntry,
   type ScoreComponents,
@@ -46,6 +47,8 @@ export interface RouteInput {
   readonly config: SchedulerConfig;
   /** What holds dispatch (`queue:pause`); expired ones are ignored here. */
   readonly holds?: readonly PauseHold[];
+  /** The fleet quota record's entries (`Fleet.fleetQuota`), folded with every status. */
+  readonly fleetQuota?: readonly FleetQuotaEntry[];
 }
 
 const SPAN_MS: Readonly<Record<WindowSpan, number>> = { "5h": 5 * 3600_000, "7d": 7 * 86_400_000 };
@@ -83,7 +86,7 @@ interface Pass {
 export function route(input: RouteInput): Decision {
   const { task, machines, now, config } = input;
   const inFlight = input.tasks.filter((t) => t.id !== task.id && IN_FLIGHT.includes(t.state));
-  const newest = newestQuotaByAccount(machines);
+  const newest = newestQuotaByAccount(machines, input.fleetQuota);
   const pass: Pass = {
     task,
     now,
@@ -250,7 +253,7 @@ function judgeAccount(
  * reads 100 there while credits remain. Only a daemon that predates the
  * amounts leaves the percent to decide. Last month's spend is unknown, not spent.
  */
-function creditsSpent({ c, cu, cl, at }: QuotaObservation, nowMs: number): boolean {
+function creditsSpent({ c, cu, cl, at }: QuotaReading, nowMs: number): boolean {
   if (!sameCreditMonth(at, nowMs / 1000)) return false;
   if (cu !== undefined && cl !== undefined) return cu >= cl;
   return (c ?? 0) >= 100;
@@ -369,8 +372,9 @@ export function accountResetAt(
   tasks: readonly Task[],
   now: number,
   config: SchedulerConfig,
+  fleetQuota: readonly FleetQuotaEntry[] = [],
 ): number | null {
-  const account = accountQuota(accountId, machines, newestQuotaByAccount(machines));
+  const account = accountQuota(accountId, machines, newestQuotaByAccount(machines, fleetQuota));
   if (!account.known) return null;
   const resetMs = (w: QuotaWindow): number[] =>
     w.resetsAt !== undefined && w.resetsAt * 1000 > now ? [w.resetsAt * 1000] : [];
@@ -394,8 +398,13 @@ export function accountResetAt(
 }
 
 /** The reset of one window (a `Candidate.spill` label) on `accountId`'s newest reading, unix seconds. */
-export function windowResetOf(accountId: string, machines: readonly Machine[], window: string): number | undefined {
-  const account = accountQuota(accountId, machines, newestQuotaByAccount(machines));
+export function windowResetOf(
+  accountId: string,
+  machines: readonly Machine[],
+  window: string,
+  fleetQuota: readonly FleetQuotaEntry[] = [],
+): number | undefined {
+  const account = accountQuota(accountId, machines, newestQuotaByAccount(machines, fleetQuota));
   return account.known ? account.windows.find((w) => w.label === window)?.resetsAt : undefined;
 }
 
@@ -442,7 +451,7 @@ function carries(machine: Machine, status: MachineStatus, accountId: string): bo
 }
 
 /** Every window the reading has; which of them a task is judged on is `appliesTo`'s. */
-function windowsOf(o: QuotaObservation): QuotaWindow[] {
+function windowsOf(o: QuotaReading): QuotaWindow[] {
   const windows: QuotaWindow[] = [];
   if (o.h !== undefined) windows.push({ label: "5h", pct: o.h, resetsAt: o.hr, span: "5h" });
   if (o.d !== undefined) windows.push({ label: "7d", pct: o.d, resetsAt: o.dr, span: "7d" });

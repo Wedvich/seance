@@ -1097,7 +1097,7 @@ export function parseAccountRecord(value: unknown): AccountRecord | null {
   return { version: value["version"], accountId: value["accountId"], alias };
 }
 
-function parseFleetQuotaEntry(value: unknown): FleetQuotaEntry | null {
+export function parseFleetQuotaEntry(value: unknown): FleetQuotaEntry | null {
   if (!isRecord(value) || !isAccountId(value["accountId"]) || !isRoutingId(value["observer"])) return null;
   const reading = parseQuotaReading(value["reading"]);
   // Bounded here, not in `parseQuotaReading`: a status from an older daemon parses as before.

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -7,9 +7,11 @@ import {
   open,
   parseMachineInfo,
   parseMachineStatus,
+  QUOTA_KEY,
   toBase64,
   type MachineInfo,
   type MachineStatus,
+  type StoreRequestFrame,
 } from "@seance/shared";
 import { createBackend } from "../src/backend-default.ts";
 import type { Config } from "../src/config.ts";
@@ -103,5 +105,57 @@ test("the injected probe and clock drive the register's scan stamp and the statu
   } finally {
     daemon?.stop();
     relay.stop();
+  }
+});
+
+test("the first fleet quota write follows the register's own sample, not the next interval", async () => {
+  const relay = startTestRelay(TOKEN);
+  const config: Config = {
+    name: "QuotaMac",
+    relayUrl: relay.url,
+    bearerToken: TOKEN,
+    psk: PSK,
+    repoRoots: [fixture.root],
+    tmuxSession: "main",
+  };
+  const home = join(base, "quota-home");
+  await mkdir(home, { recursive: true });
+  await writeFile(
+    join(home, ".claude.json"),
+    JSON.stringify({
+      oauthAccount: { organizationUuid: "org", accountUuid: "acct" },
+      cachedUsageUtilization: { fetchedAtMs: NOW_MS - 60_000, utilization: { five_hour: { utilization: 10 } } },
+    }),
+  );
+  // Its own state dir: a fresh one boots at scan 0, so the register's scan differs from the boot
+  // snapshot's — a dir another test already rescanned would hide a missing `onSample` wiring.
+  const sharedStateDir = process.env["SEANCE_STATE_DIR"];
+  process.env["SEANCE_STATE_DIR"] = join(base, "quota-state");
+  let daemon: { stop(): void } | undefined;
+  try {
+    daemon = await startDaemon({
+      config,
+      backend: createBackend(config, { home }),
+      home,
+      pingIntervalMs: 60_000,
+      pongTimeoutMs: 1_000,
+      baseBackoffMs: 20,
+      now: () => NOW_MS,
+      probe,
+      // Far past the test: only the sample after the register can write inside it.
+      fleetQuota: { intervalMs: 600_000 },
+    });
+    let put: StoreRequestFrame | undefined;
+    for (let i = 0; i < 10 && put === undefined; i++) {
+      // oxlint-disable-next-line no-await-in-loop -- frames arrive in order
+      const frame = await relay.storeFrames.next(5_000);
+      if (frame.t === "store-put" && frame.key === QUOTA_KEY) put = frame;
+    }
+    expect(put).toMatchObject({ key: QUOTA_KEY, expect: 0 });
+  } finally {
+    daemon?.stop();
+    relay.stop();
+    if (sharedStateDir === undefined) delete process.env["SEANCE_STATE_DIR"];
+    else process.env["SEANCE_STATE_DIR"] = sharedStateDir;
   }
 });

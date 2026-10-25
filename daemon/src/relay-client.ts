@@ -178,6 +178,15 @@ export class RelayClient {
     return this.#ws?.readyState === WebSocket.OPEN;
   }
 
+  /**
+   * Connected, and this socket's register frame has left. No ack follows one:
+   * the relay settles a pending register before it answers any later frame on
+   * the socket, so a store frame sent now is judged against it.
+   */
+  get registered(): boolean {
+    return this.connected && this.#registered;
+  }
+
   /** Re-send the register frame (repo set changed). No-op while disconnected — reconnect registers anyway. */
   async reRegister(): Promise<void> {
     if (!this.connected) return;

@@ -36,7 +36,8 @@ import {
  * `queue:` is `forbidden`, a list is ascending by key. `appWrite` stands in
  * for an app's create, and sends `store-changed` to the leader's socket.
  * Absent from the store double, against the DO: the size caps and the create
- * floor, tombstone expiry, app-leg store frames over a socket, and the refusal
+ * floor, tombstone expiry, every app-leg store frame over a socket but a get
+ * (the leader's leg reads the fleet quota record at takeover), and the refusal
  * log. A test that needs an answer the rules would not give uses
  * `replyNextStore`.
  *
@@ -152,7 +153,7 @@ export interface TestRelay {
   schedulerTerm: number | null;
   /** Every store frame a daemon sent, in order — held or answered. */
   readonly storeFrames: AsyncQueue<StoreRequestFrame>;
-  /** Answer no store frame: a timeout for the sender. */
+  /** Answer no store frame, an app's get included: a timeout for the sender. */
   holdStoreReplies: boolean;
   /**
    * The next store frame gets this raw reply instead of the rules' answer — a
@@ -269,6 +270,13 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
 
   const onAppMessage = (ws: Bun.ServerWebSocket<Role>, text: string): void => {
     const frame = JSON.parse(text) as AppFrame;
+    if (frame.t === "store-get") {
+      if (relay.holdStoreReplies) return;
+      const held = isStoreKey(frame.key) ? records.get(frame.key) : undefined;
+      const record = held === undefined ? null : { key: frame.key, version: held.version, env: held.env };
+      ws.send(JSON.stringify({ t: "store-record", re: frame.id, record } satisfies StoreReplyFrame));
+      return;
+    }
     if (frame.t !== "msg") return;
     appFrames.push(frame);
     const { env } = frame;

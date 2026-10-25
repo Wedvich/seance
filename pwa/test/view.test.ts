@@ -44,6 +44,7 @@ function relay(overrides: Partial<RelayState> = {}): RelayState {
     settling: false,
     registrySettled: true,
     scheduler: { kind: "none" },
+    fleetQuota: [],
     ...overrides,
   };
 }

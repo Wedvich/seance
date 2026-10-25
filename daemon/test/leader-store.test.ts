@@ -563,6 +563,7 @@ describe("leader in the daemon", () => {
     const daemon = await startDaemon({
       config,
       backend: createBackend(config, { home: join(base, "home"), waitMs: 700 }),
+      home: join(base, "home"),
       pingIntervalMs: 60_000,
       pongTimeoutMs: 300,
       baseBackoffMs: 20,

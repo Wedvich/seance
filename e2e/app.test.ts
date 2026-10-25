@@ -485,6 +485,14 @@ describe("daemon ↔ relay ↔ app", () => {
     let restored = false;
     try {
       await app.waitForApp((s) => ownMachine(s, stack.deviceId)?.connected === true, "machine online");
+      // The daemon's own reading lands in the fleet quota record, which outlives its entry below.
+      const recorded = async (): Promise<boolean> => {
+        await app.client.refreshFleetQuota();
+        return app.client
+          .getState()
+          .fleetQuota.some((entry) => entry.accountId === E2E_ACCOUNT_ID && entry.observer === stack.deviceId);
+      };
+      await pollUntil(recorded, "the daemon's reading in the fleet quota record");
       // The order `uninstall` relies on: while the service still holds a socket
       // the relay refuses, which is why the CLI stops it first.
       expect(await deregisterMachine(stack.config, stack.deviceId)).toEqual({ kind: "connected" });
@@ -493,7 +501,11 @@ describe("daemon ↔ relay ↔ app", () => {
       await app.waitForApp((s) => ownMachine(s, stack.deviceId)?.connected === false, "machine offline");
 
       expect(await deregisterMachine(stack.config, stack.deviceId)).toEqual({ kind: "forgotten" });
-      await app.waitForApp((s) => ownMachine(s, stack.deviceId) === null, "entry gone from the app");
+      const forgotten = await app.waitForApp((s) => ownMachine(s, stack.deviceId) === null, "entry gone from the app");
+      const fleetQuota = app.client.getState().fleetQuota;
+      expect(newestQuotaByAccount(forgotten.relay.machines, fleetQuota).get(E2E_ACCOUNT_ID)?.deviceId).toBe(
+        stack.deviceId,
+      );
       // Idempotent: an uninstall run twice reports nothing to delete, not a failure.
       expect(await deregisterMachine(stack.config, stack.deviceId)).toEqual({ kind: "absent" });
 

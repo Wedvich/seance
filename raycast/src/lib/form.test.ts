@@ -343,6 +343,7 @@ function relayOf(machines: readonly Machine[]): RelayState {
     settling: false,
     registrySettled: true,
     scheduler: { kind: "none" },
+    fleetQuota: [],
   };
 }
 

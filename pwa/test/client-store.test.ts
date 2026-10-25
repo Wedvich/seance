@@ -11,15 +11,18 @@ import {
   openAtRest,
   openTaskRecord,
   parseEnvelope,
+  QUOTA_KEY,
   RelayClient,
   failureReasonText,
   RequestFailure,
   sealAccountRecord,
+  sealFleetQuotaRecord,
   sealTaskRecord,
   taskKey,
   TASK_REQUEST_LIMITS,
   TASK_SPEC_LIMITS,
   toBase64,
+  type FleetQuotaEntry,
   type StoreRecord,
   type Task,
   type UnreadableRecord,
@@ -505,5 +508,132 @@ describe("store transport", () => {
     // The socket orders frames, so once this answers, the late reply has been handled.
     double.answer = null;
     expect(await client.getTask(crypto.randomUUID())).toEqual({ ok: true, task: null });
+  });
+});
+
+describe("fleet quota record", () => {
+  const ENTRY: FleetQuotaEntry = {
+    accountId: "acct-1",
+    observer: "dev-a",
+    reading: { h: 40, s: "cache", at: 1_800_000_000 },
+  };
+
+  async function quotaRecord(version: number, sealWith = key): Promise<StoreRecord> {
+    return {
+      key: QUOTA_KEY,
+      version,
+      env: await sealFleetQuotaRecord(sealWith, "dev-a", { version, accounts: [ENTRY] }),
+    };
+  }
+
+  function polling(double: StoreDouble, storeTimeoutMs = 5_000): RelayClient {
+    const client = new RelayClient({
+      url: double.url,
+      token: TOKEN,
+      key,
+      storeTimeoutMs,
+      fleetQuotaRefreshMs: 60_000,
+      createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
+      log: () => {},
+    });
+    clients.push(client);
+    client.start();
+    return client;
+  }
+
+  test("a client built without a refresh never reads it", async () => {
+    const double = startDouble();
+    const client = await connect(double);
+    expect(await client.getTask(crypto.randomUUID())).toEqual({ ok: true, task: null });
+    expect(double.received.some((frame) => frame["key"] === QUOTA_KEY)).toBe(false);
+    expect(client.getState().fleetQuota).toEqual([]);
+  });
+
+  test("reads on open; a refusal keeps the last copy, an unreadable record empties it", async () => {
+    const double = startDouble();
+    double.records.set(QUOTA_KEY, await quotaRecord(3));
+    const client = polling(double);
+    await pollUntil(() => client.getState().fleetQuota.length === 1, "the read on open");
+    expect(client.getState().fleetQuota).toEqual([ENTRY]);
+
+    const held = client.getState().fleetQuota;
+    await client.refreshFleetQuota();
+    expect(client.getState().fleetQuota).toBe(held);
+
+    double.answer = (frame) => ({ t: "store-refused", re: frame["id"], code: "rate_limited" });
+    await client.refreshFleetQuota();
+    expect(client.getState().fleetQuota).toEqual([ENTRY]);
+
+    double.answer = null;
+    double.records.set(QUOTA_KEY, await quotaRecord(4, otherKey));
+    await client.refreshFleetQuota();
+    expect(client.getState().fleetQuota).toEqual([]);
+  });
+
+  test("an older answer finishing after a newer one never replaces it", async () => {
+    const double = startDouble();
+    double.records.set(QUOTA_KEY, await quotaRecord(5));
+    const client = polling(double);
+    await pollUntil(() => client.getState().fleetQuota.length === 1, "the read on open");
+    const stale = await quotaRecord(3);
+    const older = {
+      ...stale,
+      env: await sealFleetQuotaRecord(key, "dev-b", {
+        version: 3,
+        accounts: [{ ...ENTRY, accountId: "acct-old" }],
+      }),
+    };
+    double.answer = (frame) => ({ t: "store-record", re: frame["id"], record: older });
+    await client.refreshFleetQuota();
+    expect(client.getState().fleetQuota).toEqual([ENTRY]);
+  });
+
+  test("a relay store reset lowers the version floor, so the next socket's answers are read", async () => {
+    const double = startDouble();
+    double.records.set(QUOTA_KEY, await quotaRecord(5));
+    const client = polling(double);
+    await pollUntil(() => client.getState().fleetQuota.length === 1, "the read on open");
+    const fresh = await quotaRecord(1);
+    double.records.set(QUOTA_KEY, {
+      ...fresh,
+      env: await sealFleetQuotaRecord(key, "dev-b", {
+        version: 1,
+        accounts: [{ ...ENTRY, accountId: "acct-new" }],
+      }),
+    });
+    client.reconnect();
+    await pollUntil(() => client.getState().fleetQuota[0]?.accountId === "acct-new", "the read after the reset");
+  });
+
+  test("a quota read leaves no wire line, a failing one does", async () => {
+    const double = startDouble();
+    double.records.set(QUOTA_KEY, await quotaRecord(3));
+    const lines: string[] = [];
+    const client = new RelayClient({
+      url: double.url,
+      token: TOKEN,
+      key,
+      storeTimeoutMs: 50,
+      fleetQuotaRefreshMs: 60_000,
+      createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
+      log: (line) => void lines.push(line),
+    });
+    clients.push(client);
+    client.start();
+    await pollUntil(() => client.getState().fleetQuota.length === 1, "the read on open");
+    expect(lines).toEqual([]);
+    double.answer = () => "silent";
+    await client.refreshFleetQuota();
+    expect(lines.filter((line) => line.includes("timeout"))).toHaveLength(1);
+  });
+
+  test("a read with no answer resolves at the store timeout and keeps the last copy", async () => {
+    const double = startDouble();
+    double.records.set(QUOTA_KEY, await quotaRecord(3));
+    const client = polling(double, 50);
+    await pollUntil(() => client.getState().fleetQuota.length === 1, "the read on open");
+    double.answer = () => "silent";
+    await client.refreshFleetQuota();
+    expect(client.getState().fleetQuota).toEqual([ENTRY]);
   });
 });

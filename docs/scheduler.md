@@ -405,7 +405,7 @@ of M4 has landed.
 | 1     | `/usage` refresh (was: OAuth quota poll) — **Done** (PR #249)      | — (spiked 2026-10-20)                                                  | S–M                      |
 | 1     | Skills filter — **Done**                                           | —                                                                      | S; M with project skills |
 | 1     | Account records — **Done**                                         | store rules v2                                                         | M                        |
-| 1     | Fleet quota record                                                 | store rules v2                                                         | M                        |
+| 1     | Fleet quota record — **Done**                                      | store rules v2                                                         | M                        |
 | 1     | CLI `auto` — **Done**; keyless `auto` remains                      | MCP's enqueue split out                                                | S–M                      |
 | 1     | `failed` from exit status (new) — **Done**                         | —                                                                      | S–M                      |
 | 2     | Stacking                                                           | authoring surface; #28                                                 | L                        |
@@ -726,40 +726,14 @@ of M4 has landed.
       taken slots stay taken.
     - _Recommended:_ (a). It is the only option that clears the squat, and it reuses `discard`'s
       shape and its guard instead of adding a new kind of write.
-- **Fleet quota record** (decided 2026-10-17, no longer conditional) — one record of
-  `{ accountId → newest observation }`, written by daemons on a fixed cadence (~5 min) by
-  read-open-compare-`expect`: a daemon writes only an observation newer than the one stored, so
-  the record keeps the newest observation, not the last write. One record, not one per account —
-  per-account writes would tell the relay when each account is in use. Why it is needed, not just
-  nice: the kept-status fold (M2) holds an account's quota only as long as some machine's own
-  snapshot does. Each daemon writes over its own, so the fleet's newest reading lives only on the
-  machine that saw it, and a `forget`, a reinstall or a machine retired takes that reading with
-  it. Persisting `SessionQuota` (DESIGN.md, "Session events") stops a restart regressing it, and
-  does nothing for those. Its other payoff is `status` shrinking to pressure, which frees most of
-  the 16 KiB socket attachment; its cost is a daemon write path into the store and a 5-min floor
-  on freshness, where `status` is faster — so readers fold both, newest wins.
-  - _Corrections (R2)._
-    - "A single `quota` key" does not fit `STORE_KEY_PATTERN`, which needs a prefix plus a
-      routing id.
-    - Daemons are a writer class the prefix table does not have, and the first writer on a prefix
-      that is not term-fenced. So the create floor must cover the daemon leg, and `#nudgeLeader`'s
-      premise — a daemon-leg write is the leader's — stops holding.
-    - The plan said both "whether or not anything changed" and "only an observation newer than the
-      one stored". The second is the rule.
-    - It depends on store rules v2, not on account records.
-  - _Estimate:_ about 288 get-and-put pairs per daemon a day, roughly 2,900 rows written at 10
-    daemons (3% of the free limit).
-  - _Constraint for the writer (after store rules v2):_ the relay answers a `/daemon` socket's
-    store frames only once its register is accepted (`forbidden` before, on a superseded socket or
-    after a failed verify), and `RelayClient.store()` does not check that — today only the leader
-    calls it, after `lead`.
-    - Send only after the register is accepted: gate on the first `lead`/`follow` (or a register
-      ack). A `forbidden` after a reconnect means register first, then retry — not a lost write.
-    - Stay under the per-socket write floor (`MAX_STORE_CREATES_PER_WINDOW`, 60 writes per 60 s,
-      creates and overwrites alike since `quota:` is not term-fenced). Create with `expect: 0` only
-      when `store-get` shows no record; otherwise overwrite by the version read.
-    - The key is `QUOTA_KEY` (`quota:fleet`), never a per-account key — the singleton prefix
-      refuses any other, and per-account keys are what the one-record decision rules out.
+- **Fleet quota record — Done (2026-10-25).** One record of each account's newest reading,
+  written by every daemon by read-open-compare-`expect` on a 5-min cadence, folded with the
+  statuses by every reader. Needed, not just nice: the kept status holds an account's quota only
+  while some machine's own snapshot does, so a `forget`, a reinstall or a retired machine took the
+  fleet's newest reading with it. One record, not one per account: per-account writes would tell
+  the relay when each account is in use. DESIGN.md _Scheduler_, "Fleet quota record" records the
+  writer as built (its register gate, bounds and the unreadable-record rule) and its readers.
+  `status` shrinking to pressure, the other payoff, is not done.
 - **Auth health** (after the `/usage` refresh) — `authOk` says only that `.claude.json` names an
   `oauthAccount`: a revoked or lapsed login still reads as signed in, and the `auth missing`
   filter routes to an exclave that cannot start a session. Per exclave `auth: ok | expired |

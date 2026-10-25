@@ -8,9 +8,10 @@ import {
   sameCreditMonth,
   schedulerRole,
   type ExclaveInfo,
+  type FleetQuotaEntry,
   type Machine,
   type NewestQuota,
-  type QuotaObservation,
+  type QuotaReading,
   type SchedulerAvailability,
   type SchedulerRole,
   type UpdateOutcome,
@@ -280,7 +281,7 @@ function quotaBar(label: string, pct: number, resetsAt: number | undefined, now:
  * and until then they are a monthly figure nothing on the card is spending.
  * Last month's figure says nothing about this one's, so it shows no bar.
  */
-function quotaBars(observation: QuotaObservation, now: number): QuotaBar[] {
+function quotaBars(observation: QuotaReading, now: number): QuotaBar[] {
   const bars: QuotaBar[] = [];
   if (observation.h !== undefined) bars.push(quotaBar("5h", observation.h, observation.hr, now));
   if (observation.d !== undefined) bars.push(quotaBar("7d", observation.d, observation.dr, now));
@@ -299,7 +300,7 @@ const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD
  * Without amounts (a daemon that predates them) the note is empty.
  * The daemon sends cents.
  */
-function creditsBar({ c, cu, cl }: QuotaObservation): QuotaBar {
+function creditsBar({ c, cu, cl }: QuotaReading): QuotaBar {
   const base = gauge("Credits", c ?? 0);
   // Credits are only on screen while a window is full, so spending them is never "fine": no green band.
   const bar = base.level === "ok" ? { ...base, level: "warn" as const } : base;
@@ -317,8 +318,12 @@ function historyHost(group: AccountGroup, newest: Machine | undefined): string |
 }
 
 function observedLine(quota: NewestQuota | undefined, observer: Machine | undefined, now: number): string {
-  if (quota === undefined || observer === undefined) {
+  if (quota === undefined) {
     return "No quota seen yet. It shows once a session has run and its machine has reported.";
+  }
+  // Only the fleet quota record outlives its observer's registry entry.
+  if (observer === undefined) {
+    return `${quota.observation.s} · ${formatSeen(quota.observation.at * 1000, now)} on a machine no longer listed`;
   }
   const where = observer.connected ? observer.name : `${observer.name}, asleep`;
   return `${quota.observation.s} · ${formatSeen(quota.observation.at * 1000, now)} on ${where}`;
@@ -326,12 +331,18 @@ function observedLine(quota: NewestQuota | undefined, observer: Machine | undefi
 
 /**
  * Grouped by account id across every machine; whose numbers show is
- * `newestQuotaByAccount`'s rule (DESIGN.md, PWA). An asleep machine's kept status counts like a
- * live one, its age on the observed line; a machine with no status at all names the account
- * but contributes no numbers. Exclaves that
+ * `newestQuotaByAccount`'s rule (DESIGN.md, PWA), over the statuses and the fleet quota
+ * record. An asleep machine's kept status counts like a live one, its age on the observed
+ * line; a machine with no status at all names the account but contributes no numbers, unless
+ * the record holds a reading for it. Exclaves that
  * aren't signed in have no account to group under and appear only on their card.
  */
-function deriveAccounts(machines: readonly Machine[], now: number, aliases: AccountAliases): AccountCard[] {
+function deriveAccounts(
+  machines: readonly Machine[],
+  now: number,
+  aliases: AccountAliases,
+  fleetQuota: readonly FleetQuotaEntry[],
+): AccountCard[] {
   const groups = new Map<string, AccountGroup>();
   for (const machine of machines) {
     const exclaves = machine.exclaves ?? [];
@@ -352,7 +363,7 @@ function deriveAccounts(machines: readonly Machine[], now: number, aliases: Acco
     }
   }
 
-  const newest = newestQuotaByAccount(machines);
+  const newest = newestQuotaByAccount(machines, fleetQuota);
   return [...groups.values()].map((group) => {
     const quota = newest.get(group.accountId);
     const observer = machines.find((machine) => machine.deviceId === quota?.deviceId);
@@ -374,10 +385,11 @@ export function deriveMachines(
   now: number,
   scheduler: SchedulerAvailability,
   aliases: AccountAliases = {},
+  fleetQuota: readonly FleetQuotaEntry[] = [],
 ): MachinesView {
   return {
     scheduler: schedulerLine(machines, scheduler),
     cards: machines.map((machine) => machineCard(machine, now, scheduler, aliases)),
-    accounts: deriveAccounts(machines, now, aliases),
+    accounts: deriveAccounts(machines, now, aliases, fleetQuota),
   };
 }

@@ -1,16 +1,18 @@
 import type { Machine } from "./app-client.ts";
-import type { QuotaObservation } from "./types.ts";
+import type { FleetQuotaEntry, QuotaObservation, QuotaReading } from "./types.ts";
 
 /**
  * The fleet-wide quota rules, one copy for every reader: the PWA's account
- * cards today, the scheduler's filter and score in M2 (docs/scheduler.md). An
- * account's quota is spread over every machine hosting one of its exclaves, so
- * it is folded across the fleet rather than read off any one status.
+ * cards and the scheduler's filter and score (docs/scheduler.md). An account's
+ * quota is spread over every machine hosting one of its exclaves, so it is
+ * folded across the fleet — every status, and the fleet quota record — rather
+ * than read off any one status.
  */
 
 export interface NewestQuota {
-  readonly observation: QuotaObservation;
-  /** The machine whose status carried it — the account's freshest observer. */
+  /** A status's observation keeps its exclave index; a record entry's reading has none. Read neither by it. */
+  readonly observation: QuotaObservation | QuotaReading;
+  /** The machine that saw it — a status's sender, or a record entry's `observer` — the account's freshest observer. */
   readonly deviceId: string;
 }
 
@@ -27,21 +29,31 @@ export interface NewestQuota {
  * which is why this reads `status` directly and never through `liveStatus`.
  * A machine with no status at all (not yet reporting, or re-registered since)
  * contributes no numbers: an account absent from the map is unknown, not 0%.
+ *
+ * `fleet` is the fleet quota record's entries (DESIGN.md, Scheduler, "Fleet
+ * quota record"): each joins its account's candidates after every status, so a
+ * tie goes to the status, and its `observer` stands in as the machine — one
+ * that may have left the registry, which is what the record is for.
  */
 export function newestQuotaByAccount(
   machines: readonly Pick<Machine, "deviceId" | "exclaves" | "status">[],
+  fleet: readonly FleetQuotaEntry[] = [],
 ): ReadonlyMap<string, NewestQuota> {
   const seen = new Map<string, NewestQuota[]>();
+  const add = (accountId: string, candidate: NewestQuota): void => {
+    const list = seen.get(accountId) ?? [];
+    list.push(candidate);
+    seen.set(accountId, list);
+  };
   for (const machine of machines) {
     const exclaves = machine.exclaves ?? [];
     for (const observation of machine.status?.quota ?? []) {
       const accountId = exclaves[observation.x]?.accountId;
       if (accountId === undefined || accountId === null) continue;
-      const list = seen.get(accountId) ?? [];
-      list.push({ observation, deviceId: machine.deviceId });
-      seen.set(accountId, list);
+      add(accountId, { observation, deviceId: machine.deviceId });
     }
   }
+  for (const entry of fleet) add(entry.accountId, { observation: entry.reading, deviceId: entry.observer });
   const newest = new Map<string, NewestQuota>();
   for (const [accountId, all] of seen) {
     // Stable sort: a tie keeps fleet order.
@@ -71,7 +83,7 @@ const SEVEN_DAYS_S = 7 * 86_400;
  * erase them. The percent and its amounts travel together, like a window and
  * its reset.
  */
-export function mergeQuota(newer: QuotaObservation, older: QuotaObservation): QuotaObservation {
+export function mergeQuota(newer: QuotaReading, older: QuotaReading): QuotaReading {
   const age = newer.at - older.at;
   const fresh = (resetsAt: number | undefined, lengthS: number): boolean => resetsAt !== undefined || age < lengthS;
   const models = new Set((newer.w ?? []).map((window) => window.m));
@@ -92,7 +104,7 @@ export function mergeQuota(newer: QuotaObservation, older: QuotaObservation): Qu
   };
 }
 
-function creditsOf({ c, cu, cl }: QuotaObservation): Pick<QuotaObservation, "c" | "cu" | "cl"> {
+function creditsOf({ c, cu, cl }: QuotaReading): Pick<QuotaObservation, "c" | "cu" | "cl"> {
   return {
     ...(c === undefined ? {} : { c }),
     ...(cu === undefined || cl === undefined ? {} : { cu, cl }),

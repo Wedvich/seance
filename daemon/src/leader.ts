@@ -13,6 +13,7 @@ import {
   parseBranchState,
   parseSessionEvent,
   QUEUE_MAX_TASKS,
+  QUOTA_KEY,
   quote,
   STORE_PREFIXES,
   type BranchState,
@@ -78,6 +79,8 @@ export interface LeaderRelay extends AppRelay {
   readonly deliver: (env: Envelope) => Promise<void>;
   /** The coalesced nudge to every app that the queue changed (`RelayClient.queueChanged`); false when nothing was sent. */
   readonly queueChanged: (change: QueueChanged) => Promise<boolean>;
+  /** Re-reads the fleet quota record into `getState().fleetQuota` (`RelayClient.refreshFleetQuota`); never rejects on a failed read. */
+  readonly refreshFleetQuota: () => Promise<void>;
 }
 
 /**
@@ -320,7 +323,14 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     );
   };
   const onStoreChanged = (key: string, _version: number): void => {
-    if (!live || !key.startsWith(STORE_PREFIXES.task.prefix)) return;
+    if (!live) return;
+    // Another daemon's readings: re-read on the leg. A changed record reaches
+    // `tick` through the subscription below; an unchanged one needs no pass.
+    if (key === QUOTA_KEY) {
+      relay.refreshFleetQuota().catch(fail);
+      return;
+    }
+    if (!key.startsWith(STORE_PREFIXES.task.prefix)) return;
     const id = key.slice(STORE_PREFIXES.task.prefix.length);
     if (!running) {
       changed.add(id);
@@ -430,6 +440,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
   // list means "no push yet", and reconciling against it would ask nobody.
   const fleetReady = Promise.withResolvers<void>();
   let seen = relay.getState().machines;
+  let seenQuota = relay.getState().fleetQuota;
   const unsubscribe = relay.subscribe(() => {
     const state = relay.getState();
     // Terminal: the shared client never redials a rejected token, so the term
@@ -443,8 +454,9 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
       if (state.status === "open" && state.registrySettled) fleetReady.resolve();
       return;
     }
-    if (state.machines !== seen) {
+    if (state.machines !== seen || state.fleetQuota !== seenQuota) {
       seen = state.machines;
+      seenQuota = state.fleetQuota;
       tick();
     }
   });
@@ -466,6 +478,11 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
 
   const settled = (async (): Promise<void> => {
     await fleetReady.promise;
+    // The fleet quota record before the first pass: without it an account only
+    // the record has seen routes as unobserved. Resolves within the store
+    // timeout whatever it finds, so a relay that answers nothing holds no term.
+    await relay.refreshFleetQuota();
+    if (!live) return;
     // The relay still names this daemon leader, so a takeover that failed is
     // retried rather than left as a term that holds the role and runs nothing.
     for (;;) {
@@ -493,6 +510,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     await refreshChanged();
     if (!live) return;
     seen = relay.getState().machines;
+    seenQuota = relay.getState().fleetQuota;
     timer = setInterval(() => {
       // A create stamped ahead of this clock (a phone's fast clock) binds once the clock passes
       // its stamp, and no `store-changed` will say so: re-read it on the timer, one get each, and

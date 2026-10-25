@@ -24,6 +24,7 @@ function state(overrides: Partial<AppState> = {}): AppState {
       skewed: 0,
       settling: false,
       registrySettled: true,
+      fleetQuota: [],
       scheduler: { kind: "none" },
     },
     form: DEFAULT_FORM,

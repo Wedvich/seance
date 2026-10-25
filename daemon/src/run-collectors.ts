@@ -28,6 +28,8 @@ export interface StatusLoopDeps {
   readonly connected: () => boolean;
   /** `RelayClient.sendStatus`: `current` is asked again after the seal. */
   readonly send: (status: MachineStatus, current: () => boolean) => Promise<boolean>;
+  /** A sample against the current register blob resolved, sent or not. */
+  readonly onSample?: () => void;
 }
 
 export interface StatusLoop {
@@ -37,6 +39,8 @@ export interface StatusLoop {
    * push an app got carries no snapshot until this one.
    */
   readonly sampleNow: () => void;
+  /** The last sample whole — before `fitStatus` trims it for the wire — or null before the first. */
+  readonly latest: () => MachineStatus | null;
   readonly stop: () => void;
 }
 
@@ -70,7 +74,9 @@ export function startStatusLoop(metrics: MetricsStore, collectors: CollectorDeps
     telemetry
       .tick()
       .then((snapshot) => {
-        if (stopped || !loop.connected()) return false;
+        if (stopped) return false;
+        if (snapshot.scan === collectors.registered().scan) loop.onSample?.();
+        if (!loop.connected()) return false;
         // A tick begun before the latest register names the blob before it —
         // at boot, none at all — and every reader would drop it. Sent anyway it
         // spends the relay's one-per-interval floor, and the tick the register
@@ -95,6 +101,7 @@ export function startStatusLoop(metrics: MetricsStore, collectors: CollectorDeps
       timer = setInterval(sample, loop.intervalMs);
       sample();
     },
+    latest: () => telemetry.latest(),
     stop: (): void => {
       stopped = true;
       if (timer !== null) clearInterval(timer);

@@ -177,7 +177,12 @@ green:
   (`shared/src/account-record.ts`) — sealed to `"app"` under op `account`, its sealed version the
   relay's, its `accountId` HMAC'd under the PSK-derived account key to its own key — and an alias
   is display-only, never used to route, bind or place, and no reader deletes a record it cannot
-  read on its own — after a PSK rotation every record reads that way — and a tombstone lives exactly as long as
+  read on its own — after a PSK rotation every record reads that way — with one bounded exception: the fleet quota
+  writer (`daemon/src/fleet-quota.ts`) overwrites a `quota:fleet` record it cannot read, at its
+  version, only once that record has stood unchanged at one store version for `FLEET_QUOTA_STALL_MS`
+  (24 h of awake observation time since this writer first saw it there, each gap between sightings counted up to twice the interval; a readable read resets it) (no
+  deletes on `quota:`, so a dead one would hold the slot for good), and the record is read only
+  through `openFleetQuotaRecord` — and a tombstone lives exactly as long as
   admission's age limit (`STORE_TOMBSTONE_MS` for both: the relay's tombstone, `isExpired` in
   `scheduler/src/deps.ts`), since a pruned task's version-1 blob put back after its tombstone
   lapses must be too old to admit, and a `branch-state` is never accepted from an app, and an
