@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll } from "bun:test";
+import { REPO_MAX_SKILLS } from "@seance/shared";
 import { addWorktree, makeClone, makeSeparateGitDirClone } from "../test/fixtures.ts";
 import { normalizeOrigin, originQuery, readDefaultBranch, readOriginUrl, repoSetsEqual, scanRepos } from "./scan.ts";
 
@@ -152,6 +153,39 @@ describe("scanRepos", () => {
 
   test("missing root scans to empty, not an error", async () => {
     expect(await scanRepos(["/nonexistent/seance-test-root"])).toEqual([]);
+  });
+
+  test("project skills: listed sorted, absent when none, re-read each scan so a new one changes the set", async () => {
+    const root = await makeRoot();
+    const repo = await makeRepo(root, "alpha");
+    await makeRepo(root, "beta");
+    const skill = async (name: string): Promise<void> => {
+      await mkdir(join(repo, ".claude", "skills", name), { recursive: true });
+      await writeFile(join(repo, ".claude", "skills", name, "SKILL.md"), "");
+    };
+    await skill("ship");
+    await skill("deploy");
+    await mkdir(join(repo, ".claude", "skills", "stray"), { recursive: true });
+    const first = await scanRepos([root]);
+    expect(first.map((r) => r.skills)).toEqual([["deploy", "ship"], undefined]);
+    expect(first[1]).not.toHaveProperty("skills");
+
+    await skill("plan");
+    const second = await scanRepos([root], first);
+    expect(second[0]?.skills).toEqual(["deploy", "plan", "ship"]);
+    expect(repoSetsEqual(first, second)).toBe(false);
+  });
+
+  test("project skills past REPO_MAX_SKILLS are cut to the first by sort order, never sent whole", async () => {
+    const root = await makeRoot();
+    const repo = await makeRepo(root, "alpha");
+    const names = Array.from({ length: REPO_MAX_SKILLS + 2 }, (_, i) => `s${String(i).padStart(2, "0")}`);
+    for (const name of names) {
+      await mkdir(join(repo, ".claude", "skills", name), { recursive: true });
+      await writeFile(join(repo, ".claude", "skills", name, "SKILL.md"), "");
+    }
+    const [entry] = await scanRepos([root]);
+    expect(entry?.skills).toEqual(names.slice(0, REPO_MAX_SKILLS));
   });
 });
 

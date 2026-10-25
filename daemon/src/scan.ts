@@ -1,7 +1,8 @@
 import { readdir } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import type { RepoEntry } from "@seance/shared";
+import { REPO_MAX_SKILLS, type RepoEntry } from "@seance/shared";
 import { mapLimit } from "./concurrency.ts";
+import { listSkills } from "./exclaves.ts";
 import { git } from "./exec.ts";
 import { canonical, inspectCheckout, resolveCommonDir } from "./gitdir.ts";
 
@@ -208,7 +209,8 @@ function assignNames(paths: readonly string[]): ReadonlyMap<string, string> {
  * previous scan when already resolved — default branches practically never
  * change — and is read from local refs only for new (or still-null) repos.
  * `origin` is re-read every scan: one file, no process, and a remote does get
- * repointed. Basename when there is none — a key, so never absent.
+ * repointed. Basename when there is none — a key, so never absent. Project
+ * skills are re-read every scan too, so adding or removing one re-registers.
  */
 export async function scanRepos(
   roots: readonly string[],
@@ -221,9 +223,10 @@ export async function scanRepos(
   const entries = await scanLimit(paths, async (path): Promise<RepoEntry> => {
     const cached = prevByPath.get(path)?.defaultBranch ?? null;
     const commonDir = await resolveCommonDir(path);
-    const [defaultBranch, url] = await Promise.all([
+    const [defaultBranch, url, skills] = await Promise.all([
       cached ?? readDefaultBranch(path),
       commonDir === null ? null : readOriginUrl(commonDir),
+      listSkills(join(path, ".claude", "skills")),
     ]);
     const origin = url === null ? null : normalizeOrigin(url);
     return {
@@ -231,6 +234,8 @@ export async function scanRepos(
       path,
       defaultBranch,
       origin: origin ?? basename(path),
+      // A reader drops a longer list whole, so the first names by sort order go rather than none.
+      ...(skills.length === 0 ? {} : { skills: skills.slice(0, REPO_MAX_SKILLS) }),
     };
   });
   return entries.toSorted((a, b) => a.name.localeCompare(b.name));
