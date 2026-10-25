@@ -178,6 +178,30 @@ describe("deriveMachines", () => {
     expect(accountDisplayName([named], "org-2:acct-bbbbbbbb-2222")).toBe("acct acct-bbb");
   });
 
+  test("one email on two orgs reads with each org on the card, the exclave row and a hold; an alias still leads", () => {
+    const personal = "1a2b3c4d-personal:acct-same";
+    const team = "9f8e7d6c-team:acct-same";
+    const both = machine({
+      deviceId: "a",
+      name: "a",
+      exclaves: [
+        { ...exclave("default", personal), email: "me@example.com" },
+        { ...exclave("work", team), email: "me@example.com" },
+      ],
+    });
+    const { cards, accounts } = deriveMachines([both], NOW, NO_LEADER);
+    expect(accounts.map((account) => account.detail)).toEqual([
+      "me@example.com (org 1a2b3c4d) · on a",
+      "me@example.com (org 9f8e7d6c) · on a",
+    ]);
+    expect(cards[0]?.exclaves.map((row) => row.account)).toEqual([
+      "me@example.com (org 1a2b3c4d)",
+      "me@example.com (org 9f8e7d6c)",
+    ]);
+    expect(accountDisplayName([both], team)).toBe("me@example.com (org 9f8e7d6c)");
+    expect(accountDisplayName([both], team, { [team]: "work" })).toBe("work");
+  });
+
   test("an account id that names an inherited property is no alias", () => {
     const odd = machine({ exclaves: [exclave("default", "constructor")] });
     expect(deriveMachines([odd], NOW, NO_LEADER, {}).accounts[0]?.alias).toBeNull();

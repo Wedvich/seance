@@ -1,6 +1,9 @@
 import {
   accountName,
+  accountNameIn,
   CAPABILITIES,
+  knownAccounts,
+  type KnownAccount,
   effectivePct,
   liveStatus,
   METRIC_NAMES,
@@ -139,20 +142,12 @@ export function accountDisplayName(
   accountId: string,
   aliases: AccountAliases = {},
 ): string {
-  const alias = aliasOf(aliases, accountId);
-  for (const machine of machines) {
-    for (const exclave of machine.exclaves ?? []) {
-      if (exclave.accountId === accountId && exclave.email !== undefined) {
-        return accountName(accountId, exclave.email, alias);
-      }
-    }
-  }
-  return accountName(accountId, undefined, alias);
+  return accountNameIn(knownAccounts(machines), accountId, aliasOf(aliases, accountId));
 }
 
-function accountLabel(exclave: ExclaveInfo, aliases: AccountAliases): string {
+function accountLabel(exclave: ExclaveInfo, aliases: AccountAliases, known: readonly KnownAccount[]): string {
   if (exclave.accountId !== null) {
-    return accountName(exclave.accountId, exclave.email, aliasOf(aliases, exclave.accountId));
+    return accountName(exclave.accountId, exclave.email, aliasOf(aliases, exclave.accountId), known);
   }
   return exclave.authOk ? "signed in" : "not signed in";
 }
@@ -210,6 +205,7 @@ function machineCard(
   now: number,
   scheduler: SchedulerAvailability,
   aliases: AccountAliases,
+  known: readonly KnownAccount[],
 ): MachineCard {
   // Not drawn for an asleep card: its status is the one the relay kept, and its
   // last beat would read as current pressure beside "last seen". Its quota
@@ -236,7 +232,7 @@ function machineCard(
     note: machineNote(machine),
     exclaves: (machine.exclaves ?? []).map((exclave, index) => ({
       id: exclave.id,
-      account: accountLabel(exclave, aliases),
+      account: accountLabel(exclave, aliases, known),
       sessions: status?.sess?.[index] ?? null,
     })),
     charts: servesMetrics(machine),
@@ -331,6 +327,7 @@ function deriveAccounts(
   now: number,
   aliases: AccountAliases,
   fleetQuota: readonly FleetQuotaEntry[],
+  known: readonly KnownAccount[],
 ): AccountCard[] {
   const groups = new Map<string, AccountGroup>();
   for (const machine of machines) {
@@ -361,7 +358,7 @@ function deriveAccounts(
       accountId: group.accountId,
       alias: alias ?? null,
       title: [...group.exclaves].join(" · "),
-      detail: `${accountName(group.accountId, group.email, alias)} · on ${[...group.machines].join(", ")}`,
+      detail: `${accountName(group.accountId, group.email, alias, known)} · on ${[...group.machines].join(", ")}`,
       bars: quota === undefined ? [] : quotaBars(quota.observation, now),
       observed: observedLine(quota, observer, now),
       historyFrom: historyHost(group, observer),
@@ -376,9 +373,10 @@ export function deriveMachines(
   aliases: AccountAliases = {},
   fleetQuota: readonly FleetQuotaEntry[] = [],
 ): MachinesView {
+  const known = knownAccounts(machines);
   return {
     scheduler: schedulerLine(machines, scheduler),
-    cards: machines.map((machine) => machineCard(machine, now, scheduler, aliases)),
-    accounts: deriveAccounts(machines, now, aliases, fleetQuota),
+    cards: machines.map((machine) => machineCard(machine, now, scheduler, aliases, known)),
+    accounts: deriveAccounts(machines, now, aliases, fleetQuota, known),
   };
 }

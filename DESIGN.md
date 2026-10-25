@@ -2814,6 +2814,10 @@ alias, and Raycast reads none.
 - **PWA.** The account card's "Rename" opens an inline field (at most 64 characters, trimmed; empty
   clears). Names show on the account cards, a machine card's exclave rows and the Queue screen's
   pause holds: alias, else email, else `acct` and the first eight characters of the account half.
+  One person on a personal plan and a Team org has one email and one account half under two org
+  halves, so where another account the registry reports would read the same, the email or short id
+  gains `(org <first eight of the org half>)`; an alias is per account and never gains one
+  (`accountName` in `shared/src/account-record.ts`, the rule every client shares).
 
 ### The queue store (`daemon/src/queue-store.ts`) — landed 2026-10-18, M3 item 3
 
