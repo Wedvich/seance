@@ -506,7 +506,7 @@ describe("settings record: the leader's term creates it, and no later term repla
     }
   }, 30_000);
 
-  test("push-subscribe adds a browser's subscription to the record, is idempotent, refuses a host off the allowlist, and stops at the cap", async () => {
+  test("push-subscribe adds a browser's subscription to the record, is idempotent, refuses a host off the allowlist, stops at the cap, and push-unsubscribe frees a slot", async () => {
     await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
     await stack.daemon.leader.settled();
     const app = startApp(stack);
@@ -541,6 +541,16 @@ describe("settings record: the leader's term creates it, and no later term repla
       }
       expect(await app.client.pushSubscribe(sub("over"))).toMatchObject({ ok: false, code: "subscriptions_full" });
       expect((await readSettings())?.record.subscriptions).toHaveLength(PUSH_MAX_SUBSCRIPTIONS);
+
+      // push-unsubscribe frees a slot; asking again for the same endpoint writes nothing.
+      const leaving = sub("fill-1").endpoint;
+      expect(await app.client.pushUnsubscribe({ endpoint: leaving })).toEqual({ endpoint: leaving });
+      const freed = await readSettings();
+      expect(freed?.record.subscriptions).toHaveLength(PUSH_MAX_SUBSCRIPTIONS - 1);
+      expect(freed?.record.subscriptions?.some((s) => s.endpoint === leaving)).toBe(false);
+      expect(await app.client.pushUnsubscribe({ endpoint: leaving })).toEqual({ endpoint: leaving });
+      expect((await readSettings())?.version).toBe(freed?.version);
+      expect(await app.client.pushSubscribe(sub("over"))).toEqual({ endpoint: sub("over").endpoint });
     } finally {
       app.stop();
     }
