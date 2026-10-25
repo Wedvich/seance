@@ -713,7 +713,8 @@ of M4 has landed.
       the record changed since) and writes no tombstone. The relay's `account:` rule then allows
       a delete on the leader's term socket only, so this reopens the deterministic-key delete #8
       avoided. It also reopens rollback: a deleted key restarts at version 1, so an old genuine
-      version-1 blob a token holder kept (every past ciphertext is listable) then reads as the
+      version-1 blob a token holder kept (each ciphertext is listable while it is current, so a
+      holder can keep every one) then reads as the
       current record, where today's put-back lands at a higher version and reads
       `version_mismatch`. The rollback protection holds only while no key's version history is
       reset. A tombstone would only block the key's real account for 30 days. Cost: one relay
@@ -932,7 +933,9 @@ same PR, with the reason.
   alias with junk that readers skip — but not read or forge one, and not delete it, since
   `account:` refuses deletes (#8); the next real edit overwrites the junk. Nor can it roll one
   back (an old blob put back lands at a higher version and reads `version_mismatch`), which
-  holds only while `account:` refuses deletes and no key's version history is reset. It can also create
+  holds only while `account:` refuses deletes and no key's version history is reset: an operator
+  reset of `account:` storage with the PSK unchanged (a DO migration, `deleted_classes`, a redeploy
+  to a fresh worker) reopens it, so rotate the PSK or bump `ACCOUNT_KEY_HKDF_INFO` then. It can also create
   junk account keys up to the prefix's cap, which nothing in the product removes (DESIGN.md
   Threat model, item 3). Holding the leader's term would be a larger act — next item.
 - **Leader capture** (decided 2026-10-16, M2 and M3's gate; built). A bearer-token holder could

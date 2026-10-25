@@ -61,7 +61,10 @@ secret put SCHEDULER_LEADERS` from `relay/` replaces the whole list and rolls a 
 version, so every socket drops and re-registers. Set it before deploying a relay that
 first reads it (October 2026): until it is set, no daemon leads, so `auto` only queues. Nothing gates Durable Object migrations: a change to
 `migrations` in `relay/wrangler.jsonc` is applied by the next deploy, so review one as
-a production change.
+a production change. One that resets a class's storage (a dropped or renamed class,
+`deleted_classes`, or deploying to a fresh worker or account) restarts every `account:`
+key's version at 1, which reopens alias rollback unless the PSK changes too: rotate it
+(or bump `ACCOUNT_KEY_HKDF_INFO`) with such a reset (DESIGN.md, "Account records").
 
 ## How the tests are layered
 

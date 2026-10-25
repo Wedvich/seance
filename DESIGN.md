@@ -400,10 +400,12 @@ Séance's noise is cover for a real intruder.
    keys are deterministic (an HMAC, a singleton), where a tombstone would block the
    one key that names the thing for 30 days, so they are cleared by overwrite. A
    holder can therefore overwrite an alias or the quota record with junk readers
-   skip — never read or forge one, and never roll one back, provided a key's version history is
-   never reset (an alias's reader binds its sealed version to the relay's, so an old blob put back
-   lands higher and is refused; that needs no delete, purge or store wipe short of a PSK rotation,
-   which is why #22's purge would reopen it) — and, the residual, create junk keys
+   skip — never read or forge one, and never roll one back, provided no delete, purge or store
+   wipe resets a key's versions (an alias's reader binds its sealed version to the relay's, so an
+   old blob put back lands higher and is refused; after a reset the key restarts at version 1,
+   where an old version-1 blob reads as genuine, which is why #22's purge would reopen it, and
+   why resetting `account:` storage is an operator act with a rule: Account records, "Rollback")
+   — and, the residual, create junk keys
    under `account:` up to its cap of 64, which nothing in the product removes, since
    deletes are refused. The singleton prefixes take one key (`StorePrefixRule.key`:
    `queue:pause`, `quota:fleet`) and refuse any other `invalid_request`, so a holder
@@ -2645,7 +2647,7 @@ daemons never read one, and `seanced mcp` and Raycast show no alias yet.
   as `account:` has no delete path: changing either moves every account to a new key and orphans
   the old records into slots nothing can free. A later re-key is a deliberate new label.
   `importPskBase` is the non-extractable HKDF base every PSK-derived key other than the AES one
-  comes from; `importAccountKey` composes the two for tests and the CLI.
+  comes from; `importAccountKey` composes the two, for tests and the e2e suite.
 - **The store key** is `account:` plus the lowercase hex of `HMAC(accountKey, "oauth|" + accountId)`,
   64 hex characters, which `STORE_KEY_PATTERN` allows. `accountId` is `organizationUuid:accountUuid`.
   The `oauth|` kind prefix keeps ids of a later kind (an API key, a deployment) disjoint from these.
@@ -2663,13 +2665,17 @@ daemons never read one, and `seanced mcp` and Raycast show no alias yet.
   the only way into an account record, and `openAccountListing` applies it to a listing, reporting a
   key outside `account:` or listed twice as `key_mismatch` for every copy. Unreadable is reported,
   never fatal, never deleted: the listing keeps `{ key, version, reason }` for each.
-- **Rollback.** A token holder can `store-list` or `get` every past ciphertext and put one back by
-  overwrite. The blob is authentic, but the put lands at a higher version than the one sealed in
+- **Rollback.** A token holder can `store-list` or `get` each ciphertext while it is current, and so
+  keep every one, and put one back by overwrite (the relay holds only the current version). The blob is authentic, but the put lands at a higher version than the one sealed in
   it, so the reader says `version_mismatch` and the card falls back to the email, else the short id,
   never the old alias. That holds while a key's version history is never reset: the relay refuses
-  deletes under `account:`, and no purge or store wipe exists short of a PSK rotation (a deleted key
-  would restart at version 1, where an old version-1 blob reads as genuine; #22's option (a) would
-  reopen this). It holds against a token holder, not the relay, which can serve a stale blob at the
+  deletes under `account:`, and no purge op exists (a deleted key would restart at version 1, where
+  an old version-1 blob reads as genuine; #22's option (a) would reopen this). Nothing in the
+  product wipes the store, but an operator can: any reset of `account:` storage with the PSK
+  unchanged (a Durable Object migration that drops or renames the class, `deleted_classes`, a
+  redeploy to a fresh worker or account) restarts every key at version 1 and reopens rollback.
+  The rule: rotate the PSK, or bump `ACCOUNT_KEY_HKDF_INFO` (a new label moves every account to a
+  new key), whenever that storage is reset. It holds against a token holder, not the relay, which can serve a stale blob at the
   matching version (Threat model, item 4): accepted, since an alias is display-only and never routes,
   binds or places anything. A blob moved to another account's key reads `key_mismatch`, so a writer
   without the PSK files no record under any account's key.
