@@ -163,4 +163,51 @@ describe("account labels", () => {
     expect(accountNameIn(known, OTHER)).toBe("acct acct-fff");
     expect(accountName("work", undefined)).toBe("acct work");
   });
+
+  test("twins are found case-insensitively, and the original text is what shows", () => {
+    const known = [
+      { accountId: PERSONAL, email: "Me@Example.com" },
+      { accountId: TEAM, email: "me@example.com" },
+    ];
+    expect(accountNameIn(known, PERSONAL)).toBe("Me@Example.com (org 1a2b3c4d)");
+    expect(accountNameIn(known, TEAM)).toBe("me@example.com (org 9f8e7d6c)");
+  });
+
+  test("a tag that would still collide lengthens: the whole org half, else the whole account id", () => {
+    const a = "abcdefgh-one:acct-1";
+    const b = "abcdefgh-two:acct-1";
+    const known = [
+      { accountId: a, email: "me@example.com" },
+      { accountId: b, email: "me@example.com" },
+    ];
+    expect(accountNameIn(known, a)).toBe("me@example.com (org abcdefgh-one)");
+    expect(accountNameIn(known, b)).toBe("me@example.com (org abcdefgh-two)");
+
+    // Same org, account halves sharing eight characters: the org cannot tell them apart.
+    const same = [
+      { accountId: "org-1:abcdefgh-1", email: undefined },
+      { accountId: "org-1:abcdefgh-2", email: undefined },
+    ];
+    expect(accountNameIn(same, "org-1:abcdefgh-1")).toBe("acct abcdefgh (id org-1:abcdefgh-1)");
+    expect(accountNameIn(same, "org-1:abcdefgh-2")).toBe("acct abcdefgh (id org-1:abcdefgh-2)");
+
+    // No org half, or an empty one: nothing to name, so the id.
+    const bare = [
+      { accountId: "abcdefgh-1", email: undefined },
+      { accountId: ":abcdefgh-2", email: undefined },
+      { accountId: "org-9:abcdefgh-3", email: undefined },
+    ];
+    expect(accountNameIn(bare, "abcdefgh-1")).toBe("acct abcdefgh (id abcdefgh-1)");
+    expect(accountNameIn(bare, ":abcdefgh-2")).toBe("acct abcdefgh (id :abcdefgh-2)");
+    expect(accountNameIn(bare, "org-9:abcdefgh-3")).toBe("acct abcdefgh (org org-9)");
+  });
+
+  test("knownAccounts adds extra ids with no email, the registry's entry winning", () => {
+    expect(knownAccounts(machines, [PERSONAL, "org-z:new"])).toEqual([
+      { accountId: PERSONAL, email: "me@example.com" },
+      { accountId: TEAM, email: "me@example.com" },
+      { accountId: OTHER, email: "you@example.com" },
+      { accountId: "org-z:new", email: undefined },
+    ]);
+  });
 });

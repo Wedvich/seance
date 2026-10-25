@@ -768,7 +768,7 @@ export function buildMcpServer(
     "get_queue",
     {
       title: "List the scheduler's queue",
-      description: `List the scheduler's queue — the tasks spawn_session with machine "auto" queued from any client, and what holds dispatch (a paused queue, or an account named as a pin names it) — with each one's state, its pin (whichever of machine and account it pins: the machine by name where known, plus its deviceId; the account by email where a machine reports it, else a short id, plus its accountId; an email or short id two accounts share gains the org's short id), the machines it avoids, where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). ${AUTO_LIMITS}`,
+      description: `List the scheduler's queue — the tasks spawn_session with machine "auto" queued from any client, and what holds dispatch (a paused queue, or an account named as a pin names it) — with each one's state, its pin (whichever of machine and account it pins: the machine by name where known, plus its deviceId; the account by email where a machine reports it, else a short id, plus its accountId; an email or short id two accounts share, case aside, gains a tag telling them apart: the org's short id, or more of it where that still collides; pinned and held accounts no machine reports count as accounts too), the machines it avoids, where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). ${AUTO_LIMITS}`,
       annotations: { readOnlyHint: true },
     },
     async () =>
@@ -783,7 +783,12 @@ export function buildMcpServer(
         if (reply === null)
           return errorResult("get_queue: the scheduler's answer was unreadable (a seanced version mismatch?)");
         if ("ok" in reply) return errorResult(`get_queue failed (${reply.code}): ${schedulerErrorText(reply.code)}`);
-        const known = knownAccounts(lease.machines);
+        // Pinned and held accounts no machine reports count too: two such read alike without a tag.
+        const named = [
+          ...reply.tasks.flatMap((task) => (task.spec.pin?.account === undefined ? [] : [task.spec.pin.account])),
+          ...(reply.holds ?? []).flatMap((hold) => (hold.account === undefined ? [] : [hold.account])),
+        ];
+        const known = knownAccounts(lease.machines, named);
         const tasks = reply.tasks.map((task) => describeTask(task, lease.machines, known));
         const holds = (reply.holds ?? []).map((hold) => describeHold(hold, known));
         return textResult(JSON.stringify({ at: new Date(reply.at).toISOString(), holds, tasks }, null, 2));

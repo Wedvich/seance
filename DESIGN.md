@@ -2816,7 +2816,11 @@ alias, and Raycast reads none.
   pause holds: alias, else email, else `acct` and the first eight characters of the account half.
   One person on a personal plan and a Team org has one email and one account half under two org
   halves, so where another account the registry reports would read the same, the email or short id
-  gains `(org <first eight of the org half>)`; an alias is per account and never gains one
+  gains `(org <first eight of the org half>)` (the whole org half where that still collides, the
+  whole account id where twins share the org half; twins found case-insensitively, and an account
+  a screen names that no machine reports counts as one); an alias is per account and never gains
+  one, though the registry carries none, so an aliased account's unaliased twin is tagged all the
+  same and one account's label reads alike in the PWA and in `seanced mcp`, which shows no alias
   (`accountName` in `shared/src/account-record.ts`, the rule every client shares).
 
 ### The queue store (`daemon/src/queue-store.ts`) — landed 2026-10-18, M3 item 3

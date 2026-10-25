@@ -1962,6 +1962,7 @@ describe("get_queue", () => {
             { until: "resume", at: 5_000 },
             { account: "org-b:acct-2", until: "reset", at: 5_500, resumeAt: 9_000 },
             { account: "org-z:0123456789ab", until: "resume", at: 5_600 },
+            { account: "org-y:0123456789cd", until: "resume", at: 5_700 },
           ],
           at: 6_000,
         },
@@ -1980,12 +1981,18 @@ describe("get_queue", () => {
         since: new Date(5_500).toISOString(),
         resumeAt: new Date(9_000).toISOString(),
       },
-      // No machine reports it: a short id, as a pin's.
+      // No machine reports either: short ids, tagged against each other.
       {
-        account: "acct 01234567",
+        account: "acct 01234567 (org org-z)",
         accountId: "org-z:0123456789ab",
         until: "resume",
         since: new Date(5_600).toISOString(),
+      },
+      {
+        account: "acct 01234567 (org org-y)",
+        accountId: "org-y:0123456789cd",
+        until: "resume",
+        since: new Date(5_700).toISOString(),
       },
     ]);
     const [stuck, manual, finished, pinned] = parsed.tasks;

@@ -1,5 +1,4 @@
 import {
-  accountName,
   accountNameIn,
   CAPABILITIES,
   knownAccounts,
@@ -138,16 +137,18 @@ export function formatUntil(at: number, now: number): string {
 
 /** An account as the cards name it, for a screen that holds only its id (a pause's hold). */
 export function accountDisplayName(
-  machines: readonly Machine[],
+  known: readonly KnownAccount[],
   accountId: string,
   aliases: AccountAliases = {},
 ): string {
-  return accountNameIn(knownAccounts(machines), accountId, aliasOf(aliases, accountId));
+  return accountNameIn(known, accountId, aliasOf(aliases, accountId));
 }
 
+// Through `known`, not the row's own email: one account reports an email on one machine and none on
+// another, and has one label everywhere.
 function accountLabel(exclave: ExclaveInfo, aliases: AccountAliases, known: readonly KnownAccount[]): string {
   if (exclave.accountId !== null) {
-    return accountName(exclave.accountId, exclave.email, aliasOf(aliases, exclave.accountId), known);
+    return accountNameIn(known, exclave.accountId, aliasOf(aliases, exclave.accountId));
   }
   return exclave.authOk ? "signed in" : "not signed in";
 }
@@ -245,8 +246,6 @@ interface AccountGroup {
   readonly machines: Set<string>;
   /** Online hosts that serve `metrics`, in fleet order. */
   readonly charted: string[];
-  /** The first email any of its exclaves reports; one account has one. */
-  email: string | undefined;
 }
 
 function servesMetrics(machine: Machine): boolean {
@@ -339,10 +338,8 @@ function deriveAccounts(
         exclaves: new Set(),
         machines: new Set(),
         charted: [],
-        email: undefined,
       };
       group.exclaves.add(exclave.id);
-      group.email ??= exclave.email;
       group.machines.add(machine.name);
       if (servesMetrics(machine) && !group.charted.includes(machine.deviceId)) group.charted.push(machine.deviceId);
       groups.set(exclave.accountId, group);
@@ -358,7 +355,7 @@ function deriveAccounts(
       accountId: group.accountId,
       alias: alias ?? null,
       title: [...group.exclaves].join(" · "),
-      detail: `${accountName(group.accountId, group.email, alias, known)} · on ${[...group.machines].join(", ")}`,
+      detail: `${accountNameIn(known, group.accountId, alias)} · on ${[...group.machines].join(", ")}`,
       bars: quota === undefined ? [] : quotaBars(quota.observation, now),
       observed: observedLine(quota, observer, now),
       historyFrom: historyHost(group, observer),

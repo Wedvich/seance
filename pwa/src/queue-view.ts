@@ -3,7 +3,9 @@ import {
   QUEUE_MAX_TASKS,
   TASK_PHASES,
   TASK_SPEC_LIMITS,
+  knownAccounts,
   type DepAfter,
+  type KnownAccount,
   type PauseHold,
   type PrChecks,
   type PrState,
@@ -114,19 +116,19 @@ function statusLine(state: AppState): { text: string; available: boolean } {
   return { text: `Scheduler on ${leader?.name ?? scheduler.deviceId}`, available: true };
 }
 
-function holdText(hold: PauseHold, state: AppState, now: number): string {
+function holdText(hold: PauseHold, state: AppState, known: readonly KnownAccount[], now: number): string {
   if (hold.account === undefined) return "The whole queue is paused until resumed";
-  const who = accountDisplayName(state.relay.machines, hold.account, state.accounts.aliases);
+  const who = accountDisplayName(known, hold.account, state.accounts.aliases);
   if (hold.until === "resume") return `${who} is paused until resumed`;
   // `formatUntil` reads "resets in 3h"; inside this sentence the verb is already said.
   const when = hold.resumeAt === undefined ? "" : ` (${formatUntil(hold.resumeAt, now).replace(/^resets /u, "")})`;
   return `${who} is paused until its quota resets${when}`;
 }
 
-function holdRow(hold: PauseHold, state: AppState, now: number): HoldRow {
+function holdRow(hold: PauseHold, state: AppState, known: readonly KnownAccount[], now: number): HoldRow {
   return {
     key: hold.account ?? "queue",
-    text: holdText(hold, state, now),
+    text: holdText(hold, state, known, now),
     ...(hold.account === undefined ? {} : { account: hold.account }),
   };
 }
@@ -278,7 +280,10 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
     return { title, rows: members.map(({ task }) => rowOf(task, state, now, skew, titles)) };
   }).filter((section) => section.rows.length > 0);
 
-  const holds = (ok?.holds ?? []).map((hold) => holdRow(hold, state, now));
+  // Once for every hold: a held account no machine reports still counts as a twin.
+  const heldIds = (ok?.holds ?? []).flatMap((hold) => (hold.account === undefined ? [] : [hold.account]));
+  const known = knownAccounts(state.relay.machines, heldIds);
+  const holds = (ok?.holds ?? []).map((hold) => holdRow(hold, state, known, now));
 
   // A list already read stays up while the leader is away: the status line says it may be stale.
   let empty: string | null = null;
