@@ -12,6 +12,7 @@ import {
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { LazyRelay } from "../daemon/src/app-relay.ts";
+import { spawnAuto } from "../daemon/src/cli-auto.ts";
 import { relayFleet } from "../daemon/src/fleet.ts";
 import { buildMcpServer } from "../daemon/src/mcp.ts";
 import { identityOfState, readState } from "../daemon/src/state.ts";
@@ -299,6 +300,81 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       if (down) await stack.restartDaemon();
       await app.client.cancel(id).catch(() => null);
       if (window !== null) await killWindow(window);
+      app.stop();
+    }
+  }, 60_000);
+
+  // docs/scheduler.md M4, CLI `auto`: `seanced spawn --auto` enqueues as an app
+  // does, so it lands with no leader up and runs once one leads. Driven through
+  // `spawnAuto` over a real app socket — `cmdSpawnAuto` adds only config and key.
+  test("a CLI auto spawn queues with no leader up and runs once one leads, recorded as the CLI's", async () => {
+    const app = startApp(stack, { auto: true });
+    const lazy = new LazyRelay({
+      create: () =>
+        new RelayClient({
+          url: wsUrl(stack.relay, "/app"),
+          token: TOKEN,
+          key: stack.appKey,
+          log: () => {},
+          createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
+        }),
+    });
+    const enqueued: string[] = [];
+    let down = false;
+    let id: string | undefined;
+    let window: string | null = null;
+    // The leader audits to its stdout, which in-process is console.log.
+    const audit = spyOn(console, "log");
+    try {
+      await app.waitForApp(
+        (state) => state.relay.scheduler.kind === "ready" && fixtureOrigin(state) !== null,
+        "the suite's daemon verified as leader, with its repos listed",
+      );
+      stack.daemon.stop();
+      down = true;
+      await app.waitForApp((state) => state.relay.scheduler.kind === "none", "no leader while the daemon is down");
+
+      const outcome = await spawnAuto(
+        { repo: "myrepo", here: true, title: "cli auto", prompt: "queued from a shell", auto: true },
+        relayFleet(lazy),
+        (line) => {
+          enqueued.push(line);
+        },
+      );
+      expect(outcome.ok).toBe(true);
+      expect(outcome.text).toContain("No scheduler is leading right now");
+      id = /^task (\S+): queued/u.exec(outcome.text)?.[1];
+      if (id === undefined) throw new Error(`no task id in: ${outcome.text}`);
+      const taskId = id;
+      expect(enqueued).toEqual([
+        expect.stringMatching(/^audit enqueue origin=cli client=cli task="[^"]+" createdAt=\d+ queued$/u),
+      ]);
+
+      await stack.restartDaemon();
+      down = false;
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead again", 10_000);
+      await stack.daemon.leader.settled();
+      await pollUntil(
+        async () => (await stack.queue().get(taskId))?.body?.state === "running",
+        "the CLI's task to run under the new term",
+        20_000,
+      );
+      // `stack.queue()` reads over the daemon's own socket, so the record is read once it is back.
+      const running = (await stack.queue().get(taskId))?.body;
+      expect(running?.spec.client).toBe("cli");
+      window = running?.assignment?.window ?? null;
+      if (window === null) throw new Error("no window on the running task");
+      expect(await listWindows()).toContain(window);
+      const lines = audit.mock.calls.map((args) => args.join(" "));
+      const admit = lines.find((line) => line.includes("op=admit") && line.includes(`task=${JSON.stringify(taskId)}`));
+      expect(admit).toContain('client="cli"');
+      expect(lines.some((line) => line.includes("queued from a shell"))).toBe(false);
+    } finally {
+      audit.mockRestore();
+      if (down) await stack.restartDaemon();
+      if (id !== undefined) await app.client.cancel(id).catch(() => null);
+      if (window !== null) await killWindow(window);
+      lazy.stop();
       app.stop();
     }
   }, 60_000);
