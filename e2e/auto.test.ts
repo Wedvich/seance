@@ -446,7 +446,14 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       expect(named?.ok).toBe(true);
 
       const outcome = await spawnAuto(
-        { repo: "myrepo", here: false, prompt: "keyless by alias", auto: true, account: "keyless-alias" },
+        {
+          repo: "myrepo",
+          here: false,
+          prompt: "keyless by alias",
+          auto: true,
+          account: "keyless-alias",
+          not: [stack.deviceId],
+        },
         built.fleet,
         (line) => {
           enqueued.push(line);
@@ -466,6 +473,8 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       window = running?.assignment?.window ?? null;
       expect(running?.spec.client).toBe("cli");
       expect(running?.spec.pin).toEqual({ account: otherId });
+      // `--not` rides the broker's frame too: the suite's own daemon, which would otherwise be a candidate.
+      expect(running?.spec.avoid).toEqual([stack.deviceId]);
       expect(enqueued).toEqual([
         expect.stringMatching(/^audit enqueue origin=cli client=cli task="[^"]+" createdAt=\d+ queued$/u),
       ]);
