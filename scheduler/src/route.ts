@@ -3,6 +3,7 @@ import {
   DEFAULT_MODEL,
   effectivePct,
   isQuotaTrimmed,
+  isSkillName,
   isStatusStale,
   liveStatus,
   newestQuotaByAccount,
@@ -74,6 +75,8 @@ interface Pass {
   readonly accountAt: (placement: Placement) => string | null;
   readonly capReached: Reason | null;
   readonly holds: readonly PauseHold[];
+  /** The task's skill when the inventory knows it, so it restricts; null when nothing does. */
+  readonly skill: string | null;
 }
 
 export function route(input: RouteInput): Decision {
@@ -92,6 +95,7 @@ export function route(input: RouteInput): Decision {
         ? { code: "cap_reached", inFlight: inFlight.length, max: config.globalMax }
         : null,
     holds: activeHolds(input.holds ?? [], now),
+    skill: knownSkill(task, machines),
   };
   const caps = [queuePause(pass.holds), pass.capReached, batchCap(task, input.tasks)].filter((r) => r !== null);
 
@@ -128,6 +132,9 @@ function judge(pass: Pass, machine: Machine, machineReasons: readonly Reason[], 
   const clone = machine.repos.find((r) => r.exclave === exclave.id && r.origin === task.spec.repo);
   const rejected: Reason[] = [...machineReasons, ...pinFilter(task, machine, exclave)];
   if (clone === undefined) rejected.push({ code: "repo_absent" });
+  if (pass.skill !== null && !exclave.skills.includes(pass.skill) && clone?.skills?.includes(pass.skill) !== true) {
+    rejected.push({ code: "skill_absent", skill: pass.skill });
+  }
   if (!exclave.authOk || exclave.accountId === null) rejected.push({ code: "auth_missing" });
   const seat = seatOf(config, exclave.seatTier);
   const gated = gatedModel(task.spec.model ?? DEFAULT_MODEL, config);
@@ -263,6 +270,35 @@ function machineFilter(machine: Machine, now: number, config: SchedulerConfig): 
   // A real daemon always lists `default`, so an empty list is a blob it did not write — as unknown as none.
   if (machine.exclaves === undefined || machine.exclaves.length === 0) reasons.push({ code: "exclaves_unknown" });
   return reasons;
+}
+
+/**
+ * The skill a task needs (DESIGN.md, Scheduler, "Skills filter"): declared, else
+ * the prompt's leading `/name` — Claude Code invokes a slash command only as
+ * the prompt's first token, so one later in the text is a mention.
+ */
+function taskSkill(task: Task): string | undefined {
+  if (task.spec.skill !== undefined) return task.spec.skill;
+  const token = /^\/(\S+)/u.exec(task.spec.prompt ?? "")?.[1];
+  return isSkillName(token) ? token : undefined;
+}
+
+/**
+ * Only a name the inventory knows restricts; an unknown one (a built-in, a
+ * plugin's, a typo) passes. The inventory is every exclave's skills, offline
+ * machines included as the autocomplete counts them, plus the project skills
+ * of this task's repo only: one in another repo cannot be what `/name` means
+ * here, and counting it would hold back a same-named command.
+ */
+function knownSkill(task: Task, machines: readonly Machine[]): string | null {
+  const skill = taskSkill(task);
+  if (skill === undefined) return null;
+  const known = machines.some(
+    (m) =>
+      m.exclaves?.some((x) => x.skills.includes(skill)) === true ||
+      m.repos.some((r) => r.origin === task.spec.repo && r.skills?.includes(skill) === true),
+  );
+  return known ? skill : null;
 }
 
 function pinFilter(task: Task, machine: Machine, exclave: ExclaveInfo): Reason[] {
