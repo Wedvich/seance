@@ -37,6 +37,8 @@ function rig(
   opts: {
     readonly status?: "open" | "rejected";
     readonly maxInFlight?: number;
+    /** Holds the dial: the relay client is built only once this settles, as a cold connect would be. */
+    readonly dial?: Promise<void>;
     readonly idleMs?: number;
     readonly now?: () => number;
     readonly scheduler?: SchedulerAvailability;
@@ -46,7 +48,8 @@ function rig(
   const fakes: FakeRelay[] = [];
   const lines: string[] = [];
   const relay = new LazyRelay({
-    create: () => {
+    create: async () => {
+      await opts.dial;
       const fake = fakeRelay([machine({ deviceId: SELF, name: "This Box" }), REMOTE], respond, opts.status);
       if (opts.scheduler !== undefined) fake.setState({ scheduler: opts.scheduler });
       if (opts.accounts !== undefined) fake.accounts = opts.accounts;
@@ -450,6 +453,21 @@ describe("the broker's scheduler actions", () => {
     expect(machines).toMatchObject({ ok: true, re: "m1" });
     gate.resolve(null);
     expect((await slow).ok).toBe(true);
+    broker.stop();
+  });
+
+  test("concurrent reads parked on a cold dial are all answered, not refused as busy", async () => {
+    const dial = Promise.withResolvers<void>();
+    const { broker, fakes } = rig(undefined, { dial: dial.promise, maxInFlight: 1 });
+    const reads = ["a", "b", "c", "d", "e", "f"].map((id, i) =>
+      broker.handle({ v: 1, kind: "broker", id, action: i % 2 === 0 ? "machines" : "fleet" }),
+    );
+    // Nothing has dialed yet: every read is parked on the one connect.
+    expect(fakes).toHaveLength(0);
+    dial.resolve();
+    const replies = await Promise.all(reads);
+    expect(replies.map((reply) => reply.ok)).toEqual([true, true, true, true, true, true]);
+    expect(fakes).toHaveLength(1);
     broker.stop();
   });
 

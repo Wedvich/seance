@@ -59,18 +59,17 @@ import { log } from "./log.ts";
 
 /**
  * Generous for one human's Claude sessions; small enough that a runaway local
- * process cannot pile up spawns behind a slow relay.
+ * process cannot pile up spawns behind a slow relay. Counts every action but
+ * `machines` and `fleet`: those are answered from the connection's cached
+ * registry, and every tool call of a keyless peer opens with one, so slow
+ * scheduler calls (a cancel waits up to 25 s) filling this pool must not turn the
+ * next call's lease open into `busy`. They take no slot at all — not even while
+ * parked on a cold dial (up to the connect timeout plus the registry settle),
+ * which every waiter shares, and which ends them all together — since a slot
+ * counted there would turn a burst of lease opens into `busy`. Once the
+ * connection is up a read is a map lookup and one audit line.
  */
 const MAX_IN_FLIGHT = 16;
-
-/**
- * Its own small share for `machines` and `fleet`: they are answered from the
- * connection's cached registry with no relay round trip, and every tool call of
- * a keyless peer opens with one. Counted with the rest, slow scheduler calls (a
- * cancel waits up to 25 s) could fill the pool and turn the next call's lease
- * open into `busy` — taking even a spawn on this machine's registry view away.
- */
-const MAX_READS_IN_FLIGHT = 4;
 
 export interface BrokerOpts {
   /** This daemon's own deviceId. A request aimed here belongs on the local op path, not a relay round trip back to itself. */
@@ -78,8 +77,6 @@ export interface BrokerOpts {
   readonly relay: LazyRelay;
   readonly auditSink: AuditSink;
   readonly maxInFlight?: number;
-  /** The share `machines` and `fleet` have to themselves, beside `maxInFlight`. */
-  readonly maxReadsInFlight?: number;
   /** Stamps a brokered task's `createdAt`, so a peer cannot back- or forward-date one; tests pin it. */
   readonly now?: () => number;
 }
@@ -101,8 +98,16 @@ export interface Broker {
  */
 export function brokerRelay(config: Pick<Config, "relayUrl" | "bearerToken">, psk: string): LazyRelay {
   let keys: Promise<AppKeys> | undefined;
+  // A rejected derivation is not cached: the next dial tries again instead of failing the same way for good.
+  const appKeys = (): Promise<AppKeys> => {
+    keys ??= importAppKeys(psk).catch((err: unknown) => {
+      keys = undefined;
+      throw err;
+    });
+    return keys;
+  };
   return new LazyRelay({
-    create: async () => appRelayClient(config, await (keys ??= importAppKeys(psk)), (line) => log.info(line)),
+    create: async () => appRelayClient(config, await appKeys(), (line) => log.info(line)),
   });
 }
 
@@ -229,12 +234,10 @@ function clientOf(payload: unknown): string | undefined {
 export function createBroker(opts: BrokerOpts): Broker {
   const audit = brokerAudit(opts.auditSink);
   const maxInFlight = opts.maxInFlight ?? MAX_IN_FLIGHT;
-  const maxReads = opts.maxReadsInFlight ?? MAX_READS_IN_FLIGHT;
   const now = opts.now ?? Date.now;
   // One listing budget for every keyless process on the box: the relay allows each socket four a minute.
   const cacheOf = accountCaches();
   let inFlight = 0;
-  let readsInFlight = 0;
   let stopped = false;
 
   const fail = async (
@@ -367,17 +370,16 @@ export function createBroker(opts: BrokerOpts): Broker {
         );
       } else await audit.request(id, request.remoteOp, request.deviceId, clientOf(request.payload));
       if (stopped) return await fail(id, "shutting_down", "the daemon is stopping");
-      const read = request.action === "machines" || request.action === "fleet";
-      if (read ? readsInFlight >= maxReads : inFlight >= maxInFlight) {
-        return await fail(id, "busy", `${read ? maxReads : maxInFlight} brokered requests already in flight`);
+      // Reads take no slot (see MAX_IN_FLIGHT).
+      if (request.action === "machines" || request.action === "fleet") return await serve(request);
+      if (inFlight >= maxInFlight) {
+        return await fail(id, "busy", `${maxInFlight} brokered requests already in flight`);
       }
-      if (read) readsInFlight += 1;
-      else inFlight += 1;
+      inFlight += 1;
       try {
         return await serve(request);
       } finally {
-        if (read) readsInFlight -= 1;
-        else inFlight -= 1;
+        inFlight -= 1;
       }
     } catch (err) {
       log.error(`broker: request ${quote(id)} crashed: ${String(err)}`);
