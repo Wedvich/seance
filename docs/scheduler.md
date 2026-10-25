@@ -38,7 +38,7 @@ stay as they are; the table says which word each one means.
 | Done signal       | Layered: PR merged (leader, forge: GitHub via `gh`) / PR merged (daemon, local git) / Linear Done → session ended → manual                                                                                                                                                                                                                                                                  |
 | Quota exhausted   | Spill into credits, loudly (Web Push), with pause: until resume / until next reset                                                                                                                                                                                                                                                                                                          |
 | Concurrency       | Global max, per-account max, per-batch strategy (`sequential` / `parallel(n)` / `auto`)                                                                                                                                                                                                                                                                                                     |
-| Alerts            | Web Push (VAPID) from the leader to subscribed PWAs (M4; key sealed in the DO, see _Secrets_)                                                                                                                                                                                                                                                                                               |
+| Alerts            | Web Push (VAPID) from the leader to subscribed PWAs (built; DESIGN.md, _Scheduler_, "Web Push")                                                                                                                                                                                                                                                                                             |
 | Needs input       | `needs-input` state, alert, keeps its slot; idle timeout escalates, never kills                                                                                                                                                                                                                                                                                                             |
 | Event ingest      | New ingest-only `session-event` frame kind on the local socket, after the fleet broker's precedent (threat-model widening, recorded)                                                                                                                                                                                                                                                        |
 | Proxmox           | Machine pressure = the container's own cgroup and PSI view, read by the LXC daemon and folded into its own `status`; no Proxmox API or token (decided 2026-10-20, M4 #17)                                                                                                                                                                                                                   |
@@ -181,11 +181,9 @@ they now live:
 - Projected usage: the fixed per-task estimate (_Settled defaults_ 8), to be tuned from observed
   deltas per task.
 
-**Credits spill:** detected, logged and shown in the PWA (DESIGN.md "Credits spill"). An account
-whose credits are spent to the monthly cap is never spilled into (DESIGN.md, Routing). From M4 the
-same `onAlert` fires a Web Push ("Spending credits on <account> for <task>"), once per account
-per window, not per task; the de-dupe outliving a leader change is M4's (Settings and Web Push,
-below).
+**Credits spill:** detected, logged, pushed and shown in the PWA (DESIGN.md "Credits spill", "Web
+Push"). An account whose credits are spent to the monthly cap is never spilled into (DESIGN.md,
+Routing).
 
 **Done detection, ahead.** The forge is built: the leader reads each GitHub PR with its own `gh` and settles a merge (DESIGN.md, "PR status"). Linear Done (M4, if linked, polled). A session that ends with no PR
 and a nonzero exit is `failed` since M4's _`failed` from exit status_, which fails its
@@ -353,7 +351,7 @@ and the verified leader running an unverified-era task were added at close-out.
   fetch it prompts, the leader's answer and its dispatch log no `wire` line (relay).
 
 **Gaps.** No stacking: every task starts from the default branch, and `TaskSpec.base` stays
-unset. Alerts are PWA-only until M4's Web Push. Linear is not consulted; done comes from local
+unset. Linear is not consulted; done comes from local
 merge detection, the session ending, or manual marking. Quota is still session-reported (until
 M4's `/usage` refresh; closed 2026-10-20).
 Batches and hand-declared deps have no authoring surface: the library, the record and the leader
@@ -398,7 +396,6 @@ of M4 has landed.
 | 0     | Daemon seams and test infrastructure — **Done**                    | the review's splits of `scheduler.ts`, the PWA store and MCP's enqueue | —                        |
 | 0     | #28 (the seed prompt on stdin) and #29 (relay security) — **Done** | —                                                                      | —                        |
 | 1     | Authoring surface (new) — **Done**                                 | —                                                                      | M                        |
-| 1     | Settings and Web Push, in three PRs                                | store rules v2; the fetch seam                                         | L                        |
 | 1     | `/usage` refresh (was: OAuth quota poll) — **Done** (PR #249)      | — (spiked 2026-10-20)                                                  | S–M                      |
 | 1     | Skills filter — **Done**                                           | —                                                                      | S; M with project skills |
 | 1     | Account records — **Done**                                         | store rules v2                                                         | M                        |
@@ -635,24 +632,6 @@ of M4 has landed.
     token lives, what a leak reveals: the node's whole inventory). Open with it: who polls — one
     daemon per node or the leader, not every LXC — and where a node-level reading lives, since
     `MachineStatus` is one machine reporting itself.
-- **Settings and Web Push**, in three PRs — the VAPID keypair in the store under the PSK, the
-  credits-spill and needs-input alerts, `push-subscribe`; also a machine health alert (disk
-  nearly full, from the `disk_pct`/`disk_free_mib` series M1 already stores — the Machines
-  screen shows the fill level, but only a push reaches someone not looking at it). The `onAlert` seam exists,
-  hard-wired to a log line (`startTerm` in `daemon/src/leader.ts`); a workbox service worker
-  exists. Built: the settings record and the VAPID keypair (DESIGN.md, _Scheduler_,
-  "Settings record"), `push-subscribe`, the sender with RFC 8291/8292, the PWA's Notifications
-  card and a minimal push handler that shows every push ("Web Push"). Missing: the new alert kinds
-  (disk), the persisted de-dupe, and the handler's click-through to the task.
-  - _Decided (#9), who writes `settings`:_ recorded in DESIGN.md (_Scheduler_, "Settings record").
-  - _Decided (#10), Web Push egress from a dev machine:_ recorded in DESIGN.md (_Scheduler_,
-    "Web Push").
-  - _Decided (#11), notification actions:_ clicking opens the Queue screen at the alert's task,
-    by the task id the payload carries (the owner added the deep link). No actions: iOS ignores
-    them, and the service worker holds no PSK.
-  - _Decided (#12), spill de-dupe across leader changes:_ stamp the alerted window on the task
-    record and seed it at takeover. The 31 terms seen in 6 hours would otherwise repeat a push per
-    term.
 - **Linear** — key in `settings`; relation-derived deps and Done as a done signal. Needs settings
   and the authoring surface. _Decided (#18):_
   - Only `blocks` / `blocked by` count; `related` and `duplicate` carry no order.
@@ -781,13 +760,15 @@ same PR, with the reason.
    usage (current + this task's estimate + reservations), so with the v1 estimates (5% of a 5h
    window, 1% of a week) a new task is refused from ~85% current in 5h and ~89% in 7d; and a window that resets within 15 min counts as empty for the
    filter, since a task started then runs almost entirely after the reset.
-5. **`needs-input` escalation** after 30 min (`needsInputEscalateMs`, built with M3 item 5):
-   re-alert once, keep the slot, never kill. The re-alert is the record's `escalated`, a leader
-   log line and a push.
+5. **`needs-input` alerts**: a first alert after 2 min (`needsInputAlertMs`, the debounce against
+   auto mode's per-call needs-input flicker), then one escalation after 30 min
+   (`needsInputEscalateMs`, built with M3 item 5): keep the slot, never kill. Each is a leader log
+   line and a push, and each is persisted on the record (`inputAlerted`, `escalated`) so a new
+   leader repeats neither.
 6. **Disk is a floor, not a load.** Under 1 GiB free (`status.free`) filters the machine out;
    above it disk adds nothing to the score. A fill level says how much upkeep a machine needs,
    not how busy it is — scored, an 85%-full idle disk would read as 85% busy and push work off
-   it. The same series feeds M4's health alert and the Machines screen's Disk gauge.
+   it. The same series feeds the disk push alert and the Machines screen's Disk gauge.
 7. **No age cap on a quota reading** beyond the reset rule. The 5h window bounds itself — a
    reading older than 5h is past its reset and reads 0% — so only the 7d window can drift, and
    only through use the fleet does not see. Fleet accounts are used almost only inside the

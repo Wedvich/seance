@@ -2209,8 +2209,8 @@ export interface VapidKeys {
 export const LINEAR_KEY_MAX_LENGTH = 256;
 
 /**
- * Payload of the settings record (`op: "settings"`, sealed to SCHEDULER_ID; M4,
- * Settings and Web Push). The leader alone writes it (decided #9), from an
+ * Payload of the settings record (`op: "settings"`, sealed to SCHEDULER_ID; M4).
+ * The leader alone writes it (decided #9), from an
  * app's request sealed `from: "app"`; every PSK holder can open it. Never in
  * logs, `queue`, MCP or `status`. Each part absent until set.
  */
@@ -2438,7 +2438,7 @@ export interface RoutePreviewResponse {
 }
 
 /**
- * `op: "push-subscribe"` (M4, Settings and Web Push), app → leader, sealed
+ * `op: "push-subscribe"` (M4), app → leader, sealed
  * `from: "app"`: add this browser's subscription to the settings record. The
  * leader parses it with `parsePushSubscribeRequest`, which holds the endpoint
  * to `PUSH_SERVICE_HOSTS`; refusals are `invalid_request` (also what a leader
