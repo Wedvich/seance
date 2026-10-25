@@ -179,7 +179,11 @@ async function enqueueQueued(store: QueueStore, leader: Leader, id: string, fiel
  * `github.com/acme/app`, a fresh status with headroom — each blob sealed by
  * the machine it describes, as the leg's client requires.
  */
-async function routableEntry(deviceId: string, observed = true): Promise<RegistryView> {
+async function routableEntry(
+  deviceId: string,
+  observed = true,
+  reading: Partial<MachineStatus> = {},
+): Promise<RegistryView> {
   const info: MachineInfo = {
     name: deviceId,
     platform: "linux",
@@ -204,6 +208,7 @@ async function routableEntry(deviceId: string, observed = true): Promise<Registr
     mem: 10,
     free: 50_000,
     ...(observed ? { quota: [{ x: 0, h: 10, d: 10, s: "session", at: nowS - 60 }] } : {}),
+    ...reading,
   };
   const sealed = (op: OpName, payload: unknown): Promise<Envelope> =>
     seal(key, { to: APP_ID, from: deviceId }, { id: crypto.randomUUID(), ts: Date.now(), op, payload });
@@ -1051,7 +1056,12 @@ describe("leader push", () => {
         return { ok: true, version: at + 1 };
       },
     };
-    return { store, puts, subscriptions: () => held?.record?.subscriptions };
+    return {
+      store,
+      puts,
+      subscriptions: () => held?.record?.subscriptions,
+      diskAlerts: () => held?.record?.diskAlerts,
+    };
   };
 
   /** Runs one request through a leading term and returns the app's answer. */
@@ -1346,6 +1356,69 @@ describe("leader push", () => {
     expect(lines.some((line) => line.includes("needs input: task="))).toBe(true);
     expect(lines.some((line) => line.includes("pruned a subscription host=fcm.googleapis.com status=410"))).toBe(true);
     expect(lines.some((line) => line.includes("/fcm/send/") || line.includes("vapid t="))).toBe(false);
+  });
+});
+
+describe("leader disk alerts", () => {
+  const sub: WebPushSubscription = {
+    endpoint: "https://fcm.googleapis.com/fcm/send/live",
+    keys: {
+      p256dh: "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4",
+      auth: "BTBZMqHH6r4Tts7J_aSIgg",
+    },
+  };
+
+  /** The record in memory, with the relay's version rule. */
+  const heldSettings = async () => {
+    let held: SettingsRead = {
+      version: 1,
+      record: { version: 1, vapid: await generateVapidKeys(), subscriptions: [sub] },
+    };
+    const store: SettingsStore = {
+      get: async () => held,
+      put: async (at, record) => {
+        if (held === null || held.version !== at) return { ok: false, code: "version_conflict" };
+        held = { version: at + 1, record: { ...record, version: at + 1 } };
+        return { ok: true, version: at + 1 };
+      },
+    };
+    return { store, diskAlerts: () => held?.record?.diskAlerts };
+  };
+
+  test("a nearly full disk is pushed once and recorded; a later term repeats nothing, and recovery re-arms it", async () => {
+    const relay = startTestRelay(TOKEN);
+    const push = startPushEndpoint();
+    const settings = await heldSettings();
+    relay.setRegistry([await routableEntry("b", true, { disk: 95 })]);
+    const { leader } = leaderOver(relay, new MemoryQueueStore(), 40, undefined, settings.store, (input, init) =>
+      fetch(push.endpoint(new URL(String(input)).pathname.split("/").at(-1) ?? ""), init),
+    );
+    const lines = await captureLog(async () => {
+      try {
+        leader.lead(1);
+        await leader.settled();
+        await push.waitForRequests(1);
+        await pollUntil(() => settings.diskAlerts()?.length === 1, "the alerted machine on the record");
+        expect(settings.diskAlerts()?.map((e) => e.deviceId)).toEqual(["b"]);
+
+        // A new term reads the record, so the same full disk is not news.
+        leader.lead(2);
+        await pollUntil(() => leader.term() === 2, "the second term");
+        await leader.settled();
+        await Bun.sleep(300);
+        expect(push.requests()).toHaveLength(1);
+
+        relay.setRegistry([await routableEntry("b", true, { disk: 50 })]);
+        await pollUntil(() => (settings.diskAlerts() ?? []).length === 0, "the recovery");
+        relay.setRegistry([await routableEntry("b", true, { disk: 96 })]);
+        await push.waitForRequests(2);
+      } finally {
+        leader.stop();
+        relay.stop();
+        await push.stop();
+      }
+    });
+    expect(lines.filter((line) => line.includes("disk nearly full: device="))).toHaveLength(2);
   });
 });
 
