@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { importPsk, openAtRest, sealAtRest, toBase64 } from "./crypto.ts";
 import { openTaskListing, openTaskRecord, queuedTask, sealTaskRecord, taskKey } from "./task-record.ts";
-import { APP_ID, PIN_SENTINEL, SCHEDULER_ID, type Task, type TaskRecord } from "./types.ts";
+import { APP_ID, PIN_SENTINEL, SCHEDULER_ID, TASK_SPEC_LIMITS, type Task, type TaskRecord } from "./types.ts";
 
 const key = await importPsk(toBase64(new Uint8Array(32).fill(7)));
 const otherKey = await importPsk(toBase64(new Uint8Array(32).fill(9)));
@@ -55,12 +55,20 @@ describe("task records at rest", () => {
   test("an account pin or an avoid list is sealed with the sentinel an older leader refuses; the rest without", async () => {
     const at = (value: unknown, name: string): unknown =>
       typeof value === "object" && value !== null ? Object.entries(value).find(([k]) => k === name)?.[1] : undefined;
-    // The pin rule of every leader before `pinAccount`, as it stood: an exclave, if present, non-empty.
-    const olderPinParses = (pin: unknown): boolean => {
-      if (typeof pin !== "object" || pin === null) return false;
-      const exclave = at(pin, "exclave");
-      return exclave === undefined || (typeof exclave === "string" && exclave !== "");
+    // What every leader before `pinAccount` ran on a spec's pin, copied from the previous release's shared/src/parse.ts (e0e3b56):
+    // `isPlacementField` (650-652), `parsePin` (660-666), and the `pinned === null` arm of `parseTaskSpec` (717).
+    const olderIsPlacementField = (value: unknown): boolean =>
+      typeof value === "string" && value.length <= TASK_SPEC_LIMITS.placement && value !== "";
+    const olderParsePin = (value: unknown): object | null => {
+      if (typeof value !== "object" || value === null) return null;
+      const deviceId = at(value, "deviceId");
+      const exclave = at(value, "exclave");
+      if (deviceId !== undefined && typeof deviceId !== "string") return null;
+      if (exclave !== undefined && !olderIsPlacementField(exclave)) return null;
+      return { ...(deviceId === undefined ? {} : { deviceId }), ...(exclave === undefined ? {} : { exclave }) };
     };
+    // parsePin null makes parseTaskSpec null: the whole record is unreadable to that leader.
+    const olderPinParses = (pin: unknown): boolean => olderParsePin(pin) !== null;
     const sealedPin = async (spec: Task["spec"]): Promise<unknown> => {
       const task = { ...queued(), spec };
       const env = await sealTaskRecord(key, APP_ID, { version: 1, task });

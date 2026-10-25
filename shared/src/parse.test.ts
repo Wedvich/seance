@@ -926,7 +926,7 @@ describe("store", () => {
       plan: true,
       skill: "s".repeat(SKILL_NAME_MAX_LENGTH),
       // The longest account id and every avoid slot at its longest id: the sentinel rides along too.
-      pin: { deviceId: device, account: "a".repeat(TASK_SPEC_LIMITS.account) },
+      pin: { deviceId: device, account: "ø".repeat(TASK_SPEC_LIMITS.account) },
       avoid: Array.from({ length: TASK_SPEC_LIMITS.avoid }, (_, i) => `${i}`.padEnd(ROUTING_ID_MAX_LENGTH, "A")),
       lineage: placement,
       base: placement,
