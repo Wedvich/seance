@@ -11,6 +11,7 @@ import {
   TASK_REQUEST_LIMITS,
   TASK_SPEC_LIMITS,
   type Machine,
+  type SpawnClient,
   type TaskRequest,
   type TaskSpec,
 } from "@seance/shared";
@@ -85,15 +86,28 @@ export function resolveOrigin(
   };
 }
 
+/** The way past the prompt bound other than shortening: a direct spawn is not bound by the scheduler's. */
+const PROMPT_BOUND_ESCAPE: Readonly<Record<EnqueueSurface, string>> = {
+  mcp: "name a machine",
+  cli: "drop --auto to spawn here directly",
+};
+
 /**
  * Past a bound `createTask` refuses the enqueue locally as a bare
  * `invalid_request`, before any store write — so it is refused here, naming
  * the bound, as the PWA does.
  */
-function overBound(field: keyof typeof TASK_REQUEST_LIMITS, value: string | undefined): string | null {
+function overBound(
+  field: keyof typeof TASK_REQUEST_LIMITS,
+  value: string | undefined,
+  surface: EnqueueSurface,
+): string | null {
   const limit = TASK_REQUEST_LIMITS[field];
   if (value === undefined || value.length <= limit) return null;
-  const fix = field === "prompt" ? " — shorten it (the session can gather the rest with tools), or name a machine" : "";
+  const fix =
+    field === "prompt"
+      ? ` — shorten it (the session can gather the rest with tools), or ${PROMPT_BOUND_ESCAPE[surface]}`
+      : "";
   return `the ${field} is ${value.length} characters; auto takes at most ${limit}${fix}`;
 }
 
@@ -109,13 +123,13 @@ export function pinExclaveError(exclave: string): string | null {
   return null;
 }
 
-export function taskRequestError(request: TaskRequest): string | null {
+export function taskRequestError(request: TaskRequest, surface: EnqueueSurface = "mcp"): string | null {
   return (
-    overBound("prompt", request.prompt) ??
-    overBound("title", request.title) ??
-    overBound("model", request.model) ??
-    overBound("effort", request.effort) ??
-    overBound("repo", request.repo)
+    overBound("prompt", request.prompt, surface) ??
+    overBound("title", request.title, surface) ??
+    overBound("model", request.model, surface) ??
+    overBound("effort", request.effort, surface) ??
+    overBound("repo", request.repo, surface)
   );
 }
 
@@ -124,8 +138,8 @@ export function taskRequestError(request: TaskRequest): string | null {
  * `invalid_request`, which tells an agent nothing: every bound it can cross is
  * named here first, and the parser itself is the backstop for the rest.
  */
-export function specError(spec: AutoSpec): string | null {
-  const request = taskRequestError(spec);
+export function specError(spec: AutoSpec, surface: EnqueueSurface = "mcp"): string | null {
+  const request = taskRequestError(spec, surface);
   if (request !== null) return request;
   const { deps, linear, pin } = spec;
   if (pin !== undefined) {
@@ -147,7 +161,7 @@ export function specError(spec: AutoSpec): string | null {
     }
     if (linear.url !== undefined && httpsUrl(linear.url) === null) return "linear.url must be an https: URL";
   }
-  // `client` is the caller's own name, well within its bound, so the spec parses as the record will.
+  // `client` is left out: every caller's name fits its bound, so the spec parses as the record will.
   return parseTaskSpec(spec) === null ? "invalid task spec" : null;
 }
 
@@ -204,7 +218,7 @@ export async function enqueueAuto(
   surface: EnqueueSurface,
   id?: string,
 ): Promise<AutoEnqueued> {
-  const task = queuedTask({ ...request, client: surface }, Date.now(), id);
+  const task = queuedTask({ ...request, client: surface satisfies SpawnClient }, Date.now(), id);
   const audited = enqueueAudit(audit, surface);
   const followUp = FOLLOW_UP[surface];
   // Whether any try left this process: a socket that was never open sent nothing, so nothing can have queued.
@@ -228,6 +242,12 @@ export async function enqueueAuto(
       }
       const why =
         err instanceof RequestFailure ? failureReasonText(err) : err instanceof Error ? err.message : String(err);
+      if (sent) {
+        // An earlier try may have stored it, so this is no clean failure: audit it as the lost path does.
+        // oxlint-disable-next-line no-await-in-loop -- the last thing this try does: it returns
+        await audited(task, { kind: "unanswered" });
+        return failed(`auto failed: ${why} — task ${task.id} may have queued; ${followUp.check} before retrying`);
+      }
       return failed(`auto failed: ${why}`);
     }
     if (reply === null) {

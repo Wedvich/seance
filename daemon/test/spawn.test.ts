@@ -698,15 +698,22 @@ describe("wire input cannot escape the repo set or the shell", () => {
 // docs/scheduler.md M4: `--auto` is the one CLI form that dials the relay, so a
 // direct `seanced spawn` must still work with the relay unreachable.
 describe("seanced spawn (the CLI, as a subprocess)", () => {
-  test("a direct spawn works with the relay unreachable, audited origin=cli", async () => {
+  test("a direct spawn never dials the relay, audited origin=cli", async () => {
     const configDir = join(base, "cli-config");
     const stateDir = join(base, "cli-state");
     await mkdir(configDir, { recursive: true });
     await mkdir(stateDir, { recursive: true });
-    // A port that was just bound and released: nothing listens there.
-    const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
-    const { port } = probe;
-    await probe.stop(true);
+    // A relay that counts any request or upgrade: a direct spawn must never dial it.
+    let dialled = 0;
+    const relay = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () => {
+        dialled += 1;
+        return new Response("no", { status: 503 });
+      },
+    });
+    const { port } = relay;
     await Bun.write(
       join(configDir, "config.json"),
       JSON.stringify({
@@ -734,8 +741,12 @@ describe("seanced spawn (the CLI, as a subprocess)", () => {
       const log = await Bun.file(join(stateDir, "seanced.log")).text();
       expect(log).toContain("audit spawn origin=cli");
       expect(log).not.toContain("audit enqueue");
+      // After the positive result: a non-event, so it is asserted once the spawn is done.
+      expect(dialled).toBe(0);
     } finally {
+      // `tmux` returns a failed kill (no such window) rather than throwing, so this cannot mask the real failure.
       await tmux(["kill-window", "-t", "main:No Relay"]);
+      await relay.stop(true);
     }
   }, 30_000);
 });

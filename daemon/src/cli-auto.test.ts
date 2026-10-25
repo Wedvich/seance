@@ -96,11 +96,30 @@ describe("spawnAuto", () => {
   test("every try unanswered names the task and the app's queue, not an MCP tool", async () => {
     const fake = scheduledRelay();
     fake.onCreate = () => new RequestFailure("dropped", "the relay socket closed", "relay");
-    const { ok, text } = await run(fake);
+    const { ok, text, audited } = await run(fake);
     expect(ok).toBe(false);
     expect(text).toBe(
       `auto: no answer from the relay after 3 tries — task ${fake.creates[0]?.id} may have queued; check the app's queue before retrying`,
     );
+    expect(audited).toEqual([
+      `audit enqueue origin=cli client=cli task="${fake.creates[0]?.id}" createdAt=${fake.creates[0]?.createdAt} unanswered`,
+    ]);
+  }, 10_000);
+
+  test("a hard failure after an earlier try was sent may have queued: audited unanswered, naming the task", async () => {
+    const fake = scheduledRelay();
+    let tries = 0;
+    fake.onCreate = () => {
+      tries += 1;
+      return tries === 1 ? new RequestFailure("timeout", "no reply", "relay") : new Error("the socket exploded");
+    };
+    const { ok, text, audited } = await run(fake);
+    expect(ok).toBe(false);
+    expect(fake.creates).toHaveLength(2);
+    expect(text).toBe(
+      `auto failed: the socket exploded — task ${fake.creates[0]?.id} may have queued; check the app's queue before retrying`,
+    );
+    expect(audited).toEqual([expect.stringMatching(/^audit enqueue origin=cli client=cli .* unanswered$/u)]);
   }, 10_000);
 
   test("a repo no machine reports is refused, with nothing written", async () => {

@@ -407,7 +407,7 @@ of M4 has landed.
 | 1     | Skills filter                                                      | —                                                                      | S; M with project skills |
 | 1     | Account records                                                    | store rules v2                                                         | M                        |
 | 1     | Fleet quota record                                                 | store rules v2                                                         | M                        |
-| 1     | CLI and keyless MCP `auto`                                         | MCP's enqueue split out                                                | S–M                      |
+| 1     | CLI `auto` — **Done**; keyless `auto` remains                      | MCP's enqueue split out                                                | S–M                      |
 | 1     | `failed` from exit status (new) — **Done**                         | —                                                                      | S–M                      |
 | 2     | Stacking                                                           | authoring surface; #28                                                 | L                        |
 | 2     | Auth health                                                        | `/usage` refresh; Web Push for its alert                               | M                        |
@@ -804,6 +804,7 @@ of M4 has landed.
     own key"). An enqueue there is a new broker action, which is a threat-model change
     (DESIGN.md "Fleet broker"); without it, a keyless box gets no `auto`.
   - _Decided (#16):_ defer the broker action.
+  - Exit: keyless `seanced mcp`'s `auto` queues a task through the broker (refused today).
 
   Raycast `auto` attaches the same way as the CLI's.
 

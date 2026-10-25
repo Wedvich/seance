@@ -8,6 +8,7 @@ import {
   quote,
   type DespawnRequest,
   type FailureReason,
+  type SpawnClient,
   type SpawnRequest,
   type UpdateOutcome,
 } from "@seance/shared";
@@ -308,7 +309,7 @@ export type EnqueueOutcome =
  * `seanced spawn --auto` typed at this machine — the CLI's own origin, since
  * `audit enqueue` already tells the act apart from its `audit spawn`.
  */
-export type EnqueueSurface = "mcp" | "cli";
+export type EnqueueSurface = Extract<SpawnClient, "mcp" | "cli">;
 
 /**
  * An app-role process on this box enqueuing on `auto` with the key itself

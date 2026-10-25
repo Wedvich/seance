@@ -677,7 +677,9 @@ nothing checked it. The last is the gap they leave.
   M3 review S5). `seanced spawn --auto` writes the same line under `cli`
   (`origin=cli client=cli`): the surface is still someone at this machine's shell,
   and `audit enqueue` beside `audit spawn` already tells the two acts apart, as `relay`
-  covers spawn, despawn and queue (added 2026-10-25, M4). The daemon writes
+  covers spawn, despawn and queue (added 2026-10-25, M4). A process interrupted after a
+  send (Ctrl-C) leaves no enqueue line, for either surface: accepted, since the store
+  record and the leader's `op=admit` line still show the task. The daemon writes
   via stdout (launchd redirects it); the CLI appends to the same file itself,
   and failing to do so warns rather than failing a spawn the human asked for.
   Two independent writers is safe only while nothing rotates the file.
@@ -3364,7 +3366,9 @@ for the lot with its own `gh`.
   of one tmux exec. And any same-uid process can rewrite the option, which is
   why the read revalidates it against the pattern; a session relabelling itself
   is the same residual the threat model accepts for the session-event path.
-  `seanced spawn` takes no task id: only the scheduler mints them.
+  A direct `seanced spawn` sends no `SpawnRequest.taskId`: only the scheduler mints the
+  ids of the spawns it dispatches. `--auto` mints the queued task record's id in the CLI
+  process, as every app-role enqueue (the PWA, MCP) does.
 - **Pre-trust on spawn**: Claude Code blocks startup on a per-directory trust
   dialog (`projects[<path>].hasTrustDialogAccepted` in the `.claude.json` of
   the exclave the repo sits in — `~/.claude.json` for `default`,
@@ -4829,28 +4833,6 @@ says. That an agent asked for it is in that agent's transcript, in the MCP box's
 `audit enqueue origin=mcp` line, and on the leader's `op=admit` line, which reads the
 task record's `client` (`TaskSpec.client`, bounded to 64; added 2026-10-18, M3 review S5).
 
-**CLI `auto`** (added 2026-10-25, scheduler M4). `seanced spawn --auto <repo> [--here]
-[-t <title>] [[-p] <task>]` enqueues through the same `daemon/src/auto.ts` code as
-MCP's `auto` (`cli-auto.ts` is only the CLI's wiring): the clone name resolves to its
-origin over the registry, the task is sealed and `store-put` at `expect: 0`, so it
-queues with no leader up, and the answer is `task <id>: queued`. The record's `client`
-is `"cli"`, and the box's own line is `audit enqueue origin=cli client=cli` (the audit
-paragraph in the threat model says why `cli`, not a new origin). The follow-up line
-names the app's queue, not `get_queue`/`cancel_task`, which a shell cannot call.
-
-- _Spelling:_ a flag, not MCP's `machine: "auto"` as a positional — `auto` is a
-  legal repo name, and `seanced spawn auto` would read as one.
-- _Flags:_ the ones a direct spawn has, which are `TaskRequest`'s `mode`, `title` and
-  `prompt`; the prompt is optional, as in MCP. Model, effort, plan, pins and the
-  authoring fields are not CLI flags at all, so v1 adds none.
-- _Key and relay:_ the one CLI form that dials the relay, as an app with this shell's
-  own PSK (`loadPsk`, as `seanced mcp` resolves it); `LazyRelay`'s connect bound
-  turns an unreachable relay into "not queued" rather than a hang. A direct
-  `seanced spawn` loads nothing of this and stays relay-free.
-- _Keyless boxes:_ refused ("needs this machine's own key"), never brokered — the
-  broker's actions are fixed and an enqueue action is a threat-model change, deferred
-  for MCP and CLI alike (docs/scheduler.md, M4).
-
 **Threat-model addendum.**
 
 - New path in: any local Claude session that loads the server — including
@@ -4883,6 +4865,40 @@ names the app's queue, not `get_queue`/`cancel_task`, which a shell cannot call.
   boot-order dependent.
 - Prompt text is never logged on the MCP tier either — the Claude session
   that issued the spawn is its natural transcript.
+
+### CLI `auto` (`daemon/src/cli-auto.ts`) — added 2026-10-25, scheduler M4
+
+`seanced spawn --auto <repo> [--here]
+[-t <title>] [[-p] <task>]` enqueues through the same `daemon/src/auto.ts` code as
+MCP's `auto` (`cli-auto.ts` is only the CLI's wiring): the clone name resolves to its
+origin over the registry, the task is sealed and `store-put` at `expect: 0`, so it
+queues with no leader up, and the answer is `task <id>: queued`. The record's `client`
+is `"cli"`, and the box's own line is `audit enqueue origin=cli client=cli` (the audit
+paragraph in the threat model says why `cli`, not a new origin). The follow-up line
+names the app's queue, not `get_queue`/`cancel_task`, which a shell cannot call.
+
+- _Spelling:_ a flag, not MCP's `machine: "auto"` as a positional — `auto` is a
+  legal repo name, and `seanced spawn auto` would read as one.
+- _Flags:_ the ones a direct spawn has, which are `TaskRequest`'s `mode`, `title` and
+  `prompt`; the prompt is optional, as in MCP. Model, effort, plan, pins and the
+  authoring fields are not CLI flags at all, so v1 adds none.
+- _Key and relay:_ the one CLI form that dials the relay, as an app with this shell's
+  own PSK (`loadPsk`, as `seanced mcp` resolves it); `LazyRelay`'s connect bound
+  turns an unreachable relay into "not queued" rather than a hang. A direct
+  `seanced spawn` loads nothing of this and stays relay-free.
+- _Keyless boxes:_ refused ("needs this machine's own key"), never brokered — the
+  broker's actions are fixed and an enqueue action is a threat-model change, deferred
+  for MCP and CLI alike (docs/scheduler.md, M4).
+
+_Threat-model delta._ One new path in: a user at this machine's shell holding the
+config and the PSK can now enqueue a task, where before they could spawn on any
+machine with the same two. Nothing they can reach widens — a queued task runs only
+through the leader's own gates — and no new key is at rest: the process imports the
+key this shell already reads, and a service-delivered credential is never read by it
+(refused, above). The audit is the `audit enqueue origin=cli` line; prompt text is
+never logged. A process interrupted after a send (Ctrl-C) leaves no line, as with
+MCP: accepted, since the store record and the leader's `op=admit` line still show
+the task.
 
 ## Local op socket (`daemon/src/local-socket.ts`) — designed 2026-08-29
 

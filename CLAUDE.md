@@ -127,8 +127,8 @@ green:
   requests the daemon forwards to other machines for a keyless `seanced mcp`, `schedule` for
   the daemon's reap timer, `harvest` for the daemon closing a dead task pane after noting its exit
   status, `leader` for the scheduler loop dispatching to its own machine in
-  process and admitting a task, and `mcp` for `seanced mcp`'s own `auto` enqueue line, which
-  `seanced spawn --auto` writes under `cli`, its surface's origin — a new
+  process and admitting a task, `mcp` for `seanced mcp`'s own `auto` enqueue line, and `cli` for
+  anything typed at this machine's shell, its `spawn --auto` enqueue line included — a new
   surface adds an origin, never reuses one),
   prompt text is never logged, a service-delivered credential never leaves the daemon process
   (`exec.ts` strips `CREDENTIALS_DIRECTORY`, or the tmux server it boots hands the PSK's path to

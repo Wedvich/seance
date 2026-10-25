@@ -12,7 +12,7 @@ import {
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { LazyRelay } from "../daemon/src/app-relay.ts";
-import { spawnAuto } from "../daemon/src/cli-auto.ts";
+import { autoFleet, spawnAuto } from "../daemon/src/cli-auto.ts";
 import { relayFleet } from "../daemon/src/fleet.ts";
 import { buildMcpServer } from "../daemon/src/mcp.ts";
 import { identityOfState, readState } from "../daemon/src/state.ts";
@@ -306,19 +306,12 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
 
   // docs/scheduler.md M4, CLI `auto`: `seanced spawn --auto` enqueues as an app
   // does, so it lands with no leader up and runs once one leads. Driven through
-  // `spawnAuto` over a real app socket — `cmdSpawnAuto` adds only config and key.
+  // `autoFleet` (the config's PSK, its `/daemon` URL turned `/app`) and `spawnAuto`
+  // over a real app socket — `cmdSpawnAuto` adds only the process exit.
   test("a CLI auto spawn queues with no leader up and runs once one leads, recorded as the CLI's", async () => {
     const app = startApp(stack, { auto: true });
-    const lazy = new LazyRelay({
-      create: () =>
-        new RelayClient({
-          url: wsUrl(stack.relay, "/app"),
-          token: TOKEN,
-          key: stack.appKey,
-          log: () => {},
-          createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
-        }),
-    });
+    const built = await autoFleet(stack.config, { stores: [] });
+    if ("error" in built) throw new Error(built.error);
     const enqueued: string[] = [];
     let down = false;
     let id: string | undefined;
@@ -336,7 +329,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
 
       const outcome = await spawnAuto(
         { repo: "myrepo", here: true, title: "cli auto", prompt: "queued from a shell", auto: true },
-        relayFleet(lazy),
+        built.fleet,
         (line) => {
           enqueued.push(line);
         },
@@ -374,7 +367,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       if (down) await stack.restartDaemon();
       if (id !== undefined) await app.client.cancel(id).catch(() => null);
       if (window !== null) await killWindow(window);
-      lazy.stop();
+      built.fleet.stop();
       app.stop();
     }
   }, 60_000);

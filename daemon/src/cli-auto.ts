@@ -7,12 +7,10 @@ import { loadConfig, loadPsk, type Config } from "./config.ts";
 import { relayFleet, type Fleet, type FleetLease } from "./fleet.ts";
 import type { PskStore } from "./psk-store.ts";
 
-/**
- * `seanced spawn --auto`: queue the spawn for the scheduler as an app-role
- * client, as `seanced mcp`'s `auto` does — a sealed task `store-put` at
- * `expect: 0`, so it queues with no leader up. The one CLI form that dials the
- * relay and needs the PSK; a direct `seanced spawn` stays relay-free.
- */
+// `seanced spawn --auto`: queue the spawn for the scheduler as an app-role
+// client, as `seanced mcp`'s `auto` does — a sealed task `store-put` at
+// `expect: 0`, so it queues with no leader up. The one CLI form that dials the
+// relay and needs the PSK; a direct `seanced spawn` stays relay-free.
 
 /**
  * The broker's actions are fixed (DESIGN.md "Fleet broker") and enqueue is not
@@ -58,7 +56,7 @@ export async function spawnAuto(args: SpawnCliArgs, fleet: Fleet, audit: AuditSi
     ...(args.prompt === undefined ? {} : { prompt: args.prompt }),
   };
   // Refused before the relay is dialled: no round trip to learn the prompt is too long.
-  const invalid = specError(spec);
+  const invalid = specError(spec, "cli");
   if (invalid !== null) return failed(`auto refused: ${invalid}`);
   let lease: FleetLease;
   try {
@@ -71,7 +69,7 @@ export async function spawnAuto(args: SpawnCliArgs, fleet: Fleet, audit: AuditSi
     const resolved = resolveOrigin(lease.machines, args.repo);
     if ("error" in resolved) return failed(`auto refused: ${resolved.error}`);
     const resolvedSpec: AutoSpec = { ...spec, repo: resolved.origin };
-    const longOrigin = specError(resolvedSpec);
+    const longOrigin = specError(resolvedSpec, "cli");
     if (longOrigin !== null) return failed(`auto refused: ${longOrigin}`);
     return await enqueueAuto(lease.scheduler, resolvedSpec, audit, "cli");
   } finally {
@@ -92,4 +90,6 @@ export async function cmdSpawnAuto(args: SpawnCliArgs): Promise<void> {
     process.exit(1);
   }
   console.log(outcome.text);
+  // As `seanced mcp` exits explicitly: a socket stuck closing must not hold the shell.
+  process.exit(0);
 }
