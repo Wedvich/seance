@@ -935,7 +935,7 @@ export function buildMcpServer(
           const resolvedSpec: AutoSpec = { ...spec, ...resolved.fields };
           const longOrigin = specError(resolvedSpec);
           if (longOrigin !== null) return errorResult(`auto refused: ${longOrigin}${lengthNote(longOrigin, until)}`);
-          const enqueued = await enqueueAuto(lease.scheduler, resolvedSpec, audit);
+          const enqueued = await enqueueAuto(lease.scheduler, resolvedSpec, audit, "mcp");
           return enqueued.ok ? textResult(enqueued.text) : errorResult(enqueued.text);
         });
       }
@@ -1139,7 +1139,7 @@ export function buildMcpServer(
         const landed: string[] = [];
         for (const [i, member] of resolvedPlan.entries()) {
           // oxlint-disable-next-line no-await-in-loop -- each create follows the one before
-          const enqueued = await enqueueAuto(lease.scheduler, member.spec, audit, member.id);
+          const enqueued = await enqueueAuto(lease.scheduler, member.spec, audit, "mcp", member.id);
           if (!enqueued.ok) {
             const queued = landed.length === 0 ? "none had queued" : `already queued: ${landed.join(", ")}`;
             return errorResult(

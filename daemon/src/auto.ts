@@ -14,7 +14,7 @@ import {
   type TaskRequest,
   type TaskSpec,
 } from "@seance/shared";
-import { enqueueAudit, type AuditSink } from "./audit.ts";
+import { enqueueAudit, type AuditSink, type EnqueueSurface } from "./audit.ts";
 import type { SchedulerLeg } from "./fleet.ts";
 import { originQuery } from "./scan.ts";
 
@@ -147,7 +147,8 @@ export function specError(spec: AutoSpec): string | null {
     }
     if (linear.url !== undefined && httpsUrl(linear.url) === null) return "linear.url must be an https: URL";
   }
-  return parseTaskSpec({ ...spec, client: "mcp" }) === null ? "invalid task spec" : null;
+  // `client` is the caller's own name, well within its bound, so the spec parses as the record will.
+  return parseTaskSpec(spec) === null ? "invalid task spec" : null;
 }
 
 /** Whether the spec needs a leader that understands `until: "reported"` or `after: "done"` (`CAPABILITIES.reportedDone`). */
@@ -173,22 +174,39 @@ export function leaderTakesReported(lease: {
 const ENQUEUE_ATTEMPTS = 3;
 const ENQUEUE_RETRY_MS = 1_000;
 
+/** Where each surface's reader looks next: a shell user cannot call MCP's tools, so the CLI names the app's queue. */
+const FOLLOW_UP: Readonly<Record<EnqueueSurface, { readonly placed: string; readonly check: string }>> = {
+  mcp: {
+    placed:
+      "The scheduler places it as soon as a machine and account can take it; get_queue shows where it lands and why, and cancel_task takes it out.",
+    check: "check get_queue",
+  },
+  cli: {
+    placed:
+      "The scheduler places it as soon as a machine and account can take it; the app's queue shows where it lands and why, and cancels it.",
+    check: "check the app's queue",
+  },
+};
+
 /**
  * Enqueues by `store-put` — the relay answers it itself, so no leader is needed:
  * with none (or an unverified one) the task waits in the relay's queue until one
  * leads. A lost reply (timeout, dropped socket) or no socket is tried again with
  * the same task, since a repeat create reads `landedEarlier`; every try lost says
  * so and names the id. Never logs: `seanced mcp`'s stdout is its JSON-RPC
- * channel. The text names MCP's tools (`get_queue`, `cancel_task`).
+ * channel. `surface` is the record's `client` and the audit line's origin, and
+ * picks the follow-up text.
  */
 export async function enqueueAuto(
   scheduler: SchedulerLeg,
   request: AutoSpec,
   audit: AuditSink,
+  surface: EnqueueSurface,
   id?: string,
 ): Promise<AutoEnqueued> {
-  const task = queuedTask({ ...request, client: "mcp" }, Date.now(), id);
-  const audited = enqueueAudit(audit);
+  const task = queuedTask({ ...request, client: surface }, Date.now(), id);
+  const audited = enqueueAudit(audit, surface);
+  const followUp = FOLLOW_UP[surface];
   // Whether any try left this process: a socket that was never open sent nothing, so nothing can have queued.
   let sent = false;
   for (let attempt = 1; attempt <= ENQUEUE_ATTEMPTS; attempt += 1) {
@@ -225,7 +243,7 @@ export async function enqueueAuto(
     await audited(task, { kind: "queued", landedEarlier: reply.landedEarlier });
     const lines = [
       `task ${task.id}: queued${reply.landedEarlier ? " (an earlier try had already stored it)" : ""}`,
-      "The scheduler places it as soon as a machine and account can take it; get_queue shows where it lands and why, and cancel_task takes it out.",
+      followUp.placed,
     ];
     if (schedulerRefusal(scheduler.availability()) !== null) {
       lines.push(
@@ -239,6 +257,6 @@ export async function enqueueAuto(
   }
   await audited(task, { kind: "unanswered" });
   return failed(
-    `auto: no answer from the relay after ${ENQUEUE_ATTEMPTS} tries — task ${task.id} may have queued; check get_queue before retrying`,
+    `auto: no answer from the relay after ${ENQUEUE_ATTEMPTS} tries — task ${task.id} may have queued; ${followUp.check} before retrying`,
   );
 }
