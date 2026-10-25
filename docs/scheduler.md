@@ -391,26 +391,29 @@ and #20 were settled earlier, and #21 was added in the same session. #22 (junk u
 found after store rules v2 landed) is still open.
 
 **Order.** Wave 0 settles the seams the items share. Wave 1 is the items nothing else in M4 has to
-precede. Wave 2 waits on the wave-1 item named.
+precede. Wave 2 waits on the wave-1 item named. _Later_ is deferred by the owner (2026-10-25),
+not blocked: nothing in M4 waits on it, and whether it is built at all is decided once the rest
+of M4 has landed.
 
-| Wave | Item                                                               | Depends on                                                             | Size                     |
-| ---- | ------------------------------------------------------------------ | ---------------------------------------------------------------------- | ------------------------ |
-| 0    | Store rules v2 (relay) — **Done**                                  | the review's S4 store bounds; #29                                      | —                        |
-| 0    | One schema PR for every M4 shape — **Done**                        | the owner's calls below                                                | —                        |
-| 0    | Daemon seams and test infrastructure — **Done**                    | the review's splits of `scheduler.ts`, the PWA store and MCP's enqueue | —                        |
-| 0    | #28 (the seed prompt on stdin) and #29 (relay security) — **Done** | —                                                                      | —                        |
-| 1    | Authoring surface (new) — **Done**                                 | —                                                                      | M                        |
-| 1    | Settings and Web Push, in three PRs                                | store rules v2; the fetch seam                                         | L                        |
-| 1    | `/usage` refresh (was: OAuth quota poll) — **Done** (PR #249)      | — (spiked 2026-10-20)                                                  | S–M                      |
-| 1    | Skills filter                                                      | —                                                                      | S; M with project skills |
-| 1    | LXC pressure view (was: Proxmox node view)                         | —                                                                      | S                        |
-| 1    | Account records                                                    | store rules v2                                                         | M                        |
-| 1    | Fleet quota record                                                 | store rules v2                                                         | M                        |
-| 1    | CLI and keyless MCP `auto`                                         | MCP's enqueue split out                                                | S–M                      |
-| 1    | `failed` from exit status (new) — **Done**                         | —                                                                      | S–M                      |
-| 2    | Stacking                                                           | authoring surface; #28                                                 | L                        |
-| 2    | Auth health                                                        | `/usage` refresh; Web Push for its alert                               | M                        |
-| 2    | Linear                                                             | settings; authoring surface                                            | L                        |
+| Wave  | Item                                                               | Depends on                                                             | Size                     |
+| ----- | ------------------------------------------------------------------ | ---------------------------------------------------------------------- | ------------------------ |
+| 0     | Store rules v2 (relay) — **Done**                                  | the review's S4 store bounds; #29                                      | —                        |
+| 0     | One schema PR for every M4 shape — **Done**                        | the owner's calls below                                                | —                        |
+| 0     | Daemon seams and test infrastructure — **Done**                    | the review's splits of `scheduler.ts`, the PWA store and MCP's enqueue | —                        |
+| 0     | #28 (the seed prompt on stdin) and #29 (relay security) — **Done** | —                                                                      | —                        |
+| 1     | Authoring surface (new) — **Done**                                 | —                                                                      | M                        |
+| 1     | Settings and Web Push, in three PRs                                | store rules v2; the fetch seam                                         | L                        |
+| 1     | `/usage` refresh (was: OAuth quota poll) — **Done** (PR #249)      | — (spiked 2026-10-20)                                                  | S–M                      |
+| 1     | Skills filter                                                      | —                                                                      | S; M with project skills |
+| 1     | Account records                                                    | store rules v2                                                         | M                        |
+| 1     | Fleet quota record                                                 | store rules v2                                                         | M                        |
+| 1     | CLI and keyless MCP `auto`                                         | MCP's enqueue split out                                                | S–M                      |
+| 1     | `failed` from exit status (new) — **Done**                         | —                                                                      | S–M                      |
+| 2     | Stacking                                                           | authoring surface; #28                                                 | L                        |
+| 2     | Auth health                                                        | `/usage` refresh; Web Push for its alert                               | M                        |
+| 2     | Linear                                                             | settings; authoring surface                                            | L                        |
+| Later | LXC pressure view (was: Proxmox node view)                         | —                                                                      | S                        |
+| Later | Proxmox node view (follow-up)                                      | LXC pressure view; reopens #17                                         | M                        |
 
 **Wave 0.** Owned by the review's relay and daemon sessions, not planned here in full:
 
@@ -636,6 +639,17 @@ precede. Wave 2 waits on the wave-1 item named.
   limits and PSI). The review proposed a read-only PVEAuditor token with a pinned certificate;
   the owner chose to hold no Proxmox credential at all, at the cost of a node-wide view:
   pressure from neighbouring containers is invisible except as this one's PSI.
+  - _Deferred (2026-10-25)_ to the end of M4, with the node view below. The owner has not
+    decided whether to build it at all; that is decided then.
+  - Keep its `status` fields container-scoped (this container's limit, usage, PSI), never named
+    as the host's, so a node view lands beside them instead of repurposing them under older
+    daemons.
+  - _Follow-up, not decided: a Proxmox node view._ What only the API adds is which neighbour
+    and the node's headroom, for routing across nodes. It reopens #17: a read-only PVEAuditor
+    token with a pinned certificate held somewhere, which is a threat-model change (where the
+    token lives, what a leak reveals: the node's whole inventory). Open with it: who polls — one
+    daemon per node or the leader, not every LXC — and where a node-level reading lives, since
+    `MachineStatus` is one machine reporting itself.
 - **Settings and Web Push**, in three PRs — the VAPID keypair in the store under the PSK, the
   credits-spill and needs-input alerts, `push-subscribe`; also a machine health alert (disk
   nearly full, from the `disk_pct`/`disk_free_mib` series M1 already stores — the Machines
