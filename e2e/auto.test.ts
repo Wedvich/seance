@@ -276,9 +276,9 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
 
       // The daemon's own trail names the origin and the peer's claimed client, never the prompt.
       const lines = audit.mock.calls.map((args) => args.join(" "));
-      expect(lines.some((line) => line.includes('audit broker origin=local-broker action=scheduler op="enqueue"'))).toBe(
-        true,
-      );
+      expect(
+        lines.some((line) => line.includes('audit broker origin=local-broker action=scheduler op="enqueue"')),
+      ).toBe(true);
       const enqueued = lines.find((line) => line.includes("audit enqueue origin=local-broker"));
       expect(enqueued).toContain("claimed_client=mcp");
       expect(enqueued).toContain(`task=${JSON.stringify(taskId)}`);
