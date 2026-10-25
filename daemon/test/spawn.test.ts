@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { RepoEntry, SessionEntry, SpawnRequest } from "@seance/shared";
 import { SpawnFailure, type SpawnOutcome } from "../src/backend.ts";
 import { exec, git } from "../src/exec.ts";
@@ -692,4 +693,49 @@ describe("wire input cannot escape the repo set or the shell", () => {
       [viaQuote, viaSubst],
     );
   });
+});
+
+// docs/scheduler.md M4: `--auto` is the one CLI form that dials the relay, so a
+// direct `seanced spawn` must still work with the relay unreachable.
+describe("seanced spawn (the CLI, as a subprocess)", () => {
+  test("a direct spawn works with the relay unreachable, audited origin=cli", async () => {
+    const configDir = join(base, "cli-config");
+    const stateDir = join(base, "cli-state");
+    await mkdir(configDir, { recursive: true });
+    await mkdir(stateDir, { recursive: true });
+    // A port that was just bound and released: nothing listens there.
+    const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
+    const { port } = probe;
+    await probe.stop(true);
+    await Bun.write(
+      join(configDir, "config.json"),
+      JSON.stringify({
+        name: "CliBox",
+        relayUrl: `ws://127.0.0.1:${port}/daemon`,
+        bearerToken: "token",
+        psk: "",
+        repoRoots: [fixture.root],
+      }),
+    );
+    const mainPath = fileURLToPath(new URL("../src/main.ts", import.meta.url));
+    const proc = Bun.spawn([process.execPath, mainPath, "spawn", "myrepo", "--here", "-t", "No Relay"], {
+      env: { ...process.env, SEANCE_CONFIG_DIR: configDir, SEANCE_STATE_DIR: stateDir, HOME: home },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [code, stdout, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    try {
+      expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
+      expect(stdout).toContain("spawned 'No Relay'");
+      const log = await Bun.file(join(stateDir, "seanced.log")).text();
+      expect(log).toContain("audit spawn origin=cli");
+      expect(log).not.toContain("audit enqueue");
+    } finally {
+      await tmux(["kill-window", "-t", "main:No Relay"]);
+    }
+  }, 30_000);
 });
