@@ -329,6 +329,46 @@ describe("deriveQueue", () => {
     expect(accountOnly.paused).toBe(false);
   });
 
+  test("holds tell apart one email signed in to two orgs, and held accounts no machine reports", () => {
+    const signedIn = (accountId: string, email: string): ExclaveInfo => ({
+      id: accountId,
+      authOk: true,
+      accountId,
+      email,
+      extraUsageEnabled: null,
+      skills: [],
+    });
+    const mac = machine({
+      exclaves: [
+        signedIn("1a2b3c4d-personal:acct-same", "me@acme.dev"),
+        signedIn("9f8e7d6c-team:acct-same", "me@acme.dev"),
+      ],
+    });
+    const view = deriveQueue(
+      state(
+        ok(
+          [],
+          [
+            { account: "1a2b3c4d-personal:acct-same", until: "resume", at: NOW },
+            { account: "9f8e7d6c-team:acct-same", until: "resume", at: NOW },
+            // No machine reports either: they read alike unless the hold list counts them.
+            { account: "org-p:abcdefgh-1", until: "resume", at: NOW },
+            { account: "org-q:abcdefgh-2", until: "resume", at: NOW },
+          ],
+        ),
+        {},
+        { machines: [mac] },
+      ),
+      NOW,
+    );
+    expect(view.holds.map((h) => h.text)).toEqual([
+      "me@acme.dev (org 1a2b3c4d) is paused until resumed",
+      "me@acme.dev (org 9f8e7d6c) is paused until resumed",
+      "acct abcdefgh (org org-p) is paused until resumed",
+      "acct abcdefgh (org org-q) is paused until resumed",
+    ]);
+  });
+
   test("a held account shows its alias in place of its email", () => {
     const exclave: ExclaveInfo = {
       id: "work",
