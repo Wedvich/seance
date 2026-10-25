@@ -971,6 +971,17 @@ describe("spawn_session on auto", () => {
     );
   }, 10_000);
 
+  test("three tries lost through the daemon's broker blame the daemon, not the relay", async () => {
+    const fake = leaderRelay();
+    fake.onCreate = () => new RequestFailure("dropped", "the daemon did not answer within 40000ms", "daemon");
+    const { text, error } = await callAuto(fake);
+    expect(error).toBe(true);
+    expect(fake.creates).toHaveLength(3);
+    expect(text).toBe(
+      `auto: no answer from this machine's daemon after 3 tries — task ${fake.creates[0]?.id} may have queued; check get_queue before retrying`,
+    );
+  }, 10_000);
+
   test("three tries that never left the process say it was not queued, not that it may have been", async () => {
     const fake = leaderRelay();
     fake.onCreate = () => new RequestFailure("disconnected", "the relay socket is not open", "relay");

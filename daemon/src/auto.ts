@@ -499,6 +499,8 @@ export async function enqueueAuto(
   const followUp = FOLLOW_UP[surface];
   // Whether any try left this process: a socket that was never open sent nothing, so nothing can have queued.
   let sent = false;
+  // Who the last lost try blamed, so the closing line names what stayed silent: through the broker it is the daemon, not the relay.
+  let lastLostTarget: RequestFailure["target"] = "relay";
   for (let attempt = 1; attempt <= ENQUEUE_ATTEMPTS; attempt += 1) {
     if (attempt > 1) {
       // oxlint-disable-next-line no-await-in-loop -- the wait between tries
@@ -516,9 +518,10 @@ export async function enqueueAuto(
         (err.reason === "timeout" || err.reason === "dropped" || err.reason === "disconnected");
       if (lost) {
         if (!(err instanceof RequestFailure && err.reason === "disconnected")) sent = true;
+        if (err instanceof RequestFailure) lastLostTarget = err.target;
         continue;
       }
-      // Its message already says it may have landed; the line below names the task.
+      // A daemon fault's message is the daemon's own words (`boom`), not a verdict on whether it landed; the line below says that.
       const why =
         err instanceof DaemonFault
           ? err.message
@@ -563,6 +566,6 @@ export async function enqueueAuto(
   }
   await audited(task, { kind: "unanswered" });
   return failed(
-    `auto: no answer from the relay after ${ENQUEUE_ATTEMPTS} tries — task ${task.id} may have queued; ${followUp.check} before retrying`,
+    `auto: no answer from ${lastLostTarget === "daemon" ? "this machine's daemon" : "the relay"} after ${ENQUEUE_ATTEMPTS} tries — task ${task.id} may have queued; ${followUp.check} before retrying`,
   );
 }
