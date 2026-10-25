@@ -50,7 +50,8 @@ export interface StoreIo {
   /**
    * A read that cannot be answered rejects: a short list read as the whole
    * queue would be tasks the new leader never runs, and the takeover that
-   * fails is retried.
+   * fails is retried; a settings read that fails is no verdict on the record,
+   * and the term's tick tries it again.
    */
   readonly read: (frame: StoreRequestFrame) => Promise<StoreReplyFrame>;
   /** The adapter's answer to a write: the relay's reply mapped, or the term's end thrown. */
