@@ -6,6 +6,7 @@ import type { RepoEntry } from "@seance/shared";
 import { reapAudit, type AuditSink } from "../src/audit.ts";
 import { exec } from "../src/exec.ts";
 import { tmuxHarvestPanes } from "../src/exit-status.ts";
+import type { FsmonitorDaemon, FsmonitorSeams } from "../src/fsmonitor.ts";
 import { resolveCommonDir } from "../src/gitdir.ts";
 import { LaunchLedger } from "../src/launch-ledger.ts";
 import {
@@ -160,6 +161,7 @@ async function reap(repo: Repo, overrides: Partial<ReapOptions> = {}): Promise<R
     audit: reapAudit("cli", collect),
     deadPaneMinAgeMs: 0,
     pruneLogPath: repo.pruneLog,
+    fsmonitor: null,
     ...overrides,
   });
 }
@@ -567,5 +569,172 @@ describe("withReapLock", () => {
     await writeFile(path, "2147483646");
     expect(await withReapLock(() => Promise.resolve("ran"), path)).toBe("ran");
     expect(await Bun.file(path).exists()).toBe(false);
+  });
+});
+
+describe("reap: fsmonitor daemons (injected — Linux git ships no daemon)", () => {
+  const HOUR = 60 * 60 * 1000;
+
+  interface FakeMonitors {
+    readonly seams: FsmonitorSeams;
+    /** Each stop, and whether its directory was still on disk when asked. */
+    readonly stops: { readonly path: string; readonly existed: boolean }[];
+    readonly signalled: number[];
+  }
+
+  function fakeMonitors(daemons: readonly FsmonitorDaemon[], stopAnswers = true): FakeMonitors {
+    const stops: { path: string; existed: boolean }[] = [];
+    const signalled: number[] = [];
+    return {
+      stops,
+      signalled,
+      seams: {
+        list: () => Promise.resolve(daemons),
+        stop: async (path) => {
+          stops.push({ path, existed: await Bun.file(join(path, ".git")).exists() });
+          return stopAnswers;
+        },
+        signal: (pid) => {
+          signalled.push(pid);
+          return true;
+        },
+      },
+    };
+  }
+
+  interface Fleet {
+    readonly repo: Repo;
+    readonly removable: string;
+    readonly young: string;
+    readonly paned: string;
+    readonly scratch: string;
+    readonly gone: string;
+    readonly paneId: string;
+    readonly daemons: readonly FsmonitorDaemon[];
+  }
+
+  /**
+   * One daemon per case, by pid: 11 a merged, old worktree reap removes; 12 a
+   * worktree too young to remove; 13 the main clone; 14 a worktree with a tmux
+   * pane inside; 15 a scratchpad left with only `.claude`; 16 a directory gone;
+   * 17 unmapped.
+   */
+  async function fleet(): Promise<Fleet> {
+    const repo = await freshRepo();
+    const removable = join(repo.path, ".claude", "worktrees", "done");
+    const young = join(repo.path, ".claude", "worktrees", "busy");
+    const paned = join(repo.path, ".claude", "worktrees", "paned");
+    const scratch = join(base, `scratch-${fixtures}`);
+    const gone = join(base, `gone-${fixtures}`);
+    await addWorktree(repo.path, removable);
+    await addWorktree(repo.path, young);
+    await addWorktree(repo.path, paned);
+    await age(removable);
+    await mkdir(join(scratch, ".claude"), { recursive: true });
+    const paneId = await openWindow("sleep 600", paned);
+    await pollUntil(
+      async () => (await listPanes()).some((pane) => pane.paneId === paneId && pane.path.endsWith("/worktrees/paned")),
+      "pane in the worktree",
+    );
+    const daemons = [
+      { pid: 11, rssKb: 5120, worktree: removable },
+      { pid: 12, rssKb: 5120, worktree: young },
+      { pid: 13, rssKb: 5120, worktree: repo.path },
+      { pid: 14, rssKb: 5120, worktree: paned },
+      { pid: 15, rssKb: 3072, worktree: scratch },
+      { pid: 16, rssKb: 1024, worktree: gone },
+      { pid: 17, rssKb: 5120, worktree: null },
+    ];
+    return { repo, removable, young, paned, scratch, gone, paneId, daemons };
+  }
+
+  function byPid(report: ReapReport): readonly (readonly [number | null, string, string])[] {
+    return report.monitors.stopped
+      .map((m) => [m.pid, m.how, m.why] as const)
+      .toSorted((a, b) => (a[0] ?? 0) - (b[0] ?? 0));
+  }
+
+  test("stops a removed worktree's daemon first, then ones on no repo or a gone directory; recent and paned ones run on", async () => {
+    const { repo, removable, scratch, paneId, daemons } = await fleet();
+    const fake = fakeMonitors(daemons);
+
+    const report = await reap(repo, { fsmonitor: fake.seams, monitorIdleMs: 10 * DAY_MS });
+    await tmuxOk(["kill-pane", "-t", paneId]);
+    expect(report.repos[0]?.removedWorktrees.map((w) => w.path)).toEqual([removable]);
+    expect(fake.stops).toEqual([{ path: removable, existed: true }]);
+    expect(fake.signalled.toSorted()).toEqual([15, 16]);
+    expect(byPid(report)).toEqual([
+      [11, "stop", "removed"],
+      [15, "signal", "no-repo"],
+      [16, "signal", "gone"],
+    ]);
+    expect(report.monitors.kept).toEqual({ inUse: 1, recent: 2, unreadable: 0, unmapped: 1 });
+    expect(lines).toContain(
+      `audit reap origin=cli stopped-fsmonitor path="${removable}" pid=11 how=stop reason=removed`,
+    );
+    expect(lines).toContain(
+      `audit reap origin=cli stopped-fsmonitor path="${scratch}" pid=15 how=signal reason=no-repo`,
+    );
+    expect(lines.at(-1)).toContain("monitors=3");
+    const printed = formatReport(report).join("\n");
+    expect(printed).toContain("stopped 3 fsmonitor daemons (9.0 MB)");
+    // Every daemon listed is accounted for: three stopped, four left running.
+    expect(printed).toContain(
+      "4 daemons: 1 with a tmux pane inside, 2 used in the last 240h, 1 whose directory lsof didn't say",
+    );
+  });
+
+  test("an idle repo's daemon is asked to stop, and signalled when the ask fails; a pane inside still keeps one", async () => {
+    const { repo, young, paneId, daemons } = await fleet();
+    const fake = fakeMonitors(daemons, false);
+
+    // A day on: past the hour for every repo, short of the week a worktree needs.
+    const report = await reap(repo, { fsmonitor: fake.seams, monitorIdleMs: HOUR, now: Date.now() + DAY_MS });
+    await tmuxOk(["kill-pane", "-t", paneId]);
+    expect(fake.stops.map((stop) => stop.path).toSorted()).toEqual(
+      [join(repo.path, ".claude", "worktrees", "done"), young, repo.path].toSorted(),
+    );
+    expect(byPid(report)).toEqual([
+      [11, "signal", "gone"],
+      [12, "signal", "idle"],
+      [13, "signal", "idle"],
+      [15, "signal", "no-repo"],
+      [16, "signal", "gone"],
+    ]);
+    expect(report.monitors.kept).toEqual({ inUse: 1, recent: 0, unreadable: 0, unmapped: 1 });
+  });
+
+  test("a dry run stops and signals nothing, records nothing, and says how it would stop each", async () => {
+    const { repo, removable, paneId, daemons } = await fleet();
+    const fake = fakeMonitors(daemons);
+
+    const report = await reap(repo, {
+      fsmonitor: fake.seams,
+      dryRun: true,
+      monitorIdleMs: HOUR,
+      now: Date.now() + DAY_MS,
+    });
+    await tmuxOk(["kill-pane", "-t", paneId]);
+    expect(fake.stops).toEqual([]);
+    expect(fake.signalled).toEqual([]);
+    expect(lines).toEqual([]);
+    expect(await exists(removable)).toBe(true);
+    expect(byPid(report)).toEqual([
+      [11, "stop", "removed"],
+      [12, "stop", "idle"],
+      [13, "stop", "idle"],
+      [15, "signal", "no-repo"],
+      [16, "signal", "gone"],
+    ]);
+    expect(formatReport(report).join("\n")).toContain("would stop 5 fsmonitor daemons");
+  });
+
+  test("with no seams, as on native Windows, the report says nothing about daemons", async () => {
+    const { repo, paneId } = await fleet();
+    const report = await reap(repo);
+    await tmuxOk(["kill-pane", "-t", paneId]);
+    expect(report.monitors.stopped).toEqual([]);
+    expect(report.monitors.kept).toEqual({ inUse: 0, recent: 0, unreadable: 0, unmapped: 0 });
+    expect(formatReport(report).join("\n")).not.toContain("fsmonitor");
   });
 });

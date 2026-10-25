@@ -23,7 +23,7 @@ import { dirname, isAbsolute, resolve } from "node:path";
  */
 export type Checkout =
   | { readonly kind: "none" }
-  | { readonly kind: "main" | "linked"; readonly commonDir: string }
+  | { readonly kind: "main" | "linked"; readonly commonDir: string; readonly gitDir: string }
   | { readonly kind: "broken" | "unreadable" };
 
 const NONE: Checkout = { kind: "none" };
@@ -65,7 +65,7 @@ export async function inspectCheckout(dir: string): Promise<Checkout> {
   const dotGitIs = await presence(dotGit);
   if (dotGitIs === "absent") return NONE;
   if (dotGitIs === "error") return UNREADABLE;
-  if (dotGitIs === "dir") return { kind: "main", commonDir: dotGit };
+  if (dotGitIs === "dir") return { kind: "main", commonDir: dotGit, gitDir: dotGit };
 
   const gitDir = await readPointer(dotGit, /^gitdir:\s*(.+)$/mu, dir);
   if (gitDir === undefined) return UNREADABLE;
@@ -76,12 +76,12 @@ export async function inspectCheckout(dir: string): Promise<Checkout> {
 
   const commondir = `${gitDir}/commondir`;
   const commondirIs = await presence(commondir);
-  if (commondirIs === "absent") return { kind: "main", commonDir: gitDir };
+  if (commondirIs === "absent") return { kind: "main", commonDir: gitDir, gitDir };
   if (commondirIs === "error") return UNREADABLE;
   const commonDir = await readPointer(commondir, /^(.+)$/mu, gitDir);
   if (commonDir === undefined) return UNREADABLE;
   if (commonDir === null) return BROKEN;
-  return { kind: "linked", commonDir };
+  return { kind: "linked", commonDir, gitDir };
 }
 
 /** Canonical, so it compares equal however each checkout's pointer spelled it. */

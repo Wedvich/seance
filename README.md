@@ -416,7 +416,10 @@ linked worktree only when no tmux pane is inside it, it is clean, its branch is 
 week (`--min-age-days` to change). It deletes merged branches, closes séance windows
 that are dead or sitting on claude's "keep or remove this worktree?" prompt, and
 reports what it left: dirty worktrees, branches whose upstream is gone but which hold
-unpushed commits, and live sessions with the id `despawn` takes. Every deleted branch
+unpushed commits, and live sessions with the id `despawn` takes. Where git runs
+`core.fsmonitor=true` daemons (macOS), it also stops every one with no tmux pane in its
+checkout and an hour unused, and any on a directory gone or no longer a repo, reporting
+the memory freed; git starts a new one when a repo next needs it. Every deleted branch
 is in the audit log with its sha, so `git branch <name> <sha>` brings it back. It acts
 by default; run `--dry-run` first.
 
