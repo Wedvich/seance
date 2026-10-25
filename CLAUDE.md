@@ -195,7 +195,8 @@ green:
   `pushEndpoint` accepts at send time (https, a `PUSH_SERVICE_HOSTS` host), redirects refused and
   timed out, never awaited by the scheduler pass; its payload carries ids and state only, and no
   endpoint, key, JWT or payload is logged, and the service worker (`pwa/public/push-sw.js`) holds
-  no PSK, so a notification's text is fixed per kind and a click opens only a same-origin path it
+  no PSK, so a notification's text is fixed per kind (a spill's window label shown only as one of
+  the known `5h`/`7d`) and a click opens only a same-origin path it
   built from an id that passed `isTaskId` (`/?task=<id>`, `/?screen=machines`), which the app
   reads back through the same rule. Don't let changes drift from them.
 - The daemon's local op socket (`daemon/src/local-socket.ts`) is what makes an MCP spawn aimed at

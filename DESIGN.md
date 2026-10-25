@@ -538,7 +538,8 @@ Séance's noise is cover for a real intruder.
    a gap with no repair path yet. The page's service worker holds no PSK: it opens
    nothing it receives, and a notification's text is fixed per kind with only a task id (or a
    device id) from the payload, so a forged push (a thief leader's, with a subscription it
-   read) can make the browser show one of four sentences and nothing else. A click opens a
+   read) can make the browser show one of four sentences, a spill's with at worst a known window
+   label (`5h` or `7d`) and a number, and nothing else. A click opens a
    same-origin path the worker itself built from an id that passed `isTaskId`
    (`/?task=<id>` or `/?screen=machines`), re-checked when the click lands; the app reads the
    same two shapes through the same rule, so neither a hostile payload nor a hostile query
@@ -4694,8 +4695,12 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   "Séance" notification, even one it cannot read, because Chrome shows its own otherwise and
   WebKit revokes a subscription after a few silent pushes. The text is fixed per kind ("A task
   is waiting for input", "… still waiting for input (30 min)", "A task is spending credits (7d
-  at 105%)", "A machine's disk is nearly full"); the payload's ids are the notification's tag,
-  so a repeat replaces rather than stacks, and the target of a click. It holds no PSK, so it
+  at 105%)", "A machine's disk is nearly full"); the spill's window is shown only when it is one
+  of the scheduler's labels (`5h`, `7d`, or a per-model `7d <model>`, shown as `7d`), never as
+  the payload spells it. The payload's ids are the notification's tag, so a repeat replaces
+  rather than stacks, and every notification sets `renotify` so that replacement is still
+  heard (the 30-minute escalation and a second disk alert reuse their first alert's tag). The
+  id is also the target of a click. It holds no PSK, so it
   shows no name or title, and a payload it cannot read (an unknown kind or version, an id that
   fails the `isTaskId` rule it copies) shows the generic text with no target.
   - **The deep link.** A click opens the app at `/?task=<id>` (a task or spill alert) or

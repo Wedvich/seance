@@ -4,8 +4,9 @@
  *
  * A push always shows a notification, even for a payload it cannot read: Chrome shows its own
  * "updated in the background" one otherwise, and WebKit revokes a subscription after a few
- * silent pushes. The text is fixed per kind; the payload carries ids and state, never a title
- * or a prompt, and this worker holds no PSK to open anything more.
+ * silent pushes. The text is fixed per kind, a spill's window label shown only as one of the known
+ * `5h`/`7d`; the payload carries ids and state, never a title or a prompt, and this worker holds no
+ * PSK to open anything more.
  */
 
 // A function scope, so nothing here lands in the global scope the generated worker shares.
@@ -21,8 +22,16 @@
 
   const FALLBACK = { body: "Something needs your attention.", tag: "seance", url: null };
 
-  /** A window label is shown as text only; cap it so a hostile payload cannot fill a notification. */
-  const WINDOW_SHOWN_MAX = 64;
+  /**
+   * The quota windows the scheduler labels a spill with (`windowsOf`, scheduler/src/route.ts): `5h`, `7d`,
+   * and a per-model weekly `7d <model>`. Only these are shown, as the fixed `5h` or `7d`: a label is the
+   * payload's, and the text stays this file's. Anything else is left out of the text.
+   */
+  function windowShown(label) {
+    if (typeof label !== "string") return "";
+    if (label === "5h" || label === "7d") return label;
+    return label.startsWith("7d ") ? "7d" : "";
+  }
 
   /** What a push says, or null for one this worker cannot read: unknown kind or version, a bad id. */
   function describe(alert) {
@@ -39,9 +48,9 @@
       return { body, tag: `needs-input:${alert.taskId}`, url };
     }
     if (alert.kind === "spill") {
-      const window = typeof alert.window === "string" ? alert.window.slice(0, WINDOW_SHOWN_MAX) : "";
+      const window = windowShown(alert.window);
       const pct = Number.isFinite(alert.projectedPct) ? Math.round(alert.projectedPct) : null;
-      const where = pct === null ? window : `${window} at ${pct}%`;
+      const where = pct === null ? window : window === "" ? `${pct}%` : `${window} at ${pct}%`;
       return {
         body: where === "" ? "A task is spending credits." : `A task is spending credits (${where}).`,
         tag: `spill:${alert.taskId}`,
@@ -61,8 +70,15 @@
 
   self.addEventListener("push", (event) => {
     const { body, tag, url } = readAlert(event);
+    // A tag replaces the notification already shown under it, silently unless `renotify`: the 30-minute
+    // escalation and a repeated disk alert reuse their first alert's tag and must still be heard.
     event.waitUntil(
-      self.registration.showNotification("Séance", { body, tag, ...(url === null ? {} : { data: { url } }) }),
+      self.registration.showNotification("Séance", {
+        body,
+        tag,
+        renotify: true,
+        ...(url === null ? {} : { data: { url } }),
+      }),
     );
   });
 

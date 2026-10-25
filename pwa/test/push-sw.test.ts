@@ -9,7 +9,12 @@ type Handler = (event: unknown) => void;
 
 interface Shown {
   readonly title: string;
-  readonly options: { readonly body: string; readonly tag: string; readonly data?: { readonly url: string } };
+  readonly options: {
+    readonly body: string;
+    readonly tag: string;
+    readonly renotify: boolean;
+    readonly data?: { readonly url: string };
+  };
 }
 
 interface Window {
@@ -86,13 +91,19 @@ describe("push-sw.js", () => {
     expect(worker.shown).toEqual([
       {
         title: "Séance",
-        options: { body: "A task is waiting for input.", tag: `needs-input:${TASK}`, data: { url: `/?task=${TASK}` } },
+        options: {
+          body: "A task is waiting for input.",
+          tag: `needs-input:${TASK}`,
+          renotify: true,
+          data: { url: `/?task=${TASK}` },
+        },
       },
       {
         title: "Séance",
         options: {
           body: "A task is still waiting for input (30 min).",
           tag: `needs-input:${TASK}`,
+          renotify: true,
           data: { url: `/?task=${TASK}` },
         },
       },
@@ -101,32 +112,60 @@ describe("push-sw.js", () => {
         options: {
           body: "A task is spending credits (7d at 105%).",
           tag: `spill:${TASK}`,
+          renotify: true,
           data: { url: `/?task=${TASK}` },
         },
       },
       {
         title: "Séance",
-        options: { body: "A machine's disk is nearly full.", tag: "disk:dev-1", data: { url: "/?screen=machines" } },
+        options: {
+          body: "A machine's disk is nearly full.",
+          tag: "disk:dev-1",
+          renotify: true,
+          data: { url: "/?screen=machines" },
+        },
       },
     ]);
   });
 
-  test("nothing a payload carries beyond its ids and numbers reaches the text", async () => {
+  test("nothing a payload carries beyond its ids and numbers reaches the text, and only a known window label is shown", async () => {
     const worker = boot();
-    await worker.push(
-      JSON.stringify({
-        v: 1,
-        kind: "spill",
-        at: 1,
-        taskId: TASK,
-        window: "x".repeat(500),
-        projectedPct: "high",
-        title: "secret",
-      }),
-    );
-    const options = worker.shown[0]?.options;
-    expect(options?.body).toBe(`A task is spending credits (${"x".repeat(64)}).`);
+    const spill = (window: unknown): string =>
+      JSON.stringify({ v: 1, kind: "spill", at: 1, taskId: TASK, window, projectedPct: 104, title: "secret" });
+    // The scheduler's labels: both windows, and a per-model weekly named by a daemon-reported display name.
+    for (const window of ["5h", "7d", "7d Fable", "x".repeat(500), "7days", "5h <b>x</b>", "", 7, null])
+      await worker.push(spill(window));
+    expect(worker.shown.map((n) => n.options.body)).toEqual([
+      "A task is spending credits (5h at 104%).",
+      "A task is spending credits (7d at 104%).",
+      "A task is spending credits (7d at 104%).",
+      "A task is spending credits (104%).",
+      "A task is spending credits (104%).",
+      "A task is spending credits (104%).",
+      "A task is spending credits (104%).",
+      "A task is spending credits (104%).",
+      "A task is spending credits (104%).",
+    ]);
+    await worker.push(JSON.stringify({ v: 1, kind: "spill", at: 1, taskId: TASK, window: "5h", projectedPct: "high" }));
+    expect(worker.shown.at(-1)?.options.body).toBe("A task is spending credits (5h).");
     expect(JSON.stringify(worker.shown)).not.toContain("secret");
+  });
+
+  test("every notification renotifies: a repeat under its tag (the escalation, a second disk alert) is heard, not swapped in silently", async () => {
+    const worker = boot();
+    await worker.push(JSON.stringify({ v: 1, kind: "needs-input", at: 1, taskId: TASK, since: 1, escalated: false }));
+    await worker.push(JSON.stringify({ v: 1, kind: "needs-input", at: 2, taskId: TASK, since: 1, escalated: true }));
+    await worker.push(JSON.stringify({ v: 1, kind: "disk", at: 3, deviceId: "dev-1", diskPct: 93 }));
+    await worker.push(JSON.stringify({ v: 1, kind: "disk", at: 4, deviceId: "dev-1", diskPct: 95 }));
+    await worker.push("not json");
+    expect(worker.shown.map((n) => n.options.tag)).toEqual([
+      `needs-input:${TASK}`,
+      `needs-input:${TASK}`,
+      "disk:dev-1",
+      "disk:dev-1",
+      "seance",
+    ]);
+    expect(worker.shown.map((n) => n.options.renotify)).toEqual([true, true, true, true, true]);
   });
 
   test("a payload it cannot read still shows a notification with no target, so the browser never shows its own", async () => {
@@ -140,7 +179,7 @@ describe("push-sw.js", () => {
     await worker.push(JSON.stringify({ kind: "needs-input", taskId: TASK }));
     expect(worker.shown).toHaveLength(6);
     for (const { options } of worker.shown)
-      expect(options).toEqual({ body: "Something needs your attention.", tag: "seance" });
+      expect(options).toEqual({ body: "Something needs your attention.", tag: "seance", renotify: true });
   });
 
   test("an id isTaskId would refuse never becomes a task path; the worker's copy of the rule agrees with it", async () => {
@@ -169,7 +208,7 @@ describe("push-sw.js", () => {
     ids.forEach((taskId, i) => {
       const { options } = worker.shown[i] ?? { options: undefined };
       if (isTaskId(taskId)) expect(options?.data?.url).toBe(`/?task=${encodeURIComponent(taskId)}`);
-      else expect(options).toEqual({ body: "Something needs your attention.", tag: "seance" });
+      else expect(options).toEqual({ body: "Something needs your attention.", tag: "seance", renotify: true });
     });
   });
 
