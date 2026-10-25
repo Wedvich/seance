@@ -1,4 +1,4 @@
-import { APP_ID, ENVELOPE_MAX_CT_LENGTH, seal, type Envelope, type MachineInfo } from "@seance/shared";
+import { APP_ID, ENVELOPE_MAX_CT_LENGTH, seal, type Envelope, type MachineInfo, type RepoEntry } from "@seance/shared";
 
 export interface SealedInfo {
   readonly sealed: Envelope;
@@ -18,7 +18,8 @@ export async function sealMachineInfo(key: CryptoKey, from: string, info: Machin
   if (sealed.ct.length <= ENVELOPE_MAX_CT_LENGTH || !info.repos.some((r) => r.skills !== undefined)) {
     return { sealed, droppedSkills: false };
   }
-  const repos = info.repos.map(({ skills: _, ...repo }) => repo);
+  // Spread, not rebuilt field by field, so a RepoEntry field added later survives; JSON drops the undefined.
+  const repos = info.repos.map((repo): RepoEntry => ({ ...repo, skills: undefined }));
   return { sealed: await sealInfo(key, from, { ...info, repos }), droppedSkills: true };
 }
 
