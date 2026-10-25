@@ -1,6 +1,7 @@
 import { createBackend } from "../daemon/src/backend-default.ts";
 import { loadConfig } from "../daemon/src/config.ts";
 import { startDaemon } from "../daemon/src/run.ts";
+import { pushGuardFetch } from "./push-guard.ts";
 
 /**
  * A second, real daemon for the two-machine e2e flows, booted by
@@ -29,6 +30,8 @@ const daemon = await startDaemon({
   pingIntervalMs: 60_000,
   pongTimeoutMs: 1_000,
   baseBackoffMs: 20,
+  // Never a real push service: a second daemon can lead and hold the suite's subscriptions too.
+  httpFetch: pushGuardFetch(),
 });
 
 const stop = (): void => {

@@ -125,7 +125,10 @@ key's version at 1, which reopens alias rollback unless the PSK changes too: rot
   daemons in one process would share a deviceId and an op socket. Every daemon gets a
   fixture home (`home` in its run opts), so its exclaves and account are the test's, never
   the developer's `~/.exclaves` and `~/.claude.json`. The suite's own daemon starts with a
-  credential-sourced `resolvedPsk`, since only such a daemon brokers. Daemons mint
+  credential-sourced `resolvedPsk`, since only such a daemon brokers. Every e2e daemon's
+  `httpFetch` is `pushGuardFetch` (`e2e/push-guard.ts`): a request to an allowlisted push
+  host is refused, and `stack.pushAttempts()` lists the hosts the suite's daemon tried, so a
+  suite that subscribes a browser never POSTs to a real push service. Daemons mint
   their ids at first start, after the relay has booted, so `startStack` mints the
   suite daemon's — and each second daemon named in `secondLeaders` — through the
   daemon's own `loadOrInitState` first and lists them; the daemon then loads that

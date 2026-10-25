@@ -415,6 +415,16 @@ describe("takeover: a leader stopped between spawn and verdict", () => {
   }, 60_000);
 });
 
+/**
+ * RFC 8291 Appendix A's user agent: a real P-256 point, so a send gets as far as the request,
+ * where `pushGuardFetch` refuses it. Keys that were not a point would fail earlier, at
+ * encryption, and prove nothing about the seam.
+ */
+const USER_AGENT_KEYS = {
+  p256dh: "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4",
+  auth: "BTBZMqHH6r4Tts7J_aSIgg",
+};
+
 describe("settings record: the leader's term creates it, and no later term replaces it", () => {
   /** What an app's `store-get` of `settings:main` opens to, as any PSK holder reads it. */
   const readSettings = async (): Promise<{ readonly version: number; readonly record: SettingsRecord } | null> => {
@@ -500,11 +510,7 @@ describe("settings record: the leader's term creates it, and no later term repla
     await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
     await stack.daemon.leader.settled();
     const app = startApp(stack);
-    // Not a real P-256 point: the leader only stores these, and no push is sent in this test.
-    const keys = {
-      p256dh: Buffer.alloc(65, 1).toString("base64url"),
-      auth: Buffer.alloc(16, 2).toString("base64url"),
-    };
+    const keys = USER_AGENT_KEYS;
     const sub = (id: string, host = "fcm.googleapis.com") => ({ endpoint: `https://${host}/fcm/send/${id}`, keys });
     try {
       await app.waitForApp((state) => state.relay.scheduler.kind === "ready", "the leader verified");
@@ -536,6 +542,39 @@ describe("settings record: the leader's term creates it, and no later term repla
       expect(await app.client.pushSubscribe(sub("over"))).toMatchObject({ ok: false, code: "subscriptions_full" });
       expect((await readSettings())?.record.subscriptions).toHaveLength(PUSH_MAX_SUBSCRIPTIONS);
     } finally {
+      app.stop();
+    }
+  }, 60_000);
+
+  test("an alert the leader raises is pushed at the seam, which refuses it: no real push service is contacted", async () => {
+    const app = startApp(stack);
+    const taskId = "e2e-push-stuck";
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await app.waitForApp((state) => state.relay.scheduler.kind === "ready", "the leader verified");
+      const keys = USER_AGENT_KEYS;
+      await pollUntil(
+        async () => {
+          const reply = await app.client.pushSubscribe({ endpoint: "https://fcm.googleapis.com/fcm/send/guard", keys });
+          // Full is fine: the record then holds the subscriptions an earlier test wrote.
+          return reply !== null && ("endpoint" in reply || reply.code === "subscriptions_full");
+        },
+        "the leader to answer the subscribe",
+        10_000,
+      );
+      // Escalates on the next term's first pass, and the term pushes beside its log line.
+      await stack.seedTask({
+        id: taskId,
+        spec: { repo: "github.com/acme/app", mode: "worktree" },
+        state: "needs-input",
+        createdAt: Date.now(),
+        needsInputSince: 1,
+      });
+      await stack.restartDaemon();
+      await pollUntil(() => stack.pushAttempts().length > 0, "the leader to try a push", 10_000);
+      expect(stack.pushAttempts().every((host) => host === "fcm.googleapis.com")).toBe(true);
+    } finally {
+      await app.client.cancel(taskId).catch(() => null);
       app.stop();
     }
   }, 60_000);
