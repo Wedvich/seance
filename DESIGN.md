@@ -3535,11 +3535,19 @@ for the lot with its own `gh`.
   the cadence everything else in the blob already has, and a sign-in changes
   `.claude.json`, not the list); reporting the config dir path (derivable, and
   the app has no use for a path it can't open).
-  **Project skills** (2026-10-25): each clone's `<clone>/.claude/skills/` is listed by the
-  same rule as an exclave's (`listSkills`), with every scan, onto `RepoEntry.skills` — sorted,
-  cut to the first `REPO_MAX_SKILLS` (a reader drops a longer list whole), absent when empty —
-  so adding or removing one re-registers like a new clone. Only the clone's own checkout is
-  read: linked worktrees are no clones. The register blob is sealed once and, past
+  **Project skills** (2026-10-25): each clone's `.claude/skills/<name>/SKILL.md` is read with
+  every scan, onto `RepoEntry.skills`, from the tree of `origin/<default>` as last fetched
+  (one `git ls-tree`, argv exec, output capped, no per-entry `stat`) — not the working tree,
+  because that is what a worktree spawn sees: it branches from `origin/<default>`
+  (`prepareWorktree`), so a skill on a feature branch or uncommitted would be advertised and
+  absent, and a checkout behind origin would under-advertise. A `--here` spawn's checkout (or a
+  machine with `worktree.baseRef: "head"`) may differ; accepted. Only a regular blob counts
+  (a symlink entry would cost one more process to resolve), a name must pass `isSkillName`
+  (one that fails is dropped, never the list — a reader drops the whole list on a bad name,
+  which the filter would read as "has none"), and the list is sorted and cut to the first
+  `REPO_MAX_SKILLS` (a reader drops a longer list whole), absent when empty — so adding or
+  removing one re-registers like a new clone. Any git failure (no ref, no dir, timeout) reads
+  as no skills and never costs the clone its entry. Linked worktrees are no clones. The register blob is sealed once and, past
   `ENVELOPE_MAX_CT_LENGTH`, sealed again without any clone's project skills, with a warn
   line (`sealMachineInfo`), since the relay would drop the whole registration unseen.
 - **Telemetry** (`daemon/src/telemetry.ts`, `daemon/src/metrics-store.ts`, added

@@ -1,9 +1,8 @@
 import { readdir } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import { REPO_MAX_SKILLS, type RepoEntry } from "@seance/shared";
+import { isSkillName, REPO_MAX_SKILLS, type RepoEntry } from "@seance/shared";
 import { mapLimit } from "./concurrency.ts";
-import { listSkills } from "./exclaves.ts";
-import { git } from "./exec.ts";
+import { exec, git } from "./exec.ts";
 import { canonical, inspectCheckout, resolveCommonDir } from "./gitdir.ts";
 
 const SCAN_CONCURRENCY = 16;
@@ -119,6 +118,41 @@ export async function readOriginUrl(commonDir: string): Promise<string | null> {
   return null;
 }
 
+/** Bounds what a hostile tree can make the scan read: output kept, and so records parsed. */
+const SKILLS_LS_TREE_MAX_BYTES = 256 * 1024;
+
+/**
+ * A clone's project skills, read from `origin/<default>` as last fetched — the
+ * ref a worktree spawn branches from (`prepareWorktree`), so a skill on a
+ * feature branch or uncommitted is not advertised, and one only on origin is.
+ * One `ls-tree`, no per-entry `stat`. Only `.claude/skills/<name>/SKILL.md` as a
+ * regular blob counts: a symlink entry is skipped because resolving it needs
+ * the target's blob, one more process per entry. Any git failure (no ref, no
+ * dir, timeout) reads as no skills — never costs the clone its entry.
+ */
+async function readProjectSkills(repoPath: string, defaultBranch: string | null): Promise<readonly string[]> {
+  if (defaultBranch === null) return [];
+  const result = await exec(
+    ["git", "ls-tree", "-r", "-z", `refs/remotes/origin/${defaultBranch}`, "--", ".claude/skills/"],
+    { cwd: repoPath, timeoutMs: 5_000, maxOutputBytes: SKILLS_LS_TREE_MAX_BYTES },
+  );
+  if (result.exitCode !== 0) return [];
+  // The last piece is empty when the output is whole and a cut record when it was truncated.
+  const records = result.stdout.split("\0").slice(0, -1);
+  const names = new Set<string>();
+  for (const record of records) {
+    const tab = record.indexOf("\t");
+    if (tab < 0) continue;
+    const [mode, type] = record.slice(0, tab).split(" ");
+    if (type !== "blob" || !mode?.startsWith("100")) continue;
+    const parts = record.slice(tab + 1).split("/");
+    const name = parts[2];
+    if (parts.length !== 4 || parts[3] !== "SKILL.md" || name === undefined || !isSkillName(name)) continue;
+    names.add(name);
+  }
+  return [...names].toSorted();
+}
+
 async function listDirs(parent: string): Promise<readonly string[]> {
   try {
     const entries = await readdir(parent, { withFileTypes: true });
@@ -223,11 +257,11 @@ export async function scanRepos(
   const entries = await scanLimit(paths, async (path): Promise<RepoEntry> => {
     const cached = prevByPath.get(path)?.defaultBranch ?? null;
     const commonDir = await resolveCommonDir(path);
-    const [defaultBranch, url, skills] = await Promise.all([
+    const [defaultBranch, url] = await Promise.all([
       cached ?? readDefaultBranch(path),
       commonDir === null ? null : readOriginUrl(commonDir),
-      listSkills(join(path, ".claude", "skills")),
     ]);
+    const skills = await readProjectSkills(path, defaultBranch);
     const origin = url === null ? null : normalizeOrigin(url);
     return {
       name: names.get(path) ?? path,
