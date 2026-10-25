@@ -674,7 +674,10 @@ nothing checked it. The last is the gap they leave.
   `op=admit` line is under it too. `mcp` is `seanced mcp` enqueuing on `auto` with the
   key itself: a store write the relay answers, which no daemon sees, so that process
   appends its own `audit enqueue` line to the log, as the CLI does (added 2026-10-18,
-  M3 review S5). The daemon writes
+  M3 review S5). `seanced spawn --auto` writes the same line under `cli`
+  (`origin=cli client=cli`): the surface is still someone at this machine's shell,
+  and `audit enqueue` beside `audit spawn` already tells the two acts apart, as `relay`
+  covers spawn, despawn and queue (added 2026-10-25, M4). The daemon writes
   via stdout (launchd redirects it); the CLI appends to the same file itself,
   and failing to do so warns rather than failing a spawn the human asked for.
   Two independent writers is safe only while nothing rotates the file.
@@ -4811,7 +4814,7 @@ at my desk" from "something else drove my machines" — so the spawn payload
 gains an optional free-text `client` field, and the audit line becomes
 `origin=relay client="mcp"`, quoted through the same escaper as every other
 wire-supplied string. `SPAWN_CLIENTS` in `shared/src/types.ts` names the
-values our own senders stamp ("pwa", "mcp") — sender-side discipline only.
+values our own senders stamp ("pwa", "mcp", "raycast", "cli") — sender-side discipline only.
 Old daemons ignore the unknown field. Rejected: accepting an
 indistinguishable third spawn path (the audit invariant would quietly stop
 meaning what it says); validating `client` against a closed union on receive —
@@ -4825,6 +4828,28 @@ An `auto` spawn is not an MCP spawn at its target: the leader dispatches with it
 says. That an agent asked for it is in that agent's transcript, in the MCP box's own
 `audit enqueue origin=mcp` line, and on the leader's `op=admit` line, which reads the
 task record's `client` (`TaskSpec.client`, bounded to 64; added 2026-10-18, M3 review S5).
+
+**CLI `auto`** (added 2026-10-25, scheduler M4). `seanced spawn --auto <repo> [--here]
+[-t <title>] [[-p] <task>]` enqueues through the same `daemon/src/auto.ts` code as
+MCP's `auto` (`cli-auto.ts` is only the CLI's wiring): the clone name resolves to its
+origin over the registry, the task is sealed and `store-put` at `expect: 0`, so it
+queues with no leader up, and the answer is `task <id>: queued`. The record's `client`
+is `"cli"`, and the box's own line is `audit enqueue origin=cli client=cli` (the audit
+paragraph in the threat model says why `cli`, not a new origin). The follow-up line
+names the app's queue, not `get_queue`/`cancel_task`, which a shell cannot call.
+
+- _Spelling:_ a flag, not MCP's `machine: "auto"` as a positional — `auto` is a
+  legal repo name, and `seanced spawn auto` would read as one.
+- _Flags:_ the ones a direct spawn has, which are `TaskRequest`'s `mode`, `title` and
+  `prompt`; the prompt is optional, as in MCP. Model, effort, plan, pins and the
+  authoring fields are not CLI flags at all, so v1 adds none.
+- _Key and relay:_ the one CLI form that dials the relay, as an app with this shell's
+  own PSK (`loadPsk`, as `seanced mcp` resolves it); `LazyRelay`'s connect bound
+  turns an unreachable relay into "not queued" rather than a hang. A direct
+  `seanced spawn` loads nothing of this and stays relay-free.
+- _Keyless boxes:_ refused ("needs this machine's own key"), never brokered — the
+  broker's actions are fixed and an enqueue action is a threat-model change, deferred
+  for MCP and CLI alike (docs/scheduler.md, M4).
 
 **Threat-model addendum.**
 
