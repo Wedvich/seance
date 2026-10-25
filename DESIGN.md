@@ -2741,9 +2741,10 @@ account pin's alias at submit time ("`pin` and `avoid` on auto" below). `seanced
 for that and to name accounts in `list_machines` (each exclave's `account`, plus `alias` where
 one is set) and `get_queue` (pins and holds), from one cached listing per socket ("Account
 listings" below). The Raycast extension lists them once per open and names the selected machine's
-accounts under its picker (_Raycast extension_, "Scope is spawn"). Every reader that cannot list — a keyless
-`seanced mcp` going through the broker, an install without the account key, a refused or lost
-listing — shows email or short id instead, never an error.
+accounts under its picker (_Raycast extension_, "Scope is spawn"). Every label not read from a listing — a keyless
+`seanced mcp`'s, which never asks the broker for one ("Account listings" below), an install
+without the account key, a refused or lost listing — shows email or short id instead, never an
+error.
 
 - **The key is derived, not the PSK's AES key reused.** `deriveAccountKey` (`shared/src/crypto.ts`)
   is HKDF-SHA-256 over the 32 raw PSK bytes, salt the UTF-8 `seance hkdf v1` and info
@@ -5113,8 +5114,13 @@ and receives registry pushes. Zero relay/DO changes; every channel property
     label falls back to the email or short id meanwhile, and a pin says aliases are unavailable
     right now, asking for an email or id — never that the account is unknown. The `account` label
     is a display name and no valid `pin.account` value (a pin takes `alias`, `email` or `accountId`);
-    the tool descriptions say so. Through the broker there is no key and no
-    listing, and labels never carry an alias.
+    the tool descriptions say so. Through the broker (a keyless `seanced mcp`, 2026-10-25) labels
+    never carry an alias and ask the daemon nothing; only a pin's resolution sends the broker's
+    `accounts`. The frame carries no label-or-pin field, so the daemon cannot tell a label read
+    from a pin's: it reads every one as a pin, bypassing the hold, and a label through it would
+    list again on every call after a refusal. Each brokered call is also an `audit broker
+    origin=local-broker` line, one per `list_machines` and `get_queue`. Rejected: a label field
+    on `accounts` — a broker-protocol widening for a display name.
   - **Rollout: a gate and a sentinel.** A leader predating this would read `pin.account` and
     `avoid` as nothing and place the task anywhere. Two guards, both required. At submit, a client
     writes either field only when the verified leader's registry entry advertises
@@ -5544,7 +5550,9 @@ app-role relay client with the key it imported at start.
 - **Account names resolve in the client.** The broker serves the account listing, and the client
   runs the same `resolvePlacement`, so there is one implementation. The daemon keeps one
   `AccountCache` per app-role client, so every keyless process on the box together stays under
-  the relay's four account lists per minute per socket.
+  the relay's four account lists per minute per socket. Only a pin asks: the broker reads past
+  the cache's label hold, and a keyless `list_machines` or `get_queue` labels by email, never by
+  alias ("Account listings").
 - **Replies are rebuilt, not forwarded.** The registry crosses with its exclaves, capabilities and
   status (the placement code needs them); the scheduler's availability, a created task and the
   queue are parsed on the peer side by the same parsers the keyed path uses. A reply the peer

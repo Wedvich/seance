@@ -347,6 +347,45 @@ describe("mcp tools", () => {
     lazy.stop();
   });
 
+  test("through the broker, list_machines and get_queue label by email and never ask the daemon for accounts", async () => {
+    const machines = [machine({ exclaves: [signedIn("default", PERSONAL)] })];
+    const queue = {
+      tasks: [
+        task({ id: "t-1", state: "ready", spec: { repo: ORIGIN, mode: "worktree", pin: { account: PERSONAL } } }),
+      ],
+      at: 6_000,
+    };
+    // A daemon whose cache holds an alias: answering `accounts` would put it in the labels.
+    const double = await startBrokerDouble((raw, id) => {
+      if (!isRecord(raw)) return brokerFail(id, "invalid_request", "not a frame");
+      if (raw["action"] === "fleet") {
+        return brokerOk(id, { machines, scheduler: { kind: "ready", deviceId: "device-1", term: 1 } });
+      }
+      if (raw["schedulerOp"] === "queue") return brokerOk(id, queue);
+      if (raw["schedulerOp"] === "accounts") return brokerOk(id, ALIASES);
+      return brokerFail(id, "unsupported", "not in this double");
+    });
+    try {
+      const fleet = selectFleet({
+        key: () => Promise.resolve(null),
+        direct: () => {
+          throw new Error("no key, so no direct path");
+        },
+        broker: brokerFleet({ path: double.path }),
+      });
+      const client = await connectedClient(fleet, null);
+      const [listed]: { exclaves: unknown[] }[] = JSON.parse(
+        toolText(await client.callTool({ name: "list_machines", arguments: {} })),
+      );
+      expect(listed?.exclaves).toEqual([{ id: "default", accountId: PERSONAL, email: EMAIL, account: EMAIL }]);
+      const parsed = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} })));
+      expect(parsed.tasks[0].pin).toEqual({ account: EMAIL, accountId: PERSONAL });
+      expect(double.frames.some((frame) => isRecord(frame) && frame["schedulerOp"] === "accounts")).toBe(false);
+    } finally {
+      await double.stop();
+    }
+  });
+
   // A leader on an older build is what made the queue look wrong; this is how it shows.
   test("list_machines names each machine's build and marks the scheduler leader only once its proof verified", async () => {
     const source = { sha: "0123456789abcdef".repeat(2) + "01234567", commitTs: 1_700_000_000_000, branch: "main" };

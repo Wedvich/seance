@@ -9,7 +9,8 @@ import type { AppRelay } from "./app-relay.ts";
  * about 7 refills: by then asking is likely to succeed. Neither a reopen nor a `store-changed`
  * ends the hold, or a flapping socket or an alias-editing PWA would have N processes list
  * again at once; the price is a label that stays on the email for up to a minute. Auto's pin
- * resolution passes `bypassHold`: it needs the real answer and is a person's one-off call.
+ * resolution passes `bypassHold`: it needs the real answer and is a person's one-off call. So does
+ * the broker, which only a pin asks (keyless labels carry no alias).
  */
 export const NULL_HOLD_MS = 60_000;
 
