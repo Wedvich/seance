@@ -285,7 +285,7 @@ function machineFilter(machine: Machine, now: number, config: SchedulerConfig): 
  * Closing wrappers and trailing sentence punctuation are not part of the name
  * (a token ending in `:` cannot be a `plugin:name`, but `:` stays inside one).
  */
-const SKILL_TOKEN = /(?<![^\s`"'(\[])\/([^\s/]+)(?=\s|$)/gu;
+const SKILL_TOKEN = /(?<![^\s`"'([])\/([^\s/]+)(?=\s|$)/gu;
 
 /**
  * The names a task may mean (DESIGN.md, Scheduler, "Skills filter"): declared,
