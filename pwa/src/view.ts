@@ -71,6 +71,12 @@ export interface MachineChoice {
   readonly sub: string;
   readonly disabled: boolean;
   readonly selected: boolean;
+  /** Rescan is offered on connected rows only: an offline machine can't answer it. */
+  readonly canRescan: boolean;
+  /** One rescan runs at a time, so every row's action is off while any is scanning. */
+  readonly rescanDisabled: boolean;
+  /** Set only on the row of the machine being rescanned, or whose rescan failed. */
+  readonly rescan: "scanning" | "failed" | null;
 }
 
 /** One row of the Account sheet: an account some exclave reports signed in. */
@@ -80,6 +86,8 @@ export interface AccountChoice {
   readonly sub: string;
   readonly disabled: boolean;
   readonly selected: boolean;
+  /** Green while some machine signed in to it is connected, grey when only asleep ones are. */
+  readonly dot: Dot;
 }
 
 /** Why the form's pins can't be queued, as the button's label and the sentence under it. */
@@ -388,13 +396,13 @@ export function derivePinProblem(
 }
 
 function deriveMachineChoices(state: AppState, now: number): readonly MachineChoice[] {
-  const { relay, form } = state;
+  const { relay, form, rescan } = state;
   const known = formAccounts(relay.machines, form);
   return relay.machines
     .toSorted((a, b) => collator.compare(a.name, b.name))
     .map((machine) => {
       const base = machine.connected
-        ? `online · ${machine.repos.length} ${machine.repos.length === 1 ? "repo" : "repos"}`
+        ? `online · ${machine.repos.length} ${machine.repos.length === 1 ? "repo" : "repos"} · last scanned ${formatSeen(machine.scannedAt, now)}`
         : `offline · last seen ${formatSeen(machine.lastSeen, now)}`;
       let disabled = false;
       let sub = base;
@@ -405,7 +413,18 @@ function deriveMachineChoices(state: AppState, now: number): readonly MachineCho
         disabled = true;
         sub = `${accountNameIn(known, form.account, aliasOf(state.accounts.aliases, form.account))} isn't signed in here`;
       }
-      return { machine, sub, disabled, selected: machine.deviceId === form.machine };
+      const here = rescan.kind !== "idle" && rescan.deviceId === machine.deviceId ? rescan.kind : null;
+      if (here === "scanning") sub = "scanning…";
+      if (here === "failed") sub = "couldn't rescan — last known list";
+      return {
+        machine,
+        sub,
+        disabled,
+        selected: machine.deviceId === form.machine,
+        canRescan: machine.connected,
+        rescanDisabled: rescan.kind === "scanning",
+        rescan: here,
+      };
     });
 }
 
@@ -415,7 +434,7 @@ function deriveAccountChoices(state: AppState): readonly AccountChoice[] {
   const pinned = form.machine === null ? undefined : relay.machines.find((m) => m.deviceId === form.machine);
   return known
     .filter(({ accountId }) => relay.machines.some((m) => hasAccount(m, accountId)))
-    .map(({ accountId }) => {
+    .map(({ accountId }): AccountChoice => {
       const label = accountNameIn(known, accountId, aliasOf(state.accounts.aliases, accountId));
       const where = relay.machines.filter((m) => hasAccount(m, accountId)).map((m) => m.name);
       const away = pinned !== undefined && !hasAccount(pinned, accountId);
@@ -425,6 +444,7 @@ function deriveAccountChoices(state: AppState): readonly AccountChoice[] {
         sub: away ? `not signed in on ${pinned.name}` : `on ${where.join(", ")}`,
         disabled: away,
         selected: accountId === form.account,
+        dot: relay.machines.some((m) => m.connected && hasAccount(m, accountId)) ? "ok" : "off",
       };
     })
     .toSorted((a, b) => collator.compare(a.label, b.label));
@@ -503,6 +523,8 @@ function deriveFooterStatus(state: AppState, machine: Machine | null, problem: P
   const { reason, note } = deriveAutoAvailability(state.relay);
   if (reason !== null) return reason;
   if (problem !== null) return problem.text;
+  // The tile says "Unknown machine" here, so the footer must not claim the scheduler picks.
+  if (state.form.machine !== null && machine === null) return "The pinned machine isn't listed";
   if (machine !== null && !machine.connected) return `${machine.name} is offline — the task waits for it`;
   if (note !== null) return note;
   return machine === null ? "The scheduler picks the machine" : `Pinned to ${machine.name}`;

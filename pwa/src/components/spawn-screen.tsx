@@ -12,7 +12,6 @@ import {
   type Model,
   type PersistedForm,
   type PreviewState,
-  type RescanState,
   type SheetKind,
 } from "../state.ts";
 import { completeSkill, matchSkills, promptSegments, skillIndex, skillToken } from "../skills.ts";
@@ -122,7 +121,6 @@ function ActiveSheet(props: {
   kind: SheetKind;
   model: Model;
   effort: Effort;
-  rescan: RescanState;
   batch: PersistedForm["batch"];
   /** Derived while the After sheet is open, so the list is not rebuilt on every keystroke. */
   afterSheet: AfterSheetView | null;
@@ -138,7 +136,6 @@ function ActiveSheet(props: {
     effort: selectedEffort,
     batch,
     afterSheet,
-    rescan,
     closing,
     onExited,
   } = props;
@@ -164,28 +161,24 @@ function ActiveSheet(props: {
           disabled={!auto.available}
           onClick={() => actions.pickMachine(null)}
         />
-        {view.machineChoices.map(({ machine, sub, disabled, selected }) => {
-          const here = rescan.kind !== "idle" && rescan.deviceId === machine.deviceId ? rescan.kind : null;
-          return (
-            <SheetItem
-              key={machine.deviceId}
-              label={machine.name}
-              sub={here === "scanning" ? "scanning…" : here === "failed" ? "couldn't rescan — last known list" : sub}
-              dot={machine.connected ? "ok" : "off"}
-              selected={selected}
-              disabled={disabled}
-              // Only offered while offline: the relay refuses to forget a machine
-              // it holds a socket for, so on a connected row it would do nothing.
-              onRemove={machine.connected ? null : () => actions.removeMachine(machine.deviceId)}
-              removeLabel={`Forget ${machine.name}`}
-              // The reverse: an offline machine can't answer a rescan.
-              onAction={machine.connected ? () => actions.rescan(machine.deviceId) : null}
-              actionLabel={`Rescan ${machine.name}`}
-              actionDisabled={rescan.kind === "scanning"}
-              onClick={() => actions.pickMachine(machine.deviceId)}
-            />
-          );
-        })}
+        {view.machineChoices.map(({ machine, sub, disabled, selected, canRescan, rescanDisabled }) => (
+          <SheetItem
+            key={machine.deviceId}
+            label={machine.name}
+            sub={sub}
+            dot={machine.connected ? "ok" : "off"}
+            selected={selected}
+            disabled={disabled}
+            // Only offered while offline: the relay refuses to forget a machine
+            // it holds a socket for, so on a connected row it would do nothing.
+            onRemove={machine.connected ? null : () => actions.removeMachine(machine.deviceId)}
+            removeLabel={`Forget ${machine.name}`}
+            onAction={canRescan ? () => actions.rescan(machine.deviceId) : null}
+            actionLabel={`Rescan ${machine.name}`}
+            actionDisabled={rescanDisabled}
+            onClick={() => actions.pickMachine(machine.deviceId)}
+          />
+        ))}
       </Sheet>
     );
   }
@@ -206,7 +199,7 @@ function ActiveSheet(props: {
             key={choice.accountId}
             label={choice.label}
             sub={choice.sub}
-            dot="ok"
+            dot={choice.dot}
             selected={choice.selected}
             disabled={choice.disabled}
             onClick={() => actions.pickAccount(choice.accountId)}
@@ -444,14 +437,13 @@ export function SpawnScreen(props: {
   sheet: SheetKind | null;
   machines: readonly Machine[];
   now: number;
-  rescan: RescanState;
   preview: PreviewState | null;
   /** The After sheet's list; non-null only while that sheet is open. */
   afterSheet: AfterSheetView | null;
   /** Desktop layout: the queue is a column of its own and the settings pill sits in its header. */
   columns: boolean;
 }): JSX.Element {
-  const { actions, view, form, promptUndo, sheet, machines, now, rescan, preview, afterSheet, columns } = props;
+  const { actions, view, form, promptUndo, sheet, machines, now, preview, afterSheet, columns } = props;
   const offline = view.machine !== null && !view.machine.connected;
   const [renderedSheet, sheetClosing, unmountSheet] = useSheetExit(sheet);
   const promptInput = useRef<HTMLTextAreaElement>(null);
@@ -791,7 +783,6 @@ export function SpawnScreen(props: {
           effort={form.effort}
           batch={form.batch}
           afterSheet={lastAfterSheet.current}
-          rescan={rescan}
           closing={sheetClosing}
           onExited={unmountSheet}
         />

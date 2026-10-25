@@ -62,7 +62,6 @@ export function App(props: { store: Store }): JSX.Element {
         sheet={state.sheet}
         machines={state.relay.machines}
         now={now}
-        rescan={state.rescan}
         preview={state.preview}
         afterSheet={state.sheet === "after" ? deriveAfterSheet(state, now) : null}
         columns={wide}

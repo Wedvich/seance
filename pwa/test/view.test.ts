@@ -227,6 +227,7 @@ describe("banner and button", () => {
     );
     expect(view.machine).toBeNull();
     expect(view.machineTile).toMatchObject({ value: "Unknown machine", dot: "off" });
+    expect(view.footerStatus).toBe("The pinned machine isn't listed");
     expect(view.meta).toBe("0 online · 1 asleep · 0 sessions");
   });
 
@@ -497,9 +498,61 @@ describe("the pickers", () => {
   test("the Machine sheet lists every machine, disabling the ones the account pin or a missing exclave rule out", () => {
     const view = deriveView(state({ relay: leader([mac, wsl, bare]) }, { account: "acct-work", machine: "mac" }), NOW);
     const rows = Object.fromEntries(view.machineChoices.map((c) => [c.machine.name, c]));
-    expect(rows["Mac"]).toMatchObject({ disabled: false, selected: true, sub: "online · 2 repos" });
+    expect(rows["Mac"]).toMatchObject({
+      disabled: false,
+      selected: true,
+      sub: "online · 2 repos · last scanned just now",
+    });
     expect(rows["WSL"]).toMatchObject({ disabled: true, selected: false, sub: "work@acme.dev isn't signed in here" });
     expect(rows["Bare"]).toMatchObject({ disabled: true, sub: "its daemon needs an update" });
+  });
+
+  test("the Machine sheet shows when a connected machine last scanned, and offline ones when they were last seen", () => {
+    const scanned = machine({ ...mac, scannedAt: NOW - 3 * 3_600_000 });
+    const asleep = machine({ ...wsl, connected: false, lastSeen: NOW - 2 * 86_400_000 });
+    const rows = Object.fromEntries(
+      deriveView(state({ relay: leader([scanned, asleep]) }), NOW).machineChoices.map((c) => [c.machine.name, c]),
+    );
+    expect(rows["Mac"]?.sub).toBe("online · 2 repos · last scanned 3h ago");
+    expect(rows["WSL"]?.sub).toBe("offline · last seen 2d ago");
+  });
+
+  test("a rescan shows on its own row only: offered while connected, disabled while any runs", () => {
+    const asleep = machine({ ...wsl, connected: false });
+    const idle = deriveView(state({ relay: leader([mac, asleep, bare]) }), NOW);
+    const idleRows = Object.fromEntries(idle.machineChoices.map((c) => [c.machine.name, c]));
+    expect(idleRows["Mac"]).toMatchObject({ canRescan: true, rescanDisabled: false, rescan: null });
+    expect(idleRows["WSL"]).toMatchObject({ canRescan: false, rescanDisabled: false, rescan: null });
+
+    const scanning = deriveView(
+      state({ relay: leader([mac, asleep, bare]), rescan: { kind: "scanning", deviceId: "mac" } }),
+      NOW,
+    );
+    const rows = Object.fromEntries(scanning.machineChoices.map((c) => [c.machine.name, c]));
+    expect(rows["Mac"]).toMatchObject({ rescan: "scanning", rescanDisabled: true, sub: "scanning…" });
+    expect(rows["Bare"]).toMatchObject({ rescan: null, rescanDisabled: true, canRescan: true });
+    expect(rows["WSL"]).toMatchObject({ rescan: null, canRescan: false });
+
+    const failed = deriveView(
+      state({ relay: leader([mac, asleep, bare]), rescan: { kind: "failed", deviceId: "bare" } }),
+      NOW,
+    );
+    const failedRows = Object.fromEntries(failed.machineChoices.map((c) => [c.machine.name, c]));
+    expect(failedRows["Bare"]).toMatchObject({
+      rescan: "failed",
+      rescanDisabled: false,
+      sub: "couldn't rescan — last known list",
+    });
+    expect(failedRows["Mac"]).toMatchObject({ rescan: null, sub: "online · 2 repos · last scanned just now" });
+  });
+
+  test("an Account row's dot is green while a machine signed in to it is connected, grey when all are asleep", () => {
+    const asleep = machine({ ...wsl, connected: false });
+    const view = deriveView(state({ relay: leader([mac, asleep]) }), NOW);
+    expect(view.accountChoices.map((c) => [c.accountId, c.dot])).toEqual([
+      ["acct-home", "off"],
+      ["acct-work", "ok"],
+    ]);
   });
 
   test("the Account sheet lists accounts some exclave reports, disabling the ones the pinned machine lacks", () => {
