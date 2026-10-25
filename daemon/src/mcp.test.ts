@@ -1477,6 +1477,10 @@ describe("spawn_session on auto, pinned", () => {
       expect(answer.error).toBe(true);
       expect(answer.text).toContain(`spawn refused: ${text}`);
     }
+    // A top-level machine must not make an empty pin valid.
+    const emptyBeside = await callAuto(fake, { machine: "wsl", repo: HQ, pin: {} });
+    expect(emptyBeside.error).toBe(true);
+    expect(emptyBeside.text).toContain("spawn refused: pin names neither a machine nor an account");
     expect(fake.started).toBe(0);
   });
 

@@ -128,11 +128,16 @@ interface PinInput {
   readonly exclave?: unknown;
 }
 
-/** `pin` and `avoid` as one placement, refused before anything dials the relay when malformed. */
+/**
+ * `pin` and `avoid` as one placement, refused before anything dials the relay when malformed.
+ * `machinePin` is spawn_session's top-level `machine`, merged in only after the pin itself
+ * is checked, so it cannot turn an empty `pin: {}` into a valid one.
+ */
 function placementInput(
   pin: PinInput | undefined,
   avoid: readonly string[] | undefined,
   names: PlacementNames = MCP_PLACEMENT_NAMES,
+  machinePin?: string,
 ): { readonly input: PlacementInput } | { readonly error: string } {
   if (pin !== undefined && "exclave" in pin) {
     return { error: "exclave pins are gone — pin an account (list_machines shows each exclave's account)" };
@@ -141,7 +146,7 @@ function placementInput(
     return { error: "pin names neither a machine nor an account" };
   }
   const input: PlacementInput = {
-    machine: pin?.machine,
+    machine: machinePin ?? pin?.machine,
     account: pin?.account,
     ...(avoid === undefined ? {} : { avoid }),
   };
@@ -904,7 +909,7 @@ export function buildMcpServer(
         machinePin === undefined ? MCP_PLACEMENT_NAMES : { ...MCP_PLACEMENT_NAMES, machine: "machine" };
       const reported = withReportedPrompt(until, prompt);
       if ("error" in reported) return errorResult(`spawn refused: ${reported.error}`);
-      const placement = placementInput(machinePin === undefined ? pin : { ...pin, machine: machinePin }, avoid, names);
+      const placement = placementInput(pin, avoid, names, machinePin);
       if ("error" in placement) return errorResult(`spawn refused: ${placement.error}`);
       // `client` is not a TaskRequest field: the leader stamps its own
       // dispatch `client=scheduler`, so the target audits the session as the
