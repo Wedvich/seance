@@ -1,9 +1,8 @@
 import {
-  APP_ID,
   CAPABILITIES,
+  ENVELOPE_MAX_CT_LENGTH,
   importPsk,
   ReplayGuard,
-  seal,
   STATUS_INTERVAL_MS,
   type Envelope,
   type MachineInfo,
@@ -30,6 +29,7 @@ import { createHandler, createLocalOps, type HandlerContext } from "./handlers.t
 import { createLeader, type Leader, type QueueStore } from "./leader.ts";
 import { startLocalSocket } from "./local-socket.ts";
 import { log } from "./log.ts";
+import { sealMachineInfo } from "./machine-info.ts";
 import { MetricsStore } from "./metrics-store.ts";
 import type { PrPollerOpts } from "./pr-status.ts";
 import { RelayClient } from "./relay-client.ts";
@@ -243,16 +243,10 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.exitStatus, CAPABILITIES.reportedDone],
     };
     const candidate: Registered = { scan: info.scannedAt, exclaves: exclaveScan };
-    const sealed = await seal(
-      key,
-      { to: APP_ID, from: state.deviceId },
-      {
-        id: crypto.randomUUID(),
-        ts: Date.now(),
-        op: "machine-info",
-        payload: info,
-      },
-    );
+    const { sealed, droppedSkills } = await sealMachineInfo(key, state.deviceId, info);
+    if (droppedSkills) {
+      log.warn(`register blob over ${ENVELOPE_MAX_CT_LENGTH} chars — sent without project skills`);
+    }
     candidates.set(sealed, candidate);
     return sealed;
   };
