@@ -70,10 +70,11 @@ export function readForm(): PersistedForm {
   return {
     // A legacy form's `machineId`, `auto` and `repos` are dropped on purpose: a saved machine
     // pick becomes auto, since a silent pin would make a former direct spawner's next task
-    // wait on caps it never chose. Its `autoRepo` is the repo.
+    // wait on caps it never chose. Its `autoRepo` is the repo only when `auto` was true: with `auto`
+    // false it is a stale leftover from an earlier auto session, and a task queued there is a surprise.
     machine: asString(record["machine"]),
     account: asString(record["account"]),
-    repo: asString(record["repo"]) ?? asString(record["autoRepo"]),
+    repo: asString(record["repo"]) ?? (record["auto"] === true ? asString(record["autoRepo"]) : null),
     prompt: asString(record["prompt"]) ?? "",
     worktree: typeof record["worktree"] === "boolean" ? record["worktree"] : DEFAULT_FORM.worktree,
     model: isModel(record["model"]) ? record["model"] : DEFAULT_FORM.model,

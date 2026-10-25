@@ -44,12 +44,20 @@ describe("form persistence", () => {
     expect(readForm()).toEqual(form);
   });
 
-  test("a legacy form reads as auto/auto: autoRepo becomes repo, a saved machineId is not a pin (D2)", () => {
+  test("a legacy auto form reads as auto/auto: autoRepo becomes repo, a saved machineId is not a pin (D2)", () => {
+    store.set(
+      "seance:form",
+      JSON.stringify({ machineId: "dev-1", auto: true, autoRepo: "github.com/acme/app", repos: { "dev-1": "x" } }),
+    );
+    expect(readForm()).toMatchObject({ machine: null, account: null, repo: "github.com/acme/app" });
+  });
+
+  test("a legacy direct-spawn form (auto false) leaves repo null: its autoRepo is stale", () => {
     store.set(
       "seance:form",
       JSON.stringify({ machineId: "dev-1", auto: false, autoRepo: "github.com/acme/app", repos: { "dev-1": "x" } }),
     );
-    expect(readForm()).toMatchObject({ machine: null, account: null, repo: "github.com/acme/app" });
+    expect(readForm()).toMatchObject({ machine: null, account: null, repo: null });
   });
 
   test("a form from before authoring reads with the authoring fields at their defaults", () => {
