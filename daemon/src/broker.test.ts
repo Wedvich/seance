@@ -276,8 +276,9 @@ describe("the broker's scheduler actions", () => {
     broker.stop();
   });
 
-  // The fake takes the `Task`, not the store frame, so `expect: 0` is not observable here; e2e's real relay
-  // and the shared client's own tests hold that. This is the broker's half: the answer and its audit line.
+  // The fake takes the `Task`, not the store frame, so `expect: 0` is not observable here. The shared client's
+  // `createTask` suite (pwa/test/client-store.test.ts) asserts the put is at `expect: 0` and that a repeat
+  // reads `landedEarlier`. This is the broker's half: the answer and its audit line.
   test("a repeated id's landedEarlier answer is relayed and audited as such", async () => {
     const { broker, fakes, lines } = rig(undefined, { now: () => 5_000 });
     const seen = new Set<string>();
