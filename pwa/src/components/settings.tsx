@@ -1,5 +1,7 @@
 import type { JSX } from "preact";
 import { useEffect, useState } from "preact/hooks";
+import { enablePush, type PushClient } from "../push.ts";
+import { browserPushEnv, pushSupported } from "../push-browser.ts";
 import { readPref, setPref, THEME_PREFS, type ThemePref } from "../theme.ts";
 import type { ConnectionState } from "../view.ts";
 import { RelayDot } from "./relay-dot.tsx";
@@ -30,6 +32,7 @@ export function Settings(props: {
   closeStyle: "back" | "close";
   onDismiss: () => void;
   onReconnect: () => void;
+  push: PushClient;
 }): JSX.Element {
   const { relayLine, relayState, connected, closeStyle, onDismiss, onReconnect } = props;
   // Both secrets are known to exist: the app only mounts once they load.
@@ -116,6 +119,8 @@ export function Settings(props: {
             }}
           />
         </div>
+
+        <NotificationsCard push={props.push} />
       </form>
 
       <footer className="footer">
@@ -127,6 +132,51 @@ export function Settings(props: {
         </button>
       </footer>
     </>
+  );
+}
+
+type PushView =
+  | { readonly kind: "unsupported" | "denied" | "enabled" | "off" | "working" }
+  | { readonly kind: "failed"; readonly message: string };
+
+function initialPushView(): PushView {
+  if (!pushSupported()) return { kind: "unsupported" };
+  const permission = browserPushEnv.permission();
+  if (permission === "denied") return { kind: "denied" };
+  // Granted: the boot re-sync has already put the subscription back if the record lost it.
+  return { kind: permission === "granted" ? "enabled" : "off" };
+}
+
+const PUSH_LINES = {
+  unsupported:
+    "This browser can't do push. On iOS, add Séance to the Home Screen first (Share, then Add to Home Screen), then open it from there.",
+  denied: "Notifications are blocked for Séance. Allow them in the browser's site settings, then come back.",
+  enabled: "On for this browser: you'll hear about spill, and about a task that has waited for input.",
+  off: "Get a notification when an account is about to spill or a task waits for your input.",
+  working: "Setting up…",
+} as const;
+
+function NotificationsCard(props: { push: PushClient }): JSX.Element {
+  const [view, setView] = useState<PushView>(initialPushView);
+  const busy = view.kind === "working";
+  // Called from the click itself, with no await before it: iOS grants permission only to a gesture.
+  const enable = (): void => {
+    setView({ kind: "working" });
+    void enablePush(props.push, browserPushEnv).then((outcome) =>
+      setView(outcome.kind === "enabled" ? { kind: "enabled" } : outcome),
+    );
+  };
+  const canEnable = view.kind === "off" || view.kind === "failed" || busy;
+  return (
+    <div className="push-card card">
+      <span className="theme-title">Notifications</span>
+      <p className="push-line">{view.kind === "failed" ? view.message : PUSH_LINES[view.kind]}</p>
+      {canEnable && (
+        <button type="button" className="push-button" disabled={busy} onClick={enable}>
+          {view.kind === "failed" ? "Try again" : "Enable notifications"}
+        </button>
+      )}
+    </div>
   );
 }
 

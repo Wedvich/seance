@@ -1225,6 +1225,35 @@
   color: var(--err);
 }
 
+/* ---- notifications card ---- */
+
+.push-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 14px 16px;
+  border-radius: 14px;
+}
+
+.push-line {
+  margin: 0;
+  font-size: 13.5px;
+  color: var(--fg2);
+}
+
+.push-button {
+  padding: 8px 14px;
+  border-radius: 10px;
+  font-weight: 600;
+  background: var(--sur2);
+  color: var(--fg);
+}
+
+.push-button:disabled {
+  opacity: 0.6;
+}
+
 /* ---- theme segmented control ---- */
 
 .theme-card {
