@@ -4762,7 +4762,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   Queue screen's ready rows say the same. Every Queue card, whatever its state, carries the task's
   pin in the verdict's words (`pinLine`, "Pinned to <machine> · <account>") and its avoid list
   ("Avoids <machine>, …"); a machine reads by its registry name, else a short id, and an account by
-  its alias, else its label (aliases display-only). `route-preview` drops a pin (`parseTaskRequest`), so the
+  its alias, else the email a machine reports for it, else `accountNameIn`'s short-id fallback
+  ("acct " plus the first eight characters of the id's last `:` segment); aliases are display-only. The
+  avoid list shows on the card only, never on the verdict, and is capped like `waitingText` ("+N more"). `route-preview` drops a pin (`parseTaskRequest`), so the
   placement preview is asked, and shown, only with both pickers on Auto; a pin-aware preview is a
   follow-up (docs/scheduler.md).
 - **Auto is each picker's first row, and the scheduler is asked only through it** (scheduler M2

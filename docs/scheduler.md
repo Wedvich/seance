@@ -761,7 +761,7 @@ of M4 has landed.
   Push beside the disk health alert. Exit: a revoked exclave is filtered `auth expired` and
   clears after `/login`; a failed refresh for any other reason never reads as `expired` (daemon).
 
-- **Spawn defaults to the scheduler** — **Done** (owner, 2026-10-25; PRs #309, #310 and PR 3): every
+- **Spawn defaults to the scheduler** — **Done** (owner, 2026-10-25; PRs #309, #310 and #311): every
   spawn is a task, a machine or an account is a pin on it, and a task's pin and `avoid` show on
   its queue card. DESIGN.md is the record ("CLI spawn", "MCP server", "PWA", "Fleet broker").
   - _Follow-up:_ `route-preview` takes a pin. It drops one today (`parseTaskRequest`), so the

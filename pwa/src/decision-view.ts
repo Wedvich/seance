@@ -269,10 +269,13 @@ function machineLabel(machines: readonly Machine[], deviceId: string): string {
   return machines.find((m) => m.deviceId === deviceId)?.name ?? deviceId.slice(0, 8);
 }
 
-/** "Avoids <machine>, <machine>" for a task with an avoid list; null otherwise. */
+/** "Avoids <machine>, <machine>" (capped like `waitingText`) for a task with an avoid list; null otherwise. */
 export function avoidLine(task: Task, machines: readonly Machine[]): string | null {
   const avoid = task.spec.avoid ?? [];
-  return avoid.length === 0 ? null : `Avoids ${avoid.map((id) => machineLabel(machines, id)).join(", ")}`;
+  if (avoid.length === 0) return null;
+  const labels = avoid.slice(0, WAITING_LIMIT).map((id) => machineLabel(machines, id));
+  const more = avoid.length - WAITING_LIMIT;
+  return `Avoids ${labels.join(", ")}${more > 0 ? `, +${more} more` : ""}`;
 }
 
 /** "Pinned to <machine> · <account>" for a pinned task; null otherwise. The labels are display text from the registry. */

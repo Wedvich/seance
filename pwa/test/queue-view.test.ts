@@ -555,7 +555,10 @@ describe("authoring on a row", () => {
     expect(placed({ pin: { deviceId: "dev-b" } }, "running")).toBe("Pinned to WSL");
     expect(placed({ pin: { deviceId: "dev-a", account } }, "done")).toBe("Pinned to Mac · Acme");
     expect(placed({ avoid: ["dev-b", "ffffffff00001111"] }, "queued")).toBe("Avoids WSL, ffffffff");
-    expect(placed({ pin: { deviceId: "dev-a" }, avoid: ["dev-b"] })).toBe("Pinned to Mac · Avoids WSL");
+    expect(placed({ pin: { deviceId: "dev-a" }, avoid: ["dev-b"] })).toBe("Pinned to Mac. Avoids WSL");
+    expect(placed({ pin: { deviceId: "dev-a", account }, avoid: ["dev-b"] })).toBe("Pinned to Mac · Acme. Avoids WSL");
+    expect(placed({ avoid: ["dev-b", "a1", "b2", "c3", "d4"] })).toBe("Avoids WSL, a1, b2, +2 more");
+    expect(placed({ avoid: [] })).toBeNull();
     expect(placed({ pin: { deviceId: "0123456789abcdef" } })).toBe("Pinned to 01234567");
     expect(placed({})).toBeNull();
   });
@@ -582,6 +585,12 @@ describe("authoring on a row", () => {
       ).sections[0]?.rows[0]?.placement;
     expect(row({ [account]: "Acme" })).toBe("Pinned to Acme");
     expect(row({})).toBe("Pinned to me@acme.dev");
+  });
+
+  test("an account pin no machine reports and no alias reads by accountNameIn's short-id fallback", () => {
+    const pinned = task("t", { spec: { repo: ORIGIN, mode: "worktree", pin: { account: "org:acct-1234567890" } } });
+    const placement = deriveQueue(state(ok([pinned])), NOW).sections[0]?.rows[0]?.placement;
+    expect(placement).toBe("Pinned to acct acct-123");
   });
 
   test("a task can be followed up while it can still be waited on, or once it is done; not after it failed or was cancelled", () => {

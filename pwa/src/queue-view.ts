@@ -232,7 +232,7 @@ function placementLine(task: Task, state: AppState): string | null {
   const parts = [pinLine(task, machines, state.accounts.aliases), avoidLine(task, machines)].filter(
     (part): part is string => part !== null,
   );
-  return parts.length === 0 ? null : parts.join(" · ");
+  return parts.length === 0 ? null : parts.join(". ");
 }
 
 function rowOf(task: Task, state: AppState, now: number, skew: number, titles: ReadonlyMap<string, string>): QueueRow {
