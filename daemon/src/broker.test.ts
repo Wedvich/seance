@@ -273,7 +273,9 @@ describe("the broker's scheduler actions", () => {
     broker.stop();
   });
 
-  test("a repeated id reads landedEarlier and is audited as such — a create at expect 0, never an overwrite", async () => {
+  // The fake takes the `Task`, not the store frame, so `expect: 0` is not observable here; e2e's real relay
+  // and the shared client's own tests hold that. This is the broker's half: the answer and its audit line.
+  test("a repeated id's landedEarlier answer is relayed and audited as such", async () => {
     const { broker, fakes, lines } = rig(undefined, { now: () => 5_000 });
     const seen = new Set<string>();
     // The relay's answer to a create at `expect: 0` on a key that holds a record.
@@ -325,17 +327,34 @@ describe("the broker's scheduler actions", () => {
     broker.stop();
   });
 
-  test("a create that fails in flight keeps its reason and still leaves an outcome line", async () => {
+  test("a create that fails in flight keeps its reason and target and still leaves an outcome line", async () => {
     const { broker, fakes, lines } = rig();
     await broker.handle(enqueue({}, { id: "warm" }));
     const fake = fakes[0];
     if (fake === undefined) throw new Error("expected a relay");
-    fake.onCreate = () => new RequestFailure("disconnected", "the relay hung up");
+    fake.onCreate = () => new RequestFailure("timeout", "store-put timed out", "relay");
     const reply = failed(await broker.handle(enqueue({}, { id: "s2" })));
-    expect(reply).toMatchObject({ code: "request_failed", reason: "disconnected" });
+    expect(reply).toMatchObject({ code: "request_failed", reason: "timeout", target: "relay" });
     expect(
       lines.some((line) => line.startsWith("audit enqueue origin=local-broker") && line.endsWith("unanswered")),
     ).toBe(true);
+    broker.stop();
+  });
+
+  test("a create that never left the daemon leaves no outcome line, since nothing can have been stored", async () => {
+    const { broker, fakes, lines } = rig();
+    await broker.handle(enqueue({}, { id: "warm" }));
+    const fake = fakes[0];
+    if (fake === undefined) throw new Error("expected a relay");
+    const before = lines.length;
+    fake.onCreate = () => new RequestFailure("disconnected", "the relay hung up");
+    const reply = failed(await broker.handle(enqueue({}, { id: "s2" })));
+    expect(reply).toMatchObject({ code: "request_failed", reason: "disconnected" });
+    expect(lines.slice(before).filter((line) => line.startsWith("audit enqueue "))).toEqual([]);
+    // The failure itself is still on record, as for any brokered request.
+    expect(lines.slice(before).some((line) => line.includes("failed code=request_failed reason=disconnected"))).toBe(
+      true,
+    );
     broker.stop();
   });
 
@@ -412,6 +431,25 @@ describe("the broker's scheduler actions", () => {
     const reply = failed(await broker.handle(frame({ schedulerOp: "pause" })));
     expect(reply.code).toBe("op_not_allowed");
     expect(reply.message).toContain('"pause"');
+    broker.stop();
+  });
+
+  test("fleet and machines are answered while the scheduler's slots are full", async () => {
+    const gate = Promise.withResolvers<null>();
+    const { broker, fakes } = rig(() => gate.promise.then(() => ({ at: 1, tasks: [] })), {
+      maxInFlight: 1,
+      scheduler: LEADING,
+    });
+    // A slow scheduler call holds the whole scheduler share (a cancel waits up to 25 s).
+    const slow = broker.handle(frame({ schedulerOp: "queue" }));
+    await pollUntil(() => (fakes[0]?.requests.length ?? 0) > 0, "the queue request to reach the relay");
+    expect(failed(await broker.handle(frame({ id: "s2", schedulerOp: "queue" }))).code).toBe("busy");
+    const fleet = await broker.handle({ v: 1, kind: "broker", id: "f1", action: "fleet" });
+    expect(fleet).toMatchObject({ ok: true, re: "f1" });
+    const machines = await broker.handle({ v: 1, kind: "broker", id: "m1", action: "machines" });
+    expect(machines).toMatchObject({ ok: true, re: "m1" });
+    gate.resolve(null);
+    expect((await slow).ok).toBe(true);
     broker.stop();
   });
 
@@ -657,8 +695,8 @@ describe("key handling", () => {
     // credential-delivered box nothing else can read it, and a second lookup is
     // a second TPM touch. Structural, like raycast's layering test: the modules
     // the broker is made of never reach for the stores.
-    for (const file of ["broker.ts", "broker-protocol.ts", "broker-client.ts", "app-relay.ts"]) {
-      // oxlint-disable-next-line no-await-in-loop -- four small reads
+    for (const file of ["broker.ts", "broker-protocol.ts", "broker-client.ts", "app-relay.ts", "account-cache.ts"]) {
+      // oxlint-disable-next-line no-await-in-loop -- five small reads
       const source = await Bun.file(new URL(file, import.meta.url)).text();
       expect(source).not.toMatch(/\bloadPsk\b|psk-store|tpmcreds|keychain|dpapi|credential\.ts/u);
     }

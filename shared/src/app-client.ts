@@ -130,8 +130,12 @@ export class RequestFailure extends Error {
   constructor(
     readonly reason: FailureReason,
     message: string,
-    /** What did not answer: a store frame's timeout blames the relay, not a machine. */
-    readonly target: "machine" | "relay" = "machine",
+    /**
+     * What did not answer: a store frame's timeout blames the relay, not a machine.
+     * `daemon` is a keyless peer's own daemon (the fleet broker) failing, before
+     * or after it sent anything on — never a relay's or a machine's doing.
+     */
+    readonly target: "machine" | "relay" | "daemon" = "machine",
   ) {
     super(message);
     this.name = "RequestFailure";
@@ -154,7 +158,10 @@ export function failureReasonText(failure: RequestFailure): string {
     case "disconnected":
       return "lost the relay connection before the request went out";
     case "dropped":
-      return "lost the relay connection after the request went out — it may have landed anyway";
+      // The daemon's own words: its failure was not the relay connection, and naming that would misdirect the reader.
+      return failure.target === "daemon"
+        ? `${failure.message} — the request may have landed anyway`
+        : "lost the relay connection after the request went out — it may have landed anyway";
     case "no_leader":
       return "no scheduler is leading — no connected daemon can take auto right now";
     case "leader_unverified":

@@ -146,7 +146,16 @@ export type BrokerReply =
       readonly message: string;
       /** Set with `request_failed`, so the peer can rebuild the same `RequestFailure` the direct path would throw. */
       readonly reason?: FailureReason;
+      /** With `reason`: what did not answer, so a relay timeout is not read back as a machine's. An older peer ignores it. */
+      readonly target?: RelayFailureTarget;
     };
+
+/** What a relay-side failure blames; the broker carries it, and a `daemon` target is only ever minted peer-side. */
+export type RelayFailureTarget = "machine" | "relay";
+
+function isRelayFailureTarget(value: unknown): value is RelayFailureTarget {
+  return value === "machine" || value === "relay";
+}
 
 /** How the local socket tells a broker frame from a `Plain` before validating either. */
 export function isBrokerFrame(raw: unknown): boolean {
@@ -164,7 +173,13 @@ export function brokerOk(re: string, data: unknown): BrokerReply {
   return { v: BROKER_VERSION, kind: "broker-reply", re, ok: true, data };
 }
 
-export function brokerFail(re: string, code: BrokerErrorCode, message: string, reason?: FailureReason): BrokerReply {
+export function brokerFail(
+  re: string,
+  code: BrokerErrorCode,
+  message: string,
+  reason?: FailureReason,
+  target?: RelayFailureTarget,
+): BrokerReply {
   return {
     v: BROKER_VERSION,
     kind: "broker-reply",
@@ -173,6 +188,7 @@ export function brokerFail(re: string, code: BrokerErrorCode, message: string, r
     code,
     message,
     ...(reason === undefined ? {} : { reason }),
+    ...(target === undefined ? {} : { target }),
   };
 }
 
@@ -213,9 +229,15 @@ export function parseBrokerReply(raw: unknown): BrokerReply | null {
   if (typeof re !== "string") return null;
   if (raw["ok"] === true) return brokerOk(re, raw["data"]);
   if (raw["ok"] !== false) return null;
-  const { code, message, reason } = raw;
+  const { code, message, reason, target } = raw;
   if (!isBrokerErrorCode(code) || typeof message !== "string") return null;
-  return brokerFail(re, code, message, isFailureReason(reason) ? reason : undefined);
+  return brokerFail(
+    re,
+    code,
+    message,
+    isFailureReason(reason) ? reason : undefined,
+    isRelayFailureTarget(target) ? target : undefined,
+  );
 }
 
 /**

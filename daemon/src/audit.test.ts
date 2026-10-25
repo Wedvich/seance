@@ -103,8 +103,8 @@ describe("enqueue audit lines", () => {
   const task = { id: "t-1", createdAt: 42 };
 
   test("a surface writes its own origin and client, and the line is unchanged for the direct path", async () => {
-    await enqueueAudit(collect, "mcp", "mcp")(task, { kind: "queued", landedEarlier: false });
-    await enqueueAudit(collect, "cli", "cli")(task, { kind: "unanswered" });
+    await enqueueAudit(collect, "mcp")(task, { kind: "queued", landedEarlier: false });
+    await enqueueAudit(collect, "cli")(task, { kind: "unanswered" });
     expect(collected).toEqual([
       'audit enqueue origin=mcp client=mcp task="t-1" createdAt=42 queued',
       'audit enqueue origin=cli client=cli task="t-1" createdAt=42 unanswered',

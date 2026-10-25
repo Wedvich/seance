@@ -2,12 +2,21 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { importPsk, isRecord, RequestFailure, toBase64, type Machine, type Task } from "@seance/shared";
+import {
+  failureReasonText,
+  importPsk,
+  isRecord,
+  RequestFailure,
+  toBase64,
+  type Machine,
+  type Task,
+} from "@seance/shared";
 import { startBrokerDouble } from "../test/broker-double.ts";
 import { machine } from "../test/fake-app-relay.ts";
 import { BrokerError } from "./broker-client.ts";
 import { brokerFail, brokerOk, type BrokerReply } from "./broker-protocol.ts";
-import { brokerFleet, FleetUnreachable, selectFleet, type Fleet, type FleetLease } from "./fleet.ts";
+import { enqueueAuto } from "./auto.ts";
+import { brokerFleet, DaemonFault, FleetUnreachable, selectFleet, type Fleet, type FleetLease } from "./fleet.ts";
 
 interface CountingFleet extends Fleet {
   opened: number;
@@ -357,13 +366,18 @@ describe("the brokered scheduler leg's failures", () => {
     }
   });
 
-  test("a daemon that never answers is dropped at the peer's deadline", async () => {
+  test("a daemon that never answers is dropped at the peer's deadline, in the daemon's words and not the relay's", async () => {
     const double = await schedulerDaemon(() => new Promise<BrokerReply>(() => {}));
     try {
-      // The fleet probe is answered; the scheduler frames are not.
-      const lease = await brokerFleet({ path: double.path, timeoutMs: 150 }).open();
+      // The fleet probe is answered at once; the scheduler frames are not. One bound covers both, so it is
+      // generous enough that the probe is never what times out on a loaded machine.
+      const lease = await brokerFleet({ path: double.path, timeoutMs: 1_000 }).open();
       const failure = await rejection(lease.scheduler?.queue() ?? Promise.reject(new Error("no leg")));
-      expect(failure).toMatchObject({ reason: "dropped" });
+      expect(failure).toMatchObject({ reason: "dropped", target: "daemon" });
+      if (!(failure instanceof RequestFailure)) throw new Error("expected a RequestFailure");
+      expect(failureReasonText(failure)).toContain("the daemon did not answer within 1000ms");
+      expect(failureReasonText(failure)).toContain("may have landed anyway");
+      expect(failureReasonText(failure)).not.toContain("relay connection");
     } finally {
       await double.stop();
     }
@@ -373,6 +387,41 @@ describe("the brokered scheduler leg's failures", () => {
     const failures = await thrown((id) => brokerFail(id, "request_failed", "no scheduler is leading", "no_leader"));
     expect(failures.map((failure) => failure.reason)).toEqual(["no_leader", "no_leader"]);
     expect(failures[0]?.message).toBe("no scheduler is leading");
+  });
+
+  test("the relay's target survives the wire, so a relay timeout is not worded as a machine's", async () => {
+    const failures = await thrown((id) => brokerFail(id, "request_failed", "store-put timed out", "timeout", "relay"));
+    for (const failure of failures) {
+      expect(failure).toMatchObject({ reason: "timeout", target: "relay" });
+      expect(failureReasonText(failure)).toContain("the relay did not answer");
+    }
+    // An older daemon sends none, and the default is what the direct path's machine ops carry.
+    const [bare] = await thrown((id) => brokerFail(id, "request_failed", "no answer", "timeout"));
+    expect(bare?.target).toBe("machine");
+  });
+
+  test("a request_failed reason this build does not know is dropped, the uncertain class, never refused", async () => {
+    // A newer daemon's reason: the parser drops it, which is the shape of a reasonless failure.
+    const failures = await thrown((id) => brokerFail(id, "request_failed", "a reason from the future"));
+    expect(failures.map((failure) => failure.reason)).toEqual(["dropped", "dropped"]);
+    expect(failures[0]?.message).toBe("a reason from the future");
+  });
+
+  test("a daemon-side fault keeps the daemon's message instead of the fixed relay line", async () => {
+    for (const code of ["internal_error", "stopped_in_flight"] as const) {
+      // oxlint-disable-next-line no-await-in-loop -- one double each
+      const failures = await thrown((id) => brokerFail(id, code, `${code} from the daemon`));
+      for (const failure of failures) {
+        const text = failureReasonText(failure);
+        expect(text).toContain(`${code} from the daemon`);
+        expect(text).toContain("may have landed anyway");
+        expect(text).not.toContain("relay connection");
+      }
+    }
+    // The direct path's own `dropped` is a lost relay socket, and its line is unchanged.
+    expect(failureReasonText(new RequestFailure("dropped", "closed", "relay"))).toBe(
+      "lost the relay connection after the request went out — it may have landed anyway",
+    );
   });
 
   test("an enqueue answer that is not a TaskCreated is dropped, not trusted", async () => {
@@ -428,5 +477,73 @@ describe("the brokered scheduler leg's failures", () => {
     } finally {
       await refusing.stop();
     }
+  });
+});
+
+describe("enqueueAuto through the brokered leg", () => {
+  const REQUEST = { repo: "github.com/m/seance", mode: "worktree", prompt: "fix it" } as const;
+  const enqueues = (frames: readonly unknown[]): Record<string, unknown>[] =>
+    frames.filter((frame): frame is Record<string, unknown> => isRecord(frame) && frame["schedulerOp"] === "enqueue");
+
+  test("a first enqueue the daemon drops is retried, and the retry carries the same task id", async () => {
+    let tries = 0;
+    const double = await schedulerDaemon((id) => {
+      tries += 1;
+      return tries === 1
+        ? brokerFail(id, "stopped_in_flight", "the daemon stopped while the request was out")
+        : brokerOk(id, { ok: true, landedEarlier: true });
+    });
+    try {
+      const lease = await brokerFleet({ path: double.path }).open();
+      if (lease.scheduler === null) throw new Error("expected a scheduler leg");
+      const outcome = await enqueueAuto(lease.scheduler, REQUEST, () => {}, "mcp");
+      expect(outcome.ok).toBe(true);
+      expect(outcome.text).toContain("an earlier try had already stored it");
+      const sent = enqueues(double.frames);
+      expect(sent).toHaveLength(2);
+      expect(typeof sent[0]?.["taskId"]).toBe("string");
+      expect(sent[1]?.["taskId"]).toBe(sent[0]?.["taskId"]);
+    } finally {
+      await double.stop();
+    }
+  }, 10_000);
+
+  test("a daemon fault is final: one send, no retry, and still worded as possibly queued", async () => {
+    // `bad_reply` is minted peer-side, for an answer the daemon sent that is not an enqueue's.
+    const cases = [
+      { say: (id: string): BrokerReply => brokerFail(id, "internal_error", "boom"), words: "boom" },
+      {
+        say: (id: string): BrokerReply => brokerOk(id, { ok: "maybe" }),
+        words: "the daemon's answer was not readable",
+      },
+    ];
+    for (const { say, words } of cases) {
+      // oxlint-disable-next-line no-await-in-loop -- one double each
+      const double = await schedulerDaemon(say);
+      const audited: string[] = [];
+      try {
+        // oxlint-disable-next-line no-await-in-loop -- one double each
+        const lease = await brokerFleet({ path: double.path }).open();
+        if (lease.scheduler === null) throw new Error("expected a scheduler leg");
+        // oxlint-disable-next-line no-await-in-loop -- one double each
+        const outcome = await enqueueAuto(lease.scheduler, REQUEST, (line) => void audited.push(line), "mcp");
+        const [only] = enqueues(double.frames);
+        expect(enqueues(double.frames)).toHaveLength(1);
+        expect(outcome.ok).toBe(false);
+        expect(outcome.text).toBe(
+          `auto failed: ${words} — task ${String(only?.["taskId"])} may have queued; check get_queue before retrying`,
+        );
+        expect(audited).toEqual([expect.stringMatching(/^audit enqueue origin=mcp client=mcp .* unanswered$/u)]);
+      } finally {
+        // oxlint-disable-next-line no-await-in-loop -- one double each
+        await double.stop();
+      }
+    }
+  });
+
+  test("a DaemonFault is a RequestFailure, so every direct-path catch still sees one", () => {
+    const fault = new DaemonFault("boom");
+    expect(fault).toBeInstanceOf(RequestFailure);
+    expect(fault).toMatchObject({ reason: "dropped", target: "daemon", message: "boom" });
   });
 });

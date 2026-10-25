@@ -318,6 +318,11 @@ export type EnqueueSurface = Extract<SpawnClient, "mcp" | "cli">;
  */
 export type EnqueueOrigin = EnqueueSurface | BrokerOrigin;
 
+export type EnqueueAuditLine = (
+  task: { readonly id: string; readonly createdAt: number },
+  outcome: EnqueueOutcome,
+) => Promise<void>;
+
 /**
  * An app-role process on this box enqueuing on `auto` with the key itself
  * (`relayFleet`): a store write that reaches no daemon, so this line, under its
@@ -326,11 +331,11 @@ export type EnqueueOrigin = EnqueueSurface | BrokerOrigin;
  * surface's, and the daemon's under `local-broker`, whose `createdAt` is the
  * daemon's stamp. Never the prompt.
  */
-export function enqueueAudit(
-  sink: AuditSink,
-  origin: EnqueueOrigin,
-  client: EnqueueSurface,
-): (task: { readonly id: string; readonly createdAt: number }, outcome: EnqueueOutcome) => Promise<void> {
+export function enqueueAudit(sink: AuditSink, surface: EnqueueSurface): EnqueueAuditLine;
+export function enqueueAudit(sink: AuditSink, origin: BrokerOrigin, claimedClient: EnqueueSurface): EnqueueAuditLine;
+export function enqueueAudit(sink: AuditSink, origin: EnqueueOrigin, claimedClient?: EnqueueSurface): EnqueueAuditLine {
+  // A surface's origin is its client; only the daemon writing for a peer has a client that is not its own origin.
+  const client = claimedClient ?? origin;
   return async (task, outcome) => {
     const how =
       outcome.kind === "queued"

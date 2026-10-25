@@ -13,7 +13,7 @@ import {
   type SpawnClient,
   type SpawnRequest,
 } from "@seance/shared";
-import { appRelayClient, LazyRelay, type AppKeys, type AppRelay } from "./app-relay.ts";
+import { appRelayClient, importAppKeys, LazyRelay, type AppKeys, type AppRelay } from "./app-relay.ts";
 import { accountCaches } from "./account-cache.ts";
 import { brokerAudit, enqueueAudit, type AuditSink, type EnqueueOutcome } from "./audit.ts";
 import {
@@ -27,6 +27,7 @@ import {
   type BrokerErrorCode,
   type BrokerReply,
   type BrokerRequest,
+  type RelayFailureTarget,
 } from "./broker-protocol.ts";
 import type { Config } from "./config.ts";
 import { isDespawnRequest, isSpawnRequest } from "./handlers.ts";
@@ -62,12 +63,23 @@ import { log } from "./log.ts";
  */
 const MAX_IN_FLIGHT = 16;
 
+/**
+ * Its own small share for `machines` and `fleet`: they are answered from the
+ * connection's cached registry with no relay round trip, and every tool call of
+ * a keyless peer opens with one. Counted with the rest, slow scheduler calls (a
+ * cancel waits up to 25 s) could fill the pool and turn the next call's lease
+ * open into `busy` — taking even a spawn on this machine's registry view away.
+ */
+const MAX_READS_IN_FLIGHT = 4;
+
 export interface BrokerOpts {
   /** This daemon's own deviceId. A request aimed here belongs on the local op path, not a relay round trip back to itself. */
   readonly selfDeviceId: string;
   readonly relay: LazyRelay;
   readonly auditSink: AuditSink;
   readonly maxInFlight?: number;
+  /** The share `machines` and `fleet` have to themselves, beside `maxInFlight`. */
+  readonly maxReadsInFlight?: number;
   /** Stamps a brokered task's `createdAt`, so a peer cannot back- or forward-date one; tests pin it. */
   readonly now?: () => number;
 }
@@ -80,14 +92,18 @@ export interface Broker {
 }
 
 /**
- * The broker's relay connection: the daemon's already-imported keys, never a
- * second store lookup — on a credential-delivered box nothing but this process can
- * read the key, and a second lookup would be a second chance to get it wrong.
- * Lazy and idle-closing like `seanced mcp`'s, so a box nobody brokers through
- * holds no extra socket.
+ * The broker's relay connection, over the PSK the daemon already resolved —
+ * never a second store lookup: on a credential-delivered box nothing but this
+ * process can read the key, and a second lookup would be a second chance to get
+ * it wrong. Both keys derive here (`importAppKeys`), on the first dial, so the
+ * account HMAC key exists only in a daemon that brokers. Lazy and idle-closing
+ * like `seanced mcp`'s, so a box nobody brokers through holds no extra socket.
  */
-export function brokerRelay(config: Pick<Config, "relayUrl" | "bearerToken">, keys: AppKeys): LazyRelay {
-  return new LazyRelay({ create: () => appRelayClient(config, keys, (line) => log.info(line)) });
+export function brokerRelay(config: Pick<Config, "relayUrl" | "bearerToken">, psk: string): LazyRelay {
+  let keys: Promise<AppKeys> | undefined;
+  return new LazyRelay({
+    create: async () => appRelayClient(config, await (keys ??= importAppKeys(psk)), (line) => log.info(line)),
+  });
 }
 
 type Parsed = { readonly request: BrokerRequest } | { readonly code: BrokerErrorCode; readonly message: string };
@@ -213,10 +229,12 @@ function clientOf(payload: unknown): string | undefined {
 export function createBroker(opts: BrokerOpts): Broker {
   const audit = brokerAudit(opts.auditSink);
   const maxInFlight = opts.maxInFlight ?? MAX_IN_FLIGHT;
+  const maxReads = opts.maxReadsInFlight ?? MAX_READS_IN_FLIGHT;
   const now = opts.now ?? Date.now;
   // One listing budget for every keyless process on the box: the relay allows each socket four a minute.
   const cacheOf = accountCaches();
   let inFlight = 0;
+  let readsInFlight = 0;
   let stopped = false;
 
   const fail = async (
@@ -224,9 +242,10 @@ export function createBroker(opts: BrokerOpts): Broker {
     code: BrokerErrorCode,
     message: string,
     reason?: FailureReason,
+    target?: RelayFailureTarget,
   ): Promise<BrokerReply> => {
     await audit.failed(id, code, reason);
-    return brokerFail(id, code, message, reason);
+    return brokerFail(id, code, message, reason, target);
   };
 
   /**
@@ -237,7 +256,8 @@ export function createBroker(opts: BrokerOpts): Broker {
   const relayFailed = (id: string, err: unknown): Promise<BrokerReply> => {
     if (!(err instanceof RequestFailure)) throw err;
     if (stopped) return fail(id, "stopped_in_flight", "the daemon stopped while the request was out");
-    return fail(id, "request_failed", err.message, err.reason);
+    // `daemon` is minted peer-side only; whatever this process's client blames, the wire carries machine or relay.
+    return fail(id, "request_failed", err.message, err.reason, err.target === "relay" ? "relay" : "machine");
   };
 
   const serveScheduler = async (
@@ -257,7 +277,10 @@ export function createBroker(opts: BrokerOpts): Broker {
         try {
           reply = await client.createTask(task);
         } catch (err) {
-          await audited(task, { kind: "unanswered" });
+          // A try that never left this daemon cannot have stored anything, so it is no line to audit (as `enqueueAuto`).
+          if (!(err instanceof RequestFailure && err.reason === "disconnected")) {
+            await audited(task, { kind: "unanswered" });
+          }
           return await relayFailed(id, err);
         }
         const outcome: EnqueueOutcome =
@@ -344,12 +367,17 @@ export function createBroker(opts: BrokerOpts): Broker {
         );
       } else await audit.request(id, request.remoteOp, request.deviceId, clientOf(request.payload));
       if (stopped) return await fail(id, "shutting_down", "the daemon is stopping");
-      if (inFlight >= maxInFlight) return await fail(id, "busy", `${maxInFlight} brokered requests already in flight`);
-      inFlight += 1;
+      const read = request.action === "machines" || request.action === "fleet";
+      if (read ? readsInFlight >= maxReads : inFlight >= maxInFlight) {
+        return await fail(id, "busy", `${read ? maxReads : maxInFlight} brokered requests already in flight`);
+      }
+      if (read) readsInFlight += 1;
+      else inFlight += 1;
       try {
         return await serve(request);
       } finally {
-        inFlight -= 1;
+        if (read) readsInFlight -= 1;
+        else inFlight -= 1;
       }
     } catch (err) {
       log.error(`broker: request ${quote(id)} crashed: ${String(err)}`);

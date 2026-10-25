@@ -23,6 +23,7 @@ import {
   brokerSchedulerCall,
   isUncertainBrokerCode,
   type BrokerCallOpts,
+  type BrokerClientCode,
   type SchedulerCall,
 } from "./broker-client.ts";
 import { parseTaskCreated, type BrokerOp } from "./broker-protocol.ts";
@@ -67,9 +68,11 @@ export interface FleetLease {
   /** As `RelayClient.request`: any op may answer with an `ErrorResponse`. */
   readonly request: <T>(deviceId: string, op: BrokerOp, payload: unknown) => Promise<T | ErrorResponse>;
   /**
-   * Null only through the broker of a daemon that predates brokered scheduler
-   * access (DESIGN.md "Fleet broker"): it answered `fleet` with `unsupported`, or
-   * not at all, so there is nothing to send `auto` through.
+   * Null only through the broker, and only when this machine's daemon could not
+   * say: it predates brokered scheduler access (DESIGN.md "Fleet broker") or was
+   * restarting, so it answered `fleet` with `unsupported`, or not at all, and
+   * there is nothing to send `auto` through. A non-null leg whose availability
+   * is `none` is a different thing: the daemon answered, and no leader is verified.
    */
   readonly scheduler: SchedulerLeg | null;
   /** Ends the call; the direct transport's idle clock starts from here. */
@@ -114,6 +117,33 @@ export const SCHEDULER_NEEDS_NEWER_DAEMON =
   "this machine's daemon predates brokered auto, or was restarting — try again; if it persists, `seanced update`, then `seanced restart` if it did not restart itself";
 
 /**
+ * A daemon-side fault after the request may have gone on (`bad_reply`,
+ * `internal_error`). `dropped`, so it words as "may have landed" — but `enqueueAuto`
+ * does not retry it: a retry meets the same fault, and the daemon's own message
+ * is the answer, not a connection loss.
+ */
+export class DaemonFault extends RequestFailure {
+  constructor(message: string) {
+    super("dropped", message, "daemon");
+    this.name = "DaemonFault";
+  }
+}
+
+/** Codes where the fault is the daemon's own, so a repeat would hit it again. */
+const DAEMON_FAULTS: ReadonlySet<BrokerClientCode> = new Set<BrokerClientCode>(["bad_reply", "internal_error"]);
+
+/**
+ * A broker failure as the failure the direct path would have thrown, with the
+ * broker's own words kept (`target: "daemon"`): the fixed "lost the relay
+ * connection" line would misdescribe a daemon that timed out, hung up or crashed.
+ */
+function brokerFailure(err: BrokerError): RequestFailure {
+  const text = brokerFailureText(err);
+  if (DAEMON_FAULTS.has(err.code)) return new DaemonFault(text);
+  return new RequestFailure(isUncertainBrokerCode(err.code) ? "dropped" : "refused", text, "daemon");
+}
+
+/**
  * The scheduler through the daemon's broker. `availability` is the snapshot the
  * lease opened on, the same lifetime as its `machines`.
  *
@@ -121,8 +151,9 @@ export const SCHEDULER_NEEDS_NEWER_DAEMON =
  * `enqueueAuto` retries `dropped` with the same id (an enqueue is idempotent by
  * id) and treats anything else as final, and `cancel`'s text words `dropped` as
  * "may have landed". So a code that can follow a request already sent is
- * `dropped`, and a pre-send refusal (no daemon, busy, stopping, not brokering)
- * is `refused` — it must not read as "may have landed".
+ * `dropped` (a `DaemonFault` when retrying is pointless), and a pre-send refusal
+ * (no daemon, busy, stopping, not brokering) is `refused` — it must not read as
+ * "may have landed".
  */
 export function brokerScheduler(availability: SchedulerAvailability, opts: BrokerCallOpts = {}): SchedulerLeg {
   /** `read` answers undefined for data that is not a reply to this op. */
@@ -134,7 +165,7 @@ export function brokerScheduler(availability: SchedulerAvailability, opts: Broke
       return reply;
     } catch (err) {
       if (!(err instanceof BrokerError)) throw err;
-      throw new RequestFailure(isUncertainBrokerCode(err.code) ? "dropped" : "refused", brokerFailureText(err));
+      throw brokerFailure(err);
     }
   };
   return {
@@ -193,7 +224,7 @@ export function brokerFleet(opts: BrokerCallOpts = {}): Fleet {
  * broker — the fix is on this side, never "update seanced".
  */
 const NOT_BROKERING =
-  "this daemon's key is not service-delivered, so it does not broker — `seanced mcp` has to read the PSK itself";
+  "this daemon's key is not service-delivered, so it does not broker — this process has to read the PSK itself";
 const WHY_KEYLESS =
   "run `seanced doctor` from this shell to see why it cannot (a locked keychain, a refused TPM unseal, an empty psk field — fill the field or run `seanced psk-import`)";
 

@@ -177,7 +177,10 @@ describe("the fleet broker on the local op socket", () => {
     expect(await scheduler.enqueue(task)).toEqual({ ok: true, landedEarlier: false });
     expect(await scheduler.accounts()).toEqual([]);
     expect(await rejection(scheduler.queue())).toMatchObject({ reason: "no_leader" });
-    expect(await rejection(scheduler.cancel(task.id))).toBeInstanceOf(RequestFailure);
+    // A leaderless cancel is refused at the source, so the reason is the leaderless one — not merely some failure.
+    const cancelled = await rejection(scheduler.cancel(task.id));
+    expect(cancelled).toBeInstanceOf(RequestFailure);
+    expect(cancelled).toMatchObject({ reason: "no_leader" });
     expect(audit.join("\n")).toContain(`action=scheduler op="enqueue" task="${task.id}" claimed_client="mcp"`);
   });
 

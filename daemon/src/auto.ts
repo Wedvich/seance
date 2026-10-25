@@ -18,7 +18,7 @@ import {
   type TaskSpec,
 } from "@seance/shared";
 import { enqueueAudit, type AuditSink, type EnqueueSurface } from "./audit.ts";
-import type { SchedulerLeg } from "./fleet.ts";
+import { DaemonFault, type SchedulerLeg } from "./fleet.ts";
 import { originQuery } from "./scan.ts";
 
 /**
@@ -495,7 +495,7 @@ export async function enqueueAuto(
   id?: string,
 ): Promise<AutoEnqueued> {
   const task = queuedTask({ ...request, client: surface satisfies SpawnClient }, Date.now(), id);
-  const audited = enqueueAudit(audit, surface, surface);
+  const audited = enqueueAudit(audit, surface);
   const followUp = FOLLOW_UP[surface];
   // Whether any try left this process: a socket that was never open sent nothing, so nothing can have queued.
   let sent = false;
@@ -509,16 +509,26 @@ export async function enqueueAuto(
       // oxlint-disable-next-line no-await-in-loop -- each try follows the one before
       reply = await scheduler.enqueue(task);
     } catch (err) {
+      // A daemon fault is final, not lost: a repeat meets it again.
       const lost =
         err instanceof RequestFailure &&
+        !(err instanceof DaemonFault) &&
         (err.reason === "timeout" || err.reason === "dropped" || err.reason === "disconnected");
       if (lost) {
         if (!(err instanceof RequestFailure && err.reason === "disconnected")) sent = true;
         continue;
       }
+      // Its message already says it may have landed; the line below names the task.
       const why =
-        err instanceof RequestFailure ? failureReasonText(err) : err instanceof Error ? err.message : String(err);
-      if (sent) {
+        err instanceof DaemonFault
+          ? err.message
+          : err instanceof RequestFailure
+            ? failureReasonText(err)
+            : err instanceof Error
+              ? err.message
+              : String(err);
+      // A fault after the send left the daemon may have stored it, as a lost earlier try may have.
+      if (sent || err instanceof DaemonFault) {
         // An earlier try may have stored it, so this is no clean failure: audit it as the lost path does.
         // oxlint-disable-next-line no-await-in-loop -- the last thing this try does: it returns
         await audited(task, { kind: "unanswered" });

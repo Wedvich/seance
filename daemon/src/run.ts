@@ -2,7 +2,6 @@ import {
   CAPABILITIES,
   ENVELOPE_MAX_CT_LENGTH,
   FLEET_QUOTA_INTERVAL_MS,
-  importAccountKey,
   importPsk,
   ReplayGuard,
   STATUS_INTERVAL_MS,
@@ -203,8 +202,6 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   let state: State = await loadOrInitState();
   const identity = await identityOfState(state);
   const key = await importPsk(resolved.psk);
-  // Derived from the PSK already resolved, not a store lookup: only the broker reads `account:` records with it.
-  const accountKey = await importAccountKey(resolved.psk);
   const now = opts.now ?? Date.now;
   const httpFetch: Fetch = opts.httpFetch ?? ((input, init) => fetch(input, init));
   const startedAt = now();
@@ -520,7 +517,6 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     config,
     resolved,
     key,
-    accountKey,
     deviceId: state.deviceId,
     client,
     leader,

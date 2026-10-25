@@ -61,6 +61,8 @@ const UNCERTAIN: ReadonlySet<BrokerClientCode> = new Set<BrokerClientCode>([
   "internal_error",
   "reply_too_large",
   "bad_reply",
+  // A `request_failed` without a reason this build reads is a newer daemon's: a relay failure, so a write may have gone out.
+  "request_failed",
 ]);
 
 /** Whether a code may follow a request the daemon already sent on — what `RequestFailure("dropped")` means. */
@@ -102,7 +104,7 @@ async function call(frame: BrokerRequest, deadlineMs: number, opts: BrokerCallOp
   // Rebuilt rather than wrapped, so a brokered failure renders through
   // `failureReasonText` exactly as the same failure on the direct path does.
   if (reply.code === "request_failed" && reply.reason !== undefined)
-    throw new RequestFailure(reply.reason, reply.message);
+    throw new RequestFailure(reply.reason, reply.message, reply.target);
   throw new BrokerError(reply.code, reply.message);
 }
 
@@ -147,7 +149,11 @@ export async function brokerFleetState(
   try {
     data = await call(frame, brokerDeadlineMs(null), opts);
   } catch (err) {
-    if (err instanceof BrokerError && (err.code === "unsupported" || err.code === "daemon_closed")) {
+    // `reply_too_large` falls back for the same reason `daemon_closed` does: `fleet` changes nothing, and `machines` is the smaller answer.
+    if (
+      err instanceof BrokerError &&
+      (err.code === "unsupported" || err.code === "daemon_closed" || err.code === "reply_too_large")
+    ) {
       return { machines: await brokerMachines(opts), scheduler: null };
     }
     throw err;
