@@ -90,7 +90,11 @@ key's version at 1, which reopens alias rollback unless the PSK changes too: rot
   the read instead); `GitFixture.pushBranch` commits on a feature branch and pushes it to
   the fixture's origin, as a session finishing its work would; and `startPushEndpoint`
   (`daemon/test/push-endpoint.ts`) is a Web Push service on 127.0.0.1 that records each
-  push and answers a chosen status, or holds the answer. Each has a self-test beside it.
+  push and answers a chosen status, or holds the answer. Each has a self-test beside it. The
+  leader's tests reach the stub through `createLeader`'s `httpFetch` option (the 6th parameter of
+  `leaderOver` in `daemon/test/leader.test.ts`), which rewrites the subscription's allowlisted
+  host to the stub's `endpoint(id)`: the sender's allowlist re-check still runs on the stored
+  endpoint, and only the transport is redirected.
 - **relay** and **pwa** — the real Worker and Durable Object under workerd via
   Miniflare, reading bindings from `wrangler.jsonc`, so config drift there fails tests
   by design. The app's relay client is exercised against the shipped relay rather than

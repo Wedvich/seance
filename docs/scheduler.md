@@ -453,8 +453,8 @@ of M4 has landed.
   - the exit status rides `TaskProgress.exit` (the `sessions` reply's `progress` and the launch
     ledger), not `ended` or the session event, whose hook runs before the pane dies;
   - auth in `MachineStatus` is `ax`, the expired exclaves' indices, never trimmed;
-  - `push-subscribe` is typed and parsed but not in `SCHEDULER_OPS`; a leader answers it
-    `invalid_request` until the Web Push PR adds its handler and `OP_TIMEOUT_MS` entry;
+  - `push-subscribe` is in `SCHEDULER_OPS` (10 s `OP_TIMEOUT_MS`); a leader that predates it
+    answers `invalid_request`;
   - push subscriptions, the VAPID key pair and the Linear key are one `settings` record.
 
   Store rules v2, above, accepts the prefixes.
@@ -641,19 +641,12 @@ of M4 has landed.
   screen shows the fill level, but only a push reaches someone not looking at it). The `onAlert` seam exists,
   hard-wired to a log line (`startTerm` in `daemon/src/leader.ts`); a workbox service worker
   exists. Built: the settings record and the VAPID keypair (DESIGN.md, _Scheduler_,
-  "Settings record"). Missing: `push-subscribe`, RFC 8291 encryption, a push
-  handler, the new alert kinds and a persisted de-dupe. Push endpoints can take seconds, so never
-  await a send in the pass (as `#launch` does for spawns), and read subscriptions once per term,
-  not per alert.
+  "Settings record"), `push-subscribe`, the sender with RFC 8291/8292, the PWA's Notifications
+  card and a minimal push handler that shows every push ("Web Push"). Missing: the new alert kinds
+  (disk), the persisted de-dupe, and the handler's click-through to the task.
   - _Decided (#9), who writes `settings`:_ recorded in DESIGN.md (_Scheduler_, "Settings record").
-  - _Decided (#10), Web Push egress from a dev machine:_
-    - An allowlist of push-service hosts: `fcm.googleapis.com`,
-      `updates.push.services.mozilla.com`, `web.push.apple.com` and `*.notify.windows.com` —
-      stricter than the review's "any https public host", so a forged subscription cannot aim
-      the leader at an arbitrary URL. A new browser vendor is a one-line change.
-    - https only, no redirects, short timeouts.
-    - Ids and state only in payloads.
-    - Prune a subscription on 404 or 410.
+  - _Decided (#10), Web Push egress from a dev machine:_ recorded in DESIGN.md (_Scheduler_,
+    "Web Push").
   - _Decided (#11), notification actions:_ clicking opens the Queue screen at the alert's task,
     by the task id the payload carries (the owner added the deep link). No actions: iOS ignores
     them, and the service worker holds no PSK.
@@ -789,8 +782,8 @@ same PR, with the reason.
    window, 1% of a week) a new task is refused from ~85% current in 5h and ~89% in 7d; and a window that resets within 15 min counts as empty for the
    filter, since a task started then runs almost entirely after the reset.
 5. **`needs-input` escalation** after 30 min (`needsInputEscalateMs`, built with M3 item 5):
-   re-alert once, keep the slot, never kill. Until M4's Web Push the re-alert is the record's
-   `escalated` and a leader log line.
+   re-alert once, keep the slot, never kill. The re-alert is the record's `escalated`, a leader
+   log line and a push.
 6. **Disk is a floor, not a load.** Under 1 GiB free (`status.free`) filters the machine out;
    above it disk adds nothing to the score. A fill level says how much upkeep a machine needs,
    not how busy it is — scored, an 85%-full idle disk would read as 85% busy and push work off
