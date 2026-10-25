@@ -6,11 +6,14 @@
  * none). Only the one character before the `/` is checked, so `x(/sh` counts.
  */
 
-/** A character a token may follow, besides whitespace or the text's start. */
-export const SKILL_TOKEN_OPENER = /^[\s`"'([]$/u;
+// One class body for both regexes, so the opener set cannot drift between picker and routing.
+const OPENERS = String.raw`\s\x60"'([`;
+
+/** A character a token may follow, besides the text's start. */
+export const SKILL_TOKEN_OPENER = new RegExp(`^[${OPENERS}]$`, "u");
 
 /** Every token in a text; group 1 is the raw name, closing run included — pass it through `trimSkillName`. */
-export const SKILL_TOKEN = /(?<![^\s`"'([])\/([^\s/]+)(?=\s|$)/gu;
+export const SKILL_TOKEN = new RegExp(String.raw`(?<![^${OPENERS}])\/([^\s/]+)(?=\s|$)`, "gu");
 
 /**
  * Closing wrappers and trailing sentence punctuation are not part of the name

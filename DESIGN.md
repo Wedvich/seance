@@ -2213,8 +2213,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   reading holds only other models' weeklies is `quota_unknown` (`unobserved`), never 0%.
 - **Skills filter** (2026-10-25, docs/scheduler.md M4 _Skills_, decided #19). A task's skill
   is its declared `TaskRequest.skill` (which wins outright: only it is checked), else every
-  `/name` token in its prompt that the inventory knows, each required. A token is the PWA
-  picker's, widened for wrapping: a `/` at the prompt's start, after whitespace or after one of
+  `/name` token in its prompt that the inventory knows, each required. A token follows the one
+  rule the PWA picker completes by (`shared/src/skill-token.ts`): a `/` at the prompt's start, after whitespace or after one of
   `` ` `` `"` `'` `(` `[`, the name running to the next whitespace with no second `/` (so
   `and/or`, `https://a/b` and `/tmp/x` are none), closing `` ` `` `"` `'` `)` `]` and trailing
   `.,;!?:` stripped (a name ending in `:` cannot be a `plugin:name`, which keeps its inner `:`),
