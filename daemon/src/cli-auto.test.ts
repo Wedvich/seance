@@ -186,7 +186,9 @@ describe("autoFleet", () => {
       expect(outcome.text).toStartWith("auto: not queued — this shell could not read the PSK");
       expect(outcome.text.indexOf("could not read the PSK")).toBeLessThan(outcome.text.indexOf("is seanced running?"));
       // No daemon: a plain spawn goes through it too, so it is not promised to work.
-      expect(outcome.text).toEndWith("Ops on this machine go through that same daemon, so they fail too until it is running.");
+      expect(outcome.text).toEndWith(
+        "Ops on this machine go through that same daemon, so they fail too until it is running.",
+      );
       expect(outcome.text).not.toContain("needs no key");
     } finally {
       await rm(dir, { recursive: true, force: true });

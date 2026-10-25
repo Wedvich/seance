@@ -312,7 +312,9 @@ describe("brokerFleet", () => {
   });
 
   test("a fleet answer too large to send fails the lease instead of falling back to machines", async () => {
-    const double = await startBrokerDouble((_raw, id) => brokerFail(id, "reply_too_large", "the answer ran past the cap"));
+    const double = await startBrokerDouble((_raw, id) =>
+      brokerFail(id, "reply_too_large", "the answer ran past the cap"),
+    );
     try {
       expect(await rejection(brokerFleet({ path: double.path }).open())).toMatchObject({ code: "reply_too_large" });
       expect(double.frames.map(actionOf)).toEqual(["fleet"]);
