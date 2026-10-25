@@ -1354,6 +1354,13 @@
   animation: fleet-marked 3s ease-out;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .fleet-card-marked {
+    animation: none;
+    box-shadow: 0 0 0 2px var(--acc);
+  }
+}
+
 @keyframes fleet-marked {
   from {
     box-shadow: 0 0 0 2px var(--acc);
