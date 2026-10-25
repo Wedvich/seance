@@ -690,16 +690,18 @@ export class Store {
    */
   async #submit(): Promise<void> {
     const { relay, form } = this.#state;
-    const repo = resolveRepo(scopedRepos(relay.machines, form), form);
-    if (repo === null || !deriveAutoAvailability(relay).available || this.#state.spawning) return;
+    if (!deriveAutoAvailability(relay).available || this.#state.spawning) return;
     // The leader bounds what it reads; past the bound it would skip the task, and the store's refusal blames versions.
     const refusal = (message: string): void => this.#showVerdict({ kind: "unqueued", message, mayHaveLanded: false });
-    // The button blocks these too; a form that changed since it rendered is stopped here.
+    // The button blocks these too; a form that changed since it rendered is stopped here. Before the repo
+    // check: a pin nothing satisfies leaves no repo in scope, and that silence would hide the reason.
     const problem = derivePinProblem(relay, form, this.#state.accounts.aliases);
     if (problem !== null) {
       refusal(`${problem.text}.`);
       return;
     }
+    const repo = resolveRepo(scopedRepos(relay.machines, form), form);
+    if (repo === null) return;
     const reported = form.until === "reported";
     // An older leader would drop `until` and hold a `done` edge unreadable, so neither is written to one.
     if ((reported || form.after.some((dep) => dep.after === "done")) && !deriveReportedAvailability(relay)) {

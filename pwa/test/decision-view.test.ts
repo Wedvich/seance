@@ -8,7 +8,7 @@ import {
   type Reason,
   type Task,
 } from "@seance/shared";
-import { describeDecision, isPlaced, queuedBody, taskHeadline } from "../src/decision-view.ts";
+import { describeDecision, isPlaced, pinLine, queuedBody, taskHeadline, waitingText } from "../src/decision-view.ts";
 
 const NOW = 1_800_000_000_000;
 const NOW_S = NOW / 1000;
@@ -356,5 +356,50 @@ describe("a task settled by its session's own report", () => {
     expect(taskHeadline(task({ state: "awaiting-merge", assignment: at }), machines, NOW)).toContain(
       "waiting for the PR to merge",
     );
+  });
+});
+
+describe("waitingText and pinLine", () => {
+  const over: Reason = { code: "quota_over_line", window: "5h", projectedPct: 100 };
+  const waiting = (candidates: readonly Candidate[], extra: Partial<Task> = {}): Task => ({
+    id: "t",
+    spec: { repo: "github.com/acme/app", mode: "worktree" },
+    state: "ready",
+    createdAt: NOW,
+    decision: { at: NOW, chosen: null, candidates },
+    ...extra,
+  });
+
+  test("names each place that held the task and why, leaving out places cut only for the pin", () => {
+    const task = waiting([
+      rejected("full", "FullBox", [over]),
+      rejected("other", "Other", [{ code: "pin_mismatch", field: "deviceId" }]),
+      rejected("both", "Both", [{ code: "pin_mismatch", field: "account" }, { code: "offline" }]),
+    ]);
+    expect(waitingText(task)).toBe(`FullBox · work: ${reasonText(over)}; Both · work: offline`);
+  });
+
+  test("caps the places at three and counts the rest", () => {
+    const task = waiting(["a", "b", "c", "d", "e"].map((id) => rejected(id, id, [over])));
+    expect(waitingText(task)?.endsWith("; +2 more")).toBe(true);
+  });
+
+  test("is null with no decision, a chosen place, a non-ready state, or nothing but pin reasons", () => {
+    expect(waitingText({ ...waiting([]), decision: undefined })).toBeNull();
+    expect(waitingText(waiting([rejected("o", "Other", [{ code: "pin_mismatch", field: "deviceId" }])]))).toBeNull();
+    expect(waitingText(waiting([rejected("f", "F", [over])], { state: "queued" }))).toBeNull();
+    const chosen = { deviceId: "f", exclave: "default", clone: "app" };
+    const candidates = [scored("f", "F", 1)];
+    expect(waitingText({ ...waiting(candidates), decision: { at: NOW, chosen, candidates } })).toBeNull();
+  });
+
+  test("pinLine words the machine and account from display labels, and is null without a pin", () => {
+    const machines = [machine("mac", "Mac")];
+    const plain = waiting([]);
+    expect(pinLine(plain, machines, {})).toBeNull();
+    const pinned = { ...plain, spec: { ...plain.spec, pin: { deviceId: "mac", account: "acct-1" } } };
+    expect(pinLine(pinned, machines, { "acct-1": "Work" })).toBe("Pinned to Mac · Work");
+    const machineOnly = { ...plain, spec: { ...plain.spec, pin: { deviceId: "mac" } } };
+    expect(pinLine(machineOnly, machines, {})).toBe("Pinned to Mac");
   });
 });

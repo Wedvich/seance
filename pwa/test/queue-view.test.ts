@@ -12,8 +12,8 @@ import {
   type Task,
 } from "@seance/shared";
 import { deriveAfterSheet, deriveQueue } from "../src/queue-view.ts";
-import { DEFAULT_FORM, type QueueState } from "../src/state.ts";
-import { CAPABILITIES } from "@seance/shared";
+import { DEFAULT_FORM, RESCAN_IDLE, type QueueState } from "../src/state.ts";
+import { CAPABILITIES, reasonText } from "@seance/shared";
 import { failedBody, type AppState } from "../src/view.ts";
 
 const NOW = 1_800_000_000_000;
@@ -60,8 +60,7 @@ function state(
     machines: false,
     history: null,
     spawning: false,
-    rescanning: false,
-    rescan: "idle",
+    rescan: RESCAN_IDLE,
     verdict: null,
     preview: null,
     sessions: {},
@@ -145,6 +144,30 @@ describe("deriveQueue", () => {
       expect(view.sections[0]?.rows[0]?.body).toBe(failedBody(code));
       expect(view.sections[0]?.rows[0]?.dot).toBe("err");
     }
+  });
+
+  test("a ready card says why it waits, leaving out places cut only for the pin", () => {
+    const over = { code: "quota_over_line", window: "5h", projectedPct: 100 } as const;
+    const held = task("w", {
+      state: "ready",
+      decision: {
+        at: NOW,
+        chosen: null,
+        candidates: [
+          { deviceId: "full", machine: "FullBox", exclave: "default", rejected: [over] },
+          {
+            deviceId: "mac",
+            machine: "Mac",
+            exclave: "default",
+            rejected: [{ code: "pin_mismatch", field: "deviceId" }],
+          },
+        ],
+      },
+    });
+    const body = deriveQueue(state(ok([held])), NOW).sections[0]?.rows[0]?.body;
+    expect(body).toContain("Waiting: FullBox · default:");
+    expect(body).toContain(reasonText(over));
+    expect(body).not.toContain("Mac");
   });
 
   test("a row's title is the task's, else its prompt's first line cut to 80, else its window (unless it is the daemon's `session` fallback), else its repo", () => {

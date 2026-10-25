@@ -32,7 +32,7 @@ import type { ServerWebSocket } from "bun";
 import { pollUntil } from "./poll.ts";
 import { RelayClient, RequestFailure, type RelayState } from "@seance/shared";
 import { startFakeDaemon } from "./daemon.ts";
-import { DEFAULT_FORM, type PersistedForm } from "../src/state.ts";
+import { DEFAULT_FORM, RESCAN_IDLE, type PersistedForm } from "../src/state.ts";
 import { Store } from "../src/store.ts";
 import type { AppState } from "../src/view.ts";
 import { fakeHistory, installBrowserGlobals } from "./stubs.ts";
@@ -1199,200 +1199,6 @@ describe("store", () => {
     };
   }
 
-  test("a repo_not_found retry rescans before spawning again", async () => {
-    const deviceId = await newDeviceId();
-    const ops: string[] = [];
-    // The daemon knows the repo again only once it has rescanned — the exact
-    // stale-cache shape the retry exists for.
-    let rescanned = false;
-    const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Rescanner"), {
-      sessions: () => ({ sessions: [], at: Date.now() }),
-      rescan: () => {
-        ops.push("rescan");
-        rescanned = true;
-        return { repos: machineInfo("Rescanner").repos, scannedAt: Date.now() };
-      },
-      spawn: () => {
-        ops.push("spawn");
-        return rescanned
-          ? { ok: true, window: "port-the-pane", path: "/tmp/w", sessions: [] }
-          : { ok: false, code: "repo_not_found", message: "no repo named seance" };
-      },
-    });
-    const { store, waitForApp, stop } = startStore({
-      machineId: deviceId,
-      repos: { [deviceId]: "seance" },
-      prompt: "port the pane",
-    });
-    try {
-      await waitForApp(online(deviceId), "machine online");
-      await store.spawn();
-      const failed = store.getState().verdict;
-      if (failed?.kind !== "failed") throw new Error(`expected failed verdict, got ${JSON.stringify(failed)}`);
-      expect(failed.code).toBe("repo_not_found");
-
-      store.retrySpawn(failed);
-      await waitForApp((state) => state.verdict?.kind === "ok", "retry landed");
-      expect(ops).toEqual(["spawn", "rescan", "spawn"]);
-    } finally {
-      stop();
-      daemon.close();
-    }
-  });
-
-  test("a repo the rescan still misses lands a conclusive verdict instead of looping", async () => {
-    const deviceId = await newDeviceId();
-    const ops: string[] = [];
-    const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Gone"), {
-      sessions: () => ({ sessions: [], at: Date.now() }),
-      // The fresh scan no longer carries the repo the form remembers.
-      rescan: () => ({
-        repos: [{ name: "pengefix", path: "/Users/m/pengefix", defaultBranch: "main" }],
-        scannedAt: Date.now(),
-      }),
-      spawn: () => {
-        ops.push("spawn");
-        return { ok: false, code: "repo_not_found", message: "no repo named seance" };
-      },
-    });
-    const { store, waitForApp, stop } = startStore({ machineId: deviceId, repos: { [deviceId]: "seance" } });
-    try {
-      await waitForApp(online(deviceId), "machine online");
-      await store.spawn();
-      const failed = store.getState().verdict;
-      if (failed?.kind !== "failed") throw new Error(`expected failed verdict, got ${JSON.stringify(failed)}`);
-      store.retrySpawn(failed);
-      const state = await waitForApp(
-        (s) => s.verdict?.kind === "failed" && s.verdict.rescan === "missing",
-        "conclusive verdict",
-      );
-      if (state.verdict?.kind !== "failed") throw new Error("unreachable");
-      expect(state.verdict.code).toBe("repo_not_found");
-      // The rescan answered — no second spawn was attempted.
-      expect(ops).toEqual(["spawn"]);
-      expect(state.spawning).toBe(false);
-      expect(state.rescanning).toBe(false);
-    } finally {
-      stop();
-      daemon.close();
-    }
-  });
-
-  test("a spawn that started but never registered reaches the verdict as pending, screen and all", async () => {
-    const deviceId = await newDeviceId();
-    const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Thad"), {
-      sessions: () => ({ sessions: [], at: Date.now() }),
-      spawn: () => ({
-        ok: true,
-        window: "stuck-on-a-dialog",
-        path: "/tmp/w",
-        pending: true,
-        note: "started but never registered — it may be waiting on a prompt on that machine:\nDo you trust the files in this folder?",
-        sessions: [],
-      }),
-    });
-    const { store, waitForApp, stop } = startStore({
-      machineId: deviceId,
-      repos: { [deviceId]: "seance" },
-      prompt: "port the pane",
-    });
-    try {
-      await waitForApp(online(deviceId), "machine online");
-      await store.spawn();
-      const verdict = store.getState().verdict;
-      if (verdict?.kind !== "ok") throw new Error(`expected ok verdict, got ${JSON.stringify(verdict)}`);
-      // Without this the verdict renders "It's running on Thad" over an empty machine.
-      expect(verdict.pending).toBe(true);
-      expect(verdict.note).toContain("Do you trust the files in this folder?");
-    } finally {
-      stop();
-      daemon.close();
-    }
-  });
-
-  test("a status mid-spawn keeps the spawn pending, so a reply dropped after it is still reconciled", async () => {
-    const deviceId = await newDeviceId();
-    const info = machineInfo("Busy");
-    // No spawn handler: the request stays in flight for as long as the test needs.
-    const daemon = await startFakeDaemon(relay, key, deviceId, info, {
-      sessions: () => ({ sessions: [], at: Date.now() }),
-    });
-    const { store, waitForApp, stop } = startStore({ machineId: deviceId, repos: { [deviceId]: "seance" } });
-    try {
-      await waitForApp(online(deviceId), "machine online");
-      const spawning = store.spawn();
-      // The daemon's telemetry beat: every register and every STATUS_INTERVAL_MS,
-      // so on a real machine one lands inside a spawn's wait as a matter of course.
-      daemon.client.send(await statusEnvelope(deviceId, { at: 1, scan: info.scannedAt, cpu: 5 }));
-      await waitForApp(
-        (s) => s.relay.machines.some((machine) => machine.deviceId === deviceId && machine.status !== undefined),
-        "status rendered",
-      );
-      expect(store.getState().spawning).toBe(true);
-      expect(store.pendingSpawn).not.toBeNull();
-
-      // The app dies before the daemon answers — the iOS-kill-mid-spawn shape.
-      stop();
-      await spawning;
-      const { verdict } = store.getState();
-      if (verdict?.kind !== "unknown") throw new Error(`expected unknown verdict, got ${JSON.stringify(verdict)}`);
-      expect(verdict.reason).toBe("dropped");
-      // What main.tsx persists, and the relaunch's only way to ask the machine.
-      expect(store.pendingSpawn).toMatchObject({ machineId: deviceId, repo: "seance" });
-    } finally {
-      stop();
-      daemon.close();
-      // The relay this file shares sits at its 32-entry cap; given back even on a
-      // failure, or every later test that registers fails with it.
-      const { client, waitFor } = startClient();
-      try {
-        await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && !m.connected), "registry sees it gone");
-        client.forget(deviceId);
-        await waitFor((s) => !s.machines.some((m) => m.deviceId === deviceId), "entry is gone");
-      } finally {
-        client.stop();
-      }
-    }
-  });
-
-  test("a retry whose rescan never lands says so instead of spawning into the stale cache", async () => {
-    const deviceId = await newDeviceId();
-    const ops: string[] = [];
-    // Answers the spawn but not the rescan, which can then only time out.
-    const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Deaf"), {
-      sessions: () => ({ sessions: [], at: Date.now() }),
-      spawn: () => {
-        ops.push("spawn");
-        return { ok: false, code: "repo_not_found", message: "no repo named seance" };
-      },
-    });
-    const { store, waitForApp, stop } = startStore(
-      { machineId: deviceId, repos: { [deviceId]: "seance" } },
-      { timeouts: { rescan: 300 } },
-    );
-    try {
-      await waitForApp(online(deviceId), "machine online");
-      await store.spawn();
-      const failed = store.getState().verdict;
-      if (failed?.kind !== "failed") throw new Error(`expected failed verdict, got ${JSON.stringify(failed)}`);
-
-      store.retrySpawn(failed);
-      // The rescan is in flight and nothing has been sent to the daemon yet.
-      expect(store.getState().rescanning).toBe(true);
-      expect(store.getState().spawning).toBe(false);
-      const state = await waitForApp(
-        (s) => s.verdict?.kind === "failed" && s.verdict.rescan === "unreachable",
-        "the failed rescan reported",
-      );
-      expect(state.rescanning).toBe(false);
-      // Nothing was retried against the cache the rescan failed to refresh.
-      expect(ops).toEqual(["spawn"]);
-    } finally {
-      stop();
-      daemon.close();
-    }
-  });
-
   test("a rescan that changes nothing still moves the scan time the row shows", async () => {
     const deviceId = await newDeviceId();
     const info = { ...machineInfo("Unchanged"), scannedAt: Date.now() - 2 * 60 * 60 * 1000 };
@@ -1405,12 +1211,12 @@ describe("store", () => {
     });
     const scanTime = (): number | undefined =>
       store.getState().relay.machines.find((machine) => machine.deviceId === deviceId)?.scannedAt;
-    const { store, waitForApp, stop } = startStore({ machineId: deviceId });
+    const { store, waitForApp, stop } = startStore({ machine: deviceId });
     try {
       await waitForApp(online(deviceId), "machine online");
       expect(scanTime()).toBe(info.scannedAt);
-      await store.rescan();
-      expect(store.getState().rescan).toBe("idle");
+      await store.rescan(deviceId);
+      expect(store.getState().rescan).toEqual(RESCAN_IDLE);
       expect(scanTime()).toBe(scannedAt);
     } finally {
       stop();
@@ -1424,99 +1230,34 @@ describe("store", () => {
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Mute"), {
       sessions: () => ({ sessions: [], at: Date.now() }),
     });
-    const { store, waitForApp, stop } = startStore({ machineId: deviceId }, { timeouts: { rescan: 300 } });
+    const { store, waitForApp, stop } = startStore({ machine: deviceId }, { timeouts: { rescan: 300 } });
     try {
       await waitForApp(online(deviceId), "machine online");
-      store.openSheet("repo");
-      void store.rescan();
-      expect(store.getState().rescan).toBe("scanning");
-      // Backing out into another sheet mid-scan: the failure lands with no repo
+      store.openSheet("machine");
+      void store.rescan(deviceId);
+      expect(store.getState().rescan).toEqual({ kind: "scanning", deviceId });
+      // Backing out into another sheet mid-scan: the failure lands with no Machine
       // sheet to show it, so it has to still be there on the next open.
       store.onPopState();
       store.openSheet("model");
-      await waitForApp((state) => state.rescan === "failed", "rescan failure surfaced");
+      await waitForApp((state) => state.rescan.kind === "failed", "rescan failure surfaced");
       store.onPopState();
-      store.openSheet("repo");
-      expect(store.getState().rescan).toBe("failed");
+      store.openSheet("machine");
+      expect(store.getState().rescan).toEqual({ kind: "failed", deviceId });
       store.onPopState();
-      expect(store.getState().rescan).toBe("idle");
+      expect(store.getState().rescan).toEqual(RESCAN_IDLE);
     } finally {
       stop();
       daemon.close();
     }
   });
 
-  // A dismissal's back is delivered later, so a retry that went back would close
-  // whichever verdict had landed by then — here the rescan's own report.
-  test("a retry's verdict survives the history the failed one left", async () => {
-    const deviceId = await newDeviceId();
-    const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Deaf"), {
-      sessions: () => ({ sessions: [], at: Date.now() }),
-      spawn: () => ({ ok: false, code: "repo_not_found", message: "no repo named seance" }),
-    });
-    const history = fakeHistory();
-    const { store, waitForApp, stop } = startStore(
-      { machineId: deviceId, repos: { [deviceId]: "seance" } },
-      { timeouts: { rescan: 300 } },
-    );
-    try {
-      await waitForApp(online(deviceId), "machine online");
-      await store.spawn();
-      const failed = store.getState().verdict;
-      if (failed?.kind !== "failed") throw new Error(`expected failed verdict, got ${JSON.stringify(failed)}`);
-
-      store.retrySpawn(failed);
-      await waitForApp((s) => s.verdict?.kind === "failed" && s.verdict.rescan === "unreachable", "rescan reported");
-      history.settle(store);
-
-      expect(store.getState().verdict).toMatchObject({ kind: "failed", rescan: "unreachable" });
-      // The retried verdict took over the failed one's entry: one layer, one back.
-      expect(history.entries()).toHaveLength(2);
-      store.dismissLayer();
-      history.settle(store);
-      expect(store.getState().verdict).toBeNull();
-      expect(history.index()).toBe(0);
-    } finally {
-      stop();
-      history.restore();
-      daemon.close();
-    }
-  });
-
-  test("reusePrompt restores the prompt the success verdict stashed", async () => {
-    const deviceId = await newDeviceId();
-    const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Reuser"), {
-      sessions: () => ({ sessions: [], at: Date.now() }),
-      spawn: () => ({ ok: true, window: "resurrect-me", path: "/tmp/w", sessions: [] }),
-    });
-    const { store, waitForApp, stop } = startStore({
-      machineId: deviceId,
-      repos: { [deviceId]: "seance" },
-      prompt: "resurrect me",
-    });
-    try {
-      await waitForApp(online(deviceId), "machine online");
-      await store.spawn();
-      const state = store.getState();
-      if (state.verdict?.kind !== "ok") throw new Error(`expected ok verdict, got ${JSON.stringify(state.verdict)}`);
-      // Cleared on success as before; the verdict carries the copy to restore.
-      expect(state.form.prompt).toBe("");
-      expect(state.verdict.prompt).toBe("resurrect me");
-
-      store.reusePrompt(state.verdict);
-      expect(store.getState().form.prompt).toBe("resurrect me");
-    } finally {
-      stop();
-      daemon.close();
-    }
-  });
-
-  test("a confirmed forget takes the machine's repo, selection and session list with it", async () => {
+  test("a confirmed forget takes the machine's pin and session list with it", async () => {
     const deviceId = await newDeviceId();
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Retired"), {
       sessions: () => ({ sessions: [], at: Date.now() }),
     });
-    const { store, waitForApp, stop } = startStore({ machineId: deviceId, repos: { [deviceId]: "seance" } });
+    const { store, waitForApp, stop } = startStore({ machine: deviceId });
     try {
       await waitForApp((s) => s.sessions[deviceId] !== undefined, "sessions fetched");
       daemon.close();
@@ -1530,8 +1271,7 @@ describe("store", () => {
         (s) => !s.relay.machines.some((m) => m.deviceId === deviceId),
         "entry left the registry",
       );
-      expect(state.form.machineId).toBeNull();
-      expect(state.form.repos[deviceId]).toBeUndefined();
+      expect(state.form.machine).toBeNull();
       expect(state.sessions[deviceId]).toBeUndefined();
     } finally {
       stop();
@@ -1541,12 +1281,12 @@ describe("store", () => {
   // The bin is only offered on an offline row, so this is a race: the daemon
   // reconnected between the render and the tap. The relay refuses, and the app
   // must not have thrown the selection away on the way there.
-  test("a refused forget leaves the repo and the selection where they were", async () => {
+  test("a refused forget leaves the pin where it was", async () => {
     const deviceId = await newDeviceId();
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Wide Awake Too"), {
       sessions: () => ({ sessions: [], at: Date.now() }),
     });
-    const { store, waitForApp, stop } = startStore({ machineId: deviceId, repos: { [deviceId]: "seance" } });
+    const { store, waitForApp, stop } = startStore({ machine: deviceId });
     try {
       await waitForApp(online(deviceId), "machine online");
       store.removeMachine(deviceId);
@@ -1555,8 +1295,7 @@ describe("store", () => {
 
       const state = store.getState();
       expect(state.relay.machines.some((m) => m.deviceId === deviceId)).toBe(true);
-      expect(state.form.machineId).toBe(deviceId);
-      expect(state.form.repos[deviceId]).toBe("seance");
+      expect(state.form.machine).toBe(deviceId);
     } finally {
       stop();
       daemon.close();
