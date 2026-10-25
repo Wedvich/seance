@@ -1,5 +1,7 @@
 import { homedir } from "node:os";
 import { afterEach, describe, expect, test } from "bun:test";
+import { accountStoreKey } from "@seance/shared";
+import { importAppKeys } from "../../../daemon/src/app-relay.ts";
 import { configSkeleton, loadPsk, type Config } from "../../../daemon/src/config.ts";
 import { PSK_SERVICE as DAEMON_PSK_SERVICE } from "../../../daemon/src/keychain.ts";
 import { configDir as daemonConfigDir, configPath as daemonConfigPath } from "../../../daemon/src/paths.ts";
@@ -136,7 +138,31 @@ describe("drift guard: PSK precedence agrees with loadPsk", () => {
   });
 });
 
+test("drift guard: the account key is the daemon's, so both find one account's record at one store key", async () => {
+  const ours = await loadKey(sources());
+  const daemons = await importAppKeys(PSK);
+  if (daemons.accountKey === undefined) throw new Error("the daemon derived no account key");
+  if (ours.accountKey === undefined) throw new Error("the extension derived no account key");
+  const accountId = "org-a:acct-1";
+  expect(await accountStoreKey(ours.accountKey, accountId)).toBe(await accountStoreKey(daemons.accountKey, accountId));
+  expect(ours.accountKey.extractable).toBe(false);
+});
+
 describe("loadKey", () => {
+  test("a failing account-key derivation leaves it absent and the spawn credentials intact", async () => {
+    const reported: unknown[] = [];
+    const credentials = await loadKey(
+      sources({
+        deriveAccountKey: () => Promise.reject(new Error("no HMAC here")),
+        onAccountKeyError: (error) => reported.push(error),
+      }),
+    );
+    expect(credentials.accountKey).toBeUndefined();
+    expect(reported).toEqual([new Error("no HMAC here")]);
+    expect(credentials.key.algorithm.name).toBe("AES-GCM");
+    expect(credentials.bearerToken).toBe("token");
+  });
+
   test("swaps the daemon relay path for the app path and imports a non-extractable key", async () => {
     const credentials = await loadKey(sources());
     expect(credentials.relayUrl).toBe("wss://relay.example.dev/app");

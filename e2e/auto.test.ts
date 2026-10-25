@@ -49,6 +49,19 @@ afterAll(async () => {
   await suite?.dispose();
 });
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** One machine's `exclaves` from a `list_machines` result, narrowed rather than cast; empty when the shape is off. */
+function exclavesOf(result: { readonly content: unknown }, deviceId: string): readonly unknown[] {
+  const [first] = Array.isArray(result.content) ? result.content : [];
+  if (!isRecord(first) || typeof first["text"] !== "string") return [];
+  const machines: unknown = JSON.parse(first["text"]);
+  if (!Array.isArray(machines)) return [];
+  const machine = machines.find((entry: unknown) => isRecord(entry) && entry["deviceId"] === deviceId);
+  return isRecord(machine) && Array.isArray(machine["exclaves"]) ? machine["exclaves"] : [];
+}
+
 async function heldBy(reply: Promise<QueueReply | null>): Promise<unknown> {
   const read = await reply;
   if (read === null || !("holds" in read)) throw new Error(`no queue: ${JSON.stringify(read)}`);
@@ -346,6 +359,17 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       );
       const named = await app.client.putAccountAlias(otherId, "elsewhere", 0);
       expect(named?.ok).toBe(true);
+
+      // The alias the app set names the account in list_machines too, beside its id and email.
+      const listing = await client.callTool({ name: "list_machines", arguments: {} });
+      expect(exclavesOf(listing, second.deviceId)).toContainEqual(
+        expect.objectContaining({
+          accountId: otherId,
+          email: "pin@e2e.test",
+          account: "elsewhere",
+          alias: "elsewhere",
+        }),
+      );
 
       const placedOn = async (id: string, label: string): Promise<void> => {
         await pollUntil(

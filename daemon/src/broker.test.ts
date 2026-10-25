@@ -405,7 +405,7 @@ describe("the broker's scheduler actions", () => {
     broker.stop();
   });
 
-  test("an account listing the client cannot make reads as null, never a crash", async () => {
+  test("an account listing the client cannot make reads as null, never a crash, and the next asks again", async () => {
     const { broker, fakes } = rig();
     await broker.handle(frame({ schedulerOp: "queue" }));
     const fake = fakes[0];
@@ -413,6 +413,10 @@ describe("the broker's scheduler actions", () => {
     fake.accounts = new RequestFailure("unsupported", "no account key", "relay");
     const reply = await broker.handle(frame({ id: "a", schedulerOp: "accounts" }));
     expect(reply).toMatchObject({ ok: true, data: null });
+    // Only a pin asks the broker, so the label hold never keeps it from the real answer.
+    const records: AccountRecord[] = [{ accountId: "org-a:me", alias: "personal", version: 1 }];
+    fake.accounts = records;
+    expect(await broker.handle(frame({ id: "b", schedulerOp: "accounts" }))).toMatchObject({ ok: true, data: records });
     broker.stop();
   });
 
