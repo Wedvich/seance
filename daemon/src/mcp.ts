@@ -174,10 +174,59 @@ interface ToolResult {
 const textResult = (text: string): ToolResult => ({ content: [{ type: "text", text }] });
 const errorResult = (text: string): ToolResult => ({ content: [{ type: "text", text }], isError: true });
 
+/**
+ * What names an account to a person: alias, else email, else short id (`accountNameIn`). `aliases`
+ * is empty wherever none could be read; a label is all it ever decides.
+ */
+interface AccountNames {
+  readonly known: readonly KnownAccount[];
+  readonly aliases: ReadonlyMap<string, string>;
+}
+
+const nameOf = (names: AccountNames, accountId: string): string =>
+  accountNameIn(names.known, accountId, names.aliases.get(accountId));
+
+/**
+ * The aliases set on `accountIds`, from the lease's cached listing (`AccountCache`: once per
+ * socket, as the PWA lists, since the `account:` list bucket is shared). None through the broker,
+ * which has no key, and no listing spent when nothing needs a name. A refused, lost or failed
+ * listing is no aliases: a label never fails a call.
+ */
+async function accountAliases(lease: FleetLease, accountIds: readonly string[]): Promise<ReadonlyMap<string, string>> {
+  const aliases = new Map<string, string>();
+  if (lease.scheduler === null || accountIds.length === 0) return aliases;
+  let records: Awaited<ReturnType<SchedulerLeg["accounts"]>>;
+  try {
+    records = await lease.scheduler.accounts();
+  } catch {
+    return aliases;
+  }
+  const wanted = new Set(accountIds);
+  for (const record of records ?? []) {
+    if (record.alias !== null && wanted.has(record.accountId)) aliases.set(record.accountId, record.alias);
+  }
+  return aliases;
+}
+
+/**
+ * Every account the registry reports plus `extraIds` (which count as twins too), with the aliases
+ * of those `shown` names — every known one by default. One listing at most.
+ */
+async function accountNames(
+  lease: FleetLease,
+  extraIds: readonly string[] = [],
+  shown?: readonly string[],
+): Promise<AccountNames> {
+  const known = knownAccounts(lease.machines, extraIds);
+  const ids = shown ?? known.map((account) => account.accountId);
+  return { known, aliases: await accountAliases(lease, ids) };
+}
+
 function describeMachine(
   machine: Machine,
   local: LocalMachine | null,
   scheduler: SchedulerAvailability | null,
+  names: AccountNames,
 ): Record<string, unknown> {
   // Null when this transport has no view of the scheduler at all (a broker daemon that predates brokered scheduler access).
   const role = scheduler === null ? null : schedulerRole(machine.deviceId, scheduler);
@@ -197,6 +246,7 @@ function describeMachine(
             id: info.id,
             ...(info.accountId === null ? {} : { accountId: info.accountId }),
             ...(info.email === undefined ? {} : { email: info.email }),
+            ...(info.accountId === null ? {} : describeName(names, info.accountId)),
           })),
         }),
     // Named so the model knows which target costs nothing to reach; spawning
@@ -393,12 +443,15 @@ function machineName(task: Task, machines: readonly Machine[], deviceId: string)
   );
 }
 
-/**
- * An account by the email some registry entry reports, else its short id, beside its id. No alias:
- * that would spend an `account:` listing, whose budget the PWA shares, on a label.
- */
-function describeAccount(known: readonly KnownAccount[], accountId: string): Record<string, string> {
-  return { account: accountNameIn(known, accountId), accountId };
+/** An account's label, plus its alias where one is set: a pin takes the alias too. */
+function describeName(names: AccountNames, accountId: string): Record<string, string> {
+  const alias = names.aliases.get(accountId);
+  return { account: nameOf(names, accountId), ...(alias === undefined ? {} : { alias }) };
+}
+
+/** An account by its label beside its id. */
+function describeAccount(names: AccountNames, accountId: string): Record<string, string> {
+  return { account: nameOf(names, accountId), accountId };
 }
 
 /** A machine by deviceId, named where this view knows it. */
@@ -407,17 +460,13 @@ function describeDevice(task: Task, machines: readonly Machine[], deviceId: stri
   return { ...(machine === undefined ? {} : { machine }), deviceId };
 }
 
-/** A task's pin: its machine named where this view knows it, its account by email or short id beside the id. */
-function describePin(
-  task: Task,
-  machines: readonly Machine[],
-  known: readonly KnownAccount[],
-): Record<string, string> | null {
+/** A task's pin: its machine named where this view knows it, its account by label beside the id. */
+function describePin(task: Task, machines: readonly Machine[], names: AccountNames): Record<string, string> | null {
   const { pin } = task.spec;
   if (pin === undefined) return null;
   return {
     ...(pin.deviceId === undefined ? {} : describeDevice(task, machines, pin.deviceId)),
-    ...(pin.account === undefined ? {} : describeAccount(known, pin.account)),
+    ...(pin.account === undefined ? {} : describeAccount(names, pin.account)),
   };
 }
 
@@ -440,9 +489,9 @@ function failureMessage(failure: NonNullable<Task["failure"]>): string {
   return worded === null ? failure.message : `${worded} (${failure.message})`;
 }
 
-function describeHold(hold: PauseHold, known: readonly KnownAccount[]): Record<string, unknown> {
+function describeHold(hold: PauseHold, names: AccountNames): Record<string, unknown> {
   return {
-    ...(hold.account === undefined ? {} : describeAccount(known, hold.account)),
+    ...(hold.account === undefined ? {} : describeAccount(names, hold.account)),
     until: hold.until,
     since: new Date(hold.at).toISOString(),
     ...(hold.resumeAt === undefined ? {} : { resumeAt: new Date(hold.resumeAt).toISOString() }),
@@ -595,13 +644,9 @@ function lengthNote(invalid: string, until: TaskUntil | undefined): string {
   return " (the instruction to report is appended to the prompt and counts)";
 }
 
-function describeTask(
-  task: Task,
-  machines: readonly Machine[],
-  known: readonly KnownAccount[],
-): Record<string, unknown> {
+function describeTask(task: Task, machines: readonly Machine[], names: AccountNames): Record<string, unknown> {
   const placement = placementOf(task, machines);
-  const pin = describePin(task, machines, known);
+  const pin = describePin(task, machines, names);
   const { spec } = task;
   return {
     id: task.id,
@@ -710,7 +755,7 @@ export function buildMcpServer(
     {
       title: "List machines",
       description:
-        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any — an auto task's pin.account takes either, or the account's alias; a machine with the field absent or empty reports none, so auto cannot place there until its daemon updates. Offline machines are listed with their last-seen time. `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that `auto` tasks go through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue and cancel_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
+        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any, plus `account`, the name every Séance client shows for it (its alias where one is set, else the email, else a short id; tagged where two accounts would read alike), and `alias` where one is set — an auto task's pin.account takes the accountId, the email or the alias; a machine with the field absent or empty reports none, so auto cannot place there until its daemon updates. Offline machines are listed with their last-seen time. `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that `auto` tasks go through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue and cancel_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
       annotations: { readOnlyHint: true },
     },
     async () => {
@@ -733,7 +778,8 @@ export function buildMcpServer(
       }
       try {
         const scheduler = lease.scheduler?.availability() ?? null;
-        const machines = lease.machines.map((machine) => describeMachine(machine, local, scheduler));
+        const names = await accountNames(lease);
+        const machines = lease.machines.map((machine) => describeMachine(machine, local, scheduler, names));
         return textResult(JSON.stringify(machines, null, 2));
       } finally {
         lease.release();
@@ -774,7 +820,7 @@ export function buildMcpServer(
     "get_queue",
     {
       title: "List the scheduler's queue",
-      description: `List the scheduler's queue — the tasks spawn_session with machine "auto" queued from any client, and what holds dispatch (a paused queue, or an account named as a pin names it) — with each one's state, its pin (whichever of machine and account it pins: the machine by name where known, plus its deviceId; the account by email where a machine reports it, else a short id, plus its accountId; an email or short id two accounts share, case aside, gains a tag telling them apart: the org's short id, or more of it where that still collides; pinned and held accounts no machine reports count as accounts too), the machines it avoids, where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). ${AUTO_LIMITS}`,
+      description: `List the scheduler's queue — the tasks spawn_session with machine "auto" queued from any client, and what holds dispatch (a paused queue, or an account named as a pin names it) — with each one's state, its pin (whichever of machine and account it pins: the machine by name where known, plus its deviceId; the account by its alias where one is set, else the email a machine reports, else a short id, plus its accountId; an email or short id two accounts share, case aside, gains a tag telling them apart: the org's short id, or more of it where that still collides; pinned and held accounts no machine reports count as accounts too), the machines it avoids, where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). ${AUTO_LIMITS}`,
       annotations: { readOnlyHint: true },
     },
     async () =>
@@ -794,9 +840,10 @@ export function buildMcpServer(
           ...reply.tasks.flatMap((task) => (task.spec.pin?.account === undefined ? [] : [task.spec.pin.account])),
           ...(reply.holds ?? []).flatMap((hold) => (hold.account === undefined ? [] : [hold.account])),
         ];
-        const known = knownAccounts(lease.machines, named);
-        const tasks = reply.tasks.map((task) => describeTask(task, lease.machines, known));
-        const holds = (reply.holds ?? []).map((hold) => describeHold(hold, known));
+        // Only a pin or a hold names an account here: no listing for a queue that names none.
+        const names = await accountNames(lease, named, named);
+        const tasks = reply.tasks.map((task) => describeTask(task, lease.machines, names));
+        const holds = (reply.holds ?? []).map((hold) => describeHold(hold, names));
         return textResult(JSON.stringify({ at: new Date(reply.at).toISOString(), holds, tasks }, null, 2));
       }),
   );

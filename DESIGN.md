@@ -2736,9 +2736,13 @@ A Claude account is named once, by any PSK holder, and every app client shows th
 is a sealed `account:<hmac>` record in the relay's store (rules v2); `shared/src/account-record.ts`
 is what a record is and who reads it how, `RelayClient.listAccounts` / `getAccountRecord` /
 `putAccountAlias` the app leg, and `pwa/src/account-store.ts` the PWA's side. The leader and the
-daemons never read one. `seanced mcp` and `seanced spawn --auto` read them for one thing only: to
-resolve an account pin's alias at submit time ("`pin` and `avoid` on auto" below); they show no
-alias, and Raycast reads none.
+daemons never read one. `seanced spawn --auto` reads them for one thing only: to resolve an
+account pin's alias at submit time ("`pin` and `avoid` on auto" below). `seanced mcp` reads them
+for that and to name accounts in `list_machines` (each exclave's `account`, plus `alias` where
+one is set) and `get_queue` (pins and holds), from one cached listing per socket ("Account
+listings" below). Raycast reads none. Every reader that cannot list — a keyless
+`seanced mcp` going through the broker, an install without the account key, a refused or lost
+listing — shows email or short id instead, never an error.
 
 - **The key is derived, not the PSK's AES key reused.** `deriveAccountKey` (`shared/src/crypto.ts`)
   is HKDF-SHA-256 over the 32 raw PSK bytes, salt the UTF-8 `seance hkdf v1` and info
@@ -2827,8 +2831,9 @@ alias, and Raycast reads none.
   whole account id where twins share the org half; twins found case-insensitively, and an account
   a screen names that no machine reports counts as one); an alias is per account and never gains
   one, though the registry carries none, so an aliased account's unaliased twin is tagged all the
-  same and one account's label reads alike in the PWA and in `seanced mcp`, which shows no alias
-  (`accountName` in `shared/src/account-record.ts`, the rule every client shares).
+  same and one account's label reads alike in every client, whether or not it could read the
+  aliases (`accountName` in `shared/src/account-record.ts`, the rule every client shares —
+  `seanced mcp` and Raycast name accounts through it too).
 
 ### The queue store (`daemon/src/queue-store.ts`) — landed 2026-10-18, M3 item 3
 
@@ -5076,13 +5081,19 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   - **Account listings.** An alias needs the account records, and the relay's `account:` list
     bucket is per socket and shared in effect with the PWA. So `AccountCache` (`daemon/src/account-cache.ts`)
     lists at most once per socket generation, dropped on an `account:` `store-changed` and on a
-    reopen, and only an account pin asks. `get_queue` and `list_machines` spend no listing: they
-    label an account by the email a registry entry reports, else a short id (org-tagged as the PWA's
-    where two read the same), never an alias — one would show only while a pin's listing happened
-    to be cached, so a label would flip between calls. `get_queue` names a pin's account and an
-    account pause hold's alike, label beside `accountId`. A refused or lost
-    listing is not cached and says aliases are unavailable right now, asking for an email or id —
-    never that the account is unknown.
+    reopen. An account pin asks, and so do `list_machines` (when some machine reports an account)
+    and `get_queue` (when a pin or hold names one): both label an account as the PWA does — alias,
+    else the email a registry entry reports, else a short id, org-tagged where two read the same
+    — so a call spends at most the one listing its socket has not yet made. `list_machines` adds
+    each exclave's `account` label and its `alias` where one is set, beside the `accountId` and
+    email a pin takes; `get_queue` names a pin's account and an account pause hold's alike, label
+    beside `accountId`. Superseded (2026-10-25): labels spending no listing at all, chosen so a
+    label would not flip between calls with whether a pin's listing happened to be cached; with
+    every label reading the one per-socket cache, a label flips only when a listing is refused or
+    lost, and then to the email. A refused or lost listing is not cached: a label falls back to the
+    email or short id for that call, and a pin says aliases are unavailable right now, asking for
+    an email or id — never that the account is unknown. Through the broker there is no key and no
+    listing, and labels never carry an alias.
   - **Rollout: a gate and a sentinel.** A leader predating this would read `pin.account` and
     `avoid` as nothing and place the task anywhere. Two guards, both required. At submit, a client
     writes either field only when the verified leader's registry entry advertises

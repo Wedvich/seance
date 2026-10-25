@@ -232,11 +232,68 @@ describe("mcp tools", () => {
       toolText(await client.callTool({ name: "list_machines", arguments: {} })),
     );
     expect(updated?.exclaves).toEqual([
-      { id: "default", accountId: "org:default" },
-      { id: "work", accountId: "org:work", email: "me@pengefix.no" },
+      { id: "default", accountId: "org:default", account: "acct default" },
+      { id: "work", accountId: "org:work", email: "me@pengefix.no", account: "me@pengefix.no" },
       { id: "spare" },
     ]);
     expect(old).not.toHaveProperty("exclaves");
+    lazy.stop();
+  });
+
+  test("list_machines names each account by its alias, from one listing across calls", async () => {
+    const machines = [
+      machine({ exclaves: [signedIn("default", PERSONAL)] }),
+      machine({ deviceId: "device-2", name: "Linux Box", exclaves: [signedIn("work", EMPLOYER)] }),
+    ];
+    const fake = fakeRelay(machines);
+    fake.accounts = [{ accountId: PERSONAL, alias: "personal", version: 1 }];
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    for (let call = 0; call < 2; call += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- the second call is the point: it must not list again
+      const listed: { exclaves: unknown[] }[] = JSON.parse(
+        toolText(await client.callTool({ name: "list_machines", arguments: {} })),
+      );
+      expect(listed.map((entry) => entry.exclaves)).toEqual([
+        [{ id: "default", accountId: PERSONAL, email: EMAIL, account: "personal", alias: "personal" }],
+        // The unaliased twin keeps its org tag, as the PWA draws it.
+        [{ id: "work", accountId: EMPLOYER, email: EMAIL, account: `${EMAIL} (org org-b)` }],
+      ]);
+    }
+    expect(fake.accountLists).toBe(1);
+    lazy.stop();
+  });
+
+  test("list_machines falls back to the email or short id when the aliases cannot be read, and never fails", async () => {
+    const cases: [string, FakeRelay["accounts"]][] = [
+      ["refused", { ok: false, code: "rate_limited" }],
+      ["unreadable", null],
+      ["no account key", new RequestFailure("unsupported", "this install has no account key", "relay")],
+      ["a bug", new Error("boom")],
+    ];
+    for (const [label, accounts] of cases) {
+      const fake = fakeRelay([machine({ exclaves: [signedIn("default", PERSONAL), exclave("spare")] })]);
+      fake.accounts = accounts;
+      const lazy = new LazyRelay({ create: () => fake });
+      // oxlint-disable-next-line no-await-in-loop -- one client per failure
+      const result = await (await connectedClient(lazy)).callTool({ name: "list_machines", arguments: {} });
+      expect(result.isError, label).toBeFalsy();
+      const [listed]: { exclaves: unknown[] }[] = JSON.parse(toolText(result));
+      expect(listed?.exclaves, label).toEqual([
+        { id: "default", accountId: PERSONAL, email: EMAIL, account: EMAIL },
+        { id: "spare", accountId: "org:spare", account: "acct spare" },
+      ]);
+      lazy.stop();
+    }
+  });
+
+  test("list_machines spends no listing when no machine reports an account", async () => {
+    const fake = fakeRelay([machine({ exclaves: [{ ...exclave("spare"), accountId: null }] }), machine()]);
+    fake.accounts = ALIASES;
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    await client.callTool({ name: "list_machines", arguments: {} });
+    expect(fake.accountLists).toBe(0);
     lazy.stop();
   });
 
@@ -1910,15 +1967,48 @@ describe("get_queue", () => {
     expect(tasks.map((t: { pin?: unknown }) => t.pin)).toEqual([
       { machine: "Linux Box", deviceId: "device-2", account: "me@pengefix.no", accountId: "org-b:acct-2" },
       { deviceId: "device-gone" },
-      // No machine reports it: a short id, never a listing spent on a label.
+      // No machine reports it and no record names it: a short id.
       { account: "acct 01234567", accountId: "org-z:0123456789ab" },
       undefined,
       { machine: "Lost Box", deviceId: "device-lost" },
     ]);
     expect(tasks[0].avoid).toEqual([{ machine: "MacBook Pro", deviceId: "device-1" }, { deviceId: "device-gone" }]);
     expect(tasks[1]).not.toHaveProperty("avoid");
-    expect(fake.accountLists).toBe(0);
+    // Pins name accounts, so one listing; none is aliased here.
+    expect(fake.accountLists).toBe(1);
     lazy.stop();
+  });
+
+  test("names a pinned or held account by its alias, and lists nothing for a queue that names no account", async () => {
+    const machines = [machine({ exclaves: [signedIn("default", PERSONAL), signedIn("work", EMPLOYER)] })];
+    const fake = leaderRelay(
+      [
+        {
+          tasks: [
+            task({ id: "t-1", state: "ready", spec: { repo: ORIGIN, mode: "worktree", pin: { account: PERSONAL } } }),
+          ],
+          holds: [{ account: EMPLOYER, until: "resume", at: 5_000 }],
+          at: 6_000,
+        },
+      ],
+      machines,
+    );
+    fake.accounts = [{ accountId: PERSONAL, alias: "personal", version: 1 }];
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const parsed = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} })));
+    expect(parsed.tasks[0].pin).toEqual({ account: "personal", accountId: PERSONAL });
+    expect(parsed.holds[0]).toMatchObject({ account: `${EMAIL} (org org-b)`, accountId: EMPLOYER });
+    expect(fake.accountLists).toBe(1);
+    lazy.stop();
+
+    // A fresh socket, and a queue naming no account: no listing at all.
+    const bare = leaderRelay([{ tasks: [task({ id: "t-2", state: "ready" })], at: 7_000 }], machines);
+    bare.accounts = ALIASES;
+    const bareLazy = new LazyRelay({ create: () => bare });
+    await (await connectedClient(bareLazy)).callTool({ name: "get_queue", arguments: {} });
+    expect(bare.accountLists).toBe(0);
+    bareLazy.stop();
   });
 
   test("a finished task has no prompt key, and its placement's window still names it", async () => {
@@ -2023,8 +2113,8 @@ describe("get_queue", () => {
     expect(manual.doneBy).toBe("manual");
     expect(finished.doneBy).toBe("session");
     expect(pinned.pin).toEqual({ account: "me@pengefix.no (org org-c)", accountId: "org-c:acct-2" });
-    // A label never spends an account listing: the PWA shares that budget.
-    expect(fake.accountLists).toBe(0);
+    // One listing for every label in the call: the PWA shares that budget.
+    expect(fake.accountLists).toBe(1);
     lazy.stop();
   });
 

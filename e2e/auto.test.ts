@@ -347,6 +347,21 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       const named = await app.client.putAccountAlias(otherId, "elsewhere", 0);
       expect(named?.ok).toBe(true);
 
+      // The alias the app set names the account in list_machines too, beside its id and email.
+      const listing = await client.callTool({ name: "list_machines", arguments: {} });
+      const listed = JSON.parse((listing.content as { text: string }[])[0]?.text ?? "[]") as {
+        deviceId: string;
+        exclaves?: { accountId?: string; account?: string; alias?: string }[];
+      }[];
+      expect(listed.find((m) => m.deviceId === second.deviceId)?.exclaves).toContainEqual(
+        expect.objectContaining({
+          accountId: otherId,
+          email: "pin@e2e.test",
+          account: "elsewhere",
+          alias: "elsewhere",
+        }),
+      );
+
       const placedOn = async (id: string, label: string): Promise<void> => {
         await pollUntil(
           async () => (await stack.queue().get(id))?.body?.state === "running",

@@ -2,14 +2,15 @@ import { RequestFailure, STORE_PREFIXES, type AccountRecord } from "@seance/shar
 import type { AppRelay } from "./app-relay.ts";
 
 /**
- * The account records an `auto` client resolves an alias by, read once per
+ * The account records an app-role daemon client resolves and shows aliases by, read once per
  * socket generation as the PWA's `AccountStore` reads them: every app shares
  * the relay's `account:` list bucket, and one socket may list four times a
  * minute, so a listing per tool call would spend what the PWA needs. Dropped on
  * a reopen (nudges sent while down are lost) and on a `store-changed` for an
  * `account:` key — relay plaintext, only a hint to list again. A refused or
  * lost listing is not kept, and reads as null: aliases unavailable right now.
- * Listed only when a caller asks, which only an account pin does.
+ * Listed only when a caller asks: an account pin, or `seanced mcp` labelling an
+ * account in `list_machines` or `get_queue`.
  */
 export class AccountCache {
   readonly #client: Pick<AppRelay, "listAccounts">;
