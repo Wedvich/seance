@@ -67,28 +67,33 @@ describe("parseSpawnArgs", () => {
     expect(() => parseSpawnArgs(["--auto"])).toThrow("usage:");
   });
 
-  test("--auto anywhere combines with every other flag; the prompt still joins from bare words", () => {
-    expect(parseSpawnArgs(["--auto", "seance", "--here", "-t", "My Task", "fix", "it"])).toEqual({
-      repo: "seance",
-      here: true,
-      title: "My Task",
-      prompt: "fix it",
-      auto: true,
-    });
+  test("--auto is a no-op anywhere: the same args as without it", () => {
+    expect(parseSpawnArgs(["--auto", "seance", "--here", "-t", "My Task", "fix", "it"])).toEqual(
+      parseSpawnArgs(["seance", "--here", "-t", "My Task", "fix", "it"]),
+    );
     expect(parseSpawnArgs(["seance", "-p", "do it", "--auto"])).toEqual({
       repo: "seance",
       here: false,
       prompt: "do it",
-      auto: true,
     });
     // `-p` takes the next word as given, so a prompt that reads like the flag stays a prompt.
     expect(parseSpawnArgs(["seance", "-p", "--auto"])).toEqual({ repo: "seance", here: false, prompt: "--auto" });
   });
 
-  test("--machine, --account and repeatable --not ride --auto, each taking the next word", () => {
+  test("--now parses to now: true beside --here, -t and -p", () => {
+    expect(parseSpawnArgs(["--now", "seance", "--here", "-t", "My Task", "-p", "do it"])).toEqual({
+      repo: "seance",
+      here: true,
+      title: "My Task",
+      prompt: "do it",
+      now: true,
+    });
+    expect(parseSpawnArgs(["seance", "go", "--now"])).toEqual({ repo: "seance", here: false, prompt: "go", now: true });
+  });
+
+  test("--machine, --account and repeatable --not need no flag, each taking the next word", () => {
     expect(
       parseSpawnArgs([
-        "--auto",
         "--machine",
         "here",
         "seance",
@@ -103,7 +108,6 @@ describe("parseSpawnArgs", () => {
     ).toEqual({
       repo: "seance",
       here: false,
-      auto: true,
       prompt: "go",
       machine: "here",
       account: "me@pengefix.no",
@@ -111,12 +115,19 @@ describe("parseSpawnArgs", () => {
     });
   });
 
-  test("a placement flag without --auto, without a value, or given twice is a usage error", () => {
-    expect(() => parseSpawnArgs(["seance", "--machine", "wsl"])).toThrow("--machine, --account and --not need --auto");
-    expect(() => parseSpawnArgs(["seance", "--not", "wsl"])).toThrow("need --auto");
-    expect(() => parseSpawnArgs(["--auto", "seance", "--account"])).toThrow("usage:");
-    expect(() => parseSpawnArgs(["--auto", "seance", "--machine", "a", "--machine", "b"])).toThrow("usage:");
-    expect(() => parseSpawnArgs(["--auto", "seance", "--account", "a", "--account", "b"])).toThrow("usage:");
+  test("--now refuses every pin flag and --auto", () => {
+    expect(() => parseSpawnArgs(["--now", "seance", "--machine", "x"])).toThrow("--now spawns on this machine now");
+    expect(() => parseSpawnArgs(["--now", "seance", "--account", "a"])).toThrow("--now spawns on this machine now");
+    expect(() => parseSpawnArgs(["--now", "seance", "--not", "here"])).toThrow("--now spawns on this machine now");
+    expect(() => parseSpawnArgs(["--now", "--auto", "seance"])).toThrow("--now and --auto contradict");
+    expect(() => parseSpawnArgs(["seance", "--auto", "--now"])).toThrow("--now and --auto contradict");
+  });
+
+  test("a placement flag without a value, or --machine / --account given twice, is a usage error", () => {
+    expect(() => parseSpawnArgs(["seance", "--account"])).toThrow("usage:");
+    expect(() => parseSpawnArgs(["seance", "--not"])).toThrow("usage:");
+    expect(() => parseSpawnArgs(["seance", "--machine", "a", "--machine", "b"])).toThrow("usage:");
+    expect(() => parseSpawnArgs(["seance", "--account", "a", "--account", "b"])).toThrow("usage:");
   });
 });
 
