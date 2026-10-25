@@ -57,19 +57,20 @@ describe("mcp ↔ relay ↔ daemon", () => {
       // the machine's repo list carries the fixture — same race Store.spawn ducks.
       await pollUntil(async () => (await text("list_machines", {})).includes("myrepo"), "repo visible over MCP");
 
-      // The leader must be up for the task to run; the pin needs the machine's exclaves, which land
-      // with its first status, so ask until the answer is a queued task.
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
-      await stack.daemon.leader.settled();
-      let spawned = "";
+      // The pin needs the machine's exclaves, which land with its first status, and the leader must be
+      // up for the task to run. Poll those preconditions, then spawn once: retrying the spawn itself
+      // would queue a duplicate task whenever a lost reply had in fact stored the first.
       await pollUntil(
         async () => {
-          spawned = await text("spawn_session", { machine: "TestMac", repo: "myrepo", prompt: "haunt the relay" });
-          return spawned.startsWith("task ");
+          const listed = JSON.parse(await text("list_machines", {})) as { name: string; exclaves?: unknown[] }[];
+          return (listed.find((entry) => entry.name === "TestMac")?.exclaves ?? []).length > 0;
         },
-        "the pinned spawn to queue",
+        "the machine's exclaves in list_machines",
         20_000,
       );
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      const spawned = await text("spawn_session", { machine: "TestMac", repo: "myrepo", prompt: "haunt the relay" });
       const id = /^task (\S+): queued/u.exec(spawned)?.[1];
       if (id === undefined) throw new Error(`no task id in: ${spawned}`);
       await pollUntil(
@@ -207,8 +208,15 @@ describe("keyless mcp ↔ local daemon's broker ↔ relay ↔ remote daemon", ()
     // A's audit lines land on its stdout, which in-process is console.log.
     const audit = spyOn(console, "log");
     let window: string | null = null;
+    let pinnedTaskId: string | undefined;
     try {
-      type Listed = { name: string; local: boolean; connected: boolean; repos: string[] }[];
+      type Listed = {
+        name: string;
+        local: boolean;
+        connected: boolean;
+        repos: string[];
+        exclaves?: unknown[];
+      }[];
       let listed: Listed = [];
       await pollUntil(
         async () => {
@@ -216,7 +224,11 @@ describe("keyless mcp ↔ local daemon's broker ↔ relay ↔ remote daemon", ()
           if (error || !text.startsWith("[")) return false;
           listed = JSON.parse(text) as Listed;
           return listed.some(
-            (entry) => entry.name === "RemoteBox" && entry.connected && entry.repos.includes("myrepo"),
+            (entry) =>
+              entry.name === "RemoteBox" &&
+              entry.connected &&
+              entry.repos.includes("myrepo") &&
+              (entry.exclaves ?? []).length > 0,
           );
         },
         "the remote machine in the brokered registry",
@@ -275,21 +287,16 @@ describe("keyless mcp ↔ local daemon's broker ↔ relay ↔ remote daemon", ()
       // The current MCP's spawn is a task the broker enqueues, pinned to B: the leader (A) places it there.
       await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
       await stack.daemon.leader.settled();
-      let queued = { text: "", error: true };
-      await pollUntil(
-        async () => {
-          queued = await call("spawn_session", {
-            machine: "RemoteBox",
-            repo: "myrepo",
-            prompt: "pinned through broker",
-          });
-          return !queued.error;
-        },
-        "the keyless pinned spawn to queue",
-        20_000,
-      );
+      // B's exclaves were listed above (its pin needs them); one spawn, not a retry that could queue twice.
+      const queued = await call("spawn_session", {
+        machine: "RemoteBox",
+        repo: "myrepo",
+        prompt: "pinned through broker",
+      });
+      expect(queued.error).toBe(false);
       const taskId = /^task (\S+): queued/u.exec(queued.text)?.[1];
       if (taskId === undefined) throw new Error(`no task id in: ${queued.text}`);
+      pinnedTaskId = taskId;
       await pollUntil(
         async () => (await stack.queue().get(taskId))?.body?.state === "running",
         "the pinned task to run on the remote machine",
@@ -315,6 +322,8 @@ describe("keyless mcp ↔ local daemon's broker ↔ relay ↔ remote daemon", ()
         20_000,
       );
     } finally {
+      // The task is the test's own: end it whether or not an assertion above got to it.
+      if (pinnedTaskId !== undefined) await call("cancel_task", { taskId: pinnedTaskId });
       audit.mockRestore();
       if (window !== null) await tmux(["kill-window", "-t", `${remote.tmuxSession}:${window}`]);
       await client.close();
