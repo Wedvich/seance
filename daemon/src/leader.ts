@@ -265,8 +265,7 @@ function alertToPush(alert: SchedulerAlert, at: number): PushAlert {
   if (alert.kind === "spill") {
     return { v: 1, kind: "spill", at, taskId: alert.taskId, window: alert.window, projectedPct: alert.projectedPct };
   }
-  // Only the 30-minute escalation alerts a needs-input stay today.
-  return { v: 1, kind: "needs-input", at, taskId: alert.taskId, since: alert.since, escalated: true };
+  return { v: 1, kind: "needs-input", at, taskId: alert.taskId, since: alert.since, escalated: alert.escalated };
 }
 
 /** Where admission leaves a `queued` task (`admission` in the library). */

@@ -52,6 +52,11 @@ export interface SchedulerConfig {
   readonly globalMax: number;
   /** The same count per account, by the account of each task's placement. */
   readonly accountMax: number;
+  /**
+   * A task in `needs-input` this long is alerted once (`inputAlert`): well above the seconds an
+   * auto-mode classifier call flickers it, well below the escalation.
+   */
+  readonly needsInputAlertMs: number;
   /** A task in `needs-input` this long is escalated once: re-alerted, never killed, its slot kept. */
   readonly needsInputEscalateMs: number;
   readonly reservationTtlMs: number;
@@ -129,6 +134,7 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   globalMax: 8,
   // Half the fleet's slots: one account's sessions draw on its 5h window together.
   accountMax: 4,
+  needsInputAlertMs: 2 * 60_000,
   needsInputEscalateMs: 30 * 60_000,
   reservationTtlMs: 120_000,
   lostAfterMs: 15 * 60_000,
