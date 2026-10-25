@@ -108,8 +108,8 @@ key's version at 1, which reopens alias rollback unless the PSK changes too: rot
   a dispose breaks its stdio.
 - **e2e** — all three real components at once: the daemon from `daemon/src`, the
   Worker + Durable Object under workerd, and the app's relay client and store. It runs
-  the user flows end to end — machine discovery, spawns and their failures,
-  dropped-reply reconciliation, rescan, daemon restart — and is what catches drift
+  the user flows end to end — machine discovery, the daemon's spawn op and its
+  failures, PWA tasks (auto and pinned), rescan, daemon restart — and is what catches drift
   between the doubles and the real thing. One file per area (`app`, `mcp`, `leader`,
   `auto`, `authoring`), each booting the same stack of its own through `startSuite` in `e2e/suite.ts`,
   so a new area is a new file and never an edit to another's setup. The files share one

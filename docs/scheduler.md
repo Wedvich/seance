@@ -408,7 +408,7 @@ of M4 has landed.
 | 1     | Fleet quota record — **Done**                                      | store rules v2                                                         | M                        |
 | 1     | CLI `auto` — **Done**                                              | MCP's enqueue split out                                                | S–M                      |
 | 1     | `failed` from exit status (new) — **Done**                         | —                                                                      | S–M                      |
-| 2     | Spawn defaults to the scheduler, in three PRs (PR 1 **Done**)      | account pins (PR #303); keyless `auto` for MCP (**Done**)              | M–L                      |
+| 2     | Spawn defaults to the scheduler, in three PRs (PRs 1, 2 **Done**)  | account pins (PR #303); keyless `auto` for MCP (**Done**)              | M–L                      |
 | 2     | Stacking                                                           | authoring surface; #28                                                 | L                        |
 | 2     | Auth health                                                        | `/usage` refresh; Web Push for its alert                               | M                        |
 | 2     | Linear                                                             | settings; authoring surface                                            | L                        |
@@ -761,15 +761,16 @@ of M4 has landed.
   Push beside the disk health alert. Exit: a revoked exclave is filtered `auth expired` and
   clears after `/login`; a failed refresh for any other reason never reads as `expired` (daemon).
 
-- **Spawn defaults to the scheduler** (owner, 2026-10-25). **PR 1 (CLI and MCP) is Done**;
-  DESIGN.md records it ("CLI spawn", "MCP server"). PR 2 and 3 remain. `auto` stops being a special
+- **Spawn defaults to the scheduler** (owner, 2026-10-25). **PR 1 (CLI and MCP) and PR 2 (the PWA) are Done**;
+  DESIGN.md records them ("CLI spawn", "MCP server", "PWA"). PR 3 remains. `auto` stops being a special
   machine value: every spawn is a task, and a machine or an account is a pin on it. One path
   means the scheduler's caps, quota projection and reservations see every session, not only
   the ones queued through `auto`, and the three clients stop carrying two behaviours each.
   - CLI and MCP — **Done** (PR 1): `seanced spawn` enqueues, `--now` is the relay-free direct spawn,
     and `spawn_session`'s `machine` is an optional pin (DESIGN.md "CLI spawn", "MCP server").
-  - PWA: two pickers, **Machine** and **Account**, each defaulting to `auto`. Choosing one
-    pins that field; nothing in the PWA spawns directly any more.
+  - PWA — **Done** (PR 2): two pickers, **Machine** and **Account**, each defaulting to `auto`;
+    choosing one pins that field, and nothing in the PWA spawns directly any more (DESIGN.md,
+    "PWA"). A pinned task's wait reason shows on its verdict and its ready queue row.
   - _Decided:_ every scheduler limit applies to a pinned task — the in-flight caps, the 90%
     quota line, the disk floor. A pin only narrows where a task may go; a pinned task waits
     with the reason shown, as an unpinned one does.
@@ -779,10 +780,13 @@ of M4 has landed.
     keyless `seanced mcp` or `seanced spawn` reaches the scheduler through the broker's
     `scheduler` action (DESIGN.md "Fleet broker", "The scheduler actions"), so moving MCP onto
     the scheduler no longer takes spawning away from a keyless box.
+  - _Follow-up:_ `route-preview` takes a pin. It drops one today (`parseTaskRequest`), so the
+    PWA's placement preview is shown with both pickers on `auto` only; a preview that honours
+    the pins would show where a pinned task would go, and why it would wait.
   - _Follow-up:_ drop `spawn` from `LOCAL_OPS` and `BROKER_OPS` once no pre-PR-1 `seanced mcp` can
     still be running. It narrows the local socket's and the broker's allowlists, so it is a
     threat-model change, recorded in DESIGN.md with it.
-  - In three PRs: (1) CLI and MCP on the new model; (2) the PWA's two pickers; (3) a task's
+  - In three PRs: (1) CLI and MCP on the new model; (2) the PWA's two pickers (**Done**); (3) a task's
     pin and `avoid` on its queue card. Exit: a plain `seanced spawn` and a PWA spawn with both
     pickers on `auto` land as tasks (e2e); a PWA spawn with a machine picked lands there as a
     pinned task, and waits with its reason when that machine is full (e2e); `seanced spawn

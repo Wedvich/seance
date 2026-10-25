@@ -1064,8 +1064,8 @@ Who owns each frame in code — the place to change when a frame changes:
 | `forget-refused`                                                    | `relay/src/hub.ts`                                                                                                                                                                                        | `shared/src/app-client.ts` — logged, never modelled                                                                                                                                                                                                                                                                                      |
 | `"ping"` / `"pong"`                                                 | both socket legs                                                                                                                                                                                          | DO auto-response — answered without waking `hub.ts`; sweep reads the timestamps                                                                                                                                                                                                                                                          |
 | envelope `seal`/`open`, AAD, replay                                 | `shared/src/crypto.ts`                                                                                                                                                                                    | same file — both ends share it, or nothing decrypts                                                                                                                                                                                                                                                                                      |
-| ops `sessions` / `spawn`                                            | `pwa/src/store.ts` via `shared/src/app-client.ts`                                                                                                                                                         | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`                                                                                                                                                                                                                                                                    |
-| op `rescan`                                                         | `pwa/src/store.ts` via `shared/src/app-client.ts`                                                                                                                                                         | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                                                                                                                                                                                                                                            |
+| ops `sessions` / `spawn`                                            | `sessions`: `pwa/src/store.ts` via `shared/src/app-client.ts`; `spawn`: no PWA sender since M4 PR 2 (older apps, `seanced spawn --now`)                                                                   | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`                                                                                                                                                                                                                                                                    |
+| op `rescan`                                                         | `pwa/src/store.ts` via `shared/src/app-client.ts`, from a Machine-sheet row                                                                                                                               | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                                                                                                                                                                                                                                            |
 | op `despawn`                                                        | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                                                                                                                                                        | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                                                                                                                                                                                                                                                   |
 | `status` (daemon→relay)                                             | `daemon/src/run-collectors.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register                                                                                                       | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest on the socket attachment, kept in the entry on close/sweep until the next register                                                                                                                                                                                    |
 | `status` (relay→app)                                                | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`                                                                                                                      | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped                                                                                                                                                                                                                                   |
@@ -4556,7 +4556,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   layer that is already open is replaced in place rather than pushed again, so one
   layer never costs two backs. Retry is the one close that doesn't go back: a
   back is delivered later, and would close whichever verdict had landed by then
-  (a rescan with no socket fails at once). It keeps the failed verdict's entry for
+  (a retry with no socket fails at once). It keeps the failed verdict's entry for
   the next layer instead, and gives it back only if the retry ends without one.
 - **Relay status is a passive dot, settings is the button, and they share one
   pill.** The header control is a segmented pill on the `.seg` track/face idiom:
@@ -4710,8 +4710,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   beat of waking. No confirm step: the row is offline, the act costs a reconnect
   at worst, and clearing several retired machines in a row is the normal case.
   Connected rows get no bin — the relay would refuse it (`Threat model`).
-  The store drops that machine's remembered repo, its session list and the
-  selection if it was the one selected: unlike a hide, nothing brings that
+  The store drops that machine's session list and the
+  pin if it was the one picked (the account pin stays): unlike a hide, nothing brings that
   deviceId back. It drops them when the registry push says the entry is gone,
   not when the bin is tapped, and in that same patch — so a `forget` the relay
   refuses or one that never left a closed socket leaves the app exactly as it
@@ -4723,36 +4723,43 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   for now" where the user meant "this machine is gone", and left the relay's
   registry filling up with entries only a manual purge could reach. The key is
   now cleared on start (`dropLegacyHidden`) so no stale list outlives the change.
-- **A lost spawn reply is reconciled, not guessed.** Backgrounding the app
-  mid-spawn loses the reply (a blind relay cannot queue it), so the pending
-  spawn is persisted and the machine is asked what is running once there is a
-  socket again. Reporting a failure there would be a lie: the session may well
-  be live. Never while the request is still in flight: a `status` beat or
-  registry push mid-spawn would otherwise spend the record on a question the
-  reply is about to answer, flashing a "dropped" verdict over a healthy spawn
-  and leaving nothing to reconcile if the reply really is lost. A refused
-  delivery is reported as a known no, separately.
-- **A `repo_not_found` retry rescans first.** The verdict's "Rescan and try again"
-  awaits a rescan and checks the reply for the repo before spawning again; a repo
-  the fresh scan still lacks is reported as conclusively gone (back to the form)
-  instead of looping. That wait says "Rescanning…", not "Starting…" — nothing has
-  reached the daemon yet — and a rescan that never lands is reported as such
-  rather than spawned through: the daemon would resolve the repo against the very
-  cache the rescan failed to refresh, so the second failure is known in advance.
-  The repo sheet's own rescan row shows scanning/failure inline and keeps the
-  sheet open, rather than closing silently; its failure note clears when that
-  sheet closes, so one landing while another layer is up is not reset unseen.
-- **The success verdict offers "Reuse this prompt", not "Open in Claude".** The
-  `claude://code` link opened only the session list, and the Claude app already
-  notifies when a remote-control session starts — while spawning the same prompt
-  on a second machine meant retyping it. The spawned prompt rides the ok verdict;
-  the form itself is still cleared on success, so a reload cannot resurrect a
-  draft already acted on.
-- **`auto` is a machine-picker row, and the scheduler is asked only through it** (scheduler M2
-  item 6). The row sits above the machines, laid out like them, with a blue dot where a machine
-  has its green one (on the MACHINE tile too, once picked). It is greyed with its reason, its dot
-  grey like an offline machine's — on the tile as on the row — only when the relay socket is not open
-  ("Not connected to the relay"). With a socket open it is available whatever the leader's state
+- **Every PWA spawn is a task, and the Machine and Account pickers pin it** (M4 PR 2,
+  2026-10-25). The form no longer sends `spawn`: the button is **Queue**, or **Queue on
+  <machine>**, and writes a `queued` task through `createTask` whether or not a leader is up. The
+  MACHINE and ACCOUNT tiles each open a sheet whose first row is Auto; a pick is a `pin` on the
+  spec, `{deviceId?, account?}`, ids only (an alias or email is display text and goes in no
+  record). The pickers are independent and neither resets the other: a pair the registry no
+  longer satisfies is refused at the button and again in `Store.spawn` (`derivePinProblem`,
+  mirroring `resolvePlacement` in `daemon/src/auto.ts`: an account signed in nowhere, an account
+  the picked machine lacks, a machine reporting no exclaves). `pin.account` is written only to a
+  verified leader advertising `pinAccount`, since an older one would drop it from the spec; with
+  no verified leader it can't be confirmed, so it is refused ("try again once one leads") rather
+  than queued, unlike a plain task. A machine pin has no gate. An offline pinned machine is not a
+  block: the task waits for it, and the footer and verdict say so. Rows the other pick rules out
+  are disabled with their reason ("work@acme.dev isn't signed in here"). The repo list is
+  `scopedRepos`: origins across the fleet, narrowed to the picked machine and to the exclaves of
+  the picked account, strictly (a clone from a daemon predating exclaves is in no account, as
+  `inAccount` has it), and one resolver (`resolveRepo`) serves the tile, the button, the preview
+  and the submit. The remembered repo is `PersistedForm.repo`, an origin; it is dropped when a
+  pick leaves it no clone. A saved pre-M4 `machineId` is read as Auto, never as a pin (the owner's
+  call, D2): it was a machine to spawn on directly, not a placement the owner asked for.
+  The daemon still answers `spawn` (older apps, older MCP clients) and `seanced spawn --now` is
+  the direct path; the PWA has no direct spawn any more, so what this replaced is gone with it: the
+  persisted pending spawn and its reconciliation of a lost reply, the `repo_not_found` rescan
+  retry, and the success verdict's "Reuse this prompt" (a task's verdict is queued, and the form
+  clears on the put). `seance:pending` is cleared on start (`dropLegacyPending`). A machine's
+  **rescan** lives on its Machine-sheet row (a second action beside forget), shows scanning or
+  its failure on that row, and a failure clears when the sheet closes. A pinned task is
+  routed by the leader like any other, so the verdict says why it waits (`waitingText`: each place
+  that held it and the reasons, leaving out places the pin or the avoid list ruled out), and the
+  Queue screen's ready rows say the same. `route-preview` drops a pin (`parseTaskRequest`), so the
+  placement preview is asked, and shown, only with both pickers on Auto; a pin-aware preview is a
+  follow-up (docs/scheduler.md).
+- **Auto is each picker's first row, and the scheduler is asked only through it** (scheduler M2
+  item 6; both pickers since M4 PR 2). The row sits above the machines (or accounts), laid out like
+  them, with a blue dot where a machine has its green one (on the tile too, once picked). Queuing
+  is greyed with its reason, the dot grey like an offline machine's — on the tile as on the row —
+  only when the relay socket is not open ("Not connected to the relay"). With a socket open it is available whatever the leader's state
   (owner's call, M3 item 6): the queue is the relay's, so an enqueue needs no leader. Where
   `RelayState.scheduler` is not `ready` the row carries a note instead of a reason — `none`
   reads "No scheduler is leading right now — it waits in the queue until one does", `unverified`
@@ -4763,11 +4770,10 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   the source: `routePreview`, `queue`, `cancel`, `markDone`, `pause` and `resume` throw `leader_unverified` or `no_leader`
   without sending, so nothing reaches an unverified nominee however the UI is driven; the relay's `offline`
   for the scheduler address (no leader socket) comes back as `no_leader` too, and marks no
-  machine offline. On `auto` the repo
-  picker lists repos by `origin` across the fleet (a clone's name is machine-local), remembered
-  as `PersistedForm.autoRepo` beside `auto` rather than as a sentinel in `machineId`, so leaving
-  auto restores the machine picked last. A **placement preview** card asks `route-preview`
-  whenever auto is chosen, its repo changes, the leader changes or is verified, or the socket
+  machine offline. The repo
+  picker lists repos by `origin` (a clone's name is machine-local), scoped by the pins as above.
+  A **placement preview** card, shown with both pickers on Auto, asks `route-preview`
+  whenever it is (re)shown, its repo changes, the leader changes or is verified, or the socket
   comes back from a drop (which can fail a preview in flight while leaving the leader as it was);
   and, 500ms after a burst settles, whenever a machine connects or drops or its repo set changes
   (2026-10-17) — a status beat moves neither, so it asks nothing. A pause or resume asks it
@@ -4780,11 +4786,11 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   decision as "chose X because …, rejected Y because …", one row per candidate, losers behind a
   disclosure (`decision-view.ts` lays it out; each reason's clause, and each scheduler
   refusal's, is `shared/src/scheduler-text.ts`, which `seanced mcp` words from too). The preview leaves out the quota reading
-  each candidate was judged on (the task record keeps it). **Queue on auto** is an enqueue
+  each candidate was judged on (the task record keeps it). **Queue** is an enqueue
   (M3 item 6): the form builds a `queued` task (`queuedTask`, id minted here) and `createTask`
   `store-put`s it, so it needs an open relay socket and nothing else. The verdict shows the task
   and follows it (2026-10-19: as one screen that moves, not three — it is keyed on the task id so
-  refreshes update it in place; three tiles, Queued · Placed · Running, each the direct spawn's
+  refreshes update it in place; three tiles, Queued · Placed · Running, each a
   glyph squircle, stand in for the glyph until the task settles, since an outcome is a glyph and
   a stage is not, and `lost` is a `?` not a third tile; the waiting tile pulses and a tile that
   stops waiting lets its pulse finish; the headline and body slide and crossfade on change. The
@@ -4816,8 +4822,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   `queue-changed` is read while the tab is hidden (M3 review P5): showing it re-dials, and the
   reopen reads the queue and the followed task whole. A pending enqueue is not persisted across a reload: a lost
   reply there leaves the task queued and visible on the Queue screen, which is the way back to it.
-  Picking a machine is unchanged — a direct `spawn` to its daemon, which needs no
-  leader.
+  A picked machine or account is a pin on the same task (above).
 - **The Queue screen** (M3 item 6) is the app's view of the relay's queue, opened from the
   phone's header menu (an attention dot on it while a task is escalated). It reads `queue` from the leader
   and so shows nothing while none leads — it says why ("No scheduler is leading right now") and
@@ -4846,10 +4851,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   queue. The same cap applies as in the leader's reply: a full reply says it shows the most
   relevant `QUEUE_MAX_TASKS`. Each row shows what it waits on ("After <title> (opened)") and its batch place ("Batch #2 ·
   one at a time"), and offers **Follow up** while the task can still be waited on or once it
-  is `done`: the form goes to `auto` with that task as its After edge at `opened`. See
+  is `done`: the form takes that task as its After edge at `opened`. See
   "Authoring from the auto form" below.
-- **Authoring from the auto form** (2026-10-23, M4 #21). On `auto` — and only there, since
-  a machine pick is a direct spawn with no queue to wait in — the form adds AFTER and BATCH
+- **Authoring from the auto form** (2026-10-23, M4 #21). The form adds AFTER and BATCH
   tiles, a "Settle on its done report" switch and a Linear issue field. **AFTER** opens a sheet of
   the tasks the leader holds that have not failed or been cancelled (read when the sheet opens),
   each with an Opened, Merged or Done choice; Done is offered only while the verified leader
@@ -4885,8 +4889,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   slot by UNDO for six seconds, which is cheaper than a dialog on an action that
   costs nothing to take back. The stashed text lives in `AppState.promptUndo`,
   outside the persisted form: a draft you discarded should not come back on
-  reload, and anything that writes the prompt (typing, a spawn, "Start another",
-  "Reuse this prompt") drops the offer, because the stash would no longer be what
+  reload, and anything that writes the prompt (typing, a spawn, "Start another") drops the offer, because the stash would no longer be what
   the field lost. CLEAR also blurs the textarea — an empty field is nothing to
   type into, and on a phone the keyboard should go with the text — while UNDO
   focuses it again, caret at the end, so the draft can be picked back up.
@@ -4894,7 +4897,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   lists the union of skill names across every machine, exclave and clone —
   `MachineInfo.exclaves[].skills` and `RepoEntry.skills` (project skills, which routing honours
   too, so one must complete) from the register blobs the app already holds, offline machines included — so it needs no
-  leader and works on a direct pick as on `auto`. Names only, no descriptions and no
+  leader and works under any pin. Names only, no descriptions and no
   machine list: the blob carries every name to every app, and descriptions would grow it per
   skill; placement is the routing filter's job (Scheduler, "Skills filter", which reads any `/name`
   token in the prompt), so the list stays a plain union. It
@@ -6211,8 +6214,9 @@ are tmux-rename's, except where they say mods.
   the coarse `claude://code` (session list) link was removed from the verdict: it
   added nothing over the notification the Claude app itself raises when a
   remote-control session starts; see Problem & scope.
-- A spawn reply lost to a >45s background cannot be recovered exactly, only
-  reconciled from the session list. Relay-side buffering of app-bound envelopes
+- A `spawn` reply lost to a >45s background cannot be recovered exactly, only
+  reconciled from the session list (the daemon's op; the PWA no longer sends it, since a
+  task's lost create is re-put by id and cannot queue twice). Relay-side buffering of app-bound envelopes
   would fix the short cases, but `ts` lives inside the ciphertext so a blind
   relay cannot re-stamp one; anything flushed beyond `REPLAY_WINDOW_MS` is
   rejected as stale. Deliberately not built — see below.
@@ -6245,7 +6249,8 @@ are tmux-rename's, except where they say mods.
 
 - Optional: relay buffers app-bound envelopes (bounded, TTL ≤ ~45s to stay
   inside the replay window) so a spawn reply survives a short background
-  instead of falling through to reconciliation.
+  instead of falling through to reconciliation. (Historical for the PWA since M4 PR 2: it
+  sends no `spawn`; a task's create is re-put by id.)
 
 Resolved 2026-07-28, at the WSL machine: WSL support — DPAPI PSK store
 (threat-model item 2) and the systemd-unit + linger + logon-task lifecycle
@@ -6268,7 +6273,7 @@ the linger fix when system systemd is up.
 Resolved 2026-07-27: repo-scan caching/rescan triggers, replay window, and
 DO hibernation — decisions recorded in their sections above. Also resolved with
 the PWA: `/app` close codes, PSK at rest, session fan-out, and lost-reply
-reconciliation.
+reconciliation (replaced in M4 PR 2 by re-putting the same task id).
 
 The threat model is fully built out as of 2026-07-27: spawn audit logging on
 both paths with `origin`; keychain-backed PSK on macOS behind `loadPsk()` plus
