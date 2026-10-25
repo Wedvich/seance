@@ -1,4 +1,4 @@
-import type { AccountRecord, UnreadableRecord } from "@seance/shared";
+import type { AccountEntry, AccountRecord, UnreadableRecord } from "@seance/shared";
 import {
   accountRecord,
   failureReasonText,
@@ -44,6 +44,8 @@ export class AccountStore {
   readonly #versions = new Map<string, number>();
   /** The account a readable record at a key names; an unreadable one has none. */
   readonly #accountByKey = new Map<string, string>();
+  /** Keys read singly (a nudge, a rename) since the last reopen: a listing sent before such a read may be older than it. */
+  readonly #read = new Set<string>();
   /** Whether a listing has landed on this socket: until then `#versions` may miss records the relay holds. */
   #listed = false;
   /** Bumped on every reopen: a listing sent on an earlier socket answers for a view since replaced. */
@@ -69,6 +71,7 @@ export class AccountStore {
     if (!reopened || !this.#client.accountsNamed) return;
     this.#generation += 1;
     this.#listed = false;
+    this.#read.clear();
     this.#stopRetry();
     void this.#list(true);
   }
@@ -92,27 +95,56 @@ export class AccountStore {
       if (generation !== this.#generation) return;
       if (listing?.ok === true) {
         landed = true;
-        this.#versions.clear();
-        this.#accountByKey.clear();
-        const aliases: Record<string, string> = {};
-        for (const { key, record } of listing.accounts) {
-          this.#versions.set(key, record.version);
-          this.#accountByKey.set(key, record.accountId);
-          if (record.alias !== null) aliases[record.accountId] = record.alias;
-        }
-        for (const { key, version } of listing.unreadable) this.#versions.set(key, version);
-        this.#listed = true;
-        this.#set({ aliases });
+        this.#land(listing.accounts, listing.unreadable);
       }
     } catch (err) {
       // What is held stays up, and a read that fails says nothing: the name was never a promise.
       if (!(err instanceof RequestFailure)) throw err;
     }
-    if (landed || this.#listed || !mayRetry) return;
+    // A reopen or dispose while the listing was out owns the retry now.
+    if (landed || this.#listed || !mayRetry || generation !== this.#generation) return;
     this.#retry = setTimeout(() => {
       this.#retry = null;
       void this.#list(false);
     }, LIST_RETRY_MS);
+  }
+
+  /**
+   * Replaces what is held with a listing, except what a single read since the
+   * reopen saw newer: a nudge's read can resolve before the listing sent first,
+   * and the listing is then the older snapshot (and lacks keys made after it).
+   */
+  #land(accounts: readonly AccountEntry[], unreadable: readonly UnreadableRecord[]): void {
+    const versions = new Map<string, number>();
+    const named = new Map<string, { accountId: string; alias: string | null }>();
+    for (const { key, record } of accounts) {
+      versions.set(key, record.version);
+      named.set(key, { accountId: record.accountId, alias: record.alias });
+    }
+    for (const { key, version } of unreadable) versions.set(key, version);
+    for (const key of this.#read) {
+      const held = this.#versions.get(key);
+      if (held === undefined || held <= (versions.get(key) ?? 0)) continue;
+      versions.set(key, held);
+      const accountId = this.#accountByKey.get(key);
+      if (accountId === undefined) named.delete(key);
+      else named.set(key, { accountId, alias: this.#heldAlias(accountId) });
+    }
+    this.#versions.clear();
+    for (const [key, version] of versions) this.#versions.set(key, version);
+    this.#accountByKey.clear();
+    for (const [key, { accountId }] of named) this.#accountByKey.set(key, accountId);
+    this.#listed = true;
+    // fromEntries, not indexed assignment: an accountId of `__proto__` must be an own entry.
+    const aliases = Object.fromEntries(
+      [...named.values()].flatMap(({ accountId, alias }) => (alias === null ? [] : [[accountId, alias] as const])),
+    );
+    this.#set({ aliases });
+  }
+
+  #heldAlias(accountId: string): string | null {
+    const { aliases } = this.#accounts;
+    return Object.hasOwn(aliases, accountId) ? (aliases[accountId] ?? null) : null;
   }
 
   /** A `store-changed` nudge: relay plaintext, so only a hint to re-read a key, and only a newer version is worth it. */
@@ -139,28 +171,40 @@ export class AccountStore {
     }
   }
 
+  /** Versions only move forward: a read resolving late must not put back what a newer one showed. */
   #take(key: string, version: number, entry: AccountRecord | UnreadableRecord | null): void {
+    const held = this.#versions.get(key);
+    if (held !== undefined && version < held) return;
+    this.#read.add(key);
     const was = this.#accountByKey.get(key);
     this.#accountByKey.delete(key);
     if (entry === null) this.#versions.delete(key);
     else this.#versions.set(key, version);
     const aliases = { ...this.#accounts.aliases };
     if (was !== undefined) delete aliases[was];
-    if (entry !== null && "accountId" in entry) {
-      this.#accountByKey.set(key, entry.accountId);
-      if (entry.alias !== null) aliases[entry.accountId] = entry.alias;
-    }
-    this.#set({ aliases });
-  }
-
-  /** Names an account (a blank `text` clears it) at the version held for its key; a lost race re-reads and says so. */
-  async rename(accountId: string, text: string): Promise<void> {
-    if (this.#accounts.saving !== null || !this.#client.accountsNamed) return;
-    if (accountRecord(accountId, text, 1) === null) {
-      this.#set({ notice: TOO_LONG });
+    const named = entry !== null && "accountId" in entry ? entry : null;
+    if (named === null) {
+      this.#set({ aliases });
       return;
     }
+    this.#accountByKey.set(key, named.accountId);
+    // A computed key in a literal defines an own property, where `aliases[id] = …` would hit `__proto__`'s setter.
+    this.#set({ aliases: named.alias === null ? aliases : { ...aliases, [named.accountId]: named.alias } });
+  }
+
+  /**
+   * Names an account (a blank `text` clears it) at the version held for its key;
+   * a lost race re-reads and says so. True only when the name landed, so a form
+   * can stay open on its draft otherwise.
+   */
+  async rename(accountId: string, text: string): Promise<boolean> {
+    if (this.#accounts.saving !== null || !this.#client.accountsNamed) return false;
+    if (accountRecord(accountId, text, 1) === null) {
+      this.#set({ notice: TOO_LONG });
+      return false;
+    }
     this.#set({ saving: accountId, notice: null });
+    let landed = false;
     try {
       const key = await this.#client.accountStoreKey(accountId);
       // Without a listing the version held may be 0 for a key the relay has: read it first, or the put reads as a conflict.
@@ -170,6 +214,7 @@ export class AccountStore {
         this.#set({ notice: "The relay's answer was unreadable — reopen to see whether it landed" });
       } else if (written.ok) {
         this.#take(key, written.record.version, written.record);
+        landed = true;
       } else if (written.code === "version_conflict") {
         await this.#refresh(key);
         this.#set({ notice: CONFLICT });
@@ -183,6 +228,7 @@ export class AccountStore {
     } finally {
       this.#set({ saving: null });
     }
+    return landed;
   }
 
   dismissNotice(): void {

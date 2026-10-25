@@ -40,8 +40,8 @@ export function MachinesScreen(props: {
   onDismiss?: () => void;
   onShowHistory: (target: HistoryTarget, range?: HistoryRange) => void;
   onHideHistory: () => void;
-  /** Resolves once the rename has settled, however it ended. */
-  onRename: (accountId: string, text: string) => Promise<void>;
+  /** Resolves once the rename has settled: true when the name landed. */
+  onRename: (accountId: string, text: string) => Promise<boolean>;
   onDismissAccountNotice: () => void;
 }): JSX.Element {
   const {
@@ -198,7 +198,7 @@ function AccountCardView(props: {
   /** Some rename is in flight; one at a time. */
   busy: boolean;
   history: HistoryView | null;
-  onRename: (accountId: string, text: string) => Promise<void>;
+  onRename: (accountId: string, text: string) => Promise<boolean>;
   onShowHistory: (target: HistoryTarget, range?: HistoryRange) => void;
   onHideHistory: () => void;
 }): JSX.Element {
@@ -251,7 +251,10 @@ function AccountCardView(props: {
           className="fleet-rename-form"
           onSubmit={(event) => {
             event.preventDefault();
-            void onRename(account.accountId, draft).then(() => setEditing(false));
+            // Open after a conflict or refusal: the notice says why, and the draft is still there to resend.
+            void onRename(account.accountId, draft).then((landed) => {
+              if (landed) setEditing(false);
+            });
           }}
         >
           <input

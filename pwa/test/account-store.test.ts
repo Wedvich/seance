@@ -26,6 +26,7 @@ installBrowserGlobals();
 const TOKEN = "test-bearer-token";
 const ACCOUNT = "org-1:acct-aaaaaaaa-1111";
 const OTHER = "org-1:acct-bbbbbbbb-2222";
+const THIRD = "org-1:acct-cccccccc-3333";
 
 let key: CryptoKey;
 let accountKey: CryptoKey;
@@ -45,6 +46,8 @@ interface Double {
   readonly sockets: Set<ServerWebSocket<unknown>>;
   /** Replies to the next `store-list` this way instead of from `records`. */
   refuseLists: number;
+  /** While set, a `store-list` is answered from the records as they were asked, once it resolves: a reply that lands late. */
+  listGate: Promise<void> | null;
   /** A write is not announced to the other sockets: a nudge lost to a drop. */
   muted: boolean;
   readonly stop: () => Promise<void>;
@@ -85,14 +88,17 @@ function startDouble(): Double {
         const re = frame["id"];
         const at = typeof frame["key"] === "string" ? records.get(frame["key"]) : undefined;
         switch (frame["t"]) {
-          case "store-list":
-            if (double.refuseLists > 0) {
-              double.refuseLists -= 1;
-              ws.send(JSON.stringify({ t: "store-refused", re, code: "rate_limited" }));
-              return;
-            }
-            ws.send(JSON.stringify({ t: "store-listed", re, records: [...records.values()] }));
+          case "store-list": {
+            const refused = double.refuseLists > 0;
+            if (refused) double.refuseLists -= 1;
+            const snapshot = [...records.values()];
+            const answer = JSON.stringify(
+              refused ? { t: "store-refused", re, code: "rate_limited" } : { t: "store-listed", re, records: snapshot },
+            );
+            if (double.listGate === null) ws.send(answer);
+            else void double.listGate.then(() => ws.send(answer));
             return;
+          }
           case "store-get":
             ws.send(JSON.stringify({ t: "store-record", re, record: at ?? null }));
             return;
@@ -128,6 +134,7 @@ function startDouble(): Double {
     received,
     sockets,
     refuseLists: 0,
+    listGate: null,
     muted: false,
     stop: () => server.stop(true),
   };
@@ -172,6 +179,42 @@ async function planted(
 
 function nudge(double: Double, storeKey: string, version: number): void {
   for (const socket of double.sockets) socket.send(JSON.stringify({ t: "store-changed", key: storeKey, version }));
+}
+
+/** Stands in for the retry timer only: records what is armed and cleared, fires nothing by itself. */
+function stubRetryTimer(): {
+  readonly armed: (() => void)[];
+  readonly cleared: unknown[];
+  readonly restore: () => void;
+} {
+  const realSet = globalThis.setTimeout;
+  const realClear = globalThis.clearTimeout;
+  const armed: (() => void)[] = [];
+  const cleared: unknown[] = [];
+  const handle = 4242;
+  Object.defineProperty(globalThis, "setTimeout", {
+    value: (callback: () => void, ms: number) => {
+      if (ms !== LIST_RETRY_MS) return realSet(callback, ms);
+      armed.push(callback);
+      return handle;
+    },
+    configurable: true,
+  });
+  Object.defineProperty(globalThis, "clearTimeout", {
+    value: (id: Parameters<typeof clearTimeout>[0]) => {
+      if (id === handle) cleared.push(id);
+      else realClear(id);
+    },
+    configurable: true,
+  });
+  return {
+    armed,
+    cleared,
+    restore: () => {
+      Object.defineProperty(globalThis, "setTimeout", { value: realSet, configurable: true });
+      Object.defineProperty(globalThis, "clearTimeout", { value: realClear, configurable: true });
+    },
+  };
 }
 
 const gets = (double: Double): number => double.received.filter((frame) => frame["t"] === "store-get").length;
@@ -300,6 +343,146 @@ describe("account aliases in the store", () => {
       await pollUntil(() => store.getState().accounts.aliases[OTHER] === "other", "the retry's listing");
     } finally {
       Object.defineProperty(globalThis, "setTimeout", { value: realSet, configurable: true });
+    }
+  });
+
+  test("a listing that lands after newer nudge reads keeps what they saw, and the next rename does not conflict", async () => {
+    const double = startDouble();
+    await planted(double, ACCOUNT, "work");
+    await planted(double, THIRD, "third");
+    let release: () => void = () => {};
+    double.listGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const store = await openStore(double);
+    await pollUntil(() => lists(double) === 1, "the listing to be asked");
+
+    // The listing is now a snapshot of version 1 and lacks OTHER; these reads resolve before it does.
+    const key = await planted(double, ACCOUNT, "home", 2);
+    const fresh = await planted(double, OTHER, "new");
+    nudge(double, key, 2);
+    nudge(double, fresh, 1);
+    await pollUntil(
+      () => store.getState().accounts.aliases[ACCOUNT] === "home" && store.getState().accounts.aliases[OTHER] === "new",
+      "the nudged reads to land",
+    );
+    release();
+    await pollUntil(() => store.getState().accounts.aliases[THIRD] === "third", "the older listing to land");
+    expect(store.getState().accounts.aliases).toEqual({ [ACCOUNT]: "home", [OTHER]: "new", [THIRD]: "third" });
+
+    await store.renameAccount(ACCOUNT, "again");
+    expect(store.getState().accounts.notice).toBeNull();
+    expect(double.records.get(key)?.version).toBe(3);
+  });
+
+  test("a nudge no newer than what a rename left held reads nothing, and the name stays", async () => {
+    const double = startDouble();
+    const key = await planted(double, ACCOUNT, "work");
+    const store = await openStore(double);
+    await pollUntil(() => store.getState().accounts.aliases[ACCOUNT] === "work", "the listing to land");
+    await store.renameAccount(ACCOUNT, "home");
+
+    nudge(double, key, 2);
+    // A newer one is the proof the first was seen and dropped.
+    const fresh = await planted(double, OTHER, "other");
+    nudge(double, fresh, 1);
+    await pollUntil(() => store.getState().accounts.aliases[OTHER] === "other", "the newer nudge to be read");
+    expect(gets(double)).toBe(1);
+    expect(store.getState().accounts.aliases[ACCOUNT]).toBe("home");
+  });
+
+  test("an account id of __proto__ is an alias like any other", async () => {
+    const double = startDouble();
+    await planted(double, "__proto__", "odd");
+    const store = await openStore(double);
+    await pollUntil(() => Object.hasOwn(store.getState().accounts.aliases, "__proto__"), "the listing to land");
+    expect(Object.entries(store.getState().accounts.aliases)).toEqual([["__proto__", "odd"]]);
+
+    await store.renameAccount("__proto__", "renamed");
+    expect(store.getState().accounts.notice).toBeNull();
+    expect(Object.entries(store.getState().accounts.aliases)).toEqual([["__proto__", "renamed"]]);
+    await store.renameAccount(OTHER, "plain");
+    expect(Object.entries(store.getState().accounts.aliases)).toEqual([
+      ["__proto__", "renamed"],
+      [OTHER, "plain"],
+    ]);
+  });
+
+  test("a rename reports whether it landed", async () => {
+    const double = startDouble();
+    const a = await openStore(double);
+    const b = await openStore(double);
+    await pollUntil(() => lists(double) === 2, "both clients to list");
+    double.muted = true;
+    expect(await b.renameAccount(ACCOUNT, "from-b")).toBe(true);
+    expect(await a.renameAccount(ACCOUNT, "from-a")).toBe(false);
+    expect(await a.renameAccount(ACCOUNT, "x".repeat(65))).toBe(false);
+    expect(await a.renameAccount(ACCOUNT, "from-a")).toBe(true);
+  });
+
+  test("a reopen lists again, so a write made while the socket was away shows", async () => {
+    const double = startDouble();
+    await planted(double, ACCOUNT, "work");
+    const store = await openStore(double);
+    await pollUntil(() => store.getState().accounts.aliases[ACCOUNT] === "work", "the listing to land");
+
+    // No nudge: the other client's write went out while this socket was down.
+    await planted(double, OTHER, "later");
+    clients[0]?.reconnect();
+    await pollUntil(() => store.getState().accounts.aliases[OTHER] === "later", "the second listing");
+    expect(lists(double)).toBe(2);
+    expect(store.getState().accounts.aliases[ACCOUNT]).toBe("work");
+  });
+
+  test("a nudge while the tab is hidden reads nothing", async () => {
+    const double = startDouble();
+    const store = await openStore(double);
+    await pollUntil(() => lists(double) === 1, "the listing");
+    const hidden = await planted(double, OTHER, "home");
+    const shown = await planted(double, THIRD, "third");
+
+    Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true, writable: true });
+    try {
+      nudge(double, hidden, 1);
+      // A non-event can't be polled for.
+      await Bun.sleep(50);
+      expect(gets(double)).toBe(0);
+      // The visible one proves the socket was live and the hidden one dropped, not lost.
+      Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true, writable: true });
+      nudge(double, shown, 1);
+      await pollUntil(() => store.getState().accounts.aliases[THIRD] === "third", "the visible nudge to be read");
+      expect(gets(double)).toBe(1);
+      expect(store.getState().accounts.aliases[OTHER]).toBeUndefined();
+    } finally {
+      Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true, writable: true });
+    }
+  });
+
+  test("dispose clears an armed retry, and a refusal landing after it arms none", async () => {
+    const timer = stubRetryTimer();
+    try {
+      const double = startDouble();
+      double.refuseLists = 1;
+      await openStore(double);
+      await pollUntil(() => timer.armed.length === 1, "the retry to be armed");
+      for (const off of detach.splice(0)) off();
+      expect(timer.cleared).toEqual([4242]);
+
+      // A refusal answering a store since disposed: nothing is armed for a view that is gone.
+      const late = startDouble();
+      late.refuseLists = 1;
+      let release: () => void = () => {};
+      late.listGate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await openStore(late);
+      await pollUntil(() => lists(late) === 1, "the listing to be asked");
+      for (const off of detach.splice(0)) off();
+      release();
+      await Bun.sleep(100);
+      expect(timer.armed).toHaveLength(1);
+    } finally {
+      timer.restore();
     }
   });
 

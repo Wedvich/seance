@@ -365,6 +365,13 @@ describe("account records", () => {
     expect(cleared).toEqual({ ok: true, key: at, record: { version: 3, accountId: ACCOUNT_ID, alias: null } });
   });
 
+  test("a put answered with a version other than expect + 1 is no answer", async () => {
+    const double = startDouble();
+    const client = await connect(double, 5_000, true);
+    double.answer = (frame) => ({ t: "store-written", re: frame["id"], version: 5 });
+    expect(await client.putAccountAlias(ACCOUNT_ID, "work", 0)).toBeNull();
+  });
+
   test("refuses locally, sending nothing, an alias past the bound", async () => {
     const double = startDouble();
     const client = await connect(double, 5_000, true);

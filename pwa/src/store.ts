@@ -696,8 +696,8 @@ export class Store {
     if (this.#state.verdict !== null) this.#patch({ verdict: null });
   }
 
-  /** Names a Claude account (blank clears it); every client shows it. */
-  renameAccount(accountId: string, text: string): Promise<void> {
+  /** Names a Claude account (blank clears it); every client shows it. True when the name landed. */
+  renameAccount(accountId: string, text: string): Promise<boolean> {
     return this.#accounts.rename(accountId, text);
   }
 
