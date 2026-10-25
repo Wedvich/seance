@@ -4001,7 +4001,8 @@ for the lot with its own `gh`.
   only, because the seed prompt renders in that pane and prompt text is never
   logged. `pending` is a separate flag rather than a note the clients
   pattern-match, because it changes what each surface _says_: the PWA verdict
-  drops "It's running on X" for "it started, but it's stuck", muted rather than
+  drops "It's running on X" for "it started, but it's stuck" (historical for the PWA: it has no
+  direct spawn since M4 PR 2, so that verdict is gone), muted rather than
   green and offering the form back instead of "Start another" (a retry meets the
   same dialog and leaves two stuck windows); Raycast switches the toast to the
   attention style; `seanced mcp` appends "(started, not registered yet)".
@@ -4481,7 +4482,9 @@ that silently blocks the only socket the app has. HSTS rides in the same file
 not apply), without `includeSubDomains`/`preload` — that hostname is not ours to
 make claims about, and `.dev` is preloaded at the TLD anyway.
 
-V1 surface: machine list (online/offline + last-seen, offline ones removable), per-machine repo
+V1 surface (historical for the PWA: the per-machine repo picker and the direct spawn verdict
+described here were replaced by the Machine and Account pickers and queued tasks, M4 PR 2, see
+the Auto bullet below): machine list (online/offline + last-seen, offline ones removable), per-machine repo
 picker, spawn form (prompt optional, worktree/`--here` toggle, model and
 effort as first-class tiles, defaults opus/medium), spawn verdict (daemon
 relays tmux window name or the captured error), and per-machine counts of running
@@ -4507,16 +4510,20 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   sits beside it, written in the same transaction (_Scheduler_, "Account records").
   Bearer token and relay URL remain in `localStorage`; the token has to be
   readable because it goes on the URL.
-- **The form and any in-flight spawn are persisted.** iOS kills backgrounded
+- **The form is persisted; no in-flight spawn is.** iOS kills backgrounded
   PWAs freely, and the prompt is the only thing here the user wrote. The prompt
   therefore sits in plaintext `localStorage` — a deliberate asymmetry against
-  the PSK, weighing one message's text against standing authority.
-- **The repo selection is remembered per machine, not globally.** Each machine has
-  its own repo set and its own habitual project, so one shared "last repo" was
-  wrong on every machine but the one just used. `PersistedForm.repos` maps deviceId
-  to repo name and is the only place the selection lives — a single global `repo`
-  field alongside it could only drift. An unknown or deleted repo still falls back
-  to the machine's first, so a stale map degrades rather than blocks.
+  the PSK, weighing one message's text against standing authority. A spawn used to be
+  persisted too (`seance:pending`) so a lost reply could be reconciled; every spawn is a
+  queued task now, whose record is the relay's, so nothing pending is kept and
+  `dropLegacyPending` clears the old key on start.
+- **The repo selection is one origin, scoped by the pins, not one per machine.** It
+  used to be remembered per machine (`PersistedForm.repos`, deviceId to repo name), because
+  each machine had its own clone set and a direct spawn named a machine. A task names a
+  repo by `origin` and the scheduler picks the clone, so the choice no longer belongs to a
+  machine: `PersistedForm.repo` is the origin, the only place it lives, and `scopedRepos`
+  narrows what is offered to the picked machine and account. A pick that leaves the origin
+  no clone drops it. The per-machine map could only drift against that.
 - **Sessions are fanned out, not polled.** The header total spans every online
   machine, so `sessions` is sent to each on connect, when a machine wakes, and
   on resume from background — that last one because a suspended PWA's socket
@@ -4781,6 +4788,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   last ones (another device's pause, a reset lifting one) asks after the same 500ms
   (2026-10-23): a hold decides the preview as much as the fleet does. The card's label says how old
   the decision is ("decided 2m ago"): load and quota move under it between asks.
+  Since M4 PR 2 both pickers default to Auto, so the preview runs for every PWA user, not
+  only those who had opted into auto: the cost is bounded by the debounce above and the
+  leader-change trigger.
   A preview answered `not_ready` — a term still taking over — is asked again every second, at
   most 10 times, rather than shown as a failure. The card shows the
   decision as "chose X because …, rejected Y because …", one row per candidate, losers behind a
@@ -5987,8 +5997,7 @@ latency budget — one hotkey to a running session.
 - **Defaults: last-used wins**, persisted after each successful spawn;
   preferences seed only the first run, or when the remembered machine is gone
   from the registry. The prompt always starts empty. Repos are remembered _per
-  machine_, mirroring the PWA's `PersistedForm`, so switching machines restores
-  what you last ran there.
+  machine_, so switching machines restores what you last ran there.
 - **Refuses rather than fires blind.** Offline machines stay selectable and are
   marked in the dropdown, but submitting names the reason it cannot go (asleep,
   no socket, empty registry, no repos) instead of disabling a button silently.
