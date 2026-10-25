@@ -58,7 +58,7 @@ describe("authoring: dependencies, batches and Linear links, from the PWA and fr
   // "opened" needs a PR and a pushed branch, which a stub session never makes, so a dependent
   // stays blocked until the predecessor is marked done — which releases every edge on it.
   test("the PWA's After, Batch and Linear fields reach the stored task, which waits on its predecessor and then runs", async () => {
-    const app = startApp(stack, { auto: true });
+    const app = startApp(stack);
     const windows: string[] = [];
     try {
       const p = await runningPredecessor(app, "authoring predecessor (pwa)");
@@ -102,7 +102,7 @@ describe("authoring: dependencies, batches and Linear links, from the PWA and fr
   }, 90_000);
 
   test("queue_batch stores its members with matching batch ids, indexes and resolved refs, and releases them in order", async () => {
-    const app = startApp(stack, { auto: true });
+    const app = startApp(stack);
     const lazy = new LazyRelay({
       create: () =>
         new RelayClient({

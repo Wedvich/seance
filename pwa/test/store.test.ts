@@ -2,6 +2,7 @@ import { importPsk, toBase64 } from "@seance/shared";
 import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import {
   CAPABILITIES,
+  accountRecord,
   type BatchStrategy,
   QUEUE_MAX_TASKS,
   RelayClient,
@@ -12,6 +13,7 @@ import {
   type Decision,
   type DiscardReply,
   type DiscardRequest,
+  type ExclaveInfo,
   type Machine,
   type MetricsReply,
   type MetricsRequest,
@@ -376,7 +378,7 @@ describe("layers and history", () => {
 
     store.openSettings();
     store.openSheet("machine");
-    store.selectMachine("m-1");
+    store.pickMachine("m-1");
     fake.settle(store);
 
     expect(store.getState().sheet).toBeNull();
@@ -598,7 +600,7 @@ function firstCreate(client: ScriptedClient): Task {
 
 /** A queued verdict on screen and the same task as a row on the open Queue screen. */
 async function followedAndListed(client: ScriptedClient): Promise<{ store: Store; created: Task }> {
-  const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+  const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
   await store.spawn();
   const created = firstCreate(client);
   client.onQueue = async () => ({ tasks: [created], holds: [], at: 1 });
@@ -635,7 +637,7 @@ describe("auto's error paths", () => {
     const client = new ScriptedClient();
     client.onPreview = async () => ({ ok: false, code: "not_ready", message: "taking over" });
     const store = new Store(client);
-    store.selectAuto();
+    store.pickMachine(null);
     await until(() => timers.armed(PREVIEW_RETRY_MS) === 1, "the retry armed");
     expect(store.getState().preview).toMatchObject({ kind: "loading" });
 
@@ -650,19 +652,19 @@ describe("auto's error paths", () => {
     const late = Promise.withResolvers<RoutePreviewReply | null>();
     client.onPreview = () => late.promise;
     const store = new Store(client);
-    store.selectAuto();
-    store.selectMachine("dev-b");
+    store.pickMachine(null);
+    store.pickMachine("dev-b");
     late.resolve({ decision: DECISION });
     await drain();
     expect(store.getState().preview).toBeNull();
-    expect(store.getState().form.auto).toBe(false);
+    expect(store.getState().form.machine).toBe("dev-b");
   });
 
   test("a re-ask keeps the last decision on screen until its answer lands", async () => {
     const client = new ScriptedClient();
     client.onPreview = async () => ({ decision: DECISION });
     const store = new Store(client);
-    store.selectAuto();
+    store.pickMachine(null);
     await until(() => store.getState().preview?.kind === "ok", "the first preview");
 
     const late = Promise.withResolvers<RoutePreviewReply | null>();
@@ -676,7 +678,7 @@ describe("auto's error paths", () => {
 
   test("a presence or repo change asks the preview again once its burst settles; a status beat does not", async () => {
     const client = new ScriptedClient();
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true });
+    const store = new Store(client, { ...DEFAULT_FORM });
     const detach = store.attach();
     await until(() => store.getState().preview?.kind === "ok", "the first preview");
     expect(client.previews).toHaveLength(1);
@@ -698,7 +700,7 @@ describe("auto's error paths", () => {
     client.onCreate = async () => {
       throw new RequestFailure("timeout", "store-put timed out after 10000ms", "relay");
     };
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
     await store.spawn();
     const verdict = store.getState().verdict;
     expect(verdict).toMatchObject({ kind: "unqueued", mayHaveLanded: true, retry: { id: client.creates[0]?.id } });
@@ -715,6 +717,37 @@ describe("auto's error paths", () => {
     expect(store.getState().form.prompt).toBe("");
   });
 
+  // A dismissal's back is delivered later, so a retry that went back would close whichever verdict had landed by then.
+  test("a retry's verdict survives the history the failed one left", async () => {
+    const fake = fakeHistory();
+    try {
+      const client = new ScriptedClient();
+      client.onCreate = async () => {
+        throw new RequestFailure("timeout", "store-put timed out after 10000ms", "relay");
+      };
+      const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+      await store.spawn();
+      const failed = store.getState().verdict;
+      if (failed?.kind !== "unqueued") throw new Error("expected unqueued");
+      fake.settle(store);
+
+      store.retrySpawn(failed);
+      await until(() => client.creates.length === 2, "the retry put");
+      await until(() => store.getState().verdict?.kind === "unqueued", "the retried verdict shown");
+      fake.settle(store);
+
+      expect(store.getState().verdict).toMatchObject({ kind: "unqueued", mayHaveLanded: true });
+      // The retried verdict took over the failed one's entry: one layer, one back.
+      expect(fake.entries()).toHaveLength(2);
+      store.dismissLayer();
+      fake.settle(store);
+      expect(store.getState().verdict).toBeNull();
+      expect(fake.index()).toBe(0);
+    } finally {
+      fake.restore();
+    }
+  });
+
   test("a create that never left is not queued; one dropped after the send may be; both can be retried", async () => {
     for (const [reason, mayHaveLanded] of [
       ["disconnected", false],
@@ -724,7 +757,7 @@ describe("auto's error paths", () => {
       client.onCreate = async () => {
         throw new RequestFailure(reason, "the relay socket closed", "relay");
       };
-      const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+      const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
       // oxlint-disable-next-line no-await-in-loop -- one store each
       await store.spawn();
       expect(store.getState().verdict).toMatchObject({ kind: "unqueued", mayHaveLanded, retry: expect.anything() });
@@ -740,12 +773,12 @@ describe("auto's error paths", () => {
       client.onCreate = async () => {
         throw new RequestFailure(reason, message, "relay");
       };
-      const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+      const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
       // oxlint-disable-next-line no-await-in-loop -- one store each
       await store.spawn();
       const verdict = store.getState().verdict;
       if (verdict === null) throw new Error("no verdict");
-      const { body } = describeVerdict(verdict, "dev-a", [], 0, null);
+      const { body } = describeVerdict(verdict, [], {}, 0, null);
       expect(body.match(/may have/gu)).toHaveLength(1);
       expect(body).not.toContain("store-put");
       expect(body).toMatch(/^[A-Z].*\.$/u);
@@ -763,7 +796,7 @@ describe("auto's error paths", () => {
     ] as const) {
       const client = new ScriptedClient();
       client.onCreate = async () => ({ ok: false, code });
-      const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+      const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
       // oxlint-disable-next-line no-await-in-loop -- one store each
       await store.spawn();
       const verdict = store.getState().verdict;
@@ -782,7 +815,7 @@ describe("auto's error paths", () => {
       const listed = Array.from({ length: count }, (_, i) => ({ taskId: `j-${i}`, version: 1, reason: "unopenable" }));
       client.onQueue = async () => ({ tasks: [], holds: [], unreadable: listed, at: 1 });
       client.onCreate = async () => ({ ok: false, code: "store_full" });
-      const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+      const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
       // oxlint-disable-next-line no-await-in-loop -- one store each
       await store.refreshQueue();
       // oxlint-disable-next-line no-await-in-loop -- as above
@@ -798,14 +831,14 @@ describe("auto's error paths", () => {
   test("a store answer this build cannot read may have landed, and can be re-put", async () => {
     const client = new ScriptedClient();
     client.onCreate = async () => null;
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
     await store.spawn();
     expect(store.getState().verdict).toMatchObject({ kind: "unqueued", mayHaveLanded: true, retry: expect.anything() });
   });
 
   test("a created task becomes the queued verdict as the app's own copy, and the prompt clears", async () => {
     const client = new ScriptedClient();
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
     await store.spawn();
     const created = firstCreate(client);
     expect(created).toMatchObject({ state: "queued", spec: { repo: ORIGIN, prompt: "fix it" } });
@@ -816,7 +849,7 @@ describe("auto's error paths", () => {
 
   test("following stops once the task is running", async () => {
     const client = new ScriptedClient();
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
     await store.spawn();
     const created = firstCreate(client);
     expect(store.getState().verdict).toMatchObject({ kind: "queued", task: { state: "queued" } });
@@ -837,7 +870,7 @@ describe("auto's error paths", () => {
 
   test("following stops and says so when the leader refuses the read", async () => {
     const client = new ScriptedClient();
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
     await store.spawn();
     client.onQueue = async () => ({ ok: false, code: "invalid_request", message: "?" });
     timers.fire(QUEUE_POLL_MS);
@@ -871,7 +904,7 @@ describe("auto's error paths", () => {
     expect(followEnd(store)).toEqual({ kind: "unlisted" });
     const verdict = store.getState().verdict;
     if (verdict === null) throw new Error("no verdict");
-    const { body } = describeVerdict(verdict, "dev-a", [], 0, null);
+    const { body } = describeVerdict(verdict, [], {}, 0, null);
     expect(body).toContain("still in the queue");
     expect(body).not.toContain("stopped answering");
     detach();
@@ -892,7 +925,7 @@ describe("auto's error paths", () => {
     expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
     const verdict = store.getState().verdict;
     if (verdict === null) throw new Error("no verdict");
-    expect(describeVerdict(verdict, "dev-a", [], 0, null).body).toEndWith("no longer in the queue.");
+    expect(describeVerdict(verdict, [], {}, 0, null).body).toEndWith("no longer in the queue.");
     detach();
   });
 
@@ -919,7 +952,7 @@ describe("auto's error paths", () => {
 
   test("missed polls keep what was shown and ask again; out of polls, it says what it last knew may be stale", async () => {
     const client = new ScriptedClient();
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
     await store.spawn();
     const created = firstCreate(client);
     client.onQueue = async () => {
@@ -942,7 +975,7 @@ describe("auto's error paths", () => {
     client.onQueue = async () => {
       throw new RequestFailure("no_leader", "no scheduler is leading");
     };
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
     await store.spawn();
     expect(store.getState().verdict).toMatchObject({ kind: "queued" });
     expect(client.creates).toHaveLength(1);
@@ -967,8 +1000,8 @@ describe("auto's error paths", () => {
     client.onPreview = async () => {
       throw new RequestFailure("no_leader", "no scheduler is leading");
     };
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true });
-    store.selectAuto();
+    const store = new Store(client, { ...DEFAULT_FORM });
+    store.pickMachine(null);
     await until(() => store.getState().preview?.kind === "failed", "the preview to fail");
     expect(store.getState().preview).toMatchObject({
       kind: "failed",
@@ -978,7 +1011,7 @@ describe("auto's error paths", () => {
 
   test("a queue-changed naming the followed task reads it without spending a poll; one naming another does not", async () => {
     const client = new ScriptedClient();
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
     const detach = store.attach();
     await store.spawn();
     const created = firstCreate(client);
@@ -1000,7 +1033,7 @@ describe("auto's error paths", () => {
 
   test("a nudge with no ids reads the followed task too, and spends nothing when the read misses", async () => {
     const client = new ScriptedClient();
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
     const detach = store.attach();
     await store.spawn();
     client.onQueue = async () => {
@@ -1016,7 +1049,7 @@ describe("auto's error paths", () => {
 
   test("a slow poll answered after a newer read settled the verdict does not walk it back", async () => {
     const client = new ScriptedClient();
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
     const detach = store.attach();
     await store.spawn();
     const created = firstCreate(client);
@@ -1042,7 +1075,7 @@ describe("auto's error paths", () => {
 
   test("a poll answered after a newer unsettled read is dropped, and its follow carries on", async () => {
     const client = new ScriptedClient();
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
     const detach = store.attach();
     await store.spawn();
     const created = firstCreate(client);
@@ -1283,7 +1316,7 @@ describe("the queue screen", () => {
     const client = new ScriptedClient();
     client.onPreview = async () => ({ decision: DECISION });
     const store = await loaded(client);
-    store.selectAuto();
+    store.pickMachine(null);
     await until(() => store.getState().preview?.kind === "ok", "the first preview");
     client.previews.length = 0;
 
@@ -1376,7 +1409,7 @@ describe("the queue screen", () => {
 
   test("a nudge naming the followed task asks the leader once: the queue read it set off updates the verdict too", async () => {
     const client = new ScriptedClient();
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
     const detach = store.attach();
     await store.spawn();
     const created = firstCreate(client);
@@ -1393,7 +1426,7 @@ describe("the queue screen", () => {
 
   test("a reconnect while a queued verdict waits reads that task once, spending no poll", async () => {
     const client = new ScriptedClient();
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
     const detach = store.attach();
     await store.spawn();
     const created = firstCreate(client);
@@ -1600,6 +1633,108 @@ describe("the queue screen", () => {
   });
 });
 
+describe("pinning a task", () => {
+  const home = (id: string, accountId: string | null): ExclaveInfo => ({
+    id,
+    authOk: accountId !== null,
+    accountId,
+    email: `${id}@acme.dev`,
+    extraUsageEnabled: null,
+    skills: [],
+  });
+  const clone = (exclave: string): Machine["repos"] => [
+    { name: "app", path: "/r/app", defaultBranch: "main", origin: ORIGIN, exclave },
+  ];
+  /** dev-a leads and advertises the account pin; dev-b is signed in to another account. */
+  const pinning = (capabilities: string[] = [CAPABILITIES.pinAccount]): ScriptedClient =>
+    new ScriptedClient({
+      machines: [
+        autoMachine("dev-a", { capabilities, exclaves: [home("work", "acct-w")], repos: clone("work") }),
+        autoMachine("dev-b", { exclaves: [home("home", "acct-h")], repos: clone("home") }),
+      ],
+    });
+  const form = { ...DEFAULT_FORM, prompt: "fix it" };
+
+  test("a plain form writes no pin", async () => {
+    const client = pinning();
+    await new Store(client, form).spawn();
+    expect(firstCreate(client).spec).not.toHaveProperty("pin");
+  });
+
+  test("a machine pin and an account pin go into the spec as ids, and nothing else", async () => {
+    const client = pinning();
+    await new Store(client, { ...form, machine: "dev-b" }).spawn();
+    expect(firstCreate(client).spec.pin).toEqual({ deviceId: "dev-b" });
+
+    const both = pinning();
+    await new Store(both, { ...form, machine: "dev-a", account: "acct-w" }).spawn();
+    expect(firstCreate(both).spec.pin).toEqual({ deviceId: "dev-a", account: "acct-w" });
+  });
+
+  test("an account's name and email stay out of the spec: the pin carries the id", async () => {
+    const client = pinning();
+    Object.defineProperty(client, "accountsNamed", { value: true });
+    client.accountStoreKey = async () => "account:k-w";
+    client.getAccountRecord = async (recordKey) => ({ ok: true, key: recordKey, version: 0, entry: null });
+    client.putAccountAlias = async (accountId, name, version) => {
+      const record = accountRecord(accountId, name, version + 1);
+      if (record === null) throw new Error("bad record");
+      return { ok: true, key: "account:k-w", record };
+    };
+    const store = new Store(client, { ...form, account: "acct-w" });
+    expect(await store.renameAccount("acct-w", "Secret Name")).toBe(true);
+    // Both names are display state, so a leak into the spec would be a copy of what the form shows.
+    expect(store.getState().accounts.aliases).toEqual({ "acct-w": "Secret Name" });
+    expect(deriveView(store.getState(), Date.now()).accountTile.value).toBe("Secret Name");
+
+    await store.spawn();
+    const sealed = JSON.stringify(firstCreate(client).spec);
+    expect(sealed).toContain("acct-w");
+    expect(sealed).not.toContain("Secret Name");
+    expect(sealed).not.toContain("work@acme.dev");
+  });
+
+  test("an account pin the leader can't take is refused before anything is written", async () => {
+    const client = pinning([]);
+    const store = new Store(client, { ...form, account: "acct-w" });
+    await store.spawn();
+    expect(client.creates).toEqual([]);
+    expect(store.getState().verdict).toMatchObject({ kind: "unqueued", mayHaveLanded: false });
+    const { verdict } = store.getState();
+    if (verdict === null) throw new Error("no verdict");
+    expect(describeVerdict(verdict, [], {}, 0, null).body).toContain("update seanced");
+  });
+
+  test("an account no machine is signed in to is refused, and the form keeps its pin", async () => {
+    const client = pinning();
+    const store = new Store(client, { ...form, account: "acct-gone" });
+    await store.spawn();
+    expect(client.creates).toEqual([]);
+    expect(store.getState().verdict).toMatchObject({ kind: "unqueued", mayHaveLanded: false });
+    expect(store.getState().form.account).toBe("acct-gone");
+  });
+
+  test("a machine that leaves the registry resets the machine pick and keeps the account", () => {
+    const client = pinning();
+    const store = new Store(client, { ...form, machine: "dev-b", account: "acct-w" });
+    const detach = store.attach();
+    client.emit({ machines: client.relay.machines.filter((m) => m.deviceId !== "dev-b") });
+    expect(store.getState().form).toMatchObject({ machine: null, account: "acct-w" });
+    detach();
+  });
+
+  test("picking either side drops a repo the new scope doesn't hold, and never touches the other pick", () => {
+    const client = pinning();
+    const store = new Store(client, { ...form, repo: ORIGIN, machine: "dev-b" });
+    store.pickAccount("acct-w");
+    // acct-w is signed in on dev-a only, so dev-b's clone is out of scope for the pair.
+    expect(store.getState().form).toMatchObject({ repo: null, machine: "dev-b", account: "acct-w" });
+    store.pickAccount(null);
+    store.pickMachine(null);
+    expect(store.getState().form).toMatchObject({ machine: null, account: null });
+  });
+});
+
 describe("authoring a task from the auto form", () => {
   let timers: ReturnType<typeof captureTimers>;
   let fake: ReturnType<typeof fakeHistory>;
@@ -1620,7 +1755,7 @@ describe("authoring a task from the auto form", () => {
       machines: [autoMachine("dev-a", { capabilities: [CAPABILITIES.reportedDone] }), autoMachine("dev-b")],
     });
   const BATCH = { id: "b-1", strategy: { mode: "sequential" }, next: 1 } as const;
-  const form = { ...DEFAULT_FORM, auto: true, prompt: "fix it" };
+  const form = { ...DEFAULT_FORM, prompt: "fix it" };
 
   test("deps, batch and Linear go into the spec, with no `until` unless it was changed, and then reset or advance", async () => {
     const client = new ScriptedClient();
@@ -1789,7 +1924,7 @@ describe("authoring a task from the auto form", () => {
     fake.settle(store);
     expect(fake.index()).toBe(0);
     expect(store.getState()).toMatchObject({ queue: false, verdict: null, queueNotice: null });
-    expect(store.getState().form).toMatchObject({ auto: true, after: [{ task: "base", after: "opened" }] });
+    expect(store.getState().form).toMatchObject({ after: [{ task: "base", after: "opened" }] });
     expect(created.id).not.toBe("base");
   });
 
@@ -1799,7 +1934,6 @@ describe("authoring a task from the auto form", () => {
     wide.followUp("base");
     expect(fake.index()).toBe(0);
     expect(wide.getState().form).toMatchObject({
-      auto: true,
       prompt: "keep",
       after: [{ task: "base", after: "opened" }],
     });
@@ -1807,5 +1941,21 @@ describe("authoring a task from the auto form", () => {
     const away = new Store(new ScriptedClient({ status: "retrying" }), DEFAULT_FORM);
     away.followUp("base");
     expect(away.getState().form).toEqual(DEFAULT_FORM);
+  });
+
+  test("a follow-up resets both pickers to auto, and keeps the rest of the form", () => {
+    const store = new Store(new ScriptedClient(), {
+      ...DEFAULT_FORM,
+      prompt: "keep",
+      machine: "dev-b",
+      account: "acct-w",
+    });
+    store.followUp("base");
+    expect(store.getState().form).toMatchObject({
+      machine: null,
+      account: null,
+      prompt: "keep",
+      after: [{ task: "base", after: "opened" }],
+    });
   });
 });

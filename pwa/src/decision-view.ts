@@ -1,4 +1,6 @@
 import {
+  accountNameIn,
+  knownAccounts,
   reasonText,
   taskFailureText,
   type Candidate,
@@ -236,6 +238,51 @@ export function taskHeadline(task: Task, machines: readonly Machine[], now: numb
     case "cancelled":
       return task.leftRunning === true ? `Cancelled — its session may still be running${place}.` : "Cancelled.";
   }
+}
+
+/** How many rejected places a wait reason names before "+N more". */
+const WAITING_LIMIT = 3;
+
+/**
+ * Why a ready task is still waiting, from its decision: each place that took it
+ * out and the reasons, the clause `reasonText` words. Places the pin or the
+ * avoid list rules out (`pin_mismatch`, `avoided`) are left out whole — the pin is the ask, not news.
+ * Null with no decision yet, or one that chose a place.
+ */
+export function waitingText(task: Task): string | null {
+  const { decision } = task;
+  if (task.state !== "ready" || decision === undefined || decision.chosen !== null) return null;
+  const places = decision.candidates
+    // A place the pin or the avoid list rules out is moot whatever else is wrong with it (an offline machine
+    // the task was never going to use is not news).
+    .filter((candidate) => !candidate.rejected.some((r) => r.code === "pin_mismatch" || r.code === "avoided"))
+    .map((candidate) => ({ where: where(candidate), why: candidate.rejected.map(reasonText) }))
+    .filter((place) => place.why.length > 0)
+    .map((place) => `${place.where}: ${place.why.join(", ")}`);
+  if (places.length === 0) return null;
+  const more = places.length - WAITING_LIMIT;
+  return `${places.slice(0, WAITING_LIMIT).join("; ")}${more > 0 ? `; +${more} more` : ""}`;
+}
+
+/** "Pinned to <machine> · <account>" for a pinned task; null otherwise. The labels are display text from the registry. */
+export function pinLine(
+  task: Task,
+  machines: readonly Machine[],
+  aliases: Readonly<Record<string, string>>,
+): string | null {
+  const { pin } = task.spec;
+  if (pin === undefined) return null;
+  const parts: string[] = [];
+  if (pin.deviceId !== undefined) {
+    parts.push(machines.find((m) => m.deviceId === pin.deviceId)?.name ?? pin.deviceId.slice(0, 8));
+  }
+  if (pin.account !== undefined) {
+    const known = knownAccounts(machines, [pin.account]);
+    parts.push(
+      accountNameIn(known, pin.account, Object.hasOwn(aliases, pin.account) ? aliases[pin.account] : undefined),
+    );
+  }
+  return parts.length === 0 ? null : `Pinned to ${parts.join(" · ")}`;
 }
 
 /** Keyed on `assignment`, not the state: a waiting task marked done was never placed, so its decision stays a "would". */

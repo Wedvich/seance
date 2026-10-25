@@ -97,7 +97,7 @@ This first deploy is by hand; afterwards CI redeploys the relay on every push to
 and a CI deploy leaves it alone — as does `SCHEDULER_LEADERS`, the second secret,
 set in step 4 once your machines have ids. Until it is set no machine leads the
 scheduler, so **Auto** queues the task and it waits there until one does (no
-preview, no placement); direct spawns don't need it.
+preview, no placement); `seanced spawn --now` doesn't need it.
 
 Note the `<subdomain>` in the printed URL — steps 3 and 4 derive their URLs
 from it.
@@ -320,17 +320,16 @@ checkout's `daemon/src/main.ts session-event` with `bun` from PATH, so it needs 
 ### From the phone
 
 Type what the session should do — or leave the prompt blank to start an empty one —
-then pick where it runs. Four tiles open pickers: **machine**, **repository**,
-**model** (Fable / Opus / Sonnet / Haiku), and **effort** (Low through Max). **Fresh
-worktree** is on by default; switching it off runs the session in the repo as it
-stands. Then start it.
+then pick where it runs. Tiles open pickers: **machine**, **account**, **repository**,
+**model** (Fable / Opus / Sonnet / Haiku), and **effort** (Low through Max), plus the
+authoring ones below. **Fresh worktree** is on by default; switching it off runs the
+session in the repo as it stands. Then queue it.
 
-The verdict names the tmux window it created, and from there you continue the session
-in the Claude app like any other. Two things keep you from spawning duplicates: the
-header counts sessions across every machine (`2 online · 1 asleep · 3 sessions`), and
-the footer counts what is already running on the machine you picked. The repo list
-comes from that daemon's last scan — **↻ Rescan repos** in the repository picker
-refreshes it, and a spawn that cannot find its repo offers to rescan and retry.
+Every spawn from the phone is a queued task: the app never starts a session on a machine
+itself. The verdict names the task and follows it until it is running, then you continue
+the session in the Claude app like any other. The header counts sessions across every
+machine (`2 online · 1 asleep · 3 sessions`), and the footer says who places the task —
+the scheduler, or the machine you pinned.
 
 A machine you have retired keeps its place in the picker with a stale last-seen —
 the relay never expires an entry. The bin on an offline row deletes it there, so it
@@ -340,21 +339,29 @@ daemon connects again. `seanced uninstall` deletes it for you on the way out; un
 
 There is no title field: the daemon names the tmux window after the prompt.
 
-**Auto** at the top of the machine picker lets the scheduler choose: the repository
-picker then lists repos by origin, across every machine that has a clone, and a
-placement preview under the tiles says where it would start and why each other
-machine lost. **Queue on auto** puts the task in the relay's queue, and the verdict
-follows it until it is running, with the decision behind it. With no scheduler leading
+The machine's repo list comes from its daemon's last scan. **↻ Rescan** sits on that
+machine's row in the Machine picker (offline machines can't answer it, and one rescan runs
+at a time); it refreshes the list and the row shows when it last scanned.
+
+The **Machine** and **Account** pickers each start on **Auto**, which lets the scheduler
+choose; picking a machine or an account pins the task to it. The repository picker lists
+repos by origin, across every machine that has a clone (narrowed to the picked machine and
+account), and with both pickers on Auto a placement preview under the tiles says where it
+would start and why each other machine lost. **Queue** (or **Queue on <machine>**) puts the
+task in the relay's queue, and the queued verdict
+shows the decision behind it, and why it waits while it does. With no scheduler leading
 (no machine on the relay's `SCHEDULER_LEADERS` is connected — step 4), or one that
 can't be verified (its registry entry doesn't open with your key), the task still
 queues and waits there until one does; only the placement preview needs a leader.
-Auto is greyed only when the app isn't connected to the relay. **Queue** (a column on
+Queuing is greyed only when the app isn't connected to the relay. A pinned task waits for
+its machine or account when it is offline or over a limit, and says why; pinning an
+account needs a leader that supports it, and says so otherwise. The **Queue screen** (a column on
 desktop, in the header menu on a phone) shows everything queued: what needs you, what
 is running or waiting, and what finished, with **Cancel** and **Mark done** (each takes
 a second tap when it would end a running session), and **Pause** / **Resume**. The app
 pauses the whole queue only; a hold on one account shows with its own **Resume**, but
-no client sets one yet. Picking a machine directly always works, with or without a
-scheduler.
+no client sets one yet. `seanced spawn --now` starts a session directly on a machine,
+with or without a scheduler.
 
 Upgrading into the queue: until the machine leading the scheduler runs a build with
 it, tasks an updated app or `seanced mcp` queues sit unrun, and an older app's

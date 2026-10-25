@@ -1,7 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import type { Machine, RelayState } from "@seance/shared";
-import { DEFAULT_FORM } from "../../../pwa/src/state.ts";
-import { resolveMachine as pwaResolveMachine, resolveRepo as pwaResolveRepo } from "../../../pwa/src/view.ts";
 import {
   checkSubmit,
   initialValues,
@@ -328,85 +325,5 @@ describe("nextLastUsed", () => {
 
   test("does not invent an entry when nothing was selected", () => {
     expect(nextLastUsed(null, values()).repos).toEqual({});
-  });
-});
-
-function relayOf(machines: readonly Machine[]): RelayState {
-  return {
-    status: "open",
-    rejection: null,
-    machines,
-    registrySize: machines.length,
-    ignored: 0,
-    unbound: 0,
-    skewed: 0,
-    settling: false,
-    registrySettled: true,
-    scheduler: { kind: "none" },
-    fleetQuota: [],
-  };
-}
-
-/**
- * pickMachine and pickRepo document themselves as the PWA's resolveMachine /
- * resolveRepo fallback policy, extended only by the named-default preference
- * (inert here: machineName is ""). Asserted the way credentials.test.ts pins
- * the daemon: import the PWA's own functions, feed both sides equivalent
- * inputs, and require the same choice. `reconcile` is the exported surface the
- * pickers sit behind.
- */
-describe("drift guard: fallback policy agrees with pwa/src/view.ts", () => {
-  function pwaMachine(overrides: Partial<Machine> = {}): Machine {
-    return { ...machine(), platform: "darwin", ...overrides };
-  }
-
-  function expectAgreement(
-    machines: readonly Machine[],
-    machineId: string | null,
-    repos: Readonly<Record<string, string>>,
-  ): void {
-    const chosen = pwaResolveMachine(relayOf(machines), machineId);
-    const repo = pwaResolveRepo(chosen, { ...DEFAULT_FORM, machineId, repos });
-    const lastUsed: LastUsed = { machineId, repos, model: "opus", effort: "medium", worktree: true };
-    const ours = reconcile(values({ machineId }), machines, { cached: machines, lastUsed, defaults });
-    expect(ours.values.machineId).toBe(chosen?.deviceId ?? null);
-    expect(ours.values.repo).toBe(repo?.name ?? null);
-  }
-
-  const twoRepos = [
-    { name: "api", path: "/a", defaultBranch: null },
-    { name: "www", path: "/w", defaultBranch: null },
-  ];
-
-  test("a remembered machine still present keeps its remembered repo", () => {
-    expectAgreement(
-      [pwaMachine(), pwaMachine({ deviceId: "device-2", name: "desktop", repos: twoRepos })],
-      "device-2",
-      { "device-2": "www" },
-    );
-  });
-
-  test("a remembered machine that is gone falls to the first connected", () => {
-    expectAgreement(
-      [pwaMachine({ connected: false }), pwaMachine({ deviceId: "device-2", name: "desktop" })],
-      "gone",
-      {},
-    );
-  });
-
-  test("nothing connected falls to the first listed", () => {
-    expectAgreement(
-      [pwaMachine({ connected: false }), pwaMachine({ deviceId: "device-2", connected: false })],
-      null,
-      {},
-    );
-  });
-
-  test("a remembered repo that is gone falls to the machine's first", () => {
-    expectAgreement([pwaMachine({ repos: twoRepos })], "device-1", { "device-1": "vanished" });
-  });
-
-  test("an empty registry resolves nothing on either side", () => {
-    expectAgreement([], "device-1", {});
   });
 });

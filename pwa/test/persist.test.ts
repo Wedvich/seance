@@ -18,7 +18,7 @@ Object.defineProperty(globalThis, "localStorage", {
   },
 });
 
-const { dropLegacyHidden, readForm, readPending, writeForm, writePending } = await import("../src/persist.ts");
+const { dropLegacyHidden, dropLegacyPending, readForm, writeForm } = await import("../src/persist.ts");
 const { DEFAULT_FORM } = await import("../src/state.ts");
 
 beforeEach(() => store.clear());
@@ -28,10 +28,9 @@ const TASK = "3f1c2b7e-9d4a-4c1e-8a55-0b6f2d9e7a10";
 describe("form persistence", () => {
   test("round-trips a form", () => {
     const form = {
-      machineId: "dev-1",
-      auto: true,
-      autoRepo: "github.com/acme/app",
-      repos: { "dev-1": "seance" },
+      machine: "dev-1",
+      account: "acct-1",
+      repo: "github.com/acme/app",
       prompt: "port the pane",
       worktree: false,
       model: "fable",
@@ -45,11 +44,24 @@ describe("form persistence", () => {
     expect(readForm()).toEqual(form);
   });
 
-  test("a form from before authoring reads with the authoring fields at their defaults", () => {
+  test("a legacy auto form reads as auto/auto: autoRepo becomes repo, a saved machineId is not a pin (D2)", () => {
     store.set(
       "seance:form",
-      JSON.stringify({ machineId: "dev-1", auto: true, prompt: "old", worktree: true, model: "opus", effort: "high" }),
+      JSON.stringify({ machineId: "dev-1", auto: true, autoRepo: "github.com/acme/app", repos: { "dev-1": "x" } }),
     );
+    expect(readForm()).toMatchObject({ machine: null, account: null, repo: "github.com/acme/app" });
+  });
+
+  test("a legacy direct-spawn form (auto false) leaves repo null: its autoRepo is stale", () => {
+    store.set(
+      "seance:form",
+      JSON.stringify({ machineId: "dev-1", auto: false, autoRepo: "github.com/acme/app", repos: { "dev-1": "x" } }),
+    );
+    expect(readForm()).toMatchObject({ machine: null, account: null, repo: null });
+  });
+
+  test("a form from before authoring reads with the authoring fields at their defaults", () => {
+    store.set("seance:form", JSON.stringify({ prompt: "old", worktree: true, model: "opus", effort: "high" }));
     expect(readForm()).toMatchObject({ after: [], until: "merged", linearIssue: "", batch: null, prompt: "old" });
   });
 
@@ -117,28 +129,16 @@ describe("form persistence", () => {
   });
 
   test("ignores wrongly typed fields rather than trusting them", () => {
-    store.set(
-      "seance:form",
-      JSON.stringify({ machineId: 7, repos: { "dev-1": 3, "dev-2": "seance" }, prompt: null, worktree: "yes" }),
-    );
-    expect(readForm()).toEqual({ ...DEFAULT_FORM, machineId: null, repos: { "dev-2": "seance" }, prompt: "" });
+    store.set("seance:form", JSON.stringify({ machine: 7, account: false, repo: 3, prompt: null, worktree: "yes" }));
+    expect(readForm()).toEqual({ ...DEFAULT_FORM, prompt: "" });
   });
 });
 
-describe("pending spawn persistence", () => {
-  test("round-trips and clears", () => {
-    const pending = { machineId: "dev-1", repo: "seance", requestedAt: 1_800_000_000_000 };
-    writePending(pending);
-    expect(readPending()).toEqual(pending);
-    writePending(null);
-    expect(readPending()).toBeNull();
-  });
-
-  // A half-written entry must not resurrect a reconciliation for a machine that
-  // was never asked.
-  test("rejects an incomplete entry", () => {
-    store.set("seance:pending", JSON.stringify({ machineId: "dev-1" }));
-    expect(readPending()).toBeNull();
+describe("the legacy pending-spawn entry", () => {
+  test("is cleared, so a lost-reply record from an older build cannot linger", () => {
+    store.set("seance:pending", JSON.stringify({ machineId: "dev-1", repo: "seance", requestedAt: 1 }));
+    dropLegacyPending();
+    expect(store.get("seance:pending")).toBeUndefined();
   });
 });
 
