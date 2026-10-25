@@ -2,8 +2,10 @@
 // with the rest of the client's suites; a double stands in for the relay
 // because the real one answers no store frame until scheduler M3 item 1.
 import {
+  accountStoreKey,
   APP_ID,
   AT_REST_OPS,
+  importAccountKey,
   importPsk,
   isRecord,
   openAtRest,
@@ -12,6 +14,7 @@ import {
   RelayClient,
   failureReasonText,
   RequestFailure,
+  sealAccountRecord,
   sealTaskRecord,
   taskKey,
   TASK_REQUEST_LIMITS,
@@ -28,8 +31,10 @@ import { pollUntil } from "./poll.ts";
 const TOKEN = "test-bearer-token";
 let key: CryptoKey;
 let otherKey: CryptoKey;
+let accountKey: CryptoKey;
 
 beforeAll(async () => {
+  accountKey = await importAccountKey(toBase64(new Uint8Array(32).fill(7)));
   key = await importPsk(toBase64(new Uint8Array(32).fill(7)));
   otherKey = await importPsk(toBase64(new Uint8Array(32).fill(9)));
 });
@@ -125,11 +130,12 @@ function startDouble(): StoreDouble {
   return double;
 }
 
-async function connect(double: StoreDouble, storeTimeoutMs = 5_000): Promise<RelayClient> {
+async function connect(double: StoreDouble, storeTimeoutMs = 5_000, withAccountKey = false): Promise<RelayClient> {
   const client = new RelayClient({
     url: double.url,
     token: TOKEN,
     key,
+    ...(withAccountKey ? { accountKey } : {}),
     storeTimeoutMs,
     createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
     log: () => {},
@@ -315,6 +321,123 @@ describe("reading tasks", () => {
     const other = await stored(queued(), 1);
     double.answer = (frame) => ({ t: "store-record", re: frame["id"], record: other });
     expect(await client.getTask(crypto.randomUUID())).toBeNull();
+  });
+});
+
+const ACCOUNT_ID = "org-uuid:account-uuid";
+
+async function storedAccount(
+  accountId: string,
+  alias: string | null,
+  version: number,
+  at?: string,
+): Promise<StoreRecord> {
+  return {
+    key: at ?? (await accountStoreKey(accountKey, accountId)),
+    version,
+    env: await sealAccountRecord(key, APP_ID, { version, accountId, alias }),
+  };
+}
+
+describe("account records", () => {
+  test("a rename is a compare-and-set: create at 0, overwrite at the held version, a stale expect conflicts", async () => {
+    const double = startDouble();
+    const client = await connect(double, 5_000, true);
+    const at = await client.accountStoreKey(ACCOUNT_ID);
+
+    const created = await client.putAccountAlias(ACCOUNT_ID, "work", 0);
+    expect(created).toEqual({ ok: true, key: at, record: { version: 1, accountId: ACCOUNT_ID, alias: "work" } });
+    expect(await client.getAccountRecord(at)).toEqual({
+      ok: true,
+      key: at,
+      version: 1,
+      entry: { version: 1, accountId: ACCOUNT_ID, alias: "work" },
+    });
+
+    const renamed = await client.putAccountAlias(ACCOUNT_ID, "  home ", 1);
+    expect(renamed).toEqual({ ok: true, key: at, record: { version: 2, accountId: ACCOUNT_ID, alias: "home" } });
+    expect(double.records.get(at)?.version).toBe(2);
+
+    // Never mapped to success, unlike a task create: the other client's name would be lost.
+    expect(await client.putAccountAlias(ACCOUNT_ID, "stale", 1)).toEqual({ ok: false, code: "version_conflict" });
+    expect(await client.putAccountAlias(ACCOUNT_ID, "stale", 0)).toEqual({ ok: false, code: "version_conflict" });
+    const cleared = await client.putAccountAlias(ACCOUNT_ID, "", 2);
+    expect(cleared).toEqual({ ok: true, key: at, record: { version: 3, accountId: ACCOUNT_ID, alias: null } });
+  });
+
+  test("refuses locally, sending nothing, an alias past the bound", async () => {
+    const double = startDouble();
+    const client = await connect(double, 5_000, true);
+    expect(await client.putAccountAlias(ACCOUNT_ID, "x".repeat(65), 0)).toEqual({ ok: false, code: "invalid_request" });
+    expect(double.received).toEqual([]);
+  });
+
+  test("a get for a key outside account: sends nothing; an absent key reads as version 0", async () => {
+    const double = startDouble();
+    const client = await connect(double, 5_000, true);
+    expect(await client.getAccountRecord(taskKey(crypto.randomUUID()))).toBeNull();
+    expect(await client.getAccountRecord("account:not a key")).toBeNull();
+    expect(double.received).toEqual([]);
+    const absent = await client.accountStoreKey(ACCOUNT_ID);
+    expect(await client.getAccountRecord(absent)).toEqual({ ok: true, key: absent, version: 0, entry: null });
+  });
+
+  test("a get answered with another key's record is no answer", async () => {
+    const double = startDouble();
+    const client = await connect(double, 5_000, true);
+    const other = await storedAccount("org-uuid:other", "home", 1);
+    double.answer = (frame) => ({ t: "store-record", re: frame["id"], record: other });
+    expect(await client.getAccountRecord(await client.accountStoreKey(ACCOUNT_ID))).toBeNull();
+  });
+
+  test("an unreadable record comes back with its reason and the relay's version, for a rename to overwrite", async () => {
+    const double = startDouble();
+    const client = await connect(double, 5_000, true);
+    const at = await client.accountStoreKey(ACCOUNT_ID);
+    // An authentic version-1 blob put back by overwrite: the relay now holds it at 2.
+    double.records.set(at, { ...(await storedAccount(ACCOUNT_ID, "old", 1)), version: 2 });
+    expect(await client.getAccountRecord(at)).toEqual({
+      ok: true,
+      key: at,
+      version: 2,
+      entry: { key: at, version: 2, reason: "version_mismatch" },
+    });
+    expect(await client.putAccountAlias(ACCOUNT_ID, "new", 2)).toEqual({
+      ok: true,
+      key: at,
+      record: { version: 3, accountId: ACCOUNT_ID, alias: "new" },
+    });
+  });
+
+  test("a listing reports a record under the wrong key as unreadable, the rest still read", async () => {
+    const double = startDouble();
+    const client = await connect(double, 5_000, true);
+    const good = await storedAccount(ACCOUNT_ID, "work", 1);
+    const planted = await storedAccount(ACCOUNT_ID, "forged", 1, `account:${"0".repeat(64)}`);
+    for (const record of [good, planted]) double.records.set(record.key, record);
+    const listing = await client.listAccounts();
+    expect(listing).toEqual({
+      ok: true,
+      accounts: [{ key: good.key, record: { version: 1, accountId: ACCOUNT_ID, alias: "work" } }],
+      unreadable: [{ key: planted.key, version: 1, reason: "key_mismatch" }],
+    });
+  });
+
+  test("hands back a refusal raw, and a client without an account key is unsupported before anything is sent", async () => {
+    const double = startDouble();
+    const bare = await connect(double);
+    expect(bare.accountsNamed).toBe(false);
+    expect(await failure(bare.listAccounts())).toBe("unsupported");
+    expect(await failure(bare.getAccountRecord("account:" + "a".repeat(64)))).toBe("unsupported");
+    expect(await failure(bare.putAccountAlias(ACCOUNT_ID, "work", 0))).toBe("unsupported");
+    expect(await failure(bare.accountStoreKey(ACCOUNT_ID))).toBe("unsupported");
+    expect(double.received).toEqual([]);
+
+    const client = await connect(double, 5_000, true);
+    expect(client.accountsNamed).toBe(true);
+    double.answer = (frame) => ({ t: "store-refused", re: frame["id"], code: "store_full" });
+    expect(await client.putAccountAlias(ACCOUNT_ID, "work", 0)).toEqual({ ok: false, code: "store_full" });
+    expect(await client.listAccounts()).toEqual({ ok: false, code: "store_full" });
   });
 });
 

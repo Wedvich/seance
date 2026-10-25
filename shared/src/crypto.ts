@@ -19,12 +19,53 @@ export function fromBase64(b64: string): Uint8Array<ArrayBuffer> {
   return out;
 }
 
-export async function importPsk(pskBase64: string): Promise<CryptoKey> {
+function pskBytes(pskBase64: string): Uint8Array<ArrayBuffer> {
   const raw = fromBase64(pskBase64);
   if (raw.byteLength !== PSK_BYTES) {
     throw new Error(`PSK must be ${PSK_BYTES} bytes, got ${raw.byteLength}`);
   }
-  return crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt", "decrypt"]);
+  return raw;
+}
+
+export async function importPsk(pskBase64: string): Promise<CryptoKey> {
+  return crypto.subtle.importKey("raw", pskBytes(pskBase64), "AES-GCM", false, ["encrypt", "decrypt"]);
+}
+
+/**
+ * Salt and info of the account key's HKDF. The salt is public: it separates
+ * this derivation's domain, nothing more. Both are fixed for as long as
+ * `account:` has no delete path — changing either orphans every record into a
+ * slot nothing can free (DESIGN.md, "Account records").
+ */
+export const ACCOUNT_KEY_HKDF_SALT = "seance hkdf v1";
+export const ACCOUNT_KEY_HKDF_INFO = "seance account-key v1";
+
+/**
+ * The non-extractable HKDF base every PSK-derived key other than the AES one
+ * comes from. A client that persists this rather than a finished key can
+ * derive a later one without asking for the PSK again.
+ */
+export async function importPskBase(pskBase64: string): Promise<CryptoKey> {
+  return crypto.subtle.importKey("raw", pskBytes(pskBase64), "HKDF", false, ["deriveKey"]);
+}
+
+/**
+ * The HMAC key behind `account:<hmac>` keys. HKDF with its own info label keeps
+ * it apart from the AES-GCM key; non-extractable, so it can only sign.
+ */
+export async function deriveAccountKey(base: CryptoKey): Promise<CryptoKey> {
+  const utf8 = (text: string): Uint8Array<ArrayBuffer> => new Uint8Array(new TextEncoder().encode(text));
+  return crypto.subtle.deriveKey(
+    { name: "HKDF", hash: "SHA-256", salt: utf8(ACCOUNT_KEY_HKDF_SALT), info: utf8(ACCOUNT_KEY_HKDF_INFO) },
+    base,
+    { name: "HMAC", hash: "SHA-256", length: 256 },
+    false,
+    ["sign"],
+  );
+}
+
+export async function importAccountKey(pskBase64: string): Promise<CryptoKey> {
+  return deriveAccountKey(await importPskBase(pskBase64));
 }
 
 // Both ends must produce identical AAD bytes or nothing decrypts — this
