@@ -139,6 +139,9 @@ describe("deriveQueue", () => {
           task("dozing", { state: "needs-input", assignment: onB, escalated: true, needsInputSince: NOW - 3_600_000 }),
           task("ask", { state: "needs-input", assignment: placedAt }),
           task("stuck", { state: "needs-input", assignment: placedAt, escalated: true }),
+          task("back", { state: "lost", assignment: placedAt }),
+          task("nowhere", { state: "lost" }),
+          task("run", { state: "running", assignment: onB }),
         ]),
         {},
         { machines: [awake, asleep] },
@@ -146,7 +149,12 @@ describe("deriveQueue", () => {
       NOW,
     );
     const rows = view.sections.find((s) => s.title === "Needs you")?.rows ?? [];
-    expect(rows.map((r) => r.id)).toEqual(["stuck", "ask", "dozing", "lost"]);
+    expect(rows.map((r) => r.id)).toEqual(["stuck", "ask", "dozing", "lost", "back", "nowhere"]);
+    // Sleep reorders Needs you only: a running task on it is still Running.
+    expect(view.sections.find((s) => s.title === "Running")?.rows.map((r) => r.id)).toEqual(["run"]);
+    const settles = "Settles when its machine wakes; cancel or mark done to give up on it";
+    expect(rows[4]?.body).not.toBe(settles);
+    expect(rows[5]?.body).not.toBe(settles);
     expect(rows[3]).toMatchObject({
       headline: "Asleep on MacBook · default — its machine went to sleep 10m ago.",
       body: "Settles when its machine wakes; cancel or mark done to give up on it",

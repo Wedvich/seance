@@ -4895,8 +4895,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   prompt-cut view come from. It re-reads on every `queue-changed` (the named tasks only, merged
   into what it holds), on a reconnect and on a leader change. A named task the reply leaves out
   is dropped only if the store holds no record of it, the same rule as the verdict's. Tasks group by what each needs from
-  the owner: Needs you (escalated first, then `needs-input`, then `needs-input` on an asleep machine, then `lost`), Running, Waiting,
-  Awaiting merge, Finished, in the leader's order within each (`queue-view.ts`). A row shows the
+  the owner: Needs you (escalated first, then `needs-input`, then `needs-input` on an asleep
+  machine, then `lost`), Running, Waiting, Awaiting merge, Finished, in the leader's order within each (`queue-view.ts`). A row shows the
   task's title (its own, else its prompt's first line cut to 80, else its session's window name, else its repo), where it is and
   why, with the decision's record on tap — in the past tense once the task was placed ("spending
   credits", not "would spend"). A task whose session reported a PR (`Task.prUrl`, the newest one —
