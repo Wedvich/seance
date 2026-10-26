@@ -709,6 +709,92 @@ describe("authoring on a row", () => {
   });
 });
 
+describe("continuing a failed task", () => {
+  const CAN = [CAPABILITIES.continueTask];
+  const failed = task("f", {
+    state: "failed",
+    failure: { code: "session_failed", message: "the session ended with exit 137" },
+    spec: { repo: ORIGIN, mode: "worktree", title: "Fix the thing" },
+    assignment: placedAt,
+  });
+  const continuation = (fields: Partial<Task>): Task =>
+    task("c", { spec: { repo: ORIGIN, mode: "continue", continues: { task: "f", at: placedAt } }, ...fields });
+
+  /** The row for `id`, with the leader and the machine it ran on (both dev-a here) advertising `capabilities`. */
+  const rowOf = (tasks: readonly Task[], id: string, capabilities?: readonly string[], machines?: readonly Machine[]) =>
+    deriveQueue(
+      state(
+        ok(tasks),
+        {},
+        { machines: machines ?? [machine({ ...(capabilities === undefined ? {} : { capabilities }) })] },
+      ),
+      NOW,
+    )
+      .sections.flatMap((section) => section.rows)
+      .find((row) => row.id === id);
+
+  test("offered on a failed session when its machine and the leader both advertise it", () => {
+    expect(rowOf([failed], "f", CAN)?.canContinue).toBe(true);
+    expect(rowOf([failed], "f")?.canContinue).toBe(false);
+  });
+
+  test("a continuation the machine refused shows the daemon's reason", () => {
+    const refused = continuation({
+      state: "failed",
+      failure: { code: "not_continuable", message: "its worktree is locked (on a usb disk)" },
+    });
+    expect(rowOf([failed, refused], "c", CAN)?.body).toContain("its worktree is locked (on a usb disk)");
+  });
+
+  test("not offered when the leader cannot take a continue task, though the machine it ran on can", () => {
+    const leader = machine({ deviceId: "dev-leader", name: "Leader" });
+    const ran = machine({ capabilities: CAN });
+    const relay = { scheduler: { kind: "ready", deviceId: "dev-leader", term: 1 } } as const;
+    const row = deriveQueue(state(ok([failed]), {}, { machines: [ran, leader], ...relay }), NOW).sections[0]?.rows[0];
+    expect(row?.canContinue).toBe(false);
+  });
+
+  test("not offered while the leader is unverified or absent, or when the machine it ran on is gone", () => {
+    const unverified = { scheduler: { kind: "unverified", deviceId: "dev-a", term: 2 } } as const;
+    expect(
+      deriveQueue(state(ok([failed]), {}, { machines: [machine({ capabilities: CAN })], ...unverified }), NOW)
+        .sections[0]?.rows[0]?.canContinue,
+    ).toBe(false);
+    const elsewhere = machine({ deviceId: "dev-z", capabilities: CAN });
+    expect(rowOf([failed], "f", CAN, [elsewhere])?.canContinue).toBe(false);
+  });
+
+  test("only a failed session: not another failure, a task that ran in place, or one still going", () => {
+    const other = task("o", {
+      state: "failed",
+      failure: { code: "repo_not_found", message: "x" },
+      assignment: placedAt,
+    });
+    const inPlace = { ...failed, id: "p", spec: { repo: ORIGIN, mode: "here" } } satisfies Task;
+    const running = task("r", { state: "running", assignment: placedAt });
+    for (const t of [other, inPlace, running]) expect(rowOf([t], t.id, CAN)?.canContinue).toBe(false);
+  });
+
+  test("withdrawn once a continuation is past the queue in any state; a queued, blocked, failed or cancelled one does not hold it", () => {
+    for (const held of ["reserved", "running", "needs-input", "lost", "awaiting-merge", "done"] as const) {
+      expect(rowOf([failed, continuation({ state: held })], "f", CAN)?.canContinue, held).toBe(false);
+    }
+    for (const free of ["queued", "blocked", "ready", "failed", "cancelled"] as const) {
+      expect(rowOf([failed, continuation({ state: free })], "f", CAN)?.canContinue).toBe(true);
+    }
+  });
+
+  test("a continuation names what it continues, by title when listed, else by id; other rows carry no such line", () => {
+    expect(rowOf([failed, continuation({})], "c", CAN)?.continues).toBe("Continues Fix the thing");
+    expect(rowOf([continuation({})], "c", CAN)?.continues).toBe("Continues task f");
+    const long = continuation({
+      spec: { repo: ORIGIN, mode: "continue", continues: { task: "0123456789abcdef", at: placedAt } },
+    });
+    expect(rowOf([long], "c", CAN)?.continues).toBe("Continues task 01234567");
+    expect(rowOf([failed], "f", CAN)?.continues).toBeNull();
+  });
+});
+
 describe("deriveAfterSheet", () => {
   const form = { ...DEFAULT_FORM, auto: true };
 

@@ -812,6 +812,7 @@ export class Scheduler {
       ...(spec.model === undefined ? {} : { model: spec.model }),
       ...(spec.effort === undefined ? {} : { effort: spec.effort }),
       ...(spec.plan === undefined ? {} : { plan: spec.plan }),
+      ...(spec.continues === undefined ? {} : { continues: spec.continues.task }),
       client: SCHEDULER_CLIENT,
       taskId: task.id,
     });

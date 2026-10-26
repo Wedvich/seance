@@ -425,6 +425,8 @@ describe("parseTaskRequest", () => {
     for (const bad of [
       { ...minimal, repo: "" },
       { ...minimal, mode: "elsewhere" },
+      // A route preview has no target to continue at: only a stored spec carries the mode.
+      { ...minimal, mode: "continue" },
       { ...minimal, prompt: 1 },
       { ...minimal, plan: "yes" },
       { ...minimal, model: "" },
@@ -516,6 +518,44 @@ describe("parseTaskSpec", () => {
     ]) {
       expect(parseTaskSpec(bad)).toBeNull();
     }
+  });
+
+  describe("a continuation", () => {
+    const at = { deviceId: "dev-a", exclave: "default", clone: "app" };
+    const spec: TaskSpec = { ...request, mode: "continue", continues: { task: "t-old", at } };
+
+    test("round-trips: the mode and the field travel together", () => {
+      expect(parseTaskSpec(spec)).toEqual(spec);
+      expect(parseTaskSpec({ ...spec, continues: { task: "t-old", at, extra: 1 } })).toEqual(spec);
+    });
+
+    test("the field without the mode, or the mode without the field, is no spec", () => {
+      expect(parseTaskSpec({ ...spec, mode: "worktree" })).toBeNull();
+      expect(parseTaskSpec({ ...spec, mode: "here" })).toBeNull();
+      expect(parseTaskSpec({ ...request, mode: "continue" })).toBeNull();
+    });
+
+    test("a bad task id or target nulls the spec", () => {
+      for (const continues of [
+        { task: "has space", at },
+        { task: "", at },
+        { task: 7, at },
+        { task: "t-old" },
+        { task: "t-old", at: { ...at, exclave: "" } },
+        { task: "t-old", at: { ...at, clone: "c".repeat(TARGET_LIMITS.clone + 1) } },
+        { task: "t-old", at: { ...at, deviceId: "has space" } },
+        { task: "t-old", at: { deviceId: "dev-a", exclave: "default" } },
+        "t-old",
+        null,
+      ]) {
+        expect(parseTaskSpec({ ...spec, continues })).toBeNull();
+      }
+    });
+
+    test("a lineage beside it is still read as lineage", () => {
+      const lineage = { deviceId: "dev-b", exclave: "work" };
+      expect(parseTaskSpec({ ...spec, lineage })).toEqual({ ...spec, lineage });
+    });
   });
 
   test("an exclave in a pin is read by no one: a legacy exclave pin, or the sentinel, parses without it", () => {
@@ -1209,6 +1249,16 @@ describe("bindTaskRecord", () => {
     const ahead = { version: 1, task: { ...task, createdAt: now + REPLAY_WINDOW_MS + 1 } };
     expect(bindTaskRecord(ahead, { key, version: 1 }, now)).toBe("created_ahead");
   });
+
+  test("a task that continues itself is never kept, so it never dispatches; one that continues another is", () => {
+    const at = { deviceId: "dev-a", exclave: "default", clone: "app" };
+    const continuing = (of: string): TaskRecord => ({
+      version: 1,
+      task: { ...task, spec: { repo: "github.com/acme/app", mode: "continue", continues: { task: of, at } } },
+    });
+    expect(bindTaskRecord(continuing("t-1"), { key, version: 1 }, now)).toBe("malformed");
+    expect(bindTaskRecord(continuing("t-0"), { key, version: 1 }, now)).toEqual(continuing("t-0"));
+  });
 });
 
 describe("parseTaskProgressList", () => {
@@ -1412,6 +1462,8 @@ describe("M4 shapes", () => {
       { code: "auth_expired" },
       { code: "base_unpushed" },
       { code: "skill_absent", skill: "ship" },
+      { code: "continue_elsewhere" },
+      { code: "continue_unsupported" },
     ];
     for (const reason of reasons) expect(parseDecision(decide(reason))?.candidates[0]?.rejected).toEqual([reason]);
     for (const skill of [undefined, "", "a/b"]) {

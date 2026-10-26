@@ -111,6 +111,7 @@ import {
   type SessionEvent,
   type SessionState,
   type SpawnErrorCode,
+  type SpawnMode,
   type SourceInfo,
   type UpdateReport,
 } from "./types.ts";
@@ -619,11 +620,20 @@ function isBoundedString(value: unknown, max: number): value is string {
  * task. Null for anything malformed or past `TASK_REQUEST_LIMITS`.
  */
 export function parseTaskRequest(value: unknown): TaskRequest | null {
+  return parseRequestFields(value, ["worktree", "here"]);
+}
+
+/**
+ * `modes` is what the caller admits: route-preview takes no `continue` (it
+ * routes by skills and has no target to preview), a stored spec does.
+ */
+function parseRequestFields(value: unknown, modes: readonly SpawnMode[]): TaskRequest | null {
   if (!isRecord(value)) return null;
   const { repo, mode, prompt, title, model, effort, plan, skill } = value;
   const limits = TASK_REQUEST_LIMITS;
   if (!isBoundedString(repo, limits.repo) || repo === "") return null;
-  if (mode !== "worktree" && mode !== "here") return null;
+  const admitted = modes.find((m) => m === mode);
+  if (admitted === undefined) return null;
   if (prompt !== undefined && !isBoundedString(prompt, limits.prompt)) return null;
   if (title !== undefined && !isBoundedString(title, limits.title)) return null;
   // Empty would reach the spawn as a flag with no value; absent is how a default is asked for.
@@ -633,7 +643,7 @@ export function parseTaskRequest(value: unknown): TaskRequest | null {
   if (skill !== undefined && !isSkillName(skill)) return null;
   return {
     repo,
-    mode,
+    mode: admitted,
     ...(prompt === undefined ? {} : { prompt }),
     ...(title === undefined ? {} : { title }),
     ...(model === undefined ? {} : { model }),
@@ -714,18 +724,21 @@ function parseLinear(value: unknown): LinearLink | null {
  * before, it must not.
  */
 export function parseTaskSpec(value: unknown): TaskSpec | null {
-  const request = parseTaskRequest(value);
+  const request = parseRequestFields(value, ["worktree", "here", "continue"]);
   if (request === null || !isRecord(value)) return null;
-  const { pin, avoid, lineage, base, batch, deps, linear, client, until } = value;
+  const { pin, avoid, lineage, base, batch, deps, linear, client, until, continues } = value;
   const pinned = pin === undefined ? undefined : parsePin(pin);
   const avoids = avoid === undefined ? undefined : parseAvoid(avoid);
-  const continues = lineage === undefined ? undefined : parsePlacement(lineage);
+  const lineal = lineage === undefined ? undefined : parsePlacement(lineage);
+  const resumes = continues === undefined ? undefined : parseContinues(continues);
   const builds = base === undefined ? undefined : parsePlacement(base);
   const member = batch === undefined ? undefined : parseBatch(batch);
   const edges = deps === undefined ? undefined : parseList(deps, parseDep);
   const issue = linear === undefined ? undefined : parseLinear(linear);
-  if (pinned === null || avoids === null || continues === null || builds === null || member === null) return null;
-  if (issue === null) return null;
+  if (pinned === null || avoids === null || lineal === null || builds === null || member === null) return null;
+  if (issue === null || resumes === null) return null;
+  // The mode is what an older leader refuses, so the field never travels without it.
+  if ((request.mode === "continue") !== (resumes !== undefined)) return null;
   if (edges === null || (edges !== undefined && edges.length > TASK_SPEC_LIMITS.deps)) return null;
   if (client !== undefined && !isName(client, TASK_SPEC_LIMITS.client)) return null;
   const settles = until === undefined ? undefined : TASK_UNTIL.find((u) => u === until);
@@ -734,14 +747,22 @@ export function parseTaskSpec(value: unknown): TaskSpec | null {
     ...request,
     ...(pinned === undefined ? {} : { pin: pinned }),
     ...(avoids === undefined ? {} : { avoid: avoids }),
-    ...(continues === undefined ? {} : { lineage: continues }),
+    ...(lineal === undefined ? {} : { lineage: lineal }),
     ...(builds === undefined ? {} : { base: builds }),
     ...(member === undefined ? {} : { batch: member }),
     ...(edges === undefined ? {} : { deps: edges }),
     ...(issue === undefined ? {} : { linear: issue }),
     ...(client === undefined ? {} : { client }),
     ...(settles === undefined ? {} : { until: settles }),
+    ...(resumes === undefined ? {} : { continues: resumes }),
   };
+}
+
+function parseContinues(value: unknown): TaskSpec["continues"] | null {
+  if (!isRecord(value)) return null;
+  const { task } = value;
+  const at = parseTarget(value["at"]);
+  return isTaskId(task) && at !== null ? { task, at } : null;
 }
 
 function isRoutingId(value: unknown): value is string {
@@ -780,6 +801,8 @@ function parseReason(value: unknown): Reason | null {
     case "exclaves_unknown":
     case "pressure_unknown":
     case "repo_absent":
+    case "continue_elsewhere":
+    case "continue_unsupported":
     case "auth_missing":
     case "auth_expired":
     case "base_unpushed":
@@ -1065,6 +1088,8 @@ export function bindTaskRecord(
   if (stored.key !== `${STORE_PREFIXES.task.prefix}${record.task.id}`) return "key_mismatch";
   if (record.version === 1 && record.task.state !== "queued") return "created_unqueued";
   if (record.task.createdAt > now + REPLAY_WINDOW_MS) return "created_ahead";
+  // A task that continues itself has no earlier launch to resume; the daemon would only refuse it, so it never dispatches.
+  if (record.task.spec.continues?.task === record.task.id) return "malformed";
   return record;
 }
 

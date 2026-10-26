@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   APP_ID,
   BRANCH_MAX_LENGTH,
@@ -380,6 +383,7 @@ describe("a task's launch is recorded before it runs", () => {
     const tasks: TaskLaunches = {
       launch: () => Promise.reject(new Error("disk full")),
       launched: () => false,
+      continuation: () => ({ refused: "unused" }),
       settled: () => Promise.resolve(),
       report: () => ({ ended: [], ledgerSince: 0 }),
       progress: () => [],
@@ -397,6 +401,7 @@ describe("a task's launch is recorded before it runs", () => {
     const tasks: TaskLaunches = {
       launch: () => Promise.reject(new Error("unused")),
       launched: () => false,
+      continuation: () => ({ refused: "unused" }),
       settled: () => Promise.resolve(),
       report: () => ({ ended: [], ledgerSince: 0 }),
       progress: () => {
@@ -753,5 +758,223 @@ describe("metrics answers from the store, within one envelope", () => {
   test("a daemon without a store answers with a code instead of leaving the chart to time out", async () => {
     const reply = await metricsReply(null, { from: NOW, to: NOW, step: 30 });
     expect(reply).toMatchObject({ ok: false, code: "internal_error" });
+  });
+});
+
+describe("a scheduler spawn that continues a failed task", () => {
+  let clone = "";
+  let site = "";
+  const OLD = "old-task";
+  const NEW = "new-task";
+  const repos = (): readonly RepoEntry[] => [{ name: "myrepo", path: clone, defaultBranch: "main" }];
+
+  beforeAll(async () => {
+    // Canonical: the handler compares the ledger's path with its realpath.
+    clone = await realpath(await mkdtemp(join(tmpdir(), "seance-continue-")));
+    site = join(clone, ".claude", "worktrees", "fix");
+    await mkdir(site, { recursive: true });
+  });
+
+  afterAll(async () => {
+    await rm(clone, { recursive: true, force: true });
+  });
+
+  const continuation = (extra: Record<string, unknown> = {}): Plain =>
+    request("spawn", {
+      repo: "myrepo",
+      mode: "continue",
+      taskId: NEW,
+      continues: OLD,
+      client: SCHEDULER_CLIENT,
+      ...extra,
+    });
+
+  interface Noted {
+    readonly repo?: string;
+    readonly path?: string;
+  }
+
+  /** A ledger holding OLD as launched (into `where`, unless null), and a backend recording what it is asked to spawn. */
+  async function rig(where: Noted | null = {}) {
+    const ledger = LaunchLedger.memory();
+    await ledger.record(OLD);
+    if (where !== null) await ledger.note(OLD, { repo: where.repo ?? clone, path: where.path ?? site });
+    const calls: { readonly request: SpawnRequest; readonly continuation: { readonly path: string } | undefined }[] =
+      [];
+    const backend: SessionBackend = {
+      spawn: (spawn, _repos, continued) => {
+        calls.push({ request: spawn, continuation: continued });
+        return Promise.resolve({ window: "fix", path: continued?.path ?? "/p", registered: true, handle: "@1" });
+      },
+      sessions: () => Promise.resolve([]),
+      doctor: () => Promise.resolve([]),
+    };
+    const handlerCtx: HandlerContext = { ...ctx, backend, getRepos: repos, tasks: new EndedTasks(ledger) };
+    return { ledger, calls, handlerCtx };
+  }
+
+  test("runs in the ledger's path: the backend is handed it, the new task notes it, the trail names both ids", async () => {
+    const { ledger, calls, handlerCtx } = await rig();
+    const reply = await createHandler(handlerCtx)(continuation(), SCHEDULER_ID);
+    expect(reply?.payload).toMatchObject({ ok: true, path: site });
+    expect(calls).toEqual([
+      { request: expect.objectContaining({ mode: "continue", continues: OLD }), continuation: { path: site } },
+    ]);
+    expect(ledger.notes()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ taskId: NEW, repo: clone, path: site })]),
+    );
+    expect(logged()).toContain(`mode=continue title="" `);
+    expect(logged()).toContain(`task="${NEW}" continues="${OLD}" prompt=none`);
+    expect(logged()).toContain(`ok window="fix" path="${site}"`);
+  });
+
+  test("the leader's own machine continues in process, under its own origin", async () => {
+    const { calls, handlerCtx } = await rig();
+    const reply = await createLocalOps(handlerCtx, "leader").spawn({
+      repo: "myrepo",
+      mode: "continue",
+      taskId: NEW,
+      continues: OLD,
+      client: SCHEDULER_CLIENT,
+    });
+    expect(reply).toMatchObject({ ok: true });
+    expect(calls).toHaveLength(1);
+    expect(logged()).toContain("audit spawn origin=leader");
+    expect(logged()).toContain(`continues="${OLD}"`);
+  });
+
+  test("a request not sealed by the scheduler, and the local socket's, are refused before anything is recorded or run", async () => {
+    const { ledger, calls, handlerCtx } = await rig();
+    const cases: readonly (readonly [(plain: Plain, from?: string) => Promise<Plain | null>, string | undefined])[] = [
+      [createHandler(handlerCtx), APP_ID],
+      [createHandler(handlerCtx), undefined],
+      [createHandler(handlerCtx, "local"), undefined],
+    ];
+    for (const [handle, from] of cases) {
+      lines.length = 0;
+      // oxlint-disable-next-line no-await-in-loop -- each case reads the lines the previous one cleared
+      const reply = await handle(continuation(), from);
+      expect(reply?.payload).toMatchObject({ ok: false, code: "not_continuable" });
+      expect(logged()).toContain("failed code=not_continuable");
+    }
+    expect(calls).toEqual([]);
+    expect(ledger.ids()).toEqual([OLD]);
+  });
+
+  test("malformed continue shapes are rejected, each rule alone", async () => {
+    const { calls, handlerCtx } = await rig();
+    const handle = createHandler(handlerCtx);
+    const bad: readonly Record<string, unknown>[] = [
+      { continues: undefined },
+      { mode: "worktree" },
+      { mode: "here" },
+      { continues: "a b" },
+      { continues: 7 },
+    ];
+    for (const extra of bad) {
+      lines.length = 0;
+      // oxlint-disable-next-line no-await-in-loop -- each case reads the lines the previous one cleared
+      const reply = await handle(continuation(extra), SCHEDULER_ID);
+      expect(reply?.payload).toMatchObject({ ok: false, code: "internal_error" });
+      expect(logged()).toContain("audit spawn origin=relay rejected");
+    }
+    expect(calls).toEqual([]);
+  });
+
+  test("a well-formed request breaking only a continue rule is not_continuable, which settles the task, never internal_error", async () => {
+    const { ledger, calls, handlerCtx } = await rig();
+    const handle = createHandler(handlerCtx);
+    const refused: readonly (readonly [Record<string, unknown>, string])[] = [
+      [{ taskId: undefined }, "needs the id"],
+      [{ client: "mcp" }, "only the scheduler"],
+      [{ client: undefined }, "only the scheduler"],
+      [{ continues: NEW }, "cannot continue itself"],
+    ];
+    for (const [extra, why] of refused) {
+      lines.length = 0;
+      // oxlint-disable-next-line no-await-in-loop -- each case reads the lines the previous one cleared
+      const reply = await handle(continuation(extra), SCHEDULER_ID);
+      expect(reply?.payload, why).toMatchObject({
+        ok: false,
+        code: "not_continuable",
+        message: expect.stringContaining(why),
+      });
+      expect(logged()).toContain("failed code=not_continuable");
+    }
+    expect(calls).toEqual([]);
+    expect(ledger.ids()).toEqual([OLD]);
+  });
+
+  describe("refused with no ledger entry for the new id and the backend never called", () => {
+    const refusedWith = async (where: Noted | null, message: RegExp): Promise<void> => {
+      const { ledger, calls, handlerCtx } = await rig(where);
+      const reply = await createHandler(handlerCtx)(continuation(), SCHEDULER_ID);
+      expect(reply?.payload).toMatchObject({
+        ok: false,
+        code: "not_continuable",
+        message: expect.stringMatching(message),
+      });
+      expect(logged()).toContain("failed code=not_continuable");
+      expect(calls).toEqual([]);
+      expect(ledger.ids()).toEqual([OLD]);
+    };
+
+    test("the ledger holds no launch of the task", async () => {
+      const ledger = LaunchLedger.memory();
+      const calls: unknown[] = [];
+      const backend: SessionBackend = {
+        spawn: (...args) => {
+          calls.push(args);
+          return Promise.reject(new Error("unused"));
+        },
+        sessions: () => Promise.resolve([]),
+        doctor: () => Promise.resolve([]),
+      };
+      const reply = await createHandler({ ...ctx, backend, getRepos: repos, tasks: new EndedTasks(ledger) })(
+        continuation(),
+        SCHEDULER_ID,
+      );
+      expect(reply?.payload).toMatchObject({
+        ok: false,
+        code: "not_continuable",
+        message: expect.stringContaining("holds no launch"),
+      });
+      expect(calls).toEqual([]);
+      expect(ledger.ids()).toEqual([]);
+    });
+
+    test("it was a here run, or never landed: no worktree was noted", () =>
+      refusedWith(null, /no worktree of it was noted/u));
+
+    test("a daemon keeping no launch record", async () => {
+      const { calls, handlerCtx } = await rig();
+      const reply = await createHandler({ ...handlerCtx, tasks: undefined })(continuation(), SCHEDULER_ID);
+      expect(reply?.payload).toMatchObject({ ok: false, code: "not_continuable" });
+      expect(calls).toEqual([]);
+    });
+
+    test("it ran in another clone of the repo", () => refusedWith({ repo: "/elsewhere/myrepo" }, /another clone/u));
+
+    test("the noted path is outside the clone's .claude/worktrees", async () => {
+      const outside = join(clone, "src");
+      await mkdir(outside, { recursive: true });
+      await refusedWith({ path: outside }, /not a worktree of myrepo/u);
+    });
+
+    test("the noted path is a symlink into one", async () => {
+      const link = join(clone, ".claude", "worktrees", "link");
+      await symlink(site, link);
+      await refusedWith({ path: link }, /not a worktree of myrepo/u);
+    });
+
+    test("it is gone", () => refusedWith({ path: join(clone, ".claude", "worktrees", "reaped") }, /is gone/u));
+  });
+
+  test("a repo the scan set no longer holds answers repo_not_found, before anything is recorded", async () => {
+    const { ledger, calls, handlerCtx } = await rig();
+    const reply = await createHandler({ ...handlerCtx, getRepos: () => [] })(continuation(), SCHEDULER_ID);
+    expect(reply?.payload).toMatchObject({ ok: false, code: "repo_not_found" });
+    expect(calls).toEqual([]);
+    expect(ledger.ids()).toEqual([OLD]);
   });
 });

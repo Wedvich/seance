@@ -550,6 +550,24 @@ of M4 has landed.
   - A spawn that times out before claude registers and then dies untitled gets no status
     (harvest takes only titled panes; reap closes it), so its task settles `done` as before.
 
+- **Continue a failed task (new, 2026-10-26).** A task that failed `session_failed` (an OOM
+  kill) leaves its worktree and its conversation on disk, and the only remedy was a new task from
+  scratch. A **Continue** action queues a new task that resumes the conversation (`claude --continue`)
+  in the same worktree.
+  - _Decided:_ a new task linked by `TaskSpec.continues { task, at }` (the old task stays `failed`,
+    and its dependents stay failed); a new mode value `"continue"` as the forward-compat gate (an
+    older leader's parser refuses it, so the record is held unreadable instead of spawned as a fresh
+    worktree); exact-target routing (only the `(deviceId, exclave, clone)` of the old assignment, only on
+    a daemon advertising `continueTask`); the cwd resolved from the daemon's own launch ledger, never from
+    the wire; a spawn sealed by the scheduler only (the local socket and every other `from` refused
+    `not_continuable`); a brokered enqueue allowed, so keyless `seanced mcp` works; a CLI,
+    `seanced continue <task-id> [--prompt …]`, that enqueues through the scheduler (a hand-run
+    `claude --continue` is untracked by design); a stale worktree lock in Claude's own
+    `claude session … (pid N start …)` form with a dead pid unlocked, any other lock refused; manual only, for
+    `session_failed` alone (not `here` runs, not an automatic continue after an OOM kill). Surfaces: the
+    PWA's failed card, MCP's `continue_task`, the CLI.
+  - _As built:_ DESIGN.md, _Daemon_, "Continuing a failed task", records it and what was rejected.
+
 - **Asleep machines on the Queue screen (new, 2026-10-26) — Done.** A task placed on a MacBook whose
   lid closes keeps reading "It's waiting for input on MacBook M4 Pro · default" until
   `lostAfterMs`, then "Lost on … — its machine went away 16m ago" under _Needs you_, though

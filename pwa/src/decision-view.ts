@@ -353,7 +353,13 @@ export function queuedBody(task: Task): string {
       if (task.doneBy === "reported") return "Its session reported it done.";
       return task.doneBy === "manual" ? "Marked done by hand." : "The session ended.";
     case "failed":
-      return failedBody(task.failure?.code, task.failure?.exit, task.spec.until, task.failure?.oomKill);
+      return failedBody(
+        task.failure?.code,
+        task.failure?.exit,
+        task.spec.until,
+        task.failure?.oomKill,
+        task.failure?.message,
+      );
     case "cancelled":
       return task.leftRunning === true ? LEFT_RUNNING : "Nothing is running.";
   }

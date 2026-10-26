@@ -128,7 +128,7 @@ green:
   account list), for a keyless `seanced mcp` or `seanced spawn`, `schedule` for
   the daemon's reap timer, `harvest` for the daemon closing a dead task pane after noting its exit
   status, `leader` for the scheduler loop dispatching to its own machine in
-  process and admitting a task, `mcp` for `seanced mcp`'s own `spawn_session`/`queue_batch` enqueue lines, and `cli` for
+  process and admitting a task, `mcp` for `seanced mcp`'s own `spawn_session`/`queue_batch`/`continue_task` enqueue lines, and `cli` for
   anything typed at this machine's shell, its `spawn` enqueue line included — a new
   surface adds an origin, never reuses one),
   prompt text is never logged, a service-delivered credential never leaves the daemon process
@@ -156,7 +156,11 @@ green:
   disk before its spawn runs, a spawn whose id it cannot record is refused, and `since` only
   moves forward — since it is what makes `ledgerSince` a proof that a spawn never landed — and a
   scheduler spawn for a task id the ledger holds as launched is refused `task_launched`, audited,
-  never run again, and the leader's version floor (`daemon/src/version-floor.ts`) is one per
+  never run again, and a continuation (`mode: "continue"`) runs only for a spawn sealed `from` the
+  scheduler with `client: "scheduler"` (or the leader's in-process dispatch), in the worktree this
+  machine's own launch ledger noted for the continued task id — never a path from a frame — under the
+  clone its `repo` name resolved to, and a task record carrying `continues` always carries
+  `mode: "continue"`, which an older leader's parser refuses, and the leader's version floor (`daemon/src/version-floor.ts`) is one per
   process like `schedulerGuard`, persisted 0600, and only ever raised by a read (the leader's own
   pause write alone may set it lower): a task record below it is `version_regressed`, a pause
   below it or missing holds the whole queue, and a task record that vanishes without the
@@ -203,7 +207,8 @@ green:
   `cancel`, `accounts`) — DESIGN.md's "Fleet broker" is the record, and any widening of it,
   including running it on other daemons, is the same kind of change. A brokered enqueue is a create
   at `expect: 0` of a task the daemon sealed itself from a parsed spec, with the daemon's own
-  `createdAt`, no lineage or base, and a client of `mcp` or `cli` only, audited as `claimed_client`
+  `createdAt`, no lineage or base (a continue spec's `continues` is carried, and only while the
+  leader advertises `continueTask`), and a client of `mcp` or `cli` only, audited as `claimed_client`
   (the peer's unverified word); a `landedEarlier` on it is the relay's answer for a peer-chosen id:
   it may stand for a tombstone or another client's task, never an overwrite. The socket's third frame
   kind, `session-event` (`session-events.ts`, DESIGN.md "Session events"), is ingest-only and

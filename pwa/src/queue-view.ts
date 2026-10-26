@@ -3,6 +3,7 @@ import {
   QUEUE_MAX_TASKS,
   TASK_PHASES,
   TASK_SPEC_LIMITS,
+  continueOffer,
   knownAccounts,
   type DepAfter,
   type KnownAccount,
@@ -15,7 +16,14 @@ import {
 import { machineAsleep, needsAttention } from "./asleep.ts";
 import { avoidLine, pinLine, taskHeadline, waitingText } from "./decision-view.ts";
 import { accountDisplayName, formatUntil } from "./machines-view.ts";
-import { deriveReportedAvailability, failedBody, formatSeen, originLabel, type AppState } from "./view.ts";
+import {
+  deriveContinueAvailability,
+  deriveReportedAvailability,
+  failedBody,
+  formatSeen,
+  originLabel,
+  type AppState,
+} from "./view.ts";
 
 /**
  * The Queue screen as data: sections, rows and the hold lines, derived in one
@@ -40,8 +48,15 @@ export interface QueueRow {
   readonly markDoneEndsSession: boolean;
   /** Offered while the task can still be waited on, or finished done: "Follow up" prefills the form's After. */
   readonly canFollowUp: boolean;
+  /**
+   * A failed session that can be picked up where it stopped: its machine is present and
+   * advertises it, the leader does too, and no continuation of it is already live or settled.
+   */
+  readonly canContinue: boolean;
   /** What it waits on, one line; null when it waits on nothing. */
   readonly deps: string | null;
+  /** The earlier session it continues, one line; null for any other task. */
+  readonly continues: string | null;
   /** Its pin and avoid list, one line in the verdict's wording; null when it has neither. */
   readonly placement: string | null;
   /** Its place in a batch, one line; null outside one. */
@@ -162,7 +177,13 @@ function bodyOf(task: Task, machines: readonly Machine[], now: number): string |
   const waiting = waitingText(task);
   if (waiting !== null) return `Waiting: ${waiting}`;
   if (task.state === "failed") {
-    return failedBody(task.failure?.code, task.failure?.exit, task.spec.until, task.failure?.oomKill);
+    return failedBody(
+      task.failure?.code,
+      task.failure?.exit,
+      task.spec.until,
+      task.failure?.oomKill,
+      task.failure?.message,
+    );
   }
   if (task.state === "needs-input" && task.escalated === true) {
     return task.needsInputSince === undefined
@@ -223,6 +244,12 @@ function depsLine(task: Task, titles: ReadonlyMap<string, string>): string | nul
   return `After ${deps.length} tasks${when}`;
 }
 
+function continuesLine(task: Task, titles: ReadonlyMap<string, string>): string | null {
+  const earlier = task.spec.continues?.task;
+  if (earlier === undefined) return null;
+  return `Continues ${titles.get(earlier) ?? `task ${earlier.slice(0, 8)}`}`;
+}
+
 function batchLine(task: Task): string | null {
   const { batch } = task.spec;
   return batch === undefined ? null : `Batch #${batch.index}`;
@@ -236,7 +263,14 @@ function placementLine(task: Task, state: AppState): string | null {
   return parts.length === 0 ? null : parts.join(". ");
 }
 
-function rowOf(task: Task, state: AppState, now: number, skew: number, titles: ReadonlyMap<string, string>): QueueRow {
+function rowOf(
+  task: Task,
+  state: AppState,
+  now: number,
+  skew: number,
+  titles: ReadonlyMap<string, string>,
+  tasks: readonly Task[],
+): QueueRow {
   const phase = TASK_PHASES[task.state];
   const actionable = phase !== "dispatching" && phase !== "finished";
   return {
@@ -251,7 +285,9 @@ function rowOf(task: Task, state: AppState, now: number, skew: number, titles: R
     cancelEndsSession: phase === "placed",
     markDoneEndsSession: task.state === "running" || task.state === "needs-input" || task.state === "lost",
     canFollowUp: phase !== "finished" || task.state === "done",
+    canContinue: continueOffer(task, state.relay.machines, tasks).ok && deriveContinueAvailability(state.relay),
     deps: depsLine(task, titles),
+    continues: continuesLine(task, titles),
     placement: placementLine(task, state),
     batch: batchLine(task),
     busy: state.taskAction?.taskId === task.id,
@@ -318,7 +354,7 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
       .filter((entry): entry is { task: Task; rank: number } => entry.rank !== null)
       // Stable: equal ranks keep the leader's order.
       .toSorted((a, b) => a.rank - b.rank);
-    return { title, rows: members.map(({ task }) => rowOf(task, state, now, skew, titles)) };
+    return { title, rows: members.map(({ task }) => rowOf(task, state, now, skew, titles, tasks)) };
   }).filter((section) => section.rows.length > 0);
 
   // Once for every hold: a held account no machine reports still counts as a twin.

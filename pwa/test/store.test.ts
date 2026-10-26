@@ -1284,6 +1284,133 @@ describe("the queue screen", () => {
     expect(store.getState().queueNotice).toBeNull();
   });
 
+  describe("continueTask", () => {
+    const at = { deviceId: "dev-a", exclave: "default", clone: "app" };
+    const failed: Task = {
+      id: "f-1",
+      spec: {
+        repo: ORIGIN,
+        mode: "worktree",
+        prompt: "fix it",
+        title: "fix-it",
+        model: "opus",
+        pin: { deviceId: "dev-b" },
+      },
+      state: "failed",
+      failure: { code: "session_failed", message: "the session ended with exit 137" },
+      assignment: { ...at, window: "fix-it" },
+      createdAt: 1,
+    };
+
+    async function withFailed(client: ScriptedClient): Promise<Store> {
+      client.onQueue = async () => ({ tasks: [failed], holds: [], at: 1 });
+      const store = new Store(client);
+      store.openQueue();
+      await until(() => store.getState().queueView?.kind === "ok", "the queue read");
+      return store;
+    }
+
+    const capable = (): ScriptedClient =>
+      new ScriptedClient({
+        machines: [
+          autoMachine("dev-a", { capabilities: [CAPABILITIES.continueTask] }),
+          autoMachine("dev-b", { capabilities: [CAPABILITIES.continueTask] }),
+        ],
+      });
+
+    test("writes a continue task aimed at the exact clone, as the PWA's, and lists it at once", async () => {
+      const client = capable();
+      const store = await withFailed(client);
+      await store.continueTask("f-1");
+
+      expect(client.creates).toHaveLength(1);
+      const [created] = client.creates;
+      expect(created?.spec).toEqual({
+        repo: ORIGIN,
+        mode: "continue",
+        title: "fix-it",
+        model: "opus",
+        continues: { task: "f-1", at },
+        client: "pwa",
+      });
+      expect(created?.state).toBe("queued");
+      expect(store.getState().queueNotice).toBeNull();
+      expect(store.getState().taskAction).toBeNull();
+      const view = store.getState().queueView;
+      expect(view?.kind === "ok" ? view.tasks.map((t) => t.id) : []).toEqual([String(created?.id), "f-1"]);
+    });
+
+    test("an answer that never came says it may have landed; a refusal says nothing was stored", async () => {
+      const client = capable();
+      const store = await withFailed(client);
+      client.onCreate = async () => null;
+      await store.continueTask("f-1");
+      expect(store.getState().queueNotice).toContain("Couldn't read the relay's answer");
+      expect(store.getState().queueNotice).toContain("It may have landed anyway.");
+
+      client.onCreate = async () => ({ ok: false, code: "store_full", message: "full" });
+      await store.continueTask("f-1");
+      expect(store.getState().queueNotice).not.toContain("may have landed");
+      expect(store.getState().queueNotice).toContain("full");
+      const view = store.getState().queueView;
+      expect(view?.kind === "ok" && view.tasks).toEqual([failed]);
+    });
+
+    test("writes nothing for a task the list no longer holds, or one the offer refuses", async () => {
+      const client = capable();
+      const store = await withFailed(client);
+      await store.continueTask("gone");
+      expect(store.getState().queueNotice).toBe("That task is no longer listed.");
+
+      // dev-b leads and can, but the machine it ran on (dev-a) cannot.
+      const detach = store.attach();
+      client.emit({
+        machines: [autoMachine("dev-a"), autoMachine("dev-b", { capabilities: [CAPABILITIES.continueTask] })],
+        scheduler: { kind: "ready", deviceId: "dev-b", term: 1 },
+      });
+      await store.continueTask("f-1");
+      detach();
+      expect(store.getState().queueNotice).toContain("can't continue a session yet");
+      expect(client.creates).toEqual([]);
+    });
+
+    test("checks the leader at the tap, not only when the button was drawn", async () => {
+      const client = capable();
+      const store = await withFailed(client);
+      const detach = store.attach();
+      // The leader changed to one that cannot take a continue task (or went away) after the row was drawn.
+      client.emit({
+        machines: [autoMachine("dev-a", { capabilities: [CAPABILITIES.continueTask] }), autoMachine("dev-b")],
+        scheduler: { kind: "ready", deviceId: "dev-b", term: 2 },
+      });
+      await store.continueTask("f-1");
+      expect(store.getState().queueNotice).toContain("No verified scheduler");
+      client.emit({ scheduler: { kind: "none" } });
+      await store.continueTask("f-1");
+      detach();
+      expect(store.getState().queueNotice).toContain("No verified scheduler");
+      expect(client.creates).toEqual([]);
+      expect(store.getState().taskAction).toBeNull();
+    });
+
+    test("writes nothing for a task something already continues", async () => {
+      const client = capable();
+      const continuation: Task = {
+        id: "c-1",
+        spec: { repo: ORIGIN, mode: "continue", continues: { task: "f-1", at } },
+        state: "needs-input",
+        createdAt: 2,
+      };
+      client.onQueue = async () => ({ tasks: [failed, continuation], holds: [], at: 1 });
+      const store = new Store(client);
+      store.openQueue();
+      await until(() => store.getState().queueView?.kind === "ok", "the queue read");
+      await store.continueTask("f-1");
+      expect(store.getState().queueNotice).toContain("already underway");
+      expect(client.creates).toEqual([]);
+    });
+  });
+
   test("pause and resume replace the holds with the leader's answer, and a refusal is the notice", async () => {
     const client = new ScriptedClient();
     const store = await loaded(client);

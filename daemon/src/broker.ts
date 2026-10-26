@@ -1,5 +1,6 @@
 import {
   APP_ID,
+  CAPABILITIES,
   isRecord,
   isTaskId,
   MACHINES_ID,
@@ -15,6 +16,7 @@ import {
 } from "@seance/shared";
 import { appRelayClient, importAppKeys, LazyRelay, type AppKeys, type AppRelay } from "./app-relay.ts";
 import { accountCaches } from "./account-cache.ts";
+import { advertises, continueGateError } from "./auto.ts";
 import { brokerAudit, enqueueAudit, type AuditSink, type EnqueueOutcome } from "./audit.ts";
 import {
   BROKER_VERSION,
@@ -152,7 +154,8 @@ function cleanDespawn(p: DespawnRequest): DespawnRequest {
  * value of known fields and bounded as the leader's own parser bounds it; it may
  * not set `lineage` or `base` (neither client sends them), and its `client` is
  * `mcp` or `cli` — the peer's unverifiable claim, since the daemon cannot tell
- * the two apart, kept in the record and audited as `claimed_client`. Never
+ * the two apart, kept in the record and audited as `claimed_client`. It may
+ * continue a failed task (`mode: "continue"` with `continues`, paired by the parser). Never
  * `pwa`, `raycast` or `scheduler`. `queue` and `accounts` take no payload, and
  * whatever else the frame carries is never forwarded.
  */
@@ -217,6 +220,10 @@ export function parseBrokerRequest(raw: unknown, selfDeviceId: string): Parsed {
   if (remoteOp === "sessions") clean = {};
   else if (remoteOp === "spawn") {
     if (!isSpawnRequest(payload)) return { code: "invalid_request", message: "malformed spawn request" };
+    // `cleanSpawn` drops `continues`, so a brokered continue would arrive half-formed; only the scheduler continues.
+    if (payload.mode !== "worktree" && payload.mode !== "here") {
+      return { code: "invalid_request", message: "a brokered spawn's mode must be worktree or here" };
+    }
     clean = cleanSpawn(payload);
   } else {
     if (!isDespawnRequest(payload)) return { code: "invalid_request", message: "malformed despawn request" };
@@ -273,6 +280,12 @@ export function createBroker(opts: BrokerOpts): Broker {
         const surface = request.spec.client;
         // Parsed already; this keeps the type honest without a cast.
         if (!isBrokerEnqueueClient(surface)) return await fail(id, "invalid_request", "client must be mcp or cli");
+        // A leader that cannot route `mode: "continue"` holds the record unreadable, so none is written to it.
+        if (request.spec.continues !== undefined) {
+          const { machines, scheduler } = client.getState();
+          const gate = continueGateError(scheduler, advertises(machines, scheduler, CAPABILITIES.continueTask));
+          if (gate !== null) return await fail(id, "invalid_request", gate);
+        }
         // Built here, never taken from the peer: its id and spec, this daemon's clock.
         const task = queuedTask(request.spec, now(), request.taskId);
         const audited = enqueueAudit(opts.auditSink, "local-broker", surface);
@@ -368,6 +381,7 @@ export function createBroker(opts: BrokerOpts): Broker {
           request.schedulerOp,
           task,
           request.schedulerOp === "enqueue" ? request.spec.client : undefined,
+          request.schedulerOp === "enqueue" ? request.spec.continues?.task : undefined,
         );
       } else await audit.request(id, request.remoteOp, request.deviceId, clientOf(request.payload));
       if (stopped) return await fail(id, "shutting_down", "the daemon is stopping");

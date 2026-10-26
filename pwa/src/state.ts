@@ -196,7 +196,7 @@ export interface AccountsState {
 /** A cancel or mark-done on its way to the leader; the row shows it busy. */
 export interface TaskAction {
   readonly taskId: string;
-  readonly op: "cancel" | "mark-done";
+  readonly op: "cancel" | "mark-done" | "continue";
 }
 
 export type HistoryResult =

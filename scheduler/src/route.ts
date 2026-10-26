@@ -111,7 +111,7 @@ export function route(input: RouteInput): Decision {
 
   const candidates: Candidate[] = [];
   for (const machine of machines) {
-    const machineReasons = [...machineFilter(machine, now, config), ...caps];
+    const machineReasons = [...machineFilter(machine, now, config), ...continueFilter(task, machine), ...caps];
     if (machine.exclaves === undefined || machine.exclaves.length === 0) {
       candidates.push({ deviceId: machine.deviceId, machine: machine.name, exclave: null, rejected: machineReasons });
       continue;
@@ -141,12 +141,21 @@ function judge(pass: Pass, machine: Machine, machineReasons: readonly Reason[], 
   const { task, config, inFlight } = pass;
   const { skills } = pass;
   const clones = machine.repos.filter((r) => r.exclave === exclave.id && r.origin === task.spec.repo);
+  // A continuation resumes one worktree, in one clone: the daemon's own check wants the very clone it ran in.
+  const at = task.spec.continues?.at;
   // An exclave's skill serves any clone, so only a skill the exclave lacks picks among clones: the first
   // clone that, with the exclave, has every required skill; none does, the first match.
   const lacking = (r: RepoEntry | undefined): string | undefined =>
     skills.find((s) => !exclave.skills.includes(s) && r?.skills?.includes(s) !== true);
-  const clone = clones.find((r) => lacking(r) === undefined) ?? clones[0];
+  const clone =
+    at === undefined
+      ? (clones.find((r) => lacking(r) === undefined) ?? clones[0])
+      : clones.find((r) => r.name === at.clone);
   const rejected: Reason[] = [...machineReasons, ...placementFilter(task, machine, exclave)];
+  // Once per candidate: another machine already carries it from `continueFilter`.
+  if (at !== undefined && exclave.id !== at.exclave && !rejected.some((r) => r.code === "continue_elsewhere")) {
+    rejected.push({ code: "continue_elsewhere" });
+  }
   if (clone === undefined) rejected.push({ code: "repo_absent" });
   const missing = lacking(clone);
   if (missing !== undefined) rejected.push({ code: "skill_absent", skill: missing });
@@ -297,6 +306,22 @@ function machineFilter(machine: Machine, now: number, config: SchedulerConfig): 
   if (machine.capabilities?.includes(CAPABILITIES.taskId) !== true) reasons.push({ code: "task_id_unsupported" });
   // A real daemon always lists `default`, so an empty list is a blob it did not write — as unknown as none.
   if (machine.exclaves === undefined || machine.exclaves.length === 0) reasons.push({ code: "exclaves_unknown" });
+  return reasons;
+}
+
+/**
+ * A continue task (DESIGN.md, Daemon, "Continuing a failed task") has one
+ * acceptable target, in the clone and exclave `judge` checks. Here, the machine:
+ * another is `continue_elsewhere`, and the target must be a daemon that spawns
+ * the mode at all, or it would refuse the request as malformed.
+ */
+function continueFilter(task: Task, machine: Machine): Reason[] {
+  const at = task.spec.continues?.at;
+  if (at === undefined) return [];
+  const reasons: Reason[] = [];
+  if (machine.deviceId !== at.deviceId) reasons.push({ code: "continue_elsewhere" });
+  if (machine.capabilities?.includes(CAPABILITIES.continueTask) !== true)
+    reasons.push({ code: "continue_unsupported" });
   return reasons;
 }
 

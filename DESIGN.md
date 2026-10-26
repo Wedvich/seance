@@ -638,6 +638,12 @@ nothing checked it. The last is the gap they leave.
 - `spawn` resolves `repo` by **name lookup against the cached scan set**
   (`repos.find(r => r.name === request.repo)`). A wire-supplied string is never
   joined onto a path root. `repo_not_found` is a security outcome, not just UX.
+  A continuation (`mode: "continue"`, Daemon, "Continuing a failed task") is the one spawn
+  with a cwd that is not the clone or a name beneath it, and that cwd comes only from this
+  machine's own launch ledger, keyed by the continued task id (bounded by `TASK_ID_PATTERN`),
+  never from the frame. The noted path must also be a worktree of the clone the `repo` name
+  resolved to: the same clone, canonical with no symlink on the way, under
+  `<clone>/.claude/worktrees/`.
 - Every external process is invoked as an **argv array** (`exec.ts`). The one
   shell string is the tmux inner command, where every wire-supplied value —
   `title`, `model`, `effort`, worktree name — goes through `shq()`. Nothing
@@ -646,7 +652,9 @@ nothing checked it. The last is the gap they leave.
   literal: no wire-supplied text reaches the command line, so there is nothing
   to quote. A future flag carrying wire _text_ is back under the rule. `taskId`
   never enters the shell string at all: it is an argv value to `tmux set-option`,
-  and bounded to `TASK_ID_PATTERN` before it gets that far. The `/usage` refresh's
+  and bounded to `TASK_ID_PATTERN` before it gets that far. A continuation's `--continue` is
+  a literal flag; `continues` is a ledger key and never enters the shell string, and its
+  session name is the ledger path's basename, through `shq()`. The `/usage` refresh's
   claude run takes no wire or frame value at all: fixed argv, and an env built from
   the exclave scan alone (Daemon, "Usage refresh").
 - The OOM confirmation's reads (`daemon/src/oom-kill.ts`, Daemon, "Exit status") take no
@@ -666,6 +674,16 @@ nothing checked it. The last is the gap they leave.
   life — readable by every local process, path 6's injected agent included, for
   every session on the box. It is delivered on stdin now; mechanics and
   rejected alternatives under Daemon.
+- **A continuation is scheduler-only** (2026-10-26). `mode: "continue"` runs only for a spawn
+  sealed `from: "scheduler"` with `client: "scheduler"`, or the leader's in-process dispatch; the
+  local op socket, the direct `spawn` op from an app and every other `from` get `not_continuable`,
+  audited, with nothing launched and no ledger write. Residual: any PSK holder can seal as the
+  scheduler, which grants nothing an ordinary spawn does not (it already starts claude in any
+  scanned repo); what it adds is resuming a conversation this machine's ledger recorded.
+- **A record carrying `continues` always carries `mode: "continue"`**, a value an older leader's
+  `parseTaskRequest` refuses, so such a record is held unreadable there and never spawned as a
+  fresh worktree (the same mechanism as `pin.exclave: ""` for `pin.account`; the parser also
+  requires the field and the mode to come together).
 - **Every spawn path audits, through one formatter**, tagged `origin=relay`,
   `origin=cli` or `origin=local`. A trail that covered only the relay would make
   `seanced spawn` the quieter way in — precisely the path someone with local
@@ -690,7 +708,10 @@ nothing checked it. The last is the gap they leave.
   `op=admit` line is under it too. `mcp` is `seanced mcp` enqueuing on `auto` with the
   key itself: a store write the relay answers, which no daemon sees, so that process
   appends its own `audit enqueue` line to the log, as the CLI does (added 2026-10-18,
-  M3 review S5). `seanced spawn` writes the same line under `cli`
+  M3 review S5). `continue_task` enqueues under the same `mcp` origin, since it is the same
+  surface (`seanced continue`, under `cli`), and the spawn line of a continuation gains
+  `continues=<old id>` after `mode=continue` (2026-10-26; ordinary lines are byte-identical).
+  `seanced spawn` writes the same line under `cli`
   (`origin=cli client=cli`): the surface is still someone at this machine's shell,
   and `audit enqueue` beside `audit spawn` already tells the two acts apart, as `relay`
   covers spawn, despawn and queue (added 2026-10-25, M4). A process interrupted after a
@@ -1056,41 +1077,41 @@ sequenceDiagram
 
 Who owns each frame in code — the place to change when a frame changes:
 
-| Frame / op                                                          | Sent from                                                                                                                                                                                                 | Handled in                                                                                                                                                                                                                                                                                                                               |
-| ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `register`                                                          | `daemon/src/relay-client.ts` (signed via `shared/src/identity.ts`, v2 over `roles`)                                                                                                                       | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`, verified via `shared/src/identity.ts`)                                                                                                                                                                                                                                        |
-| `lead` / `follow`                                                   | `relay/src/hub.ts` `#renominate`, on the answer of `relay/src/leadership.ts`                                                                                                                              | `daemon/src/relay-client.ts` → `daemon/src/leader.ts`, which starts or ends a term                                                                                                                                                                                                                                                       |
-| `lead-proof` (daemon→relay, op `lead-proof` at rest)                | `daemon/src/relay-client.ts` `#proveLead`, on every `lead`                                                                                                                                                | `relay/src/hub.ts` `#leadProof` (bounded in `relay/src/wire.ts`): the first from the leader's socket under the current term, kept on the leader record and carried in `registry`; opened by `shared/src/app-client.ts` `#decryptLeadProof`                                                                                               |
-| `msg` (→`"scheduler"`)                                              | any app or daemon                                                                                                                                                                                         | routed by `relay/src/hub.ts` to the nominated leader's daemon socket (no leader → `undeliverable` (app) or dropped (daemon)); `daemon/src/relay-client.ts` hands it unopened to `daemon/src/leader.ts`, whose leg opens and correlates it — with no term running, `relay-client.ts` opens it and answers an app's request `not_leader`   |
-| ops `queue` / `route-preview` / `cancel`                            | an app via `shared/src/app-client.ts`, sealed `to: "scheduler"`: `pwa/src/scheduler-store.ts`, and `daemon/src/mcp.ts` for `queue` and `cancel`, through the broker (`daemon/src/broker.ts`) when keyless | `daemon/src/leader-requests.ts` (`answer`, each op through its own parser: `parseQueueRequest`, `parseTaskRequest` for `route-preview`, `parseTaskRef`); the reply leaves on the daemon socket via `RelayClient.reply` in `daemon/src/relay-client.ts`                                                                                   |
-| `msg` (`from: "scheduler"`, `term`)                                 | the leader's app-role leg, built per term in `daemon/src/leader.ts` and sent on by `termFleet` in `daemon/src/leader-adapters.ts`, over `shared/src/app-client.ts` built with `scheduler: { term }`       | fenced by `relay/src/hub.ts` `#isCurrentTerm` (term only: an app socket has no identity to check) — a stale term is `undeliverable { code: "not_leader" }`, which ends the term; then routed as any app `msg`                                                                                                                            |
-| `msg` (app→daemon)                                                  | `shared/src/app-client.ts`                                                                                                                                                                                | routed by `relay/src/hub.ts`; opened in `daemon/src/relay-client.ts`; op dispatched in `daemon/src/handlers.ts`                                                                                                                                                                                                                          |
-| `msg` (daemon→app)                                                  | `daemon/src/relay-client.ts`                                                                                                                                                                              | broadcast by `relay/src/hub.ts`; correlated on `re` in `shared/src/app-client.ts`                                                                                                                                                                                                                                                        |
-| `msg` (→`"machines"` broadcast)                                     | any PSK holder                                                                                                                                                                                            | fanned by `relay/src/hub.ts` to registered daemons except the sender; receivers allowlist the op                                                                                                                                                                                                                                         |
-| op `update-available`                                               | `daemon/src/run.ts` via `broadcast()`                                                                                                                                                                     | allowlisted in `daemon/src/relay-client.ts`; pipeline in `daemon/src/update.ts`                                                                                                                                                                                                                                                          |
-| `registry`                                                          | `relay/src/hub.ts` (with `scheduler: { deviceId, term, proof? } \| null`)                                                                                                                                 | `shared/src/app-client.ts` — `scheduler` read as `RelayState.scheduler`, `ready` only when the nominee's own entry opened and its `proof` opens as its `lead-proof` for this term                                                                                                                                                        |
-| `undeliverable`                                                     | `relay/src/hub.ts`                                                                                                                                                                                        | `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                               |
-| `forget`                                                            | `shared/src/app-client.ts`                                                                                                                                                                                | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`); the registry push it causes is its only ack                                                                                                                                                                                                                                  |
-| `forget-refused`                                                    | `relay/src/hub.ts`                                                                                                                                                                                        | `shared/src/app-client.ts` — logged, never modelled                                                                                                                                                                                                                                                                                      |
-| `"ping"` / `"pong"`                                                 | both socket legs                                                                                                                                                                                          | DO auto-response — answered without waking `hub.ts`; sweep reads the timestamps                                                                                                                                                                                                                                                          |
-| envelope `seal`/`open`, AAD, replay                                 | `shared/src/crypto.ts`                                                                                                                                                                                    | same file — both ends share it, or nothing decrypts                                                                                                                                                                                                                                                                                      |
-| ops `sessions` / `spawn`                                            | `sessions`: `pwa/src/store.ts` via `shared/src/app-client.ts`; `spawn`: no PWA sender since M4 PR 2 (older apps, `seanced spawn --now`)                                                                   | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`                                                                                                                                                                                                                                                                    |
-| op `rescan`                                                         | `pwa/src/store.ts` via `shared/src/app-client.ts`, from a Machine-sheet row                                                                                                                               | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                                                                                                                                                                                                                                            |
-| op `despawn`                                                        | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                                                                                                                                                        | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                                                                                                                                                                                                                                                   |
-| `status` (daemon→relay)                                             | `daemon/src/run-collectors.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register                                                                                                       | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest on the socket attachment, kept in the entry on close/sweep until the next register                                                                                                                                                                                    |
-| `status` (relay→app)                                                | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`                                                                                                                      | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped                                                                                                                                                                                                                                   |
-| op `metrics`                                                        | `pwa/src/store.ts` via `shared/src/app-client.ts` `metrics()`, gated and parsed                                                                                                                           | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts`; sized at the transport (`#sealReply`, `daemon/src/relay-client.ts`)                                                                                                                                                                                       |
-| op `session-event` (→`"scheduler"`)                                 | `daemon/src/session-events.ts` via `sendToScheduler()` in `daemon/src/relay-client.ts`; on the leader's own machine, `Leader.onSession` in process                                                        | `daemon/src/leader.ts`: opened by the term's leg (`onEvent` in `shared/src/app-client.ts`, under the daemon's one scheduler `ReplayGuard`), validated by `parseSessionEvent`, applied by `Scheduler.onSession`                                                                                                                           |
-| `store-list` / `store-get` / `store-put` / `store-delete`           | apps via `shared/src/app-client.ts` (list/get/create); the leader's daemon socket via `daemon/src/queue-store.ts`, with `term` on writes; the fleet broker's enqueue (`daemon/src/broker.ts`)             | parsed and bounded in `relay/src/wire.ts`, rules in `relay/src/store.ts`, dispatched by `relay/src/hub.ts` `#onStoreFrame`                                                                                                                                                                                                               |
-| `store-listed` / `store-record` / `store-written` / `store-refused` | `relay/src/hub.ts` `#onStoreFrame`, answering from `relay/src/store.ts`                                                                                                                                   | `parseStoreReply` in `shared/src/parse.ts`; correlated on `re` by the app-client, which settles a reply it cannot read as `null` at once, and by the queue store                                                                                                                                                                         |
-| `store-changed`                                                     | `relay/src/hub.ts` `#nudgeLeader`, to the leader's term socket after a write it did not make; `#nudgeApps`, to other apps after an `account:` write                                                       | `daemon/src/relay-client.ts` `onStoreChanged` → `daemon/src/leader.ts` `Leader.onStoreChanged`, via `parseStoreChanged` (`task:` keys only); `shared/src/app-client.ts`, via `parseStoreChanged`, to `onStoreChanged` listeners (`pwa/src/account-store.ts` re-reads an `account:` key on one)                                           |
-| records `task` / `pause-state` (at rest)                            | `task`: `sealTaskRecord` (`shared/src/task-record.ts`), by the app-client's `createTask` and the queue store; `pause-state`: `sealAtRest`, by the queue store                                             | `task`: `openTaskRecord` (`shared/src/task-record.ts`) — `openAtRest`, no replay guard, sealed `to: "scheduler"`, then `bindTaskRecord`; `pause-state`: `openAtRest` and `parsePauseRecord` in the queue store, held by `Scheduler.load`                                                                                                 |
-| ops `mark-done` / `pause` / `resume` / `discard`                    | an app via `shared/src/app-client.ts`: `pwa/src/scheduler-store.ts` (the Queue screen)                                                                                                                    | `daemon/src/leader-requests.ts` `answer`, parsed by `parsePauseRequest` / `parseResumeRequest` / `parseDiscardRequest`, run by `Scheduler.pause` / `resume`, `Scheduler.markDone` and `Scheduler.discard`                                                                                                                                |
-| op `queue-changed` (→`"app"`)                                       | `daemon/src/leader.ts` on the term's leg, as `from: "scheduler"`, coalesced to one per 500 ms                                                                                                             | `shared/src/app-client.ts`, via `parseQueueChanged`: heard only by an app client (one with no term) and only `from: "scheduler"`, handed to `onQueueChanged` listeners — `pwa/src/scheduler-store.ts` re-reads on it                                                                                                                     |
-| op `branch-state` (→`"scheduler"`)                                  | `daemon/src/branch-state.ts` via `RelayClient.sendBranchState()`; on the leader's own machine `run-capabilities.ts` hands it in process to `leader.onBranchState` instead (Scheduler, "Branch state")     | `daemon/src/leader.ts` `onEvent`, via `parseBranchState`, into the one `onBranchState` sink, which feeds the library                                                                                                                                                                                                                     |
-| record `quota` (at rest)                                            | `sealFleetQuotaRecord` (`shared/src/fleet-quota.ts`), by each daemon's fleet quota writer (`daemon/src/fleet-quota.ts`) on its own socket                                                                 | `openFleetQuotaRecord` (`shared/src/fleet-quota.ts`) — `openAtRest`, sealed `to: "app"`, `parseFleetQuotaRecord`, sealed `version` the store's — by the app-client's `refreshFleetQuota` (the PWA and the leader's leg) and the writer; stored under `quota:fleet` (_Scheduler_, "Fleet quota record")                                   |
-| records `account` / `settings` (at rest)                            | `account` written by `sealAccountRecord` (`shared/src/account-record.ts`) from the PWA's rename; `settings` unwritten so far                                                                              | `account`: `openAccountRecord`, which opens at rest then `parseAccountRecord` and binds version and key; `settings`: `openAtRest` with its op, then `parseSettingsRecord` (`shared/src/parse.ts`); stored under `account:` and `settings:` (_Scheduler_, "The store")                                                                    |
-| op `push-subscribe` (→`"scheduler"`)                                | not yet sent (M4, Web Push)                                                                                                                                                                               | not in `SCHEDULER_OPS`: `daemon/src/leader.ts` answers it `invalid_request` as any op it does not handle, and a non-leading daemon drops it (`daemon/src/relay-client.ts`: not a scheduler op), so the app sees a timeout, not `not_leader`, until the op joins `SCHEDULER_OPS`; its handler will parse with `parsePushSubscribeRequest` |
+| Frame / op                                                          | Sent from                                                                                                                                                                                                                                                                                                                                                                          | Handled in                                                                                                                                                                                                                                                                                                                               |
+| ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `register`                                                          | `daemon/src/relay-client.ts` (signed via `shared/src/identity.ts`, v2 over `roles`)                                                                                                                                                                                                                                                                                                | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`, verified via `shared/src/identity.ts`)                                                                                                                                                                                                                                        |
+| `lead` / `follow`                                                   | `relay/src/hub.ts` `#renominate`, on the answer of `relay/src/leadership.ts`                                                                                                                                                                                                                                                                                                       | `daemon/src/relay-client.ts` → `daemon/src/leader.ts`, which starts or ends a term                                                                                                                                                                                                                                                       |
+| `lead-proof` (daemon→relay, op `lead-proof` at rest)                | `daemon/src/relay-client.ts` `#proveLead`, on every `lead`                                                                                                                                                                                                                                                                                                                         | `relay/src/hub.ts` `#leadProof` (bounded in `relay/src/wire.ts`): the first from the leader's socket under the current term, kept on the leader record and carried in `registry`; opened by `shared/src/app-client.ts` `#decryptLeadProof`                                                                                               |
+| `msg` (→`"scheduler"`)                                              | any app or daemon                                                                                                                                                                                                                                                                                                                                                                  | routed by `relay/src/hub.ts` to the nominated leader's daemon socket (no leader → `undeliverable` (app) or dropped (daemon)); `daemon/src/relay-client.ts` hands it unopened to `daemon/src/leader.ts`, whose leg opens and correlates it — with no term running, `relay-client.ts` opens it and answers an app's request `not_leader`   |
+| ops `queue` / `route-preview` / `cancel`                            | an app via `shared/src/app-client.ts`, sealed `to: "scheduler"`: `pwa/src/scheduler-store.ts`, and `daemon/src/mcp.ts` for `queue` and `cancel`, through the broker (`daemon/src/broker.ts`) when keyless                                                                                                                                                                          | `daemon/src/leader-requests.ts` (`answer`, each op through its own parser: `parseQueueRequest`, `parseTaskRequest` for `route-preview`, `parseTaskRef`); the reply leaves on the daemon socket via `RelayClient.reply` in `daemon/src/relay-client.ts`                                                                                   |
+| `msg` (`from: "scheduler"`, `term`)                                 | the leader's app-role leg, built per term in `daemon/src/leader.ts` and sent on by `termFleet` in `daemon/src/leader-adapters.ts`, over `shared/src/app-client.ts` built with `scheduler: { term }`                                                                                                                                                                                | fenced by `relay/src/hub.ts` `#isCurrentTerm` (term only: an app socket has no identity to check) — a stale term is `undeliverable { code: "not_leader" }`, which ends the term; then routed as any app `msg`                                                                                                                            |
+| `msg` (app→daemon)                                                  | `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                                                                         | routed by `relay/src/hub.ts`; opened in `daemon/src/relay-client.ts`; op dispatched in `daemon/src/handlers.ts`                                                                                                                                                                                                                          |
+| `msg` (daemon→app)                                                  | `daemon/src/relay-client.ts`                                                                                                                                                                                                                                                                                                                                                       | broadcast by `relay/src/hub.ts`; correlated on `re` in `shared/src/app-client.ts`                                                                                                                                                                                                                                                        |
+| `msg` (→`"machines"` broadcast)                                     | any PSK holder                                                                                                                                                                                                                                                                                                                                                                     | fanned by `relay/src/hub.ts` to registered daemons except the sender; receivers allowlist the op                                                                                                                                                                                                                                         |
+| op `update-available`                                               | `daemon/src/run.ts` via `broadcast()`                                                                                                                                                                                                                                                                                                                                              | allowlisted in `daemon/src/relay-client.ts`; pipeline in `daemon/src/update.ts`                                                                                                                                                                                                                                                          |
+| `registry`                                                          | `relay/src/hub.ts` (with `scheduler: { deviceId, term, proof? } \| null`)                                                                                                                                                                                                                                                                                                          | `shared/src/app-client.ts` — `scheduler` read as `RelayState.scheduler`, `ready` only when the nominee's own entry opened and its `proof` opens as its `lead-proof` for this term                                                                                                                                                        |
+| `undeliverable`                                                     | `relay/src/hub.ts`                                                                                                                                                                                                                                                                                                                                                                 | `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                               |
+| `forget`                                                            | `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                                                                         | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`); the registry push it causes is its only ack                                                                                                                                                                                                                                  |
+| `forget-refused`                                                    | `relay/src/hub.ts`                                                                                                                                                                                                                                                                                                                                                                 | `shared/src/app-client.ts` — logged, never modelled                                                                                                                                                                                                                                                                                      |
+| `"ping"` / `"pong"`                                                 | both socket legs                                                                                                                                                                                                                                                                                                                                                                   | DO auto-response — answered without waking `hub.ts`; sweep reads the timestamps                                                                                                                                                                                                                                                          |
+| envelope `seal`/`open`, AAD, replay                                 | `shared/src/crypto.ts`                                                                                                                                                                                                                                                                                                                                                             | same file — both ends share it, or nothing decrypts                                                                                                                                                                                                                                                                                      |
+| ops `sessions` / `spawn`                                            | `sessions`: `pwa/src/store.ts` via `shared/src/app-client.ts`; `spawn`: no PWA sender since M4 PR 2 (older apps, `seanced spawn --now`)                                                                                                                                                                                                                                            | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`; a `mode: "continue"` spawn (the leader's dispatch of a continue task, sealed `from: "scheduler"`) resolves its worktree from the launch ledger first (Daemon, "Continuing a failed task")                                                                         |
+| op `rescan`                                                         | `pwa/src/store.ts` via `shared/src/app-client.ts`, from a Machine-sheet row                                                                                                                                                                                                                                                                                                        | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                                                                                                                                                                                                                                            |
+| op `despawn`                                                        | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                                                 | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                                                                                                                                                                                                                                                   |
+| `status` (daemon→relay)                                             | `daemon/src/run-collectors.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register                                                                                                                                                                                                                                                                                | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest on the socket attachment, kept in the entry on close/sweep until the next register                                                                                                                                                                                    |
+| `status` (relay→app)                                                | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`                                                                                                                                                                                                                                                                                               | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped                                                                                                                                                                                                                                   |
+| op `metrics`                                                        | `pwa/src/store.ts` via `shared/src/app-client.ts` `metrics()`, gated and parsed                                                                                                                                                                                                                                                                                                    | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts`; sized at the transport (`#sealReply`, `daemon/src/relay-client.ts`)                                                                                                                                                                                       |
+| op `session-event` (→`"scheduler"`)                                 | `daemon/src/session-events.ts` via `sendToScheduler()` in `daemon/src/relay-client.ts`; on the leader's own machine, `Leader.onSession` in process                                                                                                                                                                                                                                 | `daemon/src/leader.ts`: opened by the term's leg (`onEvent` in `shared/src/app-client.ts`, under the daemon's one scheduler `ReplayGuard`), validated by `parseSessionEvent`, applied by `Scheduler.onSession`                                                                                                                           |
+| `store-list` / `store-get` / `store-put` / `store-delete`           | apps via `shared/src/app-client.ts` (list/get/create); the leader's daemon socket via `daemon/src/queue-store.ts`, with `term` on writes; the fleet broker's enqueue (`daemon/src/broker.ts`)                                                                                                                                                                                      | parsed and bounded in `relay/src/wire.ts`, rules in `relay/src/store.ts`, dispatched by `relay/src/hub.ts` `#onStoreFrame`                                                                                                                                                                                                               |
+| `store-listed` / `store-record` / `store-written` / `store-refused` | `relay/src/hub.ts` `#onStoreFrame`, answering from `relay/src/store.ts`                                                                                                                                                                                                                                                                                                            | `parseStoreReply` in `shared/src/parse.ts`; correlated on `re` by the app-client, which settles a reply it cannot read as `null` at once, and by the queue store                                                                                                                                                                         |
+| `store-changed`                                                     | `relay/src/hub.ts` `#nudgeLeader`, to the leader's term socket after a write it did not make; `#nudgeApps`, to other apps after an `account:` write                                                                                                                                                                                                                                | `daemon/src/relay-client.ts` `onStoreChanged` → `daemon/src/leader.ts` `Leader.onStoreChanged`, via `parseStoreChanged` (`task:` keys only); `shared/src/app-client.ts`, via `parseStoreChanged`, to `onStoreChanged` listeners (`pwa/src/account-store.ts` re-reads an `account:` key on one)                                           |
+| records `task` / `pause-state` (at rest)                            | `task`: `sealTaskRecord` (`shared/src/task-record.ts`), by the app-client's `createTask` and the queue store; a continue task (`TaskSpec.continues`, from `shared/src/continue-task.ts`) is written the same way, and the leader dispatches it as a `spawn` with `mode: "continue"` (`#dispatch` in `scheduler/src/scheduler.ts`); `pause-state`: `sealAtRest`, by the queue store | `task`: `openTaskRecord` (`shared/src/task-record.ts`) — `openAtRest`, no replay guard, sealed `to: "scheduler"`, then `bindTaskRecord`; `pause-state`: `openAtRest` and `parsePauseRecord` in the queue store, held by `Scheduler.load`                                                                                                 |
+| ops `mark-done` / `pause` / `resume` / `discard`                    | an app via `shared/src/app-client.ts`: `pwa/src/scheduler-store.ts` (the Queue screen)                                                                                                                                                                                                                                                                                             | `daemon/src/leader-requests.ts` `answer`, parsed by `parsePauseRequest` / `parseResumeRequest` / `parseDiscardRequest`, run by `Scheduler.pause` / `resume`, `Scheduler.markDone` and `Scheduler.discard`                                                                                                                                |
+| op `queue-changed` (→`"app"`)                                       | `daemon/src/leader.ts` on the term's leg, as `from: "scheduler"`, coalesced to one per 500 ms                                                                                                                                                                                                                                                                                      | `shared/src/app-client.ts`, via `parseQueueChanged`: heard only by an app client (one with no term) and only `from: "scheduler"`, handed to `onQueueChanged` listeners — `pwa/src/scheduler-store.ts` re-reads on it                                                                                                                     |
+| op `branch-state` (→`"scheduler"`)                                  | `daemon/src/branch-state.ts` via `RelayClient.sendBranchState()`; on the leader's own machine `run-capabilities.ts` hands it in process to `leader.onBranchState` instead (Scheduler, "Branch state")                                                                                                                                                                              | `daemon/src/leader.ts` `onEvent`, via `parseBranchState`, into the one `onBranchState` sink, which feeds the library                                                                                                                                                                                                                     |
+| record `quota` (at rest)                                            | `sealFleetQuotaRecord` (`shared/src/fleet-quota.ts`), by each daemon's fleet quota writer (`daemon/src/fleet-quota.ts`) on its own socket                                                                                                                                                                                                                                          | `openFleetQuotaRecord` (`shared/src/fleet-quota.ts`) — `openAtRest`, sealed `to: "app"`, `parseFleetQuotaRecord`, sealed `version` the store's — by the app-client's `refreshFleetQuota` (the PWA and the leader's leg) and the writer; stored under `quota:fleet` (_Scheduler_, "Fleet quota record")                                   |
+| records `account` / `settings` (at rest)                            | `account` written by `sealAccountRecord` (`shared/src/account-record.ts`) from the PWA's rename; `settings` unwritten so far                                                                                                                                                                                                                                                       | `account`: `openAccountRecord`, which opens at rest then `parseAccountRecord` and binds version and key; `settings`: `openAtRest` with its op, then `parseSettingsRecord` (`shared/src/parse.ts`); stored under `account:` and `settings:` (_Scheduler_, "The store")                                                                    |
+| op `push-subscribe` (→`"scheduler"`)                                | not yet sent (M4, Web Push)                                                                                                                                                                                                                                                                                                                                                        | not in `SCHEDULER_OPS`: `daemon/src/leader.ts` answers it `invalid_request` as any op it does not handle, and a non-leading daemon drops it (`daemon/src/relay-client.ts`: not a scheduler op), so the app sees a timeout, not `not_leader`, until the op joins `SCHEDULER_OPS`; its handler will parse with `parsePushSubscribeRequest` |
 
 `sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
 over the local op socket, arriving at the same `daemon/src/handlers.ts` routing.
@@ -1522,6 +1543,14 @@ an old peer's frames parse as before. Mixed versions:
   fields: an older daemon's parser skips them and its next write drops them, so after a downgrade
   and upgrade a running session is sampled again on the next pass, and an `oom` of any other
   shape reads as no sample. No rollout order.
+- `TaskSpec.continues` and `mode: "continue"` (2026-10-26, Daemon, "Continuing a failed task"):
+  the mode is the gate. An older leader's `parseTaskRequest` refuses it, so a record carrying
+  `continues` (which always carries the mode, the parser requires both together) is held unreadable
+  rather than stripped and spawned as a fresh worktree; an older daemon's `isSpawnRequest` refuses the
+  mode, and the leader routes only to a machine advertising `continueTask`; a client writes the spec
+  only to a verified leader advertising it. An older app drops the task from its list (the lenient
+  queue parser, as for `pinAccount`). The reasons `continue_elsewhere` and `continue_unsupported` are
+  dropped by an older reader like any unknown reason. No rollout order.
 - Reasons `skill_absent { skill }`, `auth_expired` and `base_unpushed`: an older app or
   leader drops an unknown reason from a decision and keeps the candidate.
 - `session-event` `done`: ingested since 2026-10-23 (Local op socket, "Session events"). A daemon
@@ -2327,6 +2356,14 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   (g) a clone without `refs/remotes/origin/HEAD` (no resolvable default branch) advertises no
   project skills.
 
+- **Continue routing** (2026-10-26, Daemon, "Continuing a failed task"). A task with
+  `spec.continues` has exactly one acceptable candidate, the `(deviceId, exclave, clone)` in
+  `continues.at`: every other machine is `continue_elsewhere` (`continueFilter` in `route.ts`), a
+  machine that does not advertise `CAPABILITIES.continueTask` is `continue_unsupported` (so an older
+  daemon is never routed one), `judge` picks the clone by name rather than by skills and rejects another
+  exclave `continue_elsewhere`, and a clone the machine no longer has is `repo_absent`. Every other filter,
+  cap and score applies as to any task. The dispatch adds `continues: <old id>` to the spawn request.
+  A `not_continuable` reply fails the task with that code and message (`settle.ts` verdict).
 - **Routing caps** (M2's global, M3 item 5's per account). Both count `IN_FLIGHT` — reserved, running
   and `needs-input`, which keeps its slot — and neither counts `lost` ("`lost`" below).
   `globalMax` (8) puts `cap_reached` with no `scope` on every candidate, as M2's leaders sent
@@ -2806,6 +2843,11 @@ reuses the record helpers.
   rule, not the reader's: such a record still reads, to be failed `queue_expired` and pruned.
   Every one of these holds against a token holder writing through the relay's checks, not
   against the relay itself (Threat model, item 4).
+- **A continuation's link** (2026-10-26): `TaskSpec.continues { task, at }` rides the sealed record
+  as any spec field, parsed field by field by `parseTaskSpec` (and so by `createTask`, which seals the
+  parsed copy, and every reseal by the leader). It is present exactly with `mode: "continue"`, which
+  gates older leaders (Daemon, "Continuing a failed task"). `at` is the old task's assignment copied at
+  enqueue; the old record may be pruned.
 - **Unreadable is reported, never fatal, never deleted.** `RelayClient.listTasks` returns the
   tasks that bound beside `{ key, version, reason }` for each that did not; `getTask` returns
   either. The app leg has no delete at all (the relay forbids it), so clearing junk stays a
@@ -3748,7 +3790,10 @@ for the lot with its own `gh`.
   first-run onboarding would block the session regardless, and fabricating
   claude's own file is worse. The worktree needs no separate entry: claude
   starts at the repo root and moves into the worktree after the trust
-  check. Memoized in-process per (config, repo) pair, so it costs one
+  check. A continuation is the exception: it starts in the worktree itself, so
+  `spawnContinued` trusts that path in the clone's exclave config file, one more
+  `projects[<path>]` entry per continued worktree (Daemon, "Continuing a failed task").
+  Memoized in-process per (config, repo) pair, so it costs one
   config read per repo per daemon run. Rejected: caching trust in
   state.json or `RepoEntry` (stale in the dangerous direction — revoking
   trust in claude would be silently overridden forever by a cache that
@@ -4370,6 +4415,140 @@ for the lot with its own `gh`.
   not the daemon. Both caffeinate call sites are already platform-gated.
 - Config file: relay URL, bearer token, PSK, machine name, repo roots; the
   deviceId's seed lives in state.json.
+
+### Continuing a failed task (mode `"continue"`) — designed 2026-10-26
+
+A task that failed `session_failed` (an OOM SIGKILL, a crash) leaves its worktree and its
+Claude conversation on disk. **Continue** queues a _new_ task that resumes that conversation
+(`claude --continue`) in the same worktree, on the same machine and clone. The PWA's failed card
+carries the button, MCP has `continue_task { taskId, prompt? }` and the shell has `seanced
+continue <task-id> [--prompt …]`; all three write the same spec (`continuationSpec`,
+`shared/src/continue-task.ts`, the one place that says which tasks offer it — `continueOffer` — and which
+fields carry over), under the same gates.
+
+- **The flow.** An app (or a keyless process through the broker) writes a `task:` record whose spec
+  has `mode: "continue"` and `continues: { task: <old id>, at: { deviceId, exclave, clone } }` —
+  the old task's `assignment`, copied at enqueue so the old record may be pruned. The leader routes it
+  like any task, with one rule: only the `(deviceId, exclave, clone)` in `at` is a candidate,
+  and only while that machine advertises `CAPABILITIES.continueTask` (Scheduler, "The library").
+  Its dispatch is a `spawn { mode: "continue", continues: <old id>, taskId: <new id>, client:
+  "scheduler" }`. The daemon (`handleSpawn`) looks the old id up in its own launch ledger
+  (`EndedTasks.continuation`), checks the noted path, and `spawnContinued` opens a window there
+  running `claude … --continue -- < seed`.
+- **Spec and request fields.** `TaskSpec.continues` is present exactly when `mode` is `"continue"`:
+  `parseTaskSpec` refuses either without the other, so a record cannot carry a half. `parseTaskRequest`
+  (route-preview) refuses the mode, so a preview never routes one. `SpawnRequest.continues` is the
+  old task id, bounded by `TASK_ID_PATTERN`, required exactly with the mode. The spec's `at` is display
+  and routing only; **the daemon never reads a path from the wire**.
+- **Refusals** (the new `not_continuable` spawn error code, one code with the reason in the message;
+  each is audited `failed`, and none leaves a ledger entry for the new id). Two groups, by where they
+  fall. _Before the write-ahead `launch`_ (the handler, nothing recorded yet): a spawn not sealed by
+  the scheduler (`from` other than `"scheduler"`, the local socket, or a `client` other than
+  `"scheduler"`), one without its own task id, or one naming itself as the task it continues; no
+  ledger record of the old id (the ledger keeps a week or 128 launches, so continuing works only while
+  it holds the old launch); the old launch still in flight; a note with no path (a `here` launch, or
+  one from a daemon predating site notes); the noted repo not being the clone `repo` resolved to; a
+  noted path that is not canonical (a symlink anywhere on it) or not under
+  `<clone>/.claude/worktrees/`; the path gone; and `repo_not_found` for a repo the scan set no longer
+  holds. _After it_ (`spawnContinued`, the new id already written ahead): the repo or the path gone
+  again by then; the old task still having a live pane; any live pane whose cwd is inside the
+  worktree (a second claude in one worktree would race the first on its transcript and its git
+  state); a worktree lock that is not a stale Claude one, one that could not be read, and one that
+  could not be unlocked (below). A refusal there is a `SpawnFailure`, so the handler retracts the
+  write-ahead entry (`settle(false)`): nothing launched, and no entry for the new id stays. The code
+  is not `task_running`, which the leader's verdict reads as "the new task is already running" and
+  marks it so, and not a transport code such as `internal_error`, which the verdict cannot settle on
+  and would leave the task reserved: every rule a well-formed request can break answers
+  `not_continuable`, and `internal_error` is left to a request that does not parse. A task record that
+  continues itself is not read at all (`bindTaskRecord` calls it malformed), so it never reaches a
+  daemon. `not_continuable` fails the new task with the daemon's message; the old task stays `failed`.
+- **The argv.** As a worktree spawn, minus `--worktree` and the fetch: tmux `-c <path>`, `claude -n
+  <name> --remote-control --model … --effort …[ --permission-mode plan] --continue -- < seed`.
+  `--continue` is a literal flag, the name is the path's basename through `shq()`, and `continues` never
+  enters the shell string. `--continue` resumes the newest conversation _of that cwd_, which is why the
+  cwd must be the worktree: the exclave's `CLAUDE_CONFIG_DIR` is picked by the owner's shell hook by
+  cwd and the transcript dir by path, so the same path means the same exclave and the same
+  conversation. The tmux window is named by `-n` and tagged with the new task id as ever.
+- **The seed is always written.** A continuation's stdin carries a fixed preamble (and `From the user:
+  <prompt>` when one was given): "This session was resumed by séance in the same git worktree at
+  <path>, after the previous session ended unexpectedly (killed, crashed or out of memory) partway
+  through. Its last tool call may not have finished, and processes it started in the background may
+  still be running (only claude itself was killed): check the worktree's state and running processes
+  before restarting anything, then carry on where it left off." It never claims that background work is
+  gone: the pane checks see claude, not its surviving children. Two reasons, both load-bearing: the
+  model should be told what happened, and Claude Code 2.1.310 shows a blocking "Resume from summary /
+  full session" dialog on a resume of a session at least 70 minutes old and 100k tokens big (the typical
+  OOM'd session) unless an initial message is given, which nothing on a remote can answer. As defence in
+  depth the window's `-e` env also sets `CLAUDE_CODE_RESUME_THRESHOLD_MINUTES` and
+  `CLAUDE_CODE_RESUME_TOKEN_THRESHOLD` very high. That `--continue` combined with `-n`,
+  `--remote-control` and a stdin seed delivers the seed as the next user turn is proven only by the dev
+  check (a real SIGKILL, then a continue; the resumed transcript shows the preamble as a new user turn).
+- **Trust.** The worktree path is pre-trusted in the clone's exclave config ("Pre-trust on spawn"):
+  claude starts in the worktree itself here, not the repo root, so the dialog would otherwise block it.
+- **The git lock residual.** Claude Code locks the worktree it created for the life of its process
+  (reason `claude session <name> (pid N start <procStart>)`, no ` start …` on Windows; Claude's own
+  parser also takes `claude agent …`), and a SIGKILL leaves it locked, which also makes reap keep
+  it. `spawnContinued` reads the worktree's lock (`worktree list --porcelain -z`, the parser
+  `reap-git.ts` already has): no lock goes on; a lock whose reason matches Claude's own grammar (the
+  same bounds it parses with) and whose pid is not alive (`kill(pid, 0)` answers ESRCH) is unlocked
+  (`worktree unlock`, argv, one `log.info` line naming the path) and the continue goes on; any other
+  lock (another reason, a live pid, a pid it may not signal) refuses `not_continuable` and is left
+  alone. The start time is deliberately not compared against the pid's: a reused pid reads as live and
+  the lock stays, a refusal rather than a guess (fail closed; the operator unlocks by hand). Reap's own handling is unchanged: a locked
+  worktree is kept and reported. The new session locks nothing (it is `--continue`, not `--worktree`),
+  so reap's live-pane rule is what protects the worktree while it runs.
+- **Two notes on one path.** The new task's ledger note records the same `path`, with a newer `siteAt`,
+  and branch-state gives a path to its newest `siteAt` (`daemon/src/branch-state.ts`), so the new task owns
+  the worktree's branch state while it runs. The old note stays until eviction; its late events fall on a
+  `failed` task, which the leader ignores. A continuation that is itself killed can be continued again,
+  since its note has the same path. The old note's `prUrl`, `branch` and `tip` are not carried:
+  branch-state re-reads the live worktree, and a `session_failed` task under the default `until:
+  "merged"` had no PR by definition.
+- **The link is display-only.** `continues.task` shows "Continues …" on the new card and hides the
+  button while a live continuation exists; nothing routes by it, so the old record may be pruned. A
+  continuation is an ordinary new task: it counts against the global, account and quota caps, and
+  `until` and `linear` carry over (under `until: "reported"` the resumed conversation already holds the
+  report instruction). `deps`, `batch`, `skill`, `pin`, `avoid`, `lineage` and `base` do not: the target
+  is exact, and the old task's dependents stay `dependency_failed`.
+- **Gates.** A client writes a continue spec only to a verified leader advertising `continueTask` (the
+  PWA's `deriveContinueAvailability`, the MCP tool's and the CLI's `leaderAdvertises`, the broker before
+  it forwards), and `continueOffer` needs the task's machine to be listed and advertising it as well.
+  The same function, given the list the caller read the task from, also refuses a task that already has a
+  continuation in any state but `queued`, `blocked`, `ready`, `failed` or `cancelled` (so `reserved`,
+  `running`, `needs-input`, `lost`, `awaiting-merge` and `done` all hold it): the PWA's button, `continue_task`,
+  `seanced continue` and `get_queue`'s `continuable` share that one rule. The button shows only while the
+  failed task was not `here` and has an assignment. A `ready` continuation does not hide it: one can sit unplaceable
+  forever (the target re-keyed, the clone gone, a daemon rolled back — `queue_expired` applies only at
+  admission and `ready → failed` is illegal, so it waits until cancelled by hand, its reasons
+  `continue_elsewhere`, `repo_absent` or `continue_unsupported` saying why; a known residual). Two taps
+  from two clients make two tasks, and the daemon's per-path lock and live-pane check refuse the second
+  with `not_continuable`. The rule sees only the list it was given (at most `QUEUE_MAX_TASKS`), so a
+  finished continuation that has fallen off it no longer holds the old task, and a tap resumes the
+  conversation again once no pane runs in the worktree — a known residual. Rejected: the daemon refusing
+  any task whose path a newer ledger note owns. A continuation cancelled or failed by the scheduler after
+  it ran is offered no Continue itself, so that rule would strand the conversation for good.
+- **Not offered:** failures other than `session_failed` (`dispatch_unconfirmed` and `lost_expired` may
+  never have launched, and the daemon's ledger check would refuse anyway; a follow-up could widen
+  `continueOffer`), `here` runs, and an automatic continue after an OOM kill — continuing is a manual act.
+- **Rollout.** No relay change (the app leg already creates under `task:`). The new mode is the
+  forward-compat gate: an older leader's `parseTaskRequest` refuses `"continue"`, so a record carrying
+  `continues` (which always carries the mode) is held unreadable there, never spawned as a fresh worktree
+  (a bare extra field would be stripped by an older parser, and the task would fail open). An older
+  daemon's `isSpawnRequest` refuses the mode; the leader routes only to machines advertising
+  `continueTask`; an older app's lenient queue parser drops the task from its list (the same residual as
+  `pinAccount`). Order does not matter.
+- **Rejected:** relaunching the same task id (the launch ledger refuses it, `task_launched`, and the
+  old record is terminal); a new scheduler op (a spawn already carries everything, and a new op is a new
+  wire surface); `continues` without a new mode (an older leader strips it and spawns a fresh worktree:
+  fails open); reusing `pin.exclave` or `PIN_SENTINEL` (the current `parsePin` ignores it);
+  `pin.deviceId` + `pin.account` (a re-login strands the pin, and another clone of the same origin can be
+  chosen); `lineage` (stickiness is a bonus, never a filter); a path on the wire (the daemon's ledger is
+  the only authority on it); `claude --resume <id>` (the daemon knows no Claude session id, and
+  `remoteSession` is display-only); reusing `--worktree <name>` (untested, and it starts a new
+  conversation); offering continue on the direct `spawn` op or the local socket (scheduler-only keeps
+  the surface at one); automatic continuation (manual by decision). A hand-run `claude --continue` in
+  the worktree stays untracked by design — its session events bind to no tagged pane — which is why the
+  shell has `seanced continue` rather than a documented recipe.
 
 ## Reap (`seanced reap`) — designed 2026-10-09
 
@@ -5063,6 +5242,19 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   relevant `QUEUE_MAX_TASKS`. Each row shows what it waits on ("After <title> (opened)") and its batch place ("Batch #2"), and offers **Follow up** while the task can still be waited on or once it
   is `done`: the form takes that task as its After edge at `opened`. See
   "Authoring from the auto form" below.
+- **Continue on the Queue screen** (2026-10-26, Daemon, "Continuing a failed task"). A failed
+  `session_failed` card carries a single-tap **Continue** when `continueOffer` allows it (the task was
+  not `here`, has an assignment, its machine is listed and advertises `continueTask`), the verified
+  leader advertises it (`deriveContinueAvailability`), and no continuation of it has the session
+  (`continueOffer`'s rule: any state but `queued`, `blocked`, `ready`, `failed` or `cancelled`; a `ready` one
+  does not hide it, since it may never be placeable). The tap re-checks the leader and the offer before
+  writing, since either may have changed since the card was drawn, then writes the continuation spec with
+  `client: "pwa"` through `createTask`, merged into the list as any enqueue is; a refused gate or offer or
+  a store answer becomes the screen's notice. The continuation's card
+  reads "Continues <old title>", falling back to "task <id prefix>". A `not_continuable` failure
+  reads "The machine couldn't continue the earlier session: <the daemon's reason>. Nothing new was
+  started." (the failure's message, rendered as text), or a generic line naming the possible causes when
+  it carries none.
 - **Asleep machines on the Queue screen** (2026-10-26, scheduler M4). A lid closed on a placed
   task is not a lost task, and nothing on it can be answered from the phone; the row says so
   rather than reading "waiting for input" until the leader calls it `lost`. A derived view, not
@@ -5309,6 +5501,17 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   install` does per exclave, and the tool allowed there (`mcp__seance__report_task_done` in its
   permissions): a call stopped at a permission prompt is no report. Without either the report is
   never made and the task waits for `mark-done`, its exit, or `merge_expired`.
+- **`continue_task { taskId, prompt? }`** (2026-10-26, Daemon, "Continuing a failed task"). Enqueues
+  a continuation of a `session_failed` task: the session's conversation is resumed in its worktree, on
+  the same machine and clone, as a new task (the old one stays failed). It reads the leader's queue for
+  the task (an id it does not list is "not in the leader's list (pruned, or past the N most relevant)"),
+  asks `continueOffer` (shared with the PWA) whether it can be continued, writes the spec
+  `continuationSpec` makes with `client: "mcp"`, and enqueues it through `enqueueAuto` under the `mcp`
+  origin, as `spawn_session` does. Gated like `until: "reported"`: the verified leader must advertise
+  `continueTask`, else the refusal says so ("ready" or "none" wording, as the account-pin gate). Keyless
+  boxes broker it ("Fleet broker"). `get_queue` shows `continues` on a continuation and `continuable:
+  true` on a task that can be continued. Needs `mcp__seance__continue_task` allowed where an agent calls
+  it, as `report_task_done` does.
 - **`pin` and `avoid` on a spawn** (2026-10-23; accounts and `avoid` 2026-10-25, M4). `spawn_session`
   (its `machine` field, or `pin.machine`), each `queue_batch` member (`pin.machine`) and `seanced spawn`
   (`--machine`, `--account`, repeatable `--not`) take a pin to a machine, an account or both, and a list of
@@ -5536,6 +5739,12 @@ names the app's queue, not `get_queue`/`cancel_task`, which a shell cannot call.
   The hint does not suggest cancelling: an app's cancel needs a verified leader, and apps cannot delete `task:` records.
 - _Prompt bound:_ a prompt over the scheduler's bound is refused naming `--now` as the way past it, since
   a direct spawn is not bound by it. MCP has no such escape.
+- _`seanced continue <task-id> [--prompt <text>]`_ (2026-10-26, Daemon, "Continuing a failed task"):
+  `continueAuto` in `cli-auto.ts` does what MCP's `continue_task` does (leader gate, `queue()` lookup,
+  `continueOffer`, `continuationSpec` with `client: "cli"`, `enqueueAuto` under `origin=cli`) through
+  `autoFleet`, so a keyless box brokers it. It never touches the local op socket's `spawn`: a continue
+  spawn stays scheduler-only, and a continue from a terminal is a tracked task, not a hand-run `claude
+  --continue` (invisible to the scheduler). It prints the new task id, or the refusal and exits non-zero.
 
 _Threat-model delta._ None new. `--now` is the old direct spawn, and `origin=cli` covers both lines
 (`audit spawn` and `audit enqueue`). The queued form is as before: a user at this machine's shell holding the
@@ -5751,7 +5960,7 @@ app-role relay client with the key it imported at start.
   and client — never the payload, so never the prompt. Not `local`: a `local` line
   says this box's tmux was touched, and a brokered spawn touches someone else's. A
   scheduler frame logs `action=scheduler op="enqueue|queue|cancel|accounts"` with the task id
-  and, for an enqueue, `claimed_client`; `fleet` logs `action=fleet`. An enqueue also writes
+  and, for an enqueue, `claimed_client` (and `continues=<old id>` on a continue spec); `fleet` logs `action=fleet`. An enqueue also writes
   `audit enqueue origin=local-broker claimed_client=<mcp|cli> task="…" createdAt=<ms> queued`
   (or `queued landedEarlier=true`, `refused code="…"`, `unanswered`), one per try the relay
   answered or lost, because the surface's own `audit enqueue origin=mcp|cli` line records the
@@ -5819,7 +6028,19 @@ app-role relay client with the key it imported at start.
   another client's task, never an overwrite.
 - **Validation fails closed.** `taskId` must be a task id; `spec` must parse through
   `parseTaskSpec` (the length bounds, `parsePin`'s two fields, a bounded unique avoid list); `lineage`
-  and `base` must be absent; `client` must be `mcp` or `cli`. The parsed value, a fresh object
+  and `base` must be absent; `client` must be `mcp` or `cli`. **Continue specs** (2026-10-26) are the
+  one widening: a brokered enqueue may carry `mode: "continue"` with `continues` (already refused
+  unless paired, by `parseTaskSpec`), so a keyless `seanced mcp` `continue_task` and `seanced continue`
+  work on a credential-delivered box. Before forwarding one the broker checks the verified leader
+  advertises `continueTask` and refuses plainly otherwise, mirroring the client gate; everything else
+  stays: the daemon seals from the parsed spec at `expect: 0` with its own `createdAt`, lineage and base
+  are still refused, and a non-continue enqueue is unchanged. The `request` action's remote `spawn`
+  takes no widening: its `mode` must be `worktree` or `here`, else `invalid_request` (a continue
+  spawn is the scheduler's, and `cleanSpawn` drops `continues`). What the keyless process gains is queueing
+  a continuation of a task the leader lists, nothing a keyed client could not already write; the
+  daemon that runs it still resolves the worktree from its own ledger and takes the spawn from the
+  scheduler only. A hand-run `claude --continue` is untracked by design (Daemon, "Continuing a failed
+  task"). The parsed value, a fresh object
   holding known fields only, is what is sealed. `cancel` takes a parsed task ref. `queue` and
   `accounts` take no payload and anything extra is dropped. The gates `leaderTakesReported` and
   `pinAccountGateError` stay in the client, as on the keyed path. Rejected: duplicating them

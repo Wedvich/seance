@@ -1,6 +1,7 @@
 import { appRelayClient, importAppKeys, LazyRelay } from "./app-relay.ts";
 import { cliSink, type AuditSink } from "./audit.ts";
 import {
+  continueAuto,
   enqueueAuto,
   pinAccountGateError,
   placementInputError,
@@ -14,7 +15,7 @@ import {
   type PlacementInput,
   type PlacementNames,
 } from "./auto.ts";
-import type { SpawnCliArgs } from "./cli.ts";
+import type { ContinueCliArgs, SpawnCliArgs } from "./cli.ts";
 import { BrokerError, type BrokerCallOpts } from "./broker-client.ts";
 import { loadConfig, loadPsk, type Config } from "./config.ts";
 import {
@@ -170,6 +171,55 @@ export async function spawnAuto(
   } finally {
     lease.release();
   }
+}
+
+/**
+ * `seanced continue`: the same gates and enqueue as MCP's `continue_task` (`continueAuto`), under
+ * this shell's own origin. A continuation is a scheduler task or nothing, so there is no `--now`.
+ */
+export async function continueTaskAuto(
+  args: ContinueCliArgs,
+  fleet: Fleet,
+  audit: AuditSink,
+  opts: { readonly keyless?: boolean } = {},
+): Promise<AutoEnqueued> {
+  let lease: FleetLease;
+  try {
+    lease = await fleet.open();
+  } catch (err) {
+    const why = err instanceof BrokerError ? brokerFailureText(err) : err instanceof Error ? err.message : String(err);
+    return failed(
+      opts.keyless === true
+        ? `continue: not queued — this shell could not read the PSK, so the daemon's broker was the only way to the scheduler, and it failed: ${why}`
+        : `continue: not queued — ${why}`,
+    );
+  }
+  try {
+    if (lease.scheduler === null) return failed(`continue unavailable: ${SCHEDULER_NEEDS_NEWER_DAEMON}`);
+    return await continueAuto(
+      { machines: lease.machines, scheduler: lease.scheduler },
+      args.taskId,
+      args.prompt,
+      audit,
+      "cli",
+    );
+  } finally {
+    lease.release();
+  }
+}
+
+export async function cmdContinueAuto(args: ContinueCliArgs): Promise<void> {
+  const config = await loadConfig();
+  const built = await autoFleet(config);
+  const outcome = await continueTaskAuto(args, built.fleet, cliSink, { keyless: built.keyless }).finally(() =>
+    built.fleet.stop(),
+  );
+  if (!outcome.ok) {
+    console.error(outcome.text);
+    process.exit(1);
+  }
+  console.log(outcome.text);
+  process.exit(0);
 }
 
 export async function cmdSpawnAuto(args: SpawnCliArgs): Promise<void> {

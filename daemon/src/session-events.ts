@@ -321,6 +321,23 @@ export class EndedTasks {
   }
 
   /**
+   * Where a continued task's session ran, from this ledger alone — the one authority on
+   * a worktree path (DESIGN.md, Daemon, "Continuing a failed task"); a frame never names
+   * one. `refused` says why there is none, in words the task's failure carries.
+   */
+  continuation(taskId: string): { readonly repo: string; readonly path: string } | { readonly refused: string } {
+    if (this.#launches.has(taskId)) return { refused: "a launch of it is still in flight here" };
+    if (!this.#ledger.ids().includes(taskId)) {
+      return { refused: "this machine holds no launch of it (its launch ledger keeps a week, at most 128 launches)" };
+    }
+    const note = this.#ledger.notes().find((n) => n.taskId === taskId);
+    if (note?.path === undefined || note.repo === undefined) {
+      return { refused: "no worktree of it was noted here (a here-mode run, or it never landed)" };
+    }
+    return { repo: note.repo, path: note.path };
+  }
+
+  /**
    * Resolves once no launch is in flight. A reply listed mid-spawn would show
    * the task in neither `sessions` nor `ended` — the shape that proves a spawn
    * never landed — so the reply waits the few seconds a spawn takes instead.

@@ -1,11 +1,15 @@
 import {
   CAPABILITIES,
+  continuationSpec,
+  continueOffer,
   failureReasonText,
   httpsUrl,
   isTaskId,
   parseTaskSpec,
   queuedTask,
   RequestFailure,
+  QUEUE_MAX_TASKS,
+  schedulerErrorText,
   schedulerRefusal,
   storeErrorText,
   TASK_REQUEST_LIMITS,
@@ -13,6 +17,7 @@ import {
   type AccountRecord,
   type Capability,
   type Machine,
+  type SchedulerAvailability,
   type SpawnClient,
   type TaskRequest,
   type TaskSpec,
@@ -116,7 +121,8 @@ function overBound(
 }
 
 /** What an `auto` enqueue may carry beyond a request: the authoring fields (M4), a pin and avoid, never lineage or base. */
-export type AutoSpec = TaskRequest & Pick<TaskSpec, "deps" | "batch" | "until" | "linear" | "pin" | "avoid">;
+export type AutoSpec = TaskRequest &
+  Pick<TaskSpec, "deps" | "batch" | "until" | "linear" | "pin" | "avoid" | "continues">;
 
 /**
  * `machine` is the human name from the target's config, resolved against the
@@ -280,7 +286,7 @@ function listAccounts(signedIn: ReadonlyMap<string, SignedIn>, records: readonly
 
 /** A placement resolved at submit time: what the spec stores, the repo scope, and what to tell the person. */
 export interface ResolvedPlacement {
-  readonly fields: Pick<AutoSpec, "pin" | "avoid">;
+  readonly fields: Pick<AutoSpec, "pin" | "avoid" | "continues">;
   /** The machines a repo name is read against: the pinned one (or all), its clones cut to the pinned account's exclaves. */
   readonly machines: readonly Machine[];
   /** What `resolveOrigin` names the scope by. */
@@ -449,10 +455,71 @@ interface SchedulerLease {
 
 /** Whether the verified leader advertises `capability`; none, or an unverified one, cannot say, so it is false. */
 export function leaderAdvertises(lease: SchedulerLease, capability: Capability): boolean {
-  const leader = lease.scheduler.availability();
+  return advertises(lease.machines, lease.scheduler.availability(), capability);
+}
+
+/** `leaderAdvertises` over a registry and a leader's availability, for a caller with no `SchedulerLeg` (the broker). */
+export function advertises(
+  machines: readonly Machine[],
+  leader: SchedulerAvailability,
+  capability: Capability,
+): boolean {
   if (leader.kind !== "ready") return false;
-  const machine = lease.machines.find((m) => m.deviceId === leader.deviceId);
+  const machine = machines.find((m) => m.deviceId === leader.deviceId);
   return machine?.capabilities?.includes(capability) === true;
+}
+
+/** The submit-time gate for a continue task: the leader must route `mode: "continue"`, or it holds the record unreadable. */
+export function continueGateError(availability: SchedulerAvailability, advertised: boolean): string | null {
+  if (advertised) return null;
+  return availability.kind === "ready"
+    ? "the scheduler's leader cannot continue a session yet — its daemon needs `seanced update`"
+    : "no verified scheduler is leading, so it cannot be confirmed to continue a session — try again once one leads";
+}
+
+/**
+ * Queues a task that resumes a failed task's session (DESIGN.md, Daemon, "Continuing a failed
+ * task"): the same gates as the app's Continue button — the leader and the machine it ran on
+ * advertise `continueTask`, the task is a failed session in a worktree — then a create
+ * like `spawn_session`'s. `label` names the caller in refusals. Never logs, as `enqueueAuto`.
+ */
+export async function continueAuto(
+  lease: SchedulerLease,
+  taskId: string,
+  prompt: string | undefined,
+  audit: AuditSink,
+  surface: EnqueueSurface,
+): Promise<AutoEnqueued> {
+  const label = surface === "mcp" ? "continue_task" : "continue";
+  const shown = JSON.stringify(taskId.slice(0, 64));
+  if (!isTaskId(taskId)) return failed(`${label} refused: ${shown} is not a task id`);
+  const availability = lease.scheduler.availability();
+  const gate = continueGateError(availability, leaderAdvertises(lease, CAPABILITIES.continueTask));
+  if (gate !== null) return failed(`${label} refused: ${gate}`);
+  let reply: Awaited<ReturnType<SchedulerLeg["queue"]>>;
+  try {
+    reply = await lease.scheduler.queue();
+  } catch (err) {
+    const why =
+      err instanceof RequestFailure ? failureReasonText(err) : err instanceof Error ? err.message : String(err);
+    return failed(`${label} failed: ${why}`);
+  }
+  if (reply === null)
+    return failed(`${label} failed: the scheduler's answer was unreadable (a seanced version mismatch?)`);
+  if ("ok" in reply) return failed(`${label} failed (${reply.code}): ${schedulerErrorText(reply.code)}`);
+  const task = reply.tasks.find((t) => t.id === taskId);
+  if (task === undefined) {
+    return failed(
+      `${label} refused: task ${taskId} is not in the leader's list (pruned, or past the ${QUEUE_MAX_TASKS} most relevant)`,
+    );
+  }
+  const offer = continueOffer(task, lease.machines, reply.tasks);
+  if (!offer.ok) return failed(`${label} refused: ${offer.reason}`);
+  const spec = continuationSpec(task, offer.at, prompt);
+  const invalid = specError(spec, surface);
+  if (invalid !== null) return failed(`${label} refused: ${invalid}`);
+  const enqueued = await enqueueAuto(lease.scheduler, spec, audit, surface);
+  return enqueued.ok ? { ...enqueued, text: `continuing task ${taskId}\n${enqueued.text}` } : enqueued;
 }
 
 /**
