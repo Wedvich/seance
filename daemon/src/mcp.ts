@@ -515,7 +515,7 @@ function placementOf(task: Task, machines: readonly Machine[]): TaskPlacement | 
  * A `session_failed` with its status drops it: the wording already says all the message does.
  */
 function failureMessage(task: Task, failure: NonNullable<Task["failure"]>): string {
-  const worded = taskFailureText(failure.code, failure.exit, task.spec.until);
+  const worded = taskFailureText(failure.code, failure.exit, task.spec.until, failure.oomKill);
   if (worded === null) return failure.message;
   return failure.code === "session_failed" && failure.exit !== undefined ? worded : `${worded} (${failure.message})`;
 }
