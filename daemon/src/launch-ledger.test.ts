@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseTaskProgressList } from "@seance/shared";
 import { LaunchLedger, LEDGER_MAX, LEDGER_MAX_AGE_MS, type TaskNote } from "./launch-ledger.ts";
+import { OOM_REFRESH_MS } from "./oom-kill.ts";
 
 let dir: string;
 let path: string;
@@ -405,10 +406,7 @@ describe("LaunchLedger progress notes", () => {
 });
 
 describe("LaunchLedger OOM samples", () => {
-  const unit = [
-    { cgroup: "/system.slice/seanced.service", kills: 42 },
-    { cgroup: "/system.slice", kills: 42 },
-  ];
+  const unit = { cgroup: "/system.slice/seanced.service", kills: 42, at: 5, paneId: "%1", windowId: "@1" };
 
   test("a sample survives a reopen but stays out of progress, and changing it alone keeps at", async () => {
     let now = 5;
@@ -417,11 +415,42 @@ describe("LaunchLedger OOM samples", () => {
     await ledger.note("t1", { branch: "b" });
     now = 6;
     expect(await ledger.apply("t1", { oom: unit })).toBe("written");
-    expect(await ledger.apply("t1", { oom: unit })).toBe("same");
+    // Quiet pass: same reading a little later, no write.
+    expect(await ledger.apply("t1", { oom: { ...unit, at: 6 } })).toBe("same");
+    expect(await ledger.apply("t1", { oom: { ...unit, kills: 43, at: 6 } })).toBe("written");
     expect(ledger.progress()).toEqual([{ taskId: "t1", at: 5, branch: "b" }]);
     const reopened = await LaunchLedger.open(path, () => 7);
-    expect(reopened.notes()[0]?.oom).toEqual(unit);
+    expect(reopened.notes()[0]?.oom).toEqual({ ...unit, kills: 43, at: 6 });
     expect(reopened.notes()[0]?.at).toBe(5);
+  });
+
+  test("an unchanged sample is rewritten once stale, so its time stays inside the verdict's window", async () => {
+    const ledger = await LaunchLedger.open(path, () => 5);
+    await ledger.record("t1");
+    await ledger.note("t1", { oom: unit });
+    expect(await ledger.apply("t1", { oom: { ...unit, at: unit.at + OOM_REFRESH_MS } })).toBe("written");
+    expect(ledger.notes()[0]?.oom?.at).toBe(unit.at + OOM_REFRESH_MS);
+  });
+
+  test("another pane's sample replaces it: a relaunch is not judged on the old pane's count", async () => {
+    const ledger = await LaunchLedger.open(path, () => 5);
+    await ledger.record("t1");
+    await ledger.note("t1", { oom: unit });
+    expect(await ledger.apply("t1", { oom: { ...unit, paneId: "%2", windowId: "@2" } })).toBe("written");
+    expect(ledger.notes()[0]?.oom?.paneId).toBe("%2");
+  });
+
+  test("a batch persists once for every task's change, and not at all when nothing changed", async () => {
+    const ledger = await LaunchLedger.open(path, () => 5);
+    for (const id of ["t1", "t2", "t3"]) await ledger.record(id);
+    const entries = ["t1", "t2", "t3"].map((taskId) => ({ taskId, patch: { oom: unit } }));
+    await ledger.noteBatch([...entries, { taskId: "unknown", patch: { oom: unit } }]);
+    const written = await readFile(path, "utf8");
+    expect(JSON.parse(written).progress).toHaveLength(3);
+    // Same content again: untouched on disk.
+    await writeFile(path, "sentinel");
+    await ledger.noteBatch(entries);
+    expect(await readFile(path, "utf8")).toBe("sentinel");
   });
 
   test("the verdict reaches progress beside a SIGKILL only, and a bad sample or verdict is dropped, never the note", async () => {
@@ -438,13 +467,25 @@ describe("LaunchLedger OOM samples", () => {
     expect(parseTaskProgressList(ledger.progress())).toEqual(ledger.progress());
 
     const file = JSON.parse(await readFile(path, "utf8"));
-    file.progress[0].oom = [{ cgroup: "/../etc", kills: 1 }];
+    // The list shape an earlier draft wrote reads as no sample.
+    file.progress[0].oom = [unit];
     file.progress[0].oomKill = "yes";
     await writeFile(path, JSON.stringify(file));
     const [note] = (await LaunchLedger.open(path, () => 10)).notes();
     expect(note).toMatchObject({ taskId: "t1", exit: 137 });
     expect(note).not.toHaveProperty("oom");
     expect(note).not.toHaveProperty("oomKill");
+  });
+
+  test("a later note of the exit replaces the verdict, never keeps a stale one", async () => {
+    const ledger = await LaunchLedger.open(path, () => 9);
+    await ledger.record("t1");
+    await ledger.note("t1", { exit: 137, oomKill: true });
+    // Another sample or progress note leaves it; a fresh exit note without one clears it.
+    await ledger.note("t1", { branch: "b" });
+    expect(ledger.progress()[0]?.oomKill).toBe(true);
+    await ledger.note("t1", { exit: 137 });
+    expect(ledger.progress()).toEqual([{ taskId: "t1", at: 9, branch: "b", exit: 137 }]);
   });
 });
 

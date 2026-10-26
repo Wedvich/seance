@@ -1,5 +1,6 @@
+import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 /**
  * Whether the kernel OOM-killed a session that died of SIGKILL (DESIGN.md,
@@ -10,33 +11,58 @@ import { dirname, join } from "node:path";
  * lives (`/proc/<pane_pid>/cgroup`: the pid is tmux's, the path the kernel's,
  * nothing from the wire) and compared once the pane is found dead.
  *
+ * Only the pane's own (leaf) cgroup is read: a parent holds other sessions' and
+ * other apps' processes, so its count says nothing about this one.
+ *
  * Nothing here throws or logs: an unreadable file is no verdict, and harvest
  * runs in the daemon only, never under `seanced mcp`.
  */
 
-/** A cgroup's `oom_kill` count when the session was last seen alive in it. */
+/** A pane's cgroup `oom_kill` count when its session was last seen alive, and which pane that was. */
 export interface OomSample {
   /** v2 path as `/proc/<pid>/cgroup` gives it, from the cgroup root. */
   readonly cgroup: string;
   readonly kills: number;
+  /** Ms epoch of the sample, refreshed in the ledger once `OOM_REFRESH_MS` old. */
+  readonly at: number;
+  /** The pane and window it was taken from: a relaunch's pane never inherits it. */
+  readonly paneId: string;
+  readonly windowId: string;
 }
 
-/** The two reads, injected so tests point them at a temp tree. */
+/** The reads, injected so tests point them at a temp tree. */
 export interface OomProbe {
   /** The pid's v2 cgroup; null off Linux, without a v2 line, or for a pid gone. */
   readonly cgroupOf: (pid: number) => Promise<string | null>;
   /** The cgroup's `oom_kill` count; null when its `memory.events` does not read (gone, v1, no memory controller). */
   readonly kills: (cgroup: string) => Promise<number | null>;
+  /**
+   * Whether the pid is on its way out: gone, a zombie, or with SIGKILL pending. The kernel counts the
+   * kill when it sends the signal, so a count read in that gap already holds the death it would be compared to.
+   */
+  readonly exiting: (pid: number) => Promise<boolean>;
 }
 
 const CGROUP_PATH_MAX = 4096;
+const TMUX_ID = /^[%@]\d{1,9}$/u;
+const SIGKILL_PENDING = 0x100n;
 
 /**
- * The session's own cgroup, then its parent. A per-pane `tmux-spawn-*.scope`
- * is removed once its last process exits, taking its `memory.events` with it;
- * the parent (a long-lived slice) outlives it and counts its kills too.
+ * The most a verdict of `true` may span, either side of the death: from the last sample while alive to
+ * the death, and from the death to the judge. The count is unattributed, so a wider window lets a kill
+ * hours away read as this session's; ten minutes is five of the leader's two-minute sweeps, which are
+ * what drive sampling. Past it the verdict is unknown. `false` has no bound: no kill at all in any window.
  */
-export const OOM_SAMPLE_DEPTH = 2;
+export const OOM_WINDOW_MS = 10 * 60_000;
+
+/** An unchanged sample is rewritten only once this old, so a quiet pass costs no ledger write but `at` stays within the window. */
+export const OOM_REFRESH_MS = 2 * 60_000;
+
+/** One pane's whole sample or one judge read: `/proc` and cgroup reads take kernel locks that can stall under memory pressure, and `sessions` waits on them. */
+export const OOM_READ_TIMEOUT_MS = 1_000;
+
+/** tmux's `pane_dead_time` has second resolution, truncated down; a sample this far past it can still precede the death. */
+const DEAD_TIME_SLACK_MS = 1_000;
 
 /** Absolute, bounded, no `.`/`..` step: what the kernel writes, and all the ledger may hand back to a read. */
 export function isCgroupPath(value: unknown): value is string {
@@ -45,23 +71,27 @@ export function isCgroupPath(value: unknown): value is string {
   return value.split("/").every((step) => step !== "." && step !== "..");
 }
 
-/** For the ledger's parser: a bad list is no sample, never a bad file. */
-export function isOomSamples(value: unknown): value is readonly OomSample[] {
+/** For the ledger's parser: a bad sample is no sample, never a bad file. */
+export function isOomSample(value: unknown): value is OomSample {
   return (
-    Array.isArray(value) &&
-    value.length > 0 &&
-    value.length <= OOM_SAMPLE_DEPTH &&
-    value.every(
-      (entry: unknown) =>
-        typeof entry === "object" &&
-        entry !== null &&
-        "cgroup" in entry &&
-        "kills" in entry &&
-        isCgroupPath(entry.cgroup) &&
-        typeof entry.kills === "number" &&
-        Number.isSafeInteger(entry.kills) &&
-        entry.kills >= 0,
-    )
+    typeof value === "object" &&
+    value !== null &&
+    "cgroup" in value &&
+    "kills" in value &&
+    "at" in value &&
+    "paneId" in value &&
+    "windowId" in value &&
+    isCgroupPath(value.cgroup) &&
+    typeof value.kills === "number" &&
+    Number.isSafeInteger(value.kills) &&
+    value.kills >= 0 &&
+    typeof value.at === "number" &&
+    Number.isSafeInteger(value.at) &&
+    value.at >= 0 &&
+    typeof value.paneId === "string" &&
+    TMUX_ID.test(value.paneId) &&
+    typeof value.windowId === "string" &&
+    TMUX_ID.test(value.windowId)
   );
 }
 
@@ -83,21 +113,54 @@ export function parseOomKills(text: string): number | null {
   return null;
 }
 
+/** `/proc/<pid>/status`: a zombie or dead state, or SIGKILL pending (thread- or process-directed). Unparseable counts as exiting: no sample beats a wrong one. */
+export function isExiting(status: string): boolean {
+  let stated = false;
+  for (const line of status.split("\n")) {
+    const [key, value = ""] = line.split(":", 2);
+    const field = value.trim();
+    if (key === "State") {
+      if (/^[ZXx]/u.test(field)) return true;
+      stated = true;
+    } else if (key === "SigPnd" || key === "ShdPnd") {
+      if (!/^[0-9a-f]{1,16}$/iu.test(field)) return true;
+      if ((BigInt(`0x${field}`) & SIGKILL_PENDING) !== 0n) return true;
+    }
+  }
+  return !stated;
+}
+
 export interface ProcOomProbeOptions {
   readonly proc?: string;
   readonly cgroupRoot?: string;
   readonly platform?: NodeJS.Platform;
 }
 
-/** The host's `/proc` and cgroup v2 mount; none anywhere but Linux, so no pass lists panes for it. */
+/**
+ * The cgroup namespace may root `/proc/<pid>/cgroup` somewhere other than the
+ * mount at `cgroupRoot`, and then every path would read another cgroup's counter.
+ * The daemon's own cgroup must resolve under the mount to a `memory.events`.
+ */
+function mountMatchesNamespace(proc: string, root: string): boolean {
+  try {
+    const own = parseProcCgroup(readFileSync(join(proc, "self", "cgroup"), "utf8"));
+    return own !== null && existsSync(join(root, own, "memory.events"));
+  } catch {
+    return false;
+  }
+}
+
+/** The host's `/proc` and cgroup v2 mount; none anywhere but Linux, nor where the mount is not this namespace's, so no pass lists panes for it. */
 export function procOomProbe(opts: ProcOomProbeOptions = {}): OomProbe | undefined {
   if ((opts.platform ?? process.platform) !== "linux") return undefined;
   const proc = opts.proc ?? "/proc";
   const root = opts.cgroupRoot ?? "/sys/fs/cgroup";
+  if (!mountMatchesNamespace(proc, root)) return undefined;
   const read = (path: string): Promise<string | null> => readFile(path, "utf8").catch(() => null);
+  const validPid = (pid: number): boolean => Number.isSafeInteger(pid) && pid > 0;
   return {
     cgroupOf: async (pid) => {
-      if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+      if (!validPid(pid)) return null;
       const text = await read(join(proc, String(pid), "cgroup"));
       return text === null ? null : parseProcCgroup(text);
     },
@@ -105,6 +168,11 @@ export function procOomProbe(opts: ProcOomProbeOptions = {}): OomProbe | undefin
       if (!isCgroupPath(cgroup)) return null;
       const text = await read(join(root, cgroup, "memory.events"));
       return text === null ? null : parseOomKills(text);
+    },
+    exiting: async (pid) => {
+      if (!validPid(pid)) return true;
+      const text = await read(join(proc, String(pid), "status"));
+      return text === null || isExiting(text);
     },
   };
 }
@@ -114,6 +182,7 @@ export function perPass(probe: OomProbe): OomProbe {
   const counts = new Map<string, Promise<number | null>>();
   return {
     cgroupOf: probe.cgroupOf,
+    exiting: probe.exiting,
     kills: (cgroup) => {
       const known = counts.get(cgroup);
       if (known !== undefined) return known;
@@ -124,48 +193,81 @@ export function perPass(probe: OomProbe): OomProbe {
   };
 }
 
-/** A live pid's samples, nearest cgroup first, the unreadable left out; none off Linux or on failure. */
-export async function sampleOom(pid: number, probe: OomProbe): Promise<readonly OomSample[]> {
+/** The read's value, or null when it fails or outlasts `ms`; the timer never outlives it. */
+async function bounded<T>(read: () => Promise<T | null>, ms: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), ms);
+  });
   try {
-    const leaf = await probe.cgroupOf(pid);
-    if (leaf === null) return [];
-    const chain = [leaf];
-    while (chain.length < OOM_SAMPLE_DEPTH && chain.at(-1) !== "/") chain.push(dirname(chain.at(-1) ?? "/"));
-    const samples: OomSample[] = [];
-    for (const cgroup of chain) {
-      // oxlint-disable-next-line no-await-in-loop -- at most two small reads, in order
-      const kills = await probe.kills(cgroup);
-      if (kills !== null) samples.push({ cgroup, kills });
-    }
-    return samples;
+    return await Promise.race([read(), timeout]);
   } catch {
-    return [];
+    return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
+/** The live pane a sample is taken from. */
+export interface OomPane {
+  readonly pid: number;
+  readonly paneId: string;
+  readonly windowId: string;
+}
+
 /**
- * The verdict for a pane found dead of SIGKILL, from the samples taken while it
- * lived. The nearest sampled cgroup decides both ways: a rise is an OOM kill
- * counted there between then and now; no change is none, since the count is
- * hierarchical and covers global kills. A drop means the cgroup was made anew,
- * which proves nothing. Once the nearest no longer reads, a farther one can
- * only confirm: under the `memory_localevents` mount option a parent counts
- * none of its children's kills, so its silence is no negative.
- * Undefined: unknown.
+ * A live pane's own cgroup and its count; null off Linux, on any failure or
+ * timeout, for a cgroup that does not read, and for a pid on its way out — the
+ * previous sample then stands, which is the one taken before the kill.
  */
-export async function judgeOomKill(samples: readonly OomSample[], probe: OomProbe): Promise<boolean | undefined> {
-  try {
-    const [nearest, ...farther] = samples;
-    if (nearest === undefined) return undefined;
-    const now = await probe.kills(nearest.cgroup);
-    if (now !== null) return now > nearest.kills ? true : now === nearest.kills ? false : undefined;
-    for (const sample of farther) {
-      // oxlint-disable-next-line no-await-in-loop -- at most one more read
-      const later = await probe.kills(sample.cgroup);
-      if (later !== null && later > sample.kills) return true;
-    }
-    return undefined;
-  } catch {
-    return undefined;
-  }
+export function sampleOom(
+  pane: OomPane,
+  probe: OomProbe,
+  now: () => number = Date.now,
+  timeoutMs: number = OOM_READ_TIMEOUT_MS,
+): Promise<OomSample | null> {
+  return bounded(async () => {
+    const cgroup = await probe.cgroupOf(pane.pid);
+    if (cgroup === null) return null;
+    const kills = await probe.kills(cgroup);
+    if (kills === null) return null;
+    // After the counts: a kill already counted has SIGKILL pending by now.
+    if (await probe.exiting(pane.pid)) return null;
+    return { cgroup, kills, at: now(), paneId: pane.paneId, windowId: pane.windowId };
+  }, timeoutMs);
+}
+
+/** The dead pane a verdict is for; `deadAt` is `pane_dead_time` in ms, null when tmux gave none. */
+export interface OomDeath {
+  readonly paneId: string;
+  readonly windowId: string;
+  readonly deadAt: number | null;
+}
+
+/**
+ * The verdict for a pane found dead of SIGKILL, from the sample taken while it
+ * lived — its own, never another launch's pane's. Only the pane's own cgroup
+ * speaks: unchanged is `false` (the count is hierarchical and covers global
+ * kills), a rise is `true` only inside `OOM_WINDOW_MS` of the death on both
+ * sides and with a known death time; a drop means the cgroup was made anew,
+ * and a cgroup that no longer reads (a per-pane scope, removed once empty) says
+ * nothing either way. Undefined: unknown.
+ */
+export async function judgeOomKill(
+  sample: OomSample | undefined,
+  death: OomDeath,
+  probe: OomProbe,
+  now: () => number = Date.now,
+  timeoutMs: number = OOM_READ_TIMEOUT_MS,
+): Promise<boolean | undefined> {
+  if (sample?.paneId !== death.paneId || sample.windowId !== death.windowId) return undefined;
+  const { deadAt } = death;
+  // A sample after the death already holds its kill.
+  if (deadAt !== null && sample.at > deadAt + DEAD_TIME_SLACK_MS) return undefined;
+  const current = await bounded(() => probe.kills(sample.cgroup), timeoutMs);
+  if (current === null || current < sample.kills) return undefined;
+  if (current === sample.kills) return false;
+  if (deadAt === null) return undefined;
+  if (deadAt - sample.at > OOM_WINDOW_MS || now() - deadAt > OOM_WINDOW_MS) return undefined;
+  return true;
 }

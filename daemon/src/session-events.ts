@@ -207,7 +207,9 @@ export class EndedTasks {
         : {
             probe: oom,
             sampled: (taskId) => ledger.notes().find((note) => note.taskId === taskId)?.oom,
-            noteSamples: (taskId, samples) => ledger.note(taskId, { oom: samples }),
+            noteSamples: (entries) =>
+              ledger.noteBatch(entries.map(({ taskId, sample }) => ({ taskId, patch: { oom: sample } }))),
+            now,
           };
   }
 
@@ -246,15 +248,20 @@ export class EndedTasks {
     }
     return async (launched, landed) => {
       if (launched) launches.landed = true;
+      let sample = false;
       try {
         const site = landed?.site;
         if (launched && landed !== undefined) {
           await this.#ledger.startNote(taskId, site && { repo: site.repo, path: site.worktree }, launches.prUrl);
-          // A baseline from the start, not the next pass: a session dying before that would have none.
-          if (this.#panes !== undefined && this.#oom !== undefined) await sampleOomPanes(this.#panes, this.#oom);
+          sample = true;
         }
       } finally {
         await finish();
+      }
+      // A baseline from the start, not the next pass: a session dying before that would have none. After
+      // `finish`, and not awaited: its reads can stall, and neither the launch nor `sessions` waits on them.
+      if (sample && this.#panes !== undefined && this.#oom !== undefined) {
+        void sampleOomPanes(this.#panes, this.#oom);
       }
     };
   }

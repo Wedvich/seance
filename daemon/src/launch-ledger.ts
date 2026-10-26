@@ -13,7 +13,7 @@ import {
 } from "@seance/shared";
 import { writeDurable } from "./durable-write.ts";
 import { log } from "./log.ts";
-import { isOomSamples, type OomSample } from "./oom-kill.ts";
+import { isOomSample, OOM_REFRESH_MS, type OomSample } from "./oom-kill.ts";
 import { stateDir } from "./paths.ts";
 
 /**
@@ -77,11 +77,11 @@ export interface TaskNote {
   /** The session's exit status, noted from its dead pane before the pane is closed (`exit-status.ts`). */
   readonly exit?: number;
   /**
-   * Its cgroups' `oom_kill` counts as last seen while the pane lived (`oom-kill.ts`), nearest first;
-   * internal, never in `TaskProgress`. Here so a restart keeps the baseline. Written only on a change,
-   * so it stands for the last pass that saw the pane alive.
+   * Its pane's cgroup `oom_kill` count as last seen while the pane lived (`oom-kill.ts`), with the pane
+   * it came from; internal, never in `TaskProgress`. Here so a restart keeps the baseline. Rewritten
+   * on a change or once `OOM_REFRESH_MS` old, so it stands for a recent pass that saw the pane alive.
    */
-  readonly oom?: readonly OomSample[];
+  readonly oom?: OomSample;
   /** `judgeOomKill`'s verdict, noted with a SIGKILL `exit` (`TaskProgress.oomKill`). */
   readonly oomKill?: boolean;
 }
@@ -142,7 +142,7 @@ function parseNote(raw: unknown, ids: ReadonlySet<string>): NotedTask | null {
     ...(reported === true ? { reported: true as const } : {}),
     ...(url === undefined ? {} : { prUrl: url }),
     ...(isExitStatus(exit) ? { exit } : {}),
-    ...(isOomSamples(oom) ? { oom } : {}),
+    ...(isOomSample(oom) ? { oom } : {}),
     ...(typeof oomKill === "boolean" ? { oomKill } : {}),
   };
 }
@@ -205,11 +205,16 @@ function mergeNote(taskId: string, base: NotedTask | undefined, patch: TaskNote)
     ...(patch.prUrl !== undefined ? { prUrl: patch.prUrl } : base?.prUrl !== undefined ? { prUrl: base.prUrl } : {}),
     ...(patch.exit !== undefined ? { exit: patch.exit } : base?.exit !== undefined ? { exit: base.exit } : {}),
     ...(patch.oom !== undefined ? { oom: patch.oom } : base?.oom !== undefined ? { oom: base.oom } : {}),
-    ...(patch.oomKill !== undefined
-      ? { oomKill: patch.oomKill }
-      : base?.oomKill !== undefined
-        ? { oomKill: base.oomKill }
-        : {}),
+    // A verdict belongs to the exit it was judged with: a note of the exit replaces it, never inherits one.
+    ...(patch.exit !== undefined
+      ? patch.oomKill === undefined
+        ? {}
+        : { oomKill: patch.oomKill }
+      : patch.oomKill !== undefined
+        ? { oomKill: patch.oomKill }
+        : base?.oomKill !== undefined
+          ? { oomKill: base.oomKill }
+          : {}),
     ...(patch.ahead === true || base?.ahead === true ? { ahead: true as const } : {}),
     ...(patch.pushed === true || base?.pushed === true ? { pushed: true as const } : {}),
     ...(patch.merged === true || base?.merged === true ? { merged: true as const } : {}),
@@ -217,9 +222,16 @@ function mergeNote(taskId: string, base: NotedTask | undefined, patch: TaskNote)
   };
 }
 
-function sameSamples(a: readonly OomSample[] | undefined, b: readonly OomSample[] | undefined): boolean {
+/** The same reading of the same pane, unless the old one is `OOM_REFRESH_MS` stale: a quiet pass is no write. */
+function sameSample(a: OomSample | undefined, b: OomSample | undefined): boolean {
   if (a === undefined || b === undefined) return a === b;
-  return a.length === b.length && a.every((s, i) => s.cgroup === b[i]?.cgroup && s.kills === b[i]?.kills);
+  return (
+    a.cgroup === b.cgroup &&
+    a.kills === b.kills &&
+    a.paneId === b.paneId &&
+    a.windowId === b.windowId &&
+    b.at - a.at < OOM_REFRESH_MS
+  );
 }
 
 /** Equal but for the OOM samples, which are no progress: a change there alone keeps `at`. */
@@ -240,7 +252,7 @@ function sameProgress(a: NotedTask, b: NotedTask): boolean {
 }
 
 function sameNote(a: NotedTask, b: NotedTask): boolean {
-  return sameProgress(a, b) && sameSamples(a.oom, b.oom);
+  return sameProgress(a, b) && sameSample(a.oom, b.oom);
 }
 
 export class LaunchLedger {
@@ -373,6 +385,35 @@ export class LaunchLedger {
    * held), `unwritten` when memory has it and the write failed.
    */
   async apply(taskId: string, patch: TaskNote, under?: { readonly siteAt: number | undefined }): Promise<NoteOutcome> {
+    const staged = this.#stage(taskId, patch, under);
+    if (staged !== "written") return staged;
+    try {
+      await this.#persist();
+    } catch (err) {
+      log.warn(`launch ledger: could not record task progress (${String(err)})`);
+      return "unwritten";
+    }
+    return "written";
+  }
+
+  /**
+   * `note` for several tasks, persisted once: a pass that samples every live
+   * pane would otherwise write the ledger once per pane. A pass that changes
+   * no note costs no write.
+   */
+  async noteBatch(entries: readonly { readonly taskId: string; readonly patch: TaskNote }[]): Promise<void> {
+    let changed = false;
+    for (const { taskId, patch } of entries) if (this.#stage(taskId, patch) === "written") changed = true;
+    if (!changed) return;
+    try {
+      await this.#persist();
+    } catch (err) {
+      log.warn(`launch ledger: could not record task progress (${String(err)})`);
+    }
+  }
+
+  /** The in-memory half of `apply`: "written" here means staged, not yet on disk. */
+  #stage(taskId: string, patch: TaskNote, under?: { readonly siteAt: number | undefined }): NoteOutcome {
     if (!this.#tasks.has(taskId)) return "refused";
     const old = this.#notes.get(taskId);
     if (under !== undefined && old?.siteAt !== under.siteAt) return "refused";
@@ -383,12 +424,6 @@ export class LaunchLedger {
     const stamp = this.#now();
     const at = old !== undefined && base !== undefined && sameProgress(old, next) ? old.at : stamp;
     this.#notes.set(taskId, { ...next, at, ...(resited ? { siteAt: stamp } : {}) });
-    try {
-      await this.#persist();
-    } catch (err) {
-      log.warn(`launch ledger: could not record task progress (${String(err)})`);
-      return "unwritten";
-    }
     return "written";
   }
 
