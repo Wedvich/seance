@@ -14,7 +14,7 @@ import {
   showToast,
 } from "@raycast/api";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { lastHeardAt, type RelayState, type SpawnRequest, type SpawnResponse } from "@seance/shared";
+import type { RelayState, SpawnRequest, SpawnResponse } from "@seance/shared";
 import {
   accountLine,
   NO_ALIASES,
@@ -28,6 +28,7 @@ import { loadKey } from "./lib/credentials.ts";
 import { failureText } from "./lib/errors.ts";
 import {
   checkSubmit,
+  formatAge,
   initialValues,
   nextLastUsed,
   reconcile,
@@ -98,21 +99,11 @@ function statusLine(relay: RelayState | null, machines: readonly PickerMachine[]
     if (relay.settling) return "Reaching the relay…";
     return machines.length === 0
       ? "Relay unreachable"
-      : `Relay unreachable — showing the last list, from ${formatAge(machines)}`;
+      : `Relay unreachable — showing the last list, from ${formatAge(machines, Date.now())}`;
   }
   if (!relay.registrySettled) return "Connected — waiting for the machine list";
   const online = machines.filter((machine) => machine.connected).length;
   return `Connected · ${online} of ${machines.length} ${machines.length === 1 ? "machine" : "machines"} online`;
-}
-
-function formatAge(machines: readonly PickerMachine[]): string {
-  const newest = Math.max(...machines.map((machine) => lastHeardAt(machine)));
-  const elapsed = Math.max(0, Date.now() - newest);
-  const minutes = Math.floor(elapsed / 60_000);
-  if (minutes < 1) return "moments ago";
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  return hours < 24 ? `${hours}h ago` : `${Math.floor(hours / 24)}d ago`;
 }
 
 /**
