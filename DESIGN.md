@@ -2343,6 +2343,13 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   then is accepted — nothing is killed or despawned, and nothing new is placed until the count
   falls under it. A dark wake or blip restarts the clock (any pass that sees the machine
   connected clears it), so the grace starts over. A batch's bound still counts them ("Batches").
+  Accepted: (a) the leader sees "not connected", not "asleep". A crashed or stopped daemon
+  (`KillMode=process`, `daemon/src/systemd.ts`, so its tmux sessions outlive it) or a machine that
+  lost the relay but not Anthropic keeps running and billing while its slots are free after 2 min
+  — `lost` assumes the same at 15 min — taken because idle machines being used outweighs that
+  rarer case. (b) Over-cap stacks across sleeps: a laptop sleeps with 4, a desktop gets 4 and
+  sleeps, a third machine gets 4, and both wake to 12 on one account; projected usage and the
+  spill guard never saw the released tasks. Nothing bounds it beyond the drain.
   A reservation on a machine with no assigned task is not on the clock and keeps its slot until
   its TTL settles it. Rejected: shortening `lostAfterMs` to the same end. `lost` is a state
   change with other consequences — a reservation settles through it, the PWA shows it, expiry

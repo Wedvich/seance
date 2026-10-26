@@ -65,8 +65,9 @@ export interface SchedulerConfig {
    * An in-flight task whose machine has been absent this long stops counting
    * toward `globalMax`, `accountMax` and projected usage, its state unchanged:
    * nothing runs there while it sleeps. Short of `lostAfterMs`, which settles
-   * reservations and writes a record; long enough that a dark wake or a blip
-   * frees nothing. Counted again once its machine is back.
+   * reservations and writes a record. A blip or reconnect frees nothing; a
+   * dark wake restarts the clock, so slots return only after the
+   * connected-read window (~2.5 min) plus this. Counted again once its machine is back.
    */
   readonly slotReleaseAfterMs: number;
   /**
