@@ -1222,7 +1222,9 @@ export function buildMcpServer(
         if ("error" in resolved) return errorResult(resolved.error);
         const target = resolved.machine;
         if (!target.connected) {
-          return errorResult(`${target.name} is not connected — last seen ${new Date(lastHeardAt(target)).toISOString()}`);
+          return errorResult(
+            `${target.name} is not connected — last seen ${new Date(lastHeardAt(target)).toISOString()}`,
+          );
         }
         try {
           return rendered(await lease.request<DespawnResponse>(target.deviceId, "despawn", request), target.name);
