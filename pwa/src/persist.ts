@@ -50,12 +50,22 @@ function asDeps(value: unknown): readonly TaskDep[] {
   return deps;
 }
 
-/** An older build's open batch also held a `strategy`; it is ignored, so that batch stays open. */
+function isAutoStrategy(strategy: unknown): boolean {
+  if (strategy === "auto") return true;
+  return typeof strategy === "object" && strategy !== null && Reflect.get(strategy, "mode") === "auto";
+}
+
+/**
+ * An older build's open batch also held a `strategy`. `auto` (or none) is a plain group and stays open;
+ * a sequential or parallel one is dropped, since further enqueues would join it with no order or bound.
+ */
 function asBatch(value: unknown): OpenBatch | null {
   if (typeof value !== "object" || value === null) return null;
   const id: unknown = Reflect.get(value, "id");
   const next: unknown = Reflect.get(value, "next");
   if (!isTaskId(id)) return null;
+  const strategy: unknown = Reflect.get(value, "strategy");
+  if (strategy !== undefined && !isAutoStrategy(strategy)) return null;
   // One past the bound is a full batch: the last member took `batchIndex`, and the form says so instead of forgetting it.
   if (typeof next !== "number" || !Number.isInteger(next) || next < 1 || next > TASK_SPEC_LIMITS.batchIndex + 1)
     return null;

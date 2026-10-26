@@ -116,7 +116,7 @@ function line(
     // Reasons a leader a version ahead minted are dropped at parse: say so rather than show none.
     const why =
       candidate.rejected.length === 0
-        ? "rejected for a reason this app can't read — update it"
+        ? "rejected for a reason this app can't read; the leader may run another version"
         : candidate.rejected.map(reasonText).join(", ");
     return { id, where: where(candidate), outcome, why, quota };
   }

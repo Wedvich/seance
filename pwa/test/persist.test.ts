@@ -99,8 +99,12 @@ describe("form persistence", () => {
     expect(readForm().batch).toEqual(good);
   });
 
-  test("an older build's open batch, strategy and all, stays open without it", () => {
-    for (const strategy of [{ mode: "sequential" }, { mode: "parallel", max: 99 }, "sequential"]) {
+  test("an older build's open batch with an order or a bound is dropped; auto or none stays open", () => {
+    for (const strategy of [{ mode: "sequential" }, { mode: "parallel", max: 99 }, "sequential", "parallel", 7]) {
+      store.set("seance:form", JSON.stringify({ batch: { id: TASK, strategy, next: 3 } }));
+      expect(readForm().batch).toBeNull();
+    }
+    for (const strategy of [{ mode: "auto" }, "auto", undefined]) {
       store.set("seance:form", JSON.stringify({ batch: { id: TASK, strategy, next: 3 } }));
       expect(readForm().batch).toEqual({ id: TASK, next: 3 });
     }

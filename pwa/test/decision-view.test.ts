@@ -123,7 +123,7 @@ describe("describeDecision", () => {
   test("a candidate whose reasons this build could not read still reads as rejected", () => {
     const unknown: Decision = { at: NOW, chosen: null, candidates: [rejected("lxc", "LXC", [])] };
     expect(describeDecision(unknown, [], NOW, "would").others[0]?.why).toBe(
-      "rejected for a reason this app can't read — update it",
+      "rejected for a reason this app can't read; the leader may run another version",
     );
   });
 
