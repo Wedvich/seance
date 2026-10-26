@@ -537,7 +537,8 @@ of M4 has landed.
   carries the verdict as `failure.oomKill`: "out of memory (the kernel's OOM killer fired as it
   died)" (only when sampled and judged within ten minutes of the death) or "not by the kernel's
   OOM killer" in place of "possibly out of memory", which stays for macOS, an unreadable or
-  vanished cgroup (a per-pane tmux scope), a stale or other launch's sample, and older daemons.
+  vanished cgroup (a per-pane tmux scope), a rise with a stale sample or a late check, another pane's
+  sample, and older daemons.
   DESIGN.md, _Daemon_, "Exit status", records what the count proves on a shared cgroup.
 
   _Open gaps (follow-up, not yet planned):_
