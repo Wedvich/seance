@@ -95,11 +95,18 @@ describe("deriveMachines", () => {
       NOW,
       NO_LEADER,
     );
-    expect(cards[0]?.meta).toStartWith("asleep · last seen");
+    expect(cards[0]?.meta).toBe("asleep · last seen 17m ago");
     expect(cards[0]?.gauges).toEqual([]);
     expect(cards[0]?.exclaves[0]?.sessions).toBeNull();
     expect(accounts[0]?.bars.map((bar) => bar.pct)).toEqual([7]);
     expect(accounts[0]?.observed).toEndWith("18m ago on mac, asleep");
+    // A socket the relay still listed when it slept: lastSeen is the register's, days old; the beat is the sleep.
+    const listed = deriveMachines(
+      [machine({ connected: false, lastSeen: NOW - 3 * 86_400_000, status })],
+      NOW,
+      NO_LEADER,
+    );
+    expect(listed.cards[0]?.meta).toBe("asleep · last seen 17m ago");
   });
 
   test("an account across machines takes the newest observation; unsigned exclaves group nowhere", () => {

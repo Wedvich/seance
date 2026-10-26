@@ -408,6 +408,7 @@ of M4 has landed.
 | 1     | Fleet quota record — **Done**                                      | store rules v2                                                         | M                        |
 | 1     | CLI `auto` — **Done**                                              | MCP's enqueue split out                                                | S–M                      |
 | 1     | `failed` from exit status (new) — **Done**                         | —                                                                      | S–M                      |
+| 1     | Asleep machines on the Queue screen (new) — **Done**               | —                                                                      | S                        |
 | 2     | Spawn defaults to the scheduler (**Done**)                         | account pins (PR #303); keyless `auto` for MCP (**Done**)              | M–L                      |
 | 2     | Stacking                                                           | authoring surface; #28                                                 | L                        |
 | 2     | Auth health                                                        | `/usage` refresh; Web Push for its alert                               | M                        |
@@ -540,6 +541,70 @@ of M4 has landed.
     `progress` entry where one was read.
   - A spawn that times out before claude registers and then dies untitled gets no status
     (harvest takes only titled panes; reap closes it), so its task settles `done` as before.
+
+- **Asleep machines on the Queue screen (new, 2026-10-26) — Done.** A task placed on a MacBook whose
+  lid closes keeps reading "It's waiting for input on MacBook M4 Pro · default" until
+  `lostAfterMs`, then "Lost on … — its machine went away 16m ago" under _Needs you_, though
+  nothing is lost and nothing can be answered: the machine is asleep. Decided with the design
+  session of 2026-10-26; lands as one PWA PR, and DESIGN.md _PWA_, "The Queue screen", takes it
+  over.
+  - _Decided, a derived view, not a state:_ the leader's states stay as they are (`lost` after
+    15 min, Settled defaults 10). The PWA derives "asleep" per row from the task's machine: a
+    `reserved`, `running`, `needs-input` or `lost` task whose assigned (or reserved) machine is
+    listed and not `connected` says so in its headline — "It's waiting for input on MacBook M4
+    Pro · default — its machine went to sleep 14m ago" (`running`: "It's running …",
+    `reserved`: "Starting …", each with the same clause; `formatSeen` words the age, as the
+    `lost` line does today). A `lost` task on such a machine is headlined "Asleep on MacBook M4
+    Pro · default — its machine went to sleep 22m ago", with the body "Settles when its machine
+    wakes; cancel or mark done to give up on it" — the leader's `lost` is that very judgement,
+    and its one remedy from the phone is giving up. "Lost" stays for a `lost` task whose machine
+    is listed and `connected` — "Lost on … — its machine is back but hasn't answered for it
+    yet", true both of a machine genuinely back (its next `sessions` pass settles the task) and
+    of a dark wake's zombie socket (a failed delivery re-marks it within seconds) — and for one
+    whose machine is no longer in the registry, which keeps today's wording from `absentSince`.
+    `awaiting-merge` carries no clause: the leader reads the merge with its own `gh`. Rejected: a
+    new task state, or a per-pass `absentSince` on running tasks — a store write per absent task
+    per pass, for a label, where the leader's absence clock is in memory by design (DESIGN.md
+    "`lost`"); a PWA-side hysteresis on `connected` — per device and per reload, it delays the
+    truth for the person who just opened the lid while the Machines screen beside it has already
+    flipped.
+  - _Decided, the signal:_ `Machine.connected` as the PWA's own `RelayClient` derives it (the
+    relay's live-socket flag, overridden by this client's proven-offline marks) — the signal the
+    Machines card's "asleep" already reads, never the relay flag alone. Why: `connected` is held
+    per app-role client, and a client's marks come only from its own failed deliveries, so the
+    leader, the daemon's broker (`list_machines`) and the PWA can disagree for minutes (DESIGN.md
+    _Presence & identity_, "Every app-role client holds its own marks"). The leader's
+    `#connectedIds` is not on the wire, exporting it is a per-pass write, and the PWA's own view
+    is the one that agrees with the rest of its screen. Accepted: a dark wake — the Mac
+    registering, or sending one `status` beat, and sleeping again; measured 2026-10-26 at
+    14:04:48 and 14:21:45 UTC — clears every reader's mark, so the clause disappears for the
+    moments until a delivery fails (the leader: ≤ 10 s) or the sweep closes the zombie socket
+    (≤ ~2.5 min); the Machines card flickers identically, and the fix for that is not in the
+    PWA.
+  - _Decided, "since":_ when the machine was last heard from — `lastHeardAt(machine)`, the later
+    of `lastSeen` and the kept `status.at` (`shared/src/status-reader.ts`, beside `liveStatus`),
+    shared by the Queue card, the Machines card's "asleep · last seen" and the machine picker's
+    "offline · last seen". The sweep stamps `lastSeen` with the last heartbeat, so once the
+    socket is closed it is within one beat of the sleep; but while the relay still lists a slept
+    socket — the window a proven-offline mark exists for — `lastSeen` is the register's time,
+    hours or days old on a machine that was simply up, and today's card says "last seen 3d ago"
+    of a machine that slept three minutes ago. The daemon's `status` beat, kept with the entry
+    when the socket goes, is at most a beat older than the sleep in both windows. Not
+    `absentSince`: the leader's clock starts a pass after its own view flipped (minutes after
+    the sleep), exists only on `lost`, and reading it for one state and `lastSeen` for another
+    makes the same card change its mind at the 15-minute mark.
+  - _Decided, Needs you:_ an asleep task stays in _Needs you_ — opening the lid is the action,
+    and "Running" would read as progress — ranked after what can be answered from the phone now:
+    escalated and live, `needs-input` and live, `needs-input` on an asleep machine, then `lost`.
+    Rejected: an "Asleep" section — sleep is the machine's property, shown on the Machines
+    screen, and a section that empties the moment the lid opens moves every row mid-glance. The
+    header's attention dot and the row's dot are unchanged, and so is `get_queue`: it lists raw
+    `state` and placement, and a model reads `connected` from `list_machines`.
+
+  _As built (2026-10-26):_ **Done**, as decided, in one PWA change: `lastHeardAt` beside
+  `liveStatus`, `machineAsleep` and the headlines in `pwa/src/decision-view.ts`, the body and
+  ranks in `pwa/src/queue-view.ts`. DESIGN.md _PWA_, "Asleep machines on the Queue screen", is
+  the record.
 
 - **Stacking** — `baseBranch` and `base_not_found`, lineage, the handoff preamble. Exit: a
   dependent task's worktree starts from its predecessor's branch; an unresolvable base fails

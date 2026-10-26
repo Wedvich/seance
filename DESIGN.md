@@ -834,7 +834,10 @@ The Durable Object persists a machine registry:
   `true` on disk. Entries go out to the PWA as `RegistryEntry & { connected }`.
 - `lastSeen` is written on register, on `webSocketClose`, and by the sweep —
   which stamps the last heartbeat rather than sweep time, since the machine
-  has been gone since then.
+  has been gone since then. So while a socket is listed, `lastSeen` is its
+  register's time, not its last heartbeat's: a machine up for three days
+  reads "last seen 3d ago" until the sweep closes its slept socket and
+  rewrites it. The kept `status.at` is the fresher stamp in that window.
 - **Silent daemon sockets are swept.** An abruptly-slept Mac sends no close
   frame, so its socket would read `connected: true` until Cloudflare noticed
   the dead TCP peer — unbounded, hours in practice. A storage alarm runs
@@ -1258,6 +1261,29 @@ requesting socket only.
   wake-driven session refresh keys on `lastSeen`, not the `connected` flag, so
   a mark clearing is not a "wake" — otherwise a machine answering slower than
   its op timeout enters a permanent mark → clear → re-poll flap loop.
+- **Every app-role client holds its own marks** (noted 2026-10-26). `connected`
+  is derived per `RelayClient`: the relay's live-socket flag, overridden by
+  proven-offline marks that come only from that client's own failed deliveries,
+  and cleared by a later register, any reply that decrypts, or a `status` beat
+  that opens. Four clients exist — the daemon's leader client (its `sessions`
+  and `spawn` requests are what mark), the daemon's broker client
+  (`list_machines` for a keyless `seanced mcp`; it sends only scheduler ops, so
+  it never marks, and it re-dials after five idle minutes with no marks at all),
+  the PWA's and Raycast's — and two of them answer "is this machine connected"
+  from one daemon process. Measured 2026-10-26 (UTC): the MacBook registered at
+  14:04:48 and slept within the beat; the leader's `sessions` to it timed out at
+  14:05:15 and marked it, and the mark held while `lastSeen` stayed at 14:04:48,
+  so every routing decision from then called it `offline` — while
+  `list_machines` at 14:19–14:21, through the broker client freshly dialled
+  after idling since 12:21, reported the relay's raw `connected: true, lastSeen
+  14:04:48`. Both were honest readings of different evidence. A beat around
+  14:21 then cleared the leader's mark, its next `sessions` came back
+  `undeliverable offline` within 20 ms, and the Mac registered again at
+  14:21:45 — a dark wake clears every client's mark at once, and each reads the
+  machine online until its own next delivery fails or the sweep runs (≤ ~2.5
+  min). Any consumer deriving "asleep" reads its own client's `connected`, the
+  one that agrees with the rest of its screen (docs/scheduler.md, M4, "Asleep
+  machines on the Queue screen").
 - **A request that never left is told from one that did** (`FailureReason`,
   `shared/src/app-client.ts`; split 2026-10-17). `disconnected` is a request
   refused before the send — no open socket, or the socket died while it was
@@ -4869,8 +4895,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   prompt-cut view come from. It re-reads on every `queue-changed` (the named tasks only, merged
   into what it holds), on a reconnect and on a leader change. A named task the reply leaves out
   is dropped only if the store holds no record of it, the same rule as the verdict's. Tasks group by what each needs from
-  the owner: Needs you (escalated first, then `needs-input`, then `lost`), Running, Waiting,
-  Awaiting merge, Finished, in the leader's order within each (`queue-view.ts`). A row shows the
+  the owner: Needs you (escalated first, then `needs-input`, then `needs-input` on an asleep
+  machine, then `lost`), Running, Waiting, Awaiting merge, Finished, in the leader's order within each (`queue-view.ts`). A row shows the
   task's title (its own, else its prompt's first line cut to 80, else its session's window name, else its repo), where it is and
   why, with the decision's record on tap — in the past tense once the task was placed ("spending
   credits", not "would spend"). A task whose session reported a PR (`Task.prUrl`, the newest one —
@@ -4891,6 +4917,37 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   one at a time"), and offers **Follow up** while the task can still be waited on or once it
   is `done`: the form takes that task as its After edge at `opened`. See
   "Authoring from the auto form" below.
+- **Asleep machines on the Queue screen** (2026-10-26, scheduler M4). A lid closed on a placed
+  task is not a lost task, and nothing on it can be answered from the phone; the row says so
+  rather than reading "waiting for input" until the leader calls it `lost`. A derived view, not
+  a state: a `reserved`, `running`, `needs-input` or `lost` task whose assigned (else reserved)
+  machine is listed and not `connected` adds "— its machine went to sleep 14m ago" to its
+  headline ("Starting …", "It's running …", "It's waiting for input …"). A `lost` task there is
+  headlined "Asleep on MacBook · default — its machine went to sleep 22m ago", with the body
+  "Settles when its machine wakes; cancel or mark done to give up on it": the leader's `lost` is
+  that very judgement, and giving up is the phone's one remedy. "Lost" stays for a `lost` task
+  whose machine is listed and `connected` ("its machine is back but hasn't answered for it yet",
+  true of a machine back, whose next `sessions` pass settles it, and of a dark wake's zombie
+  socket, re-marked on its next failed delivery) and for one no longer in the registry, worded
+  from `absentSince` as before. `awaiting-merge` carries no clause: the leader reads the merge
+  with its own `gh`. The signal is `Machine.connected` as this client's `RelayClient` derives it
+  (relay flag plus its own proven-offline marks), the one the Machines card's "asleep" reads —
+  so the screen agrees with itself, at the cost of the clause flickering off through a dark wake
+  exactly as that card does. The age is `lastHeardAt(machine)` (`shared/src/status-reader.ts`),
+  the later of `lastSeen` and the kept `status.at`, which the Machines card's "asleep · last
+  seen" and the machine picker's "offline · last seen" now read too: while the relay still lists
+  a slept socket, `lastSeen` is the register's time, days old, where the last beat is within one
+  of the sleep. In Needs you an asleep `needs-input` ranks after live ones (escalated, then not)
+  and before `lost`; dots, the attention dot and `get_queue` are unchanged. Rejected: a new task
+  state, or a per-pass `absentSince` on running tasks — a store write per absent task per pass
+  for a label, where the leader's absence clock is in memory by design; a PWA-side hysteresis on
+  `connected` — per device and per reload, it delays the truth for whoever just opened the lid;
+  the leader's `#connectedIds` (not on the wire; exporting it is a per-pass write) or the relay
+  flag alone (each app-role client holds its own marks — Presence & identity); `absentSince` as
+  the "since" — it starts a pass after the leader's own view flipped, exists only on `lost`, and
+  would make the same card change its age at the 15-minute mark; an "Asleep" section — sleep is
+  the machine's property, and a section that empties as the lid opens moves every row
+  mid-glance.
 - **Authoring from the auto form** (2026-10-23, M4 #21). The form adds AFTER and BATCH
   tiles, a "Settle on its done report" switch and a Linear issue field. **AFTER** opens a sheet of
   the tasks the leader holds that have not failed or been cancelled (read when the sheet opens),

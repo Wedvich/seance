@@ -515,6 +515,14 @@ describe("the pickers", () => {
     );
     expect(rows["Mac"]?.sub).toBe("online · 2 repos · last scanned 3h ago");
     expect(rows["WSL"]?.sub).toBe("offline · last seen 2d ago");
+
+    // Its last status beat is newer than the register's lastSeen: the beat says when it slept.
+    const beat = { at: (NOW - 5 * 60_000) / 1000, scan: 1, cpu: 1, mem: 1 };
+    const slept = machine({ ...wsl, connected: false, lastSeen: NOW - 2 * 86_400_000, status: beat });
+    const choice = deriveView(state({ relay: leader([scanned, slept]) }), NOW).machineChoices.find(
+      (c) => c.machine.name === "WSL",
+    );
+    expect(choice?.sub).toBe("offline · last seen 5m ago");
   });
 
   test("a rescan shows on its own row only: offered while connected, disabled while any runs", () => {

@@ -6,12 +6,13 @@ import {
   knownAccounts,
   type DepAfter,
   type KnownAccount,
+  type Machine,
   type PauseHold,
   type PrChecks,
   type PrState,
   type Task,
 } from "@seance/shared";
-import { avoidLine, pinLine, taskHeadline, waitingText } from "./decision-view.ts";
+import { avoidLine, machineAsleep, pinLine, taskHeadline, waitingText } from "./decision-view.ts";
 import { accountDisplayName, formatUntil } from "./machines-view.ts";
 import {
   deriveReportedAvailability,
@@ -159,7 +160,11 @@ function dotOf(task: Task): QueueDot | null {
   return null;
 }
 
-function bodyOf(task: Task, now: number): string | null {
+function bodyOf(task: Task, machines: readonly Machine[], now: number): string | null {
+  // The leader's `lost` is the sleep itself: waking settles it, and giving up is all the phone can do.
+  if (task.state === "lost" && machineAsleep(task, machines)) {
+    return "Settles when its machine wakes; cancel or mark done to give up on it";
+  }
   const waiting = waitingText(task);
   if (waiting !== null) return `Waiting: ${waiting}`;
   if (task.state === "failed") return failedBody(task.failure?.code, task.failure?.exit, task.spec.until);
@@ -242,7 +247,7 @@ function rowOf(task: Task, state: AppState, now: number, skew: number, titles: R
     id: task.id,
     title: titleOf(task),
     headline: taskHeadline(task, state.relay.machines, now),
-    body: bodyOf(task, now),
+    body: bodyOf(task, state.relay.machines, now),
     dot: dotOf(task),
     age: formatSeen(task.createdAt, now),
     canCancel: actionable,
@@ -259,12 +264,22 @@ function rowOf(task: Task, state: AppState, now: number, skew: number, titles: R
   };
 }
 
-const SECTIONS: readonly { readonly title: string; readonly pick: (task: Task) => number | null }[] = [
-  {
-    title: "Needs you",
-    // Escalated first: those have waited past the leader's patience.
-    pick: (t) => (t.state === "needs-input" ? (t.escalated === true ? 0 : 1) : t.state === "lost" ? 2 : null),
-  },
+type Pick = (task: Task, machines: readonly Machine[]) => number | null;
+
+/**
+ * What can be answered from the phone now first — escalated (past the leader's patience), then
+ * the rest of live needs-input — then needs-input on an asleep machine, whose action is opening
+ * the lid, then lost.
+ */
+const needsYou: Pick = (t, machines) => {
+  if (t.state === "lost") return 3;
+  if (t.state !== "needs-input") return null;
+  if (machineAsleep(t, machines)) return 2;
+  return t.escalated === true ? 0 : 1;
+};
+
+const SECTIONS: readonly { readonly title: string; readonly pick: Pick }[] = [
+  { title: "Needs you", pick: needsYou },
   { title: "Running", pick: (t) => (t.state === "reserved" || t.state === "running" ? 0 : null) },
   { title: "Waiting", pick: (t) => (t.state === "queued" || t.state === "blocked" || t.state === "ready" ? 0 : null) },
   { title: "Awaiting merge", pick: (t) => (t.state === "awaiting-merge" ? 0 : null) },
@@ -286,7 +301,7 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
 
   const sections = SECTIONS.map(({ title, pick }) => {
     const members = tasks
-      .map((task) => ({ task, rank: pick(task) }))
+      .map((task) => ({ task, rank: pick(task, state.relay.machines) }))
       .filter((entry): entry is { task: Task; rank: number } => entry.rank !== null)
       // Stable: equal ranks keep the leader's order.
       .toSorted((a, b) => a.rank - b.rank);
