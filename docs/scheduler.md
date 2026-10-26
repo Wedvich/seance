@@ -526,7 +526,10 @@ of M4 has landed.
   `endingTimeoutMs`, 5 min, then it settles as if no exit were known — once a check out has
   answered and a read begun after it still lists the session; a machine that is not connected
   settles on the deadline alone, never `lost` at the defaults), so the event path and the sweep are one path; a nonzero exit (a signal death as `128 + signal`) fails the task `session_failed`. DESIGN.md, _Daemon_, "Exit
-  status", records the rest and what was rejected.
+  status", records the rest and what was rejected. _Follow-up (2026-10-26):_ the failure carries
+  the status as `failure.exit`, so the PWA and `get_queue` say how the session ended — "killed
+  (SIGKILL), possibly out of memory" for 137, a signal's name for the others macOS and Linux number
+  alike, "exited with status N" otherwise — instead of "exited with an error".
 
   _Open gaps (follow-up, not yet planned):_
   - The deadline and disconnect settles call `ended(task, undefined)`, so a PR the daemon noted

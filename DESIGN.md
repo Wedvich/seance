@@ -1470,6 +1470,11 @@ an old peer's frames parse as before. Mixed versions:
   ignores (it settles a PR-less `ended` on the event, as before), and the `session_failed`
   failure code, which an older leader or app reads leniently (`parseTaskRecord` takes any
   bounded code); an older PWA words it as a spawn refusal.
+- `Task.failure.exit` (2026-10-26, a `session_failed` task's exit status, 1–255): lenient both
+  ways. A reader drops one out of range and keeps the failure; an older reader's parser takes only
+  `code` and `message`, so it shows "exited with an error" as before, and an older leader
+  re-writing the record drops the field with the same result. A record without it (an older
+  leader's, or any failed before) reads as before. No rollout order.
 - Reasons `skill_absent { skill }`, `auth_expired` and `base_unpushed`: an older app or
   leader drops an unknown reason from a decision and keeps the candidate.
 - `session-event` `done`: ingested since 2026-10-23 (Local op socket, "Session events"). A daemon
@@ -2505,7 +2510,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   event's `prUrl`, the one its record holds, or its machine's `progress` — is
   `awaiting-merge`: it holds no slot, and `after: "merged"` dependents wait on. With none
   it is `done`, `doneBy: "session"` — unless its machine reports a nonzero exit status
-  (`TaskProgress.exit`), when it is `failed`, `session_failed`, and its dependents fail
+  (`TaskProgress.exit`), when it is `failed`, `session_failed` (the status beside the message as
+  `failure.exit`, which readers word; Daemon, "Exit status"), and its dependents fail
   `dependency_failed` rather than start on a branch with nothing pushed (M4, `failed` from exit
   status, M3 review R3; Daemon, "Exit status"). **`until: "reported"`** (#21, 2026-10-23): a merge settles nothing there. It is
   recorded on the task (`merged: true`, which still releases `after: "merged"` dependents) and the
@@ -4062,7 +4068,13 @@ for the lot with its own `gh`.
   believed merge does (merged → `done` by `merged`, PR → `awaiting-merge`). A signal death (an OOM
   SIGKILL, a segfault) leaves `pane_dead_status` empty and `pane_dead_signal` set (tmux 3.3 and
   later; a number on Linux, a name on macOS, resolved through `os.constants.signals`), read as `128 + signal`, the shell's convention and inside 0–255, so it fails like any
-  nonzero exit. No status — 0, which
+  nonzero exit. The leader stores the status on the failure as `failure.exit` (2026-10-26), and
+  readers word it through `sessionExit` in `shared/src/scheduler-text.ts` — the PWA's headline
+  and card, `get_queue` — never by parsing the message, which stays for older readers: 137 reads
+  "killed (SIGKILL), possibly out of memory" (the OOM killer's signal, but a person's `kill -9`
+  too, hence "possibly"), another signal by name, anything else "exited with status N". Only the
+  signals macOS and Linux number alike (1–6, 8, 9, 11, 13–15) are named, since the fold uses the
+  sealing daemon's own numbering and 128 + 10 is SIGUSR1 on one and SIGBUS on the other. No status — 0, which
   under `failed` closes the window and is never seen, a signal death on a tmux without
   `pane_dead_signal` (the field reads empty), a tmux older than 3.2 (which refuses `failed`, so the window gets `off`), a pane someone closed by
   hand, an older daemon — settles `done` as before. A despawn is not told apart: its `/exit` exits
