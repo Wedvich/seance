@@ -408,7 +408,7 @@ of M4 has landed.
 | 1     | Fleet quota record — **Done**                                      | store rules v2                                                         | M                        |
 | 1     | CLI `auto` — **Done**                                              | MCP's enqueue split out                                                | S–M                      |
 | 1     | `failed` from exit status (new) — **Done**                         | —                                                                      | S–M                      |
-| 1     | Asleep machines on the Queue screen (new)                          | —                                                                      | S                        |
+| 1     | Asleep machines on the Queue screen (new) — **Done**               | —                                                                      | S                        |
 | 2     | Spawn defaults to the scheduler (**Done**)                         | account pins (PR #303); keyless `auto` for MCP (**Done**)              | M–L                      |
 | 2     | Stacking                                                           | authoring surface; #28                                                 | L                        |
 | 2     | Auth health                                                        | `/usage` refresh; Web Push for its alert                               | M                        |
@@ -542,7 +542,7 @@ of M4 has landed.
   - A spawn that times out before claude registers and then dies untitled gets no status
     (harvest takes only titled panes; reap closes it), so its task settles `done` as before.
 
-- **Asleep machines on the Queue screen (new, 2026-10-26).** A task placed on a MacBook whose
+- **Asleep machines on the Queue screen (new, 2026-10-26) — Done.** A task placed on a MacBook whose
   lid closes keeps reading "It's waiting for input on MacBook M4 Pro · default" until
   `lostAfterMs`, then "Lost on … — its machine went away 16m ago" under _Needs you_, though
   nothing is lost and nothing can be answered: the machine is asleep. Decided with the design
@@ -600,6 +600,11 @@ of M4 has landed.
     screen, and a section that empties the moment the lid opens moves every row mid-glance. The
     header's attention dot and the row's dot are unchanged, and so is `get_queue`: it lists raw
     `state` and placement, and a model reads `connected` from `list_machines`.
+
+  _As built (2026-10-26):_ **Done**, as decided, in one PWA change: `lastHeardAt` beside
+  `liveStatus`, `machineAsleep` and the headlines in `pwa/src/decision-view.ts`, the body and
+  ranks in `pwa/src/queue-view.ts`. DESIGN.md _PWA_, "Asleep machines on the Queue screen", is
+  the record.
 
 - **Stacking** — `baseBranch` and `base_not_found`, lineage, the handoff preamble. Exit: a
   dependent task's worktree starts from its predecessor's branch; an unresolvable base fails

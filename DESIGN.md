@@ -4895,7 +4895,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   prompt-cut view come from. It re-reads on every `queue-changed` (the named tasks only, merged
   into what it holds), on a reconnect and on a leader change. A named task the reply leaves out
   is dropped only if the store holds no record of it, the same rule as the verdict's. Tasks group by what each needs from
-  the owner: Needs you (escalated first, then `needs-input`, then `lost`), Running, Waiting,
+  the owner: Needs you (escalated first, then `needs-input`, then `needs-input` on an asleep machine, then `lost`), Running, Waiting,
   Awaiting merge, Finished, in the leader's order within each (`queue-view.ts`). A row shows the
   task's title (its own, else its prompt's first line cut to 80, else its session's window name, else its repo), where it is and
   why, with the decision's record on tap — in the past tense once the task was placed ("spending
@@ -4917,6 +4917,37 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   one at a time"), and offers **Follow up** while the task can still be waited on or once it
   is `done`: the form takes that task as its After edge at `opened`. See
   "Authoring from the auto form" below.
+- **Asleep machines on the Queue screen** (2026-10-26, scheduler M4). A lid closed on a placed
+  task is not a lost task, and nothing on it can be answered from the phone; the row says so
+  rather than reading "waiting for input" until the leader calls it `lost`. A derived view, not
+  a state: a `reserved`, `running`, `needs-input` or `lost` task whose assigned (else reserved)
+  machine is listed and not `connected` adds "— its machine went to sleep 14m ago" to its
+  headline ("Starting …", "It's running …", "It's waiting for input …"). A `lost` task there is
+  headlined "Asleep on MacBook · default — its machine went to sleep 22m ago", with the body
+  "Settles when its machine wakes; cancel or mark done to give up on it": the leader's `lost` is
+  that very judgement, and giving up is the phone's one remedy. "Lost" stays for a `lost` task
+  whose machine is listed and `connected` ("its machine is back but hasn't answered for it yet",
+  true of a machine back, whose next `sessions` pass settles it, and of a dark wake's zombie
+  socket, re-marked on its next failed delivery) and for one no longer in the registry, worded
+  from `absentSince` as before. `awaiting-merge` carries no clause: the leader reads the merge
+  with its own `gh`. The signal is `Machine.connected` as this client's `RelayClient` derives it
+  (relay flag plus its own proven-offline marks), the one the Machines card's "asleep" reads —
+  so the screen agrees with itself, at the cost of the clause flickering off through a dark wake
+  exactly as that card does. The age is `lastHeardAt(machine)` (`shared/src/status-reader.ts`),
+  the later of `lastSeen` and the kept `status.at`, which the Machines card's "asleep · last
+  seen" and the machine picker's "offline · last seen" now read too: while the relay still lists
+  a slept socket, `lastSeen` is the register's time, days old, where the last beat is within one
+  of the sleep. In Needs you an asleep `needs-input` ranks after live ones (escalated, then not)
+  and before `lost`; dots, the attention dot and `get_queue` are unchanged. Rejected: a new task
+  state, or a per-pass `absentSince` on running tasks — a store write per absent task per pass
+  for a label, where the leader's absence clock is in memory by design; a PWA-side hysteresis on
+  `connected` — per device and per reload, it delays the truth for whoever just opened the lid;
+  the leader's `#connectedIds` (not on the wire; exporting it is a per-pass write) or the relay
+  flag alone (each app-role client holds its own marks — Presence & identity); `absentSince` as
+  the "since" — it starts a pass after the leader's own view flipped, exists only on `lost`, and
+  would make the same card change its age at the 15-minute mark; an "Asleep" section — sleep is
+  the machine's property, and a section that empties as the lid opens moves every row
+  mid-glance.
 - **Authoring from the auto form** (2026-10-23, M4 #21). The form adds AFTER and BATCH
   tiles, a "Settle on its done report" switch and a Linear issue field. **AFTER** opens a sheet of
   the tasks the leader holds that have not failed or been cancelled (read when the sheet opens),
