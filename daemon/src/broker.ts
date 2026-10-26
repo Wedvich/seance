@@ -220,6 +220,10 @@ export function parseBrokerRequest(raw: unknown, selfDeviceId: string): Parsed {
   if (remoteOp === "sessions") clean = {};
   else if (remoteOp === "spawn") {
     if (!isSpawnRequest(payload)) return { code: "invalid_request", message: "malformed spawn request" };
+    // `cleanSpawn` drops `continues`, so a brokered continue would arrive half-formed; only the scheduler continues.
+    if (payload.mode !== "worktree" && payload.mode !== "here") {
+      return { code: "invalid_request", message: "a brokered spawn's mode must be worktree or here" };
+    }
     clean = cleanSpawn(payload);
   } else {
     if (!isDespawnRequest(payload)) return { code: "invalid_request", message: "malformed despawn request" };
@@ -377,6 +381,7 @@ export function createBroker(opts: BrokerOpts): Broker {
           request.schedulerOp,
           task,
           request.schedulerOp === "enqueue" ? request.spec.client : undefined,
+          request.schedulerOp === "enqueue" ? request.spec.continues?.task : undefined,
         );
       } else await audit.request(id, request.remoteOp, request.deviceId, clientOf(request.payload));
       if (stopped) return await fail(id, "shutting_down", "the daemon is stopping");

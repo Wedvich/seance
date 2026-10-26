@@ -372,12 +372,16 @@ export type BrokerOrigin = "local-broker";
 export interface BrokerAudit {
   readonly machines: (id: string) => Promise<void>;
   readonly fleet: (id: string) => Promise<void>;
-  /** `task` and `client` only where the op carries them; `client` is the peer's claim, never verified. */
+  /**
+   * `task` and `client` only where the op carries them; `client` is the peer's claim, never verified.
+   * `continues` is the old task id of an enqueued continue spec.
+   */
   readonly scheduler: (
     id: string,
     op: BrokerSchedulerOp,
     task: string | undefined,
     client: string | undefined,
+    continues?: string,
   ) => Promise<void>;
   readonly request: (id: string, op: string, deviceId: string, client: string | undefined) => Promise<void>;
   readonly ok: (id: string) => Promise<void>;
@@ -397,9 +401,9 @@ export function brokerAudit(sink: AuditSink, origin: BrokerOrigin = "local-broke
   return {
     machines: (id) => emit(`action=machines id=${quote(id)}`),
     fleet: (id) => emit(`action=fleet id=${quote(id)}`),
-    scheduler: (id, op, task, client) =>
+    scheduler: (id, op, task, client, continues) =>
       emit(
-        `action=scheduler op=${quote(op)}${task === undefined ? "" : ` task=${quote(task)}`}${client === undefined ? "" : ` claimed_client=${quote(client)}`} id=${quote(id)}`,
+        `action=scheduler op=${quote(op)}${task === undefined ? "" : ` task=${quote(task)}`}${client === undefined ? "" : ` claimed_client=${quote(client)}`}${continues === undefined ? "" : ` continues=${quote(continues)}`} id=${quote(id)}`,
       ),
     request: (id, op, deviceId, client) =>
       emit(

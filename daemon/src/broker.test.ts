@@ -151,6 +151,14 @@ describe("parseBrokerRequest refuses everything off the allowlist", () => {
       request({ remoteOp: "spawn", payload: { repo: "r", mode: "here", plan: "yes" } }),
       "invalid_request",
     ],
+    [
+      "a remote continue spawn, which only the scheduler makes",
+      request({
+        remoteOp: "spawn",
+        payload: { repo: "r", mode: "continue", taskId: TASK_ID, continues: "t-0", client: "scheduler" },
+      }),
+      "invalid_request",
+    ],
     ["a malformed despawn", request({ remoteOp: "despawn", payload: { id: 12 } }), "invalid_request"],
     ["no id", request({ id: undefined }), "invalid_request"],
     ["not an object", { length: 3 }, "invalid_request"],
@@ -317,6 +325,14 @@ describe("the broker's scheduler actions", () => {
       ]);
       expect(lines).toContain(
         `audit enqueue origin=local-broker claimed_client=cli task="${TASK_ID}" continues="${CONTINUES.task}" createdAt=5000 queued`,
+      );
+      expect(lines).toContainEqual(
+        expect.stringMatching(
+          new RegExp(
+            `^audit broker origin=local-broker action=scheduler op="enqueue" task="${TASK_ID}" claimed_client="cli" continues="${CONTINUES.task}" id=`,
+            "u",
+          ),
+        ),
       );
       broker.stop();
     });
