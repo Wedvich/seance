@@ -660,9 +660,9 @@ const FAILED_NEXT_STEP: ReadonlyMap<string, string> = new Map([
   ["session_failed", "Tasks waiting on it failed with it. Its transcript on that machine says why."],
 ]);
 
-export function failedBody(code: string | undefined): string {
+export function failedBody(code: string | undefined, exit?: number): string {
   // A code the scheduler set itself says why; any other is a daemon's spawn refusal.
-  const scheduler = code === undefined ? null : taskFailureText(code);
+  const scheduler = code === undefined ? null : taskFailureText(code, exit);
   if (code === undefined || scheduler === null) return "The machine refused the spawn. Nothing is running.";
   return `${sentence(scheduler)} ${FAILED_NEXT_STEP.get(code) ?? "Nothing is running."}`;
 }

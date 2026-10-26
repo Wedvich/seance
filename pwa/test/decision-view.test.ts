@@ -279,6 +279,13 @@ describe("taskHeadline", () => {
     expect(taskHeadline({ ...failed("session_failed"), assignment: at }, machines, NOW)).toBe(
       "Its session exited with an error on Mac · default, with no PR.",
     );
+    const exited = (exit: number) =>
+      task({ state: "failed", assignment: at, failure: { code: "session_failed", message: "raw", exit } });
+    expect(taskHeadline(exited(137), machines, NOW)).toBe(
+      "Its session was killed (SIGKILL) on Mac · default, possibly out of memory, with no PR.",
+    );
+    expect(taskHeadline(exited(143), machines, NOW)).toBe("Its session was killed (SIGTERM) on Mac · default, with no PR.");
+    expect(taskHeadline(exited(1), machines, NOW)).toBe("Its session exited with status 1 on Mac · default, with no PR.");
     expect(taskHeadline({ ...failed("repo_not_found"), assignment: at }, machines, NOW)).toBe(
       "It didn't take on Mac · default.",
     );

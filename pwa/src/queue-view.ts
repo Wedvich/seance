@@ -162,7 +162,7 @@ function dotOf(task: Task): QueueDot | null {
 function bodyOf(task: Task, now: number): string | null {
   const waiting = waitingText(task);
   if (waiting !== null) return `Waiting: ${waiting}`;
-  if (task.state === "failed") return failedBody(task.failure?.code);
+  if (task.state === "failed") return failedBody(task.failure?.code, task.failure?.exit);
   if (task.state === "needs-input" && task.escalated === true) {
     return task.needsInputSince === undefined
       ? "Waiting for input"
