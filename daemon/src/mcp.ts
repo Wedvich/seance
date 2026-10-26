@@ -514,7 +514,7 @@ function placementOf(task: Task, machines: readonly Machine[]): TaskPlacement | 
  * the failed dependency, the loop, or why a dispatch went unconfirmed. A daemon refusal's is its own.
  */
 function failureMessage(failure: NonNullable<Task["failure"]>): string {
-  const worded = taskFailureText(failure.code);
+  const worded = taskFailureText(failure.code, failure.exit);
   return worded === null ? failure.message : `${worded} (${failure.message})`;
 }
 
