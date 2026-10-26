@@ -834,7 +834,10 @@ The Durable Object persists a machine registry:
   `true` on disk. Entries go out to the PWA as `RegistryEntry & { connected }`.
 - `lastSeen` is written on register, on `webSocketClose`, and by the sweep —
   which stamps the last heartbeat rather than sweep time, since the machine
-  has been gone since then.
+  has been gone since then. So while a socket is listed, `lastSeen` is its
+  register's time, not its last heartbeat's: a machine up for three days
+  reads "last seen 3d ago" until the sweep closes its slept socket and
+  rewrites it. The kept `status.at` is the fresher stamp in that window.
 - **Silent daemon sockets are swept.** An abruptly-slept Mac sends no close
   frame, so its socket would read `connected: true` until Cloudflare noticed
   the dead TCP peer — unbounded, hours in practice. A storage alarm runs
@@ -1258,6 +1261,29 @@ requesting socket only.
   wake-driven session refresh keys on `lastSeen`, not the `connected` flag, so
   a mark clearing is not a "wake" — otherwise a machine answering slower than
   its op timeout enters a permanent mark → clear → re-poll flap loop.
+- **Every app-role client holds its own marks** (noted 2026-10-26). `connected`
+  is derived per `RelayClient`: the relay's live-socket flag, overridden by
+  proven-offline marks that come only from that client's own failed deliveries,
+  and cleared by a later register, any reply that decrypts, or a `status` beat
+  that opens. Four clients exist — the daemon's leader client (its `sessions`
+  and `spawn` requests are what mark), the daemon's broker client
+  (`list_machines` for a keyless `seanced mcp`; it sends only scheduler ops, so
+  it never marks, and it re-dials after five idle minutes with no marks at all),
+  the PWA's and Raycast's — and two of them answer "is this machine connected"
+  from one daemon process. Measured 2026-10-26 (UTC): the MacBook registered at
+  14:04:48 and slept within the beat; the leader's `sessions` to it timed out at
+  14:05:15 and marked it, and the mark held while `lastSeen` stayed at 14:04:48,
+  so every routing decision from then called it `offline` — while
+  `list_machines` at 14:19–14:21, through the broker client freshly dialled
+  after idling since 12:21, reported the relay's raw `connected: true, lastSeen
+  14:04:48`. Both were honest readings of different evidence. A beat around
+  14:21 then cleared the leader's mark, its next `sessions` came back
+  `undeliverable offline` within 20 ms, and the Mac registered again at
+  14:21:45 — a dark wake clears every client's mark at once, and each reads the
+  machine online until its own next delivery fails or the sweep runs (≤ ~2.5
+  min). Any consumer deriving "asleep" reads its own client's `connected`, the
+  one that agrees with the rest of its screen (docs/scheduler.md, M4, "Asleep
+  machines on the Queue screen").
 - **A request that never left is told from one that did** (`FailureReason`,
   `shared/src/app-client.ts`; split 2026-10-17). `disconnected` is a request
   refused before the send — no open socket, or the socket died while it was
