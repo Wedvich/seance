@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   isCgroupPath,
   isExiting,
+  isExitingStat,
   isOomSample,
   judgeOomKill,
   OOM_WINDOW_MS,
@@ -28,12 +29,22 @@ async function cgroupOfPid(pid: number | "self", text: string): Promise<void> {
   await writeFile(join(proc, String(pid), "cgroup"), text);
 }
 
-async function statusOfPid(pid: number, state: string, pending = "0000000000000000"): Promise<void> {
+function statLine(pid: number, state: string, flags: number, comm = "claude"): string {
+  return `${pid} (${comm}) ${state} 1 ${pid} ${pid} 0 -1 ${flags} 0 0 0 0 0 0 0 0 20 0 1 0 5 100 10\n`;
+}
+
+async function statusOfPid(
+  pid: number,
+  state: string,
+  pending = "0000000000000000",
+  flags = 0x400000,
+): Promise<void> {
   await mkdir(join(proc, String(pid)), { recursive: true });
   await writeFile(
     join(proc, String(pid), "status"),
     `Name:\tclaude\nState:\t${state}\nSigPnd:\t0\nShdPnd:\t${pending}\n`,
   );
+  await writeFile(join(proc, String(pid), "stat"), statLine(pid, state[0] ?? "S", flags));
 }
 
 async function oomKills(root: string, cgroup: string, kills: number): Promise<void> {
@@ -139,8 +150,21 @@ describe("exiting, against the real files", () => {
     expect(await live.exiting(501)).toBe(true);
     expect(await live.exiting(502)).toBe(true);
     expect(await live.exiting(503)).toBe(false);
+    // PF_EXITING alone, with nothing pending in the status.
+    await statusOfPid(504, "S (sleeping)", "0000000000000000", 0x400004);
+    expect(await live.exiting(504)).toBe(true);
     expect(await live.exiting(999)).toBe(true);
     expect(await live.exiting(0)).toBe(true);
+  });
+
+  test("PF_EXITING is read from the stat flags, past a comm holding spaces and parens", () => {
+    expect(isExitingStat(statLine(7, "S", 0x400000))).toBe(false);
+    expect(isExitingStat(statLine(7, "S", 0x400004))).toBe(true);
+    expect(isExitingStat(statLine(7, "S", 0x400000, "a) S 1 2 3 4 5 4 (b"))).toBe(false);
+    expect(isExitingStat(statLine(7, "S", 0x400004, "a) S 1 2 3 4 5 0 (b"))).toBe(true);
+    expect(isExitingStat("")).toBe(true);
+    expect(isExitingStat("7 (x) S 1 2")).toBe(true);
+    expect(isExitingStat("7 (x) S 1 2 3 4 5 nope 0")).toBe(true);
   });
 
   test("unparseable status counts as exiting", () => {
@@ -263,6 +287,9 @@ describe("validation", () => {
       { ...good, at: -1 },
       { ...good, paneId: "3" },
       { ...good, windowId: "@x" },
+      // Each prefix belongs to its own field.
+      { ...good, paneId: "@3" },
+      { ...good, windowId: "%4" },
       { cgroup: UNIT, kills: 1 },
       // The list a first draft of this field wrote.
       [good],

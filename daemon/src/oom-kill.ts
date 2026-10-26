@@ -44,8 +44,10 @@ export interface OomProbe {
 }
 
 const CGROUP_PATH_MAX = 4096;
-const TMUX_ID = /^[%@]\d{1,9}$/u;
+const PANE_ID = /^%\d{1,10}$/u;
+const WINDOW_ID = /^@\d{1,10}$/u;
 const SIGKILL_PENDING = 0x100n;
+const PF_EXITING = 0x4;
 
 /**
  * The most a verdict of `true` may span, either side of the death: from the last sample while alive to
@@ -89,9 +91,9 @@ export function isOomSample(value: unknown): value is OomSample {
     Number.isSafeInteger(value.at) &&
     value.at >= 0 &&
     typeof value.paneId === "string" &&
-    TMUX_ID.test(value.paneId) &&
+    PANE_ID.test(value.paneId) &&
     typeof value.windowId === "string" &&
-    TMUX_ID.test(value.windowId)
+    WINDOW_ID.test(value.windowId)
   );
 }
 
@@ -128,6 +130,22 @@ export function isExiting(status: string): boolean {
     }
   }
   return !stated;
+}
+
+/**
+ * `/proc/<pid>/stat`: PF_EXITING in the flags, set once the task starts exiting whatever signals remain visible.
+ * Flags are field 9, counted after the last `)`: comm may hold spaces and parens. Unparseable counts as exiting.
+ */
+export function isExitingStat(stat: string): boolean {
+  const end = stat.lastIndexOf(")");
+  if (end < 0) return true;
+  // After comm: state, ppid, pgrp, session, tty_nr, tpgid, flags.
+  const flags = stat
+    .slice(end + 1)
+    .trim()
+    .split(/\s+/u)[6];
+  if (flags === undefined || !/^\d{1,20}$/u.test(flags)) return true;
+  return (BigInt(flags) & BigInt(PF_EXITING)) !== 0n;
 }
 
 export interface ProcOomProbeOptions {
@@ -171,8 +189,11 @@ export function procOomProbe(opts: ProcOomProbeOptions = {}): OomProbe | undefin
     },
     exiting: async (pid) => {
       if (!validPid(pid)) return true;
-      const text = await read(join(proc, String(pid), "status"));
-      return text === null || isExiting(text);
+      const [status, stat] = await Promise.all([
+        read(join(proc, String(pid), "status")),
+        read(join(proc, String(pid), "stat")),
+      ]);
+      return status === null || stat === null || isExiting(status) || isExitingStat(stat);
     },
   };
 }
@@ -219,6 +240,9 @@ export interface OomPane {
  * A live pane's own cgroup and its count; null off Linux, on any failure or
  * timeout, for a cgroup that does not read, and for a pid on its way out — the
  * previous sample then stands, which is the one taken before the kill.
+ *
+ * Accepted: a pid reused between the pane listing and these reads would sample another process's cgroup.
+ * Pids are allocated sequentially and the reads follow the listing within moments.
  */
 export function sampleOom(
   pane: OomPane,

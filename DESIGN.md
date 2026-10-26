@@ -4140,11 +4140,17 @@ for the lot with its own `gh`.
   time stays fresh; a sample-only change does not move `at`. It survives a restart and is fenced
   by pane: a verdict uses only a sample of the same pane and window, so a relaunch's pane never
   inherits the old one's baseline nor the old one's death the new one's. A sample is discarded
-  when its pid is already on its way out (gone, zombie, or SIGKILL pending in `/proc/<pid>/status`
-  — checked after the count is read, since the kernel counts the kill as it sends the signal and
-  a pane can still be listed alive while its process exits); the previous sample stands. A spawn
-  that lands is sampled at once, after its launch settles and not awaited, so a session dying
-  before the next pass has a baseline and a stalled read holds nothing. When harvest finds the
+  when its pid is already on its way out (gone, zombie, SIGKILL pending in `/proc/<pid>/status`,
+  or `PF_EXITING` in the flags of `/proc/<pid>/stat` — checked after the count is read, since the
+  kernel counts the kill as it sends the signal and a pane can still be listed alive while its
+  process exits; the stat flag backs the status check, which assumes SIGKILL stays visible for the
+  whole exit); the previous sample stands. `at` is taken before any read of the pass, so it is
+  never later than the count it stamps. A spawn that lands is sampled at once, after its launch
+  settles and not awaited, so a session dying before the next pass has a baseline and a stalled
+  read holds nothing. Sampling is single-flight: a read timeout bounds the wait, not the read, so
+  while an earlier pass's or spawn's sample reads are outstanding no further sample is taken. A
+  pid reused between the pane listing and the reads would sample another process; accepted, since
+  pids are allocated sequentially and the reads follow the listing within moments. When harvest finds the
   pane dead with 137 it compares, and notes the verdict beside the status in one note (`oomKill`,
   carried by `progress`, stored by the leader as `failure.oomKill`): the leaf's count risen is
   `true`, unchanged `false`, dropped (made anew) unknown, and a leaf that no longer reads unknown.
