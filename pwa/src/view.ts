@@ -3,6 +3,7 @@ import {
   CAPABILITIES,
   endedBySignal,
   knownAccounts,
+  lastHeardAt,
   sentence,
   taskFailureText,
   type TaskUntil,
@@ -411,7 +412,7 @@ function deriveMachineChoices(state: AppState, now: number): readonly MachineCho
     .map((machine) => {
       const base = machine.connected
         ? `online · ${machine.repos.length} ${machine.repos.length === 1 ? "repo" : "repos"} · last scanned ${formatSeen(machine.scannedAt, now)}`
-        : `offline · last seen ${formatSeen(machine.lastSeen, now)}`;
+        : `offline · last seen ${formatSeen(lastHeardAt(machine), now)}`;
       let disabled = false;
       let sub = base;
       if ((machine.exclaves ?? []).length === 0) {
