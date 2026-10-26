@@ -11,12 +11,12 @@ import {
 import {
   describeDecision,
   isPlaced,
-  machineAsleep,
   pinLine,
   queuedBody,
   taskHeadline,
   waitingText,
 } from "../src/decision-view.ts";
+import { machineAsleep } from "../src/asleep.ts";
 
 const NOW = 1_800_000_000_000;
 const NOW_S = NOW / 1000;

@@ -12,7 +12,8 @@ import {
   type PrState,
   type Task,
 } from "@seance/shared";
-import { avoidLine, machineAsleep, needsAttention, pinLine, taskHeadline, waitingText } from "./decision-view.ts";
+import { machineAsleep, needsAttention } from "./asleep.ts";
+import { avoidLine, pinLine, taskHeadline, waitingText } from "./decision-view.ts";
 import { accountDisplayName, formatUntil } from "./machines-view.ts";
 import {
   deriveReportedAvailability,

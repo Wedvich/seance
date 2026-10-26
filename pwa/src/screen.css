@@ -1383,10 +1383,7 @@
   transition: transform 150ms ease;
 }
 
-.disclosure[aria-expanded="true"] > .disclosure-chevron {
-  transform: rotate(90deg);
-}
-
+.disclosure[aria-expanded="true"] > .disclosure-chevron,
 .fleet-note {
   margin: 0;
   font-size: 13px;
@@ -2092,7 +2089,7 @@
   gap: var(--gap);
 }
 
-/* The heading's own type, made tappable; padding grows the target, negative margins take it back. */
+/* The heading's own type, made tappable; padding grows the target, negative margins take it back (the column's gutter absorbs the sideways give-back). */
 .queue-section-toggle {
   display: inline-flex;
   align-items: center;
@@ -2110,6 +2107,10 @@
   .queue-section-toggle:hover {
     color: var(--acc);
   }
+}
+
+.queue-section-toggle:focus-visible {
+  color: var(--acc);
 }
 
 .queue-section-toggle[aria-expanded="true"] > .disclosure-chevron {

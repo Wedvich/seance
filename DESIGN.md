@@ -5036,7 +5036,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   seen" and the machine picker's "offline · last seen" now read too: while the relay still lists
   a slept socket, `lastSeen` is the register's time, days old, where the last beat is within one
   of the sleep. Every such task sits in its own **Asleep** section, below Waiting, collapsed to
-  "ASLEEP · 3" until tapped (in-memory state, closed on each open of the screen), ordered
+  "ASLEEP · 3" until tapped (in-memory state per mount, never stored: closed on each open on a phone, where the screen remounts; kept for the page's life on desktop, where the queue column stays mounted), ordered
   `needs-input`, then `running`/`reserved`, then `lost`: Needs you holds only what can be acted on
   now (amended 2026-10-26, after use). The summary's running count and the attention dot (both
   `queueAttention` and the screen's) skip asleep tasks; row dots and `get_queue` are unchanged.

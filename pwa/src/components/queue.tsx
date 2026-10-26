@@ -141,12 +141,13 @@ export function QueueScreen(props: {
                     type="button"
                     className="queue-section-toggle"
                     aria-expanded={asleepOpen}
+                    aria-label={`${section.title}, ${section.rows.length} ${section.rows.length === 1 ? "task" : "tasks"}`}
                     onClick={() => setAsleepOpen((open) => !open)}
                   >
                     <span className="disclosure-chevron" aria-hidden="true">
                       ▶
                     </span>
-                    {section.title.toUpperCase()} · {section.rows.length}
+                    {section.title} · {section.rows.length}
                   </button>
                 </h2>
               ) : (

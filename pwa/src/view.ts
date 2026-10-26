@@ -23,7 +23,7 @@ import {
   type TaskAction,
   type Verdict,
 } from "./state.ts";
-import { needsAttention } from "./decision-view.ts";
+import { needsAttention } from "./asleep.ts";
 
 /**
  * Everything the screen renders, derived in one pure pass. Components stay dumb

@@ -14,7 +14,7 @@ import {
 import { deriveAfterSheet, deriveQueue } from "../src/queue-view.ts";
 import { DEFAULT_FORM, RESCAN_IDLE, type QueueState } from "../src/state.ts";
 import { CAPABILITIES, reasonText } from "@seance/shared";
-import { failedBody, type AppState } from "../src/view.ts";
+import { deriveView, failedBody, type AppState } from "../src/view.ts";
 
 const NOW = 1_800_000_000_000;
 const ORIGIN = "github.com/acme/app";
@@ -179,6 +179,56 @@ describe("deriveQueue", () => {
     expect(needs.map((r) => r.body)).not.toContain(settles);
     // Dots are the leader's verdict, unchanged by the derived sleep.
     expect(rows[0]?.dot).toBe("err");
+  });
+
+  test("reserved tasks stay in Running on a connected or an unlisted machine", () => {
+    const view = deriveQueue(
+      state(
+        ok([
+          task("here", { state: "reserved", reservation: { ...placedAt, expiresAt: NOW } }),
+          task("nowhere", { state: "reserved", reservation: { ...placedAt, deviceId: "dev-gone", expiresAt: NOW } }),
+        ]),
+      ),
+      NOW,
+    );
+    expect(titles(view)).toEqual(["Running"]);
+    expect(view.sections[0]?.rows.map((r) => r.id)).toEqual(["here", "nowhere"]);
+  });
+
+  test("when every task is asleep the screen is not empty, and only Asleep shows", () => {
+    const asleep = machine({ connected: false, lastSeen: NOW - 600_000 });
+    const view = deriveQueue(
+      state(ok([task("run", { state: "running", assignment: placedAt })]), {}, { machines: [asleep] }),
+      NOW,
+    );
+    expect(view.empty).toBeNull();
+    expect(titles(view)).toEqual(["Asleep"]);
+    expect(view.summary).toBe("0 running · 0 waiting");
+  });
+
+  test("the Queue chip's attention (queueAttention) skips escalated tasks on asleep machines", () => {
+    const asleep = machine({ connected: false, lastSeen: NOW - 600_000 });
+    const dozing = task("dozing", { state: "needs-input", assignment: placedAt, escalated: true });
+    const live = task("live", { state: "needs-input", escalated: true });
+    const relay = { machines: [asleep] };
+    expect(deriveView(state(ok([dozing]), {}, relay), NOW).queueAttention).toBe(false);
+    expect(deriveView(state(ok([dozing, live]), {}, relay), NOW).queueAttention).toBe(true);
+  });
+
+  test("an escalated task an awake machine holds still outranks plain needs-input", () => {
+    const awake = machine();
+    const view = deriveQueue(
+      state(
+        ok([
+          task("plain", { state: "needs-input", assignment: placedAt }),
+          task("stuck", { state: "needs-input", assignment: placedAt, escalated: true }),
+        ]),
+        {},
+        { machines: [awake] },
+      ),
+      NOW,
+    );
+    expect(view.sections[0]?.rows.map((r) => r.id)).toEqual(["stuck", "plain"]);
   });
 
   test("an escalated task says how long it has waited, and attention follows it", () => {
