@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   cmdInstall,
+  parseContinueArgs,
   parseDespawnArgs,
   parseInstallArgs,
   parseModArgs,
@@ -34,6 +35,21 @@ describe("parseDespawnArgs", () => {
   test("no id, two ids, or an unknown flag is a usage error, not a guess", () => {
     for (const argv of [[], ["%1", "%2"], ["%1", "-f"], ["--force"]]) {
       expect(() => parseDespawnArgs(argv)).toThrow("usage: seanced despawn");
+    }
+  });
+});
+
+describe("parseContinueArgs", () => {
+  test("takes one task id and an optional note, by flag or as bare words", () => {
+    expect(parseContinueArgs(["t-1"])).toEqual({ taskId: "t-1" });
+    expect(parseContinueArgs(["t-1", "-p", "retry the tests"])).toEqual({ taskId: "t-1", prompt: "retry the tests" });
+    expect(parseContinueArgs(["--prompt", "go on", "t-1"])).toEqual({ taskId: "t-1", prompt: "go on" });
+    expect(parseContinueArgs(["t-1", "go", "on"])).toEqual({ taskId: "t-1", prompt: "go on" });
+  });
+
+  test("no id, a dangling flag, or an unknown flag is a usage error", () => {
+    for (const argv of [[], ["-p", "x"], ["t-1", "-p"], ["t-1", "--now"]]) {
+      expect(() => parseContinueArgs(argv)).toThrow("usage: seanced continue");
     }
   });
 });

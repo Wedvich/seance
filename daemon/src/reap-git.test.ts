@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseBranches, parseWorktreeList, transcriptDir } from "./reap-git.ts";
+import { parseBranches, parseWorktreeList, parseWorktreeLock, transcriptDir } from "./reap-git.ts";
 
 /** `git worktree list --porcelain -z`: NUL after every attribute, an empty one ending each record. */
 function porcelain(...records: readonly (readonly string[])[]): string {
@@ -76,5 +76,25 @@ describe("transcriptDir", () => {
       if (previous === undefined) delete process.env["CLAUDE_CONFIG_DIR"];
       else process.env["CLAUDE_CONFIG_DIR"] = previous;
     }
+  });
+});
+
+describe("parseWorktreeLock", () => {
+  const raw = porcelain(
+    ["worktree /r/main", "HEAD aaa", "branch refs/heads/main"],
+    ["worktree /r/a", "HEAD bbb", "branch refs/heads/a", "locked claude session fix (pid 4242)"],
+    ["worktree /r/b", "HEAD ccc", "detached", "locked"],
+    ["worktree /r/odd\nname", "HEAD ddd", "detached", "locked on a usb disk"],
+  );
+
+  test("gives the reason a worktree is locked with, an empty one when none was given, and null when unlocked", () => {
+    expect(parseWorktreeLock(raw, "/r/a")).toEqual({ reason: "claude session fix (pid 4242)" });
+    expect(parseWorktreeLock(raw, "/r/b")).toEqual({ reason: "" });
+    expect(parseWorktreeLock(raw, "/r/main")).toBeNull();
+  });
+
+  test("reads the record of the path asked for, newline in it included, and none for an unlisted path", () => {
+    expect(parseWorktreeLock(raw, "/r/odd\nname")).toEqual({ reason: "on a usb disk" });
+    expect(parseWorktreeLock(raw, "/r/elsewhere")).toBeNull();
   });
 });

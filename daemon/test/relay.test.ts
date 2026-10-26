@@ -599,7 +599,14 @@ describe("daemon ↔ relay integration", () => {
     const daemon = await startTestDaemon(relay.url);
     try {
       const { deviceId, info } = await registerWithRepo(relay, "myrepo");
-      expect(info.capabilities).toEqual(["metrics", "taskId", "exitStatus", "reportedDone", "pinAccount"]);
+      expect(info.capabilities).toEqual([
+        "metrics",
+        "taskId",
+        "exitStatus",
+        "reportedDone",
+        "pinAccount",
+        "continueTask",
+      ]);
       // A status leaves only after its tick wrote the store, so one in hand
       // means there is history to ask for.
       await relay.statuses.next();

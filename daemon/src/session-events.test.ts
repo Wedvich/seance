@@ -244,6 +244,20 @@ describe("EndedTasks", () => {
     expect(done).toBe(true);
   });
 
+  test("continuation says where a launch ran, or why it cannot be continued", async () => {
+    const ledger = LaunchLedger.memory();
+    const ended = new EndedTasks(ledger);
+    expect(ended.continuation("unknown")).toEqual({ refused: expect.stringContaining("holds no launch") });
+    // Launched, not yet settled: its site is not known and a second spawn must not race it.
+    const settle = await ended.launch("flying");
+    expect(ended.continuation("flying")).toEqual({ refused: expect.stringContaining("still in flight") });
+    await settle(true);
+    expect(ended.continuation("flying")).toEqual({ refused: expect.stringContaining("no worktree of it was noted") });
+    await ledger.record("landed");
+    await ledger.note("landed", { repo: "/r", path: "/r/.claude/worktrees/x" });
+    expect(ended.continuation("landed")).toEqual({ repo: "/r", path: "/r/.claude/worktrees/x" });
+  });
+
   test("a ledger that cannot record refuses the launch and holds nothing back", async () => {
     const dir = await mkdtemp(join(tmpdir(), "seance-ledger-"));
     try {

@@ -4,21 +4,24 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   CAPABILITIES,
+  isRecord,
   RequestFailure,
   storeErrorText,
   TASK_REQUEST_LIMITS,
   toBase64,
   type Capability,
   type ExclaveInfo,
+  type Machine,
   type SchedulerAvailability,
+  type Task,
   type TaskSpec,
 } from "@seance/shared";
 import { startBrokerDouble } from "../test/broker-double.ts";
 import { fakeRelay, machine } from "../test/fake-app-relay.ts";
 import { LazyRelay } from "./app-relay.ts";
 import { brokerFail, brokerOk } from "./broker-protocol.ts";
-import { autoFleet, spawnAuto } from "./cli-auto.ts";
-import type { SpawnCliArgs } from "./cli.ts";
+import { autoFleet, continueTaskAuto, spawnAuto } from "./cli-auto.ts";
+import type { ContinueCliArgs, SpawnCliArgs } from "./cli.ts";
 import type { Config } from "./config.ts";
 import { relayFleet, SCHEDULER_NEEDS_NEWER_DAEMON } from "./fleet.ts";
 
@@ -415,5 +418,144 @@ describe("spawnAuto's placement flags", () => {
     expect(ok).toBe(false);
     expect(text).toContain("`here` names this machine, which has no seanced state yet");
     expect(fake.started).toBe(0);
+  });
+});
+
+describe("continueTaskAuto", () => {
+  const AT = { deviceId: "device-2", exclave: "work", clone: "seance" };
+  const failedTask: Task = {
+    id: "t-1",
+    state: "failed",
+    createdAt: 4_000,
+    failure: { code: "session_failed", message: "the session ended with exit 137" },
+    spec: { repo: ORIGIN, mode: "worktree", prompt: "fix it", title: "fix-it" },
+    assignment: { ...AT, window: "fix-it" },
+  };
+  const CAN = [CAPABILITIES.continueTask];
+
+  /** The leader (device-1) and the box the task ran on (device-2). */
+  const machines = (advertising: { readonly leader?: boolean } = {}): Machine[] => [
+    machine({ deviceId: "device-1", name: "Leader", ...(advertising.leader === false ? {} : { capabilities: CAN }) }),
+    machine({ deviceId: "device-2", name: "Linux Box", capabilities: CAN }),
+  ];
+
+  async function runContinue(
+    queue: readonly Task[],
+    fleetMachines: readonly Machine[] = machines(),
+    args: ContinueCliArgs | undefined = undefined,
+  ): Promise<{ ok: boolean; text: string; audited: readonly string[]; fake: ReturnType<typeof fakeRelay> }> {
+    const fake = fakeRelay(fleetMachines, (op) => (op === "queue" ? { tasks: queue, at: 6_000 } : new Error(op)));
+    fake.setState({ scheduler: LEADING });
+    const lazy = new LazyRelay({ create: () => fake });
+    const audited: string[] = [];
+    try {
+      const outcome = await continueTaskAuto(args ?? { taskId: "t-1" }, relayFleet(lazy), (line) => {
+        audited.push(line);
+      });
+      return { ...outcome, audited, fake };
+    } finally {
+      lazy.stop();
+    }
+  }
+
+  test("queues the continuation as the CLI's: an exact target, the note, origin=cli, naming no MCP tool", async () => {
+    const { ok, text, audited, fake } = await runContinue([failedTask], machines(), { taskId: "t-1", prompt: "go on" });
+    expect(ok).toBe(true);
+    const [created] = fake.creates;
+    expect(created?.spec).toEqual({
+      repo: ORIGIN,
+      mode: "continue",
+      prompt: "go on",
+      title: "fix-it",
+      continues: { task: "t-1", at: AT },
+      client: "cli",
+    } satisfies TaskSpec);
+    expect(text).toStartWith("continuing task t-1\n");
+    expect(text).toContain(`task ${created?.id}: queued`);
+    expect(text).not.toContain("get_queue");
+    expect(audited).toEqual([
+      `audit enqueue origin=cli client=cli task="${created?.id}" continues="t-1" createdAt=${created?.createdAt} queued`,
+    ]);
+  });
+
+  test("refuses a task nobody lists, one that is not a failed session, and a leader that cannot continue; nothing is queued", async () => {
+    const cases: [string, Awaited<ReturnType<typeof runContinue>>][] = [
+      ["not in the leader's list", await runContinue([])],
+      ["only a task whose session ended in failure", await runContinue([{ ...failedTask, state: "done" }])],
+      [
+        "the scheduler's leader cannot continue a session yet",
+        await runContinue([failedTask], machines({ leader: false })),
+      ],
+    ];
+    for (const [reason, outcome] of cases) {
+      expect(outcome.ok).toBe(false);
+      expect(outcome.text).toStartWith("continue refused: ");
+      expect(outcome.text).toContain(reason);
+      expect(outcome.fake.creates).toEqual([]);
+      expect(outcome.audited).toEqual([]);
+    }
+  });
+
+  describe("through the daemon's broker, for a shell that cannot read the key", () => {
+    const answer =
+      (frames: Record<string, unknown>[], fleetMachines: readonly Machine[]) =>
+      (raw: unknown, id: string): ReturnType<typeof brokerOk> => {
+        if (!isRecord(raw)) return brokerFail(id, "invalid_request", "not a frame");
+        frames.push(raw);
+        if (raw["action"] === "fleet") return brokerOk(id, { machines: fleetMachines, scheduler: LEADING });
+        if (raw["schedulerOp"] === "queue") return brokerOk(id, { tasks: [failedTask], at: 6_000 });
+        if (raw["schedulerOp"] === "enqueue") return brokerOk(id, { ok: true, landedEarlier: false });
+        return brokerFail(id, "unsupported", "not in this double");
+      };
+
+    test("the enqueue frame carries the continue spec, for the daemon to seal", async () => {
+      const frames: Record<string, unknown>[] = [];
+      const double = await startBrokerDouble(answer(frames, machines()));
+      try {
+        const built = await autoFleet(config({ psk: "" }), { stores: [], broker: { path: double.path } });
+        const audited: string[] = [];
+        const outcome = await continueTaskAuto({ taskId: "t-1" }, built.fleet, (line) => void audited.push(line), {
+          keyless: built.keyless,
+        });
+        expect(outcome.ok).toBe(true);
+        const sent = frames.find((frame) => frame["schedulerOp"] === "enqueue");
+        expect(sent).toMatchObject({
+          spec: { mode: "continue", continues: { task: "t-1", at: AT }, client: "cli" },
+        });
+        // This shell's own line, as on the direct path; the daemon writes its `local-broker` one when it seals.
+        expect(audited).toEqual([expect.stringContaining('continues="t-1"')]);
+      } finally {
+        await double.stop();
+      }
+    });
+
+    test("a leader that cannot continue is refused before any enqueue frame", async () => {
+      const frames: Record<string, unknown>[] = [];
+      const double = await startBrokerDouble(answer(frames, machines({ leader: false })));
+      try {
+        const built = await autoFleet(config({ psk: "" }), { stores: [], broker: { path: double.path } });
+        const outcome = await continueTaskAuto({ taskId: "t-1" }, built.fleet, () => {}, { keyless: true });
+        expect(outcome.ok).toBe(false);
+        expect(outcome.text).toContain("the scheduler's leader cannot continue a session yet");
+        expect(frames.some((frame) => frame["schedulerOp"] === "enqueue")).toBe(false);
+      } finally {
+        await double.stop();
+      }
+    });
+
+    test("a daemon that predates the broker is told to update", async () => {
+      const double = await startBrokerDouble((raw, id) =>
+        isRecord(raw) && raw["action"] === "machines"
+          ? brokerOk(id, [machine()])
+          : brokerFail(id, "unsupported", "action is not brokered"),
+      );
+      try {
+        const built = await autoFleet(config({ psk: "" }), { stores: [], broker: { path: double.path } });
+        const outcome = await continueTaskAuto({ taskId: "t-1" }, built.fleet, () => {}, { keyless: true });
+        expect(outcome).toEqual({ ok: false, text: `continue unavailable: ${SCHEDULER_NEEDS_NEWER_DAEMON}` });
+      } finally {
+        await double.stop();
+      }
+    });
   });
 });
