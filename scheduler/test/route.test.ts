@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ExclaveInfo, Machine } from "@seance/shared";
+import { BATCH_STRATEGY, type ExclaveInfo, type Machine } from "@seance/shared";
 import { DEFAULT_CONFIG, route, type Candidate, type Decision, type SchedulerConfig, type Task } from "../src/index.ts";
 import { accountResetAt } from "../src/route.ts";
 import { clone, exclave, machine, NOW, NOW_S, obs, spec, status } from "./fixtures.ts";
@@ -695,11 +695,17 @@ describe("filter", () => {
       expect(freed.chosen).toEqual({ deviceId: "a", exclave: "main", clone: "app" });
     });
 
-    test("a batch's bound still counts them: its own serialization waits for its members", () => {
-      const batch = (index: number) => spec({ batch: { id: "b1", index, strategy: { mode: "parallel", max: 1 } } });
+    test("a batch member there counts toward nothing past the caps' own rule: a batch has no bound", () => {
+      const batch = (index: number) => spec({ batch: { id: "b1", index, strategy: BATCH_STRATEGY } });
       const tasks = [{ ...held("x", "s"), spec: batch(0) }];
-      const candidate = only(decide([machine("a")], { task: task({ spec: batch(1) }), tasks, released }));
-      expect(candidate.rejected).toEqual([{ code: "cap_reached", inFlight: 1, max: 1, scope: "batch" }]);
+      const next = task({ spec: batch(1) });
+      expect(only(decide([machine("a")], { task: next, tasks, config: { globalMax: 1 }, released })).rejected).toEqual(
+        [],
+      );
+      // Awake, it holds the global slot as any task does, and nothing more.
+      expect(only(decide([machine("a")], { task: next, tasks, config: { globalMax: 1 } })).rejected).toEqual([
+        { code: "cap_reached", inFlight: 1, max: 1 },
+      ]);
     });
   });
 
