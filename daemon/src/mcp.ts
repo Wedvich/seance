@@ -446,7 +446,8 @@ export function decisionText(decision: Decision): string {
     .filter((c) => c !== winner)
     .map((c) => {
       if (c.rejected.length > 0) return `${candidateWhere(c)}: ${c.rejected.map(reasonText).join(", ")}`;
-      if (c.score === undefined) return `${candidateWhere(c)}: rejected for a reason this seanced cannot read`;
+      if (c.score === undefined)
+        return `${candidateWhere(c)}: rejected for a reason this seanced can't read; the leader may run another version`;
       // With nothing chosen a scored candidate lost to something other than its score (a hold, a race).
       const lost = chosen === null ? "scored but not chosen" : "scored higher";
       return `${candidateWhere(c)}: ${lost}, ${c.score.total.toFixed(2)}`;
@@ -1008,8 +1009,11 @@ export function buildMcpServer(
     "queue_batch",
     {
       title: "Queue a batch of tasks",
-      description: `Queue several tasks for the scheduler at once, as one batch: a group that shows together in get_queue and the app, numbered in the order given. A batch sets no order and no limit of its own — members run as soon as their dependencies and the fleet's and accounts' concurrency caps allow, side by side unless told otherwise. To run members in order, give each its after: another member by its ref (an earlier one only), or an existing task by its id. Pin a member to a machine, an account or both with its pin, and keep it off machines with its avoid, as spawn_session's: an unknown or ambiguous machine or account refuses the whole batch, and a pinned member waits for a slot where it is pinned; each account a member is pinned to is named in the answer. Answers with the batch id and each member's task id, or names the member that failed and the ones that had already queued. ${AUTO_LIMITS}`,
+      description: `Queue several tasks for the scheduler at once, as one batch: a group that shows together in get_queue and the app, numbered in the order given. A batch sets no order and no limit of its own — members run as soon as their dependencies and the fleet's and accounts' concurrency caps allow, side by side unless told otherwise. To run members in order, give each its after: another member by its ref (an earlier one only), or an existing task by its id. Pin a member to a machine, an account or both with its pin, and keep it off machines with its avoid, as spawn_session's: an unknown or ambiguous machine or account refuses the whole batch, and a pinned member waits for a slot where it is pinned; each account a member is pinned to is named in the answer. Answers with the batch id and each member's task id, or names the member that failed and the ones that had already queued. The old strategy and max fields are retired. ${AUTO_LIMITS}`,
       inputSchema: z.object({
+        // Retired, still parsed: zod drops unknown keys, which would turn a stale caller's order into a silent plain group.
+        strategy: z.unknown().optional().describe("Retired: refused unless absent or auto"),
+        max: z.unknown().optional().describe("Retired: refused"),
         tasks: z
           .array(
             z.object({
@@ -1046,7 +1050,12 @@ export function buildMcpServer(
       }),
       annotations: { readOnlyHint: false },
     },
-    async ({ tasks }) => {
+    async ({ strategy, max, tasks }) => {
+      if ((strategy !== undefined && strategy !== "auto") || max !== undefined) {
+        return errorResult(
+          "queue_batch refused: a batch no longer orders or limits its members, so strategy and max are retired. Give each member its after to order them; concurrency is the fleet's and accounts' caps",
+        );
+      }
       const batchId = crypto.randomUUID();
       const planned: {
         readonly id: string;

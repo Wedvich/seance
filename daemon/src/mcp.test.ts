@@ -1789,12 +1789,24 @@ describe("queue_batch", () => {
     expect(fake.requests).toEqual([]);
   });
 
-  test("a caller still sending a strategy gets a plain group: a batch has no order or limit to ask for", async () => {
+  test("a caller still sending an order or a limit is refused, not given a plain group; auto or none is fine", async () => {
+    for (const extra of [
+      { strategy: "sequential" },
+      { strategy: "parallel", max: 2 },
+      { strategy: "bogus" },
+      { max: 1 },
+    ]) {
+      const fake = leaderRelay();
+      const refused = await callTool(fake, "queue_batch", { ...extra, tasks: [member(), member()] });
+      expect(refused.error).toBe(true);
+      expect(refused.text).toContain("no longer orders or limits");
+      expect(refused.text).toContain("after");
+      expect(fake.creates).toEqual([]);
+    }
     const fake = leaderRelay();
-    const ok = await callTool(fake, "queue_batch", { strategy: "parallel", max: 2, tasks: [member(), member()] });
+    const ok = await callTool(fake, "queue_batch", { strategy: "auto", tasks: [member(), member()] });
     expect(ok.error).toBe(false);
     expect(fake.creates.map((t) => t.spec.batch?.strategy)).toEqual([BATCH_STRATEGY, BATCH_STRATEGY]);
-    expect(ok.text).not.toContain("parallel");
   });
 
   test("a bad ref, a task waiting on itself, or an ambiguous edge refuses the whole batch before anything is stored", async () => {
