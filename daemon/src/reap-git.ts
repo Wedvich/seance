@@ -271,10 +271,10 @@ export async function classifyTip(
   return (await patches.landedSince(mergeBase, patchId)) ? "squash" : "unmerged-gone";
 }
 
-/** Commits on `tip` that aren't in `base` by sha — the count a kept branch is reported with. */
-export async function commitsAhead(repoPath: string, tip: string, base: string): Promise<number> {
+/** Commits on `tip` that aren't in `base` by sha — the count a kept branch is reported with. Null when rev-list failed: unknown, not zero. */
+export async function commitsAhead(repoPath: string, tip: string, base: string): Promise<number | null> {
   const result = await hardenedGit(repoPath, ["rev-list", "--count", `${base}..${tip}`]);
-  return result.exitCode === 0 ? Number(result.stdout.trim()) : 0;
+  return result.exitCode === 0 ? Number(result.stdout.trim()) : null;
 }
 
 /**
