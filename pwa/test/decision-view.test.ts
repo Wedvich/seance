@@ -284,8 +284,12 @@ describe("taskHeadline", () => {
     expect(taskHeadline(exited(137), machines, NOW)).toBe(
       "Its session was killed (SIGKILL) on Mac · default, possibly out of memory, with no PR.",
     );
-    expect(taskHeadline(exited(143), machines, NOW)).toBe("Its session was killed (SIGTERM) on Mac · default, with no PR.");
-    expect(taskHeadline(exited(1), machines, NOW)).toBe("Its session exited with status 1 on Mac · default, with no PR.");
+    expect(taskHeadline(exited(143), machines, NOW)).toBe(
+      "Its session was killed (SIGTERM) on Mac · default, with no PR.",
+    );
+    expect(taskHeadline(exited(1), machines, NOW)).toBe(
+      "Its session exited with status 1 on Mac · default, with no PR.",
+    );
     expect(taskHeadline({ ...failed("repo_not_found"), assignment: at }, machines, NOW)).toBe(
       "It didn't take on Mac · default.",
     );

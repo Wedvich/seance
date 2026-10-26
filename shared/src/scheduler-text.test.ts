@@ -18,7 +18,9 @@ describe("taskFailureText", () => {
     expect(taskFailureText("session_failed", 137)).toBe(
       "its session was killed (SIGKILL), possibly out of memory, and reported no pull request",
     );
-    expect(taskFailureText("session_failed", 143)).toBe("its session was killed (SIGTERM) and reported no pull request");
+    expect(taskFailureText("session_failed", 143)).toBe(
+      "its session was killed (SIGTERM) and reported no pull request",
+    );
     expect(taskFailureText("session_failed", 1)).toBe("its session exited with status 1 and reported no pull request");
     expect(taskFailureText("session_failed")).toBe("its session exited with an error and reported no pull request");
     expect(taskFailureText("merge_expired", 137)).toBe(taskFailureText("merge_expired"));

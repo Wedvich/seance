@@ -118,7 +118,7 @@ describe("a session's exit status", () => {
     expect(fleet.sessionCalls).toEqual(["a", "a"]);
     expect(scheduler.task("t")).toMatchObject({ state: "failed", failure: { code: "session_failed", exit: 137 } });
     // The status is stored as a field, not only inside the message, so a reader words it without parsing.
-    expect((await store.get("t"))?.body.failure).toMatchObject({ code: "session_failed", exit: 137 });
+    expect((await store.get("t"))?.body?.failure).toMatchObject({ code: "session_failed", exit: 137 });
     expect(scheduler.task("dep")).toMatchObject({ state: "failed", failure: { code: "dependency_failed" } });
   });
 
