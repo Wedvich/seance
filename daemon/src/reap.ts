@@ -26,6 +26,7 @@ import {
   readPruneLog,
   removeWorktree,
   resolveRemoteHead,
+  type BranchRecord,
   type BranchVerdict,
   type FetchOutcome,
   type Merged,
@@ -99,10 +100,11 @@ export interface RepoReport {
   readonly dirty: readonly { readonly path: string; readonly changes: number }[];
   /** Upstream gone, commits on it nowhere upstream: unpushed work, kept. */
   readonly keptBranches: readonly { readonly name: string; readonly ahead: number | null }[];
-  /** Linked worktrees on unpushed work — upstream gone, or detached past the default branch. Kept. */
+  /** Linked worktrees on unpushed work — upstream gone, never pushed, or detached past the default branch. Kept. */
   readonly keptWorktrees: readonly {
     readonly path: string;
     readonly branch: string | null;
+    readonly why: KeptWorktreeWhy;
     readonly ahead: number | null;
   }[];
   /** Worktrees whose pane is open in tmux — someone is in them. */
@@ -110,9 +112,28 @@ export interface RepoReport {
   readonly locked: readonly string[];
   /** Merged and clean, but touched more recently than the age gate. */
   readonly young: number;
-  /** Unmerged worktrees on a branch whose upstream isn't gone (still tracked, or never pushed): in-flight work, counted only. */
+  /** Unmerged worktrees on a branch whose upstream is still live: in-flight work, counted only. */
   readonly active: number;
   readonly failed: readonly { readonly what: string; readonly detail: string }[];
+}
+
+export type KeptWorktreeWhy = "upstream-gone" | "never-pushed" | "detached";
+
+const KEPT_WORKTREE_TEXT: Readonly<Record<KeptWorktreeWhy, string>> = {
+  "upstream-gone": "upstream gone",
+  "never-pushed": "never pushed",
+  detached: "detached",
+};
+
+/** Why an unmerged worktree is listed, or null for one on a live upstream (counted `active`). */
+function keptWorktreeWhy(
+  branch: string | null,
+  verdict: BranchVerdict,
+  byName: ReadonlyMap<string, BranchRecord>,
+): KeptWorktreeWhy | null {
+  if (branch === null) return "detached";
+  if (verdict === "unmerged-gone") return "upstream-gone";
+  return byName.get(branch)?.hasUpstream === false ? "never-pushed" : null;
 }
 
 export interface PaneNote {
@@ -619,14 +640,16 @@ async function reapRepo(
     const verdict = await verdictFor(worktree.head, worktree.branch);
     if (!isMerged(verdict)) {
       // Checked-out branch is skipped by the branch pass, so this row is its only report; a detached tip is never
-      // patch-checked (verdict active), listed here because no branch holds its commits.
-      if (verdict === "unmerged-gone" || worktree.branch === null) {
-        // oxlint-disable-next-line no-await-in-loop
-        const ahead = await commitsAhead(repo.path, worktree.head, base);
-        report.keptWorktrees.push({ path: worktree.path, branch: worktree.branch, ahead });
-      } else {
+      // patch-checked (verdict active), listed here because no branch holds its commits. A branch missing from
+      // `byName` claims nothing and stays counted.
+      const why = keptWorktreeWhy(worktree.branch, verdict, byName);
+      if (why === null) {
         active += 1;
+        continue;
       }
+      // oxlint-disable-next-line no-await-in-loop
+      const ahead = await commitsAhead(repo.path, worktree.head, base);
+      report.keptWorktrees.push({ path: worktree.path, branch: worktree.branch, why, ahead });
       continue;
     }
     // oxlint-disable-next-line no-await-in-loop
@@ -765,7 +788,8 @@ export function formatReport(report: ReapReport): readonly string[] {
       rows.push(row("kept branch", `${kept.name}   upstream gone, ${aheadText(kept.ahead)}`));
     }
     for (const kept of repo.keptWorktrees) {
-      const why = kept.branch === null ? "detached" : `${kept.branch}   upstream gone`;
+      const text = KEPT_WORKTREE_TEXT[kept.why];
+      const why = kept.branch === null ? text : `${kept.branch}   ${text}`;
       rows.push(row("kept worktree", `${tilde(kept.path)}   ${why}, ${aheadText(kept.ahead)}`));
     }
     for (const path of repo.inUse) rows.push(row("in use", `${tilde(path)}   a tmux pane is inside it`));

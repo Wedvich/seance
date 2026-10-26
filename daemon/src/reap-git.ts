@@ -126,17 +126,24 @@ export interface BranchRecord {
   readonly sha: string;
   /** Its upstream is configured but the remote branch is gone (`[gone]`) — what a merged PR's deleted branch leaves. */
   readonly upstreamGone: boolean;
+  /** Any upstream is configured — false is a branch never pushed, local-only work. */
+  readonly hasUpstream: boolean;
 }
 
-const BRANCH_FORMAT = "%(refname)%00%(objectname)%00%(upstream:track)";
+const BRANCH_FORMAT = "%(refname)%00%(objectname)%00%(upstream:track)%00%(upstream)";
 
 /** Pure parser over `for-each-ref` in `BRANCH_FORMAT` — exported for unit tests. */
 export function parseBranches(raw: string): readonly BranchRecord[] {
   const branches: BranchRecord[] = [];
   for (const line of raw.split("\n")) {
-    const [ref, sha, track] = line.split("\0");
+    const [ref, sha, track, upstream] = line.split("\0");
     if (ref === undefined || sha === undefined || !ref.startsWith("refs/heads/")) continue;
-    branches.push({ name: ref.slice("refs/heads/".length), sha, upstreamGone: track === "[gone]" });
+    branches.push({
+      name: ref.slice("refs/heads/".length),
+      sha,
+      upstreamGone: track === "[gone]",
+      hasUpstream: upstream !== undefined && upstream !== "",
+    });
   }
   return branches;
 }
