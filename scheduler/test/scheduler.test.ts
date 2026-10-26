@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { MAX_TASKS, REPLAY_WINDOW_MS, type DespawnRequest, type DespawnResponse } from "@seance/shared";
+import { CAPABILITIES, MAX_TASKS, REPLAY_WINDOW_MS, type DespawnRequest, type DespawnResponse } from "@seance/shared";
 import {
   DEFAULT_CONFIG,
   MemoryQueueStore,
@@ -100,6 +100,48 @@ describe("dispatch", () => {
     await pass(scheduler);
     expect(fleet.spawns).toHaveLength(1);
     expect(scheduler.task(task.id)).toMatchObject({ state: "failed", failure: { code: "repo_not_found" } });
+  });
+
+  describe("a continue task", () => {
+    const at = { deviceId: "a", exclave: "main", clone: "app" };
+    const continuing = spec({ mode: "continue", continues: { task: "t-old", at } });
+    const capable = (): ReturnType<typeof machine> =>
+      machine("a", { capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.continueTask] });
+
+    test("is spawned in continue mode on its target, carrying the id it continues", async () => {
+      const { fleet, scheduler, store } = setup(new FakeFleet([capable()]));
+      const task = await enqueue(store, scheduler, continuing);
+      await pass(scheduler);
+      expect(fleet.spawns).toEqual([
+        {
+          deviceId: "a",
+          request: {
+            repo: "app",
+            mode: "continue",
+            prompt: "do it",
+            continues: "t-old",
+            client: SCHEDULER_CLIENT,
+            taskId: task.id,
+          },
+        },
+      ]);
+      expect(scheduler.task(task.id)?.state).toBe("running");
+    });
+
+    test("a not_continuable refusal fails it with the daemon's code and message, and it does not stay reserved", async () => {
+      const { fleet, scheduler, store } = setup(new FakeFleet([capable()]));
+      fleet.scripts.set("a", () => ({ ok: false, code: "not_continuable", message: "its worktree is gone" }));
+      const task = await enqueue(store, scheduler, continuing);
+      await pass(scheduler);
+      await pass(scheduler);
+      expect(fleet.spawns).toHaveLength(1);
+      const after = scheduler.task(task.id);
+      expect(after).toMatchObject({
+        state: "failed",
+        failure: { code: "not_continuable", message: "its worktree is gone" },
+      });
+      expect(after?.reservation).toBeUndefined();
+    });
   });
 
   test("task_running from a stale read resolves to running on the existing pane, without a second spawn", async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ExclaveInfo, Machine } from "@seance/shared";
+import { CAPABILITIES, type ExclaveInfo, type Machine } from "@seance/shared";
 import { DEFAULT_CONFIG, route, type Candidate, type Decision, type SchedulerConfig, type Task } from "../src/index.ts";
 import { accountResetAt } from "../src/route.ts";
 import { clone, exclave, machine, NOW, NOW_S, obs, spec, status } from "./fixtures.ts";
@@ -922,6 +922,65 @@ describe("stickiness", () => {
       task: task({ spec: spec({ lineage: { deviceId: "owner", exclave: "main" } }) }),
     });
     expect(decision.chosen?.deviceId).toBe("other");
+  });
+});
+
+describe("a continue task", () => {
+  const capable = [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.continueTask];
+  const continuing = (at: { deviceId: string; exclave: string; clone: string }): Task =>
+    task({ spec: spec({ mode: "continue", continues: { task: "t-old", at } }) });
+  const reasonsOf = (decision: Decision): Record<string, readonly unknown[]> =>
+    Object.fromEntries(decision.candidates.map((c) => [`${c.deviceId}/${c.exclave}`, c.rejected]));
+  /** `a` is the target; two exclaves, and a second clone of the same repo in `main` that skills would prefer. */
+  const fleet = (): Machine[] => [
+    machine("a", {
+      capabilities: capable,
+      exclaves: [exclave("main", "org:a"), exclave("work", "org:w", { skills: ["ship"] })],
+      repos: [clone("app", "main"), clone("app-2", "main"), clone("app-w", "work")],
+      status: status({ quota: [obs(0), obs(1)] }),
+    }),
+    machine("b", { capabilities: capable }),
+  ];
+
+  test("only the exact machine, exclave and clone is left; the rest say it ran elsewhere", () => {
+    const decision = decide(fleet(), { task: continuing({ deviceId: "a", exclave: "main", clone: "app-2" }) });
+    expect(decision.chosen).toEqual({ deviceId: "a", exclave: "main", clone: "app-2" });
+    const reasons = reasonsOf(decision);
+    expect(reasons["a/main"]).toEqual([]);
+    expect(reasons["a/work"]).toContainEqual({ code: "continue_elsewhere" });
+    expect(reasons["b/main"]).toContainEqual({ code: "continue_elsewhere" });
+  });
+
+  test("the named clone is judged on its own skills: another clone's project skill does not stand in", () => {
+    const at = { deviceId: "a", exclave: "main", clone: "app-2" };
+    const withSkill = [{ ...clone("app", "main"), skills: ["ship"] }, clone("app-2", "main")];
+    const decision = decide(
+      [machine("a", { capabilities: capable, repos: withSkill, exclaves: [exclave("main", "org:a")] })],
+      { task: task({ spec: spec({ mode: "continue", prompt: "/ship it", continues: { task: "t-old", at } }) }) },
+    );
+    expect(decision.chosen).toBeNull();
+    expect(only(decision).rejected).toEqual([{ code: "skill_absent", skill: "ship" }]);
+    expect(only(decision).clone).toBe("app-2");
+  });
+
+  test("a target without the capability is continue_unsupported, and never chosen", () => {
+    const old = machine("a", { capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId] });
+    const decision = decide([old], { task: continuing({ deviceId: "a", exclave: "main", clone: "app" }) });
+    expect(decision.chosen).toBeNull();
+    expect(only(decision).rejected).toEqual([{ code: "continue_unsupported" }]);
+  });
+
+  test("a clone the target no longer has is repo_absent", () => {
+    const decision = decide(fleet(), { task: continuing({ deviceId: "a", exclave: "main", clone: "gone" }) });
+    expect(decision.chosen).toBeNull();
+    expect(reasonsOf(decision)["a/main"]).toEqual([{ code: "repo_absent" }]);
+  });
+
+  test("an ordinary task is not held to any of it", () => {
+    const decision = decide(fleet());
+    expect(decision.candidates.flatMap((c) => c.rejected.map((r) => r.code))).not.toContain("continue_elsewhere");
+    expect(decision.candidates.flatMap((c) => c.rejected.map((r) => r.code))).not.toContain("continue_unsupported");
+    expect(decision.chosen).not.toBeNull();
   });
 });
 
