@@ -186,6 +186,11 @@ describe("deriveQueue", () => {
     const view = deriveQueue(state(ok([task("f", { state: "failed", failure })])), NOW);
     expect(view.sections[0]?.rows[0]?.body).toBe(failedBody("session_failed", 137));
     expect(view.sections[0]?.rows[0]?.body).toContain("killed (SIGKILL), possibly out of memory");
+    const judged = { ...failure, oomKill: true };
+    const confirmed = deriveQueue(state(ok([task("f", { state: "failed", failure: judged })])), NOW);
+    expect(confirmed.sections[0]?.rows[0]?.body).toContain(
+      "killed (SIGKILL), out of memory (the kernel's OOM killer fired as it died),",
+    );
   });
 
   test("a ready card says why it waits, leaving out places cut only for the pin", () => {

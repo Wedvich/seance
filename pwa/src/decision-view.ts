@@ -260,7 +260,7 @@ export function taskHeadline(task: Task, machines: readonly Machine[], now: numb
       if (task.failure?.code === "merge_expired") return "No merge seen for its PR — the scheduler gave up waiting.";
       if (task.failure?.code === "session_failed") {
         // No `exit` from an older leader: how it ended is unknown, and `sessionExit` says so.
-        const { clause, hint } = sessionExit(task.failure.exit);
+        const { clause, hint } = sessionExit(task.failure.exit, task.failure.oomKill);
         const lacked = task.spec.until === "reported" ? "with no done report" : "with no PR";
         return `Its session ${clause}${place}${hint === undefined ? "" : `, ${hint}`}, ${lacked}.`;
       }
@@ -373,7 +373,7 @@ export function queuedBody(task: Task): string {
       if (task.doneBy === "reported") return "Its session reported it done.";
       return task.doneBy === "manual" ? "Marked done by hand." : "The session ended.";
     case "failed":
-      return failedBody(task.failure?.code, task.failure?.exit, task.spec.until);
+      return failedBody(task.failure?.code, task.failure?.exit, task.spec.until, task.failure?.oomKill);
     case "cancelled":
       return task.leftRunning === true ? LEFT_RUNNING : "Nothing is running.";
   }

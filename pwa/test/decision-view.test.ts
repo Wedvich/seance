@@ -353,6 +353,19 @@ describe("taskHeadline", () => {
       "Its session was killed (SIGKILL), possibly out of memory, with no PR.",
     );
     expect(taskHeadline(unplaced(1), machines, NOW)).toBe("Its session exited with status 1, with no PR.");
+    // The machine's kernel said whether an OOM kill landed in its cgroup as it died.
+    const judged = (oomKill: boolean) =>
+      task({
+        state: "failed",
+        assignment: at,
+        failure: { code: "session_failed", message: "raw", exit: 137, oomKill },
+      });
+    expect(taskHeadline(judged(true), machines, NOW)).toBe(
+      "Its session was killed (SIGKILL) on Mac · default, out of memory (the kernel's OOM killer fired as it died), with no PR.",
+    );
+    expect(taskHeadline(judged(false), machines, NOW)).toBe(
+      "Its session was killed (SIGKILL) on Mac · default, not by the kernel's OOM killer, with no PR.",
+    );
     // Under until reported it was the done report that never came.
     expect(
       taskHeadline(
