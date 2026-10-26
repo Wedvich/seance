@@ -22,7 +22,7 @@ import {
   TASK_SPEC_LIMITS,
   TASK_UNTIL,
   withReportInstruction,
-  type BatchStrategy,
+  BATCH_STRATEGY,
   type Candidate,
   type Decision,
   type DespawnRequest,
@@ -446,7 +446,8 @@ export function decisionText(decision: Decision): string {
     .filter((c) => c !== winner)
     .map((c) => {
       if (c.rejected.length > 0) return `${candidateWhere(c)}: ${c.rejected.map(reasonText).join(", ")}`;
-      if (c.score === undefined) return `${candidateWhere(c)}: rejected for a reason this seanced cannot read`;
+      if (c.score === undefined)
+        return `${candidateWhere(c)}: rejected for a reason this seanced can't read; the leader may run another version`;
       // With nothing chosen a scored candidate lost to something other than its score (a hold, a race).
       const lost = chosen === null ? "scored but not chosen" : "scored higher";
       return `${candidateWhere(c)}: ${lost}, ${c.score.total.toFixed(2)}`;
@@ -656,20 +657,6 @@ function withReportedPrompt(
 /** A batch is at most this many members: one tool call, and `queue_batch` creates them one by one. */
 const BATCH_TASKS_MAX = 16;
 
-function batchStrategy(
-  strategy: "sequential" | "parallel" | "auto",
-  max: number | undefined,
-): { readonly strategy: BatchStrategy } | { readonly error: string } {
-  if (strategy === "parallel") {
-    return max === undefined ? { error: 'strategy "parallel" needs max' } : { strategy: { mode: "parallel", max } };
-  }
-  return max === undefined ? { strategy: { mode: strategy } } : { error: `max applies to strategy "parallel" only` };
-}
-
-function describeStrategy(strategy: BatchStrategy): string {
-  return strategy.mode === "parallel" ? `parallel, at most ${strategy.max} at once` : strategy.mode;
-}
-
 /** Under `until: "reported"` the prompt the author wrote is not the one that is bounded. */
 function lengthNote(invalid: string, until: TaskUntil | undefined): string {
   if (until !== "reported" || !invalid.startsWith("the prompt is")) return "";
@@ -700,7 +687,7 @@ function describeTask(task: Task, machines: readonly Machine[], names: AccountNa
     ...(spec.until === "reported" ? { until: spec.until } : {}),
     // A merge under `until: "reported"` settles nothing, so it is told apart from a finish here too.
     ...(task.merged === true ? { merged: true } : {}),
-    ...(spec.batch === undefined ? {} : { batch: spec.batch }),
+    ...(spec.batch === undefined ? {} : { batch: { id: spec.batch.id, index: spec.batch.index } }),
     ...(spec.deps === undefined ? {} : { after: spec.deps.map((dep) => ({ task: dep.task, when: dep.after })) }),
     ...(spec.linear === undefined ? {} : { linear: spec.linear }),
   };
@@ -1022,16 +1009,11 @@ export function buildMcpServer(
     "queue_batch",
     {
       title: "Queue a batch of tasks",
-      description: `Queue several tasks for the scheduler at once, as one batch with a shared strategy: "sequential" runs them one at a time in the order given, "parallel" runs at most max at once, "auto" leaves it to the dependencies and the fleet's capacity. Name a task's own dependencies with after: another member by its ref (an earlier one only), or an existing task by its id. Pin a member to a machine, an account or both with its pin, and keep it off machines with its avoid, as spawn_session's: an unknown or ambiguous machine or account refuses the whole batch, and a pinned member waits for a slot where it is pinned; each account a member is pinned to is named in the answer. Answers with the batch id and each member's task id, or names the member that failed and the ones that had already queued. ${AUTO_LIMITS}`,
+      description: `Queue several tasks for the scheduler at once, as one batch: a group that shows together in get_queue and the app, numbered in the order given. A batch sets no order and no limit of its own — members run as soon as their dependencies and the fleet's and accounts' concurrency caps allow, side by side unless told otherwise. To run members in order, give each its after: another member by its ref (an earlier one only), or an existing task by its id. Pin a member to a machine, an account or both with its pin, and keep it off machines with its avoid, as spawn_session's: an unknown or ambiguous machine or account refuses the whole batch, and a pinned member waits for a slot where it is pinned; each account a member is pinned to is named in the answer. Answers with the batch id and each member's task id, or names the member that failed and the ones that had already queued. The old strategy and max fields are retired. ${AUTO_LIMITS}`,
       inputSchema: z.object({
-        strategy: z.enum(["sequential", "parallel", "auto"]),
-        max: z
-          .number()
-          .int()
-          .min(1)
-          .max(TASK_SPEC_LIMITS.parallel)
-          .optional()
-          .describe('At most this many members run at once. Required with strategy "parallel", refused otherwise'),
+        // Retired, still parsed: zod drops unknown keys, which would turn a stale caller's order into a silent plain group.
+        strategy: z.unknown().optional().describe("Retired: refused unless absent or auto"),
+        max: z.unknown().optional().describe("Retired: refused"),
         tasks: z
           .array(
             z.object({
@@ -1069,8 +1051,11 @@ export function buildMcpServer(
       annotations: { readOnlyHint: false },
     },
     async ({ strategy, max, tasks }) => {
-      const shared = batchStrategy(strategy, max);
-      if ("error" in shared) return errorResult(`queue_batch: ${shared.error}`);
+      if ((strategy !== undefined && strategy !== "auto") || max !== undefined) {
+        return errorResult(
+          "queue_batch refused: a batch no longer orders or limits its members, so strategy and max are retired. Give each member its after to order them; concurrency is the fleet's and accounts' caps",
+        );
+      }
       const batchId = crypto.randomUUID();
       const planned: {
         readonly id: string;
@@ -1116,7 +1101,7 @@ export function buildMcpServer(
           repo: member.repo,
           ...requestFields({ ...member, prompt: reported.prompt }),
           ...authoredFields(deps, member.until, member.linear),
-          batch: { id: batchId, index: n, strategy: shared.strategy },
+          batch: { id: batchId, index: n, strategy: BATCH_STRATEGY },
         };
         const invalid = specError(spec);
         if (invalid !== null) {
@@ -1169,7 +1154,7 @@ export function buildMcpServer(
           landed.push(member.id);
         }
         const lines = [
-          `batch ${batchId}: ${resolvedPlan.length} tasks queued (${describeStrategy(shared.strategy)})`,
+          `batch ${batchId}: ${resolvedPlan.length} tasks queued`,
           ...resolvedPlan.map(({ id, ref }, i) => `task ${i + 1}${ref === undefined ? "" : ` (${ref})`}: ${id}`),
           ...echoes.map(({ text }) => text),
           "The scheduler places them as capacity and their dependencies allow; get_queue shows where each lands and why, and cancel_task takes one out.",

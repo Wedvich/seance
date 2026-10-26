@@ -253,7 +253,7 @@ function useSpawnActions(store: Store): SpawnActions {
       removeAfter: (taskId) => store.removeAfter(taskId),
       setUntil: (until) => store.setUntil(until),
       setLinearIssue: (issue) => store.setLinearIssue(issue),
-      startBatch: (strategy) => store.startBatch(strategy),
+      startBatch: () => store.startBatch(),
       endBatch: () => store.endBatch(),
     }),
     [store],

@@ -679,7 +679,7 @@ export class Scheduler {
     await this.#admit();
     const ready = dispatchOrder(this.tasks().filter((t) => t.state === "ready" && !this.#dispatches.has(t.id)));
     // Reserve one at a time, so each sees the reservations before it in projected
-    // usage and its batch's bound. The spawns are not awaited: one slow machine
+    // usage and the caps. The spawns are not awaited: one slow machine
     // must not hold every other placement, TTL and absence check behind its 90s
     // timeout.
     for (const task of ready) {

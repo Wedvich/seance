@@ -24,7 +24,6 @@ import {
   type RepoEntry,
   type ScoreComponents,
 } from "@seance/shared";
-import { batchCap } from "./batch.ts";
 import type { SchedulerConfig, SeatProfile, WindowSpan } from "./config.ts";
 import { codeUnitOrder } from "./order.ts";
 import { accountPause, activeHolds, queuePause } from "./pause.ts";
@@ -53,7 +52,7 @@ export interface RouteInput {
   readonly fleetQuota?: readonly FleetQuotaEntry[];
   /**
    * Machines absent past `slotReleaseAfterMs`: their in-flight tasks hold no
-   * slot and no projected usage here, though a batch's bound still counts them.
+   * slot and no projected usage here.
    */
   readonly released?: ReadonlySet<string>;
 }
@@ -108,7 +107,7 @@ export function route(input: RouteInput): Decision {
     holds: activeHolds(input.holds ?? [], now),
     skills: knownSkills(task, machines),
   };
-  const caps = [queuePause(pass.holds), pass.capReached, batchCap(task, input.tasks)].filter((r) => r !== null);
+  const caps = [queuePause(pass.holds), pass.capReached].filter((r) => r !== null);
 
   const candidates: Candidate[] = [];
   for (const machine of machines) {

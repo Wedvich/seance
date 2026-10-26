@@ -123,7 +123,7 @@ describe("describeDecision", () => {
   test("a candidate whose reasons this build could not read still reads as rejected", () => {
     const unknown: Decision = { at: NOW, chosen: null, candidates: [rejected("lxc", "LXC", [])] };
     expect(describeDecision(unknown, [], NOW, "would").others[0]?.why).toBe(
-      "rejected for a reason this app can't read — update it",
+      "rejected for a reason this app can't read; the leader may run another version",
     );
   });
 
@@ -212,8 +212,6 @@ test("every reason has its own words", () => {
     { code: "quota_over_line", window: "7d", projectedPct: 101, creditsSpent: true },
     { code: "cap_reached", inFlight: 8, max: 8 },
     { code: "cap_reached", inFlight: 2, max: 2, scope: "account" },
-    { code: "cap_reached", inFlight: 1, max: 1, scope: "batch" },
-    { code: "batch_order", index: 2 },
     { code: "paused", until: "resume", scope: "queue" },
     { code: "paused", until: "reset", scope: "account" },
   ];
@@ -223,7 +221,6 @@ test("every reason has its own words", () => {
   expect(texts).toContain("5h quota would reach 92%");
   expect(texts).toContain("7d quota would reach 101%, and its credits are spent");
   expect(texts).toContain("8 of 8 auto tasks already in flight");
-  expect(texts).toContain("its batch runs in order, and it waits for batch member #2, earlier in its order");
 });
 
 describe("taskHeadline", () => {

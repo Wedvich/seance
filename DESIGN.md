@@ -1493,6 +1493,10 @@ an old peer's frames parse as before. Mixed versions:
   and every record carrying either also carries `pin.exclave: ""`, which an older `parsePin`
   refuses — an older leader that takes over later holds the record unreadable instead
   (Scheduler, "`pin` and `avoid` on auto"). A stored `pin.exclave` is ignored by the current parser.
+- `TaskSpec.batch.strategy` (2026-10-26, not an M4 shape but the same kind of skew): batches
+  stopped scheduling, and every writer emits the one value `{ mode: "auto" }` because an older
+  `parseBatch` nulls a batch without a strategy; the current parser ignores any stored value
+  (Scheduler, "Batches").
 - `RepoEntry.skills` (a clone's project skills, at most `REPO_MAX_SKILLS`): lenient, so a bad
   list costs the field, never the entry or the machine. Scanned and routed on since
   2026-10-25 (Daemon, "Exclaves"; Scheduler, "Skills filter"). `MachineStatus.ax` (the exclave
@@ -2227,8 +2231,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   task's `avoid` names the machine), `repo_absent` (matched on
   `RepoEntry.origin`, never the machine-local name), `auth_missing`, `quota_unknown`,
   `quota_over_line`, `model_not_included` (the task's model is a gated one its seat bills
-  to credits — "Seats" below), `cap_reached` (global; `scope: "account"`, "Routing caps" below; or `scope:
-  "batch"`, "Batches" below), `batch_order` ("Batches"), `paused` ("Pause"), `skill_absent` (naming the skill; "Skills filter" below).
+  to credits — "Seats" below), `cap_reached` (global, or `scope: "account"`, "Routing caps" below; the
+  `scope: "batch"` and `batch_order` an older leader sent went with batch strategies, "Batches"), `paused` ("Pause"), `skill_absent` (naming the skill; "Skills filter" below).
   M4's `base_unpushed` and `auth_expired` are read and worded already; no filter emits them
   yet. Pressure
   comes only through `liveStatus` (a connected machine's) and then only if `isStatusStale`
@@ -2343,7 +2347,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   runs or bills on a sleeping machine. Once it is back its tasks count again; a fleet over a cap
   then is accepted — nothing is killed or despawned, and nothing new is placed until the count
   falls under it. A dark wake or blip restarts the clock (any pass that sees the machine
-  connected clears it), so the grace starts over. A batch's bound still counts them ("Batches").
+  connected clears it), so the grace starts over. Nothing else counts them: a batch has no
+  bound (2026-10-26, "Batches"), so the carve-out that kept one counting them is gone.
   Accepted: (a) the leader sees "not connected", not "asleep". A crashed or stopped daemon
   (`KillMode=process`, `daemon/src/systemd.ts`, so its tmux sessions outlive it) or a machine that
   lost the relay but not Anthropic keeps running and billing while its slots are free after 2 min
@@ -2529,9 +2534,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   passed since the dependent's own `createdAt` (a client puts a batch one record at a
   time), where an id held as an unreadable record waits, being in the store; and
   `dependency_cycle`, every `queued` or `blocked` member of a strongly connected component
-  over every held task, a self-edge included, and a `sequential` member's wait on the
-  nearest lower `index` not over counted as an edge (a lower index depending on a higher
-  one of its batch would otherwise deadlock silently), so a loop a later create closes fails the
+  over every held task, a self-edge included — `deps` are the only edges, a batch adding none
+  ("Batches") — so a loop a later create closes fails the
   member already blocked too — leaving out the edges of a finished task, whose dependents
   its outcome has already released or failed, so a `cancelled` member's dependent fails
   `dependency_failed`, not `dependency_cycle`. A `queued` task whose `createdAt` is more than
@@ -2545,31 +2549,49 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   call, so its dependents fail `dependency_failed` with it and pruning can take it — held
   `queued` instead, it would wait forever and hold its dependents with it. A release lands at the next pass, not on
   the event: the host ticks at least every 30s.
-- **Batches** (`batch.ts`, M3 item 4a). No batch record exists: a batch is the tasks that
-  name its id, and its strategy is the earliest-created member's (ties to the lower id).
-  `sequential` bounds it at one member in flight, `parallel` at `max`, `auto` not at all;
-  at the bound every candidate carries `cap_reached` with `scope: "batch"`. The bound
-  counts `IN_FLIGHT` and `lost`, so an `awaiting-merge` member frees its place but a lost
-  one does not: the global cap leaves `lost` out so a forgotten machine cannot pin it, a
-  reason a batch's own serialization lacks, and its session may still run on a machine
-  that only sleeps, so the next `sequential` member would run beside it. For the same reason
-  it still counts a member whose machine is asleep past `slotReleaseAfterMs`, which the caps
-  release ("Routing caps"). `sequential` also
-  enforces `index` order, which routing order alone cannot (a member whose predecessor is
-  unroutable this pass would go first): a member is held until every held lower index is
-  over — finished in any state, `failed` and `cancelled` included, or `awaiting-merge` —
-  with `batch_order`, naming the nearest lower index not over (the one cycle detection
-  counts as its edge). Its own reason, not `cap_reached`: the earlier member may be in
-  flight, but as often `blocked` or unroutable, and "1 of 1 in flight" would misstate that;
-  at the bound `cap_reached` comes first. One still `blocked` or unroutable holds it.
-  `parseBatch` bounds `index` at `MAX_TASKS` (`TASK_SPEC_LIMITS.batchIndex`): the store holds
-  no more task records, so no batch held at once has more members. Order is enforced among held
-  members only: a lower index not in the store (never put, not yet refreshed, or pruned)
-  holds nothing, so gaps, 1-based numbering and pruning never wedge a batch, and the check
-  costs the members, not the `index`. One client puts a batch together, so the window is a
-  refresh. A pass routes ready tasks
-  oldest first, except that one batch's members go in `index` order from where its oldest
-  ready member would have gone.
+- **Batches** (`batch.ts`, M3 item 4a; a group only since 2026-10-26). **A batch is a group;
+  order is `after`, concurrency is the caps.** No batch record exists: a batch is the tasks
+  that name its id, each with its `index`. It is where a set of tasks came from, shown
+  together (the Queue screen, `get_queue`) and acted on together; it holds no member back.
+  Order between members is their `after` edges, which `queue_batch` writes by `ref`;
+  concurrency is the global and per-account caps, with their asleep-grace rule ("Routing
+  caps"), and nothing else. A pass routes ready tasks oldest first, except that one batch's
+  members go in `index` order from where its oldest ready member would have gone — so they
+  sit together and in the order given, which is grouping, not a guarantee: a member
+  unroutable this pass does not hold the next. `parseBatch` bounds `index` at `MAX_TASKS`
+  (`TASK_SPEC_LIMITS.batchIndex`): the store holds no more task records, so no batch held at
+  once has more members.
+  **Mixed versions.** `BatchMembership.strategy` stays on the wire as the one value
+  `BATCH_STRATEGY` (`{ mode: "auto" }`): an older `parseBatch` nulls a batch without a valid
+  strategy, and its `parseTaskSpec` then nulls the whole spec, so a record without one would
+  be unreadable to every pre-change leader and app, and dropped from an older app's queue. It
+  is a field of the type, not added at serialization, so the store record, the leader's
+  `queue`/`cancel`/`mark-done` replies and the broker's enqueue frame all carry it without a
+  per-path emitter. `auto` is the value an older leader applies no batch bound to, so one
+  leading over a batch all of whose members new code wrote already behaves as this one. A batch
+  begun by old code with `sequential` or `parallel` and continued by new code is not: the old
+  `strategyOf` takes the earliest-created member's strategy, so an old leader still serialises or
+  bounds the whole batch. The PWA drops a persisted open batch carrying such a strategy, so its
+  next enqueue starts a new batch. The parser ignores whatever an older
+  writer stored (`sequential`, `parallel` with `max`, garbage, none) and reads it as
+  `BATCH_STRATEGY`, so a live record from before keeps its group and loses its strategy at
+  the next leader write; an older PWA or MCP may still write `sequential` during a rollout,
+  and this leader ignores it. A reader drops an older leader's `batch_order` and `cap_reached`
+  `scope: "batch"` as unknown reasons — the reason, never the candidate or the decision (as
+  for any reason a leader ahead mints) — so dropping them needed no tolerant step. Removing
+  the constant is a follow-up (docs/scheduler.md, M4 "Batches are a group").
+  Rejected (owner, 2026-10-26), both built in M3 and removed:
+  - _`sequential`_ (one member in flight, in `index` order, held with `batch_order`): an
+    implicit dependency chain. The explicit form says the same thing and is the one the
+    scheduler already reasons about — cycle detection, `opened`/`merged`/`done` release,
+    failure propagation — where `sequential` needed its own hold, its own reason, an order
+    edge in cycle detection and its own release rule (any finish, `failed` included, released
+    the next, unlike a dep). A sugar that writes the edges for the caller was rejected too:
+    the explicit edges are preferred.
+  - _`parallel` (at most `max` in flight)_: no value over the fleet and account caps, which
+    already bound what runs; a per-batch bound only added a third count with its own
+    exceptions — it kept counting `lost` members and, after #318, members on a machine asleep
+    past the grace, which the caps release. That carve-out went with it.
 - **Done detection** (`done.ts`, M3 item 4a). A failed session read is no answer, never an empty
   list: `listClaudeSessions` and `listPanes` read empty only when no tmux server runs (tmux's
   "no server running", or a socket path that does not exist), and throw on any other failure —
@@ -2753,9 +2775,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   there, untracked — nothing resurrects it or despawns it (`sessionChange`, `branchChange` and
   `settle` decline for a `failed` task), `cancel` answers `finished`, and it is ended by hand.
   No alert and no audit line: nothing spawns or despawns, and the record is the trace.
-  Accepted: a `sequential` batch counts a `lost` member toward its bound because its session may
-  still run ("Batches"), so past 7 days the next member may run beside one still alive on a
-  machine that slept that long. Mixed versions: a leader older than this change reads `endedAt` as
+  Mixed versions: a leader older than this change reads `endedAt` as
   an unknown field and drops it on its next write of that record, so the new leader ages that task
   from `createdAt`, which is never later, so expiry only comes earlier; an older leader never
   expires anything.
@@ -5040,8 +5060,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   there and becomes the notice. The queue is then read whole. Holds show whole or per account, by the account's
   own name, with a reset's time, each with **Resume**; the footer pauses or resumes the whole
   queue. The same cap applies as in the leader's reply: a full reply says it shows the most
-  relevant `QUEUE_MAX_TASKS`. Each row shows what it waits on ("After <title> (opened)") and its batch place ("Batch #2 ·
-  one at a time"), and offers **Follow up** while the task can still be waited on or once it
+  relevant `QUEUE_MAX_TASKS`. Each row shows what it waits on ("After <title> (opened)") and its batch place ("Batch #2"), and offers **Follow up** while the task can still be waited on or once it
   is `done`: the form takes that task as its After edge at `opened`. See
   "Authoring from the auto form" below.
 - **Asleep machines on the Queue screen** (2026-10-26, scheduler M4). A lid closed on a placed
@@ -5085,11 +5104,13 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   the tasks the leader holds that have not failed or been cancelled (read when the sheet opens),
   each with an Opened, Merged or Done choice; Done is offered only while the verified leader
   advertises `reportedDone`, as is the switch. An edge on a task the list no longer shows stays, by id, so it can
-  be removed. **BATCH** is an _open batch_: pick One at a time, Up to N at once or No limit,
-  and the next enqueues join it, numbered from 1, until End batch. It is `{id, strategy, next}`
-  in the persisted form: each enqueue takes index `next`, and the counter moves only for the
-  member it numbered, so a retry that lands twice moves it once (`landedEarlier`). Picking the open strategy again keeps the
-  batch, so a tap cannot renumber one in flight. Deps, `until` and the Linear issue belong to one
+  be removed. **BATCH** is an _open batch_: Start batch,
+  and the next enqueues join it, numbered from 1, until End batch; the sheet says a batch sets
+  no order or limit, and that After is how to run tasks in turn ("Batches"). It is `{id, next}`
+  in the persisted form (an older build's `strategy` there is ignored): each enqueue takes index `next`, and the counter moves only for the
+  member it numbered, so a retry that lands twice moves it once (`landedEarlier`). Start batch
+  while one is open keeps it, so a tap cannot renumber one in flight. (Until 2026-10-26 the sheet
+  picked One at a time, Up to N at once or No limit.) Deps, `until` and the Linear issue belong to one
   task and reset after each enqueue; the batch persists. **Follow up** on a queue row is the
   chain's shortcut: the form with that task as its one `opened` edge, and both pickers reset to Auto (the scheduler places a follow-up; the pins of whatever the form held are not inherited). Settling on the report appends the
   report instruction to the prompt on the client (`withReportInstruction`, so the stored task
@@ -5263,8 +5284,10 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   `spawn_session` takes `after` (up to `TASK_SPEC_LIMITS.deps` of `{task, when}`,
   `when` being `opened`, `merged` or `done`), `until` (`merged` or `reported`) and `linear`
   (`{issue}`, trimmed as the PWA's field is; a blank one is refused), with or without a named machine. **`queue_batch
-  { strategy, max?, tasks }`** puts up to 16 members as one batch (`sequential`, `parallel` with
-  `max`, or `auto`): ids are minted first so a member's `after` can name an earlier one by `ref`
+  { tasks }`** puts up to 16 members as one batch, a group with no order or limit of its own
+  ("Batches"; its `strategy` and `max` went 2026-10-26; the schema still parses them loosely so a
+  caller sending `sequential`, `parallel` or any `max` is refused with a pointer to `after`, never
+  given a silent plain group — absent or `auto` is accepted): order is each member's `after`. Ids are minted first so a member's `after` can name an earlier one by `ref`
   (a later or unknown `ref`, two edges naming both fields or neither, and a ref used twice are refused in a
   pre-flight pass before anything is created), indexes are 1.. in the order given, and the members
   are `createTask`ed one by one. A failure partway stops the batch and answers with the ids that

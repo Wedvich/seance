@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { TASK_REQUEST_LIMITS, TASK_SPEC_LIMITS } from "@seance/shared";
+import { BATCH_STRATEGY, TASK_REQUEST_LIMITS, TASK_SPEC_LIMITS } from "@seance/shared";
 import { specError, usesReported, type AutoSpec } from "./auto.ts";
 
 const BASE: AutoSpec = { repo: "github.com/m/seance", mode: "worktree" };
@@ -14,7 +14,7 @@ describe("specError", () => {
         deps: [{ task: ID, after: "done" }],
         until: "reported",
         linear: { issue: "ENG-1", url: "https://linear.app/x/issue/ENG-1" },
-        batch: { id: ID, index: 1, strategy: { mode: "parallel", max: 2 } },
+        batch: { id: ID, index: 1, strategy: BATCH_STRATEGY },
       }),
     ).toBeNull();
   });
@@ -41,7 +41,7 @@ describe("specError", () => {
     expect(
       specError({
         ...BASE,
-        batch: { id: ID, index: TASK_SPEC_LIMITS.batchIndex + 1, strategy: { mode: "sequential" } },
+        batch: { id: ID, index: TASK_SPEC_LIMITS.batchIndex + 1, strategy: BATCH_STRATEGY },
       }),
     ).toBe("invalid task spec");
   });

@@ -37,7 +37,7 @@ stay as they are; the table says which word each one means.
 | Deps              | Per edge `after: opened` (stacked, default) or `after: merged`; Linear relations + hand-declared                                                                                                                                                                                                                                                                                            |
 | Done signal       | Layered: PR merged (leader, forge: GitHub via `gh`) / PR merged (daemon, local git) / Linear Done → session ended → manual                                                                                                                                                                                                                                                                  |
 | Quota exhausted   | Spill into credits, loudly (Web Push), with pause: until resume / until next reset                                                                                                                                                                                                                                                                                                          |
-| Concurrency       | Global max, per-account max, per-batch strategy (`sequential` / `parallel(n)` / `auto`)                                                                                                                                                                                                                                                                                                     |
+| Concurrency       | Global max, per-account max; a batch is a group with no bound or order (2026-10-26)                                                                                                                                                                                                                                                                                                         |
 | Alerts            | Web Push (VAPID) from the leader to subscribed PWAs (M4; key sealed in the DO, see _Secrets_)                                                                                                                                                                                                                                                                                               |
 | Needs input       | `needs-input` state, alert, keeps its slot; idle timeout escalates, never kills                                                                                                                                                                                                                                                                                                             |
 | Event ingest      | New ingest-only `session-event` frame kind on the local socket, after the fleet broker's precedent (threat-model widening, recorded)                                                                                                                                                                                                                                                        |
@@ -173,8 +173,8 @@ they now live:
 
 **Routing, ahead.** M4 adds:
 
-- Filters (the per-account cap, the per-batch bound and `skill_absent` are DESIGN.md "Routing
-  caps", "Batches" and "Skills filter"): stacked base unpushed and not on this exclave (M4,
+- Filters (the per-account cap and `skill_absent` are DESIGN.md "Routing caps" and "Skills
+  filter"; the per-batch bound M3 built went 2026-10-26, "Batches"): stacked base unpushed and not on this exclave (M4,
   _Stacking_); auth expired (M4, _Auth health_).
 - Score: `dependencyDistance` gets an input once M4's stacking fills `TaskSpec.base`. The LXC
   pressure view (M4) reaches `machinePressure` folded into the LXC daemon's own `status`, so the
@@ -867,6 +867,18 @@ of M4 has landed.
 
   Raycast `auto` attaches the same way as the CLI's.
 
+- **Batches are a group** — **Done** (owner, 2026-10-26). A batch is where a set of tasks came
+  from, shown and acted on together, never a scheduling primitive: `sequential` and `parallel`
+  went from the scheduler, `queue_batch` and the PWA, so order is `after` edges and concurrency
+  the global and per-account caps. #318's carve-out (a batch bound counting members on an asleep
+  machine) went with them. DESIGN.md "Batches" is the record, with both strategies as rejected
+  alternatives.
+  - _Follow-up:_ stop emitting `strategy: { mode: "auto" }` (`BATCH_STRATEGY`) and drop the field
+    from `BatchMembership` once no pre-change leader, app or daemon can still read a record — an
+    older `parseBatch` nulls a batch without one. The parser already ignores it, so this is a
+    type and writer change only. The `batch_order` and `cap_reached` `scope: "batch"` reasons an
+    older leader sends need no step: readers already drop them as unknown.
+
 ## Settled defaults (interview, 2026-10-15)
 
 Nothing below is open. An implementer who wants a different value changes this section in the
@@ -993,8 +1005,8 @@ same PR, with the reason.
     usage, with no change of state; on return they count again and the fleet may sit over a cap
     until work drains. A blip or relay reconnect frees nothing, and a dark wake restarts the clock, so after each one
     the slots come back only after the connected-read window (~2.5 min, DESIGN.md) plus the grace; `lostAfterMs` (10)
-    stays 15 min, because `lost` writes records and settles reservations. A batch's bound still
-    counts them. DESIGN.md "Routing caps" has the rule and the rejected alternative.
+    stays 15 min, because `lost` writes records and settles reservations. Nothing else counts them:
+    the batch-bound carve-out went with batch strategies (2026-10-26). DESIGN.md "Routing caps" has the rule and the rejected alternative.
 
 ## Risks / unknowns
 
