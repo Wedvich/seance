@@ -1,6 +1,6 @@
 import type { ComponentChildren, JSX } from "preact";
 import { useEffect, useState } from "preact/hooks";
-import type { QueueRow, QueueScreenView } from "../queue-view.ts";
+import { ASLEEP_SECTION, type QueueRow, type QueueScreenView } from "../queue-view.ts";
 import type { ConnectionState } from "../view.ts";
 import { RelaySettings } from "./relay-dot.tsx";
 
@@ -34,6 +34,8 @@ export function QueueScreen(props: {
 }): JSX.Element {
   const { view, relayState, notice, pausing, onDismiss, onRefresh, onCancel, onMarkDone } = props;
   const [armed, setArmed] = useState<string | null>(null);
+  // Memory only: persist.ts keeps the spawn form's record, no place for a view's open/closed.
+  const [asleepOpen, setAsleepOpen] = useState(false);
 
   useEffect(() => {
     if (armed === null) return;
@@ -128,85 +130,106 @@ export function QueueScreen(props: {
           </div>
         )}
         {view.empty !== null && <p className="fleet-empty">{view.empty}</p>}
-        {view.sections.map((section) => (
-          <section key={section.title} className="queue-section">
-            <h2 className="label fleet-heading">{section.title.toUpperCase()}</h2>
-            {section.rows.map((row) => (
-              <section key={row.id} className="fleet-card card">
-                <div className="fleet-card-head">
-                  {row.dot !== null && <span className={`dot dot-${row.dot}`} aria-hidden="true" />}
-                  <div className="fleet-card-title">
-                    <h3 className="fleet-name">
-                      {row.session === null ? (
-                        row.title
-                      ) : (
-                        <a
-                          className="queue-session"
-                          href={row.session}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          title="Open the session on claude.ai"
-                        >
-                          {row.title}
-                        </a>
-                      )}
-                    </h3>
-                    <p className="fleet-meta">
-                      {row.headline} · {row.age}
-                    </p>
-                  </div>
-                </div>
-                {row.deps !== null && <p className="fleet-card-body">{row.deps}</p>}
-                {row.placement !== null && <p className="fleet-card-body">{row.placement}</p>}
-                {row.batch !== null && <p className="fleet-card-body">{row.batch}</p>}
-                {row.body !== null && <p className="fleet-card-body">{row.body}</p>}
-                {(row.pr !== null || row.canMarkDone || row.canCancel || row.canFollowUp) && (
-                  <div className="queue-actions">
-                    {row.pr !== null && (
-                      <a
-                        className={`fleet-badge queue-pr${row.pr.state === null ? "" : ` queue-pr-${row.pr.state}`}${row.pr.stale ? " queue-pr-stale" : ""}`}
-                        href={row.pr.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        title={row.pr.description}
-                        aria-label={row.pr.accessibleName}
-                      >
-                        <PrStateIcon state={row.pr.state} />
-                        {row.pr.label}
-                        {row.pr.checks !== null && <PrChecksIcon checks={row.pr.checks} />}
-                      </a>
+        {view.sections.map((section) => {
+          const collapsible = section.title === ASLEEP_SECTION;
+          const shown = !collapsible || asleepOpen;
+          return (
+            <section key={section.title} className="queue-section">
+              {collapsible ? (
+                <h2 className="label fleet-heading">
+                  <button
+                    type="button"
+                    className="queue-section-toggle"
+                    aria-expanded={asleepOpen}
+                    onClick={() => setAsleepOpen((open) => !open)}
+                  >
+                    <span className="disclosure-chevron" aria-hidden="true">
+                      ▶
+                    </span>
+                    {section.title.toUpperCase()} · {section.rows.length}
+                  </button>
+                </h2>
+              ) : (
+                <h2 className="label fleet-heading">{section.title.toUpperCase()}</h2>
+              )}
+              {shown &&
+                section.rows.map((row) => (
+                  <section key={row.id} className="fleet-card card">
+                    <div className="fleet-card-head">
+                      {row.dot !== null && <span className={`dot dot-${row.dot}`} aria-hidden="true" />}
+                      <div className="fleet-card-title">
+                        <h3 className="fleet-name">
+                          {row.session === null ? (
+                            row.title
+                          ) : (
+                            <a
+                              className="queue-session"
+                              href={row.session}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              title="Open the session on claude.ai"
+                            >
+                              {row.title}
+                            </a>
+                          )}
+                        </h3>
+                        <p className="fleet-meta">
+                          {row.headline} · {row.age}
+                        </p>
+                      </div>
+                    </div>
+                    {row.deps !== null && <p className="fleet-card-body">{row.deps}</p>}
+                    {row.placement !== null && <p className="fleet-card-body">{row.placement}</p>}
+                    {row.batch !== null && <p className="fleet-card-body">{row.batch}</p>}
+                    {row.body !== null && <p className="fleet-card-body">{row.body}</p>}
+                    {(row.pr !== null || row.canMarkDone || row.canCancel || row.canFollowUp) && (
+                      <div className="queue-actions">
+                        {row.pr !== null && (
+                          <a
+                            className={`fleet-badge queue-pr${row.pr.state === null ? "" : ` queue-pr-${row.pr.state}`}${row.pr.stale ? " queue-pr-stale" : ""}`}
+                            href={row.pr.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            title={row.pr.description}
+                            aria-label={row.pr.accessibleName}
+                          >
+                            <PrStateIcon state={row.pr.state} />
+                            {row.pr.label}
+                            {row.pr.checks !== null && <PrChecksIcon checks={row.pr.checks} />}
+                          </a>
+                        )}
+                        {row.canFollowUp && (
+                          <button type="button" className="quiet" onClick={() => props.onFollowUp(row.id)}>
+                            Follow up
+                          </button>
+                        )}
+                        {row.canMarkDone && (
+                          <button
+                            type="button"
+                            className="quiet"
+                            disabled={!view.available || row.busy}
+                            onClick={() => act(row, "mark-done")}
+                          >
+                            {armed === `mark-done:${row.id}` ? "Tap again to mark done" : "Mark done"}
+                          </button>
+                        )}
+                        {row.canCancel && (
+                          <button
+                            type="button"
+                            className="quiet"
+                            disabled={!view.available || row.busy}
+                            onClick={() => act(row, "cancel")}
+                          >
+                            {armed === `cancel:${row.id}` ? "Tap again to cancel" : "Cancel"}
+                          </button>
+                        )}
+                      </div>
                     )}
-                    {row.canFollowUp && (
-                      <button type="button" className="quiet" onClick={() => props.onFollowUp(row.id)}>
-                        Follow up
-                      </button>
-                    )}
-                    {row.canMarkDone && (
-                      <button
-                        type="button"
-                        className="quiet"
-                        disabled={!view.available || row.busy}
-                        onClick={() => act(row, "mark-done")}
-                      >
-                        {armed === `mark-done:${row.id}` ? "Tap again to mark done" : "Mark done"}
-                      </button>
-                    )}
-                    {row.canCancel && (
-                      <button
-                        type="button"
-                        className="quiet"
-                        disabled={!view.available || row.busy}
-                        onClick={() => act(row, "cancel")}
-                      >
-                        {armed === `cancel:${row.id}` ? "Tap again to cancel" : "Cancel"}
-                      </button>
-                    )}
-                  </div>
-                )}
-              </section>
-            ))}
-          </section>
-        ))}
+                  </section>
+                ))}
+            </section>
+          );
+        })}
         {view.partial !== null && <p className="fleet-note">{view.partial}</p>}
       </div>
 

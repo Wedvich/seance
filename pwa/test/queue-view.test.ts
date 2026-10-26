@@ -128,39 +128,57 @@ describe("deriveQueue", () => {
     expect(titles(only)).toEqual(["Waiting"]);
   });
 
-  test("needs-input on an asleep machine ranks after what the phone can answer, and a lost one there says it settles on waking", () => {
+  test("tasks on an asleep machine leave Needs you and Running for Asleep, in their own order", () => {
     const awake = machine();
     const asleep = machine({ deviceId: "dev-b", name: "MacBook", connected: false, lastSeen: NOW - 600_000 });
     const onB = { ...placedAt, deviceId: "dev-b" };
+    const onGone = { ...placedAt, deviceId: "dev-gone" };
     const view = deriveQueue(
       state(
         ok([
           task("lost", { state: "lost", assignment: onB }),
-          task("dozing", { state: "needs-input", assignment: onB, escalated: true, needsInputSince: NOW - 3_600_000 }),
-          task("ask", { state: "needs-input", assignment: placedAt }),
-          task("stuck", { state: "needs-input", assignment: placedAt, escalated: true }),
-          task("back", { state: "lost", assignment: placedAt }),
-          task("nowhere", { state: "lost" }),
           task("run", { state: "running", assignment: onB }),
+          task("dozing", { state: "needs-input", assignment: onB, escalated: true, needsInputSince: NOW - 3_600_000 }),
+          task("starting", { state: "reserved", reservation: { ...onB, expiresAt: NOW } }),
+          task("nodding", { state: "needs-input", assignment: onB }),
+          task("ask", { state: "needs-input", assignment: placedAt }),
+          task("back", { state: "lost", assignment: placedAt }),
+          task("nowhere", { state: "lost", assignment: onGone }),
+          task("liveRun", { state: "running", assignment: placedAt }),
+          task("goneRun", { state: "running", assignment: onGone }),
+          task("goneAsk", { state: "needs-input", assignment: onGone }),
+          task("w", { state: "ready" }),
+          task("merge", { state: "awaiting-merge", assignment: onB }),
+          task("done", { state: "done", assignment: onB }),
         ]),
         {},
         { machines: [awake, asleep] },
       ),
       NOW,
     );
-    const rows = view.sections.find((s) => s.title === "Needs you")?.rows ?? [];
-    expect(rows.map((r) => r.id)).toEqual(["stuck", "ask", "dozing", "lost", "back", "nowhere"]);
-    // Sleep reorders Needs you only: a running task on it is still Running.
-    expect(view.sections.find((s) => s.title === "Running")?.rows.map((r) => r.id)).toEqual(["run"]);
+    expect(titles(view)).toEqual(["Needs you", "Running", "Waiting", "Asleep", "Awaiting merge", "Finished"]);
+    const ids = (title: string): string[] => view.sections.find((s) => s.title === title)?.rows.map((r) => r.id) ?? [];
+    // Connected or unlisted machines keep their tasks where they were.
+    expect(ids("Needs you")).toEqual(["ask", "goneAsk", "back", "nowhere"]);
+    expect(ids("Running")).toEqual(["liveRun", "goneRun"]);
+    // needs-input, then running/reserved, then lost; leader order within each.
+    expect(ids("Asleep")).toEqual(["dozing", "nodding", "run", "starting", "lost"]);
+    expect(ids("Awaiting merge")).toEqual(["merge"]);
+    expect(ids("Finished")).toEqual(["done"]);
+    expect(view.summary).toBe("2 running · 1 waiting");
+    // An escalated task asleep can't be answered now: it lights nothing.
+    expect(view.attention).toBe(false);
+
+    const rows = view.sections.find((s) => s.title === "Asleep")?.rows ?? [];
     const settles = "Settles when its machine wakes; cancel or mark done to give up on it";
-    expect(rows[4]?.body).not.toBe(settles);
-    expect(rows[5]?.body).not.toBe(settles);
-    expect(rows[3]).toMatchObject({
+    expect(rows[4]).toMatchObject({
       headline: "Asleep on MacBook · default — its machine went to sleep 10m ago.",
-      body: "Settles when its machine wakes; cancel or mark done to give up on it",
+      body: settles,
     });
+    const needs = view.sections.find((s) => s.title === "Needs you")?.rows ?? [];
+    expect(needs.map((r) => r.body)).not.toContain(settles);
     // Dots are the leader's verdict, unchanged by the derived sleep.
-    expect(rows[2]?.dot).toBe("err");
+    expect(rows[0]?.dot).toBe("err");
   });
 
   test("an escalated task says how long it has waited, and attention follows it", () => {

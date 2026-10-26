@@ -12,7 +12,7 @@ import {
   type PrState,
   type Task,
 } from "@seance/shared";
-import { avoidLine, machineAsleep, pinLine, taskHeadline, waitingText } from "./decision-view.ts";
+import { avoidLine, machineAsleep, needsAttention, pinLine, taskHeadline, waitingText } from "./decision-view.ts";
 import { accountDisplayName, formatUntil } from "./machines-view.ts";
 import {
   deriveReportedAvailability,
@@ -269,21 +269,38 @@ function rowOf(task: Task, state: AppState, now: number, skew: number, titles: R
 type Pick = (task: Task, machines: readonly Machine[]) => number | null;
 
 /**
- * What can be answered from the phone now first — escalated (past the leader's patience), then
- * the rest of live needs-input — then needs-input on an asleep machine, whose action is opening
- * the lid, then lost.
+ * Escalated (past the leader's patience) first, then the rest of needs-input, then lost — a
+ * lost task whose machine is back or gone, since one asleep is in Asleep.
  */
 const needsYou: Pick = (t, machines) => {
-  if (t.state === "lost") return 3;
+  if (machineAsleep(t, machines)) return null;
+  if (t.state === "lost") return 2;
   if (t.state !== "needs-input") return null;
-  if (machineAsleep(t, machines)) return 2;
   return t.escalated === true ? 0 : 1;
 };
 
+/**
+ * Nothing on a sleeping machine can be acted on from the phone, so it leaves Needs you and
+ * Running for a section of its own (DESIGN.md, "Asleep machines on the Queue screen").
+ */
+const asleep: Pick = (t, machines) => {
+  if (!machineAsleep(t, machines)) return null;
+  if (t.state === "needs-input") return 0;
+  return t.state === "lost" ? 2 : 1;
+};
+
+/** The one section the screen renders collapsed until tapped. */
+export const ASLEEP_SECTION = "Asleep";
+
 const SECTIONS: readonly { readonly title: string; readonly pick: Pick }[] = [
   { title: "Needs you", pick: needsYou },
-  { title: "Running", pick: (t) => (t.state === "reserved" || t.state === "running" ? 0 : null) },
+  {
+    title: "Running",
+    pick: (t, machines) =>
+      (t.state === "reserved" || t.state === "running") && !machineAsleep(t, machines) ? 0 : null,
+  },
   { title: "Waiting", pick: (t) => (t.state === "queued" || t.state === "blocked" || t.state === "ready" ? 0 : null) },
+  { title: ASLEEP_SECTION, pick: asleep },
   { title: "Awaiting merge", pick: (t) => (t.state === "awaiting-merge" ? 0 : null) },
   { title: "Finished", pick: (t) => (TASK_PHASES[t.state] === "finished" ? 0 : null) },
 ];
@@ -335,7 +352,7 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
     unreadable: unreadableLine(ok?.unreadable.length ?? 0),
     sections,
     empty,
-    attention: tasks.some((t) => t.state === "needs-input" && t.escalated === true),
+    attention: needsAttention(tasks, state.relay.machines),
   };
 }
 

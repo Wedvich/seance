@@ -608,11 +608,15 @@ of M4 has landed.
     screen, and a section that empties the moment the lid opens moves every row mid-glance. The
     header's attention dot and the row's dot are unchanged, and so is `get_queue`: it lists raw
     `state` and placement, and a model reads `connected` from `list_machines`.
+    _Reversed after use (2026-10-26):_ ranked low in Needs you, an asleep row still read as
+    something to answer now. Asleep tasks now get their own collapsed "Asleep" section below
+    Waiting, and leave the running count and the attention dot.
 
-  _As built (2026-10-26):_ **Done**, as decided, in one PWA change: `lastHeardAt` beside
+  _As built (2026-10-26):_ **Done**, in two PWA changes: #316 built `lastHeardAt` beside
   `liveStatus`, `machineAsleep` and the headlines in `pwa/src/decision-view.ts`, the body and
-  ranks in `pwa/src/queue-view.ts`. DESIGN.md _PWA_, "Asleep machines on the Queue screen", is
-  the record.
+  ranks in `pwa/src/queue-view.ts`; the follow-up replaced the ranks with the collapsed Asleep
+  section (`queue-view.ts`, `components/queue.tsx`) and `needsAttention`. DESIGN.md _PWA_,
+  "Asleep machines on the Queue screen", is the record.
 
 - **Stacking** — `baseBranch` and `base_not_found`, lineage, the handoff preamble. Exit: a
   dependent task's worktree starts from its predecessor's branch; an unresolvable base fails

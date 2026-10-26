@@ -205,9 +205,14 @@ function sleepingMachine(task: Task, machines: readonly Machine[]): Machine | un
   return machine?.connected === false ? machine : undefined;
 }
 
-/** True when the task's machine is asleep: its row ranks and reads differently on the Queue screen. */
+/** True when the task's machine is asleep: its row moves to Asleep and reads differently on the Queue screen. */
 export function machineAsleep(task: Task, machines: readonly Machine[]): boolean {
   return sleepingMachine(task, machines) !== undefined;
+}
+
+/** An escalated task the phone can answer now: one on a sleeping machine waits for the lid. */
+export function needsAttention(tasks: readonly Task[], machines: readonly Machine[]): boolean {
+  return tasks.some((t) => t.state === "needs-input" && t.escalated === true && !machineAsleep(t, machines));
 }
 
 /** What became of a queued task, in one line: the verdict's headline. */

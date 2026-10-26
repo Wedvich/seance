@@ -2092,6 +2092,30 @@
   gap: var(--gap);
 }
 
+/* The heading's own type, made tappable; padding grows the target, negative margins take it back. */
+.queue-section-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  padding: 8px 4px;
+  margin: -8px -4px;
+}
+
+@media (hover: hover) {
+  .queue-section-toggle:hover {
+    color: var(--acc);
+  }
+}
+
+.queue-section-toggle[aria-expanded="true"] > .disclosure-chevron {
+  transform: rotate(90deg);
+}
+
 .fleet-card-body {
   margin: 0;
   font-size: 13px;

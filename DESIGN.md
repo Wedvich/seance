@@ -4993,8 +4993,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   prompt-cut view come from. It re-reads on every `queue-changed` (the named tasks only, merged
   into what it holds), on a reconnect and on a leader change. A named task the reply leaves out
   is dropped only if the store holds no record of it, the same rule as the verdict's. Tasks group by what each needs from
-  the owner: Needs you (escalated first, then `needs-input`, then `needs-input` on an asleep
-  machine, then `lost`), Running, Waiting, Awaiting merge, Finished, in the leader's order within each (`queue-view.ts`). A row shows the
+  the owner: Needs you (escalated first, then `needs-input`, then `lost`), Running, Waiting,
+  Asleep (collapsed; below), Awaiting merge, Finished, in the leader's order within each (`queue-view.ts`). A row shows the
   task's title (its own, else its prompt's first line cut to 80, else its session's window name, else its repo), where it is and
   why, with the decision's record on tap — in the past tense once the task was placed ("spending
   credits", not "would spend"). A task whose session reported a PR (`Task.prUrl`, the newest one —
@@ -5035,17 +5035,21 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   the later of `lastSeen` and the kept `status.at`, which the Machines card's "asleep · last
   seen" and the machine picker's "offline · last seen" now read too: while the relay still lists
   a slept socket, `lastSeen` is the register's time, days old, where the last beat is within one
-  of the sleep. In Needs you an asleep `needs-input` ranks after live ones (escalated, then not)
-  and before `lost`; dots, the attention dot and `get_queue` are unchanged. Rejected: a new task
+  of the sleep. Every such task sits in its own **Asleep** section, below Waiting, collapsed to
+  "ASLEEP · 3" until tapped (in-memory state, closed on each open of the screen), ordered
+  `needs-input`, then `running`/`reserved`, then `lost`: Needs you holds only what can be acted on
+  now (amended 2026-10-26, after use). The summary's running count and the attention dot (both
+  `queueAttention` and the screen's) skip asleep tasks; row dots and `get_queue` are unchanged.
+  Rejected: keeping them in Needs you ranked after live ones (built in #316) — a row on a sleeping
+  machine still read as something to answer now, which it is not; the section moving rows as a
+  lid opens was the cost #316 weighed, and collapsed it moves little the eye was on. Also rejected: a new task
   state, or a per-pass `absentSince` on running tasks — a store write per absent task per pass
   for a label, where the leader's absence clock is in memory by design; a PWA-side hysteresis on
   `connected` — per device and per reload, it delays the truth for whoever just opened the lid;
   the leader's `#connectedIds` (not on the wire; exporting it is a per-pass write) or the relay
   flag alone (each app-role client holds its own marks — Presence & identity); `absentSince` as
   the "since" — it starts a pass after the leader's own view flipped, exists only on `lost`, and
-  would make the same card change its age at the 15-minute mark; an "Asleep" section — sleep is
-  the machine's property, and a section that empties as the lid opens moves every row
-  mid-glance.
+  would make the same card change its age at the 15-minute mark.
 - **Authoring from the auto form** (2026-10-23, M4 #21). The form adds AFTER and BATCH
   tiles, a "Settle on its done report" switch and a Linear issue field. **AFTER** opens a sheet of
   the tasks the leader holds that have not failed or been cancelled (read when the sheet opens),
