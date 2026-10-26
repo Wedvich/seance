@@ -477,15 +477,19 @@ describe("LaunchLedger OOM samples", () => {
     expect(note).not.toHaveProperty("oomKill");
   });
 
-  test("a later note of the exit replaces the verdict, never keeps a stale one", async () => {
+  test("a verdict stays for the same exit and goes with a different one", async () => {
     const ledger = await LaunchLedger.open(path, () => 9);
     await ledger.record("t1");
     await ledger.note("t1", { exit: 137, oomKill: true });
-    // Another sample or progress note leaves it; a fresh exit note without one clears it.
+    // Another sample or progress note leaves it.
     await ledger.note("t1", { branch: "b" });
     expect(ledger.progress()[0]?.oomKill).toBe(true);
+    // The same exit noted again without one (a racing pass whose judge read failed) keeps it.
     await ledger.note("t1", { exit: 137 });
-    expect(ledger.progress()).toEqual([{ taskId: "t1", at: 9, branch: "b", exit: 137 }]);
+    expect(ledger.progress()).toEqual([{ taskId: "t1", at: 9, branch: "b", exit: 137, oomKill: true }]);
+    // Another exit clears it.
+    await ledger.note("t1", { exit: 1 });
+    expect(ledger.progress()).toEqual([{ taskId: "t1", at: 9, branch: "b", exit: 1 }]);
   });
 });
 

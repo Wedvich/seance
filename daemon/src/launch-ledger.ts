@@ -205,16 +205,13 @@ function mergeNote(taskId: string, base: NotedTask | undefined, patch: TaskNote)
     ...(patch.prUrl !== undefined ? { prUrl: patch.prUrl } : base?.prUrl !== undefined ? { prUrl: base.prUrl } : {}),
     ...(patch.exit !== undefined ? { exit: patch.exit } : base?.exit !== undefined ? { exit: base.exit } : {}),
     ...(patch.oom !== undefined ? { oom: patch.oom } : base?.oom !== undefined ? { oom: base.oom } : {}),
-    // A verdict belongs to the exit it was judged with: a note of the exit replaces it, never inherits one.
-    ...(patch.exit !== undefined
-      ? patch.oomKill === undefined
-        ? {}
-        : { oomKill: patch.oomKill }
-      : patch.oomKill !== undefined
-        ? { oomKill: patch.oomKill }
-        : base?.oomKill !== undefined
-          ? { oomKill: base.oomKill }
-          : {}),
+    // A verdict belongs to the exit it was judged with: another exit (or a new launch, whose base is gone)
+    // drops it, but a re-note of the same exit keeps it, since a racing harvest pass whose judge read failed carries none.
+    ...(patch.oomKill !== undefined
+      ? { oomKill: patch.oomKill }
+      : base?.oomKill !== undefined && (patch.exit === undefined || patch.exit === base.exit)
+        ? { oomKill: base.oomKill }
+        : {}),
     ...(patch.ahead === true || base?.ahead === true ? { ahead: true as const } : {}),
     ...(patch.pushed === true || base?.pushed === true ? { pushed: true as const } : {}),
     ...(patch.merged === true || base?.merged === true ? { merged: true as const } : {}),
