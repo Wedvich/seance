@@ -1,6 +1,7 @@
 import { REPLAY_WINDOW_MS } from "./crypto.ts";
 import {
   ACCOUNT_ALIAS_MAX_LENGTH,
+  BATCH_STRATEGY,
   BRANCH_MAX_LENGTH,
   CANDIDATE_MAX_REASONS,
   DECISION_MAX_CANDIDATES,
@@ -35,7 +36,6 @@ import {
   TASK_SPEC_LIMITS,
   type AccountRecord,
   type BatchMembership,
-  type BatchStrategy,
   type FleetQuotaEntry,
   type FleetQuotaRecord,
   type PushSubscribeReply,
@@ -688,20 +688,16 @@ function parseAvoid(value: unknown): readonly string[] | null {
   return ids;
 }
 
-export function parseBatchStrategy(value: unknown): BatchStrategy | null {
-  if (!isRecord(value)) return null;
-  const { mode, max } = value;
-  if (mode === "sequential" || mode === "auto") return { mode };
-  if (mode !== "parallel" || !isUint(max) || max < 1 || max > TASK_SPEC_LIMITS.parallel) return null;
-  return { mode, max };
-}
-
+/**
+ * Whatever `strategy` an older writer stored — `sequential`, `parallel`, none
+ * — is read as `BATCH_STRATEGY`: no batch schedules, so a live record from
+ * before the change must still read rather than null its spec.
+ */
 function parseBatch(value: unknown): BatchMembership | null {
   if (!isRecord(value)) return null;
   const { id, index } = value;
-  const strategy = parseBatchStrategy(value["strategy"]);
-  if (!isTaskId(id) || !isUint(index) || index > TASK_SPEC_LIMITS.batchIndex || strategy === null) return null;
-  return { id, index, strategy };
+  if (!isTaskId(id) || !isUint(index) || index > TASK_SPEC_LIMITS.batchIndex) return null;
+  return { id, index, strategy: BATCH_STRATEGY };
 }
 
 function parseDep(value: unknown): TaskDep | null {
@@ -841,11 +837,7 @@ function parseReason(value: unknown): Reason | null {
       const { inFlight, max, scope } = value;
       if (!isUint(inFlight) || !isUint(max)) return null;
       if (scope === undefined) return { code, inFlight, max };
-      return scope === "global" || scope === "account" || scope === "batch" ? { code, inFlight, max, scope } : null;
-    }
-    case "batch_order": {
-      const { index } = value;
-      return isUint(index) && index <= TASK_SPEC_LIMITS.batchIndex ? { code, index } : null;
+      return scope === "global" || scope === "account" ? { code, inFlight, max, scope } : null;
     }
     case "paused": {
       const until = PAUSE_UNTIL.find((u) => u === value["until"]);

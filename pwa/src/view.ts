@@ -8,7 +8,7 @@ import {
   taskFailureText,
   type TaskUntil,
 } from "@seance/shared";
-import type { BatchStrategy, KnownAccount, Machine, RelayState } from "@seance/shared";
+import type { KnownAccount, Machine, RelayState } from "@seance/shared";
 import {
   EFFORT_LABELS,
   MODEL_LABELS,
@@ -23,6 +23,7 @@ import {
   type TaskAction,
   type Verdict,
 } from "./state.ts";
+import { needsAttention } from "./asleep.ts";
 
 /**
  * Everything the screen renders, derived in one pure pass. Components stay dumb
@@ -284,14 +285,6 @@ export function deriveContinueAvailability(relay: RelayState): boolean {
   if (relay.status !== "open" || scheduler.kind !== "ready") return false;
   const leader = relay.machines.find((m) => m.deviceId === scheduler.deviceId);
   return leader?.capabilities?.includes(CAPABILITIES.continueTask) === true;
-}
-
-export function describeStrategy(strategy: BatchStrategy): string {
-  return strategy.mode === "sequential"
-    ? "one at a time"
-    : strategy.mode === "parallel"
-      ? `up to ${strategy.max} at once`
-      : "no limit";
 }
 
 function afterValue(after: PersistedForm["after"]): string {
@@ -644,7 +637,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
     afterTile: { label: "AFTER", value: afterValue(form.after), mono: false, dot: null },
     batchTile: {
       label: "BATCH",
-      value: form.batch === null ? "Off" : `#${form.batch.next} · ${describeStrategy(form.batch.strategy)}`,
+      value: form.batch === null ? "Off" : `#${form.batch.next}`,
       mono: false,
       dot: null,
     },
@@ -661,9 +654,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
     machineChoices: deriveMachineChoices(state, now),
     accountChoices: deriveAccountChoices(state),
     previewShown: previewAsked(form),
-    queueAttention:
-      state.queueView?.kind === "ok" &&
-      state.queueView.tasks.some((t) => t.state === "needs-input" && t.escalated === true),
+    queueAttention: state.queueView?.kind === "ok" && needsAttention(state.queueView.tasks, state.relay.machines),
   };
 }
 

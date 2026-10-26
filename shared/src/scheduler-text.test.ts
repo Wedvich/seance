@@ -80,12 +80,6 @@ describe("sessionExit", () => {
 });
 
 describe("reasonText", () => {
-  test("batch_order names the member it waits for by the spec's own index, without claiming it started", () => {
-    const text = reasonText({ code: "batch_order", index: 0 });
-    expect(text).toContain("#0");
-    expect(text).not.toContain("ended");
-  });
-
   test("a placement restriction says which one turned the candidate away", () => {
     expect(reasonText({ code: "pin_mismatch", field: "deviceId" })).toBe("not the pinned machine");
     expect(reasonText({ code: "pin_mismatch", field: "account" })).toBe("not the pinned account");

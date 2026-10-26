@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { TASK_SPEC_LIMITS, type BatchStrategy } from "@seance/shared";
+import { parseTask } from "@seance/shared";
 import { MemoryQueueStore, Scheduler, type Task, type TaskSpec } from "../src/index.ts";
 import { FakeFleet, machine, NOW, readerChecked, spec } from "./fixtures.ts";
 
-/** Batches (M3 item 4a): a strategy's bound as `cap_reached` scope `batch`, and members routed in index order (`batch_order`). */
+/**
+ * Batches are a group (2026-10-26): no bound, no order of their own. Order is
+ * `after`, concurrency the caps; a pass only keeps members adjacent in index order.
+ */
 
 const FLEET = ["a", "b", "c", "d"].map((id) => machine(id));
 
@@ -12,21 +15,26 @@ function setup() {
   const fleet = new FakeFleet(FLEET);
   const store = new MemoryQueueStore({ now: () => clock.now });
   const scheduler = new Scheduler({ store: readerChecked(store, () => clock.now), fleet, now: () => clock.now });
+  /**
+   * A member as a record holds it, read through the parser every reader uses —
+   * `strategy` is raw, so a record an older writer sealed reads as it would.
+   */
   async function member(
     id: string,
     index: number,
-    strategy: BatchStrategy,
-    fields: Partial<Task> = {},
-    specFields: Partial<TaskSpec> = {},
+    options: { strategy?: unknown; fields?: Partial<Task>; specFields?: Partial<TaskSpec> } = {},
   ): Promise<void> {
     clock.now += 1;
-    const body: Task = {
+    const strategy = "strategy" in options ? options.strategy : { mode: "auto" };
+    const raw = {
       id,
-      spec: spec({ batch: { id: "b1", index, strategy }, ...specFields }),
+      spec: { ...spec(options.specFields), batch: { id: "b1", index, strategy } },
       state: "ready",
       createdAt: clock.now,
-      ...fields,
+      ...options.fields,
     };
+    const body = parseTask(raw);
+    if (body === null) throw new Error(`${id} does not parse`);
     const write = await store.put(id, 0, body);
     if (!write.ok) throw new Error(`put ${id}: ${write.code}`);
   }
@@ -43,172 +51,90 @@ function dispatched(fleet: FakeFleet): (string | undefined)[] {
 }
 
 describe("batches", () => {
-  test("sequential runs one member at a time, in index order, whatever order they were created in", async () => {
+  test("a batch holds no bound: its members route in one pass, in index order whatever order they were created in", async () => {
     const { fleet, scheduler, member } = setup();
-    const sequential = { mode: "sequential" } as const;
-    await member("third", 2, sequential);
-    await member("first", 0, sequential);
-    await member("second", 1, sequential);
+    await member("third", 2);
+    await member("first", 0);
+    await member("second", 1);
+    await scheduler.load();
+    await pass(scheduler);
+    expect(dispatched(fleet)).toEqual(["first", "second", "third"]);
+  });
+
+  test("order between members is their after edges: the later one waits for the earlier to finish", async () => {
+    const { fleet, scheduler, member } = setup();
+    await member("first", 1, { fields: { state: "queued" } });
+    await member("second", 2, {
+      fields: { state: "queued" },
+      specFields: { deps: [{ task: "first", after: "opened" }] },
+    });
     await scheduler.load();
     await pass(scheduler);
     expect(dispatched(fleet)).toEqual(["first"]);
-    expect(scheduler.lastDecision("second")?.candidates[0]?.rejected).toContainEqual({
-      code: "cap_reached",
-      inFlight: 1,
-      max: 1,
-      scope: "batch",
-    });
+    expect(scheduler.task("second")?.state).toBe("blocked");
 
     await scheduler.onSession("first", "ended", { deviceId: fleet.spawns[0]?.deviceId ?? "", pane: "%1" });
+    await pass(scheduler);
     await pass(scheduler);
     expect(dispatched(fleet)).toEqual(["first", "second"]);
   });
 
-  test("parallel holds the batch to its max", async () => {
-    const { fleet, scheduler, member } = setup();
-    for (const [i, id] of ["p0", "p1", "p2"].entries()) {
+  test("a record an older writer stored as sequential or parallel schedules as a plain group", async () => {
+    for (const strategy of [{ mode: "sequential" }, { mode: "parallel", max: 1 }, undefined]) {
+      const { fleet, scheduler, member } = setup();
       // oxlint-disable-next-line no-await-in-loop -- created in order
-      await member(id, i, { mode: "parallel", max: 2 });
+      for (const [i, id] of ["m0", "m1", "m2"].entries()) await member(id, i, { strategy });
+      // oxlint-disable-next-line no-await-in-loop -- one scheduler per strategy
+      await scheduler.load();
+      // oxlint-disable-next-line no-await-in-loop -- one scheduler per strategy
+      await pass(scheduler);
+      expect(dispatched(fleet)).toEqual(["m0", "m1", "m2"]);
+      expect(scheduler.task("m0")?.spec.batch?.strategy).toEqual({ mode: "auto" });
+      // No decision names a batch: no batch_order, no batch-scoped cap.
+      for (const id of ["m0", "m1", "m2"]) {
+        const decision = scheduler.task(id)?.decision;
+        expect(decision?.candidates.length).toBeGreaterThan(0);
+        for (const candidate of decision?.candidates ?? []) {
+          expect(candidate.rejected.map((r) => String(r.code))).not.toContain("batch_order");
+          expect(candidate.rejected.some((r) => "scope" in r && String(r.scope) === "batch")).toBe(false);
+        }
+      }
     }
-    await scheduler.load();
-    await pass(scheduler);
-    expect(dispatched(fleet)).toEqual(["p0", "p1"]);
-    expect(scheduler.task("p2")?.state).toBe("ready");
-    expect(scheduler.lastDecision("p2")?.candidates[0]?.rejected).toContainEqual({
-      code: "cap_reached",
-      inFlight: 2,
-      max: 2,
-      scope: "batch",
-    });
   });
 
-  test("a lost member counts toward the bound: its session may still run on a machine that only sleeps", async () => {
+  test("an unroutable lower index holds nothing: there is no batch order hold", async () => {
+    const { fleet, scheduler, member } = setup();
+    await member("first", 0, { strategy: { mode: "sequential" }, specFields: { repo: "github.com/acme/elsewhere" } });
+    await member("second", 1, { strategy: { mode: "sequential" } });
+    await scheduler.load();
+    await pass(scheduler);
+    expect(dispatched(fleet)).toEqual(["second"]);
+  });
+
+  test("a lost member holds nothing: a batch counts toward no bound", async () => {
+    const { fleet, scheduler, member } = setup();
     const lost: Partial<Task> = {
       state: "lost",
       assignment: { deviceId: "z", exclave: "main", clone: "app", pane: "%1" },
     };
-    const parallel = setup();
-    await parallel.member("l0", 0, { mode: "parallel", max: 1 }, lost);
-    await parallel.member("l1", 1, { mode: "parallel", max: 1 });
-    await parallel.scheduler.load();
-    await pass(parallel.scheduler);
-    expect(dispatched(parallel.fleet)).toEqual([]);
-
-    const sequential = setup();
-    // The lost member has the higher index, so only the bound's count, not index order, can hold s1.
-    await sequential.member("s1", 1, { mode: "sequential" });
-    await sequential.member("s5", 5, { mode: "sequential" }, lost);
-    await sequential.scheduler.load();
-    await pass(sequential.scheduler);
-    expect(dispatched(sequential.fleet)).toEqual([]);
+    await member("l0", 0, { strategy: { mode: "parallel", max: 1 }, fields: lost });
+    await member("l1", 1, { strategy: { mode: "parallel", max: 1 } });
+    await scheduler.load();
+    await pass(scheduler);
+    expect(dispatched(fleet)).toEqual(["l1"]);
   });
 
-  describe("sequential enforces index order, not whichever member routes first", () => {
-    const sequential = { mode: "sequential" } as const;
-
-    test("an unroutable lower index holds the next, and the hold names the nearest one", async () => {
-      const { fleet, scheduler, member } = setup();
-      const elsewhere = { repo: "github.com/acme/elsewhere" };
-      await member("first", 0, sequential, {}, elsewhere);
-      await member("second", 1, sequential, {}, elsewhere);
-      await member("third", 2, sequential);
-      await scheduler.load();
-      await pass(scheduler);
-      expect(dispatched(fleet)).toEqual([]);
-      // Nothing of the batch is in flight, so the hold says what it waits on, not a cap.
-      const rejected = scheduler.lastDecision("third")?.candidates[0]?.rejected;
-      expect(rejected).toContainEqual({ code: "batch_order", index: 1 });
-      expect(rejected?.some((r) => r.code === "cap_reached")).toBe(false);
+  test("a lower index that depends on a higher one is no loop: it waits for it", async () => {
+    const { fleet, scheduler, member } = setup();
+    await member("low", 0, {
+      strategy: { mode: "sequential" },
+      fields: { state: "queued" },
+      specFields: { deps: [{ task: "high", after: "opened" }] },
     });
-
-    test("a lower index not in the store holds nothing: gaps, 1-based numbering and pruned members never wedge a batch", async () => {
-      const { fleet, scheduler, member } = setup();
-      await member("third", 3, sequential);
-      await member("second", 2, sequential);
-      await scheduler.load();
-      await pass(scheduler);
-      expect(dispatched(fleet)).toEqual(["second"]);
-    });
-
-    test("the next member starts when the previous one is awaiting-merge", async () => {
-      const { fleet, scheduler, member } = setup();
-      await member("first", 0, sequential, { state: "awaiting-merge", prUrl: "https://github.com/acme/app/pull/1" });
-      await member("second", 1, sequential);
-      await scheduler.load();
-      await pass(scheduler);
-      expect(dispatched(fleet)).toEqual(["second"]);
-    });
-
-    test("an index at the bound is readable and routes: the hold costs the members, not the index", async () => {
-      const { fleet, scheduler, member } = setup();
-      await member("first", 0, sequential);
-      await member("last", TASK_SPEC_LIMITS.batchIndex, sequential);
-      await scheduler.load();
-      await pass(scheduler);
-      expect(dispatched(fleet)).toEqual(["first"]);
-      expect(scheduler.lastDecision("last")?.candidates[0]?.rejected).toContainEqual({
-        code: "cap_reached",
-        inFlight: 1,
-        max: 1,
-        scope: "batch",
-      });
-    });
-
-    test("a lower index that depends on a higher one of its sequential batch is a loop: both fail at admission", async () => {
-      const { scheduler, member } = setup();
-      await member("low", 0, sequential, { state: "queued" }, { deps: [{ task: "high", after: "opened" }] });
-      await member("high", 1, sequential, { state: "queued" });
-      await scheduler.load();
-      await pass(scheduler);
-      for (const id of ["low", "high"]) {
-        expect(scheduler.task(id)).toMatchObject({ state: "failed", failure: { code: "dependency_cycle" } });
-      }
-    });
-
-    test("an index 0 still blocked on a dependency holds index 1", async () => {
-      const { fleet, scheduler, member } = setup();
-      const lost: Partial<Task> = {
-        state: "lost",
-        assignment: { deviceId: "z", exclave: "main", clone: "app", pane: "%1" },
-      };
-      await member("gate", 9, { mode: "auto" }, lost, { batch: undefined });
-      await member("first", 0, sequential, { state: "blocked" }, { deps: [{ task: "gate", after: "merged" }] });
-      await member("second", 1, sequential);
-      await scheduler.load();
-      await pass(scheduler);
-      expect(dispatched(fleet)).toEqual([]);
-      expect(scheduler.task("first")?.state).toBe("blocked");
-      expect(scheduler.lastDecision("second")?.candidates[0]?.rejected).toContainEqual({
-        code: "batch_order",
-        index: 0,
-      });
-    });
-
-    test("a lower index finished in any state releases the next", async () => {
-      const { fleet, scheduler, member } = setup();
-      await member("first", 0, sequential, { state: "failed", failure: { code: "repo_not_found", message: "gone" } });
-      await member("second", 1, sequential);
-      await scheduler.load();
-      await pass(scheduler);
-      expect(dispatched(fleet)).toEqual(["second"]);
-    });
-  });
-
-  test("auto has no batch bound; where members disagree, the earliest-created member's strategy wins", async () => {
-    const auto = setup();
-    for (const [i, id] of ["x0", "x1", "x2"].entries()) {
-      // oxlint-disable-next-line no-await-in-loop -- created in order
-      await auto.member(id, i, { mode: "auto" });
-    }
-    await auto.scheduler.load();
-    await pass(auto.scheduler);
-    expect(dispatched(auto.fleet)).toEqual(["x0", "x1", "x2"]);
-
-    const mixed = setup();
-    await mixed.member("m0", 0, { mode: "sequential" });
-    await mixed.member("m1", 1, { mode: "auto" });
-    await mixed.scheduler.load();
-    await pass(mixed.scheduler);
-    expect(dispatched(mixed.fleet)).toEqual(["m0"]);
+    await member("high", 1, { strategy: { mode: "sequential" }, fields: { state: "queued" } });
+    await scheduler.load();
+    await pass(scheduler);
+    expect(dispatched(fleet)).toEqual(["high"]);
+    expect(scheduler.task("low")?.state).toBe("blocked");
   });
 });

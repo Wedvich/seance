@@ -48,6 +48,7 @@ import { REPLAY_WINDOW_MS } from "./crypto.ts";
 import { taskRecordAtRest } from "./task-record.ts";
 import {
   ACCOUNT_ALIAS_MAX_LENGTH,
+  BATCH_STRATEGY,
   BRANCH_MAX_LENGTH,
   CANDIDATE_MAX_REASONS,
   EXIT_STATUS_MAX,
@@ -458,7 +459,7 @@ describe("parseTaskSpec", () => {
     avoid: ["dev-b", "dev-c"],
     lineage: { deviceId: "dev-a", exclave: "default" },
     base: { deviceId: "dev-b", exclave: "work" },
-    batch: { id: "batch-1", index: 2, strategy: { mode: "parallel", max: 3 } },
+    batch: { id: "batch-1", index: 2, strategy: BATCH_STRATEGY },
     deps: [
       { task: "t-1", after: "opened" },
       { task: "t-2", after: "merged" },
@@ -470,11 +471,25 @@ describe("parseTaskSpec", () => {
   test("a whole spec round-trips, and fields it does not know stay behind", () => {
     expect(parseTaskSpec(full)).toEqual(full);
     expect(parseTaskSpec({ ...request, taskId: "x", deviceId: "y" })).toEqual(request);
-    for (const strategy of [{ mode: "sequential" }, { mode: "auto" }] as const) {
-      expect(parseTaskSpec({ ...request, batch: { id: "b", index: 0, strategy } })?.batch?.strategy).toEqual(strategy);
-    }
-    const last: BatchMembership = { id: "b", index: TASK_SPEC_LIMITS.batchIndex, strategy: { mode: "sequential" } };
+    const last: BatchMembership = { id: "b", index: TASK_SPEC_LIMITS.batchIndex, strategy: BATCH_STRATEGY };
     expect(parseTaskSpec({ ...full, batch: last })?.batch).toEqual(last);
+  });
+
+  test("a batch's stored strategy, whatever an older writer put there, reads as the one a group carries", () => {
+    for (const strategy of [
+      { mode: "sequential" },
+      { mode: "parallel", max: 3 },
+      { mode: "parallel", max: 0 },
+      { mode: "round-robin" },
+      "sequential",
+      undefined,
+    ]) {
+      expect(parseTaskSpec({ ...request, batch: { id: "b", index: 1, strategy } })?.batch).toEqual({
+        id: "b",
+        index: 1,
+        strategy: BATCH_STRATEGY,
+      });
+    }
   });
 
   test("a malformed optional field nulls the spec — a task must not run without the pin or deps it was given", () => {
@@ -489,9 +504,6 @@ describe("parseTaskSpec", () => {
       { ...full, avoid: Array.from({ length: TASK_SPEC_LIMITS.avoid + 1 }, (_, i) => `dev-${i}`) },
       { ...full, lineage: { deviceId: "dev-a" } },
       { ...full, batch: { ...full.batch, id: "has space" } },
-      { ...full, batch: { ...full.batch, strategy: { mode: "parallel", max: 0 } } },
-      { ...full, batch: { ...full.batch, strategy: { mode: "parallel", max: TASK_SPEC_LIMITS.parallel + 1 } } },
-      { ...full, batch: { ...full.batch, strategy: { mode: "round-robin" } } },
       { ...full, batch: { ...full.batch, index: TASK_SPEC_LIMITS.batchIndex + 1 } },
       { ...full, batch: { ...full.batch, index: -1 } },
       { ...full, deps: [{ task: "t-1", after: "pushed" }] },
@@ -686,9 +698,10 @@ describe("tasks and their records", () => {
     const reason: Reason = { code: "cap_reached", inFlight: 2, max: 2, scope: "account" };
     const decision = (r: unknown) => ({ at: 1, chosen: null, candidates: [{ ...candidate, rejected: [r] }] });
     expect(parseDecision(decision(reason))?.candidates[0]?.rejected).toEqual([reason]);
-    const batch: Reason = { ...reason, scope: "batch" };
-    expect(parseDecision(decision(batch))?.candidates[0]?.rejected).toEqual([batch]);
-    expect(parseDecision(decision({ ...reason, scope: "machine" }))?.candidates[0]?.rejected).toEqual([]);
+    // An older leader's batch scope reads as unknown since batches stopped scheduling.
+    for (const scope of ["batch", "machine"]) {
+      expect(parseDecision(decision({ ...reason, scope }))?.candidates[0]?.rejected).toEqual([]);
+    }
     const legacy: Reason = { code: "cap_reached", inFlight: 8, max: 8 };
     expect(parseDecision(decision(legacy))?.candidates[0]?.rejected).toEqual([legacy]);
   });
@@ -703,14 +716,14 @@ describe("tasks and their records", () => {
     expect(parseDecision(decision({ ...over, creditsSpent: false }))?.candidates[0]?.rejected).toEqual([]);
   });
 
-  test("a batch order hold names the member it waits on; an index past the batch bound drops the reason", () => {
+  test("an older leader's batch order hold drops the reason, never the candidate or the decision", () => {
     const candidate = { deviceId: "d", machine: "mac", exclave: "default", rejected: [] };
-    const decision = (r: unknown) => ({ at: 1, chosen: null, candidates: [{ ...candidate, rejected: [r] }] });
-    const order: Reason = { code: "batch_order", index: 3 };
-    expect(parseDecision(decision(order))?.candidates[0]?.rejected).toEqual([order]);
-    for (const index of [TASK_SPEC_LIMITS.batchIndex + 1, -1, 1.5, "3", undefined]) {
-      expect(parseDecision(decision({ code: "batch_order", index }))?.candidates[0]?.rejected).toEqual([]);
-    }
+    const decision = {
+      at: 1,
+      chosen: null,
+      candidates: [{ ...candidate, rejected: [{ code: "batch_order", index: 3 }] }],
+    };
+    expect(parseDecision(decision)?.candidates).toEqual([{ ...candidate, rejected: [] }]);
   });
 
   test("a model not included names the gated model; an empty or oversized one drops the reason", () => {
@@ -971,7 +984,7 @@ describe("store", () => {
       avoid: Array.from({ length: TASK_SPEC_LIMITS.avoid }, (_, i) => `${i}`.padEnd(ROUTING_ID_MAX_LENGTH, "A")),
       lineage: placement,
       base: placement,
-      batch: { id: crypto.randomUUID(), index: 15, strategy: { mode: "parallel", max: TASK_SPEC_LIMITS.parallel } },
+      batch: { id: crypto.randomUUID(), index: 15, strategy: BATCH_STRATEGY },
       deps: Array.from({ length: TASK_SPEC_LIMITS.deps }, () => ({
         task: crypto.randomUUID(),
         after: "merged" as const,

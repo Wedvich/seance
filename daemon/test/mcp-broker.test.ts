@@ -234,7 +234,6 @@ describe("the MCP tools, direct and brokered", () => {
         [
           "queue_batch",
           {
-            strategy: "auto",
             tasks: [
               { repo: "seance", prompt: "a" },
               { repo: "seance", prompt: "b" },

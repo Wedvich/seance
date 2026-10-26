@@ -62,6 +62,15 @@ export interface SchedulerConfig {
    */
   readonly lostAfterMs: number;
   /**
+   * An in-flight task whose machine has been absent this long stops counting
+   * toward `globalMax`, `accountMax` and projected usage, its state unchanged:
+   * nothing runs there while it sleeps. Short of `lostAfterMs`, which settles
+   * reservations and writes a record. A blip or reconnect frees nothing; a
+   * dark wake restarts the clock, so slots return only after the
+   * connected-read window (~2.5 min) plus this. Counted again once its machine is back.
+   */
+  readonly slotReleaseAfterMs: number;
+  /**
    * A `lost` task whose machine went away (`absentSince`, else `createdAt`)
    * longer ago than this, and is disconnected now (a connected machine's
    * `sessions` is about to settle it), is `failed` `lost_expired`. Never pruned while `lost`,
@@ -132,6 +141,7 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   needsInputEscalateMs: 30 * 60_000,
   reservationTtlMs: 120_000,
   lostAfterMs: 15 * 60_000,
+  slotReleaseAfterMs: 2 * 60_000,
   lostExpiryMs: 7 * 24 * 60 * 60_000,
   // Tied to the ledger: past its age no machine can report the merge (`mergeExpiryMs` doc).
   mergeExpiryMs: LAUNCH_LEDGER_MAX_AGE_MS,

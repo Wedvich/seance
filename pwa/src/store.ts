@@ -1,5 +1,4 @@
 import type {
-  BatchStrategy,
   DepAfter,
   MetricsErrorCode,
   MetricsReply,
@@ -12,6 +11,7 @@ import type {
   TaskUntil,
 } from "@seance/shared";
 import {
+  BATCH_STRATEGY,
   failureReasonText,
   queuedTask,
   RequestFailure,
@@ -416,14 +416,12 @@ export class Store {
   }
 
   /**
-   * The next enqueues join a new batch of `strategy`, numbered from 1. The same
-   * strategy again keeps the batch open: re-picking it must not renumber a
-   * batch already in flight.
+   * The next enqueues join a new batch, numbered from 1. An open batch stays
+   * open: a second tap must not renumber a batch already in flight.
    */
-  startBatch(strategy: BatchStrategy): void {
+  startBatch(): void {
     const { form } = this.#state;
-    const same = form.batch !== null && JSON.stringify(form.batch.strategy) === JSON.stringify(strategy);
-    if (!same) this.#patch({ form: { ...form, batch: { id: crypto.randomUUID(), strategy, next: 1 } } });
+    if (form.batch === null) this.#patch({ form: { ...form, batch: { id: crypto.randomUUID(), next: 1 } } });
     this.dismissLayer();
   }
 
@@ -747,7 +745,7 @@ export class Store {
       ...(form.after.length === 0 ? {} : { deps: form.after }),
       ...(form.batch === null
         ? {}
-        : { batch: { id: form.batch.id, index: form.batch.next, strategy: form.batch.strategy } }),
+        : { batch: { id: form.batch.id, index: form.batch.next, strategy: BATCH_STRATEGY } }),
       ...(reported ? { until: form.until } : {}),
       ...(issue === "" ? {} : { linear: { issue } }),
     };

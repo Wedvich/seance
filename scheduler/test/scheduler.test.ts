@@ -12,7 +12,7 @@ import {
   type TaskSpawnReply,
 } from "../src/index.ts";
 import { advance } from "../src/task.ts";
-import { enqueue, FakeFleet, machine, NOW, readerChecked, spec, unreachable } from "./fixtures.ts";
+import { enqueue, FakeFleet, machine, NOW, NOW_S, obs, readerChecked, spec, status, unreachable } from "./fixtures.ts";
 
 function setup(fleet = new FakeFleet([machine("a")]), config = DEFAULT_CONFIG) {
   const store = new MemoryQueueStore();
@@ -648,6 +648,130 @@ describe("a machine that stops answering", () => {
     fleet.running.set("a", [{ id: "%2", window: "w2", repo: "app", path: "/p", taskId: "l1" }]);
     await scheduler.takeover();
     expect(scheduler.task("l1")).toMatchObject({ state: "running", assignment: { pane: "%2" } });
+  });
+});
+
+describe("a machine asleep past slotReleaseAfterMs", () => {
+  const GRACE = DEFAULT_CONFIG.slotReleaseAfterMs;
+
+  /** One task running on `a` under a global max of 1, then `a` asleep, seen by a pass. */
+  async function asleepHoldingTheSlot() {
+    const env = setup(new FakeFleet([machine("a"), machine("b")]), { ...DEFAULT_CONFIG, globalMax: 1 });
+    const first = await enqueue(env.store, env.scheduler, spec({ pin: { deviceId: "a" } }));
+    await pass(env.scheduler);
+    expect(env.scheduler.task(first.id)).toMatchObject({ state: "running", assignment: { deviceId: "a" } });
+    env.fleet.fleet = [machine("a", { connected: false }), machine("b")];
+    await pass(env.scheduler);
+    const second = await enqueue(env.store, env.scheduler, spec());
+    return { ...env, first, second };
+  }
+
+  function reasons(scheduler: Scheduler, id: string): unknown {
+    return scheduler.lastDecision(id)?.candidates.flatMap((c) => c.rejected);
+  }
+
+  async function at(env: { clock: { now: number }; fleet: FakeFleet; scheduler: Scheduler }, now: number) {
+    env.clock.now = now;
+    env.fleet.beat(now);
+    await pass(env.scheduler);
+  }
+
+  async function end(env: { fleet: FakeFleet; scheduler: Scheduler }, id: string): Promise<void> {
+    const assignment = env.scheduler.task(id)?.assignment;
+    if (assignment?.pane === undefined) throw new Error(`${id} has no pane`);
+    env.fleet.end(assignment.deviceId, id);
+    await env.scheduler.onSession(id, "ended", { deviceId: assignment.deviceId, pane: assignment.pane });
+  }
+
+  test("short of the grace its task holds the slot; past it another machine gets the work, its task untouched", async () => {
+    const env = await asleepHoldingTheSlot();
+    const { scheduler, first, second } = env;
+    await at(env, NOW + GRACE - 1);
+    expect(scheduler.task(second.id)?.state).toBe("ready");
+    expect(reasons(scheduler, second.id)).toContainEqual({ code: "cap_reached", inFlight: 1, max: 1 });
+
+    await at(env, NOW + GRACE);
+    expect(scheduler.task(second.id)).toMatchObject({ state: "running", assignment: { deviceId: "b" } });
+    expect(scheduler.task(first.id)).toMatchObject({ state: "running", assignment: { deviceId: "a" } });
+  });
+
+  test("back with its task running: over the cap, nothing killed, nothing placed until the count drops under", async () => {
+    const env = await asleepHoldingTheSlot();
+    const { fleet, scheduler, store, first, second } = env;
+    await at(env, NOW + GRACE);
+    expect(scheduler.task(second.id)?.state).toBe("running");
+
+    fleet.fleet = [machine("a"), machine("b")];
+    await at(env, NOW + GRACE + 1);
+    expect(scheduler.task(first.id)).toMatchObject({ state: "running", assignment: { deviceId: "a" } });
+    expect(fleet.despawns).toEqual([]);
+    const third = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    expect(scheduler.task(third.id)?.state).toBe("ready");
+    expect(reasons(scheduler, third.id)).toContainEqual({ code: "cap_reached", inFlight: 2, max: 1 });
+
+    await end(env, second.id);
+    await pass(scheduler);
+    expect(reasons(scheduler, third.id)).toContainEqual({ code: "cap_reached", inFlight: 1, max: 1 });
+    await end(env, first.id);
+    await pass(scheduler);
+    expect(scheduler.task(third.id)?.state).toBe("running");
+    expect(fleet.spawns).toHaveLength(3);
+  });
+
+  test("a flap restarts the grace: absent, back, absent again holds the slot until the new absence runs its course", async () => {
+    const env = await asleepHoldingTheSlot();
+    const { fleet, scheduler, second } = env;
+    await at(env, NOW + GRACE - 1);
+    fleet.fleet = [machine("a"), machine("b")];
+    await at(env, NOW + GRACE);
+    fleet.fleet = [machine("a", { connected: false }), machine("b")];
+    const away = NOW + GRACE + 1;
+    await at(env, away);
+    await at(env, away + GRACE - 1);
+    expect(scheduler.task(second.id)?.state).toBe("ready");
+    expect(reasons(scheduler, second.id)).toContainEqual({ code: "cap_reached", inFlight: 1, max: 1 });
+
+    await at(env, away + GRACE);
+    expect(scheduler.task(second.id)).toMatchObject({ state: "running", assignment: { deviceId: "b" } });
+  });
+
+  test("back before any pass: preview already counts its task again, as the next pass will", async () => {
+    const env = await asleepHoldingTheSlot();
+    const { clock, fleet, scheduler } = env;
+    clock.now = NOW + GRACE;
+    fleet.beat(clock.now);
+    const rejected = (): unknown => scheduler.preview(spec()).candidates.flatMap((c) => c.rejected);
+    expect(rejected()).not.toContainEqual(expect.objectContaining({ code: "cap_reached" }));
+
+    fleet.fleet = [machine("a"), machine("b")];
+    expect(rejected()).toContainEqual({ code: "cap_reached", inFlight: 1, max: 1 });
+  });
+
+  test("pause until reset leaves the tasks of a machine asleep past the grace out of its projected usage", async () => {
+    const reading = (h: number) =>
+      machine("a", { status: status({ quota: [obs(0, { h, hr: NOW_S + 7200, d: 40, dr: NOW_S + 3600 })] }) });
+    const env = setup(new FakeFleet([reading(10)]));
+    const { clock, fleet, scheduler, store } = env;
+    for (let i = 0; i < 3; i++) await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    expect(fleet.spawns).toHaveLength(3);
+
+    // 78% plus four tasks of 5% crosses the line in 5h, so while they count the reset is its, the latest.
+    fleet.fleet = [machine("a", { ...reading(78), connected: false })];
+    await at(env, NOW + 1);
+    clock.now = NOW + GRACE;
+    expect(await scheduler.pause({ until: "reset", account: "org:a" })).toMatchObject({
+      ok: true,
+      holds: [{ resumeAt: (NOW_S + 7200) * 1000 }],
+    });
+    await scheduler.resume({ account: "org:a" });
+
+    clock.now = NOW + 1 + GRACE;
+    expect(await scheduler.pause({ until: "reset", account: "org:a" })).toMatchObject({
+      ok: true,
+      holds: [{ resumeAt: (NOW_S + 3600) * 1000 }],
+    });
   });
 });
 

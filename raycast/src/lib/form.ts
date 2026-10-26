@@ -1,4 +1,4 @@
-import type { RepoEntry } from "@seance/shared";
+import { lastHeardAt, type MachineStatus, type RepoEntry } from "@seance/shared";
 import type { Effort, Model } from "./options.ts";
 
 /**
@@ -13,7 +13,10 @@ export interface PickerMachine {
   readonly deviceId: string;
   readonly name: string;
   readonly connected: boolean;
+  /** In a cached projection, already the heard time (`lastHeardAt`): the cache keeps no `status`. */
   readonly lastSeen: number;
+  /** Live registry only; dates a slept machine past its register (`lastHeardAt`). */
+  readonly status?: MachineStatus;
   readonly scannedAt: number;
   readonly repos: readonly RepoEntry[];
 }
@@ -222,4 +225,15 @@ export function checkSubmit(values: FormValues, machines: readonly PickerMachine
     return { ok: false, reason: `${machine.name} has no repos — check repoRoots in its config, then rescan` };
   }
   return { ok: true, machine, repo: values.repo };
+}
+
+/** Age of the freshest machine contact, for the cached-list banner. `now` is injected so it is testable. */
+export function formatAge(machines: readonly PickerMachine[], now: number): string {
+  const newest = Math.max(...machines.map((machine) => lastHeardAt(machine)));
+  const elapsed = Math.max(0, now - newest);
+  const minutes = Math.floor(elapsed / 60_000);
+  if (minutes < 1) return "moments ago";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 24 ? `${hours}h ago` : `${Math.floor(hours / 24)}d ago`;
 }

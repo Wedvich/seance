@@ -12,6 +12,7 @@ import {
   type Score,
   type Task,
 } from "@seance/shared";
+import { sleepingMachine } from "./asleep.ts";
 import { failedBody, formatSeen } from "./view.ts";
 
 /**
@@ -115,7 +116,7 @@ function line(
     // Reasons a leader a version ahead minted are dropped at parse: say so rather than show none.
     const why =
       candidate.rejected.length === 0
-        ? "rejected for a reason this app can't read — update it"
+        ? "rejected for a reason this app can't read; the leader may run another version"
         : candidate.rejected.map(reasonText).join(", ");
     return { id, where: where(candidate), outcome, why, quota };
   }
@@ -187,27 +188,6 @@ export function describeDecision(
     others,
     omitted,
   };
-}
-
-/** States whose headline says the machine is asleep: a session may be alive there, waiting on the lid. */
-const SLEEP_AWARE: ReadonlySet<Task["state"]> = new Set(["reserved", "running", "needs-input", "lost"]);
-
-/**
- * The task's machine when it is listed and not `connected` as this client sees
- * it — the signal the Machines card's "asleep" reads, never the relay flag alone
- * (DESIGN.md, "The Queue screen"). A derived view: the leader's state is unchanged.
- */
-function sleepingMachine(task: Task, machines: readonly Machine[]): Machine | undefined {
-  if (!SLEEP_AWARE.has(task.state)) return undefined;
-  const at = task.assignment ?? task.reservation;
-  if (at === undefined) return undefined;
-  const machine = machines.find((m) => m.deviceId === at.deviceId);
-  return machine?.connected === false ? machine : undefined;
-}
-
-/** True when the task's machine is asleep: its row ranks and reads differently on the Queue screen. */
-export function machineAsleep(task: Task, machines: readonly Machine[]): boolean {
-  return sleepingMachine(task, machines) !== undefined;
 }
 
 /** What became of a queued task, in one line: the verdict's headline. */

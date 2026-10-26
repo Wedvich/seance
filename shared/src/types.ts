@@ -1640,25 +1640,25 @@ export interface Placement {
 }
 
 /**
- * How a batch's members share the fleet. `sequential`: one at a time, in
- * `index` order. `parallel`: at most `max` at once. `auto`: no batch-level
- * bound — deps and the global and per-account caps decide.
+ * What every `BatchMembership.strategy` holds. A batch is a group, not a
+ * scheduling primitive (2026-10-26): order is `after`, concurrency the caps.
+ * The field stays only because an older `parseBatch` nulls a batch without a
+ * strategy, and the whole spec with it; `auto` is the one value an older
+ * leader applies no batch bound to. Dropped once no pre-change leader, app or
+ * daemon remains (docs/scheduler.md, M4 "Batches are a group").
  */
-export type BatchStrategy =
-  | { readonly mode: "sequential" }
-  | { readonly mode: "parallel"; readonly max: number }
-  | { readonly mode: "auto" };
+export const BATCH_STRATEGY = { mode: "auto" } as const;
 
 /**
- * A task's place in a batch. Every member carries the strategy, since there is
- * no batch record — one client creates a batch's members together, so they
- * agree; where they do not, the earliest-created member's wins.
+ * A task's place in a batch: a group with no record of its own, so a batch is
+ * the tasks that name its id. It holds no order and no bound.
  */
 export interface BatchMembership {
   /** `TASK_ID_PATTERN`, minted by the client like a task id. */
   readonly id: string;
   readonly index: number;
-  readonly strategy: BatchStrategy;
+  /** `BATCH_STRATEGY` always: whatever an older writer stored reads as it. */
+  readonly strategy: typeof BATCH_STRATEGY;
 }
 
 /**
@@ -1720,7 +1720,6 @@ export interface LinearLink {
 export const TASK_SPEC_LIMITS = {
   client: 64,
   deps: 16,
-  parallel: 16,
   linearIssue: 64,
   placement: ROUTING_ID_MAX_LENGTH,
   batchIndex: MAX_TASKS,
@@ -1875,21 +1874,15 @@ export type Reason =
   | { readonly code: "model_not_included"; readonly model: string }
   /**
    * `scope` absent is `global`, as M2's leaders sent it. M3's: `account`, the
-   * per-account cap; `batch`, the task's batch at its strategy's bound
-   * (`sequential` is a bound of 1).
+   * per-account cap. (Scope `batch` and the `batch_order` reason went with
+   * batch strategies; a reader drops either as a reason it does not know.)
    */
   | {
       readonly code: "cap_reached";
       readonly inFlight: number;
       readonly max: number;
-      readonly scope?: "global" | "account" | "batch";
+      readonly scope?: "global" | "account";
     }
-  /**
-   * A `sequential` batch member held for order: the member at `index`, the
-   * nearest lower one the scheduler holds, has not ended yet — running, or
-   * still `blocked` or unroutable itself.
-   */
-  | { readonly code: "batch_order"; readonly index: number }
   /**
    * A pause holds dispatch (`PauseHold`): the whole queue, or the candidate's
    * account. Set by the leader since M3 item 5.

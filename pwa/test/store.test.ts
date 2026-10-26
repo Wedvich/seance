@@ -3,7 +3,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:te
 import {
   CAPABILITIES,
   accountRecord,
-  type BatchStrategy,
+  BATCH_STRATEGY,
   QUEUE_MAX_TASKS,
   RelayClient,
   RequestFailure,
@@ -1881,7 +1881,7 @@ describe("authoring a task from the auto form", () => {
     new ScriptedClient({
       machines: [autoMachine("dev-a", { capabilities: [CAPABILITIES.reportedDone] }), autoMachine("dev-b")],
     });
-  const BATCH = { id: "b-1", strategy: { mode: "sequential" }, next: 1 } as const;
+  const BATCH = { id: "b-1", next: 1 } as const;
   const form = { ...DEFAULT_FORM, prompt: "fix it" };
 
   test("deps, batch and Linear go into the spec, with no `until` unless it was changed, and then reset or advance", async () => {
@@ -1898,7 +1898,7 @@ describe("authoring a task from the auto form", () => {
       client: "pwa",
       prompt: "fix it",
       deps: [{ task: "base", after: "merged" }],
-      batch: { id: "b-1", index: 1, strategy: { mode: "sequential" } },
+      batch: { id: "b-1", index: 1, strategy: BATCH_STRATEGY },
       linear: { issue: "ENG-7" },
     });
     expect(firstCreate(client).spec).not.toHaveProperty("until");
@@ -1997,31 +1997,29 @@ describe("authoring a task from the auto form", () => {
     expect(store.getState().form.after.some((dep) => dep.task === "a")).toBe(false);
   });
 
-  test("re-picking the open batch's strategy keeps its id and counter; another strategy starts a new batch", () => {
+  test("starting a batch while one is open keeps its id and counter; after End batch a start is a new batch", () => {
     const store = new Store(new ScriptedClient(), form);
-    const pick = (strategy: BatchStrategy): void => {
+    const start = (): void => {
       store.openSheet("batch");
-      store.startBatch(strategy);
+      store.startBatch();
       fake.settle(store);
     };
-    pick({ mode: "sequential" });
+    start();
     const first = store.getState().form.batch;
-    expect(first).toMatchObject({ strategy: { mode: "sequential" }, next: 1 });
+    expect(first).toMatchObject({ next: 1 });
     expect(store.getState().sheet).toBeNull();
 
-    pick({ mode: "sequential" });
+    start();
     expect(store.getState().form.batch).toBe(first);
-
-    pick({ mode: "parallel", max: 2 });
-    const second = store.getState().form.batch;
-    expect(second?.id).not.toBe(first?.id);
-    expect(second).toMatchObject({ strategy: { mode: "parallel", max: 2 }, next: 1 });
 
     store.openSheet("batch");
     store.endBatch();
     fake.settle(store);
     expect(store.getState().form.batch).toBeNull();
     expect(store.getState().sheet).toBeNull();
+
+    start();
+    expect(store.getState().form.batch?.id).not.toBe(first?.id);
   });
 
   test("the Linear issue is clamped to what a spec takes", () => {

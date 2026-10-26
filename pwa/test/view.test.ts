@@ -661,13 +661,13 @@ describe("deriveReportedAvailability", () => {
         {},
         {
           after: [{ task: "t-1", after: "merged" }],
-          batch: { id: "b", strategy: { mode: "parallel", max: 2 }, next: 3 },
+          batch: { id: "b", next: 3 },
         },
       ),
       NOW,
     );
     expect(view.afterTile).toMatchObject({ label: "AFTER", value: "1 task · merged" });
-    expect(view.batchTile).toMatchObject({ label: "BATCH", value: "#3 · up to 2 at once" });
+    expect(view.batchTile).toMatchObject({ label: "BATCH", value: "#3" });
     const bare = deriveView(state(), NOW);
     expect(bare.afterTile.value).toBe("None");
     expect(bare.batchTile.value).toBe("Off");

@@ -1,7 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import { importPsk, openAtRest, sealAtRest, toBase64 } from "./crypto.ts";
 import { openTaskListing, openTaskRecord, queuedTask, sealTaskRecord, taskKey } from "./task-record.ts";
-import { APP_ID, PIN_SENTINEL, SCHEDULER_ID, TASK_SPEC_LIMITS, type Task, type TaskRecord } from "./types.ts";
+import {
+  APP_ID,
+  AT_REST_OPS,
+  BATCH_STRATEGY,
+  PIN_SENTINEL,
+  SCHEDULER_ID,
+  TASK_SPEC_LIMITS,
+  type Task,
+  type TaskRecord,
+} from "./types.ts";
 
 const key = await importPsk(toBase64(new Uint8Array(32).fill(7)));
 const otherKey = await importPsk(toBase64(new Uint8Array(32).fill(9)));
@@ -21,6 +30,21 @@ describe("task records at rest", () => {
     expect(env.to).toBe(SCHEDULER_ID);
     expect(env.from).toBe(APP_ID);
     expect(await openTaskRecord(key, { key: taskKey(task.id), version: 1, env }, NOW + 20 * DAY_MS)).toEqual(record);
+  });
+
+  test("a record an older writer sealed with a sequential or parallel batch strategy opens as a plain group", async () => {
+    for (const strategy of [{ mode: "sequential" }, { mode: "parallel", max: 2 }]) {
+      const task = queued();
+      // Raw, as the older writer's sealer emitted it: this build's types cannot carry the old strategy.
+      const raw = {
+        version: 1,
+        task: { ...task, spec: { ...task.spec, batch: { id: crypto.randomUUID(), index: 1, strategy } } },
+      };
+      const env = await sealAtRest(key, { to: SCHEDULER_ID, from: APP_ID }, AT_REST_OPS.task, raw);
+      const read = await openTaskRecord(key, { key: taskKey(task.id), version: 1, env }, NOW);
+      if (typeof read === "string") throw new Error(`unreadable: ${read}`);
+      expect(read.task.spec.batch).toEqual({ id: raw.task.spec.batch.id, index: 1, strategy: BATCH_STRATEGY });
+    }
   });
 
   test("another key, another op or another addressee is unopenable", async () => {

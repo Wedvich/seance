@@ -140,9 +140,10 @@ export class Scheduler {
   readonly #decisions = new Map<string, Decision>();
   /**
    * deviceId → when a pass first saw it not connected (or gone from the
-   * registry), for machines holding placed or `awaiting-merge` tasks. Memory
-   * only: a new leader starts the count again, which can only delay `lost`,
-   * never hasten it — and it is this clock, not `Machine.lastSeen`, because a
+   * registry), for machines holding placed or `awaiting-merge` tasks: what
+   * `lost` and slot release (`#released`) both age from. Memory only: a new
+   * leader starts the count again, which can only delay either, never hasten
+   * it — and it is this clock, not `Machine.lastSeen`, because a
    * timeout's offline mark can make a machine read disconnected beside a
    * `lastSeen` hours old.
    */
@@ -245,7 +246,15 @@ export class Scheduler {
       const resumeAt =
         account === undefined
           ? null
-          : accountResetAt(account, this.#fleet.machines(), this.tasks(), now, this.#config, this.#fleetQuota());
+          : accountResetAt(
+              account,
+              this.#fleet.machines(),
+              this.tasks(),
+              now,
+              this.#config,
+              this.#fleetQuota(),
+              this.#released(now),
+            );
       if (account === undefined || resumeAt === null) return { ok: false, code: "reset_unknown" };
       hold = { account, until: "reset", at: now, resumeAt };
     }
@@ -390,17 +399,33 @@ export class Scheduler {
 
   /** A dry run over the current fleet: what `tick` would decide for this spec now. */
   preview(spec: TaskSpec): Decision {
-    const task: Task = { id: "", spec, state: "ready", createdAt: this.#now() };
+    const now = this.#now();
+    const task: Task = { id: "", spec, state: "ready", createdAt: now };
     return capped(
       route({
         task,
         machines: this.#fleet.machines(),
         tasks: this.tasks(),
-        now: this.#now(),
+        now,
         config: this.#config,
         holds: this.#pause.holds,
         fleetQuota: this.#fleetQuota(),
+        released: this.#released(now),
       }),
+    );
+  }
+
+  /**
+   * Machines absent past `slotReleaseAfterMs` by `#absentSince`, and still
+   * away: one back since the last `#markAbsent` already counts again, so a
+   * `preview` between the two says what the next pass will.
+   */
+  #released(now: number): ReadonlySet<string> {
+    const connected = this.#connectedIds();
+    return new Set(
+      [...this.#absentSince]
+        .filter(([deviceId, since]) => !connected.has(deviceId) && now - since >= this.#config.slotReleaseAfterMs)
+        .map(([deviceId]) => deviceId),
     );
   }
 
@@ -654,7 +679,7 @@ export class Scheduler {
     await this.#admit();
     const ready = dispatchOrder(this.tasks().filter((t) => t.state === "ready" && !this.#dispatches.has(t.id)));
     // Reserve one at a time, so each sees the reservations before it in projected
-    // usage and its batch's bound. The spawns are not awaited: one slow machine
+    // usage and the caps. The spawns are not awaited: one slow machine
     // must not hold every other placement, TTL and absence check behind its 90s
     // timeout.
     for (const task of ready) {
@@ -668,6 +693,7 @@ export class Scheduler {
           config: this.#config,
           holds: this.#pause.holds,
           fleetQuota: this.#fleetQuota(),
+          released: this.#released(now),
         }),
       );
       this.#decisions.set(task.id, decision);
