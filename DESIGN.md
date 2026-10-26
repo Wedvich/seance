@@ -843,7 +843,8 @@ The Durable Object persists a machine registry:
   has been gone since then. So while a socket is listed, `lastSeen` is its
   register's time, not its last heartbeat's: a machine up for three days
   reads "last seen 3d ago" until the sweep closes its slept socket and
-  rewrites it. The kept `status.at` is the fresher stamp in that window.
+  rewrites it. The kept `status.at` is the fresher stamp in that window, so every
+  displayed "last seen" (PWA, Raycast, `seanced mcp`) reads `lastHeardAt`, the later of the two.
 - **Silent daemon sockets are swept.** An abruptly-slept Mac sends no close
   frame, so its socket would read `connected: true` until Cloudflare noticed
   the dead TCP peer — unbounded, hours in practice. A storage alarm runs
@@ -5061,7 +5062,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   so the screen agrees with itself, at the cost of the clause flickering off through a dark wake
   exactly as that card does. The age is `lastHeardAt(machine)` (`shared/src/status-reader.ts`),
   the later of `lastSeen` and the kept `status.at`, which the Machines card's "asleep · last
-  seen" and the machine picker's "offline · last seen" now read too: while the relay still lists
+  seen", the machine picker's "offline · last seen", Raycast's cached-list age and every
+  `seanced mcp` "last seen" (`list_machines`' `lastSeen` included) now read too: while the relay still lists
   a slept socket, `lastSeen` is the register's time, days old, where the last beat is within one
   of the sleep. Every such task sits in its own **Asleep** section, below Waiting, collapsed to
   "ASLEEP · 3" until tapped (in-memory state per mount, never stored: closed on each open on a phone, where the screen remounts; kept for the page's life on desktop, where the queue column stays mounted), ordered

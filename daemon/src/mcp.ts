@@ -38,6 +38,7 @@ import {
   type Task,
   type TaskDep,
   type TaskUntil,
+  lastHeardAt,
 } from "@seance/shared";
 import { appRelayClient, importAppKeys, LazyRelay, type AppKeys } from "./app-relay.ts";
 import { cliSink, type AuditSink } from "./audit.ts";
@@ -267,7 +268,7 @@ function describeMachine(
     deviceId: machine.deviceId,
     platform: machine.platform,
     connected: machine.connected,
-    lastSeen: new Date(machine.lastSeen).toISOString(),
+    lastSeen: new Date(lastHeardAt(machine)).toISOString(),
     repos: machine.repos.map((repo) => repo.name),
     // Absent, not empty, on a daemon predating exclaves: the scheduler cannot place there.
     ...(machine.exclaves === undefined
@@ -786,7 +787,7 @@ export function buildMcpServer(
     {
       title: "List machines",
       description:
-        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any, plus `account`, the name every Séance client shows for it (its alias where one is set, else the email, else a short id; tagged where two accounts would read alike; no alias on a box whose daemon brokers for it, with no readable PSK) — a display name only, never a value for pin.account — and `alias` where one is set: a spawn's pin.account takes the `accountId`, the `email` or the `alias`, not `account`; a machine with the field absent or empty reports none, so the scheduler cannot place there until its daemon updates. Offline machines are listed with their last-seen time. `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that every spawn goes through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue and cancel_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
+        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any, plus `account`, the name every Séance client shows for it (its alias where one is set, else the email, else a short id; tagged where two accounts would read alike; no alias on a box whose daemon brokers for it, with no readable PSK) — a display name only, never a value for pin.account — and `alias` where one is set: a spawn's pin.account takes the `accountId`, the `email` or the `alias`, not `account`; a machine with the field absent or empty reports none, so the scheduler cannot place there until its daemon updates. Offline machines are listed with their last-seen time: `lastSeen` is when the machine was last heard from (its last register or status beat, whichever is later). `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that every spawn goes through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue and cancel_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
       annotations: { readOnlyHint: true },
     },
     async () => {
@@ -1221,7 +1222,9 @@ export function buildMcpServer(
         if ("error" in resolved) return errorResult(resolved.error);
         const target = resolved.machine;
         if (!target.connected) {
-          return errorResult(`${target.name} is not connected — last seen ${new Date(target.lastSeen).toISOString()}`);
+          return errorResult(
+            `${target.name} is not connected — last seen ${new Date(lastHeardAt(target)).toISOString()}`,
+          );
         }
         try {
           return rendered(await lease.request<DespawnResponse>(target.deviceId, "despawn", request), target.name);

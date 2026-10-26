@@ -618,6 +618,17 @@ of M4 has landed.
   section (`queue-view.ts`, `components/queue.tsx`) and `needsAttention`. DESIGN.md _PWA_,
   "Asleep machines on the Queue screen", is the record.
 
+- **"Last seen" off the PWA (new, 2026-10-26) — Done.** Raycast's cached-list age and every
+  `seanced mcp` "last seen" (`list_machines`' `lastSeen`, the despawn not-connected refusal,
+  `auto`'s offline-pin note) still read the register's `lastSeen`, so they said "3d ago" of a
+  machine that slept minutes ago. Exit: they read `lastHeardAt` like the PWA.
+
+  _As built (2026-10-26):_ **Done.** `daemon/src/mcp.ts` and `auto.ts` format `lastHeardAt`;
+  `list_machines` keeps the `lastSeen` key, its value now the heard time (the tool description
+  says so). The brokered path carries `status` (`parseMachines`), so it agrees. Raycast's
+  `PickerMachine` takes the live `status`, and the registry cache folds `lastHeardAt` into its
+  existing `lastSeen` key rather than storing `status`, so an older cached entry still parses.
+
 - **Stacking** — `baseBranch` and `base_not_found`, lineage, the handoff preamble. Exit: a
   dependent task's worktree starts from its predecessor's branch; an unresolvable base fails
   with the code, not a shell error. Gap: a rebase after the predecessor changes is manual.

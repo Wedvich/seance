@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import type { MachineStatus } from "@seance/shared";
 import {
   checkSubmit,
+  formatAge,
   initialValues,
   nextLastUsed,
   reconcile,
@@ -325,5 +327,39 @@ describe("nextLastUsed", () => {
 
   test("does not invent an entry when nothing was selected", () => {
     expect(nextLastUsed(null, values()).repos).toEqual({});
+  });
+});
+
+describe("formatAge", () => {
+  const now = 1_760_000_000_000;
+  const stamp = (at: number): MachineStatus => ({ at: at / 1000, scan: 0 });
+
+  test("dates a live machine by its newer status beat, not its register time", () => {
+    const m = machine({ lastSeen: now - 3 * 86_400_000, status: stamp(now - 120_000) });
+    expect(formatAge([m], now)).toBe("2m ago");
+  });
+
+  test("falls back to lastSeen without a status", () => {
+    expect(formatAge([machine({ lastSeen: now - 3 * 3_600_000 })], now)).toBe("3h ago");
+  });
+
+  test("takes the newest across machines", () => {
+    const old = machine({ lastSeen: now - 5 * 86_400_000 });
+    const fresh = machine({ deviceId: "d2", lastSeen: now - 10 * 60_000 });
+    expect(formatAge([old, fresh], now)).toBe("10m ago");
+  });
+
+  test("buckets: moments, minutes, hours, days", () => {
+    const at = (ms: number): string => formatAge([machine({ lastSeen: now - ms })], now);
+    expect(at(59_999)).toBe("moments ago");
+    expect(at(60_000)).toBe("1m ago");
+    expect(at(59 * 60_000)).toBe("59m ago");
+    expect(at(60 * 60_000)).toBe("1h ago");
+    expect(at(23 * 3_600_000)).toBe("23h ago");
+    expect(at(24 * 3_600_000)).toBe("1d ago");
+  });
+
+  test("a future timestamp (clock skew) reads as moments ago", () => {
+    expect(formatAge([machine({ lastSeen: now + 60_000 })], now)).toBe("moments ago");
   });
 });

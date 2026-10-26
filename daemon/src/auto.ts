@@ -16,6 +16,7 @@ import {
   type SpawnClient,
   type TaskRequest,
   type TaskSpec,
+  lastHeardAt,
 } from "@seance/shared";
 import { enqueueAudit, type AuditSink, type EnqueueSurface } from "./audit.ts";
 import { DaemonFault, type SchedulerLeg } from "./fleet.ts";
@@ -320,7 +321,7 @@ export async function resolvePlacement(
   const notes: string[] = [];
   if (target !== undefined && !target.connected) {
     notes.push(
-      `${target.name} is offline (last seen ${new Date(target.lastSeen).toISOString()}); the task waits for it`,
+      `${target.name} is offline (last seen ${new Date(lastHeardAt(target)).toISOString()}); the task waits for it`,
     );
   }
   if (input.account !== undefined) {
