@@ -46,6 +46,15 @@ or a `tmux-spawn-*.scope` per pane with a systemd-built tmux. `cat /proc/<pane p
 shows it (`tmux list-panes -a -F '#{pane_pid}'` for the pid). A hybrid v1/v2 host, or WSL
 without systemd, has no count to read, and the wording stays "possibly".
 
+Only the pane's own cgroup is read, so a per-pane `tmux-spawn-*.scope` (removed once its last
+process exits, and so usually gone by the time the death is found) leaves the verdict unknown and
+the wording "possibly". A confirmed "out of memory" also needs the sample within ten minutes
+before the death and the check within ten minutes after, which the leader's two-minute sweep
+keeps. The daemon builds no probe when its own `/proc/self/cgroup` path does not resolve to a
+`memory.events` under `/sys/fs/cgroup` — a container in its own cgroup namespace without a
+matching cgroup mount would otherwise read another cgroup's count. Verified on a 7.0 kernel; an
+older kernel may count a global OOM kill differently.
+
 ### System unit with a delivered credential (systemd ≥ 256)
 
 Where the PSK lives in a TPM-sealed blob and systemd is ≥ 256, the daemon must run as

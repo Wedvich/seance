@@ -533,11 +533,12 @@ of M4 has landed.
   alike ("ended on SIGTERM (status 143)": only SIGKILL claims a kill), "exited with status N" otherwise —
   instead of "exited with an error". Under `until: "reported"` it says "did not report done" for "reported no pull request".
   _Follow-up (2026-10-26):_ on Linux with cgroup v2 the daemon checks a 137 against the
-  kernel's `oom_kill` count for the session's cgroup, sampled while it lived, and the failure
+  kernel's `oom_kill` count for the session's own cgroup, sampled while it lived, and the failure
   carries the verdict as `failure.oomKill`: "out of memory (the kernel's OOM killer fired as it
-  died)" or "not by the kernel's OOM killer" in place of "possibly out of memory", which stays
-  for macOS, an unreadable count and older daemons. DESIGN.md, _Daemon_, "Exit status", records
-  what the count proves on a shared cgroup.
+  died)" (only when sampled and judged within ten minutes of the death) or "not by the kernel's
+  OOM killer" in place of "possibly out of memory", which stays for macOS, an unreadable or
+  vanished cgroup (a per-pane tmux scope), a stale or other launch's sample, and older daemons.
+  DESIGN.md, _Daemon_, "Exit status", records what the count proves on a shared cgroup.
 
   _Open gaps (follow-up, not yet planned):_
   - The deadline and disconnect settles call `ended(task, undefined)`, so a PR the daemon noted
