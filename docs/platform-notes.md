@@ -33,6 +33,19 @@ sudo systemctl daemon-reload
 echo 0 | sudo tee /proc/$(systemctl show -p MainPID --value user@<uid>.service)/oom_score_adj
 ```
 
+### Out-of-memory kills
+
+When a task session dies of SIGKILL (status 137), the daemon checks the kernel's `oom_kill`
+count in `memory.events` for the cgroup the session's process lived in, sampled while it was
+alive, and the PWA and `get_queue` then say "out of memory" or "not by the kernel's OOM killer"
+instead of "possibly out of memory" (DESIGN.md, Daemon, "Exit status"). It needs cgroup v2 with
+the memory controller, which a pure-v2 systemd box has; no root. Where the sessions' cgroup is:
+under a `--system` unit, the unit's own (`/system.slice/seanced.service`), shared by every
+session and the daemon; under a user unit, `seanced.service` in the user manager's `app.slice`,
+or a `tmux-spawn-*.scope` per pane with a systemd-built tmux. `cat /proc/<pane pid>/cgroup`
+shows it (`tmux list-panes -a -F '#{pane_pid}'` for the pid). A hybrid v1/v2 host, or WSL
+without systemd, has no count to read, and the wording stays "possibly".
+
 ### System unit with a delivered credential (systemd ≥ 256)
 
 Where the PSK lives in a TPM-sealed blob and systemd is ≥ 256, the daemon must run as
