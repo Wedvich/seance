@@ -90,6 +90,15 @@ describe("batches", () => {
       await pass(scheduler);
       expect(dispatched(fleet)).toEqual(["m0", "m1", "m2"]);
       expect(scheduler.task("m0")?.spec.batch?.strategy).toEqual({ mode: "auto" });
+      // No decision names a batch: no batch_order, no batch-scoped cap.
+      for (const id of ["m0", "m1", "m2"]) {
+        const decision = scheduler.task(id)?.decision;
+        expect(decision?.candidates.length).toBeGreaterThan(0);
+        for (const candidate of decision?.candidates ?? []) {
+          expect(candidate.rejected.map((r) => String(r.code))).not.toContain("batch_order");
+          expect(candidate.rejected.some((r) => "scope" in r && String(r.scope) === "batch")).toBe(false);
+        }
+      }
     }
   });
 

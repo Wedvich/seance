@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { BATCH_STRATEGY, type ExclaveInfo, type Machine } from "@seance/shared";
+import { parseTask, type ExclaveInfo, type Machine } from "@seance/shared";
 import { DEFAULT_CONFIG, route, type Candidate, type Decision, type SchedulerConfig, type Task } from "../src/index.ts";
 import { accountResetAt } from "../src/route.ts";
 import { clone, exclave, machine, NOW, NOW_S, obs, spec, status } from "./fixtures.ts";
@@ -695,17 +695,31 @@ describe("filter", () => {
       expect(freed.chosen).toEqual({ deviceId: "a", exclave: "main", clone: "app" });
     });
 
-    test("a batch member there counts toward nothing past the caps' own rule: a batch has no bound", () => {
-      const batch = (index: number) => spec({ batch: { id: "b1", index, strategy: BATCH_STRATEGY } });
-      const tasks = [{ ...held("x", "s"), spec: batch(0) }];
-      const next = task({ spec: batch(1) });
-      expect(only(decide([machine("a")], { task: next, tasks, config: { globalMax: 1 }, released })).rejected).toEqual(
-        [],
-      );
-      // Awake, it holds the global slot as any task does, and nothing more.
-      expect(only(decide([machine("a")], { task: next, tasks, config: { globalMax: 1 } })).rejected).toEqual([
-        { code: "cap_reached", inFlight: 1, max: 1 },
-      ]);
+    test("an old record's batch bound is gone: the next member meets only what the caps define", () => {
+      // Raw, as an older writer sealed it, through the parser every reader uses.
+      const member = (id: string, index: number, strategy: unknown, fields: Record<string, unknown> = {}): Task => {
+        const body = parseTask({
+          id,
+          spec: { ...spec(), batch: { id: "b1", index, strategy } },
+          state: "ready",
+          createdAt: NOW,
+          ...fields,
+        });
+        if (body === null) throw new Error(`${id} does not parse`);
+        return body;
+      };
+      for (const strategy of [{ mode: "parallel", max: 1 }, { mode: "sequential" }]) {
+        const running = member("x", 0, strategy, {
+          state: "running",
+          assignment: { deviceId: "s", exclave: "main", clone: "app" },
+        });
+        const next = member("n", 1, strategy);
+        const one = { task: next, tasks: [running], config: { globalMax: 1 } };
+        // Asleep past the grace, the first holds no slot and nothing else holds the next.
+        expect(only(decide([machine("a")], { ...one, released })).rejected).toEqual([]);
+        // Awake, it holds the global slot as any task does, and nothing batch-shaped.
+        expect(only(decide([machine("a")], one)).rejected).toEqual([{ code: "cap_reached", inFlight: 1, max: 1 }]);
+      }
     });
   });
 

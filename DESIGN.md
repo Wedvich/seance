@@ -2568,7 +2568,11 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   is a field of the type, not added at serialization, so the store record, the leader's
   `queue`/`cancel`/`mark-done` replies and the broker's enqueue frame all carry it without a
   per-path emitter. `auto` is the value an older leader applies no batch bound to, so one
-  leading over new records already behaves as this one. The parser ignores whatever an older
+  leading over a batch all of whose members new code wrote already behaves as this one. A batch
+  begun by old code with `sequential` or `parallel` and continued by new code is not: the old
+  `strategyOf` takes the earliest-created member's strategy, so an old leader still serialises or
+  bounds the whole batch. The PWA drops a persisted open batch carrying such a strategy, so its
+  next enqueue starts a new batch. The parser ignores whatever an older
   writer stored (`sequential`, `parallel` with `max`, garbage, none) and reads it as
   `BATCH_STRATEGY`, so a live record from before keeps its group and loses its strategy at
   the next leader write; an older PWA or MCP may still write `sequential` during a rollout,
@@ -5281,8 +5285,9 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   `when` being `opened`, `merged` or `done`), `until` (`merged` or `reported`) and `linear`
   (`{issue}`, trimmed as the PWA's field is; a blank one is refused), with or without a named machine. **`queue_batch
   { tasks }`** puts up to 16 members as one batch, a group with no order or limit of its own
-  ("Batches"; its `strategy` and `max` went 2026-10-26, and a caller still sending them gets a
-  plain group, the schema dropping unknown keys): order is each member's `after`. Ids are minted first so a member's `after` can name an earlier one by `ref`
+  ("Batches"; its `strategy` and `max` went 2026-10-26; the schema still parses them loosely so a
+  caller sending `sequential`, `parallel` or any `max` is refused with a pointer to `after`, never
+  given a silent plain group — absent or `auto` is accepted): order is each member's `after`. Ids are minted first so a member's `after` can name an earlier one by `ref`
   (a later or unknown `ref`, two edges naming both fields or neither, and a ref used twice are refused in a
   pre-flight pass before anything is created), indexes are 1.. in the order given, and the members
   are `createTask`ed one by one. A failure partway stops the batch and answers with the ids that
