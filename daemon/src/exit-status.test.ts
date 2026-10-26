@@ -87,28 +87,22 @@ describe("the OOM verdict on a SIGKILL death", () => {
     tasks: EndedTasks;
     ledger: LaunchLedger;
     counts: Map<string, number>;
-    fail: { kills: boolean; cgroupOf: boolean; stall: boolean };
+    fail: { kills: boolean; cgroupOf: boolean };
     exiting: Set<number>;
     closed: string[];
     clock: { now: number };
     setPanes: (next: PaneInfo[]) => void;
   } {
     const counts = new Map<string, number>();
-    const fail = { kills: false, cgroupOf: false, stall: false };
+    const fail = { kills: false, cgroupOf: false };
     const exiting = new Set<number>();
     const closed: string[] = [];
     const clock = { now: 1 };
     let panes: PaneInfo[] = [];
-    const never = Promise.withResolvers<never>().promise;
     const probe: OomProbe = {
-      cgroupOf: (pid) =>
-        fail.stall ? never : fail.cgroupOf ? Promise.reject(new Error("EIO")) : Promise.resolve(`/unit-${pid}`),
+      cgroupOf: (pid) => (fail.cgroupOf ? Promise.reject(new Error("EIO")) : Promise.resolve(`/unit-${pid}`)),
       kills: (cgroup) =>
-        fail.stall
-          ? never
-          : fail.kills
-            ? Promise.reject(new Error("EIO"))
-            : Promise.resolve(counts.get(cgroup) ?? null),
+        fail.kills ? Promise.reject(new Error("EIO")) : Promise.resolve(counts.get(cgroup) ?? null),
       exiting: (pid) => Promise.resolve(exiting.has(pid)),
     };
     const ledger = LaunchLedger.memory(() => clock.now);
@@ -170,17 +164,100 @@ describe("the OOM verdict on a SIGKILL death", () => {
   });
 
   test("a spawn that lands is sampled at once, without holding its launch or the sessions reply", async () => {
-    const { tasks, ledger, counts, fail, setPanes } = rig();
+    const { tasks, ledger, counts, setPanes } = rig();
     counts.set("/unit-1", 4);
     setPanes([alive(1)]);
     await launched(tasks, "task-1");
     await pollUntil(() => ledger.notes().some((note) => note.taskId === "task-1" && note.oom?.kills === 4), "sample");
+  });
 
-    // Reads that never answer: the launch still settles.
-    fail.stall = true;
-    setPanes([alive(2)]);
+  test("a spawn's sample reads do not hold its launch: it settles while they are still pending, and the sample lands once they answer", async () => {
+    const gate = Promise.withResolvers<string | null>();
+    let asked = 0;
+    const probe: OomProbe = {
+      cgroupOf: () => {
+        asked += 1;
+        return gate.promise;
+      },
+      kills: () => Promise.resolve(4),
+      exiting: () => Promise.resolve(false),
+    };
+    const ledger = LaunchLedger.memory(() => 1);
+    // A timeout far past the test: were the launch to wait on the read, this would hang rather than pass.
+    const tasks = new EndedTasks(
+      ledger,
+      () => 1,
+      { list: () => Promise.resolve([alive(2)]), close: () => Promise.resolve() },
+      probe,
+      60_000,
+    );
     await launched(tasks, "task-2");
+    await pollUntil(() => asked === 1, "the spawn's sample read");
     expect(ledger.notes().find((note) => note.taskId === "task-2")?.oom).toBeUndefined();
+
+    gate.resolve("/unit-2");
+    await pollUntil(() => ledger.notes().some((note) => note.taskId === "task-2" && note.oom?.kills === 4), "sample");
+  });
+
+  test("sampling is single-flight: stalled reads of an earlier pass are not piled on, and sampling resumes once they settle", async () => {
+    const gate = Promise.withResolvers<string | null>();
+    let asked = 0;
+    const probe: OomProbe = {
+      cgroupOf: () => {
+        asked += 1;
+        return gate.promise;
+      },
+      kills: () => Promise.resolve(4),
+      exiting: () => Promise.resolve(false),
+    };
+    const sampled: string[] = [];
+    const deps = {
+      list: () => Promise.resolve([alive(1)]),
+      note: () => Promise.resolve(true),
+      close: () => Promise.resolve(),
+      oom: {
+        probe,
+        sampled: () => undefined,
+        noteSamples: () => Promise.resolve(sampled.push("written")),
+        timeoutMs: 10,
+      },
+    };
+    await harvestExits(deps);
+    await harvestExits(deps);
+    await harvestExits(deps);
+    expect(asked).toBe(1);
+
+    gate.resolve("/unit-1");
+    await pollUntil(async () => {
+      await harvestExits(deps);
+      return sampled.length > 0;
+    }, "sampling to resume");
+    expect(asked).toBe(2);
+  });
+
+  test("a live sample is stamped no later than its count is read, never with a cached one's later time", async () => {
+    const clock = { now: 100 };
+    const stamps: number[] = [];
+    const probe: OomProbe = {
+      cgroupOf: () => Promise.resolve("/shared"),
+      kills: () => {
+        clock.now += 50;
+        return Promise.resolve(4);
+      },
+      exiting: () => Promise.resolve(false),
+    };
+    await harvestExits({
+      list: () => Promise.resolve([alive(1), alive(2)]),
+      note: () => Promise.resolve(true),
+      close: () => Promise.resolve(),
+      oom: {
+        probe,
+        sampled: () => undefined,
+        noteSamples: (entries) => Promise.resolve(stamps.push(...entries.map((entry) => entry.sample.at))),
+        now: () => clock.now,
+      },
+    });
+    expect(stamps).toEqual([100, 100]);
   });
 
   test("a probe that fails costs the verdict, never the status or the close", async () => {

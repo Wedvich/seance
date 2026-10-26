@@ -227,13 +227,15 @@ export function sampleOom(
   timeoutMs: number = OOM_READ_TIMEOUT_MS,
 ): Promise<OomSample | null> {
   return bounded(async () => {
+    // Before the reads, so `at` is never later than the count it stamps.
+    const at = now();
     const cgroup = await probe.cgroupOf(pane.pid);
     if (cgroup === null) return null;
     const kills = await probe.kills(cgroup);
     if (kills === null) return null;
     // After the counts: a kill already counted has SIGKILL pending by now.
     if (await probe.exiting(pane.pid)) return null;
-    return { cgroup, kills, at: now(), paneId: pane.paneId, windowId: pane.windowId };
+    return { cgroup, kills, at, paneId: pane.paneId, windowId: pane.windowId };
   }, timeoutMs);
 }
 

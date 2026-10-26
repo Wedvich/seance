@@ -197,6 +197,7 @@ export class EndedTasks {
     now: () => number = Date.now,
     panes?: HarvestPanes,
     oom?: OomProbe,
+    oomTimeoutMs?: number,
   ) {
     this.#ledger = ledger;
     this.#now = now;
@@ -210,6 +211,7 @@ export class EndedTasks {
             noteSamples: (entries) =>
               ledger.noteBatch(entries.map(({ taskId, sample }) => ({ taskId, patch: { oom: sample } }))),
             now,
+            ...(oomTimeoutMs === undefined ? {} : { timeoutMs: oomTimeoutMs }),
           };
   }
 
