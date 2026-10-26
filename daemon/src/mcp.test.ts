@@ -220,6 +220,17 @@ describe("mcp tools", () => {
     lazy.stop();
   });
 
+  test("list_machines reports a slept machine's last status beat, not its days-old register, as lastSeen", async () => {
+    const slept = machine({ connected: false, lastSeen: 2_000, status: { at: 90_000, scan: 1_000 } });
+    const lazy = new LazyRelay({ create: () => fakeRelay([slept]) });
+    const client = await connectedClient(lazy);
+    const listed: Record<string, unknown>[] = JSON.parse(
+      toolText(await client.callTool({ name: "list_machines", arguments: {} })),
+    );
+    expect(listed[0]?.["lastSeen"]).toBe(new Date(90_000_000).toISOString());
+    lazy.stop();
+  });
+
   test("list_machines lists each machine's exclaves with the account signed in there, and none for a machine that reports none", async () => {
     const signedOut: ExclaveInfo = { ...exclave("spare"), accountId: null };
     const machines = [
@@ -685,6 +696,18 @@ describe("despawn_session", () => {
     expect(fake.requests[0]?.op).toBe("despawn");
     // Nobody asked for force, so it must not ride along.
     expect(fake.requests[0]?.payload).toEqual({ id: "%12", client: "mcp" });
+    lazy.stop();
+  });
+
+  test("a despawn on a disconnected machine is refused with when it was last heard from", async () => {
+    const slept = machine({ connected: false, lastSeen: 2_000, status: { at: 90_000, scan: 1_000 } });
+    const fake = fakeRelay([slept]);
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const result = await client.callTool({ name: "despawn_session", arguments: { machine: "MacBook Pro", id: "%12" } });
+    expect(result.isError).toBe(true);
+    expect(toolText(result)).toBe(`MacBook Pro is not connected — last seen ${new Date(90_000_000).toISOString()}`);
+    expect(fake.requests).toHaveLength(0);
     lazy.stop();
   });
 
@@ -1376,6 +1399,15 @@ describe("resolvePlacement", () => {
     expect(resolved.echo).not.toContain("\n");
     const online = await placed({ machine: "thad" });
     expect(online.echo).toBeNull();
+  });
+
+  test("an offline pinned machine's note dates it by its last status beat when that is newer than its register", async () => {
+    const machines = pinMachines().map((m) =>
+      m.deviceId === "device-thad" ? machine({ ...m, connected: false, status: { at: 90_000, scan: 1_000 } }) : m,
+    );
+    const resolved = await resolvePlacement(machines, listed().accounts, { machine: "thad" });
+    if ("error" in resolved) throw new Error(resolved.error);
+    expect(resolved.echo).toContain(`Thad is offline (last seen ${new Date(90_000_000).toISOString()})`);
   });
 
   test("an account by alias, by id, or by an email only it reports; the email never reaches the spec", async () => {
