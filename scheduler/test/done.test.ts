@@ -113,12 +113,17 @@ describe("a session's exit status", () => {
     expect(scheduler.task("t")?.state).toBe("running");
 
     // Asked again on the next pass, sweep or not.
-    fleet.sessionsReply = () => ({ ok: true, sessions: [], ended: ["t"], progress: [progress("t", { exit: 137 })] });
+    fleet.sessionsReply = () => ({
+      ok: true,
+      sessions: [],
+      ended: ["t"],
+      progress: [progress("t", { exit: 137, oomKill: true })],
+    });
     await pass(scheduler);
     expect(fleet.sessionCalls).toEqual(["a", "a"]);
     expect(scheduler.task("t")).toMatchObject({ state: "failed", failure: { code: "session_failed", exit: 137 } });
-    // The status is stored as a field, not only inside the message, so a reader words it without parsing.
-    expect((await store.get("t"))?.body?.failure).toMatchObject({ code: "session_failed", exit: 137 });
+    // The status and the OOM verdict are stored as fields, not only inside the message, so a reader words them without parsing.
+    expect((await store.get("t"))?.body?.failure).toMatchObject({ code: "session_failed", exit: 137, oomKill: true });
     expect(scheduler.task("dep")).toMatchObject({ state: "failed", failure: { code: "dependency_failed" } });
   });
 
@@ -763,6 +768,17 @@ describe("until: reported", () => {
       failure: { message: "its session exited with status 1 and reported no pull request" },
     });
     expect(ended(running("merged"), { reported: true })).toMatchObject({ state: "done", doneBy: "session" });
+  });
+
+  test("ended: the OOM verdict rides on the failure beside a SIGKILL only, a false one included", () => {
+    expect(ended(running("merged"), { exit: 137, oomKill: false })?.failure).toEqual({
+      code: "session_failed",
+      message: "its session exited with status 137 and reported no pull request",
+      exit: 137,
+      oomKill: false,
+    });
+    expect(ended(running("merged"), { exit: 137 })?.failure).not.toHaveProperty("oomKill");
+    expect(ended(running("merged"), { exit: 1, oomKill: true })?.failure).not.toHaveProperty("oomKill");
   });
 
   test("branchChange: a live merge is recorded on a reported task", () => {
