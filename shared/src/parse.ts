@@ -1005,10 +1005,12 @@ export function parseTask(value: unknown): Task | null {
   let failed: Task["failure"];
   if (failure !== undefined) {
     if (!isRecord(failure) || !isName(failure["code"], TASK_FAILURE_LIMITS.code)) return null;
-    const { message } = failure;
+    const { message, exit } = failure;
     if (typeof message !== "string") return null;
+    // Display-only, so a bad one costs the field, never the failure.
+    const status = isUint(exit) && exit >= 1 && exit <= EXIT_STATUS_MAX ? { exit } : {};
     // Cut rather than refused: an M2 leader stored a daemon's message whole, and its tail must not cost the task.
-    failed = { code: failure["code"], message: message.slice(0, TASK_FAILURE_LIMITS.message) };
+    failed = { code: failure["code"], message: message.slice(0, TASK_FAILURE_LIMITS.message), ...status };
   }
   const progress = parseProgressFields(value);
   if (progress === null) return null;

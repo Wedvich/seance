@@ -149,10 +149,51 @@ const TASK_FAILURE_TEXT: Record<TaskFailureCode, string> = {
   queue_expired: `it sat in the queue over ${Math.round(STORE_TOMBSTONE_MS / DAY_MS)} days, too long to start safely`,
 };
 
-/** A scheduler-set failure's line; null for any other code — a daemon's spawn refusal, or one minted later. */
-export function taskFailureText(code: string): string | null {
+/**
+ * Signals by number, only where macOS and Linux agree: the daemon folds a signal
+ * death into `128 + n` by its own host's numbering (`daemon/src/sessions.ts`), so
+ * a number past these (10 is SIGUSR1 on Linux, SIGBUS on macOS) names nothing.
+ */
+const PORTABLE_SIGNALS: ReadonlyMap<number, string> = new Map([
+  [1, "SIGHUP"],
+  [2, "SIGINT"],
+  [3, "SIGQUIT"],
+  [4, "SIGILL"],
+  [5, "SIGTRAP"],
+  [6, "SIGABRT"],
+  [8, "SIGFPE"],
+  [9, "SIGKILL"],
+  [11, "SIGSEGV"],
+  [13, "SIGPIPE"],
+  [14, "SIGALRM"],
+  [15, "SIGTERM"],
+]);
+
+/** How a session ended, from `Task.failure.exit`: a clause after "its session", and a hint where one helps. */
+export interface SessionExit {
+  readonly clause: string;
+  readonly hint?: string;
+}
+
+export function sessionExit(exit: number): SessionExit {
+  const signal = exit > 128 ? PORTABLE_SIGNALS.get(exit - 128) : undefined;
+  if (signal === undefined) return { clause: `exited with status ${exit}` };
+  // The kernel's OOM killer sends SIGKILL; so can a person, hence "possibly".
+  return signal === "SIGKILL"
+    ? { clause: "was killed (SIGKILL)", hint: "possibly out of memory" }
+    : { clause: `was killed (${signal})` };
+}
+
+/**
+ * A scheduler-set failure's line; null for any other code — a daemon's spawn refusal, or one minted later.
+ * `exit` (`Task.failure.exit`) words a `session_failed` exactly; without it, or for any other code, the line is the code's alone.
+ */
+export function taskFailureText(code: string, exit?: number): string | null {
   const known = TASK_FAILURE_CODES.find((c) => c === code);
-  return known === undefined ? null : TASK_FAILURE_TEXT[known];
+  if (known === undefined) return null;
+  if (known !== "session_failed" || exit === undefined) return TASK_FAILURE_TEXT[known];
+  const { clause, hint } = sessionExit(exit);
+  return `its session ${clause}${hint === undefined ? "" : `, ${hint},`} and reported no pull request`;
 }
 
 /** A clause shown on its own: capitalized and closed. */

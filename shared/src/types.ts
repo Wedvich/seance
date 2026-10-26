@@ -1945,9 +1945,12 @@ export interface Task {
   /**
    * A daemon's `SpawnErrorCode`, or a `TaskFailureCode`; a string, so a code
    * minted later still parses. Bounded by `TASK_FAILURE_LIMITS`: the message is
-   * often a daemon's, and it is stored.
+   * often a daemon's, and it is stored. `exit`, with `session_failed` only: the
+   * session's exit status (`TaskProgress.exit`, 1–`EXIT_STATUS_MAX`), so a reader
+   * words how it ended without parsing the message. Display-only; a reader drops
+   * one out of range and keeps the failure, and an older one ignores it.
    */
-  readonly failure?: { readonly code: string; readonly message: string };
+  readonly failure?: { readonly code: string; readonly message: string; readonly exit?: number };
   /** With `lost`: when the scheduler first saw the task's machine absent, ms. */
   readonly absentSince?: number;
   /**
