@@ -110,10 +110,10 @@ export function isSpawnRequest(payload: unknown): payload is SpawnRequest {
   // `continues` is the one field of a continuation and only of one. It is a ledger key: the
   // worktree comes from this machine's own record of that task, never from the request.
   if (obj["continues"] !== undefined && !isTaskId(obj["continues"])) return false;
-  if ((obj["mode"] === "continue") !== (obj["continues"] !== undefined)) return false;
-  if (obj["mode"] !== "continue") return true;
-  // Only the scheduler's own task spawns, and one never continues itself.
-  return obj["taskId"] !== undefined && obj["client"] === SCHEDULER_CLIENT && obj["continues"] !== obj["taskId"];
+  // The rules a well-formed continuation can still break (the scheduler's client, a task id, not itself)
+  // are `continuationRefusal`'s: a malformed request answers `internal_error`, a transport code that
+  // leaves the leader's task reserved, where `not_continuable` settles it.
+  return (obj["mode"] === "continue") === (obj["continues"] !== undefined);
 }
 
 /** Shape only: what the id may name is the backend's to decide, and it does. */
@@ -194,6 +194,19 @@ function notContinuable(message: string): SpawnRefusal {
 }
 
 /**
+ * Who may continue, and what a continuation names: only the scheduler's own task spawn, which
+ * always carries its task id, and never the task it continues. Before the ledger is read or
+ * anything recorded.
+ */
+function continuationRefusal(request: SpawnRequest, scheduler: boolean): SpawnRefusal | null {
+  if (!scheduler || request.client !== SCHEDULER_CLIENT)
+    return notContinuable("only the scheduler continues a session");
+  if (request.taskId === undefined) return notContinuable("a continuation needs the id of the task that carries it");
+  if (request.continues === request.taskId) return notContinuable("a task cannot continue itself");
+  return null;
+}
+
+/**
  * The worktree a continuation resumes in, from this machine's launch ledger and checked
  * before anything is recorded or run (DESIGN.md, Daemon, "Continuing a failed task"): the
  * clone `repo` resolved to is the one the ledger noted, and the path is canonical and under
@@ -239,9 +252,12 @@ async function handleSpawn(
   }
   await audit.request(payload);
   // `from` says who sealed the request; `client` is free text anyone can write, so it is not the gate.
-  if (payload.mode === "continue" && !scheduler) {
-    await audit.failed("not_continuable");
-    return notContinuable("only the scheduler continues a session");
+  if (payload.mode === "continue") {
+    const refusal = continuationRefusal(payload, scheduler);
+    if (refusal !== null) {
+      await audit.failed("not_continuable");
+      return refusal;
+    }
   }
   const refused = await relaunchRefusal(ctx, payload);
   if (refused !== null) {

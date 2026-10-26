@@ -1096,6 +1096,8 @@ export function bindTaskRecord(
   if (stored.key !== `${STORE_PREFIXES.task.prefix}${record.task.id}`) return "key_mismatch";
   if (record.version === 1 && record.task.state !== "queued") return "created_unqueued";
   if (record.task.createdAt > now + REPLAY_WINDOW_MS) return "created_ahead";
+  // A task that continues itself has no earlier launch to resume; the daemon would only refuse it, so it never dispatches.
+  if (record.task.spec.continues?.task === record.task.id) return "malformed";
   return record;
 }
 

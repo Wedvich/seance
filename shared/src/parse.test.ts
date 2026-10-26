@@ -1236,6 +1236,16 @@ describe("bindTaskRecord", () => {
     const ahead = { version: 1, task: { ...task, createdAt: now + REPLAY_WINDOW_MS + 1 } };
     expect(bindTaskRecord(ahead, { key, version: 1 }, now)).toBe("created_ahead");
   });
+
+  test("a task that continues itself is never kept, so it never dispatches; one that continues another is", () => {
+    const at = { deviceId: "dev-a", exclave: "default", clone: "app" };
+    const continuing = (of: string): TaskRecord => ({
+      version: 1,
+      task: { ...task, spec: { repo: "github.com/acme/app", mode: "continue", continues: { task: of, at } } },
+    });
+    expect(bindTaskRecord(continuing("t-1"), { key, version: 1 }, now)).toBe("malformed");
+    expect(bindTaskRecord(continuing("t-0"), { key, version: 1 }, now)).toEqual(continuing("t-0"));
+  });
 });
 
 describe("parseTaskProgressList", () => {

@@ -870,10 +870,6 @@ describe("a scheduler spawn that continues a failed task", () => {
       { mode: "here" },
       { continues: "a b" },
       { continues: 7 },
-      { taskId: undefined },
-      { client: "mcp" },
-      { client: undefined },
-      { continues: NEW },
     ];
     for (const extra of bad) {
       lines.length = 0;
@@ -883,6 +879,30 @@ describe("a scheduler spawn that continues a failed task", () => {
       expect(logged()).toContain("audit spawn origin=relay rejected");
     }
     expect(calls).toEqual([]);
+  });
+
+  test("a well-formed request breaking only a continue rule is not_continuable, which settles the task, never internal_error", async () => {
+    const { ledger, calls, handlerCtx } = await rig();
+    const handle = createHandler(handlerCtx);
+    const refused: readonly (readonly [Record<string, unknown>, string])[] = [
+      [{ taskId: undefined }, "needs the id"],
+      [{ client: "mcp" }, "only the scheduler"],
+      [{ client: undefined }, "only the scheduler"],
+      [{ continues: NEW }, "cannot continue itself"],
+    ];
+    for (const [extra, why] of refused) {
+      lines.length = 0;
+      // oxlint-disable-next-line no-await-in-loop -- each case reads the lines the previous one cleared
+      const reply = await handle(continuation(extra), SCHEDULER_ID);
+      expect(reply?.payload, why).toMatchObject({
+        ok: false,
+        code: "not_continuable",
+        message: expect.stringContaining(why),
+      });
+      expect(logged()).toContain("failed code=not_continuable");
+    }
+    expect(calls).toEqual([]);
+    expect(ledger.ids()).toEqual([OLD]);
   });
 
   describe("refused with no ledger entry for the new id and the backend never called", () => {
