@@ -486,6 +486,18 @@ describe("continueTaskAuto", () => {
         "the scheduler's leader cannot continue a session yet",
         await runContinue([failedTask], machines({ leader: false })),
       ],
+      [
+        "a continuation of it is already underway or finished",
+        await runContinue([
+          failedTask,
+          {
+            id: "t-2",
+            spec: { repo: ORIGIN, mode: "continue", continues: { task: "t-1", at: AT } },
+            state: "needs-input",
+            createdAt: 2,
+          },
+        ]),
+      ],
     ];
     for (const [reason, outcome] of cases) {
       expect(outcome.ok).toBe(false);

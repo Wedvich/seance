@@ -680,6 +680,14 @@ describe("continuing a failed task", () => {
     expect(rowOf([failed], "f")?.canContinue).toBe(false);
   });
 
+  test("a continuation the machine refused shows the daemon's reason", () => {
+    const refused = continuation({
+      state: "failed",
+      failure: { code: "not_continuable", message: "its worktree is locked (on a usb disk)" },
+    });
+    expect(rowOf([failed, refused], "c", CAN)?.body).toContain("its worktree is locked (on a usb disk)");
+  });
+
   test("not offered when the leader cannot take a continue task, though the machine it ran on can", () => {
     const leader = machine({ deviceId: "dev-leader", name: "Leader" });
     const ran = machine({ capabilities: CAN });
@@ -709,11 +717,11 @@ describe("continuing a failed task", () => {
     for (const t of [other, inPlace, running]) expect(rowOf([t], t.id, CAN)?.canContinue).toBe(false);
   });
 
-  test("withdrawn once a continuation is placed, running or done; a queued, failed or cancelled one does not hold it", () => {
-    for (const held of ["reserved", "running", "done"] as const) {
-      expect(rowOf([failed, continuation({ state: held })], "f", CAN)?.canContinue).toBe(false);
+  test("withdrawn once a continuation is past the queue in any state; a queued, blocked, failed or cancelled one does not hold it", () => {
+    for (const held of ["reserved", "running", "needs-input", "lost", "awaiting-merge", "done"] as const) {
+      expect(rowOf([failed, continuation({ state: held })], "f", CAN)?.canContinue, held).toBe(false);
     }
-    for (const free of ["queued", "ready", "failed", "cancelled"] as const) {
+    for (const free of ["queued", "blocked", "ready", "failed", "cancelled"] as const) {
       expect(rowOf([failed, continuation({ state: free })], "f", CAN)?.canContinue).toBe(true);
     }
   });

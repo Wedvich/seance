@@ -1362,11 +1362,51 @@ describe("the queue screen", () => {
       await store.continueTask("gone");
       expect(store.getState().queueNotice).toBe("That task is no longer listed.");
 
+      // dev-b leads and can, but the machine it ran on (dev-a) cannot.
       const detach = store.attach();
-      client.emit({ machines: [autoMachine("dev-a"), autoMachine("dev-b")] });
+      client.emit({
+        machines: [autoMachine("dev-a"), autoMachine("dev-b", { capabilities: [CAPABILITIES.continueTask] })],
+        scheduler: { kind: "ready", deviceId: "dev-b", term: 1 },
+      });
       await store.continueTask("f-1");
       detach();
       expect(store.getState().queueNotice).toContain("can't continue a session yet");
+      expect(client.creates).toEqual([]);
+    });
+
+    test("checks the leader at the tap, not only when the button was drawn", async () => {
+      const client = capable();
+      const store = await withFailed(client);
+      const detach = store.attach();
+      // The leader changed to one that cannot take a continue task (or went away) after the row was drawn.
+      client.emit({
+        machines: [autoMachine("dev-a", { capabilities: [CAPABILITIES.continueTask] }), autoMachine("dev-b")],
+        scheduler: { kind: "ready", deviceId: "dev-b", term: 2 },
+      });
+      await store.continueTask("f-1");
+      expect(store.getState().queueNotice).toContain("No verified scheduler");
+      client.emit({ scheduler: { kind: "none" } });
+      await store.continueTask("f-1");
+      detach();
+      expect(store.getState().queueNotice).toContain("No verified scheduler");
+      expect(client.creates).toEqual([]);
+      expect(store.getState().taskAction).toBeNull();
+    });
+
+    test("writes nothing for a task something already continues", async () => {
+      const client = capable();
+      const running: Task = {
+        id: "c-1",
+        spec: { repo: ORIGIN, mode: "continue", continues: { task: "f-1", at } },
+        state: "needs-input",
+        createdAt: 2,
+      };
+      client.onQueue = async () => ({ tasks: [failed, running], holds: [], at: 1 });
+      const store = new Store(client);
+      store.openQueue();
+      await until(() => store.getState().queueView?.kind === "ok", "the queue read");
+      await store.continueTask("f-1");
+      expect(store.getState().queueNotice).toContain("already underway");
       expect(client.creates).toEqual([]);
     });
   });

@@ -1,21 +1,39 @@
 import type { Machine } from "./app-client.ts";
-import { CAPABILITIES, type Target, type Task, type TaskSpec } from "./types.ts";
+import { CAPABILITIES, type Target, type Task, type TaskSpec, type TaskState } from "./types.ts";
 
 export type ContinueOffer =
   | { readonly ok: true; readonly at: Target }
   | { readonly ok: false; readonly reason: string };
 
 /**
+ * States in which a task that continues another has not (or no longer) taken the session. A
+ * queued continuation may still fail unplaced, and cancelling it frees the offer; one that
+ * failed or was cancelled left the worktree to be continued again.
+ */
+const NOT_CONTINUING: ReadonlySet<TaskState> = new Set<TaskState>([
+  "queued",
+  "blocked",
+  "ready",
+  "failed",
+  "cancelled",
+]);
+
+/**
  * Whether a failed task's session can be resumed, and where: the one rule the
  * PWA's button, MCP's `continue_task` and `seanced continue` share so they
  * cannot drift (DESIGN.md, Daemon, "Continuing a failed task"). Only a
  * `session_failed` task qualifies — the others may never have launched, and the
- * daemon's ledger would refuse them anyway. Imports nothing that logs, since
- * `seanced mcp` reaches it.
+ * daemon's ledger would refuse them anyway. And only once: `tasks` is the list the
+ * caller read it from, and a continuation anywhere past the queue (placed, running,
+ * waiting on a person, finished) has the worktree, so a second would only be
+ * refused by the daemon. Imports nothing that logs, since `seanced mcp` reaches it.
  */
-export function continueOffer(task: Task, machines: readonly Machine[]): ContinueOffer {
+export function continueOffer(task: Task, machines: readonly Machine[], tasks: readonly Task[]): ContinueOffer {
   if (task.state !== "failed" || task.failure?.code !== "session_failed") {
     return { ok: false, reason: "only a task whose session ended in failure can be continued" };
+  }
+  if (tasks.some((other) => other.spec.continues?.task === task.id && !NOT_CONTINUING.has(other.state))) {
+    return { ok: false, reason: "a continuation of it is already underway or finished" };
   }
   if (task.spec.mode === "here") {
     return { ok: false, reason: "a task run in place has no worktree of its own to continue" };

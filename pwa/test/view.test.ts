@@ -612,6 +612,13 @@ describe("failedBody", () => {
     // A refused continue is not "a refused spawn": it names what was missing and says nothing started.
     expect(failedBody("not_continuable")).toStartWith("The machine couldn't continue the earlier session");
     expect(failedBody("not_continuable")).toEndWith("Nothing new was started.");
+    expect(failedBody("not_continuable")).toContain("locked");
+    // The daemon's own reason says which cause it was.
+    expect(
+      failedBody("not_continuable", undefined, undefined, undefined, "its worktree is locked (on a usb disk)"),
+    ).toBe(
+      "The machine couldn't continue the earlier session: its worktree is locked (on a usb disk). Nothing new was started.",
+    );
     // With the machine's OOM verdict (`failure.oomKill`), the SIGKILL is worded by it, either way.
     expect(failedBody("session_failed", 137, undefined, true)).toBe(
       "Its session was killed (SIGKILL), out of memory (the kernel's OOM killer fired as it died), and reported no pull request. Tasks waiting on it failed with it. Its transcript on that machine stops where it ended.",

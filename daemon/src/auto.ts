@@ -512,7 +512,7 @@ export async function continueAuto(
       `${label} refused: task ${taskId} is not in the leader's list (pruned, or past the ${QUEUE_MAX_TASKS} most relevant)`,
     );
   }
-  const offer = continueOffer(task, lease.machines);
+  const offer = continueOffer(task, lease.machines, reply.tasks);
   if (!offer.ok) return failed(`${label} refused: ${offer.reason}`);
   const spec = continuationSpec(task, offer.at, prompt);
   const invalid = specError(spec, surface);

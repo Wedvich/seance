@@ -677,7 +677,12 @@ function lengthNote(invalid: string, until: TaskUntil | undefined): string {
   return " (the instruction to report is appended to the prompt and counts)";
 }
 
-function describeTask(task: Task, machines: readonly Machine[], names: AccountNames): Record<string, unknown> {
+function describeTask(
+  task: Task,
+  machines: readonly Machine[],
+  names: AccountNames,
+  tasks: readonly Task[],
+): Record<string, unknown> {
   const placement = placementOf(task, machines);
   const pin = describePin(task, machines, names);
   const { spec } = task;
@@ -706,7 +711,7 @@ function describeTask(task: Task, machines: readonly Machine[], names: AccountNa
     ...(spec.linear === undefined ? {} : { linear: spec.linear }),
     ...(spec.continues === undefined ? {} : { continues: spec.continues.task }),
     // The same offer the app's Continue button follows; `continue_task` still re-checks the leader.
-    ...(continueOffer(task, machines).ok ? { continuable: true } : {}),
+    ...(continueOffer(task, machines, tasks).ok ? { continuable: true } : {}),
   };
 }
 
@@ -878,7 +883,7 @@ export function buildMcpServer(
         ];
         // Only a pin or a hold names an account here: no listing for a queue that names none.
         const names = await accountNames(lease, named, named);
-        const tasks = reply.tasks.map((task) => describeTask(task, lease.machines, names));
+        const tasks = reply.tasks.map((task) => describeTask(task, lease.machines, names, reply.tasks));
         const holds = (reply.holds ?? []).map((hold) => describeHold(hold, names));
         return textResult(JSON.stringify({ at: new Date(reply.at).toISOString(), holds, tasks }, null, 2));
       }),

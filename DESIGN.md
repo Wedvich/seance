@@ -4455,9 +4455,12 @@ fields carry over), under the same gates.
   is exact, and the old task's dependents stay `dependency_failed`.
 - **Gates.** A client writes a continue spec only to a verified leader advertising `continueTask` (the
   PWA's `deriveContinueAvailability`, the MCP tool's and the CLI's `leaderAdvertises`, the broker before
-  it forwards), and `continueOffer` needs the task's machine to be listed and advertising it as well. The
-  button shows only while the failed task was not `here`, has an assignment, and has no continuation in
-  `reserved`, `running` or `done`. A `ready` continuation does not hide it: one can sit unplaceable
+  it forwards), and `continueOffer` needs the task's machine to be listed and advertising it as well.
+  The same function, given the list the caller read the task from, also refuses a task that already has a
+  continuation in any state but `queued`, `blocked`, `ready`, `failed` or `cancelled` (so `reserved`,
+  `running`, `needs-input`, `lost`, `awaiting-merge` and `done` all hold it): the PWA's button, `continue_task`,
+  `seanced continue` and `get_queue`'s `continuable` share that one rule. The button shows only while the
+  failed task was not `here` and has an assignment. A `ready` continuation does not hide it: one can sit unplaceable
   forever (the target re-keyed, the clone gone, a daemon rolled back — `queue_expired` applies only at
   admission and `ready → failed` is illegal, so it waits until cancelled by hand, its reasons
   `continue_elsewhere`, `repo_absent` or `continue_unsupported` saying why; a known residual). Two taps
@@ -5182,13 +5185,16 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
 - **Continue on the Queue screen** (2026-10-26, Daemon, "Continuing a failed task"). A failed
   `session_failed` card carries a single-tap **Continue** when `continueOffer` allows it (the task was
   not `here`, has an assignment, its machine is listed and advertises `continueTask`), the verified
-  leader advertises it (`deriveContinueAvailability`), and no continuation of it is `reserved`,
-  `running` or `done`: a `ready` one does not hide it, since it may never be placeable. The tap
-  writes the continuation spec with `client: "pwa"` through `createTask`, merged into the list as any
-  enqueue is; a refused offer or a store answer becomes the screen's notice. The continuation's card
+  leader advertises it (`deriveContinueAvailability`), and no continuation of it has the session
+  (`continueOffer`'s rule: any state but `queued`, `blocked`, `ready`, `failed` or `cancelled`; a `ready` one
+  does not hide it, since it may never be placeable). The tap re-checks the leader and the offer before
+  writing, since either may have changed since the card was drawn, then writes the continuation spec with
+  `client: "pwa"` through `createTask`, merged into the list as any enqueue is; a refused gate or offer or
+  a store answer becomes the screen's notice. The continuation's card
   reads "Continues <old title>", falling back to "task <id prefix>". A `not_continuable` failure
-  reads "The machine couldn't continue the earlier session: its worktree or its launch record is gone,
-  or a session is open there. Nothing new was started."
+  reads "The machine couldn't continue the earlier session: <the daemon's reason>. Nothing new was
+  started." (the failure's message, rendered as text), or a generic line naming the possible causes when
+  it carries none.
 - **Asleep machines on the Queue screen** (2026-10-26, scheduler M4). A lid closed on a placed
   task is not a lost task, and nothing on it can be answered from the phone; the row says so
   rather than reading "waiting for input" until the leader calls it `lost`. A derived view, not

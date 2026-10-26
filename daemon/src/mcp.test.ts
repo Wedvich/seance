@@ -2409,6 +2409,21 @@ describe("continue_task", () => {
     for (const { fake } of [missing, finished, hereRun, other]) expect(fake.creates).toEqual([]);
   });
 
+  test("refuses a task something already continues, in any state past the queue, and queues nothing", async () => {
+    const continuation = (state: Task["state"]): Task =>
+      task({ id: "t-2", state, spec: { repo: ORIGIN, mode: "continue", continues: { task: "t-1", at: AT } } });
+    for (const state of ["running", "needs-input", "lost", "awaiting-merge", "done"] as const) {
+      // oxlint-disable-next-line no-await-in-loop -- one relay at a time
+      const held = await callContinue([failedTask, continuation(state)]);
+      expect(held.error, state).toBe(true);
+      expect(held.text, state).toContain("already underway or finished");
+      expect(held.fake.creates, state).toEqual([]);
+    }
+    // One still waiting leaves the offer open.
+    const waiting = await callContinue([failedTask, continuation("queued")]);
+    expect(waiting.error).toBe(false);
+  });
+
   test("a note over the prompt bound is refused before anything is queued, and a malformed id is no task id", async () => {
     const long = await callContinue([failedTask], continuingMachines(), {
       taskId: "t-1",
@@ -2462,6 +2477,22 @@ describe("continue_task", () => {
     expect(queue.tasks.find((t) => t["id"] === "t-1")).not.toHaveProperty("continues");
     expect(queue.tasks.find((t) => t["id"] === "t-2")).toMatchObject({ continues: "t-1" });
     expect(queue.tasks.find((t) => t["id"] === "t-2")).not.toHaveProperty("continuable");
+    lazy.stop();
+  });
+
+  test("get_queue withdraws continuable once a continuation has the session", async () => {
+    const running = task({
+      id: "t-2",
+      state: "running",
+      spec: { repo: ORIGIN, mode: "continue", continues: { task: "t-1", at: AT } },
+    });
+    const fake = leaderRelay([{ tasks: [failedTask, running], at: 6_000 }], continuingMachines());
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const queue = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} }))) as {
+      tasks: Record<string, unknown>[];
+    };
+    expect(queue.tasks.find((t) => t["id"] === "t-1")).not.toHaveProperty("continuable");
     lazy.stop();
   });
 });

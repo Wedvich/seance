@@ -177,7 +177,13 @@ function bodyOf(task: Task, machines: readonly Machine[], now: number): string |
   const waiting = waitingText(task);
   if (waiting !== null) return `Waiting: ${waiting}`;
   if (task.state === "failed") {
-    return failedBody(task.failure?.code, task.failure?.exit, task.spec.until, task.failure?.oomKill);
+    return failedBody(
+      task.failure?.code,
+      task.failure?.exit,
+      task.spec.until,
+      task.failure?.oomKill,
+      task.failure?.message,
+    );
   }
   if (task.state === "needs-input" && task.escalated === true) {
     return task.needsInputSince === undefined
@@ -244,21 +250,6 @@ function continuesLine(task: Task, titles: ReadonlyMap<string, string>): string 
   return `Continues ${titles.get(earlier) ?? `task ${earlier.slice(0, 8)}`}`;
 }
 
-/**
- * Tasks something already continues. A queued (`ready`) continuation does not count: it may
- * still fail unplaced, and cancelling it frees the offer. One that has been placed has the
- * worktree (or finished with it), so a second tap would only be refused by the daemon.
- */
-function continuedIds(tasks: readonly Task[]): ReadonlySet<string> {
-  const ids = tasks.flatMap((task) =>
-    (task.state === "reserved" || task.state === "running" || task.state === "done") &&
-    task.spec.continues !== undefined
-      ? [task.spec.continues.task]
-      : [],
-  );
-  return new Set(ids);
-}
-
 function batchLine(task: Task): string | null {
   const { batch } = task.spec;
   return batch === undefined ? null : `Batch #${batch.index} · ${describeStrategy(batch.strategy)}`;
@@ -278,7 +269,7 @@ function rowOf(
   now: number,
   skew: number,
   titles: ReadonlyMap<string, string>,
-  continued: ReadonlySet<string>,
+  tasks: readonly Task[],
 ): QueueRow {
   const phase = TASK_PHASES[task.state];
   const actionable = phase !== "dispatching" && phase !== "finished";
@@ -294,10 +285,7 @@ function rowOf(
     cancelEndsSession: phase === "placed",
     markDoneEndsSession: task.state === "running" || task.state === "needs-input" || task.state === "lost",
     canFollowUp: phase !== "finished" || task.state === "done",
-    canContinue:
-      continueOffer(task, state.relay.machines).ok &&
-      deriveContinueAvailability(state.relay) &&
-      !continued.has(task.id),
+    canContinue: continueOffer(task, state.relay.machines, tasks).ok && deriveContinueAvailability(state.relay),
     deps: depsLine(task, titles),
     continues: continuesLine(task, titles),
     placement: placementLine(task, state),
@@ -342,7 +330,6 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
   const tasks = ok?.tasks ?? [];
   const titles = new Map(tasks.map((task) => [task.id, titleOf(task)]));
   const skew = ok?.skew ?? 0;
-  const continued = continuedIds(tasks);
 
   const sections = SECTIONS.map(({ title, pick }) => {
     const members = tasks
@@ -350,7 +337,7 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
       .filter((entry): entry is { task: Task; rank: number } => entry.rank !== null)
       // Stable: equal ranks keep the leader's order.
       .toSorted((a, b) => a.rank - b.rank);
-    return { title, rows: members.map(({ task }) => rowOf(task, state, now, skew, titles, continued)) };
+    return { title, rows: members.map(({ task }) => rowOf(task, state, now, skew, titles, tasks)) };
   }).filter((section) => section.rows.length > 0);
 
   // Once for every hold: a held account no machine reports still counts as a twin.

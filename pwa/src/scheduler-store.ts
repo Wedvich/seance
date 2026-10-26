@@ -23,7 +23,7 @@ import {
 } from "@seance/shared";
 import type { FollowEnd, PersistedForm, PreviewState, QueueState, TaskAction } from "./state.ts";
 import type { AppState } from "./view.ts";
-import { deriveAutoAvailability, previewAsked, resolveRepo, scopedRepos } from "./view.ts";
+import { deriveAutoAvailability, deriveContinueAvailability, previewAsked, resolveRepo, scopedRepos } from "./view.ts";
 
 /**
  * The app's side of the scheduler, apart from `Store`'s layers, form and
@@ -35,6 +35,9 @@ import { deriveAutoAvailability, previewAsked, resolveRepo, scopedRepos } from "
  */
 
 export const STORE_UNREADABLE = "Couldn't read the relay's answer. Update the app and the relay to matching versions.";
+
+const CONTINUE_UNAVAILABLE =
+  "No verified scheduler that can continue a session is leading right now. Try again once one is.";
 
 const SCHEDULER_UNREADABLE = "Couldn't read the scheduler's answer. Update seanced and the app to matching versions.";
 
@@ -495,7 +498,9 @@ export class SchedulerStore {
     const view = this.#state.queueView;
     const failed = view?.kind === "ok" ? view.tasks.find((t) => t.id === taskId) : undefined;
     if (failed === undefined) return "That task is no longer listed.";
-    const offer = continueOffer(failed, this.#state.relay.machines);
+    // The button was gated on this when drawn; the leader may have changed or gone since the tap.
+    if (!deriveContinueAvailability(this.#state.relay)) return CONTINUE_UNAVAILABLE;
+    const offer = continueOffer(failed, this.#state.relay.machines, view?.kind === "ok" ? view.tasks : []);
     if (!offer.ok) return sentence(offer.reason);
     const task = queuedTask({ ...continuationSpec(failed, offer.at), client: "pwa" }, Date.now());
     const reply = await this.#client.createTask(task);

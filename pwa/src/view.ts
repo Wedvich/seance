@@ -688,12 +688,22 @@ function sessionFailedNextStep(exit: number | undefined): string {
   return `Tasks waiting on it failed with it. ${transcript}`;
 }
 
-export function failedBody(code: string | undefined, exit?: number, until?: TaskUntil, oomKill?: boolean): string {
+export function failedBody(
+  code: string | undefined,
+  exit?: number,
+  until?: TaskUntil,
+  oomKill?: boolean,
+  message?: string,
+): string {
   // A code the scheduler set itself says why; any other is a daemon's spawn refusal.
   const scheduler = code === undefined ? null : taskFailureText(code, exit, until, oomKill);
   // The daemon's own refusal of a continue task, worded for it: the generic line would say a spawn was refused.
+  // Its message says which of the several causes it was; shown as text, like any failure message.
   if (code === "not_continuable") {
-    return "The machine couldn't continue the earlier session: its worktree or its launch record is gone, or a session is open there. Nothing new was started.";
+    const why = message?.trim().replace(/\.$/u, "") ?? "";
+    return why === ""
+      ? "The machine couldn't continue the earlier session: its worktree or its launch record is gone, a session is open there, or the worktree is locked. Nothing new was started."
+      : `The machine couldn't continue the earlier session: ${why}. Nothing new was started.`;
   }
   if (code === undefined || scheduler === null) return "The machine refused the spawn. Nothing is running.";
   const next = code === "session_failed" ? sessionFailedNextStep(exit) : FAILED_NEXT_STEP.get(code);

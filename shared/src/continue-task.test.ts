@@ -35,7 +35,7 @@ const able = [machine([CAPABILITIES.continueTask])];
 
 describe("continueOffer", () => {
   test("a placed session_failed task on a machine that advertises it is offered, at its own target", () => {
-    expect(continueOffer(failed(), able)).toEqual({
+    expect(continueOffer(failed(), able, [])).toEqual({
       ok: true,
       at: { deviceId: "dev-a", exclave: "default", clone: "app" },
     });
@@ -53,10 +53,34 @@ describe("continueOffer", () => {
       ["machine predates capabilities", failed(), [machine(undefined)]],
     ];
     for (const [name, task, machines] of refusals) {
-      const offer = continueOffer(task, machines);
+      const offer = continueOffer(task, machines, []);
       expect(offer.ok, name).toBe(false);
       expect(offer.ok ? "" : offer.reason.length, name).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("continueOffer, once", () => {
+  const old = failed();
+  const continuation = (state: Task["state"], continues = "t-old"): Task => ({
+    id: `t-${state}`,
+    spec: { repo: old.spec.repo, mode: "continue", continues: { task: continues, at: { deviceId: "dev-a", exclave: "default", clone: "app" } } },
+    state,
+    createdAt: 2,
+  });
+
+  test("a continuation anywhere past the queue closes the offer", () => {
+    for (const state of ["reserved", "running", "needs-input", "lost", "awaiting-merge", "done"] as const) {
+      const offer = continueOffer(old, able, [old, continuation(state)]);
+      expect(offer.ok, state).toBe(false);
+    }
+  });
+
+  test("one still queued, or that failed or was cancelled, leaves it open; so does another task's", () => {
+    for (const state of ["queued", "blocked", "ready", "failed", "cancelled"] as const) {
+      expect(continueOffer(old, able, [old, continuation(state)]).ok, state).toBe(true);
+    }
+    expect(continueOffer(old, able, [old, continuation("running", "t-other")]).ok).toBe(true);
   });
 });
 
