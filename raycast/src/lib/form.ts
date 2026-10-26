@@ -1,4 +1,4 @@
-import type { RepoEntry } from "@seance/shared";
+import type { MachineStatus, RepoEntry } from "@seance/shared";
 import type { Effort, Model } from "./options.ts";
 
 /**
@@ -13,7 +13,10 @@ export interface PickerMachine {
   readonly deviceId: string;
   readonly name: string;
   readonly connected: boolean;
+  /** In a cached projection, already the heard time (`lastHeardAt`): the cache keeps no `status`. */
   readonly lastSeen: number;
+  /** Live registry only; dates a slept machine past its register (`lastHeardAt`). */
+  readonly status?: MachineStatus;
   readonly scannedAt: number;
   readonly repos: readonly RepoEntry[];
 }
