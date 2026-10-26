@@ -89,20 +89,20 @@ export interface ProcOomProbeOptions {
   readonly platform?: NodeJS.Platform;
 }
 
-/** The host's `/proc` and cgroup v2 mount; inert anywhere but Linux. */
-export function procOomProbe(opts: ProcOomProbeOptions = {}): OomProbe {
+/** The host's `/proc` and cgroup v2 mount; none anywhere but Linux, so no pass lists panes for it. */
+export function procOomProbe(opts: ProcOomProbeOptions = {}): OomProbe | undefined {
+  if ((opts.platform ?? process.platform) !== "linux") return undefined;
   const proc = opts.proc ?? "/proc";
   const root = opts.cgroupRoot ?? "/sys/fs/cgroup";
-  const linux = (opts.platform ?? process.platform) === "linux";
   const read = (path: string): Promise<string | null> => readFile(path, "utf8").catch(() => null);
   return {
     cgroupOf: async (pid) => {
-      if (!linux || !Number.isSafeInteger(pid) || pid <= 0) return null;
+      if (!Number.isSafeInteger(pid) || pid <= 0) return null;
       const text = await read(join(proc, String(pid), "cgroup"));
       return text === null ? null : parseProcCgroup(text);
     },
     kills: async (cgroup) => {
-      if (!linux || !isCgroupPath(cgroup)) return null;
+      if (!isCgroupPath(cgroup)) return null;
       const text = await read(join(root, cgroup, "memory.events"));
       return text === null ? null : parseOomKills(text);
     },

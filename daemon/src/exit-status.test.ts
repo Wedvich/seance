@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { harvestExits, owesExit, whileRegistering } from "./exit-status.ts";
+import { LaunchLedger } from "./launch-ledger.ts";
+import type { OomProbe } from "./oom-kill.ts";
+import { EndedTasks } from "./session-events.ts";
 import type { PaneInfo } from "./sessions.ts";
 
 function pane(paneId: string, fields: Partial<PaneInfo> = {}): PaneInfo {
@@ -71,6 +74,84 @@ describe("harvestExits", () => {
     // Once the spawn is past registration its pane is harvestable again.
     await harvestExits(deps);
     expect(closed.toSorted()).toEqual(["%1", "%1", "%2"]);
+  });
+});
+
+describe("the OOM verdict on a SIGKILL death", () => {
+  /** The kernel's side: one cgroup per pid, counts set by the test. */
+  function kernel(): { probe: OomProbe; counts: Map<string, number>; failing: { on: boolean } } {
+    const counts = new Map<string, number>();
+    const failing = { on: false };
+    const probe: OomProbe = {
+      cgroupOf: (pid) => Promise.resolve(`/unit-${pid}`),
+      kills: (cgroup) => (failing.on ? Promise.reject(new Error("EIO")) : Promise.resolve(counts.get(cgroup) ?? null)),
+    };
+    return { probe, counts, failing };
+  }
+
+  async function launched(tasks: EndedTasks, ...ids: string[]): Promise<void> {
+    for (const id of ids) {
+      // oxlint-disable-next-line no-await-in-loop -- one launch at a time, as a machine runs them
+      await (
+        await tasks.launch(id)
+      )(true, {});
+    }
+  }
+
+  test("sampled at launch and on every pass while alive, judged once found dead, and carried to progress", async () => {
+    const { probe, counts } = kernel();
+    let panes: PaneInfo[] = [
+      pane("%1", { dead: false, deadStatus: null, pid: 1 }),
+      pane("%2", { dead: false, deadStatus: null, pid: 2 }),
+      pane("%3", { dead: false, deadStatus: null, pid: 3 }),
+    ];
+    const tasks = new EndedTasks(
+      LaunchLedger.memory(() => 1),
+      () => 1,
+      { list: () => Promise.resolve(panes), close: () => Promise.resolve() },
+      probe,
+    );
+    counts.set("/unit-1", 4).set("/unit-2", 7).set("/unit-3", 0);
+    await launched(tasks, "task-1", "task-2", "task-3", "task-4");
+    // A later pass moves the baseline: a kill counted while the pane still lived was not its death.
+    counts.set("/unit-1", 5);
+    await tasks.harvestExits();
+
+    counts.set("/unit-2", 8);
+    panes = [
+      pane("%1", { deadStatus: 137 }),
+      pane("%2", { deadStatus: 137 }),
+      pane("%3", { deadStatus: 1 }),
+      // Never seen alive: no baseline, no verdict.
+      pane("%4", { deadStatus: 137 }),
+    ];
+    await tasks.harvestExits();
+    const progress = tasks.progress();
+    expect(progress).toEqual([
+      { taskId: "task-1", at: 1, exit: 137, oomKill: false },
+      { taskId: "task-2", at: 1, exit: 137, oomKill: true },
+      { taskId: "task-3", at: 1, exit: 1 },
+      { taskId: "task-4", at: 1, exit: 137 },
+    ]);
+  });
+
+  test("a probe that fails costs the verdict, never the status or the close", async () => {
+    const { probe, counts, failing } = kernel();
+    const closed: string[] = [];
+    let panes: PaneInfo[] = [pane("%1", { dead: false, deadStatus: null, pid: 1 })];
+    const tasks = new EndedTasks(
+      LaunchLedger.memory(() => 1),
+      () => 1,
+      { list: () => Promise.resolve(panes), close: (p) => Promise.resolve(closed.push(p.paneId)) },
+      probe,
+    );
+    counts.set("/unit-1", 4);
+    await launched(tasks, "task-1");
+    failing.on = true;
+    panes = [pane("%1", { deadStatus: 137 })];
+    await tasks.harvestExits();
+    expect(tasks.progress()).toEqual([{ taskId: "task-1", at: 1, exit: 137 }]);
+    expect(closed).toEqual(["%1"]);
   });
 });
 

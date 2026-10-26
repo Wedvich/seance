@@ -13,9 +13,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exclaveOf, type Exclave } from "./exclaves.ts";
-import { harvestExits, type HarvestPanes } from "./exit-status.ts";
+import { harvestExits, sampleOomPanes, type HarvestOom, type HarvestPanes } from "./exit-status.ts";
 import { LaunchLedger, type LaunchSite, type NoteOutcome } from "./launch-ledger.ts";
 import { log } from "./log.ts";
+import type { OomProbe } from "./oom-kill.ts";
 import { ancestorIn, peerPid, peerPidSupported, socketFd } from "./peer.ts";
 import { SESSION_EVENT_KIND, SESSION_EVENT_VERSION, type SessionEventReply } from "./session-event-frame.ts";
 import { FIELD_SEP, TASK_FIELD, tmux } from "./tmux.ts";
@@ -185,12 +186,29 @@ export class EndedTasks {
   readonly #launches = new Map<string, Launches>();
   readonly #now: () => number;
   readonly #panes: HarvestPanes | undefined;
+  readonly #oom: HarvestOom | undefined;
 
-  /** `panes` is the tmux side of `harvestExits`; without it harvest does nothing. */
-  constructor(ledger: LaunchLedger = LaunchLedger.memory(), now: () => number = Date.now, panes?: HarvestPanes) {
+  /**
+   * `panes` is the tmux side of `harvestExits`; without it harvest does nothing.
+   * `oom` (Linux only) samples live task panes and judges a SIGKILL death.
+   */
+  constructor(
+    ledger: LaunchLedger = LaunchLedger.memory(),
+    now: () => number = Date.now,
+    panes?: HarvestPanes,
+    oom?: OomProbe,
+  ) {
     this.#ledger = ledger;
     this.#now = now;
     this.#panes = panes;
+    this.#oom =
+      oom === undefined
+        ? undefined
+        : {
+            probe: oom,
+            sampled: (taskId) => ledger.notes().find((note) => note.taskId === taskId)?.oom,
+            noteSamples: (taskId, samples) => ledger.note(taskId, { oom: samples }),
+          };
   }
 
   /**
@@ -232,6 +250,8 @@ export class EndedTasks {
         const site = landed?.site;
         if (launched && landed !== undefined) {
           await this.#ledger.startNote(taskId, site && { repo: site.repo, path: site.worktree }, launches.prUrl);
+          // A baseline from the start, not the next pass: a session dying before that would have none.
+          if (this.#panes !== undefined && this.#oom !== undefined) await sampleOomPanes(this.#panes, this.#oom);
         }
       } finally {
         await finish();
@@ -263,7 +283,12 @@ export class EndedTasks {
   /** Each dead task pane's exit status into the ledger, then the pane closed (`exit-status.ts`). */
   async harvestExits(): Promise<void> {
     if (this.#panes === undefined) return;
-    await harvestExits({ ...this.#panes, note: (taskId, exit) => this.#ledger.note(taskId, { exit }) });
+    await harvestExits({
+      ...this.#panes,
+      note: (taskId, exit, oomKill) =>
+        this.#ledger.note(taskId, { exit, ...(oomKill === undefined ? {} : { oomKill }) }),
+      ...(this.#oom === undefined ? {} : { oom: this.#oom }),
+    });
   }
 
   /** The one ledger of this file in this process, for the branch-state emitter. */

@@ -51,7 +51,11 @@ afterAll(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-const probe = (): OomProbe => procOomProbe({ proc, cgroupRoot, platform: "linux" });
+function probe(): OomProbe {
+  const linux = procOomProbe({ proc, cgroupRoot, platform: "linux" });
+  if (linux === undefined) throw new Error("no probe on linux");
+  return linux;
+}
 
 describe("sampleOom", () => {
   test("samples the pane's own cgroup, then its parent, as /proc names them", async () => {
@@ -61,12 +65,15 @@ describe("sampleOom", () => {
     ]);
   });
 
-  test("nothing where nothing reads: v1, a gone pid, a path that climbs, another platform", async () => {
+  test("no probe at all off Linux: macOS has no equivalent", () => {
+    expect(procOomProbe({ proc, cgroupRoot, platform: "darwin" })).toBeUndefined();
+  });
+
+  test("nothing where nothing reads: v1, a gone pid, a path that climbs", async () => {
     expect(await sampleOom(200, probe())).toEqual([]);
     expect(await sampleOom(999, probe())).toEqual([]);
     expect(await sampleOom(400, probe())).toEqual([]);
     expect(await sampleOom(-1, probe())).toEqual([]);
-    expect(await sampleOom(100, procOomProbe({ proc, cgroupRoot, platform: "darwin" }))).toEqual([]);
   });
 
   test("a probe that throws is no sample", async () => {
