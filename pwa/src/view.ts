@@ -23,6 +23,7 @@ import {
   type TaskAction,
   type Verdict,
 } from "./state.ts";
+import { needsAttention } from "./asleep.ts";
 
 /**
  * Everything the screen renders, derived in one pure pass. Components stay dumb
@@ -649,9 +650,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
     machineChoices: deriveMachineChoices(state, now),
     accountChoices: deriveAccountChoices(state),
     previewShown: previewAsked(form),
-    queueAttention:
-      state.queueView?.kind === "ok" &&
-      state.queueView.tasks.some((t) => t.state === "needs-input" && t.escalated === true),
+    queueAttention: state.queueView?.kind === "ok" && needsAttention(state.queueView.tasks, state.relay.machines),
   };
 }
 
