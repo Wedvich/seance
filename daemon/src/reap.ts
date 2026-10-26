@@ -99,11 +99,15 @@ export interface RepoReport {
   readonly dirty: readonly { readonly path: string; readonly changes: number }[];
   /** Upstream gone, commits on it nowhere upstream: unpushed work, kept. */
   readonly keptBranches: readonly { readonly name: string; readonly ahead: number }[];
+  /** Linked worktrees on unpushed work — upstream gone, or detached past the default branch. Kept. */
+  readonly keptWorktrees: readonly { readonly path: string; readonly branch: string | null; readonly ahead: number }[];
   /** Worktrees whose pane is open in tmux — someone is in them. */
   readonly inUse: readonly string[];
   readonly locked: readonly string[];
   /** Merged and clean, but touched more recently than the age gate. */
   readonly young: number;
+  /** Unmerged worktrees whose branch still has an upstream: in-flight work, counted only. */
+  readonly active: number;
   readonly failed: readonly { readonly what: string; readonly detail: string }[];
 }
 
@@ -457,6 +461,7 @@ type ListKey =
   | "pruned"
   | "dirty"
   | "keptBranches"
+  | "keptWorktrees"
   | "inUse"
   | "locked"
   | "failed";
@@ -475,6 +480,7 @@ function emptyLists(): RepoLists {
     pruned: [],
     dirty: [],
     keptBranches: [],
+    keptWorktrees: [],
     inUse: [],
     locked: [],
     failed: [],
@@ -482,7 +488,7 @@ function emptyLists(): RepoLists {
 }
 
 function emptyRepoReport(repo: string): RepoReport {
-  return { repo, ...emptyLists(), young: 0 };
+  return { repo, ...emptyLists(), young: 0, active: 0 };
 }
 
 interface Target {
@@ -564,6 +570,7 @@ async function reapRepo(
 
   const report = emptyLists();
   let young = 0;
+  let active = 0;
 
   const byName = new Map(branches.map((branch) => [branch.name, branch]));
   const verdicts = new Map<string, BranchVerdict>();
@@ -606,7 +613,17 @@ async function reapRepo(
     }
     // oxlint-disable-next-line no-await-in-loop
     const verdict = await verdictFor(worktree.head, worktree.branch);
-    if (!isMerged(verdict)) continue;
+    if (!isMerged(verdict)) {
+      // Its branch stays out of the branch pass while checked out, so this row is the only place it shows.
+      if (verdict === "unmerged-gone" || worktree.branch === null) {
+        // oxlint-disable-next-line no-await-in-loop
+        const ahead = await commitsAhead(repo.path, worktree.head, base);
+        report.keptWorktrees.push({ path: worktree.path, branch: worktree.branch, ahead });
+      } else {
+        active += 1;
+      }
+      continue;
+    }
     // oxlint-disable-next-line no-await-in-loop
     const gitDir = await gitDirOf(worktree.path);
     if (gitDir === null) {
@@ -631,7 +648,6 @@ async function reapRepo(
       continue;
     }
     const idleDays = Math.floor((now - touched) / DAY_MS);
-    // oxlint-disable-next-line no-await-in-loop
     // oxlint-disable-next-line no-await-in-loop
     if (monitors !== null) await stopMonitor(monitors, worktree.path, real, opts);
     if (!opts.dryRun) {
@@ -661,7 +677,7 @@ async function reapRepo(
       what: "worktree list",
       detail: "git could not list worktrees again before deleting branches",
     });
-    return { repo: repo.name, ...(fetch === undefined ? {} : { fetch }), ...report, young };
+    return { repo: repo.name, ...(fetch === undefined ? {} : { fetch }), ...report, young, active };
   }
   const checkedOut = new Set(current.flatMap((worktree) => (worktree.branch === null ? [] : [worktree.branch])));
   for (const branch of branches) {
@@ -687,7 +703,7 @@ async function reapRepo(
     report.deletedBranches.push({ name: branch.name, sha: branch.sha, why: verdict });
   }
 
-  return { repo: repo.name, ...(fetch === undefined ? {} : { fetch }), ...report, young };
+  return { repo: repo.name, ...(fetch === undefined ? {} : { fetch }), ...report, young, active };
 }
 
 function tilde(path: string): string {
@@ -737,6 +753,12 @@ export function formatReport(report: ReapReport): readonly string[] {
     for (const kept of repo.keptBranches) {
       rows.push(
         row("kept branch", `${kept.name}   upstream gone, ${plural(kept.ahead, "commit")} not on the default branch`),
+      );
+    }
+    for (const kept of repo.keptWorktrees) {
+      const why = kept.branch === null ? "detached" : `${kept.branch}   upstream gone`;
+      rows.push(
+        row("kept worktree", `${tilde(kept.path)}   ${why}, ${plural(kept.ahead, "commit")} not on the default branch`),
       );
     }
     for (const path of repo.inUse) rows.push(row("in use", `${tilde(path)}   a tmux pane is inside it`));
@@ -797,6 +819,8 @@ export function formatReport(report: ReapReport): readonly string[] {
             )})`,
           ]),
       `${sum((repo) => repo.dirty.length)} dirty`,
+      `${sum((repo) => repo.keptWorktrees.length)} kept unmerged`,
+      `${sum((repo) => repo.active)} active`,
       `${plural(report.openPanes.length, "session")} left open`,
       `${sum((repo) => repo.young)} younger than ${report.minAgeDays}d`,
     ].join(" · "),

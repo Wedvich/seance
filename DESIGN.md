@@ -4245,7 +4245,11 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
   hunks before it landed — kept, the safe side. Upstream gone with
   commits whose patch is nowhere upstream is unpushed work: kept and reported —
   a branch stacked on another PR's branch included, since its diff carries the
-  parent's changes and matches no one commit. Deletion is
+  parent's changes and matches no one commit. A linked worktree on such a
+  branch, or detached with commits past the default branch, is listed as a
+  kept worktree — its branch is skipped by the branch pass while checked out,
+  so it would show nowhere else; one on a branch whose upstream still exists
+  is only counted (`active`). Deletion is
   `update-ref -d <ref> <sha>`, a compare-and-delete that refuses a branch that
   moved since it was judged, then its config section, as `git branch -D` would.
   Every deletion's audit line carries the full tip sha — `git branch <name>
