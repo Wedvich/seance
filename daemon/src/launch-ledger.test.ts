@@ -404,6 +404,50 @@ describe("LaunchLedger progress notes", () => {
   });
 });
 
+describe("LaunchLedger OOM samples", () => {
+  const unit = [
+    { cgroup: "/system.slice/seanced.service", kills: 42 },
+    { cgroup: "/system.slice", kills: 42 },
+  ];
+
+  test("a sample survives a reopen but stays out of progress, and changing it alone keeps at", async () => {
+    let now = 5;
+    const ledger = await LaunchLedger.open(path, () => now);
+    await ledger.record("t1");
+    await ledger.note("t1", { branch: "b" });
+    now = 6;
+    expect(await ledger.apply("t1", { oom: unit })).toBe("written");
+    expect(await ledger.apply("t1", { oom: unit })).toBe("same");
+    expect(ledger.progress()).toEqual([{ taskId: "t1", at: 5, branch: "b" }]);
+    const reopened = await LaunchLedger.open(path, () => 7);
+    expect(reopened.notes()[0]?.oom).toEqual(unit);
+    expect(reopened.notes()[0]?.at).toBe(5);
+  });
+
+  test("the verdict reaches progress beside a SIGKILL only, and a bad sample or verdict is dropped, never the note", async () => {
+    const ledger = await LaunchLedger.open(path, () => 9);
+    await ledger.record("t1");
+    await ledger.record("t2");
+    await ledger.note("t1", { oom: unit });
+    await ledger.note("t1", { exit: 137, oomKill: true });
+    await ledger.note("t2", { exit: 1, oomKill: false });
+    expect(ledger.progress()).toEqual([
+      { taskId: "t1", at: 9, exit: 137, oomKill: true },
+      { taskId: "t2", at: 9, exit: 1 },
+    ]);
+    expect(parseTaskProgressList(ledger.progress())).toEqual(ledger.progress());
+
+    const file = JSON.parse(await readFile(path, "utf8"));
+    file.progress[0].oom = [{ cgroup: "/../etc", kills: 1 }];
+    file.progress[0].oomKill = "yes";
+    await writeFile(path, JSON.stringify(file));
+    const [note] = (await LaunchLedger.open(path, () => 10)).notes();
+    expect(note).toMatchObject({ taskId: "t1", exit: 137 });
+    expect(note).not.toHaveProperty("oom");
+    expect(note).not.toHaveProperty("oomKill");
+  });
+});
+
 describe("LaunchLedger reported notes (#21)", () => {
   test("a report survives a reopen, is sticky across later notes, reaches progress, and a relaunch starts without it", async () => {
     const ledger = await LaunchLedger.open(path, () => 9);
