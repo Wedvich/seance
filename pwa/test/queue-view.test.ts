@@ -128,6 +128,33 @@ describe("deriveQueue", () => {
     expect(titles(only)).toEqual(["Waiting"]);
   });
 
+  test("needs-input on an asleep machine ranks after what the phone can answer, and a lost one there says it settles on waking", () => {
+    const awake = machine();
+    const asleep = machine({ deviceId: "dev-b", name: "MacBook", connected: false, lastSeen: NOW - 600_000 });
+    const onB = { ...placedAt, deviceId: "dev-b" };
+    const view = deriveQueue(
+      state(
+        ok([
+          task("lost", { state: "lost", assignment: onB }),
+          task("dozing", { state: "needs-input", assignment: onB, escalated: true, needsInputSince: NOW - 3_600_000 }),
+          task("ask", { state: "needs-input", assignment: placedAt }),
+          task("stuck", { state: "needs-input", assignment: placedAt, escalated: true }),
+        ]),
+        {},
+        { machines: [awake, asleep] },
+      ),
+      NOW,
+    );
+    const rows = view.sections.find((s) => s.title === "Needs you")?.rows ?? [];
+    expect(rows.map((r) => r.id)).toEqual(["stuck", "ask", "dozing", "lost"]);
+    expect(rows[3]).toMatchObject({
+      headline: "Asleep on MacBook · default — its machine went to sleep 10m ago.",
+      body: "Settles when its machine wakes; cancel or mark done to give up on it",
+    });
+    // Dots are the leader's verdict, unchanged by the derived sleep.
+    expect(rows[2]?.dot).toBe("err");
+  });
+
   test("an escalated task says how long it has waited, and attention follows it", () => {
     const stuck = task("stuck", { state: "needs-input", escalated: true, needsInputSince: NOW - 3 * 3_600_000 });
     const view = deriveQueue(state(ok([stuck])), NOW);
