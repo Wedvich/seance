@@ -43,17 +43,19 @@ describe("parseWorktreeList", () => {
 });
 
 describe("parseBranches", () => {
-  test("reads name, tip, and whether the upstream is gone", () => {
+  test("reads name, tip, whether an upstream is set, and whether it is gone", () => {
     const raw = [
-      "refs/heads/main\0aaa\0",
-      "refs/heads/feat/x\0bbb\0[gone]",
-      "refs/heads/ahead\0ccc\0[ahead 2]",
+      "refs/heads/main\0aaa\0\0refs/remotes/origin/main",
+      "refs/heads/feat/x\0bbb\0[gone]\0refs/remotes/origin/feat/x",
+      "refs/heads/ahead\0ccc\0[ahead 2]\0refs/remotes/origin/ahead",
+      "refs/heads/local\0ddd\0\0",
       "",
     ].join("\n");
     expect(parseBranches(raw)).toEqual([
-      { name: "main", sha: "aaa", upstreamGone: false },
-      { name: "feat/x", sha: "bbb", upstreamGone: true },
-      { name: "ahead", sha: "ccc", upstreamGone: false },
+      { name: "main", sha: "aaa", upstreamGone: false, hasUpstream: true },
+      { name: "feat/x", sha: "bbb", upstreamGone: true, hasUpstream: true },
+      { name: "ahead", sha: "ccc", upstreamGone: false, hasUpstream: true },
+      { name: "local", sha: "ddd", upstreamGone: false, hasUpstream: false },
     ]);
   });
 
