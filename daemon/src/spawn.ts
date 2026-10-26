@@ -410,8 +410,13 @@ export async function spawnSession(
  */
 const pathSpawns = new Map<string, Promise<unknown>>();
 
-/** Claude Code's own lock on a worktree it made, held for its process's life: `claude session <name> (pid N)`. */
-const CLAUDE_LOCK = /^claude session .+ \(pid (\d+)\)$/u;
+/**
+ * Claude Code's own lock on a worktree it made, held for its process's life: `claude session
+ * <name> (pid N start <procStart>)`, the ` start …` part absent on Windows. Its own parser's
+ * grammar, bounds included. The start time is not compared, so a live pid (even a reused one)
+ * stays a refusal: fail closed.
+ */
+const CLAUDE_LOCK = /^claude (?:agent|session) .{1,255} \(pid (\d{1,10})(?: start .{1,255})?\)$/u;
 
 function underDir(dir: string, path: string): boolean {
   return path === dir || path.startsWith(`${dir}/`);

@@ -4429,12 +4429,15 @@ fields carry over), under the same gates.
 - **Trust.** The worktree path is pre-trusted in the clone's exclave config ("Pre-trust on spawn"):
   claude starts in the worktree itself here, not the repo root, so the dialog would otherwise block it.
 - **The git lock residual.** Claude Code locks the worktree it created for the life of its process
-  (reason `claude session <name> (pid N)`), and a SIGKILL leaves it locked, which also makes reap keep
+  (reason `claude session <name> (pid N start <procStart>)`, no ` start …` on Windows; Claude's own
+  parser also takes `claude agent …`), and a SIGKILL leaves it locked, which also makes reap keep
   it. `spawnContinued` reads the worktree's lock (`worktree list --porcelain -z`, the parser
-  `reap-git.ts` already has): no lock goes on; a lock whose reason is exactly Claude's own form with a pid
-  that is not alive (`kill(pid, 0)` answers ESRCH) is unlocked (`worktree unlock`, argv, one `log.info`
-  line naming the path) and the continue goes on; any other lock (another reason, a live pid, a pid it may
-  not signal) refuses `not_continuable` and is left alone. Reap's own handling is unchanged: a locked
+  `reap-git.ts` already has): no lock goes on; a lock whose reason matches Claude's own grammar (the
+  same bounds it parses with) and whose pid is not alive (`kill(pid, 0)` answers ESRCH) is unlocked
+  (`worktree unlock`, argv, one `log.info` line naming the path) and the continue goes on; any other
+  lock (another reason, a live pid, a pid it may not signal) refuses `not_continuable` and is left
+  alone. The start time is deliberately not compared against the pid's: a reused pid reads as live and
+  the lock stays, a refusal rather than a guess (fail closed; the operator unlocks by hand). Reap's own handling is unchanged: a locked
   worktree is kept and reported. The new session locks nothing (it is `--continue`, not `--worktree`),
   so reap's live-pane rule is what protects the worktree while it runs.
 - **Two notes on one path.** The new task's ledger note records the same `path`, with a newer `siteAt`,

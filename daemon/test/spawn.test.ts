@@ -717,16 +717,13 @@ describe("spawnSession continuing a failed task's session", () => {
   });
 
   describe("a lock on the worktree", () => {
-    test("a dead claude's is released and the session continues", async () => {
+    // Claude's own wording (2.1.310 adds the start time off Windows); a pid no machine has.
+    test.each([
+      ["with its start time", (name: string) => `claude session ${name} (pid 99999999 start 646904935)`],
+      ["without one (Windows)", (name: string) => `claude session ${name} (pid 99999999)`],
+    ])("a dead claude's, %s, is released and the session continues", async (_form, reason) => {
       const wt = await makeWorktree();
-      // Claude's own wording; a pid no machine has.
-      await git(fixture.repoPath, [
-        "worktree",
-        "lock",
-        "--reason",
-        `claude session ${wt.name} (pid 99999999)`,
-        wt.path,
-      ]);
+      await git(fixture.repoPath, ["worktree", "lock", "--reason", reason(wt.name), wt.path]);
       let outcome: SpawnOutcome | undefined;
       try {
         expect(await lockedOf(wt)).toBe(true);
@@ -742,7 +739,12 @@ describe("spawnSession continuing a failed task's session", () => {
     test("anyone else's, and a live claude's, is refused and left in place", async () => {
       const wt = await makeWorktree();
       try {
-        for (const reason of ["on a usb disk", "", `claude session ${wt.name} (pid ${process.pid})`]) {
+        for (const reason of [
+          "on a usb disk",
+          "",
+          `claude session ${wt.name} (pid ${process.pid})`,
+          `claude session ${wt.name} (pid ${process.pid} start 646904935)`,
+        ]) {
           // oxlint-disable-next-line no-await-in-loop -- one lock at a time on the one worktree
           await git(fixture.repoPath, ["worktree", "lock", ...(reason === "" ? [] : ["--reason", reason]), wt.path]);
           // oxlint-disable-next-line no-await-in-loop

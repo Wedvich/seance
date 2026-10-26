@@ -563,7 +563,7 @@ of M4 has landed.
     `not_continuable`); a brokered enqueue allowed, so keyless `seanced mcp` works; a CLI,
     `seanced continue <task-id> [--prompt …]`, that enqueues through the scheduler (a hand-run
     `claude --continue` is untracked by design); a stale worktree lock in Claude's own
-    `claude session … (pid N)` form with a dead pid unlocked, any other lock refused; manual only, for
+    `claude session … (pid N start …)` form with a dead pid unlocked, any other lock refused; manual only, for
     `session_failed` alone (not `here` runs, not an automatic continue after an OOM kill). Surfaces: the
     PWA's failed card, MCP's `continue_task`, the CLI.
   - _As built:_ DESIGN.md, _Daemon_, "Continuing a failed task", records it and what was rejected.

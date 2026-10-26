@@ -82,15 +82,18 @@ describe("transcriptDir", () => {
 describe("parseWorktreeLock", () => {
   const raw = porcelain(
     ["worktree /r/main", "HEAD aaa", "branch refs/heads/main"],
-    ["worktree /r/a", "HEAD bbb", "branch refs/heads/a", "locked claude session fix (pid 4242)"],
+    ["worktree /r/a", "HEAD bbb", "branch refs/heads/a", "locked claude session fix (pid 4242 start 646904935)"],
     ["worktree /r/b", "HEAD ccc", "detached", "locked"],
     ["worktree /r/odd\nname", "HEAD ddd", "detached", "locked on a usb disk"],
+    ["worktree /r/short", "HEAD eee", "detached", "locked claude session fix (pid 4242)"],
   );
 
   test("gives the reason a worktree is locked with, an empty one when none was given, and null when unlocked", () => {
-    expect(parseWorktreeLock(raw, "/r/a")).toEqual({ reason: "claude session fix (pid 4242)" });
+    expect(parseWorktreeLock(raw, "/r/a")).toEqual({ reason: "claude session fix (pid 4242 start 646904935)" });
     expect(parseWorktreeLock(raw, "/r/b")).toEqual({ reason: "" });
     expect(parseWorktreeLock(raw, "/r/main")).toBeNull();
+    // The form Claude writes on Windows, with no start time.
+    expect(parseWorktreeLock(raw, "/r/short")).toEqual({ reason: "claude session fix (pid 4242)" });
   });
 
   test("reads the record of the path asked for, newline in it included, and none for an unlisted path", () => {
