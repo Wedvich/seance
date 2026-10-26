@@ -71,6 +71,7 @@ import {
   PIN_SENTINEL,
   ROUTING_ID_MAX_LENGTH,
   SESSIONS_MAX_PROGRESS,
+  SIGKILL_STATUS,
   STORE_CREATE_MAX_CT_LENGTH,
   STORE_MAX_CT_LENGTH,
   STORE_PREFIXES,
@@ -1129,6 +1130,21 @@ describe("what a leader writes into a task is bounded", () => {
     expect(failed({ code: "merge_expired", message: "m", exit: 137 })).toEqual({ code: "merge_expired", message: "m" });
   });
 
+  test("a failure's OOM verdict is kept only beside a SIGKILL status, and a bad one costs only the field", () => {
+    const failed = (failure: object) => parseTask({ ...task, state: "failed", failure })?.failure;
+    const killed = { code: "session_failed", message: "m", exit: SIGKILL_STATUS };
+    expect(failed({ ...killed, oomKill: true })).toEqual({ ...killed, oomKill: true });
+    expect(failed({ ...killed, oomKill: false })).toEqual({ ...killed, oomKill: false });
+    for (const oomKill of ["true", 1, null]) expect(failed({ ...killed, oomKill })).toEqual(killed);
+    expect(failed({ ...killed, exit: 1, oomKill: true })).toEqual({ ...killed, exit: 1 });
+    // An out-of-range status is dropped, and the verdict with it.
+    expect(failed({ ...killed, exit: "137", oomKill: true })).toEqual({ code: "session_failed", message: "m" });
+    expect(failed({ code: "merge_expired", message: "m", exit: 137, oomKill: true })).toEqual({
+      code: "merge_expired",
+      message: "m",
+    });
+  });
+
   test("a decision lists at most DECISION_MAX_CANDIDATES, each with bounded reasons, and says when it was cut", () => {
     const candidate = { deviceId: "d-1", machine: "mac", exclave: "default", rejected: [{ code: "offline" }] };
     const decision = (n: number, extra: object = {}) => ({
@@ -1205,6 +1221,17 @@ describe("parseTaskProgressList", () => {
   test("a session's report is kept", () => {
     const reported = { taskId: "t-4", reported: true, at: 4 } as const;
     expect(parseTaskProgressList([reported])).toEqual([reported]);
+  });
+
+  test("an OOM verdict rides only with a SIGKILL status, and a bad one costs the field, never the entry", () => {
+    const killed = { taskId: "t-5", exit: SIGKILL_STATUS, at: 5 };
+    expect(parseTaskProgressList([{ ...killed, oomKill: true }])).toEqual([{ ...killed, oomKill: true }]);
+    expect(parseTaskProgressList([{ ...killed, oomKill: false }])).toEqual([{ ...killed, oomKill: false }]);
+    for (const oomKill of ["yes", 1, null]) {
+      expect(parseTaskProgressList([entry, { ...killed, oomKill }])).toEqual([entry, killed]);
+    }
+    expect(parseTaskProgressList([{ ...killed, exit: 1, oomKill: true }])).toEqual([{ ...killed, exit: 1 }]);
+    expect(parseTaskProgressList([{ taskId: "t-5", oomKill: true, at: 5 }])).toEqual([{ taskId: "t-5", at: 5 }]);
   });
 
   test("strict: one unreadable entry, or too many, nulls the list — a dropped one would read as no PR", () => {

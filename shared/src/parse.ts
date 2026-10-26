@@ -27,6 +27,7 @@ import {
   ROUTING_ID_MAX_LENGTH,
   ROUTING_ID_PATTERN,
   SESSIONS_MAX_PROGRESS,
+  SIGKILL_STATUS,
   STORE_KEY_PATTERN,
   STORE_PREFIXES,
   TARGET_LIMITS,
@@ -1008,10 +1009,12 @@ export function parseTask(value: unknown): Task | null {
     const { message, exit } = failure;
     if (typeof message !== "string") return null;
     // Display-only, so a bad one costs the field, never the failure.
-    const status =
-      failure["code"] === "session_failed" && isUint(exit) && exit >= 1 && exit <= EXIT_STATUS_MAX ? { exit } : {};
+    const sessionFailed = failure["code"] === "session_failed" && isUint(exit) && exit >= 1 && exit <= EXIT_STATUS_MAX;
+    const status = sessionFailed ? { exit } : {};
+    const { oomKill } = failure;
+    const oom = sessionFailed && exit === SIGKILL_STATUS && typeof oomKill === "boolean" ? { oomKill } : {};
     // Cut rather than refused: an M2 leader stored a daemon's message whole, and its tail must not cost the task.
-    failed = { code: failure["code"], message: message.slice(0, TASK_FAILURE_LIMITS.message), ...status };
+    failed = { code: failure["code"], message: message.slice(0, TASK_FAILURE_LIMITS.message), ...status, ...oom };
   }
   const progress = parseProgressFields(value);
   if (progress === null) return null;
@@ -1369,7 +1372,7 @@ export function parseTaskProgressList(value: unknown): readonly TaskProgress[] |
 
 function parseTaskProgress(value: unknown): TaskProgress | null {
   if (!isRecord(value)) return null;
-  const { taskId, prUrl, branch, pushed, merged, reported, exit, at } = value;
+  const { taskId, prUrl, branch, pushed, merged, reported, exit, oomKill, at } = value;
   if (!isTaskId(taskId) || !isFiniteNumber(at)) return null;
   if (exit !== undefined && (!isUint(exit) || exit > EXIT_STATUS_MAX)) return null;
   const url = prUrl === undefined ? undefined : httpsUrl(prUrl);
@@ -1386,6 +1389,8 @@ function parseTaskProgress(value: unknown): TaskProgress | null {
     ...(merged === undefined ? {} : { merged }),
     ...(reported === undefined ? {} : { reported }),
     ...(exit === undefined ? {} : { exit }),
+    // Display-only: a bad one, or one beside another status, costs the field — never the entry, which would null the list.
+    ...(exit === SIGKILL_STATUS && typeof oomKill === "boolean" ? { oomKill } : {}),
   };
 }
 
