@@ -17,6 +17,7 @@ import {
   withReapLock,
   type ReapOptions,
   type ReapReport,
+  type RepoReport,
 } from "../src/reap.ts";
 import { transcriptDir } from "../src/reap-git.ts";
 import { scanRepos } from "../src/scan.ts";
@@ -325,7 +326,7 @@ describe("reap: worktrees and branches (real git)", () => {
     const locked = join(repo.path, ".claude", "worktrees", "locked");
     const local = join(repo.path, ".claude", "worktrees", "local");
     await addWorktree(repo.path, local);
-    await commit(local, "local.txt");
+    const localTip = await commit(local, "local.txt");
     await addWorktree(repo.path, gone);
     await commit(gone, "pushed.txt");
     await git(gone, "push", "-q", "-u", "origin", "wt-gone");
@@ -362,18 +363,19 @@ describe("reap: worktrees and branches (real git)", () => {
     const report = await reap(repo);
     const [result] = report.repos;
     // `git worktree list` order is the filesystem's, not ours.
+    const expected: RepoReport["keptWorktrees"] = [
+      { path: detached, branch: null, why: "detached", ahead: 1 },
+      { path: gone, branch: "wt-gone", why: "upstream-gone", ahead: 2 },
+      { path: local, branch: "wt-local", why: "never-pushed", ahead: 1 },
+    ];
     expect((result?.keptWorktrees ?? []).toSorted((a, b) => a.path.localeCompare(b.path))).toEqual(
-      [
-        { path: detached, branch: null, why: "detached", ahead: 1 } as const,
-        { path: gone, branch: "wt-gone", why: "upstream-gone", ahead: 2 } as const,
-        { path: local, branch: "wt-local", why: "never-pushed", ahead: 1 } as const,
-      ].toSorted((a, b) => a.path.localeCompare(b.path)),
+      expected.toSorted((a, b) => a.path.localeCompare(b.path)),
     );
     expect(result?.locked).toEqual([locked]);
     expect(result?.active).toBe(1);
     expect(result?.removedWorktrees).toEqual([]);
     expect(result?.keptBranches).toEqual([]);
-    expect(await git(repo.path, "rev-parse", "--verify", "-q", "refs/heads/wt-local")).not.toBe("");
+    expect(await git(repo.path, "rev-parse", "refs/heads/wt-local")).toBe(localTip);
     for (const worktree of [gone, detached, active, locked, local]) {
       // oxlint-disable-next-line no-await-in-loop
       expect(await exists(worktree)).toBe(true);
