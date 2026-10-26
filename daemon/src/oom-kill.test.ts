@@ -33,12 +33,7 @@ function statLine(pid: number, state: string, flags: number, comm = "claude"): s
   return `${pid} (${comm}) ${state} 1 ${pid} ${pid} 0 -1 ${flags} 0 0 0 0 0 0 0 0 20 0 1 0 5 100 10\n`;
 }
 
-async function statusOfPid(
-  pid: number,
-  state: string,
-  pending = "0000000000000000",
-  flags = 0x400000,
-): Promise<void> {
+async function statusOfPid(pid: number, state: string, pending = "0000000000000000", flags = 0x400000): Promise<void> {
   await mkdir(join(proc, String(pid)), { recursive: true });
   await writeFile(
     join(proc, String(pid), "status"),

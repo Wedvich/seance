@@ -101,8 +101,7 @@ describe("the OOM verdict on a SIGKILL death", () => {
     let panes: PaneInfo[] = [];
     const probe: OomProbe = {
       cgroupOf: (pid) => (fail.cgroupOf ? Promise.reject(new Error("EIO")) : Promise.resolve(`/unit-${pid}`)),
-      kills: (cgroup) =>
-        fail.kills ? Promise.reject(new Error("EIO")) : Promise.resolve(counts.get(cgroup) ?? null),
+      kills: (cgroup) => (fail.kills ? Promise.reject(new Error("EIO")) : Promise.resolve(counts.get(cgroup) ?? null)),
       exiting: (pid) => Promise.resolve(exiting.has(pid)),
     };
     const ledger = LaunchLedger.memory(() => clock.now);
