@@ -2481,12 +2481,12 @@ describe("continue_task", () => {
   });
 
   test("get_queue withdraws continuable once a continuation has the session", async () => {
-    const running = task({
+    const underway = task({
       id: "t-2",
       state: "running",
       spec: { repo: ORIGIN, mode: "continue", continues: { task: "t-1", at: AT } },
     });
-    const fake = leaderRelay([{ tasks: [failedTask, running], at: 6_000 }], continuingMachines());
+    const fake = leaderRelay([{ tasks: [failedTask, underway], at: 6_000 }], continuingMachines());
     const lazy = new LazyRelay({ create: () => fake });
     const client = await connectedClient(lazy);
     const queue = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} }))) as {

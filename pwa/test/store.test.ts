@@ -1395,13 +1395,13 @@ describe("the queue screen", () => {
 
     test("writes nothing for a task something already continues", async () => {
       const client = capable();
-      const running: Task = {
+      const continuation: Task = {
         id: "c-1",
         spec: { repo: ORIGIN, mode: "continue", continues: { task: "f-1", at } },
         state: "needs-input",
         createdAt: 2,
       };
-      client.onQueue = async () => ({ tasks: [failed, running], holds: [], at: 1 });
+      client.onQueue = async () => ({ tasks: [failed, continuation], holds: [], at: 1 });
       const store = new Store(client);
       store.openQueue();
       await until(() => store.getState().queueView?.kind === "ok", "the queue read");

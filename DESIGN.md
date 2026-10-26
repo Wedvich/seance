@@ -4392,19 +4392,27 @@ fields carry over), under the same gates.
   old task id, bounded by `TASK_ID_PATTERN`, required exactly with the mode. The spec's `at` is display
   and routing only; **the daemon never reads a path from the wire**.
 - **Refusals** (the new `not_continuable` spawn error code, one code with the reason in the message;
-  every one comes before the write-ahead `launch`, so no ledger entry for the new id stays, and each is
-  audited `failed`): a spawn not sealed by the scheduler (`from` other than `"scheduler"`, the local
-  socket, or a `client` other than `"scheduler"`); no ledger record of the old id (the ledger keeps a
-  week or 128 launches, so continuing works only while it holds the old launch); the old launch still
-  in flight; a note with no path (a `here` launch, or one from a daemon predating site notes); the noted
-  repo not being the clone `repo` resolved to; a noted path that is not canonical (a symlink anywhere
-  on it) or not under `<clone>/.claude/worktrees/`; the path gone; the old task still having a live
-  pane; any live pane whose cwd is inside the worktree (a second claude in one worktree would race the
-  first on its transcript and its git state); a worktree lock that is not a stale Claude one (below).
-  The code is not `task_running`, which the leader's verdict reads as "the new task is already
-  running" and marks it so, and not a transport code such as `internal_error`, which the verdict cannot
-  settle on and would leave the task reserved. `not_continuable` fails the new task with the daemon's
-  message; the old task stays `failed`.
+  each is audited `failed`, and none leaves a ledger entry for the new id). Two groups, by where they
+  fall. _Before the write-ahead `launch`_ (the handler, nothing recorded yet): a spawn not sealed by
+  the scheduler (`from` other than `"scheduler"`, the local socket, or a `client` other than
+  `"scheduler"`), one without its own task id, or one naming itself as the task it continues; no
+  ledger record of the old id (the ledger keeps a week or 128 launches, so continuing works only while
+  it holds the old launch); the old launch still in flight; a note with no path (a `here` launch, or
+  one from a daemon predating site notes); the noted repo not being the clone `repo` resolved to; a
+  noted path that is not canonical (a symlink anywhere on it) or not under
+  `<clone>/.claude/worktrees/`; the path gone; and `repo_not_found` for a repo the scan set no longer
+  holds. _After it_ (`spawnContinued`, the new id already written ahead): the repo or the path gone
+  again by then; the old task still having a live pane; any live pane whose cwd is inside the
+  worktree (a second claude in one worktree would race the first on its transcript and its git
+  state); a worktree lock that is not a stale Claude one, one that could not be read, and one that
+  could not be unlocked (below). A refusal there is a `SpawnFailure`, so the handler retracts the
+  write-ahead entry (`settle(false)`): nothing launched, and no entry for the new id stays. The code
+  is not `task_running`, which the leader's verdict reads as "the new task is already running" and
+  marks it so, and not a transport code such as `internal_error`, which the verdict cannot settle on
+  and would leave the task reserved: every rule a well-formed request can break answers
+  `not_continuable`, and `internal_error` is left to a request that does not parse. A task record that
+  continues itself is not read at all (`bindTaskRecord` calls it malformed), so it never reaches a
+  daemon. `not_continuable` fails the new task with the daemon's message; the old task stays `failed`.
 - **The argv.** As a worktree spawn, minus `--worktree` and the fetch: tmux `-c <path>`, `claude -n
   <name> --remote-control --model … --effort …[ --permission-mode plan] --continue -- < seed`.
   `--continue` is a literal flag, the name is the path's basename through `shq()`, and `continues` never
@@ -5965,7 +5973,9 @@ app-role relay client with the key it imported at start.
   work on a credential-delivered box. Before forwarding one the broker checks the verified leader
   advertises `continueTask` and refuses plainly otherwise, mirroring the client gate; everything else
   stays: the daemon seals from the parsed spec at `expect: 0` with its own `createdAt`, lineage and base
-  are still refused, and a non-continue enqueue is unchanged. What the keyless process gains is queueing
+  are still refused, and a non-continue enqueue is unchanged. The `request` action's remote `spawn`
+  takes no widening: its `mode` must be `worktree` or `here`, else `invalid_request` (a continue
+  spawn is the scheduler's, and `cleanSpawn` drops `continues`). What the keyless process gains is queueing
   a continuation of a task the leader lists, nothing a keyed client could not already write; the
   daemon that runs it still resolves the worktree from its own ledger and takes the spawn from the
   scheduler only. A hand-run `claude --continue` is untracked by design (Daemon, "Continuing a failed

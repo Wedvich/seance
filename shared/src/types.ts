@@ -1302,11 +1302,13 @@ export const SPAWN_ERROR_CODES = [
   "base_not_found",
   /**
    * A `mode: "continue"` spawn that cannot resume: not sealed by the scheduler, no
-   * ledger record of the continued task, its launch still in flight, no worktree
-   * noted (a `here` run), a different clone from the one `repo` resolved to, a path
-   * outside `<clone>/.claude/worktrees/` or not canonical, the worktree gone, a live
-   * session still in it, or a lock on it that is not a stale Claude one. Nothing
-   * launched, no ledger entry for the new id.
+   * task id of its own or naming itself, no ledger record of the continued task, its
+   * launch still in flight, no worktree noted (a `here` run), a different clone from
+   * the one `repo` resolved to, a path outside `<clone>/.claude/worktrees/` or not
+   * canonical, the worktree gone, a live session still in it, or a lock on it that is
+   * not a stale Claude one. Nothing launched. The refusals up to the path check come
+   * before the write-ahead launch record; the backend's (worktree gone again, live
+   * pane, lock) come after it, and the handler retracts the entry, so none stays.
    */
   "not_continuable",
   "launch_error",

@@ -64,7 +64,11 @@ describe("continueOffer, once", () => {
   const old = failed();
   const continuation = (state: Task["state"], continues = "t-old"): Task => ({
     id: `t-${state}`,
-    spec: { repo: old.spec.repo, mode: "continue", continues: { task: continues, at: { deviceId: "dev-a", exclave: "default", clone: "app" } } },
+    spec: {
+      repo: old.spec.repo,
+      mode: "continue",
+      continues: { task: continues, at: { deviceId: "dev-a", exclave: "default", clone: "app" } },
+    },
     state,
     createdAt: 2,
   });
