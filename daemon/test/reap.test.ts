@@ -322,6 +322,7 @@ describe("reap: worktrees and branches (real git)", () => {
     const gone = join(repo.path, ".claude", "worktrees", "gone");
     const detached = join(repo.path, ".claude", "worktrees", "detached");
     const active = join(repo.path, ".claude", "worktrees", "active");
+    const locked = join(repo.path, ".claude", "worktrees", "locked");
     await addWorktree(repo.path, gone);
     await commit(gone, "pushed.txt");
     await git(gone, "push", "-q", "-u", "origin", "wt-gone");
@@ -332,8 +333,14 @@ describe("reap: worktrees and branches (real git)", () => {
     await addWorktree(repo.path, active);
     await commit(active, "wip.txt");
     await git(active, "push", "-q", "-u", "origin", "wt-active");
+    await addWorktree(repo.path, locked);
+    await commit(locked, "held.txt");
+    await git(locked, "push", "-q", "-u", "origin", "wt-locked");
+    await commit(locked, "held-unpushed.txt");
+    await git(repo.path, "push", "-q", "origin", ":wt-locked");
+    await git(repo.path, "worktree", "lock", locked);
     await git(repo.path, "fetch", "-q", "--prune", "origin");
-    for (const worktree of [gone, detached, active]) {
+    for (const worktree of [gone, detached, active, locked]) {
       // oxlint-disable-next-line no-await-in-loop
       await age(worktree);
     }
@@ -343,18 +350,22 @@ describe("reap: worktrees and branches (real git)", () => {
       `kept worktree      ${gone}   wt-gone   upstream gone, 2 commits not on the default branch`,
     );
     expect(preview).toContain(`kept worktree      ${detached}   detached, 1 commit not on the default branch`);
-    expect(preview).toContain("2 kept unmerged · 1 active");
+    expect(preview).toContain("2 kept worktrees · 1 active");
 
     const report = await reap(repo);
     const [result] = report.repos;
-    expect(result?.keptWorktrees).toEqual([
-      { path: detached, branch: null, ahead: 1 },
-      { path: gone, branch: "wt-gone", ahead: 2 },
-    ]);
+    // `git worktree list` order is the filesystem's, not ours.
+    expect((result?.keptWorktrees ?? []).toSorted((a, b) => a.path.localeCompare(b.path))).toEqual(
+      [
+        { path: detached, branch: null, ahead: 1 },
+        { path: gone, branch: "wt-gone", ahead: 2 },
+      ].toSorted((a, b) => a.path.localeCompare(b.path)),
+    );
+    expect(result?.locked).toEqual([locked]);
     expect(result?.active).toBe(1);
     expect(result?.removedWorktrees).toEqual([]);
     expect(result?.keptBranches).toEqual([]);
-    for (const worktree of [gone, detached, active]) {
+    for (const worktree of [gone, detached, active, locked]) {
       // oxlint-disable-next-line no-await-in-loop
       expect(await exists(worktree)).toBe(true);
     }

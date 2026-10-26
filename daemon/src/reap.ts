@@ -98,15 +98,15 @@ export interface RepoReport {
   readonly pruned: readonly string[];
   readonly dirty: readonly { readonly path: string; readonly changes: number }[];
   /** Upstream gone, commits on it nowhere upstream: unpushed work, kept. */
-  readonly keptBranches: readonly { readonly name: string; readonly ahead: number }[];
+  readonly keptBranches: readonly { readonly name: string; readonly ahead: number | null }[];
   /** Linked worktrees on unpushed work — upstream gone, or detached past the default branch. Kept. */
-  readonly keptWorktrees: readonly { readonly path: string; readonly branch: string | null; readonly ahead: number }[];
+  readonly keptWorktrees: readonly { readonly path: string; readonly branch: string | null; readonly ahead: number | null }[];
   /** Worktrees whose pane is open in tmux — someone is in them. */
   readonly inUse: readonly string[];
   readonly locked: readonly string[];
   /** Merged and clean, but touched more recently than the age gate. */
   readonly young: number;
-  /** Unmerged worktrees whose branch still has an upstream: in-flight work, counted only. */
+  /** Unmerged worktrees on a branch whose upstream isn't gone (still tracked, or never pushed): in-flight work, counted only. */
   readonly active: number;
   readonly failed: readonly { readonly what: string; readonly detail: string }[];
 }
@@ -614,7 +614,8 @@ async function reapRepo(
     // oxlint-disable-next-line no-await-in-loop
     const verdict = await verdictFor(worktree.head, worktree.branch);
     if (!isMerged(verdict)) {
-      // Its branch stays out of the branch pass while checked out, so this row is the only place it shows.
+      // Checked-out branch is skipped by the branch pass, so this row is its only report; a detached tip is never
+      // patch-checked (verdict active), listed here because no branch holds its commits.
       if (verdict === "unmerged-gone" || worktree.branch === null) {
         // oxlint-disable-next-line no-await-in-loop
         const ahead = await commitsAhead(repo.path, worktree.head, base);
@@ -719,6 +720,12 @@ function megabytes(kb: number): string {
   return `${(kb / 1024).toFixed(1)} MB`;
 }
 
+function aheadText(ahead: number | null): string {
+  return ahead === null
+    ? "commits not on the default branch (count unavailable)"
+    : `${plural(ahead, "commit")} not on the default branch`;
+}
+
 function plural(count: number, noun: string, nouns = `${noun}s`): string {
   return `${count} ${count === 1 ? noun : nouns}`;
 }
@@ -752,13 +759,13 @@ export function formatReport(report: ReapReport): readonly string[] {
     }
     for (const kept of repo.keptBranches) {
       rows.push(
-        row("kept branch", `${kept.name}   upstream gone, ${plural(kept.ahead, "commit")} not on the default branch`),
+        row("kept branch", `${kept.name}   upstream gone, ${aheadText(kept.ahead)}`),
       );
     }
     for (const kept of repo.keptWorktrees) {
       const why = kept.branch === null ? "detached" : `${kept.branch}   upstream gone`;
       rows.push(
-        row("kept worktree", `${tilde(kept.path)}   ${why}, ${plural(kept.ahead, "commit")} not on the default branch`),
+        row("kept worktree", `${tilde(kept.path)}   ${why}, ${aheadText(kept.ahead)}`),
       );
     }
     for (const path of repo.inUse) rows.push(row("in use", `${tilde(path)}   a tmux pane is inside it`));
@@ -819,7 +826,7 @@ export function formatReport(report: ReapReport): readonly string[] {
             )})`,
           ]),
       `${sum((repo) => repo.dirty.length)} dirty`,
-      `${sum((repo) => repo.keptWorktrees.length)} kept unmerged`,
+      plural(sum((repo) => repo.keptWorktrees.length), "kept worktree"),
       `${sum((repo) => repo.active)} active`,
       `${plural(report.openPanes.length, "session")} left open`,
       `${sum((repo) => repo.young)} younger than ${report.minAgeDays}d`,

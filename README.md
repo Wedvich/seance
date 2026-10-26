@@ -438,7 +438,7 @@ week (`--min-age-days` to change). It deletes merged branches, closes séance wi
 that are dead or sitting on claude's "keep or remove this worktree?" prompt, and
 reports what it left: dirty worktrees, branches and worktrees whose upstream is gone but
 which hold unpushed commits, detached worktrees with commits on no branch, a count of
-worktrees still on a live branch, and live sessions with the id `despawn` takes. Where git runs
+worktrees on a branch whose upstream isn't gone (still tracked, or never pushed), and live sessions with the id `despawn` takes. Where git runs
 `core.fsmonitor=true` daemons (macOS), it also stops every one with no tmux pane in its
 checkout and an hour unused, and any on a directory gone or no longer a repo, reporting
 the memory freed; git starts a new one when a repo next needs it. Every deleted branch
