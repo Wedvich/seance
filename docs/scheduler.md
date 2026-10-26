@@ -977,6 +977,13 @@ same PR, with the reason.
     reads from `.claude.json` — mapped, not set per account, so it needs no account records
     (M4). A tier the table doesn't name, or none (an older daemon, a non-Team account), keeps
     today's estimate but includes no gated model: an unknown seat may bill Fable to credits.
+18. **A machine asleep 2 min holds no concurrency slot** (`slotReleaseAfterMs`, owner,
+    2026-10-26). Its in-flight tasks stop counting toward `globalMax`, `accountMax` and projected
+    usage, with no change of state; on return they count again and the fleet may sit over a cap
+    until work drains. A blip or relay reconnect frees nothing, and a dark wake restarts the clock, so after each one
+    the slots come back only after the connected-read window (~2.5 min, DESIGN.md) plus the grace; `lostAfterMs` (10)
+    stays 15 min, because `lost` writes records and settles reservations. A batch's bound still
+    counts them. DESIGN.md "Routing caps" has the rule and the rejected alternative.
 
 ## Risks / unknowns
 

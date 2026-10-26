@@ -2331,6 +2331,32 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   "each in-flight one billed to the same account" — one count, `accountInFlight` in
   `route.ts`. A task whose machine has left the registry has no account to read and counts
   toward neither; its machine's absence makes it `lost` anyway.
+  **A machine asleep past a grace holds no slot** (2026-10-26, docs/scheduler.md Settled
+  defaults 18). An in-flight task placed (assignment, else reservation) on a machine the leader
+  has seen absent for `slotReleaseAfterMs` (2 min) counts toward neither cap nor projected usage
+  (`accountResetAt` included): `route` takes the set as `RouteInput.released`, which the leader
+  derives from the same in-memory `#absentSince` clock `lost` ages from, keeping only machines
+  still away, so `route-preview` between a reconnect and the next pass agrees with that pass.
+  The task's state is untouched. Why: a closed laptop's four tasks held a whole account's cap
+  for the 15 minutes before `lost`, while another machine on the account sat idle, and nothing
+  runs or bills on a sleeping machine. Once it is back its tasks count again; a fleet over a cap
+  then is accepted — nothing is killed or despawned, and nothing new is placed until the count
+  falls under it. A dark wake or blip restarts the clock (any pass that sees the machine
+  connected clears it), so the grace starts over. A batch's bound still counts them ("Batches").
+  Accepted: (a) the leader sees "not connected", not "asleep". A crashed or stopped daemon
+  (`KillMode=process`, `daemon/src/systemd.ts`, so its tmux sessions outlive it) or a machine that
+  lost the relay but not Anthropic keeps running and billing while its slots are free after 2 min
+  — `lost` assumes the same at 15 min — taken because idle machines being used outweighs that
+  rarer case. (b) Over-cap stacks across sleeps: a laptop sleeps with 4, a desktop gets 4 and
+  sleeps, a third machine gets 4, and both wake to 12 on one account; projected usage and the
+  spill guard never saw the released tasks. Nothing bounds it beyond the drain.
+  A reservation on a machine with no assigned task is not on the clock and keeps its slot until
+  its TTL settles it. Rejected: shortening `lostAfterMs` to the same end. `lost` is a state
+  change with other consequences — a reservation settles through it, the PWA shows it, expiry
+  ages from it — and a store write per task each time it flips, so every dark wake would cost
+  writes and a misleading label; releasing slots needs none of that. The decision's
+  `cap_reached` count is the released-free one and does not say how many were left out: saying
+  so would take a wire field on `Reason`.
 - **Pause** (`pause.ts`, M3 item 5). `queue:pause` holds the holds (`PauseHold`): one on the
   whole queue, one per account, at most `MAX_PAUSE_HOLDS` — account holds stop one short of
   it, so a whole-queue pause always fits. The library reads it on `load()` —
@@ -2525,7 +2551,9 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   counts `IN_FLIGHT` and `lost`, so an `awaiting-merge` member frees its place but a lost
   one does not: the global cap leaves `lost` out so a forgotten machine cannot pin it, a
   reason a batch's own serialization lacks, and its session may still run on a machine
-  that only sleeps, so the next `sequential` member would run beside it. `sequential` also
+  that only sleeps, so the next `sequential` member would run beside it. For the same reason
+  it still counts a member whose machine is asleep past `slotReleaseAfterMs`, which the caps
+  release ("Routing caps"). `sequential` also
   enforces `index` order, which routing order alone cannot (a member whose predecessor is
   unroutable this pass would go first): a member is held until every held lower index is
   over — finished in any state, `failed` and `cancelled` included, or `awaiting-merge` —
