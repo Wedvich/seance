@@ -1117,6 +1117,18 @@ describe("what a leader writes into a task is bounded", () => {
     expect(parseTask({ ...task, state: "failed", failure: { code: "", message: "m" } })).toBeNull();
   });
 
+  test("a failure's exit status is kept in range and dropped outside it, never costing the failure or the task", () => {
+    const failed = (failure: object) => parseTask({ ...task, state: "failed", failure })?.failure;
+    const base = { code: "session_failed", message: "m" };
+    expect(failed({ ...base, exit: 137 })).toEqual({ ...base, exit: 137 });
+    expect(failed({ ...base, exit: EXIT_STATUS_MAX })).toEqual({ ...base, exit: EXIT_STATUS_MAX });
+    // An older leader's record: no field, read as before.
+    expect(failed(base)).toEqual(base);
+    for (const exit of [0, EXIT_STATUS_MAX + 1, 1.5, -1, "137", null]) expect(failed({ ...base, exit })).toEqual(base);
+    // Only a session_failed has one to word.
+    expect(failed({ code: "merge_expired", message: "m", exit: 137 })).toEqual({ code: "merge_expired", message: "m" });
+  });
+
   test("a decision lists at most DECISION_MAX_CANDIDATES, each with bounded reasons, and says when it was cut", () => {
     const candidate = { deviceId: "d-1", machine: "mac", exclave: "default", rejected: [{ code: "offline" }] };
     const decision = (n: number, extra: object = {}) => ({

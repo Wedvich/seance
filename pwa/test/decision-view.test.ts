@@ -279,6 +279,32 @@ describe("taskHeadline", () => {
     expect(taskHeadline({ ...failed("session_failed"), assignment: at }, machines, NOW)).toBe(
       "Its session exited with an error on Mac · default, with no PR.",
     );
+    const exited = (exit: number) =>
+      task({ state: "failed", assignment: at, failure: { code: "session_failed", message: "raw", exit } });
+    expect(taskHeadline(exited(137), machines, NOW)).toBe(
+      "Its session was killed (SIGKILL) on Mac · default, possibly out of memory, with no PR.",
+    );
+    expect(taskHeadline(exited(143), machines, NOW)).toBe(
+      "Its session ended on SIGTERM (status 143) on Mac · default, with no PR.",
+    );
+    // No assignment or reservation: no place to name.
+    const unplaced = (exit: number) =>
+      task({ state: "failed", failure: { code: "session_failed", message: "raw", exit } });
+    expect(taskHeadline(unplaced(137), machines, NOW)).toBe(
+      "Its session was killed (SIGKILL), possibly out of memory, with no PR.",
+    );
+    expect(taskHeadline(unplaced(1), machines, NOW)).toBe("Its session exited with status 1, with no PR.");
+    // Under until reported it was the done report that never came.
+    expect(
+      taskHeadline(
+        { ...exited(1), spec: { repo: "github.com/acme/app", mode: "worktree", until: "reported" } },
+        machines,
+        NOW,
+      ),
+    ).toBe("Its session exited with status 1 on Mac · default, with no done report.");
+    expect(taskHeadline(exited(1), machines, NOW)).toBe(
+      "Its session exited with status 1 on Mac · default, with no PR.",
+    );
     expect(taskHeadline({ ...failed("repo_not_found"), assignment: at }, machines, NOW)).toBe(
       "It didn't take on Mac · default.",
     );

@@ -512,10 +512,12 @@ function placementOf(task: Task, machines: readonly Machine[]): TaskPlacement | 
 /**
  * A scheduler-set code leads with its shared wording, but keeps the raw message: it alone names
  * the failed dependency, the loop, or why a dispatch went unconfirmed. A daemon refusal's is its own.
+ * A `session_failed` with its status drops it: the wording already says all the message does.
  */
-function failureMessage(failure: NonNullable<Task["failure"]>): string {
-  const worded = taskFailureText(failure.code);
-  return worded === null ? failure.message : `${worded} (${failure.message})`;
+function failureMessage(task: Task, failure: NonNullable<Task["failure"]>): string {
+  const worded = taskFailureText(failure.code, failure.exit, task.spec.until);
+  if (worded === null) return failure.message;
+  return failure.code === "session_failed" && failure.exit !== undefined ? worded : `${worded} (${failure.message})`;
 }
 
 function describeHold(hold: PauseHold, names: AccountNames): Record<string, unknown> {
@@ -689,7 +691,7 @@ function describeTask(task: Task, machines: readonly Machine[], names: AccountNa
     ...(pin === null ? {} : { pin }),
     ...(spec.avoid === undefined ? {} : { avoid: spec.avoid.map((id) => describeDevice(task, machines, id)) }),
     ...(task.decision === undefined ? {} : { decision: decisionText(task.decision) }),
-    ...(task.failure === undefined ? {} : { failure: `${task.failure.code}: ${failureMessage(task.failure)}` }),
+    ...(task.failure === undefined ? {} : { failure: `${task.failure.code}: ${failureMessage(task, task.failure)}` }),
     // A `manual` mark reads apart from a finish: a person settled it, nothing observed it end.
     ...(task.state === "done" && task.doneBy !== undefined ? { doneBy: task.doneBy } : {}),
     ...(task.escalated === true ? { escalated: true } : {}),

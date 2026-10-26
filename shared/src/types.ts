@@ -1421,12 +1421,14 @@ export interface TaskProgress {
   readonly reported?: true;
   /**
    * The session's exit status once its pane died (tmux's `pane_dead_status`,
-   * 0–255), for `failed` from exit status (M4). Here rather than on `ended`,
+   * 0–255), for `failed` from exit status (M4). A signal death is `128 + signal`
+   * (`exitStatus` in `daemon/src/sessions.ts`). Here rather than on `ended`,
    * whose entries are bare ids an older leader reads as such, and on the ledger
    * entry that already survives restarts, so the sweep and a takeover read one
-   * value. Absent while the pane lives, for a status tmux did not give (a
-   * signal), after a clean exit (its window keeps only a failed pane, so a 0 is
-   * never seen), and from older daemons — a reader then settles as today.
+   * value. Absent while the pane lives, for a signal death on a tmux that gives
+   * no `pane_dead_signal` (before 3.3), after a clean exit (its window keeps only
+   * a failed pane, so a 0 is never seen), and from older daemons — a reader then
+   * settles as today.
    */
   readonly exit?: number;
   /** When any of these last changed, ms (an unchanged state is not re-stamped). */
@@ -1945,9 +1947,12 @@ export interface Task {
   /**
    * A daemon's `SpawnErrorCode`, or a `TaskFailureCode`; a string, so a code
    * minted later still parses. Bounded by `TASK_FAILURE_LIMITS`: the message is
-   * often a daemon's, and it is stored.
+   * often a daemon's, and it is stored. `exit`, with `session_failed` only: the
+   * session's exit status (`TaskProgress.exit`, 1–`EXIT_STATUS_MAX`), so a reader
+   * words how it ended without parsing the message. Display-only; a reader drops
+   * one out of range and keeps the failure, and an older one ignores it.
    */
-  readonly failure?: { readonly code: string; readonly message: string };
+  readonly failure?: { readonly code: string; readonly message: string; readonly exit?: number };
   /** With `lost`: when the scheduler first saw the task's machine absent, ms. */
   readonly absentSince?: number;
   /**

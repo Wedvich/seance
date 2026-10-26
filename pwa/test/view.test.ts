@@ -586,6 +586,21 @@ describe("failedBody", () => {
     // It ran and ended: its dependents are the news, and "Nothing is running." would say less.
     expect(failedBody("session_failed")).toContain("exited with an error");
     expect(failedBody("session_failed")).toContain("Tasks waiting on it failed with it.");
+    // With its exit status (`failure.exit`), it says how the session ended.
+    expect(failedBody("session_failed", 137)).toStartWith(
+      "Its session was killed (SIGKILL), possibly out of memory, and reported no pull request.",
+    );
+    expect(failedBody("session_failed", 139)).toStartWith("Its session ended on SIGSEGV (status 139) and reported");
+    // A killed process writes nothing at the end; a plain exit's transcript says why.
+    expect(failedBody("session_failed", 137)).toEndWith("Its transcript on that machine stops where it ended.");
+    expect(failedBody("session_failed", 2)).toEndWith("Its transcript on that machine says why.");
+    expect(failedBody("session_failed")).toEndWith("Its transcript on that machine says why.");
+    expect(failedBody("session_failed", 1, "reported")).toStartWith(
+      "Its session exited with status 1 and did not report done.",
+    );
+    expect(failedBody("session_failed", 2)).toStartWith("Its session exited with status 2 and reported");
+    expect(failedBody("session_failed", 137)).toContain("Tasks waiting on it failed with it.");
+    expect(failedBody("repo_not_found", 137)).toBe("The machine refused the spawn. Nothing is running.");
   });
 });
 

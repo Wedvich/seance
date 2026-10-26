@@ -1,4 +1,12 @@
-import { accountNameIn, CAPABILITIES, knownAccounts, sentence, taskFailureText } from "@seance/shared";
+import {
+  accountNameIn,
+  CAPABILITIES,
+  endedBySignal,
+  knownAccounts,
+  sentence,
+  taskFailureText,
+  type TaskUntil,
+} from "@seance/shared";
 import type { BatchStrategy, KnownAccount, Machine, RelayState } from "@seance/shared";
 import {
   EFFORT_LABELS,
@@ -657,12 +665,20 @@ const FAILED_NEXT_STEP: ReadonlyMap<string, string> = new Map([
     "merge_expired",
     "Tasks waiting on it failed with it. If it did merge, submit the tasks that waited on it again. Its session had already ended.",
   ],
-  ["session_failed", "Tasks waiting on it failed with it. Its transcript on that machine says why."],
 ]);
 
-export function failedBody(code: string | undefined): string {
+/** A killed process writes nothing at the end, so its transcript has no reason to give. */
+function sessionFailedNextStep(exit: number | undefined): string {
+  const transcript = endedBySignal(exit)
+    ? "Its transcript on that machine stops where it ended."
+    : "Its transcript on that machine says why.";
+  return `Tasks waiting on it failed with it. ${transcript}`;
+}
+
+export function failedBody(code: string | undefined, exit?: number, until?: TaskUntil): string {
   // A code the scheduler set itself says why; any other is a daemon's spawn refusal.
-  const scheduler = code === undefined ? null : taskFailureText(code);
+  const scheduler = code === undefined ? null : taskFailureText(code, exit, until);
   if (code === undefined || scheduler === null) return "The machine refused the spawn. Nothing is running.";
-  return `${sentence(scheduler)} ${FAILED_NEXT_STEP.get(code) ?? "Nothing is running."}`;
+  const next = code === "session_failed" ? sessionFailedNextStep(exit) : FAILED_NEXT_STEP.get(code);
+  return `${sentence(scheduler)} ${next ?? "Nothing is running."}`;
 }

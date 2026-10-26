@@ -146,6 +146,13 @@ describe("deriveQueue", () => {
     }
   });
 
+  test("a failed session's card says how it ended, from the exit status its failure carries", () => {
+    const failure = { code: "session_failed", message: "m", exit: 137 };
+    const view = deriveQueue(state(ok([task("f", { state: "failed", failure })])), NOW);
+    expect(view.sections[0]?.rows[0]?.body).toBe(failedBody("session_failed", 137));
+    expect(view.sections[0]?.rows[0]?.body).toContain("killed (SIGKILL), possibly out of memory");
+  });
+
   test("a ready card says why it waits, leaving out places cut only for the pin", () => {
     const over = { code: "quota_over_line", window: "5h", projectedPct: 100 } as const;
     const held = task("w", {
