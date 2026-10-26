@@ -120,7 +120,8 @@ export function ended(task: Task, entry: Progress | undefined, fields: TaskField
   const exit = seen?.exit;
   if (exit !== undefined && exit !== 0) {
     const message = `its session exited with status ${exit} and reported no pull request`;
-    return advance(open, "failed", { failure: { code: "session_failed", message } });
+    // `exit` too, so readers word it without parsing the message (an older one keeps only the message).
+    return advance(open, "failed", { failure: { code: "session_failed", message, exit } });
   }
   return advance(open, "done", { doneBy: "session" });
 }

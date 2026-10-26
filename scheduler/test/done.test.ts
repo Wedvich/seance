@@ -101,7 +101,7 @@ describe("a session's exit status", () => {
   const dying = { id: "%1", window: "w", repo: "app", path: "/wt/t", taskId: "t" } as const;
 
   test("from a machine that reports it, a PR-less end waits for the answer: nonzero fails the task and its dependents", async () => {
-    const { fleet, scheduler, put } = setup(reporting());
+    const { fleet, scheduler, put, store } = setup(reporting());
     await put("t", { assignment: ON_A });
     await put("dep", { state: "queued", spec: spec({ deps: [{ task: "t", after: "merged" }] }) });
     await scheduler.load();
@@ -113,10 +113,12 @@ describe("a session's exit status", () => {
     expect(scheduler.task("t")?.state).toBe("running");
 
     // Asked again on the next pass, sweep or not.
-    fleet.sessionsReply = () => ({ ok: true, sessions: [], ended: ["t"], progress: [progress("t", { exit: 1 })] });
+    fleet.sessionsReply = () => ({ ok: true, sessions: [], ended: ["t"], progress: [progress("t", { exit: 137 })] });
     await pass(scheduler);
     expect(fleet.sessionCalls).toEqual(["a", "a"]);
-    expect(scheduler.task("t")).toMatchObject({ state: "failed", failure: { code: "session_failed" } });
+    expect(scheduler.task("t")).toMatchObject({ state: "failed", failure: { code: "session_failed", exit: 137 } });
+    // The status is stored as a field, not only inside the message, so a reader words it without parsing.
+    expect((await store.get("t"))?.body.failure).toMatchObject({ code: "session_failed", exit: 137 });
     expect(scheduler.task("dep")).toMatchObject({ state: "failed", failure: { code: "dependency_failed" } });
   });
 
@@ -755,7 +757,7 @@ describe("until: reported", () => {
     expect(ended(running("reported"), { exit: 0 })).toMatchObject({ state: "done", doneBy: "session" });
     expect(ended(running("reported"), { exit: 1 })).toMatchObject({
       state: "failed",
-      failure: { code: "session_failed" },
+      failure: { code: "session_failed", exit: 1 },
     });
     expect(ended(running("merged"), { reported: true })).toMatchObject({ state: "done", doneBy: "session" });
   });
