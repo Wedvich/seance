@@ -8,7 +8,15 @@ import {
   type Reason,
   type Task,
 } from "@seance/shared";
-import { describeDecision, isPlaced, pinLine, queuedBody, taskHeadline, waitingText } from "../src/decision-view.ts";
+import {
+  describeDecision,
+  isPlaced,
+  machineAsleep,
+  pinLine,
+  queuedBody,
+  taskHeadline,
+  waitingText,
+} from "../src/decision-view.ts";
 
 const NOW = 1_800_000_000_000;
 const NOW_S = NOW / 1000;
@@ -246,10 +254,61 @@ describe("taskHeadline", () => {
     );
   });
 
-  test("a lost task says its machine went away, and when", () => {
-    expect(taskHeadline(task({ state: "lost", assignment: at, absentSince: NOW - 20 * 60_000 }), machines, NOW)).toBe(
-      "Lost on Mac · default — its machine went away 20m ago.",
+  test("a lost task on a machine back says it hasn't answered yet; on one gone from the registry, when it went", () => {
+    const lost = task({ state: "lost", assignment: at, absentSince: NOW - 20 * 60_000 });
+    expect(taskHeadline(lost, machines, NOW)).toBe(
+      "Lost on Mac · default — its machine is back but hasn't answered for it yet.",
     );
+    expect(taskHeadline(lost, [], NOW)).toBe("Lost on mac · default — its machine went away 20m ago.");
+    expect(taskHeadline({ ...lost, absentSince: undefined }, [], NOW)).toBe(
+      "Lost on mac · default — its machine stopped answering.",
+    );
+  });
+
+  describe("on an asleep machine", () => {
+    const asleep = [{ ...machine("mac", "Mac", false), lastSeen: NOW - 14 * 60_000 }];
+
+    test("every live state says so, with when it was last heard from", () => {
+      expect(taskHeadline(task({ state: "needs-input", assignment: at }), asleep, NOW)).toBe(
+        "It's waiting for input on Mac · default — its machine went to sleep 14m ago.",
+      );
+      expect(taskHeadline(task({ state: "running", assignment: at }), asleep, NOW)).toBe(
+        "It's running on Mac · default — its machine went to sleep 14m ago.",
+      );
+      // Reservation only: the machine the scheduler is starting it on.
+      expect(taskHeadline(task({ state: "reserved", reservation: { ...at, expiresAt: NOW } }), asleep, NOW)).toBe(
+        "Starting on Mac · default — its machine went to sleep 14m ago.",
+      );
+      expect(taskHeadline(task({ state: "lost", assignment: at, absentSince: NOW - 2 * 60_000 }), asleep, NOW)).toBe(
+        "Asleep on Mac · default — its machine went to sleep 14m ago.",
+      );
+      expect(machineAsleep(task({ state: "lost", assignment: at }), asleep)).toBe(true);
+    });
+
+    test("the age is the newer of lastSeen and the status beat", () => {
+      const stale = [
+        {
+          ...machine("mac", "Mac", false),
+          lastSeen: NOW - 3 * 86_400_000,
+          status: { at: (NOW - 3 * 60_000) / 1000, scan: NOW, cpu: 1, mem: 1, disk: 1, free: 1 },
+        },
+      ];
+      expect(taskHeadline(task({ state: "running", assignment: at }), stale, NOW)).toBe(
+        "It's running on Mac · default — its machine went to sleep 3m ago.",
+      );
+    });
+
+    test("a connected or unlisted machine, or a state the leader settles alone, carries no clause", () => {
+      expect(taskHeadline(task({ state: "needs-input", assignment: at }), machines, NOW)).toBe(
+        "It's waiting for input on Mac · default.",
+      );
+      expect(taskHeadline(task({ state: "running", assignment: at }), [], NOW)).toBe("It's running on mac · default.");
+      expect(taskHeadline(task({ state: "awaiting-merge", assignment: at }), asleep, NOW)).toBe(
+        "Its session ended on Mac · default — waiting for the PR to merge.",
+      );
+      expect(machineAsleep(task({ state: "awaiting-merge", assignment: at }), asleep)).toBe(false);
+      expect(machineAsleep(task({ state: "running", assignment: at }), machines)).toBe(false);
+    });
   });
 
   test("a cancel that could not reach its machine, and a spawn never confirmed, say what may still run", () => {
