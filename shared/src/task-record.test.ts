@@ -92,6 +92,20 @@ describe("task records at rest", () => {
     expect(await sealedPin({ ...base, pin: { deviceId: "dev-a" } })).toEqual({ deviceId: "dev-a" });
   });
 
+  test("a continuation keeps its mode and link through seal and open; the link without the mode is unreadable", async () => {
+    const at = { deviceId: "dev-a", exclave: "default", clone: "app" };
+    const base = queued();
+    const task: Task = { ...base, spec: { ...base.spec, mode: "continue", continues: { task: "t-old", at } } };
+    const read = async (t: Task): Promise<unknown> => {
+      const env = await sealTaskRecord(key, APP_ID, { version: 1, task: t });
+      return openTaskRecord(key, { key: taskKey(t.id), version: 1, env }, NOW);
+    };
+    expect(await read(task)).toEqual({ version: 1, task });
+    // What an older leader's parse would have left: the field it cannot know is dropped with the mode refused,
+    // so the pair never reads half-way here either.
+    expect(await read({ ...task, spec: { ...task.spec, mode: "worktree" } })).toBe("malformed");
+  });
+
   test("a body that opens but is no task record is malformed", async () => {
     const id = crypto.randomUUID();
     const env = await sealAtRest(key, { to: SCHEDULER_ID, from: APP_ID }, "task", { version: 1, task: { id } });

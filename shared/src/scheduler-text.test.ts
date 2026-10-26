@@ -91,6 +91,11 @@ describe("reasonText", () => {
     expect(reasonText({ code: "pin_mismatch", field: "account" })).toBe("not the pinned account");
     expect(reasonText({ code: "avoided" })).toBe("the task avoids this machine");
   });
+
+  test("a continuation says why a candidate is not the one it resumes on", () => {
+    expect(reasonText({ code: "continue_elsewhere" })).toBe("the session it continues ran elsewhere");
+    expect(reasonText({ code: "continue_unsupported" })).toContain("seanced update");
+  });
 });
 
 describe("storeErrorText", () => {

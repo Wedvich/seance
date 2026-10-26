@@ -103,6 +103,10 @@ export function reasonText(reason: Reason): string {
       return "the task avoids this machine";
     case "repo_absent":
       return "no clone of this repo there";
+    case "continue_elsewhere":
+      return "the session it continues ran elsewhere";
+    case "continue_unsupported":
+      return "its daemon can't continue a session yet (needs seanced update)";
     case "auth_missing":
       return "not signed in";
     case "auth_expired":

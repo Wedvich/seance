@@ -948,6 +948,9 @@ export interface MachineInfo {
  * `TaskSpec.avoid` — what a client checks of the verified leader before writing
  * either. An older leader would rebuild the spec without both; the record's
  * `PIN_SENTINEL` makes it unreadable to one instead (`TaskSpec.pin`).
+ * `continueTask`: as a daemon, spawns `mode: "continue"`; as a leader, routes and
+ * dispatches a continue task — what a client checks of the verified leader before
+ * writing one (an older leader refuses the mode, holding the record unreadable).
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -956,6 +959,7 @@ export const CAPABILITIES = {
   exitStatus: "exitStatus",
   reportedDone: "reportedDone",
   pinAccount: "pinAccount",
+  continueTask: "continueTask",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -1199,7 +1203,13 @@ export const METRIC_NAMES = {
 
 export type MetricName = (typeof METRIC_NAMES)[keyof typeof METRIC_NAMES];
 
-export type SpawnMode = "worktree" | "here";
+/**
+ * `continue` resumes a failed task's session (`claude --continue`) in the worktree
+ * this machine's launch ledger noted for `SpawnRequest.continues`. It comes only
+ * from the leader's dispatch of a continue task (DESIGN.md, Daemon, "Continuing a
+ * failed task"); no direct client sends it.
+ */
+export type SpawnMode = "worktree" | "here" | "continue";
 
 /**
  * Client names our own senders stamp into `SpawnRequest.client` — compile-time
@@ -1258,6 +1268,13 @@ export interface SpawnRequest {
    * none.
    */
   readonly baseBranch?: string;
+  /**
+   * The failed task whose worktree the session resumes. Required exactly when
+   * `mode` is `"continue"`. Bounded by `TASK_ID_PATTERN`; resolved against the
+   * receiving daemon's own launch ledger, never a path from the wire. An older
+   * daemon refuses the mode as malformed.
+   */
+  readonly continues?: string;
 }
 
 /**
@@ -1283,6 +1300,15 @@ export const SPAWN_ERROR_CODES = [
   "no_default_branch",
   /** `baseBranch` names no branch on origin (M4, stacking). */
   "base_not_found",
+  /**
+   * A `mode: "continue"` spawn that cannot resume: not sealed by the scheduler, no
+   * ledger record of the continued task, its launch still in flight, no worktree
+   * noted (a `here` run), a different clone from the one `repo` resolved to, a path
+   * outside `<clone>/.claude/worktrees/` or not canonical, the worktree gone, a live
+   * session still in it, or a lock on it that is not a stale Claude one. Nothing
+   * launched, no ledger entry for the new id.
+   */
+  "not_continuable",
   "launch_error",
   "claude_died",
   "timeout",
@@ -1757,6 +1783,14 @@ export interface TaskSpec extends TaskRequest {
   readonly deps?: readonly TaskDep[];
   readonly linear?: LinearLink;
   /**
+   * The failed task this one resumes and where its worktree is: its id and its
+   * `assignment` as a `Target`, copied by the app at enqueue so the old record may
+   * be pruned. Present exactly when `mode === "continue"` (the parser requires
+   * both), which an older leader refuses, so it holds the record unreadable rather
+   * than strip this. Routing and display only: the daemon never reads a path from it.
+   */
+  readonly continues?: { readonly task: string; readonly at: Target };
+  /**
    * Which app-role client enqueued it, as `SpawnRequest.client` — audit trail
    * only (the leader's admit line), at most `TASK_SPEC_LIMITS.client`. Absent
    * from older clients.
@@ -1806,6 +1840,10 @@ export type Reason =
   /** The machine is in the task's `avoid` list. */
   | { readonly code: "avoided" }
   | { readonly code: "repo_absent" }
+  /** A continue task's target is exactly one (machine, exclave, clone); this is another. */
+  | { readonly code: "continue_elsewhere" }
+  /** The target machine does not advertise `CAPABILITIES.continueTask`. */
+  | { readonly code: "continue_unsupported" }
   | { readonly code: "auth_missing" }
   /** M4, Auth health: the exclave is listed in its status's `ax`. */
   | { readonly code: "auth_expired" }
