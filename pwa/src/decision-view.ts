@@ -232,10 +232,10 @@ export function taskHeadline(task: Task, machines: readonly Machine[], now: numb
       if (task.failure?.code === "lost_expired") return `Given up${place} — its session may still be running there.`;
       if (task.failure?.code === "merge_expired") return "No merge seen for its PR — the scheduler gave up waiting.";
       if (task.failure?.code === "session_failed") {
-        // No `exit` from an older leader: how it ended is unknown, so it reads as before.
-        if (task.failure.exit === undefined) return `Its session exited with an error${place}, with no PR.`;
+        // No `exit` from an older leader: how it ended is unknown, and `sessionExit` says so.
         const { clause, hint } = sessionExit(task.failure.exit);
-        return `Its session ${clause}${place}${hint === undefined ? "" : `, ${hint}`}, with no PR.`;
+        const lacked = task.spec.until === "reported" ? "with no done report" : "with no PR";
+        return `Its session ${clause}${place}${hint === undefined ? "" : `, ${hint}`}, ${lacked}.`;
       }
       // A scheduler-set failure never reached a machine; only a daemon refusal "didn't take" there.
       return task.failure !== undefined && taskFailureText(task.failure.code) !== null
@@ -346,7 +346,7 @@ export function queuedBody(task: Task): string {
       if (task.doneBy === "reported") return "Its session reported it done.";
       return task.doneBy === "manual" ? "Marked done by hand." : "The session ended.";
     case "failed":
-      return failedBody(task.failure?.code, task.failure?.exit);
+      return failedBody(task.failure?.code, task.failure?.exit, task.spec.until);
     case "cancelled":
       return task.leftRunning === true ? LEFT_RUNNING : "Nothing is running.";
   }

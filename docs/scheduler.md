@@ -529,7 +529,8 @@ of M4 has landed.
   status", records the rest and what was rejected. _Follow-up (2026-10-26):_ the failure carries
   the status as `failure.exit`, so the PWA and `get_queue` say how the session ended — "killed
   (SIGKILL), possibly out of memory" for 137, a signal's name for the others macOS and Linux number
-  alike, "exited with status N" otherwise — instead of "exited with an error".
+  alike ("ended on SIGTERM (status 143)": only SIGKILL claims a kill), "exited with status N" otherwise —
+  instead of "exited with an error". Under `until: "reported"` it says "did not report done" for "reported no pull request".
 
   _Open gaps (follow-up, not yet planned):_
   - The deadline and disconnect settles call `ended(task, undefined)`, so a PR the daemon noted

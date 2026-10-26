@@ -19,26 +19,47 @@ describe("taskFailureText", () => {
       "its session was killed (SIGKILL), possibly out of memory, and reported no pull request",
     );
     expect(taskFailureText("session_failed", 143)).toBe(
-      "its session was killed (SIGTERM) and reported no pull request",
+      "its session ended on SIGTERM (status 143) and reported no pull request",
     );
     expect(taskFailureText("session_failed", 1)).toBe("its session exited with status 1 and reported no pull request");
     expect(taskFailureText("session_failed")).toBe("its session exited with an error and reported no pull request");
+    // 0 is no failure, and nothing else outside 1–255 or non-integer is a status: all read as no status.
+    for (const exit of [0, -1, 256, 1.5, Number.NaN]) {
+      expect(taskFailureText("session_failed", exit)).toBe(taskFailureText("session_failed"));
+    }
     expect(taskFailureText("merge_expired", 137)).toBe(taskFailureText("merge_expired"));
     expect(taskFailureText("repo_not_found", 137)).toBeNull();
+  });
+
+  test("under until reported, the missing thing is the done report, not a pull request", () => {
+    expect(taskFailureText("session_failed", 1, "reported")).toBe(
+      "its session exited with status 1 and did not report done",
+    );
+    expect(taskFailureText("session_failed", undefined, "reported")).toBe(
+      "its session exited with an error and did not report done",
+    );
+    expect(taskFailureText("session_failed", 1, "merged")).toBe(taskFailureText("session_failed", 1));
+    expect(taskFailureText("merge_expired", undefined, "reported")).toBe(taskFailureText("merge_expired"));
   });
 });
 
 describe("sessionExit", () => {
-  test("names a signal death only where macOS and Linux number it alike, and hints at memory only for SIGKILL", () => {
+  test("names a signal death only where macOS and Linux number it alike, and claims a kill and a memory hint only for SIGKILL", () => {
     expect(sessionExit(137)).toEqual({ clause: "was killed (SIGKILL)", hint: "possibly out of memory" });
-    expect(sessionExit(139)).toEqual({ clause: "was killed (SIGSEGV)" });
-    expect(sessionExit(130)).toEqual({ clause: "was killed (SIGINT)" });
-    expect(sessionExit(143)).toEqual({ clause: "was killed (SIGTERM)" });
+    expect(sessionExit(139)).toEqual({ clause: "ended on SIGSEGV (status 139)" });
+    expect(sessionExit(130)).toEqual({ clause: "ended on SIGINT (status 130)" });
+    expect(sessionExit(143)).toEqual({ clause: "ended on SIGTERM (status 143)" });
     // 128 + 10: SIGUSR1 on Linux, SIGBUS on macOS — the status is all that is certain.
     expect(sessionExit(138)).toEqual({ clause: "exited with status 138" });
     expect(sessionExit(128)).toEqual({ clause: "exited with status 128" });
     expect(sessionExit(1)).toEqual({ clause: "exited with status 1" });
     expect(sessionExit(9)).toEqual({ clause: "exited with status 9" });
+  });
+
+  test("a value outside 1–255, or none, is no status", () => {
+    for (const exit of [undefined, 0, -1, 256, 1.5, Number.NaN]) {
+      expect(sessionExit(exit)).toEqual({ clause: "exited with an error" });
+    }
   });
 });
 

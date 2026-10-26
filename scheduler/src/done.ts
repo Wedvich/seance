@@ -119,7 +119,8 @@ export function ended(task: Task, entry: Progress | undefined, fields: TaskField
   if (open.prUrl !== undefined) return advance(open, "awaiting-merge");
   const exit = seen?.exit;
   if (exit !== undefined && exit !== 0) {
-    const message = `its session exited with status ${exit} and reported no pull request`;
+    const missing = settlesOnReport(known) ? "did not report done" : "reported no pull request";
+    const message = `its session exited with status ${exit} and ${missing}`;
     // `exit` too, so readers word it without parsing the message (an older one keeps only the message).
     return advance(open, "failed", { failure: { code: "session_failed", message, exit } });
   }

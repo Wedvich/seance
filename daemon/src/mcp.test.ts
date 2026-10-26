@@ -2035,7 +2035,15 @@ describe("get_queue", () => {
           failed("t-1", "dispatch_unconfirmed", "the launch ledger no longer reaches back to its reservation"),
           failed("t-2", "repo_not_found", "no such repo"),
           // The leader's own record: its exit status rides beside the message, so the line words it.
-          task({ id: "t-3", state: "failed", failure: { code: "session_failed", message: "exited 137", exit: 137 } }),
+          task({
+            id: "t-3",
+            state: "failed",
+            failure: {
+              code: "session_failed",
+              message: "its session exited with status 137 and reported no pull request",
+              exit: 137,
+            },
+          }),
         ],
         at: 6_000,
       },
@@ -2047,7 +2055,7 @@ describe("get_queue", () => {
     expect(tasks.map((t: { failure: string }) => t.failure)).toEqual([
       `dispatch_unconfirmed: ${taskFailureText("dispatch_unconfirmed")} (the launch ledger no longer reaches back to its reservation)`,
       "repo_not_found: no such repo",
-      "session_failed: its session was killed (SIGKILL), possibly out of memory, and reported no pull request (exited 137)",
+      "session_failed: its session was killed (SIGKILL), possibly out of memory, and reported no pull request",
     ]);
     lazy.stop();
   });

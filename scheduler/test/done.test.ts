@@ -757,7 +757,10 @@ describe("until: reported", () => {
     expect(ended(running("reported"), { exit: 0 })).toMatchObject({ state: "done", doneBy: "session" });
     expect(ended(running("reported"), { exit: 1 })).toMatchObject({
       state: "failed",
-      failure: { code: "session_failed", exit: 1 },
+      failure: { code: "session_failed", exit: 1, message: "its session exited with status 1 and did not report done" },
+    });
+    expect(ended(running("merged"), { exit: 1 })).toMatchObject({
+      failure: { message: "its session exited with status 1 and reported no pull request" },
     });
     expect(ended(running("merged"), { reported: true })).toMatchObject({ state: "done", doneBy: "session" });
   });

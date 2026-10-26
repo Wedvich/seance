@@ -1125,6 +1125,8 @@ describe("what a leader writes into a task is bounded", () => {
     // An older leader's record: no field, read as before.
     expect(failed(base)).toEqual(base);
     for (const exit of [0, EXIT_STATUS_MAX + 1, 1.5, -1, "137", null]) expect(failed({ ...base, exit })).toEqual(base);
+    // Only a session_failed has one to word.
+    expect(failed({ code: "merge_expired", message: "m", exit: 137 })).toEqual({ code: "merge_expired", message: "m" });
   });
 
   test("a decision lists at most DECISION_MAX_CANDIDATES, each with bounded reasons, and says when it was cut", () => {

@@ -4072,7 +4072,12 @@ for the lot with its own `gh`.
   readers word it through `sessionExit` in `shared/src/scheduler-text.ts` — the PWA's headline
   and card, `get_queue` — never by parsing the message, which stays for older readers: 137 reads
   "killed (SIGKILL), possibly out of memory" (the OOM killer's signal, but a person's `kill -9`
-  too, hence "possibly"), another signal by name, anything else "exited with status N". Only the
+  too, hence "possibly"), another signal "ended on SIGTERM (status 143)" — only SIGKILL cannot be
+  caught, so only it claims a kill; a process may exit on any other by choice — anything else
+  "exited with status N". A value outside 1–255 reads as no status. A signal status also tells the
+  card its transcript stops where it ended, since nothing writes one at the end. Under `until:
+  "reported"` the missing thing is the done report, so the leader's message and the wording say
+  "did not report done", not "reported no pull request". Only the
   signals macOS and Linux number alike (1–6, 8, 9, 11, 13–15) are named, since the fold uses the
   sealing daemon's own numbering and 128 + 10 is SIGUSR1 on one and SIGBUS on the other. No status — 0, which
   under `failed` closes the window and is never seen, a signal death on a tmux without

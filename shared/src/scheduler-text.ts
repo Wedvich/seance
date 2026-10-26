@@ -1,5 +1,6 @@
 import {
   SCHEDULER_ERROR_CODES,
+  EXIT_STATUS_MAX,
   STORE_ERROR_CODES,
   STORE_TOMBSTONE_MS,
   TASK_FAILURE_CODES,
@@ -8,6 +9,7 @@ import {
   type SchedulerErrorCode,
   type StoreErrorCode,
   type TaskFailureCode,
+  type TaskUntil,
   type TransportErrorCode,
 } from "./types.ts";
 
@@ -175,25 +177,45 @@ export interface SessionExit {
   readonly hint?: string;
 }
 
-export function sessionExit(exit: number): SessionExit {
-  const signal = exit > 128 ? PORTABLE_SIGNALS.get(exit - 128) : undefined;
-  if (signal === undefined) return { clause: `exited with status ${exit}` };
-  // The kernel's OOM killer sends SIGKILL; so can a person, hence "possibly".
+/** A status `Task.failure.exit` may hold; anything else (0, a negative, past a byte, a fraction) is no failure status. */
+function failureStatus(exit: number | undefined): number | undefined {
+  return exit !== undefined && Number.isInteger(exit) && exit >= 1 && exit <= EXIT_STATUS_MAX ? exit : undefined;
+}
+
+/** A status past 128 is the shell's `128 + signal`, so the session was ended from outside and wrote nothing at the end. */
+export function endedBySignal(exit: number | undefined): boolean {
+  const status = failureStatus(exit);
+  return status !== undefined && status > 128;
+}
+
+/** What a task under `until: "reported"` lacked, beside a PR: the session's own report. */
+function missing(until: TaskUntil | undefined): string {
+  return until === "reported" ? "did not report done" : "reported no pull request";
+}
+
+export function sessionExit(exit?: number): SessionExit {
+  const status = failureStatus(exit);
+  if (status === undefined) return { clause: "exited with an error" };
+  const signal = status > 128 ? PORTABLE_SIGNALS.get(status - 128) : undefined;
+  if (signal === undefined) return { clause: `exited with status ${status}` };
+  // Only SIGKILL cannot be caught: any other signal's status may be a process exiting on it by choice, so it never claims a kill.
+  // The OOM killer sends SIGKILL; so can a person, hence "possibly".
   return signal === "SIGKILL"
     ? { clause: "was killed (SIGKILL)", hint: "possibly out of memory" }
-    : { clause: `was killed (${signal})` };
+    : { clause: `ended on ${signal} (status ${status})` };
 }
 
 /**
  * A scheduler-set failure's line; null for any other code — a daemon's spawn refusal, or one minted later.
- * `exit` (`Task.failure.exit`) words a `session_failed` exactly; without it, or for any other code, the line is the code's alone.
+ * `exit` (`Task.failure.exit`) words a `session_failed` exactly, and `until` (`TaskSpec.until`) what it lacked;
+ * without `exit`, or for any other code, the line is the code's alone.
  */
-export function taskFailureText(code: string, exit?: number): string | null {
+export function taskFailureText(code: string, exit?: number, until?: TaskUntil): string | null {
   const known = TASK_FAILURE_CODES.find((c) => c === code);
   if (known === undefined) return null;
-  if (known !== "session_failed" || exit === undefined) return TASK_FAILURE_TEXT[known];
+  if (known !== "session_failed") return TASK_FAILURE_TEXT[known];
   const { clause, hint } = sessionExit(exit);
-  return `its session ${clause}${hint === undefined ? "" : `, ${hint},`} and reported no pull request`;
+  return `its session ${clause}${hint === undefined ? "" : `, ${hint},`} and ${missing(until)}`;
 }
 
 /** A clause shown on its own: capitalized and closed. */
