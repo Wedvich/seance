@@ -1,3 +1,5 @@
+import { stat } from "node:fs/promises";
+import { join, sep } from "node:path";
 import type {
   DespawnRequest,
   DespawnResponse,
@@ -33,6 +35,7 @@ import {
   type SpawnOrigin,
 } from "./audit.ts";
 import { DespawnFailure, SpawnFailure, type DespawnResult, type SessionBackend, type SpawnOutcome } from "./backend.ts";
+import { canonical } from "./gitdir.ts";
 import { log } from "./log.ts";
 import type { SettleLaunch } from "./session-events.ts";
 
@@ -67,6 +70,13 @@ export interface TaskLaunches {
   readonly launch: (taskId: string) => Promise<SettleLaunch>;
   /** The ledger holds the task as launched here, and no launch of it is in flight. */
   readonly launched: (taskId: string) => boolean;
+  /**
+   * Where the ledger noted `taskId`'s worktree, for a continuation; `refused` says why there
+   * is none. Never from the wire: the request names a task, this machine says where it ran.
+   */
+  readonly continuation: (
+    taskId: string,
+  ) => { readonly repo: string; readonly path: string } | { readonly refused: string };
   /** Resolves once no launch is in flight. */
   readonly settled: () => Promise<void>;
   /** What the ledger holds of each launched task's PR and branch, for the scheduler's `sessions`. */
@@ -86,7 +96,7 @@ export function isSpawnRequest(payload: unknown): payload is SpawnRequest {
   if (typeof payload !== "object" || payload === null) return false;
   const obj = payload as Record<string, unknown>;
   if (typeof obj["repo"] !== "string" || obj["repo"] === "") return false;
-  if (obj["mode"] !== "worktree" && obj["mode"] !== "here") return false;
+  if (obj["mode"] !== "worktree" && obj["mode"] !== "here" && obj["mode"] !== "continue") return false;
   for (const key of ["prompt", "title", "model", "effort", "client"]) {
     if (obj[key] !== undefined && typeof obj[key] !== "string") return false;
   }
@@ -97,7 +107,13 @@ export function isSpawnRequest(payload: unknown): payload is SpawnRequest {
   // is the hazard the `baseBranch` capability exists for. Stacking lifts this refusal and
   // holds the name to `isBranchName` instead.
   if (obj["baseBranch"] !== undefined) return false;
-  return true;
+  // `continues` is the one field of a continuation and only of one. It is a ledger key: the
+  // worktree comes from this machine's own record of that task, never from the request.
+  if (obj["continues"] !== undefined && !isTaskId(obj["continues"])) return false;
+  if ((obj["mode"] === "continue") !== (obj["continues"] !== undefined)) return false;
+  if (obj["mode"] !== "continue") return true;
+  // Only the scheduler's own task spawns, and one never continues itself.
+  return obj["taskId"] !== undefined && obj["client"] === SCHEDULER_CLIENT && obj["continues"] !== obj["taskId"];
 }
 
 /** Shape only: what the id may name is the backend's to decide, and it does. */
@@ -171,16 +187,77 @@ async function relaunchRefusal(
   };
 }
 
-async function handleSpawn(ctx: HandlerContext, audit: SpawnAudit, payload: unknown): Promise<SpawnResponse> {
+type SpawnRefusal = Extract<SpawnResponse, { readonly ok: false }>;
+
+function notContinuable(message: string): SpawnRefusal {
+  return { ok: false, code: "not_continuable", message };
+}
+
+/**
+ * The worktree a continuation resumes in, from this machine's launch ledger and checked
+ * before anything is recorded or run (DESIGN.md, Daemon, "Continuing a failed task"): the
+ * clone `repo` resolved to is the one the ledger noted, and the path is canonical and under
+ * that clone's `.claude/worktrees/`, so a ledger written by anything else cannot aim a
+ * session at an arbitrary directory.
+ */
+async function continuationSite(
+  ctx: HandlerContext,
+  request: SpawnRequest,
+  repos: readonly RepoEntry[],
+): Promise<{ readonly path: string } | SpawnRefusal> {
+  const site = request.continues === undefined ? undefined : ctx.tasks?.continuation(request.continues);
+  if (site === undefined) return notContinuable("this machine keeps no launch record to continue from");
+  if ("refused" in site) return notContinuable(site.refused);
+  const entry = repos.find((r) => r.name === request.repo);
+  if (entry === undefined) {
+    return { ok: false, code: "repo_not_found", message: `no repo named "${request.repo}" — try a rescan` };
+  }
+  if (entry.path !== site.repo) {
+    return notContinuable(`it ran in another clone of ${request.repo} (${site.repo}), not this one`);
+  }
+  const real = await canonical(site.path);
+  const present = await stat(real).then(
+    (info) => info.isDirectory(),
+    () => false,
+  );
+  if (!present) return notContinuable(`its worktree ${site.path} is gone (removed or reaped)`);
+  if (real !== site.path || !real.startsWith(join(entry.path, ".claude", "worktrees") + sep)) {
+    return notContinuable(`its noted path ${site.path} is not a worktree of ${request.repo}`);
+  }
+  return { path: real };
+}
+
+async function handleSpawn(
+  ctx: HandlerContext,
+  audit: SpawnAudit,
+  payload: unknown,
+  scheduler: boolean,
+): Promise<SpawnResponse> {
   if (!isSpawnRequest(payload)) {
     await audit.rejected("malformed request");
     return { ok: false, code: "internal_error", message: "malformed spawn request" };
   }
   await audit.request(payload);
+  // `from` says who sealed the request; `client` is free text anyone can write, so it is not the gate.
+  if (payload.mode === "continue" && !scheduler) {
+    await audit.failed("not_continuable");
+    return notContinuable("only the scheduler continues a session");
+  }
   const refused = await relaunchRefusal(ctx, payload);
   if (refused !== null) {
     await audit.failed(refused.code, refused.id);
     return refused;
+  }
+  // Read once: a rescan in between must not pair the spawn with another clone.
+  const repos = ctx.getRepos();
+  let continuation: { readonly path: string } | undefined;
+  if (payload.mode === "continue") {
+    const site = await continuationSite(ctx, payload, repos);
+    if ("code" in site) {
+      await audit.failed(site.code);
+      return site;
+    }
+    continuation = site;
   }
   let settle: SettleLaunch | undefined;
   if (payload.taskId !== undefined && ctx.tasks !== undefined) {
@@ -199,10 +276,8 @@ async function handleSpawn(ctx: HandlerContext, audit: SpawnAudit, payload: unkn
   }
   try {
     let outcome: SpawnOutcome;
-    // Read once: a rescan in between must not pair the spawn with another clone.
-    const repos = ctx.getRepos();
     try {
-      outcome = await ctx.backend.spawn(payload, repos);
+      outcome = await ctx.backend.spawn(payload, repos, continuation);
     } catch (err) {
       // A refusal launched nothing, except `task_running`: its session is an earlier launch of this task.
       // Neither it nor a crash starts a note: the earlier launch's stays.
@@ -210,7 +285,8 @@ async function handleSpawn(ctx: HandlerContext, audit: SpawnAudit, payload: unkn
       throw err;
     }
     // Only a worktree has a branch of its own to watch; `here` runs in the clone itself.
-    const entry = payload.mode === "worktree" ? repos.find((r) => r.name === payload.repo) : undefined;
+    // A continuation watches the worktree it resumed, under its new task id.
+    const entry = payload.mode !== "here" ? repos.find((r) => r.name === payload.repo) : undefined;
     await settle?.(true, entry === undefined ? {} : { site: { repo: entry.path, worktree: outcome.path } });
     await audit.ok(outcome);
     // The app writes this list straight into its cache, so it is read only now,
@@ -401,7 +477,7 @@ export function createLocalOps(ctx: HandlerContext, origin: SpawnOrigin): LocalO
     sessions: () => run("sessions", crypto.randomUUID(), () => listSessions(ctx, true)),
     spawn: (payload) => {
       const taskId = isRecord(payload) && isTaskId(payload["taskId"]) ? payload["taskId"] : crypto.randomUUID();
-      return run("spawn", taskId, () => handleSpawn(ctx, audit, payload));
+      return run("spawn", taskId, () => handleSpawn(ctx, audit, payload, true));
     },
     despawn: (payload) => run("despawn", crypto.randomUUID(), () => handleDespawn(ctx, despawnTrail, payload)),
   };
@@ -448,7 +524,7 @@ export function createHandler(
         case "sessions":
           return { payload: await listSessions(ctx, from === SCHEDULER_ID) };
         case "spawn":
-          return { payload: await handleSpawn(ctx, audit, plain.payload) };
+          return { payload: await handleSpawn(ctx, audit, plain.payload, from === SCHEDULER_ID) };
         case "despawn":
           return { payload: await handleDespawn(ctx, despawnTrail, plain.payload) };
         case "metrics":

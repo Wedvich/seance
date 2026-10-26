@@ -4,6 +4,7 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
 import {
   accountNameIn,
+  continueOffer,
   DEP_AFTER,
   knownAccounts,
   type KnownAccount,
@@ -42,6 +43,7 @@ import {
 import { appRelayClient, importAppKeys, LazyRelay, type AppKeys } from "./app-relay.ts";
 import { cliSink, type AuditSink } from "./audit.ts";
 import {
+  continueAuto,
   enqueueAuto,
   leaderTakesReported,
   MCP_PLACEMENT_NAMES,
@@ -394,7 +396,7 @@ const AUTO_LIMITS =
 
 /** What `schedulerFailureText` and `olderDaemonText` name a scheduler call by. */
 type SchedulerCall = "get_queue" | "cancel_task";
-type SchedulerTool = "spawn_session" | "queue_batch" | SchedulerCall;
+type SchedulerTool = "spawn_session" | "queue_batch" | "continue_task" | SchedulerCall;
 
 /**
  * A keyless box's daemon brokers the scheduler (DESIGN.md "Fleet broker"), so a
@@ -702,6 +704,9 @@ function describeTask(task: Task, machines: readonly Machine[], names: AccountNa
     ...(spec.batch === undefined ? {} : { batch: spec.batch }),
     ...(spec.deps === undefined ? {} : { after: spec.deps.map((dep) => ({ task: dep.task, when: dep.after })) }),
     ...(spec.linear === undefined ? {} : { linear: spec.linear }),
+    ...(spec.continues === undefined ? {} : { continues: spec.continues.task }),
+    // The same offer the app's Continue button follows; `continue_task` still re-checks the leader.
+    ...(continueOffer(task, machines).ok ? { continuable: true } : {}),
   };
 }
 
@@ -914,6 +919,31 @@ export function buildMcpServer(
           return errorResult(`cancel_task failed (${reply.code}): ${schedulerErrorText(reply.code)}${said}`);
         }
         return renderCancelled(reply.task, lease.machines);
+      }),
+  );
+
+  server.registerTool(
+    "continue_task",
+    {
+      title: "Continue a failed scheduler task",
+      description: `Resume a task whose session ended in failure (get_queue marks one \`continuable\`): the same conversation, in the same worktree on the same machine, as a new task the scheduler dispatches there. Only for a session that was killed, crashed or ran out of memory partway; the old task stays failed, and so do the tasks that wait on it. The new task waits in the queue like any other, and fails if the worktree is gone (reaped), a session is open in it, or the machine no longer holds the launch record (kept a week, at most 128 launches). \`prompt\` is an optional note the resumed session is told, within the ${TASK_REQUEST_LIMITS.prompt}-character prompt bound. Answers with the new task id; get_queue shows where it lands. ${AUTO_LIMITS}`,
+      inputSchema: z.object({
+        taskId: z.string().describe("The failed task's id from get_queue"),
+        prompt: z.string().optional().describe("Optional: a note for the resumed session, from the user"),
+      }),
+      annotations: { readOnlyHint: false },
+    },
+    async ({ taskId, prompt }) =>
+      withFleet(async (lease) => {
+        if (lease.scheduler === null) return errorResult(olderDaemonText("continue_task"));
+        const outcome = await continueAuto(
+          { machines: lease.machines, scheduler: lease.scheduler },
+          taskId,
+          prompt,
+          audit,
+          "mcp",
+        );
+        return outcome.ok ? textResult(outcome.text) : errorResult(outcome.text);
       }),
   );
 

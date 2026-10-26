@@ -178,11 +178,13 @@ export function spawnAudit(origin: SpawnOrigin, sink: AuditSink): SpawnAudit {
       // Only when on, so every ordinary spawn's line stays byte-identical.
       const planNote = request.plan === true ? "plan=true " : "";
       const taskNote = request.taskId === undefined ? "" : `task=${quote(request.taskId)} `;
+      const continuesNote = request.continues === undefined ? "" : `continues=${quote(request.continues)} `;
       await emit(
         `${clientNote}repo=${quote(request.repo)} mode=${request.mode} title=${quote(request.title ?? "")} ` +
           `model=${quote(request.model ?? DEFAULT_MODEL)} effort=${quote(request.effort ?? DEFAULT_EFFORT)} ` +
           planNote +
           taskNote +
+          continuesNote +
           promptNote,
       );
     },
@@ -319,7 +321,11 @@ export type EnqueueSurface = Extract<SpawnClient, "mcp" | "cli">;
 export type EnqueueOrigin = EnqueueSurface | BrokerOrigin;
 
 export type EnqueueAuditLine = (
-  task: { readonly id: string; readonly createdAt: number },
+  task: {
+    readonly id: string;
+    readonly createdAt: number;
+    readonly spec?: { readonly continues?: { readonly task: string } };
+  },
   outcome: EnqueueOutcome,
 ) => Promise<void>;
 
@@ -345,8 +351,11 @@ export function enqueueAudit(sink: AuditSink, origin: EnqueueOrigin, claimedClie
             `refused code=${quote(outcome.code)}`
           : "unanswered";
     const who = origin === "local-broker" ? "claimed_client" : "client";
+    // Only a continuation has one, so every other line is unchanged.
+    const continued = task.spec?.continues?.task;
+    const continues = continued === undefined ? "" : ` continues=${quote(continued)}`;
     await sink(
-      `audit enqueue origin=${origin} ${who}=${client} task=${quote(task.id)} createdAt=${task.createdAt} ${how}`,
+      `audit enqueue origin=${origin} ${who}=${client} task=${quote(task.id)}${continues} createdAt=${task.createdAt} ${how}`,
     );
   };
 }
