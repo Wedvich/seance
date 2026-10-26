@@ -1337,7 +1337,7 @@ describe("the queue screen", () => {
       expect(store.getState().queueNotice).toBeNull();
       expect(store.getState().taskAction).toBeNull();
       const view = store.getState().queueView;
-      expect(view?.kind === "ok" && view.tasks.map((t) => t.id)).toEqual([created?.id, "f-1"]);
+      expect(view?.kind === "ok" ? view.tasks.map((t) => t.id) : []).toEqual([String(created?.id), "f-1"]);
     });
 
     test("an answer that never came says it may have landed; a refusal says nothing was stored", async () => {

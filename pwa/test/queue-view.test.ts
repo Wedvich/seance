@@ -689,7 +689,7 @@ describe("continuing a failed task", () => {
   });
 
   test("not offered while the leader is unverified or absent, or when the machine it ran on is gone", () => {
-    const unverified = { scheduler: { kind: "unverified", deviceId: "dev-a" } } as const;
+    const unverified = { scheduler: { kind: "unverified", deviceId: "dev-a", term: 2 } } as const;
     expect(
       deriveQueue(state(ok([failed]), {}, { machines: [machine({ capabilities: CAN })], ...unverified }), NOW)
         .sections[0]?.rows[0]?.canContinue,
