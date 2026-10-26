@@ -2,7 +2,6 @@ import {
   DEFAULT_EFFORT,
   DEFAULT_MODEL,
   METRIC_NAMES,
-  type BatchStrategy,
   type MetricName,
   type MetricsSeries,
   type MetricsStep,
@@ -109,13 +108,12 @@ export interface PersistedForm {
 }
 
 /**
- * A batch has no record of its own: each member carries the id and strategy, so
- * the form keeps them and numbers the next member. `next` moves only when a
- * member is stored, so a retry re-sends the same index.
+ * A batch has no record of its own: each member carries the id, so the form
+ * keeps it and numbers the next member. `next` moves only when a member is
+ * stored, so a retry re-sends the same index.
  */
 export interface OpenBatch {
   readonly id: string;
-  readonly strategy: BatchStrategy;
   readonly next: number;
 }
 

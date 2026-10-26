@@ -15,14 +15,7 @@ import {
 import { machineAsleep, needsAttention } from "./asleep.ts";
 import { avoidLine, pinLine, taskHeadline, waitingText } from "./decision-view.ts";
 import { accountDisplayName, formatUntil } from "./machines-view.ts";
-import {
-  deriveReportedAvailability,
-  describeStrategy,
-  failedBody,
-  formatSeen,
-  originLabel,
-  type AppState,
-} from "./view.ts";
+import { deriveReportedAvailability, failedBody, formatSeen, originLabel, type AppState } from "./view.ts";
 
 /**
  * The Queue screen as data: sections, rows and the hold lines, derived in one
@@ -232,7 +225,7 @@ function depsLine(task: Task, titles: ReadonlyMap<string, string>): string | nul
 
 function batchLine(task: Task): string | null {
   const { batch } = task.spec;
-  return batch === undefined ? null : `Batch #${batch.index} · ${describeStrategy(batch.strategy)}`;
+  return batch === undefined ? null : `Batch #${batch.index}`;
 }
 
 function placementLine(task: Task, state: AppState): string | null {

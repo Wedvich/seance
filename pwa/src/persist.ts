@@ -1,4 +1,4 @@
-import { DEP_AFTER, isTaskId, parseBatchStrategy, TASK_SPEC_LIMITS, TASK_UNTIL, type TaskDep } from "@seance/shared";
+import { DEP_AFTER, isTaskId, TASK_SPEC_LIMITS, TASK_UNTIL, type TaskDep } from "@seance/shared";
 import { DEFAULT_FORM, isEffort, isModel, type OpenBatch, type PersistedForm } from "./state.ts";
 
 /**
@@ -50,16 +50,16 @@ function asDeps(value: unknown): readonly TaskDep[] {
   return deps;
 }
 
+/** An older build's open batch also held a `strategy`; it is ignored, so that batch stays open. */
 function asBatch(value: unknown): OpenBatch | null {
   if (typeof value !== "object" || value === null) return null;
   const id: unknown = Reflect.get(value, "id");
   const next: unknown = Reflect.get(value, "next");
-  const strategy = parseBatchStrategy(Reflect.get(value, "strategy"));
-  if (!isTaskId(id) || strategy === null) return null;
+  if (!isTaskId(id)) return null;
   // One past the bound is a full batch: the last member took `batchIndex`, and the form says so instead of forgetting it.
   if (typeof next !== "number" || !Number.isInteger(next) || next < 1 || next > TASK_SPEC_LIMITS.batchIndex + 1)
     return null;
-  return { id, strategy, next };
+  return { id, next };
 }
 
 /** Hand-validated rather than trusted: this is last week's build's output. */

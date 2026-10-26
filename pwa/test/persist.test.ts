@@ -38,7 +38,7 @@ describe("form persistence", () => {
       after: [{ task: TASK, after: "done" }],
       until: "reported",
       linearIssue: "ENG-1",
-      batch: { id: TASK, strategy: { mode: "parallel", max: 3 }, next: 4 },
+      batch: { id: TASK, next: 4 },
     } as const;
     writeForm(form);
     expect(readForm()).toEqual(form);
@@ -83,16 +83,13 @@ describe("form persistence", () => {
   });
 
   test("a batch that parseTaskSpec would refuse is dropped whole", () => {
-    const good = { id: TASK, strategy: { mode: "sequential" as const }, next: 2 };
+    const good = { id: TASK, next: 2 };
     for (const batch of [
       { ...good, id: "has space" },
       { ...good, next: 0 },
       { ...good, next: 1.5 },
       { ...good, next: TASK_SPEC_LIMITS.batchIndex + 2 },
       { ...good, next: 100_000 },
-      { ...good, strategy: { mode: "parallel", max: 99 } },
-      { ...good, strategy: { mode: "parallel" } },
-      { ...good, strategy: "sequential" },
       "batch",
     ]) {
       store.set("seance:form", JSON.stringify({ batch }));
@@ -102,9 +99,16 @@ describe("form persistence", () => {
     expect(readForm().batch).toEqual(good);
   });
 
+  test("an older build's open batch, strategy and all, stays open without it", () => {
+    for (const strategy of [{ mode: "sequential" }, { mode: "parallel", max: 99 }, "sequential"]) {
+      store.set("seance:form", JSON.stringify({ batch: { id: TASK, strategy, next: 3 } }));
+      expect(readForm().batch).toEqual({ id: TASK, next: 3 });
+    }
+  });
+
   test("a full batch (next one past the last index) survives a reload, so the form still says it is full", () => {
     for (const next of [TASK_SPEC_LIMITS.batchIndex, TASK_SPEC_LIMITS.batchIndex + 1]) {
-      const batch = { id: TASK, strategy: { mode: "sequential" as const }, next };
+      const batch = { id: TASK, next };
       store.set("seance:form", JSON.stringify({ batch }));
       expect(readForm().batch).toEqual(batch);
     }

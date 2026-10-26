@@ -8,7 +8,7 @@ import {
   taskFailureText,
   type TaskUntil,
 } from "@seance/shared";
-import type { BatchStrategy, KnownAccount, Machine, RelayState } from "@seance/shared";
+import type { KnownAccount, Machine, RelayState } from "@seance/shared";
 import {
   EFFORT_LABELS,
   MODEL_LABELS,
@@ -273,14 +273,6 @@ export function deriveReportedAvailability(relay: RelayState): boolean {
   if (relay.status !== "open" || scheduler.kind !== "ready") return false;
   const leader = relay.machines.find((m) => m.deviceId === scheduler.deviceId);
   return leader?.capabilities?.includes(CAPABILITIES.reportedDone) === true;
-}
-
-export function describeStrategy(strategy: BatchStrategy): string {
-  return strategy.mode === "sequential"
-    ? "one at a time"
-    : strategy.mode === "parallel"
-      ? `up to ${strategy.max} at once`
-      : "no limit";
 }
 
 function afterValue(after: PersistedForm["after"]): string {
@@ -633,7 +625,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
     afterTile: { label: "AFTER", value: afterValue(form.after), mono: false, dot: null },
     batchTile: {
       label: "BATCH",
-      value: form.batch === null ? "Off" : `#${form.batch.next} · ${describeStrategy(form.batch.strategy)}`,
+      value: form.batch === null ? "Off" : `#${form.batch.next}`,
       mono: false,
       dot: null,
     },

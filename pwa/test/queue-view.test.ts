@@ -13,7 +13,7 @@ import {
 } from "@seance/shared";
 import { deriveAfterSheet, deriveQueue } from "../src/queue-view.ts";
 import { DEFAULT_FORM, RESCAN_IDLE, type QueueState } from "../src/state.ts";
-import { CAPABILITIES, reasonText } from "@seance/shared";
+import { BATCH_STRATEGY, CAPABILITIES, reasonText } from "@seance/shared";
 import { deriveView, failedBody, type AppState } from "../src/view.ts";
 
 const NOW = 1_800_000_000_000;
@@ -587,7 +587,7 @@ describe("deriveQueue", () => {
 });
 
 describe("authoring on a row", () => {
-  const batch = { id: "b-1", index: 2, strategy: { mode: "sequential" } } as const;
+  const batch = { id: "b-1", index: 2, strategy: BATCH_STRATEGY } as const;
   const rowOf = (tasks: readonly Task[], id: string) =>
     deriveQueue(state(ok(tasks)), NOW)
       .sections.flatMap((section) => section.rows)
@@ -634,19 +634,9 @@ describe("authoring on a row", () => {
     expect(rowOf(tasks, "base")?.deps).toBeNull();
   });
 
-  test("a batch member shows its place and strategy", () => {
+  test("a batch member shows its place, and nothing about order or limits: a batch has none", () => {
     const member = task("m", { spec: { repo: ORIGIN, mode: "worktree", batch } });
-    expect(rowOf([member], "m")?.batch).toBe("Batch #2 · one at a time");
-    expect(
-      rowOf(
-        [
-          task("p", {
-            spec: { repo: ORIGIN, mode: "worktree", batch: { ...batch, strategy: { mode: "parallel", max: 3 } } },
-          }),
-        ],
-        "p",
-      )?.batch,
-    ).toBe("Batch #2 · up to 3 at once");
+    expect(rowOf([member], "m")?.batch).toBe("Batch #2");
     expect(rowOf([task("n")], "n")?.batch).toBeNull();
   });
 
