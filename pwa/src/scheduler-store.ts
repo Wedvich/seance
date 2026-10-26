@@ -8,13 +8,17 @@ import type {
   TaskRequest,
 } from "@seance/shared";
 import {
+  continuationSpec,
+  continueOffer,
   failureReasonText,
   isSettled,
   isTransportError,
   QUEUE_MAX_TASKS,
+  queuedTask,
   RequestFailure,
   schedulerErrorText,
   sentence,
+  storeErrorText,
   type RelayClient,
 } from "@seance/shared";
 import type { FollowEnd, PersistedForm, PreviewState, QueueState, TaskAction } from "./state.ts";
@@ -29,6 +33,8 @@ import { deriveAutoAvailability, previewAsked, resolveRepo, scopedRepos } from "
  * are only the bookkeeping behind them (timers, read sequences, what was last
  * asked). Enqueueing stays in `Store`: its verdict is a layer.
  */
+
+export const STORE_UNREADABLE = "Couldn't read the relay's answer. Update the app and the relay to matching versions.";
 
 const SCHEDULER_UNREADABLE = "Couldn't read the scheduler's answer. Update seanced and the app to matching versions.";
 
@@ -477,11 +483,38 @@ export class SchedulerStore {
     return this.#actOnTask({ taskId, op: "mark-done" });
   }
 
+  /**
+   * Writes a new task that picks up a failed one's session where it stopped, through the same
+   * `createTask` an enqueue uses: the leader dispatches it to the machine the old one ran on.
+   */
+  continueTask(taskId: string): Promise<void> {
+    return this.#actOnTask({ taskId, op: "continue" });
+  }
+
+  async #continue(taskId: string): Promise<string | null> {
+    const view = this.#state.queueView;
+    const failed = view?.kind === "ok" ? view.tasks.find((t) => t.id === taskId) : undefined;
+    if (failed === undefined) return "That task is no longer listed.";
+    const offer = continueOffer(failed, this.#state.relay.machines);
+    if (!offer.ok) return sentence(offer.reason);
+    const task = queuedTask({ ...continuationSpec(failed, offer.at), client: "pwa" }, Date.now());
+    const reply = await this.#client.createTask(task);
+    if (reply === null) return `${STORE_UNREADABLE} ${MAY_HAVE_LANDED}`;
+    if (!reply.ok) return sentence(storeErrorText(reply.code));
+    this.#mergeTask(task);
+    return null;
+  }
+
   async #actOnTask(action: TaskAction): Promise<void> {
     if (this.#state.taskAction !== null) return;
     this.#patch({ taskAction: action, queueNotice: null });
     let notice: string | null = null;
     try {
+      if (action.op === "continue") {
+        notice = await this.#continue(action.taskId);
+        this.#patch({ taskAction: null, queueNotice: notice });
+        return;
+      }
       const reply =
         action.op === "cancel" ? await this.#client.cancel(action.taskId) : await this.#client.markDone(action.taskId);
       if (reply === null) notice = `${SCHEDULER_UNREADABLE} ${MAY_HAVE_LANDED}`;

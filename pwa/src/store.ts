@@ -41,7 +41,7 @@ import {
 } from "./state.ts";
 import { AccountStore } from "./account-store.ts";
 import { accountSeries } from "./chart.ts";
-import { SchedulerStore, taskRequest } from "./scheduler-store.ts";
+import { SchedulerStore, STORE_UNREADABLE, taskRequest } from "./scheduler-store.ts";
 import type { AppState } from "./view.ts";
 import {
   deriveAutoAvailability,
@@ -90,8 +90,6 @@ const HISTORY_ERRORS: Record<MetricsErrorCode, string> = {
   invalid_request: "The machine refused the request. Update seanced and the app to matching versions.",
   internal_error: "The machine couldn't read its history store.",
 };
-
-const STORE_UNREADABLE = "Couldn't read the relay's answer. Update the app and the relay to matching versions.";
 
 /**
  * Why a create's answer never came, without the shared line's "may have
@@ -505,6 +503,10 @@ export class Store {
 
   markDone(taskId: string): Promise<void> {
     return this.#queue.markDone(taskId);
+  }
+
+  continueTask(taskId: string): Promise<void> {
+    return this.#queue.continueTask(taskId);
   }
 
   pauseQueue(): Promise<void> {

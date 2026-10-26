@@ -274,6 +274,18 @@ export function deriveReportedAvailability(relay: RelayState): boolean {
   return leader?.capabilities?.includes(CAPABILITIES.reportedDone) === true;
 }
 
+/**
+ * A continue task is written only to a verified leader that advertises `continueTask`: an older
+ * one fails to parse the record's mode and holds it unreadable. Like `deriveReportedAvailability`,
+ * no leader (or an unverified one) says no.
+ */
+export function deriveContinueAvailability(relay: RelayState): boolean {
+  const { scheduler } = relay;
+  if (relay.status !== "open" || scheduler.kind !== "ready") return false;
+  const leader = relay.machines.find((m) => m.deviceId === scheduler.deviceId);
+  return leader?.capabilities?.includes(CAPABILITIES.continueTask) === true;
+}
+
 export function describeStrategy(strategy: BatchStrategy): string {
   return strategy.mode === "sequential"
     ? "one at a time"
@@ -679,6 +691,10 @@ function sessionFailedNextStep(exit: number | undefined): string {
 export function failedBody(code: string | undefined, exit?: number, until?: TaskUntil, oomKill?: boolean): string {
   // A code the scheduler set itself says why; any other is a daemon's spawn refusal.
   const scheduler = code === undefined ? null : taskFailureText(code, exit, until, oomKill);
+  // The daemon's own refusal of a continue task, worded for it: the generic line would say a spawn was refused.
+  if (code === "not_continuable") {
+    return "The machine couldn't continue the earlier session: its worktree or its launch record is gone, or a session is open there. Nothing new was started.";
+  }
   if (code === undefined || scheduler === null) return "The machine refused the spawn. Nothing is running.";
   const next = code === "session_failed" ? sessionFailedNextStep(exit) : FAILED_NEXT_STEP.get(code);
   return `${sentence(scheduler)} ${next ?? "Nothing is running."}`;

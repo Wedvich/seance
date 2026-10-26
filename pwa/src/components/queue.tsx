@@ -24,6 +24,8 @@ export function QueueScreen(props: {
   onRefresh: () => void;
   onCancel: (taskId: string) => void;
   onMarkDone: (taskId: string) => void;
+  /** Queues a task that resumes this failed one's session in its worktree, on its machine. */
+  onContinue: (taskId: string) => void;
   /** Starts a new task that waits on this one: the form opens on `auto` with it in After. */
   onFollowUp: (taskId: string) => void;
   onPause: () => void;
@@ -157,10 +159,11 @@ export function QueueScreen(props: {
                   </div>
                 </div>
                 {row.deps !== null && <p className="fleet-card-body">{row.deps}</p>}
+                {row.continues !== null && <p className="fleet-card-body">{row.continues}</p>}
                 {row.placement !== null && <p className="fleet-card-body">{row.placement}</p>}
                 {row.batch !== null && <p className="fleet-card-body">{row.batch}</p>}
                 {row.body !== null && <p className="fleet-card-body">{row.body}</p>}
-                {(row.pr !== null || row.canMarkDone || row.canCancel || row.canFollowUp) && (
+                {(row.pr !== null || row.canMarkDone || row.canCancel || row.canFollowUp || row.canContinue) && (
                   <div className="queue-actions">
                     {row.pr !== null && (
                       <a
@@ -179,6 +182,16 @@ export function QueueScreen(props: {
                     {row.canFollowUp && (
                       <button type="button" className="quiet" onClick={() => props.onFollowUp(row.id)}>
                         Follow up
+                      </button>
+                    )}
+                    {row.canContinue && (
+                      <button
+                        type="button"
+                        className="quiet"
+                        disabled={!view.available || row.busy}
+                        onClick={() => props.onContinue(row.id)}
+                      >
+                        Continue
                       </button>
                     )}
                     {row.canMarkDone && (
