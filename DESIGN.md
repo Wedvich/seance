@@ -649,6 +649,12 @@ nothing checked it. The last is the gap they leave.
   and bounded to `TASK_ID_PATTERN` before it gets that far. The `/usage` refresh's
   claude run takes no wire or frame value at all: fixed argv, and an env built from
   the exclave scan alone (Daemon, "Usage refresh").
+- The OOM confirmation's reads (`daemon/src/oom-kill.ts`, Daemon, "Exit status") take no
+  wire value: the pid comes from tmux's `#{pane_pid}`, so the paths are `/proc/<pid>/{cgroup,status}`
+  and `memory.events` under the cgroup mount named by the kernel's own line. A cgroup path must be
+  absolute, bounded, free of NUL and newline, and `.`/`..` steps are refused — also when the
+  ledger hands one back after a restart. Each read is bounded by a timeout, and nothing in the
+  module logs, since it runs under no `seanced mcp`.
 - Every spawn is **logged at start and outcome** with repo, mode, title, model,
   effort, plan mode when on, task id when present (and, on `task_running`, the
   session it collided with), prompt length and prompt SHA-256 prefix — never the
@@ -1501,6 +1507,16 @@ an old peer's frames parse as before. Mixed versions:
   `code` and `message`, so it shows "exited with an error" as before, and an older leader
   re-writing the record drops the field with the same result. A record without it (an older
   leader's, or any failed before) reads as before. No rollout order.
+- `TaskProgress.oomKill` and `Task.failure.oomKill` (2026-10-26, Linux's OOM verdict on a SIGKILL
+  death, Daemon, "Exit status"): lenient both ways, beside `exit: 137` only. A reader drops a
+  malformed or misplaced one and keeps the entry or the failure — never the `progress` list,
+  which one bad entry nulls. An older leader's progress parser ignores the key and stores no
+  verdict; an older app's task parser and an older leader re-writing the record drop it. Either
+  way, and from an older daemon, a SIGKILL reads "possibly out of memory" as before. The launch
+  ledger's `oom` sample (one object: cgroup, count, time, pane) and `oomKill` are optional note
+  fields: an older daemon's parser skips them and its next write drops them, so after a downgrade
+  and upgrade a running session is sampled again on the next pass, and an `oom` of any other
+  shape reads as no sample. No rollout order.
 - Reasons `skill_absent { skill }`, `auth_expired` and `base_unpushed`: an older app or
   leader drops an unknown reason from a decision and keeps the candidate.
 - `session-event` `done`: ingested since 2026-10-23 (Local op socket, "Session events"). A daemon
@@ -3091,8 +3107,8 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   noted but never sent when the process exits is recovered only through `progress`, which the
   leader reads on takeover and when the machine comes back.
 - **`progress` in the scheduler's `sessions` reply.** One `TaskProgress` per ledger task with any of
-  PR URL, branch, pushed, merged or exit status (since 2026-10-21, Daemon, "Exit status"), without
-  paths or tips; an entry that would not pass
+  PR URL, branch, pushed, merged or exit status (since 2026-10-21, Daemon, "Exit status"), the
+  last with its OOM verdict on Linux (since 2026-10-26), without paths, tips or cgroup samples; an entry that would not pass
   `parseTaskProgressList` is left out, since one bad entry nulls the leader's whole list.
   `at` is the last change, never refreshed by an unchanged pass, so an idle branch costs no ledger
   write per minute. The reply is held to 44 000 bytes of JSON (`REPLY_JSON_BUDGET`, the queue
@@ -4105,7 +4121,89 @@ for the lot with its own `gh`.
   "reported"` the missing thing is the done report, so the leader's message and the wording say
   "did not report done", not "reported no pull request". Only the
   signals macOS and Linux number alike (1–6, 8, 9, 11, 13–15) are named, since the fold uses the
-  sealing daemon's own numbering and 128 + 10 is SIGUSR1 on one and SIGBUS on the other. No status — 0, which
+  sealing daemon's own numbering and 128 + 10 is SIGUSR1 on one and SIGBUS on the other.
+  **OOM confirmation** (2026-10-26, `daemon/src/oom-kill.ts`): on Linux with cgroup v2 a 137 is
+  checked against the kernel's own count. The kernel counts every OOM kill, a memcg limit's and
+  the global killer's alike, as `oom_kill` in the victim's cgroup's `memory.events` and each
+  ancestor's, readable without root. Verified on thad's kernel (`uname -r` 7.0) on a `--system`
+  box: `oom_kill 44` with `oom 0`, so global kills are counted on the victim's memcg there;
+  older kernels may differ (the global killer's accounting against the victim's memcg is the part
+  not verified on any other version), and where it does not hold a real OOM kill reads as `false`
+  — the one wrong answer this design can give, so a kernel older than the one measured is a risk
+  taken, not a checked case. The count names no pid, so the daemon samples it while the pane
+  lives: harvest reads, for every live task pane of ours, its process's cgroup from
+  `/proc/<pane_pid>/cgroup` (the pid tmux gives, the path the kernel writes — no wire value
+  reaches either read) and that cgroup's `oom_kill` — the pane's own (leaf) cgroup only — and notes
+  it on the ledger note (`oom`: the cgroup, the count, the time, and the pane and window it came
+  from). One pass's samples are one batched ledger write, and an unchanged sample is rewritten
+  only once two minutes old (`OOM_REFRESH_MS`), so a quiet pass costs no write while the stored
+  time stays fresh; a sample-only change does not move `at`. It survives a restart and is fenced
+  by pane: a verdict uses only a sample of the same pane and window, so a relaunch's pane never
+  inherits the old one's baseline nor the old one's death the new one's. A sample is discarded
+  when its pid is already on its way out (gone, zombie, SIGKILL pending in `/proc/<pid>/status`,
+  or `PF_EXITING` in the flags of `/proc/<pid>/stat` — checked after the count is read, since the
+  kernel counts the kill as it sends the signal and a pane can still be listed alive while its
+  process exits; the stat flag backs the status check, which assumes SIGKILL stays visible for the
+  whole exit); the previous sample stands. `at` is taken before any read of the pass, so it is
+  never later than the count it stamps. A spawn that lands is sampled at once, after its launch
+  settles and not awaited, so a session dying before the next pass has a baseline and a stalled
+  read holds nothing. Sampling is single-flight: a read timeout bounds the wait, not the read, so
+  while an earlier pass's or spawn's sample reads are outstanding no further sample is taken. A
+  pid reused between the pane listing and the reads would sample another process; accepted, since
+  pids are allocated sequentially and the reads follow the listing within moments. When harvest finds the
+  pane dead with 137 it compares, and notes the verdict beside the status in one note (`oomKill`,
+  carried by `progress`, stored by the leader as `failure.oomKill`): the leaf's count risen is
+  `true`, unchanged `false`, dropped (made anew) unknown, and a leaf that no longer reads unknown.
+  A parent cgroup is not sampled: it holds other sessions' and other apps' processes (a desktop's
+  `app.slice`, every app), too broad to say anything about this one in either direction.
+  `true` has a bound: the sample must be taken within ten minutes before the death
+  (`pane_dead_time`) and the judge must read within ten minutes after it (`OOM_WINDOW_MS`: five of
+  the leader's two-minute sweeps, which are what drive sampling; the count is unattributed, so a
+  wider window lets a kill hours away read as this session's). Outside it, or with no death time,
+  unknown. `false` has no bound: no kill at all in any window. A later note of the exit replaces
+  `oomKill` rather than inheriting one from an earlier note of the same launch. Every read is
+  timed (`OOM_READ_TIMEOUT_MS`, one second, per sample and per judge read) because `/proc/<pid>/cgroup`
+  takes the kernel's `cgroup_mutex` and can stall under memory pressure while the leader's
+  `sessions` waits ten; a timeout is no sample or no verdict. Harvest notes and closes the dead
+  panes before it samples the live ones, so sampling never delays an exit. No sample (a pane
+  never seen alive, a ledger from before), anything unreadable, or macOS, where no probe is
+  built: unknown, the field absent, and the wording as before. Nothing in it throws or logs; a
+  failed read costs the verdict, never the status or the close. The probe is built only where the
+  daemon's own `/proc/self/cgroup` path resolves under `/sys/fs/cgroup` to a `memory.events`: in a
+  cgroup namespace without a matching mount (an LXC container showing the host's tree) every path
+  would read another cgroup's counter, so none is built and the verdict stays unknown (also
+  docs/platform-notes.md). Wording (`sessionExit`): `true` reads "killed (SIGKILL), out of memory
+  (the kernel's OOM killer fired as it died)", `false` "killed (SIGKILL), not by the kernel's OOM
+  killer". What `true` proves is narrower than it reads alone: an OOM kill was counted in the
+  session's cgroup between the last sample that saw it alive and the read that found it dead, and
+  the session died of SIGKILL in that window. On a unit install that cgroup is shared by every
+  session and the daemon, so another session's process could account for the count — hence the
+  copy names the evidence, not the victim. `false` is a real negative for the kernel's killer,
+  since the count is hierarchical and covers global kills; a userspace killer (systemd-oomd,
+  earlyoom) counts nothing, hence "not by the kernel's OOM killer", never "not out of memory".
+  Where a session's process lives, by install mode: a `--system` unit's daemon-booted tmux keeps
+  every pane in the unit's cgroup (`/system.slice/seanced.service`, measured), since a system
+  unit's tmux cannot reach the user bus — the case the verdict is for; a user unit's sits in
+  `user@<uid>.service/app.slice/seanced.service`, or, with a systemd-built tmux (Debian's), each
+  pane in its own `tmux-spawn-*.scope` under the user manager (docs/platform-notes.md). **Known
+  limitation:** under a tmux that puts panes in transient scopes the scope is removed once its last
+  process exits, so by harvest the leaf is usually gone and the verdict there is unknown; the copy
+  stays "possibly". The parent is no stand-in (above). A server a login shell booted, or one an
+  older daemon booted under another mode, is wherever that put it, which is why the pane's own
+  process is read rather than the daemon's cgroup; no systemd (WSL without it) puts it in `/`,
+  whose `memory.events` does not exist, and a hybrid v1/v2 host has no memory controller on the
+  unified tree — both unknown. Out of scope: the OOM killer often picks a child (a test runner,
+  `tsc`) and claude survives, leaving no exit status to judge. Rejected: the kernel log (`dmesg`,
+  `journalctl -k`), which names the victim's pid but needs root or the `adm`/`systemd-journal`
+  group, and the daemon never runs as root; a baseline only at spawn (on a shared unit cgroup a
+  session's whole lifetime of other sessions' kills would read as its own); the daemon's own
+  cgroup as the session's (wrong whenever another mode or a login shell booted the server); the
+  parent cgroup as a fallback or confirmation (too broad, above); `memory.events.local` (no help
+  once a per-pane scope is gone); `oom_group_kill` (`memory.oom.group` is off on every unit
+  séance writes). Future alternative, for the scoped-tmux case: a delegated cgroup per pane that
+  the daemon owns and reads after the process exits — needs the daemon to create and clean up
+  cgroups (a user manager's delegation, or a system unit's `Delegate=`), a change to how panes
+  are spawned, so not taken here. No status — 0, which
   under `failed` closes the window and is never seen, a signal death on a tmux without
   `pane_dead_signal` (the field reads empty), a tmux older than 3.2 (which refuses `failed`, so the window gets `off`), a pane someone closed by
   hand, an older daemon — settles `done` as before. A despawn is not told apart: its `/exit` exits

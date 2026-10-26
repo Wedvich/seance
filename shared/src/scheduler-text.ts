@@ -193,28 +193,42 @@ function missing(until: TaskUntil | undefined): string {
   return until === "reported" ? "did not report done" : "reported no pull request";
 }
 
-export function sessionExit(exit?: number): SessionExit {
+/**
+ * What `oomKill` (`Task.failure.oomKill`) makes of a SIGKILL. `true` names the
+ * evidence, not the victim: an OOM kill counted in its cgroup while it died,
+ * which on a unit install every session shares. `false` rules out only the
+ * kernel's OOM killer — a userspace one (systemd-oomd, earlyoom) counts nothing.
+ */
+function sigkillHint(oomKill: boolean | undefined): string {
+  if (oomKill === true) return "out of memory (the kernel's OOM killer fired as it died)";
+  if (oomKill === false) return "not by the kernel's OOM killer";
+  // The OOM killer sends SIGKILL; so can a person, hence "possibly".
+  return "possibly out of memory";
+}
+
+/** `oomKill` is read only with a SIGKILL status, the one it is noted beside. */
+export function sessionExit(exit?: number, oomKill?: boolean): SessionExit {
   const status = failureStatus(exit);
   if (status === undefined) return { clause: "exited with an error" };
   const signal = status > 128 ? PORTABLE_SIGNALS.get(status - 128) : undefined;
   if (signal === undefined) return { clause: `exited with status ${status}` };
   // Only SIGKILL cannot be caught: any other signal's status may be a process exiting on it by choice, so it never claims a kill.
-  // The OOM killer sends SIGKILL; so can a person, hence "possibly".
   return signal === "SIGKILL"
-    ? { clause: "was killed (SIGKILL)", hint: "possibly out of memory" }
+    ? { clause: "was killed (SIGKILL)", hint: sigkillHint(oomKill) }
     : { clause: `ended on ${signal} (status ${status})` };
 }
 
 /**
  * A scheduler-set failure's line; null for any other code — a daemon's spawn refusal, or one minted later.
- * `exit` (`Task.failure.exit`) words a `session_failed` exactly, and `until` (`TaskSpec.until`) what it lacked;
- * without `exit`, or for any other code, the line is the code's alone.
+ * `exit` (`Task.failure.exit`) words a `session_failed` exactly, with `oomKill` (`Task.failure.oomKill`)
+ * for a SIGKILL, and `until` (`TaskSpec.until`) what it lacked; without `exit`, or for any other code,
+ * the line is the code's alone.
  */
-export function taskFailureText(code: string, exit?: number, until?: TaskUntil): string | null {
+export function taskFailureText(code: string, exit?: number, until?: TaskUntil, oomKill?: boolean): string | null {
   const known = TASK_FAILURE_CODES.find((c) => c === code);
   if (known === undefined) return null;
   if (known !== "session_failed") return TASK_FAILURE_TEXT[known];
-  const { clause, hint } = sessionExit(exit);
+  const { clause, hint } = sessionExit(exit, oomKill);
   return `its session ${clause}${hint === undefined ? "" : `, ${hint},`} and ${missing(until)}`;
 }
 

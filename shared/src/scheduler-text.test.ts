@@ -56,6 +56,22 @@ describe("sessionExit", () => {
     expect(sessionExit(9)).toEqual({ clause: "exited with status 9" });
   });
 
+  test("a SIGKILL says out of memory only on the kernel's count, rules out only the kernel's killer, and stays hedged without either", () => {
+    expect(sessionExit(137, true)).toEqual({
+      clause: "was killed (SIGKILL)",
+      hint: "out of memory (the kernel's OOM killer fired as it died)",
+    });
+    expect(sessionExit(137, false)).toEqual({ clause: "was killed (SIGKILL)", hint: "not by the kernel's OOM killer" });
+    expect(sessionExit(137, undefined)).toEqual(sessionExit(137));
+    // Noted only beside a SIGKILL; any other status ignores it.
+    expect(sessionExit(143, true)).toEqual(sessionExit(143));
+    expect(sessionExit(1, true)).toEqual(sessionExit(1));
+    expect(taskFailureText("session_failed", 137, "reported", true)).toBe(
+      "its session was killed (SIGKILL), out of memory (the kernel's OOM killer fired as it died), and did not report done",
+    );
+    expect(taskFailureText("merge_expired", 137, undefined, true)).toBe(taskFailureText("merge_expired"));
+  });
+
   test("a value outside 1–255, or none, is no status", () => {
     for (const exit of [undefined, 0, -1, 256, 1.5, Number.NaN]) {
       expect(sessionExit(exit)).toEqual({ clause: "exited with an error" });

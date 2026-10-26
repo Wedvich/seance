@@ -2044,6 +2044,17 @@ describe("get_queue", () => {
               exit: 137,
             },
           }),
+          // With the machine's OOM verdict beside it, the line says what the kernel counted.
+          task({
+            id: "t-4",
+            state: "failed",
+            failure: {
+              code: "session_failed",
+              message: "its session exited with status 137 and reported no pull request",
+              exit: 137,
+              oomKill: true,
+            },
+          }),
         ],
         at: 6_000,
       },
@@ -2056,6 +2067,7 @@ describe("get_queue", () => {
       `dispatch_unconfirmed: ${taskFailureText("dispatch_unconfirmed")} (the launch ledger no longer reaches back to its reservation)`,
       "repo_not_found: no such repo",
       "session_failed: its session was killed (SIGKILL), possibly out of memory, and reported no pull request",
+      "session_failed: its session was killed (SIGKILL), out of memory (the kernel's OOM killer fired as it died), and reported no pull request",
     ]);
     lazy.stop();
   });

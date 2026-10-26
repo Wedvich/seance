@@ -167,7 +167,9 @@ function bodyOf(task: Task, machines: readonly Machine[], now: number): string |
   }
   const waiting = waitingText(task);
   if (waiting !== null) return `Waiting: ${waiting}`;
-  if (task.state === "failed") return failedBody(task.failure?.code, task.failure?.exit, task.spec.until);
+  if (task.state === "failed") {
+    return failedBody(task.failure?.code, task.failure?.exit, task.spec.until, task.failure?.oomKill);
+  }
   if (task.state === "needs-input" && task.escalated === true) {
     return task.needsInputSince === undefined
       ? "Waiting for input"

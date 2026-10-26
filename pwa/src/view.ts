@@ -676,9 +676,9 @@ function sessionFailedNextStep(exit: number | undefined): string {
   return `Tasks waiting on it failed with it. ${transcript}`;
 }
 
-export function failedBody(code: string | undefined, exit?: number, until?: TaskUntil): string {
+export function failedBody(code: string | undefined, exit?: number, until?: TaskUntil, oomKill?: boolean): string {
   // A code the scheduler set itself says why; any other is a daemon's spawn refusal.
-  const scheduler = code === undefined ? null : taskFailureText(code, exit, until);
+  const scheduler = code === undefined ? null : taskFailureText(code, exit, until, oomKill);
   if (code === undefined || scheduler === null) return "The machine refused the spawn. Nothing is running.";
   const next = code === "session_failed" ? sessionFailedNextStep(exit) : FAILED_NEXT_STEP.get(code);
   return `${sentence(scheduler)} ${next ?? "Nothing is running."}`;

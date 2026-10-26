@@ -609,6 +609,13 @@ describe("failedBody", () => {
     expect(failedBody("session_failed", 2)).toStartWith("Its session exited with status 2 and reported");
     expect(failedBody("session_failed", 137)).toContain("Tasks waiting on it failed with it.");
     expect(failedBody("repo_not_found", 137)).toBe("The machine refused the spawn. Nothing is running.");
+    // With the machine's OOM verdict (`failure.oomKill`), the SIGKILL is worded by it, either way.
+    expect(failedBody("session_failed", 137, undefined, true)).toBe(
+      "Its session was killed (SIGKILL), out of memory (the kernel's OOM killer fired as it died), and reported no pull request. Tasks waiting on it failed with it. Its transcript on that machine stops where it ended.",
+    );
+    expect(failedBody("session_failed", 137, undefined, false)).toStartWith(
+      "Its session was killed (SIGKILL), not by the kernel's OOM killer, and reported no pull request.",
+    );
   });
 });
 

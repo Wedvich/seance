@@ -1431,12 +1431,25 @@ export interface TaskProgress {
    * settles as today.
    */
   readonly exit?: number;
+  /**
+   * With `exit: SIGKILL_STATUS` only, on Linux with cgroup v2: whether the
+   * kernel counted an OOM kill (`memory.events` `oom_kill`) in the session's
+   * cgroup between the last time the daemon saw it alive and the pass that
+   * found it dead (`daemon/src/oom-kill.ts`). `true` says an OOM kill landed
+   * there then, not that this session was its victim — on a unit install every
+   * session shares the cgroup. `false` says no kernel OOM kill did. Absent:
+   * unknown (no sample, unreadable, macOS, an older daemon).
+   */
+  readonly oomKill?: boolean;
   /** When any of these last changed, ms (an unchanged state is not re-stamped). */
   readonly at: number;
 }
 
 /** Exit statuses `TaskProgress.exit` may hold: a process's, 0–255. */
 export const EXIT_STATUS_MAX = 255;
+
+/** A SIGKILL death as `TaskProgress.exit` holds it (`128 + 9`): the OOM killer's signal, and the only status `oomKill` rides with. */
+export const SIGKILL_STATUS = 137;
 
 /**
  * What a session is doing, as `session-event` reports it (docs/scheduler.md).
@@ -1951,8 +1964,15 @@ export interface Task {
    * session's exit status (`TaskProgress.exit`, 1–`EXIT_STATUS_MAX`), so a reader
    * words how it ended without parsing the message. Display-only; a reader drops
    * one out of range and keeps the failure, and an older one ignores it.
+   * `oomKill`, with `exit: SIGKILL_STATUS` only: `TaskProgress.oomKill`, read
+   * the same way and dropped the same way.
    */
-  readonly failure?: { readonly code: string; readonly message: string; readonly exit?: number };
+  readonly failure?: {
+    readonly code: string;
+    readonly message: string;
+    readonly exit?: number;
+    readonly oomKill?: boolean;
+  };
   /** With `lost`: when the scheduler first saw the task's machine absent, ms. */
   readonly absentSince?: number;
   /**
