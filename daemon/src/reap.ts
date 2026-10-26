@@ -100,7 +100,11 @@ export interface RepoReport {
   /** Upstream gone, commits on it nowhere upstream: unpushed work, kept. */
   readonly keptBranches: readonly { readonly name: string; readonly ahead: number | null }[];
   /** Linked worktrees on unpushed work — upstream gone, or detached past the default branch. Kept. */
-  readonly keptWorktrees: readonly { readonly path: string; readonly branch: string | null; readonly ahead: number | null }[];
+  readonly keptWorktrees: readonly {
+    readonly path: string;
+    readonly branch: string | null;
+    readonly ahead: number | null;
+  }[];
   /** Worktrees whose pane is open in tmux — someone is in them. */
   readonly inUse: readonly string[];
   readonly locked: readonly string[];
@@ -758,15 +762,11 @@ export function formatReport(report: ReapReport): readonly string[] {
       rows.push(row("dirty worktree", `${tilde(dirty.path)}   ${plural(dirty.changes, "change")} — kept`));
     }
     for (const kept of repo.keptBranches) {
-      rows.push(
-        row("kept branch", `${kept.name}   upstream gone, ${aheadText(kept.ahead)}`),
-      );
+      rows.push(row("kept branch", `${kept.name}   upstream gone, ${aheadText(kept.ahead)}`));
     }
     for (const kept of repo.keptWorktrees) {
       const why = kept.branch === null ? "detached" : `${kept.branch}   upstream gone`;
-      rows.push(
-        row("kept worktree", `${tilde(kept.path)}   ${why}, ${aheadText(kept.ahead)}`),
-      );
+      rows.push(row("kept worktree", `${tilde(kept.path)}   ${why}, ${aheadText(kept.ahead)}`));
     }
     for (const path of repo.inUse) rows.push(row("in use", `${tilde(path)}   a tmux pane is inside it`));
     for (const path of repo.locked) rows.push(row("locked worktree", tilde(path)));
@@ -826,7 +826,10 @@ export function formatReport(report: ReapReport): readonly string[] {
             )})`,
           ]),
       `${sum((repo) => repo.dirty.length)} dirty`,
-      plural(sum((repo) => repo.keptWorktrees.length), "kept worktree"),
+      plural(
+        sum((repo) => repo.keptWorktrees.length),
+        "kept worktree",
+      ),
       `${sum((repo) => repo.active)} active`,
       `${plural(report.openPanes.length, "session")} left open`,
       `${sum((repo) => repo.young)} younger than ${report.minAgeDays}d`,
