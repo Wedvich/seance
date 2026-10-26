@@ -10,7 +10,12 @@ function task(fields: Partial<Task> = {}): Task {
 
 function decide(
   machines: readonly Machine[],
-  fields: { task?: Task; tasks?: readonly Task[]; config?: Partial<SchedulerConfig> } = {},
+  fields: {
+    task?: Task;
+    tasks?: readonly Task[];
+    config?: Partial<SchedulerConfig>;
+    released?: ReadonlySet<string>;
+  } = {},
 ): Decision {
   return route({
     task: fields.task ?? task(),
@@ -18,6 +23,7 @@ function decide(
     tasks: fields.tasks ?? [],
     now: NOW,
     config: { ...DEFAULT_CONFIG, ...fields.config },
+    ...(fields.released === undefined ? {} : { released: fields.released }),
   });
 }
 
@@ -666,6 +672,37 @@ describe("filter", () => {
     });
   });
 
+  describe("a machine asleep past slotReleaseAfterMs holds no slot", () => {
+    /** Machine `s`, asleep, signed in to `org:a` as `a` is. */
+    const asleep = machine("s", { connected: false, exclaves: [exclave("main", "org:a")] });
+    const released = new Set(["s"]);
+
+    test("its in-flight tasks, reserved included, leave the global count; the rest still count", () => {
+      const tasks = [held("x", "s"), held("y", "s", "reserved"), held("z", "b")];
+      const candidate = only(decide([machine("a")], { tasks, config: { globalMax: 1 }, released }));
+      expect(candidate.rejected).toEqual([{ code: "cap_reached", inFlight: 1, max: 1 }]);
+      expect(only(decide([machine("a")], { tasks, config: { globalMax: 2 }, released })).rejected).toEqual([]);
+    });
+
+    test("its tasks leave its account's count, so another machine on the account gets the work", () => {
+      const tasks = [held("x", "s"), held("y", "s", "needs-input")];
+      const fleet = [machine("a", { exclaves: [exclave("main", "org:a")] }), asleep];
+      const holding = decide(fleet, { tasks, config: { accountMax: 2 } });
+      expect(byExclave(holding, "main")?.rejected).toEqual([
+        { code: "cap_reached", inFlight: 2, max: 2, scope: "account" },
+      ]);
+      const freed = decide(fleet, { tasks, config: { accountMax: 2 }, released });
+      expect(freed.chosen).toEqual({ deviceId: "a", exclave: "main", clone: "app" });
+    });
+
+    test("a batch's bound still counts them: its own serialization waits for its members", () => {
+      const batch = (index: number) => spec({ batch: { id: "b1", index, strategy: { mode: "parallel", max: 1 } } });
+      const tasks = [{ ...held("x", "s"), spec: batch(0) }];
+      const candidate = only(decide([machine("a")], { task: task({ spec: batch(1) }), tasks, released }));
+      expect(candidate.rejected).toEqual([{ code: "cap_reached", inFlight: 1, max: 1, scope: "batch" }]);
+    });
+  });
+
   describe("paused", () => {
     const fleet = [machine("a"), machine("b")];
 
@@ -715,6 +752,10 @@ describe("filter", () => {
       expect(accountResetAt("org:a", [reading], inFlight, NOW, DEFAULT_CONFIG)).toBe((NOW_S + 7200) * 1000);
       // Alone it is under the line everywhere: the earliest reset.
       expect(accountResetAt("org:a", [reading], [], NOW, DEFAULT_CONFIG)).toBe((NOW_S + 3600) * 1000);
+      // Their machine asleep past the grace: they hold no projected usage, as in routing.
+      expect(accountResetAt("org:a", [reading], inFlight, NOW, DEFAULT_CONFIG, [], new Set(["a"]))).toBe(
+        (NOW_S + 3600) * 1000,
+      );
     });
 
     test("a standard seat's estimate is scaled, as routing scales it", () => {

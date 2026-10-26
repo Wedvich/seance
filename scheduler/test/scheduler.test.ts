@@ -609,6 +609,92 @@ describe("a machine that stops answering", () => {
   });
 });
 
+describe("a machine asleep past slotReleaseAfterMs", () => {
+  const GRACE = DEFAULT_CONFIG.slotReleaseAfterMs;
+
+  /** One task running on `a` under a global max of 1, then `a` asleep, seen by a pass. */
+  async function asleepHoldingTheSlot() {
+    const env = setup(new FakeFleet([machine("a"), machine("b")]), { ...DEFAULT_CONFIG, globalMax: 1 });
+    const first = await enqueue(env.store, env.scheduler, spec({ pin: { deviceId: "a" } }));
+    await pass(env.scheduler);
+    expect(env.scheduler.task(first.id)).toMatchObject({ state: "running", assignment: { deviceId: "a" } });
+    env.fleet.fleet = [machine("a", { connected: false }), machine("b")];
+    await pass(env.scheduler);
+    const second = await enqueue(env.store, env.scheduler, spec());
+    return { ...env, first, second };
+  }
+
+  function capReached(scheduler: Scheduler, id: string): unknown {
+    return scheduler.lastDecision(id)?.candidates.flatMap((c) => c.rejected);
+  }
+
+  async function at(env: { clock: { now: number }; fleet: FakeFleet; scheduler: Scheduler }, now: number) {
+    env.clock.now = now;
+    env.fleet.beat(now);
+    await pass(env.scheduler);
+  }
+
+  async function end(env: { fleet: FakeFleet; scheduler: Scheduler }, id: string): Promise<void> {
+    const assignment = env.scheduler.task(id)?.assignment;
+    if (assignment?.pane === undefined) throw new Error(`${id} has no pane`);
+    env.fleet.end(assignment.deviceId, id);
+    await env.scheduler.onSession(id, "ended", { deviceId: assignment.deviceId, pane: assignment.pane });
+  }
+
+  test("short of the grace its task holds the slot; past it another machine gets the work, its task untouched", async () => {
+    const env = await asleepHoldingTheSlot();
+    const { scheduler, first, second } = env;
+    await at(env, NOW + GRACE - 1);
+    expect(scheduler.task(second.id)?.state).toBe("ready");
+    expect(capReached(scheduler, second.id)).toContainEqual({ code: "cap_reached", inFlight: 1, max: 1 });
+
+    await at(env, NOW + GRACE);
+    expect(scheduler.task(second.id)).toMatchObject({ state: "running", assignment: { deviceId: "b" } });
+    expect(scheduler.task(first.id)).toMatchObject({ state: "running", assignment: { deviceId: "a" } });
+  });
+
+  test("back with its task running: over the cap, nothing killed, nothing placed until the count drops under", async () => {
+    const env = await asleepHoldingTheSlot();
+    const { fleet, scheduler, store, first, second } = env;
+    await at(env, NOW + GRACE);
+    expect(scheduler.task(second.id)?.state).toBe("running");
+
+    fleet.fleet = [machine("a"), machine("b")];
+    await at(env, NOW + GRACE + 1);
+    expect(scheduler.task(first.id)).toMatchObject({ state: "running", assignment: { deviceId: "a" } });
+    expect(fleet.despawns).toEqual([]);
+    const third = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    expect(scheduler.task(third.id)?.state).toBe("ready");
+    expect(capReached(scheduler, third.id)).toContainEqual({ code: "cap_reached", inFlight: 2, max: 1 });
+
+    await end(env, second.id);
+    await pass(scheduler);
+    expect(capReached(scheduler, third.id)).toContainEqual({ code: "cap_reached", inFlight: 1, max: 1 });
+    await end(env, first.id);
+    await pass(scheduler);
+    expect(scheduler.task(third.id)?.state).toBe("running");
+    expect(fleet.spawns).toHaveLength(3);
+  });
+
+  test("a flap restarts the grace: absent, back, absent again holds the slot until the new absence runs its course", async () => {
+    const env = await asleepHoldingTheSlot();
+    const { fleet, scheduler, second } = env;
+    await at(env, NOW + GRACE - 1);
+    fleet.fleet = [machine("a"), machine("b")];
+    await at(env, NOW + GRACE);
+    fleet.fleet = [machine("a", { connected: false }), machine("b")];
+    const away = NOW + GRACE + 1;
+    await at(env, away);
+    await at(env, away + GRACE - 1);
+    expect(scheduler.task(second.id)?.state).toBe("ready");
+    expect(capReached(scheduler, second.id)).toContainEqual({ code: "cap_reached", inFlight: 1, max: 1 });
+
+    await at(env, away + GRACE);
+    expect(scheduler.task(second.id)).toMatchObject({ state: "running", assignment: { deviceId: "b" } });
+  });
+});
+
 describe("prune", () => {
   test("past the keep, the oldest finished tasks are deleted; nothing unfinished ever is", async () => {
     const { clock, fleet, store, scheduler } = setup();

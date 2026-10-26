@@ -51,6 +51,11 @@ export interface RouteInput {
   readonly holds?: readonly PauseHold[];
   /** The fleet quota record's entries (`Fleet.fleetQuota`), folded with every status. */
   readonly fleetQuota?: readonly FleetQuotaEntry[];
+  /**
+   * Machines absent past `slotReleaseAfterMs`: their in-flight tasks hold no
+   * slot and no projected usage here, though a batch's bound still counts them.
+   */
+  readonly released?: ReadonlySet<string>;
 }
 
 const SPAN_MS: Readonly<Record<WindowSpan, number>> = { "5h": 5 * 3600_000, "7d": 7 * 86_400_000 };
@@ -87,7 +92,7 @@ interface Pass {
 
 export function route(input: RouteInput): Decision {
   const { task, machines, now, config } = input;
-  const inFlight = input.tasks.filter((t) => t.id !== task.id && IN_FLIGHT.includes(t.state));
+  const inFlight = holdingSlots(input.tasks, input.released).filter((t) => t.id !== task.id);
   const newest = newestQuotaByAccount(machines, input.fleetQuota);
   const pass: Pass = {
     task,
@@ -196,6 +201,19 @@ interface AccountJudgement {
   readonly quota?: QuotaBasis;
   readonly spill?: Candidate["spill"];
   readonly pressure: number;
+}
+
+/**
+ * What the caps and projected usage count: in flight, and not placed on a
+ * machine asleep past `slotReleaseAfterMs`. Nothing runs there while it
+ * sleeps; once it is back its tasks count again, over a cap or not.
+ */
+function holdingSlots(tasks: readonly Task[], released: ReadonlySet<string> = new Set()): Task[] {
+  return tasks.filter((t) => {
+    if (!IN_FLIGHT.includes(t.state)) return false;
+    const at = t.assignment ?? t.reservation;
+    return at === undefined || !released.has(at.deviceId);
+  });
 }
 
 /**
@@ -369,6 +387,7 @@ export function accountResetAt(
   now: number,
   config: SchedulerConfig,
   fleetQuota: readonly FleetQuotaEntry[] = [],
+  released: ReadonlySet<string> = new Set(),
 ): number | null {
   const account = accountQuota(accountId, machines, newestQuotaByAccount(machines, fleetQuota));
   if (!account.known) return null;
@@ -376,7 +395,7 @@ export function accountResetAt(
     w.resetsAt !== undefined && w.resetsAt * 1000 > now ? [w.resetsAt * 1000] : [];
   const sharing = accountInFlight(
     {
-      inFlight: tasks.filter((t) => IN_FLIGHT.includes(t.state)),
+      inFlight: holdingSlots(tasks, released),
       accountAt: (placement) => accountOfPlacement(machines, placement),
     },
     accountId,
