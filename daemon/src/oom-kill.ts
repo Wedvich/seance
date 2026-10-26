@@ -49,7 +49,7 @@ export function isCgroupPath(value: unknown): value is string {
 export function isOomSamples(value: unknown): value is readonly OomSample[] {
   return (
     Array.isArray(value) &&
-    value.length >= 1 &&
+    value.length > 0 &&
     value.length <= OOM_SAMPLE_DEPTH &&
     value.every(
       (entry: unknown) =>
