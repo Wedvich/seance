@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   isQuotaTrimmed,
   isStatusStale,
+  lastHeardAt,
   sanitizeStatus,
   STATUS_CLOCK_SKEW_MS,
   STATUS_STALE_MS,
@@ -99,5 +100,21 @@ describe("isQuotaTrimmed", () => {
     expect(isQuotaTrimmed(status)).toBe(false);
     expect(isQuotaTrimmed({ ...status, tr: 0 })).toBe(true);
     expect(isQuotaTrimmed({ ...status, tr: 2 })).toBe(true);
+  });
+});
+
+describe("lastHeardAt", () => {
+  test("a status beat newer than lastSeen wins, in milliseconds", () => {
+    expect(lastHeardAt({ lastSeen: NOW_MS - 3 * 86_400_000, status: { ...status, at: NOW_S - 180 } })).toBe(
+      NOW_MS - 180_000,
+    );
+  });
+
+  test("no status falls back to lastSeen", () => {
+    expect(lastHeardAt({ lastSeen: NOW_MS - 60_000 })).toBe(NOW_MS - 60_000);
+  });
+
+  test("a status older than a later register's lastSeen never wins", () => {
+    expect(lastHeardAt({ lastSeen: NOW_MS - 5_000, status: { ...status, at: NOW_S - 600 } })).toBe(NOW_MS - 5_000);
   });
 });
