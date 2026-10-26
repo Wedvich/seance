@@ -4473,7 +4473,11 @@ fields carry over), under the same gates.
   admission and `ready → failed` is illegal, so it waits until cancelled by hand, its reasons
   `continue_elsewhere`, `repo_absent` or `continue_unsupported` saying why; a known residual). Two taps
   from two clients make two tasks, and the daemon's per-path lock and live-pane check refuse the second
-  with `not_continuable`.
+  with `not_continuable`. The rule sees only the list it was given (at most `QUEUE_MAX_TASKS`), so a
+  finished continuation that has fallen off it no longer holds the old task, and a tap resumes the
+  conversation again once no pane runs in the worktree — a known residual. Rejected: the daemon refusing
+  any task whose path a newer ledger note owns. A continuation cancelled or failed by the scheduler after
+  it ran is offered no Continue itself, so that rule would strand the conversation for good.
 - **Not offered:** failures other than `session_failed` (`dispatch_unconfirmed` and `lost_expired` may
   never have launched, and the daemon's ledger check would refuse anyway; a follow-up could widen
   `continueOffer`), `here` runs, and an automatic continue after an OOM kill — continuing is a manual act.
