@@ -15,6 +15,7 @@ function pane(paneId: string, fields: Partial<PaneInfo> = {}): PaneInfo {
     command: "claude",
     path: "/wt",
     taskId: `task-${paneId.slice(1)}`,
+    pid: null,
     ...fields,
   };
 }
