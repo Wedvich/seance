@@ -166,7 +166,13 @@ export type SettleLaunch = (
  * memory. A task in either that no session in the reply carries is listed — so
  * a lost event, a session the mod never saw, a crash that fired no SessionEnd,
  * and a pane stuck before it registered all read as ran-and-ended, never as
- * never-started.
+ * never-started. A launch the process died in the middle of is listed too, and
+ * also named in `interrupted` (`LaunchLedger`): a leader that reads the field
+ * does not settle it `done`, and one that predates it still reads it as ran.
+ *
+ * It also holds task launches while the daemon is about to exit (`drain`): a
+ * launch begun then would be cut off, so it is refused unrecorded instead
+ * (`LaunchesClosed`).
  */
 /**
  * The launches of one task id in flight together. Only the first can find the
@@ -182,7 +188,34 @@ interface Launches {
   prUrl?: string;
 }
 
+/**
+ * How long a self-update waits for task launches in flight before it restarts:
+ * a spawn's own timeout is 90 s (`OP_TIMEOUT_MS.spawn`), so past this none is
+ * still one its leader waits on.
+ */
+export const UPDATE_DRAIN_MS = 120_000;
+
+/**
+ * How long SIGTERM/SIGINT waits for them: under launchd's default `ExitTimeOut`
+ * of 20 s (the plist sets none), and far under systemd's `TimeoutStopSec` of
+ * 90 s with `KillMode=process`. A launch cut off past it is `interrupted`.
+ */
+export const SHUTDOWN_DRAIN_MS = 15_000;
+
+/**
+ * A task launch arrived while the daemon is restarting. Nothing was recorded or
+ * run, so the spawn is answered with a transport code (`internal_error`): its
+ * leader leaves the task reserved and settles it from `sessions` at the TTL.
+ */
+export class LaunchesClosed extends Error {
+  constructor() {
+    super("this daemon is restarting, so no task launch was recorded or run — it will be settled from `sessions`");
+    this.name = "LaunchesClosed";
+  }
+}
+
 export class EndedTasks {
+  #closed = false;
   readonly #ended = new Map<string, number>();
   readonly #ledger: LaunchLedger;
   readonly #inFlight = new Set<Promise<void>>();
@@ -227,6 +260,9 @@ export class EndedTasks {
    * the same id, in flight beside it, ran.
    */
   async launch(taskId: string): Promise<SettleLaunch> {
+    // Before any await, and never parked for later: a launch held outside `#inFlight` reads as never-landed in
+    // `sessions`, so one resumed after its reservation's TTL would start a twin of a task re-dispatched elsewhere.
+    if (this.#closed) throw new LaunchesClosed();
     const over = Promise.withResolvers<void>();
     this.#inFlight.add(over.promise);
     const launches = this.#launches.get(taskId) ?? { open: 0, retractable: false, landed: false };
@@ -239,6 +275,8 @@ export class EndedTasks {
         if (launches.open > 0) return;
         this.#launches.delete(taskId);
         if (launches.retractable && !launches.landed) await this.#ledger.retract(taskId);
+        // On disk before `over` resolves, so a drain that returns has left nothing pending.
+        else await this.#ledger.clearPending(taskId);
       } finally {
         this.#inFlight.delete(over.promise);
         over.resolve();
@@ -274,6 +312,33 @@ export class EndedTasks {
         void sampleOomPanes(this.#panes, this.#oom);
       }
     };
+  }
+
+  /**
+   * Stops accepting task launches (`LaunchesClosed`) and resolves once those in flight are over, or
+   * `timeoutMs` has passed. True when they finished, false on the timeout. Idempotent.
+   */
+  async drain(timeoutMs: number): Promise<boolean> {
+    this.#closed = true;
+    if (this.#inFlight.size > 0) {
+      log.info(`holding task launches: waiting up to ${timeoutMs / 1000}s for ${this.#inFlight.size} in flight`);
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<false>((resolve) => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+    });
+    try {
+      const done = await Promise.race([this.settled().then(() => true as const), timeout]);
+      if (!done) log.warn(`task launches still in flight after ${timeoutMs / 1000}s: ${this.#inFlight.size}`);
+      return done;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Takes task launches again. Only launches that arrive later: a refused one was never parked. */
+  reopen(): void {
+    this.#closed = false;
   }
 
   /**
@@ -326,14 +391,22 @@ export class EndedTasks {
     if (this.#panes === undefined) return;
     await harvestExits({
       ...this.#panes,
-      note: (taskId, exit, oomKill) =>
-        this.#ledger.note(taskId, { exit, ...(oomKill === undefined ? {} : { oomKill }) }),
+      note: async (taskId, exit, oomKill) => {
+        const noted = await this.#ledger.note(taskId, { exit, ...(oomKill === undefined ? {} : { oomKill }) });
+        await this.#ledger.clearInterrupted([taskId]);
+        return noted;
+      },
       closing: (taskId) => this.closing(taskId),
       launching: (taskId) => this.#launches.has(taskId),
       unaccounted: () => this.unaccounted(),
       vanished: (launch) => this.vanished(launch.taskId, launch.recordedAt),
       ...(this.#oom === undefined ? {} : { oom: this.#oom }),
     });
+  }
+
+  /** A live pane carries this task: no longer an interrupted launch. Best-effort, never rejects. */
+  sessionSeen(taskId: string): Promise<void> {
+    return this.#ledger.clearInterrupted([taskId]);
   }
 
   /** The one ledger of this file in this process, for the branch-state emitter. */
@@ -404,12 +477,21 @@ export class EndedTasks {
   /**
    * `carried`: the task ids of the sessions the same reply lists. Every task
    * this daemon launched since `ledgerSince` is in exactly one of the two.
+   * `interrupted` is the part of `ended` a past process died launching; one a
+   * live session carries is accounted for, and its mark is cleared.
    */
-  report(carried: ReadonlySet<string>): { readonly ended: readonly string[]; readonly ledgerSince: number } {
+  report(carried: ReadonlySet<string>): {
+    readonly ended: readonly string[];
+    readonly ledgerSince: number;
+    readonly interrupted?: readonly string[];
+  } {
     this.#prune();
     const out = new Set<string>();
     for (const id of [...this.#ended.keys(), ...this.#ledger.ids()]) if (!carried.has(id)) out.add(id);
-    return { ended: [...out], ledgerSince: this.#ledger.since() };
+    const marked = this.#ledger.interrupted();
+    const interrupted = marked.filter((id) => !carried.has(id));
+    void this.#ledger.clearInterrupted(marked.filter((id) => carried.has(id)));
+    return { ended: [...out], ledgerSince: this.#ledger.since(), ...(interrupted.length === 0 ? {} : { interrupted }) };
   }
 
   #prune(): void {
@@ -567,6 +649,8 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
         log.info(`local socket: session-event from pid=${peer ?? "unknown"} matched no live pane — dropped`);
         return { ok: false, code: "unbound" };
       }
+      // Ingest, not a new act: the id is the kernel-bound pane's own, never the frame's, and it only lifts that task's mark.
+      if (pane.taskId !== null) void deps.ended.sessionSeen(pane.taskId);
       const at = now();
       const exclave = exclaveOf(pane.path, deps.exclaves());
       if (!stopped) deps.onActivity?.(exclave);

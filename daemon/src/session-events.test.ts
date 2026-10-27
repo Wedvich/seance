@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionEvent } from "@seance/shared";
@@ -11,6 +11,7 @@ import {
   ENDED_MAX,
   ENDED_TTL_MS,
   EndedTasks,
+  LaunchesClosed,
   parsePanePids,
   peerBindingProblem,
   parseSessionEventFrame,
@@ -309,6 +310,139 @@ describe("EndedTasks", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("EndedTasks interrupted launches and the drain", () => {
+  async function inTmp(run: (path: string) => Promise<void>): Promise<void> {
+    const dir = await mkdtemp(join(tmpdir(), "seance-interrupted-"));
+    try {
+      await run(join(dir, "launched.json"));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+  const fileOf = async (path: string): Promise<{ pending?: string[]; interrupted?: string[] }> =>
+    JSON.parse(await readFile(path, "utf8"));
+
+  /** Neither mark on disk: the file a restart reads back as no interrupted launch. */
+  const markless = async (path: string): Promise<boolean> => {
+    const file = await fileOf(path);
+    return file.pending === undefined && file.interrupted === undefined;
+  };
+
+  /** A process that began a launch and died before it settled, then a new one on the same file. */
+  async function afterCrash(path: string, id: string): Promise<EndedTasks> {
+    await new EndedTasks(await LaunchLedger.open(path)).launch(id);
+    return new EndedTasks(await LaunchLedger.open(path));
+  }
+
+  const paneEvents = (ended: EndedTasks, pane: BoundPane): ReturnType<typeof createSessionEvents> =>
+    createSessionEvents({
+      panes: () => Promise.resolve([pane]),
+      exclaves: () => [],
+      forward: () => {},
+      ended,
+      coalesceMs: 0,
+      hostNamesPeers: () => false,
+    });
+
+  test("a launch with no settle reports interrupted, beside ended, after a restart", async () => {
+    await inTmp(async (path) => {
+      const restarted = await afterCrash(path, "t1");
+      expect(restarted.report(new Set())).toMatchObject({ ended: ["t1"], interrupted: ["t1"] });
+    });
+  });
+
+  test("a session carrying it omits it and clears the mark on disk", async () => {
+    await inTmp(async (path) => {
+      const restarted = await afterCrash(path, "t1");
+      expect(restarted.report(new Set(["t1"]))).not.toHaveProperty("interrupted");
+      await pollUntil(() => markless(path), "the mark cleared on disk");
+      expect((await LaunchLedger.open(path)).interrupted()).toEqual([]);
+    });
+  });
+
+  test("drain resolves true only once the launch in flight settled, its pending clear on disk by then", async () => {
+    await inTmp(async (path) => {
+      const ended = new EndedTasks(await LaunchLedger.open(path));
+      const settle = await ended.launch("t1");
+      expect((await fileOf(path)).pending).toEqual(["t1"]);
+      let drained: boolean | null = null;
+      const draining = ended.drain(10_000).then((ok) => (drained = ok));
+      await Bun.sleep(20); // a non-event can't be polled
+      expect(drained).toBeNull();
+      await settle(true, {});
+      expect(await draining).toBe(true);
+      expect(await fileOf(path)).not.toHaveProperty("pending");
+    });
+  });
+
+  test("a launch after drain is refused unrecorded, and settled does not wait for it", async () => {
+    await inTmp(async (path) => {
+      const ended = new EndedTasks(await LaunchLedger.open(path));
+      expect(await ended.drain(1_000)).toBe(true);
+      await expect(ended.launch("late")).rejects.toBeInstanceOf(LaunchesClosed);
+      await ended.settled();
+      expect(ended.launched("late")).toBe(false);
+      await expect(readFile(path, "utf8")).rejects.toThrow();
+    });
+  });
+
+  test("a launch begun before drain still records, runs and is waited for", async () => {
+    const ended = new EndedTasks();
+    const settle = await ended.launch("t1");
+    const draining = ended.drain(10_000);
+    await settle(true, {});
+    expect(await draining).toBe(true);
+    expect(ended.launched("t1")).toBe(true);
+  });
+
+  test("reopen takes launches again", async () => {
+    const ended = new EndedTasks();
+    await ended.drain(1_000);
+    ended.reopen();
+    await (
+      await ended.launch("t1")
+    )(true, {});
+    expect(ended.launched("t1")).toBe(true);
+  });
+
+  test("drain returns false at its timeout, with the launch still in flight", async () => {
+    const ended = new EndedTasks();
+    const settle = await ended.launch("t1");
+    expect(await ended.drain(20)).toBe(false);
+    await settle(true, {});
+    await ended.settled();
+  });
+
+  test("a bound session event from the pane of an interrupted task clears its mark", async () => {
+    await inTmp(async (path) => {
+      const restarted = await afterCrash(path, "t1");
+      const events = paneEvents(restarted, { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" });
+      try {
+        await events.handle(frame({ pane: "%1", state: "busy" }), null);
+        await pollUntil(() => restarted.ledger.interrupted().length === 0, "the mark cleared");
+        await pollUntil(() => markless(path), "the clear on disk");
+      } finally {
+        events.stop();
+      }
+    });
+  });
+
+  test("an unbound event, and one from another task's pane, clear nothing", async () => {
+    await inTmp(async (path) => {
+      const restarted = await afterCrash(path, "t1");
+      const events = paneEvents(restarted, { id: "%2", pid: 20, dead: false, taskId: "other", path: "/home" });
+      try {
+        await events.handle(frame({ pane: "%9", state: "busy" }), null);
+        await events.handle(frame({ pane: "%2", state: "busy" }), null);
+        await Bun.sleep(30); // a non-event can't be polled
+        expect(restarted.ledger.interrupted()).toEqual(["t1"]);
+      } finally {
+        events.stop();
+      }
+    });
   });
 });
 
