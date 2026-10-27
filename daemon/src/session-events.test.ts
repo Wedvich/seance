@@ -442,6 +442,15 @@ describe("EndedTasks interrupted launches and the drain", () => {
     await ended.drain(1_000, { final: true });
     ended.reopen();
     await expect(ended.launch("late")).rejects.toBeInstanceOf(LaunchesClosed);
+
+    const plain = new EndedTasks();
+    await plain.drain(1_000);
+    await expect(plain.launch("held")).rejects.toBeInstanceOf(LaunchesClosed);
+    plain.reopen();
+    await (
+      await plain.launch("later")
+    )(true, {});
+    expect(plain.report(new Set())).toMatchObject({ ended: ["later"] });
   });
 
   test("a crash with no verdict marks the launch interrupted on disk; a refusal and a landed launch do not", async () => {

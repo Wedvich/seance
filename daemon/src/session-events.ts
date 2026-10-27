@@ -198,20 +198,6 @@ interface Launches {
 }
 
 /**
- * How long a self-update waits for task launches in flight before it restarts:
- * a spawn's own timeout is 90 s (`OP_TIMEOUT_MS.spawn`), so past this none is
- * still one its leader waits on.
- */
-export const UPDATE_DRAIN_MS = 120_000;
-
-/**
- * How long SIGTERM/SIGINT waits for them: under launchd's default `ExitTimeOut`
- * of 20 s (the plist sets none), and far under systemd's `TimeoutStopSec` of
- * 90 s with `KillMode=process`. A launch cut off past it is `interrupted`.
- */
-export const SHUTDOWN_DRAIN_MS = 15_000;
-
-/**
  * A task launch arrived while the daemon is restarting. Nothing was recorded or
  * run, so the spawn is answered with a transport code (`internal_error`): its
  * leader leaves the task reserved and settles it from `sessions` at the TTL.
@@ -361,9 +347,10 @@ export class EndedTasks {
   async drain(timeoutMs: number, opts?: { readonly final?: boolean }): Promise<boolean> {
     this.#closed = true;
     if (opts?.final === true) this.#final = true;
-    const waiting = this.#inFlight.size + this.#holds.size;
-    if (waiting > 0) {
-      log.info(`holding task launches: waiting up to ${timeoutMs / 1000}s for ${waiting} in flight`);
+    if (this.#inFlight.size + this.#holds.size > 0) {
+      log.info(
+        `holding task launches: waiting up to ${timeoutMs / 1000}s for ${this.#inFlight.size} launching, ${this.#holds.size} replying`,
+      );
     }
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<false>((resolve) => {

@@ -50,7 +50,7 @@ async function runForeground(): Promise<void> {
     import("./service.ts"),
     import("./supervise.ts"),
     import("./run.ts"),
-    import("./session-events.ts"),
+    import("./drain-limits.ts"),
     import("./shutdown.ts"),
   ]);
   // Self-update only under the supervisor that can actually relaunch us.

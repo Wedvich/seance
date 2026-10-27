@@ -4,10 +4,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureAuditLog } from "./audit.ts";
 import type { Check } from "./check.ts";
+import { SHUTDOWN_DRAIN_MS } from "./drain-limits.ts";
 import { exec, type ExecResult } from "./exec.ts";
 import { recordedBunCheck, resolvedBun } from "./link.ts";
 import { logPath } from "./paths.ts";
-import { SHUTDOWN_DRAIN_MS } from "./session-events.ts";
 import type { InstallResult } from "./service-types.ts";
 
 export const LAUNCHD_LABEL = "io.seance.seanced";

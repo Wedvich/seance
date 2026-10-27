@@ -26,6 +26,7 @@ import {
 import { exclaveInfoEqual, scanExclaves, tagExclaves, type ExclaveScan } from "./exclaves.ts";
 import { appRelayClient } from "./app-relay.ts";
 import type { BranchStateDeps } from "./branch-state.ts";
+import { UPDATE_DRAIN_MS } from "./drain-limits.ts";
 import { createHandler, createLocalOps, type HandlerContext } from "./handlers.ts";
 import { createFleetQuotaWriter, newestReadings } from "./fleet-quota.ts";
 import { createLeader, type Leader, type QueueStore } from "./leader.ts";
@@ -40,7 +41,7 @@ import { startCapabilities } from "./run-capabilities.ts";
 import { startStatusLoop } from "./run-collectors.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
 import { readSource } from "./selfsource.ts";
-import { EndedTasks, UPDATE_DRAIN_MS } from "./session-events.ts";
+import { EndedTasks } from "./session-events.ts";
 import { LaunchLedger, launchLedgerPath } from "./launch-ledger.ts";
 import { VersionFloor, versionFloorPath } from "./version-floor.ts";
 import type { Fetch } from "./seams.ts";
