@@ -5,6 +5,7 @@ import {
   TASK_SPEC_LIMITS,
   continueOffer,
   knownAccounts,
+  waitingContinuation,
   type DepAfter,
   type KnownAccount,
   type Machine,
@@ -99,7 +100,7 @@ export interface QueueRow {
   readonly canFollowUp: boolean;
   /**
    * A failed or cancelled session that can be picked up where it stopped: its machine is present and
-   * advertises it, the leader does too, and no continuation of it is already live or settled.
+   * advertises it, the leader does too, and no continuation of it is already waiting, live or settled.
    */
   readonly canContinue: boolean;
   /** A `ready` task only the concurrency caps hold: "Start now" places it past them. */
@@ -112,6 +113,8 @@ export interface QueueRow {
   readonly deps: string | null;
   /** The earlier session it continues, one line; null for any other task. */
   readonly continues: string | null;
+  /** A continuation of it still in the queue, one line naming it, and its row's id to reveal on tap; null for any other task. */
+  readonly continuing: { readonly id: string; readonly text: string } | null;
   /** Its pin and avoid list, one line in the verdict's wording; null when it has neither. */
   readonly placement: string | null;
   /** Its place in a batch, one line; null outside one. */
@@ -308,6 +311,11 @@ function continuesLine(task: Task, titles: ReadonlyMap<string, string>): string 
   return `Continues ${titles.get(earlier) ?? `task ${earlier.slice(0, 8)}`}`;
 }
 
+function continuingOf(task: Task, tasks: readonly Task[]): QueueRow["continuing"] {
+  const waiting = waitingContinuation(task, tasks);
+  return waiting === undefined ? null : { id: waiting.id, text: `Continuing as ${taskTitle(waiting)} · waiting` };
+}
+
 function batchLine(task: Task): string | null {
   const { batch } = task.spec;
   return batch === undefined ? null : `Batch #${batch.index}`;
@@ -367,6 +375,7 @@ function rowOf(
     inline: primaryAction({ canContinue, canRunNow }),
     deps: depsLine(task, titles),
     continues: continuesLine(task, titles),
+    continuing: continuingOf(task, tasks),
     placement: placementLine(task, state),
     batch: batchLine(task),
     busy: state.taskAction?.taskId === task.id,

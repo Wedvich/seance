@@ -501,6 +501,18 @@ describe("continueTaskAuto", () => {
           },
         ]),
       ],
+      [
+        "already continuing as task t-3, which is still waiting in the queue",
+        await runContinue([
+          failedTask,
+          {
+            id: "t-3",
+            spec: { repo: ORIGIN, mode: "continue", continues: { task: "t-1", at: AT } },
+            state: "queued",
+            createdAt: 2,
+          },
+        ]),
+      ],
     ];
     for (const [reason, outcome] of cases) {
       expect(outcome.ok).toBe(false);

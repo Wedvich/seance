@@ -577,7 +577,8 @@ of M4 has landed.
   - _Follow-up (2026-10-27), landed:_ a `ready` continuation expires `continue_expired` after 4 days, a task
     cancelled after placement is continuable (`continueCancelled`), the offer moves to the newest landed
     continuation and the daemon refuses an older task whose worktree a later launch noted, and the seed is
-    worded from the old note's exit.
+    worded from the old note's exit. A continuation still waiting withholds the offer and shows on the old
+    card ("Continuing as … · waiting"), client-side from the listed tasks' `continues`.
   - _As built:_ DESIGN.md, _Daemon_, "Continuing a session", records it and what was rejected.
 
 - **Asleep machines on the Queue screen (new, 2026-10-26) — Done.** A task placed on a MacBook whose

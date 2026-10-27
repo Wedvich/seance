@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Machine } from "./app-client.ts";
-import { continuationSpec, continueOffer } from "./continue-task.ts";
+import { continuationSpec, continueOffer, waitingContinuation } from "./continue-task.ts";
 import { parseTaskSpec } from "./parse.ts";
 import { CAPABILITIES, type Assignment, type Task, type TaskSpec } from "./types.ts";
 
@@ -168,18 +168,48 @@ describe("continueOffer, once", () => {
     }
   });
 
-  test("one that never landed leaves it open; so does another task's", () => {
+  test("one still waiting withholds it, naming itself; another task's waiting one does not", () => {
+    for (const state of ["queued", "blocked", "ready"] as const) {
+      const y = continuation(state);
+      expect(waitingContinuation(old, [old, y]), state).toBe(y);
+      const offer = continueOffer(old, both, [old, y]);
+      expect(offer.ok, state).toBe(false);
+      expect(offer.ok ? "" : offer.reason, state).toBe(
+        `already continuing as task ${y.id}, which is still waiting in the queue`,
+      );
+    }
+    const elsewhere = continuation("queued", {}, "t-other");
+    expect(waitingContinuation(old, [old, elsewhere])).toBeUndefined();
+    expect(continueOffer(old, able, [old, elsewhere]).ok).toBe(true);
+  });
+
+  test("of several waiting, the oldest is named whatever the list order", () => {
+    const older = continuation("ready", { createdAt: 5 }, "t-old", "t-older");
+    const newer = continuation("queued", { createdAt: 9 }, "t-old", "t-newer");
+    expect(waitingContinuation(old, [old, newer, older])).toBe(older);
+    expect(waitingContinuation(old, [old, older, newer])).toBe(older);
+  });
+
+  test("a landed taker outranks a waiting one: the offer moves to the taker", () => {
+    const taker = failing("session_failed");
+    const waiting = continuation("queued", {}, "t-old", "t-waiting");
+    expect(waitingContinuation(old, [old, waiting, taker])).toBeUndefined();
+    const offer = continueOffer(old, both, [old, waiting, taker]);
+    expect(offer.ok ? "" : offer.reason).toContain("continue that one instead");
+  });
+
+  test("one that ended without landing leaves it open; so does another task's", () => {
     const open: readonly Task[] = [
-      continuation("queued"),
-      continuation("blocked"),
-      continuation("ready"),
       failing("not_continuable"),
       failing("continue_expired"),
       failing("dispatch_unconfirmed"),
       continuation("failed"),
       continuation("cancelled"),
     ];
-    for (const y of open) expect(continueOffer(old, able, [old, y]).ok, `${y.state} ${y.failure?.code}`).toBe(true);
+    for (const y of open) {
+      expect(waitingContinuation(old, [old, y])).toBeUndefined();
+      expect(continueOffer(old, able, [old, y]).ok, `${y.state} ${y.failure?.code}`).toBe(true);
+    }
     expect(continueOffer(old, able, [old, continuation("running", {}, "t-other")]).ok).toBe(true);
   });
 
@@ -190,6 +220,10 @@ describe("continueOffer, once", () => {
     expect(continueOffer(y, able, [old, y, z]).ok).toBe(false);
     const expired = continuation("failed", { failure: { code: "continue_expired", message: "m" } }, "t-y", "t-z");
     expect(continueOffer(y, able, [old, y, expired]).ok).toBe(true);
+    const waiting = continuation("ready", {}, "t-y", "t-z");
+    const offer = continueOffer(y, able, [old, y, waiting]);
+    expect(offer.ok ? "" : offer.reason).toContain("task t-z, which is still waiting");
+    expect(continueOffer(old, able, [old, y, waiting]).ok).toBe(false);
   });
 });
 

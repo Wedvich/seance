@@ -822,13 +822,52 @@ describe("continuing a failed task", () => {
     for (const t of [other, inPlace, running]) expect(rowOf([t], t.id, CAN)?.canContinue).toBe(false);
   });
 
-  test("withdrawn once a continuation is past the queue in any state; a queued, blocked, failed or cancelled one does not hold it", () => {
-    for (const held of ["reserved", "running", "needs-input", "lost", "awaiting-merge", "done"] as const) {
+  test("withdrawn while a continuation waits or once one is past the queue; a failed or unplaced cancelled one gives it back", () => {
+    for (const held of [
+      "queued",
+      "blocked",
+      "ready",
+      "reserved",
+      "running",
+      "needs-input",
+      "lost",
+      "awaiting-merge",
+      "done",
+    ] as const) {
       expect(rowOf([failed, continuation({ state: held })], "f", CAN)?.canContinue, held).toBe(false);
     }
-    for (const free of ["queued", "blocked", "ready", "failed", "cancelled"] as const) {
-      expect(rowOf([failed, continuation({ state: free })], "f", CAN)?.canContinue).toBe(true);
+    const refused = continuation({ state: "failed", failure: { code: "not_continuable", message: "m" } });
+    for (const free of [refused, continuation({ state: "failed" }), continuation({ state: "cancelled" })]) {
+      expect(rowOf([failed, free], "f", CAN)?.canContinue, free.failure?.code ?? free.state).toBe(true);
     }
+  });
+
+  test("a waiting continuation shows on the earlier card by its title, pointing at its row; nowhere else", () => {
+    const waiting = continuation({
+      spec: { repo: ORIGIN, mode: "continue", title: "Fix the thing again", continues: { task: "f", at: placedAt } },
+    });
+    for (const held of ["queued", "blocked", "ready"] as const) {
+      expect(rowOf([failed, { ...waiting, state: held }], "f", CAN)?.continuing, held).toEqual({
+        id: "c",
+        text: "Continuing as Fix the thing again · waiting",
+      });
+    }
+    expect(rowOf([failed, waiting], "c", CAN)?.continuing).toBeNull();
+    const refused = continuation({ state: "failed", failure: { code: "not_continuable", message: "m" } });
+    const landed = continuation({ state: "running", assignment: placedAt });
+    for (const y of [refused, landed, continuation({ state: "cancelled" })]) {
+      expect(rowOf([failed, y], "f", CAN)?.continuing, y.state).toBeNull();
+    }
+    // A landed continuation outranks a waiting one, as in continueOffer: the line would name a task that can't take over.
+    const taker = task("y1", {
+      state: "failed",
+      failure: { code: "session_failed", message: "m" },
+      assignment: placedAt,
+      spec: { repo: ORIGIN, mode: "continue", continues: { task: "f", at: placedAt } },
+    });
+    expect(rowOf([failed, taker, waiting], "f", CAN)?.continuing).toBeNull();
+    // Past QUEUE_MAX_TASKS the continuation isn't listed: nothing to name, and the offer stands.
+    expect(rowOf([failed], "f", CAN)?.continuing).toBeNull();
   });
 
   test("a cancelled task with an assignment is continuable only on a machine advertising continueCancelled", () => {

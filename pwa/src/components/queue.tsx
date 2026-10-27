@@ -1,5 +1,5 @@
 import type { ComponentChildren, JSX } from "preact";
-import { useCallback, useEffect, useState } from "preact/hooks";
+import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import {
   ASLEEP_SECTION,
   armKey,
@@ -9,6 +9,7 @@ import {
   type QueueRow,
   type QueueScreenView,
 } from "../queue-view.ts";
+import { centeredScrollTop } from "../scroll.ts";
 import type { ConnectionState } from "../view.ts";
 import { Menu, MenuDivider, MenuItem, useMenu, type MenuHandle } from "./menu.tsx";
 import { RelaySettings } from "./relay-dot.tsx";
@@ -49,6 +50,25 @@ export function QueueScreen(props: {
   const [armed, setArmed] = useState<string | null>(null);
   // Memory only: persist.ts keeps the spawn form's record, no place for a view's open/closed.
   const [asleepOpen, setAsleepOpen] = useState(false);
+  const list = useRef<HTMLDivElement>(null);
+
+  // Not scrollIntoView: that scrolls every ancestor too, which shifts the page on a phone.
+  const reveal = (taskId: string): void => {
+    const el = list.current;
+    if (el === null) return;
+    const card = el.querySelector<HTMLElement>(`[data-task="${CSS.escape(taskId)}"]`);
+    if (card === null) return;
+    const box = el.getBoundingClientRect();
+    const at = card.getBoundingClientRect();
+    const top = centeredScrollTop(
+      { top: box.top, height: box.height, scrollTop: el.scrollTop, scrollHeight: el.scrollHeight },
+      { top: at.top, height: at.height },
+    );
+    const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    el.scrollTo({ top, behavior: still ? "auto" : "smooth" });
+    // The scroll alone leaves keyboard and screen-reader focus on the button; preventScroll keeps the smooth scroll ours.
+    card.focus({ preventScroll: true });
+  };
 
   useEffect(() => {
     if (armed === null) return;
@@ -100,7 +120,7 @@ export function QueueScreen(props: {
         </div>
       </header>
 
-      <div className="fleet">
+      <div className="fleet" ref={list}>
         {notice !== null && (
           <div className="banner card banner-err" role="alert">
             <span className="banner-rule" />
@@ -177,6 +197,7 @@ export function QueueScreen(props: {
                     onRunNow={props.onRunNow}
                     onContinue={props.onContinue}
                     onFollowUp={props.onFollowUp}
+                    onReveal={reveal}
                   />
                 ))}
             </section>
@@ -218,9 +239,11 @@ function QueueCard(props: {
   onRunNow: (taskId: string) => void;
   onContinue: (taskId: string) => void;
   onFollowUp: (taskId: string) => void;
+  /** Scrolls the queue to another task's card. */
+  onReveal: (taskId: string) => void;
 }): JSX.Element {
   const { row, armed, onAct } = props;
-  const { inline } = row;
+  const { inline, continuing } = row;
   const menu = useMenu();
   // Closing by any means — a pick, an outside tap, Escape, back, a scroll — disarms this row.
   const handle: MenuHandle<HTMLButtonElement> = {
@@ -257,7 +280,7 @@ function QueueCard(props: {
   );
 
   return (
-    <section className="fleet-card card">
+    <section className="fleet-card card" data-task={row.id} tabIndex={-1}>
       <div className="fleet-card-head">
         {row.dot !== null && <span className={`dot dot-${row.dot}`} aria-hidden="true" />}
         <div className="fleet-card-title">
@@ -330,6 +353,18 @@ function QueueCard(props: {
       </div>
       {row.deps !== null && <p className="fleet-card-body">{row.deps}</p>}
       {row.continues !== null && <p className="fleet-card-body">{row.continues}</p>}
+      {continuing !== null && (
+        <p className="fleet-card-body">
+          <button
+            type="button"
+            className="queue-reveal"
+            aria-label={`${continuing.text}, show in queue`}
+            onClick={() => props.onReveal(continuing.id)}
+          >
+            {continuing.text}
+          </button>
+        </p>
+      )}
       {row.placement !== null && <p className="fleet-card-body">{row.placement}</p>}
       {row.batch !== null && <p className="fleet-card-body">{row.batch}</p>}
       {row.body !== null && <p className="fleet-card-body">{row.body}</p>}

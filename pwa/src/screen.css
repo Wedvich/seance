@@ -2257,9 +2257,53 @@
   text-underline-offset: 3px;
 }
 
-.queue-session:hover,
+@media (hover: hover) {
+  .queue-session:hover {
+    text-decoration-color: currentColor;
+  }
+}
+
 .queue-session:focus-visible {
   text-decoration-color: currentColor;
+}
+
+/* A body line that scrolls to another card: reads as the line it is, underlined like the title link. */
+.queue-reveal {
+  position: relative;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: start;
+  text-decoration: underline;
+  text-decoration-color: var(--line);
+  text-underline-offset: 3px;
+}
+
+/* The pseudo-element takes the tap target toward 44px without growing the line. */
+.queue-reveal::before {
+  content: "";
+  position: absolute;
+  inset: -12px -4px;
+}
+
+@media (hover: hover) {
+  .queue-reveal:hover {
+    text-decoration-color: currentColor;
+  }
+}
+
+.queue-reveal:focus-visible {
+  text-decoration-color: currentColor;
+}
+
+/* Focused by script when a reveal lands on it: the ring shows for keyboard use only, never after a tap. */
+.fleet-card:focus {
+  outline: none;
+}
+
+.fleet-card:focus-visible {
+  outline: 2px solid var(--acc);
+  outline-offset: 2px;
 }
 
 /* The PR chip is a quiet outline, a rounded rectangle rather than the badge's pill: at this
