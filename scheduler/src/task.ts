@@ -29,12 +29,12 @@ export type { Assignment, Placement, Reservation, Target, Task, TaskSpec, TaskSt
  * spawn confirmed: with no session it is `ready` again only when the machine's
  * ledger proves the spawn never landed, and `failed` otherwise. `lost → ready`
  * is legal for that task alone, and `advance` refuses it for any other. `done` from `queued`, `blocked` or `ready` is `mark-done`'s alone: no signal ever settles never-placed work, and it always wins. `lost`
- * and `awaiting-merge` both fail past their expiry (`expiry.ts`).
+ * and `awaiting-merge` both fail past their expiry (`expiry.ts`), and so does a `ready` continuation; `ready → failed` is expiry's alone.
  */
 export const TRANSITIONS = {
   queued: ["blocked", "ready", "done", "failed", "cancelled"],
   blocked: ["ready", "done", "failed", "cancelled"],
-  ready: ["reserved", "done", "cancelled"],
+  ready: ["reserved", "done", "failed", "cancelled"],
   reserved: ["running", "needs-input", "awaiting-merge", "done", "ready", "lost", "failed", "cancelled"],
   running: ["needs-input", "awaiting-merge", "lost", "done", "failed", "cancelled"],
   "needs-input": ["running", "awaiting-merge", "lost", "done", "failed", "cancelled"],

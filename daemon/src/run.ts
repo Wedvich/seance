@@ -253,6 +253,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         CAPABILITIES.reportedDone,
         CAPABILITIES.pinAccount,
         CAPABILITIES.continueTask,
+        CAPABILITIES.continueCancelled,
       ],
     };
     const candidate: Registered = { scan: info.scannedAt, exclaves: exclaveScan };

@@ -155,7 +155,7 @@ function cleanDespawn(p: DespawnRequest): DespawnRequest {
  * not set `lineage` or `base` (neither client sends them), and its `client` is
  * `mcp` or `cli` — the peer's unverifiable claim, since the daemon cannot tell
  * the two apart, kept in the record and audited as `claimed_client`. It may
- * continue a failed task (`mode: "continue"` with `continues`, paired by the parser). Never
+ * continue a task (`mode: "continue"` with `continues`, paired by the parser). Never
  * `pwa`, `raycast` or `scheduler`. `queue` and `accounts` take no payload, and
  * whatever else the frame carries is never forwarded.
  */

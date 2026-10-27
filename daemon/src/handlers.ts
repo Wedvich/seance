@@ -34,7 +34,14 @@ import {
   type SpawnAudit,
   type SpawnOrigin,
 } from "./audit.ts";
-import { DespawnFailure, SpawnFailure, type DespawnResult, type SessionBackend, type SpawnOutcome } from "./backend.ts";
+import {
+  DespawnFailure,
+  SpawnFailure,
+  type Continuation,
+  type DespawnResult,
+  type SessionBackend,
+  type SpawnOutcome,
+} from "./backend.ts";
 import { canonical } from "./gitdir.ts";
 import { log } from "./log.ts";
 import type { SettleLaunch } from "./session-events.ts";
@@ -76,7 +83,7 @@ export interface TaskLaunches {
    */
   readonly continuation: (
     taskId: string,
-  ) => { readonly repo: string; readonly path: string } | { readonly refused: string };
+  ) => { readonly repo: string; readonly path: string; readonly exit?: number } | { readonly refused: string };
   /** Resolves once no launch is in flight. */
   readonly settled: () => Promise<void>;
   /** What the ledger holds of each launched task's PR and branch, for the scheduler's `sessions`. */
@@ -208,7 +215,7 @@ function continuationRefusal(request: SpawnRequest, scheduler: boolean): SpawnRe
 
 /**
  * The worktree a continuation resumes in, from this machine's launch ledger and checked
- * before anything is recorded or run (DESIGN.md, Daemon, "Continuing a failed task"): the
+ * before anything is recorded or run (DESIGN.md, Daemon, "Continuing a session"): the
  * clone `repo` resolved to is the one the ledger noted, and the path is canonical and under
  * that clone's `.claude/worktrees/`, so a ledger written by anything else cannot aim a
  * session at an arbitrary directory.
@@ -217,7 +224,7 @@ async function continuationSite(
   ctx: HandlerContext,
   request: SpawnRequest,
   repos: readonly RepoEntry[],
-): Promise<{ readonly path: string } | SpawnRefusal> {
+): Promise<Continuation | SpawnRefusal> {
   const site = request.continues === undefined ? undefined : ctx.tasks?.continuation(request.continues);
   if (site === undefined) return notContinuable("this machine keeps no launch record to continue from");
   if ("refused" in site) return notContinuable(site.refused);
@@ -237,7 +244,7 @@ async function continuationSite(
   if (real !== site.path || !real.startsWith(join(entry.path, ".claude", "worktrees") + sep)) {
     return notContinuable(`its noted path ${site.path} is not a worktree of ${request.repo}`);
   }
-  return { path: real };
+  return { path: real, ...(site.exit === undefined ? {} : { exit: site.exit }) };
 }
 
 async function handleSpawn(
@@ -266,7 +273,7 @@ async function handleSpawn(
   }
   // Read once: a rescan in between must not pair the spawn with another clone.
   const repos = ctx.getRepos();
-  let continuation: { readonly path: string } | undefined;
+  let continuation: Continuation | undefined;
   if (payload.mode === "continue") {
     const site = await continuationSite(ctx, payload, repos);
     if ("code" in site) {

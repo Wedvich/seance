@@ -1,4 +1,4 @@
-import { TASK_FAILURE_LIMITS, type TaskFailureCode } from "@seance/shared";
+import { reasonText, TASK_FAILURE_LIMITS, type Decision, type TaskFailureCode } from "@seance/shared";
 import type { SchedulerConfig } from "./config.ts";
 import { advance, type Task } from "./task.ts";
 
@@ -29,14 +29,17 @@ function fail(task: Task, code: TaskFailureCode, message: string): Task {
 /**
  * `lost` and `awaiting-merge` are never pruned and hold no slot, but outlive
  * every term: past their bound they fail,
- * which also fails their waiting dependents. `lost` ages from when its machine
+ * which also fails their waiting dependents. A `ready` continuation fails past
+ * `continueExpiryMs` since `createdAt`: its machine never took it. Its message
+ * names that machine's rejections from `decision`, the leader's last in-memory one. `lost` ages from when its machine
  * went away, `awaiting-merge` from `endedAt` (an older leader's record has none:
  * `createdAt`, which is never later). Null when nothing is due.
  */
 export function expiry(
   task: Task,
   now: number,
-  config: Pick<SchedulerConfig, "lostExpiryMs" | "mergeExpiryMs">,
+  config: Pick<SchedulerConfig, "lostExpiryMs" | "mergeExpiryMs" | "continueExpiryMs">,
+  decision?: Decision,
 ): Task | null {
   if (task.state === "lost") {
     const since = task.absentSince ?? task.createdAt;
@@ -61,6 +64,20 @@ export function expiry(
       task,
       "merge_expired",
       unreported ? `${age} and it was never reported done` : `${age} and no merge of its pull request was seen`,
+    );
+  }
+  if (task.state === "ready" && task.spec.continues !== undefined) {
+    if (now - task.createdAt <= config.continueExpiryMs) return null;
+    const { at } = task.spec.continues;
+    // Exact target only: the device's other exclaves are rejected `continue_elsewhere`, which says nothing of why this one never took it.
+    const exact = (decision?.candidates ?? []).filter((c) => c.deviceId === at.deviceId && c.exclave === at.exclave);
+    const reasons = [...new Set(exact.flatMap((c) => c.rejected.map(reasonText)))];
+    // A fleet-wide hold (pause, version floor, caps, quota) also keeps it `ready`, and the clock does not stop for it.
+    const why = reasons.length > 0 ? reasons.join(", ") : "its machine never took it";
+    return fail(
+      task,
+      "continue_expired",
+      `the session it continues was not resumed within ${days(config.continueExpiryMs)} days: ${why}; the task it continues may be continued again while its machine still holds its launch (a week)`,
     );
   }
   return null;

@@ -651,7 +651,8 @@ export class Scheduler {
    * dependents fail in the same pass. A task whose machine's check is out is
    * left to it, so a machine back in time settles its task first; so is a
    * `lost` task whose machine is connected now, for the next check. Judged
-   * again inside the write, since either may change between the two.
+   * again inside the write, since either may change between the two. A `ready`
+   * continuation also fails past its bound, worded from the held decision.
    */
   async #expire(): Promise<void> {
     const now = this.#now();
@@ -662,9 +663,11 @@ export class Scheduler {
     };
     await Promise.all(
       this.tasks()
-        .filter((t) => expiry(t, now, this.#config) !== null && !spared(t))
+        .filter((t) => expiry(t, now, this.#config, this.lastDecision(t.id)) !== null && !spared(t))
         .map((seen) =>
-          this.#update(seen.id, (current) => (spared(current) ? null : expiry(current, now, this.#config))),
+          this.#update(seen.id, (current) =>
+            spared(current) ? null : expiry(current, now, this.#config, this.lastDecision(current.id)),
+          ),
         ),
     );
   }

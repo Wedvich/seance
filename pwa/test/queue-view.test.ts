@@ -784,6 +784,22 @@ describe("continuing a failed task", () => {
     }
   });
 
+  test("a cancelled task with an assignment is continuable only on a machine advertising continueCancelled", () => {
+    const cancelled = task("x", { state: "cancelled", spec: { repo: ORIGIN, mode: "worktree" }, assignment: placedAt });
+    expect(rowOf([cancelled], "x", [...CAN, CAPABILITIES.continueCancelled])?.canContinue).toBe(true);
+    expect(rowOf([cancelled], "x", CAN)?.canContinue).toBe(false);
+  });
+
+  test("the button moves to a continuation that failed after landing", () => {
+    const landed = continuation({
+      state: "failed",
+      failure: { code: "session_failed", message: "exit 137" },
+      assignment: placedAt,
+    });
+    expect(rowOf([failed, landed], "f", CAN)?.canContinue).toBe(false);
+    expect(rowOf([failed, landed], "c", CAN)?.canContinue).toBe(true);
+  });
+
   test("a continuation names what it continues, by title when listed, else by id; other rows carry no such line", () => {
     expect(rowOf([failed, continuation({})], "c", CAN)?.continues).toBe("Continues Fix the thing");
     expect(rowOf([continuation({})], "c", CAN)?.continues).toBe("Continues task f");

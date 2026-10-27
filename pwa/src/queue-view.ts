@@ -49,7 +49,7 @@ export interface QueueRow {
   /** Offered while the task can still be waited on, or finished done: "Follow up" prefills the form's After. */
   readonly canFollowUp: boolean;
   /**
-   * A failed session that can be picked up where it stopped: its machine is present and
+   * A failed or cancelled session that can be picked up where it stopped: its machine is present and
    * advertises it, the leader does too, and no continuation of it is already live or settled.
    */
   readonly canContinue: boolean;

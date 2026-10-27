@@ -951,6 +951,10 @@ export interface MachineInfo {
  * `continueTask`: as a daemon, spawns `mode: "continue"`; as a leader, routes and
  * dispatches a continue task — what a client checks of the verified leader before
  * writing one (an older leader refuses the mode, holding the record unreadable).
+ * `continueCancelled`: as a daemon, continues a task that was cancelled after it
+ * was placed. It refuses a continuation when a newer launch noted the same
+ * worktree, and words the seed from the old note's exit. Clients offer Continue
+ * on a cancelled task only on a machine advertising it.
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -960,6 +964,7 @@ export const CAPABILITIES = {
   reportedDone: "reportedDone",
   pinAccount: "pinAccount",
   continueTask: "continueTask",
+  continueCancelled: "continueCancelled",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -1204,10 +1209,10 @@ export const METRIC_NAMES = {
 export type MetricName = (typeof METRIC_NAMES)[keyof typeof METRIC_NAMES];
 
 /**
- * `continue` resumes a failed task's session (`claude --continue`) in the worktree
- * this machine's launch ledger noted for `SpawnRequest.continues`. It comes only
+ * `continue` resumes a failed or cancelled task's session (`claude --continue`) in the
+ * worktree this machine's launch ledger noted for `SpawnRequest.continues`. It comes only
  * from the leader's dispatch of a continue task (DESIGN.md, Daemon, "Continuing a
- * failed task"); no direct client sends it.
+ * session"); no direct client sends it.
  */
 export type SpawnMode = "worktree" | "here" | "continue";
 
@@ -2296,7 +2301,9 @@ export interface SettingsRecord extends VersionBound {
  * with no merge. Its `after: "merged"` dependents fail with it.
  * `session_failed`: its session exited nonzero (`TaskProgress.exit`) with no
  * PR and no merge seen, so its dependents fail rather than start on a branch
- * with nothing on it.
+ * with nothing on it. `continue_expired`: a continuation (`TaskSpec.continues`)
+ * still `ready` past `SchedulerConfig.continueExpiryMs` since `createdAt`. Its
+ * machine never took it, so it never landed.
  */
 export const TASK_FAILURE_CODES = [
   "dispatch_unconfirmed",
@@ -2307,6 +2314,7 @@ export const TASK_FAILURE_CODES = [
   "lost_expired",
   "merge_expired",
   "session_failed",
+  "continue_expired",
 ] as const;
 
 export type TaskFailureCode = (typeof TASK_FAILURE_CODES)[number];
