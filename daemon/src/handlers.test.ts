@@ -434,8 +434,9 @@ describe("a task's launch is recorded before it runs", () => {
       list: () => Promise.resolve([]),
       close: () => Promise.resolve(),
       server: () => Promise.resolve(4321),
-      recordedExits: () => Promise.resolve([]),
+      recorded: () => Promise.resolve({ exits: [], closes: [] }),
       clearExit: () => Promise.resolve(),
+      clearClose: () => Promise.resolve(),
     });
     const { backend } = taskBackend(() => Promise.resolve());
     const served: SessionBackend = {

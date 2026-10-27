@@ -29,6 +29,7 @@ import { localSocketReachable } from "./local-client.ts";
 import { localSocketChecks } from "./local-socket.ts";
 import { exec, execFailure } from "./exec.ts";
 import { scanExclaves, tagExclaves, userScopeTargets } from "./exclaves.ts";
+import { markClosed } from "./exit-status.ts";
 import { mcpFleetChecks } from "./fleet.ts";
 import { platformFsmonitor } from "./fsmonitor.ts";
 import { mcpChecks, runMcpServer } from "./mcp.ts";
@@ -297,6 +298,15 @@ export function parseDespawnArgs(argv: readonly string[]): DespawnCliArgs {
 }
 
 /**
+ * The ledger is the daemon's, so a task pane's close is marked in tmux instead, for harvest to
+ * note: unmarked, a pane killed here would read as closed from outside (`session_closed`).
+ * Best-effort, as the daemon's own note is.
+ */
+async function markClosedOrWarn(taskId: string): Promise<void> {
+  if (!(await markClosed(taskId))) console.error(`warning: could not mark task ${taskId}'s close for the daemon`);
+}
+
+/**
  * The relay-free despawn, as `cmdSpawn` is the relay-free spawn: the same
  * backend call the app request runs, audited `origin=cli`.
  */
@@ -311,7 +321,11 @@ export async function cmdDespawn(argv: readonly string[]): Promise<void> {
     throw new Error("this machine's session backend cannot despawn");
   }
   try {
-    const result = await backend.despawn(args.id, { force: args.force });
+    const result = await backend.despawn(args.id, {
+      force: args.force,
+      closing: markClosedOrWarn,
+      leaveDeadTask: true,
+    });
     await audit.ok(result);
     console.log(`${result.outcome} '${result.window}' (${args.id})`);
   } catch (err) {

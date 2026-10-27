@@ -10,11 +10,11 @@ import { scanRepos } from "../src/scan.ts";
 import { LaunchLedger } from "../src/launch-ledger.ts";
 import { reapAudit } from "../src/audit.ts";
 import { despawnSession } from "../src/despawn.ts";
-import { tmuxHarvestPanes } from "../src/exit-status.ts";
+import { markClosed, tmuxHarvestPanes } from "../src/exit-status.ts";
 import { EndedTasks } from "../src/session-events.ts";
 import { listClaudeSessions, paneInfo } from "../src/sessions.ts";
 import { sessionName, spawnSession, type SpawnOptions } from "../src/spawn.ts";
-import { FIELD_SEP, tmux, tmuxOk } from "../src/tmux.ts";
+import { CLOSED_OPTION_PREFIX, FIELD_SEP, tmux, tmuxOk } from "../src/tmux.ts";
 import {
   addWorktree,
   makeClaudeStub,
@@ -556,12 +556,13 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     }
   });
 
-  test("a task window killed while alive is noted vanished; one despawned through closing, or one that exited, is not", async () => {
+  test("a task window killed while alive is noted vanished; one despawned through closing or the CLI's mark, or one that exited, is not", async () => {
     process.env["SEANCE_CLAUDE_BIN"] = stub.repl;
     const tasks = new EndedTasks(LaunchLedger.memory(), Date.now, tmuxHarvestPanes(reapAudit("harvest", () => {})));
     try {
       const killed = await launchTask(tasks, "task-vanish", "Task Vanish");
       const despawned = await launchTask(tasks, "task-despawn", "Task Despawn");
+      const marked = await launchTask(tasks, "task-marked", "Task Marked");
       const exited = await launchTask(tasks, "task-exited", "Task Exited");
       const crashed = await launchTask(tasks, "task-crashed", "Task Crashed");
       await tasks.harvestExits();
@@ -569,6 +570,8 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
 
       await tmuxOk(["kill-window", "-t", killed.pane]);
       await despawnSession(despawned.pane, { force: true, closing: (id) => tasks.closing(id) });
+      // As `seanced despawn` does, in a process without the ledger.
+      await despawnSession(marked.pane, { force: true, closing: markClosed });
       await tmux(["send-keys", "-t", exited.pane, "-l", "/exit"]);
       await tmux(["send-keys", "-t", exited.pane, "Enter"]);
       await tmux(["send-keys", "-t", crashed.pane, "-l", "/crash 4"]);
@@ -585,9 +588,13 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
       expect(progress.find((p) => p.taskId === "task-exited")).toMatchObject({ exit: 0 });
       expect(progress.find((p) => p.taskId === "task-crashed")).toMatchObject({ exit: 4 });
       expect(progress.find((p) => p.taskId === "task-despawn")?.vanished).toBeUndefined();
+      expect(progress.find((p) => p.taskId === "task-marked")?.vanished).toBeUndefined();
+      // Noted, so unset: the next pass has nothing left to read.
+      expect((await tmux(["show-options", "-gv", `${CLOSED_OPTION_PREFIX}task-marked`])).exitCode).not.toBe(0);
     } finally {
       process.env["SEANCE_CLAUDE_BIN"] = stub.ok;
-      for (const title of ["Task Vanish", "Task Despawn", "Task Exited", "Task Crashed"]) await killWindow(title);
+      for (const title of ["Task Vanish", "Task Despawn", "Task Marked", "Task Exited", "Task Crashed"])
+        await killWindow(title);
     }
   });
 
@@ -655,6 +662,33 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
       }
     },
   );
+
+  test("the CLI's graceful despawn of the server's last pane leaves it dead for harvest: the server stays up, the exit is noted, not vanished", async () => {
+    process.env["SEANCE_CLAUDE_BIN"] = stub.repl;
+    const shared = process.env["SEANCE_TMUX_SOCKET"];
+    const alone = usePrivateTmux(base, "spawn-last-cli");
+    try {
+      const tasks = new EndedTasks(LaunchLedger.memory(), Date.now, tmuxHarvestPanes(reapAudit("harvest", () => {})));
+      const { pane, outcome } = await launchTask(tasks, "task-last-cli", "Task Last Cli");
+      for (const other of (await tmuxOk(["list-panes", "-a", "-F", "#{pane_id}"])).split("\n")) {
+        // oxlint-disable-next-line no-await-in-loop -- one pane at a time
+        if (other !== "" && other !== pane) await tmuxOk(["kill-pane", "-t", other]);
+      }
+      // As `seanced despawn` calls it.
+      const result = await despawnSession(pane, { force: false, closing: markClosed, leaveDeadTask: true });
+      expect(result.outcome).toBe("exited");
+      expect((await paneInfo(pane))?.dead).toBe(true);
+      expect(Number((await tmuxOk(["display-message", "-p", "#{pid}"])).trim())).toBe(outcome.server ?? -1);
+      await tasks.harvestExits();
+      const progress = tasks.progress().find((p) => p.taskId === "task-last-cli");
+      expect(progress).toMatchObject({ exit: 0 });
+      expect(progress?.vanished).toBeUndefined();
+    } finally {
+      process.env["SEANCE_CLAUDE_BIN"] = stub.ok;
+      await alone.dispose();
+      if (shared !== undefined) process.env["SEANCE_TMUX_SOCKET"] = shared;
+    }
+  });
 
   test("despawn notes closing, and waits for it, before it touches a task's pane", async () => {
     process.env["SEANCE_CLAUDE_BIN"] = stub.repl;
