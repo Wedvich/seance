@@ -2147,7 +2147,14 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   record kept changing under the write), and `invalid_request` past `MAX_PAUSE_HOLDS - 1` account holds. `queue`
   carries the holds in force (`QueueResponse.holds`, absent only from M2's leaders); they come
   off `REPLY_JSON_BUDGET` before any task, since a reader refuses a reply whose holds do not
-  parse — 32 at every bound still seal under the envelope. **All five are audited** (`queueAudit`
+  parse — 32 at every bound still seal under the envelope. It carries the idle releases too
+  (`QueueResponse.idle`, `{ taskId, since }` for each `running` task "Routing caps" releases
+  for sitting idle at its prompt, whatever `tasks` named): the release is the leader's memory, on
+  no record, so the reply is the only place an app can learn it. Off the budget first as well, at
+  most one per task; a reader drops a bad entry alone and shows that task as running, which it is.
+  A release beginning or ending writes nothing, so the scheduler tells the host
+  (`SchedulerOptions.onIdleChange`) and the leader nudges `queue-changed` naming the task, as a
+  write would. **All five are audited** (`queueAudit`
   in `audit.ts`) as `audit queue origin=relay op=cancel|mark-done|run-now|pause|resume id=<request>`, with
   `task=<task>` or `account=<account>` where one applies, and `ok` or `refused
   code=…`: the request id finds the app's side, and the task id joins the line to the
@@ -2447,7 +2454,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   text: classifying the reply would be guesswork and would put transcript content on the wire.
   Accepted: (a) answering released sessions overcommits — answer six with eight new running and
   fourteen draw on the caps — handled as a return from sleep is: nothing killed, nothing placed
-  until the count falls under. (b) `idle` is not always quiet: a main loop whose background
+  until the count falls under. The `queue` reply lists the releases and the Queue screen shows
+  them under Idle ("The Queue screen"). (b) `idle` is not always quiet: a main loop whose background
   subagent or background command is still working reads idle, as does a session restarted
   mid-turn until its next turn event ("Where the states come from"), so long background work can
   be released while it runs. (c) A `busy` lost on the way (a hooks-worker or relay hiccup) leaves
@@ -5331,8 +5339,12 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   prompt-cut view come from. It re-reads on every `queue-changed` (the named tasks only, merged
   into what it holds), on a reconnect and on a leader change. A named task the reply leaves out
   is dropped only if the store holds no record of it, the same rule as the verdict's. Tasks group by what each needs from
-  the owner: Needs you (escalated first, then `needs-input`, then `lost`), Running, Waiting,
-  Asleep (collapsed; below), Awaiting merge, Finished, in the leader's order within each (`queue-view.ts`). A row shows the
+  the owner: Needs you (escalated first, then `needs-input`, then `lost`), Running, Idle, Waiting,
+  Asleep (collapsed; below), Awaiting merge, Finished, in the leader's order within each (`queue-view.ts`). Idle holds the
+  `running` tasks the reply's `idle` lists (an entry for a task no longer running is ignored, so an
+  action's own reply wins), each saying "Idle at its prompt since … — its slot is free", and the
+  summary counts them ("2 running · 3 idle · 1 waiting", the idle count only when there are some).
+  Not in Needs you: nothing is owed to a session that finished its turn, and its slot is already free. A row shows the
   task's title (its own, else its prompt's first line cut to 80, else its session's window name, else its repo), where it is and
   why, with the decision's record on tap — in the past tense once the task was placed ("spending
   credits", not "would spend"). A task whose session reported a PR (`Task.prUrl`, the newest one —

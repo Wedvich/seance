@@ -2422,6 +2422,20 @@ export interface QueueResponse {
    * and what `discard` takes. Absent from older leaders, and when there are none.
    */
   readonly unreadable?: readonly UnreadableTaskRef[];
+  /**
+   * Every `running` task the leader holds no slot for because its session has
+   * sat idle at its prompt past the grace (DESIGN.md, Scheduler, "Routing
+   * caps"), whatever `QueueRequest.tasks` asked for: the release is the
+   * leader's memory, on no record, so only this says it. Absent from older
+   * leaders, and when there are none.
+   */
+  readonly idle?: readonly IdleTaskRef[];
+}
+
+/** A task released for sitting idle at its prompt, and since when it has (leader's clock, ms). */
+export interface IdleTaskRef {
+  readonly taskId: string;
+  readonly since: number;
 }
 
 /** A `task:` record the leader holds as unreadable: its id, the relay's version, and why. */

@@ -24,13 +24,15 @@ import { enqueue, FakeFleet, machine, NOW, NOW_S, obs, readerChecked, spec, stat
 function setup(fleet = new FakeFleet([machine("a")]), config = DEFAULT_CONFIG) {
   const store = new MemoryQueueStore();
   const clock = { now: NOW };
+  const idleChanges: string[] = [];
   const scheduler = new Scheduler({
     store: readerChecked(store, () => clock.now),
     fleet,
     config,
     now: () => clock.now,
+    onIdleChange: (id) => idleChanges.push(id),
   });
-  return { store, fleet, clock, scheduler };
+  return { store, fleet, clock, scheduler, idleChanges };
 }
 
 /** One pass and the spawns it sent: a pass itself never waits for a spawn's verdict. */
@@ -821,6 +823,25 @@ describe("a session idle past idleReleaseAfterMs", () => {
     expect(scheduler.task(second.id)).toMatchObject({ state: "running" });
     expect(scheduler.task(first.id)).toMatchObject({ state: "running", assignment: { deviceId: "a" } });
     expect(fleet.despawns).toEqual([]);
+  });
+
+  test("idle lists a release with when its stay began, and the host hears each start and end once", async () => {
+    const env = await holdingTheSlot();
+    const { scheduler, first, idleChanges, report } = env;
+    await report("idle");
+    await at(env, NOW + GRACE - 1);
+    expect(scheduler.idle()).toEqual([]);
+    expect(idleChanges).toEqual([]);
+
+    await at(env, NOW + GRACE);
+    expect(scheduler.idle()).toEqual([{ taskId: first.id, since: NOW }]);
+    expect(idleChanges).toEqual([first.id]);
+    await at(env, NOW + GRACE + 1);
+    expect(idleChanges).toEqual([first.id]);
+
+    await report("busy");
+    expect(scheduler.idle()).toEqual([]);
+    expect(idleChanges).toEqual([first.id, first.id]);
   });
 
   test("a repeated idle keeps its deadline", async () => {

@@ -401,6 +401,7 @@ export class SchedulerStore {
           tasks: reply.tasks,
           holds: reply.holds ?? [],
           unreadable: reply.unreadable ?? [],
+          idle: reply.idle ?? [],
           at: reply.at,
           skew: reply.at - Date.now(),
         };
@@ -420,12 +421,13 @@ export class SchedulerStore {
           return gone.has(t.id) ? [] : [t];
         });
         const added = fresh.filter((f) => !base.some((t) => t.id === f.id));
-        // Unreadable records come whole whatever was named, as holds do.
+        // Unreadable records and idle releases come whole whatever was named, as holds do.
         next = {
           kind: "ok",
           tasks: [...added, ...merged],
           holds: reply.holds ?? [],
           unreadable: reply.unreadable ?? [],
+          idle: reply.idle ?? [],
           at: reply.at,
           skew: reply.at - Date.now(),
         };
