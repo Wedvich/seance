@@ -111,7 +111,6 @@ export interface PersistedForm {
   /** Per task: what settles it. `reported` waits for its session's own done report. */
   readonly until: TaskUntil;
   /** Per task: the Linear issue it is for; empty is none. */
-  readonly linearIssue: string;
   /** Spans enqueues: the batch the next one joins, until it is ended. */
   readonly batch: OpenBatch | null;
 }
@@ -240,7 +239,6 @@ export const DEFAULT_FORM: PersistedForm = {
   effort: DEFAULT_EFFORT,
   after: [],
   until: "merged",
-  linearIssue: "",
   batch: null,
 };
 

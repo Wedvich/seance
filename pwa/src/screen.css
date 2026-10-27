@@ -2556,9 +2556,3 @@
 .after-when .seg {
   width: 100%;
 }
-
-.linear {
-  gap: 8px;
-  padding: 14px 16px;
-  border-radius: 14px;
-}
