@@ -69,6 +69,7 @@ import {
   type TaskReply,
   type TaskSpec,
   type UnreadableTaskRef,
+  type IdleTaskRef,
   METRICS_ERROR_CODES,
   METRICS_MAX_FILTER_LENGTH,
   METRICS_MAX_FILTERS,
@@ -1309,12 +1310,22 @@ export function parseQueueReply(value: unknown): QueueReply | null {
   }
   // Lenient per entry, as tasks are: a bad one costs its own discard, not the queue.
   const unreadable = listedUnreadable?.map(parseUnreadableTaskRef).filter((entry) => entry !== null);
+  const listedIdle = value["idle"];
+  if (listedIdle !== undefined && (!Array.isArray(listedIdle) || listedIdle.length > MAX_TASKS)) return null;
+  // Lenient per entry too: a bad one shows its task as running, which it is.
+  const idle = listedIdle?.map(parseIdleTaskRef).filter((entry) => entry !== null);
   return {
     tasks,
     at: value["at"],
     ...(holds === undefined ? {} : { holds }),
     ...(unreadable === undefined || unreadable.length === 0 ? {} : { unreadable }),
+    ...(idle === undefined || idle.length === 0 ? {} : { idle }),
   };
+}
+
+function parseIdleTaskRef(value: unknown): IdleTaskRef | null {
+  if (!isRecord(value) || !isTaskId(value["taskId"]) || !isFiniteNumber(value["since"])) return null;
+  return { taskId: value["taskId"], since: value["since"] };
 }
 
 function parseUnreadableTaskRef(value: unknown): UnreadableTaskRef | null {

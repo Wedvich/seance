@@ -25,6 +25,7 @@ import {
   TASK_FAILURE_LIMITS,
   type Decision,
   type DiscardResponse,
+  type IdleTaskRef,
   type PauseHold,
   type PauseResponse,
   type Plain,
@@ -59,7 +60,7 @@ function queueView(scheduler: Scheduler, now: number, only?: readonly string[]):
   const unreadable = scheduler
     .unreadable()
     .map(({ id, version, reason }): UnreadableTaskRef => ({ taskId: id, version, reason }));
-  return boundedQueue(tasks, (id) => scheduler.lastDecision(id), now, scheduler.holds(), unreadable);
+  return boundedQueue(tasks, (id) => scheduler.lastDecision(id), now, scheduler.holds(), unreadable, scheduler.idle());
 }
 
 /** Where the decision is still live: why a task waits, or where it is going. */
@@ -95,7 +96,8 @@ function byRelevance(a: Task, b: Task): number {
  * Most relevant first (`byRelevance`) and bounded, prompts cut, with every hold in force (at most
  * `MAX_PAUSE_HOLDS`, taken off the budget first: a reader refuses a reply that
  * drops one) and every unreadable record (at most `MAX_TASKS`, the store's own
- * bound, also taken off first: each is one a person may discard). Full decisions are filled against
+ * bound, also taken off first: each is one a person may discard), and every idle release (one per
+ * task at most, taken off first as well: a reader shows a missing one as running). Full decisions are filled against
  * `REPLY_JSON_BUDGET`, live ones first and then newest first; the rest go out
  * `winnerOnly`. Where even those overrun it — every bounded field near its cap —
  * the oldest tasks are left out, finished ones before live ones. Exported for
@@ -107,6 +109,7 @@ export function boundedQueue(
   now: number,
   holds: readonly PauseHold[] = [],
   unreadable: readonly UnreadableTaskRef[] = [],
+  idle: readonly IdleTaskRef[] = [],
 ): QueueResponse {
   const newest = all.toSorted(byRelevance).slice(0, QUEUE_MAX_TASKS).map(undecided);
   const decisions = new Map<string, { readonly whole: Decision; readonly cut: Decision }>();
@@ -122,6 +125,7 @@ export function boundedQueue(
     REPLY_JSON_BUDGET -
     jsonBytes(holds) -
     (unreadable.length === 0 ? 0 : jsonBytes(unreadable)) -
+    (idle.length === 0 ? 0 : jsonBytes(idle)) -
     newest.reduce((sum, task) => sum + (sizes.get(task.id) ?? 0), 0);
   const byClaim = [
     ...newest.filter((t) => LIVE_DECISION.has(t.state)),
@@ -154,6 +158,7 @@ export function boundedQueue(
     at: now,
     holds,
     ...(unreadable.length === 0 ? {} : { unreadable }),
+    ...(idle.length === 0 ? {} : { idle }),
   };
 }
 

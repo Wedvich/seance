@@ -5,6 +5,7 @@ import {
   PR_STATUS_STALE_MS,
   QUEUE_MAX_TASKS,
   type ExclaveInfo,
+  type IdleTaskRef,
   type Machine,
   type PauseHold,
   type PrStatus,
@@ -83,8 +84,13 @@ function task(id: string, fields: Partial<Task> = {}): Task {
 
 const placedAt = { deviceId: "dev-a", exclave: "default", clone: "app", window: "w" };
 
-function ok(tasks: readonly Task[], holds: readonly PauseHold[] = [], skew = 0): QueueState {
-  return { kind: "ok", tasks, holds, unreadable: [], at: NOW + skew, skew };
+function ok(
+  tasks: readonly Task[],
+  holds: readonly PauseHold[] = [],
+  skew = 0,
+  idle: readonly IdleTaskRef[] = [],
+): QueueState {
+  return { kind: "ok", tasks, holds, unreadable: [], idle, at: NOW + skew, skew };
 }
 
 function titles(view: ReturnType<typeof deriveQueue>): string[] {
@@ -568,12 +574,37 @@ describe("deriveQueue", () => {
     expect(deriveQueue(state(ok(many.slice(1))), NOW).partial).toBeNull();
   });
 
+  test("a task the leader released idle leaves Running for Idle, says since when on this device's clock, and counts in the summary", () => {
+    const at = { deviceId: "dev-a", exclave: "main", clone: "app" };
+    const idle = task("idle", { state: "running", assignment: at });
+    const busy = task("busy", { state: "running", assignment: at });
+    // A reply's idle entry for a task an action since settled: what it now is wins.
+    const settled = task("settled", { state: "done", assignment: at });
+    const skew = 60_000;
+    const released = [
+      { taskId: "idle", since: NOW + skew - 20 * 60_000 },
+      { taskId: "settled", since: NOW + skew - 20 * 60_000 },
+    ];
+    const view = deriveQueue(state(ok([idle, busy, settled], [], skew, released)), NOW);
+    expect(view.sections.map((s) => [s.title, s.rows.map((r) => r.id)])).toEqual([
+      ["Running", ["busy"]],
+      ["Idle", ["idle"]],
+      ["Finished", ["settled"]],
+    ]);
+    const row = view.sections.find((s) => s.title === "Idle")?.rows[0];
+    expect(row?.body).toBe("Idle at its prompt since 20m ago — its slot is free");
+    expect(row?.markDoneEndsSession).toBe(true);
+    expect(view.summary).toBe("1 running · 1 idle · 0 waiting");
+    expect(deriveQueue(state(ok([busy])), NOW).summary).toBe("1 running · 0 waiting");
+  });
+
   test("unreadable records get a line of their own, counted, and none gets none", () => {
     const listing = (count: number): QueueState => ({
       kind: "ok",
       tasks: [],
       holds: [],
       unreadable: Array.from({ length: count }, (_, i) => ({ taskId: `j${i}`, version: 1, reason: "unopenable" })),
+      idle: [],
       at: NOW,
       skew: 0,
     });

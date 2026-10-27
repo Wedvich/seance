@@ -4,6 +4,7 @@ import {
   quote,
   type BranchState,
   type FleetQuotaEntry,
+  type IdleTaskRef,
   type PrStatus,
   type PauseHold,
   type PauseRequest,
@@ -77,6 +78,11 @@ export interface SchedulerOptions {
    * wait for input (once its write lands) — `SchedulerAlert`. A throw goes to `onError`.
    */
   readonly onAlert?: (alert: SchedulerAlert) => void;
+  /**
+   * A task's idle release (`idle`) began or ended with no write of its own, so
+   * no store nudge says it: the host tells apps to re-read that task.
+   */
+  readonly onIdleChange?: (taskId: string) => void;
 }
 
 /**
@@ -144,6 +150,7 @@ export class Scheduler {
   readonly #now: () => number;
   readonly #onError: (err: unknown) => void;
   readonly #onAlert: (alert: SchedulerAlert) => void;
+  readonly #onIdleChange: (taskId: string) => void;
   readonly #held = new Map<string, Held>();
   readonly #pause: PauseRecord;
   readonly #spills: SpillAlerts;
@@ -168,6 +175,8 @@ export class Scheduler {
    * counts an idle task until its next `idle`, which can only delay a release.
    */
   readonly #idleSince = new Map<string, { readonly since: number; readonly deviceId: string }>();
+  /** The idle releases last told to the host (`onIdleChange`): what `#syncIdle` diffs against. */
+  #idleTold: ReadonlySet<string> = new Set();
   /**
    * deviceId → when its `sessions` first failed, until one answers: how long
    * a connected machine has said nothing usable, for a reservation past its
@@ -230,6 +239,7 @@ export class Scheduler {
         this.#fault ??= { err };
       });
     this.#onAlert = options.onAlert ?? (() => {});
+    this.#onIdleChange = options.onIdleChange ?? (() => {});
     this.#pause = new PauseRecord(this.#store, this.#now, this.#onError);
     this.#spills = new SpillAlerts(this.#config.resetGraceMs);
     this.#sweptAt = this.#now();
@@ -455,20 +465,36 @@ export class Scheduler {
       const since = this.#absentSince.get(deviceId);
       return since !== undefined && !connected.has(deviceId) && now - since >= this.#config.slotReleaseAfterMs;
     };
-    const idle = (task: Task): boolean => {
-      const clock = this.#idleSince.get(task.id);
-      return (
-        clock !== undefined && idleHere(task, clock.deviceId) && now - clock.since >= this.#config.idleReleaseAfterMs
-      );
-    };
+    const idle = new Set(this.#idleReleases(now).map((r) => r.taskId));
     return new Set(
       this.tasks()
         .filter((t) => {
           const at = t.assignment ?? t.reservation;
-          return (at !== undefined && asleep(at.deviceId)) || idle(t);
+          return (at !== undefined && asleep(at.deviceId)) || idle.has(t.id);
         })
         .map((t) => t.id),
     );
+  }
+
+  /** Tasks holding no slot for sitting idle at their prompt past `idleReleaseAfterMs`, and since when: `queue` shows them. */
+  idle(): readonly IdleTaskRef[] {
+    return this.#idleReleases(this.#now());
+  }
+
+  #idleReleases(now: number): IdleTaskRef[] {
+    return this.tasks().flatMap((task) => {
+      const clock = this.#idleSince.get(task.id);
+      if (clock === undefined || !idleHere(task, clock.deviceId)) return [];
+      return now - clock.since >= this.#config.idleReleaseAfterMs ? [{ taskId: task.id, since: clock.since }] : [];
+    });
+  }
+
+  /** Tells the host of each task whose idle release began or ended since it was last told. */
+  #syncIdle(): void {
+    const now = new Set(this.#idleReleases(this.#now()).map((r) => r.taskId));
+    const told = this.#idleTold;
+    this.#idleTold = now;
+    for (const id of new Set([...now, ...told])) if (now.has(id) !== told.has(id)) this.#onIdleChange(id);
   }
 
   #fleetQuota(): readonly FleetQuotaEntry[] {
@@ -536,6 +562,7 @@ export class Scheduler {
       return sessionChange(task, state, from, prUrl, awaitsExit);
     });
     this.#idleClock(taskId, state, from);
+    this.#syncIdle();
     if (!defers) return;
     const held = this.#held.get(taskId)?.task;
     if (held === undefined || !PLACED.includes(held.state)) return;
@@ -765,6 +792,7 @@ export class Scheduler {
       const task = this.#held.get(id)?.task;
       if (task === undefined || !idleHere(task, deviceId)) this.#idleSince.delete(id);
     }
+    this.#syncIdle();
     await this.#settleEndings();
     await this.#markAbsent();
     this.#checkOut(this.#due());

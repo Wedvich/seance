@@ -11,6 +11,7 @@ import {
   type Task,
   type TaskDep,
   type TaskUntil,
+  type IdleTaskRef,
   type UnreadableTaskRef,
 } from "@seance/shared";
 
@@ -170,6 +171,8 @@ export type QueueState =
       readonly holds: readonly PauseHold[];
       /** Records the leader cannot read: they hold store slots no prune frees, until a person discards them. */
       readonly unreadable: readonly UnreadableTaskRef[];
+      /** Running tasks the leader holds no slot for while they sit idle at their prompt (`QueueResponse.idle`). */
+      readonly idle: readonly IdleTaskRef[];
       /** The leader's clock when it answered, ms. */
       readonly at: number;
       /**

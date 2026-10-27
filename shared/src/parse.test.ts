@@ -856,6 +856,20 @@ describe("scheduler ops", () => {
     expect(parseQueueRequest([])).toBeNull();
   });
 
+  test("queue lists idle-released tasks, each one alone: a bad entry shows its task running, too many cost the reply", () => {
+    const idle = { taskId: "t-1", since: 4 };
+    expect(parseQueueReply({ tasks: [], at: 5, idle: [idle, { taskId: "t:2", since: 4 }, { taskId: "t-3" }] })).toEqual(
+      {
+        tasks: [],
+        at: 5,
+        idle: [idle],
+      },
+    );
+    expect(parseQueueReply({ tasks: [], at: 5, idle: [] })).toEqual({ tasks: [], at: 5 });
+    expect(parseQueueReply({ tasks: [], at: 5, idle: {} })).toBeNull();
+    expect(parseQueueReply({ tasks: [], at: 5, idle: Array.from({ length: MAX_TASKS + 1 }, () => idle) })).toBeNull();
+  });
+
   test("queue lists unreadable records, each one alone: a bad entry costs its own discard, too many the reply", () => {
     const junk = { taskId: "t-9", version: 3, reason: "unopenable" };
     const later = { taskId: "t-8", version: 1, reason: "sealed_elsewhere" };

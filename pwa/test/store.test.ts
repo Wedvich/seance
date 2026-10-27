@@ -1142,6 +1142,7 @@ describe("the queue screen", () => {
       tasks: [waiting, running],
       holds: [],
       unreadable: [],
+      idle: [],
       skew: expect.any(Number),
       at: 1,
     });
@@ -1209,6 +1210,7 @@ describe("the queue screen", () => {
       tasks: [done, running],
       holds: [{ until: "resume", at: 9 }],
       unreadable: [],
+      idle: [],
       skew: expect.any(Number),
       at: 2,
     });
@@ -1612,6 +1614,7 @@ describe("the queue screen", () => {
       tasks: [moved, moved2],
       holds: [],
       unreadable: [],
+      idle: [],
       skew: expect.any(Number),
       at: 4,
     });
