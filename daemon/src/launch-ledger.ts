@@ -66,6 +66,15 @@ export function launchLedgerPath(): string {
 export interface LaunchSite {
   readonly repo: string;
   readonly worktree: string;
+  /** The Claude session id this daemon chose for the launch (`--session-id`), or a continuation resumed. */
+  readonly session?: string;
+}
+
+/** What `crypto.randomUUID` makes, the only shape `--resume` is ever handed. */
+const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+
+export function isSessionId(value: unknown): value is string {
+  return typeof value === "string" && SESSION_ID_PATTERN.test(value);
 }
 
 /** What is known of a task's branch. `tip` and `ahead` are internal: never in `TaskProgress`. */
@@ -73,6 +82,11 @@ export interface TaskNote {
   readonly repo?: string;
   /** Absolute worktree path. */
   readonly path?: string;
+  /**
+   * The Claude session id the launch ran under, chosen by this daemon (`LaunchSite.session`): what a
+   * continuation resumes. Sticky; internal, never in `TaskProgress`, never read from a frame.
+   */
+  readonly session?: string;
   readonly branch?: string;
   /** The last tip that held own work (not in the default, and a net change from its fork), 40 or 64 hex: what merged and pushed are judged on once the branch is reset or gone. */
   readonly tip?: string;
@@ -168,6 +182,7 @@ function parseNote(raw: unknown, ids: ReadonlySet<string>): NotedTask | null {
     siteAt,
     repo,
     path,
+    session,
     branch,
     tip,
     ahead,
@@ -194,6 +209,7 @@ function parseNote(raw: unknown, ids: ReadonlySet<string>): NotedTask | null {
     ...(typeof siteAt === "number" && Number.isFinite(siteAt) ? { siteAt } : {}),
     ...(repoText === undefined ? {} : { repo: repoText }),
     ...(pathText === undefined ? {} : { path: pathText }),
+    ...(isSessionId(session) ? { session } : {}),
     ...(branchText === undefined ? {} : { branch: branchText }),
     ...(tipText === undefined ? {} : { tip: tipText }),
     ...(ahead === true ? { ahead: true as const } : {}),
@@ -280,6 +296,11 @@ function mergeNote(taskId: string, base: NotedTask | undefined, patch: TaskNote)
     ...(base?.siteAt === undefined ? {} : { siteAt: base.siteAt }),
     ...(patch.repo !== undefined ? { repo: patch.repo } : base?.repo !== undefined ? { repo: base.repo } : {}),
     ...(patch.path !== undefined ? { path: patch.path } : base?.path !== undefined ? { path: base.path } : {}),
+    ...(patch.session !== undefined
+      ? { session: patch.session }
+      : base?.session !== undefined
+        ? { session: base.session }
+        : {}),
     ...(patch.branch !== undefined
       ? { branch: patch.branch }
       : base?.branch !== undefined
@@ -340,9 +361,15 @@ function sameProgress(a: NotedTask, b: NotedTask): boolean {
   );
 }
 
-/** `server` and `closedHere` write but are no progress: they never move `at`. */
+/** `server`, `closedHere` and `session` write but are no progress: they never move `at`. */
 function sameNote(a: NotedTask, b: NotedTask): boolean {
-  return sameProgress(a, b) && sameSample(a.oom, b.oom) && a.server === b.server && a.closedHere === b.closedHere;
+  return (
+    sameProgress(a, b) &&
+    sameSample(a.oom, b.oom) &&
+    a.server === b.server &&
+    a.closedHere === b.closedHere &&
+    a.session === b.session
+  );
 }
 
 export class LaunchLedger {
@@ -588,7 +615,7 @@ export class LaunchLedger {
 
   /**
    * A new launch of this id landed — never a refused or crashed one, whose
-   * earlier note stays: its note starts afresh — `{repo, path}` for a
+   * earlier note stays: its note starts afresh — `{repo, path, session}` for a
    * worktree launch, nothing for `here` — whatever an earlier launch of the id
    * left. Sticky `ahead`/`pushed`/`merged` and the PR URL describe a worktree
    * that no longer is this task's; carried over, they could settle it merged.
@@ -598,7 +625,7 @@ export class LaunchLedger {
    */
   async startNote(
     taskId: string,
-    site?: { readonly repo: string; readonly path: string },
+    site?: { readonly repo: string; readonly path: string; readonly session?: string },
     prUrl?: string,
     server?: number,
   ): Promise<void> {
@@ -615,6 +642,7 @@ export class LaunchLedger {
         taskId,
         at,
         ...(site === undefined ? {} : { siteAt: at, repo: site.repo, path: site.path }),
+        ...(isSessionId(site?.session) ? { session: site.session } : {}),
         ...(prUrl === undefined ? {} : { prUrl }),
         ...(server === undefined ? {} : { server }),
       });

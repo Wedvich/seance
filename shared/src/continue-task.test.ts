@@ -31,7 +31,7 @@ function failed(over: Partial<Task> = {}, spec: Partial<TaskSpec> = {}): Task {
   };
 }
 
-const able = [machine([CAPABILITIES.continueTask])];
+const able = [machine([CAPABILITIES.continueTask, CAPABILITIES.continueSession])];
 
 describe("continueOffer", () => {
   test("a placed session_failed task on a machine that advertises it is offered, at its own target", () => {
@@ -48,8 +48,10 @@ describe("continueOffer", () => {
       ["no failure at all", failed({ failure: undefined }), able],
       ["here mode", failed({}, { mode: "here" }), able],
       ["never placed", failed({ assignment: undefined }), able],
-      ["machine unlisted", failed(), [machine([CAPABILITIES.continueTask], "dev-other")]],
+      ["machine unlisted", failed(), [machine([CAPABILITIES.continueTask, CAPABILITIES.continueSession], "dev-other")]],
       ["machine lacks the capability", failed(), [machine([CAPABILITIES.taskId])]],
+      // An older daemon would run `--continue`, which misses a worktree spawn's conversation.
+      ["machine continues without session ids", failed(), [machine([CAPABILITIES.continueTask])]],
       ["machine predates capabilities", failed(), [machine(undefined)]],
     ];
     for (const [name, task, machines] of refusals) {
@@ -62,7 +64,7 @@ describe("continueOffer", () => {
 
 describe("continueOffer, a cancelled task", () => {
   const cancelled = (over: Partial<Task> = {}): Task => failed({ state: "cancelled", failure: undefined, ...over });
-  const both = [machine([CAPABILITIES.continueTask, CAPABILITIES.continueCancelled])];
+  const both = [machine([CAPABILITIES.continueTask, CAPABILITIES.continueSession, CAPABILITIES.continueCancelled])];
 
   test("offered with an assignment on a machine advertising both capabilities, leftRunning or not", () => {
     const at = { deviceId: "dev-a", exclave: "default", clone: "app" };
@@ -103,7 +105,7 @@ describe("continueOffer, a cancelled task", () => {
 
 describe("continueOffer, once", () => {
   const old = failed();
-  const both = [machine([CAPABILITIES.continueTask, CAPABILITIES.continueCancelled])];
+  const both = [machine([CAPABILITIES.continueTask, CAPABILITIES.continueSession, CAPABILITIES.continueCancelled])];
   const continuation = (
     state: Task["state"],
     over: Partial<Task> = {},

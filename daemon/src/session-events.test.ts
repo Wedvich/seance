@@ -19,6 +19,7 @@ import {
 } from "./session-events.ts";
 
 const frame = (fields: object): object => ({ v: 1, kind: "session-event", ...fields });
+const SESSION = "0b6e1c52-3f0d-4a8e-9c7b-2d5f4e6a1b90";
 
 describe("parseSessionEventFrame", () => {
   test("keeps the fields it knows, drops the rest, and refuses a frame with nothing to report", () => {
@@ -255,8 +256,8 @@ describe("EndedTasks", () => {
     await settle(true);
     expect(ended.continuation("flying")).toEqual({ refused: expect.stringContaining("no worktree of it was noted") });
     await ledger.record("landed");
-    await ledger.note("landed", { repo: "/r", path: "/r/.claude/worktrees/x" });
-    expect(ended.continuation("landed")).toEqual({ repo: "/r", path: "/r/.claude/worktrees/x" });
+    await ledger.note("landed", { repo: "/r", path: "/r/.claude/worktrees/x", session: SESSION });
+    expect(ended.continuation("landed")).toEqual({ repo: "/r", path: "/r/.claude/worktrees/x", session: SESSION });
   });
 
   test("the newest note on a path owns it: an older task is refused, naming the newer", async () => {
@@ -265,14 +266,14 @@ describe("EndedTasks", () => {
     const ended = new EndedTasks(ledger);
     const path = "/r/.claude/worktrees/x";
     await ledger.record("old");
-    await ledger.note("old", { repo: "/r", path, exit: 137 });
+    await ledger.note("old", { repo: "/r", path, session: SESSION, exit: 137 });
     clock.now += 10;
     await ledger.record("new");
-    await ledger.note("new", { repo: "/r", path });
+    await ledger.note("new", { repo: "/r", path, session: SESSION });
     const refused = ended.continuation("old");
     expect(refused).toEqual({ refused: expect.stringContaining("new") });
     expect(refused).toEqual({ refused: expect.stringContaining(path) });
-    expect(ended.continuation("new")).toEqual({ repo: "/r", path });
+    expect(ended.continuation("new")).toEqual({ repo: "/r", path, session: SESSION });
   });
 
   test("an equal site time goes to the later launch", async () => {
@@ -283,18 +284,51 @@ describe("EndedTasks", () => {
       // oxlint-disable-next-line no-await-in-loop -- ledger order is the point
       await ledger.record(id);
       // oxlint-disable-next-line no-await-in-loop
-      await ledger.note(id, { repo: "/r", path });
+      await ledger.note(id, { repo: "/r", path, session: SESSION });
     }
     expect(ended.continuation("first")).toEqual({ refused: expect.stringContaining("second") });
-    expect(ended.continuation("second")).toEqual({ repo: "/r", path });
+    expect(ended.continuation("second")).toEqual({ repo: "/r", path, session: SESSION });
+  });
+
+  test("a landed launch's session id is noted, and a continuation of it notes the same id", async () => {
+    const ledger = LaunchLedger.memory();
+    const ended = new EndedTasks(ledger);
+    const worktree = "/r/.claude/worktrees/x";
+    await (
+      await ended.launch("first")
+    )(true, { site: { repo: "/r", worktree, session: SESSION } });
+    const site = ended.continuation("first");
+    expect(site).toEqual({ repo: "/r", path: worktree, session: SESSION });
+    if ("refused" in site) throw new Error("unreachable");
+    // What the handler settles a continuation with: the session it resumed, not a new one.
+    await (
+      await ended.launch("second")
+    )(true, { site: { repo: "/r", worktree, session: site.session } });
+    expect(ended.continuation("second")).toEqual({ repo: "/r", path: worktree, session: SESSION });
+    expect(ended.continuation("first")).toEqual({ refused: expect.stringContaining("second") });
+  });
+
+  test("a worktree noted without a session id (an older daemon's) is refused, never resumed by --continue", async () => {
+    const ledger = LaunchLedger.memory();
+    const ended = new EndedTasks(ledger);
+    await ledger.record("old");
+    await ledger.note("old", { repo: "/r", path: "/r/.claude/worktrees/x", exit: 137 });
+    expect(ended.continuation("old")).toEqual({
+      refused: expect.stringContaining("before this daemon noted session ids"),
+    });
   });
 
   test("the old note's exit is carried, for wording only", async () => {
     const ledger = LaunchLedger.memory();
     const ended = new EndedTasks(ledger);
     await ledger.record("dead");
-    await ledger.note("dead", { repo: "/r", path: "/r/.claude/worktrees/x", exit: 137 });
-    expect(ended.continuation("dead")).toEqual({ repo: "/r", path: "/r/.claude/worktrees/x", exit: 137 });
+    await ledger.note("dead", { repo: "/r", path: "/r/.claude/worktrees/x", session: SESSION, exit: 137 });
+    expect(ended.continuation("dead")).toEqual({
+      repo: "/r",
+      path: "/r/.claude/worktrees/x",
+      session: SESSION,
+      exit: 137,
+    });
   });
 
   test("a ledger that cannot record refuses the launch and holds nothing back", async () => {

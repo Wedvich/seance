@@ -652,9 +652,12 @@ nothing checked it. The last is the gap they leave.
   literal: no wire-supplied text reaches the command line, so there is nothing
   to quote. A future flag carrying wire _text_ is back under the rule. `taskId`
   never enters the shell string at all: it is an argv value to `tmux set-option`,
-  and bounded to `TASK_ID_PATTERN` before it gets that far. A continuation's `--continue` is
-  a literal flag; `continues` is a ledger key and never enters the shell string, and its
-  session name is the ledger path's basename, through `shq()`. The `/usage` refresh's
+  and bounded to `TASK_ID_PATTERN` before it gets that far. A task spawn's `--session-id` value
+  is a `crypto.randomUUID()` the daemon made; a continuation's `--resume` value is the one its
+  own launch ledger noted for the continued task (kept only as a UUID, `isSessionId`), never a
+  wire or frame value; both still go through `shq()`. `continues` is a ledger key and never
+  enters the shell string, and a continuation's session name is the ledger path's basename,
+  through `shq()`. The `/usage` refresh's
   claude run takes no wire or frame value at all: fixed argv, and an env built from
   the exclave scan alone (Daemon, "Usage refresh").
 - The OOM confirmation's reads (`daemon/src/oom-kill.ts`, Daemon, "Exit status") take no
@@ -1573,6 +1576,14 @@ an old peer's frames parse as before. Mixed versions:
   words it as a spawn refusal ("The machine refused the spawn", with the leader's message as text), an
   older MCP prints the message, the same residual as `session_failed`. An older leader never expires a
   continuation (today's behaviour). No relay change and no rollout order.
+- `CAPABILITIES.continueSession` (2026-10-27, Daemon, "Continuing a session"): an unknown string to an
+  older reader, which keeps the machine. A new client offers Continue, and a new leader routes a
+  continuation, only to a machine advertising it, so an older daemon (which would run `--continue`) gets
+  none; such a continuation waits `continue_unsupported` until `continue_expired`. The ledger note's
+  `session` is a field an older daemon's parser skips and its next write drops: after a downgrade and
+  upgrade those tasks read as noted without a session and are refused `not_continuable`. An older leader
+  still routes on `continueTask` alone; a new daemon then refuses a note without a session the same way.
+  No relay change and no rollout order.
 - The failure code `pin_expired` (2026-10-27, Scheduler, "Expiry"): the same as `continue_expired` for
   every older reader; an older leader never expires a pin. A new leader fails, in its first pass, every
   pin already past 30 days: the clean-up, and visible.
@@ -2409,8 +2420,9 @@ it through the store: an app's `store-put` create, read by the leader on `store-
 - **Continue routing** (2026-10-26, Daemon, "Continuing a session"). A task with
   `spec.continues` has exactly one acceptable candidate, the `(deviceId, exclave, clone)` in
   `continues.at`: every other machine is `continue_elsewhere` (`continueFilter` in `route.ts`), a
-  machine that does not advertise `CAPABILITIES.continueTask` is `continue_unsupported` (so an older
-  daemon is never routed one), `judge` picks the clone by name rather than by skills and rejects another
+  machine that does not advertise both `CAPABILITIES.continueTask` and `continueSession` is
+  `continue_unsupported` (so an older daemon, one without the mode or one that would run `--continue`,
+  is never routed one), `judge` picks the clone by name rather than by skills and rejects another
   exclave `continue_elsewhere`, and a clone the machine no longer has is `repo_absent`. Every other filter,
   cap and score applies as to any task. The dispatch adds `continues: <old id>` to the spawn request.
   A `not_continuable` reply fails the task with that code and message (`settle.ts` verdict). A continuation
@@ -4724,7 +4736,7 @@ for the lot with its own `gh`.
 A task that failed `session_failed` (an OOM SIGKILL, a crash) or `session_closed` (its window was
 closed from outside), or was cancelled after it was placed,
 leaves its worktree and its Claude conversation on disk. **Continue** queues a _new_ task that resumes that conversation
-(`claude --continue`) in the same worktree, on the same machine and clone. The PWA's failed or cancelled card
+(`claude --resume <id>`, the session id the daemon chose at the old launch) in the same worktree, on the same machine and clone. The PWA's failed or cancelled card
 carries the button, MCP has `continue_task { taskId, prompt? }` and the shell has `seanced
 continue <task-id> [--prompt …]`; all three write the same spec (`continuationSpec`,
 `shared/src/continue-task.ts`, the one place that says which tasks offer it — `continueOffer` — and which
@@ -4734,11 +4746,20 @@ fields carry over), under the same gates.
   has `mode: "continue"` and `continues: { task: <old id>, at: { deviceId, exclave, clone } }` —
   the old task's `assignment`, copied at enqueue so the old record may be pruned. The leader routes it
   like any task, with one rule: only the `(deviceId, exclave, clone)` in `at` is a candidate,
-  and only while that machine advertises `CAPABILITIES.continueTask` (Scheduler, "The library").
-  Its dispatch is a `spawn { mode: "continue", continues: <old id>, taskId: <new id>, client:
+  and only while that machine advertises `CAPABILITIES.continueTask` and `continueSession` (Scheduler,
+  "The library"). Its dispatch is a `spawn { mode: "continue", continues: <old id>, taskId: <new id>, client:
   "scheduler" }`. The daemon (`handleSpawn`) looks the old id up in its own launch ledger
   (`EndedTasks.continuation`), checks the noted path, and `spawnContinued` opens a window there
-  running `claude … --continue -- < seed`.
+  running `claude … --resume <noted session id> -- < seed`.
+- **The session id.** Every task spawn (worktree, and `here` for uniformity) runs `claude …
+  --session-id <uuid>`, a `crypto.randomUUID()` the daemon makes per spawn (`spawnUntracked`; an
+  untracked spawn gets none). It reaches the handler on `SpawnOutcome.session` (backend-scoped, never on
+  the wire) and is noted in the launch ledger beside the site (`TaskNote.session`, through
+  `LaunchSite.session` and `startNote`): sticky, internal, never in `TaskProgress`, and kept by
+  `parseNote` only while it is a UUID (`isSessionId`). A `here` launch notes no site, so no id either;
+  nothing continues one. Not write-ahead: a continuation needs the landed note's `path` anyway, and the
+  id is noted with it. It is never read from a frame (a session event carries only `remoteSession`, the
+  bridge's id, display-only) nor found by scanning `~/.claude*/projects`.
 - **Spec and request fields.** `TaskSpec.continues` is present exactly when `mode` is `"continue"`:
   `parseTaskSpec` refuses either without the other, so a record cannot carry a half. `parseTaskRequest`
   (route-preview) refuses the mode, so a preview never routes one. `SpawnRequest.continues` is the
@@ -4751,9 +4772,11 @@ fields carry over), under the same gates.
   `"scheduler"`), one without its own task id, or one naming itself as the task it continues; no
   ledger record of the old id (the ledger keeps a week or 128 launches, so continuing works only while
   it holds the old launch); the old launch still in flight; a later launch in the ledger having noted the same worktree
-  (`EndedTasks.continuation`, below, "Two notes on one path": `--continue` would resume that later
-  session, so the message names its task id and the path); a note with no path (a `here` launch, or
-  one from a daemon predating site notes); the noted repo not being the clone `repo` resolved to; a
+  (`EndedTasks.continuation`, below, "Two notes on one path": that later task took over the worktree
+  and the conversation, so the message names its task id and the path); a note with no path (a `here` launch, or
+  one from a daemon predating site notes); a note with a path but no session id (launched by a daemon
+  predating `continueSession`: "resume it by hand", and no `--continue` fallback, since that is what
+  missed the conversation); the noted repo not being the clone `repo` resolved to; a
   noted path that is not canonical (a symlink anywhere on it) or not under
   `<clone>/.claude/worktrees/`; the path gone; and `repo_not_found` for a repo the scan set no longer
   holds. _After it_ (`spawnContinued`, the new id already written ahead): the repo or the path gone
@@ -4769,12 +4792,38 @@ fields carry over), under the same gates.
   continues itself is not read at all (`bindTaskRecord` calls it malformed), so it never reaches a
   daemon. `not_continuable` fails the new task with the daemon's message; the old task stays `failed`.
 - **The argv.** As a worktree spawn, minus `--worktree` and the fetch: tmux `-c <path>`, `claude -n
-  <name> --remote-control --model … --effort …[ --permission-mode plan] --continue -- < seed`.
-  `--continue` is a literal flag, the name is the path's basename through `shq()`, and `continues` never
-  enters the shell string. `--continue` resumes the newest conversation _of that cwd_, which is why the
-  cwd must be the worktree: the exclave's `CLAUDE_CONFIG_DIR` is picked by the owner's shell hook by
-  cwd and the transcript dir by path, so the same path means the same exclave and the same
-  conversation. The tmux window is named by `-n` and tagged with the new task id as ever.
+  <name> --remote-control --model … --effort …[ --permission-mode plan] --resume <session> -- < seed`.
+  `<session>` is the id the old launch's note holds (above), through `shq()` though it is a UUID the
+  daemon made; the name is the path's basename through `shq()`, and `continues` never enters the shell
+  string. No `--fork-session`: the conversation keeps its id, so a continuation of the continuation
+  resumes it again. The cwd is still the worktree: the exclave's `CLAUDE_CONFIG_DIR` is picked by the
+  owner's shell hook by cwd, so the same path means the same exclave, and the tools run there. The tmux
+  window is named by `-n` and tagged with the new task id as ever.
+  - _Why not `--continue`_ (what this shipped with first). `--continue` resumes the newest conversation
+    in the cwd's project dir only, and interactive Claude files a transcript under the project its
+    process started in. A worktree spawn starts in the clone (`-c <clone> … --worktree <name>`), and
+    on the owner's Mac (an exclave, `~/.claude-pengefix2/projects/-Users-…-seance/<id>.jsonl` with
+    `"cwd"` the worktree) the transcript sat under the clone's slug, so every continuation died
+    `claude_died` "No conversation found to continue". Every tasked spawn is worktree mode and `here`
+    runs are never offered Continue, so Continue was broken everywhere it was used. Print mode (`-p`)
+    files differently and is no stand-in for a probe.
+  - _Phase 0, Claude Code 2.1.311 on Linux, 2026-10-27_ (a scratch one-commit repo, interactive claude in
+    a private tmux server, `--model haiku`, the seed on stdin as séance writes it, the
+    `RESUME_NEVER_ASKS` env; every scratch path `claude purge`d after). E1: `-c <clone>` with
+    `--remote-control --worktree w1 --session-id U1` is accepted together, and that run filed `U1.jsonl`
+    under the _worktree's_ slug — so did a control without `--session-id`, and `--continue` in that
+    worktree worked: on this build the clone-slug filing seen on the Mac did not reproduce, which is why
+    the fix must not depend on the slug. E2: `-c <worktree> --resume U1 -- < seed2` found it in place
+    (no "cd … && claude --resume" hand-off), seed2 was the next user turn after the earlier ones, and it
+    appended to the same `U1.jsonl`. E3: killed and resumed again with seed3: the chain works, same
+    file. E4 (control): `--session-id U2` started inside the worktree, then `--resume U2` there: works.
+    The Mac's shape: `--session-id U3` started in the clone (filed under the clone's slug), then
+    `--resume U3` from the worktree: found in place across the sibling project, appended to the clone's
+    `U3.jsonl`, the new turns' `cwd` the worktree. So `--resume <id>` from the worktree holds wherever
+    claude filed the transcript; E5 was not needed. `--resume` of an id with no transcript exits at once
+    ("No conversation found with session ID: …"), which the spawn reports `claude_died`. E6: no dialog
+    blocked any resume (seed plus `RESUME_NEVER_ASKS`), though these sessions were far below the
+    stale-resume thresholds, so that dialog itself stayed unexercised, as before.
 - **The seed is always written.** A continuation's stdin carries a fixed preamble (and `From the user:
   <prompt>` when one was given): "This session was resumed by séance in the same git worktree at
   <path>, after the previous session …", in one of two wordings chosen by the old task's own ledger
@@ -4792,9 +4841,10 @@ fields carry over), under the same gates.
   full session" dialog on a resume of a session at least 70 minutes old and 100k tokens big (the typical
   OOM'd session) unless an initial message is given, which nothing on a remote can answer. As defence in
   depth the window's `-e` env also sets `CLAUDE_CODE_RESUME_THRESHOLD_MINUTES` and
-  `CLAUDE_CODE_RESUME_TOKEN_THRESHOLD` very high. That `--continue` combined with `-n`,
-  `--remote-control` and a stdin seed delivers the seed as the next user turn is proven only by the dev
-  check (a real SIGKILL, then a continue; the resumed transcript shows the preamble as a new user turn).
+  `CLAUDE_CODE_RESUME_TOKEN_THRESHOLD` very high. That `--resume <id>` combined with `-n`,
+  `--remote-control` and a stdin seed delivers the seed as the next user turn is proven by Phase 0 (E2,
+  E3, above) on Linux; the dev check on a worktree task (cancel, then Continue; the resumed transcript
+  shows the preamble as a new user turn after the earlier ones) is what covers the Mac.
 - **Trust.** The worktree path is pre-trusted in the clone's exclave config ("Pre-trust on spawn"):
   claude starts in the worktree itself here, not the repo root, so the dialog would otherwise block it.
 - **The git lock residual.** Claude Code locks the worktree it created for the life of its process
@@ -4807,15 +4857,18 @@ fields carry over), under the same gates.
   lock (another reason, a live pid, a pid it may not signal) refuses `not_continuable` and is left
   alone. The start time is deliberately not compared against the pid's: a reused pid reads as live and
   the lock stays, a refusal rather than a guess (fail closed; the operator unlocks by hand). Reap's own handling is unchanged: a locked
-  worktree is kept and reported. The new session locks nothing (it is `--continue`, not `--worktree`),
+  worktree is kept and reported. The new session locks nothing (it is `--resume`, not `--worktree`),
   so reap's live-pane rule is what protects the worktree while it runs.
 - **Two notes on one path.** The new task's ledger note records the same `path`, with a newer `siteAt`,
   and branch-state gives a path to its newest `siteAt` (`pathOwners`, `daemon/src/launch-ledger.ts`, tie to
-  the later launch), so the new task owns the worktree's branch state while it runs. Continuation uses the
-  same rule: only the path's owner may be continued, so continuing the old task again after the new one
-  landed is refused `not_continuable` naming the owner, whatever the client saw. The old note stays until eviction; its late events fall on a
+  the later launch), so the new task owns the worktree's branch state while it runs. It also records the
+  same `session`, copied by the daemon from the old note (`Continuation.session`, handed back on
+  `SpawnOutcome.session`), never a new id: both notes name one conversation. Continuation uses the
+  same rule: only the path's owner may be continued, since the later task holds the worktree _and_ the
+  conversation (one shared id, and its work sits in the worktree), so continuing the old task again after
+  the new one landed is refused `not_continuable` naming the owner, whatever the client saw. The old note stays until eviction; its late events fall on a
   `failed` task, which the leader ignores. A continuation that is itself killed can be continued again,
-  since its note has the same path. The old note's `prUrl`, `branch` and `tip` are not carried:
+  since its note has the same path and the same session. The old note's `prUrl`, `branch` and `tip` are not carried:
   branch-state re-reads the live worktree, and a `session_failed` task under the default `until:
   "merged"` had no PR by definition.
 - **The link is display-only.** `continues.task` shows "Continues …" on the new card, "Continuing as … ·
@@ -4827,7 +4880,10 @@ fields carry over), under the same gates.
   is exact, and the old task's dependents stay `dependency_failed`.
 - **Gates.** A client writes a continue spec only to a verified leader advertising `continueTask` (the
   PWA's `deriveContinueAvailability`, the MCP tool's and the CLI's `leaderAdvertises`, the broker before
-  it forwards), and `continueOffer` needs the task's machine to be listed and advertising it as well. A
+  it forwards), and `continueOffer` needs the task's machine to be listed and advertising it as well,
+  and `CAPABILITIES.continueSession` beside it: an older daemon resumes with `--continue`, which misses
+  the conversation (the leader's `continueFilter` applies the same pair, so an older client's spec is
+  never routed to one either; it waits `continue_unsupported`). A
   `cancelled` task (with an assignment) additionally needs the machine to advertise
   `CAPABILITIES.continueCancelled`: an older daemon has `continueTask` but applies neither the
   ledger-owner rule nor the seed wording. The same function, given the list the caller read the task from,
@@ -4869,7 +4925,7 @@ fields carry over), under the same gates.
   - _A continuation that landed but ended with a code outside the landed list_ (`dispatch_unconfirmed` on a
     daemon whose ledger doesn't reach the reservation, a `task_launched` re-dispatch refusal) owns the path
     under the ledger rule while being offered nowhere: that worktree's conversation is unreachable through
-    séance until the ledger forgets it. Rare; `claude --continue` by hand still works.
+    séance until the ledger forgets it. Rare; `claude --resume` by hand in the worktree still works.
   - _A note without `siteAt`_ (written by an older daemon, e.g. after a rollback and re-upgrade) counts as
     oldest, so a newer continuation noted by the old daemon loses ownership to an older note with `siteAt`:
     the same rule branch-state uses; accepted.
@@ -4897,18 +4953,31 @@ fields carry over), under the same gates.
   daemon's `isSpawnRequest` refuses the mode; the leader routes only to machines advertising
   `continueTask`; an older app's lenient queue parser drops the task from its list (the same residual as
   `pinAccount`). Order does not matter.
+  - _Resuming by session id_ (2026-10-27, `CAPABILITIES.continueSession`): advertised by a daemon that
+    notes session ids and resumes by `--resume`. A client offers Continue only when the task's machine
+    advertises it (on top of `continueTask`, and `continueCancelled` for a cancelled task), and the leader
+    routes a continuation only to such a machine, so an older daemon, which would run `--continue`, never
+    gets one; an older client's spec then waits `continue_unsupported` until `continue_expired`. A task
+    launched before the upgrade has no noted session and is refused `not_continuable` ("resume it by
+    hand"). One PR, no rollout order.
 - **Rejected:** relaunching the same task id (the launch ledger refuses it, `task_launched`, and the
   old record is terminal); a new scheduler op (a spawn already carries everything, and a new op is a new
   wire surface); `continues` without a new mode (an older leader strips it and spawns a fresh worktree:
   fails open); reusing `pin.exclave` or `PIN_SENTINEL` (the current `parsePin` ignores it);
   `pin.deviceId` + `pin.account` (a re-login strands the pin, and another clone of the same origin can be
   chosen); `lineage` (stickiness is a bonus, never a filter); a path on the wire (the daemon's ledger is
-  the only authority on it); `claude --resume <id>` (the daemon knows no Claude session id, and
-  `remoteSession` is display-only); reusing `--worktree <name>` (untested, and it starts a new
+  the only authority on it); `--continue` (misses a worktree spawn's conversation, "The argv"); a
+  session id read from a frame (`remoteSession` is the bridge's, display-only) or found by scanning
+  `~/.claude*/projects` (a guess, and a path the daemon did not choose); `--fork-session` (a new id per
+  continuation would break the chain's one conversation, for nothing gained); a `--continue` fallback
+  for a note without a session (it fails the same way); copying or linking a transcript into the
+  worktree's project dir; reusing `--worktree <name>` (untested, and it starts a new
   conversation); offering continue on the direct `spawn` op or the local socket (scheduler-only keeps
-  the surface at one); automatic continuation (manual by decision). A hand-run `claude --continue` in
+  the surface at one); automatic continuation (manual by decision). A hand-run `claude --resume` in
   the worktree stays untracked by design — its session events bind to no tagged pane — which is why the
   shell has `seanced continue` rather than a documented recipe.
+- **Moved out of Rejected:** `claude --resume <id>`. It was rejected because the daemon knew no Claude
+  session id; `--session-id` on every task spawn gives it one of its own choosing (2026-10-27).
 
 ## Reap (`seanced reap`) — designed 2026-10-09
 
@@ -5715,7 +5784,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
 - **Continue on the Queue screen** (2026-10-26, widened 2026-10-27, Daemon, "Continuing a session"). A failed
   `session_failed` card, or a cancelled one that was placed, carries a single-tap **Continue** when
   `continueOffer` allows it (the task was not `here`, has an assignment, its machine is listed and
-  advertises `continueTask`, and for a cancelled one `continueCancelled`), the verified leader advertises
+  advertises `continueTask` and `continueSession`, and for a cancelled one `continueCancelled`), the verified leader advertises
   it (`deriveContinueAvailability`), and no continuation of it took over the session (`continueOffer`'s
   `tookOver` rule: the button moves along the chain to the newest landed continuation) or still waits
   in the queue. A waiting one hides the button and puts "Continuing as <its title> · waiting" on the old
@@ -6222,7 +6291,7 @@ names the app's queue, not `get_queue`/`cancel_task`, which a shell cannot call.
   `continueOffer`, `continuationSpec` with `client: "cli"`, `enqueueAuto` under `origin=cli`) through
   `autoFleet`, so a keyless box brokers it. It never touches the local op socket's `spawn`: a continue
   spawn stays scheduler-only, and a continue from a terminal is a tracked task, not a hand-run `claude
-  --continue` (invisible to the scheduler). It prints the new task id, or the refusal and exits non-zero.
+  --resume` (invisible to the scheduler). It prints the new task id, or the refusal and exits non-zero.
 
 _Threat-model delta._ None new. `--now` is the old direct spawn, and `origin=cli` covers both lines
 (`audit spawn` and `audit enqueue`). The queued form is as before: a user at this machine's shell holding the
@@ -6517,7 +6586,7 @@ app-role relay client with the key it imported at start.
   spawn is the scheduler's, and `cleanSpawn` drops `continues`). What the keyless process gains is queueing
   a continuation of a task the leader lists, nothing a keyed client could not already write; the
   daemon that runs it still resolves the worktree from its own ledger and takes the spawn from the
-  scheduler only. A hand-run `claude --continue` is untracked by design (Daemon, "Continuing a session"). The parsed value, a fresh object
+  scheduler only. A hand-run `claude --resume` is untracked by design (Daemon, "Continuing a session"). The parsed value, a fresh object
   holding known fields only, is what is sealed. `cancel` takes a parsed task ref. `queue` and
   `accounts` take no payload and anything extra is dropped. The gates `leaderTakesReported` and
   `pinAccountGateError` stay in the client, as on the keyed path. Rejected: duplicating them

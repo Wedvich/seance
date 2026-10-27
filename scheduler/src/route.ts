@@ -315,14 +315,17 @@ function machineFilter(machine: Machine, now: number, config: SchedulerConfig): 
  * A continue task (DESIGN.md, Daemon, "Continuing a session") has one
  * acceptable target, in the clone and exclave `judge` checks. Here, the machine:
  * another is `continue_elsewhere`, and the target must be a daemon that spawns
- * the mode at all, or it would refuse the request as malformed.
+ * the mode at all, or it would refuse the request as malformed, and one that
+ * resumes the session id it noted: an older one runs `--continue`, which misses
+ * a worktree spawn's conversation.
  */
 function continueFilter(task: Task, machine: Machine): Reason[] {
   const at = task.spec.continues?.at;
   if (at === undefined) return [];
   const reasons: Reason[] = [];
   if (machine.deviceId !== at.deviceId) reasons.push({ code: "continue_elsewhere" });
-  if (machine.capabilities?.includes(CAPABILITIES.continueTask) !== true)
+  const caps = machine.capabilities;
+  if (caps?.includes(CAPABILITIES.continueTask) !== true || !caps.includes(CAPABILITIES.continueSession))
     reasons.push({ code: "continue_unsupported" });
   return reasons;
 }

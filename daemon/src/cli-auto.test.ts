@@ -431,7 +431,7 @@ describe("continueTaskAuto", () => {
     spec: { repo: ORIGIN, mode: "worktree", prompt: "fix it", title: "fix-it" },
     assignment: { ...AT, window: "fix-it" },
   };
-  const CAN = [CAPABILITIES.continueTask];
+  const CAN = [CAPABILITIES.continueTask, CAPABILITIES.continueSession];
 
   /** The leader (device-1) and the box the task ran on (device-2). */
   const machines = (advertising: { readonly leader?: boolean } = {}): Machine[] => [

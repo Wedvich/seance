@@ -308,7 +308,11 @@ export class EndedTasks {
         if (launched && landed !== undefined) {
           await this.#ledger.startNote(
             taskId,
-            site && { repo: site.repo, path: site.worktree },
+            site && {
+              repo: site.repo,
+              path: site.worktree,
+              ...(site.session === undefined ? {} : { session: site.session }),
+            },
             launches.prUrl,
             landed?.server,
           );
@@ -499,15 +503,20 @@ export class EndedTasks {
 
   /**
    * Where a continued task's session ran, from this ledger alone — the one authority on
-   * a worktree path (DESIGN.md, Daemon, "Continuing a session"); a frame never names
-   * one. The newest note on a path owns it: a task whose worktree a later launch noted
-   * is refused, since `--continue` would resume that later session. `refused` says why
+   * a worktree path and on the Claude session id it chose for the launch (DESIGN.md,
+   * Daemon, "Continuing a session"); a frame never names either. The newest note on a
+   * path owns it: a later launch there continued the same conversation (one shared id)
+   * and its work sits in the worktree, so only it may be continued. `refused` says why
    * there is none, in words the task's failure carries.
    */
-  continuation(
-    taskId: string,
-  ):
-    | { readonly repo: string; readonly path: string; readonly exit?: number; readonly vanished?: true }
+  continuation(taskId: string):
+    | {
+        readonly repo: string;
+        readonly path: string;
+        readonly session: string;
+        readonly exit?: number;
+        readonly vanished?: true;
+      }
     | { readonly refused: string } {
     if (this.#launches.has(taskId)) return { refused: "a launch of it is still in flight here" };
     if (!this.#ledger.ids().includes(taskId)) {
@@ -521,12 +530,17 @@ export class EndedTasks {
     const owner = pathOwners(notes).get(note.path);
     if (owner !== undefined && owner.taskId !== taskId) {
       return {
-        refused: `task ${owner.taskId} ran in its worktree ${note.path} after it, so resuming would pick up that session; continue that task instead`,
+        refused: `task ${owner.taskId} took over its worktree ${note.path} and its conversation after it; continue that task instead`,
       };
+    }
+    // No `--continue` fallback: it is what misses a worktree spawn's conversation.
+    if (note.session === undefined) {
+      return { refused: "it was launched before this daemon noted session ids; resume it by hand" };
     }
     return {
       repo: note.repo,
       path: note.path,
+      session: note.session,
       ...(note.exit === undefined ? {} : { exit: note.exit }),
       ...(note.vanished === true && note.exit === undefined ? { vanished: true as const } : {}),
     };

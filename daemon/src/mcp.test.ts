@@ -2368,7 +2368,13 @@ describe("continue_task", () => {
         ...m,
         ...(on === false
           ? {}
-          : { capabilities: [CAPABILITIES.continueTask, ...(cancelled ? [CAPABILITIES.continueCancelled] : [])] }),
+          : {
+              capabilities: [
+                CAPABILITIES.continueTask,
+                CAPABILITIES.continueSession,
+                ...(cancelled ? [CAPABILITIES.continueCancelled] : []),
+              ],
+            }),
       });
     return [advertise(leader, advertising.leader), advertise(box, advertising.box, advertising.cancelled)];
   }

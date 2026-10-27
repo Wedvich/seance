@@ -116,7 +116,14 @@ describe("dispatch", () => {
     const at = { deviceId: "a", exclave: "main", clone: "app" };
     const continuing = spec({ mode: "continue", continues: { task: "t-old", at } });
     const capable = (): ReturnType<typeof machine> =>
-      machine("a", { capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.continueTask] });
+      machine("a", {
+        capabilities: [
+          CAPABILITIES.metrics,
+          CAPABILITIES.taskId,
+          CAPABILITIES.continueTask,
+          CAPABILITIES.continueSession,
+        ],
+      });
 
     test("is spawned in continue mode on its target, carrying the id it continues", async () => {
       const { fleet, scheduler, store } = setup(new FakeFleet([capable()]));

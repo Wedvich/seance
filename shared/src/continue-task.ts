@@ -73,8 +73,8 @@ function sessionResumable(task: Task): boolean {
  * Daemon, "Continuing a session"). A task whose session failed (`session_failed`) or
  * whose window was closed from outside (`session_closed`), or
  * that was cancelled after it was placed, qualifies — the others may never have launched,
- * and the daemon's ledger would refuse them anyway. A cancelled task needs a machine
- * advertising `continueCancelled`. And only the newest landed task in a chain holds the
+ * and the daemon's ledger would refuse them anyway. The machine must advertise
+ * `continueTask` and `continueSession`, and for a cancelled task `continueCancelled`. And only the newest landed task in a chain holds the
  * offer: `tasks` is the list the caller read it from, and a continuation that landed has
  * the worktree, so a second would only be refused by the daemon. One still waiting withholds
  * it too, until it lands or ends unplaced. Imports nothing that logs, since `seanced mcp`
@@ -121,7 +121,9 @@ export function continueOffer(task: Task, machines: readonly Machine[], tasks: r
   if (assignment === undefined) return { ok: false, reason: "the task was never placed on a machine" };
   const machine = machines.find((m) => m.deviceId === assignment.deviceId);
   if (machine === undefined) return { ok: false, reason: "the machine it ran on is no longer listed" };
-  if (machine.capabilities?.includes(CAPABILITIES.continueTask) !== true) {
+  // `continueSession`: an older daemon resumes with `--continue`, which misses a worktree spawn's conversation.
+  const caps = machine.capabilities;
+  if (caps?.includes(CAPABILITIES.continueTask) !== true || !caps.includes(CAPABILITIES.continueSession)) {
     return { ok: false, reason: "the machine it ran on can't continue a session yet (needs seanced update)" };
   }
   if (task.state === "cancelled" && machine.capabilities?.includes(CAPABILITIES.continueCancelled) !== true) {

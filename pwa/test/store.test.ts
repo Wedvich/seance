@@ -1830,8 +1830,8 @@ describe("the queue screen", () => {
     const capable = (): ScriptedClient =>
       new ScriptedClient({
         machines: [
-          autoMachine("dev-a", { capabilities: [CAPABILITIES.continueTask] }),
-          autoMachine("dev-b", { capabilities: [CAPABILITIES.continueTask] }),
+          autoMachine("dev-a", { capabilities: [CAPABILITIES.continueTask, CAPABILITIES.continueSession] }),
+          autoMachine("dev-b", { capabilities: [CAPABILITIES.continueTask, CAPABILITIES.continueSession] }),
         ],
       });
 
@@ -1882,7 +1882,10 @@ describe("the queue screen", () => {
       // dev-b leads and can, but the machine it ran on (dev-a) cannot.
       const detach = store.attach();
       client.emit({
-        machines: [autoMachine("dev-a"), autoMachine("dev-b", { capabilities: [CAPABILITIES.continueTask] })],
+        machines: [
+          autoMachine("dev-a"),
+          autoMachine("dev-b", { capabilities: [CAPABILITIES.continueTask, CAPABILITIES.continueSession] }),
+        ],
         scheduler: { kind: "ready", deviceId: "dev-b", term: 1 },
       });
       await store.continueTask("f-1");
@@ -1897,7 +1900,10 @@ describe("the queue screen", () => {
       const detach = store.attach();
       // The leader changed to one that cannot take a continue task (or went away) after the row was drawn.
       client.emit({
-        machines: [autoMachine("dev-a", { capabilities: [CAPABILITIES.continueTask] }), autoMachine("dev-b")],
+        machines: [
+          autoMachine("dev-a", { capabilities: [CAPABILITIES.continueTask, CAPABILITIES.continueSession] }),
+          autoMachine("dev-b"),
+        ],
         scheduler: { kind: "ready", deviceId: "dev-b", term: 2 },
       });
       await store.continueTask("f-1");

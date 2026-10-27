@@ -560,7 +560,7 @@ of M4 has landed.
 
 - **Continue a failed task (new, 2026-10-26; widened 2026-10-27).** A task that failed `session_failed` (an OOM
   kill) leaves its worktree and its conversation on disk, and the only remedy was a new task from
-  scratch. A **Continue** action queues a new task that resumes the conversation (`claude --continue`)
+  scratch. A **Continue** action queues a new task that resumes the conversation (`claude --resume <id>`)
   in the same worktree.
   - _Decided:_ a new task linked by `TaskSpec.continues { task, at }` (the old task stays `failed`,
     and its dependents stay failed); a new mode value `"continue"` as the forward-compat gate (an
@@ -570,7 +570,7 @@ of M4 has landed.
     the wire; a spawn sealed by the scheduler only (the local socket and every other `from` refused
     `not_continuable`); a brokered enqueue allowed, so keyless `seanced mcp` works; a CLI,
     `seanced continue <task-id> [--prompt …]`, that enqueues through the scheduler (a hand-run
-    `claude --continue` is untracked by design); a stale worktree lock in Claude's own
+    `claude --resume` is untracked by design); a stale worktree lock in Claude's own
     `claude session … (pid N start …)` form with a dead pid unlocked, any other lock refused; manual only, for
     `session_failed` alone (not `here` runs, not an automatic continue after an OOM kill). Surfaces: the
     PWA's failed card, MCP's `continue_task`, the CLI.
@@ -579,6 +579,10 @@ of M4 has landed.
     continuation and the daemon refuses an older task whose worktree a later launch noted, and the seed is
     worded from the old note's exit. A continuation still waiting withholds the offer and shows on the old
     card ("Continuing as … · waiting"), client-side from the listed tasks' `continues`.
+  - _Fix (2026-10-27), landed:_ `--continue` missed a worktree spawn's conversation (Claude can file it
+    under the clone's project), so every task spawn now runs `--session-id <uuid>` of the daemon's own,
+    noted in the launch ledger, and a continuation runs `--resume <that id>`; gated on
+    `continueSession`.
   - _As built:_ DESIGN.md, _Daemon_, "Continuing a session", records it and what was rejected.
 
 - **Asleep machines on the Queue screen (new, 2026-10-26) — Done.** A task placed on a MacBook whose

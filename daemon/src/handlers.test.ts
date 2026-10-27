@@ -960,23 +960,35 @@ describe("a scheduler spawn that continues a failed task", () => {
     readonly repo?: string;
     readonly path?: string;
     readonly exit?: number;
+    /** `null`: noted by a daemon predating session ids. */
+    readonly session?: string | null;
   }
+
+  const SESSION = "0b6e1c52-3f0d-4a8e-9c7b-2d5f4e6a1b90";
 
   /** A ledger holding OLD as launched (into `where`, unless null), and a backend recording what it is asked to spawn. */
   async function rig(where: Noted | null = {}) {
     const ledger = LaunchLedger.memory();
     await ledger.record(OLD);
+    const session = where?.session === undefined ? SESSION : where.session;
     if (where !== null)
       await ledger.note(OLD, {
         repo: where.repo ?? clone,
         path: where.path ?? site,
+        ...(session === null ? {} : { session }),
         ...(where.exit === undefined ? {} : { exit: where.exit }),
       });
     const calls: { readonly request: SpawnRequest; readonly continuation: Continuation | undefined }[] = [];
     const backend: SessionBackend = {
       spawn: (spawn, _repos, continued) => {
         calls.push({ request: spawn, continuation: continued });
-        return Promise.resolve({ window: "fix", path: continued?.path ?? "/p", registered: true, handle: "@1" });
+        return Promise.resolve({
+          window: "fix",
+          path: continued?.path ?? "/p",
+          registered: true,
+          handle: "@1",
+          ...(continued === undefined ? {} : { session: continued.session }),
+        });
       },
       sessions: () => Promise.resolve([]),
       doctor: () => Promise.resolve([]),
@@ -985,15 +997,20 @@ describe("a scheduler spawn that continues a failed task", () => {
     return { ledger, calls, handlerCtx };
   }
 
-  test("runs in the ledger's path: the backend is handed it, the new task notes it, the trail names both ids", async () => {
+  test("runs in the ledger's path under its session: the backend is handed both, the new task notes both, the trail names both ids", async () => {
     const { ledger, calls, handlerCtx } = await rig();
     const reply = await createHandler(handlerCtx)(continuation(), SCHEDULER_ID);
     expect(reply?.payload).toMatchObject({ ok: true, path: site });
+    expect(reply?.payload).not.toHaveProperty("session");
     expect(calls).toEqual([
-      { request: expect.objectContaining({ mode: "continue", continues: OLD }), continuation: { path: site } },
+      {
+        request: expect.objectContaining({ mode: "continue", continues: OLD }),
+        continuation: { path: site, session: SESSION },
+      },
     ]);
+    // The same id: continuing the continuation resumes the same conversation.
     expect(ledger.notes()).toEqual(
-      expect.arrayContaining([expect.objectContaining({ taskId: NEW, repo: clone, path: site })]),
+      expect.arrayContaining([expect.objectContaining({ taskId: NEW, repo: clone, path: site, session: SESSION })]),
     );
     expect(logged()).toContain(`mode=continue title="" `);
     expect(logged()).toContain(`task="${NEW}" continues="${OLD}" prompt=none`);
@@ -1005,7 +1022,10 @@ describe("a scheduler spawn that continues a failed task", () => {
     const reply = await createHandler(handlerCtx)(continuation(), SCHEDULER_ID);
     expect(reply?.payload).toMatchObject({ ok: true });
     expect(calls).toEqual([
-      { request: expect.objectContaining({ continues: OLD }), continuation: { path: site, exit: 137 } },
+      {
+        request: expect.objectContaining({ continues: OLD }),
+        continuation: { path: site, session: SESSION, exit: 137 },
+      },
     ]);
   });
 
@@ -1130,12 +1150,12 @@ describe("a scheduler spawn that continues a failed task", () => {
     test("a later task noted the same worktree: refused naming it, the new id never recorded", async () => {
       const { ledger, calls, handlerCtx } = await rig();
       await ledger.record("t-later");
-      await ledger.note("t-later", { repo: clone, path: site });
+      await ledger.note("t-later", { repo: clone, path: site, session: SESSION });
       const reply = await createHandler(handlerCtx)(continuation(), SCHEDULER_ID);
       expect(reply?.payload).toMatchObject({
         ok: false,
         code: "not_continuable",
-        message: expect.stringMatching(/t-later.*ran in its worktree/u),
+        message: expect.stringMatching(/t-later took over its worktree/u),
       });
       expect(logged()).toContain("failed code=not_continuable");
       expect(calls).toEqual([]);
@@ -1148,6 +1168,9 @@ describe("a scheduler spawn that continues a failed task", () => {
       expect(reply?.payload).toMatchObject({ ok: false, code: "not_continuable" });
       expect(calls).toEqual([]);
     });
+
+    test("its worktree was noted with no session id (an older daemon's launch): no --continue fallback", () =>
+      refusedWith({ session: null }, /before this daemon noted session ids; resume it by hand/u));
 
     test("it ran in another clone of the repo", () => refusedWith({ repo: "/elsewhere/myrepo" }, /another clone/u));
 

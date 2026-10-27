@@ -414,7 +414,7 @@ fleet, as below. Bare words after it become the prompt, which makes
 `-p` optional: `seanced spawn seance fix the flaky test` works.
 
 `seanced continue` queues a new task like a spawn does, so the scheduler tracks it. Running
-`claude --continue` by hand in the worktree works too, but séance does not see that session.
+`claude --resume` by hand in the worktree works too, but séance does not see that session.
 
 A spawn queues for the scheduler, as the app's and MCP's do: `<repo>` is a clone name or
 origin from any machine in the fleet, and the task waits in the relay's queue until a leader

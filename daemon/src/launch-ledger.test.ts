@@ -398,6 +398,34 @@ describe("LaunchLedger progress notes", () => {
     expect(parseTaskProgressList(progress)).not.toBeNull();
   });
 
+  test("a session id survives a reopen beside its site, sticks across notes, stays out of progress, and a malformed one is dropped", async () => {
+    const session = "0b6e1c52-3f0d-4a8e-9c7b-2d5f4e6a1b90";
+    const ledger = await LaunchLedger.open(path, () => 9);
+    for (const id of ["t1", "t2"]) await ledger.record(id);
+    await ledger.startNote("t1", { repo: "/r", path: "/r/.claude/worktrees/a", session });
+    // Not a UUID: never handed to `--resume`, so never noted.
+    await ledger.startNote("t2", { repo: "/r", path: "/r/.claude/worktrees/b", session: "--dangerous" });
+    await ledger.note("t1", { branch: "worktree-a" });
+    expect(ledger.notes()[0]?.session).toBe(session);
+    expect(ledger.notes()[1]).not.toHaveProperty("session");
+    expect(ledger.progress()).toEqual([{ taskId: "t1", at: 9, branch: "worktree-a" }]);
+
+    const reopened = await LaunchLedger.open(path, () => 10);
+    expect(reopened.notes()[0]).toMatchObject({ path: "/r/.claude/worktrees/a", session });
+    const file = JSON.parse(await readFile(path, "utf8"));
+    file.progress[0].session = `${session} --fork-session`;
+    file.progress[1].session = 42;
+    await writeFile(path, JSON.stringify(file));
+    const tampered = await LaunchLedger.open(path, () => 11);
+    expect(tampered.notes()[0]).toMatchObject({ path: "/r/.claude/worktrees/a" });
+    expect(tampered.notes()[0]).not.toHaveProperty("session");
+    expect(tampered.notes()[1]).not.toHaveProperty("session");
+
+    // A relaunch to no site starts without it.
+    await reopened.startNote("t1");
+    expect(reopened.notes().find((n) => n.taskId === "t1")).toBeUndefined();
+  });
+
   test("an exit status survives a reopen, reaches progress alone, and a relaunch starts without it", async () => {
     const ledger = await LaunchLedger.open(path, () => 9);
     await ledger.record("t1");

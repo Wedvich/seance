@@ -78,13 +78,18 @@ export interface TaskLaunches {
   /** The ledger holds the task as launched here, and no launch of it is in flight. */
   readonly launched: (taskId: string) => boolean;
   /**
-   * Where the ledger noted `taskId`'s worktree, for a continuation; `refused` says why there
-   * is none. Never from the wire: the request names a task, this machine says where it ran.
+   * Where the ledger noted `taskId`'s worktree and the session id it ran under, for a
+   * continuation; `refused` says why there is none. Never from the wire: the request names a
+   * task, this machine says where it ran and which conversation it was.
    */
-  readonly continuation: (
-    taskId: string,
-  ) =>
-    | { readonly repo: string; readonly path: string; readonly exit?: number; readonly vanished?: true }
+  readonly continuation: (taskId: string) =>
+    | {
+        readonly repo: string;
+        readonly path: string;
+        readonly session: string;
+        readonly exit?: number;
+        readonly vanished?: true;
+      }
     | { readonly refused: string };
   /** The daemon is about to close this task's pane itself; never judged vanished. */
   readonly closing: (taskId: string) => Promise<void>;
@@ -257,6 +262,7 @@ async function continuationSite(
   }
   return {
     path: real,
+    session: site.session,
     ...(site.exit === undefined ? {} : { exit: site.exit }),
     ...(site.vanished === true ? { vanished: true as const } : {}),
   };
@@ -338,7 +344,15 @@ async function handleSpawn(
     // A continuation watches the worktree it resumed, under its new task id.
     const entry = payload.mode !== "here" ? repos.find((r) => r.name === payload.repo) : undefined;
     await settle?.(true, {
-      ...(entry === undefined ? {} : { site: { repo: entry.path, worktree: outcome.path } }),
+      ...(entry === undefined
+        ? {}
+        : {
+            site: {
+              repo: entry.path,
+              worktree: outcome.path,
+              ...(outcome.session === undefined ? {} : { session: outcome.session }),
+            },
+          }),
       ...(outcome.server === undefined ? {} : { server: outcome.server }),
     });
     await audit.ok(outcome);
