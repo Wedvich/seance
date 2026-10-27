@@ -846,8 +846,8 @@ describe("continuing a failed task", () => {
     const waiting = continuation({
       spec: { repo: ORIGIN, mode: "continue", title: "Fix the thing again", continues: { task: "f", at: placedAt } },
     });
-    for (const state of ["queued", "blocked", "ready"] as const) {
-      expect(rowOf([failed, { ...waiting, state }], "f", CAN)?.continuing, state).toEqual({
+    for (const held of ["queued", "blocked", "ready"] as const) {
+      expect(rowOf([failed, { ...waiting, state: held }], "f", CAN)?.continuing, held).toEqual({
         id: "c",
         text: "Continuing as Fix the thing again · waiting",
       });
