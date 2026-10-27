@@ -318,7 +318,7 @@ function settlePlaced(task: Task, reply: SessionsAnswer): Task | null {
  * already finished — settled by its PR as `ended` settles one, never re-routed:
  * its reply and its `ended` event were both lost and its session is gone, so
  * `task_running` could not catch a second spawn. An id also in `interrupted`
- * is not known to have landed: its machine restarted mid-spawn, so it is
+ * is not known to have landed: its machine restarted or the spawn crashed mid-way, so it is
  * `failed`, never re-routed and never `done`. With neither, the task goes
  * back to `ready` only on the machine's proof (`provesNeverLanded`); without
  * it, `failed` — a terminal state that says what is unknown, where a
@@ -335,7 +335,8 @@ function settleUnconfirmed(task: Task, target: Target, reply: SessionsAnswer): T
       assignment: targetOf(target),
       failure: {
         code: "dispatch_unconfirmed",
-        message: "its machine restarted while the spawn was starting, so it may have started — not dispatched again",
+        message:
+          "its spawn was cut off before it was confirmed (its machine restarted or the spawn crashed), so it may have started — not dispatched again",
       },
     });
   }

@@ -2308,7 +2308,7 @@ export interface SettingsRecord extends VersionBound {
  * `dispatch_unconfirmed`: its spawn's reply was lost and its machine, asked
  * later, could neither show the session nor prove it never started (an older
  * daemon, or a ledger pruned past the reservation), or its machine reported the
- * launch interrupted (it restarted mid-spawn). Terminal: re-dispatching
+ * launch interrupted (it restarted or its spawn crashed mid-way). Terminal: re-dispatching
  * could start a twin. `dependency_failed`, `dependency_missing` and
  * `dependency_cycle`: an edge that can never release (`TaskDep`), set at
  * admission. `queue_expired`: `queued` past `STORE_TOMBSTONE_MS`, so it may be
