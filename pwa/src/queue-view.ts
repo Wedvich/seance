@@ -153,7 +153,7 @@ export interface HoldRow {
 }
 
 export interface QueueScreenView {
-  /** The header's meta line, "2 running · 1 waiting"; null until a list has been read. */
+  /** The header's meta line, "2/8 running · 1 waiting"; null until a list has been read. */
   readonly summary: string | null;
   /** A verified leader answers and the socket is open. */
   readonly available: boolean;
@@ -479,7 +479,7 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
       ok === null
         ? null
         : [
-            `${count("Running")} running`,
+            `${count("Running")}${ok.globalMax === undefined ? "" : `/${ok.globalMax}`} running`,
             ...(count(IDLE_SECTION) === 0 ? [] : [`${count(IDLE_SECTION)} idle`]),
             `${count("Waiting")} waiting`,
           ].join(" · "),

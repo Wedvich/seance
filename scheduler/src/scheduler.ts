@@ -271,6 +271,11 @@ export class Scheduler {
     await this.#pause.load();
   }
 
+  /** The in-flight cap routing enforces. */
+  globalMax(): number {
+    return this.#config.globalMax;
+  }
+
   /** The holds in force now: a reset hold past its `resumeAt` has lifted, written or not. */
   holds(): readonly PauseHold[] {
     return this.#pause.active();

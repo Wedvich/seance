@@ -90,8 +90,18 @@ function ok(
   holds: readonly PauseHold[] = [],
   skew = 0,
   idle: readonly IdleTaskRef[] = [],
+  globalMax?: number,
 ): QueueState {
-  return { kind: "ok", tasks, holds, unreadable: [], idle, at: NOW + skew, skew };
+  return {
+    kind: "ok",
+    tasks,
+    holds,
+    unreadable: [],
+    idle,
+    at: NOW + skew,
+    skew,
+    ...(globalMax === undefined ? {} : { globalMax }),
+  };
 }
 
 function titles(view: ReturnType<typeof deriveQueue>): string[] {
@@ -573,6 +583,13 @@ describe("deriveQueue", () => {
     ]);
     expect(deriveQueue(state(list), NOW).summary).toBe("2 running · 1 waiting");
     expect(deriveQueue(state(ok([])), NOW).summary).toBe("0 running · 0 waiting");
+    // The cap is the denominator, and a run-now task can push the numerator past it.
+    const running = [
+      task("a", { state: "running", assignment: placedAt }),
+      task("b", { state: "running", assignment: placedAt }),
+    ];
+    expect(deriveQueue(state(ok(running, [], 0, [], 2)), NOW).summary).toBe("2/2 running · 0 waiting");
+    expect(deriveQueue(state(ok(running, [], 0, [], 1)), NOW).summary).toBe("2/1 running · 0 waiting");
     expect(deriveQueue(state(null), NOW).summary).toBeNull();
   });
 

@@ -60,7 +60,15 @@ function queueView(scheduler: Scheduler, now: number, only?: readonly string[]):
   const unreadable = scheduler
     .unreadable()
     .map(({ id, version, reason }): UnreadableTaskRef => ({ taskId: id, version, reason }));
-  return boundedQueue(tasks, (id) => scheduler.lastDecision(id), now, scheduler.holds(), unreadable, scheduler.idle());
+  return boundedQueue(
+    tasks,
+    (id) => scheduler.lastDecision(id),
+    now,
+    scheduler.holds(),
+    unreadable,
+    scheduler.idle(),
+    scheduler.globalMax(),
+  );
 }
 
 /** Where the decision is still live: why a task waits, or where it is going. */
@@ -110,6 +118,7 @@ export function boundedQueue(
   holds: readonly PauseHold[] = [],
   unreadable: readonly UnreadableTaskRef[] = [],
   idle: readonly IdleTaskRef[] = [],
+  globalMax?: number,
 ): QueueResponse {
   const newest = all.toSorted(byRelevance).slice(0, QUEUE_MAX_TASKS).map(undecided);
   const decisions = new Map<string, { readonly whole: Decision; readonly cut: Decision }>();
@@ -159,6 +168,7 @@ export function boundedQueue(
     holds,
     ...(unreadable.length === 0 ? {} : { unreadable }),
     ...(idle.length === 0 ? {} : { idle }),
+    ...(globalMax === undefined ? {} : { globalMax }),
   };
 }
 
