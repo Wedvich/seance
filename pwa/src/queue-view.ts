@@ -14,7 +14,7 @@ import {
   type Task,
 } from "@seance/shared";
 import { machineAsleep, needsAttention } from "./asleep.ts";
-import { avoidLine, pinLine, taskHeadline, waitingText } from "./decision-view.ts";
+import { avoidLine, heldByCapsAlone, pinLine, taskHeadline, waitingText } from "./decision-view.ts";
 import { accountDisplayName, formatUntil } from "./machines-view.ts";
 import {
   deriveContinueAvailability,
@@ -151,7 +151,8 @@ function holdRow(hold: PauseHold, state: AppState, known: readonly KnownAccount[
 /** The window `daemon/src/spawn.ts` names a spawn with no title or prompt (`session`, `session-<n>`): says nothing about the task. */
 const NO_SLUG_WINDOW = /^session(?:-\d+)?$/u;
 
-function titleOf(task: Task): string {
+/** How a task is named wherever it is listed: its title, its prompt's first line, its window, else its repo. */
+export function taskTitle(task: Task): string {
   const { spec } = task;
   if (spec.title !== undefined && spec.title !== "") return spec.title;
   const first = spec.prompt
@@ -275,7 +276,7 @@ function placementLine(task: Task, state: AppState): string | null {
 function heldByCapsOnly(task: Task): boolean {
   const { decision } = task;
   if (task.state !== "ready" || decision === undefined || decision.chosen !== null) return false;
-  return decision.candidates.some((c) => c.rejected.length > 0 && c.rejected.every((r) => r.code === "cap_reached"));
+  return decision.candidates.some(heldByCapsAlone);
 }
 
 function rowOf(
@@ -292,7 +293,7 @@ function rowOf(
   const actionable = phase !== "dispatching" && phase !== "finished";
   return {
     id: task.id,
-    title: titleOf(task),
+    title: taskTitle(task),
     headline: taskHeadline(task, state.relay.machines, now),
     body: bodyOf(task, state.relay.machines, now, idleSince === undefined ? undefined : idleSince - skew),
     dot: dotOf(task),
@@ -368,7 +369,7 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
   const view = state.queueView;
   const ok = view?.kind === "ok" ? view : null;
   const tasks = ok?.tasks ?? [];
-  const titles = new Map(tasks.map((task) => [task.id, titleOf(task)]));
+  const titles = new Map(tasks.map((task) => [task.id, taskTitle(task)]));
   const skew = ok?.skew ?? 0;
   // Only while running: a task the reply's list outlived (settled by an action's own reply) is what it now is.
   const running = new Set(tasks.filter((t) => t.state === "running").map((t) => t.id));
@@ -450,7 +451,7 @@ export function deriveAfterSheet(state: AppState, now: number): AfterSheetView {
     .filter((task) => task.state !== "failed" && task.state !== "cancelled")
     .map((task) => ({
       id: task.id,
-      title: titleOf(task),
+      title: taskTitle(task),
       headline: taskHeadline(task, state.relay.machines, now),
       when: held.get(task.id) ?? null,
     }));

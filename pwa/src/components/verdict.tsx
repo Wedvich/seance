@@ -1,7 +1,7 @@
 import type { JSX } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { Machine } from "@seance/shared";
-import type { Verdict } from "../state.ts";
+import type { StartNowRefusal, Verdict } from "../state.ts";
 import { describeVerdict, VERDICT_STAGES, type VerdictStage } from "../verdict-view.ts";
 
 /**
@@ -133,12 +133,21 @@ export function VerdictView(props: {
   onQueue?: () => void;
   /** `deriveAutoAvailability`'s note: set while no verified scheduler would read a queued task. */
   waitingNote?: string | null;
+  /** Why a Start now's `run-now` didn't place it; shown only on the verdict for that task. */
+  startNowRefusal?: StartNowRefusal | null;
   onRetry: () => void;
   onAnother: () => void;
   onBack: () => void;
 }): JSX.Element {
   const { verdict, machines, aliases, now, onRetry, onAnother, onBack } = props;
-  const content = describeVerdict(verdict, machines, aliases, now, props.waitingNote ?? null);
+  const content = describeVerdict(
+    verdict,
+    machines,
+    aliases,
+    now,
+    props.waitingNote ?? null,
+    props.startNowRefusal ?? null,
+  );
   const onPrimary =
     content.primary.onClick === "retry" ? onRetry : content.primary.onClick === "back" ? onBack : onAnother;
 

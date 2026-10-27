@@ -49,6 +49,7 @@ export function App(props: { store: Store }): JSX.Element {
         now={now}
         onQueue={wide ? undefined : actions.openQueue}
         waitingNote={view.autoAvailability.note}
+        startNowRefusal={state.startNowRefusal}
         onRetry={() => store.retrySpawn(verdict)}
         onAnother={() => store.startAnother()}
         onBack={() => store.dismissLayer()}
@@ -242,6 +243,7 @@ function useSpawnActions(store: Store): SpawnActions {
       openSheet: (sheet) => store.openSheet(sheet),
       toggleWorktree: () => store.toggleWorktree(),
       spawn: () => void store.spawn(),
+      startNow: () => void store.startNow(),
       dismissLayer: () => store.dismissLayer(),
       pickMachine: (deviceId) => store.pickMachine(deviceId),
       pickAccount: (accountId) => store.pickAccount(accountId),

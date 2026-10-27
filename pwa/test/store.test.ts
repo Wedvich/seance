@@ -1108,6 +1108,497 @@ describe("auto's error paths", () => {
   });
 });
 
+describe("start now", () => {
+  let timers: ReturnType<typeof captureTimers>;
+
+  beforeEach(() => {
+    timers = captureTimers();
+  });
+
+  afterEach(() => timers.restore());
+
+  /** A fleet whose verified leader advertises run-now. */
+  function capable(): ScriptedClient {
+    return new ScriptedClient({
+      machines: [autoMachine("dev-a", { capabilities: [CAPABILITIES.runNow] }), autoMachine("dev-b")],
+    });
+  }
+
+  const reserved = (task: Task): Task => ({
+    ...task,
+    state: "reserved",
+    reservation: { deviceId: "dev-a", exclave: "default", clone: "app", expiresAt: 9 },
+  });
+
+  /** One follow poll answered with `task`, run to the end of its chain. */
+  async function poll(client: ScriptedClient, task: Task): Promise<void> {
+    client.onQueue = async () => ({ tasks: [task], at: 2 });
+    const asked = client.queueRequests.length;
+    timers.fire(QUEUE_POLL_MS);
+    await until(() => client.queueRequests.length > asked, "the poll");
+    await drain();
+  }
+
+  test("queues as Queue does, then sends run-now once, on the first read that shows the task ready", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+    expect(created).toMatchObject({ state: "queued", spec: { repo: ORIGIN, prompt: "fix it" } });
+    expect(store.getState().verdict).toEqual({ kind: "queued", task: created });
+    // Not admitted yet: run-now would be refused not_waiting, so nothing goes with the create.
+    expect(client.runNows).toEqual([]);
+
+    await poll(client, { ...created, state: "queued" });
+    expect(client.runNows).toEqual([]);
+
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toEqual([created.id]);
+    await until(() => queuedState(store) === "reserved", "the reply shown");
+    expect(store.getState().startNowRefusal).toBeNull();
+
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toEqual([created.id]);
+  });
+
+  test("waits through blocked, and is never sent once a pass placed the task on its own", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+
+    await poll(client, { ...created, state: "blocked" });
+    await poll(client, reserved(created));
+    expect(queuedState(store)).toBe("reserved");
+    // Back to ready (a reservation that lapsed): the intent went with the placement.
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toEqual([]);
+  });
+
+  test("Queue never sends run-now, and a new enqueue drops a Start now still waiting", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const first = firstCreate(client);
+    store.setPrompt("and this");
+    await store.spawn();
+    const second = client.creates[1];
+    if (second === undefined) throw new Error("second create missing");
+
+    // The first task shows ready too: were its intent still held, something would read and send for it.
+    client.onQueue = async () => ({
+      tasks: [
+        { ...first, state: "ready" },
+        { ...second, state: "ready" },
+      ],
+      at: 2,
+    });
+    timers.fire(QUEUE_POLL_MS);
+    await drain();
+    expect(queuedState(store)).toBe("ready");
+    expect(client.runNows).toEqual([]);
+  });
+
+  test("a refusal says why on the queued verdict, and is gone once the task moves past waiting", async () => {
+    const client = capable();
+    client.onRunNow = async () => ({ ok: false, code: "unplaceable", message: "held" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.startNow();
+    const created = firstCreate(client);
+
+    client.onQueue = async () => ({ tasks: [{ ...created, state: "ready" }], at: 2 });
+    client.nudge({ at: 2, tasks: [created.id] });
+    await until(() => store.getState().startNowRefusal !== null, "the refusal");
+    const message = "Something besides the concurrency caps keeps it from every machine — see why it waits.";
+    expect(store.getState().startNowRefusal).toEqual({ taskId: created.id, message });
+    expect(queuedState(store)).toBe("ready");
+    const verdict = store.getState().verdict;
+    if (verdict === null) throw new Error("verdict missing");
+    const body = describeVerdict(verdict, [], {}, 1, null, store.getState().startNowRefusal).body;
+    expect(body).toEndWith(`Couldn't start it at once: ${message}`);
+    // Nothing queues the Queue screen's notice for it: the verdict is where it was asked.
+    expect(store.getState().queueNotice).toBeNull();
+
+    // A reservation that lapses back to ready must not bring the note back.
+    await poll(client, reserved(created));
+    expect(store.getState().startNowRefusal).toBeNull();
+    detach();
+  });
+
+  test("a run-now that throws shows the transport failure on the verdict", async () => {
+    const client = capable();
+    client.onRunNow = async () => {
+      throw new RequestFailure("dropped", "socket closed", "relay");
+    };
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+    await poll(client, { ...created, state: "ready" });
+    await until(() => store.getState().startNowRefusal !== null, "the refusal");
+    expect(store.getState().startNowRefusal?.message).toContain("Refresh to see whether it did.");
+  });
+
+  test("a create whose answer was lost keeps the Start now for its retry", async () => {
+    const client = capable();
+    client.onCreate = async () => {
+      throw new RequestFailure("timeout", "store-put timed out after 10000ms", "relay");
+    };
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const verdict = store.getState().verdict;
+    if (verdict?.kind !== "unqueued") throw new Error("expected unqueued");
+    expect(verdict.runNow).toBe(true);
+
+    client.onCreate = async () => ({ ok: true, landedEarlier: true });
+    await store.retryEnqueue(verdict);
+    await poll(client, { ...firstCreate(client), state: "ready" });
+    expect(client.runNows).toEqual([firstCreate(client).id]);
+  });
+
+  test("a verdict left before the task is ready still sends, and a refusal lands on the Queue notice", async () => {
+    const client = capable();
+    client.onRunNow = async () => ({ ok: false, code: "unplaceable", message: "held" });
+    const fake = fakeHistory();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+    store.startAnother();
+    fake.settle(store);
+    fake.restore();
+    expect(store.getState().verdict).toBeNull();
+
+    client.onQueue = async () => ({ tasks: [{ ...created, state: "ready" }], at: 2 });
+    timers.fire(QUEUE_POLL_MS);
+    await until(() => client.runNows.length > 0, "the run-now");
+    await until(() => store.getState().queueNotice !== null, "the notice");
+    expect(client.runNows).toEqual([created.id]);
+    expect(store.getState().queueNotice).toStartWith(`Couldn't start "fix it" at once:`);
+    expect(store.getState().queueNotice).toContain("see why it waits");
+    expect(store.getState().startNowRefusal).toBeNull();
+
+    // Opening the Queue screen reads it whole; that read must not take the note down before it is seen.
+    const notice = store.getState().queueNotice;
+    client.onQueue = async () => ({ tasks: [{ ...created, state: "ready" }], holds: [], at: 3 });
+    store.openQueue();
+    await until(() => store.getState().queueView?.kind === "ok", "the queue read");
+    expect(store.getState().queueNotice).toBe(notice);
+    await store.refreshQueue();
+    expect(store.getState().queueNotice).toBeNull();
+  });
+
+  test("an answer that comes after the verdict moved to another task shows nowhere", async () => {
+    const client = capable();
+    const slow = Promise.withResolvers<TaskReply | null>();
+    client.onRunNow = () => slow.promise;
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+    await poll(client, { ...created, state: "ready" });
+    await until(() => client.runNows.length > 0, "the run-now");
+
+    store.setPrompt("and this");
+    await store.spawn();
+    slow.resolve({ ok: false, code: "unplaceable", message: "held" });
+    await drain();
+    expect(store.getState().startNowRefusal).toBeNull();
+    expect(store.getState().queueNotice).toBeNull();
+  });
+
+  test("dispatching (a pass placing it) or finished (a cancel or end): no note, one read, and the follow goes on", async () => {
+    for (const code of ["dispatching", "finished"] as const) {
+      const client = capable();
+      const answer = Promise.withResolvers<TaskReply | null>();
+      client.onRunNow = () => answer.promise;
+      const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+      // oxlint-disable-next-line no-await-in-loop -- one store at a time
+      await store.startNow();
+      const created = firstCreate(client);
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await poll(client, { ...created, state: "ready" });
+      expect(client.runNows).toHaveLength(1);
+
+      const asked = client.queueRequests.length;
+      const armed = timers.armed(QUEUE_POLL_MS);
+      answer.resolve({ ok: false, code, message: "x" });
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await drain();
+      // Before any read could show it reserved: the answer alone says nothing to the person.
+      expect(store.getState().startNowRefusal).toBeNull();
+      expect(store.getState().queueNotice).toBeNull();
+      expect(client.queueRequests.length).toBe(asked + 1);
+      expect(timers.armed(QUEUE_POLL_MS)).toBe(armed);
+
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await poll(client, reserved(created));
+      expect(queuedState(store)).toBe("reserved");
+      expect(client.runNows).toHaveLength(1);
+    }
+  });
+
+  test("not_waiting keeps the intent reading: a later ready asks again, and never more than twice", async () => {
+    const client = capable();
+    client.onRunNow = async () => ({ ok: false, code: "not_waiting", message: "x" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toHaveLength(1);
+    await poll(client, { ...created, state: "queued" });
+    expect(client.runNows).toHaveLength(1);
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toHaveLength(2);
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toHaveLength(2);
+    expect(store.getState().startNowRefusal).toBeNull();
+    expect(store.getState().queueNotice).toBeNull();
+  });
+
+  test("a long stretch with no leader spends no reads, and the ready after it still sends", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+    client.onQueue = async () => {
+      throw new RequestFailure("no_leader", "no scheduler is leading");
+    };
+    for (let n = 0; n < QUEUE_POLLS * 2; n += 1) {
+      timers.fire(QUEUE_POLL_MS);
+      // oxlint-disable-next-line no-await-in-loop -- one poll at a time
+      await drain();
+    }
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toEqual([created.id]);
+  });
+
+  test("reads that reach a leader spend the budget: once spent, the intent lapses unsent and silent", async () => {
+    const client = capable();
+    const fake = fakeHistory();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+    // Dismissed, so only the intent's own chain reads.
+    store.startAnother();
+    fake.settle(store);
+    fake.restore();
+    for (let n = 0; n < QUEUE_POLLS; n += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- one poll at a time
+      await poll(client, { ...created, state: "queued" });
+    }
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+    client.nudge({ at: 3, tasks: [created.id] });
+    await drain();
+    expect(client.runNows).toEqual([]);
+    expect(store.getState().queueNotice).toBeNull();
+  });
+
+  test("a second Start now while one is waiting replaces it", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const first = firstCreate(client);
+    store.setPrompt("and this");
+    await store.startNow();
+    const second = client.creates[1];
+    if (second === undefined) throw new Error("second create missing");
+
+    client.onQueue = async () => ({
+      tasks: [
+        { ...first, state: "ready" },
+        { ...second, state: "ready" },
+      ],
+      at: 2,
+    });
+    timers.fire(QUEUE_POLL_MS);
+    await until(() => client.runNows.length > 0, "the run-now");
+    await drain();
+    expect(client.runNows).toEqual([second.id]);
+  });
+
+  test("a run-now refused unsent for want of a leader is asked once more, then says so", async () => {
+    const client = capable();
+    client.onRunNow = async () => {
+      throw new RequestFailure("no_leader", "no scheduler is leading");
+    };
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toHaveLength(1);
+    expect(store.getState().startNowRefusal).toBeNull();
+
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toHaveLength(2);
+    expect(store.getState().startNowRefusal?.message).toBeDefined();
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toHaveLength(2);
+  });
+
+  test("a busy answer after the follow ran out still gets its one more ask", async () => {
+    const client = capable();
+    const busy = Promise.withResolvers<TaskReply | null>();
+    client.onRunNow = () => busy.promise;
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+    for (let n = 0; n < QUEUE_POLLS; n += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- one poll at a time
+      await poll(client, { ...created, state: "ready" });
+    }
+    expect(followEnd(store)).toBeDefined();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+
+    busy.resolve({ ok: false, code: "conflict", message: "x" });
+    await drain();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(1);
+    client.onRunNow = async (id) => ({ task: reserved({ ...created, id }) });
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toHaveLength(2);
+    expect(queuedState(store)).toBe("reserved");
+    expect(store.getState().startNowRefusal).toBeNull();
+  });
+
+  test("a ready sighting under an unverified leader holds the ask, not the intent", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.startNow();
+    const created = firstCreate(client);
+    client.emit({ scheduler: { kind: "unverified", deviceId: "dev-a", term: 2 } });
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toEqual([]);
+    expect(store.getState().startNowRefusal).toBeNull();
+
+    client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 2 } });
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toEqual([created.id]);
+    detach();
+  });
+
+  test("a follow that stops on a refused read leaves the run-now out to answer on the verdict", async () => {
+    const client = capable();
+    const answer = Promise.withResolvers<TaskReply | null>();
+    client.onRunNow = () => answer.promise;
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toHaveLength(1);
+
+    client.onQueue = async () => ({ ok: false, code: "not_leader", message: "x" });
+    timers.fire(QUEUE_POLL_MS);
+    await drain();
+    expect(followEnd(store)).toMatchObject({ kind: "refused" });
+
+    answer.resolve({ ok: false, code: "unplaceable", message: "held" });
+    await until(() => store.getState().startNowRefusal !== null, "the refusal");
+    expect(store.getState().startNowRefusal?.taskId).toBe(created.id);
+  });
+
+  test("detaching ends the intent: no timer stays armed, and a late answer arms none", async () => {
+    const client = capable();
+    const answer = Promise.withResolvers<TaskReply | null>();
+    client.onRunNow = () => answer.promise;
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.startNow();
+    const created = firstCreate(client);
+    await poll(client, { ...created, state: "ready" });
+    detach();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+
+    answer.resolve({ ok: false, code: "conflict", message: "x" });
+    await drain();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+    expect(store.getState().startNowRefusal).toBeNull();
+  });
+
+  test("a busy leader gets one more ask on the next ready sighting, then the note points at Run now", async () => {
+    const client = capable();
+    client.onRunNow = async () => ({ ok: false, code: "conflict", message: "x" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+    await poll(client, { ...created, state: "ready" });
+    await drain();
+    expect(client.runNows).toHaveLength(1);
+    expect(store.getState().startNowRefusal).toBeNull();
+
+    await poll(client, { ...created, state: "ready" });
+    await until(() => store.getState().startNowRefusal !== null, "the note");
+    expect(client.runNows).toHaveLength(2);
+    expect(store.getState().startNowRefusal?.message).toContain("Run now on the Queue screen");
+
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toHaveLength(2);
+  });
+
+  test("a leader that stopped advertising run-now is told so, and nothing is sent", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.startNow();
+    const created = firstCreate(client);
+    client.emit({ machines: [autoMachine("dev-a"), autoMachine("dev-b")] });
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toEqual([]);
+    expect(store.getState().startNowRefusal?.message).toBe(
+      "This leader can't start tasks past the queue; it stays queued.",
+    );
+    detach();
+  });
+
+  test("a reply after the follow ran out restarts it, so the verdict goes on to running", async () => {
+    const client = capable();
+    const slow = Promise.withResolvers<TaskReply | null>();
+    client.onRunNow = () => slow.promise;
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+    for (let n = 0; n < QUEUE_POLLS; n += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- one poll at a time
+      await poll(client, { ...created, state: "ready" });
+    }
+    expect(followEnd(store)).toBeDefined();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+
+    slow.resolve({ task: reserved(created) });
+    await until(() => queuedState(store) === "reserved", "the reply");
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(1);
+    await poll(client, { ...created, state: "running" });
+    expect(queuedState(store)).toBe("running");
+  });
+
+  test("a whole-queue read out before the run-now reply cannot walk the verdict back to ready", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.startNow();
+    const created = firstCreate(client);
+    client.onQueue = async () => ({ tasks: [created], holds: [], at: 1 });
+    store.openQueue();
+    await until(() => store.getState().queueView?.kind === "ok", "the queue read");
+
+    const slowRun = Promise.withResolvers<TaskReply | null>();
+    client.onRunNow = () => slowRun.promise;
+    await poll(client, { ...created, state: "ready" });
+    await until(() => client.runNows.length > 0, "the run-now");
+
+    const slowRead = Promise.withResolvers<QueueReply | null>();
+    client.onQueue = () => slowRead.promise;
+    client.nudge({ at: 3, tasks: [created.id] });
+    await drain();
+    slowRun.resolve({ task: reserved(created) });
+    await until(() => queuedState(store) === "reserved", "the reply");
+
+    slowRead.resolve({ tasks: [{ ...created, state: "ready" }], holds: [], at: 2 });
+    await drain();
+    expect(queuedState(store)).toBe("reserved");
+    detach();
+  });
+});
+
 describe("the queue screen", () => {
   let timers: ReturnType<typeof captureTimers>;
   let fake: ReturnType<typeof fakeHistory>;

@@ -71,6 +71,7 @@ function state(
     queueView,
     taskAction: null,
     queueNotice: null,
+    startNowRefusal: null,
     pausing: false,
     discarding: false,
     accounts: { aliases: {}, nameable: true, saving: null, notice: null },

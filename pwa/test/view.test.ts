@@ -82,6 +82,7 @@ function state(overrides: Partial<AppState> = {}, form: Partial<PersistedForm> =
     queueView: null,
     taskAction: null,
     queueNotice: null,
+    startNowRefusal: null,
     pausing: false,
     discarding: false,
     accounts: { aliases: {}, nameable: true, saving: null, notice: null },
@@ -675,5 +676,21 @@ describe("deriveReportedAvailability", () => {
     const bare = deriveView(state(), NOW);
     expect(bare.afterTile.value).toBe("None");
     expect(bare.batchTile.value).toBe("Off");
+  });
+});
+
+describe("the Start now chevron", () => {
+  const leading = { kind: "ready", deviceId: "dev-1", term: 1 } as const;
+
+  test("shows only while the verified leader advertises run-now", () => {
+    const capable = machine({ capabilities: [CAPABILITIES.runNow] });
+    expect(deriveView(state({ relay: relay({ machines: [capable], scheduler: leading }) }), NOW).startNow).toBe(true);
+    expect(deriveView(state({ relay: relay({ machines: [machine()], scheduler: leading }) }), NOW).startNow).toBe(
+      false,
+    );
+    const unverified = { kind: "unverified", deviceId: "dev-1", term: 1 } as const;
+    expect(deriveView(state({ relay: relay({ machines: [capable], scheduler: unverified }) }), NOW).startNow).toBe(
+      false,
+    );
   });
 });

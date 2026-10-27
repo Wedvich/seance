@@ -13,6 +13,7 @@ import {
   type Task,
 } from "@seance/shared";
 import { sleepingMachine } from "./asleep.ts";
+import type { PreviewState } from "./state.ts";
 import { failedBody, formatSeen } from "./view.ts";
 
 /**
@@ -142,6 +143,22 @@ function lostBy(scored: string, candidate: Candidate, winner: Candidate | undefi
   return `scored higher, ${scored} against ${n(best.total)}`;
 }
 
+/** The scored candidate the record chose; undefined when it chose none, or one a leader a version ahead left out. */
+function winnerOf(decision: Decision): Candidate | undefined {
+  const { chosen } = decision;
+  if (chosen === null) return undefined;
+  return decision.candidates.find(
+    (c) => c.deviceId === chosen.deviceId && c.exclave === chosen.exclave && c.score !== undefined,
+  );
+}
+
+/** Where the record chose, as `where` words it; the bare device id for a winner it left out. */
+function chosenName(decision: Decision): string | null {
+  if (decision.chosen === null) return null;
+  const winner = winnerOf(decision);
+  return winner === undefined ? decision.chosen.deviceId : where(winner);
+}
+
 /**
  * `tense`: a preview says what would happen, a placed task what did. A record
  * whose winner is not among its candidates (a leader a version ahead) still
@@ -154,12 +171,7 @@ export function describeDecision(
   tense: "would" | "did",
 ): DecisionSummary {
   const { chosen } = decision;
-  const winner =
-    chosen === null
-      ? undefined
-      : decision.candidates.find(
-          (c) => c.deviceId === chosen.deviceId && c.exclave === chosen.exclave && c.score !== undefined,
-        );
+  const winner = winnerOf(decision);
   const others = decision.candidates
     .filter((c) => c !== winner)
     .map((c) => line(c, c.score === undefined ? "rejected" : "scored", decision, machines, now, winner, tense));
@@ -188,6 +200,42 @@ export function describeDecision(
     others,
     omitted,
   };
+}
+
+const CAPS_ONLY_SUB = "Skip the queue — past the concurrency caps";
+
+/** The footer menu's Start now row: what skipping the queue would do, read off the placement preview. */
+export interface StartNowItem {
+  readonly sub: string;
+  readonly enabled: boolean;
+}
+
+/**
+ * The preview routes with both caps applied, so a candidate turned down for
+ * `cap_reached` alone is one `run-now` would take; anything else it rejects
+ * holds Start now too. No preview to go by (asking, failed, a pinned form) is
+ * no reason to block a tap the leader answers for itself.
+ */
+export function startNowItem(preview: PreviewState | null): StartNowItem {
+  const plain = { sub: "Skip the queue", enabled: true };
+  if (preview?.kind !== "ok") return plain;
+  const { decision } = preview;
+  const chosen = chosenName(decision);
+  const capped = decision.candidates.filter(heldByCapsAlone);
+  // `run-now` weighs the cap-held candidates too, unscored in the preview, so the target it picks is unknown.
+  if (chosen !== null)
+    return capped.length === 0 ? { sub: `Skip the queue — spawn on ${chosen}`, enabled: true } : plain;
+  const [only] = capped;
+  if (only === undefined) return { sub: "No machine can take it right now", enabled: false };
+  return {
+    sub: capped.length === 1 ? `Skip the queue — spawn on ${where(only)}` : CAPS_ONLY_SUB,
+    enabled: true,
+  };
+}
+
+/** Turned down for `cap_reached` and nothing else: a candidate `run-now`, which lifts both caps, would weigh. */
+export function heldByCapsAlone(candidate: Candidate): boolean {
+  return candidate.rejected.length > 0 && candidate.rejected.every((r) => r.code === "cap_reached");
 }
 
 /** What became of a queued task, in one line: the verdict's headline. */
