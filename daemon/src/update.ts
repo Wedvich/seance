@@ -40,6 +40,13 @@ export interface UpdaterOpts {
   readonly root?: string;
   readonly debounceMs?: number;
   readonly effects?: UpdateEffects;
+  /**
+   * Before the restart: resolves once the work the restart would cut off is over, or its cap passed,
+   * with the function that undoes it.
+   */
+  readonly quiesce?: () => Promise<() => void>;
+  /** How long after a restart that returned the quiesce is undone; `RESTART_GRACE_MS`. Tests only. */
+  readonly restartGraceMs?: number;
 }
 
 export interface Updater {
@@ -64,6 +71,11 @@ export interface Updater {
 }
 
 const DEBOUNCE_MS = 30_000;
+/**
+ * `systemctl --no-block` returns before its SIGTERM, so a restart that returned may still be coming.
+ * If none ever does, task launches must not stay held forever.
+ */
+const RESTART_GRACE_MS = 5 * 60_000;
 /** A whole branch, over whatever link the machine has: longer than reap's 30s. */
 const NETWORK_TIMEOUT_MS = 60_000;
 
@@ -143,6 +155,7 @@ export function createUpdater(opts: UpdaterOpts): Updater {
   const root = opts.root ?? checkoutRoot();
   const effects = opts.effects ?? defaultUpdateEffects();
   const debounceMs = opts.debounceMs ?? DEBOUNCE_MS;
+  const restartGraceMs = opts.restartGraceMs ?? RESTART_GRACE_MS;
   let inflight: Promise<void> | null = null;
   let lastStart = 0;
   let stopped = false;
@@ -167,9 +180,16 @@ export function createUpdater(opts: UpdaterOpts): Updater {
     // After the report: the restart ends this process, and the post-restart
     // register must already carry the ok.
     if (verdict.outcome !== "ok") return;
+    // A spawn cut off by the restart would settle `done` with no session; wait for the launches in flight.
+    const release = (await opts.quiesce?.()) ?? ((): void => {});
     try {
       await effects.restart();
+      setTimeout(() => {
+        log.error("self-update: still running after the restart returned — taking task launches again");
+        release();
+      }, restartGraceMs).unref();
     } catch (err) {
+      release();
       // The restart is the only step whose failure the `ok` already on disk
       // would otherwise hide: HEAD is at target, so every later check reads
       // `current` and this machine serves old code forever, claiming success.
