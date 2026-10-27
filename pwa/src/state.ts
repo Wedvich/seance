@@ -180,6 +180,8 @@ export type QueueState =
       readonly unreadable: readonly UnreadableTaskRef[];
       /** Running tasks the leader holds no slot for while they sit idle at their prompt (`QueueResponse.idle`). */
       readonly idle: readonly IdleTaskRef[];
+      /** The leader's in-flight cap, the header's denominator; absent from an older leader. */
+      readonly globalMax?: number;
       /** The leader's clock when it answered, ms. */
       readonly at: number;
       /**

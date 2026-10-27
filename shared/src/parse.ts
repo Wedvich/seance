@@ -1317,12 +1317,16 @@ export function parseQueueReply(value: unknown): QueueReply | null {
   if (listedIdle !== undefined && (!Array.isArray(listedIdle) || listedIdle.length > MAX_TASKS)) return null;
   // Lenient per entry too: a bad one shows its task as running, which it is.
   const idle = listedIdle?.map(parseIdleTaskRef).filter((entry) => entry !== null);
+  // Lenient: a cap that is not a positive integer only costs the header its denominator.
+  const globalMax = value["globalMax"];
+  const cap = typeof globalMax === "number" && Number.isInteger(globalMax) && globalMax > 0 ? globalMax : undefined;
   return {
     tasks,
     at: value["at"],
     ...(holds === undefined ? {} : { holds }),
     ...(unreadable === undefined || unreadable.length === 0 ? {} : { unreadable }),
     ...(idle === undefined || idle.length === 0 ? {} : { idle }),
+    ...(cap === undefined ? {} : { globalMax: cap }),
   };
 }
 

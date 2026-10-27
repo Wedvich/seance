@@ -1437,7 +1437,7 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
 Layer 2 also carries the app → scheduler ops, sealed `to: "scheduler"` and answered by the
 leader (Scheduler, "The leader"), each `T | SchedulerError`:
 
-- `queue { tasks? }` → `{ tasks, holds, at, unreadable? }` — the leader's `QUEUE_MAX_TASKS` most relevant tasks (unfinished first, an escalated
+- `queue { tasks? }` → `{ tasks, holds, at, unreadable?, globalMax? }` — the leader's `QUEUE_MAX_TASKS` most relevant tasks (unfinished first, an escalated
   `needs-input` leading, newest first within each) with their latest
   decisions, prompts cut to `QUEUE_PROMPT_PREVIEW` (none on a finished task); a decision past the reply's budget carries
   only its winner, counted in `trimmed` (Scheduler, "The leader"). `tasks` asks for those ids
@@ -1446,7 +1446,9 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   ignores it and answers its own listing, so a reader filters the reply again. `unreadable`
   lists every `task:` record the leader cannot read, whatever the filter, as `{ taskId,
   version, reason }` (at most `MAX_TASKS`, taken off the reply's budget before any task, as
-  the holds are): what fills the store without ever running.
+  the holds are): what fills the store without ever running. `globalMax` is the leader's
+  in-flight cap, the denominator of the Queue header's "8/8 running"; `run-now` places past it, so
+  the numerator may exceed it ("9/8"). Absent from an older leader, whose header shows the bare count.
 - `route-preview { repo, mode, prompt?, title?, model?, effort?, plan?, skill? }` (`TaskRequest`: a
   spawn's fields minus the machine, `repo` the repo's `origin`) → `{ decision }`, reserving
   nothing.

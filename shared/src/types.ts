@@ -2454,6 +2454,11 @@ export interface QueueResponse {
    * leaders, and when there are none.
    */
   readonly idle?: readonly IdleTaskRef[];
+  /**
+   * The leader's `globalMax`: the in-flight cap the header's "8/8 running" divides by. Not a
+   * ceiling on `running` — a task placed past the caps (`run-now`) overprovisions it. Absent from older leaders.
+   */
+  readonly globalMax?: number;
 }
 
 /** A task released for sitting idle at its prompt, and since when it has (leader's clock, ms). */
