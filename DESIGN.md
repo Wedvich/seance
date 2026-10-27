@@ -98,7 +98,7 @@ its Tailscale lockdown defeats the relay's purpose).
   thing a quantum adversary could forge.
 - **The relay is blind**: it routes opaque blobs and stores what it cannot
   read — each machine's sealed info and, since M3, the scheduler's sealed task
-  records and pause (_Scheduler_, "The store"). Relay compromise cannot read
+  records, pause and settings (_Scheduler_, "The store"). Relay compromise cannot read
   prompts or repo names, or spawn anything no PSK holder ever asked for. The
   rollback M3 opened — re-running a task a PSK holder once enqueued, lifting a
   pause — is closed by the leader's version floor and the launch ledger's
@@ -520,7 +520,16 @@ Séance's noise is cover for a real intruder.
    open and bind as the machine's (item 4). Daemons cannot check the proof — they never
    see the registry — but all they send the scheduler is fire-and-forget
    `session-event`s, sealed under the PSK, so such a leader learns their timing
-   and nothing else.
+   and nothing else. A token holder can also `store-get` `settings:main`, which only a PSK
+   holder opens, and every PSK holder can (decided #9): the VAPID private key, and later the
+   push subscriptions and the Linear key, are as readable as a prompt is. A thief leader
+   (above) can overwrite the record inside its term — the other leaders' floor stops only a
+   rollback — which would orphan every subscription; the same class as its queue writes,
+   accepted, and the remedy is the one above. It can also write a junk `settings:main` (one no
+   build opens): every later leader reads it as unusable and never replaces it, and settings
+   deletes are refused, so push stays off for good. The remedy above removes the thief but not
+   the record, so it does not bring push back; recorded under the Settings record's residual, as
+   a gap with no repair path yet.
 4. **Relay compromise** (T1557 — the relay _is_ the AiTM position). Handled:
    AAD binding makes re-addressing fail closed. Residual is availability and
    traffic analysis, both accepted — the accepted kind is a relay that stops
@@ -571,12 +580,15 @@ Séance's noise is cover for a real intruder.
    _order_, inside the accepted "replay or withhold" class. Rollback alone
    would not be: a task settled `done` at version 5, served back as its
    version-1 create, reads `queued` and is dispatched again, and a pause
-   served older or missing reads as no holds. Two checks close it (M3 review
+   served older or missing reads as no holds, and a settings record served older or missing
+   would have a leader regenerate the VAPID key and orphan every subscription. Two checks close it (M3 review
    S1, 2026-10-18). **The leader's version floor** (`daemon/src/version-floor.ts`;
    Scheduler, "The queue store"): the highest version this process has seen
    or written at each key, kept across terms and restarts, below which a task
    record reads `version_regressed` and is never admitted or dispatched, a
-   pause below it or missing holds the whole queue, and a task record that
+   pause below it or missing holds the whole queue, a settings record below it or
+   missing once seen reads `version_regressed` and push stays off (nothing is
+   regenerated or written), and a task record that
    vanishes without the leader's delete is kept as held. **The ledger
    refusal**: a daemon refuses a scheduler spawn for a task id its launch
    ledger holds as launched with `task_launched`, audited (Session events), so
@@ -775,12 +787,17 @@ nothing checked it. The last is the gap they leave.
   (`getPause` in `daemon/src/queue-store.ts`); one that fails any of it fails
   closed, as a whole-queue hold (Scheduler, "Pause"). Both bindings hold against a
   token holder, not the relay, which can serve an older version at its own
-  version (Threat model, item 4). M4's `account`, `quota` (the fleet quota record) and
-  `settings` are `AT_REST_OPS` ops too, each with its own parser, so one cannot stand in
-  for another or for a `task`. An `account` record is sealed to `"app"` and read only through
+  version (Threat model, item 4). `settings` is the leader's alone too: sealed `to` and
+  `from` `"scheduler"`, opened through `openAtRest` with its op, refused unless it came under
+  `settings:main` and sealed `to: "scheduler"`, bound by its sealed `version` against the
+  relay's, and held to the version floor (`daemon/src/settings-store.ts`); one that fails
+  any of it leaves push off for the term and is never written over (Scheduler, "Settings
+  record"). M4's `account` and `quota` (the fleet quota record) are `AT_REST_OPS` ops too,
+  each with its own parser, so one cannot stand in for another, for `settings` or for a
+  `task`. An `account` record is sealed to `"app"` and read only through
   `openAccountRecord` (`shared/src/account-record.ts`): its sealed version must be the relay's and
   its `accountId`, HMAC'd under the PSK-derived account key, its own key (_Scheduler_, "Account
-  records"); `settings` has no writer so far. `quota` is opened only through `openFleetQuotaRecord`
+  records"). `quota` is opened only through `openFleetQuotaRecord`
   (`shared/src/fleet-quota.ts`): sealed `to: "app"`, its op, its parser, and its sealed
   `version` the store's. Its `from` is not checked — any PSK holder may write it, and it
   carries readings, never authority.
@@ -1102,15 +1119,16 @@ Who owns each frame in code — the place to change when a frame changes:
 | `status` (relay→app)                                                | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`                                                                                                                                                                                                                                                                                               | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped                                                                                                                                                                                                                                   |
 | op `metrics`                                                        | `pwa/src/store.ts` via `shared/src/app-client.ts` `metrics()`, gated and parsed                                                                                                                                                                                                                                                                                                    | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts`; sized at the transport (`#sealReply`, `daemon/src/relay-client.ts`)                                                                                                                                                                                       |
 | op `session-event` (→`"scheduler"`)                                 | `daemon/src/session-events.ts` via `sendToScheduler()` in `daemon/src/relay-client.ts`; on the leader's own machine, `Leader.onSession` in process                                                                                                                                                                                                                                 | `daemon/src/leader.ts`: opened by the term's leg (`onEvent` in `shared/src/app-client.ts`, under the daemon's one scheduler `ReplayGuard`), validated by `parseSessionEvent`, applied by `Scheduler.onSession`                                                                                                                           |
-| `store-list` / `store-get` / `store-put` / `store-delete`           | apps via `shared/src/app-client.ts` (list/get/create); the leader's daemon socket via `daemon/src/queue-store.ts`, with `term` on writes; the fleet broker's enqueue (`daemon/src/broker.ts`)                                                                                                                                                                                      | parsed and bounded in `relay/src/wire.ts`, rules in `relay/src/store.ts`, dispatched by `relay/src/hub.ts` `#onStoreFrame`                                                                                                                                                                                                               |
-| `store-listed` / `store-record` / `store-written` / `store-refused` | `relay/src/hub.ts` `#onStoreFrame`, answering from `relay/src/store.ts`                                                                                                                                                                                                                                                                                                            | `parseStoreReply` in `shared/src/parse.ts`; correlated on `re` by the app-client, which settles a reply it cannot read as `null` at once, and by the queue store                                                                                                                                                                         |
+| `store-list` / `store-get` / `store-put` / `store-delete`           | apps via `shared/src/app-client.ts` (list/get/create); the leader's daemon socket via `daemon/src/queue-store.ts` and `daemon/src/settings-store.ts`, with `term` on writes; the fleet broker's enqueue (`daemon/src/broker.ts`)                                                                                                                                                   | parsed and bounded in `relay/src/wire.ts`, rules in `relay/src/store.ts`, dispatched by `relay/src/hub.ts` `#onStoreFrame`                                                                                                                                                                                                               |
+| `store-listed` / `store-record` / `store-written` / `store-refused` | `relay/src/hub.ts` `#onStoreFrame`, answering from `relay/src/store.ts`                                                                                                                                                                                                                                                                                                            | `parseStoreReply` in `shared/src/parse.ts`; correlated on `re` by the app-client, which settles a reply it cannot read as `null` at once, and by the queue and settings stores                                                                                                                                                           |
 | `store-changed`                                                     | `relay/src/hub.ts` `#nudgeLeader`, to the leader's term socket after a write it did not make; `#nudgeApps`, to other apps after an `account:` write                                                                                                                                                                                                                                | `daemon/src/relay-client.ts` `onStoreChanged` → `daemon/src/leader.ts` `Leader.onStoreChanged`, via `parseStoreChanged` (`task:` keys only); `shared/src/app-client.ts`, via `parseStoreChanged`, to `onStoreChanged` listeners (`pwa/src/account-store.ts` re-reads an `account:` key on one)                                           |
 | records `task` / `pause-state` (at rest)                            | `task`: `sealTaskRecord` (`shared/src/task-record.ts`), by the app-client's `createTask` and the queue store; a continue task (`TaskSpec.continues`, from `shared/src/continue-task.ts`) is written the same way, and the leader dispatches it as a `spawn` with `mode: "continue"` (`#dispatch` in `scheduler/src/scheduler.ts`); `pause-state`: `sealAtRest`, by the queue store | `task`: `openTaskRecord` (`shared/src/task-record.ts`) — `openAtRest`, no replay guard, sealed `to: "scheduler"`, then `bindTaskRecord`; `pause-state`: `openAtRest` and `parsePauseRecord` in the queue store, held by `Scheduler.load`                                                                                                 |
 | ops `mark-done` / `pause` / `resume` / `discard`                    | an app via `shared/src/app-client.ts`: `pwa/src/scheduler-store.ts` (the Queue screen)                                                                                                                                                                                                                                                                                             | `daemon/src/leader-requests.ts` `answer`, parsed by `parsePauseRequest` / `parseResumeRequest` / `parseDiscardRequest`, run by `Scheduler.pause` / `resume`, `Scheduler.markDone` and `Scheduler.discard`                                                                                                                                |
 | op `queue-changed` (→`"app"`)                                       | `daemon/src/leader.ts` on the term's leg, as `from: "scheduler"`, coalesced to one per 500 ms                                                                                                                                                                                                                                                                                      | `shared/src/app-client.ts`, via `parseQueueChanged`: heard only by an app client (one with no term) and only `from: "scheduler"`, handed to `onQueueChanged` listeners — `pwa/src/scheduler-store.ts` re-reads on it                                                                                                                     |
 | op `branch-state` (→`"scheduler"`)                                  | `daemon/src/branch-state.ts` via `RelayClient.sendBranchState()`; on the leader's own machine `run-capabilities.ts` hands it in process to `leader.onBranchState` instead (Scheduler, "Branch state")                                                                                                                                                                              | `daemon/src/leader.ts` `onEvent`, via `parseBranchState`, into the one `onBranchState` sink, which feeds the library                                                                                                                                                                                                                     |
 | record `quota` (at rest)                                            | `sealFleetQuotaRecord` (`shared/src/fleet-quota.ts`), by each daemon's fleet quota writer (`daemon/src/fleet-quota.ts`) on its own socket                                                                                                                                                                                                                                          | `openFleetQuotaRecord` (`shared/src/fleet-quota.ts`) — `openAtRest`, sealed `to: "app"`, `parseFleetQuotaRecord`, sealed `version` the store's — by the app-client's `refreshFleetQuota` (the PWA and the leader's leg) and the writer; stored under `quota:fleet` (_Scheduler_, "Fleet quota record")                                   |
-| records `account` / `settings` (at rest)                            | `account` written by `sealAccountRecord` (`shared/src/account-record.ts`) from the PWA's rename; `settings` unwritten so far                                                                                                                                                                                                                                                       | `account`: `openAccountRecord`, which opens at rest then `parseAccountRecord` and binds version and key; `settings`: `openAtRest` with its op, then `parseSettingsRecord` (`shared/src/parse.ts`); stored under `account:` and `settings:` (_Scheduler_, "The store")                                                                    |
+| record `account` (at rest)                                          | `sealAccountRecord` (`shared/src/account-record.ts`) from the PWA's rename                                                                                                                                                                                                                                                                                                         | `openAccountRecord`, which opens at rest then `parseAccountRecord` and binds version and key; stored under `account:` (_Scheduler_, "The store")                                                                                                                                                                                         |
+| record `settings` (at rest)                                         | `sealAtRest` with op `settings`, by the leader's settings store (`createSettingsStore` in `daemon/src/settings-store.ts`), creating `settings:main` once at a term's start when none exists (Scheduler, "Settings record")                                                                                                                                                         | `openAtRest` with its op, then `parseSettingsRecord`, bound to its key and sealed version and held to the version floor, by the same store; an app's `store-get` opens it the same way once the PWA reads it (M4, Web Push); stored under `settings:main` (_Scheduler_, "The store")                                                     |
 | op `push-subscribe` (→`"scheduler"`)                                | not yet sent (M4, Web Push)                                                                                                                                                                                                                                                                                                                                                        | not in `SCHEDULER_OPS`: `daemon/src/leader.ts` answers it `invalid_request` as any op it does not handle, and a non-leading daemon drops it (`daemon/src/relay-client.ts`: not a scheduler op), so the app sees a timeout, not `not_leader`, until the op joins `SCHEDULER_OPS`; its handler will parse with `parsePushSubscribeRequest` |
 
 `sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
@@ -1774,7 +1792,7 @@ enforces is what it can see: who is asking, the key, a version and a size.
   re-creating it from its own version-1 blob (Threat model, item 3). `settings:`, `account:` and
   `quota:` are the same (owner decision #8): deterministic keys, where a tombstone would block
   the one key that names the thing for 30 days, so they are cleared by overwrite. `settings:` is
-  a leader op's to write and every PSK holder's to read (#9); `account:` gives every registered
+  the leader's to write and every PSK holder's to read (#9); `account:` gives every registered
   daemon socket an app's rights (#14: that leg needs a signed register on top of the token, so it
   is harder to open than the app leg), and `quota:` is the daemons' alone — any daemon's, since
   the fleet quota record is written by each machine on its own cadence. A singleton prefix
@@ -1847,9 +1865,9 @@ enforces is what it can see: who is asking, the key, a version and a size.
 - **Store caps**: a create past its prefix's `cap`, or past `MAX_RECORDS` in all, is
   `store_full` on either leg. The caps (table above) sum to 202 of `MAX_RECORDS`' 256, checked in
   `relay/test/store-rules.test.ts`, so no prefix's fill can starve another's and the 54 left are
-  room for a prefix M4 has yet to name (push subscriptions). Why each: `task:` is `MAX_TASKS`;
-  `queue:` holds the pause and nothing else; `settings:` a handful of leader-held singletons (the
-  VAPID keypair, the Linear key); `account:` one per Claude account the fleet signs into, far past
+  room for a prefix not yet named. Why each: `task:` is `MAX_TASKS`;
+  `queue:` holds the pause and nothing else; `settings:` leader-held singletons (the leader
+  writes one, `settings:main`, `SETTINGS_KEY`, and the cap leaves room to split it); `account:` one per Claude account the fleet signs into, far past
   a personal fleet's handful; `quota:` the one fleet record (one per account would tell the relay
   when each is in use). A delete past `MAX_TOMBSTONES` is `store_full` too (_Tombstones_).
 - **List floors** (2026-10-18, M3 review S4). A `store-list` reads every row under its prefix,
@@ -2210,6 +2228,52 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   `startTerm` logs as `warn scheduler: <message>`: a dispatch spending credits, and a wait for
   input past 30 minutes (_The library_, "Credits spill" and "Needs input"). The line names task
   and account ids, never a prompt or title. M4's Web Push takes the same alerts.
+- **Settings record** (M4, Settings and Web Push). One record, `settings:main` (`SETTINGS_KEY`),
+  holds what the leader keeps for the fleet: the VAPID keypair push sends are signed with and,
+  as later items write them, the push subscriptions and the Linear key (`SettingsRecord`). The
+  leader alone writes it (decided #9), sealed `to` and `from` `"scheduler"` under op `settings`;
+  every PSK holder can read it, since the VAPID public key is what a browser subscribes to.
+  - **Ensured at takeover, beside it.** Once a term's registry is settled it reads the record
+    (`createTermSettings`, `daemon/src/settings.ts`), in parallel with takeover and never
+    awaited by it: push is optional, the queue is not, so a settings fault cannot hold the
+    queue up. With no record, and the floor's `settings` slot at 0, it generates the keypair
+    on WebCrypto (`generateVapidKeys`, `daemon/src/web-push.ts`: no dependency) and creates the
+    record at `expect: 0`. A term that loses that race (`version_conflict`) reads again once and
+    holds the winner's record; a later term on any leader reads the same public key. The term
+    holds the record in memory and writes it only through one serialised `update`, so its own
+    writes never race each other and nothing re-reads it per use.
+  - **Never regenerated, never written over.** Every subscription is bound to the VAPID key, so
+    a record that exists and cannot be used — `unopenable` (another PSK, the wrong `to`),
+    `malformed` (a newer build's shape, or a push host this build does not allow),
+    `version_mismatch`, `key_mismatch`, or `version_regressed` (below the floor, or missing once
+    one was seen) — leaves the holder `unavailable` for the term: push is off, nothing is
+    written, and one warning per term names the reason, never the content. The one repair of
+    an existing record is one with no `vapid` at all (a Linear-only record, which no writer
+    makes yet), given a key at its own version. A read that fails or a create whose answer was
+    lost is no verdict: the term's tick tries it again, one warning per outage, backing off (the
+    gap doubles per failure, up to about five minutes).
+  - **Held to the version floor** (_The queue store_, "The version floor"): a `settings` slot,
+    raised by reads and by the leader's own write.
+  - **Never logged.** `settings-store.ts` makes no log call; the record, its `env` and `ct`
+    reach no log line, audit line, `queue` reply, MCP output or `status`. The store-frame
+    plumbing it shares with `queue-store.ts` is `daemon/src/store-frames.ts`, scheduler-free,
+    so the adapter stays out of `LEADER_MODULES`: the term's end is thrown as the caller's
+    `revoked`.
+  - **No app-facing op yet.** The leader generates the pair itself, so no app value needs
+    writing: `push-subscribe` (Web Push) is the first settings op from an app, and the Linear
+    key's write, parser and UI belong to the Linear item, which round-trips through the
+    record's `linearKey` untouched.
+  - **Accepted:** the one repair write (a record that parses but has no `vapid`) is rebuilt from
+    the parsed record, so a field a newer build added and this build's parser drops is lost with
+    it.
+  - **Residual, with no repair path yet:** rotating the PSK leaves `settings:main` `unopenable`,
+    and so does a junk record a leader-capture thief wrote (Threat model, item 3), which no
+    leader ever replaces: push stays off until an operator path exists (settings deletes are
+    `never` and the leader never overwrites a record it cannot read). A relay that lost its
+    storage leaves the record `version_regressed` on every leader whose floor saw it, the same
+    way. A leader that never saw a settings record recreates it, and in this build the record
+    exists only at version 1: it gets a new VAPID pair, leaders whose floor is 1 accept that
+    silently, and the PWAs subscribe again. Offered as a follow-up, not built.
 - **A task on a machine that never answers again** becomes `lost` — after 15 minutes absent
   once running; while still reserved, at its TTL with its `sessions` check unanswered and its
   machine not connected, or 15 minutes past its TTL with every check failing on a machine that
@@ -3028,7 +3092,8 @@ assumes: sealing, opening and the reader rules are its job, the record shapes ar
 - **The version floor** (`daemon/src/version-floor.ts`, `flooredStore`; added 2026-10-18, M3
   review S1). Binding checks a record's sealed version against the one the relay reports, so it
   cannot see the relay itself serving an authentic old blob at that blob's own version. The
-  floor can: the highest version seen or written at each `task:` key and at `queue:pause`. A
+  floor can: the highest version seen or written at each `task:` key, at `queue:pause` and at
+  `settings:main`. A
   readable task record below it reads `version_regressed`, held apart like any unreadable one;
   a pause below it, or missing once one was seen, reads the same and so holds the whole queue
   until a `resume` or `pause` overwrites it — the leader's own pause write sets the floor, even
@@ -3044,6 +3109,15 @@ assumes: sealing, opening and the reader rules are its job, the record shapes ar
   sees again what the store still holds, and a deleted key's tombstone lasts no longer. A
   confirmed delete sets the floor one past the deleted version, so any record there reads
   regressed; a delete whose answer was lost lets the next null read count as it landing.
+  The **settings slot** (`settings`, `createSettingsStore`) is a floor beside the pause's, in the
+  same file and absent at 0, so the file is byte-identical for a leader that never saw a settings record: raised by
+  a read and by the leader's own write; below it a record reads `version_regressed`, and missing
+  once one was seen reads the same, so push is off for the term. Unlike the pause's, a settings
+  write only raises it, since no settings write is a way back from a rolled-back record. `v`
+  stays 1: an older daemon reads a bumped `v` as corrupt and starts its task floors afresh, but
+  ignores a key it does not know. Its own `save()` drops the field, so if that daemon is later
+  upgraded its settings floor restarts at 0, weakening rollback detection for one cycle
+  (accepted).
 - **The relay client's store leg** (`RelayClient.store`). Store frames correlate on their own
   `id` in a pending map apart from sealed requests, as the app-client's do, and a reply counts
   only from the socket the request left on. A reply that does not parse settles `null`; a timeout

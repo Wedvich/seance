@@ -19,6 +19,17 @@ export function fromBase64(b64: string): Uint8Array<ArrayBuffer> {
   return out;
 }
 
+/** RFC 4648 §5, unpadded: the form Web Push and VAPID keys travel in. */
+export function toBase64Url(bytes: Uint8Array): string {
+  return toBase64(bytes).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+}
+
+/** Padded or unpadded, as browsers differ (`isBase64UrlBytes` in parse.ts accepts both). */
+export function fromBase64Url(b64url: string): Uint8Array<ArrayBuffer> {
+  const std = b64url.replaceAll("-", "+").replaceAll("_", "/");
+  return fromBase64(std.padEnd(Math.ceil(std.length / 4) * 4, "="));
+}
+
 function pskBytes(pskBase64: string): Uint8Array<ArrayBuffer> {
   const raw = fromBase64(pskBase64);
   if (raw.byteLength !== PSK_BYTES) {
