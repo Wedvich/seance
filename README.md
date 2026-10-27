@@ -360,8 +360,9 @@ its machine or account when it is offline or over a limit, and says why; one sti
 after 30 days fails, so a machine back later never runs a month-old prompt. Pinning an
 account needs a leader that supports it, and says so otherwise. The **Queue screen** (a column on
 desktop, in the header menu on a phone) shows everything queued: what needs you, what
-is running or waiting, and what finished, with **Cancel** and **Mark done** (each takes
-a second tap when it would end a running session), and **Pause** / **Resume**. The app
+is running or waiting, and what finished. Each card shows its likeliest next step and keeps
+every action behind its ⋯ menu, **Cancel** and **Mark done** included (each takes a second
+tap when it would end a running session); the footer has **Pause** / **Resume**. The app
 pauses the whole queue only; a hold on one account shows with its own **Resume**, but
 no client sets one yet. `seanced spawn --now` starts a session directly on a machine,
 with or without a scheduler.
