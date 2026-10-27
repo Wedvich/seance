@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { TaskDep } from "@seance/shared";
+import { LAUNCH_LEDGER_MAX_AGE_MS, reasonText, type TaskDep } from "@seance/shared";
 import { DEFAULT_CONFIG, MemoryQueueStore, Scheduler, type Task } from "../src/index.ts";
 import type { DespawnRequest, DespawnResponse, Machine } from "@seance/shared";
 import { prunable } from "../src/prune.ts";
@@ -282,5 +282,84 @@ describe("a machine that returns after expiry", () => {
     await scheduler.load();
     await pass(scheduler);
     expect(await scheduler.cancel("t")).toEqual({ ok: false, code: "finished" });
+  });
+});
+
+describe("a ready continuation", () => {
+  const CONTINUE_MS = DEFAULT_CONFIG.continueExpiryMs;
+  const at = { deviceId: "a", exclave: "main", clone: "app" };
+  const continuing = (createdAt: number): Partial<Task> => ({
+    state: "ready",
+    spec: spec({ mode: "continue", continues: { task: "t-old", at } }),
+    createdAt,
+  });
+
+  test("stays ready at the bound and fails continue_expired a millisecond past it, worded from its machine's rejection", async () => {
+    const { fleet, clock, scheduler, put } = setup();
+    await put("t", continuing(NOW - CONTINUE_MS));
+    await scheduler.load();
+    await pass(scheduler);
+    expect(scheduler.task("t")?.state).toBe("ready");
+
+    clock.now += 1;
+    await pass(scheduler);
+    const task = scheduler.task("t");
+    expect(task).toMatchObject({ state: "failed", failure: { code: "continue_expired" } });
+    expect(task?.failure?.message).toContain(reasonText({ code: "offline" }));
+    expect(task?.failure?.message).not.toContain("never took it");
+    expect(fleet.spawns).toEqual([]);
+  });
+
+  test("a record loaded already past the bound, with no decision, says its machine never took it", async () => {
+    const { scheduler, put } = setup();
+    await put("t", continuing(NOW - CONTINUE_MS - 1));
+    await scheduler.load();
+    await pass(scheduler);
+    expect(scheduler.task("t")).toMatchObject({ state: "failed", failure: { code: "continue_expired" } });
+    expect(scheduler.task("t")?.failure?.message).toContain("its machine never took it");
+  });
+
+  test("a decision whose target candidate has no rejections is not worded as an empty list", async () => {
+    const { scheduler, put } = setup();
+    const decision = {
+      at: NOW,
+      chosen: at,
+      candidates: [{ deviceId: "a", machine: "a", exclave: "main", clone: "app", rejected: [] }],
+    };
+    await put("t", { ...continuing(NOW - CONTINUE_MS - 1), decision });
+    await scheduler.load();
+    await pass(scheduler);
+    const message = scheduler.task("t")?.failure?.message ?? "";
+    expect(message).toContain("its machine never took it");
+    expect(message).not.toContain(": ;");
+  });
+
+  test("a ready task without continues is never expired", async () => {
+    const { scheduler, put } = setup();
+    await put("t", { state: "ready", createdAt: NOW - 30 * 24 * 60 * 60_000 });
+    await scheduler.load();
+    await pass(scheduler);
+    expect(scheduler.task("t")?.state).toBe("ready");
+  });
+
+  test("fails its dependents in the same pass", async () => {
+    const { scheduler, put } = setup();
+    await put("c", continuing(NOW - CONTINUE_MS - 1));
+    await put("d", { state: "blocked", ...after("c", "done") });
+    await scheduler.load();
+    await pass(scheduler);
+    expect(scheduler.task("c")?.state).toBe("failed");
+    expect(scheduler.task("d")).toMatchObject({ state: "failed", failure: { code: "dependency_failed" } });
+  });
+});
+
+describe("the expiry bounds against the launch ledger", () => {
+  // Continue needs the target's ledger note, kept LAUNCH_LEDGER_MAX_AGE_MS: a continuation must fail before it,
+  // and `lost`/`awaiting-merge` expire at or after it. Shortening either side forces a look at DESIGN.md, Daemon,
+  // "Continuing a session", "Not offered".
+  test("continue expires before the ledger forgets; lost and merge not before", () => {
+    expect(DEFAULT_CONFIG.continueExpiryMs).toBeLessThan(LAUNCH_LEDGER_MAX_AGE_MS);
+    expect(DEFAULT_CONFIG.lostExpiryMs).toBeGreaterThanOrEqual(LAUNCH_LEDGER_MAX_AGE_MS);
+    expect(DEFAULT_CONFIG.mergeExpiryMs).toBeGreaterThanOrEqual(LAUNCH_LEDGER_MAX_AGE_MS);
   });
 });

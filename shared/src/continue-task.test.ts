@@ -60,10 +60,51 @@ describe("continueOffer", () => {
   });
 });
 
+describe("continueOffer, a cancelled task", () => {
+  const cancelled = (over: Partial<Task> = {}): Task => failed({ state: "cancelled", failure: undefined, ...over });
+  const both = [machine([CAPABILITIES.continueTask, CAPABILITIES.continueCancelled])];
+
+  test("offered with an assignment on a machine advertising both capabilities, leftRunning or not", () => {
+    const at = { deviceId: "dev-a", exclave: "default", clone: "app" };
+    expect(continueOffer(cancelled(), both, [])).toEqual({ ok: true, at });
+    expect(continueOffer(cancelled({ leftRunning: true }), both, [])).toEqual({ ok: true, at });
+  });
+
+  test("refused without continueCancelled, naming the update", () => {
+    const offer = continueOffer(cancelled(), able, []);
+    expect(offer.ok).toBe(false);
+    expect(offer.ok ? "" : offer.reason).toContain("seanced update");
+  });
+
+  test("refused with no assignment, or when its session had already finished", () => {
+    for (const task of [cancelled({ assignment: undefined }), cancelled({ endedAt: 5 })]) {
+      const offer = continueOffer(task, both, []);
+      expect(offer.ok).toBe(false);
+      expect(offer.ok ? "" : offer.reason.length).toBeGreaterThan(0);
+    }
+  });
+
+  test("done and every failure but session_failed are never offered", () => {
+    const refused: readonly Task[] = [
+      failed({ state: "done", failure: undefined }),
+      ...["lost_expired", "merge_expired", "dispatch_unconfirmed", "continue_expired"].map((code) =>
+        failed({ failure: { code, message: "m" } }),
+      ),
+    ];
+    for (const task of refused) expect(continueOffer(task, both, []).ok, task.failure?.code ?? task.state).toBe(false);
+  });
+});
+
 describe("continueOffer, once", () => {
   const old = failed();
-  const continuation = (state: Task["state"], continues = "t-old"): Task => ({
-    id: `t-${state}`,
+  const both = [machine([CAPABILITIES.continueTask, CAPABILITIES.continueCancelled])];
+  const continuation = (
+    state: Task["state"],
+    over: Partial<Task> = {},
+    continues = "t-old",
+    id = `t-${state}`,
+  ): Task => ({
+    id,
     spec: {
       repo: old.spec.repo,
       mode: "continue",
@@ -71,20 +112,54 @@ describe("continueOffer, once", () => {
     },
     state,
     createdAt: 2,
+    ...over,
   });
+  const failing = (code: string): Task => continuation("failed", { failure: { code, message: "m" } });
 
-  test("a continuation anywhere past the queue closes the offer", () => {
+  test("a continuation that landed holds the offer", () => {
     for (const state of ["reserved", "running", "needs-input", "lost", "awaiting-merge", "done"] as const) {
       const offer = continueOffer(old, able, [old, continuation(state)]);
       expect(offer.ok, state).toBe(false);
+      expect(offer.ok ? "" : offer.reason, state).toContain("already underway or finished");
     }
   });
 
-  test("one still queued, or that failed or was cancelled, leaves it open; so does another task's", () => {
-    for (const state of ["queued", "blocked", "ready", "failed", "cancelled"] as const) {
-      expect(continueOffer(old, able, [old, continuation(state)]).ok, state).toBe(true);
+  test("one that failed after landing, or was cancelled after placement, holds it and names itself", () => {
+    const takers = [
+      failing("session_failed"),
+      failing("lost_expired"),
+      failing("merge_expired"),
+      continuation("cancelled", { assignment }),
+    ];
+    for (const taker of takers) {
+      const offer = continueOffer(old, both, [old, taker]);
+      expect(offer.ok, taker.state).toBe(false);
+      expect(offer.ok ? "" : offer.reason, taker.state).toContain(taker.id);
     }
-    expect(continueOffer(old, able, [old, continuation("running", "t-other")]).ok).toBe(true);
+  });
+
+  test("one that never landed leaves it open; so does another task's", () => {
+    const open: readonly Task[] = [
+      continuation("queued"),
+      continuation("blocked"),
+      continuation("ready"),
+      failing("not_continuable"),
+      failing("continue_expired"),
+      failing("dispatch_unconfirmed"),
+      continuation("failed"),
+      continuation("cancelled"),
+    ];
+    for (const y of open) expect(continueOffer(old, able, [old, y]).ok, `${y.state} ${y.failure?.code}`).toBe(true);
+    expect(continueOffer(old, able, [old, continuation("running", {}, "t-other")]).ok).toBe(true);
+  });
+
+  test("along a chain the newest landed task holds the offer", () => {
+    const y = continuation("failed", { failure: { code: "session_failed", message: "m" }, assignment }, "t-old", "t-y");
+    const z = continuation("running", {}, "t-y", "t-z");
+    expect(continueOffer(old, able, [old, y, z]).ok).toBe(false);
+    expect(continueOffer(y, able, [old, y, z]).ok).toBe(false);
+    const expired = continuation("failed", { failure: { code: "continue_expired", message: "m" } }, "t-y", "t-z");
+    expect(continueOffer(y, able, [old, y, expired]).ok).toBe(true);
   });
 });
 

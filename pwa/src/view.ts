@@ -664,6 +664,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
  */
 const FAILED_NEXT_STEP: ReadonlyMap<string, string> = new Map([
   ["dispatch_unconfirmed", "Check that machine before starting another."],
+  ["continue_expired", "The task it continues can be continued again once its machine is back."],
   ["lost_expired", "End it on that machine once it is back."],
   [
     "merge_expired",

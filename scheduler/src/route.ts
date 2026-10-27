@@ -310,7 +310,7 @@ function machineFilter(machine: Machine, now: number, config: SchedulerConfig): 
 }
 
 /**
- * A continue task (DESIGN.md, Daemon, "Continuing a failed task") has one
+ * A continue task (DESIGN.md, Daemon, "Continuing a session") has one
  * acceptable target, in the clone and exclave `judge` checks. Here, the machine:
  * another is `continue_elsewhere`, and the target must be a daemon that spawns
  * the mode at all, or it would refuse the request as malformed.

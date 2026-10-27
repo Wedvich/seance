@@ -87,6 +87,14 @@ export interface SchedulerConfig {
    */
   readonly mergeExpiryMs: number;
   /**
+   * A continuation (`TaskSpec.continues`) still `ready` this long past `createdAt` is
+   * `failed` `continue_expired`. Fixed, not per-machine: expiry runs in the leader and
+   * leadership moves. Must stay below the launch ledger's age, since past that the
+   * target daemon would refuse the continuation anyway, and failing earlier is never
+   * premature.
+   */
+  readonly continueExpiryMs: number;
+  /**
    * How often a pass also reads `sessions` from each connected machine holding
    * a running or `awaiting-merge` task: the backstop for an `ended` event that
    * never arrived (its task would read `running` and hold its slot for good) and
@@ -145,6 +153,8 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   lostExpiryMs: 7 * 24 * 60 * 60_000,
   // Tied to the ledger: past its age no machine can report the merge (`mergeExpiryMs` doc).
   mergeExpiryMs: LAUNCH_LEDGER_MAX_AGE_MS,
+  // docs/scheduler.md, Settled defaults 19.
+  continueExpiryMs: 4 * 24 * 60 * 60_000,
   sweepIntervalMs: 120_000,
   endingTimeoutMs: 300_000,
   keepFinished: 50,

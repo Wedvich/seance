@@ -487,7 +487,7 @@ export class SchedulerStore {
   }
 
   /**
-   * Writes a new task that picks up a failed one's session where it stopped, through the same
+   * Writes a new task that picks up a failed or cancelled one's session where it stopped, through the same
    * `createTask` an enqueue uses: the leader dispatches it to the machine the old one ran on.
    */
   continueTask(taskId: string): Promise<void> {
