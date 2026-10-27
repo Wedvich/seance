@@ -159,6 +159,7 @@ export function createUpdater(opts: UpdaterOpts): Updater {
   let inflight: Promise<void> | null = null;
   let lastStart = 0;
   let stopped = false;
+  let graceTimer: ReturnType<typeof setTimeout> | null = null;
   let stale = clearedByCurrent(opts.last);
 
   const run = async (origin: UpdateOrigin): Promise<void> => {
@@ -181,15 +182,19 @@ export function createUpdater(opts: UpdaterOpts): Updater {
     // register must already carry the ok.
     if (verdict.outcome !== "ok") return;
     // A spawn cut off by the restart would settle `done` with no session; wait for the launches in flight.
-    const release = (await opts.quiesce?.()) ?? ((): void => {});
+    const release = await opts.quiesce?.();
     try {
       await effects.restart();
-      setTimeout(() => {
-        log.error("self-update: still running after the restart returned — taking task launches again");
-        release();
-      }, restartGraceMs).unref();
+      // Only with a gate to reopen: `--no-block` returns before its SIGTERM, which may never come.
+      if (release !== undefined) {
+        graceTimer = setTimeout(() => {
+          log.error("self-update: still running after the restart returned — taking task launches again");
+          release();
+        }, restartGraceMs);
+        graceTimer.unref();
+      }
     } catch (err) {
-      release();
+      release?.();
       // The restart is the only step whose failure the `ok` already on disk
       // would otherwise hide: HEAD is at target, so every later check reads
       // `current` and this machine serves old code forever, claiming success.
@@ -238,6 +243,7 @@ export function createUpdater(opts: UpdaterOpts): Updater {
     stop: (): void => {
       stopped = true;
       pending = null;
+      if (graceTimer !== null) clearTimeout(graceTimer);
     },
   };
 }

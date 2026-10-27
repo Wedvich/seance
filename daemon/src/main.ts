@@ -43,6 +43,7 @@ async function runForeground(): Promise<void> {
     { startSupervisor },
     { drainTaskLaunches },
     { SHUTDOWN_DRAIN_MS },
+    { createShutdown },
   ] = await Promise.all([
     import("./log.ts"),
     import("./power.ts"),
@@ -50,29 +51,20 @@ async function runForeground(): Promise<void> {
     import("./supervise.ts"),
     import("./run.ts"),
     import("./session-events.ts"),
+    import("./shutdown.ts"),
   ]);
   // Self-update only under the supervisor that can actually relaunch us.
   const supervised = startedBySupervisor();
   if (!supervised) log.info("not started by a service manager — self-update is off for this run");
   const daemon = await startSupervisor({ usageRefresh: {}, ...(supervised ? { selfUpdate: {} } : {}) });
   const stopPower = startPowerLoop();
-  let stopping = false;
-  const shutdown = (signal: string): void => {
-    if (stopping) {
-      log.info(`${signal} again — exiting without waiting for task launches`);
-      process.exit(0);
-    }
-    stopping = true;
-    log.info(`${signal} — shutting down`);
-    stopPower();
-    // Drain before `stop`: it keeps the relay leg up, so a finishing spawn's reply still reaches the leader.
-    void drainTaskLaunches(SHUTDOWN_DRAIN_MS)
-      .catch(() => false)
-      .finally(() => {
-        daemon.stop();
-        process.exit(0);
-      });
-  };
+  const shutdown = createShutdown({
+    info: (message) => log.info(message),
+    stopPower,
+    drain: () => drainTaskLaunches(SHUTDOWN_DRAIN_MS),
+    stop: () => daemon.stop(),
+    exit: (code) => process.exit(code),
+  });
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("SIGINT", () => shutdown("SIGINT"));
   await new Promise(() => {}); // run until signalled

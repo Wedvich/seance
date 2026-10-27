@@ -333,6 +333,20 @@ describe("self-update pipeline", () => {
       await pollUntil(async () => !(await closed()), "launches taken again after the grace");
     });
 
+    test("stopping the updater cancels the grace, so a stopped daemon's gate is not reopened under it", async () => {
+      const { upstream, checkout } = await makePair();
+      await publish(upstream);
+      const { gate, closed } = gated(30);
+      const h = harness({}, gate);
+
+      const updater = h.make(checkout);
+      updater.check("announce");
+      await updater.settled();
+      updater.stop();
+      await Bun.sleep(100); // a non-event can't be polled
+      expect(await closed()).toBe(true);
+    });
+
     test("a check that restarts nothing never closes the gate", async () => {
       const { checkout } = await makePair();
       const { ended, gate } = gated();
