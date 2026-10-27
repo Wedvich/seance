@@ -29,7 +29,7 @@ import type { Config } from "./config.ts";
 import { createHandler, createLocalOps, fitProgress, type HandlerContext, type TaskLaunches } from "./handlers.ts";
 import { LaunchLedger } from "./launch-ledger.ts";
 import { MetricsStore, type Sample } from "./metrics-store.ts";
-import { EndedTasks } from "./session-events.ts";
+import { EndedTasks, LaunchesClosed } from "./session-events.ts";
 
 // The audit trail is what's under test, so collect it at the seam the daemon
 // injects rather than off stdout, which is only where daemonSink happens to
@@ -393,6 +393,52 @@ describe("a task's launch is recorded before it runs", () => {
     expect(reply?.payload).toMatchObject({ ok: false, code: "launch_error" });
     expect(spawned).toBe(false);
     expect(logged()).toContain("audit spawn origin=relay failed code=launch_error");
+  });
+
+  test("a launch turned away by the restart drain is answered internal_error, never launch_error, and runs nothing", async () => {
+    let spawned = false;
+    const { backend } = taskBackend(() => {
+      spawned = true;
+      return Promise.resolve();
+    });
+    const tasks: TaskLaunches = {
+      launch: () => Promise.reject(new LaunchesClosed()),
+      launched: () => false,
+      continuation: () => ({ refused: "unused" }),
+      closing: () => Promise.resolve(),
+      settled: () => Promise.resolve(),
+      report: () => ({ ended: [], ledgerSince: 0 }),
+      progress: () => [],
+    };
+    const reply = await createHandler({ ...ctx, backend, tasks })(spawnTask("t-1"));
+    expect(reply?.payload).toMatchObject({ ok: false, code: "internal_error" });
+    expect(spawned).toBe(false);
+    expect(logged()).toContain("audit spawn origin=relay failed code=internal_error");
+    expect(logged()).not.toContain("launch_error");
+  });
+
+  test("interrupted from the ledger's report reaches the scheduler's sessions reply, never an app's or the local socket's", async () => {
+    const { backend } = taskBackend(() => Promise.resolve());
+    const tasks: TaskLaunches = {
+      launch: () => Promise.reject(new Error("unused")),
+      launched: () => false,
+      continuation: () => ({ refused: "unused" }),
+      closing: () => Promise.resolve(),
+      settled: () => Promise.resolve(),
+      report: () => ({ ended: ["t-1"], ledgerSince: 0, interrupted: ["t-1"] }),
+      progress: () => [],
+    };
+    const relay = createHandler({ ...ctx, backend, tasks });
+    expect(await sessionsOf(relay)).toMatchObject({ ended: ["t-1"], interrupted: ["t-1"] });
+    for (const reply of [
+      await sessionsOf(relay, APP_ID),
+      await sessionsOf(createHandler({ ...ctx, backend, tasks }, "local"), null),
+    ]) {
+      expect(reply.ended).toBeUndefined();
+      expect(reply).not.toHaveProperty("interrupted");
+    }
+    const empty: TaskLaunches = { ...tasks, report: () => ({ ended: [], ledgerSince: 0, interrupted: [] }) };
+    expect(await sessionsOf(createHandler({ ...ctx, backend, tasks: empty }))).not.toHaveProperty("interrupted");
   });
 
   test("a sessions reply harvests after listing and before it reads progress, so a pane dying between is never in neither", async () => {
