@@ -76,6 +76,20 @@ describe("the collector registry", () => {
     expect(series.find((s) => s.metric === METRIC_NAMES.mem)?.points).toHaveLength(2);
   });
 
+  test("a closed launch gate adds `drn` to the tick it is closed for, and nothing to the store", async () => {
+    let draining = false;
+    const store = MetricsStore.memory();
+    const telemetry = createTelemetry(store, { ...sources, draining: () => draining });
+
+    expect(await telemetry.tick(T0)).not.toHaveProperty("drn");
+    draining = true;
+    expect((await telemetry.tick(T0 + 30_000)).drn).toBe(true);
+    draining = false;
+    expect(await telemetry.tick(T0 + 60_000)).not.toHaveProperty("drn");
+    const metrics = new Set(store.query({ from: 0, to: T0 / 1000 + 60, step: 30 }).map((s) => s.metric));
+    expect(metrics).toEqual(new Set([METRIC_NAMES.mem, METRIC_NAMES.disk, METRIC_NAMES.free, METRIC_NAMES.sess]));
+  });
+
   test("an entry that rejects or throws drops only its own contribution", async () => {
     const store = MetricsStore.memory();
     const telemetry = createTelemetry(store, sources, [rejects, ...TELEMETRY_COLLECTORS, throws, counting]);

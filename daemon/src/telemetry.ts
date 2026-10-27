@@ -71,6 +71,8 @@ export interface TelemetrySources {
   readonly probe?: HostProbe;
   /** The clock a `tick` without an explicit time reads; defaults to `Date.now`. */
   readonly now?: () => number;
+  /** True while the daemon refuses task launches (`EndedTasks.draining`); absent reads as never. */
+  readonly draining?: () => boolean;
   /** Outbound HTTP for a collector that polls an endpoint; defaults to the global `fetch`. */
   readonly httpFetch?: Fetch;
   /**

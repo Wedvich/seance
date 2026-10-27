@@ -76,6 +76,7 @@ export const TELEMETRY_COLLECTORS: readonly TelemetryCollector[] = [
   diskIoCollector,
   sessionsCollector,
   quotaCollector,
+  drainCollector,
 ];
 
 function cpuCollector(sources: CollectorSources): Collect {
@@ -122,6 +123,12 @@ function diskIoCollector(sources: CollectorSources): Collect {
       gauge(tick, "wr", METRIC_NAMES.wr, rates?.wr ?? null),
     ]);
   };
+}
+
+/** `drn` while the task-launch gate is closed: no metric, since routing reads it live and history has no use for it. */
+function drainCollector(sources: CollectorSources): Collect {
+  return () =>
+    Promise.resolve(sources.draining?.() === true ? { fields: { drn: true }, samples: [] } : NO_CONTRIBUTION);
 }
 
 function sessionsCollector(sources: CollectorSources): Collect {
