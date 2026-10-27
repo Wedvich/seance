@@ -1926,6 +1926,15 @@ describe("the queue screen", () => {
       expect(store.getState().queueNotice).toContain("already underway");
       expect(client.creates).toEqual([]);
     });
+
+    test("a second tap while the first continuation waits writes nothing and names the first", async () => {
+      const client = capable();
+      const store = await withFailed(client);
+      await store.continueTask("f-1");
+      await store.continueTask("f-1");
+      expect(client.creates).toHaveLength(1);
+      expect(store.getState().queueNotice).toContain(`Already continuing as task ${client.creates[0]?.id}`);
+    });
   });
 
   test("pause and resume replace the holds with the leader's answer, and a refusal is the notice", async () => {

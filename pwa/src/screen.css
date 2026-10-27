@@ -2262,6 +2262,22 @@
   text-decoration-color: currentColor;
 }
 
+/* A body line that scrolls to another card: reads as the line it is, underlined like the title link. */
+.queue-reveal {
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: start;
+  text-decoration: underline;
+  text-decoration-color: var(--line);
+  text-underline-offset: 3px;
+}
+
+.queue-reveal:hover,
+.queue-reveal:focus-visible {
+  text-decoration-color: currentColor;
+}
+
 /* The PR chip is a quiet outline, a rounded rectangle rather than the badge's pill: at this
    size it reads as a control, and its colour belongs to the icons alone. Sized near the buttons
    beside it (~34px tall); the pseudo-element takes the tap target to 44px without growing
