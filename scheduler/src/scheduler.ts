@@ -435,6 +435,7 @@ export class Scheduler {
         config: this.#config,
         holds: this.#pause.holds,
         fleetQuota: this.#fleetQuota(),
+        // Per route, not per pass: each reservation's await can land a `busy` or a reconnect that counts a task again.
         released: this.#released(now),
         uncapped,
       }),
