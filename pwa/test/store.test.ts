@@ -1513,7 +1513,7 @@ describe("start now", () => {
     expect(store.getState().startNowRefusal).toBeNull();
   });
 
-  test("a busy leader gets one more ask on the next ready sighting, then the note points at Run now", async () => {
+  test("a busy leader gets one more ask on the next ready sighting, then the note points at Start now", async () => {
     const client = capable();
     client.onRunNow = async () => ({ ok: false, code: "conflict", message: "x" });
     const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
@@ -1527,7 +1527,7 @@ describe("start now", () => {
     await poll(client, { ...created, state: "ready" });
     await until(() => store.getState().startNowRefusal !== null, "the note");
     expect(client.runNows).toHaveLength(2);
-    expect(store.getState().startNowRefusal?.message).toContain("Run now on the Queue screen");
+    expect(store.getState().startNowRefusal?.message).toContain("Start now on the Queue screen");
 
     await poll(client, { ...created, state: "ready" });
     expect(client.runNows).toHaveLength(2);

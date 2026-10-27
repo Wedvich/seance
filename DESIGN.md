@@ -1472,7 +1472,7 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   (not `ready`: waiting on admission or deps, or placed), `unplaceable` (another reason holds it
   from every candidate — nothing is written, and the held decision stays the pass's), and
   `conflict`. Only to a leader advertising `CAPABILITIES.runNow`; an older one refuses the op
-  as unknown. Sent by the Queue screen's **Run now** and by the Spawn screen's **Start now**,
+  as unknown. Sent by the Queue screen's and the Spawn screen's **Start now**,
   which sends it for a task it just created once a read shows it `ready` (PWA, "Every PWA spawn
   is a task").
 - `pause { until, account? }` (`PauseRequest`) and `resume { account? }` (`ResumeRequest`) →
@@ -4837,7 +4837,7 @@ fields carry over), under the same gates.
   was that a continuation cancelled or failed after it ran would be offered no Continue itself and the
   conversation stranded; every terminal state that can still land a continuation now offers Continue itself.
 - **Not offered:** a task cancelled before it was placed (no session), a task cancelled after its session
-  had finished (`endedAt`, from `awaiting-merge`: Follow up's job, like `done`), `done`, `here` runs, an
+  had finished (`endedAt`, from `awaiting-merge`: nothing to resume, like `done`), `done`, `here` runs, an
   automatic continue after an OOM kill (manual by decision), and failures other than `session_failed`
   and `session_closed` (both offered, from one `RESUMABLE_FAILURES` set): `lost_expired`, `merge_expired` and `dispatch_unconfirmed` all fire after the ledger's 7-day eviction
   clock or mean the ledger proved nothing, so the daemon would refuse. The relation is pinned by a test
@@ -5472,8 +5472,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   `ready` (silent at the second ask); `conflict`, `not_leader`, `not_ready` and a send refused
   unsent for want of a leader (`no_leader`/`leader_unverified`, which prove it never left) read
   on once for one more ask, and a second such answer ends it with a note (the busy one points at
-  the Queue screen's Run now); anything else — another refusal, an unreadable answer, a timeout
-  or a drop — ends it with a note worded as the Queue screen's Run now notice. A note goes on the
+  the Queue screen's Start now); anything else — another refusal, an unreadable answer, a timeout
+  or a drop — ends it with a note worded as the Queue screen's Start now notice. A note goes on the
   queued verdict when that shows the task, clearing once the task is seen past waiting;
   otherwise on the Queue screen's notice, naming the task (`taskTitle`, its row label), and kept
   through reads until one asked with the screen open lands, so opening the screen shows it. The
@@ -5588,10 +5588,10 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   the record keeps no other) carries it as a chip linking out, leading the card's action row, `#123` where the URL names a
   number (GitHub's `/pull/`, GitLab's `/merge_requests/`), else `PR`; the URL is safe as an href
   because the parser admits only `https:`. Beside the chip the card shows one action inline, the
-  likeliest next step (`primaryAction` in `queue-view.ts`): **Continue**, else **Run now**, else
+  likeliest next step (`primaryAction` in `queue-view.ts`): **Continue**, else **Start now**, else
   none; Follow up, Mark done and Cancel are never inline (2026-10-27) — Follow up starts another
   task rather than acting on this one, so it lives only in the menu. Every action the card allows sits
-  behind a ⋯ in its head (the shared `Menu`, `menu.tsx`), the inline one included: Follow up, Run now,
+  behind a ⋯ in its head (the shared `Menu`, `menu.tsx`), the inline one included: Follow up (a right arrow), Start now,
   Continue, Open on claude.ai (the title's link), then past a divider Mark done and, last, Cancel in
   `--err`; one the relay can't serve right now shows greyed rather than hidden. **Cancel** and **Mark done** are offered where the leader allows
   them. Mark done sets the task `done` by hand, ending its session first when it is running,
@@ -5605,13 +5605,17 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   there and becomes the notice. The queue is then read whole. Holds show whole or per account, by the account's
   own name, with a reset's time, each with **Resume**; the footer pauses or resumes the whole
   queue. The same cap applies as in the leader's reply: a full reply says it shows the most
-  relevant `QUEUE_MAX_TASKS`. Each row shows what it waits on ("After <title> (opened)") and its batch place ("Batch #2"), and offers **Follow up** while the task can still be waited on or once it
-  is `done`: the form takes that task as its After edge at `opened`. See
+  relevant `QUEUE_MAX_TASKS`. Each row shows what it waits on ("After <title> (opened)") and its batch place ("Batch #2"), and offers **Follow up** only while the task can still be waited on (not once it
+  has finished, `done` included): the form takes that task as its After edge at `opened`. See
   "Authoring from the auto form" below. A `ready` card whose latest decision turned some
-  candidate down for `cap_reached` alone carries a single-tap **Run now** (`heldByCapsOnly` in
+  candidate down for `cap_reached` alone carries **Start now** inline too, single-tap (`heldByCapsOnly` in
   `queue-view.ts`) while the verified leader advertises `runNow`; it sends `run-now` and merges
   the reply, the task as reserved. The leader routes again on the tap, so a stale card costs a
   refusal (its notice), never a placement the cap-free route would not make.
+  Every waiting card (`queued`, `blocked`, `ready`) also has **Start now** in its ⋯ menu, always shown (`QueueRow.startNow`),
+  worded and greyed by the Spawn screen's rules (`decisionStartNowItem` over the task's latest decision: greyed only when
+  the decision has no winner and no candidate held by the caps alone, or the leader lacks `runNow`); a `queued` or `blocked` one the leader still
+  refuses `not_waiting`, as its notice.
 - **Continue on the Queue screen** (2026-10-26, widened 2026-10-27, Daemon, "Continuing a session"). A failed
   `session_failed` card, or a cancelled one that was placed, carries a single-tap **Continue** when
   `continueOffer` allows it (the task was not `here`, has an assignment, its machine is listed and

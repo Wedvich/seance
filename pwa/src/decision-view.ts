@@ -217,9 +217,13 @@ export interface StartNowItem {
  * no reason to block a tap the leader answers for itself.
  */
 export function startNowItem(preview: PreviewState | null): StartNowItem {
+  return decisionStartNowItem(preview?.kind === "ok" ? preview.decision : null);
+}
+
+/** `startNowItem` for a task already queued: its latest decision, if the leader has made one. */
+export function decisionStartNowItem(decision: Decision | null): StartNowItem {
   const plain = { sub: "Skip the queue", enabled: true };
-  if (preview?.kind !== "ok") return plain;
-  const { decision } = preview;
+  if (decision === null) return plain;
   const chosen = chosenName(decision);
   const capped = decision.candidates.filter(heldByCapsAlone);
   // `run-now` weighs the cap-held candidates too, unscored in the preview, so the target it picks is unknown.
