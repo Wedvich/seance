@@ -2553,7 +2553,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   `awaiting-merge` with one, else `done`) — unless it is also in `interrupted`, a launch its
   machine died in the middle of ("Session events"): that one is not treated as known inside the TTL
   (its pane may be on a startup dialog `sessions` does not list yet) and, past it with no session,
-  is `failed` `dispatch_unconfirmed` saying its machine restarted mid-spawn, never `done` and
+  is `failed` `dispatch_unconfirmed` saying its spawn was cut off (its machine restarted or the spawn crashed), never `done` and
   never re-dispatched (the window may exist untagged); neither releases the task to
   `ready` **only on the machine's proof** — its `ledgerSince` at least the replay window
   (60s) before the reservation was made (`reservedAt`), the window standing in for clock
@@ -5185,7 +5185,7 @@ relay state unnecessary).
   to be handed to the transport** (`EndedTasks.hold`, released by the relay client right after
   `ws.send` and its `wire send` line; for the leader's own in-process dispatch, when the handler
   returns, which is the reply), capped at `UPDATE_DRAIN_MS`
-  (120 s: past `OP_TIMEOUT_MS.spawn`, 90 s, no launch is one its leader still waits on). The hold is a
+  (`daemon/src/drain-limits.ts`, with `SHUTDOWN_DRAIN_MS`; 120 s: past `OP_TIMEOUT_MS.spawn`, 90 s, no launch is one its leader still waits on). The hold is a
   set of its own that only `drain` waits on: `settled()`, which a `sessions` reply and so the handler's
   own `sessionsAfter` wait on, must not wait for the reply it is part of. `ws.send` hands the frame to
   the socket without flushing it, so the last bytes are not proven out; that is as close as the
@@ -5198,12 +5198,14 @@ relay state unnecessary).
   task to `ready`. A refusal such as `launch_error` would instead settle it `failed`. A restart that
   throws (`restart_failed`) reopens the gate. A restart that returns does not: `systemctl --no-block`
   returns before its SIGTERM, so the gate reopens only after a 5-minute grace (`RESTART_GRACE_MS`) with
-  the process still alive, with an error line. The foreground daemon's SIGTERM/SIGINT takes the same
+  the process still alive, with an error line. The grace outlives the updater's `stop()` on purpose: the
+  gate is per process and a config reload swaps the daemon under it, so cancelling the timer there would
+  leave every task launch refused for good; at a real shutdown the final drain below makes it a no-op. The foreground daemon's SIGTERM/SIGINT takes the same
   drain, capped at `SHUTDOWN_DRAIN_MS` (15 s: under launchd's default `ExitTimeOut` of 20 s, which the
   plist leaves unset, and systemd's 90 s `TimeoutStopSec` with `KillMode=process`) and run before
   `daemon.stop()`, so a finishing spawn's reply still reaches its leader; a second signal exits at once.
   That drain is **final**: an update's release (a thrown restart, the grace) cannot reopen the gate
-  during a shutdown. `stop` throwing still exits (`shutdown.ts`). `seanced install` on macOS waits
+  during a shutdown. `stopPower` or `stop` throwing still exits (`shutdown.ts`). `seanced install` on macOS waits
   `SHUTDOWN_DRAIN_MS` plus 10 s for `bootout` to unload the job (`launchd.ts`), so it never
   bootstraps over a job still draining; systemd's 30 s relaunch wait in `signalRestart` already
   covers 15 s plus `RestartSec=5`.
