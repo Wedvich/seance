@@ -1569,6 +1569,16 @@ an old peer's frames parse as before. Mixed versions:
 - The failure code `pin_expired` (2026-10-27, Scheduler, "Expiry"): the same as `continue_expired` for
   every older reader; an older leader never expires a pin. A new leader fails, in its first pass, every
   pin already past 30 days: the clean-up, and visible.
+- `TaskProgress.vanished` and `session_closed` (2026-10-27, no capability): a newer daemon, an older
+  leader: an older `parseTaskProgress` ignores unknown keys, reads `exit: 0` as `done` (today's outcome for
+  a clean exit) and a missing exit as `done` (today's outcome for a closed window). A newer leader,
+  an older daemon never sees `vanished`: today's behaviour. Leadership moving to an older daemon: `parseTask`
+  accepts any bounded failure code, so a stored `session_closed` record parses. The three new ledger
+  note fields are dropped by an older daemon's field-by-field `parseNote`; windows it finds under
+  `on` that exited 0 hold a dead pane it notes as exit 0 (harmless) and closes; windows from before the
+  upgrade (`failed`, no `server`) are never judged. An older PWA words `session_closed` as a spawn refusal
+  (deploy the PWA with the change) and an older `seanced mcp` prints the message, a complete sentence; an
+  older app's `continueOffer` does not offer Continue for it. The relay never parses `TaskProgress`.
 - Reasons `skill_absent { skill }`, `auth_expired` and `base_unpushed`: an older app or
   leader drops an unknown reason from a decision and keeps the candidate.
 - `session-event` `done`: ingested since 2026-10-23 (Local op socket, "Session events"). A daemon
@@ -2725,7 +2735,9 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   `awaiting-merge`: it holds no slot, and `after: "merged"` dependents wait on. With none
   it is `done`, `doneBy: "session"` — unless its machine reports a nonzero exit status
   (`TaskProgress.exit`), when it is `failed`, `session_failed` (the status beside the message as
-  `failure.exit`, which readers word; Daemon, "Exit status"), and its dependents fail
+  `failure.exit`, which readers word; Daemon, "Exit status") — or, with no exit known, its machine
+  reports the window closed from outside (`TaskProgress.vanished`), `failed`, `session_closed`
+  (Daemon, "Window closed from outside"), below a PR, a merge and a report — and its dependents fail
   `dependency_failed` rather than start on a branch with nothing pushed (M4, `failed` from exit
   status, M3 review R3; Daemon, "Exit status"). **`until: "reported"`** (#21, 2026-10-23): a merge settles nothing there. It is
   recorded on the task (`merged: true`, which still releases `after: "merged"` dependents) and the
@@ -3316,8 +3328,9 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   noted but never sent when the process exits is recovered only through `progress`, which the
   leader reads on takeover and when the machine comes back.
 - **`progress` in the scheduler's `sessions` reply.** One `TaskProgress` per ledger task with any of
-  PR URL, branch, pushed, merged or exit status (since 2026-10-21, Daemon, "Exit status"), the
-  last with its OOM verdict on Linux (since 2026-10-26), without paths, tips or cgroup samples; an entry that would not pass
+  PR URL, branch, pushed, merged, exit status (since 2026-10-21, Daemon, "Exit status") or
+  `vanished` (since 2026-10-27, only while no exit is noted; Daemon, "Window closed from outside"),
+  the exit with its OOM verdict on Linux (since 2026-10-26), without paths, `server`, `closedHere`, tips or cgroup samples; an entry that would not pass
   `parseTaskProgressList` is left out, since one bad entry nulls the leader's whole list.
   `at` is the last change, never refreshed by an unchanged pass, so an idle branch costs no ledger
   write per minute. The reply is held to 44 000 bytes of JSON (`REPLY_JSON_BUDGET`, the queue
@@ -4282,8 +4295,9 @@ for the lot with its own `gh`.
   pre-answering more dialogs — `trust.ts` does that for the one gate whose config
   key is known, and detection is what covers the ones that aren't.
 - **Exit status** (2026-10-21, M4; `daemon/src/exit-status.ts`, `ended` in `done.ts`). Once
-  claude registers, a task spawn's window keeps `remain-on-exit failed`, so a clean exit closes
-  it exactly as before and any other leaves the pane dead with tmux's `pane_dead_status`. Every
+  claude registers, a task spawn's window keeps `remain-on-exit on`, so every exit, a clean one
+  included, leaves the pane dead with tmux's `pane_dead_status` (until 2026-10-27 it was `failed`,
+  which closed a clean exit's pane and left no status; see "Window closed from outside"). Every
   `sessions` reply, after it lists panes and before it reads `progress`, notes each dead,
   registered task pane's status in the launch ledger and then closes the pane (`harvestExits`),
   so the status outlives the pane and a restart, and `progress` carries it. A dead pane drops out
@@ -4291,12 +4305,12 @@ for the lot with its own `gh`.
   harvested and in `progress`, one dying after was listed alive (its task running) — harvested
   first, a pane dying between the two reads would be in neither. A pane whose task is not in this
   daemon's ledger (evicted, retracted, replaced) is closed without a note: its status has
-  nowhere to go, and reap skips a pane holding one (`owesExit`), so leaving it would be for good.
+  nowhere to go, and reap leaves every harvestable pane to harvest (`harvestable`), so leaving it would be for good.
   Each close is audited (`origin=harvest`), after a re-read of the pane that it is still dead and
   still the same window and task, since pane ids restart with the tmux server. A pane dead before its title went up is `spawnSession`'s, as before, and so
   is a window whose spawn is still polling for registration (`whileRegistering`), which harvest
-  skips so it cannot steal the `claude_died` capture. Reap skips a dead task pane holding a status
-  (`owesExit`), since closing it first would lose the status, and the daemon's reap timer, when
+  skips so it cannot steal the `claude_died` capture. Reap skips every harvestable dead task pane
+  (`harvestable`), since closing it first would lose the status or read as `vanished`, and the daemon's reap timer, when
   enabled (`REAP_DEFAULTS.intervalHours` is 0, so it is not by default), runs `harvestExits`
   before it; with the defaults a dead task pane closes on the next `sessions` read, which the
   leader's sweep makes of every machine holding placed tasks. The CLI's
@@ -4415,17 +4429,109 @@ for the lot with its own `gh`.
   séance writes). Future alternative, for the scoped-tmux case: a delegated cgroup per pane that
   the daemon owns and reads after the process exits — needs the daemon to create and clean up
   cgroups (a user manager's delegation, or a system unit's `Delegate=`), a change to how panes
-  are spawned, so not taken here. No status — 0, which
-  under `failed` closes the window and is never seen, a signal death on a tmux without
-  `pane_dead_signal` (the field reads empty), a tmux older than 3.2 (which refuses `failed`, so the window gets `off`), a pane someone closed by
-  hand, an older daemon — settles `done` as before. A despawn is not told apart: its `/exit` exits
-  0 (measured on 2.1.295) and its kill destroys the pane, leaving no status, and `cancel` and
-  `mark-done` write their own state. Rejected: holding the `ended` forward in the daemon until the
+  are spawned, so not taken here. No status — a signal death on a tmux without
+  `pane_dead_signal` (the field reads empty), an older daemon — settles `done` as before. A
+  clean 0 is now noted (and reads as a cancel in a continuation's preamble, which is right for a
+  graceful despawn, whose `/exit` exits 0, measured on 2.1.295); a pane someone closed by hand, or
+  one lost with its tmux server, is `vanished` and settles `session_closed` (below), while Séance's own
+  despawn notes `closedHere` and is not judged. `cancel` and `mark-done` write their own state. Rejected: holding the `ended` forward in the daemon until the
   pane died (the leader would still need the answer to read the status, and a hold cannot be
   awaited in the ingest handler — the hook's process is claude's child, so claude would not exit
   until it timed out); the status on `ended` or the session event (an older leader reads
   `ended` entries as bare ids, and the hook has no status to give); a shell wrapper recording
   `$?` (séance `exec`s claude, which the pane classifier and `OURS` rely on).
+- **Window closed from outside** (2026-10-27, `session_closed`; `exit-status.ts`, `launch-ledger.ts`,
+  `spawn.ts`). A task's window can go to something outside Séance (`kill-pane`, `kill-window`,
+  `kill-server`, a reboot, a tmux crash); with no status and no PR it used to read as a clean exit and
+  settle `done`. Now the daemon notes `vanished` in the launch ledger, `progress` carries it as
+  `TaskProgress.vanished: true` (only while `exit` is absent), and the leader settles the task `failed`,
+  `session_closed` ("its window was closed before its session ended and it reported no pull request",
+  or "did not report done" under `until: "reported"`) when no exit, PR, merge or report is known:
+  every one of those outranks it, as they do each other. Its dependents fail `dependency_failed`
+  as for `session_failed`, and Continue is offered (`continueOffer`, the preamble words it as "ended when
+  its window was closed", only for `exit === undefined && vanished`).
+  _Notes._ Three optional ledger fields, sticky once set and written only as `true` or a pid:
+  `server` (the pid of the tmux server the pane was launched on, set by `startNote` from
+  `SpawnOutcome.server`, never on the wire), `closedHere` (this daemon closed the pane: despawn,
+  reap, harvest) and `vanished`. `LaunchLedger.unaccounted()` lists launches with a `server` and none
+  of `exit`, `closedHere`, `vanished`; `server` is the guard for windows from before this change, which
+  run under `failed` and so are never judged, and for another backend. A launch whose `startNote`
+  failed to persist loses `server` on restart: not judged, the safe direction.
+  _Judging._ `harvestExits` (every `sessions` reply, and reap's timer when on) snapshots
+  `unaccounted()` **before** it lists panes, so a launch that settles after the snapshot is not
+  judged on a listing that predates it; a failed listing judges nothing. A candidate is vanished
+  when no listed pane carries its task id (`carried` is over every listed pane, live or dead, ours or
+  not, registering or not: `join-pane` and `move-window` keep the pane option), no exit was recorded
+  for it, and the listing provably speaks for the server it ran on: the answering server's pid
+  (`display-message -p '#{pid}'`, null when none answers) equals the candidate's `server`, or that
+  pid is no live process (`kill(pid, 0)` says `ESRCH`; `EPERM` is alive). Otherwise it is skipped
+  that pass: a socket a tmp cleaner unlinked, or a different `TMUX_TMPDIR`, with the old server
+  still running, must not fail live sessions. A launch in flight (`EndedTasks.#launches`) is
+  excluded. `noteVanished(taskId, recordedAt)` re-checks **synchronously** before staging that the
+  launch is still the one snapshotted (a relaunch moves `recordedAt`) and still unaccounted, so a
+  despawn that noted `closedHere` between snapshot and listing wins. The log line names the task
+  id only. It is durable (`launched.json`), so it survives a daemon restart.
+  _What is not vanished._ Séance's own closes note `closedHere` first and `await` it, before the
+  kill: `handleDespawn` hands the backend a `closing` hook (relay, local socket, broker and the
+  leader's in-process despawn all go through it), reap's `ReapOptions.closing` (the daemon's timer
+  passes it; the CLI's `seanced reap` passes none and so leaves every dead task pane alone, since only
+  the daemon can note a close), and harvest itself (a dead pane holding no status is announced as
+  closing before it is closed). Reap leaves every `harvestable` pane to harvest. A clean exit is noted
+  (below), so it is not missing.
+  _Exit 0 is now seen._ A task window keeps `remain-on-exit on` for its whole life (previously
+  `failed`, whose clean exits closed the pane and left no status), on the window and, tmux ≥ 3.2,
+  on the pane too (the pane option beat the window's `off` in a `join-pane` test on 3.7c, so a pane
+  moved into another window stays kept). A per-pane `pane-died` hook, set once the task registers
+  (`armTask`), records the death and closes a clean exit's pane at once:
+  `set-option -gF @seance-exit-<taskId> '#{pane_dead_status}:#{pane_dead_signal}' ; if-shell -F
+  '#{==:#{pane_dead_status},0}' 'kill-pane'`. Tmux commands only: no `run-shell`, no daemon call, and
+  the one interpolation is the task id, which `isTaskId` validates first (a failing id gets no
+  hook and no `server`, so is never judged). The status survives the pane in that server-wide
+  option; harvest reads every `@seance-exit-*` after the listing (the hook may fire between the two
+  reads), parses it as `exitStatus` parses a pane's (a signal is `128 + signal`), notes it, and
+  unsets it only after the note was staged. A nonzero exit leaves the dead pane for the user to read,
+  as before, and is noted from the pane (the option is then only unset). A status the hook did not
+  see (a pane killed while alive fires no `pane-died`) leaves no option: that absence is what
+  `vanished` means.
+  _tmux facts, verified on tmux 3.7c on a private socket (`tmux -L <name> -f /dev/null`)._ Under `on`,
+  an exit 0 leaves a dead pane with `pane_dead_status` 0 and fires `pane-died`, not `pane-exited`;
+  under `failed` an exit 0 closes the pane and fires `pane-exited`. A signal leaves a dead pane with
+  empty `pane_dead_status` and `pane_dead_signal` set (`kill` on macOS). `kill-pane` and `kill-window`
+  of a live pane remove it and fire neither `pane-exited` nor `pane-died`; `kill-pane` of a dead pane
+  fires only `window-unlinked`. `set-hook -p -t <pane> pane-died` is accepted and shows under
+  `show-hooks -p -t <pane>`; a per-pane (or per-window) `pane-died` hook shadows the global
+  `pane-died` for that pane only, and `show-hooks -g` is unchanged by it. `-F` formats in the hook
+  expand against the dying pane. When the hook's own `kill-pane` closes the pane no other hook fires
+  (the global `pane-exited`, `pane-died`, `window-unlinked` and `window-layout-changed` ones all stayed
+  silent: observed, not explained). After `kill-server`, `list-panes` reports "no server running", which
+  the daemon reads as an empty list (`noServer`).
+  _The user-visible consequence._ A user's global `pane-exited` hook (a nested-frame hook, say) no
+  longer fires on a task window's clean exit, since under `on` tmux fires `pane-died` instead, and the
+  per-pane `pane-died` hook shadows a global `pane-died` for task panes. It never fired on
+  `kill-pane` or `kill-window`.
+  _Why a hook is not the detector._ `kill-pane` and `kill-window` fire no pane hook at all, so a hook
+  cannot see the very case this exists for; a `-g` hook would replace or stack on the user's own;
+  and one that reached the daemon (a `run-shell` or a `seanced` call) would be a new trigger surface
+  into it, which the threat model counts as a change, where harvest already runs whenever the leader
+  asks. The one hook kept is the exit recorder above, a tmux-only side channel that never touches
+  the daemon. Rejected: a `-g` hook (shadowing, above); a wrapper recording `$?` (séance `exec`s
+  claude); forwarding the mod's `session.end` reason as a new claim on the `session-event`
+  frame (display-only and optional, but a new carried claim is a threat-model change: considered and
+  deferred).
+  _Residuals, each accepted._ (1) `kill-server` or a reboot loses an exit the hook recorded but harvest
+  had not read yet (the option dies with the server), so that task reads `session_closed`; Continue
+  recovers it. (2) The CLI's `seanced despawn %N` runs in its own process without the ledger and
+  notes no `closedHere`: routing it through the local socket would audit a shell-typed despawn as
+  `origin=local`, breaking one origin per surface. A graceful CLI despawn makes claude exit 0, the
+  hook records it, and the task settles `done`; only the forced `kill-pane` of a pane that outlived
+  the graceful exit reads `session_closed`. (3) A daemon that switches tmux servers (another
+  `TMUX_TMPDIR`) judges nothing while the old server runs. After a reboot a pid reused by another
+  process holds a candidate unjudged forever (the safe direction). (4) A tmux older than 3.2
+  refuses `-p`: the window-level `on` and a window-level hook stay, and a pane `join-pane`d out is
+  not covered. `remain-on-exit on` and `pane_dead_status` themselves are long-standing, so the
+  old `failed` fallback (a tmux older than 3.2 got `off`) is gone; no tmux version floor is stated
+  elsewhere. (5) A task that never launched under this daemon, or whose window predates the upgrade,
+  is not judged.
 - **Pane classifier** (added 2026-10-09, `classifyPane` in `sessions.ts`): what a
   pane is _doing_, for the code that acts on sessions rather than lists them —
   closing one window (`despawn`) and cleaning up after many (`reap`). Six states:
@@ -4504,7 +4610,10 @@ for the lot with its own `gh`.
   left to claude's SIGHUP/SIGTERM handling; and pids are signalled up to ~4s
   after they were recorded, a reuse window that signalling by pid can't close.
   A dead pane (remain-on-exit) reports a long-reaped `pane_pid`, so nothing is
-  watched there at all. The grace poll asks tmux about the one pane
+  watched there at all. A despawn of a task pane first notes `closedHere` in the launch ledger
+  (`DespawnOptions.closing`, awaited before it acts, so a harvest pass that lists the pane gone
+  afterwards never judges it `vanished`); the CLI's `seanced despawn` runs without the ledger and
+  does not (Daemon, "Window closed from outside", residual 2). The grace poll asks tmux about the one pane
   (`paneInfo`), not the whole server. Rejected:
   `kill-window` (takes a split's other panes along); targeting by window name
   (wire text, not unique); answering the exit prompt with "Remove worktree"
@@ -4536,7 +4645,8 @@ for the lot with its own `gh`.
 
 ### Continuing a session (mode `"continue"`) — designed 2026-10-26, widened 2026-10-27
 
-A task that failed `session_failed` (an OOM SIGKILL, a crash), or was cancelled after it was placed,
+A task that failed `session_failed` (an OOM SIGKILL, a crash) or `session_closed` (its window was
+closed from outside), or was cancelled after it was placed,
 leaves its worktree and its Claude conversation on disk. **Continue** queues a _new_ task that resumes that conversation
 (`claude --continue`) in the same worktree, on the same machine and clone. The PWA's failed or cancelled card
 carries the button, MCP has `continue_task { taskId, prompt? }` and the shell has `seanced
@@ -4594,7 +4704,9 @@ fields carry over), under the same gates.
   <path>, after the previous session …", in one of two wordings chosen by the old task's own ledger
   note `exit` (`Continuation.exit`, from the ledger and never a frame): nonzero says it "ended
   unexpectedly (killed, crashed or out of memory) partway through", zero or none says it "was stopped
-  before it finished (cancelled from séance)". Both go on: "Its last tool call may not have finished, and
+  before it finished (cancelled from séance)", and no exit with the note's `vanished`
+  (`Continuation.vanished`) says it "ended when its window was closed (closed by hand, or its tmux server
+  or machine stopped) partway through" (`session_closed`; only when `exit === undefined`). All go on: "Its last tool call may not have finished, and
   processes it started in the background may still be running (only claude itself was killed, or was stopped, by the wording chosen):
   check the worktree's state and running processes before restarting anything, then carry on where it
   left off." Whether a cancelled pane's exit is noted depends on harvest seeing it before despawn's
@@ -4643,8 +4755,8 @@ fields carry over), under the same gates.
   `CAPABILITIES.continueCancelled`: an older daemon has `continueTask` but applies neither the
   ledger-owner rule nor the seed wording. The same function, given the list the caller read the task from,
   also refuses a task whose session a continuation took over (`tookOver`): one that is not `queued`,
-  `blocked` or `ready`, not `failed` with a code outside {`session_failed`, `lost_expired`,
-  `merge_expired`} (a positive list: a false "did not take over" costs one daemon refusal, a false "took
+  `blocked` or `ready`, not `failed` with a code outside {`session_failed`, `session_closed`,
+  `lost_expired`, `merge_expired`} (a positive list: a false "did not take over" costs one daemon refusal, a false "took
   over" strands the conversation), and not `cancelled` without an assignment. So the button moves to the
   newest continuation that landed: when Y fails `session_failed` or is cancelled after placement,
   Continue disappears from X and appears on Y, and a Y that failed `continue_expired` or
@@ -4688,8 +4800,8 @@ fields carry over), under the same gates.
   conversation stranded; every terminal state that can still land a continuation now offers Continue itself.
 - **Not offered:** a task cancelled before it was placed (no session), a task cancelled after its session
   had finished (`endedAt`, from `awaiting-merge`: Follow up's job, like `done`), `done`, `here` runs, an
-  automatic continue after an OOM kill (manual by decision), and failures other than `session_failed`:
-  `lost_expired`, `merge_expired` and `dispatch_unconfirmed` all fire after the ledger's 7-day eviction
+  automatic continue after an OOM kill (manual by decision), and failures other than `session_failed`
+  and `session_closed` (both offered, from one `RESUMABLE_FAILURES` set): `lost_expired`, `merge_expired` and `dispatch_unconfirmed` all fire after the ledger's 7-day eviction
   clock or mean the ledger proved nothing, so the daemon would refuse. The relation is pinned by a test
   (`scheduler/test/expiry.test.ts`: `continueExpiryMs` below `LAUNCH_LEDGER_MAX_AGE_MS`, `lostExpiryMs` and
   `mergeExpiryMs` at or above it); shortening either side means revisiting this paragraph.

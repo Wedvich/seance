@@ -520,7 +520,7 @@ of M4 has landed.
 
   _As built (2026-10-21):_ **Done.** The premise was half right: `remain-on-exit` was on only
   while a spawn waited for registration, then off, so a registered session's pane closed with its
-  status. A task window now keeps `remain-on-exit failed`; the status rides the ledger and
+  status. A task window now keeps `remain-on-exit failed` (changed to `on` on 2026-10-27, below); the status rides the ledger and
   `progress` (`TaskProgress.exit`), noted before the dead pane is closed by every `sessions`
   reply. The leader settles a PR-less `ended` from a machine advertising `exitStatus` by that
   machine's next answer, asked at once and then every pass until the session is gone (at most
@@ -540,6 +540,14 @@ of M4 has landed.
   vanished cgroup (a per-pane tmux scope), a rise with a stale sample or a late check, another pane's
   sample, and older daemons.
   DESIGN.md, _Daemon_, "Exit status", records what the count proves on a shared cgroup.
+  _Follow-up (2026-10-27), landed:_ a window closed from outside (`kill-pane`, `kill-window`,
+  `kill-server`, a reboot) no longer settles `done`. The window keeps `remain-on-exit on`, so a clean
+  exit's 0 is noted too, and a per-pane `pane-died` hook records the status server-side before it closes a
+  clean exit's pane. A launched task whose pane is in no listing, with no exit and no close of the
+  daemon's own, is noted `vanished` (`TaskProgress.vanished`), and the leader settles it `failed`,
+  `session_closed` when no PR, merge or report is known; its dependents fail and Continue is offered.
+  No capability: an older leader reads it as `done`, as before. DESIGN.md, _Daemon_, "Window closed from
+  outside", records the tmux behaviour verified, why no global hook, and the residuals.
 
   _Open gaps (follow-up, not yet planned):_
   - The deadline and disconnect settles call `ended(task, undefined)`, so a PR the daemon noted
