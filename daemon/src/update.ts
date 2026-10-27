@@ -243,7 +243,9 @@ export function createUpdater(opts: UpdaterOpts): Updater {
     stop: (): void => {
       stopped = true;
       pending = null;
-      if (graceTimer !== null) clearTimeout(graceTimer);
+      // The grace timer stays: the launch gate outlives this updater (a config reload swaps the daemon,
+      // not the process), so cancelling it could leave the gate shut for good. A real shutdown's final
+      // drain makes the release a no-op.
     },
   };
 }
