@@ -6250,12 +6250,19 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   **The verdict is the one beneath the mod**: `await next(e)` at `tool.check` returns what
   the hooks below it settled, and a plugin above may still override it. One that asks over
   an allow is a missed needs-input; one that turns an ask into an allow or deny is a brief
-  needs-input with no dialog, until the call settles. No hook can see either. **Auto mode
-  reports needs-input then busy for each call its
-  classifier settles**: core answers `ask` there too, and no engine event says a dialog
-  was shown, nor does `$` read the permission mode. Accepted: the leader escalates only
-  a needs-input that lasts (`escalation`), so the flicker alerts nobody; it costs two
-  task-record writes per such call in a task's session. **Not covered**: an MCP server's elicitation, which
+  needs-input with no dialog, until the call settles. No hook can see either. **An asked
+  call reads needs-input until it settles, run included**: the dialog closes only when
+  `tool.call`'s `next` resolves, which is after the tool ran, since core prompts and runs
+  under one `next` and no engine event says an ask was settled. So an approved call reads
+  needs-input for its whole runtime, a person's approval or auto mode's classifier alike
+  (core answers `ask` there too, no engine event says a dialog was shown, and `$` reads no
+  permission mode): a 70 s test run in auto mode showed "needs you" throughout (observed
+  2026-10-27, engine 2.1.311). Accepted until the engine gives a settled-ask signal, where
+  the close moves: the leader escalates only a needs-input that lasts (`escalation`), so
+  only a tool running past it alerts anyone; it costs two task-record writes per such call.
+  Rejected: delaying the report (the fault is the late close, not the open) and reading
+  `ToolUse`/`ToolProgress` renders (`isRunning` is true while asked too, and only a drawn
+  surface raises them). **Not covered**: an MCP server's elicitation, which
   has no engine event (only the skipped `classic.Elicitation`).
 - **Ingest-only.** The handler stores (the ended-task memory) and forwards (to the
   leader). Its one other effect is a poke at the `/usage` refresh for the bound
