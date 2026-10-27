@@ -1,15 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { CAPABILITIES, SPAWN_ERROR_CODES, type Machine, type RelayState } from "@seance/shared";
-import { DEFAULT_FORM, type PersistedForm, type SessionsView } from "../src/state.ts";
+import { CAPABILITIES, type ExclaveInfo, type Machine, type RelayState } from "@seance/shared";
+import { DEFAULT_FORM, RESCAN_IDLE, type PersistedForm, type SessionsView } from "../src/state.ts";
 import {
-  abbreviatePath,
-  abbreviatePaths,
+  derivePinProblem,
   deriveReportedAvailability,
   deriveView,
   failedBody,
-  failureBody,
   formatSeen,
-  resolveMachine,
+  previewAsked,
+  resolveRepo,
+  scopedRepos,
   type AppState,
 } from "../src/view.ts";
 
@@ -21,8 +21,13 @@ function machine(overrides: Partial<Machine> = {}): Machine {
     name: "MacBook Pro",
     platform: "darwin",
     repos: [
-      { name: "seance", path: "/Users/martin/repos/seance", defaultBranch: "main" },
-      { name: "pengefix", path: "/Users/martin/repos/pengefix", defaultBranch: "main" },
+      { name: "seance", path: "/Users/martin/repos/seance", defaultBranch: "main", origin: "github.com/acme/seance" },
+      {
+        name: "pengefix",
+        path: "/Users/martin/repos/pengefix",
+        defaultBranch: "main",
+        origin: "github.com/acme/pengefix",
+      },
     ],
     scannedAt: NOW,
     lastSeen: NOW,
@@ -30,6 +35,15 @@ function machine(overrides: Partial<Machine> = {}): Machine {
     ...overrides,
   };
 }
+
+const exclave = (id: string, accountId: string | null = id): ExclaveInfo => ({
+  id,
+  authOk: accountId !== null,
+  accountId,
+  email: accountId === null ? undefined : `${id}@acme.dev`,
+  extraUsageEnabled: null,
+  skills: [],
+});
 
 function relay(overrides: Partial<RelayState> = {}): RelayState {
   const machines = overrides.machines ?? [machine()];
@@ -59,8 +73,7 @@ function state(overrides: Partial<AppState> = {}, form: Partial<PersistedForm> =
     machines: false,
     history: null,
     spawning: false,
-    rescanning: false,
-    rescan: "idle",
+    rescan: RESCAN_IDLE,
     verdict: null,
     preview: null,
     sessions: {},
@@ -97,85 +110,6 @@ describe("formatSeen", () => {
 
   test("never renders a negative age from clock skew", () => {
     expect(formatSeen(NOW + 60_000, NOW)).toBe("just now");
-  });
-});
-
-describe("abbreviatePaths", () => {
-  test("trims the prefix the machine's repos share", () => {
-    const labels = abbreviatePaths(["/Users/martin/repos/seance", "/Users/martin/repos/pengefix"]);
-    expect(labels.get("/Users/martin/repos/seance")).toBe("seance");
-    expect(labels.get("/Users/martin/repos/pengefix")).toBe("pengefix");
-  });
-
-  test("keeps the diverging segment when repos sit under different roots", () => {
-    const labels = abbreviatePaths(["/Users/martin/repos/seance", "/Users/martin/pengefix/api"]);
-    expect(labels.get("/Users/martin/repos/seance")).toBe("repos/seance");
-    expect(labels.get("/Users/martin/pengefix/api")).toBe("pengefix/api");
-  });
-
-  // The prefix belongs to the set, so a shallow repo does not pull the deeper
-  // ones up with it — each keeps everything past the shared root.
-  test("trims every path by the set's prefix, not by its own depth", () => {
-    const labels = abbreviatePaths([
-      "/Users/martin/repos/seance",
-      "/Users/martin/repos/work/api",
-      "/Users/martin/repos/work/deep/nested",
-    ]);
-    expect(labels.get("/Users/martin/repos/seance")).toBe("seance");
-    expect(labels.get("/Users/martin/repos/work/api")).toBe("work/api");
-    expect(labels.get("/Users/martin/repos/work/deep/nested")).toBe("work/deep/nested");
-  });
-
-  test("falls back to the last two segments with nothing to compare against", () => {
-    expect(abbreviatePaths(["/Users/martin/repos/seance"]).get("/Users/martin/repos/seance")).toBe("repos/seance");
-  });
-
-  // Two entries but one distinct path is still "nothing to compare against".
-  test("treats a duplicated path as a single repo", () => {
-    const paths = ["/Users/martin/repos/seance", "/Users/martin/repos/seance"];
-    expect(abbreviatePaths(paths).get("/Users/martin/repos/seance")).toBe("repos/seance");
-  });
-
-  // A repo whose whole path is a prefix of a sibling's would otherwise be
-  // trimmed down to nothing.
-  test("never swallows the repo's own directory name", () => {
-    const labels = abbreviatePaths(["/srv/app", "/srv/app/vendor/thing"]);
-    expect(labels.get("/srv/app")).toBe("app");
-    expect(labels.get("/srv/app/vendor/thing")).toBe("vendor/thing");
-  });
-
-  test("leaves a path with a single segment as it is", () => {
-    const labels = abbreviatePaths(["/srv", "/srv/app"]);
-    expect(labels.get("/srv")).toBe("/srv");
-    expect(labels.get("/srv/app")).toBe("app");
-  });
-
-  test("labels every path once and leaves an empty list empty", () => {
-    expect([...abbreviatePaths(["/a/one", "/a/two", "/a/three"])]).toEqual([
-      ["/a/one", "one"],
-      ["/a/two", "two"],
-      ["/a/three", "three"],
-    ]);
-    expect(abbreviatePaths([]).size).toBe(0);
-  });
-});
-
-// The single form exists for the repo tile: one label per render without the
-// batch's Map. Same rule, so the same edges apply.
-describe("abbreviatePath", () => {
-  test("labels one path against its siblings", () => {
-    expect(
-      abbreviatePath("/Users/martin/repos/seance", ["/Users/martin/repos/seance", "/Users/martin/repos/pengefix"]),
-    ).toBe("seance");
-  });
-
-  test("keeps the last two segments of a lone path, duplicated or not", () => {
-    expect(abbreviatePath("/Users/martin/repos/seance", ["/Users/martin/repos/seance"])).toBe("repos/seance");
-    expect(abbreviatePath("/a/b/c", ["/a/b/c", "/a/b/c"])).toBe("b/c");
-  });
-
-  test("leaves a single-segment path as it is", () => {
-    expect(abbreviatePath("/srv", ["/srv", "/srv/app"])).toBe("/srv");
   });
 });
 
@@ -284,13 +218,16 @@ describe("banner and button", () => {
     expect(view.button.enabled).toBe(true);
   });
 
-  test("a forgotten machine leaves the counts and the selection to the rest", () => {
+  // The pin is the owner's choice, so a machine that left the registry is not swapped for another.
+  test("a pin on a machine the registry no longer lists stays a pin, naming nothing", () => {
     const studio = machine({ deviceId: "dev-2", name: "Mac Studio", connected: false });
     const view = deriveView(
-      state({ relay: relay({ machines: [studio], registrySize: 1 }) }, { machineId: "dev-1" }),
+      state({ relay: relay({ machines: [studio], registrySize: 1 }) }, { machine: "dev-1" }),
       NOW,
     );
-    expect(view.machine?.deviceId).toBe("dev-2");
+    expect(view.machine).toBeNull();
+    expect(view.machineTile).toMatchObject({ value: "Unknown machine", dot: "off" });
+    expect(view.footerStatus).toBe("The pinned machine isn't listed");
     expect(view.meta).toBe("0 online · 1 asleep · 0 sessions");
   });
 
@@ -298,41 +235,33 @@ describe("banner and button", () => {
     expect(deriveView(state(), NOW).ignoredNote).toBeNull();
   });
 
-  test("an offline machine blocks the spawn and names itself", () => {
-    const asleep = machine({ connected: false, lastSeen: NOW - 3 * 86_400_000 });
-    const view = deriveView(state({ relay: relay({ machines: [asleep] }) }), NOW);
-    expect(view.banner?.title).toBe("MacBook Pro is offline");
-    expect(view.banner?.body).toContain("plugged in");
-    expect(view.button).toEqual({ label: "MacBook Pro is asleep", enabled: false, busy: false });
+  // The task waits for it, so an offline pin is a note, never a block.
+  test("an offline pinned machine still queues, and the footer says the task waits for it", () => {
+    const asleep = machine({ connected: false, lastSeen: NOW - 3 * 86_400_000, exclaves: [exclave("default")] });
+    const view = deriveView(state({ relay: relay({ machines: [asleep] }) }, { machine: "dev-1" }), NOW);
+    expect(view.banner).toBeNull();
+    expect(view.button).toEqual({ label: "Queue on MacBook Pro", enabled: true, busy: false });
     expect(view.machineTile.dot).toBe("off");
-    expect(view.footerStatus).toBe("Last seen 3d ago · sessions unknown");
+    expect(view.footerStatus).toBe("MacBook Pro is offline — the task waits for it");
   });
 
-  test("a non-Mac offline machine gets the keepalive copy instead", () => {
-    const wsl = machine({ connected: false, platform: "linux", name: "tower-wsl" });
-    const view = deriveView(state({ relay: relay({ machines: [wsl] }) }), NOW);
-    expect(view.banner?.body).toContain("keepalive");
-  });
-
-  test("pending outranks the prompt-dependent labels", () => {
+  test("queuing outranks the other labels", () => {
     const view = deriveView(state({ spawning: true }, { prompt: "hi" }), NOW);
-    expect(view.button).toEqual({ label: "Starting…", enabled: false, busy: true });
+    expect(view.button).toEqual({ label: "Queuing…", enabled: false, busy: true });
   });
 
-  test("a retry's rescan is named rather than passed off as the spawn it precedes", () => {
-    const view = deriveView(state({ rescanning: true }, { prompt: "hi" }), NOW);
-    expect(view.button).toEqual({ label: "Rescanning…", enabled: false, busy: true });
-  });
-
-  test("the label follows whether a prompt was typed", () => {
-    expect(deriveView(state(), NOW).button.label).toBe("Start empty session");
-    expect(deriveView(state({}, { prompt: "   " }), NOW).button.label).toBe("Start empty session");
-    expect(deriveView(state({}, { prompt: "port the pane" }), NOW).button.label).toBe("Start with this prompt");
+  test("the label is Queue whatever the prompt, and names a pinned machine", () => {
+    expect(deriveView(state(), NOW).button.label).toBe("Queue");
+    expect(deriveView(state({}, { prompt: "port the pane" }), NOW).button.label).toBe("Queue");
+    const pinned = machine({ exclaves: [exclave("default")] });
+    expect(deriveView(state({ relay: relay({ machines: [pinned] }) }, { machine: "dev-1" }), NOW).button.label).toBe(
+      "Queue on MacBook Pro",
+    );
   });
 });
 
 describe("sessions", () => {
-  test("totals across machines for the header and reads the selected one for the footer", () => {
+  test("totals across machines for the header", () => {
     const second = machine({ deviceId: "dev-2", name: "Mac Studio" });
     const view = deriveView(
       state({
@@ -342,17 +271,6 @@ describe("sessions", () => {
       NOW,
     );
     expect(view.meta).toBe("2 online · 0 asleep · 3 sessions");
-    expect(view.footerStatus).toBe("2 claude sessions already on MacBook Pro");
-  });
-
-  test("singularises one session", () => {
-    const view = deriveView(state({ sessions: { "dev-1": sessions(1) } }), NOW);
-    expect(view.footerStatus).toBe("1 claude session already on MacBook Pro");
-  });
-
-  test("says so plainly when nothing is running", () => {
-    const view = deriveView(state({ sessions: { "dev-1": sessions(0) } }), NOW);
-    expect(view.footerStatus).toBe("Nothing running on MacBook Pro right now");
   });
 
   // A machine whose fetch failed must not be counted as zero in the header total.
@@ -381,46 +299,80 @@ describe("sessions", () => {
     const view = deriveView(state({ sessions: { "dev-1": sessions(1) } }), NOW);
     expect(view.meta).toBe("1 online · 0 asleep · 1 session");
   });
-
-  test("shows a checking state before the first reply", () => {
-    expect(deriveView(state(), NOW).footerStatus).toBe("Checking sessions on MacBook Pro…");
-  });
 });
 
-describe("selection", () => {
-  test("prefers a connected machine when the form names one that has gone", () => {
-    const online = machine({ deviceId: "dev-2", name: "Mac Studio" });
-    const chosen = resolveMachine(relay({ machines: [online] }), "dev-vanished");
-    expect(chosen?.deviceId).toBe("dev-2");
+describe("repo scope", () => {
+  const exclaveRepo = (name: string, origin: string, exclaveId: string) => ({
+    name,
+    path: `/r/${name}`,
+    defaultBranch: "main",
+    origin,
+    exclave: exclaveId,
+  });
+  const mac = machine({
+    deviceId: "mac",
+    name: "Mac",
+    exclaves: [exclave("work", "acct-work"), exclave("home", "acct-home")],
+    repos: [exclaveRepo("api", "github.com/acme/api", "work"), exclaveRepo("blog", "github.com/me/blog", "home")],
+  });
+  const wsl = machine({
+    deviceId: "wsl",
+    name: "WSL",
+    exclaves: [exclave("default", "acct-work")],
+    repos: [
+      exclaveRepo("api-1", "github.com/acme/api", "default"),
+      exclaveRepo("tool", "github.com/acme/tool", "default"),
+    ],
+  });
+  const legacy = machine({
+    deviceId: "old",
+    name: "Old",
+    repos: [{ name: "x", path: "/r/x", defaultBranch: "main", origin: "github.com/acme/x" }],
+  });
+  const machines = [mac, wsl, legacy];
+  const origins = (repos: readonly { origin: string }[]): string[] => repos.map((r) => r.origin);
+
+  test("unpinned, every origin some machine clones appears once, labelled without the host", () => {
+    const repos = scopedRepos(machines, { machine: null, account: null });
+    expect(repos.map((r) => r.label)).toEqual(["acme/api", "acme/tool", "acme/x", "me/blog"]);
   });
 
-  test("falls back to the machine's first repo when the form names a missing one", () => {
-    const view = deriveView(state({}, { repos: { "dev-1": "deleted-repo" } }), NOW);
-    expect(view.repo?.name).toBe("seance");
+  test("a machine pin narrows to that machine's clones", () => {
+    expect(origins(scopedRepos(machines, { machine: "wsl", account: null }))).toEqual([
+      "github.com/acme/api",
+      "github.com/acme/tool",
+    ]);
   });
 
-  test("restores the repo remembered for the selected machine", () => {
-    const studio = machine({ deviceId: "dev-2", name: "Mac Studio" });
-    const view = deriveView(
-      state(
-        { relay: relay({ machines: [machine(), studio] }) },
-        { machineId: "dev-2", repos: { "dev-1": "seance", "dev-2": "pengefix" } },
-      ),
-      NOW,
-    );
-    expect(view.machine?.deviceId).toBe("dev-2");
-    expect(view.repo?.name).toBe("pengefix");
+  test("an account pin narrows to the clones in its exclaves, strictly: a daemon with no exclaves is in no account", () => {
+    expect(origins(scopedRepos(machines, { machine: null, account: "acct-work" }))).toEqual([
+      "github.com/acme/api",
+      "github.com/acme/tool",
+    ]);
+    expect(origins(scopedRepos([legacy], { machine: null, account: "acct-work" }))).toEqual([]);
   });
 
-  test("the repo tile carries the abbreviated label", () => {
-    expect(deriveView(state(), NOW).repoTile.value).toBe("seance");
+  test("both pins intersect", () => {
+    expect(origins(scopedRepos(machines, { machine: "mac", account: "acct-home" }))).toEqual(["github.com/me/blog"]);
+    expect(scopedRepos(machines, { machine: "wsl", account: "acct-home" })).toEqual([]);
   });
 
-  test("reports no repos when the machine has none", () => {
-    const bare = machine({ repos: [] });
-    const view = deriveView(state({ relay: relay({ machines: [bare] }) }), NOW);
-    expect(view.repo).toBeNull();
-    expect(view.repoTile.value).toBe("No repos");
+  test("resolveRepo keeps the remembered origin while it is in scope, else the first", () => {
+    const repos = scopedRepos(machines, { machine: "wsl", account: null });
+    expect(resolveRepo(repos, { ...DEFAULT_FORM, repo: "github.com/acme/tool" })?.origin).toBe("github.com/acme/tool");
+    expect(resolveRepo(repos, { ...DEFAULT_FORM, repo: "github.com/me/blog" })?.origin).toBe("github.com/acme/api");
+    expect(resolveRepo([], DEFAULT_FORM)).toBeNull();
+  });
+
+  test("the repo tile follows the pins, and the preview is asked only with both on auto", () => {
+    const auto = deriveView(state({ relay: relay({ machines }) }), NOW);
+    expect(auto.previewShown).toBe(true);
+    const pinned = deriveView(state({ relay: relay({ machines }) }, { machine: "mac", account: "acct-home" }), NOW);
+    expect(pinned.repoTile.value).toBe("me/blog");
+    expect(pinned.previewShown).toBe(false);
+    expect(previewAsked({ machine: "mac", account: null })).toBe(false);
+    expect(previewAsked({ machine: null, account: "acct-home" })).toBe(false);
+    expect(previewAsked({ machine: null, account: null })).toBe(true);
   });
 });
 
@@ -433,60 +385,23 @@ describe("worktree hint", () => {
   });
 });
 
-describe("failureBody", () => {
-  test("only claude_died describes a window that opened", () => {
-    expect(failureBody("claude_died", "seance", "MacBook Pro")).toContain("The window opened");
-    expect(failureBody("launch_error", "seance", "MacBook Pro")).toContain("couldn't open a window");
-  });
-
-  // The transport answers too_large for the reply, not the spawn — a success
-  // embeds the session list — so the card must not say nothing is running.
-  test("too_large says the session may be running", () => {
-    const body = failureBody("too_large", "seance", "MacBook Pro");
-    expect(body).toContain("may be running");
-    expect(body).not.toContain("Nothing is running");
-  });
-
-  test("names the repo and machine where that is the actionable part", () => {
-    expect(failureBody("repo_not_found", "seance", "Mac Studio")).toBe(
-      "seance isn't on Mac Studio anymore. Rescan its repos and try again.",
-    );
-  });
-
-  // The design's copy claimed a worktree was left behind; claude creates it, so a
-  // claude that never started created nothing. Derived from the schema of record,
-  // so a code added there is covered here without anyone remembering to.
-  test("never claims a worktree was left behind", () => {
-    for (const code of SPAWN_ERROR_CODES) {
-      expect(failureBody(code, "seance", "MacBook Pro")).not.toContain("worktree");
-    }
-  });
-
-  // The daemon mints the codes and may be a version ahead of the app; an
-  // unlisted one used to leave the verdict card blank.
-  test("says something for a code minted after this build", () => {
-    expect(failureBody("quota_exceeded", "seance", "MacBook Pro")).toContain("refused the spawn");
-  });
-});
-
-describe("auto", () => {
-  const withOrigins = machine({
+describe("the pickers", () => {
+  const leader = (machines: Machine[], capabilities: string[] = [CAPABILITIES.pinAccount]): RelayState =>
+    relay({
+      machines: machines.map((m, i) => (i === 0 ? { ...m, capabilities } : m)),
+      scheduler: { kind: "ready", deviceId: machines[0]?.deviceId ?? "", term: 4 },
+    });
+  const mac = machine({
+    deviceId: "mac",
+    name: "Mac",
+    exclaves: [exclave("work", "acct-work")],
     repos: [
-      {
-        name: "seance",
-        path: "/Users/martin/repos/seance",
-        defaultBranch: "main",
-        origin: "github.com/wedvich/seance",
-      },
-      { name: "scratch", path: "/Users/martin/repos/scratch", defaultBranch: "main", origin: "scratch" },
+      { name: "a", path: "/r/a", defaultBranch: "main", origin: "github.com/acme/a", exclave: "work" },
+      { name: "b", path: "/r/b", defaultBranch: "main", origin: "github.com/acme/b", exclave: "work" },
     ],
   });
-  const other = machine({
-    deviceId: "dev-2",
-    name: "WSL",
-    repos: [{ name: "seance-1", path: "/home/m/seance", defaultBranch: "main", origin: "github.com/wedvich/seance" }],
-  });
-  const ready = { kind: "ready", deviceId: "dev-1", term: 4 } as const;
+  const wsl = machine({ deviceId: "wsl", name: "WSL", exclaves: [exclave("home", "acct-home")] });
+  const bare = machine({ deviceId: "bare", name: "Bare" });
 
   test("with no verified leader it still queues, and the note says the task waits for one", () => {
     const cases = [
@@ -497,61 +412,168 @@ describe("auto", () => {
       ],
     ] as const;
     for (const [scheduler, note] of cases) {
-      const view = deriveView(state({ relay: relay({ machines: [withOrigins], scheduler }) }, { auto: true }), NOW);
+      const view = deriveView(state({ relay: relay({ machines: [machine()], scheduler }) }), NOW);
       expect(view.autoAvailability).toEqual({ available: true, reason: null, note });
       expect(view.footerStatus).toBe(note);
-      expect(view.button).toEqual({ label: "Queue on auto", enabled: true, busy: false });
+      expect(view.button).toEqual({ label: "Queue", enabled: true, busy: false });
       expect(view.machineTile).toMatchObject({ value: "Auto", dot: "auto" });
+      expect(view.accountTile).toMatchObject({ label: "ACCOUNT", value: "Auto", dot: "auto" });
     }
   });
 
   test("greyed with the reason only while the relay socket is not open", () => {
-    const down = deriveView(
-      state({ relay: relay({ machines: [withOrigins], status: "retrying", scheduler: ready }) }, { auto: true }),
-      NOW,
-    );
+    const down = deriveView(state({ relay: { ...leader([mac]), status: "retrying" } }), NOW);
     expect(down.autoAvailability).toEqual({ available: false, reason: "Not connected to the relay", note: null });
     expect(down.machineTile).toMatchObject({ dot: "off" });
+    expect(down.footerStatus).toBe("Not connected to the relay");
   });
 
-  test("with a verified leader it queues, naming no machine, over every repo some machine clones", () => {
-    const view = deriveView(
-      state({ relay: relay({ machines: [withOrigins, other], scheduler: ready }) }, { auto: true }),
-      NOW,
-    );
-    expect(view.autoAvailability).toEqual({ available: true, reason: null, note: null });
-    expect(view.machineTile).toEqual({ label: "MACHINE", value: "Auto", mono: false, dot: "auto" });
-    // One row per origin, however many machines clone it; the host is dropped from the label.
-    expect(view.auto?.repos).toEqual([
-      { origin: "scratch", label: "scratch" },
-      { origin: "github.com/wedvich/seance", label: "wedvich/seance" },
-    ]);
-    expect(view.repoTile.value).toBe("scratch");
-    expect(view.button).toEqual({ label: "Queue on auto", enabled: true, busy: false });
-    expect(view.banner).toBeNull();
+  test("a machine pin names the machine on the button and in the footer", () => {
+    const view = deriveView(state({ relay: leader([mac, wsl]) }, { machine: "wsl" }), NOW);
+    expect(view.machineTile).toMatchObject({ value: "WSL", dot: "ok" });
+    expect(view.button).toEqual({ label: "Queue on WSL", enabled: true, busy: false });
+    expect(view.footerStatus).toBe("Pinned to WSL");
   });
 
-  test("the remembered origin is the one shown; a machine picked directly ignores auto entirely", () => {
-    const remembered = deriveView(
+  test("an account pin shows the account by its alias, else its email", () => {
+    const aliased = deriveView(
       state(
-        { relay: relay({ machines: [withOrigins], scheduler: ready }) },
-        { auto: true, autoRepo: "github.com/wedvich/seance" },
+        {
+          relay: leader([mac]),
+          accounts: { aliases: { "acct-work": "Work" }, nameable: true, saving: null, notice: null },
+        },
+        {
+          account: "acct-work",
+        },
       ),
       NOW,
     );
-    expect(remembered.repoTile.value).toBe("wedvich/seance");
-    // No leader at all, and a direct pick still starts: it goes to the daemon, not the scheduler.
-    const relayed = relay({ machines: [withOrigins, other], scheduler: { kind: "none" } });
-    const direct = deriveView(state({ relay: relayed }, { auto: false, machineId: "dev-2" }), NOW);
-    expect(direct.auto).toBeNull();
-    expect(direct.machineTile.value).toBe("WSL");
-    expect(direct.button.enabled).toBe(true);
+    expect(aliased.accountTile).toMatchObject({ value: "Work", dot: "ok" });
+    const plain = deriveView(state({ relay: leader([mac]) }, { account: "acct-work" }), NOW);
+    expect(plain.accountTile.value).toBe("work@acme.dev");
+    expect(plain.button).toEqual({ label: "Queue", enabled: true, busy: false });
+  });
+
+  test("an account no machine reports signed in blocks the button, and says so on the tile", () => {
+    const view = deriveView(state({ relay: leader([mac]) }, { account: "acct-gone" }), NOW);
+    expect(view.accountTile.value).toEndWith("signed in nowhere");
+    expect(view.accountTile.dot).toBe("off");
+    expect(view.button).toEqual({ label: "Account not signed in", enabled: false, busy: false });
+    expect(view.footerStatus).toEndWith("isn't signed in on any machine");
+  });
+
+  test("the account gate: an unsupported leader and no leader are refused in their own words", () => {
+    const unsupported = deriveView(state({ relay: leader([mac], []) }, { account: "acct-work" }), NOW);
+    expect(unsupported.button).toEqual({ label: "Can't pin an account", enabled: false, busy: false });
+    expect(unsupported.footerStatus).toContain("update seanced");
+    const noLeader = deriveView(state({ relay: relay({ machines: [mac] }) }, { account: "acct-work" }), NOW);
+    expect(noLeader.button).toEqual({ label: "Can't pin an account", enabled: false, busy: false });
+    expect(noLeader.footerStatus).toContain("No verified scheduler is leading");
+    // A machine pin alone needs no gate.
+    expect(deriveView(state({ relay: relay({ machines: [mac] }) }, { machine: "mac" }), NOW).button.enabled).toBe(true);
+  });
+
+  test("an account the pinned machine lacks is refused; neither picker resets the other", () => {
+    const aliases = {};
+    const form = { ...DEFAULT_FORM, machine: "wsl", account: "acct-work" };
+    expect(derivePinProblem(leader([mac, wsl]), form, aliases)).toMatchObject({ label: "Account not on that machine" });
+    const view = deriveView(state({ relay: leader([mac, wsl]) }, form), NOW);
+    expect(view.button).toEqual({ label: "Account not on that machine", enabled: false, busy: false });
+    expect(view.machine?.deviceId).toBe("wsl");
+    expect(view.account).toBe("acct-work");
+  });
+
+  test("a machine that reports no exclaves can't be pinned", () => {
+    const view = deriveView(state({ relay: leader([mac, bare]) }, { machine: "bare" }), NOW);
+    expect(view.button).toEqual({ label: "Machine needs an update", enabled: false, busy: false });
   });
 
   test("with no clone carrying an origin there is nothing to run", () => {
-    const view = deriveView(state({ relay: relay({ scheduler: ready }) }, { auto: true }), NOW);
-    expect(view.auto?.repos).toEqual([]);
+    const noOrigins = machine({ repos: [{ name: "x", path: "/r/x", defaultBranch: "main" }] });
+    const view = deriveView(state({ relay: relay({ machines: [noOrigins] }) }), NOW);
+    expect(view.repos).toEqual([]);
     expect(view.button).toEqual({ label: "No repo to run", enabled: false, busy: false });
+  });
+
+  test("the Machine sheet lists every machine, disabling the ones the account pin or a missing exclave rule out", () => {
+    const view = deriveView(state({ relay: leader([mac, wsl, bare]) }, { account: "acct-work", machine: "mac" }), NOW);
+    const rows = Object.fromEntries(view.machineChoices.map((c) => [c.machine.name, c]));
+    expect(rows["Mac"]).toMatchObject({
+      disabled: false,
+      selected: true,
+      sub: "online · 2 repos · last scanned just now",
+    });
+    expect(rows["WSL"]).toMatchObject({ disabled: true, selected: false, sub: "work@acme.dev isn't signed in here" });
+    expect(rows["Bare"]).toMatchObject({ disabled: true, sub: "its daemon needs an update" });
+  });
+
+  test("the Machine sheet shows when a connected machine last scanned, and offline ones when they were last seen", () => {
+    const scanned = machine({ ...mac, scannedAt: NOW - 3 * 3_600_000 });
+    const asleep = machine({ ...wsl, connected: false, lastSeen: NOW - 2 * 86_400_000 });
+    const rows = Object.fromEntries(
+      deriveView(state({ relay: leader([scanned, asleep]) }), NOW).machineChoices.map((c) => [c.machine.name, c]),
+    );
+    expect(rows["Mac"]?.sub).toBe("online · 2 repos · last scanned 3h ago");
+    expect(rows["WSL"]?.sub).toBe("offline · last seen 2d ago");
+
+    // Its last status beat is newer than the register's lastSeen: the beat says when it slept.
+    const beat = { at: (NOW - 5 * 60_000) / 1000, scan: 1, cpu: 1, mem: 1 };
+    const slept = machine({ ...wsl, connected: false, lastSeen: NOW - 2 * 86_400_000, status: beat });
+    const choice = deriveView(state({ relay: leader([scanned, slept]) }), NOW).machineChoices.find(
+      (c) => c.machine.name === "WSL",
+    );
+    expect(choice?.sub).toBe("offline · last seen 5m ago");
+  });
+
+  test("a rescan shows on its own row only: offered while connected, disabled while any runs", () => {
+    const asleep = machine({ ...wsl, connected: false });
+    const idle = deriveView(state({ relay: leader([mac, asleep, bare]) }), NOW);
+    const idleRows = Object.fromEntries(idle.machineChoices.map((c) => [c.machine.name, c]));
+    expect(idleRows["Mac"]).toMatchObject({ canRescan: true, rescanDisabled: false, rescan: null });
+    expect(idleRows["WSL"]).toMatchObject({ canRescan: false, rescanDisabled: false, rescan: null });
+
+    const scanning = deriveView(
+      state({ relay: leader([mac, asleep, bare]), rescan: { kind: "scanning", deviceId: "mac" } }),
+      NOW,
+    );
+    const rows = Object.fromEntries(scanning.machineChoices.map((c) => [c.machine.name, c]));
+    expect(rows["Mac"]).toMatchObject({ rescan: "scanning", rescanDisabled: true, sub: "scanning…" });
+    expect(rows["Bare"]).toMatchObject({ rescan: null, rescanDisabled: true, canRescan: true });
+    expect(rows["WSL"]).toMatchObject({ rescan: null, canRescan: false });
+
+    const failed = deriveView(
+      state({ relay: leader([mac, asleep, bare]), rescan: { kind: "failed", deviceId: "bare" } }),
+      NOW,
+    );
+    const failedRows = Object.fromEntries(failed.machineChoices.map((c) => [c.machine.name, c]));
+    expect(failedRows["Bare"]).toMatchObject({
+      rescan: "failed",
+      rescanDisabled: false,
+      sub: "couldn't rescan — last known list",
+    });
+    expect(failedRows["Mac"]).toMatchObject({ rescan: null, sub: "online · 2 repos · last scanned just now" });
+  });
+
+  test("an Account row's dot is green while a machine signed in to it is connected, grey when all are asleep", () => {
+    const asleep = machine({ ...wsl, connected: false });
+    const view = deriveView(state({ relay: leader([mac, asleep]) }), NOW);
+    expect(view.accountChoices.map((c) => [c.accountId, c.dot])).toEqual([
+      ["acct-home", "off"],
+      ["acct-work", "ok"],
+    ]);
+  });
+
+  test("the Account sheet lists accounts some exclave reports, disabling the ones the pinned machine lacks", () => {
+    const view = deriveView(state({ relay: leader([mac, wsl]) }, { machine: "mac" }), NOW);
+    expect(view.accountChoices.map((c) => [c.accountId, c.disabled, c.sub])).toEqual([
+      ["acct-home", true, "not signed in on Mac"],
+      ["acct-work", false, "on Mac"],
+    ]);
+    const open = deriveView(state({ relay: leader([mac, wsl]) }, { account: "acct-home" }), NOW);
+    expect(open.accountChoices.find((c) => c.accountId === "acct-home")).toMatchObject({
+      selected: true,
+      sub: "on WSL",
+    });
   });
 });
 
@@ -572,6 +594,38 @@ describe("failedBody", () => {
     // It ran and ended: its dependents are the news, and "Nothing is running." would say less.
     expect(failedBody("session_failed")).toContain("exited with an error");
     expect(failedBody("session_failed")).toContain("Tasks waiting on it failed with it.");
+    // With its exit status (`failure.exit`), it says how the session ended.
+    expect(failedBody("session_failed", 137)).toStartWith(
+      "Its session was killed (SIGKILL), possibly out of memory, and reported no pull request.",
+    );
+    expect(failedBody("session_failed", 139)).toStartWith("Its session ended on SIGSEGV (status 139) and reported");
+    // A killed process writes nothing at the end; a plain exit's transcript says why.
+    expect(failedBody("session_failed", 137)).toEndWith("Its transcript on that machine stops where it ended.");
+    expect(failedBody("session_failed", 2)).toEndWith("Its transcript on that machine says why.");
+    expect(failedBody("session_failed")).toEndWith("Its transcript on that machine says why.");
+    expect(failedBody("session_failed", 1, "reported")).toStartWith(
+      "Its session exited with status 1 and did not report done.",
+    );
+    expect(failedBody("session_failed", 2)).toStartWith("Its session exited with status 2 and reported");
+    expect(failedBody("session_failed", 137)).toContain("Tasks waiting on it failed with it.");
+    expect(failedBody("repo_not_found", 137)).toBe("The machine refused the spawn. Nothing is running.");
+    // A refused continue is not "a refused spawn": it names what was missing and says nothing started.
+    expect(failedBody("not_continuable")).toStartWith("The machine couldn't continue the earlier session");
+    expect(failedBody("not_continuable")).toEndWith("Nothing new was started.");
+    expect(failedBody("not_continuable")).toContain("locked");
+    // The daemon's own reason says which cause it was.
+    expect(
+      failedBody("not_continuable", undefined, undefined, undefined, "its worktree is locked (on a usb disk)"),
+    ).toBe(
+      "The machine couldn't continue the earlier session: its worktree is locked (on a usb disk). Nothing new was started.",
+    );
+    // With the machine's OOM verdict (`failure.oomKill`), the SIGKILL is worded by it, either way.
+    expect(failedBody("session_failed", 137, undefined, true)).toBe(
+      "Its session was killed (SIGKILL), out of memory (the kernel's OOM killer fired as it died), and reported no pull request. Tasks waiting on it failed with it. Its transcript on that machine stops where it ended.",
+    );
+    expect(failedBody("session_failed", 137, undefined, false)).toStartWith(
+      "Its session was killed (SIGKILL), not by the kernel's OOM killer, and reported no pull request.",
+    );
   });
 });
 
@@ -601,21 +655,20 @@ describe("deriveReportedAvailability", () => {
     );
   });
 
-  test("the auto form's tiles say what is set", () => {
+  test("the authoring tiles say what is set", () => {
     const view = deriveView(
       state(
         {},
         {
-          auto: true,
           after: [{ task: "t-1", after: "merged" }],
-          batch: { id: "b", strategy: { mode: "parallel", max: 2 }, next: 3 },
+          batch: { id: "b", next: 3 },
         },
       ),
       NOW,
     );
     expect(view.afterTile).toMatchObject({ label: "AFTER", value: "1 task · merged" });
-    expect(view.batchTile).toMatchObject({ label: "BATCH", value: "#3 · up to 2 at once" });
-    const bare = deriveView(state({}, { auto: true }), NOW);
+    expect(view.batchTile).toMatchObject({ label: "BATCH", value: "#3" });
+    const bare = deriveView(state(), NOW);
     expect(bare.afterTile.value).toBe("None");
     expect(bare.batchTile.value).toBe("Off");
   });

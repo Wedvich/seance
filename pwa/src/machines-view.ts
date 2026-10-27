@@ -1,6 +1,10 @@
 import {
+  accountNameIn,
   CAPABILITIES,
+  knownAccounts,
+  type KnownAccount,
   effectivePct,
+  lastHeardAt,
   liveStatus,
   METRIC_NAMES,
   MIN_FREE_MIB,
@@ -132,38 +136,20 @@ export function formatUntil(at: number, now: number): string {
   return `resets in ${Math.floor(left / DAY)}d`;
 }
 
-/**
- * What an account is called on screen: its alias, else its email, else the
- * account half of `organizationUuid:accountUuid` shortened — enough to tell two
- * apart.
- */
-function accountName(accountId: string, email: string | undefined, alias?: string): string {
-  if (alias !== undefined) return alias;
-  if (email !== undefined) return email;
-  const account = accountId.split(":").at(-1) ?? accountId;
-  return `acct ${account.slice(0, 8)}`;
-}
-
 /** An account as the cards name it, for a screen that holds only its id (a pause's hold). */
 export function accountDisplayName(
-  machines: readonly Machine[],
+  known: readonly KnownAccount[],
   accountId: string,
   aliases: AccountAliases = {},
 ): string {
-  const alias = aliasOf(aliases, accountId);
-  for (const machine of machines) {
-    for (const exclave of machine.exclaves ?? []) {
-      if (exclave.accountId === accountId && exclave.email !== undefined) {
-        return accountName(accountId, exclave.email, alias);
-      }
-    }
-  }
-  return accountName(accountId, undefined, alias);
+  return accountNameIn(known, accountId, aliasOf(aliases, accountId));
 }
 
-function accountLabel(exclave: ExclaveInfo, aliases: AccountAliases): string {
+// Through `known`, not the row's own email: one account reports an email on one machine and none on
+// another, and has one label everywhere.
+function accountLabel(exclave: ExclaveInfo, aliases: AccountAliases, known: readonly KnownAccount[]): string {
   if (exclave.accountId !== null) {
-    return accountName(exclave.accountId, exclave.email, aliasOf(aliases, exclave.accountId));
+    return accountNameIn(known, exclave.accountId, aliasOf(aliases, exclave.accountId));
   }
   return exclave.authOk ? "signed in" : "not signed in";
 }
@@ -221,6 +207,7 @@ function machineCard(
   now: number,
   scheduler: SchedulerAvailability,
   aliases: AccountAliases,
+  known: readonly KnownAccount[],
 ): MachineCard {
   // Not drawn for an asleep card: its status is the one the relay kept, and its
   // last beat would read as current pressure beside "last seen". Its quota
@@ -233,7 +220,7 @@ function machineCard(
   ].filter((entry): entry is Gauge => entry !== null);
   const meta = machine.connected
     ? `${machine.platform}${status === undefined ? "" : ` · updated ${formatSeen(status.at * 1000, now)}`}`
-    : `asleep · last seen ${formatSeen(machine.lastSeen, now)}`;
+    : `asleep · last seen ${formatSeen(lastHeardAt(machine), now)}`;
 
   return {
     deviceId: machine.deviceId,
@@ -247,7 +234,7 @@ function machineCard(
     note: machineNote(machine),
     exclaves: (machine.exclaves ?? []).map((exclave, index) => ({
       id: exclave.id,
-      account: accountLabel(exclave, aliases),
+      account: accountLabel(exclave, aliases, known),
       sessions: status?.sess?.[index] ?? null,
     })),
     charts: servesMetrics(machine),
@@ -260,8 +247,6 @@ interface AccountGroup {
   readonly machines: Set<string>;
   /** Online hosts that serve `metrics`, in fleet order. */
   readonly charted: string[];
-  /** The first email any of its exclaves reports; one account has one. */
-  email: string | undefined;
 }
 
 function servesMetrics(machine: Machine): boolean {
@@ -342,6 +327,7 @@ function deriveAccounts(
   now: number,
   aliases: AccountAliases,
   fleetQuota: readonly FleetQuotaEntry[],
+  known: readonly KnownAccount[],
 ): AccountCard[] {
   const groups = new Map<string, AccountGroup>();
   for (const machine of machines) {
@@ -353,10 +339,8 @@ function deriveAccounts(
         exclaves: new Set(),
         machines: new Set(),
         charted: [],
-        email: undefined,
       };
       group.exclaves.add(exclave.id);
-      group.email ??= exclave.email;
       group.machines.add(machine.name);
       if (servesMetrics(machine) && !group.charted.includes(machine.deviceId)) group.charted.push(machine.deviceId);
       groups.set(exclave.accountId, group);
@@ -372,7 +356,7 @@ function deriveAccounts(
       accountId: group.accountId,
       alias: alias ?? null,
       title: [...group.exclaves].join(" · "),
-      detail: `${accountName(group.accountId, group.email, alias)} · on ${[...group.machines].join(", ")}`,
+      detail: `${accountNameIn(known, group.accountId, alias)} · on ${[...group.machines].join(", ")}`,
       bars: quota === undefined ? [] : quotaBars(quota.observation, now),
       observed: observedLine(quota, observer, now),
       historyFrom: historyHost(group, observer),
@@ -387,9 +371,10 @@ export function deriveMachines(
   aliases: AccountAliases = {},
   fleetQuota: readonly FleetQuotaEntry[] = [],
 ): MachinesView {
+  const known = knownAccounts(machines);
   return {
     scheduler: schedulerLine(machines, scheduler),
-    cards: machines.map((machine) => machineCard(machine, now, scheduler, aliases)),
-    accounts: deriveAccounts(machines, now, aliases, fleetQuota),
+    cards: machines.map((machine) => machineCard(machine, now, scheduler, aliases, known)),
+    accounts: deriveAccounts(machines, now, aliases, fleetQuota, known),
   };
 }

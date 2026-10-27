@@ -1,9 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import type { Machine, RelayState } from "@seance/shared";
-import { DEFAULT_FORM } from "../../../pwa/src/state.ts";
-import { resolveMachine as pwaResolveMachine, resolveRepo as pwaResolveRepo } from "../../../pwa/src/view.ts";
+import type { MachineStatus } from "@seance/shared";
 import {
   checkSubmit,
+  formatAge,
   initialValues,
   nextLastUsed,
   reconcile,
@@ -331,82 +330,36 @@ describe("nextLastUsed", () => {
   });
 });
 
-function relayOf(machines: readonly Machine[]): RelayState {
-  return {
-    status: "open",
-    rejection: null,
-    machines,
-    registrySize: machines.length,
-    ignored: 0,
-    unbound: 0,
-    skewed: 0,
-    settling: false,
-    registrySettled: true,
-    scheduler: { kind: "none" },
-    fleetQuota: [],
-  };
-}
+describe("formatAge", () => {
+  const now = 1_760_000_000_000;
+  const stamp = (at: number): MachineStatus => ({ at: at / 1000, scan: 0 });
 
-/**
- * pickMachine and pickRepo document themselves as the PWA's resolveMachine /
- * resolveRepo fallback policy, extended only by the named-default preference
- * (inert here: machineName is ""). Asserted the way credentials.test.ts pins
- * the daemon: import the PWA's own functions, feed both sides equivalent
- * inputs, and require the same choice. `reconcile` is the exported surface the
- * pickers sit behind.
- */
-describe("drift guard: fallback policy agrees with pwa/src/view.ts", () => {
-  function pwaMachine(overrides: Partial<Machine> = {}): Machine {
-    return { ...machine(), platform: "darwin", ...overrides };
-  }
-
-  function expectAgreement(
-    machines: readonly Machine[],
-    machineId: string | null,
-    repos: Readonly<Record<string, string>>,
-  ): void {
-    const chosen = pwaResolveMachine(relayOf(machines), machineId);
-    const repo = pwaResolveRepo(chosen, { ...DEFAULT_FORM, machineId, repos });
-    const lastUsed: LastUsed = { machineId, repos, model: "opus", effort: "medium", worktree: true };
-    const ours = reconcile(values({ machineId }), machines, { cached: machines, lastUsed, defaults });
-    expect(ours.values.machineId).toBe(chosen?.deviceId ?? null);
-    expect(ours.values.repo).toBe(repo?.name ?? null);
-  }
-
-  const twoRepos = [
-    { name: "api", path: "/a", defaultBranch: null },
-    { name: "www", path: "/w", defaultBranch: null },
-  ];
-
-  test("a remembered machine still present keeps its remembered repo", () => {
-    expectAgreement(
-      [pwaMachine(), pwaMachine({ deviceId: "device-2", name: "desktop", repos: twoRepos })],
-      "device-2",
-      { "device-2": "www" },
-    );
+  test("dates a live machine by its newer status beat, not its register time", () => {
+    const m = machine({ lastSeen: now - 3 * 86_400_000, status: stamp(now - 120_000) });
+    expect(formatAge([m], now)).toBe("2m ago");
   });
 
-  test("a remembered machine that is gone falls to the first connected", () => {
-    expectAgreement(
-      [pwaMachine({ connected: false }), pwaMachine({ deviceId: "device-2", name: "desktop" })],
-      "gone",
-      {},
-    );
+  test("falls back to lastSeen without a status", () => {
+    expect(formatAge([machine({ lastSeen: now - 3 * 3_600_000 })], now)).toBe("3h ago");
   });
 
-  test("nothing connected falls to the first listed", () => {
-    expectAgreement(
-      [pwaMachine({ connected: false }), pwaMachine({ deviceId: "device-2", connected: false })],
-      null,
-      {},
-    );
+  test("takes the newest across machines", () => {
+    const old = machine({ lastSeen: now - 5 * 86_400_000 });
+    const fresh = machine({ deviceId: "d2", lastSeen: now - 10 * 60_000 });
+    expect(formatAge([old, fresh], now)).toBe("10m ago");
   });
 
-  test("a remembered repo that is gone falls to the machine's first", () => {
-    expectAgreement([pwaMachine({ repos: twoRepos })], "device-1", { "device-1": "vanished" });
+  test("buckets: moments, minutes, hours, days", () => {
+    const at = (ms: number): string => formatAge([machine({ lastSeen: now - ms })], now);
+    expect(at(59_999)).toBe("moments ago");
+    expect(at(60_000)).toBe("1m ago");
+    expect(at(59 * 60_000)).toBe("59m ago");
+    expect(at(60 * 60_000)).toBe("1h ago");
+    expect(at(23 * 3_600_000)).toBe("23h ago");
+    expect(at(24 * 3_600_000)).toBe("1d ago");
   });
 
-  test("an empty registry resolves nothing on either side", () => {
-    expectAgreement([], "device-1", {});
+  test("a future timestamp (clock skew) reads as moments ago", () => {
+    expect(formatAge([machine({ lastSeen: now + 60_000 })], now)).toBe("moments ago");
   });
 });

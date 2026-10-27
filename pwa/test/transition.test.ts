@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Task, TaskState } from "@seance/shared";
-import { DEFAULT_FORM, type Verdict } from "../src/state.ts";
+import { DEFAULT_FORM, RESCAN_IDLE, type Verdict } from "../src/state.ts";
 import {
   screenKey,
   TRANSITION_KINDS,
@@ -34,8 +34,7 @@ function state(overrides: Partial<AppState> = {}): AppState {
     machines: false,
     history: null,
     spawning: false,
-    rescanning: false,
-    rescan: "idle",
+    rescan: RESCAN_IDLE,
     verdict: null,
     preview: null,
     sessions: {},
@@ -56,8 +55,8 @@ const queued = (id: string, taskState: TaskState): Verdict => {
   return { kind: "queued", task };
 };
 
-const OK: Verdict = { kind: "ok", window: "seance-1" };
-const OTHER: Verdict = { kind: "ok", window: "seance-2" };
+const OK: Verdict = { kind: "unqueued", message: "one", mayHaveLanded: false };
+const OTHER: Verdict = { kind: "unqueued", message: "two", mayHaveLanded: false };
 
 const kind = (from: Partial<AppState>, to: Partial<AppState>): string | null =>
   transitionKind(screenKey(state(from)), screenKey(state(to)));

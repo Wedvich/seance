@@ -97,7 +97,7 @@ This first deploy is by hand; afterwards CI redeploys the relay on every push to
 and a CI deploy leaves it alone — as does `SCHEDULER_LEADERS`, the second secret,
 set in step 4 once your machines have ids. Until it is set no machine leads the
 scheduler, so **Auto** queues the task and it waits there until one does (no
-preview, no placement); direct spawns don't need it.
+preview, no placement); `seanced spawn --now` doesn't need it.
 
 Note the `<subdomain>` in the printed URL — steps 3 and 4 derive their URLs
 from it.
@@ -320,17 +320,16 @@ checkout's `daemon/src/main.ts session-event` with `bun` from PATH, so it needs 
 ### From the phone
 
 Type what the session should do — or leave the prompt blank to start an empty one —
-then pick where it runs. Four tiles open pickers: **machine**, **repository**,
-**model** (Fable / Opus / Sonnet / Haiku), and **effort** (Low through Max). **Fresh
-worktree** is on by default; switching it off runs the session in the repo as it
-stands. Then start it.
+then pick where it runs. Tiles open pickers: **machine**, **account**, **repository**,
+**model** (Fable / Opus / Sonnet / Haiku), and **effort** (Low through Max), plus the
+authoring ones below. **Fresh worktree** is on by default; switching it off runs the
+session in the repo as it stands. Then queue it.
 
-The verdict names the tmux window it created, and from there you continue the session
-in the Claude app like any other. Two things keep you from spawning duplicates: the
-header counts sessions across every machine (`2 online · 1 asleep · 3 sessions`), and
-the footer counts what is already running on the machine you picked. The repo list
-comes from that daemon's last scan — **↻ Rescan repos** in the repository picker
-refreshes it, and a spawn that cannot find its repo offers to rescan and retry.
+Every spawn from the phone is a queued task: the app never starts a session on a machine
+itself. The verdict names the task and follows it until it is running, then you continue
+the session in the Claude app like any other. The header counts sessions across every
+machine (`2 online · 1 asleep · 3 sessions`), and the footer says who places the task —
+the scheduler, or the machine you pinned.
 
 A machine you have retired keeps its place in the picker with a stale last-seen —
 the relay never expires an entry. The bin on an offline row deletes it there, so it
@@ -340,21 +339,29 @@ daemon connects again. `seanced uninstall` deletes it for you on the way out; un
 
 There is no title field: the daemon names the tmux window after the prompt.
 
-**Auto** at the top of the machine picker lets the scheduler choose: the repository
-picker then lists repos by origin, across every machine that has a clone, and a
-placement preview under the tiles says where it would start and why each other
-machine lost. **Queue on auto** puts the task in the relay's queue, and the verdict
-follows it until it is running, with the decision behind it. With no scheduler leading
+The machine's repo list comes from its daemon's last scan. **↻ Rescan** sits on that
+machine's row in the Machine picker (offline machines can't answer it, and one rescan runs
+at a time); it refreshes the list and the row shows when it last scanned.
+
+The **Machine** and **Account** pickers each start on **Auto**, which lets the scheduler
+choose; picking a machine or an account pins the task to it. The repository picker lists
+repos by origin, across every machine that has a clone (narrowed to the picked machine and
+account), and with both pickers on Auto a placement preview under the tiles says where it
+would start and why each other machine lost. **Queue** (or **Queue on <machine>**) puts the
+task in the relay's queue, and the queued verdict
+shows the decision behind it, and why it waits while it does. With no scheduler leading
 (no machine on the relay's `SCHEDULER_LEADERS` is connected — step 4), or one that
 can't be verified (its registry entry doesn't open with your key), the task still
 queues and waits there until one does; only the placement preview needs a leader.
-Auto is greyed only when the app isn't connected to the relay. **Queue** (a column on
+Queuing is greyed only when the app isn't connected to the relay. A pinned task waits for
+its machine or account when it is offline or over a limit, and says why; pinning an
+account needs a leader that supports it, and says so otherwise. The **Queue screen** (a column on
 desktop, in the header menu on a phone) shows everything queued: what needs you, what
 is running or waiting, and what finished, with **Cancel** and **Mark done** (each takes
 a second tap when it would end a running session), and **Pause** / **Resume**. The app
 pauses the whole queue only; a hold on one account shows with its own **Resume**, but
-no client sets one yet. Picking a machine directly always works, with or without a
-scheduler.
+no client sets one yet. `seanced spawn --now` starts a session directly on a machine,
+with or without a scheduler.
 
 Upgrading into the queue: until the machine leading the scheduler runs a build with
 it, tasks an updated app or `seanced mcp` queues sit unrun, and an older app's
@@ -379,11 +386,15 @@ doesn't check out with your key.
 
 ```sh
 seanced spawn seance -t "flaky test" -p "fix the flaky spawn test"
+#   task 3f2a…: queued — the scheduler picks the machine; needs the relay, and a PSK this shell or its daemon holds
+seanced spawn --machine here seance -p "fix the flaky spawn test"
+#   pinned to this machine: it waits for a slot here rather than going elsewhere
+seanced spawn --account work --not here seance -p "rerun the slow suite"
+#   pinned to an account (alias, email or id) and kept off this machine
+seanced spawn --now seance -t "flaky test" -p "fix the flaky spawn test"
 #   spawned 'flaky test' (~/repos/seance/.claude/worktrees/flaky-test)
-
-seanced spawn seance --here   # run in the checkout as it stands, no worktree
-seanced spawn --auto seance -p "fix the flaky spawn test"
-#   task 3f2a…: queued — the scheduler picks the machine; needs this shell's PSK and the relay
+seanced spawn --now seance --here   # run in the checkout as it stands, no worktree
+seanced continue 3f2a…        # resume a failed (e.g. OOM-killed) task's conversation in its worktree, as a new task (--prompt <text> to add a note)
 seanced sessions              # running claude windows: id, window, repo, path
 seanced despawn %12           # end one by id: asks claude to exit, kills the pane after ~5s (--force: now)
 seanced reap --dry-run        # what clean-up would remove: worktrees, branches, dead windows
@@ -392,15 +403,22 @@ seanced doctor                # preflight config, binaries, roots, relay, servic
 seanced help                  # every command
 ```
 
-`<repo>` is a _name_, matched exactly against the cached scan set and never joined as
-a path — so it is whatever `seanced scan` calls the repo (a bare basename, or
-`parent/base` when two collide). Bare words after it become the prompt, which makes
+With `--now`, `<repo>` is a _name_, matched exactly against the cached scan set and never
+joined as a path — so it is whatever `seanced scan` calls the repo (a bare basename, or
+`parent/base` when two collide); a queued spawn resolves a clone name or origin across the
+fleet, as below. Bare words after it become the prompt, which makes
 `-p` optional: `seanced spawn seance fix the flaky test` works.
 
-`--auto` queues the spawn for the scheduler instead of running it here, as the app's and
-MCP's `auto` do: `<repo>` is then a clone name or origin from any machine in the fleet,
-and the task waits in the relay's queue until a leader places it. It is the one form that
-needs the relay and a PSK this shell can read; the app's queue shows where it lands.
+`seanced continue` queues a new task like a spawn does, so the scheduler tracks it. Running
+`claude --continue` by hand in the worktree works too, but séance does not see that session.
+
+A spawn queues for the scheduler, as the app's and MCP's do: `<repo>` is a clone name or
+origin from any machine in the fleet, and the task waits in the relay's queue until a leader
+places it. It needs the relay: it reads the PSK itself, or on a box where only the daemon can
+(below) asks the running daemon to enqueue for it. The app's queue shows where it lands.
+`--now` is the direct path: it spawns on this machine right away, with no relay, key, leader or
+daemon, for a fleet nobody leads, a keyless box or debugging over SSH; it takes no pin flags.
+(`--auto`, the old spelling of the default, is still accepted and does nothing.)
 
 Worktree mode, the default, puts the session in `.claude/worktrees/<slug>` on a
 `worktree-<slug>` branch. The daemon fetches `origin/<default>` first (5s at most),
@@ -422,8 +440,9 @@ linked worktree only when no tmux pane is inside it, it is clean, its branch is 
 (including squash-merged — checked locally, no `gh`), and nothing has touched it for a
 week (`--min-age-days` to change). It deletes merged branches, closes séance windows
 that are dead or sitting on claude's "keep or remove this worktree?" prompt, and
-reports what it left: dirty worktrees, branches whose upstream is gone but which hold
-unpushed commits, and live sessions with the id `despawn` takes. Where git runs
+reports what it left: dirty worktrees, branches and worktrees whose upstream is gone but
+which hold unpushed commits, worktrees on a never-pushed branch, detached worktrees with
+commits on no branch, a count of worktrees on a branch whose upstream is still live, and live sessions with the id `despawn` takes. Where git runs
 `core.fsmonitor=true` daemons (macOS), it also stops every one with no tmux pane in its
 checkout and an hour unused, and any on a directory gone or no longer a repo, reporting
 the memory freed; git starts a new one when a repo next needs it. Every deleted branch
@@ -438,33 +457,39 @@ versus the one on disk, which is how you spot a `git pull` that still needs a
 
 With `seanced mcp install` done (step 6), a local Claude Code can list machines,
 query running sessions, and spawn and end sessions on other machines through the relay:
-`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`, `queue_batch` (several tasks with a shared strategy and dependencies between them) and, for a session settling its own task, `report_task_done`. The server reads the daemon's own
+`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`, `continue_task` (resume a failed task's session in its worktree, as a new task), `queue_batch` (several tasks queued as one group, ordered only by the dependencies between them) and, for a session settling its own task, `report_task_done`. The server reads the daemon's own
 config and speaks to the relay exactly like the phone does.
 
-`spawn_session` with `machine: "auto"` queues the task in the relay, as the app's
-**auto** does: it answers at once with the task id and "queued", and `get_queue` lists
+`spawn_session` always queues the task in the relay, as the app's **auto** does: it answers
+at once with the task id and "queued", and `get_queue` lists
 the scheduler's recent tasks with where each landed and why, and any pauses in force.
 `repo` is a repo name from `list_machines` (or its origin, when the name means different
-repos on different machines). `pin: { machine?, exclave? }` restricts where it may run — the
+repos on different machines). `machine` is optional: a machine name or deviceId pins the task
+there (`"auto"`, or leaving it out, pins nothing; it is the same as `pin.machine`, and giving
+both is refused). `pin: { machine?, account? }` restricts where it may run — the
 task waits for a slot there rather than going elsewhere — and `repo` is then the name as the
-pinned machine lists it; an unknown or ambiguous machine, an unknown exclave, or a machine whose
-daemon reports no exclaves is refused. The queue is the relay's, so a task waiting for capacity
+pinned machine (or the account's clones) list it; `account` is an alias, an email or an
+accountId, and the answer names the account it resolved to. `avoid: [machine, …]` (at most 4)
+keeps it off machines. An unknown or ambiguous machine or account, an account no machine reports
+signed in, or a machine whose daemon reports no exclaves is refused; an account pin or `avoid`
+also needs a scheduler leader on a build that routes on them. The queue is the relay's, so a task waiting for capacity
 survives leadership moving — every relay deploy and daemon self-update — and so does one
 queued while no scheduler leads: the next leader runs it.
-It needs the key in the MCP process itself: on a box where only the daemon can read
-it (below), `auto` is unavailable.
+On a box where only the daemon can read the key (below), a spawn goes through the daemon.
 
 On a Linux box whose PSK is TPM-sealed and delivered only to the daemon's system unit,
 the server can't read the key — so it asks the running daemon to make those requests
-for it, over the same local socket, and the key never leaves the daemon. Every tool but
-`auto` and `get_queue` still works for every machine, with the same registration; `seanced doctor` says which
+for it, over the same local socket, and the key never leaves the daemon. Every tool,
+`spawn_session`, `get_queue` and `cancel_task` included, still works for every machine, with the same
+registration; a server that started before the daemon was updated keeps the old "needs this machine's own
+key" answer for spawns until its Claude session restarts. `seanced doctor` says which
 path MCP takes from your shell. Only such a daemon brokers: wherever the server can
 read the key itself, the daemon runs no broker, so nothing gains fleet reach without
 the key. See [docs/psk.md](docs/psk.md#mcp-on-a-credential-delivered-box).
 
-Naming _this_ machine skips the relay entirely: the request goes straight to the
-local daemon over a unix socket in the state directory, so spawning where you are
-sitting costs no round trip and works with the relay down. It is the same daemon,
+Naming _this_ machine in `get_sessions` or `despawn_session` skips the relay entirely: the request goes straight to the
+local daemon over a unix socket in the state directory, so it costs no round trip and works with the relay down.
+A spawn never takes it, since it is a queued task. It is the same daemon,
 backend and audit trail either way — the log says `origin=local` instead of
 `origin=relay`, and `seanced status` and `doctor` report whether the socket is up.
 If a remote machine shares this one's name, local wins; reach the remote one by its

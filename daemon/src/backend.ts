@@ -72,8 +72,17 @@ export interface SessionBackend {
    * `taskId` must survive the daemon (a restarted one still refuses its
    * duplicate) and be reported back by `sessions`; a duplicate throws
    * `task_running` carrying the running session's id.
+   *
+   * `continuation` is the frontend's own resolution of a `mode: "continue"` request's
+   * worktree, from its launch ledger and already checked — it never rides the wire
+   * request. A backend that cannot continue a session throws
+   * `SpawnFailure("not_continuable")`.
    */
-  readonly spawn: (request: SpawnRequest, repos: readonly RepoEntry[]) => Promise<SpawnOutcome>;
+  readonly spawn: (
+    request: SpawnRequest,
+    repos: readonly RepoEntry[],
+    continuation?: { readonly path: string },
+  ) => Promise<SpawnOutcome>;
   readonly sessions: (repos: readonly RepoEntry[]) => Promise<readonly SessionEntry[]>;
   /**
    * Ends the session `id` names — a `SessionEntry.id` this backend handed out,

@@ -566,6 +566,220 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
   });
 });
 
+// A scheduler continuation resumes a failed task's conversation in the worktree its
+// launch ledger noted (DESIGN.md, Daemon, "Continuing a failed task"). The handler
+// resolves and checks the path; this is the spawn half, against a real worktree and tmux.
+describe("spawnSession continuing a failed task's session", () => {
+  const OLD = "cont-old";
+  let seq = 0;
+
+  /** A linked worktree under the clone's `.claude/worktrees/`, as claude's `--worktree` leaves one. */
+  async function makeWorktree(): Promise<{ readonly name: string; readonly path: string }> {
+    seq += 1;
+    const name = `cont-${seq}`;
+    const raw = join(fixture.repoPath, ".claude", "worktrees", name);
+    await addWorktree(fixture.repoPath, raw);
+    return { name, path: await realpath(raw) };
+  }
+
+  async function dropWorktree(wt: { readonly name: string; readonly path: string }): Promise<void> {
+    // Twice: a locked worktree takes `--force` twice, and an unlocked one takes the first.
+    await git(fixture.repoPath, ["worktree", "remove", "--force", "--force", wt.path]);
+    await git(fixture.repoPath, ["branch", "-D", `wt-${wt.name}`]);
+  }
+
+  const continuing = (wt: { readonly path: string }, extra: Partial<SpawnRequest> = {}): Promise<SpawnOutcome> =>
+    spawnSession(
+      {
+        repo: "myrepo",
+        mode: "continue",
+        title: "Cont",
+        taskId: `cont-new-${seq}`,
+        continues: OLD,
+        client: "scheduler",
+        ...extra,
+      },
+      repos,
+      WAIT,
+      { path: wt.path },
+    );
+
+  const lockedOf = async (wt: { readonly path: string }): Promise<boolean> => {
+    const listed = (await git(fixture.repoPath, ["worktree", "list", "--porcelain"])).stdout;
+    const record = listed.split("\n\n").find((r) => r.includes(`worktree ${wt.path}`));
+    return record?.includes("\nlocked") === true;
+  };
+
+  test("resumes with --continue in the worktree, never --worktree; the pane is that directory, tagged with the new task", async () => {
+    const wt = await makeWorktree();
+    await rm(stub.argvFile, { force: true });
+    await rm(stub.stdinFile, { force: true });
+    const claudeConfig = join(home, ".claude.json");
+    await Bun.write(claudeConfig, JSON.stringify({ projects: {} }));
+    await fixture.advanceOrigin();
+    const beforeTracking = await headOf(fixture.repoPath, "origin/main");
+    let outcome: SpawnOutcome | undefined;
+    try {
+      outcome = await continuing(wt, { title: "Cont A", prompt: "the tests still fail" });
+      expect(outcome.path).toBe(wt.path);
+      expect(outcome.window).toBe("Cont A");
+      const argv = await stub.argv();
+      expect(argv).toContain("--continue");
+      expect(argv).not.toContain("--worktree");
+      // Before the terminator: after it, claude would read it as part of the prompt.
+      expect(argv.indexOf("--continue")).toBeLessThan(argv.indexOf("--"));
+      expect(argv.at(-1)).toBe("--");
+      // The name is the worktree's: no new one is minted for a session that already has a history.
+      expect(argv[argv.indexOf("-n") + 1]).toBe(wt.name);
+
+      // Told what happened, and the user's note, over stdin: never argv.
+      const seed = await stub.stdin();
+      expect(seed).toStartWith(`This session was resumed by séance in the same git worktree at ${wt.path}`);
+      expect(seed).toContain("processes it started in the background may still be running");
+      expect(seed).toEndWith("\n\nFrom the user: the tests still fail\n");
+      expect(argv.join("\0")).not.toContain("still fail");
+
+      const listed = await waitForSession("Cont A");
+      expect(listed?.path).toBe(wt.path);
+      expect(listed?.taskId).toBe(`cont-new-${seq}`);
+      // The worktree's own path is what claude's dialog asks about.
+      expect((await trustOf(claudeConfig))[wt.path]?.hasTrustDialogAccepted).toBe(true);
+      // Nothing is fetched: the session picks up what the dead one left, not a fresh base.
+      expect(await headOf(fixture.repoPath, "origin/main")).toBe(beforeTracking);
+    } finally {
+      if (outcome !== undefined) await killWindow(outcome.window);
+      await dropWorktree(wt);
+    }
+  });
+
+  test("with no note the seed is the preamble alone — a resume is always seeded, so claude's stale-resume dialog never opens", async () => {
+    const wt = await makeWorktree();
+    await rm(stub.stdinFile, { force: true });
+    let outcome: SpawnOutcome | undefined;
+    try {
+      outcome = await continuing(wt, { title: "Cont Quiet" });
+      const seed = await stub.stdin();
+      expect(seed).toStartWith("This session was resumed by séance");
+      expect(seed).toEndWith("carry on where it left off.\n");
+      expect(seed).not.toContain("From the user");
+    } finally {
+      if (outcome !== undefined) await killWindow(outcome.window);
+      await dropWorktree(wt);
+    }
+  });
+
+  test("refuses, launching nothing, when the worktree is gone", async () => {
+    const wt = await makeWorktree();
+    await dropWorktree(wt);
+    const refused = await continuing(wt, { title: "Cont Gone" }).catch((err: unknown) => err);
+    expect(refused).toMatchObject({ code: "not_continuable", message: expect.stringContaining("is gone") });
+    expect(await tmuxOk(["list-windows", "-t", "main", "-F", "#{window_name}"])).not.toContain("Cont Gone");
+  });
+
+  test("refuses while the continued task's own session still runs, and while any session is open in the worktree", async () => {
+    const wt = await makeWorktree();
+    // The old task's pane, tagged with its id, elsewhere (here mode, in the clone).
+    const old = await spawnSession({ repo: "myrepo", mode: "here", title: "Old Run", taskId: OLD }, repos, WAIT);
+    try {
+      const running = await continuing(wt, { title: "Cont Dup" }).catch((err: unknown) => err);
+      expect(running).toMatchObject({ code: "not_continuable", message: expect.stringContaining("still running") });
+      await killWindow(old.window);
+
+      // A session in the worktree under another task id, or none at all: a second claude would corrupt its history.
+      await tmuxOk(["new-window", "-d", "-t", "main:", "-c", wt.path, "-n", "Occupant", stub.ok]);
+      await pollUntil(async () => (await waitForSession("Occupant")) !== undefined, "occupant registered");
+      const open = await continuing(wt, { title: "Cont Open" }).catch((err: unknown) => err);
+      expect(open).toMatchObject({
+        code: "not_continuable",
+        message: expect.stringContaining("is open in its worktree"),
+      });
+      expect(await tmuxOk(["list-windows", "-t", "main", "-F", "#{window_name}"])).not.toContain("Cont Open");
+    } finally {
+      await killWindow("Occupant");
+      await killWindow(old.window);
+      await dropWorktree(wt);
+    }
+  });
+
+  test("two continuations of one worktree, under two task ids, start exactly one session", async () => {
+    const wt = await makeWorktree();
+    const results = await Promise.allSettled(
+      ["Twin X", "Twin Y"].map((title, i) => continuing(wt, { title, taskId: `cont-twin-${i}` })),
+    );
+    try {
+      expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+      const refused = results.find((r) => r.status === "rejected");
+      expect(refused?.status === "rejected" ? refused.reason : null).toMatchObject({ code: "not_continuable" });
+    } finally {
+      await Promise.all(results.map((r) => (r.status === "fulfilled" ? killWindow(r.value.window) : undefined)));
+      await dropWorktree(wt);
+    }
+  });
+
+  describe("a lock on the worktree", () => {
+    // Claude's own wording (2.1.310 adds the start time off Windows); a pid no machine has.
+    test.each([
+      ["with its start time", (name: string) => `claude session ${name} (pid 99999999 start 646904935)`],
+      ["without one (Windows)", (name: string) => `claude session ${name} (pid 99999999)`],
+    ])("a dead claude's, %s, is released and the session continues", async (_form, reason) => {
+      const wt = await makeWorktree();
+      await git(fixture.repoPath, ["worktree", "lock", "--reason", reason(wt.name), wt.path]);
+      let outcome: SpawnOutcome | undefined;
+      try {
+        expect(await lockedOf(wt)).toBe(true);
+        outcome = await continuing(wt, { title: "Cont Stale" });
+        expect(outcome.registered).toBe(true);
+        expect(await lockedOf(wt)).toBe(false);
+      } finally {
+        if (outcome !== undefined) await killWindow(outcome.window);
+        await dropWorktree(wt);
+      }
+    });
+
+    test("anyone else's, and a live claude's, is refused and left in place", async () => {
+      const wt = await makeWorktree();
+      try {
+        for (const reason of [
+          "on a usb disk",
+          "",
+          `claude session ${wt.name} (pid ${process.pid})`,
+          `claude session ${wt.name} (pid ${process.pid} start 646904935)`,
+        ]) {
+          // oxlint-disable-next-line no-await-in-loop -- one lock at a time on the one worktree
+          await git(fixture.repoPath, ["worktree", "lock", ...(reason === "" ? [] : ["--reason", reason]), wt.path]);
+          // oxlint-disable-next-line no-await-in-loop
+          const refused = await continuing(wt, { title: "Cont Locked" }).catch((err: unknown) => err);
+          expect(refused).toMatchObject({ code: "not_continuable", message: expect.stringContaining("is locked") });
+          // oxlint-disable-next-line no-await-in-loop
+          expect(await lockedOf(wt)).toBe(true);
+          // oxlint-disable-next-line no-await-in-loop
+          await git(fixture.repoPath, ["worktree", "unlock", wt.path]);
+        }
+        expect(await tmuxOk(["list-windows", "-t", "main", "-F", "#{window_name}"])).not.toContain("Cont Locked");
+      } finally {
+        await dropWorktree(wt);
+      }
+    });
+  });
+
+  test("an unknown repo is repo_not_found, and a continuation the backend was handed no path for is not_continuable", async () => {
+    const wt = await makeWorktree();
+    try {
+      expect(await continuing(wt, { repo: "nope" }).catch((err: unknown) => err)).toMatchObject({
+        code: "repo_not_found",
+      });
+      const bare = await spawnSession(
+        { repo: "myrepo", mode: "continue", taskId: "cont-bare", continues: OLD, client: "scheduler" },
+        repos,
+        WAIT,
+      ).catch((err: unknown) => err);
+      expect(bare).toMatchObject({ code: "not_continuable" });
+    } finally {
+      await dropWorktree(wt);
+    }
+  });
+});
+
 // Only the branches the spawn case above cannot reach: an absent tag, a tag
 // needing normalisation, and unsuffixable ones — blank or with no ASCII
 // alphanumerics — that must not render as empty parens or slugify's "session"
@@ -695,15 +909,15 @@ describe("wire input cannot escape the repo set or the shell", () => {
   });
 });
 
-// docs/scheduler.md M4: `--auto` is the one CLI form that dials the relay, so a
-// direct `seanced spawn` must still work with the relay unreachable.
+// docs/scheduler.md M4: a plain `seanced spawn` queues through the relay, so
+// `seanced spawn --now` is the form that must still work with the relay unreachable.
 describe("seanced spawn (the CLI, as a subprocess)", () => {
-  test("a direct spawn never dials the relay, audited origin=cli", async () => {
+  test("spawn --now never dials the relay, audited origin=cli", async () => {
     const configDir = join(base, "cli-config");
     const stateDir = join(base, "cli-state");
     await mkdir(configDir, { recursive: true });
     await mkdir(stateDir, { recursive: true });
-    // A relay that counts any request or upgrade: a direct spawn must never dial it.
+    // A relay that counts any request or upgrade: spawn --now must never dial it.
     let dialled = 0;
     const relay = Bun.serve({
       hostname: "127.0.0.1",
@@ -725,7 +939,7 @@ describe("seanced spawn (the CLI, as a subprocess)", () => {
       }),
     );
     const mainPath = fileURLToPath(new URL("../src/main.ts", import.meta.url));
-    const proc = Bun.spawn([process.execPath, mainPath, "spawn", "myrepo", "--here", "-t", "No Relay"], {
+    const proc = Bun.spawn([process.execPath, mainPath, "spawn", "--now", "myrepo", "--here", "-t", "No Relay"], {
       env: { ...process.env, SEANCE_CONFIG_DIR: configDir, SEANCE_STATE_DIR: stateDir, HOME: home },
       stdout: "pipe",
       stderr: "pipe",

@@ -1,5 +1,6 @@
 import {
   AT_REST_OPS,
+  PIN_SENTINEL,
   SCHEDULER_ID,
   STORE_PREFIXES,
   type Envelope,
@@ -44,7 +45,19 @@ export function withReportInstruction(prompt: string): string {
  * produce, or every reader refuses it (`bindTaskRecord`).
  */
 export function sealTaskRecord(key: CryptoKey, from: string, record: TaskRecord): Promise<Envelope> {
-  return sealAtRest(key, { to: SCHEDULER_ID, from }, AT_REST_OPS.task, record);
+  return sealAtRest(key, { to: SCHEDULER_ID, from }, AT_REST_OPS.task, taskRecordAtRest(record));
+}
+
+/**
+ * The record as it is sealed: a spec carrying `pin.account` or `avoid` gains
+ * `pin.exclave: PIN_SENTINEL`, which an older leader's parser refuses, so it
+ * holds the record unreadable instead of re-sealing it without them. Here, in
+ * the one sealer, so the app's create and every leader write emit it alike.
+ */
+export function taskRecordAtRest(record: TaskRecord): unknown {
+  const { spec } = record.task;
+  if (spec.pin?.account === undefined && spec.avoid === undefined) return record;
+  return { ...record, task: { ...record.task, spec: { ...spec, pin: { ...spec.pin, exclave: PIN_SENTINEL } } } };
 }
 
 /**

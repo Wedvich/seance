@@ -1,5 +1,9 @@
 import {
+  accountNameIn,
+  knownAccounts,
+  lastHeardAt,
   reasonText,
+  sessionExit,
   taskFailureText,
   type Candidate,
   type Decision,
@@ -8,6 +12,7 @@ import {
   type Score,
   type Task,
 } from "@seance/shared";
+import { sleepingMachine } from "./asleep.ts";
 import { failedBody, formatSeen } from "./view.ts";
 
 /**
@@ -111,7 +116,7 @@ function line(
     // Reasons a leader a version ahead minted are dropped at parse: say so rather than show none.
     const why =
       candidate.rejected.length === 0
-        ? "rejected for a reason this app can't read — update it"
+        ? "rejected for a reason this app can't read; the leader may run another version"
         : candidate.rejected.map(reasonText).join(", ");
     return { id, where: where(candidate), outcome, why, quota };
   }
@@ -188,9 +193,11 @@ export function describeDecision(
 /** What became of a queued task, in one line: the verdict's headline. */
 export function taskHeadline(task: Task, machines: readonly Machine[], now: number): string {
   const at = task.assignment ?? task.reservation;
-  const machine =
-    at === undefined ? undefined : (machines.find((m) => m.deviceId === at.deviceId)?.name ?? at.deviceId);
+  const listed = at === undefined ? undefined : machines.find((m) => m.deviceId === at.deviceId);
+  const machine = at === undefined ? undefined : (listed?.name ?? at.deviceId);
   const place = at === undefined ? "" : ` on ${machine ?? ""} · ${at.exclave}`;
+  const asleep = sleepingMachine(task, machines);
+  const slept = asleep === undefined ? "" : ` — its machine went to sleep ${formatSeen(lastHeardAt(asleep), now)}`;
   switch (task.state) {
     case "queued":
       return "Queued — waiting for the scheduler.";
@@ -199,12 +206,15 @@ export function taskHeadline(task: Task, machines: readonly Machine[], now: numb
     case "ready":
       return "Queued — waiting for a machine.";
     case "reserved":
-      return `Starting${place}…`;
+      return asleep === undefined ? `Starting${place}…` : `Starting${place}${slept}.`;
     case "running":
-      return `It's running${place}.`;
+      return `It's running${place}${slept}.`;
     case "needs-input":
-      return `It's waiting for input${place}.`;
+      return `It's waiting for input${place}${slept}.`;
     case "lost":
+      // The leader's `lost` is the sleep itself; "Lost" stays for a machine back or gone.
+      if (asleep !== undefined) return `Asleep${place}${slept}.`;
+      if (listed !== undefined) return `Lost${place} — its machine is back but hasn't answered for it yet.`;
       return task.absentSince === undefined
         ? `Lost${place} — its machine stopped answering.`
         : `Lost${place} — its machine went away ${formatSeen(task.absentSince, now)}.`;
@@ -228,7 +238,12 @@ export function taskHeadline(task: Task, machines: readonly Machine[], now: numb
       if (task.failure?.code === "dispatch_unconfirmed") return `Never confirmed${place} — it may have started there.`;
       if (task.failure?.code === "lost_expired") return `Given up${place} — its session may still be running there.`;
       if (task.failure?.code === "merge_expired") return "No merge seen for its PR — the scheduler gave up waiting.";
-      if (task.failure?.code === "session_failed") return `Its session exited with an error${place}, with no PR.`;
+      if (task.failure?.code === "session_failed") {
+        // No `exit` from an older leader: how it ended is unknown, and `sessionExit` says so.
+        const { clause, hint } = sessionExit(task.failure.exit, task.failure.oomKill);
+        const lacked = task.spec.until === "reported" ? "with no done report" : "with no PR";
+        return `Its session ${clause}${place}${hint === undefined ? "" : `, ${hint}`}, ${lacked}.`;
+      }
       // A scheduler-set failure never reached a machine; only a daemon refusal "didn't take" there.
       return task.failure !== undefined && taskFailureText(task.failure.code) !== null
         ? "It won't run."
@@ -236,6 +251,63 @@ export function taskHeadline(task: Task, machines: readonly Machine[], now: numb
     case "cancelled":
       return task.leftRunning === true ? `Cancelled — its session may still be running${place}.` : "Cancelled.";
   }
+}
+
+/** How many rejected places a wait reason names before "+N more". */
+const WAITING_LIMIT = 3;
+
+/**
+ * Why a ready task is still waiting, from its decision: each place that took it
+ * out and the reasons, the clause `reasonText` words. Places the pin or the
+ * avoid list rules out (`pin_mismatch`, `avoided`) are left out whole — the pin is the ask, not news.
+ * Null with no decision yet, or one that chose a place.
+ */
+export function waitingText(task: Task): string | null {
+  const { decision } = task;
+  if (task.state !== "ready" || decision === undefined || decision.chosen !== null) return null;
+  const places = decision.candidates
+    // A place the pin or the avoid list rules out is moot whatever else is wrong with it (an offline machine
+    // the task was never going to use is not news).
+    .filter((candidate) => !candidate.rejected.some((r) => r.code === "pin_mismatch" || r.code === "avoided"))
+    .map((candidate) => ({ where: where(candidate), why: candidate.rejected.map(reasonText) }))
+    .filter((place) => place.why.length > 0)
+    .map((place) => `${place.where}: ${place.why.join(", ")}`);
+  if (places.length === 0) return null;
+  const more = places.length - WAITING_LIMIT;
+  return `${places.slice(0, WAITING_LIMIT).join("; ")}${more > 0 ? `; +${more} more` : ""}`;
+}
+
+/** A machine's registry name, else a short id: a forgotten machine still reads as something. */
+function machineLabel(machines: readonly Machine[], deviceId: string): string {
+  return machines.find((m) => m.deviceId === deviceId)?.name ?? deviceId.slice(0, 8);
+}
+
+/** "Avoids <machine>, <machine>" (capped like `waitingText`) for a task with an avoid list; null otherwise. */
+export function avoidLine(task: Task, machines: readonly Machine[]): string | null {
+  const avoid = task.spec.avoid ?? [];
+  if (avoid.length === 0) return null;
+  const labels = avoid.slice(0, WAITING_LIMIT).map((id) => machineLabel(machines, id));
+  const more = avoid.length - WAITING_LIMIT;
+  return `Avoids ${labels.join(", ")}${more > 0 ? `, +${more} more` : ""}`;
+}
+
+/** "Pinned to <machine> · <account>" for a pinned task; null otherwise. The labels are display text from the registry. */
+export function pinLine(
+  task: Task,
+  machines: readonly Machine[],
+  aliases: Readonly<Record<string, string>>,
+): string | null {
+  const { pin } = task.spec;
+  if (pin === undefined) return null;
+  const parts: string[] = [];
+  if (pin.deviceId !== undefined) parts.push(machineLabel(machines, pin.deviceId));
+  if (pin.account !== undefined) {
+    const known = knownAccounts(machines, [pin.account]);
+    parts.push(
+      accountNameIn(known, pin.account, Object.hasOwn(aliases, pin.account) ? aliases[pin.account] : undefined),
+    );
+  }
+  return parts.length === 0 ? null : `Pinned to ${parts.join(" · ")}`;
 }
 
 /** Keyed on `assignment`, not the state: a waiting task marked done was never placed, so its decision stays a "would". */
@@ -281,7 +353,13 @@ export function queuedBody(task: Task): string {
       if (task.doneBy === "reported") return "Its session reported it done.";
       return task.doneBy === "manual" ? "Marked done by hand." : "The session ended.";
     case "failed":
-      return failedBody(task.failure?.code);
+      return failedBody(
+        task.failure?.code,
+        task.failure?.exit,
+        task.spec.until,
+        task.failure?.oomKill,
+        task.failure?.message,
+      );
     case "cancelled":
       return task.leftRunning === true ? LEFT_RUNNING : "Nothing is running.";
   }

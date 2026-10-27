@@ -13,7 +13,7 @@ import {
   type UpdateOutcome,
 } from "@seance/shared";
 import type { DespawnResult, SpawnOutcome } from "./backend.ts";
-import type { BrokerErrorCode } from "./broker-protocol.ts";
+import type { BrokerErrorCode, BrokerSchedulerOp } from "./broker-protocol.ts";
 import type { Check } from "./check.ts";
 import { fingerprintText } from "./hash.ts";
 import { formatLine, log } from "./log.ts";
@@ -178,11 +178,13 @@ export function spawnAudit(origin: SpawnOrigin, sink: AuditSink): SpawnAudit {
       // Only when on, so every ordinary spawn's line stays byte-identical.
       const planNote = request.plan === true ? "plan=true " : "";
       const taskNote = request.taskId === undefined ? "" : `task=${quote(request.taskId)} `;
+      const continuesNote = request.continues === undefined ? "" : `continues=${quote(request.continues)} `;
       await emit(
         `${clientNote}repo=${quote(request.repo)} mode=${request.mode} title=${quote(request.title ?? "")} ` +
           `model=${quote(request.model ?? DEFAULT_MODEL)} effort=${quote(request.effort ?? DEFAULT_EFFORT)} ` +
           planNote +
           taskNote +
+          continuesNote +
           promptNote,
       );
     },
@@ -309,21 +311,40 @@ export type EnqueueOutcome =
 
 /**
  * Who enqueued, as both the line's origin and its client: `seanced mcp`, or
- * `seanced spawn --auto` typed at this machine — the CLI's own origin, since
+ * `seanced spawn` typed at this machine — the CLI's own origin, since
  * `audit enqueue` already tells the act apart from its `audit spawn`.
  */
 export type EnqueueSurface = Extract<SpawnClient, "mcp" | "cli">;
 
 /**
+ * Where an enqueue line was written: the surface's own, or the daemon's when it
+ * made the enqueue for a keyless peer. The broker's line labels the client
+ * `claimed_client` — the peer's word, which the daemon cannot verify.
+ */
+export type EnqueueOrigin = EnqueueSurface | BrokerOrigin;
+
+export type EnqueueAuditLine = (
+  task: {
+    readonly id: string;
+    readonly createdAt: number;
+    readonly spec?: { readonly continues?: { readonly task: string } };
+  },
+  outcome: EnqueueOutcome,
+) => Promise<void>;
+
+/**
  * An app-role process on this box enqueuing on `auto` with the key itself
  * (`relayFleet`): a store write that reaches no daemon, so this line, under its
  * surface's origin, is the enqueuing box's only record of it; the leader's
- * `op=admit` is the other end. Never the prompt.
+ * `op=admit` is the other end. A keyless peer's enqueue leaves two: its
+ * surface's, and the daemon's under `local-broker`, whose `createdAt` is the
+ * daemon's stamp. Never the prompt.
  */
-export function enqueueAudit(
-  sink: AuditSink,
-  surface: EnqueueSurface,
-): (task: { readonly id: string; readonly createdAt: number }, outcome: EnqueueOutcome) => Promise<void> {
+export function enqueueAudit(sink: AuditSink, surface: EnqueueSurface): EnqueueAuditLine;
+export function enqueueAudit(sink: AuditSink, origin: BrokerOrigin, claimedClient: EnqueueSurface): EnqueueAuditLine;
+export function enqueueAudit(sink: AuditSink, origin: EnqueueOrigin, claimedClient?: EnqueueSurface): EnqueueAuditLine {
+  // A surface's origin is its client; only the daemon writing for a peer has a client that is not its own origin.
+  const client = claimedClient ?? origin;
   return async (task, outcome) => {
     const how =
       outcome.kind === "queued"
@@ -332,15 +353,20 @@ export function enqueueAudit(
           ? // The relay's word, so quoted: a line it shaped could otherwise read as more fields.
             `refused code=${quote(outcome.code)}`
           : "unanswered";
+    const who = origin === "local-broker" ? "claimed_client" : "client";
+    // Only a continuation has one, so every other line is unchanged.
+    const continued = task.spec?.continues?.task;
+    const continues = continued === undefined ? "" : ` continues=${quote(continued)}`;
     await sink(
-      `audit enqueue origin=${surface} client=${surface} task=${quote(task.id)} createdAt=${task.createdAt} ${how}`,
+      `audit enqueue origin=${origin} ${who}=${client} task=${quote(task.id)}${continues} createdAt=${task.createdAt} ${how}`,
     );
   };
 }
 
 /**
- * Something on this box asked the daemon to reach *another* machine for it over
- * the op socket — a keyless `seanced mcp`. Its own origin, never `local`: a
+ * Something on this box asked the daemon to reach *another* machine, or the
+ * scheduler, for it over the op socket — a keyless `seanced mcp` or `seanced
+ * spawn`. Its own origin, never `local`: a
  * `local` line means this box's tmux was touched, and a brokered spawn touches
  * someone else's. The target daemon audits the spawn itself as `origin=relay`.
  */
@@ -348,6 +374,18 @@ export type BrokerOrigin = "local-broker";
 
 export interface BrokerAudit {
   readonly machines: (id: string) => Promise<void>;
+  readonly fleet: (id: string) => Promise<void>;
+  /**
+   * `task` and `client` only where the op carries them; `client` is the peer's claim, never verified.
+   * `continues` is the old task id of an enqueued continue spec.
+   */
+  readonly scheduler: (
+    id: string,
+    op: BrokerSchedulerOp,
+    task: string | undefined,
+    client: string | undefined,
+    continues?: string,
+  ) => Promise<void>;
   readonly request: (id: string, op: string, deviceId: string, client: string | undefined) => Promise<void>;
   readonly ok: (id: string) => Promise<void>;
   readonly failed: (id: string, code: BrokerErrorCode, reason?: FailureReason) => Promise<void>;
@@ -356,7 +394,8 @@ export interface BrokerAudit {
 /**
  * Metadata only: which action, which op, which machine, which client. Never the
  * payload — a spawn's carries the prompt, and the target daemon's own line
- * already fingerprints it. Every wire-supplied value is quoted.
+ * already fingerprints it; a scheduler enqueue's spec is never logged either.
+ * Every wire-supplied value is quoted.
  */
 export function brokerAudit(sink: AuditSink, origin: BrokerOrigin = "local-broker"): BrokerAudit {
   const emit = async (rest: string): Promise<void> => {
@@ -364,6 +403,11 @@ export function brokerAudit(sink: AuditSink, origin: BrokerOrigin = "local-broke
   };
   return {
     machines: (id) => emit(`action=machines id=${quote(id)}`),
+    fleet: (id) => emit(`action=fleet id=${quote(id)}`),
+    scheduler: (id, op, task, client, continues) =>
+      emit(
+        `action=scheduler op=${quote(op)}${task === undefined ? "" : ` task=${quote(task)}`}${client === undefined ? "" : ` claimed_client=${quote(client)}`}${continues === undefined ? "" : ` continues=${quote(continues)}`} id=${quote(id)}`,
+      ),
     request: (id, op, deviceId, client) =>
       emit(
         `action=request op=${quote(op)} target=${quote(deviceId)}${client === undefined ? "" : ` client=${quote(client)}`} id=${quote(id)}`,

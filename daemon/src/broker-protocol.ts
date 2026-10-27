@@ -1,12 +1,18 @@
 import {
   isRecord,
   OP_TIMEOUT_MS,
-  parseRepoList,
-  parseSourceInfo,
-  parseUpdateReport,
+  parseMachineInfo,
+  parseMachineStatus,
   REGISTRY_SETTLE_MS,
+  STORE_LIST_TIMEOUT_MS,
+  STORE_TIMEOUT_MS,
   type FailureReason,
   type Machine,
+  type RequestFailureTarget,
+  type SchedulerAvailability,
+  type StoreRefusal,
+  type TaskCreated,
+  type TaskSpec,
 } from "@seance/shared";
 import { CONNECT_TIMEOUT_MS } from "./app-relay.ts";
 
@@ -36,8 +42,43 @@ export function isBrokerOp(value: unknown): value is BrokerOp {
   return BROKER_OPS.some((op) => op === value);
 }
 
+/**
+ * The scheduler ops a peer may ask the daemon to make as an app: what `auto`,
+ * `queue_batch`, `get_queue`, `cancel_task` and `seanced spawn` need,
+ * and the account read that resolves an alias. `mark-done`, `pause`, `resume`,
+ * `discard`, `route-preview` and every `account:` write stay off the list.
+ */
+export const BROKER_SCHEDULER_OPS = ["enqueue", "queue", "cancel", "accounts"] as const;
+
+export type BrokerSchedulerOp = (typeof BROKER_SCHEDULER_OPS)[number];
+
+export function isBrokerSchedulerOp(value: unknown): value is BrokerSchedulerOp {
+  return BROKER_SCHEDULER_OPS.some((op) => op === value);
+}
+
+/** The only clients a brokered enqueue may claim: the two surfaces that reach the broker. */
+export const BROKER_ENQUEUE_CLIENTS = ["mcp", "cli"] as const;
+
+export type BrokerEnqueueClient = (typeof BROKER_ENQUEUE_CLIENTS)[number];
+
+export function isBrokerEnqueueClient(value: unknown): value is BrokerEnqueueClient {
+  return BROKER_ENQUEUE_CLIENTS.some((client) => client === value);
+}
+
+type BrokerFrame = { readonly v: typeof BROKER_VERSION; readonly kind: "broker"; readonly id: string };
+
 export type BrokerRequest =
-  | { readonly v: typeof BROKER_VERSION; readonly kind: "broker"; readonly id: string; readonly action: "machines" }
+  | (BrokerFrame & { readonly action: "machines" })
+  | (BrokerFrame & { readonly action: "fleet" })
+  | (BrokerFrame & {
+      readonly action: "scheduler";
+      readonly schedulerOp: "enqueue";
+      /** Minted by the peer, which needs it to retry and to name `deps`; only ever a create at `expect: 0`. */
+      readonly taskId: string;
+      readonly spec: TaskSpec;
+    })
+  | (BrokerFrame & { readonly action: "scheduler"; readonly schedulerOp: "cancel"; readonly taskId: string })
+  | (BrokerFrame & { readonly action: "scheduler"; readonly schedulerOp: "queue" | "accounts" })
   | {
       readonly v: typeof BROKER_VERSION;
       readonly kind: "broker";
@@ -106,7 +147,16 @@ export type BrokerReply =
       readonly message: string;
       /** Set with `request_failed`, so the peer can rebuild the same `RequestFailure` the direct path would throw. */
       readonly reason?: FailureReason;
+      /** With `reason`: what did not answer, so a relay timeout is not read back as a machine's. An older peer ignores it. */
+      readonly target?: RelayFailureTarget;
     };
+
+/** What a relay-side failure blames; the broker carries it, and a `daemon` target is only ever minted peer-side. */
+export type RelayFailureTarget = Exclude<RequestFailureTarget, "daemon">;
+
+function isRelayFailureTarget(value: unknown): value is RelayFailureTarget {
+  return value === "machine" || value === "relay";
+}
 
 /** How the local socket tells a broker frame from a `Plain` before validating either. */
 export function isBrokerFrame(raw: unknown): boolean {
@@ -124,7 +174,13 @@ export function brokerOk(re: string, data: unknown): BrokerReply {
   return { v: BROKER_VERSION, kind: "broker-reply", re, ok: true, data };
 }
 
-export function brokerFail(re: string, code: BrokerErrorCode, message: string, reason?: FailureReason): BrokerReply {
+export function brokerFail(
+  re: string,
+  code: BrokerErrorCode,
+  message: string,
+  reason?: FailureReason,
+  target?: RelayFailureTarget,
+): BrokerReply {
   return {
     v: BROKER_VERSION,
     kind: "broker-reply",
@@ -133,6 +189,7 @@ export function brokerFail(re: string, code: BrokerErrorCode, message: string, r
     code,
     message,
     ...(reason === undefined ? {} : { reason }),
+    ...(target === undefined ? {} : { target }),
   };
 }
 
@@ -173,38 +230,83 @@ export function parseBrokerReply(raw: unknown): BrokerReply | null {
   if (typeof re !== "string") return null;
   if (raw["ok"] === true) return brokerOk(re, raw["data"]);
   if (raw["ok"] !== false) return null;
-  const { code, message, reason } = raw;
+  const { code, message, reason, target } = raw;
   if (!isBrokerErrorCode(code) || typeof message !== "string") return null;
-  return brokerFail(re, code, message, isFailureReason(reason) ? reason : undefined);
+  return brokerFail(
+    re,
+    code,
+    message,
+    isFailureReason(reason) ? reason : undefined,
+    isRelayFailureTarget(target) ? target : undefined,
+  );
 }
 
-/** The `machines` answer, checked field by field: it feeds name resolution and the model's view of the fleet. */
+/**
+ * The `machines` and `fleet` answer, checked field by field: it feeds name
+ * resolution, the repo pre-check, `auto`'s placement (exclaves, capabilities)
+ * and the model's view of the fleet. The sealed-blob fields go through the one
+ * `parseMachineInfo`, whose per-field leniency applies: a malformed optional
+ * field costs that field, never the list.
+ */
 export function parseMachines(data: unknown): readonly Machine[] | null {
   if (!Array.isArray(data)) return null;
   const machines: Machine[] = [];
   for (const candidate of data) {
     if (!isRecord(candidate)) return null;
-    const { deviceId, name, platform, scannedAt, lastSeen, connected } = candidate;
-    const repos = parseRepoList(candidate["repos"]);
-    if (typeof deviceId !== "string" || typeof name !== "string" || typeof platform !== "string") return null;
-    if (typeof scannedAt !== "number" || typeof lastSeen !== "number" || typeof connected !== "boolean") return null;
-    if (repos === null) return null;
-    // Optional and display-only, so a malformed one costs the field, never the list.
-    const source = parseSourceInfo(candidate["source"]);
-    const lastUpdate = parseUpdateReport(candidate["lastUpdate"]);
+    const { deviceId, lastSeen, connected } = candidate;
+    const info = parseMachineInfo(candidate);
+    if (info === null) return null;
+    if (typeof deviceId !== "string" || typeof lastSeen !== "number" || typeof connected !== "boolean") return null;
+    // Display-only and optional, so a malformed one costs the field.
+    const status = parseMachineStatus(candidate["status"]);
     machines.push({
       deviceId,
-      name,
-      platform,
-      repos,
-      scannedAt,
+      name: info.name,
+      platform: info.platform,
+      repos: info.repos,
+      scannedAt: info.scannedAt,
       lastSeen,
       connected,
-      ...(source === null ? {} : { source }),
-      ...(lastUpdate === null ? {} : { lastUpdate }),
+      ...(status === null ? {} : { status }),
+      ...(info.capabilities === undefined ? {} : { capabilities: info.capabilities }),
+      ...(info.exclaves === undefined ? {} : { exclaves: info.exclaves }),
+      // `MachineInfo` allows null where `Machine` wants the field absent.
+      ...(info.source === undefined || info.source === null ? {} : { source: info.source }),
+      ...(info.lastUpdate === undefined || info.lastUpdate === null ? {} : { lastUpdate: info.lastUpdate }),
     });
   }
   return machines;
+}
+
+/**
+ * Who would answer `auto`, as the daemon's connection sees it. Anything this
+ * build cannot read — a kind a newer daemon minted — is "no verified leader",
+ * the conservative gate: nothing is sent to a leader that cannot be named.
+ */
+export function parseSchedulerAvailability(value: unknown): SchedulerAvailability {
+  if (!isRecord(value)) return { kind: "none" };
+  const { kind, deviceId, term } = value;
+  if (kind !== "unverified" && kind !== "ready") return { kind: "none" };
+  if (typeof deviceId !== "string" || deviceId === "") return { kind: "none" };
+  if (typeof term !== "number" || !Number.isInteger(term) || term < 0) return { kind: "none" };
+  return { kind, deviceId, term };
+}
+
+/**
+ * An enqueue's answer: stored (`landedEarlier` or not), refused with the
+ * relay's code, or null for a lost reply. `undefined` is "not an answer at all",
+ * which the caller turns into `bad_reply` — this file has no `BrokerError`.
+ */
+export function parseTaskCreated(value: unknown): TaskCreated | StoreRefusal | null | undefined {
+  if (value === null) return null;
+  if (!isRecord(value)) return undefined;
+  if (value["ok"] === true) {
+    const { landedEarlier } = value;
+    return typeof landedEarlier === "boolean" ? { ok: true, landedEarlier } : undefined;
+  }
+  if (value["ok"] !== false) return undefined;
+  const { code } = value;
+  return typeof code === "string" ? { ok: false, code } : undefined;
 }
 
 /** Slack for sealing, the socket hop and the daemon's own scheduling. */
@@ -218,4 +320,17 @@ const BROKER_MARGIN_MS = 5_000;
  */
 export function brokerDeadlineMs(op: BrokerOp | null): number {
   return CONNECT_TIMEOUT_MS + REGISTRY_SETTLE_MS + (op === null ? 0 : OP_TIMEOUT_MS[op]) + BROKER_MARGIN_MS;
+}
+
+/** A `Record`, so a new scheduler op without a budget fails the typecheck. */
+const SCHEDULER_OP_BUDGET_MS: Record<BrokerSchedulerOp, number> = {
+  enqueue: STORE_TIMEOUT_MS,
+  queue: OP_TIMEOUT_MS.queue,
+  cancel: OP_TIMEOUT_MS.cancel,
+  accounts: STORE_LIST_TIMEOUT_MS,
+};
+
+/** As `brokerDeadlineMs`: the peer outwaits the daemon's own dial, settle and op, never just the op. */
+export function brokerSchedulerDeadlineMs(op: BrokerSchedulerOp): number {
+  return CONNECT_TIMEOUT_MS + REGISTRY_SETTLE_MS + SCHEDULER_OP_BUDGET_MS[op] + BROKER_MARGIN_MS;
 }

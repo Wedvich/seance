@@ -101,7 +101,7 @@ describe("account aliases across clients", () => {
       expect((await rawPut(raw, forgedKey, 0, forged))?.t).toBe("store-written");
       expect((await rawPut(raw, genuineKey, 0, genuine))?.t).toBe("store-written");
 
-      apps.push(startApp(stack, {}, null, { accounts: true }), startApp(stack, {}, null, { accounts: true }));
+      apps.push(startApp(stack, {}, { accounts: true }), startApp(stack, {}, { accounts: true }));
       const [a, b] = apps;
       if (a === undefined || b === undefined) throw new Error("apps did not start");
       const seen = await b.waitForApp(
@@ -120,8 +120,8 @@ describe("account aliases across clients", () => {
 
   test("a rename reaches another client by nudge alone, clears to the short id, and a put-back older blob never resurfaces", async () => {
     const raw = await connectApp(stack.relay);
-    const a = startApp(stack, {}, null, { accounts: true });
-    const b = startApp(stack, {}, null, { accounts: true });
+    const a = startApp(stack, {}, { accounts: true });
+    const b = startApp(stack, {}, { accounts: true });
     const reads = countReads(b);
     try {
       await pollUntil(() => reads.listed() >= 1, "B's first listing", 10_000);

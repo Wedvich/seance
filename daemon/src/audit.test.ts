@@ -2,7 +2,15 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { auditLogChecks, cliSink, ensureAuditLog, spawnAudit, type AuditSink } from "./audit.ts";
+import {
+  auditLogChecks,
+  brokerAudit,
+  cliSink,
+  ensureAuditLog,
+  enqueueAudit,
+  spawnAudit,
+  type AuditSink,
+} from "./audit.ts";
 import { logPath } from "./paths.ts";
 
 const modeOf = async (path: string): Promise<number> => (await stat(path)).mode & 0o777;
@@ -88,6 +96,47 @@ describe("spawn audit lines", () => {
   test("a spawn that did not ask for plan mode carries no plan field at all", async () => {
     await audit.request({ repo: "myrepo", mode: "here", plan: false });
     expect(emitted()).not.toContain("plan=");
+  });
+});
+
+describe("enqueue audit lines", () => {
+  const task = { id: "t-1", createdAt: 42 };
+
+  test("a surface writes its own origin and client, and the line is unchanged for the direct path", async () => {
+    await enqueueAudit(collect, "mcp")(task, { kind: "queued", landedEarlier: false });
+    await enqueueAudit(collect, "cli")(task, { kind: "unanswered" });
+    expect(collected).toEqual([
+      'audit enqueue origin=mcp client=mcp task="t-1" createdAt=42 queued',
+      'audit enqueue origin=cli client=cli task="t-1" createdAt=42 unanswered',
+    ]);
+  });
+
+  test("the broker's line says claimed_client: the peer's word, never client=", async () => {
+    await enqueueAudit(collect, "local-broker", "cli")(task, { kind: "queued", landedEarlier: true });
+    await enqueueAudit(collect, "local-broker", "mcp")(task, { kind: "refused", code: 'rate"limited' });
+    expect(collected).toEqual([
+      'audit enqueue origin=local-broker claimed_client=cli task="t-1" createdAt=42 queued landedEarlier=true',
+      'audit enqueue origin=local-broker claimed_client=mcp task="t-1" createdAt=42 refused code="rate\\"limited"',
+    ]);
+    expect(emitted()).not.toContain(" client=");
+  });
+});
+
+describe("broker audit lines", () => {
+  test("fleet and scheduler lines carry metadata only, every wire value quoted", async () => {
+    const audit = brokerAudit(collect);
+    await audit.fleet("f1");
+    await audit.scheduler("s1", "enqueue", "t-1", "mcp");
+    await audit.scheduler("s2", "queue", undefined, undefined);
+    await audit.scheduler("s3", "cancel", 't" injected=1', undefined);
+    await audit.scheduler("s4", "enqueue", "t-2", "cli", 't-1" x=1');
+    expect(collected).toEqual([
+      'audit broker origin=local-broker action=fleet id="f1"',
+      'audit broker origin=local-broker action=scheduler op="enqueue" task="t-1" claimed_client="mcp" id="s1"',
+      'audit broker origin=local-broker action=scheduler op="queue" id="s2"',
+      'audit broker origin=local-broker action=scheduler op="cancel" task="t\\" injected=1" id="s3"',
+      'audit broker origin=local-broker action=scheduler op="enqueue" task="t-2" claimed_client="cli" continues="t-1\\" x=1" id="s4"',
+    ]);
   });
 });
 

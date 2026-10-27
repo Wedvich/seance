@@ -3,17 +3,22 @@ import {
   QUEUE_MAX_TASKS,
   TASK_PHASES,
   TASK_SPEC_LIMITS,
+  continueOffer,
+  knownAccounts,
   type DepAfter,
+  type KnownAccount,
+  type Machine,
   type PauseHold,
   type PrChecks,
   type PrState,
   type Task,
 } from "@seance/shared";
-import { taskHeadline } from "./decision-view.ts";
+import { machineAsleep, needsAttention } from "./asleep.ts";
+import { avoidLine, pinLine, taskHeadline, waitingText } from "./decision-view.ts";
 import { accountDisplayName, formatUntil } from "./machines-view.ts";
 import {
+  deriveContinueAvailability,
   deriveReportedAvailability,
-  describeStrategy,
   failedBody,
   formatSeen,
   originLabel,
@@ -43,8 +48,17 @@ export interface QueueRow {
   readonly markDoneEndsSession: boolean;
   /** Offered while the task can still be waited on, or finished done: "Follow up" prefills the form's After. */
   readonly canFollowUp: boolean;
+  /**
+   * A failed session that can be picked up where it stopped: its machine is present and
+   * advertises it, the leader does too, and no continuation of it is already live or settled.
+   */
+  readonly canContinue: boolean;
   /** What it waits on, one line; null when it waits on nothing. */
   readonly deps: string | null;
+  /** The earlier session it continues, one line; null for any other task. */
+  readonly continues: string | null;
+  /** Its pin and avoid list, one line in the verdict's wording; null when it has neither. */
+  readonly placement: string | null;
   /** Its place in a batch, one line; null outside one. */
   readonly batch: string | null;
   readonly busy: boolean;
@@ -114,19 +128,19 @@ function statusLine(state: AppState): { text: string; available: boolean } {
   return { text: `Scheduler on ${leader?.name ?? scheduler.deviceId}`, available: true };
 }
 
-function holdText(hold: PauseHold, state: AppState, now: number): string {
+function holdText(hold: PauseHold, state: AppState, known: readonly KnownAccount[], now: number): string {
   if (hold.account === undefined) return "The whole queue is paused until resumed";
-  const who = accountDisplayName(state.relay.machines, hold.account, state.accounts.aliases);
+  const who = accountDisplayName(known, hold.account, state.accounts.aliases);
   if (hold.until === "resume") return `${who} is paused until resumed`;
   // `formatUntil` reads "resets in 3h"; inside this sentence the verb is already said.
   const when = hold.resumeAt === undefined ? "" : ` (${formatUntil(hold.resumeAt, now).replace(/^resets /u, "")})`;
   return `${who} is paused until its quota resets${when}`;
 }
 
-function holdRow(hold: PauseHold, state: AppState, now: number): HoldRow {
+function holdRow(hold: PauseHold, state: AppState, known: readonly KnownAccount[], now: number): HoldRow {
   return {
     key: hold.account ?? "queue",
-    text: holdText(hold, state, now),
+    text: holdText(hold, state, known, now),
     ...(hold.account === undefined ? {} : { account: hold.account }),
   };
 }
@@ -155,8 +169,22 @@ function dotOf(task: Task): QueueDot | null {
   return null;
 }
 
-function bodyOf(task: Task, now: number): string | null {
-  if (task.state === "failed") return failedBody(task.failure?.code);
+function bodyOf(task: Task, machines: readonly Machine[], now: number): string | null {
+  // The leader's `lost` is the sleep itself: waking settles it, and giving up is all the phone can do.
+  if (task.state === "lost" && machineAsleep(task, machines)) {
+    return "Settles when its machine wakes; cancel or mark done to give up on it";
+  }
+  const waiting = waitingText(task);
+  if (waiting !== null) return `Waiting: ${waiting}`;
+  if (task.state === "failed") {
+    return failedBody(
+      task.failure?.code,
+      task.failure?.exit,
+      task.spec.until,
+      task.failure?.oomKill,
+      task.failure?.message,
+    );
+  }
   if (task.state === "needs-input" && task.escalated === true) {
     return task.needsInputSince === undefined
       ? "Waiting for input"
@@ -216,19 +244,40 @@ function depsLine(task: Task, titles: ReadonlyMap<string, string>): string | nul
   return `After ${deps.length} tasks${when}`;
 }
 
-function batchLine(task: Task): string | null {
-  const { batch } = task.spec;
-  return batch === undefined ? null : `Batch #${batch.index} · ${describeStrategy(batch.strategy)}`;
+function continuesLine(task: Task, titles: ReadonlyMap<string, string>): string | null {
+  const earlier = task.spec.continues?.task;
+  if (earlier === undefined) return null;
+  return `Continues ${titles.get(earlier) ?? `task ${earlier.slice(0, 8)}`}`;
 }
 
-function rowOf(task: Task, state: AppState, now: number, skew: number, titles: ReadonlyMap<string, string>): QueueRow {
+function batchLine(task: Task): string | null {
+  const { batch } = task.spec;
+  return batch === undefined ? null : `Batch #${batch.index}`;
+}
+
+function placementLine(task: Task, state: AppState): string | null {
+  const { machines } = state.relay;
+  const parts = [pinLine(task, machines, state.accounts.aliases), avoidLine(task, machines)].filter(
+    (part): part is string => part !== null,
+  );
+  return parts.length === 0 ? null : parts.join(". ");
+}
+
+function rowOf(
+  task: Task,
+  state: AppState,
+  now: number,
+  skew: number,
+  titles: ReadonlyMap<string, string>,
+  tasks: readonly Task[],
+): QueueRow {
   const phase = TASK_PHASES[task.state];
   const actionable = phase !== "dispatching" && phase !== "finished";
   return {
     id: task.id,
     title: titleOf(task),
     headline: taskHeadline(task, state.relay.machines, now),
-    body: bodyOf(task, now),
+    body: bodyOf(task, state.relay.machines, now),
     dot: dotOf(task),
     age: formatSeen(task.createdAt, now),
     canCancel: actionable,
@@ -236,7 +285,10 @@ function rowOf(task: Task, state: AppState, now: number, skew: number, titles: R
     cancelEndsSession: phase === "placed",
     markDoneEndsSession: task.state === "running" || task.state === "needs-input" || task.state === "lost",
     canFollowUp: phase !== "finished" || task.state === "done",
+    canContinue: continueOffer(task, state.relay.machines, tasks).ok && deriveContinueAvailability(state.relay),
     deps: depsLine(task, titles),
+    continues: continuesLine(task, titles),
+    placement: placementLine(task, state),
     batch: batchLine(task),
     busy: state.taskAction?.taskId === task.id,
     pr: prOf(task, now, skew),
@@ -244,14 +296,41 @@ function rowOf(task: Task, state: AppState, now: number, skew: number, titles: R
   };
 }
 
-const SECTIONS: readonly { readonly title: string; readonly pick: (task: Task) => number | null }[] = [
+type Pick = (task: Task, machines: readonly Machine[]) => number | null;
+
+/**
+ * Escalated (past the leader's patience) first, then the rest of needs-input, then lost — a
+ * lost task whose machine is back or gone, since one asleep is in Asleep.
+ */
+const needsYou: Pick = (t, machines) => {
+  if (machineAsleep(t, machines)) return null;
+  if (t.state === "lost") return 2;
+  if (t.state !== "needs-input") return null;
+  return t.escalated === true ? 0 : 1;
+};
+
+/**
+ * Nothing on a sleeping machine can be acted on from the phone, so it leaves Needs you and
+ * Running for a section of its own (DESIGN.md, "Asleep machines on the Queue screen").
+ */
+const asleep: Pick = (t, machines) => {
+  if (!machineAsleep(t, machines)) return null;
+  if (t.state === "needs-input") return 0;
+  return t.state === "lost" ? 2 : 1;
+};
+
+/** The one section the screen renders collapsed until tapped. */
+export const ASLEEP_SECTION = "Asleep";
+
+const SECTIONS: readonly { readonly title: string; readonly pick: Pick }[] = [
+  { title: "Needs you", pick: needsYou },
   {
-    title: "Needs you",
-    // Escalated first: those have waited past the leader's patience.
-    pick: (t) => (t.state === "needs-input" ? (t.escalated === true ? 0 : 1) : t.state === "lost" ? 2 : null),
+    title: "Running",
+    pick: (t, machines) =>
+      (t.state === "reserved" || t.state === "running") && !machineAsleep(t, machines) ? 0 : null,
   },
-  { title: "Running", pick: (t) => (t.state === "reserved" || t.state === "running" ? 0 : null) },
   { title: "Waiting", pick: (t) => (t.state === "queued" || t.state === "blocked" || t.state === "ready" ? 0 : null) },
+  { title: ASLEEP_SECTION, pick: asleep },
   { title: "Awaiting merge", pick: (t) => (t.state === "awaiting-merge" ? 0 : null) },
   { title: "Finished", pick: (t) => (TASK_PHASES[t.state] === "finished" ? 0 : null) },
 ];
@@ -271,14 +350,17 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
 
   const sections = SECTIONS.map(({ title, pick }) => {
     const members = tasks
-      .map((task) => ({ task, rank: pick(task) }))
+      .map((task) => ({ task, rank: pick(task, state.relay.machines) }))
       .filter((entry): entry is { task: Task; rank: number } => entry.rank !== null)
       // Stable: equal ranks keep the leader's order.
       .toSorted((a, b) => a.rank - b.rank);
-    return { title, rows: members.map(({ task }) => rowOf(task, state, now, skew, titles)) };
+    return { title, rows: members.map(({ task }) => rowOf(task, state, now, skew, titles, tasks)) };
   }).filter((section) => section.rows.length > 0);
 
-  const holds = (ok?.holds ?? []).map((hold) => holdRow(hold, state, now));
+  // Once for every hold: a held account no machine reports still counts as a twin.
+  const heldIds = (ok?.holds ?? []).flatMap((hold) => (hold.account === undefined ? [] : [hold.account]));
+  const known = knownAccounts(state.relay.machines, heldIds);
+  const holds = (ok?.holds ?? []).map((hold) => holdRow(hold, state, known, now));
 
   // A list already read stays up while the leader is away: the status line says it may be stale.
   let empty: string | null = null;
@@ -300,7 +382,7 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
     unreadable: unreadableLine(ok?.unreadable.length ?? 0),
     sections,
     empty,
-    attention: tasks.some((t) => t.state === "needs-input" && t.escalated === true),
+    attention: needsAttention(tasks, state.relay.machines),
   };
 }
 

@@ -33,6 +33,7 @@ import { startLocalSocket } from "./local-socket.ts";
 import { log } from "./log.ts";
 import { sealMachineInfo } from "./machine-info.ts";
 import { MetricsStore } from "./metrics-store.ts";
+import { procOomProbe } from "./oom-kill.ts";
 import type { PrPollerOpts } from "./pr-status.ts";
 import { RelayClient } from "./relay-client.ts";
 import { startCapabilities } from "./run-capabilities.ts";
@@ -158,7 +159,7 @@ function endedTasksFor(path: string): Promise<EndedTasks> {
   let tasks = endedTasksByLedger.get(path);
   if (tasks === undefined) {
     tasks = LaunchLedger.open(path).then(
-      (ledger) => new EndedTasks(ledger, Date.now, tmuxHarvestPanes(reapAudit("harvest", daemonSink))),
+      (ledger) => new EndedTasks(ledger, Date.now, tmuxHarvestPanes(reapAudit("harvest", daemonSink)), procOomProbe()),
     );
     endedTasksByLedger.set(path, tasks);
   }
@@ -245,7 +246,14 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       exclaves: exclaveScan.info,
       source,
       lastUpdate: state.lastUpdate ?? null,
-      capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.exitStatus, CAPABILITIES.reportedDone],
+      capabilities: [
+        CAPABILITIES.metrics,
+        CAPABILITIES.taskId,
+        CAPABILITIES.exitStatus,
+        CAPABILITIES.reportedDone,
+        CAPABILITIES.pinAccount,
+        CAPABILITIES.continueTask,
+      ],
     };
     const candidate: Registered = { scan: info.scannedAt, exclaves: exclaveScan };
     const { sealed, droppedSkills, oversized } = await sealMachineInfo(key, state.deviceId, info);

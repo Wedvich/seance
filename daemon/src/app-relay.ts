@@ -1,7 +1,10 @@
 import {
   appRelayUrl,
+  importAccountKey,
+  importPsk,
   RelayClient,
   REGISTRY_SETTLE_MS,
+  type AccountListing,
   type ErrorResponse,
   type QueueReply,
   type TaskReply,
@@ -40,6 +43,9 @@ export interface AppRelay {
   readonly createTask: (task: Task) => Promise<TaskCreated | StoreRefusal | null>;
   readonly queue: () => Promise<QueueReply | null>;
   readonly cancel: (taskId: string) => Promise<TaskReply | null>;
+  /** As `RelayClient.listAccounts`: throws `unsupported` on a client built without an account key. */
+  readonly listAccounts: () => Promise<AccountListing | StoreRefusal | null>;
+  readonly onStoreChanged: (listener: (key: string, version: number) => void) => () => void;
 }
 
 /**
@@ -213,24 +219,41 @@ export class LazyRelay {
   }
 }
 
+/** The PSK's AES key, and the HMAC key `account:` records are filed under (`importAccountKey`). */
+export interface AppKeys {
+  readonly key: CryptoKey;
+  readonly accountKey?: CryptoKey;
+}
+
+/** Both keys from the PSK an `auto` client already loaded: the account key derives from it, nothing new at rest. */
+export async function importAppKeys(psk: string): Promise<AppKeys> {
+  const [key, accountKey] = await Promise.all([importPsk(psk), importAccountKey(psk)]);
+  return { key, accountKey };
+}
+
 /**
  * The shared app-role client, configured the way every daemon-side consumer
  * needs it. `log` is required rather than defaulted: the default is stdout,
  * which in `seanced mcp` is the protocol channel. `scheduler` makes it the
  * leader's leg for one term (`leader.ts`), under a replay guard that outlives it.
+ * `keys.accountKey` lets it read account records — what an `auto` client
+ * resolves an account alias by, `seanced mcp` names accounts by in `list_machines`
+ * and `get_queue`, and the broker reads for a keyless peer's; the leader's leg never does.
  */
 export function appRelayClient(
   config: Pick<Config, "relayUrl" | "bearerToken">,
-  key: CryptoKey,
+  keys: CryptoKey | AppKeys,
   log: (line: string) => void,
   scheduler?: { readonly term: number; readonly onEvent?: SchedulerEventHandler; readonly guard?: ReplayGuard },
   /** `RelayClient`'s option of that name; only the leader's leg folds quota, so only it reads the record. */
   fleetQuotaRefreshMs?: number,
 ): RelayClient {
+  const { key, accountKey } = keys instanceof CryptoKey ? { key: keys, accountKey: undefined } : keys;
   return new RelayClient({
     url: appRelayUrl(config.relayUrl),
     token: config.bearerToken,
     key,
+    ...(accountKey === undefined ? {} : { accountKey }),
     log,
     ...(fleetQuotaRefreshMs === undefined ? {} : { fleetQuotaRefreshMs }),
     // Bun dialing workerd needs this or frames die with close code 1002.

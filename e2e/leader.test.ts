@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test, type Mock } from "bun:test";
 import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import {
   AT_REST_OPS,
+  CAPABILITIES,
   openAtRest,
   parseSettingsRecord,
   parseStoreReply,
@@ -158,7 +159,7 @@ describe("session report: MCP's report path ↔ local daemon ↔ relay ↔ leade
     const predecessor = "e2e-report-pred";
     const dependent = "e2e-report-next";
     const nudge = "e2e-report-nudge";
-    const app = startApp(stack, { auto: true });
+    const app = startApp(stack);
     let window: string | undefined;
     try {
       await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
@@ -302,7 +303,7 @@ describe("takeover: a leader stopped between spawn and verdict", () => {
     const title = "held-dispatch";
     // The suite's daemon audits to its stdout, which in-process is console.log.
     const audit = spyOn(console, "log");
-    const app = startApp(stack, { auto: true });
+    const app = startApp(stack);
     let second: SecondDaemon | null = null;
     let down = false;
     try {
@@ -575,6 +576,108 @@ describe("settings record: the leader's term creates it, and no later term repla
       expect(stack.pushAttempts().every((host) => host === "fcm.googleapis.com")).toBe(true);
     } finally {
       await app.client.cancel(taskId).catch(() => null);
+      app.stop();
+    }
+  }, 60_000);
+});
+
+describe("continue: an app's continue task ↔ leader ↔ the machine that ran the failed session", () => {
+  // Only the machine's own launch ledger knows where the old session ran, so the ledger is
+  // seeded with a task note instead of running a failing session first; everything after the
+  // app's write is the real path: leader routing to the exact clone, the spawn frame, the
+  // daemon's site check and `claude --continue` in the existing worktree.
+  test("the continue task lands on the machine and clone it names and resumes in the noted worktree", async () => {
+    const oldId = crypto.randomUUID();
+    const id = crypto.randomUUID();
+    const worktree = await stack.fixture.pushBranch("cont-e2e");
+    const app = startApp(stack);
+    let second: SecondDaemon | null = null;
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      const now = Date.now();
+      second = await stack.startSecondDaemon({
+        name: "ContinueBox",
+        exclaves: [{ id: "default", observedAtMs: now, fiveHourPct: 10 }],
+        beforeBoot: (stateDir) =>
+          writeFile(
+            join(stateDir, "launched.json"),
+            JSON.stringify({
+              v: 1,
+              since: now - 10 * 60_000,
+              tasks: [[oldId, now - 60_000]],
+              progress: [
+                { taskId: oldId, at: now - 60_000, siteAt: now - 60_000, repo: stack.fixture.repoPath, path: worktree },
+              ],
+            }),
+            { mode: 0o600 },
+          ),
+      });
+      const b = second.deviceId;
+      const ready = await app.waitForApp(
+        (state) =>
+          state.relay.scheduler.kind === "ready" &&
+          state.relay.machines.some(
+            (m) =>
+              m.deviceId === b &&
+              m.connected &&
+              m.status !== undefined &&
+              m.capabilities?.includes(CAPABILITIES.continueTask) === true &&
+              m.repos.length > 0,
+          ),
+        "the leader verified and ContinueBox live, advertising continueTask",
+      );
+      const origin = fixtureOrigin(ready) ?? "";
+
+      const created = await app.client.createTask({
+        id,
+        spec: {
+          repo: origin,
+          mode: "continue",
+          title: "cont-e2e",
+          prompt: "carry on",
+          continues: { task: oldId, at: { deviceId: b, exclave: "default", clone: basename(stack.fixture.repoPath) } },
+          client: "pwa",
+        },
+        state: "queued",
+        createdAt: Date.now(),
+      });
+      expect(created).toEqual({ ok: true, landedEarlier: false });
+
+      await pollUntil(
+        async () => {
+          const log = await Bun.file(second?.log ?? "").text();
+          return log.includes("mode=continue") && log.includes("audit spawn origin=relay ok window=");
+        },
+        "B to audit the continue spawn as done",
+        20_000,
+      );
+      const log = await Bun.file(second.log).text();
+      expect(log).toContain(`continues=${JSON.stringify(oldId)}`);
+      // The stub's argv record: claude resumed the worktree's own session rather than starting one.
+      await pollUntil(
+        async () =>
+          (
+            await Bun.file(`${stack.stub.ok}.argv`)
+              .text()
+              .catch(() => "")
+          )
+            .split("\0")
+            .includes("--continue"),
+        "claude to be started with --continue",
+        10_000,
+      );
+      await pollUntil(
+        async () => (await stack.queue().get(id))?.body?.state === "running",
+        "the leader to settle the continue task running",
+        10_000,
+      );
+      expect((await stack.queue().get(id))?.body).toMatchObject({
+        assignment: { deviceId: b, clone: basename(stack.fixture.repoPath) },
+      });
+    } finally {
+      await app.client.cancel(id).catch(() => null);
+      if (second !== null) await tmux(["kill-session", "-t", second.tmuxSession]).catch(() => undefined);
+      await second?.stop();
       app.stop();
     }
   }, 60_000);

@@ -5,6 +5,7 @@ import {
   accountStoreKey,
   APP_ID,
   AT_REST_OPS,
+  BATCH_STRATEGY,
   importAccountKey,
   importPsk,
   isRecord,
@@ -157,7 +158,7 @@ function batchSpec(index: number): Task["spec"] {
   return {
     repo: "git@github.com:m/seance.git",
     mode: "worktree",
-    batch: { id: crypto.randomUUID(), index, strategy: { mode: "sequential" } },
+    batch: { id: crypto.randomUUID(), index, strategy: BATCH_STRATEGY },
   };
 }
 
