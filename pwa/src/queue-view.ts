@@ -356,7 +356,7 @@ const SECTIONS: readonly { readonly title: string; readonly pick: Pick; readonly
   {
     title: "Waiting",
     pick: (t) => (t.state === "queued" || t.state === "blocked" || t.state === "ready" ? 0 : null),
-    // The scheduler routes oldest first, so the top row is the next to go.
+    // FIFO, as the scheduler routes ready tasks (batch grouping and blocked tasks aside).
     oldestFirst: true,
   },
   { title: ASLEEP_SECTION, pick: asleep },
