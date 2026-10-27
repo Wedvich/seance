@@ -60,42 +60,55 @@ export function Menu<T extends HTMLElement>(props: {
   const direction = props.direction ?? "down";
   const node = useRef<HTMLDivElement>(null);
 
-  const place = (newState: string): void => {
-    const anchor = menu.anchor.current;
-    const el = node.current;
-    if (newState !== "open" || anchor === null || el === null) return;
-    // Width from clientWidth so `right` excludes a scrollbar; height from
-    // innerHeight because `position: fixed; bottom` resolves against the
-    // viewport, which clientHeight diverges from under a collapsing toolbar.
-    const at = menuPlacement(direction, anchor.getBoundingClientRect(), {
-      width: document.documentElement.clientWidth,
-      height: window.innerHeight,
-    });
-    el.style.top = at.top === null ? "" : `${at.top}px`;
-    el.style.bottom = at.bottom === null ? "" : `${at.bottom}px`;
-    el.style.right = `${at.right}px`;
-  };
+  const { anchor: anchorRef } = menu;
+  const place = useCallback(
+    (newState: string): void => {
+      const anchor = anchorRef.current;
+      const el = node.current;
+      if (newState !== "open" || anchor === null || el === null) return;
+      // Width from clientWidth so `right` excludes a scrollbar; height from
+      // innerHeight because `position: fixed; bottom` resolves against the
+      // viewport, which clientHeight diverges from under a collapsing toolbar.
+      const at = menuPlacement(direction, anchor.getBoundingClientRect(), {
+        width: document.documentElement.clientWidth,
+        height: window.innerHeight,
+      });
+      el.style.top = at.top === null ? "" : `${at.top}px`;
+      el.style.bottom = at.bottom === null ? "" : `${at.bottom}px`;
+      el.style.right = `${at.right}px`;
+    },
+    [anchorRef, direction],
+  );
 
   const close = useCallback((): void => node.current?.hidePopover(), []);
 
   // Placed once on open, so it would detach from a scrolled anchor. Closing on
   // scroll is what native Android menus do. Capture catches nested scrollers.
+  // A height-only resize is the soft keyboard leaving as the trigger takes
+  // focus from a textarea (Firefox resizes the layout viewport for it): closing
+  // there would shut the menu as it opens, so it re-pins instead.
   useEffect(() => {
     if (!menu.open) return;
+    const width = document.documentElement.clientWidth;
     const dismiss = (): void => close();
+    const onResize = (): void => {
+      if (document.documentElement.clientWidth !== width) return close();
+      place("open");
+    };
     window.addEventListener("scroll", dismiss, { capture: true, passive: true });
-    window.addEventListener("resize", dismiss);
+    window.addEventListener("resize", onResize);
     return () => {
       window.removeEventListener("scroll", dismiss, { capture: true });
-      window.removeEventListener("resize", dismiss);
+      window.removeEventListener("resize", onResize);
     };
-  }, [menu.open, close]);
+  }, [menu.open, close, place]);
 
   const onToggle = (newState: string): void => {
     menu.onToggle(newState);
     // Focus moves only for a keyboard open; a tap shows no highlighted row.
     if (newState !== "open" || !menu.anchor.current?.matches(":focus-visible")) return;
-    enabledItems(node.current)[0]?.focus();
+    // preventScroll: a scroll here would trip the close-on-scroll listener.
+    enabledItems(node.current)[0]?.focus({ preventScroll: true });
   };
 
   const onKeyDown = (event: KeyboardEvent): void => {
@@ -105,7 +118,7 @@ export function Menu<T extends HTMLElement>(props: {
     const next = nextIndex(event.key, at, items.length);
     if (next === null) return;
     event.preventDefault();
-    items[next]?.focus();
+    items[next]?.focus({ preventScroll: true });
   };
 
   return (
