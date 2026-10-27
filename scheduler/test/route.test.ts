@@ -156,6 +156,29 @@ describe("filter", () => {
     expect(codes(candidate)).toEqual(["pressure_unknown"]);
   });
 
+  test("draining: a restarting machine takes no task — not by run-now past the caps, not when pinned to it", () => {
+    const draining = machine("a", { status: status({ quota: [obs(0)], drn: true }) });
+    const healthy = machine("b", { exclaves: [exclave("main", "org:a")] });
+    const decision = decide([draining, healthy]);
+    expect(decision.chosen?.deviceId).toBe("b");
+    expect(codes(decision.candidates.find((c) => c.deviceId === "a")!)).toEqual(["draining"]);
+
+    const runNow = route({
+      task: task(),
+      machines: [draining],
+      tasks: [],
+      now: NOW,
+      config: DEFAULT_CONFIG,
+      uncapped: true,
+    });
+    expect(runNow.chosen).toBeNull();
+    expect(codes(only(runNow))).toEqual(["draining"]);
+
+    const pinned = decide([draining, healthy], { task: task({ spec: spec({ pin: { deviceId: "a" } }) }) });
+    expect(pinned.chosen).toBeNull();
+    expect(codes(pinned.candidates.find((c) => c.deviceId === "a")!)).toEqual(["draining"]);
+  });
+
   describe("the task's own restrictions", () => {
     /** `a` holds accounts `org:a` and `org:w`; `b` and `c` hold `org:w` too, each with a clone. */
     function fleet(): Machine[] {
