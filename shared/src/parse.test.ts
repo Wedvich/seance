@@ -1480,6 +1480,13 @@ describe("M4 shapes", () => {
     expect(parsed?.sess).not.toBe(sess);
   });
 
+  test("a status says its launch gate is closed only as `drn: true`; an open gate or an old daemon says nothing", () => {
+    expect(parseMachineStatus({ at: 1, scan: 2, drn: true })).toEqual({ at: 1, scan: 2, drn: true });
+    expect(parseMachineStatus({ at: 1, scan: 2 })).not.toHaveProperty("drn");
+    for (const drn of [false, 1, "true", null]) expect(parseMachineStatus({ at: 1, scan: 2, drn })).toBeNull();
+    expect(parseDecision(decide({ code: "draining" }))?.candidates[0]?.rejected).toEqual([{ code: "draining" }]);
+  });
+
   test("a spec settles until merged or reported, absent read as merged; an edge may wait for done", () => {
     const request: TaskRequest = { repo: "github.com/acme/app", mode: "worktree" };
     const spec: TaskSpec = { ...request, until: "reported", deps: [{ task: "t-1", after: "done" }] };

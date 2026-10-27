@@ -91,6 +91,8 @@ export function reasonText(reason: Reason): string {
       return "offline";
     case "status_stale":
       return "no fresh status, so its load is unknown";
+    case "draining":
+      return "its daemon is restarting, so it takes no new tasks";
     case "task_id_unsupported":
       return "its daemon predates task ids";
     case "exclaves_unknown":

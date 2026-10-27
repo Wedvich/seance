@@ -1103,6 +1103,14 @@ export interface MachineStatus {
    * from older daemons, and when none has expired.
    */
   readonly ax?: readonly number[];
+  /**
+   * The daemon's task-launch gate is closed (`EndedTasks.drain`: a self-update's
+   * restart, or a shutdown), so a task launch sent now is refused `internal_error`
+   * and sits reserved until its TTL; routing filters the machine (`draining`).
+   * Never trimmed, like `ax`. Absent when the gate is open, and from older daemons;
+   * an older reader ignores it.
+   */
+  readonly drn?: true;
 }
 
 /**
@@ -1856,6 +1864,8 @@ export type Reason =
   | { readonly code: "offline" }
   /** Connected, but no status, or one `isStatusStale` calls stale: pressure is unknown. */
   | { readonly code: "status_stale" }
+  /** Its status carries `drn`: the daemon is restarting and refuses task launches meanwhile. */
+  | { readonly code: "draining" }
   | { readonly code: "task_id_unsupported" }
   /** A daemon predating exclaves: which account a spawn would bill is unknown. */
   | { readonly code: "exclaves_unknown" }
