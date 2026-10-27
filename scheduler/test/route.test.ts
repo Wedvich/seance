@@ -672,19 +672,20 @@ describe("filter", () => {
     });
   });
 
-  describe("a machine asleep past slotReleaseAfterMs holds no slot", () => {
+  describe("a released task holds no slot", () => {
     /** Machine `s`, asleep, signed in to `org:a` as `a` is. */
     const asleep = machine("s", { connected: false, exclaves: [exclave("main", "org:a")] });
-    const released = new Set(["s"]);
+    // The leader's to say why; here `s` is asleep, and these are its tasks.
+    const released = new Set(["x", "y"]);
 
-    test("its in-flight tasks, reserved included, leave the global count; the rest still count", () => {
+    test("in flight, reserved included, it leaves the global count; the rest still count", () => {
       const tasks = [held("x", "s"), held("y", "s", "reserved"), held("z", "b")];
       const candidate = only(decide([machine("a")], { tasks, config: { globalMax: 1 }, released }));
       expect(candidate.rejected).toEqual([{ code: "cap_reached", inFlight: 1, max: 1 }]);
       expect(only(decide([machine("a")], { tasks, config: { globalMax: 2 }, released })).rejected).toEqual([]);
     });
 
-    test("its tasks leave its account's count, so another machine on the account gets the work", () => {
+    test("it leaves its account's count, so another machine on the account gets the work", () => {
       const tasks = [held("x", "s"), held("y", "s", "needs-input")];
       const fleet = [machine("a", { exclaves: [exclave("main", "org:a")] }), asleep];
       const holding = decide(fleet, { tasks, config: { accountMax: 2 } });
@@ -772,8 +773,8 @@ describe("filter", () => {
       expect(accountResetAt("org:a", [reading], inFlight, NOW, DEFAULT_CONFIG)).toBe((NOW_S + 7200) * 1000);
       // Alone it is under the line everywhere: the earliest reset.
       expect(accountResetAt("org:a", [reading], [], NOW, DEFAULT_CONFIG)).toBe((NOW_S + 3600) * 1000);
-      // Their machine asleep past the grace: they hold no projected usage, as in routing.
-      expect(accountResetAt("org:a", [reading], inFlight, NOW, DEFAULT_CONFIG, [], new Set(["a"]))).toBe(
+      // Released: they hold no projected usage, as in routing.
+      expect(accountResetAt("org:a", [reading], inFlight, NOW, DEFAULT_CONFIG, [], new Set(["x", "y", "z"]))).toBe(
         (NOW_S + 3600) * 1000,
       );
     });

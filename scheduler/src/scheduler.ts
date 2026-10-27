@@ -161,6 +161,14 @@ export class Scheduler {
    */
   readonly #absentSince = new Map<string, number>();
   /**
+   * Task id → when its session went idle at its prompt, and on which machine:
+   * what `#released` frees an idle task's slot by. Set only by an `idle` from
+   * the machine the task runs on, cleared by any other state it reports, and
+   * pruned once the task is not `running` there. Memory only: a new leader
+   * counts an idle task until its next `idle`, which can only delay a release.
+   */
+  readonly #idleSince = new Map<string, { readonly since: number; readonly deviceId: string }>();
+  /**
    * deviceId → when its `sessions` first failed, until one answers: how long
    * a connected machine has said nothing usable, for a reservation past its
    * TTL (`goneSince`). Memory only, as `#absentSince` is.
@@ -434,16 +442,31 @@ export class Scheduler {
   }
 
   /**
-   * Machines absent past `slotReleaseAfterMs` by `#absentSince`, and still
-   * away: one back since the last `#markAbsent` already counts again, so a
-   * `preview` between the two says what the next pass will.
+   * Tasks that hold no slot (`RouteInput.released`): placed on a machine
+   * absent past `slotReleaseAfterMs` by `#absentSince` and still away — one
+   * back since the last `#markAbsent` already counts again, so a `preview`
+   * between the two says what the next pass will — or `running` where their
+   * session has been idle past `idleReleaseAfterMs`.
    */
   #released(now: number): ReadonlySet<string> {
     const connected = this.#connectedIds();
+    const asleep = (deviceId: string): boolean => {
+      const since = this.#absentSince.get(deviceId);
+      return since !== undefined && !connected.has(deviceId) && now - since >= this.#config.slotReleaseAfterMs;
+    };
+    const idle = (task: Task): boolean => {
+      const clock = this.#idleSince.get(task.id);
+      return (
+        clock !== undefined && idleHere(task, clock.deviceId) && now - clock.since >= this.#config.idleReleaseAfterMs
+      );
+    };
     return new Set(
-      [...this.#absentSince]
-        .filter(([deviceId, since]) => !connected.has(deviceId) && now - since >= this.#config.slotReleaseAfterMs)
-        .map(([deviceId]) => deviceId),
+      this.tasks()
+        .filter((t) => {
+          const at = t.assignment ?? t.reservation;
+          return (at !== undefined && asleep(at.deviceId)) || idle(t);
+        })
+        .map((t) => t.id),
     );
   }
 
@@ -511,12 +534,33 @@ export class Scheduler {
       defers = waitsForExit(task, state, from, prUrl, awaitsExit);
       return sessionChange(task, state, from, prUrl, awaitsExit);
     });
+    this.#idleClock(taskId, state, from);
     if (!defers) return;
     const held = this.#held.get(taskId)?.task;
     if (held === undefined || !PLACED.includes(held.state)) return;
     if (!this.#ending.has(taskId)) this.#ending.set(taskId, this.#now());
     // Asked now, not at the next timed pass: the answer is what settles it, and frees its slot.
     this.tick().catch(this.#onError);
+  }
+
+  /**
+   * An `idle` from the machine the task runs on starts its clock unless one
+   * runs already, since a turn's end and a hooks-worker restart both say idle
+   * again; any other state it reports stops it. Another machine's event
+   * touches nothing, as `sessionChange` moves nothing for it — or any machine
+   * could hold a slot by resetting the clock. A sender that does not say which
+   * machine it is starts nothing, but its other states stop the clock, since
+   * `sessionChange` accepts them for a confirmed task.
+   */
+  #idleClock(taskId: string, state: SessionState, from: SessionSource | undefined): void {
+    const task = this.#held.get(taskId)?.task;
+    if (task === undefined) return;
+    if (from !== undefined && task.assignment?.deviceId !== from.deviceId) return;
+    if (state !== "idle" || from === undefined || task.state !== "running") {
+      this.#idleSince.delete(taskId);
+      return;
+    }
+    if (!this.#idleSince.has(taskId)) this.#idleSince.set(taskId, { since: this.#now(), deviceId: from.deviceId });
   }
 
   #reportsExit(deviceId: string): boolean {
@@ -716,6 +760,10 @@ export class Scheduler {
   }
 
   async #pass(): Promise<void> {
+    for (const [id, { deviceId }] of this.#idleSince) {
+      const task = this.#held.get(id)?.task;
+      if (task === undefined || !idleHere(task, deviceId)) this.#idleSince.delete(id);
+    }
     await this.#settleEndings();
     await this.#markAbsent();
     this.#checkOut(this.#due());
@@ -1081,7 +1129,8 @@ export class Scheduler {
    * `change` applied again to what it finds. A lost reply (`indeterminate`) is
    * read the same way, except that the one version after ours is ours. A record
    * past the store's bound is written again with its decision cut to the
-   * winner, never the task cut. The needs-input clock (`inputClock`) rides
+   * winner, never the task cut. An idle clock (`#idleSince`) ends on any write
+   * into or out of `running`. The needs-input clock (`inputClock`) rides
    * whatever state a write lands, so no path can enter or leave `needs-input`
    * without it, and the merge clock (`endClock`) rides entering `awaiting-merge` the same way.
    * A forge reading (`pr`) is dropped when the write moves `prUrl` (`prBound`).
@@ -1106,6 +1155,8 @@ export class Scheduler {
         const write = await this.#store.put(id, held.version, next);
         if (write.ok) {
           this.#held.set(id, { version: write.version, task: next });
+          // A stay at the prompt ends with `running`: one back from `lost` starts its grace over.
+          if (held.task.state !== "running" || next.state !== "running") this.#idleSince.delete(id);
           return next;
         }
         if (write.code === "too_large" && !trim && next.decision !== undefined) {
@@ -1148,6 +1199,11 @@ export class Scheduler {
   #refused(id: string, op: string, write: Extract<StoreWrite, { readonly ok: false }>): void {
     this.#onError(new Error(`store refused ${op} of task ${id}: ${write.code}`));
   }
+}
+
+/** Whether an idle clock started on `deviceId` still speaks for `task`: running there, as it was. */
+function idleHere(task: Task, deviceId: string): boolean {
+  return task.state === "running" && task.assignment?.deviceId === deviceId;
 }
 
 /** At most `DECISION_MAX_CANDIDATES`, cut from the end — the rejected trail — and counted in `trimmed`. */

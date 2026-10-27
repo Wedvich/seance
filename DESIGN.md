@@ -2382,7 +2382,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   A `not_continuable` reply fails the task with that code and message (`settle.ts` verdict). A continuation
   that stays unplaceable expires `continue_expired` after `continueExpiryMs` ("Expiry").
 - **Routing caps** (M2's global, M3 item 5's per account). Both count `IN_FLIGHT` — reserved, running
-  and `needs-input`, which keeps its slot — and neither counts `lost` ("`lost`" below).
+  and `needs-input`, which keeps its slot — and neither counts `lost` ("`lost`" below), nor a
+  released task (asleep or idle, below).
   `globalMax` (8) puts `cap_reached` with no `scope` on every candidate, as M2's leaders sent
   it. `accountMax` (4, docs/scheduler.md Settled defaults 8) puts `cap_reached` with `scope:
   "account"` on each candidate whose exclave's account already holds that many, counted by
@@ -2430,6 +2431,30 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   race. Rejected: a lasting flag on the task record (`spec.uncapped`), which would survive a
   takeover but needs the record schema widened and an older leader made to refuse it, for a tap
   that a person can repeat. Deferred: also lifting the quota line, for spending credits on purpose.
+  **A session idle at its prompt past a grace holds no slot** (2026-10-27, docs/scheduler.md
+  Settled defaults 20). A `running` task whose session reported `idle` ("Where the states come
+  from": main turn ended, no dialog open) from the machine it runs on, with no other state since,
+  counts toward neither cap nor projected usage once `idleReleaseAfterMs` (10 min) has passed;
+  `route` takes it in the same `released` set, which carries task ids so routing need not know why.
+  The clock is the leader's in-memory `#idleSince`: a repeated `idle` keeps it, any other state
+  from that machine clears it, another machine's event touches it no more than it moves the task
+  (or any machine could hold a slot by resetting it), and any write into or out of `running` ends
+  it, so a task back from `lost` starts its grace over. No task state:
+  `busy`/`idle` flip every turn, and a stored state would cost two writes per turn per task. Why: a
+  session that finished and asked "want a follow-up?" but was never settled held a slot for good,
+  and nothing bills while it waits. `needs-input` keeps its slot — a dialog is mid-task, so work
+  resumes for certain when it is answered. Detection reads the mod's state, never the session's
+  text: classifying the reply would be guesswork and would put transcript content on the wire.
+  Accepted: (a) answering released sessions overcommits — answer six with eight new running and
+  fourteen draw on the caps — handled as a return from sleep is: nothing killed, nothing placed
+  until the count falls under. (b) `idle` is not always quiet: a main loop whose background
+  subagent or background command is still working reads idle, as does a session restarted
+  mid-turn until its next turn event ("Where the states come from"), so long background work can
+  be released while it runs. (c) A `busy` lost on the way (a hooks-worker or relay hiccup) leaves
+  a working session released until its next event; `sessions` cannot see busy from idle, so
+  nothing else corrects it. (d) A new leader starts no clock until the next `idle`: on takeover
+  every released task counts again at once, an over-cap fleet that drains as in (a). (e) An
+  `idle` from a sender naming no machine frees nothing.
 - **Pause** (`pause.ts`, M3 item 5). `queue:pause` holds the holds (`PauseHold`): one on the
   whole queue, one per account, at most `MAX_PAUSE_HOLDS` — account holds stop one short of
   it, so a whole-queue pause always fits. The library reads it on `load()` —

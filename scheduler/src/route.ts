@@ -51,8 +51,9 @@ export interface RouteInput {
   /** The fleet quota record's entries (`Fleet.fleetQuota`), folded with every status. */
   readonly fleetQuota?: readonly FleetQuotaEntry[];
   /**
-   * Machines absent past `slotReleaseAfterMs`: their in-flight tasks hold no
-   * slot and no projected usage here.
+   * Ids of in-flight tasks that hold no slot and no projected usage here: the
+   * leader's to say why (`Scheduler`'s `#released` — a machine asleep, a
+   * session idle at its prompt).
    */
   readonly released?: ReadonlySet<string>;
   /** `runNow`: neither concurrency cap (`cap_reached`) applies; every other filter does. */
@@ -216,16 +217,11 @@ interface AccountJudgement {
 }
 
 /**
- * What the caps and projected usage count: in flight, and not placed on a
- * machine asleep past `slotReleaseAfterMs`. Nothing runs there while it
- * sleeps; once it is back its tasks count again, over a cap or not.
+ * What the caps and projected usage count: in flight, and not released. A
+ * released task that counts again is counted over a cap or not.
  */
 function holdingSlots(tasks: readonly Task[], released: ReadonlySet<string> = new Set()): Task[] {
-  return tasks.filter((t) => {
-    if (!IN_FLIGHT.includes(t.state)) return false;
-    const at = t.assignment ?? t.reservation;
-    return at === undefined || !released.has(at.deviceId);
-  });
+  return tasks.filter((t) => IN_FLIGHT.includes(t.state) && !released.has(t.id));
 }
 
 /**
