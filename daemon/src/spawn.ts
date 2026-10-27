@@ -2,7 +2,7 @@ import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { DEFAULT_EFFORT, DEFAULT_MODEL, type RepoEntry, type SpawnRequest } from "@seance/shared";
-import { SpawnFailure, type SpawnOutcome } from "./backend.ts";
+import { SpawnFailure, type Continuation, type SpawnOutcome } from "./backend.ts";
 import { freshenBase } from "./base-fetch.ts";
 import { git } from "./exec.ts";
 import { whileRegistering } from "./exit-status.ts";
@@ -133,15 +133,26 @@ const RESUME_NEVER_ASKS = [
 
 /**
  * Never asserts that the dead session's background work is gone: only claude itself
- * was killed, and a surviving child is not something the pane checks can see.
+ * was stopped, and a surviving child is not something the pane checks can see. The
+ * wording comes from the old task's own ledger note `exit`, never from a frame: nonzero
+ * is a death, anything else (zero, or none noted) a cancel.
  */
-function continuePreamble(path: string): string {
+export function continuePreamble(path: string, exit: number | undefined): string {
+  const prefix = `This session was resumed by séance in the same git worktree at ${path}, after the previous session `;
+  if (exit !== undefined && exit !== 0) {
+    return (
+      prefix +
+      `ended unexpectedly (killed, crashed or out of memory) partway through. Its last tool call may not ` +
+      `have finished, and processes it started in the background may still be running (only claude itself ` +
+      `was killed): check the worktree's state and running processes before restarting anything, then ` +
+      `carry on where it left off.`
+    );
+  }
   return (
-    `This session was resumed by séance in the same git worktree at ${path}, after the previous session ` +
-    `ended unexpectedly (killed, crashed or out of memory) partway through. Its last tool call may not ` +
-    `have finished, and processes it started in the background may still be running (only claude itself ` +
-    `was killed): check the worktree's state and running processes before restarting anything, then ` +
-    `carry on where it left off.`
+    prefix +
+    `was stopped before it finished (cancelled from séance). Its last tool call may not have finished, and ` +
+    `processes it started in the background may still be running (only claude itself was stopped): check ` +
+    `the worktree's state and running processes before restarting anything, then carry on where it left off.`
   );
 }
 
@@ -189,14 +200,14 @@ function prepareHere(repo: RepoEntry): Prepared {
 }
 
 /** `path` is the ledger's worktree, already canonical and checked (`spawnContinued`). */
-function prepareContinue(path: string): Prepared {
+function prepareContinue(path: string, exit: number | undefined): Prepared {
   return {
     launchDir: path,
     resultPath: path,
     worktreeFlag: [],
     resume: true,
     env: RESUME_NEVER_ASKS,
-    preamble: continuePreamble(path),
+    preamble: continuePreamble(path, exit),
   };
 }
 
@@ -373,7 +384,7 @@ export async function spawnSession(
   request: SpawnRequest,
   repos: readonly RepoEntry[],
   opts: SpawnOptions,
-  continuation?: { readonly path: string },
+  continuation?: Continuation,
 ): Promise<SpawnOutcome> {
   const { taskId } = request;
   if (request.mode === "continue" && (continuation === undefined || request.continues === undefined)) {
@@ -391,7 +402,7 @@ export async function spawnSession(
         throw new SpawnFailure("task_running", `task ${taskId} is already running in ${where}`, running.paneId);
       }
       if (request.mode === "continue" && continuation !== undefined && request.continues !== undefined) {
-        return spawnContinued(request, request.continues, repos, opts, continuation.path);
+        return spawnContinued(request, request.continues, repos, opts, continuation);
       }
       return spawnUntracked(request, repos, opts);
     });
@@ -478,9 +489,9 @@ function liveInside(panes: readonly PaneInfo[], path: string): Promise<PaneInfo 
 }
 
 /**
- * Resumes a failed task's conversation in its worktree: `path` is what this machine's own
- * launch ledger noted for `continues`, canonical and checked by the handler (DESIGN.md,
- * Daemon, "Continuing a failed task"). No fetch and no new worktree — the session picks up
+ * Resumes a failed or cancelled task's conversation in its worktree: `continuation.path` is
+ * what this machine's own launch ledger noted for `continues`, canonical and checked by the
+ * handler (DESIGN.md, Daemon, "Continuing a session"). No fetch and no new worktree — the session picks up
  * what the dead one left.
  */
 async function spawnContinued(
@@ -488,10 +499,11 @@ async function spawnContinued(
   continues: string,
   repos: readonly RepoEntry[],
   opts: SpawnOptions,
-  path: string,
+  continuation: Continuation,
 ): Promise<SpawnOutcome> {
+  const { path } = continuation;
   const prior = pathSpawns.get(path) ?? Promise.resolve();
-  const run = prior.catch(() => undefined).then(() => continueLocked(request, continues, repos, opts, path));
+  const run = prior.catch(() => undefined).then(() => continueLocked(request, continues, repos, opts, continuation));
   pathSpawns.set(path, run);
   try {
     return await run;
@@ -505,8 +517,9 @@ async function continueLocked(
   continues: string,
   repos: readonly RepoEntry[],
   opts: SpawnOptions,
-  path: string,
+  continuation: Continuation,
 ): Promise<SpawnOutcome> {
+  const { path } = continuation;
   const repo = repos.find((r) => r.name === request.repo);
   if (repo === undefined) {
     throw new SpawnFailure("repo_not_found", `no repo named "${request.repo}" — try a rescan`);
@@ -536,7 +549,7 @@ async function continueLocked(
 
   const name = basename(path);
   const windowName = sanitizeWindowName(request.title ?? name);
-  const prepared = prepareContinue(path);
+  const prepared = prepareContinue(path, continuation.exit);
   const inner = await buildInnerCommand(prepared, sessionName(name, opts.machineTag), request);
   return launchWindow(prepared, inner, windowName, request, opts);
 }

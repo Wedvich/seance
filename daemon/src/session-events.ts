@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exclaveOf, type Exclave } from "./exclaves.ts";
 import { harvestExits, sampleOomPanes, type HarvestOom, type HarvestPanes } from "./exit-status.ts";
-import { LaunchLedger, type LaunchSite, type NoteOutcome } from "./launch-ledger.ts";
+import { LaunchLedger, pathOwners, type LaunchSite, type NoteOutcome } from "./launch-ledger.ts";
 import { log } from "./log.ts";
 import type { OomProbe } from "./oom-kill.ts";
 import { ancestorIn, peerPid, peerPidSupported, socketFd } from "./peer.ts";
@@ -322,19 +322,30 @@ export class EndedTasks {
 
   /**
    * Where a continued task's session ran, from this ledger alone — the one authority on
-   * a worktree path (DESIGN.md, Daemon, "Continuing a failed task"); a frame never names
-   * one. `refused` says why there is none, in words the task's failure carries.
+   * a worktree path (DESIGN.md, Daemon, "Continuing a session"); a frame never names
+   * one. The newest note on a path owns it: a task whose worktree a later launch noted
+   * is refused, since `--continue` would resume that later session. `refused` says why
+   * there is none, in words the task's failure carries.
    */
-  continuation(taskId: string): { readonly repo: string; readonly path: string } | { readonly refused: string } {
+  continuation(
+    taskId: string,
+  ): { readonly repo: string; readonly path: string; readonly exit?: number } | { readonly refused: string } {
     if (this.#launches.has(taskId)) return { refused: "a launch of it is still in flight here" };
     if (!this.#ledger.ids().includes(taskId)) {
       return { refused: "this machine holds no launch of it (its launch ledger keeps a week, at most 128 launches)" };
     }
-    const note = this.#ledger.notes().find((n) => n.taskId === taskId);
+    const notes = this.#ledger.notes();
+    const note = notes.find((n) => n.taskId === taskId);
     if (note?.path === undefined || note.repo === undefined) {
       return { refused: "no worktree of it was noted here (a here-mode run, or it never landed)" };
     }
-    return { repo: note.repo, path: note.path };
+    const owner = pathOwners(notes).get(note.path);
+    if (owner !== undefined && owner.taskId !== taskId) {
+      return {
+        refused: `task ${owner.taskId} ran in its worktree ${note.path} after it, so resuming would pick up that session; continue that task instead`,
+      };
+    }
+    return { repo: note.repo, path: note.path, ...(note.exit === undefined ? {} : { exit: note.exit }) };
   }
 
   /**

@@ -258,6 +258,44 @@ describe("EndedTasks", () => {
     expect(ended.continuation("landed")).toEqual({ repo: "/r", path: "/r/.claude/worktrees/x" });
   });
 
+  test("the newest note on a path owns it: an older task is refused, naming the newer", async () => {
+    const clock = { now: 1000 };
+    const ledger = LaunchLedger.memory(() => clock.now);
+    const ended = new EndedTasks(ledger);
+    const path = "/r/.claude/worktrees/x";
+    await ledger.record("old");
+    await ledger.note("old", { repo: "/r", path, exit: 137 });
+    clock.now += 10;
+    await ledger.record("new");
+    await ledger.note("new", { repo: "/r", path });
+    const refused = ended.continuation("old");
+    expect(refused).toEqual({ refused: expect.stringContaining("new") });
+    expect(refused).toEqual({ refused: expect.stringContaining(path) });
+    expect(ended.continuation("new")).toEqual({ repo: "/r", path });
+  });
+
+  test("an equal site time goes to the later launch", async () => {
+    const ledger = LaunchLedger.memory(() => 1000);
+    const ended = new EndedTasks(ledger);
+    const path = "/r/.claude/worktrees/x";
+    for (const id of ["first", "second"]) {
+      // oxlint-disable-next-line no-await-in-loop -- ledger order is the point
+      await ledger.record(id);
+      // oxlint-disable-next-line no-await-in-loop
+      await ledger.note(id, { repo: "/r", path });
+    }
+    expect(ended.continuation("first")).toEqual({ refused: expect.stringContaining("second") });
+    expect(ended.continuation("second")).toEqual({ repo: "/r", path });
+  });
+
+  test("the old note's exit is carried, for wording only", async () => {
+    const ledger = LaunchLedger.memory();
+    const ended = new EndedTasks(ledger);
+    await ledger.record("dead");
+    await ledger.note("dead", { repo: "/r", path: "/r/.claude/worktrees/x", exit: 137 });
+    expect(ended.continuation("dead")).toEqual({ repo: "/r", path: "/r/.claude/worktrees/x", exit: 137 });
+  });
+
   test("a ledger that cannot record refuses the launch and holds nothing back", async () => {
     const dir = await mkdtemp(join(tmpdir(), "seance-ledger-"));
     try {

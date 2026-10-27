@@ -101,6 +101,21 @@ export interface NotedTask extends TaskNote {
   readonly siteAt?: number;
 }
 
+/**
+ * The note that owns each path: of two tasks naming one, the newer site (`siteAt`, absent
+ * as 0) wins, and a tie goes to the later in `notes`. One rule for branch-state's live read
+ * and for continuation, so they cannot drift.
+ */
+export function pathOwners(notes: readonly NotedTask[]): ReadonlyMap<string, NotedTask> {
+  const newest = new Map<string, NotedTask>();
+  for (const note of notes) {
+    if (note.path === undefined) continue;
+    const held = newest.get(note.path);
+    if (held === undefined || (note.siteAt ?? 0) >= (held.siteAt ?? 0)) newest.set(note.path, note);
+  }
+  return newest;
+}
+
 interface LedgerFile {
   readonly v: typeof LEDGER_VERSION;
   readonly since: number;

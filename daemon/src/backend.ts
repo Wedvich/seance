@@ -65,6 +65,13 @@ export interface SpawnOutcome {
   readonly handle?: string;
 }
 
+/** What a frontend resolved of a continued task's last launch from its own ledger. */
+export interface Continuation {
+  readonly path: string;
+  /** The continued task's exit status as its own ledger note recorded; absent when none was noted. Words the seed only. */
+  readonly exit?: number;
+}
+
 export interface SessionBackend {
   /**
    * Resolves `request.repo` by name against `repos` — the cached scan set, never
@@ -75,13 +82,13 @@ export interface SessionBackend {
    *
    * `continuation` is the frontend's own resolution of a `mode: "continue"` request's
    * worktree, from its launch ledger and already checked — it never rides the wire
-   * request. A backend that cannot continue a session throws
+   * request; its `exit` comes from the ledger too. A backend that cannot continue a session throws
    * `SpawnFailure("not_continuable")`.
    */
   readonly spawn: (
     request: SpawnRequest,
     repos: readonly RepoEntry[],
-    continuation?: { readonly path: string },
+    continuation?: Continuation,
   ) => Promise<SpawnOutcome>;
   readonly sessions: (repos: readonly RepoEntry[]) => Promise<readonly SessionEntry[]>;
   /**

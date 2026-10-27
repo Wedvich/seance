@@ -606,6 +606,7 @@ describe("daemon ↔ relay integration", () => {
         "reportedDone",
         "pinAccount",
         "continueTask",
+        "continueCancelled",
       ]);
       // A status leaves only after its tick wrote the store, so one in hand
       // means there is history to ask for.

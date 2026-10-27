@@ -25,7 +25,7 @@ usage: seanced [command]
   spawn       queue a session for the scheduler: seanced spawn <repo> [--here] [-t <title>] [[-p] <task>] (needs the relay, and a PSK this shell or its daemon holds)
               --machine <name|here> / --account <alias|email|id>: pin it; --not <machine|here>: keep it off (repeatable)
               --now: spawn on this machine right away instead: no relay, key, leader or daemon needed; takes no pin flags
-  continue    resume a failed task's session in its worktree, as a new queued task: seanced continue <task-id> [-p <note>] (needs the relay, and a PSK this shell or its daemon holds)
+  continue    resume a failed or cancelled task's session in its worktree, as a new queued task: seanced continue <task-id> [-p <note>] (needs the relay, and a PSK this shell or its daemon holds)
   despawn     end a session: seanced despawn <id> [--force] — asks claude to exit (keeping its worktree), kills the pane after ~5s
   reap        clean up after sessions: merged, clean, idle worktrees, merged branches, dead windows — [--dry-run] [--min-age-days <n>]
   mcp         serve MCP over stdio for a local Claude Code; mcp install / mcp uninstall wire it into Claude's config

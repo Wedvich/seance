@@ -24,7 +24,7 @@ export function QueueScreen(props: {
   onRefresh: () => void;
   onCancel: (taskId: string) => void;
   onMarkDone: (taskId: string) => void;
-  /** Queues a task that resumes this failed one's session in its worktree, on its machine. */
+  /** Queues a task that resumes this failed or cancelled one's session in its worktree, on its machine. */
   onContinue: (taskId: string) => void;
   /** Starts a new task that waits on this one: the form opens on `auto` with it in After. */
   onFollowUp: (taskId: string) => void;

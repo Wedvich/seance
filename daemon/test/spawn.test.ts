@@ -567,7 +567,7 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
 });
 
 // A scheduler continuation resumes a failed task's conversation in the worktree its
-// launch ledger noted (DESIGN.md, Daemon, "Continuing a failed task"). The handler
+// launch ledger noted (DESIGN.md, Daemon, "Continuing a session"). The handler
 // resolves and checks the path; this is the spawn half, against a real worktree and tmux.
 describe("spawnSession continuing a failed task's session", () => {
   const OLD = "cont-old";
@@ -588,7 +588,11 @@ describe("spawnSession continuing a failed task's session", () => {
     await git(fixture.repoPath, ["branch", "-D", `wt-${wt.name}`]);
   }
 
-  const continuing = (wt: { readonly path: string }, extra: Partial<SpawnRequest> = {}): Promise<SpawnOutcome> =>
+  const continuing = (
+    wt: { readonly path: string },
+    extra: Partial<SpawnRequest> = {},
+    exit?: number,
+  ): Promise<SpawnOutcome> =>
     spawnSession(
       {
         repo: "myrepo",
@@ -601,7 +605,7 @@ describe("spawnSession continuing a failed task's session", () => {
       },
       repos,
       WAIT,
-      { path: wt.path },
+      { path: wt.path, ...(exit === undefined ? {} : { exit }) },
     );
 
   const lockedOf = async (wt: { readonly path: string }): Promise<boolean> => {
@@ -620,7 +624,7 @@ describe("spawnSession continuing a failed task's session", () => {
     const beforeTracking = await headOf(fixture.repoPath, "origin/main");
     let outcome: SpawnOutcome | undefined;
     try {
-      outcome = await continuing(wt, { title: "Cont A", prompt: "the tests still fail" });
+      outcome = await continuing(wt, { title: "Cont A", prompt: "the tests still fail" }, 137);
       expect(outcome.path).toBe(wt.path);
       expect(outcome.window).toBe("Cont A");
       const argv = await stub.argv();
@@ -635,6 +639,7 @@ describe("spawnSession continuing a failed task's session", () => {
       // Told what happened, and the user's note, over stdin: never argv.
       const seed = await stub.stdin();
       expect(seed).toStartWith(`This session was resumed by séance in the same git worktree at ${wt.path}`);
+      expect(seed).toContain("ended unexpectedly");
       expect(seed).toContain("processes it started in the background may still be running");
       expect(seed).toEndWith("\n\nFrom the user: the tests still fail\n");
       expect(argv.join("\0")).not.toContain("still fail");
@@ -660,6 +665,8 @@ describe("spawnSession continuing a failed task's session", () => {
       outcome = await continuing(wt, { title: "Cont Quiet" });
       const seed = await stub.stdin();
       expect(seed).toStartWith("This session was resumed by séance");
+      expect(seed).toContain("was stopped before it finished (cancelled from séance)");
+      expect(seed).toContain("processes it started in the background may still be running");
       expect(seed).toEndWith("carry on where it left off.\n");
       expect(seed).not.toContain("From the user");
     } finally {
