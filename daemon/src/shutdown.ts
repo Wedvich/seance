@@ -11,7 +11,7 @@ export interface ShutdownSeams {
 /**
  * The SIGTERM/SIGINT handler. The first signal drains task launches *before* `stop`, which keeps the
  * relay leg up so a finishing spawn's reply still reaches its leader; `exit` follows `stop` even when
- * `stop` throws, or the daemon would hang past a signal. A second signal exits at once.
+ * `stopPower` or `stop` throws, or the daemon would hang past a signal. A second signal exits at once.
  */
 export function createShutdown(seams: ShutdownSeams): (signal: string) => void {
   let stopping = false;
@@ -23,7 +23,11 @@ export function createShutdown(seams: ShutdownSeams): (signal: string) => void {
     }
     stopping = true;
     seams.info(`${signal} — shutting down`);
-    seams.stopPower();
+    try {
+      seams.stopPower();
+    } catch (err) {
+      seams.info(`stopping the power loop failed (${String(err)}) — shutting down anyway`);
+    }
     void seams
       .drain()
       .catch(() => false)

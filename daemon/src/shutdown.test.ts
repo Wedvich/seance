@@ -50,6 +50,18 @@ describe("createShutdown", () => {
     expect(calls).toEqual(["stopPower", "stop", "exit 0"]);
   });
 
+  test("exits even when stopping the power loop throws", async () => {
+    const { calls, seams: s } = seams({
+      stopPower: () => {
+        calls.push("stopPower");
+        throw new Error("power broke");
+      },
+    });
+    createShutdown(s)("SIGTERM");
+    await pollUntil(() => calls.includes("exit 0"), "the exit despite the throw");
+    expect(calls).toEqual(["stopPower", "drain", "stop", "exit 0"]);
+  });
+
   test("a second signal exits at once, without waiting for the drain or stopping again", async () => {
     const gate = Promise.withResolvers<boolean>();
     const { calls, seams: s } = seams({
