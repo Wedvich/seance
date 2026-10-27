@@ -690,6 +690,39 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     }
   });
 
+  test("harvest settles the recorded options before it closes the server's last pane: an exit the hook closed is not lost with the server", async () => {
+    process.env["SEANCE_CLAUDE_BIN"] = stub.repl;
+    const shared = process.env["SEANCE_TMUX_SOCKET"];
+    const alone = usePrivateTmux(base, "spawn-last-two");
+    try {
+      const tasks = new EndedTasks(LaunchLedger.memory(), Date.now, tmuxHarvestPanes(reapAudit("harvest", () => {})));
+      const first = await launchTask(tasks, "task-first", "Task First");
+      const crashed = await launchTask(tasks, "task-second", "Task Second");
+      for (const other of (await tmuxOk(["list-panes", "-a", "-F", "#{pane_id}"])).split("\n")) {
+        // oxlint-disable-next-line no-await-in-loop -- one pane at a time
+        if (other !== "" && other !== first.pane && other !== crashed.pane) await tmuxOk(["kill-pane", "-t", other]);
+      }
+      await tmux(["send-keys", "-t", crashed.pane, "-l", "/crash 4"]);
+      await tmux(["send-keys", "-t", crashed.pane, "Enter"]);
+      await pollUntil(async () => (await paneInfo(crashed.pane))?.dead === true, `pane ${crashed.pane} dead`);
+      // The other pane remains, so the hook closes this one's clean exit and only its option holds the status.
+      const result = await despawnSession(first.pane, { force: false, closing: markClosed, leaveDeadTask: true });
+      expect(result.outcome).toBe("exited");
+      expect(await paneInfo(first.pane)).toBeNull();
+
+      // Closing the crashed pane, now the server's last, ends the server.
+      await tasks.harvestExits();
+      const progress = tasks.progress();
+      expect(progress.find((p) => p.taskId === "task-first")).toMatchObject({ exit: 0 });
+      expect(progress.find((p) => p.taskId === "task-second")).toMatchObject({ exit: 4 });
+      expect(progress.filter((p) => p.vanished === true)).toEqual([]);
+    } finally {
+      process.env["SEANCE_CLAUDE_BIN"] = stub.ok;
+      await alone.dispose();
+      if (shared !== undefined) process.env["SEANCE_TMUX_SOCKET"] = shared;
+    }
+  });
+
   test("despawn notes closing, and waits for it, before it touches a task's pane", async () => {
     process.env["SEANCE_CLAUDE_BIN"] = stub.repl;
     const tasks = new EndedTasks(LaunchLedger.memory(), Date.now, tmuxHarvestPanes(reapAudit("harvest", () => {})));

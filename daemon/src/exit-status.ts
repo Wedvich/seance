@@ -265,8 +265,9 @@ export async function sampleOomPanes(deps: Pick<HarvestPanes, "list">, oom: Harv
  *
  * Order matters. The unaccounted launches are snapshotted before the listing, so a
  * launch that settles after it is not judged on a listing that predates it; the hooks'
- * recorded exits are read after it, since one may land between the two; and a failed
- * listing returns before anything is judged.
+ * recorded exits and the CLI's close marks are read after it, since one may land between
+ * the two, and settled before any dead pane is closed, since closing the server's last pane
+ * ends the server and its options; and a failed listing returns before anything is judged.
  */
 export async function harvestExits(deps: HarvestDeps): Promise<void> {
   const candidates = deps.unaccounted();
@@ -278,39 +279,49 @@ export async function harvestExits(deps: HarvestDeps): Promise<void> {
   }
   const { oom } = deps;
   const probe = oom === undefined ? undefined : perPass(oom.probe);
-  const noted = new Set<string>();
-  await Promise.all(
-    panes
-      .filter((pane) => harvestable(pane) && !registering.has(pane.windowId))
-      .map(async (pane) => {
-        if (pane.taskId !== null && pane.deadStatus !== null) {
-          const oomKill =
-            pane.deadStatus === SIGKILL_STATUS && oom !== undefined && probe !== undefined
-              ? await judgeOomKill(
-                  oom.sampled(pane.taskId),
-                  { paneId: pane.paneId, windowId: pane.windowId, deadAt: pane.deadAt },
-                  probe,
-                  oom.now,
-                  oom.timeoutMs,
-                )
-              : undefined;
-          await deps.note(pane.taskId, pane.deadStatus, oomKill);
-          noted.add(pane.taskId);
-        } else if (pane.taskId !== null) {
-          // The daemon closing a pane that kept no status, so it must not read as closed from outside.
-          await deps.closing(pane.taskId);
-        }
-        await deps.close(pane);
-      }),
+  // A launch in flight is left whole, pane included: its `startNote` would overwrite what this pass noted,
+  // and closing the server's last pane would take the recorded options with it.
+  const dead = panes.filter(
+    (pane) =>
+      harvestable(pane) &&
+      !registering.has(pane.windowId) &&
+      pane.taskId !== null &&
+      deps.launching?.(pane.taskId) !== true,
   );
-  const recorded = await settleRecordedExits(deps, noted);
+  // The options are settled before any pane is closed: closing the server's last pane ends the server,
+  // and every option with it.
+  const recorded = await settleRecordedExits(
+    deps,
+    new Set(dead.flatMap((pane) => (pane.deadStatus === null ? [] : (pane.taskId ?? [])))),
+  );
+  await Promise.all(
+    dead.map(async (pane) => {
+      if (pane.taskId !== null && pane.deadStatus !== null) {
+        const oomKill =
+          pane.deadStatus === SIGKILL_STATUS && oom !== undefined && probe !== undefined
+            ? await judgeOomKill(
+                oom.sampled(pane.taskId),
+                { paneId: pane.paneId, windowId: pane.windowId, deadAt: pane.deadAt },
+                probe,
+                oom.now,
+                oom.timeoutMs,
+              )
+            : undefined;
+        await deps.note(pane.taskId, pane.deadStatus, oomKill);
+      } else if (pane.taskId !== null) {
+        // The daemon closing a pane that kept no status, so it must not read as closed from outside.
+        await deps.closing(pane.taskId);
+      }
+      await deps.close(pane);
+    }),
+  );
   if (recorded !== null) await judgeVanished(deps, candidates, panes, recorded);
   if (oom !== undefined) await sampleLive(panes, oom);
 }
 
 /**
  * The hooks' recorded exits into the ledger, then unset: only once the note was staged, so a failed
- * one is retried next pass. A task this pass already noted from its dead pane is only unset, and so is
+ * one is retried next pass. A task this pass notes from its dead pane (`fromPane`) is only unset, and so is
  * one the ledger does not hold. One whose launch is still in flight is left unread and unset: the launch's
  * `startNote` would overwrite the exit, so a later pass picks it up. A value that is no status (a signal
  * death on a tmux without `pane_dead_signal`) notes `closedHere` first, as a pane with no status does, so
@@ -318,7 +329,10 @@ export async function harvestExits(deps: HarvestDeps): Promise<void> {
  * unset the same way, in flight launches excepted for the same reason. Null when tmux could not be read,
  * which judges nothing.
  */
-async function settleRecordedExits(deps: HarvestDeps, noted: ReadonlySet<string>): Promise<ReadonlySet<string> | null> {
+async function settleRecordedExits(
+  deps: HarvestDeps,
+  fromPane: ReadonlySet<string>,
+): Promise<ReadonlySet<string> | null> {
   let recorded: Recorded;
   try {
     recorded = await deps.recorded();
@@ -342,12 +356,12 @@ async function settleRecordedExits(deps: HarvestDeps, noted: ReadonlySet<string>
     accounted.add(taskId);
     if (deps.launching?.(taskId) === true) continue;
     try {
-      if (exit === null && !noted.has(taskId)) {
+      if (exit === null && !fromPane.has(taskId)) {
         // oxlint-disable-next-line no-await-in-loop -- one note each, a few at most
         await deps.closing(taskId);
       }
       // oxlint-disable-next-line no-await-in-loop -- one note each, a few at most
-      if (exit !== null && !noted.has(taskId)) await deps.note(taskId, exit);
+      if (exit !== null && !fromPane.has(taskId)) await deps.note(taskId, exit);
       // oxlint-disable-next-line no-await-in-loop
       await deps.clearExit(taskId);
     } catch {

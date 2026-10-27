@@ -4520,7 +4520,10 @@ for the lot with its own `gh`.
   reads), parses it as `exitStatus` parses a pane's (a signal is `128 + signal`), notes it, and
   unsets it only after the note was staged, and not while a launch of the task is still in flight (its
   `startNote` replaces the whole note, so an exit noted earlier would be lost; the option stays for the
-  next pass). A recorded value that is no status (a signal death on a tmux without `pane_dead_signal`)
+  next pass, and so does that task's dead pane, unnoted and unclosed). The options are settled before
+  harvest closes any dead pane: closing the server's last pane ends the server, and every option with it,
+  so a task whose clean exit the hook closed beside another pane's death would otherwise read `vanished`
+  (before 2026-10-27 the panes went first). A recorded value that is no status (a signal death on a tmux without `pane_dead_signal`)
   notes `closedHere` before it is unset, so a later close of its dead pane settles `done` as before
   rather than `vanished`. A nonzero exit leaves the dead pane for the user to read,
   as before, and is noted from the pane (the option is then only unset). A status the hook did not

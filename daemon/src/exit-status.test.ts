@@ -515,15 +515,16 @@ describe("a window closed from outside", () => {
       ],
     });
     await run();
+    // Every option is settled before a pane is closed: closing the server's last pane would end the server with them.
     expect(events).toEqual([
-      "note task-1 2",
-      "close %1",
       "note task-9 0",
       "clear task-9",
       "clear task-1",
       // No parseable status: announced as closing first, so the user closing its dead pane never reads vanished.
       "closing task-x",
       "clear task-x",
+      "note task-1 2",
+      "close %1",
     ]);
   });
 
@@ -542,6 +543,27 @@ describe("a window closed from outside", () => {
       "note task-8 1",
       "clear task-8",
     ]);
+  });
+
+  test("a dead pane whose task's launch is in flight is neither noted nor closed until the launch settles", async () => {
+    const events: string[] = [];
+    const ledger = LaunchLedger.memory();
+    const tasks = new EndedTasks(ledger, Date.now, {
+      list: () => Promise.resolve([pane("%1", { deadStatus: 0 })]),
+      close: (p) => Promise.resolve(void events.push(`close ${p.paneId}`)),
+      server: () => Promise.resolve(100),
+      recorded: () => Promise.resolve({ exits: [], closes: [] }),
+      clearExit: () => Promise.resolve(),
+      clearClose: () => Promise.resolve(),
+    });
+    const settle = await tasks.launch("task-1");
+    await tasks.harvestExits();
+    expect(events).toEqual([]);
+    expect(tasks.progress()).toEqual([]);
+    await settle(true, { server: 100 });
+    await tasks.harvestExits();
+    expect(events).toEqual(["close %1"]);
+    expect(tasks.progress()).toEqual([expect.objectContaining({ taskId: "task-1", exit: 0 })]);
   });
 
   test("a close marked while the task's launch is in flight is left for a later pass, so startNote cannot overwrite it", async () => {
