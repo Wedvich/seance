@@ -402,9 +402,10 @@ describe("continue: an app's continue task ↔ leader ↔ the machine that ran t
   // Only the machine's own launch ledger knows where the old session ran, so the ledger is
   // seeded with a task note instead of running a failing session first; everything after the
   // app's write is the real path: leader routing to the exact clone, the spawn frame, the
-  // daemon's site check and `claude --continue` in the existing worktree.
+  // daemon's site check and `claude --resume <noted id>` in the existing worktree.
   test("the continue task lands on the machine and clone it names and resumes in the noted worktree", async () => {
     const oldId = crypto.randomUUID();
+    const session = crypto.randomUUID();
     const id = crypto.randomUUID();
     const worktree = await stack.fixture.pushBranch("cont-e2e");
     const app = startApp(stack);
@@ -423,7 +424,14 @@ describe("continue: an app's continue task ↔ leader ↔ the machine that ran t
               since: now - 10 * 60_000,
               tasks: [[oldId, now - 60_000]],
               progress: [
-                { taskId: oldId, at: now - 60_000, siteAt: now - 60_000, repo: stack.fixture.repoPath, path: worktree },
+                {
+                  taskId: oldId,
+                  at: now - 60_000,
+                  siteAt: now - 60_000,
+                  repo: stack.fixture.repoPath,
+                  path: worktree,
+                  session,
+                },
               ],
             }),
             { mode: 0o600 },
@@ -439,9 +447,10 @@ describe("continue: an app's continue task ↔ leader ↔ the machine that ran t
               m.connected &&
               m.status !== undefined &&
               m.capabilities?.includes(CAPABILITIES.continueTask) === true &&
+              m.capabilities.includes(CAPABILITIES.continueSession) &&
               m.repos.length > 0,
           ),
-        "the leader verified and ContinueBox live, advertising continueTask",
+        "the leader verified and ContinueBox live, advertising continueTask and continueSession",
       );
       const origin = fixtureOrigin(ready) ?? "";
 
@@ -470,19 +479,22 @@ describe("continue: an app's continue task ↔ leader ↔ the machine that ran t
       );
       const log = await Bun.file(second.log).text();
       expect(log).toContain(`continues=${JSON.stringify(oldId)}`);
-      // The stub's argv record: claude resumed the worktree's own session rather than starting one.
+      // The stub's argv record: claude resumed the session id B noted at the old launch rather than starting one.
+      const argvOf = async (): Promise<readonly string[]> =>
+        (
+          await Bun.file(`${stack.stub.ok}.argv`)
+            .text()
+            .catch(() => "")
+        ).split("\0");
       await pollUntil(
-        async () =>
-          (
-            await Bun.file(`${stack.stub.ok}.argv`)
-              .text()
-              .catch(() => "")
-          )
-            .split("\0")
-            .includes("--continue"),
-        "claude to be started with --continue",
+        async () => {
+          const argv = await argvOf();
+          return argv[argv.indexOf("--resume") + 1] === session;
+        },
+        "claude to be started with --resume and the noted session id",
         10_000,
       );
+      expect(await argvOf()).not.toContain("--continue");
       await pollUntil(
         async () => (await stack.queue().get(id))?.body?.state === "running",
         "the leader to settle the continue task running",

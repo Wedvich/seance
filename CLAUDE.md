@@ -162,7 +162,9 @@ green:
   scheduler spawn for a task id the ledger holds as launched is refused `task_launched`, audited,
   never run again, and a continuation (`mode: "continue"`) runs only for a spawn sealed `from` the
   scheduler with `client: "scheduler"` (or the leader's in-process dispatch), in the worktree this
-  machine's own launch ledger noted for the continued task id — never a path from a frame — under the
+  machine's own launch ledger noted for the continued task id — never a path from a frame — resuming
+  the Claude session id this daemon chose at that launch (`--session-id`) and noted beside it — never
+  an id from a frame — under the
   clone its `repo` name resolved to, and only while no later launch in that ledger noted the same worktree, and a task record carrying `continues` always carries
   `mode: "continue"`, which an older leader's parser refuses, and the leader's version floor (`daemon/src/version-floor.ts`) is one per
   process like `schedulerGuard`, persisted 0600, and only ever raised by a read (the leader's own

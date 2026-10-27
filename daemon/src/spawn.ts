@@ -116,8 +116,12 @@ interface Prepared {
   readonly resultPath: string;
   readonly worktreeFlag: readonly string[];
   readonly preamble: string;
-  /** Resume the directory's newest conversation (`--continue`) instead of starting one. */
-  readonly resume: boolean;
+  /**
+   * The Claude session id: a task's new one (`--session-id`), or the one a continuation resumes
+   * (`--resume`, `resume: true`). Always a `crypto.randomUUID()` this daemon made — for a resume, the
+   * one its ledger noted at that launch — never a wire value. Absent for an untracked spawn.
+   */
+  readonly session?: { readonly id: string; readonly resume: boolean };
   /** Extra `NAME=value` pairs for the window's environment (tmux `-e`), literals only. */
   readonly env: readonly string[];
 }
@@ -182,13 +186,13 @@ export function continuePreamble(path: string, exit: number | undefined, vanishe
  * another branch told the phone something untrue. Don't restore it — a remote
  * spawn has no business moving a local HEAD.
  */
-function prepareWorktree(repo: RepoEntry, worktreeName: string): Prepared {
+function prepareWorktree(repo: RepoEntry, worktreeName: string, session: string | undefined): Prepared {
   const worktreePath = join(repo.path, ".claude", "worktrees", worktreeName);
   return {
     launchDir: repo.path,
     resultPath: worktreePath,
     worktreeFlag: ["--worktree", worktreeName],
-    resume: false,
+    ...(session === undefined ? {} : { session: { id: session, resume: false } }),
     env: [],
     preamble:
       `You are a new independent Claude session in a FRESH git worktree at ${worktreePath}, ` +
@@ -198,24 +202,25 @@ function prepareWorktree(repo: RepoEntry, worktreeName: string): Prepared {
   };
 }
 
-function prepareHere(repo: RepoEntry): Prepared {
+function prepareHere(repo: RepoEntry, session: string | undefined): Prepared {
   return {
     launchDir: repo.path,
     resultPath: repo.path,
     worktreeFlag: [],
-    resume: false,
+    ...(session === undefined ? {} : { session: { id: session, resume: false } }),
     env: [],
     preamble: `You are a new independent Claude session running in the CURRENT worktree at ${repo.path}.`,
   };
 }
 
-/** `path` is the ledger's worktree, already canonical and checked (`spawnContinued`). */
-function prepareContinue(path: string, exit: number | undefined, vanished?: boolean): Prepared {
+/** `path` is the ledger's worktree, already canonical and checked (`spawnContinued`); `session` the id it noted there. */
+function prepareContinue(continuation: Continuation): Prepared {
+  const { path, session, exit, vanished } = continuation;
   return {
     launchDir: path,
     resultPath: path,
     worktreeFlag: [],
-    resume: true,
+    session: { id: session, resume: true },
     env: RESUME_NEVER_ASKS,
     preamble: continuePreamble(path, exit, vanished),
   };
@@ -229,6 +234,11 @@ interface InnerCommand {
    * name, never the fd claude is reading — cleanup cannot race the read.
    */
   readonly seedDir: string | null;
+}
+
+function sessionFlag(session: Prepared["session"]): string {
+  if (session === undefined) return "";
+  return ` ${session.resume ? "--resume" : "--session-id"} ${shq(session.id)}`;
 }
 
 async function buildInnerCommand(prepared: Prepared, session: string, request: SpawnRequest): Promise<InnerCommand> {
@@ -254,18 +264,21 @@ async function buildInnerCommand(prepared: Prepared, session: string, request: S
     // literal value, so nothing wire-supplied reaches the command line — no shq() needed
     `${request.plan === true ? " --permission-mode plan" : ""}` +
     `${prepared.worktreeFlag.length > 0 ? ` --worktree ${shq(prepared.worktreeFlag[1] ?? "")}` : ""}` +
-    // a literal flag: `continues` is a ledger key and never reaches the command line
-    `${prepared.resume ? " --continue" : ""}`;
+    // A daemon-made UUID, never a wire value (`continues` is a ledger key and never reaches the command line).
+    // `--resume <id>`, not `--continue`: claude files a `--worktree` session under the project it started
+    // in, which may be the clone's, and `--continue` looks only in the cwd's (DESIGN.md, "Continuing a session").
+    `${sessionFlag(prepared.session)}`;
+  const resume = prepared.session?.resume === true;
   const prompt = request.prompt === undefined || request.prompt === "" ? undefined : request.prompt;
   // A resume always gets a seed, even with no prompt: the preamble tells the model what happened, and
   // an initial message is what keeps claude off its blocking stale-resume dialog (`RESUME_NEVER_ASKS`).
-  if (prompt === undefined && !prepared.resume) {
+  if (prompt === undefined && !resume) {
     return { command: base, seedDir: null };
   }
 
   const seedDir = await mkdtemp(join(tmpdir(), "seance-seed-"));
   const seedFile = join(seedDir, "seed.txt");
-  const seed = prepared.resume
+  const seed = resume
     ? `${prepared.preamble}\n${prompt === undefined ? "" : `\nFrom the user: ${prompt}\n`}`
     : `${prepared.preamble}\n\nTask: ${prompt}\n`;
   await Bun.write(seedFile, seed);
@@ -596,7 +609,7 @@ async function continueLocked(
 
   const name = basename(path);
   const windowName = sanitizeWindowName(request.title ?? name);
-  const prepared = prepareContinue(path, continuation.exit, continuation.vanished);
+  const prepared = prepareContinue(continuation);
   const inner = await buildInnerCommand(prepared, sessionName(name, opts.machineTag), request);
   return launchWindow(prepared, inner, windowName, request, opts);
 }
@@ -626,7 +639,9 @@ async function spawnUntracked(
   const worktreeName = request.mode === "here" ? slug : await freeWorktreeName(repo, slug);
   const windowName = sanitizeWindowName(request.title ?? worktreeName);
 
-  const prepared = request.mode === "here" ? prepareHere(repo) : prepareWorktree(repo, worktreeName);
+  // Every task gets an id of the daemon's own, so a continuation can name the conversation it resumes.
+  const session = request.taskId === undefined ? undefined : crypto.randomUUID();
+  const prepared = request.mode === "here" ? prepareHere(repo, session) : prepareWorktree(repo, worktreeName, session);
   const inner = await buildInnerCommand(prepared, sessionName(worktreeName, opts.machineTag), request);
   // Before launch: claude reads the tracking ref, and `FETCH_HEAD`'s age, at startup.
   const note = await freshened;
@@ -694,5 +709,6 @@ async function launchWindow(
     handle: windowId,
     ...(note === undefined ? {} : { note }),
     ...(server === undefined ? {} : { server }),
+    ...(prepared.session === undefined ? {} : { session: prepared.session.id }),
   };
 }

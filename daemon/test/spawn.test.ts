@@ -123,8 +123,40 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     const found = await waitForSession("Fix Tests");
     expect(found).toBeDefined();
     expect(found?.repo).toBe("myrepo");
+    // Untracked: no task to continue, so no id is chosen.
+    expect(argv).not.toContain("--session-id");
+    expect(outcome.session).toBeUndefined();
 
     await tmux(["kill-window", "-t", "main:Fix Tests"]);
+  });
+
+  test("a worktree task gets a session id of the daemon's own, fresh per spawn, before the terminator", async () => {
+    const ids: string[] = [];
+    for (const n of [1, 2]) {
+      // oxlint-disable-next-line no-await-in-loop -- one stub argv file, read per spawn
+      await rm(stub.argvFile, { force: true });
+      // oxlint-disable-next-line no-await-in-loop
+      const outcome = await spawnSession(
+        { repo: "myrepo", mode: "worktree", title: `Sid ${n}`, prompt: "go", taskId: `task-sid-${n}` },
+        repos,
+        WAIT,
+      );
+      try {
+        // oxlint-disable-next-line no-await-in-loop
+        const argv = await stub.argv();
+        const id = argv[argv.indexOf("--session-id") + 1] ?? "";
+        expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
+        expect(argv.indexOf("--session-id")).toBeLessThan(argv.indexOf("--"));
+        expect(argv).not.toContain("--resume");
+        expect(argv).not.toContain("--continue");
+        expect(outcome.session).toBe(id);
+        ids.push(id);
+      } finally {
+        // oxlint-disable-next-line no-await-in-loop
+        await killWindow(outcome.window);
+      }
+    }
+    expect(new Set(ids).size).toBe(2);
   });
 
   // The one case pane liveness and session detection disagree on: a claude
@@ -823,6 +855,7 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
 // resolves and checks the path; this is the spawn half, against a real worktree and tmux.
 describe("spawnSession continuing a failed task's session", () => {
   const OLD = "cont-old";
+  const CONTINUED_SESSION = "0b6e1c52-3f0d-4a8e-9c7b-2d5f4e6a1b90";
   let seq = 0;
 
   /** A linked worktree under the clone's `.claude/worktrees/`, as claude's `--worktree` leaves one. */
@@ -857,7 +890,7 @@ describe("spawnSession continuing a failed task's session", () => {
       },
       repos,
       WAIT,
-      { path: wt.path, ...(exit === undefined ? {} : { exit }) },
+      { path: wt.path, session: CONTINUED_SESSION, ...(exit === undefined ? {} : { exit }) },
     );
 
   const lockedOf = async (wt: { readonly path: string }): Promise<boolean> => {
@@ -866,7 +899,7 @@ describe("spawnSession continuing a failed task's session", () => {
     return record?.includes("\nlocked") === true;
   };
 
-  test("resumes with --continue in the worktree, never --worktree; the pane is that directory, tagged with the new task", async () => {
+  test("resumes the noted session id in the worktree, never --continue or --worktree; the pane is that directory, tagged with the new task", async () => {
     const wt = await makeWorktree();
     await rm(stub.argvFile, { force: true });
     await rm(stub.stdinFile, { force: true });
@@ -880,10 +913,13 @@ describe("spawnSession continuing a failed task's session", () => {
       expect(outcome.path).toBe(wt.path);
       expect(outcome.window).toBe("Cont A");
       const argv = await stub.argv();
-      expect(argv).toContain("--continue");
+      expect(argv[argv.indexOf("--resume") + 1]).toBe(CONTINUED_SESSION);
+      expect(outcome.session).toBe(CONTINUED_SESSION);
+      expect(argv).not.toContain("--continue");
+      expect(argv).not.toContain("--session-id");
       expect(argv).not.toContain("--worktree");
       // Before the terminator: after it, claude would read it as part of the prompt.
-      expect(argv.indexOf("--continue")).toBeLessThan(argv.indexOf("--"));
+      expect(argv.indexOf("--resume")).toBeLessThan(argv.indexOf("--"));
       expect(argv.at(-1)).toBe("--");
       // The name is the worktree's: no new one is minted for a session that already has a history.
       expect(argv[argv.indexOf("-n") + 1]).toBe(wt.name);

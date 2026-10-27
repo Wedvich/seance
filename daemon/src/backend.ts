@@ -69,11 +69,19 @@ export interface SpawnOutcome {
    * not set: the task is then never judged `vanished`. Backend-scoped: never goes on the wire.
    */
   readonly server?: number;
+  /**
+   * The Claude session id the task's session runs under: chosen by the backend for a new task
+   * (`--session-id`), the continued one's for a continuation (`--resume`). Noted in the launch
+   * ledger; backend-scoped, never on the wire.
+   */
+  readonly session?: string;
 }
 
 /** What a frontend resolved of a continued task's last launch from its own ledger. */
 export interface Continuation {
   readonly path: string;
+  /** The session id that launch's ledger note holds, which the continuation resumes. */
+  readonly session: string;
   /** The continued task's exit status as its own ledger note recorded; absent when none was noted. Words the seed only. */
   readonly exit?: number;
   /** The earlier window was closed from outside (`TaskProgress.vanished`); worded in the preamble. */

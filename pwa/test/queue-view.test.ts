@@ -774,7 +774,7 @@ describe("authoring on a row", () => {
 });
 
 describe("continuing a failed task", () => {
-  const CAN = [CAPABILITIES.continueTask];
+  const CAN = [CAPABILITIES.continueTask, CAPABILITIES.continueSession];
   const failed = task("f", {
     state: "failed",
     failure: { code: "session_failed", message: "the session ended with exit 137" },
@@ -969,7 +969,7 @@ describe("the card's inline action", () => {
       failure: { code: "session_failed", message: "exit 137" },
       assignment: placedAt,
     });
-    expect(inline(failed, [CAPABILITIES.continueTask])).toBe("continue");
+    expect(inline(failed, [CAPABILITIES.continueTask, CAPABILITIES.continueSession])).toBe("continue");
     expect(inline(failed)).toBeNull();
   });
 

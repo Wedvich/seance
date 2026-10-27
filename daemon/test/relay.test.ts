@@ -712,6 +712,7 @@ describe("daemon ↔ relay integration", () => {
         "pinAccount",
         "continueTask",
         "continueCancelled",
+        "continueSession",
         "runNow",
       ]);
       // A status leaves only after its tick wrote the store, so one in hand

@@ -313,7 +313,7 @@ describe("the broker's scheduler actions", () => {
       const { broker, fakes, lines } = rig(undefined, {
         now: () => 5_000,
         scheduler: LEADING,
-        capabilities: [CAPABILITIES.continueTask],
+        capabilities: [CAPABILITIES.continueTask, CAPABILITIES.continueSession],
       });
       const reply = await broker.handle(enqueue({ ...spec, client: "cli" }));
       expect(reply).toMatchObject({ ok: true, data: { ok: true } });
@@ -342,7 +342,7 @@ describe("the broker's scheduler actions", () => {
         rig(undefined, { scheduler: LEADING }),
         rig(undefined, {
           scheduler: { kind: "unverified", deviceId: SELF, term: 4 },
-          capabilities: [CAPABILITIES.continueTask],
+          capabilities: [CAPABILITIES.continueTask, CAPABILITIES.continueSession],
         }),
         rig(),
       ];

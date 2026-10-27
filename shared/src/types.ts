@@ -965,6 +965,11 @@ export interface MachineInfo {
  * was placed. It refuses a continuation when a newer launch noted the same
  * worktree, and words the seed from the old note's exit. Clients offer Continue
  * on a cancelled task only on a machine advertising it.
+ * `continueSession`: as a daemon, gives each task spawn a Claude session id of its
+ * own choosing (`--session-id`), notes it, and continues by resuming that id
+ * (`--resume`) rather than with `--continue`, which misses a worktree spawn's
+ * conversation where Claude filed it under the clone. Clients offer Continue, and a
+ * leader routes a continuation, only to a machine advertising it.
  * `runNow`: as a leader, answers `run-now` — what a client checks of the
  * verified leader before offering it (an older one refuses the op as unknown).
  */
@@ -977,6 +982,7 @@ export const CAPABILITIES = {
   pinAccount: "pinAccount",
   continueTask: "continueTask",
   continueCancelled: "continueCancelled",
+  continueSession: "continueSession",
   runNow: "runNow",
 } as const;
 
@@ -1230,7 +1236,7 @@ export const METRIC_NAMES = {
 export type MetricName = (typeof METRIC_NAMES)[keyof typeof METRIC_NAMES];
 
 /**
- * `continue` resumes a failed or cancelled task's session (`claude --continue`) in the
+ * `continue` resumes a failed or cancelled task's session (`claude --resume <noted id>`) in the
  * worktree this machine's launch ledger noted for `SpawnRequest.continues`. It comes only
  * from the leader's dispatch of a continue task (DESIGN.md, Daemon, "Continuing a
  * session"); no direct client sends it.
@@ -1877,7 +1883,7 @@ export type Reason =
   | { readonly code: "repo_absent" }
   /** A continue task's target is exactly one (machine, exclave, clone); this is another. */
   | { readonly code: "continue_elsewhere" }
-  /** The target machine does not advertise `CAPABILITIES.continueTask`. */
+  /** The target machine does not advertise both `CAPABILITIES.continueTask` and `continueSession`. */
   | { readonly code: "continue_unsupported" }
   | { readonly code: "auth_missing" }
   /** M4, Auth health: the exclave is listed in its status's `ax`. */

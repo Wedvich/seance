@@ -1011,7 +1011,7 @@ describe("stickiness", () => {
 });
 
 describe("a continue task", () => {
-  const capable = [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.continueTask];
+  const capable = [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.continueTask, CAPABILITIES.continueSession];
   const continuing = (at: { deviceId: string; exclave: string; clone: string }): Task =>
     task({ spec: spec({ mode: "continue", continues: { task: "t-old", at } }) });
   const reasonsOf = (decision: Decision): Record<string, readonly unknown[]> =>
@@ -1050,6 +1050,13 @@ describe("a continue task", () => {
 
   test("a target without the capability is continue_unsupported, and never chosen", () => {
     const old = machine("a", { capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId] });
+    const decision = decide([old], { task: continuing({ deviceId: "a", exclave: "main", clone: "app" }) });
+    expect(decision.chosen).toBeNull();
+    expect(only(decision).rejected).toEqual([{ code: "continue_unsupported" }]);
+  });
+
+  test("a target that continues but resumes no noted session id (an older daemon's --continue) is continue_unsupported", () => {
+    const old = machine("a", { capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.continueTask] });
     const decision = decide([old], { task: continuing({ deviceId: "a", exclave: "main", clone: "app" }) });
     expect(decision.chosen).toBeNull();
     expect(only(decision).rejected).toEqual([{ code: "continue_unsupported" }]);
