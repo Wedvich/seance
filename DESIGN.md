@@ -1017,7 +1017,9 @@ The Durable Object persists a machine registry:
   over-threshold account through. `ax` (M4, auth health; nothing sends it yet) lists the
   exclave indices whose login has expired, at most `STATUS_MAX_AUTH_EXPIRED`. The trim
   never touches it — it touches only quota detail, quota and `sess` — since an exclave whose
-  expired login went unreported would read as signed in. Sent every 30s whether or not an app is watching:
+  expired login went unreported would read as signed in. `drn: true` says the daemon's task-launch
+  gate is closed ("Restart waits for task launches"), absent otherwise; never trimmed either, and the
+  parser takes `true` alone. Sent every 30s whether or not an app is watching:
   one DO wake per machine per beat (the sweep alarm already wakes it every
   60s while daemons are connected), and a fresh app never waits for one.
 - Online = WebSocket open. Heartbeats catch silent drops from both ends: a
@@ -1582,6 +1584,11 @@ an old peer's frames parse as before. Mixed versions:
   upgrade (`failed`, no `server`) are never judged. An older PWA words `session_closed` as a spawn refusal
   (deploy the PWA with the change) and an older `seanced mcp` prints the message, a complete sentence; an
   older app's `continueOffer` does not offer Continue for it. The relay never parses `TaskProgress`.
+- `MachineStatus.drn` and reason `draining` (2026-10-27, no capability): an older leader's or app's
+  `parseMachineStatus` builds a fresh object and ignores `drn`, so it routes into the gate as before
+  (refused `internal_error`, settled at the TTL); an older daemon never sends it. An older app or
+  leader drops `draining` from a decision and keeps the candidate, which the PWA words "rejected for
+  a reason this app can't read".
 - Reasons `skill_absent { skill }`, `auth_expired` and `base_unpushed`: an older app or
   leader drops an unknown reason from a decision and keeps the candidate.
 - `session-event` `done`: ingested since 2026-10-23 (Local op socket, "Session events"). A daemon
@@ -2295,7 +2302,9 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   `Decision.trimmed`. Reasons are structured codes: `offline`, `status_stale`, `task_id_unsupported`,
   `exclaves_unknown` (a daemon predating exclaves cannot say which account a spawn
   bills; an empty list reads the same, since a real daemon always lists `default`, and
-  stays in the record as one exclave-less candidate), `disk_low`, `pressure_unknown`, `pin_mismatch` (`field`: `deviceId` or `account`), `avoided` (the
+  stays in the record as one exclave-less candidate), `draining` (a fresh status carrying `drn`: the
+  daemon is restarting; every routing path, `run-now` and pinned tasks included, since it is a machine
+  filter), `disk_low`, `pressure_unknown`, `pin_mismatch` (`field`: `deviceId` or `account`), `avoided` (the
   task's `avoid` names the machine), `repo_absent` (matched on
   `RepoEntry.origin`, never the machine-local name), `auth_missing`, `quota_unknown`,
   `quota_over_line`, `model_not_included` (the task's model is a gated one its seat bills
@@ -5212,6 +5221,20 @@ relay state unnecessary).
   Spawns with no `taskId` are not held. The pre-update process does the restart, so the wave that ships
   this is unprotected: protection starts with the next one. A launch cut off anyway (a `kill -9`, a
   power cut, a drain past its cap) is covered by the ledger's `interrupted` ("Session events").
+  The closed gate is **visible to the leader**: while it is closed the daemon's `status` carries
+  `drn: true` (`EndedTasks.draining`, a telemetry collector), and routing rejects the machine
+  `draining`, so the leader stops reserving tasks into a gate that would hold each for its TTL. Each
+  close and reopen (`EndedTasks.onGate`) asks the status loop for a fresh status (`StatusLoop.refresh`),
+  sent at once or, inside the relay's `STATUS_MIN_INTERVAL_MS` floor after the last one, once it
+  passes: the update's report re-registers, and so sends a status, just before the drain, and a
+  status sent at once would be dropped. The refresh waits for any sample in flight (that register's,
+  which read the gate still open) to land, measures the floor from the latest send, re-decides when
+  its timer fires, and then takes a **fresh** sample (`tick`'s `fresh`, queued behind rather than
+  joining one in flight), so the status that follows the gate change is never one that began before
+  it. The send resolves when the frame is handed to the socket, not when the relay accepts it, and
+  the margin (5% over the floor) assumes steady latency: a refresh the relay still drops is not
+  retried, and the flag then waits for the next beat, at most 30 s. A shutdown's final drain shows too, when it lasts past the
+  floor; otherwise the socket closes first and the machine reads `offline`.
 - **Reporting rides the register blob** (`source`, `lastUpdate` —
   `Presence & identity`), `current` excluded: the steady state would rewrite
   state.json and push a registry frame on every reconnect for information

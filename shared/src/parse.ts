@@ -448,6 +448,8 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
   if (ax === null || (ax !== undefined && (ax.length > STATUS_MAX_AUTH_EXPIRED || new Set(ax).size !== ax.length))) {
     return null;
   }
+  const { drn } = value;
+  if (drn !== undefined && drn !== true) return null;
   return {
     at: value["at"],
     scan: value["scan"],
@@ -461,6 +463,7 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
     ...(quota === undefined ? {} : { quota }),
     ...(tr === undefined ? {} : { tr }),
     ...(ax === undefined ? {} : { ax }),
+    ...(drn === undefined ? {} : { drn }),
   };
 }
 
@@ -797,6 +800,7 @@ function parseReason(value: unknown): Reason | null {
   switch (code) {
     case "offline":
     case "status_stale":
+    case "draining":
     case "task_id_unsupported":
     case "exclaves_unknown":
     case "pressure_unknown":

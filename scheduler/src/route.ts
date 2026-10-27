@@ -298,6 +298,8 @@ function machineFilter(machine: Machine, now: number, config: SchedulerConfig): 
   if (!machine.connected) reasons.push({ code: "offline" });
   else if (status === undefined || isStatusStale(status, now)) reasons.push({ code: "status_stale" });
   else {
+    // Its launch gate refuses a spawn `internal_error`, which leaves the task reserved for the whole TTL.
+    if (status.drn === true) reasons.push({ code: "draining" });
     // An absent `free` is a host with no statfs answer — unknown, and the floor guards a known-full disk only.
     if (status.free !== undefined && status.free < config.minFreeMib)
       reasons.push({ code: "disk_low", freeMib: status.free });

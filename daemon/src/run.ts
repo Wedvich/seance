@@ -76,6 +76,8 @@ export interface RunOpts {
   readonly reapCheckIntervalMs?: number;
   /** Telemetry sample period; defaults to the `status` cadence. Tests shorten it. */
   readonly telemetryIntervalMs?: number;
+  /** How long after a sent status the loop holds a gate-change refresh; defaults to the relay's floor. Tests only. */
+  readonly statusFloorMs?: number;
   /**
    * A psk the caller already resolved, to skip re-reading the platform store.
    * The supervisor passes it so a reload spawns one `security`/DPAPI read
@@ -396,16 +398,20 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       sessions: () => handlerCtx.backend.sessions(state.repos),
       now,
       httpFetch,
+      draining: () => endedTasks.draining,
       ...(opts.probe === undefined ? {} : { probe: opts.probe }),
     },
     {
       intervalMs: opts.telemetryIntervalMs ?? STATUS_INTERVAL_MS,
+      ...(opts.statusFloorMs === undefined ? {} : { floorMs: opts.statusFloorMs }),
       connected: () => client.connected,
       send: (snapshot, current) => client.sendStatus(snapshot, current),
       // Late-bound: the writer is built after the loop it reads.
       onSample: () => fleetQuota.sampled(),
     },
   );
+  // So the leader stops routing here while launches are refused, rather than reserving into the gate for a TTL.
+  const stopGateWatch = endedTasks.onGate(() => status.refresh());
 
   // Every daemon may be nominated; this is what runs if it is. Its app-role leg
   // is built per term over the key imported above, never the broker's.
@@ -586,6 +592,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     localSocket: local.path,
     stop: (): void => {
       stopped = true;
+      stopGateWatch();
       status.stop();
       fleetQuota.stop();
       handlerCtx.backend.stop?.();

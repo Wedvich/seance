@@ -97,6 +97,10 @@ describe("reasonText", () => {
     expect(reasonText({ code: "avoided" })).toBe("the task avoids this machine");
   });
 
+  test("a draining machine says it is restarting, not that it is unhealthy", () => {
+    expect(reasonText({ code: "draining" })).toBe("its daemon is restarting, so it takes no new tasks");
+  });
+
   test("a continuation says why a candidate is not the one it resumes on", () => {
     expect(reasonText({ code: "continue_elsewhere" })).toBe("the session it continues ran elsewhere");
     expect(reasonText({ code: "continue_unsupported" })).toContain("seanced update");

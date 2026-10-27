@@ -7,9 +7,11 @@ import {
   MACHINES_ID,
   importPsk,
   open,
+  parseMachineStatus,
   seal,
   toBase64,
   type MachineInfo,
+  type MachineStatus,
   type UpdateAvailable,
 } from "@seance/shared";
 import type { Config } from "../src/config.ts";
@@ -23,6 +25,10 @@ import { startTestRelay, type TestRelay } from "./harness.ts";
 
 const PSK = toBase64(new Uint8Array(32).fill(7));
 const TOKEN = "test-bearer";
+/** Held-gate tests: a beat far past any test window, so a `drn` status is the gate-change refresh or nothing. */
+const LONG_BEAT_MS = 600_000;
+/** The relay double's status floor and the loop's own, so the register-then-drain ordering is the real one. */
+const FLOOR_MS = 400;
 let base: string;
 let appKey: CryptoKey;
 
@@ -65,12 +71,18 @@ interface TestDaemon {
   readonly calls: { install: number; restart: number };
 }
 
-async function startTestDaemon(relay: TestRelay, name: string, selfUpdate: SelfUpdateOpts): Promise<TestDaemon> {
+async function startTestDaemon(
+  relay: TestRelay,
+  name: string,
+  selfUpdate: SelfUpdateOpts,
+  statusFloorMs?: number,
+): Promise<TestDaemon> {
   // Fresh state dir per test: announce compares against the previous run's
   // sha, so sharing state across fixtures would cross-talk.
   process.env["SEANCE_STATE_DIR"] = join(base, name, "state");
   const roots = join(base, name, "roots");
   await mkdir(roots, { recursive: true });
+  if (statusFloorMs !== undefined) relay.statusFloorMs = statusFloorMs;
   const config: Config = {
     name: "UpdateBox",
     relayUrl: relay.url,
@@ -87,6 +99,7 @@ async function startTestDaemon(relay: TestRelay, name: string, selfUpdate: SelfU
     pingIntervalMs: 60_000,
     pongTimeoutMs: 1_000,
     baseBackoffMs: 20,
+    ...(statusFloorMs === undefined ? {} : { statusFloorMs, telemetryIntervalMs: LONG_BEAT_MS }),
     selfUpdate: {
       debounceMs: 0,
       effects: {
@@ -102,6 +115,17 @@ async function startTestDaemon(relay: TestRelay, name: string, selfUpdate: SelfU
     },
   });
   return { daemon, calls };
+}
+
+/** The next status the daemon sends that `wanted` accepts, skipping the ones before it. */
+async function statusWhere(relay: TestRelay, wanted: (status: MachineStatus) => boolean): Promise<MachineStatus> {
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    // oxlint-disable-next-line no-await-in-loop -- each status is read in turn
+    const plain = await open(appKey, await relay.statuses.next(Math.max(1, deadline - Date.now())));
+    const status = parseMachineStatus(plain.payload);
+    if (status !== null && wanted(status)) return status;
+  }
 }
 
 async function sendBroadcast(relay: TestRelay, deviceId: string, payload: unknown): Promise<void> {
@@ -200,7 +224,8 @@ describe("self-update over the relay", () => {
   test("an ok update holds its restart until a task launch in flight on this daemon has settled", async () => {
     const relay = startTestRelay(TOKEN);
     const { upstream, checkout } = await makePair("quiesce");
-    const { daemon, calls } = await startTestDaemon(relay, "quiesce", { root: checkout });
+    // A beat far past the test, and a floored relay double: the `drn` status is the gate-change refresh.
+    const { daemon, calls } = await startTestDaemon(relay, "quiesce", { root: checkout }, FLOOR_MS);
     try {
       const { deviceId } = await relay.registers.next();
       await daemon.updater?.settled();
@@ -219,10 +244,54 @@ describe("self-update over the relay", () => {
       await Bun.sleep(100); // a non-event can't be polled
       expect(calls.restart).toBe(0);
 
+      // The held gate is what the leader routes around: a status says so while it waits.
+      expect((await statusWhere(relay, (s) => s.drn === true)).drn).toBe(true);
+
       // Never launched, so nothing touches tmux: the launch is over, which is all the drain waits for.
       await settle(false);
       await pollUntil(() => calls.restart > 0, "the restart once the launch settled");
       expect(calls.restart).toBe(1);
+    } finally {
+      daemon.stop();
+      relay.stop();
+    }
+  });
+
+  test("a restart that throws reopens the gate, and the next status stops saying it is held", async () => {
+    const relay = startTestRelay(TOKEN);
+    const { upstream, checkout } = await makePair("reopen");
+    const held = Promise.withResolvers<void>();
+    let restarts = 0;
+    const { daemon } = await startTestDaemon(
+      relay,
+      "reopen",
+      {
+        root: checkout,
+        effects: {
+          install: async () => ({ ok: true }),
+          restart: async () => {
+            restarts += 1;
+            await held.promise;
+            throw new Error("systemctl said no");
+          },
+        },
+      },
+      FLOOR_MS,
+    );
+    try {
+      const { deviceId } = await relay.registers.next();
+      await daemon.updater?.settled();
+      const target = await runGit(upstream, ["commit", "-q", "--allow-empty", "-m", "next"]).then(() =>
+        runGit(upstream, ["rev-parse", "HEAD"]),
+      );
+
+      await sendBroadcast(relay, deviceId, { sha: target, commitTs: Date.now() });
+
+      await statusWhere(relay, (s) => s.drn === true);
+      expect(restarts).toBe(1);
+      held.resolve();
+      expect(await statusWhere(relay, (s) => s.drn !== true)).not.toHaveProperty("drn");
+      expect((await endedTasksFor(launchLedgerPath())).draining).toBe(false);
     } finally {
       daemon.stop();
       relay.stop();

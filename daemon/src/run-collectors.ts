@@ -1,4 +1,4 @@
-import type { MachineStatus, SessionEntry } from "@seance/shared";
+import { STATUS_MIN_INTERVAL_MS, type MachineStatus, type SessionEntry } from "@seance/shared";
 import type { Config } from "./config.ts";
 import { log } from "./log.ts";
 import type { MetricsStore } from "./metrics-store.ts";
@@ -21,6 +21,8 @@ export interface CollectorDeps {
   readonly now: () => number;
   readonly httpFetch: Fetch;
   readonly probe?: HostProbe;
+  /** `EndedTasks.draining`: the status's `drn`. */
+  readonly draining?: () => boolean;
 }
 
 export interface StatusLoopDeps {
@@ -28,6 +30,8 @@ export interface StatusLoopDeps {
   readonly connected: () => boolean;
   /** `RelayClient.sendStatus`: `current` is asked again after the seal. */
   readonly send: (status: MachineStatus, current: () => boolean) => Promise<boolean>;
+  /** How long after a sent status the relay drops the next; `refresh` waits it out. Tests only. */
+  readonly floorMs?: number;
   /** A sample against the current register blob resolved, sent or not. */
   readonly onSample?: () => void;
 }
@@ -39,6 +43,11 @@ export interface StatusLoop {
    * push an app got carries no snapshot until this one.
    */
   readonly sampleNow: () => void;
+  /**
+   * A field routing reads changed (the launch gate): samples as soon as the relay's floor lets the
+   * status through, so neither the next beat nor a frame the relay would drop is the one that tells.
+   */
+  readonly refresh: () => void;
   /** The last sample whole — before `fitStatus` trims it for the wire — or null before the first. */
   readonly latest: () => MachineStatus | null;
   readonly stop: () => void;
@@ -65,14 +74,29 @@ export function startStatusLoop(metrics: MetricsStore, collectors: CollectorDeps
       log.warn(`telemetry: ${name} failed, its fields are left out of the status: ${String(err)}`);
     },
     ...(collectors.probe === undefined ? {} : { probe: collectors.probe }),
+    ...(collectors.draining === undefined ? {} : { draining: collectors.draining }),
   });
+  // Never past the next beat: a beat shorter than the relay's floor (tests only) is the floor that holds.
+  // A twentieth over it, since the relay times the frames by their arrival, not by our send. It assumes
+  // steady latency, and `send` resolves on handing the frame to the socket, not on the relay's accepting
+  // it, so a refresh the relay still drops (a latency spike either side of the floor) is not retried:
+  // the next beat carries the flag, at most one beat late.
+  const floorMs = loop.floorMs ?? Math.min(STATUS_MIN_INTERVAL_MS, loop.intervalMs) * 1.05;
   let stopped = false;
   let timer: ReturnType<typeof setInterval> | null = null;
   let trimWarned = false;
-  const sample = (): void => {
+  let lastSentAt: number | null = null;
+  let refreshPending = false;
+  let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  // Samples started and not yet resolved (tick and send both), and the latest of them: ticks queue in
+  // order, so the last to start is the last to finish.
+  let active = 0;
+  let lastSample: Promise<unknown> = Promise.resolve();
+  const sample = (fresh = false): void => {
     if (stopped) return;
-    telemetry
-      .tick()
+    active += 1;
+    lastSample = telemetry
+      .tick(collectors.now(), fresh)
       .then((snapshot) => {
         if (stopped) return false;
         if (snapshot.scan === collectors.registered().scan) loop.onSample?.();
@@ -91,20 +115,53 @@ export function startStatusLoop(metrics: MetricsStore, collectors: CollectorDeps
           log.warn("status trimmed to fit the relay's bound — some quota detail is left out of the live view");
           trimWarned = true;
         }
-        return loop.send(status, current);
+        return loop.send(status, current).then((sent) => {
+          if (sent) lastSentAt = collectors.now();
+          return sent;
+        });
       })
-      .catch((err: unknown) => log.warn(`telemetry: ${String(err)}`));
+      .catch((err: unknown) => log.warn(`telemetry: ${String(err)}`))
+      .finally(() => {
+        active -= 1;
+      });
+  };
+  const sampleNow = (fresh = false): void => {
+    if (stopped) return;
+    if (timer !== null) clearInterval(timer);
+    timer = setInterval(() => sample(), loop.intervalMs);
+    sample(fresh);
+  };
+  // Re-decided each time it wakes: a send in flight (a register's, just before the drain) lands later
+  // than any wait computed before it, and the relay times the floor from that arrival.
+  const attemptRefresh = (): void => {
+    refreshTimer = null;
+    if (stopped) return;
+    if (active > 0) {
+      void lastSample.then(attemptRefresh);
+      return;
+    }
+    const waitMs = lastSentAt === null ? 0 : lastSentAt + floorMs - collectors.now();
+    if (waitMs > 0) {
+      refreshTimer = setTimeout(attemptRefresh, waitMs);
+      return;
+    }
+    refreshPending = false;
+    // Fresh: a sample that starts after the gate change, never a tick already reading the old gate.
+    sampleNow(true);
   };
   return {
-    sampleNow: (): void => {
-      if (timer !== null) clearInterval(timer);
-      timer = setInterval(sample, loop.intervalMs);
-      sample();
+    sampleNow: () => sampleNow(),
+    refresh: (): void => {
+      // One pending is enough: the collectors read the gate when the tick runs, not when it was asked for.
+      if (stopped || refreshPending) return;
+      refreshPending = true;
+      attemptRefresh();
     },
     latest: () => telemetry.latest(),
     stop: (): void => {
       stopped = true;
       if (timer !== null) clearInterval(timer);
+      if (refreshTimer !== null) clearTimeout(refreshTimer);
     },
   };
 }

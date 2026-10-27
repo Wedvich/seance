@@ -215,6 +215,8 @@ export class EndedTasks {
   #final = false;
   /** Spawn handlers a launch was accepted for, until their reply is out. Only `drain` waits on these. */
   readonly #holds = new Set<Promise<void>>();
+  /** Told on each close and reopen of the gate: a daemon's status carries it (`MachineStatus.drn`). */
+  readonly #gateListeners = new Set<(closed: boolean) => void>();
   readonly #ended = new Map<string, number>();
   readonly #ledger: LaunchLedger;
   readonly #inFlight = new Set<Promise<void>>();
@@ -345,7 +347,7 @@ export class EndedTasks {
    * release) cannot undo this close.
    */
   async drain(timeoutMs: number, opts?: { readonly final?: boolean }): Promise<boolean> {
-    this.#closed = true;
+    this.#setClosed(true);
     if (opts?.final === true) this.#final = true;
     if (this.#inFlight.size + this.#holds.size > 0) {
       log.info(
@@ -371,7 +373,35 @@ export class EndedTasks {
 
   /** Takes task launches again. Only launches that arrive later: a refused one was never parked. Not after a final drain. */
   reopen(): void {
-    if (!this.#final) this.#closed = false;
+    if (!this.#final) this.#setClosed(false);
+  }
+
+  /** True while task launches are refused (`LaunchesClosed`): what routing reads as draining. */
+  get draining(): boolean {
+    return this.#closed;
+  }
+
+  /**
+   * `listener` hears each change of the gate, never a repeat. Returns its unsubscribe: the gate is per
+   * process, and a config reload swaps the daemon that listens.
+   */
+  onGate(listener: (closed: boolean) => void): () => void {
+    this.#gateListeners.add(listener);
+    return () => {
+      this.#gateListeners.delete(listener);
+    };
+  }
+
+  #setClosed(closed: boolean): void {
+    if (this.#closed === closed) return;
+    this.#closed = closed;
+    for (const listener of this.#gateListeners) {
+      try {
+        listener(closed);
+      } catch (err) {
+        log.warn(`launch gate listener failed: ${String(err)}`);
+      }
+    }
   }
 
   async #quiet(): Promise<void> {
