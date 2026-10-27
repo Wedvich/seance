@@ -15,7 +15,7 @@ import {
 } from "@seance/shared";
 import { armTap, deriveAfterSheet, deriveQueue, disarmRow, primaryAction } from "../src/queue-view.ts";
 import { DEFAULT_FORM, RESCAN_IDLE, type QueueState } from "../src/state.ts";
-import { BATCH_STRATEGY, CAPABILITIES, reasonText } from "@seance/shared";
+import { CAPABILITIES, reasonText } from "@seance/shared";
 import { deriveView, failedBody, type AppState } from "../src/view.ts";
 
 const NOW = 1_800_000_000_000;
@@ -634,7 +634,7 @@ describe("deriveQueue", () => {
 });
 
 describe("authoring on a row", () => {
-  const batch = { id: "b-1", index: 2, strategy: BATCH_STRATEGY } as const;
+  const batch = { id: "b-1", index: 2 } as const;
   const rowOf = (tasks: readonly Task[], id: string) =>
     deriveQueue(state(ok(tasks)), NOW)
       .sections.flatMap((section) => section.rows)

@@ -48,7 +48,6 @@ import { REPLAY_WINDOW_MS } from "./crypto.ts";
 import { taskRecordAtRest } from "./task-record.ts";
 import {
   ACCOUNT_ALIAS_MAX_LENGTH,
-  BATCH_STRATEGY,
   BRANCH_MAX_LENGTH,
   CANDIDATE_MAX_REASONS,
   EXIT_STATUS_MAX,
@@ -459,7 +458,7 @@ describe("parseTaskSpec", () => {
     avoid: ["dev-b", "dev-c"],
     lineage: { deviceId: "dev-a", exclave: "default" },
     base: { deviceId: "dev-b", exclave: "work" },
-    batch: { id: "batch-1", index: 2, strategy: BATCH_STRATEGY },
+    batch: { id: "batch-1", index: 2 },
     deps: [
       { task: "t-1", after: "opened" },
       { task: "t-2", after: "merged" },
@@ -471,12 +470,13 @@ describe("parseTaskSpec", () => {
   test("a whole spec round-trips, and fields it does not know stay behind", () => {
     expect(parseTaskSpec(full)).toEqual(full);
     expect(parseTaskSpec({ ...request, taskId: "x", deviceId: "y" })).toEqual(request);
-    const last: BatchMembership = { id: "b", index: TASK_SPEC_LIMITS.batchIndex, strategy: BATCH_STRATEGY };
+    const last: BatchMembership = { id: "b", index: TASK_SPEC_LIMITS.batchIndex };
     expect(parseTaskSpec({ ...full, batch: last })?.batch).toEqual(last);
   });
 
-  test("a batch's stored strategy, whatever an older writer put there, reads as the one a group carries", () => {
+  test("a batch's stored strategy, whatever an older writer put there, is read and dropped", () => {
     for (const strategy of [
+      { mode: "auto" },
       { mode: "sequential" },
       { mode: "parallel", max: 3 },
       { mode: "parallel", max: 0 },
@@ -484,11 +484,9 @@ describe("parseTaskSpec", () => {
       "sequential",
       undefined,
     ]) {
-      expect(parseTaskSpec({ ...request, batch: { id: "b", index: 1, strategy } })?.batch).toEqual({
-        id: "b",
-        index: 1,
-        strategy: BATCH_STRATEGY,
-      });
+      const batch = parseTaskSpec({ ...request, batch: { id: "b", index: 1, strategy } })?.batch;
+      expect(batch).toEqual({ id: "b", index: 1 });
+      expect(batch).not.toHaveProperty("strategy");
     }
   });
 
@@ -998,7 +996,7 @@ describe("store", () => {
       avoid: Array.from({ length: TASK_SPEC_LIMITS.avoid }, (_, i) => `${i}`.padEnd(ROUTING_ID_MAX_LENGTH, "A")),
       lineage: placement,
       base: placement,
-      batch: { id: crypto.randomUUID(), index: 15, strategy: BATCH_STRATEGY },
+      batch: { id: crypto.randomUUID(), index: 15 },
       deps: Array.from({ length: TASK_SPEC_LIMITS.deps }, () => ({
         task: crypto.randomUUID(),
         after: "merged" as const,
