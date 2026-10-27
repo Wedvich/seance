@@ -1328,6 +1328,11 @@
   gap: 10px;
 }
 
+/* A dot straight in the head (queue rows) centres on the first title line, as `.fleet-name-row` does. */
+.fleet-card-head > .dot {
+  margin-top: calc((var(--fleet-line) - 7px) / 2);
+}
+
 .fleet-card-title {
   flex: 1;
   min-width: 0;
