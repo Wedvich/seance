@@ -5589,8 +5589,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   number (GitHub's `/pull/`, GitLab's `/merge_requests/`), else `PR`; the URL is safe as an href
   because the parser admits only `https:`. Beside the chip the card shows one action inline, the
   likeliest next step (`primaryAction` in `queue-view.ts`): **Continue**, else **Run now**, else
-  **Follow up** — Continue and Follow up never coexist, and a capped `ready` task's pressing step is
-  placing it; Mark done and Cancel are never inline (2026-10-27). Every action the card allows sits
+  none; Follow up, Mark done and Cancel are never inline (2026-10-27) — Follow up starts another
+  task rather than acting on this one, so it lives only in the menu. Every action the card allows sits
   behind a ⋯ in its head (the shared `Menu`, `menu.tsx`), the inline one included: Follow up, Run now,
   Continue, Open on claude.ai (the title's link), then past a divider Mark done and, last, Cancel in
   `--err`; one the relay can't serve right now shows greyed rather than hidden. **Cancel** and **Mark done** are offered where the leader allows

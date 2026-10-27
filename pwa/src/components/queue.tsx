@@ -202,7 +202,6 @@ export function QueueScreen(props: {
 const INLINE_LABEL: Record<NonNullable<QueueRow["inline"]>, string> = {
   continue: "Continue",
   "run-now": "Run now",
-  "follow-up": "Follow up",
 };
 
 /**
@@ -245,7 +244,6 @@ function QueueCard(props: {
   const run: Record<NonNullable<QueueRow["inline"]>, (taskId: string) => void> = {
     continue: props.onContinue,
     "run-now": props.onRunNow,
-    "follow-up": props.onFollowUp,
   };
   const armItem = (op: ArmOp, label: string, armedLabel: string, icon: JSX.Element, destructive: boolean) => (
     <MenuItem
@@ -351,13 +349,7 @@ function QueueCard(props: {
             </a>
           )}
           {inline !== null && (
-            <button
-              type="button"
-              className="quiet"
-              // Follow up only opens the form, so it needs no relay and is never greyed.
-              disabled={inline !== "follow-up" && disabled}
-              onClick={() => run[inline](row.id)}
-            >
+            <button type="button" className="quiet" disabled={disabled} onClick={() => run[inline](row.id)}>
               {INLINE_LABEL[inline]}
             </button>
           )}

@@ -917,7 +917,7 @@ describe("the card's inline action", () => {
     expect(inline(failed)).toBeNull();
   });
 
-  test("Run now outranks Follow up on a ready task the caps alone hold", () => {
+  test("Run now on a ready task the caps alone hold; Follow up is never inline", () => {
     const capped = task("w", {
       decision: {
         at: NOW,
@@ -928,32 +928,34 @@ describe("the card's inline action", () => {
       },
     });
     expect(inline(capped, [CAPABILITIES.runNow])).toBe("run-now");
-    expect(inline(capped)).toBe("follow-up");
+    expect(inline(capped)).toBeNull();
+    const row = deriveQueue(state(ok([capped])), NOW).sections.flatMap((section) => section.rows)[0];
+    expect(row?.canFollowUp).toBe(true);
   });
 
-  test("Follow up on a running, needing or done task; nothing on a cancelled one without Continue", () => {
-    expect(inline(task("r", { state: "running", assignment: placedAt }))).toBe("follow-up");
-    expect(inline(task("n", { state: "needs-input", assignment: placedAt }))).toBe("follow-up");
-    expect(inline(task("d", { state: "done", doneBy: "session" }))).toBe("follow-up");
+  test("nothing inline on a running, needing, done or cancelled task, where Follow up is the only act", () => {
+    expect(inline(task("r", { state: "running", assignment: placedAt }))).toBeNull();
+    expect(inline(task("n", { state: "needs-input", assignment: placedAt }))).toBeNull();
+    expect(inline(task("d", { state: "done", doneBy: "session" }))).toBeNull();
     expect(inline(task("x", { state: "cancelled" }))).toBeNull();
   });
 
-  test("Follow up on a lost task, and on one whose machine is asleep", () => {
-    expect(inline(task("l", { state: "lost", assignment: placedAt }))).toBe("follow-up");
+  test("nothing inline on a lost task, nor on one whose machine is asleep", () => {
+    expect(inline(task("l", { state: "lost", assignment: placedAt }))).toBeNull();
     const asleep = machine({ connected: false, lastSeen: NOW - 600_000 });
     const row = deriveQueue(
       state(ok([task("a", { state: "running", assignment: placedAt })]), {}, { machines: [asleep] }),
       NOW,
     ).sections.flatMap((section) => section.rows)[0];
-    expect(row?.inline).toBe("follow-up");
+    expect(row?.canFollowUp).toBe(true);
+    expect(row?.inline).toBeNull();
   });
 
   test("precedence holds whatever else is offered", () => {
-    const all = { canContinue: true, canRunNow: true, canFollowUp: true };
+    const all = { canContinue: true, canRunNow: true };
     expect(primaryAction(all)).toBe("continue");
     expect(primaryAction({ ...all, canContinue: false })).toBe("run-now");
-    expect(primaryAction({ ...all, canContinue: false, canRunNow: false })).toBe("follow-up");
-    expect(primaryAction({ canContinue: false, canRunNow: false, canFollowUp: false })).toBeNull();
+    expect(primaryAction({ canContinue: false, canRunNow: false })).toBeNull();
   });
 });
 

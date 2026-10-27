@@ -35,19 +35,15 @@ import {
 export type QueueDot = "ok" | "auto" | "err";
 
 /** The one action a card shows inline; the rest sit behind its ⋯ menu. */
-export type QueueInlineAction = "continue" | "run-now" | "follow-up";
+export type QueueInlineAction = "continue" | "run-now";
 
 /**
- * The likeliest next step. Continue and Follow up never coexist (Follow up is not offered after a
- * failure or a cancel, the only states Continue is); a `ready` task the caps alone hold also offers
- * Follow up, but placing it is the pressing step. Mark done and Cancel are never inline.
+ * The likeliest next step that acts on the task itself. Follow up, Mark done and Cancel are never
+ * inline: Follow up starts another task, so it lives only in the menu.
  */
-export function primaryAction(
-  row: Pick<QueueRow, "canContinue" | "canRunNow" | "canFollowUp">,
-): QueueInlineAction | null {
+export function primaryAction(row: Pick<QueueRow, "canContinue" | "canRunNow">): QueueInlineAction | null {
   if (row.canContinue) return "continue";
   if (row.canRunNow) return "run-now";
-  if (row.canFollowUp) return "follow-up";
   return null;
 }
 
@@ -354,7 +350,7 @@ function rowOf(
     canFollowUp,
     canContinue,
     canRunNow,
-    inline: primaryAction({ canContinue, canRunNow, canFollowUp }),
+    inline: primaryAction({ canContinue, canRunNow }),
     deps: depsLine(task, titles),
     continues: continuesLine(task, titles),
     placement: placementLine(task, state),
