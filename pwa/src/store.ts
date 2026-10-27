@@ -803,7 +803,7 @@ export class Store {
           promptUndo: null,
         });
         this.#showVerdict({ kind: "queued", task });
-        this.#queue.startFollowing(task.id, runNow);
+        this.#queue.startFollowing(task, runNow);
       }
     } catch (err) {
       // An error that is no `RequestFailure` says nothing about whether it went out, so it may have.

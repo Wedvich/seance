@@ -224,10 +224,7 @@ export function startNowItem(preview: PreviewState | null): StartNowItem {
   const capped = decision.candidates.filter(heldByCapsAlone);
   // `run-now` weighs the cap-held candidates too, unscored in the preview, so the target it picks is unknown.
   if (chosen !== null)
-    return {
-      sub: capped.length === 0 ? `Skip the queue — spawn on ${chosen}` : CAPS_ONLY_SUB,
-      enabled: true,
-    };
+    return capped.length === 0 ? { sub: `Skip the queue — spawn on ${chosen}`, enabled: true } : plain;
   const [only] = capped;
   if (only === undefined) return { sub: "No machine can take it right now", enabled: false };
   return {

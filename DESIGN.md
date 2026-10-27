@@ -1473,7 +1473,7 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   from every candidate — nothing is written, and the held decision stays the pass's), and
   `conflict`. Only to a leader advertising `CAPABILITIES.runNow`; an older one refuses the op
   as unknown. Sent by the Queue screen's **Run now** and by the Spawn screen's **Start now**,
-  which sends it for a task it just created once it is first seen `ready` (PWA, "Every PWA spawn
+  which sends it for a task it just created once a read shows it `ready` (PWA, "Every PWA spawn
   is a task").
 - `pause { until, account? }` (`PauseRequest`) and `resume { account? }` (`ResumeRequest`) →
   `{ holds }` (`PauseResponse`), every hold in force after the change (M3 item 5; Scheduler,
@@ -2454,11 +2454,12 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   takeover but needs the record schema widened and an older leader made to refuse it, for a tap
   that a person can repeat. Deferred: also lifting the quota line, for spending credits on purpose.
   The Spawn screen's **Start now** is the same op, not a new one: it creates the task as Queue
-  does, then sends `run-now` once a read first shows it `ready` — sent with the create it
-  would race admission and be refused `not_waiting`. A pass that places the task meanwhile
-  answers `dispatching`, `not_waiting` or `finished`: the task is on its way, so no note, one read.
-  Rejected for the same reason as above: a
-  flag on the create the leader would honour at admission.
+  does, then sends `run-now` once a read shows it `ready` — sent with the create it would race
+  admission and be refused `not_waiting`. `dispatching` (a pass is placing it) and `finished`
+  (a cancel or an end got there first) need no note; `not_waiting` says the leader still holds
+  it short of `ready` (admission, deps) or already ran it, so the app reads on (PWA, "Every PWA
+  spawn is a task", has the lifecycle). Rejected for the same reason as above: a flag on the
+  create the leader would honour at admission.
   **A session idle at its prompt past a grace holds no slot** (2026-10-27, docs/scheduler.md
   Settled defaults 20). A `running` task whose session reported `idle` ("Where the states come
   from": main turn ended, no dialog open) from the machine it runs on, with no other state since,
@@ -5453,20 +5454,37 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   (`components/menu.tsx`) upward with one item, Start now; without it the chevron is not
   rendered. The item's sub-line names where the placement preview would start it (`startNowItem`
   in `decision-view.ts`; with a cap-held candidate beside the chosen one it stays generic, since
-  `run-now` weighs both and the held one has no score), and it is disabled when the preview turns every candidate down for
-  more than the caps; a candidate held by `cap_reached` alone keeps it on, since that is what
-  `run-now` lifts, and no preview (asking, failed, a pinned form) leaves it on as plain "Skip the
-  queue". A tap enqueues exactly as Queue, then `SchedulerStore` holds a one-shot intent for that
-  task id: the first read (follow poll, nudge or reconnect, or the intent's own poll chain, which
-  covers a verdict dismissed before the task was `ready`) showing it `ready` sends `run-now`, if
-  the leader still advertises it; `queued` and `blocked` wait, any other state drops it (a pass
-  placed it first), and so does a new enqueue or the polls running out. A `conflict`, `not_leader`
-  or `not_ready` refusal re-arms it once for the next `ready` sighting. A refusal shows on the
-  queued verdict of its own task, worded as the Queue screen's Run now notice (a busy one points
-  at that screen's Run now), and clears once the task is seen past waiting; with no verdict
-  showing it goes on the Queue screen's notice. A reply that succeeds restarts the verdict's
-  follow with a fresh budget, so the task is seen running. The intent is in memory: a reload leaves the task queued, as a
-  takeover between the route and the write would. Rejected: sending `run-now` with the create
+  `run-now` weighs both and the held one has no score, so it is plain "Skip the queue", naming
+  neither a machine nor the caps the chosen one would not need lifted; "past the concurrency
+  caps" is only for no chosen target and several cap-held candidates), and it is disabled when
+  the preview turns every candidate down for more than the caps; a candidate held by
+  `cap_reached` alone keeps it on, since that is what `run-now` lifts, and no preview (asking,
+  failed, a pinned form) leaves it on as plain "Skip the queue".
+  A tap enqueues exactly as Queue, then `SchedulerStore` holds one Start now intent: only a new
+  successful enqueue (Queue or Start now) replaces it and only the store's `dispose` ends it from
+  outside — the verdict being dismissed, its follow stopping, refused or running out does not,
+  since the intent owns its own read chain: every `QUEUE_POLL_MS` it reads the task by id,
+  whether or not a verdict shows it, under the same read sequence as the follow so it never walks
+  the verdict back, and a fresher copy feeds the verdict and the Queue row as the follow's reads
+  do (the follow's reads and nudges feed the intent too). Its `QUEUE_POLLS` budget counts only
+  reads that reached a leader; `no_leader`/`leader_unverified` re-arm for free, as the follow's
+  do. `queued` and `blocked` wait; any state past `ready` ends it silently (a pass placed it, or
+  it ended); a spent budget ends it silently too. On `ready` with a verified leader that lacks
+  `runNow` it ends with "This leader can't start tasks past the queue; it stays queued."; with no
+  verified leader at that moment it reads on; otherwise it sends, one `run-now` out at a time and
+  two at most. The answer: the task reserved ends the intent and restarts the verdict's follow
+  with a fresh budget, so the task is seen running; `dispatching` and `finished` end it with no
+  note, one read, and the follow restarted; `not_waiting` reads on with a fresh budget for a later
+  `ready` (silent at the second ask); `conflict`, `not_leader`, `not_ready` and a send refused
+  unsent for want of a leader (`no_leader`/`leader_unverified`, which prove it never left) read
+  on once for one more ask, and a second such answer ends it with a note (the busy one points at
+  the Queue screen's Run now); anything else — another refusal, an unreadable answer, a timeout
+  or a drop — ends it with a note worded as the Queue screen's Run now notice. A note goes on the
+  queued verdict when that shows the task, clearing once the task is seen past waiting;
+  otherwise on the Queue screen's notice, naming the task (`taskTitle`, its row label), and kept
+  through reads until one asked with the screen open lands, so opening the screen shows it. The
+  intent is in memory: a reload leaves the task queued, as a takeover between the route and the
+  write would. Rejected: sending `run-now` with the create
   (refused before admission) and a wire flag on the record (above, "Run now lifts both caps").
   The daemon still answers `spawn` (older apps, older MCP clients) and `seanced spawn --now` is
   the direct path; the PWA has no direct spawn any more, so what this replaced is gone with it: the

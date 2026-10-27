@@ -1273,8 +1273,18 @@ describe("start now", () => {
     await until(() => client.runNows.length > 0, "the run-now");
     await until(() => store.getState().queueNotice !== null, "the notice");
     expect(client.runNows).toEqual([created.id]);
+    expect(store.getState().queueNotice).toStartWith(`Couldn't start "fix it" at once:`);
     expect(store.getState().queueNotice).toContain("see why it waits");
     expect(store.getState().startNowRefusal).toBeNull();
+
+    // Opening the Queue screen reads it whole; that read must not take the note down before it is seen.
+    const notice = store.getState().queueNotice;
+    client.onQueue = async () => ({ tasks: [{ ...created, state: "ready" }], holds: [], at: 3 });
+    store.openQueue();
+    await until(() => store.getState().queueView?.kind === "ok", "the queue read");
+    expect(store.getState().queueNotice).toBe(notice);
+    await store.refreshQueue();
+    expect(store.getState().queueNotice).toBeNull();
   });
 
   test("an answer that comes after the verdict moved to another task shows nowhere", async () => {
@@ -1295,24 +1305,213 @@ describe("start now", () => {
     expect(store.getState().queueNotice).toBeNull();
   });
 
-  test("a pass placing it first answers dispatching or not_waiting: no note, the verdict reads on", async () => {
-    for (const code of ["dispatching", "not_waiting", "finished"] as const) {
+  test("dispatching (a pass placing it) or finished (a cancel or end): no note, one read, and the follow goes on", async () => {
+    for (const code of ["dispatching", "finished"] as const) {
       const client = capable();
-      client.onRunNow = async () => ({ ok: false, code, message: "x" });
+      const answer = Promise.withResolvers<TaskReply | null>();
+      client.onRunNow = () => answer.promise;
       const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
       // oxlint-disable-next-line no-await-in-loop -- one store at a time
       await store.startNow();
       const created = firstCreate(client);
-      client.onQueue = async () => ({ tasks: [{ ...created, state: "ready" }], at: 2 });
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await poll(client, { ...created, state: "ready" });
+      expect(client.runNows).toHaveLength(1);
+
       const asked = client.queueRequests.length;
-      timers.fire(QUEUE_POLL_MS);
+      const armed = timers.armed(QUEUE_POLL_MS);
+      answer.resolve({ ok: false, code, message: "x" });
       // oxlint-disable-next-line no-await-in-loop -- as above
-      await until(() => client.queueRequests.length > asked, code);
-      client.onQueue = async () => ({ tasks: [reserved(created)], at: 3 });
-      // oxlint-disable-next-line no-await-in-loop -- as above
-      await until(() => queuedState(store) === "reserved", code);
+      await drain();
+      // Before any read could show it reserved: the answer alone says nothing to the person.
       expect(store.getState().startNowRefusal).toBeNull();
+      expect(store.getState().queueNotice).toBeNull();
+      expect(client.queueRequests.length).toBe(asked + 1);
+      expect(timers.armed(QUEUE_POLL_MS)).toBe(armed);
+
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await poll(client, reserved(created));
+      expect(queuedState(store)).toBe("reserved");
+      expect(client.runNows).toHaveLength(1);
     }
+  });
+
+  test("not_waiting keeps the intent reading: a later ready asks again, and never more than twice", async () => {
+    const client = capable();
+    client.onRunNow = async () => ({ ok: false, code: "not_waiting", message: "x" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toHaveLength(1);
+    await poll(client, { ...created, state: "queued" });
+    expect(client.runNows).toHaveLength(1);
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toHaveLength(2);
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toHaveLength(2);
+    expect(store.getState().startNowRefusal).toBeNull();
+    expect(store.getState().queueNotice).toBeNull();
+  });
+
+  test("a long stretch with no leader spends no reads, and the ready after it still sends", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+    client.onQueue = async () => {
+      throw new RequestFailure("no_leader", "no scheduler is leading");
+    };
+    for (let n = 0; n < QUEUE_POLLS * 2; n += 1) {
+      timers.fire(QUEUE_POLL_MS);
+      // oxlint-disable-next-line no-await-in-loop -- one poll at a time
+      await drain();
+    }
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toEqual([created.id]);
+  });
+
+  test("reads that reach a leader spend the budget: once spent, the intent lapses unsent and silent", async () => {
+    const client = capable();
+    const fake = fakeHistory();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+    // Dismissed, so only the intent's own chain reads.
+    store.startAnother();
+    fake.settle(store);
+    fake.restore();
+    for (let n = 0; n < QUEUE_POLLS; n += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- one poll at a time
+      await poll(client, { ...created, state: "queued" });
+    }
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+    client.nudge({ at: 3, tasks: [created.id] });
+    await drain();
+    expect(client.runNows).toEqual([]);
+    expect(store.getState().queueNotice).toBeNull();
+  });
+
+  test("a second Start now while one is waiting replaces it", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const first = firstCreate(client);
+    store.setPrompt("and this");
+    await store.startNow();
+    const second = client.creates[1];
+    if (second === undefined) throw new Error("second create missing");
+
+    client.onQueue = async () => ({
+      tasks: [
+        { ...first, state: "ready" },
+        { ...second, state: "ready" },
+      ],
+      at: 2,
+    });
+    timers.fire(QUEUE_POLL_MS);
+    await until(() => client.runNows.length > 0, "the run-now");
+    await drain();
+    expect(client.runNows).toEqual([second.id]);
+  });
+
+  test("a run-now refused unsent for want of a leader is asked once more, then says so", async () => {
+    const client = capable();
+    client.onRunNow = async () => {
+      throw new RequestFailure("no_leader", "no scheduler is leading");
+    };
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toHaveLength(1);
+    expect(store.getState().startNowRefusal).toBeNull();
+
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toHaveLength(2);
+    expect(store.getState().startNowRefusal?.message).toBeDefined();
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toHaveLength(2);
+  });
+
+  test("a busy answer after the follow ran out still gets its one more ask", async () => {
+    const client = capable();
+    const busy = Promise.withResolvers<TaskReply | null>();
+    client.onRunNow = () => busy.promise;
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+    for (let n = 0; n < QUEUE_POLLS; n += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- one poll at a time
+      await poll(client, { ...created, state: "ready" });
+    }
+    expect(followEnd(store)).toBeDefined();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+
+    busy.resolve({ ok: false, code: "conflict", message: "x" });
+    await drain();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(1);
+    client.onRunNow = async (id) => ({ task: reserved({ ...created, id }) });
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toHaveLength(2);
+    expect(queuedState(store)).toBe("reserved");
+    expect(store.getState().startNowRefusal).toBeNull();
+  });
+
+  test("a ready sighting under an unverified leader holds the ask, not the intent", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.startNow();
+    const created = firstCreate(client);
+    client.emit({ scheduler: { kind: "unverified", deviceId: "dev-a", term: 2 } });
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toEqual([]);
+    expect(store.getState().startNowRefusal).toBeNull();
+
+    client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 2 } });
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toEqual([created.id]);
+    detach();
+  });
+
+  test("a follow that stops on a refused read leaves the run-now out to answer on the verdict", async () => {
+    const client = capable();
+    const answer = Promise.withResolvers<TaskReply | null>();
+    client.onRunNow = () => answer.promise;
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toHaveLength(1);
+
+    client.onQueue = async () => ({ ok: false, code: "not_leader", message: "x" });
+    timers.fire(QUEUE_POLL_MS);
+    await drain();
+    expect(followEnd(store)).toMatchObject({ kind: "refused" });
+
+    answer.resolve({ ok: false, code: "unplaceable", message: "held" });
+    await until(() => store.getState().startNowRefusal !== null, "the refusal");
+    expect(store.getState().startNowRefusal?.taskId).toBe(created.id);
+  });
+
+  test("detaching ends the intent: no timer stays armed, and a late answer arms none", async () => {
+    const client = capable();
+    const answer = Promise.withResolvers<TaskReply | null>();
+    client.onRunNow = () => answer.promise;
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.startNow();
+    const created = firstCreate(client);
+    await poll(client, { ...created, state: "ready" });
+    detach();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+
+    answer.resolve({ ok: false, code: "conflict", message: "x" });
+    await drain();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+    expect(store.getState().startNowRefusal).toBeNull();
   });
 
   test("a busy leader gets one more ask on the next ready sighting, then the note points at Run now", async () => {
