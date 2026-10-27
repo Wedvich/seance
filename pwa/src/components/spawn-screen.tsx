@@ -67,7 +67,6 @@ export interface SpawnActions {
   readonly addAfter: (taskId: string, after: DepAfter) => void;
   readonly removeAfter: (taskId: string) => void;
   readonly setUntil: (until: TaskUntil) => void;
-  readonly setLinearIssue: (issue: string) => void;
   readonly startBatch: () => void;
   readonly endBatch: () => void;
 }
@@ -817,21 +816,6 @@ export function SpawnScreen(props: {
             <span className="toggle-knob" />
           </span>
         </button>
-
-        <label className="field linear card" htmlFor="linear-issue">
-          <span className="label">LINEAR ISSUE</span>
-          <input
-            id="linear-issue"
-            type="text"
-            value={form.linearIssue}
-            maxLength={TASK_SPEC_LIMITS.linearIssue}
-            placeholder="ENG-123"
-            autoComplete="off"
-            autoCapitalize="characters"
-            spellcheck={false}
-            onInput={(event) => actions.setLinearIssue(event.currentTarget.value)}
-          />
-        </label>
       </div>
 
       <footer className="footer">

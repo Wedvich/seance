@@ -91,7 +91,6 @@ export function readForm(): PersistedForm {
     effort: isEffort(record["effort"]) ? record["effort"] : DEFAULT_FORM.effort,
     after: asDeps(record["after"]),
     until: TASK_UNTIL.find((until) => until === record["until"]) ?? DEFAULT_FORM.until,
-    linearIssue: (asString(record["linearIssue"]) ?? "").slice(0, TASK_SPEC_LIMITS.linearIssue),
     batch: asBatch(record["batch"]),
   };
 }

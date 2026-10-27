@@ -256,7 +256,6 @@ function useSpawnActions(store: Store): SpawnActions {
       addAfter: (taskId, after) => store.addAfter(taskId, after),
       removeAfter: (taskId) => store.removeAfter(taskId),
       setUntil: (until) => store.setUntil(until),
-      setLinearIssue: (issue) => store.setLinearIssue(issue),
       startBatch: () => store.startBatch(),
       endBatch: () => store.endBatch(),
     }),

@@ -5667,7 +5667,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   the "since" — it starts a pass after the leader's own view flipped, exists only on `lost`, and
   would make the same card change its age at the 15-minute mark.
 - **Authoring from the auto form** (2026-10-23, M4 #21). The form adds AFTER and BATCH
-  tiles, a "Settle on its done report" switch and a Linear issue field. **AFTER** opens a sheet of
+  tiles, a "Settle on its done report" switch. (A Linear issue field, unused, was removed 2026-10-27; the
+  spec's `linear` stays on the wire, and a persisted form's `linearIssue` is ignored.) **AFTER** opens a sheet of
   the tasks the leader holds that have not failed or been cancelled (read when the sheet opens),
   each with an Opened, Merged or Done choice; Done is offered only while the verified leader
   advertises `reportedDone`, as is the switch. An edge on a task the list no longer shows stays, by id, so it can
@@ -5678,7 +5679,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   batch, so the next enqueue starts a new one): each enqueue takes index `next`, and the counter moves only for the
   member it numbered, so a retry that lands twice moves it once (`landedEarlier`). Start batch
   while one is open keeps it, so a tap cannot renumber one in flight. (Until 2026-10-26 the sheet
-  picked One at a time, Up to N at once or No limit.) Deps, `until` and the Linear issue belong to one
+  picked One at a time, Up to N at once or No limit.) Deps and `until` belong to one
   task and reset after each enqueue; the batch persists. **Follow up** on a queue row is the
   chain's shortcut: the form with that task as its one `opened` edge, and both pickers reset to Auto (the scheduler places a follow-up; the pins of whatever the form held are not inherited). Settling on the report appends the
   report instruction to the prompt on the client (`withReportInstruction`, so the stored task

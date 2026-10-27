@@ -2402,13 +2402,12 @@ describe("authoring a task from the auto form", () => {
   const BATCH = { id: "b-1", next: 1 } as const;
   const form = { ...DEFAULT_FORM, prompt: "fix it" };
 
-  test("deps, batch and Linear go into the spec, with no `until` unless it was changed, and then reset or advance", async () => {
+  test("deps and batch go into the spec, with no `until` unless it was changed, and then reset or advance", async () => {
     const client = new ScriptedClient();
     const store = new Store(client, {
       ...form,
       after: [{ task: "base", after: "merged" }],
       batch: BATCH,
-      linearIssue: " ENG-7 ",
     });
     await store.spawn();
 
@@ -2417,14 +2416,12 @@ describe("authoring a task from the auto form", () => {
       prompt: "fix it",
       deps: [{ task: "base", after: "merged" }],
       batch: { id: "b-1", index: 1 },
-      linear: { issue: "ENG-7" },
     });
     expect(firstCreate(client).spec).not.toHaveProperty("until");
     // What belongs to the task just stored is cleared; the batch stays open, one further on.
     expect(store.getState().form).toMatchObject({
       after: [],
       until: "merged",
-      linearIssue: "",
       batch: { ...BATCH, next: 2 },
     });
   });
@@ -2538,12 +2535,6 @@ describe("authoring a task from the auto form", () => {
 
     start();
     expect(store.getState().form.batch?.id).not.toBe(first?.id);
-  });
-
-  test("the Linear issue is clamped to what a spec takes", () => {
-    const store = new Store(new ScriptedClient(), form);
-    store.setLinearIssue("E".repeat(200));
-    expect(store.getState().form.linearIssue).toHaveLength(TASK_SPEC_LIMITS.linearIssue);
   });
 
   test("opening the After sheet reads the queue; other sheets do not", async () => {

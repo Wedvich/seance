@@ -411,10 +411,6 @@ export class Store {
     this.#patch({ form: { ...this.#state.form, until } });
   }
 
-  setLinearIssue(linearIssue: string): void {
-    this.#patch({ form: { ...this.#state.form, linearIssue: linearIssue.slice(0, TASK_SPEC_LIMITS.linearIssue) } });
-  }
-
   /**
    * The next enqueues join a new batch, numbered from 1. An open batch stays
    * open: a second tap must not renumber a batch already in flight.
@@ -736,7 +732,6 @@ export class Store {
       );
       return;
     }
-    const issue = form.linearIssue.trim();
     // Only ids: an alias or email is display text and never goes in a record.
     const pin = {
       ...(form.machine === null ? {} : { deviceId: form.machine }),
@@ -750,7 +745,6 @@ export class Store {
       ...(form.after.length === 0 ? {} : { deps: form.after }),
       ...(form.batch === null ? {} : { batch: { id: form.batch.id, index: form.batch.next } }),
       ...(reported ? { until: form.until } : {}),
-      ...(issue === "" ? {} : { linear: { issue } }),
     };
     await this.#enqueue(queuedTask(spec, Date.now()), runNow);
   }
@@ -794,7 +788,6 @@ export class Store {
             prompt: "",
             after: [],
             until: "merged",
-            linearIssue: "",
             batch: counted ? { ...batch, next: batch.next + 1 } : batch,
           },
           promptUndo: null,

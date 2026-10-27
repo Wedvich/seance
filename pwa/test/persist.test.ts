@@ -37,7 +37,6 @@ describe("form persistence", () => {
       effort: "max",
       after: [{ task: TASK, after: "done" }],
       until: "reported",
-      linearIssue: "ENG-1",
       batch: { id: TASK, next: 4 },
     } as const;
     writeForm(form);
@@ -62,7 +61,7 @@ describe("form persistence", () => {
 
   test("a form from before authoring reads with the authoring fields at their defaults", () => {
     store.set("seance:form", JSON.stringify({ prompt: "old", worktree: true, model: "opus", effort: "high" }));
-    expect(readForm()).toMatchObject({ after: [], until: "merged", linearIssue: "", batch: null, prompt: "old" });
+    expect(readForm()).toMatchObject({ after: [], until: "merged", batch: null, prompt: "old" });
   });
 
   test("authoring fields are validated one by one: junk entries drop, the rest stay", () => {
@@ -72,14 +71,14 @@ describe("form persistence", () => {
       JSON.stringify({
         after: [{ task: "has space", after: "opened" }, { task: TASK, after: "eventually" }, 7, null, ...tooMany],
         until: "whenever",
-        linearIssue: "E".repeat(100),
+        linearIssue: "ENG-1",
       }),
     );
     const form = readForm();
     expect(form.after).toHaveLength(16);
     expect(form.after.every((dep) => dep.task === TASK && dep.after === "opened")).toBe(true);
     expect(form.until).toBe("merged");
-    expect(form.linearIssue).toHaveLength(64);
+    expect(form).not.toHaveProperty("linearIssue");
   });
 
   test("a batch that parseTaskSpec would refuse is dropped whole", () => {
