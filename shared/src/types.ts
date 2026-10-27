@@ -1420,6 +1420,17 @@ export interface SessionsResponse {
    */
   readonly ledgerSince?: number;
   /**
+   * The task ids in `ended` whose launch this daemon recorded but never saw
+   * finish, because the process exited mid-spawn (crash, kill, power cut, or a
+   * restart past the drain cap): the session may or may not have started.
+   * Always a subset of `ended` — the ids stay there, so a reader predating the
+   * field reads them as ran, never as never-landed. Sent only to the scheduler,
+   * at most `SESSIONS_MAX_PROGRESS` ids; absent from older daemons and when
+   * empty. A leader settles one `failed` `dispatch_unconfirmed` and never
+   * re-dispatches it.
+   */
+  readonly interrupted?: readonly string[];
+  /**
    * What this daemon last knew of each task's PR and branch, live or ended —
    * the sum of the `session-event`s and `branch-state`s it sent, which are
    * fire-and-forget and lost while no leader listens. A leader reads it on
@@ -2296,7 +2307,8 @@ export interface SettingsRecord extends VersionBound {
  * `Task.failure` codes the scheduler sets itself, beside a daemon's refusal.
  * `dispatch_unconfirmed`: its spawn's reply was lost and its machine, asked
  * later, could neither show the session nor prove it never started (an older
- * daemon, or a ledger pruned past the reservation). Terminal: re-dispatching
+ * daemon, or a ledger pruned past the reservation), or its machine reported the
+ * launch interrupted (it restarted mid-spawn). Terminal: re-dispatching
  * could start a twin. `dependency_failed`, `dependency_missing` and
  * `dependency_cycle`: an edge that can never release (`TaskDep`), set at
  * admission. `queue_expired`: `queued` past `STORE_TOMBSTONE_MS`, so it may be

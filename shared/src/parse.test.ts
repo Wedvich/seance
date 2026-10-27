@@ -37,6 +37,7 @@ import {
   parsePrStatus,
   parseTask,
   parseTaskRecord,
+  parseInterrupted,
   parseTaskProgressList,
   parseTaskRef,
   parseTaskReply,
@@ -1335,6 +1336,22 @@ describe("parseTaskProgressList", () => {
       expect(parseTaskProgressList([entry, bad])).toBeNull();
     }
     expect(parseTaskProgressList(Array.from({ length: SESSIONS_MAX_PROGRESS + 1 }, () => entry))).toBeNull();
+  });
+});
+
+describe("parseInterrupted", () => {
+  test("keeps only valid task ids that are in ended", () => {
+    expect(parseInterrupted(["t-1", "t-2", "t-3", 7, "bad id!", ""], ["t-1", "t-3", "t-9"])).toEqual(["t-1", "t-3"]);
+  });
+
+  test("is undefined for a non-array value or ended, a list over the cap, and an empty result", () => {
+    expect(parseInterrupted("t-1", ["t-1"])).toBeUndefined();
+    expect(parseInterrupted(["t-1"], undefined)).toBeUndefined();
+    expect(parseInterrupted(["t-1"], "t-1")).toBeUndefined();
+    const many = Array.from({ length: SESSIONS_MAX_PROGRESS + 1 }, (_, i) => `t-${i}`);
+    expect(parseInterrupted(many, many)).toBeUndefined();
+    expect(parseInterrupted([], ["t-1"])).toBeUndefined();
+    expect(parseInterrupted(["t-2"], ["t-1"])).toBeUndefined();
   });
 });
 

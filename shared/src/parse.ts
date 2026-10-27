@@ -1397,6 +1397,17 @@ export function parseTaskProgressList(value: unknown): readonly TaskProgress[] |
   return parseList(value, parseTaskProgress);
 }
 
+/**
+ * `SessionsResponse.interrupted`, at the leader: only task ids that are also in
+ * `ended`. The reply comes from a remote PSK holder, so a bad entry falls back
+ * to today's behaviour (`done`), never to a re-dispatch.
+ */
+export function parseInterrupted(value: unknown, ended: unknown): readonly string[] | undefined {
+  if (!Array.isArray(value) || !Array.isArray(ended) || value.length > SESSIONS_MAX_PROGRESS) return undefined;
+  const kept = value.filter((id): id is string => isTaskId(id) && ended.includes(id));
+  return kept.length === 0 ? undefined : kept;
+}
+
 function parseTaskProgress(value: unknown): TaskProgress | null {
   if (!isRecord(value)) return null;
   const { taskId, prUrl, branch, pushed, merged, reported, exit, oomKill, vanished, at } = value;
