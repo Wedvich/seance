@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { pollUntil } from "../test/fixtures.ts";
 import { harvestable, harvestExits, parseRecorded, whileRegistering } from "./exit-status.ts";
 import { LaunchLedger } from "./launch-ledger.ts";
@@ -674,5 +677,27 @@ describe("a window closed from outside", () => {
       ],
       closes: ["f", "g"],
     });
+  });
+});
+
+describe("a harvested exit clears an interrupted mark", () => {
+  test("the launch a past process died in the middle of is accounted for once its exit is noted", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "seance-harvest-interrupted-"));
+    const path = join(dir, "launched.json");
+    try {
+      await new EndedTasks(await LaunchLedger.open(path)).launch("task-1");
+      const restarted = new EndedTasks(await LaunchLedger.open(path), Date.now, {
+        ...idle,
+        list: () => Promise.resolve([pane("%1")]),
+        close: () => Promise.resolve(),
+      });
+      expect(restarted.ledger.interrupted()).toEqual(["task-1"]);
+      await restarted.harvestExits();
+      expect(restarted.ledger.interrupted()).toEqual([]);
+      await pollUntil(async () => !(await readFile(path, "utf8")).includes("pending"), "the mark off disk");
+      expect((await LaunchLedger.open(path)).interrupted()).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

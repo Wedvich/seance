@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureAuditLog } from "./audit.ts";
 import type { Check } from "./check.ts";
+import { SHUTDOWN_DRAIN_MS } from "./drain-limits.ts";
 import { exec, type ExecResult } from "./exec.ts";
 import { recordedBunCheck, resolvedBun } from "./link.ts";
 import { logPath } from "./paths.ts";
@@ -70,7 +71,13 @@ export function assertMacos(action: string): void {
   }
 }
 
-const UNLOAD_WAIT_MS = 5_000;
+/**
+ * `bootout` SIGTERMs the daemon, which then drains task launches for up to `SHUTDOWN_DRAIN_MS` before it
+ * exits; the job is unloaded only after, so the wait must outlast that, or `install` bootstraps over a
+ * job still going down and leaves the agent unloaded. The margin covers launchd's 20 s `ExitTimeOut`, past which
+ * it SIGKILLs.
+ */
+const UNLOAD_WAIT_MS = SHUTDOWN_DRAIN_MS + 10_000;
 
 /**
  * `bootout` returns before launchd has finished tearing the job down, and

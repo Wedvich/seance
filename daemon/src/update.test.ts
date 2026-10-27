@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { UpdateReport } from "@seance/shared";
 import { exec } from "./exec.ts";
-import { createUpdater, type UpdateEffects, type Updater } from "./update.ts";
+import { pollUntil } from "../test/fixtures.ts";
+import { LaunchLedger } from "./launch-ledger.ts";
+import { EndedTasks, LaunchesClosed } from "./session-events.ts";
+import { createUpdater, type UpdateEffects, type Updater, type UpdaterOpts } from "./update.ts";
 
 const cleanups: string[] = [];
 afterAll(async () => {
@@ -45,7 +48,10 @@ interface Harness {
   readonly make: (root: string, debounceMs?: number) => Updater;
 }
 
-function harness(effectOverrides: Partial<UpdateEffects> = {}): Harness {
+function harness(
+  effectOverrides: Partial<UpdateEffects> = {},
+  gate: Pick<UpdaterOpts, "quiesce" | "restartGraceMs"> = {},
+): Harness {
   const reports: UpdateReport[] = [];
   const lines: string[] = [];
   const calls = { install: 0, restart: 0, reportsAtRestart: -1 };
@@ -69,6 +75,7 @@ function harness(effectOverrides: Partial<UpdateEffects> = {}): Harness {
         root,
         debounceMs,
         effects,
+        ...gate,
         sink: (line) => {
           lines.push(line);
         },
@@ -249,6 +256,125 @@ describe("self-update pipeline", () => {
     expect(h.reports.map((r) => r.outcome)).toEqual(["ok", "restart_failed"]);
     expect(h.reports[1]?.detail).toContain("unit not found");
     expect(h.lines.some((l) => l.includes("outcome=restart_failed"))).toBe(true);
+  });
+
+  describe("the restart waits for task launches", () => {
+    /** The wiring `run.ts` gives the updater, over a real `EndedTasks`. */
+    function gated(restartGraceMs?: number) {
+      const ended = new EndedTasks(LaunchLedger.memory());
+      const gate = {
+        quiesce: async (): Promise<() => void> => {
+          await ended.drain(10_000);
+          return () => ended.reopen();
+        },
+        ...(restartGraceMs === undefined ? {} : { restartGraceMs }),
+      };
+      // A probe launch that gets in is settled at once, so it never holds a drain.
+      const closed = async (): Promise<boolean> => {
+        try {
+          await (
+            await ended.launch("probe")
+          )(false);
+          return false;
+        } catch (err) {
+          return err instanceof LaunchesClosed;
+        }
+      };
+      return { ended, gate, closed };
+    }
+
+    test("an ok update with a launch in flight restarts only once it has settled", async () => {
+      const { upstream, checkout } = await makePair();
+      await publish(upstream);
+      const { ended, gate, closed } = gated();
+      const h = harness({}, gate);
+      const settle = await ended.launch("t1");
+
+      const updater = h.make(checkout);
+      updater.check("announce");
+      await pollUntil(closed, "the launch gate closed");
+      await Bun.sleep(50); // a non-event can't be polled
+      expect(h.calls.restart).toBe(0);
+      // The report is out before the wait: the post-restart register must already carry the ok.
+      expect(h.reports.map((r) => r.outcome)).toEqual(["ok"]);
+
+      await settle(true, {});
+      await updater.settled();
+      expect(h.calls.restart).toBe(1);
+    });
+
+    test("a restart that throws takes launches again, and the update is reported restart_failed", async () => {
+      const { upstream, checkout } = await makePair();
+      await publish(upstream);
+      const { ended, gate } = gated();
+      const h = harness({ restart: () => Promise.reject(new Error("no unit")) }, gate);
+
+      const updater = h.make(checkout);
+      updater.check("announce");
+      await updater.settled();
+      expect(h.reports.map((r) => r.outcome)).toEqual(["ok", "restart_failed"]);
+      await (
+        await ended.launch("later")
+      )(true, {});
+      expect(ended.launched("later")).toBe(true);
+    });
+
+    test("a restart that returns keeps launches held until the grace has passed", async () => {
+      const { upstream, checkout } = await makePair();
+      await publish(upstream);
+      const { gate, closed } = gated(50);
+      const h = harness({}, gate);
+
+      const updater = h.make(checkout);
+      updater.check("announce");
+      await updater.settled();
+      expect(h.calls.restart).toBe(1);
+      expect(await closed()).toBe(true);
+      await pollUntil(async () => !(await closed()), "launches taken again after the grace");
+    });
+
+    test("stopping the updater leaves the grace running: a config reload swaps the daemon, not the gate", async () => {
+      const { upstream, checkout } = await makePair();
+      await publish(upstream);
+      const { gate, closed } = gated(30);
+      const h = harness({}, gate);
+
+      const updater = h.make(checkout);
+      updater.check("announce");
+      await updater.settled();
+      updater.stop();
+      expect(await closed()).toBe(true);
+      await pollUntil(async () => !(await closed()), "launches taken again after the grace, stop or not");
+    });
+
+    test("the grace cannot reopen a final drain", async () => {
+      const { upstream, checkout } = await makePair();
+      await publish(upstream);
+      const { ended, gate, closed } = gated(30);
+      const h = harness({}, gate);
+
+      const updater = h.make(checkout);
+      updater.check("announce");
+      await updater.settled();
+      updater.stop();
+      await ended.drain(1_000, { final: true });
+      await Bun.sleep(100); // a non-event can't be polled
+      expect(await closed()).toBe(true);
+    });
+
+    test("a check that restarts nothing never closes the gate", async () => {
+      const { checkout } = await makePair();
+      const { ended, gate } = gated();
+      const h = harness({}, gate);
+
+      const updater = h.make(checkout);
+      updater.check("announce");
+      await updater.settled();
+      expect(h.calls.restart).toBe(0);
+      await (
+        await ended.launch("t1")
+      )(true, {});
+    });
   });
 
   test("a stopped updater neither checks nor reports", async () => {

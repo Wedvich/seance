@@ -154,7 +154,11 @@ green:
   `daemon/src/run.ts`) — never a guard per term, which would let the relay replay a `cancel` into
   each, and the launch ledger (`daemon/src/launch-ledger.ts`) is write-ahead — a task id is on
   disk before its spawn runs, a spawn whose id it cannot record is refused, and `since` only
-  moves forward — since it is what makes `ledgerSince` a proof that a spawn never landed — and a
+  moves forward — since it is what makes `ledgerSince` a proof that a spawn never landed — and an id
+  still pending when the ledger opens is reported `interrupted`, never removed from `ended` (an older
+  leader would read the gap as never-landed), and a leader never re-dispatches an interrupted task, and
+  a task launch the restart drain turns away is answered `internal_error` unrecorded, never held and
+  run later, and a
   scheduler spawn for a task id the ledger holds as launched is refused `task_launched`, audited,
   never run again, and a continuation (`mode: "continue"`) runs only for a spawn sealed `from` the
   scheduler with `client: "scheduler"` (or the leader's in-process dispatch), in the worktree this
@@ -214,14 +218,17 @@ green:
   kind, `session-event` (`session-events.ts`, DESIGN.md "Session events"), is ingest-only and
   bound to the sender's pane by its kernel-reported peer pid, never by a field it sends — the
   frame's `pane` decides only on a host that names no peer at all (`peerPidSupported`), never for
-  one connection whose pid came back null. Its two acts past ingest are poking the bound
+  one connection whose pid came back null. Its three acts past ingest are poking the bound
   exclave's `/usage` refresh (`usage-refresh.ts`), which spawns only on a stale reading, with
   fixed argv and an env built from the scan — no frame field reaches either — and a `done`
   report, which only `report_task_done` sends (`seanced session-event` drops a `done` unsent):
   the daemon notes it in the launch ledger and forwards it once, both for the pane's own task
   only, and answers `untasked` for a pane with none and `unrecorded` for a task its ledger holds
   no launch of (nothing sent); the leader settles that task only under `until: "reported"` and
-  only from the machine it was placed or reserved on.
+  only from the machine it was placed or reserved on — and clearing its own pane's task's
+  `interrupted` mark in the launch ledger, only on an `ended` or `done` frame (proof the session ran;
+  never when ingest is stopped), bound to the pane like the `done` report (including on a
+  host with no peer pid) and never to an id from the frame.
   The frame's one other carried claim is `remoteSession`, Remote Control's id for the session:
   display-only (the PWA's claude.ai link), kept only as `isRemoteSessionId` passes it, and
   never used to bind, route or move anything.

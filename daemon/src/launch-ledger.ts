@@ -34,6 +34,15 @@ import { stateDir } from "./paths.ts";
  * the worktree directory and window name already do, never the prompt; the file
  * is 0600 in the state dir.
  *
+ * `pending` is the ids whose launch was recorded but has not yet settled
+ * (landed, retracted, refused or crashed), written in the same durable write as
+ * `tasks`. An id still pending when the file is opened is a launch the process
+ * died in the middle of: it becomes `interrupted` (persisted, and kept in
+ * `tasks`, so `since` and `ended` are untouched) until a listing carrying it, a
+ * harvested exit, a bound session event or a later landing of it clears it.
+ * Both are optional top-level arrays an older reader ignores, and neither may
+ * ever make a file corrupt: that would reset `since`.
+ *
  * Bounded by count and by age, and `since` moves past each entry evicted, so
  * the claim stays true as the file forgets. Count: eviction happens only
  * through this machine's own launches, and the task waiting on proof is one
@@ -137,6 +146,10 @@ interface LedgerFile {
   readonly tasks: readonly (readonly [string, number])[];
   /** Best-effort notes, outside the proof: an older reader ignores them. */
   readonly progress?: readonly NotedTask[];
+  /** Ids recorded whose launch had not settled when this was written. */
+  readonly pending?: readonly string[];
+  /** Ids a past process died launching: see the header. */
+  readonly interrupted?: readonly string[];
 }
 
 const PATH_MAX_LENGTH = 4096;
@@ -228,7 +241,20 @@ function parseLedger(raw: unknown): LedgerFile | null {
       if (note !== null) progress.push(note);
     }
   }
-  return { v: LEDGER_VERSION, since, tasks: entries, progress };
+  return {
+    v: LEDGER_VERSION,
+    since,
+    tasks: entries,
+    progress,
+    pending: knownIds(raw["pending"], ids),
+    interrupted: knownIds(raw["interrupted"], ids),
+  };
+}
+
+/** Lenient: a non-array is none, an entry that is no recorded task id is skipped. Never a reason to call the file corrupt. */
+function knownIds(value: unknown, ids: ReadonlySet<string>): readonly string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((id): id is string => isTaskId(id) && ids.has(id));
 }
 
 async function freshSince(path: string, now: () => number): Promise<number> {
@@ -328,6 +354,10 @@ export class LaunchLedger {
   readonly #notes: Map<string, NotedTask>;
   /** Records of each id not yet on disk or failed: a failure deletes the id only when it is the last. */
   readonly #recording = new Map<string, number>();
+  /** Recorded, launch not yet settled: written with `tasks`, so a process that dies mid-spawn leaves the id here. */
+  readonly #pending = new Set<string>();
+  /** Ids a previous process died launching; always a subset of `#tasks`. */
+  readonly #interrupted: Set<string>;
   #since: number;
   #writing: Promise<unknown> = Promise.resolve();
 
@@ -337,6 +367,7 @@ export class LaunchLedger {
     this.#since = file?.since ?? since;
     this.#tasks = new Map(file?.tasks ?? []);
     this.#notes = new Map((file?.progress ?? []).map((note) => [note.taskId, note]));
+    this.#interrupted = new Set([...(file?.interrupted ?? []), ...(file?.pending ?? [])]);
   }
 
   /**
@@ -368,7 +399,14 @@ export class LaunchLedger {
       // Falls through to the warning below.
     }
     if (parsed === null) log.warn(`launch ledger at ${path} is corrupt — starting it afresh`);
-    return new LaunchLedger(path, now, parsed === null ? await freshSince(path, now) : 0, parsed);
+    const ledger = new LaunchLedger(path, now, parsed === null ? await freshSince(path, now) : 0, parsed);
+    const promoted = parsed?.pending ?? [];
+    if (promoted.length > 0) {
+      log.warn(
+        `launch ledger: the previous process exited while launching ${promoted.join(", ")} — reporting them interrupted`,
+      );
+    }
+    return ledger;
   }
 
   /** No file: for tests and a host that keeps none. Proves only what this process saw. */
@@ -398,6 +436,7 @@ export class LaunchLedger {
     this.#tasks.set(taskId, this.#now());
     this.#evict();
     this.#recording.set(taskId, (this.#recording.get(taskId) ?? 0) + 1);
+    this.#pending.add(taskId);
     try {
       await this.#persist();
     } catch (err) {
@@ -405,7 +444,10 @@ export class LaunchLedger {
       // then put the ledger on disk without it and report success. If that one
       // fails too, the id stays in memory with nothing launched: it reads as
       // ran-and-ended, never as never-started.
-      if (fresh && this.#recording.get(taskId) === 1) this.#tasks.delete(taskId);
+      if (fresh && this.#recording.get(taskId) === 1) {
+        this.#tasks.delete(taskId);
+        this.#pending.delete(taskId);
+      }
       throw err;
     } finally {
       const left = (this.#recording.get(taskId) ?? 1) - 1;
@@ -423,8 +465,61 @@ export class LaunchLedger {
   async retract(taskId: string): Promise<void> {
     if (!this.#tasks.delete(taskId)) return;
     this.#notes.delete(taskId);
+    this.#pending.delete(taskId);
+    this.#interrupted.delete(taskId);
     await this.#persist().catch((err: unknown) => {
       log.warn(`launch ledger: could not retract a launch that never ran (${String(err)})`);
+    });
+  }
+
+  /**
+   * The launch recorded for this id settled: it left `pending`, so a restart no
+   * longer reads it as interrupted. Best-effort — a failed write costs only
+   * that, and the id is then reported interrupted after a restart, which is the
+   * safe side. Nothing to write when it was not pending.
+   */
+  async clearPending(taskId: string): Promise<void> {
+    if (!this.#pending.delete(taskId)) return;
+    await this.#persist().catch((err: unknown) => {
+      log.warn(`launch ledger: could not clear a settled launch's pending mark (${String(err)})`);
+    });
+  }
+
+  /**
+   * The launch recorded for this id ended with no verdict (the spawn backend crashed): it may have left a
+   * window, so it moves from `pending` to `interrupted`, as if the process had died launching it.
+   * Best-effort like `clearPending`; nothing to do for an id no longer recorded.
+   */
+  async markInterrupted(taskId: string): Promise<void> {
+    if (!this.#tasks.has(taskId)) return;
+    this.#pending.delete(taskId);
+    this.#interrupted.add(taskId);
+    await this.#persist().catch((err: unknown) => {
+      log.warn(`launch ledger: could not mark a crashed launch interrupted (${String(err)})`);
+    });
+  }
+
+  /**
+   * Ids a previous process died launching, still in the ledger: what
+   * `SessionsResponse.interrupted` carries.
+   */
+  interrupted(): readonly string[] {
+    this.#evict();
+    return [...this.#interrupted].filter((id) => this.#tasks.has(id));
+  }
+
+  /**
+   * The ids are accounted for (listed live, exited, bound to a pane, landed):
+   * no longer interrupted. Memory changes before the first await, so a reply
+   * built right after never repeats them; the write is best-effort and never
+   * rejects.
+   */
+  async clearInterrupted(ids: Iterable<string>): Promise<void> {
+    let removed = false;
+    for (const id of ids) if (this.#interrupted.delete(id)) removed = true;
+    if (!removed) return;
+    await this.#persist().catch((err: unknown) => {
+      log.warn(`launch ledger: could not clear an interrupted mark (${String(err)})`);
     });
   }
 
@@ -508,8 +603,12 @@ export class LaunchLedger {
     server?: number,
   ): Promise<void> {
     if (!this.#tasks.has(taskId)) return;
+    // The launch landed: both marks go with it, even where no note is written (a `here` launch with no PR).
+    const wasPending = this.#pending.delete(taskId);
+    const wasInterrupted = this.#interrupted.delete(taskId);
+    const unmarked = wasPending || wasInterrupted;
     if (site === undefined && prUrl === undefined && server === undefined) {
-      if (!this.#notes.delete(taskId)) return;
+      if (!this.#notes.delete(taskId) && !unmarked) return;
     } else {
       const at = this.#now();
       this.#notes.set(taskId, {
@@ -619,6 +718,8 @@ export class LaunchLedger {
       if (at >= cutoff && this.#tasks.size <= LEDGER_MAX) break;
       this.#tasks.delete(id);
       this.#notes.delete(id);
+      this.#pending.delete(id);
+      this.#interrupted.delete(id);
       this.#since = Math.max(this.#since, at + 1);
     }
   }
@@ -630,13 +731,17 @@ export class LaunchLedger {
     const run = this.#writing
       .catch(() => undefined)
       .then(() => {
-        // Only when there are notes, so an untouched ledger stays byte-identical to the old v1.
+        // Only when there are notes or marks, so a settled ledger stays byte-identical to the old v1.
         const progress = [...this.#notes.values()];
+        const pending = [...this.#pending];
+        const interrupted = [...this.#interrupted];
         const file: LedgerFile = {
           v: LEDGER_VERSION,
           since: this.#since,
           tasks: [...this.#tasks],
           ...(progress.length === 0 ? {} : { progress }),
+          ...(pending.length === 0 ? {} : { pending }),
+          ...(interrupted.length === 0 ? {} : { interrupted }),
         };
         // Write-ahead means on disk before the launch, the rename included: synced without its
         // directory, a power cut can bring back the file before it, and `since` then "proves"

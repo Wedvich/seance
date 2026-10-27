@@ -153,7 +153,7 @@ export type TaskSpawnReply = SpawnResponse | ErrorResponse | NoAnswer;
 export type TaskSessionsReply =
   | ({ readonly ok: true } & Pick<
       SessionsResponse,
-      "sessions" | "ended" | "ledgerSince" | "progress" | "progressTrimmed"
+      "sessions" | "ended" | "interrupted" | "ledgerSince" | "progress" | "progressTrimmed"
     >)
   | ErrorResponse
   | NoAnswer;

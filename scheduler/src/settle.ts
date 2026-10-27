@@ -261,7 +261,10 @@ function settleReserved(task: Task, reply: TaskSessionsReply, at: Observed): Tas
     const reservedAt = task.reservedAt ?? reservation.expiresAt - at.reservationTtlMs;
     return advance(task, "lost", { assignment: target, absentSince: since, reservedAt });
   }
-  const known = reply.sessions.some((s) => s.taskId === task.id) || reply.ended?.includes(task.id) === true;
+  // An interrupted launch's pane may still sit on a startup dialog `sessions` doesn't list yet: wait out the TTL for it to register.
+  const known =
+    reply.sessions.some((s) => s.taskId === task.id) ||
+    (reply.ended?.includes(task.id) === true && reply.interrupted?.includes(task.id) !== true);
   if (!known && !expired) return null;
   return settleUnconfirmed(task, target, reply);
 }
@@ -314,7 +317,9 @@ function settlePlaced(task: Task, reply: SessionsAnswer): Task | null {
  * carrying the task id is the spawn that landed. An id in `ended` landed and
  * already finished — settled by its PR as `ended` settles one, never re-routed:
  * its reply and its `ended` event were both lost and its session is gone, so
- * `task_running` could not catch a second spawn. With neither, the task goes
+ * `task_running` could not catch a second spawn. An id also in `interrupted`
+ * is not known to have landed: its machine restarted or the spawn crashed mid-way, so it is
+ * `failed`, never re-routed and never `done`. With neither, the task goes
  * back to `ready` only on the machine's proof (`provesNeverLanded`); without
  * it, `failed` — a terminal state that says what is unknown, where a
  * re-dispatch could start a twin.
@@ -324,6 +329,16 @@ function settleUnconfirmed(task: Task, target: Target, reply: SessionsAnswer): T
   const session = reply.sessions.find((s) => s.taskId === task.id);
   if (session !== undefined) {
     return progressed(advance(task, "running", { assignment: assignmentOf(target, session) }), entry);
+  }
+  if (reply.interrupted?.includes(task.id) === true) {
+    return advance(task, "failed", {
+      assignment: targetOf(target),
+      failure: {
+        code: "dispatch_unconfirmed",
+        message:
+          "its spawn was cut off before it was confirmed (its machine restarted or the spawn crashed), so it may have started — not dispatched again",
+      },
+    });
   }
   if (reply.ended?.includes(task.id) === true) {
     if (unknownEnd(task, entry, reply)) return null;

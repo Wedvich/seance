@@ -29,7 +29,7 @@ import type { Config } from "./config.ts";
 import { createHandler, createLocalOps, fitProgress, type HandlerContext, type TaskLaunches } from "./handlers.ts";
 import { LaunchLedger } from "./launch-ledger.ts";
 import { MetricsStore, type Sample } from "./metrics-store.ts";
-import { EndedTasks } from "./session-events.ts";
+import { EndedTasks, LaunchesClosed } from "./session-events.ts";
 
 // The audit trail is what's under test, so collect it at the seam the daemon
 // injects rather than off stdout, which is only where daemonSink happens to
@@ -393,6 +393,118 @@ describe("a task's launch is recorded before it runs", () => {
     expect(reply?.payload).toMatchObject({ ok: false, code: "launch_error" });
     expect(spawned).toBe(false);
     expect(logged()).toContain("audit spawn origin=relay failed code=launch_error");
+  });
+
+  test("a launch turned away by the restart drain is answered internal_error, never launch_error, and runs nothing", async () => {
+    let spawned = false;
+    const { backend } = taskBackend(() => {
+      spawned = true;
+      return Promise.resolve();
+    });
+    const tasks: TaskLaunches = {
+      launch: () => Promise.reject(new LaunchesClosed()),
+      launched: () => false,
+      continuation: () => ({ refused: "unused" }),
+      closing: () => Promise.resolve(),
+      settled: () => Promise.resolve(),
+      report: () => ({ ended: [], ledgerSince: 0 }),
+      progress: () => [],
+    };
+    const reply = await createHandler({ ...ctx, backend, tasks })(spawnTask("t-1"));
+    expect(reply?.payload).toMatchObject({ ok: false, code: "internal_error" });
+    expect(spawned).toBe(false);
+    expect(logged()).toContain("audit spawn origin=relay failed code=internal_error");
+    expect(logged()).not.toContain("launch_error");
+  });
+
+  test("a scheduler spawn after a real drain answers internal_error, leaves the ledger file as it was and runs nothing", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "seance-drained-"));
+    try {
+      const path = join(dir, "launched.json");
+      const tasks = new EndedTasks(await LaunchLedger.open(path));
+      let spawns = 0;
+      const { backend } = taskBackend(() => {
+        spawns += 1;
+        return Promise.resolve();
+      });
+      const handle = createHandler({ ...ctx, backend, tasks });
+      expect((await handle(spawnTask("early"), SCHEDULER_ID))?.payload).toMatchObject({ ok: true });
+      const before = await Bun.file(path).text();
+      expect(await tasks.drain(1_000)).toBe(true);
+      const reply = await handle(spawnTask("late"), SCHEDULER_ID);
+      expect(reply?.payload).toMatchObject({ ok: false, code: "internal_error" });
+      // The leader's own machine, in process, is turned away the same.
+      expect(
+        await createLocalOps({ ...ctx, backend, tasks }, "leader").spawn({
+          repo: "myrepo",
+          mode: "here",
+          taskId: "late",
+        }),
+      ).toMatchObject({ ok: false, code: "internal_error" });
+      expect(spawns).toBe(1);
+      expect(await Bun.file(path).text()).toBe(before);
+      expect(tasks.launched("late")).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a drain waits for the spawn's reply to be handed to the transport, not only for the launch to settle", async () => {
+    const tasks = new EndedTasks(LaunchLedger.memory());
+    const { backend } = taskBackend(() => Promise.resolve());
+    const sent = Promise.withResolvers<void>();
+    const handle = createHandler({ ...ctx, backend, tasks });
+    const reply = await handle(spawnTask("t-1"), SCHEDULER_ID, sent.promise);
+    expect(reply?.payload).toMatchObject({ ok: true });
+    await tasks.settled(); // the launch is over; the reply is not out yet
+    let drained: boolean | null = null;
+    const draining = tasks.drain(10_000).then((ok) => (drained = ok));
+    await Bun.sleep(20); // a non-event can't be polled
+    expect(drained).toBeNull();
+    sent.resolve();
+    expect(await draining).toBe(true);
+    // Without a transport to wait for (the local socket), the handler's return is as far as the hold goes.
+    await handle(spawnTask("t-2"), SCHEDULER_ID);
+    expect(await tasks.drain(1_000)).toBe(true);
+  });
+
+  test("a spawn that crashes is marked interrupted; a refusal is retracted and task_running just clears", async () => {
+    const ledger = LaunchLedger.memory();
+    const tasks = new EndedTasks(ledger);
+    const run = (backend: SessionBackend, id: string): Promise<Plain | null> =>
+      createHandler({ ...ctx, backend, tasks })(spawnTask(id), SCHEDULER_ID);
+    expect((await run(failing(new Error("boom")), "crashed"))?.payload).toMatchObject({
+      ok: false,
+      code: "internal_error",
+    });
+    await run(failing(new SpawnFailure("repo_not_found", "gone")), "refused");
+    await run(failing(new SpawnFailure("task_running", "already", "%3")), "dup");
+    expect(ledger.interrupted()).toEqual(["crashed"]);
+    expect(tasks.report(new Set())).toMatchObject({ ended: ["crashed", "dup"], interrupted: ["crashed"] });
+  });
+
+  test("interrupted from the ledger's report reaches the scheduler's sessions reply, never an app's or the local socket's", async () => {
+    const { backend } = taskBackend(() => Promise.resolve());
+    const tasks: TaskLaunches = {
+      launch: () => Promise.reject(new Error("unused")),
+      launched: () => false,
+      continuation: () => ({ refused: "unused" }),
+      closing: () => Promise.resolve(),
+      settled: () => Promise.resolve(),
+      report: () => ({ ended: ["t-1"], ledgerSince: 0, interrupted: ["t-1"] }),
+      progress: () => [],
+    };
+    const relay = createHandler({ ...ctx, backend, tasks });
+    expect(await sessionsOf(relay)).toMatchObject({ ended: ["t-1"], interrupted: ["t-1"] });
+    for (const reply of [
+      await sessionsOf(relay, APP_ID),
+      await sessionsOf(createHandler({ ...ctx, backend, tasks }, "local"), null),
+    ]) {
+      expect(reply.ended).toBeUndefined();
+      expect(reply).not.toHaveProperty("interrupted");
+    }
+    const empty: TaskLaunches = { ...tasks, report: () => ({ ended: [], ledgerSince: 0, interrupted: [] }) };
+    expect(await sessionsOf(createHandler({ ...ctx, backend, tasks: empty }))).not.toHaveProperty("interrupted");
   });
 
   test("a sessions reply harvests after listing and before it reads progress, so a pane dying between is never in neither", async () => {

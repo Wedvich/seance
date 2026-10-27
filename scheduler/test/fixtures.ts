@@ -83,6 +83,8 @@ export class FakeFleet implements Fleet {
   readonly running = new Map<string, SessionEntry[]>();
   /** Task ids each daemon would report in `sessions`' `ended`. */
   readonly ended = new Map<string, string[]>();
+  /** Task ids each daemon would report in `sessions`' `interrupted`: launches it died in the middle of. */
+  readonly interrupted = new Map<string, string[]>();
   /**
    * Each daemon's `ledgerSince`; null is a daemon that predates the ledger. A
    * day before `NOW` unless set: a ledger that long predates every reservation.
@@ -142,11 +144,13 @@ export class FakeFleet implements Fleet {
     // As the relay answers a request to a machine with no socket.
     if (!this.fleet.some((m) => m.deviceId === deviceId && m.connected)) return unreachable;
     const ended = this.ended.get(deviceId);
+    const interrupted = this.interrupted.get(deviceId);
     const since = this.ledgerSince.has(deviceId) ? this.ledgerSince.get(deviceId) : NOW - 86_400_000;
     return {
       ok: true,
       sessions: this.running.get(deviceId) ?? [],
       ...(ended === undefined ? {} : { ended }),
+      ...(interrupted === undefined ? {} : { interrupted }),
       ...(since === null || since === undefined ? {} : { ledgerSince: since }),
     };
   }

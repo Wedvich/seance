@@ -14,7 +14,8 @@ import {
 } from "@seance/shared";
 import type { Config } from "../src/config.ts";
 import { exec } from "../src/exec.ts";
-import { startDaemon, type DaemonHandle, type SelfUpdateOpts } from "../src/run.ts";
+import { endedTasksFor, startDaemon, type DaemonHandle, type SelfUpdateOpts } from "../src/run.ts";
+import { launchLedgerPath } from "../src/launch-ledger.ts";
 import { saveState } from "../src/state.ts";
 import type { SessionBackend } from "../src/backend.ts";
 import { pollUntil } from "./fixtures.ts";
@@ -188,6 +189,40 @@ describe("self-update over the relay", () => {
       const info = (await open(appKey, register.info)).payload as MachineInfo;
       expect(info.lastUpdate?.outcome).toBe("ok");
       expect(info.source?.sha).toBeDefined();
+    } finally {
+      daemon.stop();
+      relay.stop();
+    }
+  });
+
+  // The DI wiring (`run.ts` hands the updater a `quiesce` over its own `EndedTasks`) is what keeps a
+  // restart from cutting off a spawn: `daemon/src/update.test.ts` proves the parts, this proves the join.
+  test("an ok update holds its restart until a task launch in flight on this daemon has settled", async () => {
+    const relay = startTestRelay(TOKEN);
+    const { upstream, checkout } = await makePair("quiesce");
+    const { daemon, calls } = await startTestDaemon(relay, "quiesce", { root: checkout });
+    try {
+      const { deviceId } = await relay.registers.next();
+      await daemon.updater?.settled();
+      const ended = await endedTasksFor(launchLedgerPath());
+      const settle = await ended.launch("held-task");
+      const target = await runGit(upstream, ["commit", "-q", "--allow-empty", "-m", "next"]).then(() =>
+        runGit(upstream, ["rev-parse", "HEAD"]),
+      );
+
+      await sendBroadcast(relay, deviceId, { sha: target, commitTs: Date.now() });
+
+      // The ok is reported before the wait, so the pipeline has reached it once the register carries it.
+      const register = await relay.registers.next(3_000);
+      expect(((await open(appKey, register.info)).payload as MachineInfo).lastUpdate?.outcome).toBe("ok");
+      expect(calls.install).toBe(1);
+      await Bun.sleep(100); // a non-event can't be polled
+      expect(calls.restart).toBe(0);
+
+      // Never launched, so nothing touches tmux: the launch is over, which is all the drain waits for.
+      await settle(false);
+      await pollUntil(() => calls.restart > 0, "the restart once the launch settled");
+      expect(calls.restart).toBe(1);
     } finally {
       daemon.stop();
       relay.stop();

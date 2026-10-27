@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { sessionChange, waitsForExit } from "../src/settle.ts";
+import { sessionChange, settle, waitsForExit, type Observed } from "../src/settle.ts";
+import type { TaskSessionsReply } from "../src/ports.ts";
 import { advance, type Task } from "../src/index.ts";
 import { NOW, spec } from "./fixtures.ts";
 
@@ -155,5 +156,54 @@ describe("sessionChange remote session", () => {
     const lost = task({ state: "lost", remoteSession: remote, reservedAt: NOW });
     expect(advance(lost, "ready").remoteSession).toBeUndefined();
     expect(advance(task({ remoteSession: remote }), "done").remoteSession).toBe(remote);
+  });
+});
+
+/** `settle` on a reply that names an id in `ended` and `interrupted`: a launch its machine died in the middle of. */
+describe("settle an interrupted launch", () => {
+  const TTL = 120_000;
+  const observed = (now: number): Observed => ({ now, connected: true, reservationTtlMs: TTL, lostAfterMs: 900_000 });
+  const reserved = task({
+    state: "reserved",
+    assignment: undefined,
+    reservedAt: NOW,
+    reservation: { deviceId: "a", exclave: "main", clone: "app", expiresAt: NOW + TTL },
+  });
+  const reply = (fields: Partial<Extract<TaskSessionsReply, { ok: true }>> = {}): TaskSessionsReply => ({
+    ok: true,
+    sessions: [],
+    ledgerSince: NOW - 86_400_000,
+    ...fields,
+  });
+
+  test("before its TTL it waits, for a pane on a startup dialog to register", () => {
+    expect(settle(reserved, reply({ ended: ["t"], interrupted: ["t"] }), observed(NOW + 1))).toBeNull();
+  });
+
+  test("past its TTL, with no session, it fails dispatch_unconfirmed and says why", () => {
+    const settled = settle(reserved, reply({ ended: ["t"], interrupted: ["t"] }), observed(NOW + TTL));
+    expect(settled).toMatchObject({ state: "failed", failure: { code: "dispatch_unconfirmed" } });
+    expect(settled?.failure?.message).toContain("restarted");
+  });
+
+  test("a session carrying the id settles it running, interrupted or not", () => {
+    const entry = { id: "%1", window: "w", repo: "app", path: "/p", taskId: "t" };
+    const live = reply({ sessions: [entry], ended: ["t"], interrupted: ["t"] });
+    expect(settle(reserved, live, observed(NOW + 1))).toMatchObject({ state: "running" });
+    expect(settle(reserved, live, observed(NOW + TTL))).toMatchObject({ state: "running" });
+  });
+
+  test("ended alone still resolves before the TTL as done (today's behaviour)", () => {
+    expect(settle(reserved, reply({ ended: ["t"] }), observed(NOW + 1))).toMatchObject({ state: "done" });
+  });
+
+  test("a never-confirmed lost task fails the same way when its machine returns", () => {
+    const lost = task({
+      state: "lost",
+      reservedAt: NOW,
+      assignment: { deviceId: "a", exclave: "main", clone: "app" },
+    });
+    const settled = settle(lost, reply({ ended: ["t"], interrupted: ["t"] }), observed(NOW + TTL * 5));
+    expect(settled).toMatchObject({ state: "failed", failure: { code: "dispatch_unconfirmed" } });
   });
 });

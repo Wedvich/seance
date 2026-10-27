@@ -44,7 +44,7 @@ import {
 } from "./backend.ts";
 import { canonical } from "./gitdir.ts";
 import { log } from "./log.ts";
-import type { SettleLaunch } from "./session-events.ts";
+import { LaunchesClosed, type SettleLaunch } from "./session-events.ts";
 
 export interface HandlerContext {
   readonly backend: SessionBackend;
@@ -63,7 +63,7 @@ export interface HandlerContext {
   readonly metrics?: (request: MetricsRequest) => readonly MetricsSeries[];
   /**
    * Task launches (`EndedTasks`): a spawn with a task id is recorded here before
-   * it runs, and the `sessions` reply's `ended` and `ledgerSince` come from it.
+   * it runs, and the `sessions` reply's `ended`, `ledgerSince` and `interrupted` come from it.
    * Absent, spawns record nothing and neither field is sent.
    */
   readonly tasks?: TaskLaunches;
@@ -90,6 +90,11 @@ export interface TaskLaunches {
   readonly closing: (taskId: string) => Promise<void>;
   /** Resolves once no launch is in flight. */
   readonly settled: () => Promise<void>;
+  /**
+   * Taken once a launch is accepted; the returned release is called when the spawn's reply is out, so a
+   * restart's drain waits for the reply too. Absent, the drain ends with the launch.
+   */
+  readonly hold?: () => () => void;
   /** What the ledger holds of each launched task's PR and branch, for the scheduler's `sessions`. */
   readonly progress: () => readonly TaskProgress[];
   /**
@@ -100,6 +105,8 @@ export interface TaskLaunches {
   readonly report: (carried: ReadonlySet<string>) => {
     readonly ended: readonly string[];
     readonly ledgerSince: number;
+    /** The part of `ended` a past process died launching (`SessionsResponse.interrupted`). */
+    readonly interrupted?: readonly string[];
   };
 }
 
@@ -260,6 +267,8 @@ async function handleSpawn(
   audit: SpawnAudit,
   payload: unknown,
   scheduler: boolean,
+  /** Settles once the transport has sent (or given up on) this reply; absent, the handler's return is as far as the hold goes. */
+  replied?: Promise<unknown>,
 ): Promise<SpawnResponse> {
   if (!isSpawnRequest(payload)) {
     await audit.rejected("malformed request");
@@ -291,10 +300,18 @@ async function handleSpawn(
     continuation = site;
   }
   let settle: SettleLaunch | undefined;
+  let unhold: (() => void) | undefined;
   if (payload.taskId !== undefined && ctx.tasks !== undefined) {
     try {
       settle = await ctx.tasks.launch(payload.taskId);
+      unhold = ctx.tasks.hold?.();
     } catch (err) {
+      // A restart in progress is no refusal: `internal_error` is a transport code, which a leader leaves
+      // reserved to the TTL (`launch_error` would settle the task `failed`). Nothing was recorded or run.
+      if (err instanceof LaunchesClosed) {
+        await audit.failed("internal_error");
+        return { ok: false, code: "internal_error", message: err.message };
+      }
       // Launched unrecorded, a lost reply could later read as proof it never ran.
       log.error(`spawn refused: could not record task ${quote(payload.taskId)} before launching it: ${String(err)}`);
       await audit.failed("launch_error");
@@ -311,8 +328,10 @@ async function handleSpawn(
       outcome = await ctx.backend.spawn(payload, repos, continuation);
     } catch (err) {
       // A refusal launched nothing, except `task_running`: its session is an earlier launch of this task.
-      // Neither it nor a crash starts a note: the earlier launch's stays.
-      await settle?.(!(err instanceof SpawnFailure) || err.code === "task_running");
+      // Neither it nor a crash starts a note: the earlier launch's stays. A crash is no verdict — a window
+      // may exist — so the ledger marks it interrupted instead of reading it as ran-and-ended.
+      if (err instanceof SpawnFailure) await settle?.(err.code === "task_running");
+      else await settle?.(true, undefined, { unknown: true });
       throw err;
     }
     // Only a worktree has a branch of its own to watch; `here` runs in the clone itself.
@@ -346,6 +365,12 @@ async function handleSpawn(
     }
     log.error(`spawn crashed: ${String(err)}`);
     return { ok: false, code: "internal_error", message: String(err) };
+  } finally {
+    // The drain waits through the reply's send where the transport says when that was.
+    if (unhold !== undefined) {
+      if (replied === undefined) unhold();
+      else void replied.then(unhold, unhold);
+    }
   }
 }
 
@@ -416,7 +441,8 @@ async function auditRequest(ctx: HandlerContext, origin: SpawnOrigin, op: string
 /**
  * `ended` is reckoned from this reply's own `sessions`, not a second tmux read:
  * a session ending between two reads would otherwise be in neither, which is
- * what proves a spawn never landed.
+ * what proves a spawn never landed. `interrupted` is the part of `ended` a past
+ * process died launching, and goes with it.
  *
  * Only the scheduler waits out a launch in flight, which is what makes the two
  * fields a proof (DESIGN.md, "Session events"), and only it gets them. A spawn
@@ -436,8 +462,14 @@ async function listSessions(ctx: HandlerContext, scheduler: boolean): Promise<Se
   await ctx.tasks?.harvestExits?.();
   const at = Date.now();
   if (ctx.tasks === undefined || !scheduler) return { sessions, at };
-  const { ended, ledgerSince } = ctx.tasks.report(new Set(sessions.flatMap((s) => s.taskId ?? [])));
-  const base: SessionsResponse = { sessions, at, ...(ended.length === 0 ? {} : { ended }), ledgerSince };
+  const { ended, ledgerSince, interrupted } = ctx.tasks.report(new Set(sessions.flatMap((s) => s.taskId ?? [])));
+  const base: SessionsResponse = {
+    sessions,
+    at,
+    ...(ended.length === 0 ? {} : { ended }),
+    ledgerSince,
+    ...(interrupted === undefined || interrupted.length === 0 ? {} : { interrupted }),
+  };
   return fitProgress(base, ctx.tasks.progress());
 }
 
@@ -515,7 +547,11 @@ export function createLocalOps(ctx: HandlerContext, origin: SpawnOrigin): LocalO
     sessions: () => run("sessions", crypto.randomUUID(), () => listSessions(ctx, true)),
     spawn: (payload) => {
       const taskId = isRecord(payload) && isTaskId(payload["taskId"]) ? payload["taskId"] : crypto.randomUUID();
-      return run("spawn", taskId, () => handleSpawn(ctx, audit, payload, true));
+      // The reply is a return value here: handed over once the handler is done.
+      const replied = Promise.withResolvers<void>();
+      return run("spawn", taskId, () => handleSpawn(ctx, audit, payload, true, replied.promise)).finally(() =>
+        replied.resolve(),
+      );
     },
     despawn: (payload) => run("despawn", crypto.randomUUID(), () => handleDespawn(ctx, despawnTrail, payload)),
   };
@@ -542,10 +578,10 @@ async function guarded<T>(op: string, body: () => Promise<T>): Promise<T | Error
 export function createHandler(
   ctx: HandlerContext,
   origin: SpawnOrigin = "relay",
-): (plain: Plain, from?: string) => Promise<Plain | null> {
+): (plain: Plain, from?: string, replied?: Promise<unknown>) => Promise<Plain | null> {
   const audit = spawnAudit(origin, ctx.auditSink);
   const despawnTrail = despawnAudit(origin, ctx.auditSink);
-  return async (plain: Plain, from?: string): Promise<Plain | null> => {
+  return async (plain: Plain, from?: string, replied?: Promise<unknown>): Promise<Plain | null> => {
     await auditRequest(ctx, origin, plain.op, plain.id);
 
     const reply = (payload: unknown): Plain => ({
@@ -562,7 +598,7 @@ export function createHandler(
         case "sessions":
           return { payload: await listSessions(ctx, from === SCHEDULER_ID) };
         case "spawn":
-          return { payload: await handleSpawn(ctx, audit, plain.payload, from === SCHEDULER_ID) };
+          return { payload: await handleSpawn(ctx, audit, plain.payload, from === SCHEDULER_ID, replied) };
         case "despawn":
           return { payload: await handleDespawn(ctx, despawnTrail, plain.payload) };
         case "metrics":

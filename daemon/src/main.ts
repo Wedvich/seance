@@ -36,23 +36,35 @@ usage: seanced [command]
 `;
 
 async function runForeground(): Promise<void> {
-  const [{ log }, { startPowerLoop }, { startedBySupervisor }, { startSupervisor }] = await Promise.all([
+  const [
+    { log },
+    { startPowerLoop },
+    { startedBySupervisor },
+    { startSupervisor },
+    { drainTaskLaunches },
+    { SHUTDOWN_DRAIN_MS },
+    { createShutdown },
+  ] = await Promise.all([
     import("./log.ts"),
     import("./power.ts"),
     import("./service.ts"),
     import("./supervise.ts"),
+    import("./run.ts"),
+    import("./drain-limits.ts"),
+    import("./shutdown.ts"),
   ]);
   // Self-update only under the supervisor that can actually relaunch us.
   const supervised = startedBySupervisor();
   if (!supervised) log.info("not started by a service manager — self-update is off for this run");
   const daemon = await startSupervisor({ usageRefresh: {}, ...(supervised ? { selfUpdate: {} } : {}) });
   const stopPower = startPowerLoop();
-  const shutdown = (signal: string): void => {
-    log.info(`${signal} — shutting down`);
-    stopPower();
-    daemon.stop();
-    process.exit(0);
-  };
+  const shutdown = createShutdown({
+    info: (message) => log.info(message),
+    stopPower,
+    drain: () => drainTaskLaunches(SHUTDOWN_DRAIN_MS),
+    stop: () => daemon.stop(),
+    exit: (code) => process.exit(code),
+  });
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("SIGINT", () => shutdown("SIGINT"));
   await new Promise(() => {}); // run until signalled

@@ -1196,6 +1196,23 @@ describe("a reply lost, then the session ends", () => {
     expect(fleet.spawns).toHaveLength(1);
   });
 
+  test("restarted mid-spawn: past the TTL its interrupted launch is failed, with no twin", async () => {
+    const { fleet, clock, scheduler, store } = lostReply();
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    // The daemon died mid-spawn: its ledger names the id in `ended` (an older leader reads that as ran) and in `interrupted`.
+    fleet.running.set("a", []);
+    fleet.ended.set("a", [task.id]);
+    fleet.interrupted.set("a", [task.id]);
+
+    clock.now += 120_000;
+    fleet.beat(clock.now);
+    await pass(scheduler);
+    expect(scheduler.task(task.id)).toMatchObject({ state: "failed", failure: { code: "dispatch_unconfirmed" } });
+    await pass(scheduler);
+    expect(fleet.spawns).toHaveLength(1);
+  });
+
   test("busy and needs-input resolve a reservation too, with the reporting pane", async () => {
     const { scheduler, store } = lostReply();
     const first = await enqueue(store, scheduler, spec());
