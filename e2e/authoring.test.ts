@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { BATCH_STRATEGY, RelayClient, type Task } from "@seance/shared";
+import { RelayClient, type Task } from "@seance/shared";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { LazyRelay } from "../daemon/src/app-relay.ts";
@@ -76,8 +76,8 @@ describe("authoring: dependencies, batches and Linear links, from the PWA and fr
 
       const stored = await taskOf(b);
       expect(stored?.spec.deps).toEqual([{ task: p.id, after: "opened" }]);
-      // The fixed strategy is stored for older readers, whose parser needs one.
-      expect(stored?.spec.batch).toMatchObject({ index: 1, strategy: BATCH_STRATEGY });
+      expect(stored?.spec.batch).toMatchObject({ index: 1 });
+      expect(stored?.spec.batch).not.toHaveProperty("strategy");
       expect(stored?.spec.linear).toEqual({ issue: "ENG-123" });
       expect(stored?.spec.client).toBe("pwa");
       // The form is ready for the next member: its per-task fields cleared, the batch one on.

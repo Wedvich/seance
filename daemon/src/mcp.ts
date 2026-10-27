@@ -23,7 +23,6 @@ import {
   TASK_SPEC_LIMITS,
   TASK_UNTIL,
   withReportInstruction,
-  BATCH_STRATEGY,
   type Candidate,
   type Decision,
   type DespawnRequest,
@@ -1137,7 +1136,7 @@ export function buildMcpServer(
           repo: member.repo,
           ...requestFields({ ...member, prompt: reported.prompt }),
           ...authoredFields(deps, member.until, member.linear),
-          batch: { id: batchId, index: n, strategy: BATCH_STRATEGY },
+          batch: { id: batchId, index: n },
         };
         const invalid = specError(spec);
         if (invalid !== null) {

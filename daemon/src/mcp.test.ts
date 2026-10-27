@@ -15,7 +15,6 @@ import {
   storeErrorText,
   taskFailureText,
   withReportInstruction,
-  BATCH_STRATEGY,
   type AccountRecord,
   type Decision,
   type ExclaveInfo,
@@ -1774,9 +1773,9 @@ describe("queue_batch", () => {
     const batchId = first?.spec.batch?.id ?? "";
     expect(batchId).toMatch(/^[0-9a-f-]{36}$/u);
     expect(fake.creates.map((t) => t.spec.batch)).toEqual([
-      { id: batchId, index: 1, strategy: BATCH_STRATEGY },
-      { id: batchId, index: 2, strategy: BATCH_STRATEGY },
-      { id: batchId, index: 3, strategy: BATCH_STRATEGY },
+      { id: batchId, index: 1 },
+      { id: batchId, index: 2 },
+      { id: batchId, index: 3 },
     ]);
     expect(first?.spec.deps).toBeUndefined();
     expect(first?.spec.linear).toEqual({ issue: "ENG-1" });
@@ -1808,7 +1807,7 @@ describe("queue_batch", () => {
     const fake = leaderRelay();
     const ok = await callTool(fake, "queue_batch", { strategy: "auto", tasks: [member(), member()] });
     expect(ok.error).toBe(false);
-    expect(fake.creates.map((t) => t.spec.batch?.strategy)).toEqual([BATCH_STRATEGY, BATCH_STRATEGY]);
+    for (const t of fake.creates) expect(t.spec.batch).not.toHaveProperty("strategy");
   });
 
   test("a bad ref, a task waiting on itself, or an ambiguous edge refuses the whole batch before anything is stored", async () => {
@@ -2177,7 +2176,7 @@ describe("get_queue", () => {
   });
 
   test("shows a task's dependencies, batch, reported settle and Linear link", async () => {
-    const batch = { id: "b-1", index: 2, strategy: BATCH_STRATEGY } as const;
+    const batch = { id: "b-1", index: 2 } as const;
     const fake = leaderRelay([
       {
         tasks: [
@@ -2207,7 +2206,6 @@ describe("get_queue", () => {
       after: [{ task: "t-0", when: "done" }],
       linear: { issue: "ENG-9" },
     });
-    // The group only: the vestigial strategy stays off the agent's view.
     expect(tasks[0].batch).toEqual({ id: "b-1", index: 2 });
     expect(tasks[1].merged).toBe(true);
     expect(tasks[2].doneBy).toBe("reported");

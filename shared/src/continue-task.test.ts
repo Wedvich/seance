@@ -211,7 +211,7 @@ describe("continuationSpec", () => {
         avoid: ["dev-y"],
         lineage: { deviceId: "dev-x", exclave: "default" },
         base: { deviceId: "dev-x", exclave: "default" },
-        batch: { id: "b", index: 1, strategy: { mode: "auto" } },
+        batch: { id: "b", index: 1 },
         deps: [{ task: "t-0", after: "merged" }],
         client: "pwa",
       },
