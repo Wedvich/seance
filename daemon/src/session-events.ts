@@ -13,9 +13,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exclaveOf, type Exclave } from "./exclaves.ts";
-import { harvestExits, type HarvestPanes } from "./exit-status.ts";
-import { LaunchLedger, type LaunchSite, type NoteOutcome } from "./launch-ledger.ts";
+import { harvestExits, sampleOomPanes, type HarvestOom, type HarvestPanes } from "./exit-status.ts";
+import { LaunchLedger, pathOwners, type LaunchSite, type NoteOutcome } from "./launch-ledger.ts";
 import { log } from "./log.ts";
+import type { OomProbe } from "./oom-kill.ts";
 import { ancestorIn, peerPid, peerPidSupported, socketFd } from "./peer.ts";
 import { SESSION_EVENT_KIND, SESSION_EVENT_VERSION, type SessionEventReply } from "./session-event-frame.ts";
 import { FIELD_SEP, TASK_FIELD, tmux } from "./tmux.ts";
@@ -151,7 +152,10 @@ export const ENDED_MAX = 128;
  * is where a worktree-mode launch landed, noted before the launch counts as
  * over so a `sessions` waiting on `settled` sees it.
  */
-export type SettleLaunch = (launched: boolean, landed?: { readonly site?: LaunchSite }) => Promise<void>;
+export type SettleLaunch = (
+  launched: boolean,
+  landed?: { readonly site?: LaunchSite; readonly server?: number },
+) => Promise<void>;
 
 /**
  * The `sessions` reply's `ended` and `ledgerSince` — the backstop for a
@@ -185,12 +189,33 @@ export class EndedTasks {
   readonly #launches = new Map<string, Launches>();
   readonly #now: () => number;
   readonly #panes: HarvestPanes | undefined;
+  readonly #oom: HarvestOom | undefined;
 
-  /** `panes` is the tmux side of `harvestExits`; without it harvest does nothing. */
-  constructor(ledger: LaunchLedger = LaunchLedger.memory(), now: () => number = Date.now, panes?: HarvestPanes) {
+  /**
+   * `panes` is the tmux side of `harvestExits`; without it harvest does nothing.
+   * `oom` (Linux only) samples live task panes and judges a SIGKILL death.
+   */
+  constructor(
+    ledger: LaunchLedger = LaunchLedger.memory(),
+    now: () => number = Date.now,
+    panes?: HarvestPanes,
+    oom?: OomProbe,
+    oomTimeoutMs?: number,
+  ) {
     this.#ledger = ledger;
     this.#now = now;
     this.#panes = panes;
+    this.#oom =
+      oom === undefined
+        ? undefined
+        : {
+            probe: oom,
+            sampled: (taskId) => ledger.notes().find((note) => note.taskId === taskId)?.oom,
+            noteSamples: (entries) =>
+              ledger.noteBatch(entries.map(({ taskId, sample }) => ({ taskId, patch: { oom: sample } }))),
+            now,
+            ...(oomTimeoutMs === undefined ? {} : { timeoutMs: oomTimeoutMs }),
+          };
   }
 
   /**
@@ -228,13 +253,25 @@ export class EndedTasks {
     }
     return async (launched, landed) => {
       if (launched) launches.landed = true;
+      let sample = false;
       try {
         const site = landed?.site;
         if (launched && landed !== undefined) {
-          await this.#ledger.startNote(taskId, site && { repo: site.repo, path: site.worktree }, launches.prUrl);
+          await this.#ledger.startNote(
+            taskId,
+            site && { repo: site.repo, path: site.worktree },
+            launches.prUrl,
+            landed?.server,
+          );
+          sample = true;
         }
       } finally {
         await finish();
+      }
+      // A baseline from the start, not the next pass: a session dying before that would have none. After
+      // `finish`, and not awaited: its reads can stall, and neither the launch nor `sessions` waits on them.
+      if (sample && this.#panes !== undefined && this.#oom !== undefined) {
+        void sampleOomPanes(this.#panes, this.#oom);
       }
     };
   }
@@ -260,10 +297,43 @@ export class EndedTasks {
     return this.#ledger.progress();
   }
 
+  /**
+   * This daemon is about to close the task's pane (despawn, reap): noted first, so the pane going
+   * missing never reads as `vanished`. Best-effort; a failed note only risks a false `vanished` on a
+   * close the leader itself asked for, which settles the task `failed` it was already ending.
+   */
+  async closing(taskId: string): Promise<void> {
+    try {
+      await this.#ledger.note(taskId, { closedHere: true });
+    } catch (err) {
+      log.warn(`launch ledger: could not note that task ${taskId} is being closed (${String(err)})`);
+    }
+  }
+
+  /** Launches harvest may judge, minus any whose spawn is still in flight or registering. */
+  unaccounted(): readonly { readonly taskId: string; readonly recordedAt: number; readonly server: number }[] {
+    return this.#ledger.unaccounted().filter((launch) => !this.#launches.has(launch.taskId));
+  }
+
+  /** Notes `vanished` unless a launch is in flight or the ledger refuses it (`LaunchLedger.noteVanished`). */
+  vanished(taskId: string, recordedAt: number): Promise<boolean> {
+    if (this.#launches.has(taskId)) return Promise.resolve(false);
+    return this.#ledger.noteVanished(taskId, recordedAt);
+  }
+
   /** Each dead task pane's exit status into the ledger, then the pane closed (`exit-status.ts`). */
   async harvestExits(): Promise<void> {
     if (this.#panes === undefined) return;
-    await harvestExits({ ...this.#panes, note: (taskId, exit) => this.#ledger.note(taskId, { exit }) });
+    await harvestExits({
+      ...this.#panes,
+      note: (taskId, exit, oomKill) =>
+        this.#ledger.note(taskId, { exit, ...(oomKill === undefined ? {} : { oomKill }) }),
+      closing: (taskId) => this.closing(taskId),
+      launching: (taskId) => this.#launches.has(taskId),
+      unaccounted: () => this.unaccounted(),
+      vanished: (launch) => this.vanished(launch.taskId, launch.recordedAt),
+      ...(this.#oom === undefined ? {} : { oom: this.#oom }),
+    });
   }
 
   /** The one ledger of this file in this process, for the branch-state emitter. */
@@ -284,6 +354,41 @@ export class EndedTasks {
    */
   launched(taskId: string): boolean {
     return !this.#launches.has(taskId) && this.#ledger.ids().includes(taskId);
+  }
+
+  /**
+   * Where a continued task's session ran, from this ledger alone — the one authority on
+   * a worktree path (DESIGN.md, Daemon, "Continuing a session"); a frame never names
+   * one. The newest note on a path owns it: a task whose worktree a later launch noted
+   * is refused, since `--continue` would resume that later session. `refused` says why
+   * there is none, in words the task's failure carries.
+   */
+  continuation(
+    taskId: string,
+  ):
+    | { readonly repo: string; readonly path: string; readonly exit?: number; readonly vanished?: true }
+    | { readonly refused: string } {
+    if (this.#launches.has(taskId)) return { refused: "a launch of it is still in flight here" };
+    if (!this.#ledger.ids().includes(taskId)) {
+      return { refused: "this machine holds no launch of it (its launch ledger keeps a week, at most 128 launches)" };
+    }
+    const notes = this.#ledger.notes();
+    const note = notes.find((n) => n.taskId === taskId);
+    if (note?.path === undefined || note.repo === undefined) {
+      return { refused: "no worktree of it was noted here (a here-mode run, or it never landed)" };
+    }
+    const owner = pathOwners(notes).get(note.path);
+    if (owner !== undefined && owner.taskId !== taskId) {
+      return {
+        refused: `task ${owner.taskId} ran in its worktree ${note.path} after it, so resuming would pick up that session; continue that task instead`,
+      };
+    }
+    return {
+      repo: note.repo,
+      path: note.path,
+      ...(note.exit === undefined ? {} : { exit: note.exit }),
+      ...(note.vanished === true && note.exit === undefined ? { vanished: true as const } : {}),
+    };
   }
 
   /**

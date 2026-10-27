@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ExclaveInfo, Machine } from "@seance/shared";
+import { CAPABILITIES, parseTask, type ExclaveInfo, type Machine } from "@seance/shared";
 import { DEFAULT_CONFIG, route, type Candidate, type Decision, type SchedulerConfig, type Task } from "../src/index.ts";
 import { accountResetAt } from "../src/route.ts";
 import { clone, exclave, machine, NOW, NOW_S, obs, spec, status } from "./fixtures.ts";
@@ -10,7 +10,12 @@ function task(fields: Partial<Task> = {}): Task {
 
 function decide(
   machines: readonly Machine[],
-  fields: { task?: Task; tasks?: readonly Task[]; config?: Partial<SchedulerConfig> } = {},
+  fields: {
+    task?: Task;
+    tasks?: readonly Task[];
+    config?: Partial<SchedulerConfig>;
+    released?: ReadonlySet<string>;
+  } = {},
 ): Decision {
   return route({
     task: fields.task ?? task(),
@@ -18,6 +23,7 @@ function decide(
     tasks: fields.tasks ?? [],
     now: NOW,
     config: { ...DEFAULT_CONFIG, ...fields.config },
+    ...(fields.released === undefined ? {} : { released: fields.released }),
   });
 }
 
@@ -666,6 +672,58 @@ describe("filter", () => {
     });
   });
 
+  describe("a released task holds no slot", () => {
+    /** Machine `s`, asleep, signed in to `org:a` as `a` is. */
+    const asleep = machine("s", { connected: false, exclaves: [exclave("main", "org:a")] });
+    // The leader's to say why; here `s` is asleep, and these are its tasks.
+    const released = new Set(["x", "y"]);
+
+    test("in flight, reserved included, it leaves the global count; the rest still count", () => {
+      const tasks = [held("x", "s"), held("y", "s", "reserved"), held("z", "b")];
+      const candidate = only(decide([machine("a")], { tasks, config: { globalMax: 1 }, released }));
+      expect(candidate.rejected).toEqual([{ code: "cap_reached", inFlight: 1, max: 1 }]);
+      expect(only(decide([machine("a")], { tasks, config: { globalMax: 2 }, released })).rejected).toEqual([]);
+    });
+
+    test("it leaves its account's count, so another machine on the account gets the work", () => {
+      const tasks = [held("x", "s"), held("y", "s", "needs-input")];
+      const fleet = [machine("a", { exclaves: [exclave("main", "org:a")] }), asleep];
+      const holding = decide(fleet, { tasks, config: { accountMax: 2 } });
+      expect(byExclave(holding, "main")?.rejected).toEqual([
+        { code: "cap_reached", inFlight: 2, max: 2, scope: "account" },
+      ]);
+      const freed = decide(fleet, { tasks, config: { accountMax: 2 }, released });
+      expect(freed.chosen).toEqual({ deviceId: "a", exclave: "main", clone: "app" });
+    });
+
+    test("an old record's batch bound is gone: the next member meets only what the caps define", () => {
+      // Raw, as an older writer sealed it, through the parser every reader uses.
+      const member = (id: string, index: number, strategy: unknown, fields: Record<string, unknown> = {}): Task => {
+        const body = parseTask({
+          id,
+          spec: { ...spec(), batch: { id: "b1", index, strategy } },
+          state: "ready",
+          createdAt: NOW,
+          ...fields,
+        });
+        if (body === null) throw new Error(`${id} does not parse`);
+        return body;
+      };
+      for (const strategy of [{ mode: "parallel", max: 1 }, { mode: "sequential" }]) {
+        const running = member("x", 0, strategy, {
+          state: "running",
+          assignment: { deviceId: "s", exclave: "main", clone: "app" },
+        });
+        const next = member("n", 1, strategy);
+        const one = { task: next, tasks: [running], config: { globalMax: 1 } };
+        // Asleep past the grace, the first holds no slot and nothing else holds the next.
+        expect(only(decide([machine("a")], { ...one, released })).rejected).toEqual([]);
+        // Awake, it holds the global slot as any task does, and nothing batch-shaped.
+        expect(only(decide([machine("a")], one)).rejected).toEqual([{ code: "cap_reached", inFlight: 1, max: 1 }]);
+      }
+    });
+  });
+
   describe("paused", () => {
     const fleet = [machine("a"), machine("b")];
 
@@ -715,6 +773,10 @@ describe("filter", () => {
       expect(accountResetAt("org:a", [reading], inFlight, NOW, DEFAULT_CONFIG)).toBe((NOW_S + 7200) * 1000);
       // Alone it is under the line everywhere: the earliest reset.
       expect(accountResetAt("org:a", [reading], [], NOW, DEFAULT_CONFIG)).toBe((NOW_S + 3600) * 1000);
+      // Released: they hold no projected usage, as in routing.
+      expect(accountResetAt("org:a", [reading], inFlight, NOW, DEFAULT_CONFIG, [], new Set(["x", "y", "z"]))).toBe(
+        (NOW_S + 3600) * 1000,
+      );
     });
 
     test("a standard seat's estimate is scaled, as routing scales it", () => {
@@ -922,6 +984,65 @@ describe("stickiness", () => {
       task: task({ spec: spec({ lineage: { deviceId: "owner", exclave: "main" } }) }),
     });
     expect(decision.chosen?.deviceId).toBe("other");
+  });
+});
+
+describe("a continue task", () => {
+  const capable = [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.continueTask];
+  const continuing = (at: { deviceId: string; exclave: string; clone: string }): Task =>
+    task({ spec: spec({ mode: "continue", continues: { task: "t-old", at } }) });
+  const reasonsOf = (decision: Decision): Record<string, readonly unknown[]> =>
+    Object.fromEntries(decision.candidates.map((c) => [`${c.deviceId}/${c.exclave}`, c.rejected]));
+  /** `a` is the target; two exclaves, and a second clone of the same repo in `main` that skills would prefer. */
+  const fleet = (): Machine[] => [
+    machine("a", {
+      capabilities: capable,
+      exclaves: [exclave("main", "org:a"), exclave("work", "org:w", { skills: ["ship"] })],
+      repos: [clone("app", "main"), clone("app-2", "main"), clone("app-w", "work")],
+      status: status({ quota: [obs(0), obs(1)] }),
+    }),
+    machine("b", { capabilities: capable }),
+  ];
+
+  test("only the exact machine, exclave and clone is left; the rest say it ran elsewhere", () => {
+    const decision = decide(fleet(), { task: continuing({ deviceId: "a", exclave: "main", clone: "app-2" }) });
+    expect(decision.chosen).toEqual({ deviceId: "a", exclave: "main", clone: "app-2" });
+    const reasons = reasonsOf(decision);
+    expect(reasons["a/main"]).toEqual([]);
+    expect(reasons["a/work"]).toContainEqual({ code: "continue_elsewhere" });
+    expect(reasons["b/main"]).toContainEqual({ code: "continue_elsewhere" });
+  });
+
+  test("the named clone is judged on its own skills: another clone's project skill does not stand in", () => {
+    const at = { deviceId: "a", exclave: "main", clone: "app-2" };
+    const withSkill = [{ ...clone("app", "main"), skills: ["ship"] }, clone("app-2", "main")];
+    const decision = decide(
+      [machine("a", { capabilities: capable, repos: withSkill, exclaves: [exclave("main", "org:a")] })],
+      { task: task({ spec: spec({ mode: "continue", prompt: "/ship it", continues: { task: "t-old", at } }) }) },
+    );
+    expect(decision.chosen).toBeNull();
+    expect(only(decision).rejected).toEqual([{ code: "skill_absent", skill: "ship" }]);
+    expect(only(decision).clone).toBe("app-2");
+  });
+
+  test("a target without the capability is continue_unsupported, and never chosen", () => {
+    const old = machine("a", { capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId] });
+    const decision = decide([old], { task: continuing({ deviceId: "a", exclave: "main", clone: "app" }) });
+    expect(decision.chosen).toBeNull();
+    expect(only(decision).rejected).toEqual([{ code: "continue_unsupported" }]);
+  });
+
+  test("a clone the target no longer has is repo_absent", () => {
+    const decision = decide(fleet(), { task: continuing({ deviceId: "a", exclave: "main", clone: "gone" }) });
+    expect(decision.chosen).toBeNull();
+    expect(reasonsOf(decision)["a/main"]).toEqual([{ code: "repo_absent" }]);
+  });
+
+  test("an ordinary task is not held to any of it", () => {
+    const decision = decide(fleet());
+    expect(decision.candidates.flatMap((c) => c.rejected.map((r) => r.code))).not.toContain("continue_elsewhere");
+    expect(decision.candidates.flatMap((c) => c.rejected.map((r) => r.code))).not.toContain("continue_unsupported");
+    expect(decision.chosen).not.toBeNull();
   });
 });
 

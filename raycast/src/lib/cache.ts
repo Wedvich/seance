@@ -1,4 +1,4 @@
-import { isRecord, parseRepoList } from "@seance/shared";
+import { isRecord, lastHeardAt, parseRepoList } from "@seance/shared";
 import { isEffort, isModel } from "./options.ts";
 import type { LastUsed, PickerMachine } from "./form.ts";
 
@@ -76,7 +76,8 @@ export async function writeRegistry(store: Store, machines: readonly PickerMachi
       deviceId: machine.deviceId,
       name: machine.name,
       connected: machine.connected,
-      lastSeen: machine.lastSeen,
+      // Folded rather than storing `status`: the key and shape stay what older builds wrote and read.
+      lastSeen: lastHeardAt(machine),
       scannedAt: machine.scannedAt,
       repos: machine.repos.map((repo) => ({ name: repo.name, path: repo.path, defaultBranch: repo.defaultBranch })),
     })),

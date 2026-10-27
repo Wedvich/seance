@@ -10,7 +10,7 @@ import {
 } from "@seance/shared";
 import { auditLogChecks, cliSink, despawnAudit, reapAudit, spawnAudit } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
-import { cmdSpawnAuto } from "./cli-auto.ts";
+import { cmdContinueAuto, cmdSpawnAuto } from "./cli-auto.ts";
 import { installMods, modChecks, uninstallMods } from "./claude-mod.ts";
 import { DespawnFailure, SpawnFailure } from "./backend.ts";
 import {
@@ -239,6 +239,45 @@ export async function cmdSpawn(argv: readonly string[]): Promise<void> {
     }
     throw err;
   }
+}
+
+export interface ContinueCliArgs {
+  readonly taskId: string;
+  readonly prompt?: string;
+}
+
+const CONTINUE_USAGE = "usage: seanced continue <task-id> [-p|--prompt <note>]";
+
+/** Exported for tests. */
+export function parseContinueArgs(argv: readonly string[]): ContinueCliArgs {
+  let taskId: string | undefined;
+  const promptParts: string[] = [];
+  let expectPrompt = false;
+  for (const arg of argv) {
+    if (expectPrompt) {
+      promptParts.push(arg);
+      expectPrompt = false;
+    } else if (arg === "-p" || arg === "--prompt") {
+      expectPrompt = true;
+    } else if (arg.startsWith("-")) {
+      throw new Error(CONTINUE_USAGE);
+    } else if (taskId === undefined) {
+      taskId = arg;
+    } else {
+      promptParts.push(arg);
+    }
+  }
+  if (taskId === undefined || expectPrompt) throw new Error(CONTINUE_USAGE);
+  const prompt = promptParts.join(" ");
+  return { taskId, ...(prompt === "" ? {} : { prompt }) };
+}
+
+/**
+ * Queues a task that resumes a failed or cancelled one's session (`cli-auto.ts`). Always a scheduler task,
+ * never the local op socket's `spawn`: a hand-run `claude --continue` is invisible to the scheduler.
+ */
+export async function cmdContinue(argv: readonly string[]): Promise<void> {
+  return cmdContinueAuto(parseContinueArgs(argv));
 }
 
 export interface DespawnCliArgs {

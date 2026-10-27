@@ -4,12 +4,14 @@ import {
   quote,
   type BranchState,
   type FleetQuotaEntry,
+  type IdleTaskRef,
   type PrStatus,
   type PauseHold,
   type PauseRequest,
   type ResumeRequest,
   type SessionState,
 } from "@seance/shared";
+import { isDeepStrictEqual } from "node:util";
 import { escalation, inputClock, SpillAlerts, type SchedulerAlert } from "./alerts.ts";
 import { dispatchOrder } from "./batch.ts";
 import { DEFAULT_CONFIG, type SchedulerConfig } from "./config.ts";
@@ -77,6 +79,11 @@ export interface SchedulerOptions {
    * wait for input (once its write lands) — `SchedulerAlert`. A throw goes to `onError`.
    */
   readonly onAlert?: (alert: SchedulerAlert) => void;
+  /**
+   * A task's idle release (`idle`) began or ended with no write of its own, so
+   * no store nudge says it: the host tells apps to re-read that task.
+   */
+  readonly onIdleChange?: (taskId: string) => void;
 }
 
 /**
@@ -94,6 +101,18 @@ export type ByHandResult =
 
 export type CancelResult = ByHandResult;
 export type MarkDoneResult = ByHandResult;
+
+/**
+ * `runNow`: the task as reserved, or why not. `not_waiting`: it is not `ready`
+ * (waiting on admission or deps, or already placed). `unplaceable`: something
+ * besides the caps holds it. `conflict`: it moved under the write.
+ */
+export type RunNowResult =
+  | { readonly ok: true; readonly task: Task }
+  | {
+      readonly ok: false;
+      readonly code: "not_found" | "dispatching" | "finished" | "not_waiting" | "unplaceable" | "conflict";
+    };
 
 /** What a settle by hand knew before its write: the task as it was, whether its session was live, and whether one was despawned. */
 interface ByHand {
@@ -132,6 +151,7 @@ export class Scheduler {
   readonly #now: () => number;
   readonly #onError: (err: unknown) => void;
   readonly #onAlert: (alert: SchedulerAlert) => void;
+  readonly #onIdleChange: (taskId: string) => void;
   readonly #held = new Map<string, Held>();
   readonly #pause: PauseRecord;
   readonly #spills: SpillAlerts;
@@ -140,13 +160,24 @@ export class Scheduler {
   readonly #decisions = new Map<string, Decision>();
   /**
    * deviceId → when a pass first saw it not connected (or gone from the
-   * registry), for machines holding placed or `awaiting-merge` tasks. Memory
-   * only: a new leader starts the count again, which can only delay `lost`,
-   * never hasten it — and it is this clock, not `Machine.lastSeen`, because a
+   * registry), for machines holding placed or `awaiting-merge` tasks: what
+   * `lost` and slot release (`#released`) both age from. Memory only: a new
+   * leader starts the count again, which can only delay either, never hasten
+   * it — and it is this clock, not `Machine.lastSeen`, because a
    * timeout's offline mark can make a machine read disconnected beside a
    * `lastSeen` hours old.
    */
   readonly #absentSince = new Map<string, number>();
+  /**
+   * Task id → when its session went idle at its prompt, and on which machine:
+   * what `#released` frees an idle task's slot by. Set only by an `idle` from
+   * the machine the task runs on, cleared by any other state it reports, and
+   * pruned once the task is not `running` there. Memory only: a new leader
+   * counts an idle task until its next `idle`, which can only delay a release.
+   */
+  readonly #idleSince = new Map<string, { readonly since: number; readonly deviceId: string }>();
+  /** The idle releases last told to the host (`onIdleChange`): what `#syncIdle` diffs against. */
+  #idleTold: ReadonlySet<string> = new Set();
   /**
    * deviceId → when its `sessions` first failed, until one answers: how long
    * a connected machine has said nothing usable, for a reservation past its
@@ -167,6 +198,21 @@ export class Scheduler {
    */
   /** Task id → when its PR-less `ended` was deferred to its machine's next answer. */
   readonly #ending = new Map<string, number>();
+  /**
+   * Task id → its cancels still out (`cancel`): the session end a cancel's own
+   * despawn causes is left to the cancel's write (`#yieldToCancel`). It catches
+   * an end reaching the scheduler while the despawn is out, not one that ended
+   * on its own and is still queued or in flight there (a `cancelled` write may
+   * win over it). Memory only: a new leader mid-cancel may still settle it as
+   * its session ended.
+   */
+  readonly #cancelling = new Map<string, number>();
+  /**
+   * `#ending` notes made by a hold (`#yieldToCancel`), not by a session's own
+   * deferred `ended`: only the latter means "ended first" to a cancel. Cleared
+   * with the note (`#clearEnding`), so a retry after `despawn_failed` holds again.
+   */
+  readonly #heldNotes = new Set<string>();
   /**
    * Finished records whose leaning write (`#leanFinished`) did not land this
    * term: a refusal repeats, so retrying would take a slot of every pass and
@@ -209,6 +255,7 @@ export class Scheduler {
         this.#fault ??= { err };
       });
     this.#onAlert = options.onAlert ?? (() => {});
+    this.#onIdleChange = options.onIdleChange ?? (() => {});
     this.#pause = new PauseRecord(this.#store, this.#now, this.#onError);
     this.#spills = new SpillAlerts(this.#config.resetGraceMs);
     this.#sweptAt = this.#now();
@@ -245,7 +292,15 @@ export class Scheduler {
       const resumeAt =
         account === undefined
           ? null
-          : accountResetAt(account, this.#fleet.machines(), this.tasks(), now, this.#config, this.#fleetQuota());
+          : accountResetAt(
+              account,
+              this.#fleet.machines(),
+              this.tasks(),
+              now,
+              this.#config,
+              this.#fleetQuota(),
+              this.#released(now),
+            );
       if (account === undefined || resumeAt === null) return { ok: false, code: "reset_unknown" };
       hold = { account, until: "reset", at: now, resumeAt };
     }
@@ -390,18 +445,72 @@ export class Scheduler {
 
   /** A dry run over the current fleet: what `tick` would decide for this spec now. */
   preview(spec: TaskSpec): Decision {
-    const task: Task = { id: "", spec, state: "ready", createdAt: this.#now() };
+    const now = this.#now();
+    const task: Task = { id: "", spec, state: "ready", createdAt: now };
+    return this.#route(task, now);
+  }
+
+  /** `task` routed over the current fleet and queue, as a pass would. */
+  #route(task: Task, now: number, uncapped = false): Decision {
     return capped(
       route({
         task,
         machines: this.#fleet.machines(),
         tasks: this.tasks(),
-        now: this.#now(),
+        now,
         config: this.#config,
         holds: this.#pause.holds,
         fleetQuota: this.#fleetQuota(),
+        // Per route, not per pass: each reservation's await can land a `busy` or a reconnect that counts a task again.
+        released: this.#released(now),
+        uncapped,
       }),
     );
+  }
+
+  /**
+   * Tasks that hold no slot (`RouteInput.released`): placed on a machine
+   * absent past `slotReleaseAfterMs` by `#absentSince` and still away — one
+   * back since the last `#markAbsent` already counts again, so a `preview`
+   * between the two says what the next pass will — or `running` where their
+   * session has been idle past `idleReleaseAfterMs`.
+   */
+  #released(now: number): ReadonlySet<string> {
+    const connected = this.#connectedIds();
+    const asleep = (deviceId: string): boolean => {
+      const since = this.#absentSince.get(deviceId);
+      return since !== undefined && !connected.has(deviceId) && now - since >= this.#config.slotReleaseAfterMs;
+    };
+    const idle = new Set(this.#idleReleases(now).map((r) => r.taskId));
+    return new Set(
+      this.tasks()
+        .filter((t) => {
+          const at = t.assignment ?? t.reservation;
+          return (at !== undefined && asleep(at.deviceId)) || idle.has(t.id);
+        })
+        .map((t) => t.id),
+    );
+  }
+
+  /** Tasks holding no slot for sitting idle at their prompt past `idleReleaseAfterMs`, and since when: `queue` shows them. */
+  idle(): readonly IdleTaskRef[] {
+    return this.#idleReleases(this.#now());
+  }
+
+  #idleReleases(now: number): IdleTaskRef[] {
+    return this.tasks().flatMap((task) => {
+      const clock = this.#idleSince.get(task.id);
+      if (clock === undefined || !idleHere(task, clock.deviceId)) return [];
+      return now - clock.since >= this.#config.idleReleaseAfterMs ? [{ taskId: task.id, since: clock.since }] : [];
+    });
+  }
+
+  /** Tells the host of each task whose idle release began or ended since it was last told. */
+  #syncIdle(): void {
+    const now = new Set(this.#idleReleases(this.#now()).map((r) => r.taskId));
+    const told = this.#idleTold;
+    this.#idleTold = now;
+    for (const id of new Set([...now, ...told])) if (now.has(id) !== told.has(id)) this.#onIdleChange(id);
   }
 
   #fleetQuota(): readonly FleetQuotaEntry[] {
@@ -466,14 +575,36 @@ export class Scheduler {
     let defers = false;
     await this.#update(taskId, (task) => {
       defers = waitsForExit(task, state, from, prUrl, awaitsExit);
-      return sessionChange(task, state, from, prUrl, awaitsExit);
+      return this.#yieldToCancel(task, sessionChange(task, state, from, prUrl, awaitsExit));
     });
+    this.#idleClock(taskId, state, from);
+    this.#syncIdle();
     if (!defers) return;
     const held = this.#held.get(taskId)?.task;
     if (held === undefined || !PLACED.includes(held.state)) return;
     if (!this.#ending.has(taskId)) this.#ending.set(taskId, this.#now());
     // Asked now, not at the next timed pass: the answer is what settles it, and frees its slot.
     this.tick().catch(this.#onError);
+  }
+
+  /**
+   * An `idle` from the machine the task runs on starts its clock unless one
+   * runs already, since a turn's end and a hooks-worker restart both say idle
+   * again; any other state it reports stops it. Another machine's event
+   * touches nothing, as `sessionChange` moves nothing for it — or any machine
+   * could hold a slot by resetting the clock. A sender that does not say which
+   * machine it is starts nothing, but its other states stop the clock, since
+   * `sessionChange` accepts them for a confirmed task.
+   */
+  #idleClock(taskId: string, state: SessionState, from: SessionSource | undefined): void {
+    const task = this.#held.get(taskId)?.task;
+    if (task === undefined) return;
+    if (from !== undefined && task.assignment?.deviceId !== from.deviceId) return;
+    if (state !== "idle" || from === undefined || task.state !== "running") {
+      this.#idleSince.delete(taskId);
+      return;
+    }
+    if (!this.#idleSince.has(taskId)) this.#idleSince.set(taskId, { since: this.#now(), deviceId: from.deviceId });
   }
 
   #reportsExit(deviceId: string): boolean {
@@ -507,23 +638,75 @@ export class Scheduler {
    * stands. A `lost` task whose
    * machine is back is despawned like a running one; with its machine still
    * gone nothing can be despawned, so it is cancelled as it stands and marked
-   * `leftRunning` — the record says plainly that a session may outlive it. A
-   * task that finishes while the despawn is out (its session reported `ended`
-   * first) is answered as it finished. A despawn that ran and then lost the
-   * right to write `cancelled` is `unrecorded`: the session is gone, the term
-   * ends, and asking again is safe (the despawn finds no session).
+   * `leftRunning` — the record says plainly that a session may outlive it.
+   * While the despawn is out, the session's end it causes (`ended`, its machine's
+   * answer, the `#ending` deadline) settles nothing (`#yieldToCancel`), so the
+   * task reads `cancelled`, never `done` or `failed`: its dependents fail, and
+   * it is continuable. Only an `ended` already deferred on a machine reporting
+   * exit statuses (`#ending`, noted by `onSession`, not by a hold) when the
+   * cancel began ended first, and is not held. One sent on its own but still
+   * queued or in flight (or, there, a real crash in that window) is written
+   * `cancelled`: the window is inherent. A merge, a PR open and the session's
+   * own `done` report are facts or its statement, not held. A task that
+   * finished anyway is answered as it finished. A despawn that ran and then lost the right to write `cancelled`
+   * is `unrecorded`: the session is gone, the term ends, and asking again is
+   * safe (the despawn finds no session).
    */
   async cancel(taskId: string): Promise<CancelResult> {
-    return this.#byHand(taskId, (current, { task, live }) => {
-      if (FINISHED.includes(current.state)) return { ok: true, task: current };
-      if (current.state === "reserved") return { ok: false, code: "dispatching" };
-      const leftRunning = task.state === "lost" && task.assignment !== undefined && !live;
-      // What was despawned, or found gone, must still be what is cancelled.
-      if (leftRunning ? current.state !== "lost" : current.assignment?.deviceId !== task.assignment?.deviceId) {
-        return null;
+    const held = !this.#ending.has(taskId) || this.#heldNotes.has(taskId);
+    if (held) this.#cancelling.set(taskId, (this.#cancelling.get(taskId) ?? 0) + 1);
+    let result: CancelResult;
+    try {
+      result = await this.#byHand(taskId, (current, { task, live }) => {
+        if (FINISHED.includes(current.state)) return { ok: true, task: current };
+        if (current.state === "reserved") return { ok: false, code: "dispatching" };
+        const leftRunning = task.state === "lost" && task.assignment !== undefined && !live;
+        // What was despawned, or found gone, must still be what is cancelled.
+        if (leftRunning ? current.state !== "lost" : current.assignment?.deviceId !== task.assignment?.deviceId) {
+          return null;
+        }
+        return advance(current, "cancelled", leftRunning ? { leftRunning: true } : {});
+      });
+    } finally {
+      if (held) {
+        const left = (this.#cancelling.get(taskId) ?? 1) - 1;
+        if (left > 0) this.#cancelling.set(taskId, left);
+        else this.#cancelling.delete(taskId);
       }
-      return advance(current, "cancelled", leftRunning ? { leftRunning: true } : {});
-    });
+    }
+    // A settle held for this cancel waits on the machine's answer: ask now, not at the next sweep.
+    if (!result.ok && result.code === "despawn_failed" && this.#heldNotes.has(taskId)) {
+      this.tick().catch(this.#onError);
+    }
+    return result;
+  }
+
+  /**
+   * `next`, unless it settles a task whose cancel is out (`#cancelling`) as its
+   * session ended — `failed`, or `done` by `session`: the cancel's own despawn
+   * ends that session, and its write says `cancelled`. A merge and the
+   * session's own `done` report are its statement, not the despawn's. The
+   * state stands and only the facts `next` carried are written (null when
+   * none is new). Noted in `#ending`, so a cancel that writes nothing
+   * (`despawn_failed`) leaves the next pass to ask its machine again.
+   */
+  #yieldToCancel(current: Task, next: Task | null): Task | null {
+    const id = current.id;
+    if (next === null || current.state === "reserved" || !this.#cancelling.has(id)) return next;
+    if (next.state !== "failed" && (next.state !== "done" || next.doneBy === "merged" || next.doneBy === "reported")) {
+      return next;
+    }
+    if (!this.#ending.has(id)) this.#ending.set(id, this.#now());
+    // Even for a note an `ended` made during the cancel: it began held, so a retry holds too.
+    this.#heldNotes.add(id);
+    const { state: _state, doneBy: _doneBy, failure: _failure, ...facts } = next;
+    const kept: Task = { ...current, ...facts };
+    return isDeepStrictEqual(kept, current) ? null : kept;
+  }
+
+  #clearEnding(id: string): void {
+    this.#ending.delete(id);
+    this.#heldNotes.delete(id);
   }
 
   /**
@@ -603,7 +786,7 @@ export class Scheduler {
    */
   async markDone(taskId: string): Promise<MarkDoneResult> {
     return this.#byHand(taskId, (current, { task, live, despawned }) => {
-      // The despawn's `ended` event may have settled it first: as for cancel, that is the answer.
+      // The despawn's `ended` event may have settled it first: unlike for cancel, that is the answer.
       if (FINISHED.includes(current.state))
         return despawned ? { ok: true, task: current } : { ok: false, code: "finished" };
       if (current.state === "reserved") return { ok: false, code: "dispatching" };
@@ -616,6 +799,31 @@ export class Scheduler {
     });
   }
 
+  /**
+   * Places a `ready` task now, past both concurrency caps (`RouteInput.uncapped`)
+   * and nothing else: a pause, the quota line, disk, a pin and every other filter
+   * still hold it, answered `unplaceable` with nothing written. Once placed it
+   * counts toward the caps like any task, so the fleet may run over them until
+   * the count drains — as when a machine wakes with released slots. One-shot:
+   * nothing on the record says it was forced, so a takeover mid-way leaves it
+   * `ready`, waiting as before.
+   */
+  async runNow(taskId: string): Promise<RunNowResult> {
+    const task = this.task(taskId);
+    if (task === undefined) return { ok: false, code: "not_found" };
+    if (FINISHED.includes(task.state)) return { ok: false, code: "finished" };
+    if (task.state === "reserved" || this.#dispatches.has(taskId)) return { ok: false, code: "dispatching" };
+    if (task.state !== "ready") return { ok: false, code: "not_waiting" };
+    const now = this.#now();
+    const decision = this.#route(task, now, true);
+    if (decision.chosen === null) return { ok: false, code: "unplaceable" };
+    const reserved = await this.#reserve(taskId, decision.chosen, decision, now);
+    if (reserved !== null) return { ok: true, task: reserved };
+    // A pass may have placed it meanwhile, which is what was asked.
+    const current = this.task(taskId);
+    return current?.state === "reserved" ? { ok: true, task: current } : { ok: false, code: "conflict" };
+  }
+
   #connected(deviceId: string): boolean {
     return this.#fleet.machines().some((m) => m.deviceId === deviceId && m.connected);
   }
@@ -626,7 +834,8 @@ export class Scheduler {
    * dependents fail in the same pass. A task whose machine's check is out is
    * left to it, so a machine back in time settles its task first; so is a
    * `lost` task whose machine is connected now, for the next check. Judged
-   * again inside the write, since either may change between the two.
+   * again inside the write, since either may change between the two. A `ready`
+   * continuation or pinned task also fails past its bound, worded from the held decision.
    */
   async #expire(): Promise<void> {
     const now = this.#now();
@@ -637,14 +846,21 @@ export class Scheduler {
     };
     await Promise.all(
       this.tasks()
-        .filter((t) => expiry(t, now, this.#config) !== null && !spared(t))
+        .filter((t) => expiry(t, now, this.#config, this.lastDecision(t.id)) !== null && !spared(t))
         .map((seen) =>
-          this.#update(seen.id, (current) => (spared(current) ? null : expiry(current, now, this.#config))),
+          this.#update(seen.id, (current) =>
+            spared(current) ? null : expiry(current, now, this.#config, this.lastDecision(current.id)),
+          ),
         ),
     );
   }
 
   async #pass(): Promise<void> {
+    for (const [id, { deviceId }] of this.#idleSince) {
+      const task = this.#held.get(id)?.task;
+      if (task === undefined || !idleHere(task, deviceId)) this.#idleSince.delete(id);
+    }
+    this.#syncIdle();
     await this.#settleEndings();
     await this.#markAbsent();
     this.#checkOut(this.#due());
@@ -652,35 +868,24 @@ export class Scheduler {
     await this.#escalate();
     // A check ticks again once its answer is settled, so a predecessor it settled releases or fails its dependents then.
     await this.#admit();
+    // Again: a task admission just released may already be past its bound, and must not launch.
+    await this.#expire();
     const ready = dispatchOrder(this.tasks().filter((t) => t.state === "ready" && !this.#dispatches.has(t.id)));
     // Reserve one at a time, so each sees the reservations before it in projected
-    // usage and its batch's bound. The spawns are not awaited: one slow machine
+    // usage and the caps. The spawns are not awaited: one slow machine
     // must not hold every other placement, TTL and absence check behind its 90s
     // timeout.
-    for (const task of ready) {
+    for (const seen of ready) {
+      // A `runNow` may have placed it while an earlier reservation was awaited: its decision must not
+      // be overwritten with this snapshot's, which nothing would clear while it runs.
+      const task = this.task(seen.id);
+      if (task?.state !== "ready" || this.#dispatches.has(task.id)) continue;
       const now = this.#now();
-      const decision = capped(
-        route({
-          task,
-          machines: this.#fleet.machines(),
-          tasks: this.tasks(),
-          now,
-          config: this.#config,
-          holds: this.#pause.holds,
-          fleetQuota: this.#fleetQuota(),
-        }),
-      );
+      const decision = this.#route(task, now);
       this.#decisions.set(task.id, decision);
       if (decision.chosen === null) continue;
-      const reservation: Reservation = { ...decision.chosen, expiresAt: now + this.#config.reservationTtlMs };
       // oxlint-disable-next-line no-await-in-loop -- each route must see the reservation before it
-      const reserved = await this.#update(task.id, (current) =>
-        // Routed from a snapshot: a task that moved meanwhile (a cancel) keeps what it moved to.
-        current.state === "ready" ? advance(current, "reserved", { reservation, decision, reservedAt: now }) : null,
-      );
-      if (reserved === null) continue;
-      this.#decisions.delete(task.id);
-      this.#launch(reserved, reservation, decision);
+      await this.#reserve(task.id, decision.chosen, decision, now);
     }
     // Lazily: a finished task an app is about to name in `deps` must outlive the refresh that tells us of it.
     await this.#pruneDue();
@@ -753,6 +958,27 @@ export class Scheduler {
   }
 
   /**
+   * Reserves a `ready` task where `decision` chose and sends its spawn: the
+   * task as reserved, or null when it moved since it was routed (a cancel, or
+   * another reservation) and keeps what it moved to.
+   */
+  async #reserve(
+    id: string,
+    chosen: NonNullable<Decision["chosen"]>,
+    decision: Decision,
+    now: number,
+  ): Promise<Task | null> {
+    const reservation: Reservation = { ...chosen, expiresAt: now + this.#config.reservationTtlMs };
+    const reserved = await this.#update(id, (current) =>
+      current.state === "ready" ? advance(current, "reserved", { reservation, decision, reservedAt: now }) : null,
+    );
+    if (reserved === null) return null;
+    this.#decisions.delete(id);
+    this.#launch(reserved, reservation, decision);
+    return reserved;
+  }
+
+  /**
    * Admission (`admission`): each `queued` or `blocked` task to where its edges
    * put it. Computed over one snapshot, so a cascade lands whole; each write
    * re-checks that its task is still waiting where it was.
@@ -786,6 +1012,7 @@ export class Scheduler {
       ...(spec.model === undefined ? {} : { model: spec.model }),
       ...(spec.effort === undefined ? {} : { effort: spec.effort }),
       ...(spec.plan === undefined ? {} : { plan: spec.plan }),
+      ...(spec.continues === undefined ? {} : { continues: spec.continues.task }),
       client: SCHEDULER_CLIENT,
       taskId: task.id,
     });
@@ -827,12 +1054,14 @@ export class Scheduler {
         if (task.state === "lost" || since === undefined || now - since < this.#config.lostAfterMs) return;
         // Its session ended, and only its exit was awaited: `lost` would fail dependents at `lost_expired` for a session that is over.
         const settling = this.#ending.has(task.id);
+        // Before the write, so a settle held for a cancel (`#yieldToCancel`) notes it again.
+        if (settling) this.#clearEnding(task.id);
         await this.#update(task.id, (current) => {
           if (current.state === "lost" || !PLACED.includes(current.state)) return null;
           if (current.assignment?.deviceId !== deviceId) return null;
-          return settling ? settledEnd(current, undefined) : advance(current, "lost", { absentSince: since });
+          if (!settling) return advance(current, "lost", { absentSince: since });
+          return this.#yieldToCancel(current, settledEnd(current, undefined));
         });
-        if (settling) this.#ending.delete(task.id);
       }),
     );
   }
@@ -849,8 +1078,10 @@ export class Scheduler {
     );
     await Promise.all(
       due.map(async ([id]) => {
-        this.#ending.delete(id);
-        await this.#update(id, (current) => (PLACED.includes(current.state) ? settledEnd(current, undefined) : null));
+        this.#clearEnding(id);
+        await this.#update(id, (current) =>
+          PLACED.includes(current.state) ? this.#yieldToCancel(current, settledEnd(current, undefined)) : null,
+        );
       }),
     );
   }
@@ -897,7 +1128,7 @@ export class Scheduler {
     this.#returned = new Set([...returned].filter(skipped));
     for (const id of this.#ending.keys()) {
       const task = this.#held.get(id)?.task;
-      if (task === undefined || !PLACED.includes(task.state)) this.#ending.delete(id);
+      if (task === undefined || !PLACED.includes(task.state)) this.#clearEnding(id);
     }
     return this.tasks().filter((t) => {
       const deviceId = deviceOf(t);
@@ -944,13 +1175,16 @@ export class Scheduler {
       tasks.map((seen) =>
         this.#update(seen.id, (current) =>
           asSeen(current, seen)
-            ? settle(current, reply, {
-                now: this.#now(),
-                connected: this.#connected(deviceId),
-                unansweredSince: this.#unansweredSince.get(deviceId),
-                reservationTtlMs: this.#config.reservationTtlMs,
-                lostAfterMs: this.#config.lostAfterMs,
-              })
+            ? this.#yieldToCancel(
+                current,
+                settle(current, reply, {
+                  now: this.#now(),
+                  connected: this.#connected(deviceId),
+                  unansweredSince: this.#unansweredSince.get(deviceId),
+                  reservationTtlMs: this.#config.reservationTtlMs,
+                  lostAfterMs: this.#config.lostAfterMs,
+                }),
+              )
             : null,
         ),
       ),
@@ -1001,7 +1235,8 @@ export class Scheduler {
    * `change` applied again to what it finds. A lost reply (`indeterminate`) is
    * read the same way, except that the one version after ours is ours. A record
    * past the store's bound is written again with its decision cut to the
-   * winner, never the task cut. The needs-input clock (`inputClock`) rides
+   * winner, never the task cut. An idle clock (`#idleSince`) ends on any write
+   * into or out of `running`. The needs-input clock (`inputClock`) rides
    * whatever state a write lands, so no path can enter or leave `needs-input`
    * without it, and the merge clock (`endClock`) rides entering `awaiting-merge` the same way.
    * A forge reading (`pr`) is dropped when the write moves `prUrl` (`prBound`).
@@ -1026,6 +1261,8 @@ export class Scheduler {
         const write = await this.#store.put(id, held.version, next);
         if (write.ok) {
           this.#held.set(id, { version: write.version, task: next });
+          // A stay at the prompt ends with `running`: one back from `lost` starts its grace over.
+          if (held.task.state !== "running" || next.state !== "running") this.#idleSince.delete(id);
           return next;
         }
         if (write.code === "too_large" && !trim && next.decision !== undefined) {
@@ -1068,6 +1305,11 @@ export class Scheduler {
   #refused(id: string, op: string, write: Extract<StoreWrite, { readonly ok: false }>): void {
     this.#onError(new Error(`store refused ${op} of task ${id}: ${write.code}`));
   }
+}
+
+/** Whether an idle clock started on `deviceId` still speaks for `task`: running there, as it was. */
+function idleHere(task: Task, deviceId: string): boolean {
+  return task.state === "running" && task.assignment?.deviceId === deviceId;
 }
 
 /** At most `DECISION_MAX_CANDIDATES`, cut from the end — the rejected trail — and counted in `trimmed`. */

@@ -24,7 +24,6 @@ import {
   type RepoEntry,
   type ScoreComponents,
 } from "@seance/shared";
-import { batchCap } from "./batch.ts";
 import type { SchedulerConfig, SeatProfile, WindowSpan } from "./config.ts";
 import { codeUnitOrder } from "./order.ts";
 import { accountPause, activeHolds, queuePause } from "./pause.ts";
@@ -51,6 +50,14 @@ export interface RouteInput {
   readonly holds?: readonly PauseHold[];
   /** The fleet quota record's entries (`Fleet.fleetQuota`), folded with every status. */
   readonly fleetQuota?: readonly FleetQuotaEntry[];
+  /**
+   * Ids of in-flight tasks that hold no slot and no projected usage here: the
+   * leader's to say why (`Scheduler`'s `#released` — a machine asleep, a
+   * session idle at its prompt).
+   */
+  readonly released?: ReadonlySet<string>;
+  /** `runNow`: neither concurrency cap (`cap_reached`) applies; every other filter does. */
+  readonly uncapped?: boolean;
 }
 
 const SPAN_MS: Readonly<Record<WindowSpan, number>> = { "5h": 5 * 3600_000, "7d": 7 * 86_400_000 };
@@ -80,6 +87,7 @@ interface Pass {
   readonly quotaOf: (accountId: string) => AccountQuota;
   readonly accountAt: (placement: Placement) => string | null;
   readonly capReached: Reason | null;
+  readonly uncapped: boolean;
   readonly holds: readonly PauseHold[];
   /** The task's skills the inventory knows, in prompt order: each restricts. Empty when nothing does. */
   readonly skills: readonly string[];
@@ -87,7 +95,7 @@ interface Pass {
 
 export function route(input: RouteInput): Decision {
   const { task, machines, now, config } = input;
-  const inFlight = input.tasks.filter((t) => t.id !== task.id && IN_FLIGHT.includes(t.state));
+  const inFlight = holdingSlots(input.tasks, input.released).filter((t) => t.id !== task.id);
   const newest = newestQuotaByAccount(machines, input.fleetQuota);
   const pass: Pass = {
     task,
@@ -96,18 +104,19 @@ export function route(input: RouteInput): Decision {
     inFlight,
     quotaOf: cached((accountId) => accountQuota(accountId, machines, newest)),
     accountAt: (placement) => accountOfPlacement(machines, placement),
+    uncapped: input.uncapped === true,
     capReached:
-      inFlight.length >= config.globalMax
+      input.uncapped !== true && inFlight.length >= config.globalMax
         ? { code: "cap_reached", inFlight: inFlight.length, max: config.globalMax }
         : null,
     holds: activeHolds(input.holds ?? [], now),
     skills: knownSkills(task, machines),
   };
-  const caps = [queuePause(pass.holds), pass.capReached, batchCap(task, input.tasks)].filter((r) => r !== null);
+  const caps = [queuePause(pass.holds), pass.capReached].filter((r) => r !== null);
 
   const candidates: Candidate[] = [];
   for (const machine of machines) {
-    const machineReasons = [...machineFilter(machine, now, config), ...caps];
+    const machineReasons = [...machineFilter(machine, now, config), ...continueFilter(task, machine), ...caps];
     if (machine.exclaves === undefined || machine.exclaves.length === 0) {
       candidates.push({ deviceId: machine.deviceId, machine: machine.name, exclave: null, rejected: machineReasons });
       continue;
@@ -137,12 +146,21 @@ function judge(pass: Pass, machine: Machine, machineReasons: readonly Reason[], 
   const { task, config, inFlight } = pass;
   const { skills } = pass;
   const clones = machine.repos.filter((r) => r.exclave === exclave.id && r.origin === task.spec.repo);
+  // A continuation resumes one worktree, in one clone: the daemon's own check wants the very clone it ran in.
+  const at = task.spec.continues?.at;
   // An exclave's skill serves any clone, so only a skill the exclave lacks picks among clones: the first
   // clone that, with the exclave, has every required skill; none does, the first match.
   const lacking = (r: RepoEntry | undefined): string | undefined =>
     skills.find((s) => !exclave.skills.includes(s) && r?.skills?.includes(s) !== true);
-  const clone = clones.find((r) => lacking(r) === undefined) ?? clones[0];
+  const clone =
+    at === undefined
+      ? (clones.find((r) => lacking(r) === undefined) ?? clones[0])
+      : clones.find((r) => r.name === at.clone);
   const rejected: Reason[] = [...machineReasons, ...placementFilter(task, machine, exclave)];
+  // Once per candidate: another machine already carries it from `continueFilter`.
+  if (at !== undefined && exclave.id !== at.exclave && !rejected.some((r) => r.code === "continue_elsewhere")) {
+    rejected.push({ code: "continue_elsewhere" });
+  }
   if (clone === undefined) rejected.push({ code: "repo_absent" });
   const missing = lacking(clone);
   if (missing !== undefined) rejected.push({ code: "skill_absent", skill: missing });
@@ -154,7 +172,7 @@ function judge(pass: Pass, machine: Machine, machineReasons: readonly Reason[], 
   const account =
     exclave.accountId === null ? null : judgeAccount(pass, exclave, exclave.accountId, sharing, seat.capacity);
   if (account?.reason !== undefined) rejected.push(account.reason);
-  if (sharing >= config.accountMax) {
+  if (!pass.uncapped && sharing >= config.accountMax) {
     rejected.push({ code: "cap_reached", inFlight: sharing, max: config.accountMax, scope: "account" });
   }
   const paused = exclave.accountId === null ? null : accountPause(pass.holds, exclave.accountId);
@@ -196,6 +214,14 @@ interface AccountJudgement {
   readonly quota?: QuotaBasis;
   readonly spill?: Candidate["spill"];
   readonly pressure: number;
+}
+
+/**
+ * What the caps and projected usage count: in flight, and not released. A
+ * released task that counts again is counted over a cap or not.
+ */
+function holdingSlots(tasks: readonly Task[], released: ReadonlySet<string> = new Set()): Task[] {
+  return tasks.filter((t) => IN_FLIGHT.includes(t.state) && !released.has(t.id));
 }
 
 /**
@@ -280,6 +306,22 @@ function machineFilter(machine: Machine, now: number, config: SchedulerConfig): 
   if (machine.capabilities?.includes(CAPABILITIES.taskId) !== true) reasons.push({ code: "task_id_unsupported" });
   // A real daemon always lists `default`, so an empty list is a blob it did not write — as unknown as none.
   if (machine.exclaves === undefined || machine.exclaves.length === 0) reasons.push({ code: "exclaves_unknown" });
+  return reasons;
+}
+
+/**
+ * A continue task (DESIGN.md, Daemon, "Continuing a session") has one
+ * acceptable target, in the clone and exclave `judge` checks. Here, the machine:
+ * another is `continue_elsewhere`, and the target must be a daemon that spawns
+ * the mode at all, or it would refuse the request as malformed.
+ */
+function continueFilter(task: Task, machine: Machine): Reason[] {
+  const at = task.spec.continues?.at;
+  if (at === undefined) return [];
+  const reasons: Reason[] = [];
+  if (machine.deviceId !== at.deviceId) reasons.push({ code: "continue_elsewhere" });
+  if (machine.capabilities?.includes(CAPABILITIES.continueTask) !== true)
+    reasons.push({ code: "continue_unsupported" });
   return reasons;
 }
 
@@ -369,6 +411,7 @@ export function accountResetAt(
   now: number,
   config: SchedulerConfig,
   fleetQuota: readonly FleetQuotaEntry[] = [],
+  released: ReadonlySet<string> = new Set(),
 ): number | null {
   const account = accountQuota(accountId, machines, newestQuotaByAccount(machines, fleetQuota));
   if (!account.known) return null;
@@ -376,7 +419,7 @@ export function accountResetAt(
     w.resetsAt !== undefined && w.resetsAt * 1000 > now ? [w.resetsAt * 1000] : [];
   const sharing = accountInFlight(
     {
-      inFlight: tasks.filter((t) => IN_FLIGHT.includes(t.state)),
+      inFlight: holdingSlots(tasks, released),
       accountAt: (placement) => accountOfPlacement(machines, placement),
     },
     accountId,

@@ -3,7 +3,15 @@ import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseTaskProgressList } from "@seance/shared";
-import { LaunchLedger, LEDGER_MAX, LEDGER_MAX_AGE_MS, type TaskNote } from "./launch-ledger.ts";
+import {
+  LaunchLedger,
+  LEDGER_MAX,
+  pathOwners,
+  type NotedTask,
+  LEDGER_MAX_AGE_MS,
+  type TaskNote,
+} from "./launch-ledger.ts";
+import { OOM_REFRESH_MS } from "./oom-kill.ts";
 
 let dir: string;
 let path: string;
@@ -404,6 +412,94 @@ describe("LaunchLedger progress notes", () => {
   });
 });
 
+describe("LaunchLedger OOM samples", () => {
+  const unit = { cgroup: "/system.slice/seanced.service", kills: 42, at: 5, paneId: "%1", windowId: "@1" };
+
+  test("a sample survives a reopen but stays out of progress, and changing it alone keeps at", async () => {
+    let now = 5;
+    const ledger = await LaunchLedger.open(path, () => now);
+    await ledger.record("t1");
+    await ledger.note("t1", { branch: "b" });
+    now = 6;
+    expect(await ledger.apply("t1", { oom: unit })).toBe("written");
+    // Quiet pass: same reading a little later, no write.
+    expect(await ledger.apply("t1", { oom: { ...unit, at: 6 } })).toBe("same");
+    expect(await ledger.apply("t1", { oom: { ...unit, kills: 43, at: 6 } })).toBe("written");
+    expect(ledger.progress()).toEqual([{ taskId: "t1", at: 5, branch: "b" }]);
+    const reopened = await LaunchLedger.open(path, () => 7);
+    expect(reopened.notes()[0]?.oom).toEqual({ ...unit, kills: 43, at: 6 });
+    expect(reopened.notes()[0]?.at).toBe(5);
+  });
+
+  test("an unchanged sample is rewritten once stale, so its time stays inside the verdict's window", async () => {
+    const ledger = await LaunchLedger.open(path, () => 5);
+    await ledger.record("t1");
+    await ledger.note("t1", { oom: unit });
+    expect(await ledger.apply("t1", { oom: { ...unit, at: unit.at + OOM_REFRESH_MS } })).toBe("written");
+    expect(ledger.notes()[0]?.oom?.at).toBe(unit.at + OOM_REFRESH_MS);
+  });
+
+  test("another pane's sample replaces it: a relaunch is not judged on the old pane's count", async () => {
+    const ledger = await LaunchLedger.open(path, () => 5);
+    await ledger.record("t1");
+    await ledger.note("t1", { oom: unit });
+    expect(await ledger.apply("t1", { oom: { ...unit, paneId: "%2", windowId: "@2" } })).toBe("written");
+    expect(ledger.notes()[0]?.oom?.paneId).toBe("%2");
+  });
+
+  test("a batch persists once for every task's change, and not at all when nothing changed", async () => {
+    const ledger = await LaunchLedger.open(path, () => 5);
+    for (const id of ["t1", "t2", "t3"]) await ledger.record(id);
+    const entries = ["t1", "t2", "t3"].map((taskId) => ({ taskId, patch: { oom: unit } }));
+    await ledger.noteBatch([...entries, { taskId: "unknown", patch: { oom: unit } }]);
+    const written = await readFile(path, "utf8");
+    expect(JSON.parse(written).progress).toHaveLength(3);
+    // Same content again: untouched on disk.
+    await writeFile(path, "sentinel");
+    await ledger.noteBatch(entries);
+    expect(await readFile(path, "utf8")).toBe("sentinel");
+  });
+
+  test("the verdict reaches progress beside a SIGKILL only, and a bad sample or verdict is dropped, never the note", async () => {
+    const ledger = await LaunchLedger.open(path, () => 9);
+    await ledger.record("t1");
+    await ledger.record("t2");
+    await ledger.note("t1", { oom: unit });
+    await ledger.note("t1", { exit: 137, oomKill: true });
+    await ledger.note("t2", { exit: 1, oomKill: false });
+    expect(ledger.progress()).toEqual([
+      { taskId: "t1", at: 9, exit: 137, oomKill: true },
+      { taskId: "t2", at: 9, exit: 1 },
+    ]);
+    expect(parseTaskProgressList(ledger.progress())).toEqual(ledger.progress());
+
+    const file = JSON.parse(await readFile(path, "utf8"));
+    // The list shape an earlier draft wrote reads as no sample.
+    file.progress[0].oom = [unit];
+    file.progress[0].oomKill = "yes";
+    await writeFile(path, JSON.stringify(file));
+    const [note] = (await LaunchLedger.open(path, () => 10)).notes();
+    expect(note).toMatchObject({ taskId: "t1", exit: 137 });
+    expect(note).not.toHaveProperty("oom");
+    expect(note).not.toHaveProperty("oomKill");
+  });
+
+  test("a verdict stays for the same exit and goes with a different one", async () => {
+    const ledger = await LaunchLedger.open(path, () => 9);
+    await ledger.record("t1");
+    await ledger.note("t1", { exit: 137, oomKill: true });
+    // Another sample or progress note leaves it.
+    await ledger.note("t1", { branch: "b" });
+    expect(ledger.progress()[0]?.oomKill).toBe(true);
+    // The same exit noted again without one (a racing pass whose judge read failed) keeps it.
+    await ledger.note("t1", { exit: 137 });
+    expect(ledger.progress()).toEqual([{ taskId: "t1", at: 9, branch: "b", exit: 137, oomKill: true }]);
+    // Another exit clears it.
+    await ledger.note("t1", { exit: 1 });
+    expect(ledger.progress()).toEqual([{ taskId: "t1", at: 9, branch: "b", exit: 1 }]);
+  });
+});
+
 describe("LaunchLedger reported notes (#21)", () => {
   test("a report survives a reopen, is sticky across later notes, reaches progress, and a relaunch starts without it", async () => {
     const ledger = await LaunchLedger.open(path, () => 9);
@@ -457,5 +553,116 @@ describe("LaunchLedger reported notes (#21)", () => {
     const file = JSON.parse(await readFile(path, "utf8"));
     expect(file.tasks).toEqual([["t1", 9]]);
     expect(file.progress[0]).toMatchObject({ taskId: "t1", reported: true });
+  });
+});
+
+describe("LaunchLedger vanished notes", () => {
+  async function opened(clock: { now: number }): Promise<LaunchLedger> {
+    const ledger = await LaunchLedger.open(path, () => clock.now);
+    await ledger.record("t1");
+    return ledger;
+  }
+
+  test("a here-mode launch with only a server still gets a note, and is unaccounted for", async () => {
+    const clock = { now: 10 };
+    const ledger = await opened(clock);
+    expect(ledger.unaccounted()).toEqual([]);
+    await ledger.startNote("t1", undefined, undefined, 4242);
+    expect(ledger.unaccounted()).toEqual([{ taskId: "t1", recordedAt: 10, server: 4242 }]);
+    // Neither the server nor anything else is progress.
+    expect(ledger.progress()).toEqual([]);
+  });
+
+  test("vanished is noted, durable across a reopen, reaches progress, and moves at; server and closedHere never do", async () => {
+    const clock = { now: 10 };
+    const ledger = await opened(clock);
+    await ledger.startNote("t1", undefined, undefined, 4242);
+    const startedAt = ledger.notes()[0]?.at;
+    clock.now = 20;
+    expect(await ledger.note("t1", { closedHere: true })).toBe(true);
+    expect(ledger.notes()[0]?.at).toBe(startedAt);
+    expect(ledger.progress()).toEqual([]);
+    // Closed here: never judged, and a second closedHere is no write.
+    expect(ledger.unaccounted()).toEqual([]);
+    expect(await ledger.noteVanished("t1", 10)).toBe(false);
+
+    const second = await opened({ now: 30 });
+    await second.record("t2");
+    await second.startNote("t2", undefined, undefined, 4242);
+    expect(await second.noteVanished("t2", 30)).toBe(true);
+    expect(second.progress()).toEqual([expect.objectContaining({ taskId: "t2", vanished: true })]);
+    expect(second.progress()[0]).not.toHaveProperty("server");
+    expect(second.progress()[0]).not.toHaveProperty("closedHere");
+    expect(await second.noteVanished("t2", 30)).toBe(false);
+
+    const reopened = await LaunchLedger.open(path, () => 99);
+    expect(reopened.progress()).toEqual([expect.objectContaining({ taskId: "t2", vanished: true })]);
+    expect(reopened.unaccounted()).toEqual([]);
+  });
+
+  test("noteVanished is refused after an exit, for a relaunch, an unknown id, or a launch with no server; progress drops it once an exit is noted", async () => {
+    const clock = { now: 10 };
+    const ledger = await opened(clock);
+    await ledger.startNote("t1", undefined, undefined, 7);
+    expect(await ledger.noteVanished("t1", 999)).toBe(false);
+    expect(await ledger.noteVanished("nope", 10)).toBe(false);
+    // A relaunch moves the record time, so a candidate snapshotted before it is refused.
+    clock.now = 50;
+    await ledger.record("t1");
+    expect(await ledger.noteVanished("t1", 10)).toBe(false);
+    await ledger.startNote("t1", undefined, undefined, 7);
+    await ledger.note("t1", { exit: 0 });
+    expect(await ledger.noteVanished("t1", 50)).toBe(false);
+
+    await ledger.record("t3");
+    await ledger.startNote("t3", undefined, undefined, 7);
+    expect(await ledger.noteVanished("t3", 50)).toBe(true);
+    await ledger.note("t3", { exit: 2 });
+    expect(ledger.progress().find((p) => p.taskId === "t3")).toEqual(expect.objectContaining({ exit: 2 }));
+    expect(ledger.progress().find((p) => p.taskId === "t3")?.vanished).toBeUndefined();
+
+    const bare = await opened({ now: 60 });
+    await bare.record("t4");
+    await bare.startNote("t4", { repo: "/r", path: "/r/wt" });
+    expect(await bare.noteVanished("t4", 60)).toBe(false);
+  });
+
+  test("a file from before these fields parses, a malformed server or flag is dropped, and the wire parser accepts a vanished entry", async () => {
+    await writeFile(
+      path,
+      JSON.stringify({
+        v: 1,
+        since: 1,
+        tasks: [["t1", 5]],
+        progress: [{ taskId: "t1", at: 5, branch: "b", server: -3, closedHere: "yes", vanished: 1 }],
+      }),
+    );
+    const ledger = await LaunchLedger.open(path, () => 9);
+    expect(ledger.notes()[0]).toEqual({ taskId: "t1", at: 5, branch: "b" });
+    await ledger.note("t1", { vanished: true });
+    expect(parseTaskProgressList(ledger.progress())).toEqual(ledger.progress());
+  });
+});
+
+describe("pathOwners", () => {
+  const note = (taskId: string, at: string | undefined, siteAt?: number): NotedTask => ({
+    taskId,
+    at: 0,
+    ...(at === undefined ? {} : { path: at }),
+    ...(siteAt === undefined ? {} : { siteAt }),
+  });
+
+  test("the newer site owns a path, whatever the order", () => {
+    expect(pathOwners([note("a", "/p", 5), note("b", "/p", 3)]).get("/p")?.taskId).toBe("a");
+    expect(pathOwners([note("b", "/p", 3), note("a", "/p", 5)]).get("/p")?.taskId).toBe("a");
+  });
+
+  test("a tie goes to the later note, and a missing siteAt counts as oldest", () => {
+    expect(pathOwners([note("a", "/p", 5), note("b", "/p", 5)]).get("/p")?.taskId).toBe("b");
+    expect(pathOwners([note("a", "/p", 1), note("b", "/p")]).get("/p")?.taskId).toBe("a");
+  });
+
+  test("notes without a path are skipped", () => {
+    expect(pathOwners([note("a", undefined, 5)]).size).toBe(0);
   });
 });

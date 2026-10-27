@@ -1,7 +1,7 @@
 import type { JSX, TargetedKeyboardEvent } from "preact";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
-import { TASK_SPEC_LIMITS, type BatchStrategy, type DepAfter, type Machine, type TaskUntil } from "@seance/shared";
-import { describeDecision } from "../decision-view.ts";
+import { TASK_SPEC_LIMITS, type DepAfter, type Machine, type TaskUntil } from "@seance/shared";
+import { describeDecision, startNowItem } from "../decision-view.ts";
 import type { AfterSheetView } from "../queue-view.ts";
 import {
   EFFORTS,
@@ -15,9 +15,10 @@ import {
   type SheetKind,
 } from "../state.ts";
 import { completeSkill, matchSkills, promptSegments, skillIndex, skillToken } from "../skills.ts";
-import { describeStrategy, formatSeen, type Tile, type ViewModel } from "../view.ts";
+import { formatSeen, type Tile, type ViewModel } from "../view.ts";
 import { DecisionCard } from "./decision.tsx";
 import { HeaderMenu } from "./header-menu.tsx";
+import { Menu, MenuItem, useMenu } from "./menu.tsx";
 import { Seg } from "./seg.tsx";
 import { dotClass, Sheet, SheetItem } from "./sheet.tsx";
 import { SkillPicker, skillOptionId } from "./skill-picker.tsx";
@@ -52,6 +53,8 @@ export interface SpawnActions {
   readonly openSheet: (sheet: SheetKind) => void;
   readonly toggleWorktree: () => void;
   readonly spawn: () => void;
+  /** Queues as `spawn` does, then asks the leader to skip the queue for it. */
+  readonly startNow: () => void;
   readonly dismissLayer: () => void;
   readonly pickMachine: (deviceId: string | null) => void;
   readonly pickAccount: (accountId: string | null) => void;
@@ -65,7 +68,7 @@ export interface SpawnActions {
   readonly removeAfter: (taskId: string) => void;
   readonly setUntil: (until: TaskUntil) => void;
   readonly setLinearIssue: (issue: string) => void;
-  readonly startBatch: (strategy: BatchStrategy) => void;
+  readonly startBatch: () => void;
   readonly endBatch: () => void;
 }
 
@@ -318,8 +321,6 @@ function AfterSheet(props: {
   );
 }
 
-const DEFAULT_PARALLEL = 3;
-
 function BatchSheet(props: {
   actions: SpawnActions;
   batch: PersistedForm["batch"];
@@ -327,11 +328,6 @@ function BatchSheet(props: {
   onExited: () => void;
 }): JSX.Element {
   const { actions, batch, closing, onExited } = props;
-  const mode = batch?.strategy.mode ?? null;
-  const current = batch?.strategy.mode === "parallel" ? batch.strategy.max : DEFAULT_PARALLEL;
-  const [max, setMax] = useState(String(current));
-  const parsed = Number(max);
-  const valid = max.trim() !== "" && Number.isInteger(parsed) && parsed >= 1 && parsed <= TASK_SPEC_LIMITS.parallel;
   return (
     <Sheet title={SHEET_TITLES.batch} closing={closing} onExited={onExited} onClose={actions.dismissLayer}>
       <SheetItem
@@ -341,43 +337,13 @@ function BatchSheet(props: {
         onClick={actions.endBatch}
       />
       <SheetItem
-        label="One at a time"
-        sub="in the order queued"
-        selected={mode === "sequential"}
-        onClick={() => actions.startBatch({ mode: "sequential" })}
+        label={batch === null ? "Start batch" : "Batch open"}
+        sub="the next tasks are grouped and numbered together"
+        selected={batch !== null}
+        onClick={actions.startBatch}
       />
-      <SheetItem
-        label="No limit"
-        sub="only dependencies and capacity hold them"
-        selected={mode === "auto"}
-        onClick={() => actions.startBatch({ mode: "auto" })}
-      />
-      <div className={mode === "parallel" ? "sheet-max sheet-item-selected" : "sheet-max"}>
-        <label htmlFor="batch-max">Up to</label>
-        <input
-          id="batch-max"
-          type="number"
-          inputMode="numeric"
-          min={1}
-          max={TASK_SPEC_LIMITS.parallel}
-          value={max}
-          onInput={(event) => setMax(event.currentTarget.value)}
-        />
-        <span>at once</span>
-        <button
-          type="button"
-          className="quiet"
-          disabled={!valid}
-          onClick={() => actions.startBatch({ mode: "parallel", max: parsed })}
-        >
-          Use
-        </button>
-      </div>
-      {batch !== null && (
-        <p className="sheet-note">
-          Open: {describeStrategy(batch.strategy)}, next is #{batch.next}.
-        </p>
-      )}
+      {batch !== null && <p className="sheet-note">Open, next is #{batch.next}.</p>}
+      <p className="sheet-note">A batch sets no order or limit: to run tasks in turn, give each its After.</p>
     </Sheet>
   );
 }
@@ -425,6 +391,112 @@ function PreviewCard(props: {
       </section>
       {refresh}
     </div>
+  );
+}
+
+/**
+ * The footer's Queue, split when the leader answers `run-now`: two sibling
+ * buttons in one pill, never nested, so Tab reaches both and a press on one
+ * never fires the other. Without `run-now` it is the one button, unchanged.
+ */
+function QueueButton(props: {
+  view: ViewModel;
+  preview: PreviewState | null;
+  onQueue: () => void;
+  onStartNow: () => void;
+}): JSX.Element {
+  const { button, startNow } = props.view;
+  const face = (
+    <button
+      type="button"
+      className={button.busy ? "primary primary-busy" : "primary"}
+      disabled={!button.enabled}
+      onClick={props.onQueue}
+    >
+      {button.label}
+    </button>
+  );
+  if (!startNow) return face;
+  return (
+    <SplitQueueButton
+      face={face}
+      enabled={button.enabled}
+      busy={button.busy}
+      preview={props.preview}
+      onStartNow={props.onStartNow}
+    />
+  );
+}
+
+/** Its own component so the menu's open state mounts and unmounts with the split: a popover removed while open fires no toggle. */
+function SplitQueueButton(props: {
+  face: JSX.Element;
+  enabled: boolean;
+  busy: boolean;
+  preview: PreviewState | null;
+  onStartNow: () => void;
+}): JSX.Element {
+  const { face, enabled, busy } = props;
+  const menu = useMenu<HTMLDivElement>();
+  const item = startNowItem(props.preview);
+  return (
+    <>
+      <div ref={menu.anchor} className={busy ? "split split-busy" : "split"}>
+        {face}
+        <span className="split-divider" aria-hidden="true" />
+        <button
+          type="button"
+          className="split-more"
+          disabled={!enabled}
+          popovertarget={menu.id}
+          aria-label="More ways to start"
+          aria-haspopup="menu"
+          aria-expanded={menu.open}
+        >
+          <svg
+            className="split-chevron"
+            viewBox="0 0 24 24"
+            width="20"
+            height="20"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M6 15l6-6 6 6" />
+          </svg>
+        </button>
+      </div>
+      <Menu menu={menu} label="More ways to start" direction="up">
+        <MenuItem
+          label="Start now"
+          icon={<BoltIcon />}
+          sub={item.sub}
+          disabled={!item.enabled}
+          onClick={props.onStartNow}
+        />
+      </Menu>
+    </>
+  );
+}
+
+function BoltIcon(): JSX.Element {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="18"
+      height="18"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.8"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M13 3 4 14h7l-1 7 9-11h-7z" />
+    </svg>
   );
 }
 
@@ -764,14 +836,12 @@ export function SpawnScreen(props: {
 
       <footer className="footer">
         {view.footerStatus !== null && <p className="footer-status">{view.footerStatus}</p>}
-        <button
-          type="button"
-          className={view.button.busy ? "primary primary-busy" : "primary"}
-          disabled={!view.button.enabled}
-          onClick={actions.spawn}
-        >
-          {view.button.label}
-        </button>
+        <QueueButton
+          view={view}
+          preview={view.previewShown ? preview : null}
+          onQueue={actions.spawn}
+          onStartNow={actions.startNow}
+        />
       </footer>
 
       {renderedSheet !== null && (

@@ -1,7 +1,9 @@
 import {
   accountNameIn,
   knownAccounts,
+  lastHeardAt,
   reasonText,
+  sessionExit,
   taskFailureText,
   type Candidate,
   type Decision,
@@ -10,6 +12,8 @@ import {
   type Score,
   type Task,
 } from "@seance/shared";
+import { sleepingMachine } from "./asleep.ts";
+import type { PreviewState } from "./state.ts";
 import { failedBody, formatSeen } from "./view.ts";
 
 /**
@@ -113,7 +117,7 @@ function line(
     // Reasons a leader a version ahead minted are dropped at parse: say so rather than show none.
     const why =
       candidate.rejected.length === 0
-        ? "rejected for a reason this app can't read — update it"
+        ? "rejected for a reason this app can't read; the leader may run another version"
         : candidate.rejected.map(reasonText).join(", ");
     return { id, where: where(candidate), outcome, why, quota };
   }
@@ -139,6 +143,22 @@ function lostBy(scored: string, candidate: Candidate, winner: Candidate | undefi
   return `scored higher, ${scored} against ${n(best.total)}`;
 }
 
+/** The scored candidate the record chose; undefined when it chose none, or one a leader a version ahead left out. */
+function winnerOf(decision: Decision): Candidate | undefined {
+  const { chosen } = decision;
+  if (chosen === null) return undefined;
+  return decision.candidates.find(
+    (c) => c.deviceId === chosen.deviceId && c.exclave === chosen.exclave && c.score !== undefined,
+  );
+}
+
+/** Where the record chose, as `where` words it; the bare device id for a winner it left out. */
+function chosenName(decision: Decision): string | null {
+  if (decision.chosen === null) return null;
+  const winner = winnerOf(decision);
+  return winner === undefined ? decision.chosen.deviceId : where(winner);
+}
+
 /**
  * `tense`: a preview says what would happen, a placed task what did. A record
  * whose winner is not among its candidates (a leader a version ahead) still
@@ -151,12 +171,7 @@ export function describeDecision(
   tense: "would" | "did",
 ): DecisionSummary {
   const { chosen } = decision;
-  const winner =
-    chosen === null
-      ? undefined
-      : decision.candidates.find(
-          (c) => c.deviceId === chosen.deviceId && c.exclave === chosen.exclave && c.score !== undefined,
-        );
+  const winner = winnerOf(decision);
   const others = decision.candidates
     .filter((c) => c !== winner)
     .map((c) => line(c, c.score === undefined ? "rejected" : "scored", decision, machines, now, winner, tense));
@@ -187,12 +202,54 @@ export function describeDecision(
   };
 }
 
+const CAPS_ONLY_SUB = "Skip the queue — past the concurrency caps";
+
+/** The footer menu's Start now row: what skipping the queue would do, read off the placement preview. */
+export interface StartNowItem {
+  readonly sub: string;
+  readonly enabled: boolean;
+}
+
+/**
+ * The preview routes with both caps applied, so a candidate turned down for
+ * `cap_reached` alone is one `run-now` would take; anything else it rejects
+ * holds Start now too. No preview to go by (asking, failed, a pinned form) is
+ * no reason to block a tap the leader answers for itself.
+ */
+export function startNowItem(preview: PreviewState | null): StartNowItem {
+  return decisionStartNowItem(preview?.kind === "ok" ? preview.decision : null);
+}
+
+/** `startNowItem` for a task already queued: its latest decision, if the leader has made one. */
+export function decisionStartNowItem(decision: Decision | null): StartNowItem {
+  const plain = { sub: "Skip the queue", enabled: true };
+  if (decision === null) return plain;
+  const chosen = chosenName(decision);
+  const capped = decision.candidates.filter(heldByCapsAlone);
+  // `run-now` weighs the cap-held candidates too, unscored in the preview, so the target it picks is unknown.
+  if (chosen !== null)
+    return capped.length === 0 ? { sub: `Skip the queue — spawn on ${chosen}`, enabled: true } : plain;
+  const [only] = capped;
+  if (only === undefined) return { sub: "No machine can take it right now", enabled: false };
+  return {
+    sub: capped.length === 1 ? `Skip the queue — spawn on ${where(only)}` : CAPS_ONLY_SUB,
+    enabled: true,
+  };
+}
+
+/** Turned down for `cap_reached` and nothing else: a candidate `run-now`, which lifts both caps, would weigh. */
+export function heldByCapsAlone(candidate: Candidate): boolean {
+  return candidate.rejected.length > 0 && candidate.rejected.every((r) => r.code === "cap_reached");
+}
+
 /** What became of a queued task, in one line: the verdict's headline. */
 export function taskHeadline(task: Task, machines: readonly Machine[], now: number): string {
   const at = task.assignment ?? task.reservation;
-  const machine =
-    at === undefined ? undefined : (machines.find((m) => m.deviceId === at.deviceId)?.name ?? at.deviceId);
+  const listed = at === undefined ? undefined : machines.find((m) => m.deviceId === at.deviceId);
+  const machine = at === undefined ? undefined : (listed?.name ?? at.deviceId);
   const place = at === undefined ? "" : ` on ${machine ?? ""} · ${at.exclave}`;
+  const asleep = sleepingMachine(task, machines);
+  const slept = asleep === undefined ? "" : ` — its machine went to sleep ${formatSeen(lastHeardAt(asleep), now)}`;
   switch (task.state) {
     case "queued":
       return "Queued — waiting for the scheduler.";
@@ -201,12 +258,15 @@ export function taskHeadline(task: Task, machines: readonly Machine[], now: numb
     case "ready":
       return "Queued — waiting for a machine.";
     case "reserved":
-      return `Starting${place}…`;
+      return asleep === undefined ? `Starting${place}…` : `Starting${place}${slept}.`;
     case "running":
-      return `It's running${place}.`;
+      return `It's running${place}${slept}.`;
     case "needs-input":
-      return `It's waiting for input${place}.`;
+      return `It's waiting for input${place}${slept}.`;
     case "lost":
+      // The leader's `lost` is the sleep itself; "Lost" stays for a machine back or gone.
+      if (asleep !== undefined) return `Asleep${place}${slept}.`;
+      if (listed !== undefined) return `Lost${place} — its machine is back but hasn't answered for it yet.`;
       return task.absentSince === undefined
         ? `Lost${place} — its machine stopped answering.`
         : `Lost${place} — its machine went away ${formatSeen(task.absentSince, now)}.`;
@@ -230,7 +290,16 @@ export function taskHeadline(task: Task, machines: readonly Machine[], now: numb
       if (task.failure?.code === "dispatch_unconfirmed") return `Never confirmed${place} — it may have started there.`;
       if (task.failure?.code === "lost_expired") return `Given up${place} — its session may still be running there.`;
       if (task.failure?.code === "merge_expired") return "No merge seen for its PR — the scheduler gave up waiting.";
-      if (task.failure?.code === "session_failed") return `Its session exited with an error${place}, with no PR.`;
+      if (task.failure?.code === "session_failed") {
+        // No `exit` from an older leader: how it ended is unknown, and `sessionExit` says so.
+        const { clause, hint } = sessionExit(task.failure.exit, task.failure.oomKill);
+        const lacked = task.spec.until === "reported" ? "with no done report" : "with no PR";
+        return `Its session ${clause}${place}${hint === undefined ? "" : `, ${hint}`}, ${lacked}.`;
+      }
+      if (task.failure?.code === "session_closed") {
+        const lacked = task.spec.until === "reported" ? "with no done report" : "with no PR";
+        return `Its window was closed${place} before its session ended, ${lacked}.`;
+      }
       // A scheduler-set failure never reached a machine; only a daemon refusal "didn't take" there.
       return task.failure !== undefined && taskFailureText(task.failure.code) !== null
         ? "It won't run."
@@ -340,7 +409,13 @@ export function queuedBody(task: Task): string {
       if (task.doneBy === "reported") return "Its session reported it done.";
       return task.doneBy === "manual" ? "Marked done by hand." : "The session ended.";
     case "failed":
-      return failedBody(task.failure?.code);
+      return failedBody(
+        task.failure?.code,
+        task.failure?.exit,
+        task.spec.until,
+        task.failure?.oomKill,
+        task.failure?.message,
+      );
     case "cancelled":
       return task.leftRunning === true ? LEFT_RUNNING : "Nothing is running.";
   }

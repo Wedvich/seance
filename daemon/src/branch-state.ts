@@ -2,7 +2,7 @@ import { BRANCH_MAX_LENGTH, type BranchState, type RepoEntry } from "@seance/sha
 import { mapLimit } from "./concurrency.ts";
 import { hardenedGit } from "./git-hardened.ts";
 import { canonical, inspectCheckout } from "./gitdir.ts";
-import type { LaunchLedger, NotedTask } from "./launch-ledger.ts";
+import { pathOwners, type LaunchLedger, type NotedTask } from "./launch-ledger.ts";
 import { log } from "./log.ts";
 import {
   classifyTip,
@@ -492,13 +492,7 @@ export function createBranchStates(deps: BranchStateDeps): BranchStates {
     // A freed worktree name can be reused by a newer spawn: the newest site owns the live read of a path, a merged
     // one included, or its older namesake would read the newer one's branch. By when the site was set, not ledger
     // order: a failed re-dispatch of an old id re-records it at the end. A tie goes to the later in the ledger.
-    const newest = new Map<string, NotedTask>();
-    for (const note of noted) {
-      if (note.path === undefined) continue;
-      const held = newest.get(note.path);
-      if (held === undefined || (note.siteAt ?? 0) >= (held.siteAt ?? 0)) newest.set(note.path, note);
-    }
-    const owners = new Map([...newest].map(([path, note]) => [path, note.taskId]));
+    const owners = new Map([...pathOwners(noted)].map(([path, note]) => [path, note.taskId]));
     const skipped = await cutOff(tracked);
     const groups = new Map<string, NotedTask[]>();
     const judgedIds = new Set<string>();

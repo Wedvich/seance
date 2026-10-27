@@ -63,6 +63,21 @@ export interface SpawnOutcome {
    * wire — `handleSpawn` builds the response field by field to keep it out.
    */
   readonly handle?: string;
+  /**
+   * The tmux server pid, present when the task's pane keeps its dead pane and its `pane-died` hook for
+   * harvest (`remain-on-exit on` past registration). Absent when it could not be read or the hook was
+   * not set: the task is then never judged `vanished`. Backend-scoped: never goes on the wire.
+   */
+  readonly server?: number;
+}
+
+/** What a frontend resolved of a continued task's last launch from its own ledger. */
+export interface Continuation {
+  readonly path: string;
+  /** The continued task's exit status as its own ledger note recorded; absent when none was noted. Words the seed only. */
+  readonly exit?: number;
+  /** The earlier window was closed from outside (`TaskProgress.vanished`); worded in the preamble. */
+  readonly vanished?: true;
 }
 
 export interface SessionBackend {
@@ -72,8 +87,17 @@ export interface SessionBackend {
    * `taskId` must survive the daemon (a restarted one still refuses its
    * duplicate) and be reported back by `sessions`; a duplicate throws
    * `task_running` carrying the running session's id.
+   *
+   * `continuation` is the frontend's own resolution of a `mode: "continue"` request's
+   * worktree, from its launch ledger and already checked — it never rides the wire
+   * request; its `exit` comes from the ledger too. A backend that cannot continue a session throws
+   * `SpawnFailure("not_continuable")`.
    */
-  readonly spawn: (request: SpawnRequest, repos: readonly RepoEntry[]) => Promise<SpawnOutcome>;
+  readonly spawn: (
+    request: SpawnRequest,
+    repos: readonly RepoEntry[],
+    continuation?: Continuation,
+  ) => Promise<SpawnOutcome>;
   readonly sessions: (repos: readonly RepoEntry[]) => Promise<readonly SessionEntry[]>;
   /**
    * Ends the session `id` names — a `SessionEntry.id` this backend handed out,
@@ -81,7 +105,10 @@ export interface SessionBackend {
    * `DespawnFailure` with a wire code. Optional: a backend that can't stop a
    * session can still start them, and the frontend answers for it.
    */
-  readonly despawn?: (id: string, opts: { readonly force: boolean }) => Promise<DespawnResult>;
+  readonly despawn?: (
+    id: string,
+    opts: { readonly force: boolean; readonly closing?: (taskId: string) => Promise<unknown> },
+  ) => Promise<DespawnResult>;
   /** Backend-specific preflight for `seanced doctor`: binary presence, server probes. */
   readonly doctor: () => Promise<readonly Check[]>;
   /**

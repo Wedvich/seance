@@ -1,4 +1,4 @@
-import { LAUNCH_LEDGER_MAX_AGE_MS, MIN_FREE_MIB } from "@seance/shared";
+import { LAUNCH_LEDGER_MAX_AGE_MS, MIN_FREE_MIB, STORE_TOMBSTONE_MS } from "@seance/shared";
 
 /** How long a quota window runs: the 5h session window, or any weekly (all-models or per-model). */
 export type WindowSpan = "5h" | "7d";
@@ -62,6 +62,23 @@ export interface SchedulerConfig {
    */
   readonly lostAfterMs: number;
   /**
+   * An in-flight task whose machine has been absent this long stops counting
+   * toward `globalMax`, `accountMax` and projected usage, its state unchanged:
+   * nothing runs there while it sleeps. Short of `lostAfterMs`, which settles
+   * reservations and writes a record. A blip or reconnect frees nothing; a
+   * dark wake restarts the clock, so slots return only after the
+   * connected-read window (~2.5 min) plus this. Counted again once its machine is back.
+   */
+  readonly slotReleaseAfterMs: number;
+  /**
+   * A `running` task whose session has sat idle at its prompt this long (its
+   * own machine's `idle` event, nothing since) stops counting toward the
+   * caps and projected usage, as `slotReleaseAfterMs` does: nothing bills
+   * while it waits for a reply. Counted again on its next state, over a cap
+   * or not. `needs-input` keeps its slot: a dialog is mid-task.
+   */
+  readonly idleReleaseAfterMs: number;
+  /**
    * A `lost` task whose machine went away (`absentSince`, else `createdAt`)
    * longer ago than this, and is disconnected now (a connected machine's
    * `sessions` is about to settle it), is `failed` `lost_expired`. Never pruned while `lost`,
@@ -77,6 +94,22 @@ export interface SchedulerConfig {
    * task is never read back, so past it nothing waits on a signal that can still arrive.
    */
   readonly mergeExpiryMs: number;
+  /**
+   * A continuation (`TaskSpec.continues`) still `ready` this long past `createdAt` is
+   * `failed` `continue_expired`. Fixed, not per-machine: expiry runs in the leader and
+   * leadership moves. Must stay below the launch ledger's age, since past that the
+   * target daemon would refuse the continuation anyway, and failing earlier is never
+   * premature.
+   */
+  readonly continueExpiryMs: number;
+  /**
+   * A pinned task (`pin.deviceId` or `pin.account`, no `continues`) still `ready` this
+   * long past `createdAt` is `failed` `pin_expired`. Its target may be retired, re-keyed
+   * or signed out for good, and a `ready` task is never pruned; a machine back later
+   * would also start a prompt too stale to run unannounced. Fixed, as
+   * `continueExpiryMs` is.
+   */
+  readonly pinExpiryMs: number;
   /**
    * How often a pass also reads `sessions` from each connected machine holding
    * a running or `awaiting-merge` task: the backstop for an `ended` event that
@@ -132,9 +165,16 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   needsInputEscalateMs: 30 * 60_000,
   reservationTtlMs: 120_000,
   lostAfterMs: 15 * 60_000,
+  slotReleaseAfterMs: 2 * 60_000,
+  // docs/scheduler.md, Settled defaults 20.
+  idleReleaseAfterMs: 10 * 60_000,
   lostExpiryMs: 7 * 24 * 60 * 60_000,
   // Tied to the ledger: past its age no machine can report the merge (`mergeExpiryMs` doc).
   mergeExpiryMs: LAUNCH_LEDGER_MAX_AGE_MS,
+  // docs/scheduler.md, Settled defaults 19.
+  continueExpiryMs: 4 * 24 * 60 * 60_000,
+  // docs/scheduler.md, Settled defaults 21. The tombstone's life by choice, not by need.
+  pinExpiryMs: STORE_TOMBSTONE_MS,
   sweepIntervalMs: 120_000,
   endingTimeoutMs: 300_000,
   keepFinished: 50,

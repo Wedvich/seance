@@ -8,7 +8,16 @@ import {
   type Reason,
   type Task,
 } from "@seance/shared";
-import { describeDecision, isPlaced, pinLine, queuedBody, taskHeadline, waitingText } from "../src/decision-view.ts";
+import {
+  describeDecision,
+  isPlaced,
+  pinLine,
+  queuedBody,
+  startNowItem,
+  taskHeadline,
+  waitingText,
+} from "../src/decision-view.ts";
+import { machineAsleep } from "../src/asleep.ts";
 
 const NOW = 1_800_000_000_000;
 const NOW_S = NOW / 1000;
@@ -122,7 +131,7 @@ describe("describeDecision", () => {
   test("a candidate whose reasons this build could not read still reads as rejected", () => {
     const unknown: Decision = { at: NOW, chosen: null, candidates: [rejected("lxc", "LXC", [])] };
     expect(describeDecision(unknown, [], NOW, "would").others[0]?.why).toBe(
-      "rejected for a reason this app can't read — update it",
+      "rejected for a reason this app can't read; the leader may run another version",
     );
   });
 
@@ -211,8 +220,6 @@ test("every reason has its own words", () => {
     { code: "quota_over_line", window: "7d", projectedPct: 101, creditsSpent: true },
     { code: "cap_reached", inFlight: 8, max: 8 },
     { code: "cap_reached", inFlight: 2, max: 2, scope: "account" },
-    { code: "cap_reached", inFlight: 1, max: 1, scope: "batch" },
-    { code: "batch_order", index: 2 },
     { code: "paused", until: "resume", scope: "queue" },
     { code: "paused", until: "reset", scope: "account" },
   ];
@@ -222,7 +229,6 @@ test("every reason has its own words", () => {
   expect(texts).toContain("5h quota would reach 92%");
   expect(texts).toContain("7d quota would reach 101%, and its credits are spent");
   expect(texts).toContain("8 of 8 auto tasks already in flight");
-  expect(texts).toContain("its batch runs in order, and it waits for batch member #2, earlier in its order");
 });
 
 describe("taskHeadline", () => {
@@ -246,10 +252,61 @@ describe("taskHeadline", () => {
     );
   });
 
-  test("a lost task says its machine went away, and when", () => {
-    expect(taskHeadline(task({ state: "lost", assignment: at, absentSince: NOW - 20 * 60_000 }), machines, NOW)).toBe(
-      "Lost on Mac · default — its machine went away 20m ago.",
+  test("a lost task on a machine back says it hasn't answered yet; on one gone from the registry, when it went", () => {
+    const lost = task({ state: "lost", assignment: at, absentSince: NOW - 20 * 60_000 });
+    expect(taskHeadline(lost, machines, NOW)).toBe(
+      "Lost on Mac · default — its machine is back but hasn't answered for it yet.",
     );
+    expect(taskHeadline(lost, [], NOW)).toBe("Lost on mac · default — its machine went away 20m ago.");
+    expect(taskHeadline({ ...lost, absentSince: undefined }, [], NOW)).toBe(
+      "Lost on mac · default — its machine stopped answering.",
+    );
+  });
+
+  describe("on an asleep machine", () => {
+    const asleep = [{ ...machine("mac", "Mac", false), lastSeen: NOW - 14 * 60_000 }];
+
+    test("every live state says so, with when it was last heard from", () => {
+      expect(taskHeadline(task({ state: "needs-input", assignment: at }), asleep, NOW)).toBe(
+        "It's waiting for input on Mac · default — its machine went to sleep 14m ago.",
+      );
+      expect(taskHeadline(task({ state: "running", assignment: at }), asleep, NOW)).toBe(
+        "It's running on Mac · default — its machine went to sleep 14m ago.",
+      );
+      // Reservation only: the machine the scheduler is starting it on.
+      expect(taskHeadline(task({ state: "reserved", reservation: { ...at, expiresAt: NOW } }), asleep, NOW)).toBe(
+        "Starting on Mac · default — its machine went to sleep 14m ago.",
+      );
+      expect(taskHeadline(task({ state: "lost", assignment: at, absentSince: NOW - 2 * 60_000 }), asleep, NOW)).toBe(
+        "Asleep on Mac · default — its machine went to sleep 14m ago.",
+      );
+      expect(machineAsleep(task({ state: "lost", assignment: at }), asleep)).toBe(true);
+    });
+
+    test("the age is the newer of lastSeen and the status beat", () => {
+      const stale = [
+        {
+          ...machine("mac", "Mac", false),
+          lastSeen: NOW - 3 * 86_400_000,
+          status: { at: (NOW - 3 * 60_000) / 1000, scan: NOW, cpu: 1, mem: 1, disk: 1, free: 1 },
+        },
+      ];
+      expect(taskHeadline(task({ state: "running", assignment: at }), stale, NOW)).toBe(
+        "It's running on Mac · default — its machine went to sleep 3m ago.",
+      );
+    });
+
+    test("a connected or unlisted machine, or a state the leader settles alone, carries no clause", () => {
+      expect(taskHeadline(task({ state: "needs-input", assignment: at }), machines, NOW)).toBe(
+        "It's waiting for input on Mac · default.",
+      );
+      expect(taskHeadline(task({ state: "running", assignment: at }), [], NOW)).toBe("It's running on mac · default.");
+      expect(taskHeadline(task({ state: "awaiting-merge", assignment: at }), asleep, NOW)).toBe(
+        "Its session ended on Mac · default — waiting for the PR to merge.",
+      );
+      expect(machineAsleep(task({ state: "awaiting-merge", assignment: at }), asleep)).toBe(false);
+      expect(machineAsleep(task({ state: "running", assignment: at }), machines)).toBe(false);
+    });
   });
 
   test("a cancel that could not reach its machine, and a spawn never confirmed, say what may still run", () => {
@@ -266,7 +323,7 @@ describe("taskHeadline", () => {
   test("a failure the scheduler set says it won't run; only a machine's refusal didn't take there", () => {
     const failed = (code: string) => task({ state: "failed", failure: { code, message: "raw" } });
     // These have their own headlines: the task may have reached a machine, or did and ran.
-    const own = new Set(["dispatch_unconfirmed", "lost_expired", "merge_expired", "session_failed"]);
+    const own = new Set(["dispatch_unconfirmed", "lost_expired", "merge_expired", "session_failed", "session_closed"]);
     for (const code of TASK_FAILURE_CODES.filter((c) => !own.has(c))) {
       expect(taskHeadline(failed(code), machines, NOW)).toBe("It won't run.");
     }
@@ -278,6 +335,55 @@ describe("taskHeadline", () => {
     );
     expect(taskHeadline({ ...failed("session_failed"), assignment: at }, machines, NOW)).toBe(
       "Its session exited with an error on Mac · default, with no PR.",
+    );
+    expect(taskHeadline({ ...failed("session_closed"), assignment: at }, machines, NOW)).toBe(
+      "Its window was closed on Mac · default before its session ended, with no PR.",
+    );
+    expect(taskHeadline(failed("session_closed"), machines, NOW)).toBe(
+      "Its window was closed before its session ended, with no PR.",
+    );
+    const closedUnderReported = failed("session_closed");
+    expect(
+      taskHeadline({ ...closedUnderReported, spec: { ...closedUnderReported.spec, until: "reported" } }, machines, NOW),
+    ).toBe("Its window was closed before its session ended, with no done report.");
+    const exited = (exit: number) =>
+      task({ state: "failed", assignment: at, failure: { code: "session_failed", message: "raw", exit } });
+    expect(taskHeadline(exited(137), machines, NOW)).toBe(
+      "Its session was killed (SIGKILL) on Mac · default, possibly out of memory, with no PR.",
+    );
+    expect(taskHeadline(exited(143), machines, NOW)).toBe(
+      "Its session ended on SIGTERM (status 143) on Mac · default, with no PR.",
+    );
+    // No assignment or reservation: no place to name.
+    const unplaced = (exit: number) =>
+      task({ state: "failed", failure: { code: "session_failed", message: "raw", exit } });
+    expect(taskHeadline(unplaced(137), machines, NOW)).toBe(
+      "Its session was killed (SIGKILL), possibly out of memory, with no PR.",
+    );
+    expect(taskHeadline(unplaced(1), machines, NOW)).toBe("Its session exited with status 1, with no PR.");
+    // The machine's kernel said whether an OOM kill landed in its cgroup as it died.
+    const judged = (oomKill: boolean) =>
+      task({
+        state: "failed",
+        assignment: at,
+        failure: { code: "session_failed", message: "raw", exit: 137, oomKill },
+      });
+    expect(taskHeadline(judged(true), machines, NOW)).toBe(
+      "Its session was killed (SIGKILL) on Mac · default, out of memory (the kernel's OOM killer fired as it died), with no PR.",
+    );
+    expect(taskHeadline(judged(false), machines, NOW)).toBe(
+      "Its session was killed (SIGKILL) on Mac · default, not by the kernel's OOM killer, with no PR.",
+    );
+    // Under until reported it was the done report that never came.
+    expect(
+      taskHeadline(
+        { ...exited(1), spec: { repo: "github.com/acme/app", mode: "worktree", until: "reported" } },
+        machines,
+        NOW,
+      ),
+    ).toBe("Its session exited with status 1 on Mac · default, with no done report.");
+    expect(taskHeadline(exited(1), machines, NOW)).toBe(
+      "Its session exited with status 1 on Mac · default, with no PR.",
     );
     expect(taskHeadline({ ...failed("repo_not_found"), assignment: at }, machines, NOW)).toBe(
       "It didn't take on Mac · default.",
@@ -401,5 +507,49 @@ describe("waitingText and pinLine", () => {
     expect(pinLine(pinned, machines, { "acct-1": "Work" })).toBe("Pinned to Mac · Work");
     const machineOnly = { ...plain, spec: { ...plain.spec, pin: { deviceId: "mac" } } };
     expect(pinLine(machineOnly, machines, {})).toBe("Pinned to Mac");
+  });
+});
+
+describe("startNowItem", () => {
+  const GLOBAL: Reason = { code: "cap_reached", inFlight: 8, max: 8 };
+  const ACCOUNT: Reason = { code: "cap_reached", inFlight: 2, max: 2, scope: "account" };
+  const ok = (chosen: Decision["chosen"], candidates: readonly Candidate[]) =>
+    ({ kind: "ok", repo: "app", decision: { at: NOW, chosen, candidates } }) as const;
+
+  test("names the machine and account the preview chose", () => {
+    const preview = ok({ deviceId: "mac", exclave: "default", clone: "app" }, [scored("mac", "Mac", 1)]);
+    expect(startNowItem(preview)).toEqual({ sub: "Skip the queue — spawn on Mac · default", enabled: true });
+  });
+
+  test("is disabled when the preview turns every candidate down for more than the caps", () => {
+    const preview = ok(null, [
+      rejected("lxc", "LXC", [{ code: "offline" }]),
+      rejected("mac", "Mac", [GLOBAL, { code: "offline" }]),
+    ]);
+    expect(startNowItem(preview)).toEqual({ sub: "No machine can take it right now", enabled: false });
+    expect(startNowItem(ok(null, []))).toEqual({ sub: "No machine can take it right now", enabled: false });
+  });
+
+  test("stays enabled where only the caps hold it, which is what run-now lifts", () => {
+    const one = ok(null, [rejected("mac", "Mac", [GLOBAL, ACCOUNT]), rejected("lxc", "LXC", [{ code: "offline" }])]);
+    expect(startNowItem(one)).toEqual({ sub: "Skip the queue — spawn on Mac · work", enabled: true });
+    const two = ok(null, [rejected("mac", "Mac", [GLOBAL]), rejected("wsl", "WSL", [ACCOUNT])]);
+    expect(startNowItem(two)).toEqual({ sub: "Skip the queue — past the concurrency caps", enabled: true });
+  });
+
+  test("a chosen target is not named while a cap-held candidate, unscored, may win run-now; nor are the caps", () => {
+    const preview = ok({ deviceId: "mac", exclave: "default", clone: "app" }, [
+      scored("mac", "Mac", 1),
+      rejected("lxc", "LXC", [GLOBAL]),
+    ]);
+    // Mac would take it with the caps standing: "past the caps" would misdescribe that outcome.
+    expect(startNowItem(preview)).toEqual({ sub: "Skip the queue", enabled: true });
+  });
+
+  test("with no answer to go by it offers a plain skip", () => {
+    const plain = { sub: "Skip the queue", enabled: true };
+    expect(startNowItem(null)).toEqual(plain);
+    expect(startNowItem({ kind: "loading", repo: "app" })).toEqual(plain);
+    expect(startNowItem({ kind: "failed", repo: "app", message: "No leader." })).toEqual(plain);
   });
 });

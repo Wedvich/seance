@@ -71,6 +71,7 @@ import {
   PIN_SENTINEL,
   ROUTING_ID_MAX_LENGTH,
   SESSIONS_MAX_PROGRESS,
+  SIGKILL_STATUS,
   STORE_CREATE_MAX_CT_LENGTH,
   STORE_MAX_CT_LENGTH,
   STORE_PREFIXES,
@@ -423,6 +424,8 @@ describe("parseTaskRequest", () => {
     for (const bad of [
       { ...minimal, repo: "" },
       { ...minimal, mode: "elsewhere" },
+      // A route preview has no target to continue at: only a stored spec carries the mode.
+      { ...minimal, mode: "continue" },
       { ...minimal, prompt: 1 },
       { ...minimal, plan: "yes" },
       { ...minimal, model: "" },
@@ -455,7 +458,7 @@ describe("parseTaskSpec", () => {
     avoid: ["dev-b", "dev-c"],
     lineage: { deviceId: "dev-a", exclave: "default" },
     base: { deviceId: "dev-b", exclave: "work" },
-    batch: { id: "batch-1", index: 2, strategy: { mode: "parallel", max: 3 } },
+    batch: { id: "batch-1", index: 2 },
     deps: [
       { task: "t-1", after: "opened" },
       { task: "t-2", after: "merged" },
@@ -467,11 +470,24 @@ describe("parseTaskSpec", () => {
   test("a whole spec round-trips, and fields it does not know stay behind", () => {
     expect(parseTaskSpec(full)).toEqual(full);
     expect(parseTaskSpec({ ...request, taskId: "x", deviceId: "y" })).toEqual(request);
-    for (const strategy of [{ mode: "sequential" }, { mode: "auto" }] as const) {
-      expect(parseTaskSpec({ ...request, batch: { id: "b", index: 0, strategy } })?.batch?.strategy).toEqual(strategy);
-    }
-    const last: BatchMembership = { id: "b", index: TASK_SPEC_LIMITS.batchIndex, strategy: { mode: "sequential" } };
+    const last: BatchMembership = { id: "b", index: TASK_SPEC_LIMITS.batchIndex };
     expect(parseTaskSpec({ ...full, batch: last })?.batch).toEqual(last);
+  });
+
+  test("a batch's stored strategy, whatever an older writer put there, is read and dropped", () => {
+    for (const strategy of [
+      { mode: "auto" },
+      { mode: "sequential" },
+      { mode: "parallel", max: 3 },
+      { mode: "parallel", max: 0 },
+      { mode: "round-robin" },
+      "sequential",
+      undefined,
+    ]) {
+      const batch = parseTaskSpec({ ...request, batch: { id: "b", index: 1, strategy } })?.batch;
+      expect(batch).toEqual({ id: "b", index: 1 });
+      expect(batch).not.toHaveProperty("strategy");
+    }
   });
 
   test("a malformed optional field nulls the spec — a task must not run without the pin or deps it was given", () => {
@@ -486,9 +502,6 @@ describe("parseTaskSpec", () => {
       { ...full, avoid: Array.from({ length: TASK_SPEC_LIMITS.avoid + 1 }, (_, i) => `dev-${i}`) },
       { ...full, lineage: { deviceId: "dev-a" } },
       { ...full, batch: { ...full.batch, id: "has space" } },
-      { ...full, batch: { ...full.batch, strategy: { mode: "parallel", max: 0 } } },
-      { ...full, batch: { ...full.batch, strategy: { mode: "parallel", max: TASK_SPEC_LIMITS.parallel + 1 } } },
-      { ...full, batch: { ...full.batch, strategy: { mode: "round-robin" } } },
       { ...full, batch: { ...full.batch, index: TASK_SPEC_LIMITS.batchIndex + 1 } },
       { ...full, batch: { ...full.batch, index: -1 } },
       { ...full, deps: [{ task: "t-1", after: "pushed" }] },
@@ -503,6 +516,44 @@ describe("parseTaskSpec", () => {
     ]) {
       expect(parseTaskSpec(bad)).toBeNull();
     }
+  });
+
+  describe("a continuation", () => {
+    const at = { deviceId: "dev-a", exclave: "default", clone: "app" };
+    const spec: TaskSpec = { ...request, mode: "continue", continues: { task: "t-old", at } };
+
+    test("round-trips: the mode and the field travel together", () => {
+      expect(parseTaskSpec(spec)).toEqual(spec);
+      expect(parseTaskSpec({ ...spec, continues: { task: "t-old", at, extra: 1 } })).toEqual(spec);
+    });
+
+    test("the field without the mode, or the mode without the field, is no spec", () => {
+      expect(parseTaskSpec({ ...spec, mode: "worktree" })).toBeNull();
+      expect(parseTaskSpec({ ...spec, mode: "here" })).toBeNull();
+      expect(parseTaskSpec({ ...request, mode: "continue" })).toBeNull();
+    });
+
+    test("a bad task id or target nulls the spec", () => {
+      for (const continues of [
+        { task: "has space", at },
+        { task: "", at },
+        { task: 7, at },
+        { task: "t-old" },
+        { task: "t-old", at: { ...at, exclave: "" } },
+        { task: "t-old", at: { ...at, clone: "c".repeat(TARGET_LIMITS.clone + 1) } },
+        { task: "t-old", at: { ...at, deviceId: "has space" } },
+        { task: "t-old", at: { deviceId: "dev-a", exclave: "default" } },
+        "t-old",
+        null,
+      ]) {
+        expect(parseTaskSpec({ ...spec, continues })).toBeNull();
+      }
+    });
+
+    test("a lineage beside it is still read as lineage", () => {
+      const lineage = { deviceId: "dev-b", exclave: "work" };
+      expect(parseTaskSpec({ ...spec, lineage })).toEqual({ ...spec, lineage });
+    });
   });
 
   test("an exclave in a pin is read by no one: a legacy exclave pin, or the sentinel, parses without it", () => {
@@ -645,9 +696,10 @@ describe("tasks and their records", () => {
     const reason: Reason = { code: "cap_reached", inFlight: 2, max: 2, scope: "account" };
     const decision = (r: unknown) => ({ at: 1, chosen: null, candidates: [{ ...candidate, rejected: [r] }] });
     expect(parseDecision(decision(reason))?.candidates[0]?.rejected).toEqual([reason]);
-    const batch: Reason = { ...reason, scope: "batch" };
-    expect(parseDecision(decision(batch))?.candidates[0]?.rejected).toEqual([batch]);
-    expect(parseDecision(decision({ ...reason, scope: "machine" }))?.candidates[0]?.rejected).toEqual([]);
+    // An older leader's batch scope reads as unknown since batches stopped scheduling.
+    for (const scope of ["batch", "machine"]) {
+      expect(parseDecision(decision({ ...reason, scope }))?.candidates[0]?.rejected).toEqual([]);
+    }
     const legacy: Reason = { code: "cap_reached", inFlight: 8, max: 8 };
     expect(parseDecision(decision(legacy))?.candidates[0]?.rejected).toEqual([legacy]);
   });
@@ -662,14 +714,14 @@ describe("tasks and their records", () => {
     expect(parseDecision(decision({ ...over, creditsSpent: false }))?.candidates[0]?.rejected).toEqual([]);
   });
 
-  test("a batch order hold names the member it waits on; an index past the batch bound drops the reason", () => {
+  test("an older leader's batch order hold drops the reason, never the candidate or the decision", () => {
     const candidate = { deviceId: "d", machine: "mac", exclave: "default", rejected: [] };
-    const decision = (r: unknown) => ({ at: 1, chosen: null, candidates: [{ ...candidate, rejected: [r] }] });
-    const order: Reason = { code: "batch_order", index: 3 };
-    expect(parseDecision(decision(order))?.candidates[0]?.rejected).toEqual([order]);
-    for (const index of [TASK_SPEC_LIMITS.batchIndex + 1, -1, 1.5, "3", undefined]) {
-      expect(parseDecision(decision({ code: "batch_order", index }))?.candidates[0]?.rejected).toEqual([]);
-    }
+    const decision = {
+      at: 1,
+      chosen: null,
+      candidates: [{ ...candidate, rejected: [{ code: "batch_order", index: 3 }] }],
+    };
+    expect(parseDecision(decision)?.candidates).toEqual([{ ...candidate, rejected: [] }]);
   });
 
   test("a model not included names the gated model; an empty or oversized one drops the reason", () => {
@@ -802,6 +854,20 @@ describe("scheduler ops", () => {
     expect(parseQueueRequest([])).toBeNull();
   });
 
+  test("queue lists idle-released tasks, each one alone: a bad entry shows its task running, too many cost the reply", () => {
+    const idle = { taskId: "t-1", since: 4 };
+    expect(parseQueueReply({ tasks: [], at: 5, idle: [idle, { taskId: "t:2", since: 4 }, { taskId: "t-3" }] })).toEqual(
+      {
+        tasks: [],
+        at: 5,
+        idle: [idle],
+      },
+    );
+    expect(parseQueueReply({ tasks: [], at: 5, idle: [] })).toEqual({ tasks: [], at: 5 });
+    expect(parseQueueReply({ tasks: [], at: 5, idle: {} })).toBeNull();
+    expect(parseQueueReply({ tasks: [], at: 5, idle: Array.from({ length: MAX_TASKS + 1 }, () => idle) })).toBeNull();
+  });
+
   test("queue lists unreadable records, each one alone: a bad entry costs its own discard, too many the reply", () => {
     const junk = { taskId: "t-9", version: 3, reason: "unopenable" };
     const later = { taskId: "t-8", version: 1, reason: "sealed_elsewhere" };
@@ -930,7 +996,7 @@ describe("store", () => {
       avoid: Array.from({ length: TASK_SPEC_LIMITS.avoid }, (_, i) => `${i}`.padEnd(ROUTING_ID_MAX_LENGTH, "A")),
       lineage: placement,
       base: placement,
-      batch: { id: crypto.randomUUID(), index: 15, strategy: { mode: "parallel", max: TASK_SPEC_LIMITS.parallel } },
+      batch: { id: crypto.randomUUID(), index: 15 },
       deps: Array.from({ length: TASK_SPEC_LIMITS.deps }, () => ({
         task: crypto.randomUUID(),
         after: "merged" as const,
@@ -1117,6 +1183,33 @@ describe("what a leader writes into a task is bounded", () => {
     expect(parseTask({ ...task, state: "failed", failure: { code: "", message: "m" } })).toBeNull();
   });
 
+  test("a failure's exit status is kept in range and dropped outside it, never costing the failure or the task", () => {
+    const failed = (failure: object) => parseTask({ ...task, state: "failed", failure })?.failure;
+    const base = { code: "session_failed", message: "m" };
+    expect(failed({ ...base, exit: 137 })).toEqual({ ...base, exit: 137 });
+    expect(failed({ ...base, exit: EXIT_STATUS_MAX })).toEqual({ ...base, exit: EXIT_STATUS_MAX });
+    // An older leader's record: no field, read as before.
+    expect(failed(base)).toEqual(base);
+    for (const exit of [0, EXIT_STATUS_MAX + 1, 1.5, -1, "137", null]) expect(failed({ ...base, exit })).toEqual(base);
+    // Only a session_failed has one to word.
+    expect(failed({ code: "merge_expired", message: "m", exit: 137 })).toEqual({ code: "merge_expired", message: "m" });
+  });
+
+  test("a failure's OOM verdict is kept only beside a SIGKILL status, and a bad one costs only the field", () => {
+    const failed = (failure: object) => parseTask({ ...task, state: "failed", failure })?.failure;
+    const killed = { code: "session_failed", message: "m", exit: SIGKILL_STATUS };
+    expect(failed({ ...killed, oomKill: true })).toEqual({ ...killed, oomKill: true });
+    expect(failed({ ...killed, oomKill: false })).toEqual({ ...killed, oomKill: false });
+    for (const oomKill of ["true", 1, null]) expect(failed({ ...killed, oomKill })).toEqual(killed);
+    expect(failed({ ...killed, exit: 1, oomKill: true })).toEqual({ ...killed, exit: 1 });
+    // An out-of-range status is dropped, and the verdict with it.
+    expect(failed({ ...killed, exit: "137", oomKill: true })).toEqual({ code: "session_failed", message: "m" });
+    expect(failed({ code: "merge_expired", message: "m", exit: 137, oomKill: true })).toEqual({
+      code: "merge_expired",
+      message: "m",
+    });
+  });
+
   test("a decision lists at most DECISION_MAX_CANDIDATES, each with bounded reasons, and says when it was cut", () => {
     const candidate = { deviceId: "d-1", machine: "mac", exclave: "default", rejected: [{ code: "offline" }] };
     const decision = (n: number, extra: object = {}) => ({
@@ -1168,6 +1261,16 @@ describe("bindTaskRecord", () => {
     const ahead = { version: 1, task: { ...task, createdAt: now + REPLAY_WINDOW_MS + 1 } };
     expect(bindTaskRecord(ahead, { key, version: 1 }, now)).toBe("created_ahead");
   });
+
+  test("a task that continues itself is never kept, so it never dispatches; one that continues another is", () => {
+    const at = { deviceId: "dev-a", exclave: "default", clone: "app" };
+    const continuing = (of: string): TaskRecord => ({
+      version: 1,
+      task: { ...task, spec: { repo: "github.com/acme/app", mode: "continue", continues: { task: of, at } } },
+    });
+    expect(bindTaskRecord(continuing("t-1"), { key, version: 1 }, now)).toBe("malformed");
+    expect(bindTaskRecord(continuing("t-0"), { key, version: 1 }, now)).toEqual(continuing("t-0"));
+  });
 });
 
 describe("parseTaskProgressList", () => {
@@ -1195,12 +1298,32 @@ describe("parseTaskProgressList", () => {
     expect(parseTaskProgressList([reported])).toEqual([reported]);
   });
 
+  test("an OOM verdict rides only with a SIGKILL status, and a bad one costs the field, never the entry", () => {
+    const killed = { taskId: "t-5", exit: SIGKILL_STATUS, at: 5 };
+    expect(parseTaskProgressList([{ ...killed, oomKill: true }])).toEqual([{ ...killed, oomKill: true }]);
+    expect(parseTaskProgressList([{ ...killed, oomKill: false }])).toEqual([{ ...killed, oomKill: false }]);
+    for (const oomKill of ["yes", 1, null]) {
+      expect(parseTaskProgressList([entry, { ...killed, oomKill }])).toEqual([entry, killed]);
+    }
+    expect(parseTaskProgressList([{ ...killed, exit: 1, oomKill: true }])).toEqual([{ ...killed, exit: 1 }]);
+    expect(parseTaskProgressList([{ taskId: "t-5", oomKill: true, at: 5 }])).toEqual([{ taskId: "t-5", at: 5 }]);
+  });
+
+  test("vanished is kept when true, and an entry without it parses", () => {
+    expect(parseTaskProgressList([{ taskId: "t-6", vanished: true, at: 6 }])).toEqual([
+      { taskId: "t-6", vanished: true, at: 6 },
+    ]);
+    expect(parseTaskProgressList([{ taskId: "t-6", at: 6 }])).toEqual([{ taskId: "t-6", at: 6 }]);
+  });
+
   test("strict: one unreadable entry, or too many, nulls the list — a dropped one would read as no PR", () => {
     for (const bad of [
       { ...entry, prUrl: "http://github.com/acme/app/pull/7" },
       { ...entry, merged: false },
       { ...entry, reported: false },
       { ...entry, reported: "yes" },
+      { ...entry, vanished: false },
+      { ...entry, vanished: "yes" },
       { ...entry, pushed: "yes" },
       { ...entry, branch: "" },
       { ...entry, taskId: "t:1" },
@@ -1360,6 +1483,8 @@ describe("M4 shapes", () => {
       { code: "auth_expired" },
       { code: "base_unpushed" },
       { code: "skill_absent", skill: "ship" },
+      { code: "continue_elsewhere" },
+      { code: "continue_unsupported" },
     ];
     for (const reason of reasons) expect(parseDecision(decide(reason))?.candidates[0]?.rejected).toEqual([reason]);
     for (const skill of [undefined, "", "a/b"]) {

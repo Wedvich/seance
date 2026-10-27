@@ -4,6 +4,7 @@ import {
   knownAccounts,
   type KnownAccount,
   effectivePct,
+  lastHeardAt,
   liveStatus,
   METRIC_NAMES,
   MIN_FREE_MIB,
@@ -219,7 +220,7 @@ function machineCard(
   ].filter((entry): entry is Gauge => entry !== null);
   const meta = machine.connected
     ? `${machine.platform}${status === undefined ? "" : ` · updated ${formatSeen(status.at * 1000, now)}`}`
-    : `asleep · last seen ${formatSeen(machine.lastSeen, now)}`;
+    : `asleep · last seen ${formatSeen(lastHeardAt(machine), now)}`;
 
   return {
     deviceId: machine.deviceId,

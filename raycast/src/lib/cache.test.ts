@@ -52,6 +52,13 @@ describe("registry cache", () => {
     expect(await readRegistry(store)).toEqual({ machines: [machine], at: 42 });
   });
 
+  test("stores a slept machine's last status beat as lastSeen, and no status", async () => {
+    const slept: PickerMachine = { ...machine, connected: false, status: { at: 90, scan: 1_000 } };
+    await writeRegistry(store, [slept], 1);
+    expect(store.items.get(REGISTRY_KEY)).not.toContain("status");
+    expect((await readRegistry(store))?.machines[0]?.lastSeen).toBe(90_000);
+  });
+
   test("drops fields the picker never renders, so the stored shape stays pinned", async () => {
     // `Machine` from the relay client carries `platform`; the projection must not.
     const wider: PickerMachine & { readonly platform: string } = { ...machine, platform: "darwin" };

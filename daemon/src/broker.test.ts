@@ -2,10 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { CONNECT_TIMEOUT_MS, LazyRelay } from "./app-relay.ts";
 import {
   OP_TIMEOUT_MS,
+  CAPABILITIES,
   RequestFailure,
   STORE_LIST_TIMEOUT_MS,
   STORE_TIMEOUT_MS,
   type AccountRecord,
+  type Capability,
   type RequestOp,
   type SchedulerAvailability,
   type Task,
@@ -43,6 +45,8 @@ function rig(
     readonly now?: () => number;
     readonly scheduler?: SchedulerAvailability;
     readonly accounts?: readonly AccountRecord[];
+    /** What this box's registry entry advertises: the leader's, in a test that makes it the leader. */
+    readonly capabilities?: readonly Capability[];
   } = {},
 ): Rig {
   const fakes: FakeRelay[] = [];
@@ -50,7 +54,12 @@ function rig(
   const relay = new LazyRelay({
     create: async () => {
       await opts.dial;
-      const fake = fakeRelay([machine({ deviceId: SELF, name: "This Box" }), REMOTE], respond, opts.status);
+      const self = machine({
+        deviceId: SELF,
+        name: "This Box",
+        ...(opts.capabilities === undefined ? {} : { capabilities: opts.capabilities }),
+      });
+      const fake = fakeRelay([self, REMOTE], respond, opts.status);
       if (opts.scheduler !== undefined) fake.setState({ scheduler: opts.scheduler });
       if (opts.accounts !== undefined) fake.accounts = opts.accounts;
       fakes.push(fake);
@@ -83,6 +92,10 @@ function request(extra: Record<string, unknown> = {}): Record<string, unknown> {
 
 const TASK_ID = "11111111-2222-4333-8444-555555555555";
 const LEADING: SchedulerAvailability = { kind: "ready", deviceId: SELF, term: 4 };
+const CONTINUES = {
+  task: "22222222-3333-4444-8555-666666666666",
+  at: { deviceId: "device-2", exclave: "default", clone: "seance" },
+};
 
 function frame(extra: Record<string, unknown> = {}): Record<string, unknown> {
   return { v: 1, kind: "broker", id: "s1", action: "scheduler", ...extra };
@@ -136,6 +149,14 @@ describe("parseBrokerRequest refuses everything off the allowlist", () => {
     [
       "a spawn with a non-boolean plan",
       request({ remoteOp: "spawn", payload: { repo: "r", mode: "here", plan: "yes" } }),
+      "invalid_request",
+    ],
+    [
+      "a remote continue spawn, which only the scheduler makes",
+      request({
+        remoteOp: "spawn",
+        payload: { repo: "r", mode: "continue", taskId: TASK_ID, continues: "t-0", client: "scheduler" },
+      }),
       "invalid_request",
     ],
     ["a malformed despawn", request({ remoteOp: "despawn", payload: { id: 12 } }), "invalid_request"],
@@ -199,6 +220,8 @@ describe("parseBrokerRequest on scheduler frames", () => {
     ["an enqueue with no spec", frame({ schedulerOp: "enqueue", taskId: TASK_ID }), "invalid_request"],
     ["an unparseable spec", enqueue({ mode: "sideways" }), "invalid_request"],
     ["a spec over the prompt bound", enqueue({ prompt: "x".repeat(100_000) }), "invalid_request"],
+    ["a continue spec without continues", enqueue({ mode: "continue" }), "invalid_request"],
+    ["continues on a worktree spec", enqueue({ continues: CONTINUES }), "invalid_request"],
     ["a spec with lineage", enqueue({ lineage: { deviceId: "device-2", exclave: "default" } }), "invalid_request"],
     ["a spec with base", enqueue({ base: { deviceId: "device-2", exclave: "default" } }), "invalid_request"],
     ["the PWA as client", enqueue({ client: "pwa" }), "invalid_request"],
@@ -214,6 +237,20 @@ describe("parseBrokerRequest on scheduler frames", () => {
 
   test("the cli is a client a keyless peer may claim", () => {
     expect(parsedRequest(enqueue({ client: "cli" }))).toMatchObject({ spec: { client: "cli" } });
+  });
+
+  test("a continue spec parses with its continues, and lineage beside it is still refused", () => {
+    const spec = { mode: "continue", continues: CONTINUES };
+    expect(parsedRequest(enqueue(spec))["spec"]).toEqual({
+      repo: "github.com/m/seance",
+      mode: "continue",
+      prompt: "secret plans",
+      client: "mcp",
+      continues: CONTINUES,
+    });
+    expect(refusedCode(enqueue({ ...spec, lineage: { deviceId: "device-2", exclave: "default" } }))).toBe(
+      "invalid_request",
+    );
   });
 
   test("what is sealed is the parsed spec: fields it does not know never survive, pins keep only what they carry", () => {
@@ -267,6 +304,63 @@ describe("the broker's scheduler actions", () => {
     );
     expect(lines.join("\n")).not.toContain("secret plans");
     broker.stop();
+  });
+
+  describe("a continue enqueue", () => {
+    const spec = { mode: "continue", continues: CONTINUES };
+
+    test("is sealed with its continues and audited with the id it continues, once the leader advertises the capability", async () => {
+      const { broker, fakes, lines } = rig(undefined, {
+        now: () => 5_000,
+        scheduler: LEADING,
+        capabilities: [CAPABILITIES.continueTask],
+      });
+      const reply = await broker.handle(enqueue({ ...spec, client: "cli" }));
+      expect(reply).toMatchObject({ ok: true, data: { ok: true } });
+      expect(fakes[0]?.creates).toEqual([
+        expect.objectContaining({
+          id: TASK_ID,
+          spec: expect.objectContaining({ mode: "continue", continues: CONTINUES }),
+        }),
+      ]);
+      expect(lines).toContain(
+        `audit enqueue origin=local-broker claimed_client=cli task="${TASK_ID}" continues="${CONTINUES.task}" createdAt=5000 queued`,
+      );
+      expect(lines).toContainEqual(
+        expect.stringMatching(
+          new RegExp(
+            `^audit broker origin=local-broker action=scheduler op="enqueue" task="${TASK_ID}" claimed_client="cli" continues="${CONTINUES.task}" id=`,
+            "u",
+          ),
+        ),
+      );
+      broker.stop();
+    });
+
+    test("is refused, nothing stored, when the leader lacks the capability, is unverified, or there is none", async () => {
+      const cases = [
+        rig(undefined, { scheduler: LEADING }),
+        rig(undefined, {
+          scheduler: { kind: "unverified", deviceId: SELF, term: 4 },
+          capabilities: [CAPABILITIES.continueTask],
+        }),
+        rig(),
+      ];
+      for (const { broker, fakes } of cases) {
+        // oxlint-disable-next-line no-await-in-loop -- sequential: each is its own broker reply
+        expect(failed(await broker.handle(enqueue(spec)))).toMatchObject({ code: "invalid_request" });
+        expect(fakes[0]?.creates ?? []).toEqual([]);
+        broker.stop();
+      }
+    });
+
+    test("an ordinary enqueue needs no capability and its audit line has no continues", async () => {
+      const { broker, fakes, lines } = rig(undefined, { now: () => 5_000, scheduler: LEADING });
+      await broker.handle(enqueue());
+      expect(fakes[0]?.creates).toHaveLength(1);
+      expect(lines.join("\n")).not.toContain("continues=");
+      broker.stop();
+    });
   });
 
   test("a peer's createdAt is ignored, not honoured", async () => {

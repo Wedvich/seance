@@ -628,6 +628,87 @@
   }
 }
 
+/* Queue split when the leader answers run-now: two sibling buttons in one pill,
+   the face and a chevron opening the footer menu. Each paints its own half (no
+   overflow clip, which would cut their focus rings) and tints alone on press;
+   the press-down moves to the pill. */
+.split {
+  display: flex;
+  align-items: stretch;
+  border-radius: 12px;
+  background: var(--acc);
+  transition: transform 0.12s ease;
+}
+
+.split:has(:enabled:active) {
+  transform: scale(0.98);
+}
+
+.split .primary {
+  flex: 1;
+  min-width: 0;
+  border-radius: 12px 0 0 12px;
+}
+
+.split .primary:enabled:active {
+  background: color-mix(in srgb, var(--acc-fg) 14%, var(--acc));
+  transform: none;
+}
+
+/* A ring drawn over the neighbouring half rather than under it. */
+.split > :focus-visible {
+  position: relative;
+  z-index: 1;
+}
+
+.split-divider {
+  width: 1px;
+  margin: 9px 0;
+  background: color-mix(in srgb, var(--acc-fg) 28%, transparent);
+}
+
+.split-more {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 54px;
+  padding: 0;
+  border: 0;
+  border-radius: 0 12px 12px 0;
+  background: var(--acc);
+  color: var(--acc-fg);
+}
+
+.split-more:enabled:active,
+.split-more[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--acc-fg) 14%, var(--acc));
+}
+
+/* Points the way the menu opens; base.css's reduced-motion rule makes the turn instant. */
+.split-chevron {
+  transition: transform 0.14s ease;
+}
+
+.split-more[aria-expanded="true"] .split-chevron {
+  transform: rotate(180deg);
+}
+
+/* Disabled and busy: both halves the lone button's disabled tone. */
+.split:has(.primary:disabled),
+.split-more:disabled {
+  background: var(--sur2);
+  color: var(--fg2);
+  cursor: default;
+}
+
+.split:has(.primary:disabled) .split-divider {
+  background: var(--line);
+}
+
+.split-busy .split-more {
+  opacity: 0.5;
+}
+
 .quiet {
   display: block;
   width: 100%;
@@ -1328,6 +1409,11 @@
   gap: 10px;
 }
 
+/* A dot straight in the head (queue rows) centres on the first title line, as `.fleet-name-row` does. */
+.fleet-card-head > .dot {
+  margin-top: calc((var(--fleet-line) - 7px) / 2);
+}
+
 .fleet-card-title {
   flex: 1;
   min-width: 0;
@@ -1383,10 +1469,7 @@
   transition: transform 150ms ease;
 }
 
-.disclosure[aria-expanded="true"] > .disclosure-chevron {
-  transform: rotate(90deg);
-}
-
+.disclosure[aria-expanded="true"] > .disclosure-chevron,
 .fleet-note {
   margin: 0;
   font-size: 13px;
@@ -2092,6 +2175,34 @@
   gap: var(--gap);
 }
 
+/* The heading's own type, made tappable; padding grows the target, negative margins take it back (the column's gutter absorbs the sideways give-back). */
+.queue-section-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  padding: 8px 4px;
+  margin: -8px -4px;
+}
+
+@media (hover: hover) {
+  .queue-section-toggle:hover {
+    color: var(--acc);
+  }
+}
+
+.queue-section-toggle:focus-visible {
+  color: var(--acc);
+}
+
+.queue-section-toggle[aria-expanded="true"] > .disclosure-chevron {
+  transform: rotate(90deg);
+}
+
 .fleet-card-body {
   margin: 0;
   font-size: 13px;
@@ -2105,7 +2216,7 @@
   gap: var(--gap);
 }
 
-/* The shared quiet button is full-width; in a row of two it sizes to its label. */
+/* The shared quiet button is full-width; beside the chip it sizes to its label. */
 .queue-actions .quiet {
   width: auto;
   padding: 8px 12px;
@@ -2114,6 +2225,27 @@
 
 .queue-actions .quiet:disabled {
   opacity: 0.5;
+}
+
+/* The card's ⋯: every action it allows (menu.tsx). Pulled into the card's padding so the dots sit
+   flush with its corner while the target stays 36px. */
+.queue-more {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  margin: -8px -8px 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--fg2);
+  cursor: pointer;
+}
+
+.queue-more[aria-expanded="true"] {
+  background: var(--sur2);
 }
 
 /* A task title that opens its session on claude.ai: still the title, so the underline is faint
@@ -2133,8 +2265,8 @@
 /* The PR chip is a quiet outline, a rounded rectangle rather than the badge's pill: at this
    size it reads as a control, and its colour belongs to the icons alone. Sized near the buttons
    beside it (~34px tall); the pseudo-element takes the tap target to 44px without growing
-   the pill. Leads the actions row; the auto margin keeps the buttons right, and a finished
-   task's row holds the chip alone. */
+   the pill. Leads the actions row; the auto margin keeps the inline action right, and a row
+   with none holds the chip alone. */
 .queue-pr {
   position: relative;
   display: inline-flex;
@@ -2226,7 +2358,7 @@
   color: var(--fg2);
 }
 
-/* ---- phone header menu: queue, machines, settings ---- */
+/* ---- header menu trigger ---- */
 
 /* An escalated task, on the closed menu's face. */
 .menu-badge {
@@ -2236,12 +2368,16 @@
   box-shadow: 0 0 0 2px var(--sur3);
 }
 
-/* Top-layer popover; `top`/`right` are set under the pill on open. */
-.header-menu {
+/* ---- menu popover (menu.tsx): header menu, and any short command menu ---- */
+
+/* Top-layer popover; `top` or `bottom`, and `right`, are set from the anchor on
+   open. base.css's reduced-motion rule clamps the transitions to an instant. */
+.menu {
+  --menu-slide: -4px;
   position: fixed;
   inset: auto;
   margin: 0;
-  min-width: 196px;
+  min-width: 236px;
   padding: 6px;
   border: 1px solid var(--line);
   border-radius: 16px;
@@ -2249,7 +2385,7 @@
   color: var(--fg);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.3);
   opacity: 0;
-  transform: translateY(-4px) scale(0.98);
+  transform: translateY(var(--menu-slide)) scale(0.98);
   transform-origin: top right;
   transition:
     opacity 0.14s ease,
@@ -2258,21 +2394,32 @@
     display 0.14s allow-discrete;
 }
 
-.header-menu:popover-open {
+.menu[data-direction="up"] {
+  --menu-slide: 4px;
+  transform-origin: bottom right;
+}
+
+/* Fading out still takes taps otherwise; a double tap would re-run an item. */
+.menu:not(:popover-open) {
+  pointer-events: none;
+}
+
+.menu:popover-open {
   display: flex;
   flex-direction: column;
+  gap: 2px;
   opacity: 1;
   transform: none;
 }
 
 @starting-style {
-  .header-menu:popover-open {
+  .menu:popover-open {
     opacity: 0;
-    transform: translateY(-4px) scale(0.98);
+    transform: translateY(var(--menu-slide)) scale(0.98);
   }
 }
 
-.header-menu-item {
+.menu-item {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -2285,25 +2432,76 @@
   font-size: 15px;
   font-weight: 600;
   text-align: left;
+  text-decoration: none;
 }
 
-.header-menu-item .dot {
+.menu-item-with-sub {
+  min-height: 52px;
+  padding: 6px 12px;
+}
+
+.menu-item-destructive {
+  color: var(--err);
+}
+
+.menu-item:disabled,
+.menu-item[aria-disabled="true"] {
+  opacity: 0.5;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.menu-item .dot {
   margin-left: auto;
 }
 
-.header-menu-icon {
+.menu-icon {
   display: flex;
   color: var(--fg2);
 }
 
+/* The icon follows the label's red. */
+.menu-item-destructive .menu-icon {
+  color: currentColor;
+}
+
+.menu-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.menu-sub {
+  color: var(--fg2);
+  font-size: 12.5px;
+  font-weight: 400;
+}
+
+.menu-divider {
+  height: 1px;
+  margin: 2px 8px; /* the flex gap adds 2px each side */
+  background: var(--line);
+}
+
 @media (hover: hover) {
-  .header-menu-item:hover {
+  .queue-more:hover {
+    background: var(--sur2);
+  }
+
+  .menu-item:not(:disabled, [aria-disabled="true"]):hover {
     background: var(--sur2);
   }
 }
 
-.header-menu-item:active,
-.header-menu-item:focus-visible {
+.menu-item:not(:disabled, [aria-disabled="true"]):active,
+.menu-item:focus-visible {
   background: var(--sur2);
 }
 
@@ -2363,41 +2561,4 @@
   gap: 8px;
   padding: 14px 16px;
   border-radius: 14px;
-}
-
-.sheet-max {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 13px;
-  border-radius: 10px;
-  font-size: 15.5px;
-  font-weight: 500;
-}
-
-.sheet-max input {
-  width: 4.5rem;
-  padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--bg);
-  color: var(--fg);
-  font-family: var(--mono);
-  font-size: 15px;
-  outline: none;
-}
-
-.sheet-max input:focus {
-  border-color: var(--acc);
-}
-
-.sheet-max .quiet {
-  width: auto;
-  margin-left: auto;
-  padding: 8px 12px;
-  color: var(--acc);
-}
-
-.sheet-max .quiet:disabled {
-  opacity: 0.5;
 }

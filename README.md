@@ -168,7 +168,7 @@ Edit `~/.config/seance/config.json`:
   Claude Code registers, so the Claude UIs read `fix-the-thing (thad)`. The tmux window
   name stays bare — locally the machine is never in question. Leave it empty for
   unsuffixed names.
-- `reap` — optional: `{ "intervalHours": 24, "minAgeDays": 7 }` runs `seanced reap`
+- `reap` — optional: `{ "intervalHours": 24, "minAgeDays": 4 }` runs `seanced reap`
   from the daemon every day, with its report in the log. Without `intervalHours` the
   schedule is off (the default); `minAgeDays` also sets the CLI's age gate.
 - `quota` — optional: `{ "staleAfterMinutes": 10 }` (the default) is how old an
@@ -323,7 +323,9 @@ Type what the session should do — or leave the prompt blank to start an empty 
 then pick where it runs. Tiles open pickers: **machine**, **account**, **repository**,
 **model** (Fable / Opus / Sonnet / Haiku), and **effort** (Low through Max), plus the
 authoring ones below. **Fresh worktree** is on by default; switching it off runs the
-session in the repo as it stands. Then queue it.
+session in the repo as it stands. Then queue it — or, from the chevron beside **Queue**,
+**Start now**, which queues it and asks the scheduler to place it at once, past its
+concurrency caps (shown only while the scheduler's leader supports it).
 
 Every spawn from the phone is a queued task: the app never starts a session on a machine
 itself. The verdict names the task and follows it until it is running, then you continue
@@ -354,11 +356,13 @@ shows the decision behind it, and why it waits while it does. With no scheduler 
 can't be verified (its registry entry doesn't open with your key), the task still
 queues and waits there until one does; only the placement preview needs a leader.
 Queuing is greyed only when the app isn't connected to the relay. A pinned task waits for
-its machine or account when it is offline or over a limit, and says why; pinning an
+its machine or account when it is offline or over a limit, and says why; one still waiting
+after 30 days fails, so a machine back later never runs a month-old prompt. Pinning an
 account needs a leader that supports it, and says so otherwise. The **Queue screen** (a column on
 desktop, in the header menu on a phone) shows everything queued: what needs you, what
-is running or waiting, and what finished, with **Cancel** and **Mark done** (each takes
-a second tap when it would end a running session), and **Pause** / **Resume**. The app
+is running or waiting, and what finished. Each card shows its likeliest next step and keeps
+every action behind its ⋯ menu, **Cancel** and **Mark done** included (each takes a second
+tap when it would end a running session); the footer has **Pause** / **Resume**. The app
 pauses the whole queue only; a hold on one account shows with its own **Resume**, but
 no client sets one yet. `seanced spawn --now` starts a session directly on a machine,
 with or without a scheduler.
@@ -394,6 +398,7 @@ seanced spawn --account work --not here seance -p "rerun the slow suite"
 seanced spawn --now seance -t "flaky test" -p "fix the flaky spawn test"
 #   spawned 'flaky test' (~/repos/seance/.claude/worktrees/flaky-test)
 seanced spawn --now seance --here   # run in the checkout as it stands, no worktree
+seanced continue 3f2a…        # resume a failed (e.g. OOM-killed) or cancelled task's conversation in its worktree, as a new task (--prompt <text> to add a note)
 seanced sessions              # running claude windows: id, window, repo, path
 seanced despawn %12           # end one by id: asks claude to exit, kills the pane after ~5s (--force: now)
 seanced reap --dry-run        # what clean-up would remove: worktrees, branches, dead windows
@@ -407,6 +412,9 @@ joined as a path — so it is whatever `seanced scan` calls the repo (a bare bas
 `parent/base` when two collide); a queued spawn resolves a clone name or origin across the
 fleet, as below. Bare words after it become the prompt, which makes
 `-p` optional: `seanced spawn seance fix the flaky test` works.
+
+`seanced continue` queues a new task like a spawn does, so the scheduler tracks it. Running
+`claude --continue` by hand in the worktree works too, but séance does not see that session.
 
 A spawn queues for the scheduler, as the app's and MCP's do: `<repo>` is a clone name or
 origin from any machine in the fleet, and the task waits in the relay's queue until a leader
@@ -433,8 +441,8 @@ the way out, so the work stays where it was; cleaning up worktrees and branches 
 
 `reap` cleans up after sessions across every repo the daemon scans. It removes a
 linked worktree only when no tmux pane is inside it, it is clean, its branch is merged
-(including squash-merged — checked locally, no `gh`), and nothing has touched it for a
-week (`--min-age-days` to change). It deletes merged branches, closes séance windows
+(including squash-merged — checked locally, no `gh`), and nothing has touched it for
+four days (`--min-age-days` to change). It deletes merged branches, closes séance windows
 that are dead or sitting on claude's "keep or remove this worktree?" prompt, and
 reports what it left: dirty worktrees, branches and worktrees whose upstream is gone but
 which hold unpushed commits, worktrees on a never-pushed branch, detached worktrees with
@@ -453,7 +461,7 @@ versus the one on disk, which is how you spot a `git pull` that still needs a
 
 With `seanced mcp install` done (step 6), a local Claude Code can list machines,
 query running sessions, and spawn and end sessions on other machines through the relay:
-`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`, `queue_batch` (several tasks with a shared strategy and dependencies between them) and, for a session settling its own task, `report_task_done`. The server reads the daemon's own
+`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`, `continue_task` (resume a failed or cancelled task's session in its worktree, as a new task), `queue_batch` (several tasks queued as one group, ordered only by the dependencies between them) and, for a session settling its own task, `report_task_done`. The server reads the daemon's own
 config and speaks to the relay exactly like the phone does.
 
 `spawn_session` always queues the task in the relay, as the app's **auto** does: it answers

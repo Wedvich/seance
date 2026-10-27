@@ -1,15 +1,20 @@
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { DEFAULT_EFFORT, DEFAULT_MODEL, type RepoEntry, type SpawnRequest } from "@seance/shared";
-import { SpawnFailure, type SpawnOutcome } from "./backend.ts";
+import { basename, join } from "node:path";
+import { DEFAULT_EFFORT, DEFAULT_MODEL, isTaskId, type RepoEntry, type SpawnRequest } from "@seance/shared";
+import { SpawnFailure, type Continuation, type SpawnOutcome } from "./backend.ts";
 import { freshenBase } from "./base-fetch.ts";
 import { git } from "./exec.ts";
 import { whileRegistering } from "./exit-status.ts";
 import { DEFAULT_EXCLAVE, exclaveConfigFile } from "./exclaves.ts";
-import { isRegistered, listPanes, paneRunningTask } from "./sessions.ts";
+import { canonical } from "./gitdir.ts";
+import { hardenedGit } from "./git-hardened.ts";
+import { log } from "./log.ts";
+import { parseWorktreeList, parseWorktreeLock } from "./reap-git.ts";
+import { isRegistered, listPanes, paneRunningTask, type PaneInfo } from "./sessions.ts";
 import {
   capturePane,
+  EXIT_OPTION_PREFIX,
   FIELD_SEP,
   PANE_TITLED,
   resolveTargetSession,
@@ -111,6 +116,54 @@ interface Prepared {
   readonly resultPath: string;
   readonly worktreeFlag: readonly string[];
   readonly preamble: string;
+  /** Resume the directory's newest conversation (`--continue`) instead of starting one. */
+  readonly resume: boolean;
+  /** Extra `NAME=value` pairs for the window's environment (tmux `-e`), literals only. */
+  readonly env: readonly string[];
+}
+
+/**
+ * Past these claude 2.1.310 stops a resume of a session this old and this big on a "Resume from
+ * summary / full session" dialog no remote can answer (the typical OOM'd session). An initial
+ * message, which a continuation always has, is what skips it; these are defence in depth.
+ */
+const RESUME_NEVER_ASKS = [
+  "CLAUDE_CODE_RESUME_THRESHOLD_MINUTES=99999999",
+  "CLAUDE_CODE_RESUME_TOKEN_THRESHOLD=99999999",
+] as const;
+
+/**
+ * Never asserts that the dead session's background work is gone: only claude itself
+ * was stopped, and a surviving child is not something the pane checks can see. The
+ * wording comes from the old task's own ledger note `exit`, never from a frame: nonzero
+ * is a death, anything else (zero, or none noted) a cancel.
+ */
+export function continuePreamble(path: string, exit: number | undefined, vanished?: boolean): string {
+  const prefix = `This session was resumed by séance in the same git worktree at ${path}, after the previous session `;
+  if (exit === undefined && vanished === true) {
+    return (
+      prefix +
+      `ended when its window was closed (closed by hand, or its tmux server or machine stopped) partway ` +
+      `through. Its last tool call may not have finished, and processes it started in the background may ` +
+      `still be running: check the worktree's state and running processes before restarting anything, ` +
+      `then carry on where it left off.`
+    );
+  }
+  if (exit !== undefined && exit !== 0) {
+    return (
+      prefix +
+      `ended unexpectedly (killed, crashed or out of memory) partway through. Its last tool call may not ` +
+      `have finished, and processes it started in the background may still be running (only claude itself ` +
+      `was killed): check the worktree's state and running processes before restarting anything, then ` +
+      `carry on where it left off.`
+    );
+  }
+  return (
+    prefix +
+    `was stopped before it finished (cancelled from séance). Its last tool call may not have finished, and ` +
+    `processes it started in the background may still be running (only claude itself was stopped): check ` +
+    `the worktree's state and running processes before restarting anything, then carry on where it left off.`
+  );
 }
 
 /**
@@ -135,6 +188,8 @@ function prepareWorktree(repo: RepoEntry, worktreeName: string): Prepared {
     launchDir: repo.path,
     resultPath: worktreePath,
     worktreeFlag: ["--worktree", worktreeName],
+    resume: false,
+    env: [],
     preamble:
       `You are a new independent Claude session in a FRESH git worktree at ${worktreePath}, ` +
       `on branch worktree-${worktreeName}. Before starting the task, set this worktree up per ` +
@@ -148,7 +203,21 @@ function prepareHere(repo: RepoEntry): Prepared {
     launchDir: repo.path,
     resultPath: repo.path,
     worktreeFlag: [],
+    resume: false,
+    env: [],
     preamble: `You are a new independent Claude session running in the CURRENT worktree at ${repo.path}.`,
+  };
+}
+
+/** `path` is the ledger's worktree, already canonical and checked (`spawnContinued`). */
+function prepareContinue(path: string, exit: number | undefined, vanished?: boolean): Prepared {
+  return {
+    launchDir: path,
+    resultPath: path,
+    worktreeFlag: [],
+    resume: true,
+    env: RESUME_NEVER_ASKS,
+    preamble: continuePreamble(path, exit, vanished),
   };
 }
 
@@ -184,14 +253,22 @@ async function buildInnerCommand(prepared: Prepared, session: string, request: S
     `--model ${shq(request.model ?? DEFAULT_MODEL)} --effort ${shq(request.effort ?? DEFAULT_EFFORT)}` +
     // literal value, so nothing wire-supplied reaches the command line — no shq() needed
     `${request.plan === true ? " --permission-mode plan" : ""}` +
-    `${prepared.worktreeFlag.length > 0 ? ` --worktree ${shq(prepared.worktreeFlag[1] ?? "")}` : ""}`;
-  if (request.prompt === undefined || request.prompt === "") {
+    `${prepared.worktreeFlag.length > 0 ? ` --worktree ${shq(prepared.worktreeFlag[1] ?? "")}` : ""}` +
+    // a literal flag: `continues` is a ledger key and never reaches the command line
+    `${prepared.resume ? " --continue" : ""}`;
+  const prompt = request.prompt === undefined || request.prompt === "" ? undefined : request.prompt;
+  // A resume always gets a seed, even with no prompt: the preamble tells the model what happened, and
+  // an initial message is what keeps claude off its blocking stale-resume dialog (`RESUME_NEVER_ASKS`).
+  if (prompt === undefined && !prepared.resume) {
     return { command: base, seedDir: null };
   }
 
   const seedDir = await mkdtemp(join(tmpdir(), "seance-seed-"));
   const seedFile = join(seedDir, "seed.txt");
-  await Bun.write(seedFile, `${prepared.preamble}\n\nTask: ${request.prompt}\n`);
+  const seed = prepared.resume
+    ? `${prepared.preamble}\n${prompt === undefined ? "" : `\nFrom the user: ${prompt}\n`}`
+    : `${prepared.preamble}\n\nTask: ${prompt}\n`;
+  await Bun.write(seedFile, seed);
   // Redirect, not an operand: an argv operand would be the expanded prompt in
   // every local process list for the session's whole life — the same text the
   // audit log deliberately reduces to a length and a hash. claude takes
@@ -229,11 +306,11 @@ export async function captureWindow(windowId: string, opts: { readonly history: 
  * registered", the shape of a claude sitting on a dialog no remote can answer.
  * Ported from /spawn.
  *
- * Past it a task's window keeps `remain-on-exit failed`: a clean exit closes it
- * as any window closes, and any other leaves the pane dead with its status for
- * `harvestExits` (`exit-status.ts`) to note before it closes it. A tmux older
- * than 3.2 refuses `failed`; that window gets `off`, and its task settles by
- * its PR alone, as before exit statuses.
+ * Past it a task's window keeps `remain-on-exit on`, so every exit, a clean one
+ * included, leaves a dead pane holding its status for `harvestExits`
+ * (`exit-status.ts`) to note before it closes it (`armTask` adds the hook that
+ * closes a clean one at once). A clean exit must leave a status: "no status" is
+ * how a window closed from outside reads. Any other window gets `off`.
  */
 async function awaitRegistration(windowId: string, waitMs: number, task: boolean): Promise<boolean> {
   await tmuxOk(["set-option", "-w", "-t", windowId, "remain-on-exit", "on"]);
@@ -262,8 +339,7 @@ async function awaitRegistration(windowId: string, waitMs: number, task: boolean
     await tmux(["kill-window", "-t", windowId]);
     throw new SpawnFailure("claude_died", `claude exited before the session started:\n${captured ?? "(no output)"}`);
   }
-  const kept = task && (await tmux(["set-option", "-w", "-t", windowId, "remain-on-exit", "failed"])).exitCode === 0;
-  if (!kept) await tmuxOk(["set-option", "-w", "-t", windowId, "remain-on-exit", "off"]);
+  if (!task) await tmuxOk(["set-option", "-w", "-t", windowId, "remain-on-exit", "off"]);
   return titled;
 }
 
@@ -284,6 +360,44 @@ async function tagTask(windowId: string, taskId: string): Promise<void> {
     }
     throw new SpawnFailure("launch_error", `could not record the task on the session: ${String(err)}`);
   }
+}
+
+/**
+ * The per-pane `pane-died` hook's one body: tmux commands only, no shell, the task id its only interpolation.
+ * A clean exit's pane is closed unless it is the server's last: the server would exit with it (`exit-empty`)
+ * and take the recorded option along, so that pane stays dead for harvest to note and close. A server whose
+ * sessions are all one group shares one set of windows, so it counts as one session.
+ */
+function exitHook(taskId: string): string {
+  const lastPane =
+    "#{&&:#{||:#{==:#{server_sessions},1},#{==:#{server_sessions},#{session_group_size}}},#{&&:#{==:#{session_windows},1},#{==:#{window_panes},1}}}";
+  return (
+    `set-option -gF ${EXIT_OPTION_PREFIX}${taskId} '#{pane_dead_status}:#{pane_dead_signal}' ; ` +
+    `if-shell -F '${lastPane}' '' 'if-shell -F "#{==:#{pane_dead_status},0}" kill-pane'`
+  );
+}
+
+/**
+ * Keeps a registered task's pane for harvest and hooks its death. Returns the tmux server's pid, which
+ * is what lets `harvestExits` judge the pane `vanished` later; undefined (never judged) when the id
+ * is not a task id, the hook could not be set, or no pid reads. Runs inside `whileRegistering`, so a
+ * harvest pass leaves the pane alone meanwhile.
+ *
+ * The hook is per pane, never `-g`/`-ga`: it shadows a global `pane-died` for this pane only (DESIGN.md,
+ * "Window closed from outside"). It records the death in a server-wide option, then closes a clean
+ * exit's pane (not the server's last). The pane option beats the window's, so a pane `join-pane`d elsewhere stays kept; a
+ * tmux without `-p` keeps the window-level `on` and hooks the window instead.
+ */
+async function armTask(windowId: string, taskId: string): Promise<number | undefined> {
+  if (!isTaskId(taskId)) return undefined;
+  const pane = (await tmux(["display-message", "-p", "-t", windowId, "#{pane_id}"])).stdout.trim();
+  if (!/^%\d+$/u.test(pane)) return undefined;
+  await tmux(["set-option", "-p", "-t", pane, "remain-on-exit", "on"]);
+  let hooked = (await tmux(["set-hook", "-p", "-t", pane, "pane-died", exitHook(taskId)])).exitCode === 0;
+  hooked ||= (await tmux(["set-hook", "-w", "-t", windowId, "pane-died", exitHook(taskId)])).exitCode === 0;
+  if (!hooked) return undefined;
+  const pid = Number((await tmux(["display-message", "-p", "#{pid}"])).stdout.trim());
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
 }
 
 export interface SpawnOptions {
@@ -317,8 +431,12 @@ export async function spawnSession(
   request: SpawnRequest,
   repos: readonly RepoEntry[],
   opts: SpawnOptions,
+  continuation?: Continuation,
 ): Promise<SpawnOutcome> {
   const { taskId } = request;
+  if (request.mode === "continue" && (continuation === undefined || request.continues === undefined)) {
+    throw new SpawnFailure("not_continuable", "this machine's session backend cannot continue a session");
+  }
   if (taskId === undefined) return spawnUntracked(request, repos, opts);
   const prior = taskSpawns.get(taskId) ?? Promise.resolve();
   const run = prior
@@ -330,6 +448,9 @@ export async function spawnSession(
         const where = running.windowName === "" ? running.paneId : running.windowName;
         throw new SpawnFailure("task_running", `task ${taskId} is already running in ${where}`, running.paneId);
       }
+      if (request.mode === "continue" && continuation !== undefined && request.continues !== undefined) {
+        return spawnContinued(request, request.continues, repos, opts, continuation);
+      }
       return spawnUntracked(request, repos, opts);
     });
   taskSpawns.set(taskId, run);
@@ -340,6 +461,146 @@ export async function spawnSession(
   }
 }
 
+/**
+ * Continuations in flight per worktree: two tasks continuing one session (two taps, two
+ * clients) are different task ids, so `taskSpawns` does not order them, and both would pass
+ * the live-pane check before either tagged a pane.
+ */
+const pathSpawns = new Map<string, Promise<unknown>>();
+
+/**
+ * Claude Code's own lock on a worktree it made, held for its process's life: `claude session
+ * <name> (pid N start <procStart>)`, the ` start …` part absent on Windows. Its own parser's
+ * grammar, bounds included. The start time is not compared, so a live pid (even a reused one)
+ * stays a refusal: fail closed.
+ */
+const CLAUDE_LOCK = /^claude (?:agent|session) .{1,255} \(pid (\d{1,10})(?: start .{1,255})?\)$/u;
+
+function underDir(dir: string, path: string): boolean {
+  return path === dir || path.startsWith(`${dir}/`);
+}
+
+/** A pid this process may not signal (EPERM) is alive; only ESRCH says gone. */
+function pidGone(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (err) {
+    return err instanceof Error && "code" in err && err.code === "ESRCH";
+  }
+}
+
+/**
+ * A killed claude leaves the lock it took on its worktree (and it makes reap keep it). The
+ * continuation clears it only in that one shape — Claude's own reason, a dead pid — and any
+ * other lock is someone's, so it refuses and leaves it.
+ */
+async function releaseStaleLock(repo: RepoEntry, path: string): Promise<void> {
+  const listed = await hardenedGit(repo.path, ["worktree", "list", "--porcelain", "-z"]);
+  if (listed.exitCode !== 0) {
+    throw new SpawnFailure("not_continuable", `could not read the worktrees of ${repo.name}, so its lock is unknown`);
+  }
+  // Compared canonical: git prints the path as it recorded it, tmux and the ledger as the filesystem spells it.
+  const records = await Promise.all(
+    parseWorktreeList(listed.stdout).map(async (record) => ({ record, real: await canonical(record.path) })),
+  );
+  const found = records.find((entry) => entry.real === path)?.record;
+  if (found === undefined) return;
+  const lock = parseWorktreeLock(listed.stdout, found.path);
+  if (lock === null) return;
+  const pid = CLAUDE_LOCK.exec(lock.reason)?.[1];
+  if (pid === undefined || !pidGone(Number(pid))) {
+    const why = lock.reason === "" ? "no reason given" : lock.reason;
+    throw new SpawnFailure("not_continuable", `its worktree is locked (${why})`);
+  }
+  const unlocked = await hardenedGit(repo.path, ["worktree", "unlock", found.path]);
+  if (unlocked.exitCode !== 0) {
+    throw new SpawnFailure(
+      "not_continuable",
+      `its worktree is locked and could not be unlocked: ${unlocked.stderr.trim()}`,
+    );
+  }
+  log.info(`unlocked ${path}: the lock was a dead claude's (${lock.reason})`);
+}
+
+function liveInside(panes: readonly PaneInfo[], path: string): Promise<PaneInfo | undefined> {
+  return Promise.all(
+    panes
+      .filter((pane) => !pane.dead)
+      .map(async (pane) =>
+        // tmux reports a realpath, so the raw path normally matches; the canonical form covers a pane whose cwd moved through a link.
+        underDir(path, pane.path) || underDir(path, await canonical(pane.path)) ? pane : undefined,
+      ),
+  ).then((hits) => hits.find((pane) => pane !== undefined));
+}
+
+/**
+ * Resumes a failed or cancelled task's conversation in its worktree: `continuation.path` is
+ * what this machine's own launch ledger noted for `continues`, canonical and checked by the
+ * handler (DESIGN.md, Daemon, "Continuing a session"). No fetch and no new worktree — the session picks up
+ * what the dead one left.
+ */
+async function spawnContinued(
+  request: SpawnRequest,
+  continues: string,
+  repos: readonly RepoEntry[],
+  opts: SpawnOptions,
+  continuation: Continuation,
+): Promise<SpawnOutcome> {
+  const { path } = continuation;
+  const prior = pathSpawns.get(path) ?? Promise.resolve();
+  const run = prior.catch(() => undefined).then(() => continueLocked(request, continues, repos, opts, continuation));
+  pathSpawns.set(path, run);
+  try {
+    return await run;
+  } finally {
+    if (pathSpawns.get(path) === run) pathSpawns.delete(path);
+  }
+}
+
+async function continueLocked(
+  request: SpawnRequest,
+  continues: string,
+  repos: readonly RepoEntry[],
+  opts: SpawnOptions,
+  continuation: Continuation,
+): Promise<SpawnOutcome> {
+  const { path } = continuation;
+  const repo = repos.find((r) => r.name === request.repo);
+  if (repo === undefined) {
+    throw new SpawnFailure("repo_not_found", `no repo named "${request.repo}" — try a rescan`);
+  }
+  const present = await stat(path).then(
+    (info) => info.isDirectory(),
+    () => false,
+  );
+  if (!present) {
+    throw new SpawnFailure("not_continuable", `its worktree ${path} is gone (removed or reaped)`);
+  }
+  const panes = await listPanes();
+  const running = paneRunningTask(panes, continues);
+  if (running !== null) {
+    const where = running.windowName === "" ? running.paneId : running.windowName;
+    throw new SpawnFailure("not_continuable", `the session is still running in ${where}`);
+  }
+  const open = await liveInside(panes, path);
+  if (open !== undefined) {
+    const where = open.windowName === "" ? open.paneId : open.windowName;
+    throw new SpawnFailure("not_continuable", `a session is open in its worktree (${where})`);
+  }
+  await releaseStaleLock(repo, path);
+
+  // The worktree, not the clone root, is where claude starts, so trust is asked for the worktree's own path.
+  await ensureRepoTrusted(path, exclaveConfigFile(opts.home, repo.exclave ?? DEFAULT_EXCLAVE));
+
+  const name = basename(path);
+  const windowName = sanitizeWindowName(request.title ?? name);
+  const prepared = prepareContinue(path, continuation.exit, continuation.vanished);
+  const inner = await buildInnerCommand(prepared, sessionName(name, opts.machineTag), request);
+  return launchWindow(prepared, inner, windowName, request, opts);
+}
+
 async function spawnUntracked(
   request: SpawnRequest,
   repos: readonly RepoEntry[],
@@ -348,6 +609,10 @@ async function spawnUntracked(
   const repo = repos.find((r) => r.name === request.repo);
   if (repo === undefined) {
     throw new SpawnFailure("repo_not_found", `no repo named "${request.repo}" — try a rescan`);
+  }
+  // A continuation goes through `spawnContinued` and never fetches: this narrows the mode `freshenBase` takes.
+  if (request.mode === "continue") {
+    throw new SpawnFailure("not_continuable", "a continuation needs its launch record's worktree");
   }
 
   // Network, so it runs beside the local steps; it never throws, so nothing
@@ -365,7 +630,17 @@ async function spawnUntracked(
   const inner = await buildInnerCommand(prepared, sessionName(worktreeName, opts.machineTag), request);
   // Before launch: claude reads the tracking ref, and `FETCH_HEAD`'s age, at startup.
   const note = await freshened;
+  return launchWindow(prepared, inner, windowName, request, opts, note);
+}
 
+async function launchWindow(
+  prepared: Prepared,
+  inner: InnerCommand,
+  windowName: string,
+  request: SpawnRequest,
+  opts: SpawnOptions,
+  note?: string,
+): Promise<SpawnOutcome> {
   // For the tmux-rename mod (claude-mods/), which keeps exactly this suffix on a
   // `/rename`'s session name and off its window. Per window as well as
   // `publishMachineTag`'s global one, so a spawn never depends on that having
@@ -374,9 +649,11 @@ async function spawnUntracked(
   // tmux server's environment holds — a server started from inside a séance
   // session carries that session's tag.
   const tagEnv = ["-e", `SEANCE_MACHINE_TAG=${machineTagSlug(opts.machineTag)}`];
+  const extraEnv = prepared.env.flatMap((pair) => ["-e", pair]);
   const target = await resolveTargetSession(opts.tmuxSession);
   let windowId: string;
   let registered: boolean;
+  let server: number | undefined;
   try {
     try {
       windowId = (
@@ -392,6 +669,7 @@ async function spawnUntracked(
           "-n",
           windowName,
           ...tagEnv,
+          ...extraEnv,
           inner.command,
         ])
       ).trim();
@@ -400,9 +678,11 @@ async function spawnUntracked(
     }
     if (request.taskId !== undefined) await tagTask(windowId, request.taskId);
 
-    registered = await whileRegistering(windowId, () =>
-      awaitRegistration(windowId, opts.waitMs ?? 5_000, request.taskId !== undefined),
-    );
+    registered = await whileRegistering(windowId, async () => {
+      const titled = await awaitRegistration(windowId, opts.waitMs ?? 5_000, request.taskId !== undefined);
+      if (request.taskId !== undefined) server = await armTask(windowId, request.taskId);
+      return titled;
+    });
   } finally {
     if (inner.seedDir !== null) await rm(inner.seedDir, { recursive: true, force: true });
   }
@@ -413,5 +693,6 @@ async function spawnUntracked(
     registered,
     handle: windowId,
     ...(note === undefined ? {} : { note }),
+    ...(server === undefined ? {} : { server }),
   };
 }

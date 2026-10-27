@@ -1,5 +1,4 @@
 import type {
-  BatchStrategy,
   DepAfter,
   MetricsErrorCode,
   MetricsReply,
@@ -41,7 +40,7 @@ import {
 } from "./state.ts";
 import { AccountStore } from "./account-store.ts";
 import { accountSeries } from "./chart.ts";
-import { SchedulerStore, taskRequest } from "./scheduler-store.ts";
+import { SchedulerStore, STORE_UNREADABLE, taskRequest } from "./scheduler-store.ts";
 import type { AppState } from "./view.ts";
 import {
   deriveAutoAvailability,
@@ -90,8 +89,6 @@ const HISTORY_ERRORS: Record<MetricsErrorCode, string> = {
   invalid_request: "The machine refused the request. Update seanced and the app to matching versions.",
   internal_error: "The machine couldn't read its history store.",
 };
-
-const STORE_UNREADABLE = "Couldn't read the relay's answer. Update the app and the relay to matching versions.";
 
 /**
  * Why a create's answer never came, without the shared line's "may have
@@ -166,6 +163,7 @@ export class Store {
       queueView: null,
       taskAction: null,
       queueNotice: null,
+      startNowRefusal: null,
       pausing: false,
       discarding: false,
       accounts: { aliases: {}, nameable: client.accountsNamed, saving: null, notice: null },
@@ -418,14 +416,12 @@ export class Store {
   }
 
   /**
-   * The next enqueues join a new batch of `strategy`, numbered from 1. The same
-   * strategy again keeps the batch open: re-picking it must not renumber a
-   * batch already in flight.
+   * The next enqueues join a new batch, numbered from 1. An open batch stays
+   * open: a second tap must not renumber a batch already in flight.
    */
-  startBatch(strategy: BatchStrategy): void {
+  startBatch(): void {
     const { form } = this.#state;
-    const same = form.batch !== null && JSON.stringify(form.batch.strategy) === JSON.stringify(strategy);
-    if (!same) this.#patch({ form: { ...form, batch: { id: crypto.randomUUID(), strategy, next: 1 } } });
+    if (form.batch === null) this.#patch({ form: { ...form, batch: { id: crypto.randomUUID(), next: 1 } } });
     this.dismissLayer();
   }
 
@@ -505,6 +501,14 @@ export class Store {
 
   markDone(taskId: string): Promise<void> {
     return this.#queue.markDone(taskId);
+  }
+
+  runNow(taskId: string): Promise<void> {
+    return this.#queue.runNow(taskId);
+  }
+
+  continueTask(taskId: string): Promise<void> {
+    return this.#queue.continueTask(taskId);
   }
 
   pauseQueue(): Promise<void> {
@@ -689,8 +693,9 @@ export class Store {
    * Every spawn is a task written to the relay's store (`createTask`), which
    * answers for itself: no leader need be up, and whichever one leads next reads
    * it. A picked machine or account is a pin on it, never a direct spawn.
+   * `runNow`: a Start now, the same task with a `run-now` once it is `ready`.
    */
-  async #submit(): Promise<void> {
+  async #submit(runNow: boolean): Promise<void> {
     const { relay, form } = this.#state;
     if (!deriveAutoAvailability(relay).available || this.#state.spawning) return;
     // The leader bounds what it reads; past the bound it would skip the task, and the store's refusal blames versions.
@@ -743,13 +748,11 @@ export class Store {
       ...(form.machine === null && form.account === null ? {} : { pin }),
       client: "pwa" satisfies SpawnClient,
       ...(form.after.length === 0 ? {} : { deps: form.after }),
-      ...(form.batch === null
-        ? {}
-        : { batch: { id: form.batch.id, index: form.batch.next, strategy: form.batch.strategy } }),
+      ...(form.batch === null ? {} : { batch: { id: form.batch.id, index: form.batch.next } }),
       ...(reported ? { until: form.until } : {}),
       ...(issue === "" ? {} : { linear: { issue } }),
     };
-    await this.#enqueue(queuedTask(spec, Date.now()));
+    await this.#enqueue(queuedTask(spec, Date.now()), runNow);
   }
 
   /**
@@ -757,16 +760,17 @@ export class Store {
    * key, so a put that had landed answers `landedEarlier` and cannot queue it
    * twice.
    */
-  async #enqueue(task: Task): Promise<void> {
+  async #enqueue(task: Task, runNow: boolean): Promise<void> {
     this.#queue.stopFollowing();
+    const again = runNow ? { runNow: true as const } : {};
     this.#patch({ spawning: true, verdict: null });
     try {
       const reply = await this.#client.createTask(task);
       if (reply === null) {
-        this.#showVerdict({ kind: "unqueued", message: STORE_UNREADABLE, mayHaveLanded: true, retry: task });
+        this.#showVerdict({ kind: "unqueued", message: STORE_UNREADABLE, mayHaveLanded: true, retry: task, ...again });
       } else if (!reply.ok) {
         // A refusal says nothing was stored. Only a full store or a busy minute is worth asking again.
-        const again = reply.code === "rate_limited" || reply.code === "store_full";
+        const retryable = reply.code === "rate_limited" || reply.code === "store_full";
         const unreadable = reply.code === "store_full" ? this.#queue.unreadableCount() : 0;
         this.#showVerdict({
           kind: "unqueued",
@@ -775,7 +779,7 @@ export class Store {
               ? `${sentence(storeFullUnreadableText(unreadable))} Clear them on the Queue screen, then try again.`
               : sentence(storeErrorText(reply.code)),
           mayHaveLanded: false,
-          ...(again ? { retry: task } : {}),
+          ...(retryable ? { retry: task, ...again } : {}),
         });
       } else {
         this.#disarmUndo();
@@ -796,21 +800,32 @@ export class Store {
           promptUndo: null,
         });
         this.#showVerdict({ kind: "queued", task });
-        this.#queue.startFollowing(task.id);
+        this.#queue.startFollowing(task, runNow);
       }
     } catch (err) {
       // An error that is no `RequestFailure` says nothing about whether it went out, so it may have.
       const failure = err instanceof RequestFailure ? err : new RequestFailure("dropped", String(err));
       // A timeout or a socket closing after the send may have come after the relay stored it.
       const mayHaveLanded = failure.reason === "timeout" || failure.reason === "dropped";
-      this.#showVerdict({ kind: "unqueued", message: enqueueFailureText(failure), mayHaveLanded, retry: task });
+      this.#showVerdict({
+        kind: "unqueued",
+        message: enqueueFailureText(failure),
+        mayHaveLanded,
+        retry: task,
+        ...again,
+      });
     } finally {
       this.#patch({ spawning: false });
     }
   }
 
   async spawn(): Promise<void> {
-    await this.#submit();
+    await this.#submit(false);
+  }
+
+  /** Queues the form as `spawn` does, then asks the leader to skip the queue for it (`run-now`). */
+  async startNow(): Promise<void> {
+    await this.#submit(true);
   }
 
   /** Clears the prompt and returns to the form. */
@@ -837,7 +852,7 @@ export class Store {
 
   /** Puts an unqueued verdict's task again; nothing to put leaves the form as the retry found it. */
   async retryEnqueue(verdict: Extract<Verdict, { kind: "unqueued" }>): Promise<void> {
-    if (verdict.retry !== undefined) await this.#enqueue(verdict.retry);
+    if (verdict.retry !== undefined) await this.#enqueue(verdict.retry, verdict.runNow === true);
   }
 
   reconnect(): void {

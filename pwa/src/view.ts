@@ -1,5 +1,14 @@
-import { accountNameIn, CAPABILITIES, knownAccounts, sentence, taskFailureText } from "@seance/shared";
-import type { BatchStrategy, KnownAccount, Machine, RelayState } from "@seance/shared";
+import {
+  accountNameIn,
+  CAPABILITIES,
+  endedBySignal,
+  knownAccounts,
+  lastHeardAt,
+  sentence,
+  taskFailureText,
+  type TaskUntil,
+} from "@seance/shared";
+import type { Capability, KnownAccount, Machine, RelayState } from "@seance/shared";
 import {
   EFFORT_LABELS,
   MODEL_LABELS,
@@ -11,9 +20,11 @@ import {
   type RescanState,
   type SessionsView,
   type SheetKind,
+  type StartNowRefusal,
   type TaskAction,
   type Verdict,
 } from "./state.ts";
+import { needsAttention } from "./asleep.ts";
 
 /**
  * Everything the screen renders, derived in one pure pass. Components stay dumb
@@ -117,6 +128,8 @@ export interface ViewModel {
   /** Null when there is nothing to warn about, so the footer holds the button alone. */
   readonly footerStatus: string | null;
   readonly button: PrimaryButton;
+  /** The button's chevron and its Start now menu: only while the verified leader answers `run-now`. */
+  readonly startNow: boolean;
   readonly ignoredNote: string | null;
   /** The pinned machine; null on auto, or when the pin names one the registry no longer lists. */
   readonly machine: Machine | null;
@@ -168,6 +181,7 @@ export interface AppState {
   readonly taskAction: TaskAction | null;
   /** The last queue action's refusal or failure, as a sentence; cleared by the next action or refresh. */
   readonly queueNotice: string | null;
+  readonly startNowRefusal: StartNowRefusal | null;
   /** A pause or resume in flight. */
   readonly pausing: boolean;
   /** Unreadable records being discarded. */
@@ -266,12 +280,25 @@ export function deriveReportedAvailability(relay: RelayState): boolean {
   return leader?.capabilities?.includes(CAPABILITIES.reportedDone) === true;
 }
 
-export function describeStrategy(strategy: BatchStrategy): string {
-  return strategy.mode === "sequential"
-    ? "one at a time"
-    : strategy.mode === "parallel"
-      ? `up to ${strategy.max} at once`
-      : "no limit";
+/**
+ * A continue task is written only to a verified leader that advertises `continueTask`: an older
+ * one fails to parse the record's mode and holds it unreadable. Like `deriveReportedAvailability`,
+ * no leader (or an unverified one) says no.
+ */
+export function deriveContinueAvailability(relay: RelayState): boolean {
+  return verifiedLeaderAdvertises(relay, CAPABILITIES.continueTask);
+}
+
+/** Whether the verified leader answers `run-now`; an older one refuses it as an op it does not know. */
+export function deriveRunNowAvailability(relay: RelayState): boolean {
+  return verifiedLeaderAdvertises(relay, CAPABILITIES.runNow);
+}
+
+function verifiedLeaderAdvertises(relay: RelayState, capability: Capability): boolean {
+  const { scheduler } = relay;
+  if (relay.status !== "open" || scheduler.kind !== "ready") return false;
+  const leader = relay.machines.find((m) => m.deviceId === scheduler.deviceId);
+  return leader?.capabilities?.includes(capability) === true;
 }
 
 function afterValue(after: PersistedForm["after"]): string {
@@ -404,7 +431,7 @@ function deriveMachineChoices(state: AppState, now: number): readonly MachineCho
     .map((machine) => {
       const base = machine.connected
         ? `online · ${machine.repos.length} ${machine.repos.length === 1 ? "repo" : "repos"} · last scanned ${formatSeen(machine.scannedAt, now)}`
-        : `offline · last seen ${formatSeen(machine.lastSeen, now)}`;
+        : `offline · last seen ${formatSeen(lastHeardAt(machine), now)}`;
       let disabled = false;
       let sub = base;
       if ((machine.exclaves ?? []).length === 0) {
@@ -624,7 +651,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
     afterTile: { label: "AFTER", value: afterValue(form.after), mono: false, dot: null },
     batchTile: {
       label: "BATCH",
-      value: form.batch === null ? "Off" : `#${form.batch.next} · ${describeStrategy(form.batch.strategy)}`,
+      value: form.batch === null ? "Off" : `#${form.batch.next}`,
       mono: false,
       dot: null,
     },
@@ -632,6 +659,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
     worktreeHint: form.worktree ? "Branches off the default branch on origin" : "Runs in the repo as it stands",
     footerStatus: deriveFooterStatus(state, machine, problem),
     button: deriveButton(state, machine, repo, problem),
+    startNow: deriveRunNowAvailability(relay),
     ignoredNote: deriveIgnoredNote(relay),
     machine,
     account,
@@ -641,9 +669,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
     machineChoices: deriveMachineChoices(state, now),
     accountChoices: deriveAccountChoices(state),
     previewShown: previewAsked(form),
-    queueAttention:
-      state.queueView?.kind === "ok" &&
-      state.queueView.tasks.some((t) => t.state === "needs-input" && t.escalated === true),
+    queueAttention: state.queueView?.kind === "ok" && needsAttention(state.queueView.tasks, state.relay.machines),
   };
 }
 
@@ -653,17 +679,48 @@ export function deriveView(state: AppState, now: number): ViewModel {
  */
 const FAILED_NEXT_STEP: ReadonlyMap<string, string> = new Map([
   ["dispatch_unconfirmed", "Check that machine before starting another."],
+  [
+    "continue_expired",
+    "The task it continues may be continued again while its machine still holds its launch (a week).",
+  ],
   ["lost_expired", "End it on that machine once it is back."],
+  ["pin_expired", "It never ran. Submit it again once its machine or account is back."],
+  [
+    "session_closed",
+    "Tasks waiting on it failed with it. Its transcript on that machine stops where its window was closed.",
+  ],
   [
     "merge_expired",
     "Tasks waiting on it failed with it. If it did merge, submit the tasks that waited on it again. Its session had already ended.",
   ],
-  ["session_failed", "Tasks waiting on it failed with it. Its transcript on that machine says why."],
 ]);
 
-export function failedBody(code: string | undefined): string {
+/** A killed process writes nothing at the end, so its transcript has no reason to give. */
+function sessionFailedNextStep(exit: number | undefined): string {
+  const transcript = endedBySignal(exit)
+    ? "Its transcript on that machine stops where it ended."
+    : "Its transcript on that machine says why.";
+  return `Tasks waiting on it failed with it. ${transcript}`;
+}
+
+export function failedBody(
+  code: string | undefined,
+  exit?: number,
+  until?: TaskUntil,
+  oomKill?: boolean,
+  message?: string,
+): string {
   // A code the scheduler set itself says why; any other is a daemon's spawn refusal.
-  const scheduler = code === undefined ? null : taskFailureText(code);
+  const scheduler = code === undefined ? null : taskFailureText(code, exit, until, oomKill);
+  // The daemon's own refusal of a continue task, worded for it: the generic line would say a spawn was refused.
+  // Its message says which of the several causes it was; shown as text, like any failure message.
+  if (code === "not_continuable") {
+    const why = message?.trim().replace(/\.$/u, "") ?? "";
+    return why === ""
+      ? "The machine couldn't continue the earlier session: its worktree or its launch record is gone, a session is open there, or the worktree is locked. Nothing new was started."
+      : `The machine couldn't continue the earlier session: ${why}. Nothing new was started.`;
+  }
   if (code === undefined || scheduler === null) return "The machine refused the spawn. Nothing is running.";
-  return `${sentence(scheduler)} ${FAILED_NEXT_STEP.get(code) ?? "Nothing is running."}`;
+  const next = code === "session_failed" ? sessionFailedNextStep(exit) : FAILED_NEXT_STEP.get(code);
+  return `${sentence(scheduler)} ${next ?? "Nothing is running."}`;
 }

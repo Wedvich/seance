@@ -34,6 +34,7 @@ import {
   type PauseHold,
   type Plain,
   type QueueResponse,
+  type IdleTaskRef,
   type UnreadableTaskRef,
   type RegistryView,
   type SessionsResponse,
@@ -43,7 +44,15 @@ import { createBackend } from "../src/backend-default.ts";
 import type { Config } from "../src/config.ts";
 import type { LocalOps } from "../src/handlers.ts";
 import { boundedQueue } from "../src/leader-requests.ts";
-import { createLeader, MemoryQueueStore, type Leader, type QueueStore, type Task } from "../src/leader.ts";
+import {
+  createLeader,
+  DEFAULT_CONFIG,
+  MemoryQueueStore,
+  type Leader,
+  type QueueStore,
+  type SchedulerConfig,
+  type Task,
+} from "../src/leader.ts";
 import type { PrPollerOpts } from "../src/pr-status.ts";
 import { startDaemon } from "../src/run.ts";
 import {
@@ -114,6 +123,7 @@ function leaderOver(
   tickIntervalMs?: number,
   prStatus?: PrPollerOpts,
   storeTimeoutMs?: number,
+  config?: SchedulerConfig,
 ) {
   const legs: RelayClient[] = [];
   const replies = new AsyncQueue<{ readonly to: string; readonly response: Plain }>("replies");
@@ -131,6 +141,7 @@ function leaderOver(
     },
     ...(tickIntervalMs === undefined ? {} : { tickIntervalMs }),
     ...(prStatus === undefined ? {} : { prStatus }),
+    ...(config === undefined ? {} : { config }),
     createRelay: (term, onEvent) => {
       const leg = new RelayClient({
         url: appRelayUrl(relay.url),
@@ -305,6 +316,53 @@ describe("queue-changed", () => {
     }
   });
 
+  test("an idle release, which writes nothing, is named in a nudge and listed by queue; busy ends it the same way", async () => {
+    const relay = startTestRelay(TOKEN);
+    relay.schedulerTerm = 1;
+    const store = new MemoryQueueStore();
+    const assignment = { deviceId: "b", ...target, pane: "%3" };
+    // No grace: the release is the event's own, so the test waits on no clock.
+    const { leader, replies } = leaderOver(relay, store, undefined, undefined, undefined, {
+      ...DEFAULT_CONFIG,
+      idleReleaseAfterMs: 0,
+    });
+    const event = async (state: string): Promise<void> => {
+      const payload = { session: "%3", taskId: "t-b", exclave: "default", state, at: Date.now() };
+      leader.deliver(
+        await seal(
+          key,
+          { to: SCHEDULER_ID, from: "b" },
+          { id: crypto.randomUUID(), ts: Date.now(), op: "session-event", payload },
+        ),
+      );
+    };
+    const listed = async (): Promise<QueueResponse["idle"]> => {
+      leader.deliver(await appRequest("queue"));
+      return queueReply((await replies.next()).response.payload).idle;
+    };
+    try {
+      leader.lead(1);
+      await leader.settled();
+      await nextNudge(relay);
+      // Held after takeover, so takeover does not wait out `b`'s sessions check.
+      await enqueueQueued(store, leader, "t-b", { state: "running", assignment });
+      expect(parseQueueChanged((await nextNudge(relay)).change)?.tasks).toEqual(["t-b"]);
+
+      const before = (await store.get("t-b"))?.version;
+      await event("idle");
+      expect(parseQueueChanged((await nextNudge(relay)).change)?.tasks).toEqual(["t-b"]);
+      expect(await listed()).toEqual([{ taskId: "t-b", since: expect.any(Number) }]);
+      expect((await store.get("t-b"))?.version).toBe(before);
+
+      await event("busy");
+      expect(parseQueueChanged((await nextNudge(relay)).change)?.tasks).toEqual(["t-b"]);
+      expect(await listed()).toBeUndefined();
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+
   test("nothing is sent once the term ended, even for a write still waiting in its window", async () => {
     const relay = startTestRelay(TOKEN);
     relay.schedulerTerm = 1;
@@ -420,7 +478,7 @@ describe("leader requests", () => {
     expect(boundedQueue(named, () => undefined, 0).tasks.map((t) => t.id)).toEqual(["merge", "f0"]);
   });
 
-  test("cancel and mark-done audit the request id with the task id, so an app's request joins the task's record", async () => {
+  test("cancel, mark-done and run-now audit the request id with the task id, so an app's request joins the task's record", async () => {
     const relay = startTestRelay(TOKEN);
     const store = new MemoryQueueStore();
     await store.put(
@@ -429,6 +487,7 @@ describe("leader requests", () => {
       task("c1", { state: "queued", spec: { repo: "github.com/acme/app", mode: "worktree", prompt: "secret" } }),
     );
     await store.put("m1", 0, task("m1", { state: "queued" }));
+    await store.put("r1", 0, task("r1", { state: "queued" }));
     const { leader, replies } = leaderOver(relay, store);
     const ids: Record<string, string> = {};
     const ask = async (name: string, op: OpName, payload: unknown): Promise<unknown> => {
@@ -454,6 +513,10 @@ describe("leader requests", () => {
           code: "task_not_found",
         });
         expect(await ask("malformed", "mark-done", { id: "m1" })).toMatchObject({ ok: false, code: "invalid_request" });
+        // Ready, but with no machine nothing places it, caps or not.
+        expect(await ask("run", "run-now", { taskId: "r1" })).toMatchObject({ ok: false, code: "unplaceable" });
+        expect(await ask("ranDone", "run-now", { taskId: "m1" })).toMatchObject({ ok: false, code: "finished" });
+        expect(await ask("runBad", "run-now", { taskId: 1 })).toMatchObject({ ok: false, code: "invalid_request" });
       } finally {
         leader.stop();
         relay.stop();
@@ -468,6 +531,9 @@ describe("leader requests", () => {
     );
     expect(audits).toContainEqual(
       expect.stringContaining(`op=mark-done id="${ids["nobody"]}" task="nobody" refused code=not_found`),
+    );
+    expect(audits).toContainEqual(
+      expect.stringContaining(`op=run-now id="${ids["run"]}" task="r1" refused code=unplaceable`),
     );
     // The prompt is the spawn line's to fingerprint, never this one's to carry.
     expect(lines.some((line) => line.includes("secret"))).toBe(false);
@@ -803,8 +869,9 @@ function boundedReply(
   tasks: readonly Task[],
   holds: readonly PauseHold[] = [],
   unreadable: readonly UnreadableTaskRef[] = [],
+  idle: readonly IdleTaskRef[] = [],
 ): Plain {
-  const payload = boundedQueue(tasks, (id) => tasks.find((t) => t.id === id)?.decision, 0, holds, unreadable);
+  const payload = boundedQueue(tasks, (id) => tasks.find((t) => t.id === id)?.decision, 0, holds, unreadable, idle);
   return { id: crypto.randomUUID(), ts: 0, op: "queue", re: crypto.randomUUID(), payload };
 }
 
@@ -878,10 +945,24 @@ describe("boundedQueue", () => {
       version: Number.MAX_SAFE_INTEGER,
       reason: "version_regressed",
     }));
+    // And an idle release for as many tasks as the store holds, each at its bounds.
+    const idle = Array.from({ length: MAX_TASKS }, (_, i) => ({
+      taskId: `${i}`.padStart(ROUTING_ID_MAX_LENGTH, "i"),
+      since: Number.MAX_SAFE_INTEGER,
+    }));
     const answered = boundedReply(tasks, holds, unreadable);
     expect(await sealedLength(answered)).toBeLessThanOrEqual(ENVELOPE_MAX_CT_LENGTH);
     expect(queueReply(answered.payload).holds).toHaveLength(MAX_PAUSE_HOLDS);
     expect(queueReply(answered.payload).unreadable).toEqual(unreadable);
+    // A full idle list too still fits whole, at the cost of more finished tasks, never a live one.
+    const crowded = boundedReply(tasks, holds, unreadable, idle);
+    expect(await sealedLength(crowded)).toBeLessThanOrEqual(ENVELOPE_MAX_CT_LENGTH);
+    expect(queueReply(crowded.payload).idle).toEqual(idle);
+    expect(
+      queueReply(crowded.payload)
+        .tasks.map((t) => t.id)
+        .slice(0, 2),
+    ).toEqual(["f1", "f0"]);
     const ids = queueReply(answered.payload).tasks.map((t) => t.id);
     expect(ids.length).toBeLessThan(QUEUE_MAX_TASKS);
     expect(ids).toContain("f0");

@@ -7,6 +7,7 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import {
   CAPABILITIES,
   isRecord,
+  QUEUE_MAX_TASKS,
   RequestFailure,
   SCHEDULER_ID,
   TASK_FAILURE_LIMITS,
@@ -217,6 +218,17 @@ describe("mcp tools", () => {
         local: false,
       },
     ]);
+    lazy.stop();
+  });
+
+  test("list_machines reports a slept machine's last status beat, not its days-old register, as lastSeen", async () => {
+    const slept = machine({ connected: false, lastSeen: 2_000, status: { at: 90_000, scan: 1_000 } });
+    const lazy = new LazyRelay({ create: () => fakeRelay([slept]) });
+    const client = await connectedClient(lazy);
+    const listed: Record<string, unknown>[] = JSON.parse(
+      toolText(await client.callTool({ name: "list_machines", arguments: {} })),
+    );
+    expect(listed[0]?.["lastSeen"]).toBe(new Date(90_000_000).toISOString());
     lazy.stop();
   });
 
@@ -688,6 +700,18 @@ describe("despawn_session", () => {
     lazy.stop();
   });
 
+  test("a despawn on a disconnected machine is refused with when it was last heard from", async () => {
+    const slept = machine({ connected: false, lastSeen: 2_000, status: { at: 90_000, scan: 1_000 } });
+    const fake = fakeRelay([slept]);
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const result = await client.callTool({ name: "despawn_session", arguments: { machine: "MacBook Pro", id: "%12" } });
+    expect(result.isError).toBe(true);
+    expect(toolText(result)).toBe(`MacBook Pro is not connected — last seen ${new Date(90_000_000).toISOString()}`);
+    expect(fake.requests).toHaveLength(0);
+    lazy.stop();
+  });
+
   test("a self-targeted despawn goes to the daemon on this box and never dials the relay", async () => {
     const fake = fakeRelay([machine()]);
     const local = fakeLocal(() => ({ ok: true, window: "task", outcome: "killed", sessions: [] }));
@@ -1028,9 +1052,10 @@ describe("spawn_session on auto", () => {
       const client = await connectedClient(fleet, fakeLocal());
       const tasks: Record<string, Record<string, unknown>> = {
         spawn_session: { machine: "auto", repo: "seance" },
-        queue_batch: { strategy: "auto", tasks: [{ repo: "seance", prompt: "do it" }] },
+        queue_batch: { tasks: [{ repo: "seance", prompt: "do it" }] },
         get_queue: {},
         cancel_task: { taskId: "t-1" },
+        continue_task: { taskId: "t-1" },
       };
       for (const [name, args] of Object.entries(tasks)) {
         // oxlint-disable-next-line no-await-in-loop -- one tool at a time keeps the double's frame order readable
@@ -1378,6 +1403,15 @@ describe("resolvePlacement", () => {
     expect(online.echo).toBeNull();
   });
 
+  test("an offline pinned machine's note dates it by its last status beat when that is newer than its register", async () => {
+    const machines = pinMachines().map((m) =>
+      m.deviceId === "device-thad" ? machine({ ...m, connected: false, status: { at: 90_000, scan: 1_000 } }) : m,
+    );
+    const resolved = await resolvePlacement(machines, listed().accounts, { machine: "thad" });
+    if ("error" in resolved) throw new Error(resolved.error);
+    expect(resolved.echo).toContain(`Thad is offline (last seen ${new Date(90_000_000).toISOString()})`);
+  });
+
   test("an account by alias, by id, or by an email only it reports; the email never reaches the spec", async () => {
     for (const input of ["employer", "EMPLOYER", EMPLOYER]) {
       // oxlint-disable-next-line no-await-in-loop -- one input each
@@ -1683,7 +1717,6 @@ describe("spawn_session on auto, pinned", () => {
   test("queue_batch places each member on its own, and one bad pin refuses the batch before the first create", async () => {
     const fake = pinRelay();
     const ok = await callTool(fake, "queue_batch", {
-      strategy: "auto",
       tasks: [
         { repo: "pengefix-hq", prompt: "a", pin: { machine: "WSL" } },
         { repo: "pengefix2/pengefix-hq", prompt: "b", pin: { account: "employer" } },
@@ -1710,7 +1743,6 @@ describe("spawn_session on auto, pinned", () => {
       const refused = pinRelay();
       // oxlint-disable-next-line no-await-in-loop -- one fake each
       const answer = await callTool(refused, "queue_batch", {
-        strategy: "auto",
         tasks: [
           { repo: HQ, prompt: "a" },
           { repo: HQ, prompt: "b", pin },
@@ -1729,7 +1761,6 @@ describe("queue_batch", () => {
   test("queues the members in order under one batch, resolving refs to the ids it minted", async () => {
     const fake = leaderRelay([], reportingMachines());
     const { text, error } = await callTool(fake, "queue_batch", {
-      strategy: "sequential",
       tasks: [
         member({ ref: "schema", title: "Schema", linear: { issue: "ENG-1" } }),
         member({ ref: "api", after: [{ ref: "schema" }] }),
@@ -1742,9 +1773,9 @@ describe("queue_batch", () => {
     const batchId = first?.spec.batch?.id ?? "";
     expect(batchId).toMatch(/^[0-9a-f-]{36}$/u);
     expect(fake.creates.map((t) => t.spec.batch)).toEqual([
-      { id: batchId, index: 1, strategy: { mode: "sequential" } },
-      { id: batchId, index: 2, strategy: { mode: "sequential" } },
-      { id: batchId, index: 3, strategy: { mode: "sequential" } },
+      { id: batchId, index: 1 },
+      { id: batchId, index: 2 },
+      { id: batchId, index: 3 },
     ]);
     expect(first?.spec.deps).toBeUndefined();
     expect(first?.spec.linear).toEqual({ issue: "ENG-1" });
@@ -1753,30 +1784,30 @@ describe("queue_batch", () => {
       { task: second?.id ?? "", after: "merged" },
       { task: PRED, after: "opened" },
     ]);
-    expect(text).toContain(`batch ${batchId}: 3 tasks queued (sequential)`);
+    expect(text).toContain(`batch ${batchId}: 3 tasks queued\n`);
     expect(text).toContain(`task 1 (schema): ${first?.id}`);
     expect(text).toContain(`task 3: ${third?.id}`);
     expect(fake.requests).toEqual([]);
   });
 
-  test("a parallel batch carries its max, and max is refused on the others", async () => {
+  test("a caller still sending an order or a limit is refused, not given a plain group; auto or none is fine", async () => {
+    for (const extra of [
+      { strategy: "sequential" },
+      { strategy: "parallel", max: 2 },
+      { strategy: "bogus" },
+      { max: 1 },
+    ]) {
+      const fake = leaderRelay();
+      const refused = await callTool(fake, "queue_batch", { ...extra, tasks: [member(), member()] });
+      expect(refused.error).toBe(true);
+      expect(refused.text).toContain("no longer orders or limits");
+      expect(refused.text).toContain("after");
+      expect(fake.creates).toEqual([]);
+    }
     const fake = leaderRelay();
-    const ok = await callTool(fake, "queue_batch", { strategy: "parallel", max: 2, tasks: [member(), member()] });
+    const ok = await callTool(fake, "queue_batch", { strategy: "auto", tasks: [member(), member()] });
     expect(ok.error).toBe(false);
-    expect(fake.creates.map((t) => t.spec.batch?.strategy)).toEqual([
-      { mode: "parallel", max: 2 },
-      { mode: "parallel", max: 2 },
-    ]);
-    expect(ok.text).toContain("parallel, at most 2 at once");
-
-    const bare = leaderRelay();
-    const noMax = await callTool(bare, "queue_batch", { strategy: "parallel", tasks: [member()] });
-    expect(noMax.error).toBe(true);
-    expect(noMax.text).toContain('strategy "parallel" needs max');
-    const stray = await callTool(bare, "queue_batch", { strategy: "auto", max: 2, tasks: [member()] });
-    expect(stray.error).toBe(true);
-    expect(stray.text).toContain('max applies to strategy "parallel" only');
-    expect(bare.started).toBe(0);
+    for (const t of fake.creates) expect(t.spec.batch).not.toHaveProperty("strategy");
   });
 
   test("a bad ref, a task waiting on itself, or an ambiguous edge refuses the whole batch before anything is stored", async () => {
@@ -1799,7 +1830,7 @@ describe("queue_batch", () => {
     for (const [tasks, text] of cases) {
       const fake = leaderRelay([], reportingMachines());
       // oxlint-disable-next-line no-await-in-loop -- one fake each
-      const answer = await callTool(fake, "queue_batch", { strategy: "auto", tasks });
+      const answer = await callTool(fake, "queue_batch", { tasks });
       expect(answer.error).toBe(true);
       expect(answer.text).toContain(text);
       expect(fake.creates).toEqual([]);
@@ -1810,7 +1841,6 @@ describe("queue_batch", () => {
   test("an unknown repo on any member refuses the batch before the first create", async () => {
     const fake = leaderRelay();
     const { text, error } = await callTool(fake, "queue_batch", {
-      strategy: "auto",
       tasks: [member(), member({ repo: "nope" })],
     });
     expect(error).toBe(true);
@@ -1823,7 +1853,6 @@ describe("queue_batch", () => {
     fake.onCreate = () =>
       fake.creates.length === 2 ? { ok: false, code: "store_full" } : { ok: true, landedEarlier: false };
     const { text, error } = await callTool(fake, "queue_batch", {
-      strategy: "sequential",
       tasks: [member(), member(), member()],
     });
     expect(error).toBe(true);
@@ -1838,7 +1867,6 @@ describe("queue_batch", () => {
     fake.onCreate = () =>
       fake.creates.length === 2 ? { ok: false, code: "store_full" } : { ok: true, landedEarlier: false };
     const { text, error } = await callTool(fake, "queue_batch", {
-      strategy: "sequential",
       tasks: [
         { repo: HQ, prompt: "a", pin: { account: "personal" } },
         { repo: HQ, prompt: "b" },
@@ -1862,7 +1890,6 @@ describe("queue_batch", () => {
   test("reported tasks need a leader that advertises them, as spawn_session does", async () => {
     const old = leaderRelay();
     const { text, error } = await callTool(old, "queue_batch", {
-      strategy: "auto",
       tasks: [member(), member({ until: "reported" })],
     });
     expect(error).toBe(true);
@@ -1871,7 +1898,6 @@ describe("queue_batch", () => {
 
     const current = leaderRelay([], reportingMachines());
     const ok = await callTool(current, "queue_batch", {
-      strategy: "auto",
       tasks: [member(), member({ until: "reported", after: [{ task: PRED, when: "done" }] })],
     });
     expect(ok.error).toBe(false);
@@ -1881,7 +1907,7 @@ describe("queue_batch", () => {
   test("with no leader the batch still queues and says it waits", async () => {
     const fake = leaderRelay();
     fake.setState({ scheduler: { kind: "none" } });
-    const { text, error } = await callTool(fake, "queue_batch", { strategy: "auto", tasks: [member()] });
+    const { text, error } = await callTool(fake, "queue_batch", { tasks: [member()] });
     expect(error).toBe(false);
     expect(text).toContain("No scheduler is leading right now");
   });
@@ -2034,6 +2060,36 @@ describe("get_queue", () => {
         tasks: [
           failed("t-1", "dispatch_unconfirmed", "the launch ledger no longer reaches back to its reservation"),
           failed("t-2", "repo_not_found", "no such repo"),
+          // The leader's own record: its exit status rides beside the message, so the line words it.
+          task({
+            id: "t-3",
+            state: "failed",
+            failure: {
+              code: "session_failed",
+              message: "its session exited with status 137 and reported no pull request",
+              exit: 137,
+            },
+          }),
+          // A closed window says all its message does, so the line is the wording alone.
+          task({
+            id: "t-5",
+            state: "failed",
+            failure: {
+              code: "session_closed",
+              message: "its window was closed before its session ended and it reported no pull request",
+            },
+          }),
+          // With the machine's OOM verdict beside it, the line says what the kernel counted.
+          task({
+            id: "t-4",
+            state: "failed",
+            failure: {
+              code: "session_failed",
+              message: "its session exited with status 137 and reported no pull request",
+              exit: 137,
+              oomKill: true,
+            },
+          }),
         ],
         at: 6_000,
       },
@@ -2045,6 +2101,9 @@ describe("get_queue", () => {
     expect(tasks.map((t: { failure: string }) => t.failure)).toEqual([
       `dispatch_unconfirmed: ${taskFailureText("dispatch_unconfirmed")} (the launch ledger no longer reaches back to its reservation)`,
       "repo_not_found: no such repo",
+      "session_failed: its session was killed (SIGKILL), possibly out of memory, and reported no pull request",
+      "session_closed: its window was closed before its session ended and it reported no pull request",
+      "session_failed: its session was killed (SIGKILL), out of memory (the kernel's OOM killer fired as it died), and reported no pull request",
     ]);
     lazy.stop();
   });
@@ -2117,7 +2176,7 @@ describe("get_queue", () => {
   });
 
   test("shows a task's dependencies, batch, reported settle and Linear link", async () => {
-    const batch = { id: "b-1", index: 2, strategy: { mode: "parallel", max: 3 } } as const;
+    const batch = { id: "b-1", index: 2 } as const;
     const fake = leaderRelay([
       {
         tasks: [
@@ -2144,10 +2203,10 @@ describe("get_queue", () => {
     const { tasks } = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} })));
     expect(tasks[0]).toMatchObject({
       until: "reported",
-      batch,
       after: [{ task: "t-0", when: "done" }],
       linear: { issue: "ENG-9" },
     });
+    expect(tasks[0].batch).toEqual({ id: "b-1", index: 2 });
     expect(tasks[1].merged).toBe(true);
     expect(tasks[2].doneBy).toBe("reported");
     expect(tasks[2]).not.toHaveProperty("until");
@@ -2286,5 +2345,227 @@ describe("cancel_task", () => {
     expect(big.text).toContain("the leader took the cancel");
     expect(big.text).toContain("check get_queue");
     for (const { text } of [crashed, long, big]) expect(text).not.toContain("may have landed");
+  });
+});
+
+describe("continue_task", () => {
+  const AT = { deviceId: "device-2", exclave: "work", clone: "seance" };
+  const failedTask = task({
+    id: "t-1",
+    state: "failed",
+    failure: { code: "session_failed", message: "the session ended with exit 137" },
+    spec: { repo: ORIGIN, mode: "worktree", prompt: "fix it", title: "fix-it", model: "opus", effort: "high" },
+    assignment: { ...AT, window: "fix-it" },
+  });
+
+  /** The leader (device-1) and the machine the task ran on (device-2), each advertising `continueTask` unless held back. */
+  function continuingMachines(
+    advertising: { readonly leader?: boolean; readonly box?: boolean; readonly cancelled?: boolean } = {},
+  ): Machine[] {
+    const [leader, box] = autoMachines();
+    const advertise = (m: Machine | undefined, on: boolean | undefined, cancelled = false): Machine =>
+      machine({
+        ...m,
+        ...(on === false
+          ? {}
+          : { capabilities: [CAPABILITIES.continueTask, ...(cancelled ? [CAPABILITIES.continueCancelled] : [])] }),
+      });
+    return [advertise(leader, advertising.leader), advertise(box, advertising.box, advertising.cancelled)];
+  }
+
+  async function callContinue(
+    queue: readonly Task[],
+    machines: readonly Machine[] = continuingMachines(),
+    args: Record<string, unknown> | undefined = undefined,
+  ): Promise<{ text: string; error: boolean; fake: ReturnType<typeof fakeRelay>; audited: readonly string[] }> {
+    const fake = leaderRelay([{ tasks: queue, at: 6_000 }], machines);
+    const lazy = new LazyRelay({ create: () => fake });
+    const audited: string[] = [];
+    const client = await connectedClient(lazy, null, (line) => {
+      audited.push(line);
+    });
+    try {
+      const result = await client.callTool({ name: "continue_task", arguments: args ?? { taskId: "t-1" } });
+      return { text: toolText(result), error: result.isError === true, fake, audited };
+    } finally {
+      lazy.stop();
+    }
+  }
+
+  test("queues a task that continues the failed one, on exactly where it ran, with the shaping fields carried over", async () => {
+    const { text, error, fake, audited } = await callContinue([failedTask], continuingMachines(), {
+      taskId: "t-1",
+      prompt: "  carry on with the tests  ",
+    });
+    expect(error).toBe(false);
+    const created = fake.creates[0];
+    expect(created?.spec).toEqual({
+      repo: ORIGIN,
+      mode: "continue",
+      prompt: "carry on with the tests",
+      title: "fix-it",
+      model: "opus",
+      effort: "high",
+      continues: { task: "t-1", at: AT },
+      client: "mcp",
+    });
+    expect(text).toStartWith("continuing task t-1\n");
+    expect(text).toContain(`task ${created?.id}: queued`);
+    expect(
+      audited.some((line) => line.startsWith("audit enqueue origin=mcp") && line.includes('continues="t-1"')),
+    ).toBe(true);
+    // The leader is asked for the queue only: nothing is dispatched from here.
+    expect(fake.requests.map((r) => r.op)).toEqual(["queue"]);
+  });
+
+  test("refuses, writing nothing, when the leader or the machine it ran on cannot continue yet", async () => {
+    const old = await callContinue([failedTask], continuingMachines({ leader: false }));
+    expect(old.error).toBe(true);
+    expect(old.text).toContain("the scheduler's leader cannot continue a session yet");
+    const oldBox = await callContinue([failedTask], continuingMachines({ box: false }));
+    expect(oldBox.error).toBe(true);
+    expect(oldBox.text).toContain("can't continue a session yet");
+    for (const { fake } of [old, oldBox]) expect(fake.creates).toEqual([]);
+    // No verified leader: the leader cannot be confirmed, so nothing is written either.
+    const fake = fakeRelay(continuingMachines(), () => ({ tasks: [failedTask], at: 6_000 }));
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const none = await client.callTool({ name: "continue_task", arguments: { taskId: "t-1" } });
+    expect(none.isError).toBe(true);
+    expect(toolText(none)).toContain("no verified scheduler is leading");
+    expect(fake.creates).toEqual([]);
+    lazy.stop();
+  });
+
+  test("refuses a task the leader does not list, a task that is not a failed session, and a here run", async () => {
+    const missing = await callContinue([], continuingMachines());
+    expect(missing.error).toBe(true);
+    expect(missing.text).toContain(`not in the leader's list (pruned, or past the ${QUEUE_MAX_TASKS} most relevant)`);
+    const finished = await callContinue([task({ ...failedTask, state: "done", failure: undefined })]);
+    expect(finished.text).toContain(
+      "only a task whose session failed or whose window was closed, or that was cancelled after it started, can be continued",
+    );
+    const hereRun = await callContinue([task({ ...failedTask, spec: { repo: ORIGIN, mode: "here" } })]);
+    expect(hereRun.text).toContain("no worktree of its own");
+    const other = await callContinue([task({ ...failedTask, failure: { code: "queue_expired", message: "x" } })]);
+    expect(other.error).toBe(true);
+    for (const { fake } of [missing, finished, hereRun, other]) expect(fake.creates).toEqual([]);
+  });
+
+  test("refuses a task something already continues, in any state past the queue, and queues nothing", async () => {
+    const continuation = (state: Task["state"]): Task =>
+      task({ id: "t-2", state, spec: { repo: ORIGIN, mode: "continue", continues: { task: "t-1", at: AT } } });
+    for (const state of ["running", "needs-input", "lost", "awaiting-merge", "done"] as const) {
+      // oxlint-disable-next-line no-await-in-loop -- one relay at a time
+      const held = await callContinue([failedTask, continuation(state)]);
+      expect(held.error, state).toBe(true);
+      expect(held.text, state).toContain("already underway or finished");
+      expect(held.fake.creates, state).toEqual([]);
+    }
+    // One still waiting leaves the offer open.
+    const waiting = await callContinue([failedTask, continuation("queued")]);
+    expect(waiting.error).toBe(false);
+  });
+
+  test("a note over the prompt bound is refused before anything is queued, and a malformed id is no task id", async () => {
+    const long = await callContinue([failedTask], continuingMachines(), {
+      taskId: "t-1",
+      prompt: "x".repeat(TASK_REQUEST_LIMITS.prompt + 1),
+    });
+    expect(long.error).toBe(true);
+    expect(long.text).toContain("the prompt is");
+    expect(long.fake.creates).toEqual([]);
+    const malformed = await callContinue([failedTask], continuingMachines(), { taskId: "a b" });
+    expect(malformed.error).toBe(true);
+    expect(malformed.text).toContain("is not a task id");
+    expect(malformed.fake.requests).toEqual([]);
+  });
+
+  test("a keyless box whose daemon predates the broker is told to update, as every scheduler tool is", async () => {
+    const double = await startBrokerDouble((raw, id) =>
+      isRecord(raw) && raw["action"] === "machines"
+        ? brokerOk(id, autoMachines())
+        : brokerFail(id, "unsupported", "action is not brokered"),
+    );
+    try {
+      const fleet = selectFleet({
+        key: () => Promise.resolve(null),
+        direct: () => {
+          throw new Error("no key, so no direct path");
+        },
+        broker: brokerFleet({ path: double.path }),
+      });
+      const client = await connectedClient(fleet, fakeLocal());
+      const result = await client.callTool({ name: "continue_task", arguments: { taskId: "t-1" } });
+      expect(result.isError).toBe(true);
+      expect(toolText(result)).toContain(SCHEDULER_NEEDS_NEWER_DAEMON);
+    } finally {
+      await double.stop();
+    }
+  });
+
+  test("get_queue marks a failed session continuable and names the task a continuation continues", async () => {
+    const continuing = task({
+      id: "t-2",
+      state: "ready",
+      spec: { repo: ORIGIN, mode: "continue", continues: { task: "t-1", at: AT } },
+    });
+    const fake = leaderRelay([{ tasks: [failedTask, continuing], at: 6_000 }], continuingMachines());
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const queue = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} }))) as {
+      tasks: Record<string, unknown>[];
+    };
+    expect(queue.tasks.find((t) => t["id"] === "t-1")).toMatchObject({ continuable: true });
+    expect(queue.tasks.find((t) => t["id"] === "t-1")).not.toHaveProperty("continues");
+    expect(queue.tasks.find((t) => t["id"] === "t-2")).toMatchObject({ continues: "t-1" });
+    expect(queue.tasks.find((t) => t["id"] === "t-2")).not.toHaveProperty("continuable");
+    lazy.stop();
+  });
+
+  test("a cancelled task with an assignment is continued only on a box advertising continueCancelled", async () => {
+    const cancelled = task({ ...failedTask, state: "cancelled", failure: undefined });
+    const queued = await callContinue([cancelled], continuingMachines({ cancelled: true }));
+    expect(queued.error).toBe(false);
+    expect(queued.fake.creates).toHaveLength(1);
+    const refused = await callContinue([cancelled], continuingMachines());
+    expect(refused.error).toBe(true);
+    expect(refused.text).toContain("continue a cancelled session");
+    expect(refused.fake.creates).toEqual([]);
+  });
+
+  test("get_queue moves continuable to a continuation that failed after landing", async () => {
+    const y = task({
+      id: "t-2",
+      state: "failed",
+      failure: { code: "session_failed", message: "exit 137" },
+      assignment: { ...AT, window: "fix-it" },
+      spec: { repo: ORIGIN, mode: "continue", continues: { task: "t-1", at: AT } },
+    });
+    const fake = leaderRelay([{ tasks: [failedTask, y], at: 6_000 }], continuingMachines());
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const queue = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} }))) as {
+      tasks: Record<string, unknown>[];
+    };
+    expect(queue.tasks.find((t) => t["id"] === "t-1")).not.toHaveProperty("continuable");
+    expect(queue.tasks.find((t) => t["id"] === "t-2")).toMatchObject({ continuable: true });
+    lazy.stop();
+  });
+
+  test("get_queue withdraws continuable once a continuation has the session", async () => {
+    const underway = task({
+      id: "t-2",
+      state: "running",
+      spec: { repo: ORIGIN, mode: "continue", continues: { task: "t-1", at: AT } },
+    });
+    const fake = leaderRelay([{ tasks: [failedTask, underway], at: 6_000 }], continuingMachines());
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const queue = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} }))) as {
+      tasks: Record<string, unknown>[];
+    };
+    expect(queue.tasks.find((t) => t["id"] === "t-1")).not.toHaveProperty("continuable");
+    lazy.stop();
   });
 });

@@ -1,7 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { importPsk, openAtRest, sealAtRest, toBase64 } from "./crypto.ts";
 import { openTaskListing, openTaskRecord, queuedTask, sealTaskRecord, taskKey } from "./task-record.ts";
-import { APP_ID, PIN_SENTINEL, SCHEDULER_ID, TASK_SPEC_LIMITS, type Task, type TaskRecord } from "./types.ts";
+import {
+  APP_ID,
+  AT_REST_OPS,
+  PIN_SENTINEL,
+  SCHEDULER_ID,
+  TASK_SPEC_LIMITS,
+  type Task,
+  type TaskRecord,
+} from "./types.ts";
 
 const key = await importPsk(toBase64(new Uint8Array(32).fill(7)));
 const otherKey = await importPsk(toBase64(new Uint8Array(32).fill(9)));
@@ -21,6 +29,32 @@ describe("task records at rest", () => {
     expect(env.to).toBe(SCHEDULER_ID);
     expect(env.from).toBe(APP_ID);
     expect(await openTaskRecord(key, { key: taskKey(task.id), version: 1, env }, NOW + 20 * DAY_MS)).toEqual(record);
+  });
+
+  test("a batched record is sealed without a strategy and round-trips as its group", async () => {
+    const task = queued();
+    const record: TaskRecord = {
+      version: 1,
+      task: { ...task, spec: { ...task.spec, batch: { id: crypto.randomUUID(), index: 3 } } },
+    };
+    const env = await sealTaskRecord(key, APP_ID, record);
+    expect(await openTaskRecord(key, { key: taskKey(task.id), version: 1, env }, NOW)).toEqual(record);
+  });
+
+  test("a record an older writer sealed with a sequential or parallel batch strategy opens as a plain group", async () => {
+    for (const strategy of [{ mode: "sequential" }, { mode: "parallel", max: 2 }, { mode: "auto" }]) {
+      const task = queued();
+      // Raw, as the older writer's sealer emitted it: this build's types cannot carry the old strategy.
+      const raw = {
+        version: 1,
+        task: { ...task, spec: { ...task.spec, batch: { id: crypto.randomUUID(), index: 1, strategy } } },
+      };
+      const env = await sealAtRest(key, { to: SCHEDULER_ID, from: APP_ID }, AT_REST_OPS.task, raw);
+      const read = await openTaskRecord(key, { key: taskKey(task.id), version: 1, env }, NOW);
+      if (typeof read === "string") throw new Error(`unreadable: ${read}`);
+      expect(read.task.spec.batch).toEqual({ id: raw.task.spec.batch.id, index: 1 });
+      expect(read.task.spec.batch).not.toHaveProperty("strategy");
+    }
   });
 
   test("another key, another op or another addressee is unopenable", async () => {
@@ -90,6 +124,20 @@ describe("task records at rest", () => {
     // Nothing an older leader can keep is sealed differently than before.
     expect(await sealedPin(base)).toBeUndefined();
     expect(await sealedPin({ ...base, pin: { deviceId: "dev-a" } })).toEqual({ deviceId: "dev-a" });
+  });
+
+  test("a continuation keeps its mode and link through seal and open; the link without the mode is unreadable", async () => {
+    const at = { deviceId: "dev-a", exclave: "default", clone: "app" };
+    const base = queued();
+    const task: Task = { ...base, spec: { ...base.spec, mode: "continue", continues: { task: "t-old", at } } };
+    const read = async (t: Task): Promise<unknown> => {
+      const env = await sealTaskRecord(key, APP_ID, { version: 1, task: t });
+      return openTaskRecord(key, { key: taskKey(t.id), version: 1, env }, NOW);
+    };
+    expect(await read(task)).toEqual({ version: 1, task });
+    // What an older leader's parse would have left: the field it cannot know is dropped with the mode refused,
+    // so the pair never reads half-way here either.
+    expect(await read({ ...task, spec: { ...task.spec, mode: "worktree" } })).toBe("malformed");
   });
 
   test("a body that opens but is no task record is malformed", async () => {

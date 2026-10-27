@@ -178,11 +178,13 @@ export function spawnAudit(origin: SpawnOrigin, sink: AuditSink): SpawnAudit {
       // Only when on, so every ordinary spawn's line stays byte-identical.
       const planNote = request.plan === true ? "plan=true " : "";
       const taskNote = request.taskId === undefined ? "" : `task=${quote(request.taskId)} `;
+      const continuesNote = request.continues === undefined ? "" : `continues=${quote(request.continues)} `;
       await emit(
         `${clientNote}repo=${quote(request.repo)} mode=${request.mode} title=${quote(request.title ?? "")} ` +
           `model=${quote(request.model ?? DEFAULT_MODEL)} effort=${quote(request.effort ?? DEFAULT_EFFORT)} ` +
           planNote +
           taskNote +
+          continuesNote +
           promptNote,
       );
     },
@@ -234,14 +236,16 @@ export function despawnAudit(origin: SpawnOrigin, sink: AuditSink): DespawnAudit
 
 export interface QueueAudit {
   readonly markedDone: (id: string, task: { readonly id: string }) => Promise<void>;
+  /** A `run-now` that reserved the task past the concurrency caps. */
+  readonly ranNow: (id: string, task: { readonly id: string }) => Promise<void>;
   readonly cancelled: (id: string, task: { readonly id: string; readonly leftRunning?: boolean }) => Promise<void>;
   /** A `discard` that deleted the unreadable record at `task` and `version`. */
   readonly discarded: (id: string, taskId: string, version: number) => Promise<void>;
   readonly refused: (
-    op: "cancel" | "mark-done" | "pause" | "resume" | "discard",
+    op: "cancel" | "mark-done" | "run-now" | "pause" | "resume" | "discard",
     id: string,
     code: string,
-    /** What the request named: a `cancel` or `mark-done`'s task, a `pause` or `resume`'s account (absent: the whole queue). */
+    /** What the request named: a `cancel`, `mark-done` or `run-now`'s task, a `pause` or `resume`'s account (absent: the whole queue). */
     subject?: { readonly taskId?: string; readonly account?: string },
   ) => Promise<void>;
   /** A `pause` or `resume` answered with the holds; `account` absent is the whole queue. */
@@ -261,6 +265,7 @@ export function queueAudit(sink: AuditSink): QueueAudit {
   };
   return {
     markedDone: (id, task) => emit(`op=mark-done id=${quote(id)} task=${quote(task.id)} ok`),
+    ranNow: (id, task) => emit(`op=run-now id=${quote(id)} task=${quote(task.id)} ok`),
     cancelled: (id, task) =>
       emit(
         `op=cancel id=${quote(id)} task=${quote(task.id)} ok${task.leftRunning === true ? " leftRunning=true" : ""}`,
@@ -319,7 +324,11 @@ export type EnqueueSurface = Extract<SpawnClient, "mcp" | "cli">;
 export type EnqueueOrigin = EnqueueSurface | BrokerOrigin;
 
 export type EnqueueAuditLine = (
-  task: { readonly id: string; readonly createdAt: number },
+  task: {
+    readonly id: string;
+    readonly createdAt: number;
+    readonly spec?: { readonly continues?: { readonly task: string } };
+  },
   outcome: EnqueueOutcome,
 ) => Promise<void>;
 
@@ -345,8 +354,11 @@ export function enqueueAudit(sink: AuditSink, origin: EnqueueOrigin, claimedClie
             `refused code=${quote(outcome.code)}`
           : "unanswered";
     const who = origin === "local-broker" ? "claimed_client" : "client";
+    // Only a continuation has one, so every other line is unchanged.
+    const continued = task.spec?.continues?.task;
+    const continues = continued === undefined ? "" : ` continues=${quote(continued)}`;
     await sink(
-      `audit enqueue origin=${origin} ${who}=${client} task=${quote(task.id)} createdAt=${task.createdAt} ${how}`,
+      `audit enqueue origin=${origin} ${who}=${client} task=${quote(task.id)}${continues} createdAt=${task.createdAt} ${how}`,
     );
   };
 }
@@ -363,12 +375,16 @@ export type BrokerOrigin = "local-broker";
 export interface BrokerAudit {
   readonly machines: (id: string) => Promise<void>;
   readonly fleet: (id: string) => Promise<void>;
-  /** `task` and `client` only where the op carries them; `client` is the peer's claim, never verified. */
+  /**
+   * `task` and `client` only where the op carries them; `client` is the peer's claim, never verified.
+   * `continues` is the old task id of an enqueued continue spec.
+   */
   readonly scheduler: (
     id: string,
     op: BrokerSchedulerOp,
     task: string | undefined,
     client: string | undefined,
+    continues?: string,
   ) => Promise<void>;
   readonly request: (id: string, op: string, deviceId: string, client: string | undefined) => Promise<void>;
   readonly ok: (id: string) => Promise<void>;
@@ -388,9 +404,9 @@ export function brokerAudit(sink: AuditSink, origin: BrokerOrigin = "local-broke
   return {
     machines: (id) => emit(`action=machines id=${quote(id)}`),
     fleet: (id) => emit(`action=fleet id=${quote(id)}`),
-    scheduler: (id, op, task, client) =>
+    scheduler: (id, op, task, client, continues) =>
       emit(
-        `action=scheduler op=${quote(op)}${task === undefined ? "" : ` task=${quote(task)}`}${client === undefined ? "" : ` claimed_client=${quote(client)}`} id=${quote(id)}`,
+        `action=scheduler op=${quote(op)}${task === undefined ? "" : ` task=${quote(task)}`}${client === undefined ? "" : ` claimed_client=${quote(client)}`}${continues === undefined ? "" : ` continues=${quote(continues)}`} id=${quote(id)}`,
       ),
     request: (id, op, deviceId, client) =>
       emit(

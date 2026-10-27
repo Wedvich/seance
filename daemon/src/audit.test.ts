@@ -129,11 +129,13 @@ describe("broker audit lines", () => {
     await audit.scheduler("s1", "enqueue", "t-1", "mcp");
     await audit.scheduler("s2", "queue", undefined, undefined);
     await audit.scheduler("s3", "cancel", 't" injected=1', undefined);
+    await audit.scheduler("s4", "enqueue", "t-2", "cli", 't-1" x=1');
     expect(collected).toEqual([
       'audit broker origin=local-broker action=fleet id="f1"',
       'audit broker origin=local-broker action=scheduler op="enqueue" task="t-1" claimed_client="mcp" id="s1"',
       'audit broker origin=local-broker action=scheduler op="queue" id="s2"',
       'audit broker origin=local-broker action=scheduler op="cancel" task="t\\" injected=1" id="s3"',
+      'audit broker origin=local-broker action=scheduler op="enqueue" task="t-2" claimed_client="cli" continues="t-1\\" x=1" id="s4"',
     ]);
   });
 });

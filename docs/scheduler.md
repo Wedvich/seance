@@ -37,7 +37,7 @@ stay as they are; the table says which word each one means.
 | Deps              | Per edge `after: opened` (stacked, default) or `after: merged`; Linear relations + hand-declared                                                                                                                                                                                                                                                                                            |
 | Done signal       | Layered: PR merged (leader, forge: GitHub via `gh`) / PR merged (daemon, local git) / Linear Done → session ended → manual                                                                                                                                                                                                                                                                  |
 | Quota exhausted   | Spill into credits, loudly (Web Push), with pause: until resume / until next reset                                                                                                                                                                                                                                                                                                          |
-| Concurrency       | Global max, per-account max, per-batch strategy (`sequential` / `parallel(n)` / `auto`)                                                                                                                                                                                                                                                                                                     |
+| Concurrency       | Global max, per-account max; a batch is a group with no bound or order (2026-10-26); asleep or idle-at-prompt tasks hold no slot past a grace (18, 20); `run-now` lifts both for one task (2026-10-27)                                                                                                                                                                                      |
 | Alerts            | Web Push (VAPID) from the leader to subscribed PWAs (M4; key sealed in the DO, see _Secrets_)                                                                                                                                                                                                                                                                                               |
 | Needs input       | `needs-input` state, alert, keeps its slot; idle timeout escalates, never kills                                                                                                                                                                                                                                                                                                             |
 | Event ingest      | New ingest-only `session-event` frame kind on the local socket, after the fleet broker's precedent (threat-model widening, recorded)                                                                                                                                                                                                                                                        |
@@ -173,8 +173,8 @@ they now live:
 
 **Routing, ahead.** M4 adds:
 
-- Filters (the per-account cap, the per-batch bound and `skill_absent` are DESIGN.md "Routing
-  caps", "Batches" and "Skills filter"): stacked base unpushed and not on this exclave (M4,
+- Filters (the per-account cap and `skill_absent` are DESIGN.md "Routing caps" and "Skills
+  filter"; the per-batch bound M3 built went 2026-10-26, "Batches"): stacked base unpushed and not on this exclave (M4,
   _Stacking_); auth expired (M4, _Auth health_).
 - Score: `dependencyDistance` gets an input once M4's stacking fills `TaskSpec.base`. The LXC
   pressure view (M4) reaches `machinePressure` folded into the LXC daemon's own `status`, so the
@@ -408,6 +408,7 @@ of M4 has landed.
 | 1     | Fleet quota record — **Done**                                      | store rules v2                                                         | M                        |
 | 1     | CLI `auto` — **Done**                                              | MCP's enqueue split out                                                | S–M                      |
 | 1     | `failed` from exit status (new) — **Done**                         | —                                                                      | S–M                      |
+| 1     | Asleep machines on the Queue screen (new) — **Done**               | —                                                                      | S                        |
 | 2     | Spawn defaults to the scheduler (**Done**)                         | account pins (PR #303); keyless `auto` for MCP (**Done**)              | M–L                      |
 | 2     | Stacking                                                           | authoring surface; #28                                                 | L                        |
 | 2     | Auth health                                                        | `/usage` refresh; Web Push for its alert                               | M                        |
@@ -519,14 +520,34 @@ of M4 has landed.
 
   _As built (2026-10-21):_ **Done.** The premise was half right: `remain-on-exit` was on only
   while a spawn waited for registration, then off, so a registered session's pane closed with its
-  status. A task window now keeps `remain-on-exit failed`; the status rides the ledger and
+  status. A task window now keeps `remain-on-exit failed` (changed to `on` on 2026-10-27, below); the status rides the ledger and
   `progress` (`TaskProgress.exit`), noted before the dead pane is closed by every `sessions`
   reply. The leader settles a PR-less `ended` from a machine advertising `exitStatus` by that
   machine's next answer, asked at once and then every pass until the session is gone (at most
   `endingTimeoutMs`, 5 min, then it settles as if no exit were known — once a check out has
   answered and a read begun after it still lists the session; a machine that is not connected
   settles on the deadline alone, never `lost` at the defaults), so the event path and the sweep are one path; a nonzero exit (a signal death as `128 + signal`) fails the task `session_failed`. DESIGN.md, _Daemon_, "Exit
-  status", records the rest and what was rejected.
+  status", records the rest and what was rejected. _Follow-up (2026-10-26):_ the failure carries
+  the status as `failure.exit`, so the PWA and `get_queue` say how the session ended — "killed
+  (SIGKILL), possibly out of memory" for 137, a signal's name for the others macOS and Linux number
+  alike ("ended on SIGTERM (status 143)": only SIGKILL claims a kill), "exited with status N" otherwise —
+  instead of "exited with an error". Under `until: "reported"` it says "did not report done" for "reported no pull request".
+  _Follow-up (2026-10-26):_ on Linux with cgroup v2 the daemon checks a 137 against the
+  kernel's `oom_kill` count for the session's own cgroup, sampled while it lived, and the failure
+  carries the verdict as `failure.oomKill`: "out of memory (the kernel's OOM killer fired as it
+  died)" (only when sampled and judged within ten minutes of the death) or "not by the kernel's
+  OOM killer" in place of "possibly out of memory", which stays for macOS, an unreadable or
+  vanished cgroup (a per-pane tmux scope), a rise with a stale sample or a late check, another pane's
+  sample, and older daemons.
+  DESIGN.md, _Daemon_, "Exit status", records what the count proves on a shared cgroup.
+  _Follow-up (2026-10-27), landed:_ a window closed from outside (`kill-pane`, `kill-window`,
+  `kill-server`, a reboot) no longer settles `done`. The window keeps `remain-on-exit on`, so a clean
+  exit's 0 is noted too, and a per-pane `pane-died` hook records the status server-side before it closes a
+  clean exit's pane. A launched task whose pane is in no listing, with no exit and no close of the
+  daemon's own, is noted `vanished` (`TaskProgress.vanished`), and the leader settles it `failed`,
+  `session_closed` when no PR, merge or report is known; its dependents fail and Continue is offered.
+  No capability: an older leader reads it as `done`, as before. DESIGN.md, _Daemon_, "Window closed from
+  outside", records the tmux behaviour verified, why no global hook, and the residuals.
 
   _Open gaps (follow-up, not yet planned):_
   - The deadline and disconnect settles call `ended(task, undefined)`, so a PR the daemon noted
@@ -536,6 +557,107 @@ of M4 has landed.
     `progress` entry where one was read.
   - A spawn that times out before claude registers and then dies untitled gets no status
     (harvest takes only titled panes; reap closes it), so its task settles `done` as before.
+
+- **Continue a failed task (new, 2026-10-26; widened 2026-10-27).** A task that failed `session_failed` (an OOM
+  kill) leaves its worktree and its conversation on disk, and the only remedy was a new task from
+  scratch. A **Continue** action queues a new task that resumes the conversation (`claude --continue`)
+  in the same worktree.
+  - _Decided:_ a new task linked by `TaskSpec.continues { task, at }` (the old task stays `failed`,
+    and its dependents stay failed); a new mode value `"continue"` as the forward-compat gate (an
+    older leader's parser refuses it, so the record is held unreadable instead of spawned as a fresh
+    worktree); exact-target routing (only the `(deviceId, exclave, clone)` of the old assignment, only on
+    a daemon advertising `continueTask`); the cwd resolved from the daemon's own launch ledger, never from
+    the wire; a spawn sealed by the scheduler only (the local socket and every other `from` refused
+    `not_continuable`); a brokered enqueue allowed, so keyless `seanced mcp` works; a CLI,
+    `seanced continue <task-id> [--prompt …]`, that enqueues through the scheduler (a hand-run
+    `claude --continue` is untracked by design); a stale worktree lock in Claude's own
+    `claude session … (pid N start …)` form with a dead pid unlocked, any other lock refused; manual only, for
+    `session_failed` alone (not `here` runs, not an automatic continue after an OOM kill). Surfaces: the
+    PWA's failed card, MCP's `continue_task`, the CLI.
+  - _Follow-up (2026-10-27), landed:_ a `ready` continuation expires `continue_expired` after 4 days, a task
+    cancelled after placement is continuable (`continueCancelled`), the offer moves to the newest landed
+    continuation and the daemon refuses an older task whose worktree a later launch noted, and the seed is
+    worded from the old note's exit.
+  - _As built:_ DESIGN.md, _Daemon_, "Continuing a session", records it and what was rejected.
+
+- **Asleep machines on the Queue screen (new, 2026-10-26) — Done.** A task placed on a MacBook whose
+  lid closes keeps reading "It's waiting for input on MacBook M4 Pro · default" until
+  `lostAfterMs`, then "Lost on … — its machine went away 16m ago" under _Needs you_, though
+  nothing is lost and nothing can be answered: the machine is asleep. Decided with the design
+  session of 2026-10-26; lands as one PWA PR, and DESIGN.md _PWA_, "The Queue screen", takes it
+  over.
+  - _Decided, a derived view, not a state:_ the leader's states stay as they are (`lost` after
+    15 min, Settled defaults 10). The PWA derives "asleep" per row from the task's machine: a
+    `reserved`, `running`, `needs-input` or `lost` task whose assigned (or reserved) machine is
+    listed and not `connected` says so in its headline — "It's waiting for input on MacBook M4
+    Pro · default — its machine went to sleep 14m ago" (`running`: "It's running …",
+    `reserved`: "Starting …", each with the same clause; `formatSeen` words the age, as the
+    `lost` line does today). A `lost` task on such a machine is headlined "Asleep on MacBook M4
+    Pro · default — its machine went to sleep 22m ago", with the body "Settles when its machine
+    wakes; cancel or mark done to give up on it" — the leader's `lost` is that very judgement,
+    and its one remedy from the phone is giving up. "Lost" stays for a `lost` task whose machine
+    is listed and `connected` — "Lost on … — its machine is back but hasn't answered for it
+    yet", true both of a machine genuinely back (its next `sessions` pass settles the task) and
+    of a dark wake's zombie socket (a failed delivery re-marks it within seconds) — and for one
+    whose machine is no longer in the registry, which keeps today's wording from `absentSince`.
+    `awaiting-merge` carries no clause: the leader reads the merge with its own `gh`. Rejected: a
+    new task state, or a per-pass `absentSince` on running tasks — a store write per absent task
+    per pass, for a label, where the leader's absence clock is in memory by design (DESIGN.md
+    "`lost`"); a PWA-side hysteresis on `connected` — per device and per reload, it delays the
+    truth for the person who just opened the lid while the Machines screen beside it has already
+    flipped.
+  - _Decided, the signal:_ `Machine.connected` as the PWA's own `RelayClient` derives it (the
+    relay's live-socket flag, overridden by this client's proven-offline marks) — the signal the
+    Machines card's "asleep" already reads, never the relay flag alone. Why: `connected` is held
+    per app-role client, and a client's marks come only from its own failed deliveries, so the
+    leader, the daemon's broker (`list_machines`) and the PWA can disagree for minutes (DESIGN.md
+    _Presence & identity_, "Every app-role client holds its own marks"). The leader's
+    `#connectedIds` is not on the wire, exporting it is a per-pass write, and the PWA's own view
+    is the one that agrees with the rest of its screen. Accepted: a dark wake — the Mac
+    registering, or sending one `status` beat, and sleeping again; measured 2026-10-26 at
+    14:04:48 and 14:21:45 UTC — clears every reader's mark, so the clause disappears for the
+    moments until a delivery fails (the leader: ≤ 10 s) or the sweep closes the zombie socket
+    (≤ ~2.5 min); the Machines card flickers identically, and the fix for that is not in the
+    PWA.
+  - _Decided, "since":_ when the machine was last heard from — `lastHeardAt(machine)`, the later
+    of `lastSeen` and the kept `status.at` (`shared/src/status-reader.ts`, beside `liveStatus`),
+    shared by the Queue card, the Machines card's "asleep · last seen" and the machine picker's
+    "offline · last seen". The sweep stamps `lastSeen` with the last heartbeat, so once the
+    socket is closed it is within one beat of the sleep; but while the relay still lists a slept
+    socket — the window a proven-offline mark exists for — `lastSeen` is the register's time,
+    hours or days old on a machine that was simply up, and today's card says "last seen 3d ago"
+    of a machine that slept three minutes ago. The daemon's `status` beat, kept with the entry
+    when the socket goes, is at most a beat older than the sleep in both windows. Not
+    `absentSince`: the leader's clock starts a pass after its own view flipped (minutes after
+    the sleep), exists only on `lost`, and reading it for one state and `lastSeen` for another
+    makes the same card change its mind at the 15-minute mark.
+  - _Decided, Needs you:_ an asleep task stays in _Needs you_ — opening the lid is the action,
+    and "Running" would read as progress — ranked after what can be answered from the phone now:
+    escalated and live, `needs-input` and live, `needs-input` on an asleep machine, then `lost`.
+    Rejected: an "Asleep" section — sleep is the machine's property, shown on the Machines
+    screen, and a section that empties the moment the lid opens moves every row mid-glance. The
+    header's attention dot and the row's dot are unchanged, and so is `get_queue`: it lists raw
+    `state` and placement, and a model reads `connected` from `list_machines`.
+    _Reversed after use (2026-10-26):_ ranked low in Needs you, an asleep row still read as
+    something to answer now. Asleep tasks now get their own collapsed "Asleep" section below
+    Waiting, and leave the running count and the attention dot.
+
+  _As built (2026-10-26):_ **Done**, in two PWA changes: #316 built `lastHeardAt` beside
+  `liveStatus`, `machineAsleep` and the headlines in `pwa/src/decision-view.ts`, the body and
+  ranks in `pwa/src/queue-view.ts`; the follow-up replaced the ranks with the collapsed Asleep
+  section (`queue-view.ts`, `components/queue.tsx`) and `needsAttention`. DESIGN.md _PWA_,
+  "Asleep machines on the Queue screen", is the record.
+
+- **"Last seen" off the PWA (new, 2026-10-26) — Done.** Raycast's cached-list age and every
+  `seanced mcp` "last seen" (`list_machines`' `lastSeen`, the despawn not-connected refusal,
+  `auto`'s offline-pin note) still read the register's `lastSeen`, so they said "3d ago" of a
+  machine that slept minutes ago. Exit: they read `lastHeardAt` like the PWA.
+
+  _As built (2026-10-26):_ **Done.** `daemon/src/mcp.ts` and `auto.ts` format `lastHeardAt`;
+  `list_machines` keeps the `lastSeen` key, its value now the heard time (the tool description
+  says so). The brokered path carries `status` (`parseMachines`), so it agrees. Raycast's
+  `PickerMachine` takes the live `status`, and the registry cache folds `lastHeardAt` into its
+  existing `lastSeen` key rather than storing `status`, so an older cached entry still parses.
 
 - **Stacking** — `baseBranch` and `base_not_found`, lineage, the handoff preamble. Exit: a
   dependent task's worktree starts from its predecessor's branch; an unresolvable base fails
@@ -775,6 +897,14 @@ of M4 has landed.
 
   Raycast `auto` attaches the same way as the CLI's.
 
+- **Batches are a group** — **Done** (owner, 2026-10-26). A batch is where a set of tasks came
+  from, shown and acted on together, never a scheduling primitive: `sequential` and `parallel`
+  went from the scheduler, `queue_batch` and the PWA, so order is `after` edges and concurrency
+  the global and per-account caps. #318's carve-out (a batch bound counting members on an asleep
+  machine) went with them. DESIGN.md "Batches" is the record, with both strategies as rejected
+  alternatives.
+  The `strategy` field left the wire 2026-10-27; the parser still drops a stored one.
+
 ## Settled defaults (interview, 2026-10-15)
 
 Nothing below is open. An implementer who wants a different value changes this section in the
@@ -896,6 +1026,42 @@ same PR, with the reason.
     reads from `.claude.json` — mapped, not set per account, so it needs no account records
     (M4). A tier the table doesn't name, or none (an older daemon, a non-Team account), keeps
     today's estimate but includes no gated model: an unknown seat may bill Fable to credits.
+18. **A machine asleep 2 min holds no concurrency slot** (`slotReleaseAfterMs`, owner,
+    2026-10-26). Its in-flight tasks stop counting toward `globalMax`, `accountMax` and projected
+    usage, with no change of state; on return they count again and the fleet may sit over a cap
+    until work drains. A blip or relay reconnect frees nothing, and a dark wake restarts the clock, so after each one
+    the slots come back only after the connected-read window (~2.5 min, DESIGN.md) plus the grace; `lostAfterMs` (10)
+    stays 15 min, because `lost` writes records and settles reservations. Nothing else counts them:
+    the batch-bound carve-out went with batch strategies (2026-10-26). DESIGN.md "Routing caps" has the rule and the rejected alternative.
+
+19. **A continuation `ready` over 4 days fails `continue_expired`** (`continueExpiryMs`, owner,
+    2026-10-27). Without it an unplaceable continuation (target re-keyed, clone gone, daemon rolled back)
+    waits until cancelled by hand. Fixed in `DEFAULT_CONFIG`, not per machine: expiry runs in the leader and
+    leadership moves. Not tied to reap's `minAgeDays`, which is about worktrees, not queue entries. The
+    ceiling is the launch ledger's age (7 days): past it the target daemon refuses the continuation anyway,
+    so failing earlier is never premature; a test pins the relation. A continuation expires at this bound
+    pinned or not; a pin without `continues` has its own (21).
+
+20. **A session idle at its prompt 10 min holds no concurrency slot** (`idleReleaseAfterMs`, owner,
+    2026-10-27). A `running` task whose own machine reported `idle` (main turn ended, no dialog open)
+    and nothing since stops counting toward `globalMax`, `accountMax` and projected usage, its state
+    unchanged — the "done, want a follow-up?" session that was never settled. Its next state counts it
+    again, over a cap or not, as item 18's do on return. `needs-input` keeps its slot: a dialog is
+    mid-task, so work resumes for certain when it is answered. Detected from the mod's `idle`, never
+    from what the session wrote. DESIGN.md "Routing caps" has the rule and the residuals.
+
+21. **A pinned task `ready` over 30 days fails `pin_expired`** (`pinExpiryMs`, owner, 2026-10-27).
+    A pin (`pin.deviceId` or `pin.account`) to a machine retired or re-keyed, or an account signed out for
+    good, otherwise waits forever: never pruned, counted toward `MAX_TASKS`, holding a place in the
+    20-task `queue` reply, and liable to start a stale prompt if its machine ever returns. 30 days is
+    the tombstone's life (`STORE_TOMBSTONE_MS`), the month `queue_expired` names, by choice (admission
+    stops a day short of it for clock skew); from `createdAt`, as 19 is. A pin released from `blocked`
+    already past it fails before dispatch rather than launching. One bound and one code for
+    machine and account pins, the message saying which. Pins only: an unpinned `ready` task no machine can
+    take (a fleet-wide `repo_absent`, `avoid` of every machine) is out of scope on purpose, since a bound
+    there also fails tasks held only by quota or caps; decided separately. Rejected: hand cancel only,
+    ranking long-waiting pins below finished tasks, a shorter account-pin bound, a leader-written `readyAt`.
+    DESIGN.md "Expiry" has the record.
 
 ## Risks / unknowns
 

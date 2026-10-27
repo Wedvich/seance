@@ -82,6 +82,7 @@ function state(overrides: Partial<AppState> = {}, form: Partial<PersistedForm> =
     queueView: null,
     taskAction: null,
     queueNotice: null,
+    startNowRefusal: null,
     pausing: false,
     discarding: false,
     accounts: { aliases: {}, nameable: true, saving: null, notice: null },
@@ -515,6 +516,14 @@ describe("the pickers", () => {
     );
     expect(rows["Mac"]?.sub).toBe("online · 2 repos · last scanned 3h ago");
     expect(rows["WSL"]?.sub).toBe("offline · last seen 2d ago");
+
+    // Its last status beat is newer than the register's lastSeen: the beat says when it slept.
+    const beat = { at: (NOW - 5 * 60_000) / 1000, scan: 1, cpu: 1, mem: 1 };
+    const slept = machine({ ...wsl, connected: false, lastSeen: NOW - 2 * 86_400_000, status: beat });
+    const choice = deriveView(state({ relay: leader([scanned, slept]) }), NOW).machineChoices.find(
+      (c) => c.machine.name === "WSL",
+    );
+    expect(choice?.sub).toBe("offline · last seen 5m ago");
   });
 
   test("a rescan shows on its own row only: offered while connected, disabled while any runs", () => {
@@ -573,6 +582,7 @@ describe("failedBody", () => {
   test("words a scheduler code by taskFailureText, and leaves any other to the spawn-refusal line", () => {
     expect(failedBody("queue_expired")).toContain("30 days");
     expect(failedBody("queue_expired")).toEndWith("Nothing is running.");
+    expect(failedBody("continue_expired")).toContain("may be continued again");
     expect(failedBody("repo_not_found")).toBe("The machine refused the spawn. Nothing is running.");
     expect(failedBody(undefined)).toBe("The machine refused the spawn. Nothing is running.");
     expect(failedBody("dispatch_unconfirmed")).toContain("will not start it again");
@@ -583,9 +593,44 @@ describe("failedBody", () => {
     // The task is failed and terminal (a failed task can't be marked done), so the advice is to resubmit what waited on it.
     expect(failedBody("merge_expired")).toContain("submit the tasks that waited on it again");
     expect(failedBody("merge_expired")).not.toContain("by hand");
+    expect(failedBody("session_closed")).toStartWith("Its window was closed before its session ended and it reported");
+    expect(failedBody("session_closed")).toContain("Tasks waiting on it failed with it.");
+    expect(failedBody("session_closed")).toEndWith("stops where its window was closed.");
     // It ran and ended: its dependents are the news, and "Nothing is running." would say less.
     expect(failedBody("session_failed")).toContain("exited with an error");
     expect(failedBody("session_failed")).toContain("Tasks waiting on it failed with it.");
+    // With its exit status (`failure.exit`), it says how the session ended.
+    expect(failedBody("session_failed", 137)).toStartWith(
+      "Its session was killed (SIGKILL), possibly out of memory, and reported no pull request.",
+    );
+    expect(failedBody("session_failed", 139)).toStartWith("Its session ended on SIGSEGV (status 139) and reported");
+    // A killed process writes nothing at the end; a plain exit's transcript says why.
+    expect(failedBody("session_failed", 137)).toEndWith("Its transcript on that machine stops where it ended.");
+    expect(failedBody("session_failed", 2)).toEndWith("Its transcript on that machine says why.");
+    expect(failedBody("session_failed")).toEndWith("Its transcript on that machine says why.");
+    expect(failedBody("session_failed", 1, "reported")).toStartWith(
+      "Its session exited with status 1 and did not report done.",
+    );
+    expect(failedBody("session_failed", 2)).toStartWith("Its session exited with status 2 and reported");
+    expect(failedBody("session_failed", 137)).toContain("Tasks waiting on it failed with it.");
+    expect(failedBody("repo_not_found", 137)).toBe("The machine refused the spawn. Nothing is running.");
+    // A refused continue is not "a refused spawn": it names what was missing and says nothing started.
+    expect(failedBody("not_continuable")).toStartWith("The machine couldn't continue the earlier session");
+    expect(failedBody("not_continuable")).toEndWith("Nothing new was started.");
+    expect(failedBody("not_continuable")).toContain("locked");
+    // The daemon's own reason says which cause it was.
+    expect(
+      failedBody("not_continuable", undefined, undefined, undefined, "its worktree is locked (on a usb disk)"),
+    ).toBe(
+      "The machine couldn't continue the earlier session: its worktree is locked (on a usb disk). Nothing new was started.",
+    );
+    // With the machine's OOM verdict (`failure.oomKill`), the SIGKILL is worded by it, either way.
+    expect(failedBody("session_failed", 137, undefined, true)).toBe(
+      "Its session was killed (SIGKILL), out of memory (the kernel's OOM killer fired as it died), and reported no pull request. Tasks waiting on it failed with it. Its transcript on that machine stops where it ended.",
+    );
+    expect(failedBody("session_failed", 137, undefined, false)).toStartWith(
+      "Its session was killed (SIGKILL), not by the kernel's OOM killer, and reported no pull request.",
+    );
   });
 });
 
@@ -621,15 +666,31 @@ describe("deriveReportedAvailability", () => {
         {},
         {
           after: [{ task: "t-1", after: "merged" }],
-          batch: { id: "b", strategy: { mode: "parallel", max: 2 }, next: 3 },
+          batch: { id: "b", next: 3 },
         },
       ),
       NOW,
     );
     expect(view.afterTile).toMatchObject({ label: "AFTER", value: "1 task · merged" });
-    expect(view.batchTile).toMatchObject({ label: "BATCH", value: "#3 · up to 2 at once" });
+    expect(view.batchTile).toMatchObject({ label: "BATCH", value: "#3" });
     const bare = deriveView(state(), NOW);
     expect(bare.afterTile.value).toBe("None");
     expect(bare.batchTile.value).toBe("Off");
+  });
+});
+
+describe("the Start now chevron", () => {
+  const leading = { kind: "ready", deviceId: "dev-1", term: 1 } as const;
+
+  test("shows only while the verified leader advertises run-now", () => {
+    const capable = machine({ capabilities: [CAPABILITIES.runNow] });
+    expect(deriveView(state({ relay: relay({ machines: [capable], scheduler: leading }) }), NOW).startNow).toBe(true);
+    expect(deriveView(state({ relay: relay({ machines: [machine()], scheduler: leading }) }), NOW).startNow).toBe(
+      false,
+    );
+    const unverified = { kind: "unverified", deviceId: "dev-1", term: 1 } as const;
+    expect(deriveView(state({ relay: relay({ machines: [capable], scheduler: unverified }) }), NOW).startNow).toBe(
+      false,
+    );
   });
 });

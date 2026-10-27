@@ -27,6 +27,7 @@ import {
   ROUTING_ID_MAX_LENGTH,
   ROUTING_ID_PATTERN,
   SESSIONS_MAX_PROGRESS,
+  SIGKILL_STATUS,
   STORE_KEY_PATTERN,
   STORE_PREFIXES,
   TARGET_LIMITS,
@@ -34,7 +35,6 @@ import {
   TASK_SPEC_LIMITS,
   type AccountRecord,
   type BatchMembership,
-  type BatchStrategy,
   type FleetQuotaEntry,
   type FleetQuotaRecord,
   type PushSubscribeReply,
@@ -68,6 +68,7 @@ import {
   type TaskReply,
   type TaskSpec,
   type UnreadableTaskRef,
+  type IdleTaskRef,
   METRICS_ERROR_CODES,
   METRICS_MAX_FILTER_LENGTH,
   METRICS_MAX_FILTERS,
@@ -110,6 +111,7 @@ import {
   type SessionEvent,
   type SessionState,
   type SpawnErrorCode,
+  type SpawnMode,
   type SourceInfo,
   type UpdateReport,
 } from "./types.ts";
@@ -618,11 +620,20 @@ function isBoundedString(value: unknown, max: number): value is string {
  * task. Null for anything malformed or past `TASK_REQUEST_LIMITS`.
  */
 export function parseTaskRequest(value: unknown): TaskRequest | null {
+  return parseRequestFields(value, ["worktree", "here"]);
+}
+
+/**
+ * `modes` is what the caller admits: route-preview takes no `continue` (it
+ * routes by skills and has no target to preview), a stored spec does.
+ */
+function parseRequestFields(value: unknown, modes: readonly SpawnMode[]): TaskRequest | null {
   if (!isRecord(value)) return null;
   const { repo, mode, prompt, title, model, effort, plan, skill } = value;
   const limits = TASK_REQUEST_LIMITS;
   if (!isBoundedString(repo, limits.repo) || repo === "") return null;
-  if (mode !== "worktree" && mode !== "here") return null;
+  const admitted = modes.find((m) => m === mode);
+  if (admitted === undefined) return null;
   if (prompt !== undefined && !isBoundedString(prompt, limits.prompt)) return null;
   if (title !== undefined && !isBoundedString(title, limits.title)) return null;
   // Empty would reach the spawn as a flag with no value; absent is how a default is asked for.
@@ -632,7 +643,7 @@ export function parseTaskRequest(value: unknown): TaskRequest | null {
   if (skill !== undefined && !isSkillName(skill)) return null;
   return {
     repo,
-    mode,
+    mode: admitted,
     ...(prompt === undefined ? {} : { prompt }),
     ...(title === undefined ? {} : { title }),
     ...(model === undefined ? {} : { model }),
@@ -677,20 +688,16 @@ function parseAvoid(value: unknown): readonly string[] | null {
   return ids;
 }
 
-export function parseBatchStrategy(value: unknown): BatchStrategy | null {
-  if (!isRecord(value)) return null;
-  const { mode, max } = value;
-  if (mode === "sequential" || mode === "auto") return { mode };
-  if (mode !== "parallel" || !isUint(max) || max < 1 || max > TASK_SPEC_LIMITS.parallel) return null;
-  return { mode, max };
-}
-
+/**
+ * Any `strategy` an older writer stored (`sequential`, `parallel`, `auto`,
+ * malformed) is ignored and dropped: no batch schedules, so a live record from before must
+ * still read rather than null its spec.
+ */
 function parseBatch(value: unknown): BatchMembership | null {
   if (!isRecord(value)) return null;
   const { id, index } = value;
-  const strategy = parseBatchStrategy(value["strategy"]);
-  if (!isTaskId(id) || !isUint(index) || index > TASK_SPEC_LIMITS.batchIndex || strategy === null) return null;
-  return { id, index, strategy };
+  if (!isTaskId(id) || !isUint(index) || index > TASK_SPEC_LIMITS.batchIndex) return null;
+  return { id, index };
 }
 
 function parseDep(value: unknown): TaskDep | null {
@@ -717,18 +724,21 @@ function parseLinear(value: unknown): LinearLink | null {
  * before, it must not.
  */
 export function parseTaskSpec(value: unknown): TaskSpec | null {
-  const request = parseTaskRequest(value);
+  const request = parseRequestFields(value, ["worktree", "here", "continue"]);
   if (request === null || !isRecord(value)) return null;
-  const { pin, avoid, lineage, base, batch, deps, linear, client, until } = value;
+  const { pin, avoid, lineage, base, batch, deps, linear, client, until, continues } = value;
   const pinned = pin === undefined ? undefined : parsePin(pin);
   const avoids = avoid === undefined ? undefined : parseAvoid(avoid);
-  const continues = lineage === undefined ? undefined : parsePlacement(lineage);
+  const lineal = lineage === undefined ? undefined : parsePlacement(lineage);
+  const resumes = continues === undefined ? undefined : parseContinues(continues);
   const builds = base === undefined ? undefined : parsePlacement(base);
   const member = batch === undefined ? undefined : parseBatch(batch);
   const edges = deps === undefined ? undefined : parseList(deps, parseDep);
   const issue = linear === undefined ? undefined : parseLinear(linear);
-  if (pinned === null || avoids === null || continues === null || builds === null || member === null) return null;
-  if (issue === null) return null;
+  if (pinned === null || avoids === null || lineal === null || builds === null || member === null) return null;
+  if (issue === null || resumes === null) return null;
+  // The mode is what an older leader refuses, so the field never travels without it.
+  if ((request.mode === "continue") !== (resumes !== undefined)) return null;
   if (edges === null || (edges !== undefined && edges.length > TASK_SPEC_LIMITS.deps)) return null;
   if (client !== undefined && !isName(client, TASK_SPEC_LIMITS.client)) return null;
   const settles = until === undefined ? undefined : TASK_UNTIL.find((u) => u === until);
@@ -737,14 +747,22 @@ export function parseTaskSpec(value: unknown): TaskSpec | null {
     ...request,
     ...(pinned === undefined ? {} : { pin: pinned }),
     ...(avoids === undefined ? {} : { avoid: avoids }),
-    ...(continues === undefined ? {} : { lineage: continues }),
+    ...(lineal === undefined ? {} : { lineage: lineal }),
     ...(builds === undefined ? {} : { base: builds }),
     ...(member === undefined ? {} : { batch: member }),
     ...(edges === undefined ? {} : { deps: edges }),
     ...(issue === undefined ? {} : { linear: issue }),
     ...(client === undefined ? {} : { client }),
     ...(settles === undefined ? {} : { until: settles }),
+    ...(resumes === undefined ? {} : { continues: resumes }),
   };
+}
+
+function parseContinues(value: unknown): TaskSpec["continues"] | null {
+  if (!isRecord(value)) return null;
+  const { task } = value;
+  const at = parseTarget(value["at"]);
+  return isTaskId(task) && at !== null ? { task, at } : null;
 }
 
 function isRoutingId(value: unknown): value is string {
@@ -783,6 +801,8 @@ function parseReason(value: unknown): Reason | null {
     case "exclaves_unknown":
     case "pressure_unknown":
     case "repo_absent":
+    case "continue_elsewhere":
+    case "continue_unsupported":
     case "auth_missing":
     case "auth_expired":
     case "base_unpushed":
@@ -817,11 +837,7 @@ function parseReason(value: unknown): Reason | null {
       const { inFlight, max, scope } = value;
       if (!isUint(inFlight) || !isUint(max)) return null;
       if (scope === undefined) return { code, inFlight, max };
-      return scope === "global" || scope === "account" || scope === "batch" ? { code, inFlight, max, scope } : null;
-    }
-    case "batch_order": {
-      const { index } = value;
-      return isUint(index) && index <= TASK_SPEC_LIMITS.batchIndex ? { code, index } : null;
+      return scope === "global" || scope === "account" ? { code, inFlight, max, scope } : null;
     }
     case "paused": {
       const until = PAUSE_UNTIL.find((u) => u === value["until"]);
@@ -1005,10 +1021,15 @@ export function parseTask(value: unknown): Task | null {
   let failed: Task["failure"];
   if (failure !== undefined) {
     if (!isRecord(failure) || !isName(failure["code"], TASK_FAILURE_LIMITS.code)) return null;
-    const { message } = failure;
+    const { message, exit } = failure;
     if (typeof message !== "string") return null;
+    // Display-only, so a bad one costs the field, never the failure.
+    const sessionFailed = failure["code"] === "session_failed" && isUint(exit) && exit >= 1 && exit <= EXIT_STATUS_MAX;
+    const status = sessionFailed ? { exit } : {};
+    const { oomKill } = failure;
+    const oom = sessionFailed && exit === SIGKILL_STATUS && typeof oomKill === "boolean" ? { oomKill } : {};
     // Cut rather than refused: an M2 leader stored a daemon's message whole, and its tail must not cost the task.
-    failed = { code: failure["code"], message: message.slice(0, TASK_FAILURE_LIMITS.message) };
+    failed = { code: failure["code"], message: message.slice(0, TASK_FAILURE_LIMITS.message), ...status, ...oom };
   }
   const progress = parseProgressFields(value);
   if (progress === null) return null;
@@ -1067,6 +1088,8 @@ export function bindTaskRecord(
   if (stored.key !== `${STORE_PREFIXES.task.prefix}${record.task.id}`) return "key_mismatch";
   if (record.version === 1 && record.task.state !== "queued") return "created_unqueued";
   if (record.task.createdAt > now + REPLAY_WINDOW_MS) return "created_ahead";
+  // A task that continues itself has no earlier launch to resume; the daemon would only refuse it, so it never dispatches.
+  if (record.task.spec.continues?.task === record.task.id) return "malformed";
   return record;
 }
 
@@ -1234,7 +1257,7 @@ export function parseSettingsRecord(value: unknown): SettingsRecord | null {
   };
 }
 
-/** `cancel` and `mark-done`, at the leader: the one field, nothing else carried on. */
+/** `cancel`, `mark-done` and `run-now`, at the leader: the one field, nothing else carried on. */
 export function parseTaskRef(value: unknown): TaskRef | null {
   return isRecord(value) && isTaskId(value["taskId"]) ? { taskId: value["taskId"] } : null;
 }
@@ -1286,12 +1309,22 @@ export function parseQueueReply(value: unknown): QueueReply | null {
   }
   // Lenient per entry, as tasks are: a bad one costs its own discard, not the queue.
   const unreadable = listedUnreadable?.map(parseUnreadableTaskRef).filter((entry) => entry !== null);
+  const listedIdle = value["idle"];
+  if (listedIdle !== undefined && (!Array.isArray(listedIdle) || listedIdle.length > MAX_TASKS)) return null;
+  // Lenient per entry too: a bad one shows its task as running, which it is.
+  const idle = listedIdle?.map(parseIdleTaskRef).filter((entry) => entry !== null);
   return {
     tasks,
     at: value["at"],
     ...(holds === undefined ? {} : { holds }),
     ...(unreadable === undefined || unreadable.length === 0 ? {} : { unreadable }),
+    ...(idle === undefined || idle.length === 0 ? {} : { idle }),
   };
+}
+
+function parseIdleTaskRef(value: unknown): IdleTaskRef | null {
+  if (!isRecord(value) || !isTaskId(value["taskId"]) || !isFiniteNumber(value["since"])) return null;
+  return { taskId: value["taskId"], since: value["since"] };
 }
 
 function parseUnreadableTaskRef(value: unknown): UnreadableTaskRef | null {
@@ -1308,7 +1341,7 @@ export function parseDiscardReply(value: unknown): DiscardReply | null {
   return isRecord(value) && isTaskId(value["taskId"]) ? { taskId: value["taskId"] } : null;
 }
 
-/** `cancel` and `mark-done` replies. */
+/** `cancel`, `mark-done` and `run-now` replies. */
 export function parseTaskReply(value: unknown): TaskReply | null {
   if (isRecord(value) && value["ok"] === false) return parseSchedulerError(value);
   const task = isRecord(value) ? parseTask(value["task"]) : null;
@@ -1366,7 +1399,7 @@ export function parseTaskProgressList(value: unknown): readonly TaskProgress[] |
 
 function parseTaskProgress(value: unknown): TaskProgress | null {
   if (!isRecord(value)) return null;
-  const { taskId, prUrl, branch, pushed, merged, reported, exit, at } = value;
+  const { taskId, prUrl, branch, pushed, merged, reported, exit, oomKill, vanished, at } = value;
   if (!isTaskId(taskId) || !isFiniteNumber(at)) return null;
   if (exit !== undefined && (!isUint(exit) || exit > EXIT_STATUS_MAX)) return null;
   const url = prUrl === undefined ? undefined : httpsUrl(prUrl);
@@ -1374,6 +1407,7 @@ function parseTaskProgress(value: unknown): TaskProgress | null {
   if (branch !== undefined && !isName(branch, BRANCH_MAX_LENGTH)) return null;
   if ((pushed !== undefined && pushed !== true) || (merged !== undefined && merged !== true)) return null;
   if (reported !== undefined && reported !== true) return null;
+  if (vanished !== undefined && vanished !== true) return null;
   return {
     taskId,
     at,
@@ -1383,6 +1417,9 @@ function parseTaskProgress(value: unknown): TaskProgress | null {
     ...(merged === undefined ? {} : { merged }),
     ...(reported === undefined ? {} : { reported }),
     ...(exit === undefined ? {} : { exit }),
+    ...(vanished === undefined ? {} : { vanished }),
+    // Display-only: a bad one, or one beside another status, costs the field — never the entry, which would null the list.
+    ...(exit === SIGKILL_STATUS && typeof oomKill === "boolean" ? { oomKill } : {}),
   };
 }
 
