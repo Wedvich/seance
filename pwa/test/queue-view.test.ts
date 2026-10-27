@@ -858,6 +858,14 @@ describe("continuing a failed task", () => {
     for (const y of [refused, landed, continuation({ state: "cancelled" })]) {
       expect(rowOf([failed, y], "f", CAN)?.continuing, y.state).toBeNull();
     }
+    // A landed continuation outranks a waiting one, as in continueOffer: the line would name a task that can't take over.
+    const taker = task("y1", {
+      state: "failed",
+      failure: { code: "session_failed", message: "m" },
+      assignment: placedAt,
+      spec: { repo: ORIGIN, mode: "continue", continues: { task: "f", at: placedAt } },
+    });
+    expect(rowOf([failed, taker, waiting], "f", CAN)?.continuing).toBeNull();
     // Past QUEUE_MAX_TASKS the continuation isn't listed: nothing to name, and the offer stands.
     expect(rowOf([failed], "f", CAN)?.continuing).toBeNull();
   });

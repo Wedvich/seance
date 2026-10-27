@@ -183,9 +183,18 @@ describe("continueOffer, once", () => {
     expect(continueOffer(old, able, [old, elsewhere]).ok).toBe(true);
   });
 
+  test("of several waiting, the oldest is named whatever the list order", () => {
+    const older = continuation("ready", { createdAt: 5 }, "t-old", "t-older");
+    const newer = continuation("queued", { createdAt: 9 }, "t-old", "t-newer");
+    expect(waitingContinuation(old, [old, newer, older])).toBe(older);
+    expect(waitingContinuation(old, [old, older, newer])).toBe(older);
+  });
+
   test("a landed taker outranks a waiting one: the offer moves to the taker", () => {
     const taker = failing("session_failed");
-    const offer = continueOffer(old, both, [old, continuation("queued", {}, "t-old", "t-waiting"), taker]);
+    const waiting = continuation("queued", {}, "t-old", "t-waiting");
+    expect(waitingContinuation(old, [old, waiting, taker])).toBeUndefined();
+    const offer = continueOffer(old, both, [old, waiting, taker]);
     expect(offer.ok ? "" : offer.reason).toContain("continue that one instead");
   });
 

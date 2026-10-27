@@ -4827,21 +4827,22 @@ fields carry over), under the same gates.
   again. The PWA's button, `continue_task`, `seanced continue` and
   `get_queue`'s `continuable` share that one rule. The button shows only while the task was not `here`
   and has an assignment. Two taps from two clients that have not yet read each other's continuation make
-  two tasks, and the daemon's per-path lock and
+  two tasks (so does a queue refresh answered before the leader has read Y's create, which can briefly
+  re-offer X; the loser is refused `not_continuable` all the same), and the daemon's per-path lock and
   live-pane check refuse the second with `not_continuable`. Residuals, each accepted:
   - _A `ready` continuation that is never placed_ (the target re-keyed, the clone gone, a daemon rolled
     back; reasons `continue_elsewhere`, `repo_absent` or `continue_unsupported`) no longer waits for a hand
     cancel: past `SchedulerConfig.continueExpiryMs` (4 days, fixed in `DEFAULT_CONFIG`, below the ledger's
     age, docs/scheduler.md Settled defaults 19) since `createdAt` it fails `continue_expired` (Scheduler,
-    "Expiry"). The old task may then be offered again, while its machine still holds its launch (the ledger
+    "Expiry"). Meanwhile it withholds the old task's offer, and cancelling it (unplaced) releases it. The old task may then be offered again, while its machine still holds its launch (the ledger
     ages from the old launch, so a continuation made over 3 days after it may find it already evicted; the
     config-relation test guards only a continuation made soon after the old launch). Existing stuck continuations fail in the first pass of a
     new leader, which is the clean-up, and visible.
-  - _The list a client sees is at most `QUEUE_MAX_TASKS`_, so a finished continuation fallen off it no
-    longer holds the old task, and a waiting one fallen off it neither withholds the offer nor shows on
-    the old card (a second Continue then races it, and whichever lands second is refused
-    `not_continuable`); the daemon's ledger rule (the newest note on the path owns it) now refuses
-    that tap, naming the owner, for the whole ledger horizon.
+  - _The list a client sees is at most `QUEUE_MAX_TASKS`_. A finished continuation fallen off it no
+    longer holds the old task, but the daemon's ledger rule (the newest note on the path owns it) refuses
+    that tap, naming the owner, for the whole ledger horizon. A waiting one fallen off it neither
+    withholds the offer nor shows on the old card: X is offered again, and whichever of the two
+    continuations lands second is refused `not_continuable`.
   - _A cancelled task with an assignment is not proof it landed._ A `lost`-from-`reserved` task carries
     `assignment` and cancel drops `reservedAt`. Such an X is offered and the daemon refuses it ("no worktree
     of it was noted" / "holds no launch"), harmless; a Y in that state counts as having taken over and hides
@@ -5653,7 +5654,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   `tookOver` rule: the button moves along the chain to the newest landed continuation) or still waits
   in the queue. A waiting one hides the button and puts "Continuing as <its title> · waiting" on the old
   card, a line that scrolls the queue to its card (centred in the list's own scroll container, not
-  `scrollIntoView`, which would shift the page on a phone); when it fails unplaced (`not_continuable`,
+  `scrollIntoView`, which would shift the page on a phone); when it fails unplaced (any failure outside the landed list, e.g. `not_continuable`,
   `continue_expired`) or is cancelled before placement, the button comes back. The tap re-checks the leader and the offer before
   writing, since either may have changed since the card was drawn, then writes the continuation spec with
   `client: "pwa"` through `createTask`, merged into the list as any enqueue is; a refused gate or offer or

@@ -66,6 +66,8 @@ export function QueueScreen(props: {
     );
     const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
     el.scrollTo({ top, behavior: still ? "auto" : "smooth" });
+    // The scroll alone leaves keyboard and screen-reader focus on the button; preventScroll keeps the smooth scroll ours.
+    card.focus({ preventScroll: true });
   };
 
   useEffect(() => {
@@ -278,7 +280,7 @@ function QueueCard(props: {
   );
 
   return (
-    <section className="fleet-card card" data-task={row.id}>
+    <section className="fleet-card card" data-task={row.id} tabIndex={-1}>
       <div className="fleet-card-head">
         {row.dot !== null && <span className={`dot dot-${row.dot}`} aria-hidden="true" />}
         <div className="fleet-card-title">
@@ -353,7 +355,12 @@ function QueueCard(props: {
       {row.continues !== null && <p className="fleet-card-body">{row.continues}</p>}
       {continuing !== null && (
         <p className="fleet-card-body">
-          <button type="button" className="queue-reveal" onClick={() => props.onReveal(continuing.id)}>
+          <button
+            type="button"
+            className="queue-reveal"
+            aria-label={`${continuing.text}, show in queue`}
+            onClick={() => props.onReveal(continuing.id)}
+          >
             {continuing.text}
           </button>
         </p>

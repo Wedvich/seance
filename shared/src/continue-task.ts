@@ -44,16 +44,21 @@ function tookOver(y: Task): boolean {
 }
 
 /**
- * A continuation of `task` still in the queue, among `tasks`. It does not hold the session
- * (`tookOver`: it may never land), but a second Continue would only race it, so the offer waits
- * on it. One `QUEUE_MAX_TASKS` left out of the list is invisible here, and the offer stands.
+ * The continuation of `task` still in the queue, among `tasks`, when none has taken over. It does
+ * not hold the session (`tookOver`: it may never land), but a second Continue would only race it,
+ * so the offer waits on it. A landed taker outranks it, so there is none then. Of several, the
+ * oldest: the one the scheduler places first, whatever the list's order. One `QUEUE_MAX_TASKS`
+ * left out of the list is invisible here, and the offer stands.
  */
 export function waitingContinuation(task: Task, tasks: readonly Task[]): Task | undefined {
-  return tasks.find(
-    (other) =>
-      other.spec.continues?.task === task.id &&
-      (other.state === "queued" || other.state === "blocked" || other.state === "ready"),
-  );
+  const continuations = tasks.filter((other) => other.spec.continues?.task === task.id);
+  if (continuations.some(tookOver)) return undefined;
+  let oldest: Task | undefined;
+  for (const other of continuations) {
+    const waits = other.state === "queued" || other.state === "blocked" || other.state === "ready";
+    if (waits && (oldest === undefined || other.createdAt < oldest.createdAt)) oldest = other;
+  }
+  return oldest;
 }
 
 /** The task-level eligibility `continueOffer` applies, so it can tell whether a taker would itself pass it. */
