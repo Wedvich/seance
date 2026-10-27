@@ -518,8 +518,54 @@ describe("a window closed from outside", () => {
       "note task-9 0",
       "clear task-9",
       "clear task-1",
+      // No parseable status: announced as closing first, so the user closing its dead pane never reads vanished.
+      "closing task-x",
       "clear task-x",
     ]);
+  });
+
+  test("the server pid is read only when some candidate is neither carried nor recorded", async () => {
+    let reads = 0;
+    const run = (panes: PaneInfo[], recorded: { taskId: string; exit: number | null }[]): Promise<void> =>
+      harvestExits({
+        ...idle,
+        list: () => Promise.resolve(panes),
+        close: () => Promise.resolve(),
+        note: () => Promise.resolve(true),
+        unaccounted: () => [{ taskId: "task-9", recordedAt: 7, server: 100 }],
+        server: () => {
+          reads += 1;
+          return Promise.resolve(100);
+        },
+        recordedExits: () => Promise.resolve(recorded),
+      });
+    await run([pane("%9", { taskId: "task-9", dead: false, deadStatus: null })], []);
+    await run([], [{ taskId: "task-9", exit: 0 }]);
+    expect(reads).toBe(0);
+    await run([], []);
+    expect(reads).toBe(1);
+  });
+
+  test("an exit recorded while the task's launch is in flight is left for a later pass, so startNote cannot overwrite it", async () => {
+    const events: string[] = [];
+    const ledger = LaunchLedger.memory();
+    const tasks = new EndedTasks(ledger, Date.now, {
+      list: () => Promise.resolve([]),
+      close: () => Promise.resolve(),
+      server: () => Promise.resolve(100),
+      recordedExits: () => Promise.resolve([{ taskId: "task-1", exit: 0 }]),
+      clearExit: (taskId) => Promise.resolve(void events.push(`clear ${taskId}`)),
+    });
+    const settle = await tasks.launch("task-1");
+    await tasks.harvestExits();
+    // Neither noted nor cleared: the hook already fired, the launch has not settled.
+    expect(events).toEqual([]);
+    expect(tasks.progress()).toEqual([]);
+    await settle(true, { server: 100 });
+    await tasks.harvestExits();
+    expect(events).toEqual(["clear task-1"]);
+    expect(tasks.progress()).toEqual([expect.objectContaining({ taskId: "task-1", exit: 0 })]);
+    expect(tasks.progress()[0]?.vanished).toBeUndefined();
   });
 
   test("a candidate on another live server is not judged; on a dead one, or the answering one, it is", async () => {

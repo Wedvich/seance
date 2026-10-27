@@ -143,6 +143,11 @@ export interface HarvestDeps extends HarvestPanes {
   readonly note: (taskId: string, exit: number, oomKill?: boolean) => Promise<boolean>;
   /** Called before closing a dead task pane that holds no status: the daemon's own close is never `vanished`. */
   readonly closing: (taskId: string) => Promise<unknown>;
+  /**
+   * True while a launch of the task is still in flight: its `startNote` replaces the whole note, so an exit
+   * noted before it would be lost. Absent means none is.
+   */
+  readonly launching?: (taskId: string) => boolean;
   /** Launches no exit, close or `vanished` note has accounted for yet, with the server each ran on. */
   readonly unaccounted: () => readonly {
     readonly taskId: string;
@@ -273,7 +278,10 @@ export async function harvestExits(deps: HarvestDeps): Promise<void> {
 /**
  * The hooks' recorded exits into the ledger, then unset: only once the note was staged, so a failed
  * one is retried next pass. A task this pass already noted from its dead pane is only unset, and so is
- * one the ledger does not hold. Null when tmux could not be read, which judges nothing.
+ * one the ledger does not hold. One whose launch is still in flight is left unread and unset: the launch's
+ * `startNote` would overwrite the exit, so a later pass picks it up. A value that is no status (a signal
+ * death on a tmux without `pane_dead_signal`) notes `closedHere` first, as a pane with no status does, so
+ * a close of its dead pane never reads `vanished`. Null when tmux could not be read, which judges nothing.
  */
 async function settleRecordedExits(deps: HarvestDeps, noted: ReadonlySet<string>): Promise<ReadonlySet<string> | null> {
   let recorded: readonly RecordedExit[];
@@ -285,7 +293,12 @@ async function settleRecordedExits(deps: HarvestDeps, noted: ReadonlySet<string>
   const accounted = new Set<string>();
   for (const { taskId, exit } of recorded) {
     accounted.add(taskId);
+    if (deps.launching?.(taskId) === true) continue;
     try {
+      if (exit === null && !noted.has(taskId)) {
+        // oxlint-disable-next-line no-await-in-loop -- one note each, a few at most
+        await deps.closing(taskId);
+      }
       // oxlint-disable-next-line no-await-in-loop -- one note each, a few at most
       if (exit !== null && !noted.has(taskId)) await deps.note(taskId, exit);
       // oxlint-disable-next-line no-await-in-loop
@@ -310,16 +323,16 @@ async function judgeVanished(
   panes: readonly PaneInfo[],
   recorded: ReadonlySet<string>,
 ): Promise<void> {
-  if (candidates.length === 0) return;
+  const carried = new Set(panes.flatMap((pane) => pane.taskId ?? []));
+  const missing = candidates.filter((launch) => !carried.has(launch.taskId) && !recorded.has(launch.taskId));
+  if (missing.length === 0) return;
   let answering: number | null;
   try {
     answering = await deps.server();
   } catch {
     return;
   }
-  const carried = new Set(panes.flatMap((pane) => pane.taskId ?? []));
-  for (const launch of candidates) {
-    if (carried.has(launch.taskId) || recorded.has(launch.taskId)) continue;
+  for (const launch of missing) {
     if (answering !== launch.server && !processGone(launch.server)) continue;
     try {
       // oxlint-disable-next-line no-await-in-loop -- one note each, a few at most

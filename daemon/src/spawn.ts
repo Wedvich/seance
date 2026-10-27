@@ -362,11 +362,16 @@ async function tagTask(windowId: string, taskId: string): Promise<void> {
   }
 }
 
-/** The per-pane `pane-died` hook's one body: tmux commands only, no shell, the task id its only interpolation. */
+/**
+ * The per-pane `pane-died` hook's one body: tmux commands only, no shell, the task id its only interpolation.
+ * A clean exit's pane is closed unless it is the server's last: the server would exit with it (`exit-empty`)
+ * and take the recorded option along, so that pane stays dead for harvest to note and close.
+ */
 function exitHook(taskId: string): string {
+  const lastPane = "#{&&:#{==:#{server_sessions},1},#{&&:#{==:#{session_windows},1},#{==:#{window_panes},1}}}";
   return (
     `set-option -gF ${EXIT_OPTION_PREFIX}${taskId} '#{pane_dead_status}:#{pane_dead_signal}' ; ` +
-    `if-shell -F '#{==:#{pane_dead_status},0}' 'kill-pane'`
+    `if-shell -F '${lastPane}' '' 'if-shell -F "#{==:#{pane_dead_status},0}" kill-pane'`
   );
 }
 
@@ -378,7 +383,7 @@ function exitHook(taskId: string): string {
  *
  * The hook is per pane, never `-g`/`-ga`: it shadows a global `pane-died` for this pane only (DESIGN.md,
  * "Window closed from outside"). It records the death in a server-wide option, then closes a clean
- * exit's pane. The pane option beats the window's, so a pane `join-pane`d elsewhere stays kept; a
+ * exit's pane (not the server's last). The pane option beats the window's, so a pane `join-pane`d elsewhere stays kept; a
  * tmux without `-p` keeps the window-level `on` and hooks the window instead.
  */
 async function armTask(windowId: string, taskId: string): Promise<number | undefined> {

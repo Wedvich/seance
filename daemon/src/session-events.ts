@@ -329,6 +329,7 @@ export class EndedTasks {
       note: (taskId, exit, oomKill) =>
         this.#ledger.note(taskId, { exit, ...(oomKill === undefined ? {} : { oomKill }) }),
       closing: (taskId) => this.closing(taskId),
+      launching: (taskId) => this.#launches.has(taskId),
       unaccounted: () => this.unaccounted(),
       vanished: (launch) => this.vanished(launch.taskId, launch.recordedAt),
       ...(this.#oom === undefined ? {} : { oom: this.#oom }),

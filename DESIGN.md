@@ -4484,15 +4484,32 @@ for the lot with its own `gh`.
   moved into another window stays kept). A per-pane `pane-died` hook, set once the task registers
   (`armTask`), records the death and closes a clean exit's pane at once:
   `set-option -gF @seance-exit-<taskId> '#{pane_dead_status}:#{pane_dead_signal}' ; if-shell -F
-  '#{==:#{pane_dead_status},0}' 'kill-pane'`. Tmux commands only: no `run-shell`, no daemon call, and
+  '#{==:#{pane_dead_status},0}' 'kill-pane'` (below: not when the pane is the server's last). Tmux commands only: no `run-shell`, no daemon call, and
   the one interpolation is the task id, which `isTaskId` validates first (a failing id gets no
   hook and no `server`, so is never judged). The status survives the pane in that server-wide
   option; harvest reads every `@seance-exit-*` after the listing (the hook may fire between the two
   reads), parses it as `exitStatus` parses a pane's (a signal is `128 + signal`), notes it, and
-  unsets it only after the note was staged. A nonzero exit leaves the dead pane for the user to read,
+  unsets it only after the note was staged, and not while a launch of the task is still in flight (its
+  `startNote` replaces the whole note, so an exit noted earlier would be lost; the option stays for the
+  next pass). A recorded value that is no status (a signal death on a tmux without `pane_dead_signal`)
+  notes `closedHere` before it is unset, so a later close of its dead pane settles `done` as before
+  rather than `vanished`. A nonzero exit leaves the dead pane for the user to read,
   as before, and is noted from the pane (the option is then only unset). A status the hook did not
   see (a pane killed while alive fires no `pane-died`) leaves no option: that absence is what
   `vanished` means.
+  _The server's last pane._ The hook's `kill-pane` of the server's only pane would make tmux exit
+  (`exit-empty`) and take the recorded option with it, leaving the recorded server pid dead and the task
+  judged `vanished`. So the hook closes a clean exit's pane only when some other pane remains:
+  `if-shell -F '#{&&:#{==:#{server_sessions},1},#{&&:#{==:#{session_windows},1},#{==:#{window_panes},1}}}'
+  '' '<kill-pane if status 0>'`. The last pane stays dead, holding its status, and harvest notes and
+  closes it as for a nonzero exit (verified on 3.7c: the other pane's exit 0 is closed, the last one's
+  is kept, the server stays up, the option is set either way). Sessions in one group share windows, so
+  `server_sessions` counts each: such a server is judged "not last" and the pane closed (not covered).
+  _tmux version floor._ The hook, `-F` expansion in it and the `set-hook -w` fallback were verified only
+  on tmux 3.7c. `-p` on `set-option` and `set-hook` needs 3.2. Whether `set-hook -w` exists before 3.2 is
+  not verified here (no older tmux was available to test). Where both `set-hook` forms are refused,
+  `armTask` returns undefined: no hook, no `server`, the task is never judged `vanished`, and a clean
+  exit still leaves its dead pane under the window-level `on`, which harvest notes like any other.
   _tmux facts, verified on tmux 3.7c on a private socket (`tmux -L <name> -f /dev/null`)._ Under `on`,
   an exit 0 leaves a dead pane with `pane_dead_status` 0 and fires `pane-died`, not `pane-exited`;
   under `failed` an exit 0 closes the pane and fires `pane-exited`. A signal leaves a dead pane with
@@ -4524,14 +4541,18 @@ for the lot with its own `gh`.
   notes no `closedHere`: routing it through the local socket would audit a shell-typed despawn as
   `origin=local`, breaking one origin per surface. A graceful CLI despawn makes claude exit 0, the
   hook records it, and the task settles `done`; only the forced `kill-pane` of a pane that outlived
-  the graceful exit reads `session_closed`. (3) A daemon that switches tmux servers (another
+  the graceful exit reads `session_closed`. A despawn or reap that notes `closedHere` and then fails
+  to close the pane leaves that task unjudgeable for good (`closedHere` is sticky): the safe direction,
+  since a later close from outside then reads `done`, as before this change. (3) A daemon that switches tmux servers (another
   `TMUX_TMPDIR`) judges nothing while the old server runs. After a reboot a pid reused by another
   process holds a candidate unjudged forever (the safe direction). (4) A tmux older than 3.2
   refuses `-p`: the window-level `on` and a window-level hook stay, and a pane `join-pane`d out is
   not covered. `remain-on-exit on` and `pane_dead_status` themselves are long-standing, so the
-  old `failed` fallback (a tmux older than 3.2 got `off`) is gone; no tmux version floor is stated
-  elsewhere. (5) A task that never launched under this daemon, or whose window predates the upgrade,
-  is not judged.
+  old `failed` fallback (a tmux older than 3.2 got `off`) is gone; see "tmux version floor" above
+  for what a tmux below 3.2 does. (5) A task that never launched under this daemon, or whose window predates the upgrade,
+  is not judged. (6) Rolling back to an older daemon leaves the hooks on live task panes, which keep
+  writing `@seance-exit-<id>` options that nobody clears until the tmux server restarts: harmless,
+  one option per task.
 - **Pane classifier** (added 2026-10-09, `classifyPane` in `sessions.ts`): what a
   pane is _doing_, for the code that acts on sessions rather than lists them —
   closing one window (`despawn`) and cleaning up after many (`reap`). Six states:

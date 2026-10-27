@@ -591,6 +591,83 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     }
   });
 
+  test("a task pane joined into a window with remain-on-exit off keeps its own on and its hook: a clean exit is still recorded", async () => {
+    process.env["SEANCE_CLAUDE_BIN"] = stub.repl;
+    const tasks = new EndedTasks(LaunchLedger.memory(), Date.now, tmuxHarvestPanes(reapAudit("harvest", () => {})));
+    try {
+      const plain = await spawnSession({ repo: "myrepo", mode: "here", title: "Plain Join" }, repos, WAIT);
+      const plainPane = (await waitForSession(plain.window))?.id ?? "";
+      const { pane } = await launchTask(tasks, "task-joined", "Task Joined");
+      await tmuxOk(["join-pane", "-d", "-s", pane, "-t", plainPane]);
+      expect((await tmuxOk(["show-options", "-w", "-v", "-t", plainPane, "remain-on-exit"])).trim()).toBe("off");
+      expect((await tmuxOk(["show-options", "-p", "-v", "-t", pane, "remain-on-exit"])).trim()).toBe("on");
+      expect(await tmuxOk(["show-hooks", "-p", "-t", pane])).toContain("pane-died");
+
+      await tmux(["send-keys", "-t", pane, "-l", "/exit"]);
+      await tmux(["send-keys", "-t", pane, "Enter"]);
+      await pollUntil(async () => (await paneInfo(pane)) === null, `pane ${pane} closed by its hook`);
+      expect((await tmuxOk(["show-options", "-g", "-v", "@seance-exit-task-joined"])).trim()).toBe("0:");
+      await tasks.harvestExits();
+      expect(tasks.progress().find((p) => p.taskId === "task-joined")).toMatchObject({ exit: 0 });
+    } finally {
+      process.env["SEANCE_CLAUDE_BIN"] = stub.ok;
+      await killWindow("Plain Join");
+      await killWindow("Task Joined");
+    }
+  });
+
+  test("a clean exit of the server's last pane leaves the dead pane: the server stays up and the exit is noted, not vanished", async () => {
+    process.env["SEANCE_CLAUDE_BIN"] = stub.repl;
+    const shared = process.env["SEANCE_TMUX_SOCKET"];
+    const alone = usePrivateTmux(base, "spawn-last");
+    try {
+      const tasks = new EndedTasks(LaunchLedger.memory(), Date.now, tmuxHarvestPanes(reapAudit("harvest", () => {})));
+      const { pane, outcome } = await launchTask(tasks, "task-last", "Task Last");
+      // A fresh server boots with a bootstrap pane of its own: drop it, so the task's is the only one.
+      for (const other of (await tmuxOk(["list-panes", "-a", "-F", "#{pane_id}"])).split("\n")) {
+        // oxlint-disable-next-line no-await-in-loop -- one pane at a time
+        if (other !== "" && other !== pane) await tmuxOk(["kill-pane", "-t", other]);
+      }
+      expect((await tmuxOk(["list-panes", "-a", "-F", "#{pane_id}"])).trim()).toBe(pane);
+      await tmux(["send-keys", "-t", pane, "-l", "/exit"]);
+      await tmux(["send-keys", "-t", pane, "Enter"]);
+      await pollUntil(async () => (await paneInfo(pane))?.dead === true, `pane ${pane} dead`);
+      // Killed by the hook, the server would have exited with the option it just recorded.
+      expect(Number((await tmuxOk(["display-message", "-p", "#{pid}"])).trim())).toBe(outcome.server ?? -1);
+      expect((await paneInfo(pane))?.deadStatus).toBe(0);
+      await tasks.harvestExits();
+      expect(tasks.progress().find((p) => p.taskId === "task-last")).toMatchObject({ exit: 0 });
+      expect(tasks.progress().find((p) => p.taskId === "task-last")?.vanished).toBeUndefined();
+    } finally {
+      process.env["SEANCE_CLAUDE_BIN"] = stub.ok;
+      await alone.dispose();
+      if (shared !== undefined) process.env["SEANCE_TMUX_SOCKET"] = shared;
+    }
+  });
+
+  test("despawn notes closing, and waits for it, before it touches a task's pane", async () => {
+    process.env["SEANCE_CLAUDE_BIN"] = stub.repl;
+    const tasks = new EndedTasks(LaunchLedger.memory(), Date.now, tmuxHarvestPanes(reapAudit("harvest", () => {})));
+    try {
+      const { pane } = await launchTask(tasks, "task-order", "Task Order");
+      const events: string[] = [];
+      await despawnSession(pane, {
+        force: true,
+        closing: async (taskId) => {
+          events.push(`closing ${taskId}`);
+          // Long enough for a kill that did not wait for us to land.
+          await Bun.sleep(300);
+          events.push(`pane alive ${(await paneInfo(pane)) !== null}`);
+        },
+      });
+      events.push(`pane alive ${(await paneInfo(pane)) !== null}`);
+      expect(events).toEqual(["closing task-order", "pane alive true", "pane alive false"]);
+    } finally {
+      process.env["SEANCE_CLAUDE_BIN"] = stub.ok;
+      await killWindow("Task Order");
+    }
+  });
+
   test("a task session killed by a signal reads as 128 + the signal, as a shell reports it", async () => {
     process.env["SEANCE_CLAUDE_BIN"] = stub.repl;
     const ledger = LaunchLedger.memory();
