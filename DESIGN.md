@@ -1367,7 +1367,8 @@ requesting socket only.
 Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
 
 - `sessions {}` → running claude tmux windows, each `{ id?, window, repo, path,
-  taskId? }`, plus `ended?`, `ledgerSince?`, `progress?` and `progressTrimmed?` for
+  taskId? }`, plus `ended?`, `interrupted?` (a subset of `ended`: launches the
+  daemon died in the middle of; "Session events"), `ledgerSince?`, `progress?` and `progressTrimmed?` for
   the scheduler alone: a request sealed `from: "scheduler"`, or the leader's
   in-process call (Local op socket, "Session events"; `progress`, Scheduler,
   "Branch state"). The one live pull — session state is inherently fresh-only.
@@ -2549,7 +2550,11 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   transport error (which may come after the spawn ran) → stays reserved. Past the 120s TTL the machine's `sessions` decide: a
   session carrying the task id is the spawn that landed; the task id in the reply's
   `ended` is one that landed and already finished, settled by its PR ("Done detection":
-  `awaiting-merge` with one, else `done`); neither releases the task to
+  `awaiting-merge` with one, else `done`) — unless it is also in `interrupted`, a launch its
+  machine died in the middle of ("Session events"): that one is not treated as known inside the TTL
+  (its pane may be on a startup dialog `sessions` does not list yet) and, past it with no session,
+  is `failed` `dispatch_unconfirmed` saying its machine restarted mid-spawn, never `done` and
+  never re-dispatched (the window may exist untagged); neither releases the task to
   `ready` **only on the machine's proof** — its `ledgerSince` at least the replay window
   (60s) before the reservation was made (`reservedAt`), the window standing in for clock
   skew, since a daemon further behind refuses this leader's every envelope as from the
@@ -2876,7 +2881,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   placed task (the event names the pane a never-confirmed task lacks). With no session, a task
   that ran has ended — `awaiting-merge` or `done` by its PR — whether or not `ended` still
   remembers it, as takeover settles a running task whose session is gone; a never-confirmed
-  one settles as its reservation would have — ended if `ended` lists it, `ready` on the
+  one settles as its reservation would have — ended if `ended` lists it (`failed`
+  `dispatch_unconfirmed` if `interrupted` does too), `ready` on the
   ledger's proof, `failed` `dispatch_unconfirmed`
   without. `lost → ready` exists for that task alone, and `advance` throws for any other. An
   unanswered check keeps it `lost`. The absence clock is the scheduler's own, in memory, started the first
@@ -5171,6 +5177,27 @@ relay state unnecessary).
   `XPC_SERVICE_NAME` under launchd); a manual foreground `seanced` would
   otherwise exit with nothing to relaunch it, or bounce the service while the
   terminal keeps serving old code.
+- **Restart waits for task launches** (`EndedTasks.drain`, wired through the updater's `quiesce`). A
+  restart that lands inside a task's spawn leaves its launch recorded in the ledger but its session
+  half-made, and a leader whose reply was cut reads the id in `ended` as ran — `done` with no session.
+  So after the `ok` is reported and before `selfRestart`, the daemon closes a gate on task launches and
+  waits for each one in flight to finish (its ledger write included), capped at `UPDATE_DRAIN_MS`
+  (120 s: past `OP_TIMEOUT_MS.spawn`, 90 s, no launch is one its leader still waits on). A task launch
+  that arrives while the gate is closed is **never parked**: it is answered at once with the transport
+  code `internal_error` (`LaunchesClosed`), unrecorded and never run. Parked and resumed later, it would
+  read as never-landed in `sessions` (it is in no `#inFlight`), and a leader that had already
+  re-dispatched the task past its TTL would get a twin. `internal_error` is what every leader version
+  reads as "stay reserved, settle from `sessions` at the TTL", where the never-landed proof returns the
+  task to `ready`. A refusal such as `launch_error` would instead settle it `failed`. A restart that
+  throws (`restart_failed`) reopens the gate. A restart that returns does not: `systemctl --no-block`
+  returns before its SIGTERM, so the gate reopens only after a 5-minute grace (`RESTART_GRACE_MS`) with
+  the process still alive, with an error line. The foreground daemon's SIGTERM/SIGINT takes the same
+  drain, capped at `SHUTDOWN_DRAIN_MS` (15 s: under launchd's default `ExitTimeOut` of 20 s, which the
+  plist leaves unset, and systemd's 90 s `TimeoutStopSec` with `KillMode=process`) and run before
+  `daemon.stop()`, so a finishing spawn's reply still reaches its leader; a second signal exits at once.
+  Spawns with no `taskId` are not held. The pre-update process does the restart, so the wave that ships
+  this is unprotected: protection starts with the next one. A launch cut off anyway (a `kill -9`, a
+  power cut, a drain past its cap) is covered by the ledger's `interrupted` ("Session events").
 - **Reporting rides the register blob** (`source`, `lastUpdate` —
   `Presence & identity`), `current` excluded: the steady state would rewrite
   state.json and push a registry frame on every reconnect for information
@@ -6792,6 +6819,43 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   first 40 characters of the prompt, slugified), as the worktree directory and window name
   already do and as `SpawnResponse.path` already reports; the prompt itself never reaches
   the file, which is 0600 in the state dir.
+
+  **A launch the process died in the middle of** (`pending` / `interrupted`, added 2026-10-27).
+  `ended` alone cannot tell a task that ran and finished from one whose spawn was cut off by a
+  restart, a crash or a power cut (the id was recorded, the session may never have started), so
+  a leader read both as `done` — a task marked done with no session, found out only by its
+  owner. The file now also keeps a top-level `pending` array, written in the **same durable
+  write** as the `tasks` entry by `record`. A launch that settles (landed, retracted, refused
+  or crashed) leaves `pending` in `finish`, durably, before the launch counts as over — so a
+  drain that resolves has left nothing pending; `startNote` clears it too, since a `here`
+  launch with no PR writes no note. On open, every id still `pending` is promoted to a
+  persisted `interrupted` set (one `warn` naming the ids; no write at open). The id stays in
+  `tasks` and in `ended`, and `since` does not move: **`interrupted` is always a subset of
+  `ended`**, and the reply names it in `SessionsResponse.interrupted` (scheduler only, at most
+  `SESSIONS_MAX_PROGRESS`, absent when empty). A reader that predates the field reads the id
+  in `ended` as ran, and never as never-landed, which would re-dispatch a twin.
+  An id is cleared, best-effort and persisted, when a `sessions` listing carries it, when
+  harvest notes its exit, when a later launch of it lands, or when a session event binds to a
+  pane carrying it. That last clear is **ingest, not a new act**: the id comes from the
+  kernel-bound pane and never from the frame, it only removes the mark of the bound pane's
+  own task, and it exists because a clean exit closes the window with no exit note. Despawn and reap's `closing`
+  do not clear it. The leader (Scheduler, "Reserve, then dispatch") does not count an
+  interrupted id as `known` while its reservation lives, since a pane tagged before the
+  crash may be on a startup dialog `sessions` does not list yet, and past the TTL with no
+  session settles it `failed` `dispatch_unconfirmed`, saying its machine restarted
+  mid-spawn; it is never re-dispatched, because the window may exist untagged (`spawn.ts`
+  creates it, then tags the task). A never-confirmed `lost` task settles the same way when its machine
+  returns. `dispatch_unconfirmed` is not continuable (`continue-task.ts`), so the task is
+  re-queued by hand; and a failed task fails its `after: "done"` dependents. The leader
+  parses the field through `parseInterrupted`, keeping only task ids that are in `ended`: a
+  bad entry falls back to `done`, never to a re-dispatch.
+  Mixed versions: an old leader ignores the field; an old daemon's file read by new code has
+  no `pending` and so no interrupted ids; a new file read by old code still parses (unknown
+  keys are ignored) and the old code's next write drops them. Neither key may ever make the
+  file corrupt, which would reset `since`: a non-array reads as empty, and an entry that is no
+  recorded task id is skipped. The two-fault case (a drain's `clearPending` write fails, so
+  the settled launch is promoted on the next open) errs to the safe side: the task is failed
+  rather than called done, at worst a launch that ran is shown failed.
 
 Untested by hand: the macOS peer-pid call itself (documented constant; CI's macOS
 leg covers it) and a real Claude Code session driving the mod end to end. The mod's
