@@ -2462,9 +2462,17 @@ describe("continue_task", () => {
       expect(held.text, state).toContain("already underway or finished");
       expect(held.fake.creates, state).toEqual([]);
     }
-    // One still waiting leaves the offer open.
+    // One still waiting withholds it too, and the refusal names it.
     const waiting = await callContinue([failedTask, continuation("queued")]);
-    expect(waiting.error).toBe(false);
+    expect(waiting.error).toBe(true);
+    expect(waiting.text).toContain("already continuing as task t-2, which is still waiting in the queue");
+    expect(waiting.fake.creates).toEqual([]);
+    // One the machine refused gives it back.
+    const refused = await callContinue([
+      failedTask,
+      task({ ...continuation("failed"), failure: { code: "not_continuable", message: "x" } }),
+    ]);
+    expect(refused.error).toBe(false);
   });
 
   test("a note over the prompt bound is refused before anything is queued, and a malformed id is no task id", async () => {
@@ -2505,9 +2513,11 @@ describe("continue_task", () => {
   });
 
   test("get_queue marks a failed session continuable and names the task a continuation continues", async () => {
+    // Refused by the machine: it never held the session, so the old task stays continuable.
     const continuing = task({
       id: "t-2",
-      state: "ready",
+      state: "failed",
+      failure: { code: "not_continuable", message: "x" },
       spec: { repo: ORIGIN, mode: "continue", continues: { task: "t-1", at: AT } },
     });
     const fake = leaderRelay([{ tasks: [failedTask, continuing], at: 6_000 }], continuingMachines());
@@ -2553,19 +2563,26 @@ describe("continue_task", () => {
     lazy.stop();
   });
 
-  test("get_queue withdraws continuable once a continuation has the session", async () => {
-    const underway = task({
-      id: "t-2",
-      state: "running",
-      spec: { repo: ORIGIN, mode: "continue", continues: { task: "t-1", at: AT } },
-    });
-    const fake = leaderRelay([{ tasks: [failedTask, underway], at: 6_000 }], continuingMachines());
-    const lazy = new LazyRelay({ create: () => fake });
-    const client = await connectedClient(lazy);
-    const queue = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} }))) as {
-      tasks: Record<string, unknown>[];
-    };
-    expect(queue.tasks.find((t) => t["id"] === "t-1")).not.toHaveProperty("continuable");
-    lazy.stop();
+  test("get_queue withdraws continuable while a continuation waits and once one has the session", async () => {
+    for (const state of ["ready", "running"] as const) {
+      const underway = task({
+        id: "t-2",
+        state,
+        spec: { repo: ORIGIN, mode: "continue", continues: { task: "t-1", at: AT } },
+      });
+      const fake = leaderRelay([{ tasks: [failedTask, underway], at: 6_000 }], continuingMachines());
+      const lazy = new LazyRelay({ create: () => fake });
+      // oxlint-disable-next-line no-await-in-loop -- one relay at a time
+      const client = await connectedClient(lazy);
+      // oxlint-disable-next-line no-await-in-loop -- one relay at a time
+      const queue = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} }))) as {
+        tasks: Record<string, unknown>[];
+      };
+      expect(
+        queue.tasks.find((t) => t["id"] === "t-1"),
+        state,
+      ).not.toHaveProperty("continuable");
+      lazy.stop();
+    }
   });
 });
