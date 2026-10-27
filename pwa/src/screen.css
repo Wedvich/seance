@@ -2266,12 +2266,16 @@
   box-shadow: 0 0 0 2px var(--sur3);
 }
 
-/* Top-layer popover; `top`/`right` are set under the pill on open. */
-.header-menu {
+/* ---- menu popover (menu.tsx): header menu, and any short command menu ---- */
+
+/* Top-layer popover; `top` or `bottom`, and `right`, are set from the anchor on
+   open. base.css's reduced-motion rule clamps the transitions to an instant. */
+.menu {
+  --menu-slide: -4px;
   position: fixed;
   inset: auto;
   margin: 0;
-  min-width: 196px;
+  min-width: 236px;
   padding: 6px;
   border: 1px solid var(--line);
   border-radius: 16px;
@@ -2279,7 +2283,7 @@
   color: var(--fg);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.3);
   opacity: 0;
-  transform: translateY(-4px) scale(0.98);
+  transform: translateY(var(--menu-slide)) scale(0.98);
   transform-origin: top right;
   transition:
     opacity 0.14s ease,
@@ -2288,21 +2292,27 @@
     display 0.14s allow-discrete;
 }
 
-.header-menu:popover-open {
+.menu[data-direction="up"] {
+  --menu-slide: 4px;
+  transform-origin: bottom right;
+}
+
+.menu:popover-open {
   display: flex;
   flex-direction: column;
+  gap: 2px;
   opacity: 1;
   transform: none;
 }
 
 @starting-style {
-  .header-menu:popover-open {
+  .menu:popover-open {
     opacity: 0;
-    transform: translateY(-4px) scale(0.98);
+    transform: translateY(var(--menu-slide)) scale(0.98);
   }
 }
 
-.header-menu-item {
+.menu-item {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -2315,25 +2325,63 @@
   font-size: 15px;
   font-weight: 600;
   text-align: left;
+  text-decoration: none;
 }
 
-.header-menu-item .dot {
+.menu-item-with-sub {
+  min-height: 52px;
+  padding: 6px 12px;
+}
+
+.menu-item-destructive {
+  color: var(--err);
+}
+
+.menu-item:disabled,
+.menu-item[aria-disabled="true"] {
+  opacity: 0.5;
+}
+
+.menu-item .dot {
   margin-left: auto;
 }
 
-.header-menu-icon {
+.menu-icon {
   display: flex;
   color: var(--fg2);
 }
 
+/* The icon follows the label's red. */
+.menu-item-destructive .menu-icon {
+  color: currentColor;
+}
+
+.menu-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.menu-sub {
+  color: var(--fg2);
+  font-size: 12.5px;
+  font-weight: 400;
+}
+
+.menu-divider {
+  height: 1px;
+  margin: 4px 8px;
+  background: var(--line);
+}
+
 @media (hover: hover) {
-  .header-menu-item:hover {
+  .menu-item:not(:disabled, [aria-disabled="true"]):hover {
     background: var(--sur2);
   }
 }
 
-.header-menu-item:active,
-.header-menu-item:focus-visible {
+.menu-item:not(:disabled, [aria-disabled="true"]):active,
+.menu-item:focus-visible {
   background: var(--sur2);
 }
 
