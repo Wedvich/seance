@@ -2755,7 +2755,10 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   `MERGED` is merged into the PR's base, so a stacked PR merged into its parent's branch is
   recorded (`pr.stacked`, still drawn as merged) and settles nothing, or `after: "merged"`
   dependents would be released with nothing on main (a base or default branch the answer does
-  not name counts as not the default). A settle off a placed task (`running`, `needs-input`,
+  not name counts as not the default). A merge counts too when the default branch contains its
+  merge commit (2026-10-27): a stack merged in cascade lands on main while each PR's
+  `baseRefName` names its parent's branch for good, and #329's task sat in `awaiting-merge`
+  with its work on main. A settle off a placed task (`running`, `needs-input`,
   `lost`) marks it `leftRunning`, as `mark-done` does a `lost` one, and leaves its session alone,
   as a `branch-state` settle does: the slot is freed while the session may still run, so the
   exclave can be over-committed until it exits, and the card says the session may still be running.
@@ -3392,6 +3395,15 @@ for the lot with its own `gh`.
   `open`, `draft`, `merged` or `closed`; the head commit's rollup as `pending`, `passing` or
   `failing`; `stacked` on a merge whose base is not the default branch; `at` the leader's
   clock at the read. Two tasks on one PR share an alias.
+- **A stacked merge is asked about again.** A merged PR whose base is not the default branch
+  takes a second batched call, only for those, aliased `c<i>` after the first call's `p<i>`:
+  `repository{ defaultBranchRef{ compare(headRef: $h){ status } } }` with the PR's `mergeCommit`
+  oid (40 or 64 hex, else not asked) as a `-f` variable. `BEHIND` or `IDENTICAL` means the
+  default branch holds the merge commit, so the reading is not `stacked`. Anything else — a
+  failed run, an unanswered alias, `DIVERGED` — keeps it `stacked`: the second call can only
+  clear the flag, never fail the poll. A parent squash-merged after its child merged into it
+  leaves the child's merge commit off main, so that child still reads stacked; it settles by
+  hand.
 - **Variables, never text.** Owner, repo and number reach `gh` only as GraphQL variables: strings
   with `-f` (`-F` would read `@file` and coerce types), the number, which the URL regex has
   already limited to a positive GraphQL `Int`, with `-F`. The query text is built from the alias

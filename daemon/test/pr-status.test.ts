@@ -50,6 +50,9 @@ type Fake = {
   /** The PR's base; the repo's default branch is `main` unless `defaultBranch` says otherwise. */
   readonly base?: string;
   readonly defaultBranch?: string | null;
+  readonly mergeOid?: string;
+  /** The default branch compared to `mergeOid`: answered at `c<i>` when set. */
+  readonly landed?: string | null;
 } | null;
 
 /** gh's GraphQL answer: alias `p<i>` per PR, `null` for one the forge gives nothing for. */
@@ -66,11 +69,16 @@ function reply(...prs: readonly Fake[]): string {
               isDraft: fake.isDraft ?? false,
               merged: fake.state === "MERGED",
               baseRefName: fake.base ?? "main",
+              mergeCommit: fake.mergeOid === undefined ? null : { oid: fake.mergeOid },
               commits: {
                 nodes: [{ commit: { statusCheckRollup: fake.rollup === undefined ? null : { state: fake.rollup } } }],
               },
             },
     };
+    // One body answers both runs: the stub replies the same to each, and each run reads its own aliases.
+    if (fake?.landed !== undefined) {
+      data[`c${i}`] = fake.landed === null ? null : { defaultBranchRef: { compare: { status: fake.landed } } };
+    }
   });
   return JSON.stringify({ data });
 }
@@ -242,6 +250,66 @@ describe("what the poller reads of a merge", () => {
       { state: "merged", stacked: true, at: 1234 },
       { state: "open", at: 1234 },
     ]);
+  });
+
+  test("a stacked merge whose merge commit the default branch holds is not `stacked`: a stack merged in cascade lands", async () => {
+    const oid = "e4e539377223b245bf1ad0d97de4e726ee65bd37";
+    await gh.setReply(
+      reply(
+        { state: "OPEN" },
+        { state: "MERGED", base: "parent", mergeOid: oid, landed: "IDENTICAL" },
+        { state: "MERGED", base: "parent", mergeOid: oid, landed: "BEHIND" },
+        { state: "MERGED", base: "parent", mergeOid: oid, landed: "DIVERGED" },
+        { state: "MERGED", base: "parent", mergeOid: oid, landed: null },
+        { state: "MERGED", base: "parent" },
+        { state: "MERGED", base: "parent", mergeOid: "not-an-oid", landed: "IDENTICAL" },
+      ),
+      0,
+    );
+    const { seen, stop } = start(
+      [1, 2, 3, 4, 5, 6, 7].map((n) => pr(n)),
+      { intervalMs: 60_000 },
+    );
+    await pollUntil(() => seen.length >= 7, "seven readings");
+    stop();
+    expect(seen.map((s) => s.status)).toEqual([
+      { state: "open", at: 1234 },
+      { state: "merged", at: 1234 },
+      { state: "merged", at: 1234 },
+      { state: "merged", stacked: true, at: 1234 },
+      { state: "merged", stacked: true, at: 1234 },
+      { state: "merged", stacked: true, at: 1234 },
+      { state: "merged", stacked: true, at: 1234 },
+    ]);
+    const runs = await gh.argvs();
+    expect(runs).toHaveLength(2);
+    const second = runs[1]?.slice(4) ?? [];
+    const query = second.find((arg) => arg.startsWith("query=")) ?? "";
+    // Only merges with a well-formed oid are asked about, keyed by their first run's alias.
+    for (const i of [1, 2, 3, 4]) expect(second).toContain(`h${i}=${oid}`);
+    expect(second.join(" ")).not.toContain("h5=");
+    expect(second.join(" ")).not.toContain("not-an-oid");
+    expect(second[second.indexOf(`h1=${oid}`) - 1]).toBe("-f");
+    for (const value of ["octo-org", "widgets", oid]) expect(query).not.toContain(value);
+  });
+
+  test("when the second run fails, a stacked merge stays `stacked` and the poll is not a failure", async () => {
+    const oid = "a".repeat(40);
+    // Exit 0 but no `c1`: what a failed second run leaves, as far as the merge is concerned.
+    await gh.setReply(reply({ state: "OPEN" }, { state: "MERGED", base: "parent", mergeOid: oid }), 0);
+    const { seen, logs, stop } = start([pr(1), pr(2)], { intervalMs: 60_000 });
+    await pollUntil(() => seen.length >= 2, "two readings");
+    stop();
+    expect(seen[1]?.status).toEqual({ state: "merged", stacked: true, at: 1234 });
+    expect(logs.warn).toEqual([]);
+  });
+
+  test("a non-stacked answer never takes a second run", async () => {
+    await gh.setReply(reply({ state: "MERGED", mergeOid: "b".repeat(40) }, { state: "OPEN" }), 0);
+    const { seen, stop } = start([pr(1), pr(2)], { intervalMs: 60_000 });
+    await pollUntil(() => seen.length >= 2, "two readings");
+    stop();
+    expect(await gh.argvs()).toHaveLength(1);
   });
 });
 
