@@ -617,6 +617,46 @@ describe("reap: séance windows (real tmux, stub claude)", () => {
     },
     DEATH_STAMP_TEST_TIMEOUT_MS,
   );
+
+  test(
+    "a dead task pane that is harvest's is left even with closing; an untitled one is closed with closing called first, and left without it",
+    async () => {
+      const repo = await freshRepo();
+      const titled = await openWindow(`tmux wait-for reap-t; exec ${stub.failing} --remote-control`);
+      const untitled = await openWindow(`tmux wait-for reap-u; exec ${stub.failing} --remote-control`);
+      for (const [pane, id] of [
+        [titled, "t-titled"],
+        [untitled, "t-untitled"],
+      ] as const) {
+        // oxlint-disable-next-line no-await-in-loop -- tmux calls for one pane, in order
+        await tmuxOk(["set-option", "-w", "-t", pane, "remain-on-exit", "on"]);
+        // oxlint-disable-next-line no-await-in-loop
+        await tmuxOk(["set-option", "-p", "-t", pane, TASK_OPTION, id]);
+      }
+      await tmuxOk(["select-pane", "-t", titled, "-T", "claude session"]);
+      await tmuxOk(["wait-for", "-S", "reap-t"]);
+      await tmuxOk(["wait-for", "-S", "reap-u"]);
+      await untilDeathStamped(titled);
+      await untilDeathStamped(untitled);
+
+      // The CLI's reap passes no closing: it cannot note that it closed a task pane, so it leaves both.
+      await reap(repo);
+      expect(await paneExists(titled)).toBe(true);
+      expect(await paneExists(untitled)).toBe(true);
+
+      const events: string[] = [];
+      const closing = (taskId: string): Promise<void> => {
+        events.push(`closing ${taskId}`);
+        return paneExists(untitled).then((here) => void events.push(`untitled exists ${here}`));
+      };
+      await reap(repo, { closing });
+      expect(events).toEqual(["closing t-untitled", "untitled exists true"]);
+      expect(await paneExists(titled)).toBe(true);
+      expect(await paneExists(untitled)).toBe(false);
+      await tmuxOk(["kill-pane", "-t", titled]);
+    },
+    DEATH_STAMP_TEST_TIMEOUT_MS,
+  );
 });
 
 describe("withReapLock", () => {

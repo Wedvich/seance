@@ -482,7 +482,7 @@ describe("continueTaskAuto", () => {
     const cases: [string, Awaited<ReturnType<typeof runContinue>>][] = [
       ["not in the leader's list", await runContinue([])],
       [
-        "only a task whose session failed, or that was cancelled",
+        "only a task whose session failed or whose window was closed, or that was cancelled",
         await runContinue([{ ...failedTask, state: "done" }]),
       ],
       [

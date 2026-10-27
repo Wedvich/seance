@@ -516,11 +516,12 @@ function placementOf(task: Task, machines: readonly Machine[]): TaskPlacement | 
 /**
  * A scheduler-set code leads with its shared wording, but keeps the raw message: it alone names
  * the failed dependency, the loop, or why a dispatch went unconfirmed. A daemon refusal's is its own.
- * A `session_failed` with its status drops it: the wording already says all the message does.
+ * A `session_failed` with its status, or a `session_closed`, drops it: the wording already says all the message does.
  */
 function failureMessage(task: Task, failure: NonNullable<Task["failure"]>): string {
   const worded = taskFailureText(failure.code, failure.exit, task.spec.until, failure.oomKill);
   if (worded === null) return failure.message;
+  if (failure.code === "session_closed") return worded;
   return failure.code === "session_failed" && failure.exit !== undefined ? worded : `${worded} (${failure.message})`;
 }
 

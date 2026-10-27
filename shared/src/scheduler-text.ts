@@ -151,6 +151,7 @@ const TASK_FAILURE_TEXT: Record<TaskFailureCode, string> = {
     "its machine stayed away too long, so the scheduler stopped waiting for it — its session may still be running there",
   merge_expired: "no merge of its pull request was seen in time, so the scheduler stopped waiting for one",
   session_failed: "its session exited with an error and reported no pull request",
+  session_closed: "its window was closed before its session ended and it reported no pull request",
   continue_expired: "the continuation was not placed in time, so the scheduler stopped waiting for it",
   pin_expired: `the machine or account it is pinned to did not take it within ${Math.round(STORE_TOMBSTONE_MS / DAY_MS)} days, so the scheduler stopped waiting for it`,
   queue_expired: `it sat in the queue over ${Math.round(STORE_TOMBSTONE_MS / DAY_MS)} days, too long to start safely`,
@@ -226,12 +227,13 @@ export function sessionExit(exit?: number, oomKill?: boolean): SessionExit {
 /**
  * A scheduler-set failure's line; null for any other code — a daemon's spawn refusal, or one minted later.
  * `exit` (`Task.failure.exit`) words a `session_failed` exactly, with `oomKill` (`Task.failure.oomKill`)
- * for a SIGKILL, and `until` (`TaskSpec.until`) what it lacked; without `exit`, or for any other code,
- * the line is the code's alone.
+ * for a SIGKILL, and `until` (`TaskSpec.until`) what it lacked, as it does for a `session_closed`;
+ * without `exit`, or for any other code, the line is the code's alone.
  */
 export function taskFailureText(code: string, exit?: number, until?: TaskUntil, oomKill?: boolean): string | null {
   const known = TASK_FAILURE_CODES.find((c) => c === code);
   if (known === undefined) return null;
+  if (known === "session_closed") return `its window was closed before its session ended and it ${missing(until)}`;
   if (known !== "session_failed") return TASK_FAILURE_TEXT[known];
   const { clause, hint } = sessionExit(exit, oomKill);
   return `its session ${clause}${hint === undefined ? "" : `, ${hint},`} and ${missing(until)}`;

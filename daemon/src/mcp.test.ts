@@ -2071,6 +2071,15 @@ describe("get_queue", () => {
               exit: 137,
             },
           }),
+          // A closed window says all its message does, so the line is the wording alone.
+          task({
+            id: "t-5",
+            state: "failed",
+            failure: {
+              code: "session_closed",
+              message: "its window was closed before its session ended and it reported no pull request",
+            },
+          }),
           // With the machine's OOM verdict beside it, the line says what the kernel counted.
           task({
             id: "t-4",
@@ -2094,6 +2103,7 @@ describe("get_queue", () => {
       `dispatch_unconfirmed: ${taskFailureText("dispatch_unconfirmed")} (the launch ledger no longer reaches back to its reservation)`,
       "repo_not_found: no such repo",
       "session_failed: its session was killed (SIGKILL), possibly out of memory, and reported no pull request",
+      "session_closed: its window was closed before its session ended and it reported no pull request",
       "session_failed: its session was killed (SIGKILL), out of memory (the kernel's OOM killer fired as it died), and reported no pull request",
     ]);
     lazy.stop();
@@ -2435,7 +2445,7 @@ describe("continue_task", () => {
     expect(missing.text).toContain(`not in the leader's list (pruned, or past the ${QUEUE_MAX_TASKS} most relevant)`);
     const finished = await callContinue([task({ ...failedTask, state: "done", failure: undefined })]);
     expect(finished.text).toContain(
-      "only a task whose session failed, or that was cancelled after it started, can be continued",
+      "only a task whose session failed or whose window was closed, or that was cancelled after it started, can be continued",
     );
     const hereRun = await callContinue([task({ ...failedTask, spec: { repo: ORIGIN, mode: "here" } })]);
     expect(hereRun.text).toContain("no worktree of its own");

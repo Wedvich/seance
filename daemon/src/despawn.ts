@@ -22,6 +22,11 @@ export interface DespawnOptions {
   readonly force: boolean;
   readonly graceMs?: number;
   readonly reapWaitMs?: number;
+  /**
+   * Awaited before this despawn acts on a task's pane, so a close of Séance's own never reads as
+   * `vanished` (`exit-status.ts`): noted first, a harvest pass that lists the pane gone sees it.
+   */
+  readonly closing?: (taskId: string) => Promise<unknown>;
 }
 
 /**
@@ -39,6 +44,7 @@ export async function despawnSession(id: string, opts: DespawnOptions): Promise<
     throw new DespawnFailure("session_not_found", `no session in pane ${id} — it may have exited already`);
   }
   const window = pane.windowName;
+  if (pane.taskId !== null) await opts.closing?.(pane.taskId);
   if (!opts.force && (await exitGracefully(pane, opts.graceMs ?? DEFAULT_GRACE_MS))) {
     return { window, outcome: "exited" };
   }

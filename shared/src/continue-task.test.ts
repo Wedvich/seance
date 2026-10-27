@@ -85,7 +85,12 @@ describe("continueOffer, a cancelled task", () => {
     expect(reasonOf(cancelled({ endedAt: 5 }))).toContain("had already finished");
   });
 
-  test("done and every failure but session_failed are never offered", () => {
+  test("a session_closed task is offered like a session_failed one", () => {
+    const closed = failed({ failure: { code: "session_closed", message: "its window was closed" } });
+    expect(continueOffer(closed, able, [closed])).toEqual({ ok: true, at: expect.anything() });
+  });
+
+  test("done and every failure but session_failed and session_closed are never offered", () => {
     const refused: readonly Task[] = [
       failed({ state: "done", failure: undefined }),
       ...["lost_expired", "merge_expired", "dispatch_unconfirmed", "continue_expired", "pin_expired"].map((code) =>
@@ -128,6 +133,7 @@ describe("continueOffer, once", () => {
   test("one that failed after landing, or was cancelled after placement, holds it and names itself", () => {
     const takers = [
       failing("session_failed"),
+      failing("session_closed"),
       failing("lost_expired"),
       failing("merge_expired"),
       continuation("cancelled", { assignment }),
@@ -144,7 +150,11 @@ describe("continueOffer, once", () => {
       const offer = continueOffer(old, both, [old, taker]);
       return offer.ok ? "" : offer.reason;
     };
-    for (const taker of [failing("session_failed"), continuation("cancelled", { assignment })]) {
+    for (const taker of [
+      failing("session_failed"),
+      failing("session_closed"),
+      continuation("cancelled", { assignment }),
+    ]) {
       expect(reasonOf(taker)).toContain("continue that one instead");
     }
     for (const taker of [

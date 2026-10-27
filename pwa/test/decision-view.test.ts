@@ -315,7 +315,7 @@ describe("taskHeadline", () => {
   test("a failure the scheduler set says it won't run; only a machine's refusal didn't take there", () => {
     const failed = (code: string) => task({ state: "failed", failure: { code, message: "raw" } });
     // These have their own headlines: the task may have reached a machine, or did and ran.
-    const own = new Set(["dispatch_unconfirmed", "lost_expired", "merge_expired", "session_failed"]);
+    const own = new Set(["dispatch_unconfirmed", "lost_expired", "merge_expired", "session_failed", "session_closed"]);
     for (const code of TASK_FAILURE_CODES.filter((c) => !own.has(c))) {
       expect(taskHeadline(failed(code), machines, NOW)).toBe("It won't run.");
     }
@@ -328,6 +328,16 @@ describe("taskHeadline", () => {
     expect(taskHeadline({ ...failed("session_failed"), assignment: at }, machines, NOW)).toBe(
       "Its session exited with an error on Mac · default, with no PR.",
     );
+    expect(taskHeadline({ ...failed("session_closed"), assignment: at }, machines, NOW)).toBe(
+      "Its window was closed on Mac · default before its session ended, with no PR.",
+    );
+    expect(taskHeadline(failed("session_closed"), machines, NOW)).toBe(
+      "Its window was closed before its session ended, with no PR.",
+    );
+    const closedUnderReported = failed("session_closed");
+    expect(
+      taskHeadline({ ...closedUnderReported, spec: { ...closedUnderReported.spec, until: "reported" } }, machines, NOW),
+    ).toBe("Its window was closed before its session ended, with no done report.");
     const exited = (exit: number) =>
       task({ state: "failed", assignment: at, failure: { code: "session_failed", message: "raw", exit } });
     expect(taskHeadline(exited(137), machines, NOW)).toBe(

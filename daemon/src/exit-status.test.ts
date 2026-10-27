@@ -1,10 +1,20 @@
 import { describe, expect, test } from "bun:test";
 import { pollUntil } from "../test/fixtures.ts";
-import { harvestExits, owesExit, whileRegistering } from "./exit-status.ts";
+import { harvestable, harvestExits, parseRecordedExits, whileRegistering } from "./exit-status.ts";
 import { LaunchLedger } from "./launch-ledger.ts";
 import { OOM_WINDOW_MS, type OomProbe } from "./oom-kill.ts";
 import { EndedTasks } from "./session-events.ts";
 import type { PaneInfo } from "./sessions.ts";
+
+/** The parts of harvest these cases do not exercise: no candidates, no server, nothing recorded. */
+const idle = {
+  closing: () => Promise.resolve(),
+  unaccounted: () => [],
+  vanished: () => Promise.resolve(),
+  server: () => Promise.resolve(null),
+  recordedExits: () => Promise.resolve([]),
+  clearExit: () => Promise.resolve(),
+};
 
 function pane(paneId: string, fields: Partial<PaneInfo> = {}): PaneInfo {
   return {
@@ -28,6 +38,7 @@ describe("harvestExits", () => {
   test("notes a dead task pane's status before closing it, and leaves every other pane alone", async () => {
     const events: string[] = [];
     await harvestExits({
+      ...idle,
       list: () =>
         Promise.resolve([
           pane("%1", { deadStatus: 3 }),
@@ -56,6 +67,7 @@ describe("harvestExits", () => {
   test("a failed pane read harvests nothing and does not throw", async () => {
     let touched = false;
     await harvestExits({
+      ...idle,
       list: () => Promise.reject(new Error("protocol version mismatch")),
       note: () => Promise.resolve((touched = true)),
       close: () => Promise.resolve((touched = true)),
@@ -66,6 +78,7 @@ describe("harvestExits", () => {
   test("a pane whose task is not in this ledger is closed, its status having nowhere to go; one a spawn still awaits is left to it", async () => {
     const closed: string[] = [];
     const deps = {
+      ...idle,
       list: () => Promise.resolve([pane("%1"), pane("%2", { windowId: "@awaited" })]),
       note: (taskId: string) => Promise.resolve(taskId !== "task-1"),
       close: (p: { paneId: string }) => Promise.resolve(closed.push(p.paneId)),
@@ -108,7 +121,7 @@ describe("the OOM verdict on a SIGKILL death", () => {
     const tasks = new EndedTasks(
       ledger,
       () => clock.now,
-      { list: () => Promise.resolve(panes), close: (p) => Promise.resolve(closed.push(p.paneId)) },
+      { ...idle, list: () => Promise.resolve(panes), close: (p) => Promise.resolve(closed.push(p.paneId)) },
       probe,
     );
     return {
@@ -186,7 +199,7 @@ describe("the OOM verdict on a SIGKILL death", () => {
     const tasks = new EndedTasks(
       ledger,
       () => 1,
-      { list: () => Promise.resolve([alive(2)]), close: () => Promise.resolve() },
+      { ...idle, list: () => Promise.resolve([alive(2)]), close: () => Promise.resolve() },
       probe,
       60_000,
     );
@@ -211,6 +224,7 @@ describe("the OOM verdict on a SIGKILL death", () => {
     };
     const sampled: string[] = [];
     const deps = {
+      ...idle,
       list: () => Promise.resolve([alive(1)]),
       note: () => Promise.resolve(true),
       close: () => Promise.resolve(),
@@ -246,6 +260,7 @@ describe("the OOM verdict on a SIGKILL death", () => {
       exiting: () => Promise.resolve(false),
     };
     await harvestExits({
+      ...idle,
       list: () => Promise.resolve([alive(1), alive(2)]),
       note: () => Promise.resolve(true),
       close: () => Promise.resolve(),
@@ -292,6 +307,7 @@ describe("the OOM verdict on a SIGKILL death", () => {
     const events: string[] = [];
     const sample = { cgroup: "/unit-1", kills: 4, at: 1, paneId: "%1", windowId: "@1" };
     await harvestExits({
+      ...idle,
       list: () => Promise.resolve([pane("%1", { deadStatus: 137 }), alive(2)]),
       note: (taskId, exit, oomKill) => {
         events.push(`note ${taskId} ${exit} ${String(oomKill)}`);
@@ -391,12 +407,202 @@ describe("the OOM verdict on a SIGKILL death", () => {
   });
 });
 
-describe("owesExit", () => {
-  test("only a harvestable pane that holds a status: reap may close the rest", () => {
-    expect(owesExit(pane("%1"))).toBe(true);
-    expect(owesExit(pane("%1", { deadStatus: 0 }))).toBe(true);
-    expect(owesExit(pane("%1", { deadStatus: null }))).toBe(false);
-    expect(owesExit(pane("%1", { titled: false }))).toBe(false);
-    expect(owesExit(pane("%1", { taskId: null }))).toBe(false);
+describe("harvestable", () => {
+  test("only a dead, titled pane of one of our tasks: reap leaves those to harvest", () => {
+    expect(harvestable(pane("%1"))).toBe(true);
+    expect(harvestable(pane("%1", { deadStatus: 0 }))).toBe(true);
+    expect(harvestable(pane("%1", { deadStatus: null }))).toBe(true);
+    expect(harvestable(pane("%1", { dead: false }))).toBe(false);
+    expect(harvestable(pane("%1", { titled: false }))).toBe(false);
+    expect(harvestable(pane("%1", { taskId: null }))).toBe(false);
+    expect(harvestable(pane("%1", { ours: false }))).toBe(false);
+  });
+});
+
+describe("a window closed from outside", () => {
+  /** A harvest pass over `panes` with one candidate per id (on server 100, which answers unless told otherwise), recording what it did. */
+  function pass(
+    panes: PaneInfo[],
+    opts: {
+      candidates?: string[];
+      server?: number | null;
+      candidateServer?: number;
+      recorded?: { taskId: string; exit: number | null }[];
+      listFails?: boolean;
+      vanishedFails?: boolean;
+    } = {},
+  ): { events: string[]; run: () => Promise<void> } {
+    const events: string[] = [];
+    const candidateServer = opts.candidateServer ?? 100;
+    return {
+      events,
+      run: () =>
+        harvestExits({
+          list: () => (opts.listFails === true ? Promise.reject(new Error("tmux down")) : Promise.resolve(panes)),
+          close: (p) => Promise.resolve(void events.push(`close ${p.paneId}`)),
+          note: (taskId, exit) => {
+            events.push(`note ${taskId} ${exit}`);
+            return Promise.resolve(true);
+          },
+          closing: (taskId) => Promise.resolve(void events.push(`closing ${taskId}`)),
+          unaccounted: () =>
+            (opts.candidates ?? ["task-9"]).map((taskId) => ({ taskId, recordedAt: 7, server: candidateServer })),
+          vanished: (launch) => {
+            events.push(`vanished ${launch.taskId}`);
+            return opts.vanishedFails === true ? Promise.reject(new Error("disk")) : Promise.resolve();
+          },
+          server: () => Promise.resolve(opts.server === undefined ? 100 : opts.server),
+          recordedExits: () => Promise.resolve(opts.recorded ?? []),
+          clearExit: (taskId) => Promise.resolve(void events.push(`clear ${taskId}`)),
+        }),
+    };
+  }
+
+  test("a candidate no listing carries is noted vanished, once", async () => {
+    const { events, run } = pass([pane("%1", { dead: false, deadStatus: null })]);
+    await run();
+    expect(events).toEqual(["vanished task-9"]);
+  });
+
+  test("a candidate whose pane is listed alive, dead (harvested), or not ours is not vanished", async () => {
+    for (const listed of [
+      pane("%9", { taskId: "task-9", dead: false, deadStatus: null }),
+      pane("%9", { taskId: "task-9", deadStatus: 3 }),
+      pane("%9", { taskId: "task-9", ours: false, dead: false }),
+      pane("%9", { taskId: "task-9", titled: false }),
+    ]) {
+      const { events, run } = pass([listed]);
+      // oxlint-disable-next-line no-await-in-loop -- one case at a time
+      await run();
+      expect(events.filter((e) => e.startsWith("vanished"))).toEqual([]);
+    }
+  });
+
+  test("a task inside whileRegistering whose pane is listed is not vanished", async () => {
+    const { events, run } = pass([pane("%9", { taskId: "task-9", windowId: "@reg" })]);
+    await whileRegistering("@reg", run);
+    expect(events).toEqual([]);
+  });
+
+  test("a dead pane with status 0 is noted before it is closed; one with no status is announced as closing first", async () => {
+    const clean = pass([pane("%1", { deadStatus: 0 })], { candidates: [] });
+    await clean.run();
+    expect(clean.events).toEqual(["note task-1 0", "close %1"]);
+    const bare = pass([pane("%1", { deadStatus: null })], { candidates: [] });
+    await bare.run();
+    expect(bare.events).toEqual(["closing task-1", "close %1"]);
+  });
+
+  test("a failed listing notes and judges nothing, and a rejecting vanished does not throw", async () => {
+    const failed = pass([], { listFails: true });
+    await failed.run();
+    expect(failed.events).toEqual([]);
+    const rejecting = pass([], { vanishedFails: true, candidates: ["task-8", "task-9"] });
+    await rejecting.run();
+    // The failure of one note does not stop the next.
+    expect(rejecting.events).toEqual(["vanished task-8", "vanished task-9"]);
+  });
+
+  test("an exit the hook recorded is noted, cleared, and keeps its task from being judged; a pane noted this pass is only cleared", async () => {
+    const { events, run } = pass([pane("%1", { deadStatus: 2 })], {
+      recorded: [
+        { taskId: "task-9", exit: 0 },
+        { taskId: "task-1", exit: 2 },
+        { taskId: "task-x", exit: null },
+      ],
+    });
+    await run();
+    expect(events).toEqual([
+      "note task-1 2",
+      "close %1",
+      "note task-9 0",
+      "clear task-9",
+      "clear task-1",
+      // No parseable status: announced as closing first, so the user closing its dead pane never reads vanished.
+      "closing task-x",
+      "clear task-x",
+    ]);
+  });
+
+  test("the server pid is read only when some candidate is neither carried nor recorded", async () => {
+    let reads = 0;
+    const run = (panes: PaneInfo[], recorded: { taskId: string; exit: number | null }[]): Promise<void> =>
+      harvestExits({
+        ...idle,
+        list: () => Promise.resolve(panes),
+        close: () => Promise.resolve(),
+        note: () => Promise.resolve(true),
+        unaccounted: () => [{ taskId: "task-9", recordedAt: 7, server: 100 }],
+        server: () => {
+          reads += 1;
+          return Promise.resolve(100);
+        },
+        recordedExits: () => Promise.resolve(recorded),
+      });
+    await run([pane("%9", { taskId: "task-9", dead: false, deadStatus: null })], []);
+    await run([], [{ taskId: "task-9", exit: 0 }]);
+    expect(reads).toBe(0);
+    await run([], []);
+    expect(reads).toBe(1);
+  });
+
+  test("an exit recorded while the task's launch is in flight is left for a later pass, so startNote cannot overwrite it", async () => {
+    const events: string[] = [];
+    const ledger = LaunchLedger.memory();
+    const tasks = new EndedTasks(ledger, Date.now, {
+      list: () => Promise.resolve([]),
+      close: () => Promise.resolve(),
+      server: () => Promise.resolve(100),
+      recordedExits: () => Promise.resolve([{ taskId: "task-1", exit: 0 }]),
+      clearExit: (taskId) => Promise.resolve(void events.push(`clear ${taskId}`)),
+    });
+    const settle = await tasks.launch("task-1");
+    await tasks.harvestExits();
+    // Neither noted nor cleared: the hook already fired, the launch has not settled.
+    expect(events).toEqual([]);
+    expect(tasks.progress()).toEqual([]);
+    await settle(true, { server: 100 });
+    await tasks.harvestExits();
+    expect(events).toEqual(["clear task-1"]);
+    expect(tasks.progress()).toEqual([expect.objectContaining({ taskId: "task-1", exit: 0 })]);
+    expect(tasks.progress()[0]?.vanished).toBeUndefined();
+  });
+
+  test("a candidate on another live server is not judged; on a dead one, or the answering one, it is", async () => {
+    // The test process's own pid: alive, and not the server that answers.
+    const other = pass([], { server: 100, candidateServer: process.pid });
+    await other.run();
+    expect(other.events).toEqual([]);
+    // No server answers but the recorded one is alive: a missing socket, not a stopped server.
+    const unreachable = pass([], { server: null, candidateServer: process.pid });
+    await unreachable.run();
+    expect(unreachable.events).toEqual([]);
+    const child = Bun.spawn(["true"]);
+    await child.exited;
+    const gone = pass([], { server: null, candidateServer: child.pid });
+    await gone.run();
+    expect(gone.events).toEqual(["vanished task-9"]);
+    const same = pass([], { server: process.pid, candidateServer: process.pid });
+    await same.run();
+    expect(same.events).toEqual(["vanished task-9"]);
+  });
+
+  test("parseRecordedExits reads the hook's value like a pane's status, and drops a foreign id", () => {
+    const output = [
+      "@seance-exit-a 0:",
+      "@seance-exit-b 3:",
+      "@seance-exit-c :kill",
+      "@seance-exit-d :",
+      '@seance-exit-e "7:"',
+      "@seance-exit-bad|id 1:",
+      "@other 1:",
+    ].join("\n");
+    expect(parseRecordedExits(output)).toEqual([
+      { taskId: "a", exit: 0 },
+      { taskId: "b", exit: 3 },
+      { taskId: "c", exit: 137 },
+      { taskId: "d", exit: null },
+      { taskId: "e", exit: 7 },
+    ]);
   });
 });

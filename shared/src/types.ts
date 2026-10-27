@@ -1471,12 +1471,19 @@ export interface TaskProgress {
    * (`exitStatus` in `daemon/src/sessions.ts`). Here rather than on `ended`,
    * whose entries are bare ids an older leader reads as such, and on the ledger
    * entry that already survives restarts, so the sweep and a takeover read one
-   * value. Absent while the pane lives, for a signal death on a tmux that gives
-   * no `pane_dead_signal` (before 3.3), after a clean exit (its window keeps only
-   * a failed pane, so a 0 is never seen), and from older daemons — a reader then
-   * settles as today.
+   * value. A task window keeps `remain-on-exit on`, so a clean exit's 0 is seen
+   * and noted too. Absent while the pane lives, for a signal death on a tmux that
+   * gives no `pane_dead_signal` (before 3.3), for a window closed from outside
+   * (`vanished`), and from older daemons — a reader then settles as today.
    */
   readonly exit?: number;
+  /**
+   * Its pane went from this machine's tmux with no exit status, and the daemon did
+   * not close it itself (closed by hand, or its server or machine stopped). Only
+   * where `exit` is absent. Ignored by a leader older than `session_closed`, which
+   * settles `done` as before.
+   */
+  readonly vanished?: true;
   /**
    * With `exit: SIGKILL_STATUS` only, on Linux with cgroup v2: whether the
    * kernel counted an OOM kill (`memory.events` `oom_kill`) in the session's
@@ -2319,6 +2326,9 @@ export interface SettingsRecord extends VersionBound {
  * machine never took it, so it never landed. `pin_expired`: a pinned task
  * (`pin.deviceId` or `pin.account`, no `continues`) still `ready` past
  * `SchedulerConfig.pinExpiryMs` since `createdAt`; it never ran.
+ * `session_closed`: its machine reported its window gone with no exit status
+ * and no close of its own (`TaskProgress.vanished`), with no PR and no merge
+ * seen. Its dependents fail as for `session_failed`.
  */
 export const TASK_FAILURE_CODES = [
   "dispatch_unconfirmed",
@@ -2331,6 +2341,7 @@ export const TASK_FAILURE_CODES = [
   "session_failed",
   "continue_expired",
   "pin_expired",
+  "session_closed",
 ] as const;
 
 export type TaskFailureCode = (typeof TASK_FAILURE_CODES)[number];

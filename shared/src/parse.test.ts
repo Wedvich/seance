@@ -1311,12 +1311,21 @@ describe("parseTaskProgressList", () => {
     expect(parseTaskProgressList([{ taskId: "t-5", oomKill: true, at: 5 }])).toEqual([{ taskId: "t-5", at: 5 }]);
   });
 
+  test("vanished is kept when true, and an entry without it parses", () => {
+    expect(parseTaskProgressList([{ taskId: "t-6", vanished: true, at: 6 }])).toEqual([
+      { taskId: "t-6", vanished: true, at: 6 },
+    ]);
+    expect(parseTaskProgressList([{ taskId: "t-6", at: 6 }])).toEqual([{ taskId: "t-6", at: 6 }]);
+  });
+
   test("strict: one unreadable entry, or too many, nulls the list — a dropped one would read as no PR", () => {
     for (const bad of [
       { ...entry, prUrl: "http://github.com/acme/app/pull/7" },
       { ...entry, merged: false },
       { ...entry, reported: false },
       { ...entry, reported: "yes" },
+      { ...entry, vanished: false },
+      { ...entry, vanished: "yes" },
       { ...entry, pushed: "yes" },
       { ...entry, branch: "" },
       { ...entry, taskId: "t:1" },

@@ -556,6 +556,94 @@ describe("LaunchLedger reported notes (#21)", () => {
   });
 });
 
+describe("LaunchLedger vanished notes", () => {
+  async function opened(clock: { now: number }): Promise<LaunchLedger> {
+    const ledger = await LaunchLedger.open(path, () => clock.now);
+    await ledger.record("t1");
+    return ledger;
+  }
+
+  test("a here-mode launch with only a server still gets a note, and is unaccounted for", async () => {
+    const clock = { now: 10 };
+    const ledger = await opened(clock);
+    expect(ledger.unaccounted()).toEqual([]);
+    await ledger.startNote("t1", undefined, undefined, 4242);
+    expect(ledger.unaccounted()).toEqual([{ taskId: "t1", recordedAt: 10, server: 4242 }]);
+    // Neither the server nor anything else is progress.
+    expect(ledger.progress()).toEqual([]);
+  });
+
+  test("vanished is noted, durable across a reopen, reaches progress, and moves at; server and closedHere never do", async () => {
+    const clock = { now: 10 };
+    const ledger = await opened(clock);
+    await ledger.startNote("t1", undefined, undefined, 4242);
+    const startedAt = ledger.notes()[0]?.at;
+    clock.now = 20;
+    expect(await ledger.note("t1", { closedHere: true })).toBe(true);
+    expect(ledger.notes()[0]?.at).toBe(startedAt);
+    expect(ledger.progress()).toEqual([]);
+    // Closed here: never judged, and a second closedHere is no write.
+    expect(ledger.unaccounted()).toEqual([]);
+    expect(await ledger.noteVanished("t1", 10)).toBe(false);
+
+    const second = await opened({ now: 30 });
+    await second.record("t2");
+    await second.startNote("t2", undefined, undefined, 4242);
+    expect(await second.noteVanished("t2", 30)).toBe(true);
+    expect(second.progress()).toEqual([expect.objectContaining({ taskId: "t2", vanished: true })]);
+    expect(second.progress()[0]).not.toHaveProperty("server");
+    expect(second.progress()[0]).not.toHaveProperty("closedHere");
+    expect(await second.noteVanished("t2", 30)).toBe(false);
+
+    const reopened = await LaunchLedger.open(path, () => 99);
+    expect(reopened.progress()).toEqual([expect.objectContaining({ taskId: "t2", vanished: true })]);
+    expect(reopened.unaccounted()).toEqual([]);
+  });
+
+  test("noteVanished is refused after an exit, for a relaunch, an unknown id, or a launch with no server; progress drops it once an exit is noted", async () => {
+    const clock = { now: 10 };
+    const ledger = await opened(clock);
+    await ledger.startNote("t1", undefined, undefined, 7);
+    expect(await ledger.noteVanished("t1", 999)).toBe(false);
+    expect(await ledger.noteVanished("nope", 10)).toBe(false);
+    // A relaunch moves the record time, so a candidate snapshotted before it is refused.
+    clock.now = 50;
+    await ledger.record("t1");
+    expect(await ledger.noteVanished("t1", 10)).toBe(false);
+    await ledger.startNote("t1", undefined, undefined, 7);
+    await ledger.note("t1", { exit: 0 });
+    expect(await ledger.noteVanished("t1", 50)).toBe(false);
+
+    await ledger.record("t3");
+    await ledger.startNote("t3", undefined, undefined, 7);
+    expect(await ledger.noteVanished("t3", 50)).toBe(true);
+    await ledger.note("t3", { exit: 2 });
+    expect(ledger.progress().find((p) => p.taskId === "t3")).toEqual(expect.objectContaining({ exit: 2 }));
+    expect(ledger.progress().find((p) => p.taskId === "t3")?.vanished).toBeUndefined();
+
+    const bare = await opened({ now: 60 });
+    await bare.record("t4");
+    await bare.startNote("t4", { repo: "/r", path: "/r/wt" });
+    expect(await bare.noteVanished("t4", 60)).toBe(false);
+  });
+
+  test("a file from before these fields parses, a malformed server or flag is dropped, and the wire parser accepts a vanished entry", async () => {
+    await writeFile(
+      path,
+      JSON.stringify({
+        v: 1,
+        since: 1,
+        tasks: [["t1", 5]],
+        progress: [{ taskId: "t1", at: 5, branch: "b", server: -3, closedHere: "yes", vanished: 1 }],
+      }),
+    );
+    const ledger = await LaunchLedger.open(path, () => 9);
+    expect(ledger.notes()[0]).toEqual({ taskId: "t1", at: 5, branch: "b" });
+    await ledger.note("t1", { vanished: true });
+    expect(parseTaskProgressList(ledger.progress())).toEqual(ledger.progress());
+  });
+});
+
 describe("pathOwners", () => {
   const note = (taskId: string, at: string | undefined, siteAt?: number): NotedTask => ({
     taskId,

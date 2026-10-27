@@ -65,6 +65,14 @@ export const PANE_TITLED = "#{?pane_title,#{?#{==:#{pane_title},#{host}},0,1},0}
 export const TASK_OPTION = "@seance-task";
 
 /**
+ * Server-wide user option, `<prefix><taskId>`, a task pane's `pane-died` hook records its
+ * `<status>:<signal>` in (`spawn.ts`). Server-wide because the pane is gone when harvest reads it;
+ * harvest notes it into the ledger and unsets it (`exit-status.ts`). Any same-uid process can set one,
+ * so a reader revalidates the id and the value.
+ */
+export const EXIT_OPTION_PREFIX = "@seance-exit-";
+
+/**
  * `TASK_OPTION` as a format field. Any same-uid process can set the option, so
  * the separator is substituted out in tmux and the value is revalidated on read.
  */
