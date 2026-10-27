@@ -43,6 +43,19 @@ function tookOver(y: Task): boolean {
   }
 }
 
+/**
+ * A continuation of `task` still in the queue, among `tasks`. It does not hold the session
+ * (`tookOver`: it may never land), but a second Continue would only race it, so the offer waits
+ * on it. One `QUEUE_MAX_TASKS` left out of the list is invisible here, and the offer stands.
+ */
+export function waitingContinuation(task: Task, tasks: readonly Task[]): Task | undefined {
+  return tasks.find(
+    (other) =>
+      other.spec.continues?.task === task.id &&
+      (other.state === "queued" || other.state === "blocked" || other.state === "ready"),
+  );
+}
+
 /** The task-level eligibility `continueOffer` applies, so it can tell whether a taker would itself pass it. */
 function sessionResumable(task: Task): boolean {
   if (task.state === "cancelled") return task.assignment !== undefined && task.endedAt === undefined;
@@ -58,8 +71,9 @@ function sessionResumable(task: Task): boolean {
  * and the daemon's ledger would refuse them anyway. A cancelled task needs a machine
  * advertising `continueCancelled`. And only the newest landed task in a chain holds the
  * offer: `tasks` is the list the caller read it from, and a continuation that landed has
- * the worktree, so a second would only be refused by the daemon. Imports nothing that
- * logs, since `seanced mcp` reaches it.
+ * the worktree, so a second would only be refused by the daemon. One still waiting withholds
+ * it too, until it lands or ends unplaced. Imports nothing that logs, since `seanced mcp`
+ * reaches it.
  */
 export function continueOffer(task: Task, machines: readonly Machine[], tasks: readonly Task[]): ContinueOffer {
   if (task.state === "cancelled") {
@@ -90,6 +104,10 @@ export function continueOffer(task: Task, machines: readonly Machine[], tasks: r
           ? `its session was taken over by task ${taker.id}; continue that one instead`
           : `its session was taken over by task ${taker.id}, which finished, so there is nothing left to continue`,
     };
+  }
+  const waiting = waitingContinuation(task, tasks);
+  if (waiting !== undefined) {
+    return { ok: false, reason: `already continuing as task ${waiting.id}, which is still waiting in the queue` };
   }
   if (task.spec.mode === "here") {
     return { ok: false, reason: "a task run in place has no worktree of its own to continue" };
