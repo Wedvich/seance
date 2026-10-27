@@ -1,4 +1,4 @@
-import { reasonText, TASK_FAILURE_LIMITS, type Decision, type TaskFailureCode } from "@seance/shared";
+import { reasonText, TASK_FAILURE_LIMITS, type Decision, type TaskFailureCode, type TaskSpec } from "@seance/shared";
 import type { SchedulerConfig } from "./config.ts";
 import { advance, type Task } from "./task.ts";
 
@@ -31,14 +31,16 @@ function fail(task: Task, code: TaskFailureCode, message: string): Task {
  * every term: past their bound they fail,
  * which also fails their waiting dependents. A `ready` continuation fails past
  * `continueExpiryMs` since `createdAt`: its machine never took it. Its message
- * names that machine's rejections from `decision`, the leader's last in-memory one. `lost` ages from when its machine
+ * names that machine's rejections from `decision`, the leader's last in-memory one. A `ready`
+ * pinned task fails past `pinExpiryMs` since `createdAt`, worded the same way: its machine or
+ * account may be gone for good, and a prompt that old is too stale to start unannounced. `lost` ages from when its machine
  * went away, `awaiting-merge` from `endedAt` (an older leader's record has none:
  * `createdAt`, which is never later). Null when nothing is due.
  */
 export function expiry(
   task: Task,
   now: number,
-  config: Pick<SchedulerConfig, "lostExpiryMs" | "mergeExpiryMs" | "continueExpiryMs">,
+  config: Pick<SchedulerConfig, "lostExpiryMs" | "mergeExpiryMs" | "continueExpiryMs" | "pinExpiryMs">,
   decision?: Decision,
 ): Task | null {
   if (task.state === "lost") {
@@ -80,5 +82,35 @@ export function expiry(
       `the session it continues was not resumed within ${days(config.continueExpiryMs)} days: ${why}; the task it continues may be continued again while its machine still holds its launch (a week)`,
     );
   }
+  // After the continuation arm: a pinned continuation expires at that arm's shorter bound.
+  const { pin } = task.spec;
+  if (task.state === "ready" && pin !== undefined && (pin.deviceId !== undefined || pin.account !== undefined)) {
+    if (now - task.createdAt <= config.pinExpiryMs) return null;
+    return fail(
+      task,
+      "pin_expired",
+      `it waited over ${days(config.pinExpiryMs)} days for the machine or account it is pinned to: ${pinWhy(pin, decision)}`,
+    );
+  }
   return null;
+}
+
+/** Why a pinned task was never placed, from the leader's last decision for it. */
+function pinWhy(pin: NonNullable<TaskSpec["pin"]>, decision: Decision | undefined): string {
+  const unknown = "no machine it is pinned to took it";
+  if (decision === undefined) return unknown;
+  const { candidates } = decision;
+  // A decision cut to its candidate cap may have dropped the one that matched: no absence is proven.
+  const whole = decision.trimmed === undefined;
+  const onDevice = pin.deviceId === undefined ? candidates : candidates.filter((c) => c.deviceId === pin.deviceId);
+  // A retired or re-keyed machine leaves the registry, so no decision lists it.
+  if (onDevice.length === 0) return whole ? "its machine was not seen" : unknown;
+  const matching = onDevice.filter((c) => !c.rejected.some((r) => r.code === "pin_mismatch"));
+  if (matching.length === 0) {
+    if (!whole) return unknown;
+    // Another machine may report the account; it was rejected on the device pin alone.
+    return pin.deviceId === undefined ? "no machine reports its account" : "its machine does not report its account";
+  }
+  const reasons = [...new Set(matching.flatMap((c) => c.rejected.map(reasonText)))];
+  return reasons.length > 0 ? reasons.join(", ") : unknown;
 }

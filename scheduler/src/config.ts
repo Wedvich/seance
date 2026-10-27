@@ -1,4 +1,4 @@
-import { LAUNCH_LEDGER_MAX_AGE_MS, MIN_FREE_MIB } from "@seance/shared";
+import { LAUNCH_LEDGER_MAX_AGE_MS, MIN_FREE_MIB, STORE_TOMBSTONE_MS } from "@seance/shared";
 
 /** How long a quota window runs: the 5h session window, or any weekly (all-models or per-model). */
 export type WindowSpan = "5h" | "7d";
@@ -103,6 +103,14 @@ export interface SchedulerConfig {
    */
   readonly continueExpiryMs: number;
   /**
+   * A pinned task (`pin.deviceId` or `pin.account`, no `continues`) still `ready` this
+   * long past `createdAt` is `failed` `pin_expired`. Its target may be retired, re-keyed
+   * or signed out for good, and a `ready` task is never pruned; a machine back later
+   * would also start a prompt too stale to run unannounced. Fixed, as
+   * `continueExpiryMs` is.
+   */
+  readonly pinExpiryMs: number;
+  /**
    * How often a pass also reads `sessions` from each connected machine holding
    * a running or `awaiting-merge` task: the backstop for an `ended` event that
    * never arrived (its task would read `running` and hold its slot for good) and
@@ -165,6 +173,8 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   mergeExpiryMs: LAUNCH_LEDGER_MAX_AGE_MS,
   // docs/scheduler.md, Settled defaults 19.
   continueExpiryMs: 4 * 24 * 60 * 60_000,
+  // docs/scheduler.md, Settled defaults 21. The tombstone's life by choice, not by need.
+  pinExpiryMs: STORE_TOMBSTONE_MS,
   sweepIntervalMs: 120_000,
   endingTimeoutMs: 300_000,
   keepFinished: 50,

@@ -152,6 +152,7 @@ const TASK_FAILURE_TEXT: Record<TaskFailureCode, string> = {
   merge_expired: "no merge of its pull request was seen in time, so the scheduler stopped waiting for one",
   session_failed: "its session exited with an error and reported no pull request",
   continue_expired: "the continuation was not placed in time, so the scheduler stopped waiting for it",
+  pin_expired: `the machine or account it is pinned to did not take it within ${Math.round(STORE_TOMBSTONE_MS / DAY_MS)} days, so the scheduler stopped waiting for it`,
   queue_expired: `it sat in the queue over ${Math.round(STORE_TOMBSTONE_MS / DAY_MS)} days, too long to start safely`,
 };
 

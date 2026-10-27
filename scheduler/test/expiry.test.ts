@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { LAUNCH_LEDGER_MAX_AGE_MS, reasonText, type TaskDep } from "@seance/shared";
 import { DEFAULT_CONFIG, MemoryQueueStore, Scheduler, type Task } from "../src/index.ts";
-import type { DespawnRequest, DespawnResponse, Machine } from "@seance/shared";
+import type { Candidate, Decision, DespawnRequest, DespawnResponse, Machine } from "@seance/shared";
 import { prunable } from "../src/prune.ts";
 import { FakeFleet, machine, NOW, readerChecked, spec, unreachable } from "./fixtures.ts";
 
@@ -357,12 +357,13 @@ describe("a ready continuation", () => {
     expect(message).not.toContain(reasonText({ code: "continue_elsewhere" }));
   });
 
-  test("a ready task without continues is never expired", async () => {
+  test("a pinned continuation fails continue_expired at its own bound, not the pin's", async () => {
     const { scheduler, put } = setup();
-    await put("t", { state: "ready", createdAt: NOW - 30 * 24 * 60 * 60_000 });
+    const pinned = continuing(NOW - CONTINUE_MS - 1);
+    await put("t", { ...pinned, spec: { ...spec(pinned.spec), pin: { deviceId: "a" } } });
     await scheduler.load();
     await pass(scheduler);
-    expect(scheduler.task("t")?.state).toBe("ready");
+    expect(scheduler.task("t")).toMatchObject({ state: "failed", failure: { code: "continue_expired" } });
   });
 
   test("fails its dependents in the same pass", async () => {
@@ -372,6 +373,132 @@ describe("a ready continuation", () => {
     await scheduler.load();
     await pass(scheduler);
     expect(scheduler.task("c")?.state).toBe("failed");
+    expect(scheduler.task("d")).toMatchObject({ state: "failed", failure: { code: "dependency_failed" } });
+  });
+});
+
+describe("a ready pinned task", () => {
+  const PIN_MS = DEFAULT_CONFIG.pinExpiryMs;
+  const pinned = (pin: Task["spec"]["pin"], createdAt: number, fields: Partial<Task> = {}): Partial<Task> => ({
+    state: "ready",
+    spec: spec({ pin }),
+    createdAt,
+    ...fields,
+  });
+  const decision = (candidates: Decision["candidates"]): Decision => ({ at: NOW, chosen: null, candidates });
+  const candidate = (deviceId: string, rejected: Candidate["rejected"]): Candidate => ({
+    deviceId,
+    machine: deviceId,
+    exclave: "main",
+    clone: "app",
+    rejected,
+  });
+
+  test("stays ready at the bound and fails pin_expired a millisecond past it, worded from its machine's rejection", async () => {
+    const { fleet, clock, scheduler, put } = setup();
+    await put("t", pinned({ deviceId: "a" }, NOW - PIN_MS));
+    await scheduler.load();
+    await pass(scheduler);
+    expect(scheduler.task("t")?.state).toBe("ready");
+
+    clock.now += 1;
+    await pass(scheduler);
+    const task = scheduler.task("t");
+    expect(task).toMatchObject({ state: "failed", failure: { code: "pin_expired" } });
+    expect(task?.failure?.message).toContain(reasonText({ code: "offline" }));
+    expect(fleet.spawns).toEqual([]);
+  });
+
+  test("a machine pin to a machine no decision lists says it was not seen", async () => {
+    const { scheduler, put } = setup();
+    const gone = decision([candidate("b", [{ code: "pin_mismatch", field: "deviceId" }])]);
+    await put("t", pinned({ deviceId: "retired" }, NOW - PIN_MS - 1, { decision: gone }));
+    await scheduler.load();
+    await pass(scheduler);
+    expect(scheduler.task("t")).toMatchObject({ state: "failed", failure: { code: "pin_expired" } });
+    expect(scheduler.task("t")?.failure?.message).toContain("its machine was not seen");
+  });
+
+  test("an account pin no machine reports says so, on its pinned machine too", async () => {
+    const { scheduler, put } = setup();
+    const noAccount = decision([
+      candidate("a", [{ code: "pin_mismatch", field: "account" }]),
+      candidate("b", [{ code: "pin_mismatch", field: "account" }]),
+    ]);
+    await put("acct", pinned({ account: "org:gone" }, NOW - PIN_MS - 1, { decision: noAccount }));
+    await scheduler.load();
+    await pass(scheduler);
+    expect(scheduler.task("acct")).toMatchObject({ state: "failed", failure: { code: "pin_expired" } });
+    expect(scheduler.task("acct")?.failure?.message).toContain("no machine reports its account");
+  });
+
+  test("a machine and account pin whose account another machine reports blames its own machine only", async () => {
+    const { scheduler, put } = setup();
+    const elsewhere = decision([
+      candidate("a", [{ code: "pin_mismatch", field: "account" }]),
+      candidate("b", [{ code: "pin_mismatch", field: "deviceId" }]),
+    ]);
+    await put("t", pinned({ deviceId: "a", account: "org:x" }, NOW - PIN_MS - 1, { decision: elsewhere }));
+    await scheduler.load();
+    await pass(scheduler);
+    const message = scheduler.task("t")?.failure?.message ?? "";
+    expect(message).toContain("its machine does not report its account");
+    expect(message).not.toContain("no machine reports");
+  });
+
+  test("a trimmed decision proves no absence", async () => {
+    const { scheduler, put } = setup();
+    const cut = (candidates: Decision["candidates"]): Decision => ({ ...decision(candidates), trimmed: 3 });
+    const accountMissing = cut([candidate("b", [{ code: "pin_mismatch", field: "account" }])]);
+    await put("device", pinned({ deviceId: "a" }, NOW - PIN_MS - 1, { decision: cut([]) }));
+    await put("account", pinned({ account: "org:x" }, NOW - PIN_MS - 1, { decision: accountMissing }));
+    await scheduler.load();
+    await pass(scheduler);
+    for (const id of ["device", "account"]) {
+      expect(scheduler.task(id)?.failure).toMatchObject({ code: "pin_expired" });
+      expect(scheduler.task(id)?.failure?.message).toContain("no machine it is pinned to took it");
+    }
+  });
+
+  test("one released from blocked already past the bound fails in that pass instead of launching", async () => {
+    const { fleet, scheduler, put } = setup(new FakeFleet([machine("a")]));
+    await put("dep", { state: "done" });
+    await put("p", {
+      state: "blocked",
+      spec: spec({ pin: { deviceId: "a" }, deps: [{ task: "dep", after: "done" }] }),
+      createdAt: NOW - PIN_MS - 1,
+    });
+    await scheduler.load();
+    await pass(scheduler);
+    expect(scheduler.task("p")).toMatchObject({ state: "failed", failure: { code: "pin_expired" } });
+    expect(fleet.spawns).toEqual([]);
+  });
+
+  test("a record loaded already past the bound, with no decision, says no pinned machine took it", async () => {
+    const { scheduler, put } = setup(new FakeFleet([]));
+    await put("t", pinned({ deviceId: "a" }, NOW - PIN_MS - 1));
+    await scheduler.load();
+    await pass(scheduler);
+    expect(scheduler.task("t")?.failure?.message).toContain("no machine it is pinned to took it");
+  });
+
+  test("an unpinned or avoid-only ready task is never expired", async () => {
+    const { scheduler, put } = setup();
+    await put("plain", { state: "ready", createdAt: NOW - PIN_MS - 1 });
+    await put("avoid", { state: "ready", spec: spec({ avoid: ["a"] }), createdAt: NOW - PIN_MS - 1 });
+    await scheduler.load();
+    await pass(scheduler);
+    expect(scheduler.task("plain")?.state).toBe("ready");
+    expect(scheduler.task("avoid")?.state).toBe("ready");
+  });
+
+  test("fails its dependents in the same pass", async () => {
+    const { scheduler, put } = setup();
+    await put("p", pinned({ deviceId: "a" }, NOW - PIN_MS - 1));
+    await put("d", { state: "blocked", ...after("p", "done") });
+    await scheduler.load();
+    await pass(scheduler);
+    expect(scheduler.task("p")?.state).toBe("failed");
     expect(scheduler.task("d")).toMatchObject({ state: "failed", failure: { code: "dependency_failed" } });
   });
 });

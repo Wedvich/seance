@@ -767,7 +767,7 @@ export class Scheduler {
    * left to it, so a machine back in time settles its task first; so is a
    * `lost` task whose machine is connected now, for the next check. Judged
    * again inside the write, since either may change between the two. A `ready`
-   * continuation also fails past its bound, worded from the held decision.
+   * continuation or pinned task also fails past its bound, worded from the held decision.
    */
   async #expire(): Promise<void> {
     const now = this.#now();
@@ -800,6 +800,8 @@ export class Scheduler {
     await this.#escalate();
     // A check ticks again once its answer is settled, so a predecessor it settled releases or fails its dependents then.
     await this.#admit();
+    // Again: a task admission just released may already be past its bound, and must not launch.
+    await this.#expire();
     const ready = dispatchOrder(this.tasks().filter((t) => t.state === "ready" && !this.#dispatches.has(t.id)));
     // Reserve one at a time, so each sees the reservations before it in projected
     // usage and the caps. The spawns are not awaited: one slow machine

@@ -1780,8 +1780,8 @@ export interface TaskSpec extends TaskRequest {
   readonly pin?: { readonly deviceId?: string; readonly account?: string };
   /**
    * Machines (deviceIds) the task must not run on, at most
-   * `TASK_SPEC_LIMITS.avoid`. Avoiding every machine leaves it waiting, as a
-   * pin to an absent machine does. Gated as `pin.account` is.
+   * `TASK_SPEC_LIMITS.avoid`. Avoiding every machine leaves it waiting, never
+   * expired (a pin to an absent machine fails `pin_expired`). Gated as `pin.account` is.
    */
   readonly avoid?: readonly string[];
   /** The session this one continues — its owner gets the sticky bonus. */
@@ -2316,7 +2316,9 @@ export interface SettingsRecord extends VersionBound {
  * PR and no merge seen, so its dependents fail rather than start on a branch
  * with nothing on it. `continue_expired`: a continuation (`TaskSpec.continues`)
  * still `ready` past `SchedulerConfig.continueExpiryMs` since `createdAt`. Its
- * machine never took it, so it never landed.
+ * machine never took it, so it never landed. `pin_expired`: a pinned task
+ * (`pin.deviceId` or `pin.account`, no `continues`) still `ready` past
+ * `SchedulerConfig.pinExpiryMs` since `createdAt`; it never ran.
  */
 export const TASK_FAILURE_CODES = [
   "dispatch_unconfirmed",
@@ -2328,6 +2330,7 @@ export const TASK_FAILURE_CODES = [
   "merge_expired",
   "session_failed",
   "continue_expired",
+  "pin_expired",
 ] as const;
 
 export type TaskFailureCode = (typeof TASK_FAILURE_CODES)[number];

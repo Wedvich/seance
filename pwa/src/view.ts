@@ -678,6 +678,7 @@ const FAILED_NEXT_STEP: ReadonlyMap<string, string> = new Map([
     "The task it continues may be continued again while its machine still holds its launch (a week).",
   ],
   ["lost_expired", "End it on that machine once it is back."],
+  ["pin_expired", "It never ran. Submit it again once its machine or account is back."],
   [
     "merge_expired",
     "Tasks waiting on it failed with it. If it did merge, submit the tasks that waited on it again. Its session had already ended.",
