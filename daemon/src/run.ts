@@ -396,6 +396,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       sessions: () => handlerCtx.backend.sessions(state.repos),
       now,
       httpFetch,
+      draining: () => endedTasks.draining,
       ...(opts.probe === undefined ? {} : { probe: opts.probe }),
     },
     {
@@ -406,6 +407,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       onSample: () => fleetQuota.sampled(),
     },
   );
+  // So the leader stops routing here while launches are refused, rather than reserving into the gate for a TTL.
+  const stopGateWatch = endedTasks.onGate(() => status.refresh());
 
   // Every daemon may be nominated; this is what runs if it is. Its app-role leg
   // is built per term over the key imported above, never the broker's.
@@ -586,6 +589,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     localSocket: local.path,
     stop: (): void => {
       stopped = true;
+      stopGateWatch();
       status.stop();
       fleetQuota.stop();
       handlerCtx.backend.stop?.();

@@ -1,4 +1,4 @@
-import type { MachineStatus, SessionEntry } from "@seance/shared";
+import { STATUS_MIN_INTERVAL_MS, type MachineStatus, type SessionEntry } from "@seance/shared";
 import type { Config } from "./config.ts";
 import { log } from "./log.ts";
 import type { MetricsStore } from "./metrics-store.ts";
@@ -21,6 +21,8 @@ export interface CollectorDeps {
   readonly now: () => number;
   readonly httpFetch: Fetch;
   readonly probe?: HostProbe;
+  /** `EndedTasks.draining`: the status's `drn`. */
+  readonly draining?: () => boolean;
 }
 
 export interface StatusLoopDeps {
@@ -28,6 +30,8 @@ export interface StatusLoopDeps {
   readonly connected: () => boolean;
   /** `RelayClient.sendStatus`: `current` is asked again after the seal. */
   readonly send: (status: MachineStatus, current: () => boolean) => Promise<boolean>;
+  /** How long after a sent status the relay drops the next; `refresh` waits it out. Tests only. */
+  readonly floorMs?: number;
   /** A sample against the current register blob resolved, sent or not. */
   readonly onSample?: () => void;
 }
@@ -39,6 +43,11 @@ export interface StatusLoop {
    * push an app got carries no snapshot until this one.
    */
   readonly sampleNow: () => void;
+  /**
+   * A field routing reads changed (the launch gate): samples as soon as the relay's floor lets the
+   * status through, so neither the next beat nor a frame the relay would drop is the one that tells.
+   */
+  readonly refresh: () => void;
   /** The last sample whole — before `fitStatus` trims it for the wire — or null before the first. */
   readonly latest: () => MachineStatus | null;
   readonly stop: () => void;
@@ -65,10 +74,16 @@ export function startStatusLoop(metrics: MetricsStore, collectors: CollectorDeps
       log.warn(`telemetry: ${name} failed, its fields are left out of the status: ${String(err)}`);
     },
     ...(collectors.probe === undefined ? {} : { probe: collectors.probe }),
+    ...(collectors.draining === undefined ? {} : { draining: collectors.draining }),
   });
+  // Never past the next beat: a beat shorter than the relay's floor (tests only) is the floor that holds.
+  // A twentieth over it, since the relay times the frames by their arrival, not by our send.
+  const floorMs = loop.floorMs ?? Math.min(STATUS_MIN_INTERVAL_MS, loop.intervalMs) * 1.05;
   let stopped = false;
   let timer: ReturnType<typeof setInterval> | null = null;
   let trimWarned = false;
+  let lastSentAt: number | null = null;
+  let refreshTimer: ReturnType<typeof setTimeout> | null = null;
   const sample = (): void => {
     if (stopped) return;
     telemetry
@@ -91,20 +106,39 @@ export function startStatusLoop(metrics: MetricsStore, collectors: CollectorDeps
           log.warn("status trimmed to fit the relay's bound — some quota detail is left out of the live view");
           trimWarned = true;
         }
-        return loop.send(status, current);
+        return loop.send(status, current).then((sent) => {
+          if (sent) lastSentAt = collectors.now();
+          return sent;
+        });
       })
       .catch((err: unknown) => log.warn(`telemetry: ${String(err)}`));
   };
+  const sampleNow = (): void => {
+    if (stopped) return;
+    if (timer !== null) clearInterval(timer);
+    timer = setInterval(sample, loop.intervalMs);
+    sample();
+  };
   return {
-    sampleNow: (): void => {
-      if (timer !== null) clearInterval(timer);
-      timer = setInterval(sample, loop.intervalMs);
-      sample();
+    sampleNow,
+    refresh: (): void => {
+      // One pending is enough: the collectors read the gate when the tick runs, not when it was asked for.
+      if (stopped || refreshTimer !== null) return;
+      const waitMs = lastSentAt === null ? 0 : lastSentAt + floorMs - collectors.now();
+      if (waitMs <= 0) {
+        sampleNow();
+        return;
+      }
+      refreshTimer = setTimeout(() => {
+        refreshTimer = null;
+        sampleNow();
+      }, waitMs);
     },
     latest: () => telemetry.latest(),
     stop: (): void => {
       stopped = true;
       if (timer !== null) clearInterval(timer);
+      if (refreshTimer !== null) clearTimeout(refreshTimer);
     },
   };
 }
