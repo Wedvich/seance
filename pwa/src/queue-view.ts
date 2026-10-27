@@ -366,13 +366,13 @@ function rowOf(
 }
 
 /** `idle`: the running tasks the leader released for sitting idle at their prompt, by id. */
-type Pick = (task: Task, machines: readonly Machine[], idle: ReadonlyMap<string, number>) => number | null;
+type SectionPick = (task: Task, machines: readonly Machine[], idle: ReadonlyMap<string, number>) => number | null;
 
 /**
  * Escalated (past the leader's patience) first, then the rest of needs-input, then lost — a
  * lost task whose machine is back or gone, since one asleep is in Asleep.
  */
-const needsYou: Pick = (t, machines) => {
+const needsYou: SectionPick = (t, machines) => {
   if (machineAsleep(t, machines)) return null;
   if (t.state === "lost") return 2;
   if (t.state !== "needs-input") return null;
@@ -383,7 +383,7 @@ const needsYou: Pick = (t, machines) => {
  * Nothing on a sleeping machine can be acted on from the phone, so it leaves Needs you and
  * Running for a section of its own (DESIGN.md, "Asleep machines on the Queue screen").
  */
-const asleep: Pick = (t, machines) => {
+const asleep: SectionPick = (t, machines) => {
   if (!machineAsleep(t, machines)) return null;
   if (t.state === "needs-input") return 0;
   return t.state === "lost" ? 2 : 1;
@@ -394,7 +394,7 @@ export const ASLEEP_SECTION = "Asleep";
 
 const IDLE_SECTION = "Idle";
 
-const SECTIONS: readonly { readonly title: string; readonly pick: Pick; readonly oldestFirst?: true }[] = [
+const SECTIONS: readonly { readonly title: string; readonly pick: SectionPick; readonly oldestFirst?: true }[] = [
   { title: "Needs you", pick: needsYou },
   {
     title: "Running",
