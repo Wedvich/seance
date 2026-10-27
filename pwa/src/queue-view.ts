@@ -34,6 +34,50 @@ import {
 
 export type QueueDot = "ok" | "auto" | "err";
 
+/** The one action a card shows inline; the rest sit behind its ⋯ menu. */
+export type QueueInlineAction = "continue" | "run-now" | "follow-up";
+
+/**
+ * The likeliest next step. Continue and Follow up never coexist (Follow up is not offered after a
+ * failure or a cancel, the only states Continue is); a `ready` task the caps alone hold also offers
+ * Follow up, but placing it is the pressing step. Mark done and Cancel are never inline.
+ */
+export function primaryAction(
+  row: Pick<QueueRow, "canContinue" | "canRunNow" | "canFollowUp">,
+): QueueInlineAction | null {
+  if (row.canContinue) return "continue";
+  if (row.canRunNow) return "run-now";
+  if (row.canFollowUp) return "follow-up";
+  return null;
+}
+
+export type ArmOp = "cancel" | "mark-done";
+
+/** Names the act and the row, so one item's tap can't arm another's. */
+export function armKey(op: ArmOp, rowId: string): string {
+  return `${op}:${rowId}`;
+}
+
+/**
+ * An act that ends a session asks twice: a first tap only arms (`fire` false, and the menu stays
+ * open to relabel), a second within the arm window fires. `armed` is what the screen holds next.
+ */
+export function armTap(
+  row: Pick<QueueRow, "id" | "cancelEndsSession" | "markDoneEndsSession">,
+  op: ArmOp,
+  armed: string | null,
+): { readonly fire: boolean; readonly armed: string | null } {
+  const key = armKey(op, row.id);
+  const endsSession = op === "cancel" ? row.cancelEndsSession : row.markDoneEndsSession;
+  if (endsSession && armed !== key) return { fire: false, armed: key };
+  return { fire: true, armed: null };
+}
+
+/** A row's menu closing, by any means, disarms that row's acts; Clear's arm and other rows' stay. */
+export function disarmRow(rowId: string, armed: string | null): string | null {
+  return armed === armKey("cancel", rowId) || armed === armKey("mark-done", rowId) ? null : armed;
+}
+
 export interface QueueRow {
   readonly id: string;
   readonly title: string;
@@ -56,6 +100,8 @@ export interface QueueRow {
   readonly canContinue: boolean;
   /** A `ready` task only the concurrency caps hold: "Run now" places it past them. */
   readonly canRunNow: boolean;
+  /** `primaryAction` of the flags above: the card's one inline button. */
+  readonly inline: QueueInlineAction | null;
   /** What it waits on, one line; null when it waits on nothing. */
   readonly deps: string | null;
   /** The earlier session it continues, one line; null for any other task. */
@@ -291,6 +337,9 @@ function rowOf(
   const phase = TASK_PHASES[task.state];
   const idleSince = idle.get(task.id);
   const actionable = phase !== "dispatching" && phase !== "finished";
+  const canFollowUp = phase !== "finished" || task.state === "done";
+  const canContinue = continueOffer(task, state.relay.machines, tasks).ok && deriveContinueAvailability(state.relay);
+  const canRunNow = heldByCapsOnly(task) && deriveRunNowAvailability(state.relay);
   return {
     id: task.id,
     title: taskTitle(task),
@@ -302,9 +351,10 @@ function rowOf(
     canMarkDone: actionable,
     cancelEndsSession: phase === "placed",
     markDoneEndsSession: task.state === "running" || task.state === "needs-input" || task.state === "lost",
-    canFollowUp: phase !== "finished" || task.state === "done",
-    canContinue: continueOffer(task, state.relay.machines, tasks).ok && deriveContinueAvailability(state.relay),
-    canRunNow: heldByCapsOnly(task) && deriveRunNowAvailability(state.relay),
+    canFollowUp,
+    canContinue,
+    canRunNow,
+    inline: primaryAction({ canContinue, canRunNow, canFollowUp }),
     deps: depsLine(task, titles),
     continues: continuesLine(task, titles),
     placement: placementLine(task, state),
@@ -316,13 +366,13 @@ function rowOf(
 }
 
 /** `idle`: the running tasks the leader released for sitting idle at their prompt, by id. */
-type Pick = (task: Task, machines: readonly Machine[], idle: ReadonlyMap<string, number>) => number | null;
+type SectionPick = (task: Task, machines: readonly Machine[], idle: ReadonlyMap<string, number>) => number | null;
 
 /**
  * Escalated (past the leader's patience) first, then the rest of needs-input, then lost — a
  * lost task whose machine is back or gone, since one asleep is in Asleep.
  */
-const needsYou: Pick = (t, machines) => {
+const needsYou: SectionPick = (t, machines) => {
   if (machineAsleep(t, machines)) return null;
   if (t.state === "lost") return 2;
   if (t.state !== "needs-input") return null;
@@ -333,7 +383,7 @@ const needsYou: Pick = (t, machines) => {
  * Nothing on a sleeping machine can be acted on from the phone, so it leaves Needs you and
  * Running for a section of its own (DESIGN.md, "Asleep machines on the Queue screen").
  */
-const asleep: Pick = (t, machines) => {
+const asleep: SectionPick = (t, machines) => {
   if (!machineAsleep(t, machines)) return null;
   if (t.state === "needs-input") return 0;
   return t.state === "lost" ? 2 : 1;
@@ -344,7 +394,7 @@ export const ASLEEP_SECTION = "Asleep";
 
 const IDLE_SECTION = "Idle";
 
-const SECTIONS: readonly { readonly title: string; readonly pick: Pick; readonly oldestFirst?: true }[] = [
+const SECTIONS: readonly { readonly title: string; readonly pick: SectionPick; readonly oldestFirst?: true }[] = [
   { title: "Needs you", pick: needsYou },
   {
     title: "Running",

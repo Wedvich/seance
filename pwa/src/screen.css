@@ -2216,7 +2216,7 @@
   gap: var(--gap);
 }
 
-/* The shared quiet button is full-width; in a row of two it sizes to its label. */
+/* The shared quiet button is full-width; beside the chip it sizes to its label. */
 .queue-actions .quiet {
   width: auto;
   padding: 8px 12px;
@@ -2225,6 +2225,27 @@
 
 .queue-actions .quiet:disabled {
   opacity: 0.5;
+}
+
+/* The card's ⋯: every action it allows (menu.tsx). Pulled into the card's padding so the dots sit
+   flush with its corner while the target stays 36px. */
+.queue-more {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  margin: -8px -8px 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--fg2);
+  cursor: pointer;
+}
+
+.queue-more[aria-expanded="true"] {
+  background: var(--sur2);
 }
 
 /* A task title that opens its session on claude.ai: still the title, so the underline is faint
@@ -2244,8 +2265,8 @@
 /* The PR chip is a quiet outline, a rounded rectangle rather than the badge's pill: at this
    size it reads as a control, and its colour belongs to the icons alone. Sized near the buttons
    beside it (~34px tall); the pseudo-element takes the tap target to 44px without growing
-   the pill. Leads the actions row; the auto margin keeps the buttons right, and a finished
-   task's row holds the chip alone. */
+   the pill. Leads the actions row; the auto margin keeps the inline action right, and a row
+   with none holds the chip alone. */
 .queue-pr {
   position: relative;
   display: inline-flex;
@@ -2428,6 +2449,15 @@
   opacity: 0.5;
 }
 
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .menu-item .dot {
   margin-left: auto;
 }
@@ -2461,6 +2491,10 @@
 }
 
 @media (hover: hover) {
+  .queue-more:hover {
+    background: var(--sur2);
+  }
+
   .menu-item:not(:disabled, [aria-disabled="true"]):hover {
     background: var(--sur2);
   }

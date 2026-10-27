@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { menuPlacement } from "../src/menu-placement.ts";
+import { menuDirection, menuPlacement } from "../src/menu-placement.ts";
 
 const viewport = { width: 400, height: 800 };
 
@@ -29,5 +29,27 @@ describe("menuPlacement", () => {
     const anchor = { top: 380, bottom: 424, right: 200 };
     expect(menuPlacement("down", anchor, viewport)).toEqual({ top: 430, bottom: null, right: 200 });
     expect(menuPlacement("up", anchor, viewport)).toEqual({ top: null, bottom: 426, right: 200 });
+  });
+});
+
+describe("menuDirection", () => {
+  const panel = 230;
+
+  test("fits below: down", () => {
+    expect(menuDirection("down", { top: 10, bottom: 54 }, viewport, panel)).toBe("down");
+  });
+
+  test("doesn't fit below but fits above: up", () => {
+    expect(menuDirection("down", { top: 600, bottom: 644 + 100 }, viewport, panel)).toBe("up");
+  });
+
+  test("fits neither: whichever side has more room", () => {
+    const short = { height: 300 };
+    expect(menuDirection("down", { top: 200, bottom: 244 }, short, panel)).toBe("up");
+    expect(menuDirection("down", { top: 60, bottom: 104 }, short, panel)).toBe("down");
+  });
+
+  test("an up request stays up even where it overruns the top", () => {
+    expect(menuDirection("up", { top: 20, bottom: 64 }, viewport, panel)).toBe("up");
   });
 });
