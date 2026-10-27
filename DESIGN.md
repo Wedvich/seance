@@ -4636,7 +4636,7 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
   `seanced despawn` takes, never acted on.
 - **A worktree is removed only if all hold**: not locked; no tmux pane's cwd
   inside it (any pane, hand-started included); its branch — or detached HEAD —
-  merged by the rules below; untouched for `reap.minAgeDays` (default 7); and
+  merged by the rules below; untouched for `reap.minAgeDays` (default 4, 7 until 2026-10-27); and
   clean — reap's `status` pins `--untracked-files=normal`, because git's own
   clean check honours `status.showUntrackedFiles=no` and would delete
   untracked files unseen. Removal is `git worktree remove` without `--force`,
@@ -4647,7 +4647,12 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
   `index` and reflog, the worktree root, and the newest Claude transcript for
   its path (`~/.claude/projects/<path, non-alphanumerics as dashes>`). It is
   read before reap's own `status`, and every reap git call sets
-  `GIT_OPTIONAL_LOCKS=0`, so measuring the age doesn't reset it. The transcript
+  `GIT_OPTIONAL_LOCKS=0`, so measuring the age doesn't reset it. Anyone else's
+  `status` does: it rewrites `index` with refreshed stat data, so a script or
+  agent surveying worktrees ahead of a reap must also pass
+  `GIT_OPTIONAL_LOCKS=0` (or `--no-optional-locks`), or every worktree it read
+  looks touched that day. Kept as a signal anyway: an editor's background
+  `status` is the only trace of use outside tmux and Claude. The transcript
   is the cheap answer to a session outside tmux — an editor's claude, a plain
   terminal — which the pane check can't see: a few `stat`s cover any claude
   wherever it runs. Rejected: a process-cwd sweep (`lsof -d cwd`), which on
@@ -4775,7 +4780,7 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
     its checkout. A pane counts for the nearest checkout containing it, so a session in
     `.claude/worktrees/x` keeps that worktree's daemon, not the main clone's. "Unused" is
     `lastTouched` (above) and the mtime of the daemon's cookie dir, which every query moves. An
-    hour, not reap's week: stopping destroys nothing, and git restarts the daemon unasked the
+    hour, not reap's days: stopping destroys nothing, and git restarts the daemon unasked the
     next time the repo is used, at the cost of one fresh crawl. Where there is a repo, `git
     fsmonitor--daemon stop` in it; SIGTERM where there is none, or the ask fails.
   - **Scope**: not the scan set — daemons sit on main clones, scratchpads and other directories
