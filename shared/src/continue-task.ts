@@ -14,9 +14,13 @@ export type ContinueOffer =
  */
 const LANDED_FAILURES: ReadonlySet<string> = new Set<TaskFailureCode>([
   "session_failed",
+  "session_closed",
   "lost_expired",
   "merge_expired",
 ]);
+
+/** The failures whose session can be resumed: it died, or its window was closed from outside. */
+const RESUMABLE_FAILURES: ReadonlySet<string> = new Set<TaskFailureCode>(["session_failed", "session_closed"]);
 
 /**
  * Whether continuation `y` holds the session of the task it continues. A queued
@@ -42,13 +46,14 @@ function tookOver(y: Task): boolean {
 /** The task-level eligibility `continueOffer` applies, so it can tell whether a taker would itself pass it. */
 function sessionResumable(task: Task): boolean {
   if (task.state === "cancelled") return task.assignment !== undefined && task.endedAt === undefined;
-  return task.state === "failed" && task.failure?.code === "session_failed";
+  return task.state === "failed" && RESUMABLE_FAILURES.has(task.failure?.code ?? "");
 }
 
 /**
  * Whether a task's session can be resumed, and where: the one rule the PWA's button,
  * MCP's `continue_task` and `seanced continue` share so they cannot drift (DESIGN.md,
- * Daemon, "Continuing a session"). A task whose session failed (`session_failed`), or
+ * Daemon, "Continuing a session"). A task whose session failed (`session_failed`) or
+ * whose window was closed from outside (`session_closed`), or
  * that was cancelled after it was placed, qualifies — the others may never have launched,
  * and the daemon's ledger would refuse them anyway. A cancelled task needs a machine
  * advertising `continueCancelled`. And only the newest landed task in a chain holds the
@@ -67,10 +72,11 @@ export function continueOffer(task: Task, machines: readonly Machine[], tasks: r
         reason: "its session had already finished before it was cancelled; use Follow up instead",
       };
     }
-  } else if (task.state !== "failed" || task.failure?.code !== "session_failed") {
+  } else if (task.state !== "failed" || !RESUMABLE_FAILURES.has(task.failure?.code ?? "")) {
     return {
       ok: false,
-      reason: "only a task whose session failed, or that was cancelled after it started, can be continued",
+      reason:
+        "only a task whose session failed or whose window was closed, or that was cancelled after it started, can be continued",
     };
   }
   const taker = tasks.find((other) => other.spec.continues?.task === task.id && tookOver(other));

@@ -1400,7 +1400,7 @@ export function parseTaskProgressList(value: unknown): readonly TaskProgress[] |
 
 function parseTaskProgress(value: unknown): TaskProgress | null {
   if (!isRecord(value)) return null;
-  const { taskId, prUrl, branch, pushed, merged, reported, exit, oomKill, at } = value;
+  const { taskId, prUrl, branch, pushed, merged, reported, exit, oomKill, vanished, at } = value;
   if (!isTaskId(taskId) || !isFiniteNumber(at)) return null;
   if (exit !== undefined && (!isUint(exit) || exit > EXIT_STATUS_MAX)) return null;
   const url = prUrl === undefined ? undefined : httpsUrl(prUrl);
@@ -1408,6 +1408,7 @@ function parseTaskProgress(value: unknown): TaskProgress | null {
   if (branch !== undefined && !isName(branch, BRANCH_MAX_LENGTH)) return null;
   if ((pushed !== undefined && pushed !== true) || (merged !== undefined && merged !== true)) return null;
   if (reported !== undefined && reported !== true) return null;
+  if (vanished !== undefined && vanished !== true) return null;
   return {
     taskId,
     at,
@@ -1417,6 +1418,7 @@ function parseTaskProgress(value: unknown): TaskProgress | null {
     ...(merged === undefined ? {} : { merged }),
     ...(reported === undefined ? {} : { reported }),
     ...(exit === undefined ? {} : { exit }),
+    ...(vanished === undefined ? {} : { vanished }),
     // Display-only: a bad one, or one beside another status, costs the field — never the entry, which would null the list.
     ...(exit === SIGKILL_STATUS && typeof oomKill === "boolean" ? { oomKill } : {}),
   };

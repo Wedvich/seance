@@ -268,6 +268,23 @@ describe("a session's exit status", () => {
     expect(scheduler.task("t")).toMatchObject({ state: "failed", failure: { code: "session_failed" } });
   });
 
+  test("a sweep settles a vanished task session_closed, and a task waiting on it fails dependency_failed", async () => {
+    const { fleet, clock, scheduler, put } = setup(reporting());
+    await put("t", { assignment: ON_A });
+    await put("dep", { state: "queued", spec: spec({ deps: [{ task: "t", after: "merged" }] }) });
+    await scheduler.load();
+    fleet.sessionsReply = () => ({
+      ok: true,
+      sessions: [],
+      ended: ["t"],
+      progress: [progress("t", { vanished: true })],
+    });
+    clock.now += DEFAULT_CONFIG.sweepIntervalMs;
+    await pass(scheduler);
+    expect(scheduler.task("t")).toMatchObject({ state: "failed", failure: { code: "session_closed" } });
+    expect(scheduler.task("dep")).toMatchObject({ state: "failed", failure: { code: "dependency_failed" } });
+  });
+
   test("a deferred end is dropped when the task is cancelled meanwhile: the deadline settles nothing", async () => {
     const { fleet, clock, scheduler, put } = setup(reporting());
     await put("t", { assignment: ON_A });
@@ -779,6 +796,38 @@ describe("until: reported", () => {
     });
     expect(ended(running("merged"), { exit: 137 })?.failure).not.toHaveProperty("oomKill");
     expect(ended(running("merged"), { exit: 1, oomKill: true })?.failure).not.toHaveProperty("oomKill");
+  });
+
+  test("ended: a vanished window with no exit, PR, merge or report fails session_closed, worded by until; any of those outranks it", () => {
+    expect(ended(running("merged"), { vanished: true })).toMatchObject({
+      state: "failed",
+      failure: {
+        code: "session_closed",
+        message: "its window was closed before its session ended and it reported no pull request",
+      },
+    });
+    expect(ended(running("reported"), { vanished: true })?.failure?.message).toBe(
+      "its window was closed before its session ended and it did not report done",
+    );
+    expect(ended(running("merged"), { vanished: true })?.failure).not.toHaveProperty("exit");
+    expect(ended(running("merged"), { vanished: true, exit: 0 })).toMatchObject({ state: "done", doneBy: "session" });
+    expect(ended(running("merged"), { vanished: true, exit: 3 })).toMatchObject({
+      failure: { code: "session_failed" },
+    });
+    expect(ended(running("merged", { prUrl: PR }), { vanished: true })).toMatchObject({ state: "awaiting-merge" });
+    expect(ended(running("merged", { prUrl: PR }), { vanished: true, ...merged })).toMatchObject({
+      state: "done",
+      doneBy: "merged",
+    });
+    expect(ended(running("reported"), { vanished: true, reported: true })).toMatchObject({
+      state: "done",
+      doneBy: "reported",
+    });
+  });
+
+  test("progressed: a vanished entry on a live task changes nothing", () => {
+    const live = running("merged");
+    expect(progressed(live, { vanished: true })).toBe(live);
   });
 
   test("branchChange: a live merge is recorded on a reported task", () => {

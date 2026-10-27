@@ -244,6 +244,10 @@ export function taskHeadline(task: Task, machines: readonly Machine[], now: numb
         const lacked = task.spec.until === "reported" ? "with no done report" : "with no PR";
         return `Its session ${clause}${place}${hint === undefined ? "" : `, ${hint}`}, ${lacked}.`;
       }
+      if (task.failure?.code === "session_closed") {
+        const lacked = task.spec.until === "reported" ? "with no done report" : "with no PR";
+        return `Its window was closed${place} before its session ended, ${lacked}.`;
+      }
       // A scheduler-set failure never reached a machine; only a daemon refusal "didn't take" there.
       return task.failure !== undefined && taskFailureText(task.failure.code) !== null
         ? "It won't run."

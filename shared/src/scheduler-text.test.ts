@@ -32,6 +32,16 @@ describe("taskFailureText", () => {
     expect(taskFailureText("repo_not_found", 137)).toBeNull();
   });
 
+  test("a session_closed is worded by what it lacked, and ignores any exit status", () => {
+    expect(taskFailureText("session_closed")).toBe(
+      "its window was closed before its session ended and it reported no pull request",
+    );
+    expect(taskFailureText("session_closed", undefined, "merged")).toBe(taskFailureText("session_closed"));
+    expect(taskFailureText("session_closed", 137, "reported")).toBe(
+      "its window was closed before its session ended and it did not report done",
+    );
+  });
+
   test("under until reported, the missing thing is the done report, not a pull request", () => {
     expect(taskFailureText("session_failed", 1, "reported")).toBe(
       "its session exited with status 1 and did not report done",

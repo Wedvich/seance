@@ -16,7 +16,10 @@ import { advance, PLACED, type Task, type TaskFields } from "./task.ts";
  * Pure: the scheduler writes what these return.
  */
 
-type Progress = Pick<TaskProgress, "prUrl" | "branch" | "pushed" | "merged" | "reported" | "exit" | "oomKill">;
+type Progress = Pick<
+  TaskProgress,
+  "prUrl" | "branch" | "pushed" | "merged" | "reported" | "exit" | "oomKill" | "vanished"
+>;
 
 /**
  * What `entry` may say of `task`. A `here` task's branch is the checkout's,
@@ -102,7 +105,9 @@ export function progressed(task: Task, entry: Progress | undefined): Task {
  * open → `awaiting-merge`, which frees its slot and keeps `after: "merged"`
  * dependents waiting; neither, and a nonzero exit → `failed`
  * (`session_failed`), which fails its dependents; neither and no such exit
- * (0, or none known) → `done` by `session`. The exit counts only there: what
+ * (0, or none known) → `done` by `session`, unless its window was closed from
+ * outside (`vanished`, no exit known) → `failed` (`session_closed`), which fails its
+ * dependents too. The exit counts only there: what
  * a merge or a PR shows landed stands however the session ended. Under
  * `until: "reported"` the session's report comes first (`done` by `reported`),
  * and a merge is recorded and falls through to the PR check instead of
@@ -125,6 +130,12 @@ export function ended(task: Task, entry: Progress | undefined, fields: TaskField
     // `exit` too, so readers word it without parsing the message (an older one keeps only the message).
     const oom = exit === SIGKILL_STATUS && seen?.oomKill !== undefined ? { oomKill: seen.oomKill } : {};
     return advance(open, "failed", { failure: { code: "session_failed", message, exit, ...oom } });
+  }
+  if (exit === undefined && seen?.vanished === true) {
+    const missing = settlesOnReport(known) ? "did not report done" : "reported no pull request";
+    return advance(open, "failed", {
+      failure: { code: "session_closed", message: `its window was closed before its session ended and it ${missing}` },
+    });
   }
   return advance(open, "done", { doneBy: "session" });
 }
