@@ -471,7 +471,7 @@ function SplitQueueButton(props: {
       <Menu menu={menu} label="More ways to start" direction="up">
         <MenuItem
           label="Start now"
-          icon={<BoltIcon />}
+          icon={<StartNowIcon />}
           sub={item.sub}
           disabled={!item.enabled}
           onClick={props.onStartNow}
@@ -481,7 +481,7 @@ function SplitQueueButton(props: {
   );
 }
 
-function BoltIcon(): JSX.Element {
+function StartNowIcon(): JSX.Element {
   return (
     <svg
       viewBox="0 0 24 24"
@@ -494,7 +494,8 @@ function BoltIcon(): JSX.Element {
       stroke-linejoin="round"
       aria-hidden="true"
     >
-      <path d="M13 3 4 14h7l-1 7 9-11h-7z" />
+      <path d="M3 6l8 6-8 6z" />
+      <path d="M12 6l8 6-8 6z" />
     </svg>
   );
 }
