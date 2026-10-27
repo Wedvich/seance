@@ -835,7 +835,7 @@ export function SpawnScreen(props: {
       </div>
 
       <footer className="footer">
-        <p className="footer-status">{view.footerStatus}</p>
+        {view.footerStatus !== null && <p className="footer-status">{view.footerStatus}</p>}
         <QueueButton
           view={view}
           preview={view.previewShown ? preview : null}
