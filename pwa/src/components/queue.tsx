@@ -1,5 +1,5 @@
 import type { ComponentChildren, JSX } from "preact";
-import { useEffect, useState } from "preact/hooks";
+import { useCallback, useEffect, useState } from "preact/hooks";
 import {
   ASLEEP_SECTION,
   armKey,
@@ -65,7 +65,8 @@ export function QueueScreen(props: {
   };
 
   // Functional: the popover's toggle lands after a second tap's own update.
-  const onMenuClosed = (rowId: string): void => setArmed((current) => disarmRow(rowId, current));
+  // Stable: QueueCard's unmount cleanup depends on it, and a changing one would disarm every render.
+  const onMenuClosed = useCallback((rowId: string): void => setArmed((current) => disarmRow(rowId, current)), []);
 
   // Deleting records can't be taken back: the button asks twice, as an act that ends a session does.
   const clear = (): void => {
@@ -231,13 +232,21 @@ function QueueCard(props: {
     },
   };
   const disabled = !props.available || row.busy;
+  const opens = row.canFollowUp || row.canRunNow || row.canContinue || row.session !== null;
+  const ends = row.canMarkDone || row.canCancel;
+  const hasMenu = opens || ends;
+  // Removing an open popover fires no `toggle`, so a card that unmounts (a poll moving its task
+  // to another section) or drops its menu would leave the row armed for the next open.
+  const { onMenuClosed } = props;
+  useEffect(() => {
+    if (!hasMenu) return;
+    return () => onMenuClosed(row.id);
+  }, [hasMenu, row.id, onMenuClosed]);
   const run: Record<NonNullable<QueueRow["inline"]>, (taskId: string) => void> = {
     continue: props.onContinue,
     "run-now": props.onRunNow,
     "follow-up": props.onFollowUp,
   };
-  const opens = row.canFollowUp || row.canRunNow || row.canContinue || row.session !== null;
-  const ends = row.canMarkDone || row.canCancel;
   const armItem = (op: ArmOp, label: string, armedLabel: string, icon: JSX.Element, destructive: boolean) => (
     <MenuItem
       label={armed === armKey(op, row.id) ? armedLabel : label}
@@ -273,7 +282,7 @@ function QueueCard(props: {
             {row.headline} · {row.age}
           </p>
         </div>
-        {(opens || ends) && (
+        {hasMenu && (
           <>
             <button
               ref={menu.anchor}
