@@ -35,17 +35,17 @@ interface Sent {
   readonly atMs: number;
 }
 
-let loop: StatusLoop | null = null;
+let running: StatusLoop | null = null;
 
 afterEach(() => {
-  loop?.stop();
-  loop = null;
+  running?.stop();
+  running = null;
 });
 
 /** A loop whose beat never fires within a test, so every send is `sampleNow` or `refresh`. */
 function start(draining: () => boolean): { readonly loop: StatusLoop; readonly sent: Sent[] } {
   const sent: Sent[] = [];
-  loop = startStatusLoop(
+  const loop = startStatusLoop(
     MetricsStore.memory(),
     {
       config,
@@ -66,6 +66,7 @@ function start(draining: () => boolean): { readonly loop: StatusLoop; readonly s
       },
     },
   );
+  running = loop;
   return { loop, sent };
 }
 
