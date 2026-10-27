@@ -304,7 +304,7 @@ function QueueCard(props: {
               {row.startNow !== null && (
                 <MenuItem
                   label="Start now"
-                  icon={<RunNowIcon />}
+                  icon={<StartNowIcon />}
                   sub={row.startNow.sub}
                   disabled={disabled || !row.startNow.enabled}
                   onClick={() => props.onRunNow(row.id)}
@@ -372,10 +372,11 @@ function FollowUpIcon(): JSX.Element {
   );
 }
 
-function RunNowIcon(): JSX.Element {
+function StartNowIcon(): JSX.Element {
   return (
     <MenuGlyph>
-      <path d="M13 3 4 14h7l-1 7 9-11h-7z" />
+      <path d="M3 6l8 6-8 6z" />
+      <path d="M12 6l8 6-8 6z" />
     </MenuGlyph>
   );
 }
@@ -383,8 +384,7 @@ function RunNowIcon(): JSX.Element {
 function ContinueIcon(): JSX.Element {
   return (
     <MenuGlyph>
-      <path d="M5 12h14" />
-      <path d="M13 6l6 6-6 6" />
+      <path d="M7 5l12 7-12 7z" />
     </MenuGlyph>
   );
 }
