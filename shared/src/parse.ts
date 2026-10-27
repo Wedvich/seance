@@ -689,8 +689,8 @@ function parseAvoid(value: unknown): readonly string[] | null {
 }
 
 /**
- * A `strategy` an older writer stored (`sequential`, `parallel`, `auto`) is
- * ignored and dropped: no batch schedules, so a live record from before must
+ * Any `strategy` an older writer stored (`sequential`, `parallel`, `auto`,
+ * malformed) is ignored and dropped: no batch schedules, so a live record from before must
  * still read rather than null its spec.
  */
 function parseBatch(value: unknown): BatchMembership | null {

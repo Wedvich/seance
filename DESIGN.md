@@ -2704,7 +2704,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   **Mixed versions.** `BatchMembership` is `{ id, index }`: no writer puts a `strategy` on
   the wire (store record, leader replies, broker enqueue). The parser accepts and drops
   whatever an older writer stored (`sequential`, `parallel` with `max`, `auto`, garbage, none),
-  so a live record from before keeps its group and loses its strategy at the next leader write,
+  so a live record from before keeps its group and loses its strategy at the next write by a
+  leader of this build (an older one still writing a record puts it back),
   and an older PWA or MCP still writing one is ignored. A pre-change reader's `parseBatch`
   nulls a batch without a strategy, and its `parseTaskSpec` the whole spec, so it cannot read a
   batched task written since: an old client drops it from its list (per task, the rest still
@@ -5669,7 +5670,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   be removed. **BATCH** is an _open batch_: Start batch,
   and the next enqueues join it, numbered from 1, until End batch; the sheet says a batch sets
   no order or limit, and that After is how to run tasks in turn ("Batches"). It is `{id, next}`
-  in the persisted form (an older build's `strategy` there is ignored): each enqueue takes index `next`, and the counter moves only for the
+  in the persisted form (an older build's `strategy` there: `auto` is kept as the open batch, anything else drops the
+  batch, so the next enqueue starts a new one): each enqueue takes index `next`, and the counter moves only for the
   member it numbered, so a retry that lands twice moves it once (`landedEarlier`). Start batch
   while one is open keeps it, so a tap cannot renumber one in flight. (Until 2026-10-26 the sheet
   picked One at a time, Up to N at once or No limit.) Deps, `until` and the Linear issue belong to one
