@@ -159,9 +159,16 @@ describe("LaunchLedger progress notes", () => {
     expect(ledger.progress()).toEqual([]);
   });
 
-  test("an untouched ledger writes plain v1; a note adds only a top-level progress array", async () => {
+  test("a settled ledger writes plain v1; a note adds only a top-level progress array", async () => {
     const ledger = await LaunchLedger.open(path, () => 100);
     await ledger.record("t1");
+    expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
+      v: 1,
+      since: 100,
+      tasks: [["t1", 100]],
+      pending: ["t1"],
+    });
+    await ledger.clearPending("t1");
     expect(JSON.parse(await readFile(path, "utf8"))).toEqual({ v: 1, since: 100, tasks: [["t1", 100]] });
     await ledger.note("t1", { repo: "/r", path: "/r/.claude/worktrees/x", branch: "worktree-x" });
     const raw: unknown = JSON.parse(await readFile(path, "utf8"));
@@ -664,5 +671,145 @@ describe("pathOwners", () => {
 
   test("notes without a path are skipped", () => {
     expect(pathOwners([note("a", undefined, 5)]).size).toBe(0);
+  });
+});
+
+describe("LaunchLedger interrupted launches", () => {
+  const read = async (): Promise<unknown> => JSON.parse(await readFile(path, "utf8"));
+  const reopen = (now = 1_000): Promise<LaunchLedger> => LaunchLedger.open(path, () => now);
+
+  test("a launch recorded and never settled reads back interrupted, still in ids, with since unchanged", async () => {
+    const first = await reopen(100);
+    await first.record("t1");
+    const second = await reopen(5_000);
+    expect(second.ids()).toEqual(["t1"]);
+    expect(second.interrupted()).toEqual(["t1"]);
+    expect(second.since()).toBe(first.since());
+    // Opening writes nothing: the promotion is memory until something else persists it.
+    expect(await read()).toEqual({ v: 1, since: 100, tasks: [["t1", 100]], pending: ["t1"] });
+  });
+
+  test("a promoted id stays interrupted across further reopens until cleared", async () => {
+    const first = await reopen(100);
+    await first.record("t1");
+    const second = await reopen();
+    await second.record("t2");
+    await second.clearPending("t2");
+    expect((await reopen()).interrupted()).toEqual(["t1"]);
+  });
+
+  test("a landed launch is not interrupted: startNote with a site, and the no-site, no-PR form", async () => {
+    const ledger = await reopen(100);
+    await ledger.record("t1");
+    await ledger.startNote("t1", { repo: "/r", path: "/w" });
+    await ledger.record("t2");
+    await ledger.startNote("t2");
+    const reopened = await reopen();
+    expect(reopened.interrupted()).toEqual([]);
+    expect(reopened.ids()).toEqual(["t1", "t2"]);
+    expect(await read()).not.toHaveProperty("pending");
+  });
+
+  test("clearPending settles it: not interrupted after a reopen, and the file is plain v1", async () => {
+    const ledger = await reopen(100);
+    await ledger.record("t1");
+    await ledger.clearPending("t1");
+    expect(await read()).toEqual({ v: 1, since: 100, tasks: [["t1", 100]] });
+    expect((await reopen()).interrupted()).toEqual([]);
+  });
+
+  test("clearPending of an id that is not pending writes nothing", async () => {
+    const ledger = await reopen(100);
+    await ledger.record("t1");
+    await ledger.clearPending("t1");
+    await rm(path);
+    await ledger.clearPending("t1");
+    await ledger.clearPending("never");
+    await expect(readFile(path, "utf8")).rejects.toThrow();
+  });
+
+  test("retract clears the id from everything", async () => {
+    const first = await reopen(100);
+    await first.record("t1");
+    const second = await reopen();
+    expect(second.interrupted()).toEqual(["t1"]);
+    await second.record("t2");
+    await second.retract("t2");
+    await second.retract("t1");
+    expect(second.interrupted()).toEqual([]);
+    expect(await read()).toEqual({ v: 1, since: 100, tasks: [] });
+  });
+
+  test("clearInterrupted persists across a reopen, and removes the key once nothing is marked", async () => {
+    const first = await reopen(100);
+    await first.record("t1");
+    await first.record("t2");
+    const second = await reopen();
+    const cleared = second.clearInterrupted(["t1", "unknown"]);
+    // Memory changed before the first await.
+    expect(second.interrupted()).toEqual(["t2"]);
+    await cleared;
+    expect((await reopen()).interrupted()).toEqual(["t2"]);
+    await second.clearInterrupted(["t2"]);
+    expect(await read()).toEqual({
+      v: 1,
+      since: 100,
+      tasks: [
+        ["t1", 100],
+        ["t2", 100],
+      ],
+    });
+  });
+
+  test("clearInterrupted never rejects when the write fails", async () => {
+    const first = await reopen(100);
+    await first.record("t1");
+    const second = await reopen();
+    await rm(path);
+    await mkdir(path, { recursive: true });
+    await second.clearInterrupted(["t1"]);
+    expect(second.interrupted()).toEqual([]);
+  });
+
+  test("eviction drops the marks with the id", async () => {
+    const clock = { now: 100 };
+    const first = await LaunchLedger.open(path, () => clock.now);
+    await first.record("old");
+    const second = await LaunchLedger.open(path, () => clock.now);
+    expect(second.interrupted()).toEqual(["old"]);
+    clock.now += LEDGER_MAX_AGE_MS + 1;
+    expect(second.ids()).toEqual([]);
+    expect(second.interrupted()).toEqual([]);
+    await second.record("new");
+    expect(await read()).toMatchObject({ tasks: [["new", clock.now]], pending: ["new"] });
+    expect(await read()).not.toHaveProperty("interrupted");
+  });
+
+  test("malformed pending/interrupted never reset since: they are skipped", async () => {
+    for (const bad of ["x", 7, null, { a: 1 }, [1, null, "unknown", "bad id!"]]) {
+      await writeFile(
+        path,
+        `${JSON.stringify({ v: 1, since: 1234, tasks: [["t1", 2000]], pending: bad, interrupted: bad })}\n`,
+      );
+      const ledger = await reopen(5_000);
+      expect(ledger.since()).toBe(1234);
+      expect(ledger.ids()).toEqual(["t1"]);
+      expect(ledger.interrupted()).toEqual([]);
+    }
+  });
+
+  test("an old daemon's file (no pending) yields no interrupted ids", async () => {
+    await writeFile(path, '{"v":1,"since":1234,"tasks":[["t1",2000]]}\n');
+    expect((await reopen(5_000)).interrupted()).toEqual([]);
+  });
+
+  test("a failed record leaves nothing pending in memory", async () => {
+    const ledger = await reopen(100);
+    await mkdir(join(path, "x"), { recursive: true });
+    await ledger.record("t1").catch(() => undefined);
+    expect(ledger.ids()).toEqual([]);
+    await rm(path, { recursive: true, force: true });
+    await ledger.clearPending("t1");
+    await expect(readFile(path, "utf8")).rejects.toThrow();
   });
 });
