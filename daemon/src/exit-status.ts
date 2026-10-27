@@ -2,7 +2,7 @@ import { isTaskId, SIGKILL_STATUS } from "@seance/shared";
 import type { ReapAudit } from "./audit.ts";
 import { judgeOomKill, perPass, sampleOom, type OomProbe, type OomSample } from "./oom-kill.ts";
 import { exitStatus, listPanes, paneInfo, type PaneInfo } from "./sessions.ts";
-import { EXIT_OPTION_PREFIX, noServer, tmux } from "./tmux.ts";
+import { CLOSED_OPTION_PREFIX, EXIT_OPTION_PREFIX, noServer, tmux } from "./tmux.ts";
 
 /**
  * A task session's exit status, for `failed` from exit status, and a window closed from
@@ -16,8 +16,8 @@ import { EXIT_OPTION_PREFIX, noServer, tmux } from "./tmux.ts";
  * harvest still leaves its status; harvest reads and unsets those options too.
  *
  * A launched task whose pane is in no listing, with no exit and no close of this daemon's
- * own (`closing`), is noted `vanished`: something outside Séance closed it, or its tmux
- * server or machine stopped. The snapshot of such candidates is taken before the listing
+ * own (`closing`) or marked by the CLI's despawn (`markClosed`), is noted `vanished`: something
+ * outside Séance closed it, or its tmux server or machine stopped. The snapshot of such candidates is taken before the listing
  * and judged only against a listing from the server the task ran on.
  *
  * Every `sessions` reply runs this after it lists panes and before it reads
@@ -56,16 +56,24 @@ export interface RecordedExit {
   readonly exit: number | null;
 }
 
+/** What the server-wide options hold: the hooks' recorded exits, and the task ids `markClosed` marked. */
+export interface Recorded {
+  readonly exits: readonly RecordedExit[];
+  readonly closes: readonly string[];
+}
+
 /** The tmux side of harvest, injected where `EndedTasks` is built so tests never touch the developer's tmux. */
 export interface HarvestPanes {
   readonly list: () => Promise<readonly PaneInfo[]>;
   readonly close: (pane: PaneInfo) => Promise<unknown>;
   /** The answering tmux server's pid; null when no server answers. Throws on any other failure. */
   readonly server: () => Promise<number | null>;
-  /** Every exit the hooks recorded (`EXIT_OPTION_PREFIX`); empty when no server answers. */
-  readonly recordedExits: () => Promise<readonly RecordedExit[]>;
+  /** Every exit the hooks recorded (`EXIT_OPTION_PREFIX`) and close marked (`CLOSED_OPTION_PREFIX`); empty when no server answers. */
+  readonly recorded: () => Promise<Recorded>;
   /** Unsets one recorded exit. */
   readonly clearExit: (taskId: string) => Promise<unknown>;
+  /** Unsets one marked close. */
+  readonly clearClose: (taskId: string) => Promise<unknown>;
 }
 
 /** The real tmux; each pane it closes is audited under origin `harvest`, one line like reap's. */
@@ -89,33 +97,58 @@ export function tmuxHarvestPanes(audit: Pick<ReapAudit, "closedPane">): HarvestP
       if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("tmux gave no server pid");
       return pid;
     },
-    recordedExits: async () => {
+    recorded: async () => {
       const result = await tmux(["show-options", "-g"]);
       if (result.exitCode !== 0) {
-        if (await noServer(result)) return [];
+        if (await noServer(result)) return { exits: [], closes: [] };
         throw new Error(`tmux show-options failed: ${result.stderr.trim() || `exit ${result.exitCode}`}`);
       }
-      return parseRecordedExits(result.stdout);
+      return parseRecorded(result.stdout);
     },
     clearExit: async (taskId) => {
       if (isTaskId(taskId)) await tmux(["set-option", "-gu", `${EXIT_OPTION_PREFIX}${taskId}`]);
     },
+    clearClose: async (taskId) => {
+      if (isTaskId(taskId)) await tmux(["set-option", "-gu", `${CLOSED_OPTION_PREFIX}${taskId}`]);
+    },
   };
 }
 
-/** `show-options -g` lines `@seance-exit-<id> <status>:<signal>`; any same-uid process can set one, so id and value are revalidated. */
-export function parseRecordedExits(output: string): readonly RecordedExit[] {
+/**
+ * `DespawnOptions.closing` for a process without the ledger (`seanced despawn`): marks the close in the
+ * task's tmux server, for the daemon's harvest to note as `closedHere`. Set before the pane is touched, so
+ * any listing that misses the pane postdates the mark, and harvest reads marks after its listing. A kill of
+ * the server's last pane takes the mark with the server (DESIGN.md, "Window closed from outside").
+ * False when tmux refused it.
+ */
+export async function markClosed(taskId: string): Promise<boolean> {
+  if (!isTaskId(taskId)) return false;
+  return (await tmux(["set-option", "-g", `${CLOSED_OPTION_PREFIX}${taskId}`, "1"])).exitCode === 0;
+}
+
+/**
+ * `show-options -g` lines `@seance-exit-<id> <status>:<signal>` and `@seance-closed-<id> <any>`; any
+ * same-uid process can set one, so ids and exit values are revalidated.
+ */
+export function parseRecorded(output: string): Recorded {
   const exits: RecordedExit[] = [];
+  const closes: string[] = [];
   for (const line of output.split("\n")) {
-    if (!line.startsWith(EXIT_OPTION_PREFIX)) continue;
     const space = line.indexOf(" ");
-    const taskId = line.slice(EXIT_OPTION_PREFIX.length, space === -1 ? undefined : space);
+    const name = line.slice(0, space === -1 ? undefined : space);
+    if (name.startsWith(CLOSED_OPTION_PREFIX)) {
+      const taskId = name.slice(CLOSED_OPTION_PREFIX.length);
+      if (isTaskId(taskId)) closes.push(taskId);
+      continue;
+    }
+    if (!name.startsWith(EXIT_OPTION_PREFIX)) continue;
+    const taskId = name.slice(EXIT_OPTION_PREFIX.length);
     if (!isTaskId(taskId)) continue;
     const value = space === -1 ? "" : line.slice(space + 1).replace(/^"(.*)"$/u, "$1");
     const [status = "", signal = ""] = value.split(":");
     exits.push({ taskId, exit: exitStatus(status, signal) });
   }
-  return exits;
+  return { exits, closes };
 }
 
 /**
@@ -232,8 +265,9 @@ export async function sampleOomPanes(deps: Pick<HarvestPanes, "list">, oom: Harv
  *
  * Order matters. The unaccounted launches are snapshotted before the listing, so a
  * launch that settles after it is not judged on a listing that predates it; the hooks'
- * recorded exits are read after it, since one may land between the two; and a failed
- * listing returns before anything is judged.
+ * recorded exits and the CLI's close marks are read after it, since one may land between
+ * the two, and settled before any dead pane is closed, since closing the server's last pane
+ * ends the server and its options; and a failed listing returns before anything is judged.
  */
 export async function harvestExits(deps: HarvestDeps): Promise<void> {
   const candidates = deps.unaccounted();
@@ -245,62 +279,89 @@ export async function harvestExits(deps: HarvestDeps): Promise<void> {
   }
   const { oom } = deps;
   const probe = oom === undefined ? undefined : perPass(oom.probe);
-  const noted = new Set<string>();
-  await Promise.all(
-    panes
-      .filter((pane) => harvestable(pane) && !registering.has(pane.windowId))
-      .map(async (pane) => {
-        if (pane.taskId !== null && pane.deadStatus !== null) {
-          const oomKill =
-            pane.deadStatus === SIGKILL_STATUS && oom !== undefined && probe !== undefined
-              ? await judgeOomKill(
-                  oom.sampled(pane.taskId),
-                  { paneId: pane.paneId, windowId: pane.windowId, deadAt: pane.deadAt },
-                  probe,
-                  oom.now,
-                  oom.timeoutMs,
-                )
-              : undefined;
-          await deps.note(pane.taskId, pane.deadStatus, oomKill);
-          noted.add(pane.taskId);
-        } else if (pane.taskId !== null) {
-          // The daemon closing a pane that kept no status, so it must not read as closed from outside.
-          await deps.closing(pane.taskId);
-        }
-        await deps.close(pane);
-      }),
+  // A launch in flight is left whole, pane included: its `startNote` would overwrite what this pass noted,
+  // and closing the server's last pane would take the recorded options with it.
+  const dead = panes.filter(
+    (pane) =>
+      harvestable(pane) &&
+      !registering.has(pane.windowId) &&
+      pane.taskId !== null &&
+      deps.launching?.(pane.taskId) !== true,
   );
-  const recorded = await settleRecordedExits(deps, noted);
+  // The options are settled before any pane is closed: closing the server's last pane ends the server,
+  // and every option with it.
+  const recorded = await settleRecordedExits(
+    deps,
+    new Set(dead.flatMap((pane) => (pane.deadStatus === null ? [] : (pane.taskId ?? [])))),
+  );
+  await Promise.all(
+    dead.map(async (pane) => {
+      if (pane.taskId !== null && pane.deadStatus !== null) {
+        const oomKill =
+          pane.deadStatus === SIGKILL_STATUS && oom !== undefined && probe !== undefined
+            ? await judgeOomKill(
+                oom.sampled(pane.taskId),
+                { paneId: pane.paneId, windowId: pane.windowId, deadAt: pane.deadAt },
+                probe,
+                oom.now,
+                oom.timeoutMs,
+              )
+            : undefined;
+        await deps.note(pane.taskId, pane.deadStatus, oomKill);
+      } else if (pane.taskId !== null) {
+        // The daemon closing a pane that kept no status, so it must not read as closed from outside.
+        await deps.closing(pane.taskId);
+      }
+      await deps.close(pane);
+    }),
+  );
   if (recorded !== null) await judgeVanished(deps, candidates, panes, recorded);
   if (oom !== undefined) await sampleLive(panes, oom);
 }
 
 /**
  * The hooks' recorded exits into the ledger, then unset: only once the note was staged, so a failed
- * one is retried next pass. A task this pass already noted from its dead pane is only unset, and so is
+ * one is retried next pass. A task this pass notes from its dead pane (`fromPane`) is only unset, and so is
  * one the ledger does not hold. One whose launch is still in flight is left unread and unset: the launch's
  * `startNote` would overwrite the exit, so a later pass picks it up. A value that is no status (a signal
  * death on a tmux without `pane_dead_signal`) notes `closedHere` first, as a pane with no status does, so
- * a close of its dead pane never reads `vanished`. Null when tmux could not be read, which judges nothing.
+ * a close of its dead pane never reads `vanished`. A close `markClosed` marked is noted `closedHere` and
+ * unset the same way, in flight launches excepted for the same reason. Null when tmux could not be read,
+ * which judges nothing.
  */
-async function settleRecordedExits(deps: HarvestDeps, noted: ReadonlySet<string>): Promise<ReadonlySet<string> | null> {
-  let recorded: readonly RecordedExit[];
+async function settleRecordedExits(
+  deps: HarvestDeps,
+  fromPane: ReadonlySet<string>,
+): Promise<ReadonlySet<string> | null> {
+  let recorded: Recorded;
   try {
-    recorded = await deps.recordedExits();
+    recorded = await deps.recorded();
   } catch {
     return null;
   }
   const accounted = new Set<string>();
-  for (const { taskId, exit } of recorded) {
+  for (const taskId of recorded.closes) {
     accounted.add(taskId);
     if (deps.launching?.(taskId) === true) continue;
     try {
-      if (exit === null && !noted.has(taskId)) {
+      // oxlint-disable-next-line no-await-in-loop -- one note each, a few at most
+      await deps.closing(taskId);
+      // oxlint-disable-next-line no-await-in-loop
+      await deps.clearClose(taskId);
+    } catch {
+      // Left in place: the next pass notes and clears it.
+    }
+  }
+  for (const { taskId, exit } of recorded.exits) {
+    accounted.add(taskId);
+    if (deps.launching?.(taskId) === true) continue;
+    try {
+      if (exit === null && !fromPane.has(taskId)) {
         // oxlint-disable-next-line no-await-in-loop -- one note each, a few at most
         await deps.closing(taskId);
       }
       // oxlint-disable-next-line no-await-in-loop -- one note each, a few at most
-      if (exit !== null && !noted.has(taskId)) await deps.note(taskId, exit);
+      if (exit !== null && !fromPane.has(taskId)) await deps.note(taskId, exit);
       // oxlint-disable-next-line no-await-in-loop
       await deps.clearExit(taskId);
     } catch {

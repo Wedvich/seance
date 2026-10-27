@@ -4467,8 +4467,8 @@ for the lot with its own `gh`.
   its window was closed", only for `exit === undefined && vanished`).
   _Notes._ Three optional ledger fields, sticky once set and written only as `true` or a pid:
   `server` (the pid of the tmux server the pane was launched on, set by `startNote` from
-  `SpawnOutcome.server`, never on the wire), `closedHere` (this daemon closed the pane: despawn,
-  reap, harvest) and `vanished`. `LaunchLedger.unaccounted()` lists launches with a `server` and none
+  `SpawnOutcome.server`, never on the wire), `closedHere` (Séance closed the pane: this daemon's despawn,
+  reap or harvest, or the CLI's despawn through its mark, below) and `vanished`. `LaunchLedger.unaccounted()` lists launches with a `server` and none
   of `exit`, `closedHere`, `vanished`; `server` is the guard for windows from before this change, which
   run under `failed` and so are never judged, and for another backend. A launch whose `startNote`
   failed to persist loses `server` on restart: not judged, the safe direction.
@@ -4492,7 +4492,21 @@ for the lot with its own `gh`.
   passes it; the CLI's `seanced reap` passes none and so leaves every dead task pane alone, since only
   the daemon can note a close), and harvest itself (a dead pane holding no status is announced as
   closing before it is closed). Reap leaves every `harvestable` pane to harvest. A clean exit is noted
-  (below), so it is not missing.
+  (below), so it is not missing. The CLI's `seanced despawn` runs in a process without the ledger, so
+  its `closing` marks the close in tmux instead (`markClosed`): a server-wide `@seance-closed-<taskId>`
+  option, set and awaited before the despawn acts, which harvest reads with the exit options (one
+  `show-options -g`, after the listing), notes as `closedHere` and unsets, and not while a launch of the
+  task is in flight (as for an exit). Set before the kill, so a listing that misses the pane postdates the
+  mark, and the read after it sees it. Its own prefix, not `@seance-exit-<id> :`: the hook may have
+  recorded a real status just before, which the CLI's write would erase; with two options an exit and
+  the close are both noted and the exit outranks, as always. The trust is the exit options': any same-uid
+  process can set one, and could already make harvest note `closedHere` by writing a non-status exit
+  value, so the mark grants nothing new; `isTaskId` gates the id on write and read, the value is ignored.
+  Rejected: routing the CLI's despawn through the local op socket (the socket proves same uid, not a
+  shell, so `origin=cli` there would be the peer's word; it would also tie the CLI to a running daemon);
+  a socket op that only notes `closedHere` while the CLI despawns in-process (survives the last-pane case
+  below, but widens the socket's allowlist and adds a trigger surface into the daemon, for the same power
+  the mark grants).
   _Exit 0 is now seen._ A task window keeps `remain-on-exit on` for its whole life (previously
   `failed`, whose clean exits closed the pane and left no status), on the window and, tmux ≥ 3.2,
   on the pane too (the pane option beat the window's `off` in a `join-pane` test on 3.7c, so a pane
@@ -4506,7 +4520,10 @@ for the lot with its own `gh`.
   reads), parses it as `exitStatus` parses a pane's (a signal is `128 + signal`), notes it, and
   unsets it only after the note was staged, and not while a launch of the task is still in flight (its
   `startNote` replaces the whole note, so an exit noted earlier would be lost; the option stays for the
-  next pass). A recorded value that is no status (a signal death on a tmux without `pane_dead_signal`)
+  next pass, and so does that task's dead pane, unnoted and unclosed). The options are settled before
+  harvest closes any dead pane: closing the server's last pane ends the server, and every option with it,
+  so a task whose clean exit the hook closed beside another pane's death would otherwise read `vanished`
+  (before 2026-10-27 the panes went first). A recorded value that is no status (a signal death on a tmux without `pane_dead_signal`)
   notes `closedHere` before it is unset, so a later close of its dead pane settles `done` as before
   rather than `vanished`. A nonzero exit leaves the dead pane for the user to read,
   as before, and is noted from the pane (the option is then only unset). A status the hook did not
@@ -4554,11 +4571,13 @@ for the lot with its own `gh`.
   deferred).
   _Residuals, each accepted._ (1) `kill-server` or a reboot loses an exit the hook recorded but harvest
   had not read yet (the option dies with the server), so that task reads `session_closed`; Continue
-  recovers it. (2) The CLI's `seanced despawn %N` runs in its own process without the ledger and
-  notes no `closedHere`: routing it through the local socket would audit a shell-typed despawn as
-  `origin=local`, breaking one origin per surface. A graceful CLI despawn makes claude exit 0, the
-  hook records it, and the task settles `done`; only the forced `kill-pane` of a pane that outlived
-  the graceful exit reads `session_closed`. A despawn or reap that notes `closedHere` and then fails
+  recovers it. (2) The CLI's `seanced despawn %N` marks its close in tmux (above), so a close of the server's
+  last pane would take the mark, and any exit the hook recorded, down with the server (`exit-empty`).
+  The graceful path avoids it: the CLI passes `leaveDeadTask`, so a task pane that dies on its `/exit`
+  is left dead for harvest to note and close (as the CLI's reap leaves them), and the dead pane shows
+  until the next `sessions` read. A forced or timed-out `kill-pane` of a live last pane still loses the
+  mark and reads `session_closed`, as for residual 1. A mark whose despawn failed to close the pane makes the task
+  unjudgeable, as below; one set while no daemon runs waits for the next harvest, or dies with the server. A despawn or reap that notes `closedHere` and then fails
   to close the pane leaves that task unjudgeable for good (`closedHere` is sticky): the safe direction,
   since a later close from outside then reads `done`, as before this change. (3) A daemon that switches tmux servers (another
   `TMUX_TMPDIR`) judges nothing while the old server runs. After a reboot a pid reused by another
@@ -4650,8 +4669,10 @@ for the lot with its own `gh`.
   A dead pane (remain-on-exit) reports a long-reaped `pane_pid`, so nothing is
   watched there at all. A despawn of a task pane first notes `closedHere` in the launch ledger
   (`DespawnOptions.closing`, awaited before it acts, so a harvest pass that lists the pane gone
-  afterwards never judges it `vanished`); the CLI's `seanced despawn` runs without the ledger and
-  does not (Daemon, "Window closed from outside", residual 2). The grace poll asks tmux about the one pane
+  afterwards never judges it `vanished`); the CLI's `seanced despawn`, without the ledger, marks the
+  close in tmux for harvest to note instead, and leaves a task pane that died on its `/exit` for harvest
+  to close (`leaveDeadTask`; Daemon, "Window closed from outside", "What is not
+  vanished", and residual 2). The grace poll asks tmux about the one pane
   (`paneInfo`), not the whole server. Rejected:
   `kill-window` (takes a split's other panes along); targeting by window name
   (wire text, not unique); answering the exit prompt with "Remove worktree"

@@ -107,7 +107,11 @@ export interface SessionBackend {
    */
   readonly despawn?: (
     id: string,
-    opts: { readonly force: boolean; readonly closing?: (taskId: string) => Promise<unknown> },
+    opts: {
+      readonly force: boolean;
+      readonly closing?: (taskId: string) => Promise<unknown>;
+      readonly leaveDeadTask?: boolean;
+    },
   ) => Promise<DespawnResult>;
   /** Backend-specific preflight for `seanced doctor`: binary presence, server probes. */
   readonly doctor: () => Promise<readonly Check[]>;

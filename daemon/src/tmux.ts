@@ -73,6 +73,14 @@ export const TASK_OPTION = "@seance-task";
 export const EXIT_OPTION_PREFIX = "@seance-exit-";
 
 /**
+ * Server-wide user option, `<prefix><taskId>`, a process without the ledger (`seanced despawn`) sets
+ * before it closes a task's pane, so the close is Séance's own and never `vanished`. Harvest notes it
+ * as `closedHere` and unsets it (`exit-status.ts`). Same trust as `EXIT_OPTION_PREFIX`: any same-uid
+ * process can set one, so the id is revalidated and the value ignored.
+ */
+export const CLOSED_OPTION_PREFIX = "@seance-closed-";
+
+/**
  * `TASK_OPTION` as a format field. Any same-uid process can set the option, so
  * the separator is substituted out in tmux and the value is revalidated on read.
  */

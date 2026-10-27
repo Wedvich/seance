@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { pollUntil } from "../test/fixtures.ts";
-import { harvestable, harvestExits, parseRecordedExits, whileRegistering } from "./exit-status.ts";
+import { harvestable, harvestExits, parseRecorded, whileRegistering } from "./exit-status.ts";
 import { LaunchLedger } from "./launch-ledger.ts";
 import { OOM_WINDOW_MS, type OomProbe } from "./oom-kill.ts";
 import { EndedTasks } from "./session-events.ts";
@@ -12,8 +12,9 @@ const idle = {
   unaccounted: () => [],
   vanished: () => Promise.resolve(),
   server: () => Promise.resolve(null),
-  recordedExits: () => Promise.resolve([]),
+  recorded: () => Promise.resolve({ exits: [], closes: [] }),
   clearExit: () => Promise.resolve(),
+  clearClose: () => Promise.resolve(),
 };
 
 function pane(paneId: string, fields: Partial<PaneInfo> = {}): PaneInfo {
@@ -428,6 +429,7 @@ describe("a window closed from outside", () => {
       server?: number | null;
       candidateServer?: number;
       recorded?: { taskId: string; exit: number | null }[];
+      closes?: string[];
       listFails?: boolean;
       vanishedFails?: boolean;
     } = {},
@@ -452,8 +454,9 @@ describe("a window closed from outside", () => {
             return opts.vanishedFails === true ? Promise.reject(new Error("disk")) : Promise.resolve();
           },
           server: () => Promise.resolve(opts.server === undefined ? 100 : opts.server),
-          recordedExits: () => Promise.resolve(opts.recorded ?? []),
+          recorded: () => Promise.resolve({ exits: opts.recorded ?? [], closes: opts.closes ?? [] }),
           clearExit: (taskId) => Promise.resolve(void events.push(`clear ${taskId}`)),
+          clearClose: (taskId) => Promise.resolve(void events.push(`unmark ${taskId}`)),
         }),
     };
   }
@@ -512,16 +515,76 @@ describe("a window closed from outside", () => {
       ],
     });
     await run();
+    // Every option is settled before a pane is closed: closing the server's last pane would end the server with them.
     expect(events).toEqual([
-      "note task-1 2",
-      "close %1",
       "note task-9 0",
       "clear task-9",
       "clear task-1",
       // No parseable status: announced as closing first, so the user closing its dead pane never reads vanished.
       "closing task-x",
       "clear task-x",
+      "note task-1 2",
+      "close %1",
     ]);
+  });
+
+  test("a close the CLI marked is noted closing, unset, and keeps its task from being judged; beside an exit, both are noted", async () => {
+    const { events, run } = pass([], {
+      candidates: ["task-8", "task-9"],
+      closes: ["task-9", "task-8"],
+      recorded: [{ taskId: "task-8", exit: 1 }],
+    });
+    await run();
+    expect(events).toEqual([
+      "closing task-9",
+      "unmark task-9",
+      "closing task-8",
+      "unmark task-8",
+      "note task-8 1",
+      "clear task-8",
+    ]);
+  });
+
+  test("a dead pane whose task's launch is in flight is neither noted nor closed until the launch settles", async () => {
+    const events: string[] = [];
+    const ledger = LaunchLedger.memory();
+    const tasks = new EndedTasks(ledger, Date.now, {
+      list: () => Promise.resolve([pane("%1", { deadStatus: 0 })]),
+      close: (p) => Promise.resolve(void events.push(`close ${p.paneId}`)),
+      server: () => Promise.resolve(100),
+      recorded: () => Promise.resolve({ exits: [], closes: [] }),
+      clearExit: () => Promise.resolve(),
+      clearClose: () => Promise.resolve(),
+    });
+    const settle = await tasks.launch("task-1");
+    await tasks.harvestExits();
+    expect(events).toEqual([]);
+    expect(tasks.progress()).toEqual([]);
+    await settle(true, { server: 100 });
+    await tasks.harvestExits();
+    expect(events).toEqual(["close %1"]);
+    expect(tasks.progress()).toEqual([expect.objectContaining({ taskId: "task-1", exit: 0 })]);
+  });
+
+  test("a close marked while the task's launch is in flight is left for a later pass, so startNote cannot overwrite it", async () => {
+    const events: string[] = [];
+    const ledger = LaunchLedger.memory();
+    const tasks = new EndedTasks(ledger, Date.now, {
+      list: () => Promise.resolve([]),
+      close: () => Promise.resolve(),
+      server: () => Promise.resolve(100),
+      recorded: () => Promise.resolve({ exits: [], closes: ["task-1"] }),
+      clearExit: () => Promise.resolve(),
+      clearClose: (taskId) => Promise.resolve(void events.push(`unmark ${taskId}`)),
+    });
+    const settle = await tasks.launch("task-1");
+    await tasks.harvestExits();
+    expect(events).toEqual([]);
+    await settle(true, { server: 100 });
+    await tasks.harvestExits();
+    expect(events).toEqual(["unmark task-1"]);
+    // Its pane is in no listing and the server answering is its own, yet it is the close's, not vanished.
+    expect(tasks.progress()[0]?.vanished).toBeUndefined();
   });
 
   test("the server pid is read only when some candidate is neither carried nor recorded", async () => {
@@ -537,7 +600,7 @@ describe("a window closed from outside", () => {
           reads += 1;
           return Promise.resolve(100);
         },
-        recordedExits: () => Promise.resolve(recorded),
+        recorded: () => Promise.resolve({ exits: recorded, closes: [] }),
       });
     await run([pane("%9", { taskId: "task-9", dead: false, deadStatus: null })], []);
     await run([], [{ taskId: "task-9", exit: 0 }]);
@@ -553,8 +616,9 @@ describe("a window closed from outside", () => {
       list: () => Promise.resolve([]),
       close: () => Promise.resolve(),
       server: () => Promise.resolve(100),
-      recordedExits: () => Promise.resolve([{ taskId: "task-1", exit: 0 }]),
+      recorded: () => Promise.resolve({ exits: [{ taskId: "task-1", exit: 0 }], closes: [] }),
       clearExit: (taskId) => Promise.resolve(void events.push(`clear ${taskId}`)),
+      clearClose: () => Promise.resolve(),
     });
     const settle = await tasks.launch("task-1");
     await tasks.harvestExits();
@@ -587,7 +651,7 @@ describe("a window closed from outside", () => {
     expect(same.events).toEqual(["vanished task-9"]);
   });
 
-  test("parseRecordedExits reads the hook's value like a pane's status, and drops a foreign id", () => {
+  test("parseRecorded reads the hook's value like a pane's status, takes a close mark's id alone, and drops a foreign id", () => {
     const output = [
       "@seance-exit-a 0:",
       "@seance-exit-b 3:",
@@ -595,14 +659,20 @@ describe("a window closed from outside", () => {
       "@seance-exit-d :",
       '@seance-exit-e "7:"',
       "@seance-exit-bad|id 1:",
+      "@seance-closed-f 1",
+      '@seance-closed-g "anything"',
+      "@seance-closed-bad|id 1",
       "@other 1:",
     ].join("\n");
-    expect(parseRecordedExits(output)).toEqual([
-      { taskId: "a", exit: 0 },
-      { taskId: "b", exit: 3 },
-      { taskId: "c", exit: 137 },
-      { taskId: "d", exit: null },
-      { taskId: "e", exit: 7 },
-    ]);
+    expect(parseRecorded(output)).toEqual({
+      exits: [
+        { taskId: "a", exit: 0 },
+        { taskId: "b", exit: 3 },
+        { taskId: "c", exit: 137 },
+        { taskId: "d", exit: null },
+        { taskId: "e", exit: 7 },
+      ],
+      closes: ["f", "g"],
+    });
   });
 });

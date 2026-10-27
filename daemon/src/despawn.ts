@@ -27,6 +27,12 @@ export interface DespawnOptions {
    * `vanished` (`exit-status.ts`): noted first, a harvest pass that lists the pane gone sees it.
    */
   readonly closing?: (taskId: string) => Promise<unknown>;
+  /**
+   * A task pane that dies during the graceful exit is left for harvest to note and close. For a process
+   * without the ledger (`seanced despawn`): the pane-died hook keeps the server's last pane dead, and
+   * closing it here would take tmux down (`exit-empty`) with the recorded exit and the close mark.
+   */
+  readonly leaveDeadTask?: boolean;
 }
 
 /**
@@ -45,7 +51,8 @@ export async function despawnSession(id: string, opts: DespawnOptions): Promise<
   }
   const window = pane.windowName;
   if (pane.taskId !== null) await opts.closing?.(pane.taskId);
-  if (!opts.force && (await exitGracefully(pane, opts.graceMs ?? DEFAULT_GRACE_MS))) {
+  const leaveDead = opts.leaveDeadTask === true && pane.taskId !== null;
+  if (!opts.force && (await exitGracefully(pane, opts.graceMs ?? DEFAULT_GRACE_MS, leaveDead))) {
     return { window, outcome: "exited" };
   }
   await killPane(id, opts.reapWaitMs ?? DEFAULT_REAP_WAIT_MS);
@@ -81,7 +88,7 @@ async function askToExit(paneId: string): Promise<void> {
 }
 
 /** True once the pane is gone; false when it outlived the grace. */
-async function exitGracefully(pane: PaneInfo, graceMs: number): Promise<boolean> {
+async function exitGracefully(pane: PaneInfo, graceMs: number, leaveDead: boolean): Promise<boolean> {
   const deadline = Date.now() + graceMs;
   // Already on the prompt — answering it is the whole exit.
   let answered = (await classifyPane(pane)) === "exit-prompt";
@@ -95,6 +102,7 @@ async function exitGracefully(pane: PaneInfo, graceMs: number): Promise<boolean>
     const state = await classifyPane(now);
     // claude has gone; what is left is a pane remain-on-exit kept, or the shell a
     // hand-started claude ran from, and closing the window was the point.
+    if (state === "dead" && leaveDead) return true;
     if (state === "dead" || state === "shell") {
       // oxlint-disable-next-line no-await-in-loop
       await tmux(["kill-pane", "-t", pane.paneId]);
