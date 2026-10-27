@@ -1,7 +1,7 @@
 import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { DEFAULT_EFFORT, DEFAULT_MODEL, type RepoEntry, type SpawnRequest } from "@seance/shared";
+import { DEFAULT_EFFORT, DEFAULT_MODEL, isTaskId, type RepoEntry, type SpawnRequest } from "@seance/shared";
 import { SpawnFailure, type Continuation, type SpawnOutcome } from "./backend.ts";
 import { freshenBase } from "./base-fetch.ts";
 import { git } from "./exec.ts";
@@ -14,6 +14,7 @@ import { parseWorktreeList, parseWorktreeLock } from "./reap-git.ts";
 import { isRegistered, listPanes, paneRunningTask, type PaneInfo } from "./sessions.ts";
 import {
   capturePane,
+  EXIT_OPTION_PREFIX,
   FIELD_SEP,
   PANE_TITLED,
   resolveTargetSession,
@@ -137,8 +138,17 @@ const RESUME_NEVER_ASKS = [
  * wording comes from the old task's own ledger note `exit`, never from a frame: nonzero
  * is a death, anything else (zero, or none noted) a cancel.
  */
-export function continuePreamble(path: string, exit: number | undefined): string {
+export function continuePreamble(path: string, exit: number | undefined, vanished?: boolean): string {
   const prefix = `This session was resumed by séance in the same git worktree at ${path}, after the previous session `;
+  if (exit === undefined && vanished === true) {
+    return (
+      prefix +
+      `ended when its window was closed (closed by hand, or its tmux server or machine stopped) partway ` +
+      `through. Its last tool call may not have finished, and processes it started in the background may ` +
+      `still be running: check the worktree's state and running processes before restarting anything, ` +
+      `then carry on where it left off.`
+    );
+  }
   if (exit !== undefined && exit !== 0) {
     return (
       prefix +
@@ -200,14 +210,14 @@ function prepareHere(repo: RepoEntry): Prepared {
 }
 
 /** `path` is the ledger's worktree, already canonical and checked (`spawnContinued`). */
-function prepareContinue(path: string, exit: number | undefined): Prepared {
+function prepareContinue(path: string, exit: number | undefined, vanished?: boolean): Prepared {
   return {
     launchDir: path,
     resultPath: path,
     worktreeFlag: [],
     resume: true,
     env: RESUME_NEVER_ASKS,
-    preamble: continuePreamble(path, exit),
+    preamble: continuePreamble(path, exit, vanished),
   };
 }
 
@@ -296,11 +306,11 @@ export async function captureWindow(windowId: string, opts: { readonly history: 
  * registered", the shape of a claude sitting on a dialog no remote can answer.
  * Ported from /spawn.
  *
- * Past it a task's window keeps `remain-on-exit failed`: a clean exit closes it
- * as any window closes, and any other leaves the pane dead with its status for
- * `harvestExits` (`exit-status.ts`) to note before it closes it. A tmux older
- * than 3.2 refuses `failed`; that window gets `off`, and its task settles by
- * its PR alone, as before exit statuses.
+ * Past it a task's window keeps `remain-on-exit on`, so every exit, a clean one
+ * included, leaves a dead pane holding its status for `harvestExits`
+ * (`exit-status.ts`) to note before it closes it (`armTask` adds the hook that
+ * closes a clean one at once). A clean exit must leave a status: "no status" is
+ * how a window closed from outside reads. Any other window gets `off`.
  */
 async function awaitRegistration(windowId: string, waitMs: number, task: boolean): Promise<boolean> {
   await tmuxOk(["set-option", "-w", "-t", windowId, "remain-on-exit", "on"]);
@@ -329,8 +339,7 @@ async function awaitRegistration(windowId: string, waitMs: number, task: boolean
     await tmux(["kill-window", "-t", windowId]);
     throw new SpawnFailure("claude_died", `claude exited before the session started:\n${captured ?? "(no output)"}`);
   }
-  const kept = task && (await tmux(["set-option", "-w", "-t", windowId, "remain-on-exit", "failed"])).exitCode === 0;
-  if (!kept) await tmuxOk(["set-option", "-w", "-t", windowId, "remain-on-exit", "off"]);
+  if (!task) await tmuxOk(["set-option", "-w", "-t", windowId, "remain-on-exit", "off"]);
   return titled;
 }
 
@@ -351,6 +360,37 @@ async function tagTask(windowId: string, taskId: string): Promise<void> {
     }
     throw new SpawnFailure("launch_error", `could not record the task on the session: ${String(err)}`);
   }
+}
+
+/** The per-pane `pane-died` hook's one body: tmux commands only, no shell, the task id its only interpolation. */
+function exitHook(taskId: string): string {
+  return (
+    `set-option -gF ${EXIT_OPTION_PREFIX}${taskId} '#{pane_dead_status}:#{pane_dead_signal}' ; ` +
+    `if-shell -F '#{==:#{pane_dead_status},0}' 'kill-pane'`
+  );
+}
+
+/**
+ * Keeps a registered task's pane for harvest and hooks its death. Returns the tmux server's pid, which
+ * is what lets `harvestExits` judge the pane `vanished` later; undefined (never judged) when the id
+ * is not a task id, the hook could not be set, or no pid reads. Runs inside `whileRegistering`, so a
+ * harvest pass leaves the pane alone meanwhile.
+ *
+ * The hook is per pane, never `-g`/`-ga`: it shadows a global `pane-died` for this pane only (DESIGN.md,
+ * "Window closed from outside"). It records the death in a server-wide option, then closes a clean
+ * exit's pane. The pane option beats the window's, so a pane `join-pane`d elsewhere stays kept; a
+ * tmux without `-p` keeps the window-level `on` and hooks the window instead.
+ */
+async function armTask(windowId: string, taskId: string): Promise<number | undefined> {
+  if (!isTaskId(taskId)) return undefined;
+  const pane = (await tmux(["display-message", "-p", "-t", windowId, "#{pane_id}"])).stdout.trim();
+  if (!/^%\d+$/u.test(pane)) return undefined;
+  await tmux(["set-option", "-p", "-t", pane, "remain-on-exit", "on"]);
+  let hooked = (await tmux(["set-hook", "-p", "-t", pane, "pane-died", exitHook(taskId)])).exitCode === 0;
+  hooked ||= (await tmux(["set-hook", "-w", "-t", windowId, "pane-died", exitHook(taskId)])).exitCode === 0;
+  if (!hooked) return undefined;
+  const pid = Number((await tmux(["display-message", "-p", "#{pid}"])).stdout.trim());
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
 }
 
 export interface SpawnOptions {
@@ -549,7 +589,7 @@ async function continueLocked(
 
   const name = basename(path);
   const windowName = sanitizeWindowName(request.title ?? name);
-  const prepared = prepareContinue(path, continuation.exit);
+  const prepared = prepareContinue(path, continuation.exit, continuation.vanished);
   const inner = await buildInnerCommand(prepared, sessionName(name, opts.machineTag), request);
   return launchWindow(prepared, inner, windowName, request, opts);
 }
@@ -606,6 +646,7 @@ async function launchWindow(
   const target = await resolveTargetSession(opts.tmuxSession);
   let windowId: string;
   let registered: boolean;
+  let server: number | undefined;
   try {
     try {
       windowId = (
@@ -630,9 +671,11 @@ async function launchWindow(
     }
     if (request.taskId !== undefined) await tagTask(windowId, request.taskId);
 
-    registered = await whileRegistering(windowId, () =>
-      awaitRegistration(windowId, opts.waitMs ?? 5_000, request.taskId !== undefined),
-    );
+    registered = await whileRegistering(windowId, async () => {
+      const titled = await awaitRegistration(windowId, opts.waitMs ?? 5_000, request.taskId !== undefined);
+      if (request.taskId !== undefined) server = await armTask(windowId, request.taskId);
+      return titled;
+    });
   } finally {
     if (inner.seedDir !== null) await rm(inner.seedDir, { recursive: true, force: true });
   }
@@ -643,5 +686,6 @@ async function launchWindow(
     registered,
     handle: windowId,
     ...(note === undefined ? {} : { note }),
+    ...(server === undefined ? {} : { server }),
   };
 }

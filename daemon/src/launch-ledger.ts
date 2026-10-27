@@ -77,6 +77,20 @@ export interface TaskNote {
   /** The session's exit status, noted from its dead pane before the pane is closed (`exit-status.ts`). */
   readonly exit?: number;
   /**
+   * The pid of the tmux server the task's pane was launched on, under `remain-on-exit on` with the
+   * per-pane `pane-died` hook (`spawn.ts`): what makes the task one harvest may judge `vanished`, and
+   * which server's listing may judge it. Sticky; internal, never in `TaskProgress`. A launch from
+   * before this field, or on another backend, has none and is never judged.
+   */
+  readonly server?: number;
+  /** This daemon closed the pane itself (despawn, reap, harvest): never judged `vanished`. Sticky; internal. */
+  readonly closedHere?: true;
+  /**
+   * The pane went from tmux with no exit status and no close of this daemon's own (`exit-status.ts`):
+   * `TaskProgress.vanished`, carried only while `exit` is absent. Sticky.
+   */
+  readonly vanished?: true;
+  /**
    * Its pane's cgroup `oom_kill` count as last seen while the pane lived (`oom-kill.ts`), with the pane
    * it came from; internal, never in `TaskProgress`. Here so a restart keeps the baseline. Rewritten
    * on a change or once `OOM_REFRESH_MS` old, so it stands for a recent pass that saw the pane alive.
@@ -135,8 +149,26 @@ function boundedText(value: unknown, max: number): string | undefined {
 /** One entry, field by field: a bad field is dropped, a bad entry is skipped, never the file. */
 function parseNote(raw: unknown, ids: ReadonlySet<string>): NotedTask | null {
   if (!isRecord(raw)) return null;
-  const { taskId, at, siteAt, repo, path, branch, tip, ahead, pushed, merged, reported, prUrl, exit, oom, oomKill } =
-    raw;
+  const {
+    taskId,
+    at,
+    siteAt,
+    repo,
+    path,
+    branch,
+    tip,
+    ahead,
+    pushed,
+    merged,
+    reported,
+    prUrl,
+    exit,
+    oom,
+    oomKill,
+    server,
+    closedHere,
+    vanished,
+  } = raw;
   if (typeof taskId !== "string" || !ids.has(taskId) || typeof at !== "number" || !Number.isFinite(at)) return null;
   const repoText = boundedText(repo, PATH_MAX_LENGTH);
   const pathText = boundedText(path, PATH_MAX_LENGTH);
@@ -159,7 +191,18 @@ function parseNote(raw: unknown, ids: ReadonlySet<string>): NotedTask | null {
     ...(isExitStatus(exit) ? { exit } : {}),
     ...(isOomSample(oom) ? { oom } : {}),
     ...(typeof oomKill === "boolean" ? { oomKill } : {}),
+    ...(isServerPid(server) ? { server } : {}),
+    ...(closedHere === true ? { closedHere: true as const } : {}),
+    ...(vanished === true ? { vanished: true as const } : {}),
   };
+}
+
+function isServerPid(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function isUnaccounted(note: NotedTask): boolean {
+  return note.exit === undefined && note.closedHere === undefined && note.vanished === undefined;
 }
 
 function isExitStatus(value: unknown): value is number {
@@ -231,6 +274,13 @@ function mergeNote(taskId: string, base: NotedTask | undefined, patch: TaskNote)
     ...(patch.pushed === true || base?.pushed === true ? { pushed: true as const } : {}),
     ...(patch.merged === true || base?.merged === true ? { merged: true as const } : {}),
     ...(patch.reported === true || base?.reported === true ? { reported: true as const } : {}),
+    ...(patch.server !== undefined
+      ? { server: patch.server }
+      : base?.server !== undefined
+        ? { server: base.server }
+        : {}),
+    ...(patch.closedHere === true || base?.closedHere === true ? { closedHere: true as const } : {}),
+    ...(patch.vanished === true || base?.vanished === true ? { vanished: true as const } : {}),
   };
 }
 
@@ -259,12 +309,14 @@ function sameProgress(a: NotedTask, b: NotedTask): boolean {
     a.pushed === b.pushed &&
     a.merged === b.merged &&
     a.reported === b.reported &&
-    a.oomKill === b.oomKill
+    a.oomKill === b.oomKill &&
+    a.vanished === b.vanished
   );
 }
 
+/** `server` and `closedHere` write but are no progress: they never move `at`. */
 function sameNote(a: NotedTask, b: NotedTask): boolean {
-  return sameProgress(a, b) && sameSample(a.oom, b.oom);
+  return sameProgress(a, b) && sameSample(a.oom, b.oom) && a.server === b.server && a.closedHere === b.closedHere;
 }
 
 export class LaunchLedger {
@@ -453,9 +505,10 @@ export class LaunchLedger {
     taskId: string,
     site?: { readonly repo: string; readonly path: string },
     prUrl?: string,
+    server?: number,
   ): Promise<void> {
     if (!this.#tasks.has(taskId)) return;
-    if (site === undefined && prUrl === undefined) {
+    if (site === undefined && prUrl === undefined && server === undefined) {
       if (!this.#notes.delete(taskId)) return;
     } else {
       const at = this.#now();
@@ -464,6 +517,7 @@ export class LaunchLedger {
         at,
         ...(site === undefined ? {} : { siteAt: at, repo: site.repo, path: site.path }),
         ...(prUrl === undefined ? {} : { prUrl }),
+        ...(server === undefined ? {} : { server }),
       });
     }
     try {
@@ -498,7 +552,8 @@ export class LaunchLedger {
         note.pushed === undefined &&
         note.merged === undefined &&
         note.reported === undefined &&
-        note.exit === undefined
+        note.exit === undefined &&
+        note.vanished === undefined
       )
         continue;
       const entry: TaskProgress = {
@@ -511,6 +566,8 @@ export class LaunchLedger {
         ...(note.reported === undefined ? {} : { reported: note.reported }),
         ...(note.exit === undefined ? {} : { exit: note.exit }),
         ...(note.oomKill === undefined || note.exit !== SIGKILL_STATUS ? {} : { oomKill: note.oomKill }),
+        // An exit always outranks it: a pane that left a status was not closed from outside.
+        ...(note.vanished === true && note.exit === undefined ? { vanished: true as const } : {}),
       };
       if (parseTaskProgressList([entry]) === null) {
         warnProgressDropped();
@@ -519,6 +576,41 @@ export class LaunchLedger {
       out.push(entry);
     }
     return out;
+  }
+
+  /**
+   * Launches whose pane was kept under a known tmux server and that nothing has accounted for yet:
+   * no exit, no close of this daemon's own, not already vanished. `recordedAt` is the launch's
+   * `record` time, which `noteVanished` re-checks so a relaunch is never judged on its predecessor.
+   */
+  unaccounted(): readonly { readonly taskId: string; readonly recordedAt: number; readonly server: number }[] {
+    this.#evict();
+    const out: { taskId: string; recordedAt: number; server: number }[] = [];
+    for (const [taskId, recordedAt] of this.#tasks) {
+      const note = this.#notes.get(taskId);
+      if (note?.server === undefined || !isUnaccounted(note)) continue;
+      out.push({ taskId, recordedAt, server: note.server });
+    }
+    return out;
+  }
+
+  /**
+   * Notes `vanished` when the launch `recordedAt` still stands and nothing accounted for it meanwhile.
+   * The check and the staging are one synchronous span, so a despawn or reap that noted `closedHere`
+   * (or a relaunch) first always wins. False when it refused.
+   */
+  async noteVanished(taskId: string, recordedAt: number): Promise<boolean> {
+    if (this.#tasks.get(taskId) !== recordedAt) return false;
+    const note = this.#notes.get(taskId);
+    if (note?.server === undefined || !isUnaccounted(note)) return false;
+    if (this.#stage(taskId, { vanished: true }) !== "written") return false;
+    log.info(`launch ledger: task ${taskId}'s window closed with no exit status (vanished)`);
+    try {
+      await this.#persist();
+    } catch (err) {
+      log.warn(`launch ledger: could not record task progress (${String(err)})`);
+    }
+    return true;
   }
 
   #evict(): void {

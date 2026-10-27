@@ -152,7 +152,10 @@ export const ENDED_MAX = 128;
  * is where a worktree-mode launch landed, noted before the launch counts as
  * over so a `sessions` waiting on `settled` sees it.
  */
-export type SettleLaunch = (launched: boolean, landed?: { readonly site?: LaunchSite }) => Promise<void>;
+export type SettleLaunch = (
+  launched: boolean,
+  landed?: { readonly site?: LaunchSite; readonly server?: number },
+) => Promise<void>;
 
 /**
  * The `sessions` reply's `ended` and `ledgerSince` — the backstop for a
@@ -254,7 +257,12 @@ export class EndedTasks {
       try {
         const site = landed?.site;
         if (launched && landed !== undefined) {
-          await this.#ledger.startNote(taskId, site && { repo: site.repo, path: site.worktree }, launches.prUrl);
+          await this.#ledger.startNote(
+            taskId,
+            site && { repo: site.repo, path: site.worktree },
+            launches.prUrl,
+            landed?.server,
+          );
           sample = true;
         }
       } finally {
@@ -289,6 +297,30 @@ export class EndedTasks {
     return this.#ledger.progress();
   }
 
+  /**
+   * This daemon is about to close the task's pane (despawn, reap): noted first, so the pane going
+   * missing never reads as `vanished`. Best-effort; a failed note only risks a false `vanished` on a
+   * close the leader itself asked for, which settles the task `failed` it was already ending.
+   */
+  async closing(taskId: string): Promise<void> {
+    try {
+      await this.#ledger.note(taskId, { closedHere: true });
+    } catch (err) {
+      log.warn(`launch ledger: could not note that task ${taskId} is being closed (${String(err)})`);
+    }
+  }
+
+  /** Launches harvest may judge, minus any whose spawn is still in flight or registering. */
+  unaccounted(): readonly { readonly taskId: string; readonly recordedAt: number; readonly server: number }[] {
+    return this.#ledger.unaccounted().filter((launch) => !this.#launches.has(launch.taskId));
+  }
+
+  /** Notes `vanished` unless a launch is in flight or the ledger refuses it (`LaunchLedger.noteVanished`). */
+  vanished(taskId: string, recordedAt: number): Promise<boolean> {
+    if (this.#launches.has(taskId)) return Promise.resolve(false);
+    return this.#ledger.noteVanished(taskId, recordedAt);
+  }
+
   /** Each dead task pane's exit status into the ledger, then the pane closed (`exit-status.ts`). */
   async harvestExits(): Promise<void> {
     if (this.#panes === undefined) return;
@@ -296,6 +328,9 @@ export class EndedTasks {
       ...this.#panes,
       note: (taskId, exit, oomKill) =>
         this.#ledger.note(taskId, { exit, ...(oomKill === undefined ? {} : { oomKill }) }),
+      closing: (taskId) => this.closing(taskId),
+      unaccounted: () => this.unaccounted(),
+      vanished: (launch) => this.vanished(launch.taskId, launch.recordedAt),
       ...(this.#oom === undefined ? {} : { oom: this.#oom }),
     });
   }
@@ -329,7 +364,9 @@ export class EndedTasks {
    */
   continuation(
     taskId: string,
-  ): { readonly repo: string; readonly path: string; readonly exit?: number } | { readonly refused: string } {
+  ):
+    | { readonly repo: string; readonly path: string; readonly exit?: number; readonly vanished?: true }
+    | { readonly refused: string } {
     if (this.#launches.has(taskId)) return { refused: "a launch of it is still in flight here" };
     if (!this.#ledger.ids().includes(taskId)) {
       return { refused: "this machine holds no launch of it (its launch ledger keeps a week, at most 128 launches)" };
@@ -345,7 +382,12 @@ export class EndedTasks {
         refused: `task ${owner.taskId} ran in its worktree ${note.path} after it, so resuming would pick up that session; continue that task instead`,
       };
     }
-    return { repo: note.repo, path: note.path, ...(note.exit === undefined ? {} : { exit: note.exit }) };
+    return {
+      repo: note.repo,
+      path: note.path,
+      ...(note.exit === undefined ? {} : { exit: note.exit }),
+      ...(note.vanished === true && note.exit === undefined ? { vanished: true as const } : {}),
+    };
   }
 
   /**

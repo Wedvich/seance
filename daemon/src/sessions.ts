@@ -248,7 +248,7 @@ export function parsePaneInfo(raw: string): readonly PaneInfo[] {
 }
 
 /** tmux prints the status only for a process that exited and the signal only for one it killed; one field is empty. */
-function exitStatus(raw: string, signal: string): number | null {
+export function exitStatus(raw: string, signal: string): number | null {
   if (/^\d{1,3}$/u.test(raw)) {
     const status = Number(raw);
     return status <= EXIT_STATUS_MAX ? status : null;

@@ -36,7 +36,7 @@ export function createBackend(
         continuation,
       ),
     sessions: (repos) => listClaudeSessions(repos),
-    despawn: (id, { force }) => despawnSession(id, { force }),
+    despawn: (id, request) => despawnSession(id, request),
     doctor: tmuxChecks,
     capture: (handle) => captureWindow(handle, { history: false }),
     start: async () => {

@@ -384,6 +384,7 @@ describe("a task's launch is recorded before it runs", () => {
       launch: () => Promise.reject(new Error("disk full")),
       launched: () => false,
       continuation: () => ({ refused: "unused" }),
+      closing: () => Promise.resolve(),
       settled: () => Promise.resolve(),
       report: () => ({ ended: [], ledgerSince: 0 }),
       progress: () => [],
@@ -402,6 +403,7 @@ describe("a task's launch is recorded before it runs", () => {
       launch: () => Promise.reject(new Error("unused")),
       launched: () => false,
       continuation: () => ({ refused: "unused" }),
+      closing: () => Promise.resolve(),
       settled: () => Promise.resolve(),
       report: () => ({ ended: [], ledgerSince: 0 }),
       progress: () => {
@@ -424,6 +426,27 @@ describe("a task's launch is recorded before it runs", () => {
     const reply = await sessionsOf(createHandler({ ...ctx, backend: listing, tasks }));
     expect(events).toEqual(["list", "harvest", "progress"]);
     expect(reply.progress).toEqual([expect.objectContaining({ taskId: "t-1", exit: 3 })]);
+  });
+
+  test("a sessions reply carries vanished from the harvest it ran: a launched task whose pane is in no listing", async () => {
+    const ledger = LaunchLedger.memory();
+    const tasks = new EndedTasks(ledger, Date.now, {
+      list: () => Promise.resolve([]),
+      close: () => Promise.resolve(),
+      server: () => Promise.resolve(4321),
+      recordedExits: () => Promise.resolve([]),
+      clearExit: () => Promise.resolve(),
+    });
+    const { backend } = taskBackend(() => Promise.resolve());
+    const served: SessionBackend = {
+      ...backend,
+      spawn: () => Promise.resolve({ window: "w", path: "/p", registered: true, server: 4321 }),
+      sessions: () => Promise.resolve([]),
+    };
+    const handle = createHandler({ ...ctx, backend: served, tasks });
+    expect((await handle(spawnTask("t-gone")))?.payload).toMatchObject({ ok: true });
+    const reply = await sessionsOf(createHandler({ ...ctx, backend: served, tasks }));
+    expect(reply.progress).toEqual([expect.objectContaining({ taskId: "t-gone", vanished: true })]);
   });
 
   describe("a scheduler spawn for a task the ledger holds as launched", () => {
@@ -656,6 +679,37 @@ describe("despawn is audited and answers with the list it left", () => {
     );
     expect(payload).toEqual({ ok: true, window: "late-riser", outcome: "exited", sessions: [] });
     expect(logged()).toContain('audit despawn origin=relay ok window="late-riser" outcome=exited');
+  });
+
+  test("a despawn hands the backend a closing hook that notes the task on the ledger first", async () => {
+    const closedIds: string[] = [];
+    let seen: ((taskId: string) => Promise<unknown>) | undefined;
+    const tasks: TaskLaunches = {
+      launch: () => Promise.reject(new Error("unused")),
+      launched: () => false,
+      continuation: () => ({ refused: "unused" }),
+      closing: (taskId) => Promise.resolve(void closedIds.push(taskId)),
+      settled: () => Promise.resolve(),
+      report: () => ({ ended: [], ledgerSince: 0 }),
+      progress: () => [],
+    };
+    const backend: SessionBackend = {
+      spawn: () => Promise.reject(new Error("unused")),
+      sessions: () => Promise.resolve([]),
+      doctor: () => Promise.resolve([]),
+      despawn: (_id, opts) => {
+        seen = opts.closing;
+        return Promise.resolve({ window: "w", outcome: "killed" });
+      },
+    };
+    const reply = await createHandler({ ...ctx, backend, tasks })(request("despawn", { id: "%1" }));
+    expect(reply?.payload).toMatchObject({ ok: true });
+    await seen?.("t-1");
+    expect(closedIds).toEqual(["t-1"]);
+    // No ledger on this daemon: nothing to note, nothing passed.
+    seen = undefined;
+    await createHandler({ ...ctx, backend })(request("despawn", { id: "%1" }));
+    expect(seen).toBeUndefined();
   });
 
   test("a backend that can't despawn answers with a code instead of dropping the request", async () => {

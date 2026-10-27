@@ -83,7 +83,11 @@ export interface TaskLaunches {
    */
   readonly continuation: (
     taskId: string,
-  ) => { readonly repo: string; readonly path: string; readonly exit?: number } | { readonly refused: string };
+  ) =>
+    | { readonly repo: string; readonly path: string; readonly exit?: number; readonly vanished?: true }
+    | { readonly refused: string };
+  /** The daemon is about to close this task's pane itself; never judged vanished. */
+  readonly closing: (taskId: string) => Promise<void>;
   /** Resolves once no launch is in flight. */
   readonly settled: () => Promise<void>;
   /** What the ledger holds of each launched task's PR and branch, for the scheduler's `sessions`. */
@@ -244,7 +248,11 @@ async function continuationSite(
   if (real !== site.path || !real.startsWith(join(entry.path, ".claude", "worktrees") + sep)) {
     return notContinuable(`its noted path ${site.path} is not a worktree of ${request.repo}`);
   }
-  return { path: real, ...(site.exit === undefined ? {} : { exit: site.exit }) };
+  return {
+    path: real,
+    ...(site.exit === undefined ? {} : { exit: site.exit }),
+    ...(site.vanished === true ? { vanished: true as const } : {}),
+  };
 }
 
 async function handleSpawn(
@@ -310,7 +318,10 @@ async function handleSpawn(
     // Only a worktree has a branch of its own to watch; `here` runs in the clone itself.
     // A continuation watches the worktree it resumed, under its new task id.
     const entry = payload.mode !== "here" ? repos.find((r) => r.name === payload.repo) : undefined;
-    await settle?.(true, entry === undefined ? {} : { site: { repo: entry.path, worktree: outcome.path } });
+    await settle?.(true, {
+      ...(entry === undefined ? {} : { site: { repo: entry.path, worktree: outcome.path } }),
+      ...(outcome.server === undefined ? {} : { server: outcome.server }),
+    });
     await audit.ok(outcome);
     // The app writes this list straight into its cache, so it is read only now,
     // after the backend has watched the new window register (or give up): a
@@ -349,8 +360,12 @@ async function handleDespawn(ctx: HandlerContext, audit: DespawnAudit, payload: 
     return { ok: false, code: "internal_error", message: "this machine's session backend cannot despawn" };
   }
   let result: DespawnResult;
+  const tasks = ctx.tasks;
   try {
-    result = await ctx.backend.despawn(payload.id, { force: payload.force === true });
+    result = await ctx.backend.despawn(payload.id, {
+      force: payload.force === true,
+      ...(tasks === undefined ? {} : { closing: (id: string) => tasks.closing(id) }),
+    });
   } catch (err) {
     if (err instanceof DespawnFailure) {
       await audit.failed(err.code);
