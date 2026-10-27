@@ -616,34 +616,45 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     }
   });
 
-  test("a clean exit of the server's last pane leaves the dead pane: the server stays up and the exit is noted, not vanished", async () => {
-    process.env["SEANCE_CLAUDE_BIN"] = stub.repl;
-    const shared = process.env["SEANCE_TMUX_SOCKET"];
-    const alone = usePrivateTmux(base, "spawn-last");
-    try {
-      const tasks = new EndedTasks(LaunchLedger.memory(), Date.now, tmuxHarvestPanes(reapAudit("harvest", () => {})));
-      const { pane, outcome } = await launchTask(tasks, "task-last", "Task Last");
-      // A fresh server boots with a bootstrap pane of its own: drop it, so the task's is the only one.
-      for (const other of (await tmuxOk(["list-panes", "-a", "-F", "#{pane_id}"])).split("\n")) {
-        // oxlint-disable-next-line no-await-in-loop -- one pane at a time
-        if (other !== "" && other !== pane) await tmuxOk(["kill-pane", "-t", other]);
+  test.each([
+    ["alone", false],
+    ["in a session group", true],
+  ])(
+    "a clean exit of the server's last pane (%s) leaves the dead pane: the server stays up and the exit is noted, not vanished",
+    async (name, grouped) => {
+      process.env["SEANCE_CLAUDE_BIN"] = stub.repl;
+      const shared = process.env["SEANCE_TMUX_SOCKET"];
+      const alone = usePrivateTmux(base, `spawn-last-${grouped ? "group" : "alone"}`);
+      try {
+        const tasks = new EndedTasks(LaunchLedger.memory(), Date.now, tmuxHarvestPanes(reapAudit("harvest", () => {})));
+        const { pane, outcome } = await launchTask(tasks, "task-last", "Task Last");
+        // A fresh server boots with a bootstrap pane of its own: drop it, so the task's is the only one.
+        for (const other of (await tmuxOk(["list-panes", "-a", "-F", "#{pane_id}"])).split("\n")) {
+          // oxlint-disable-next-line no-await-in-loop -- one pane at a time
+          if (other !== "" && other !== pane) await tmuxOk(["kill-pane", "-t", other]);
+        }
+        expect((await tmuxOk(["list-panes", "-a", "-F", "#{pane_id}"])).trim()).toBe(pane);
+        if (grouped) {
+          // A grouped sibling counts in `server_sessions` but shares the one window.
+          const session = (await tmuxOk(["display-message", "-p", "-t", pane, "#{session_name}"])).trim();
+          await tmuxOk(["new-session", "-d", "-t", session, "-s", `${name.replaceAll(" ", "-")}-sibling`]);
+        }
+        await tmux(["send-keys", "-t", pane, "-l", "/exit"]);
+        await tmux(["send-keys", "-t", pane, "Enter"]);
+        await pollUntil(async () => (await paneInfo(pane))?.dead === true, `pane ${pane} dead`);
+        // Killed by the hook, the server would have exited with the option it just recorded.
+        expect(Number((await tmuxOk(["display-message", "-p", "#{pid}"])).trim())).toBe(outcome.server ?? -1);
+        expect((await paneInfo(pane))?.deadStatus).toBe(0);
+        await tasks.harvestExits();
+        expect(tasks.progress().find((p) => p.taskId === "task-last")).toMatchObject({ exit: 0 });
+        expect(tasks.progress().find((p) => p.taskId === "task-last")?.vanished).toBeUndefined();
+      } finally {
+        process.env["SEANCE_CLAUDE_BIN"] = stub.ok;
+        await alone.dispose();
+        if (shared !== undefined) process.env["SEANCE_TMUX_SOCKET"] = shared;
       }
-      expect((await tmuxOk(["list-panes", "-a", "-F", "#{pane_id}"])).trim()).toBe(pane);
-      await tmux(["send-keys", "-t", pane, "-l", "/exit"]);
-      await tmux(["send-keys", "-t", pane, "Enter"]);
-      await pollUntil(async () => (await paneInfo(pane))?.dead === true, `pane ${pane} dead`);
-      // Killed by the hook, the server would have exited with the option it just recorded.
-      expect(Number((await tmuxOk(["display-message", "-p", "#{pid}"])).trim())).toBe(outcome.server ?? -1);
-      expect((await paneInfo(pane))?.deadStatus).toBe(0);
-      await tasks.harvestExits();
-      expect(tasks.progress().find((p) => p.taskId === "task-last")).toMatchObject({ exit: 0 });
-      expect(tasks.progress().find((p) => p.taskId === "task-last")?.vanished).toBeUndefined();
-    } finally {
-      process.env["SEANCE_CLAUDE_BIN"] = stub.ok;
-      await alone.dispose();
-      if (shared !== undefined) process.env["SEANCE_TMUX_SOCKET"] = shared;
-    }
-  });
+    },
+  );
 
   test("despawn notes closing, and waits for it, before it touches a task's pane", async () => {
     process.env["SEANCE_CLAUDE_BIN"] = stub.repl;

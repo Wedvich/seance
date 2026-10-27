@@ -365,10 +365,12 @@ async function tagTask(windowId: string, taskId: string): Promise<void> {
 /**
  * The per-pane `pane-died` hook's one body: tmux commands only, no shell, the task id its only interpolation.
  * A clean exit's pane is closed unless it is the server's last: the server would exit with it (`exit-empty`)
- * and take the recorded option along, so that pane stays dead for harvest to note and close.
+ * and take the recorded option along, so that pane stays dead for harvest to note and close. A server whose
+ * sessions are all one group shares one set of windows, so it counts as one session.
  */
 function exitHook(taskId: string): string {
-  const lastPane = "#{&&:#{==:#{server_sessions},1},#{&&:#{==:#{session_windows},1},#{==:#{window_panes},1}}}";
+  const lastPane =
+    "#{&&:#{||:#{==:#{server_sessions},1},#{==:#{server_sessions},#{session_group_size}}},#{&&:#{==:#{session_windows},1},#{==:#{window_panes},1}}}";
   return (
     `set-option -gF ${EXIT_OPTION_PREFIX}${taskId} '#{pane_dead_status}:#{pane_dead_signal}' ; ` +
     `if-shell -F '${lastPane}' '' 'if-shell -F "#{==:#{pane_dead_status},0}" kill-pane'`

@@ -4500,11 +4500,13 @@ for the lot with its own `gh`.
   _The server's last pane._ The hook's `kill-pane` of the server's only pane would make tmux exit
   (`exit-empty`) and take the recorded option with it, leaving the recorded server pid dead and the task
   judged `vanished`. So the hook closes a clean exit's pane only when some other pane remains:
-  `if-shell -F '#{&&:#{==:#{server_sessions},1},#{&&:#{==:#{session_windows},1},#{==:#{window_panes},1}}}'
+  `if-shell -F '#{&&:#{||:#{==:#{server_sessions},1},#{==:#{server_sessions},#{session_group_size}}},#{&&:#{==:#{session_windows},1},#{==:#{window_panes},1}}}'
   '' '<kill-pane if status 0>'`. The last pane stays dead, holding its status, and harvest notes and
   closes it as for a nonzero exit (verified on 3.7c: the other pane's exit 0 is closed, the last one's
   is kept, the server stays up, the option is set either way). Sessions in one group share windows, so
-  `server_sessions` counts each: such a server is judged "not last" and the pane closed (not covered).
+  `server_sessions` counts each; a server whose sessions are all one group (`server_sessions` equals
+  `session_group_size`, verified on 3.7c: ungrouped reads empty, a group of two reads 2) is one session's
+  worth of windows and counts as last too.
   _tmux version floor._ The hook, `-F` expansion in it and the `set-hook -w` fallback were verified only
   on tmux 3.7c. `-p` on `set-option` and `set-hook` needs 3.2. Whether `set-hook -w` exists before 3.2 is
   not verified here (no older tmux was available to test). Where both `set-hook` forms are refused,
