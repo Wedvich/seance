@@ -929,6 +929,8 @@ describe("the card's inline action", () => {
     });
     expect(inline(capped, [CAPABILITIES.runNow])).toBe("run-now");
     expect(inline(capped)).toBeNull();
+    const row = deriveQueue(state(ok([capped])), NOW).sections.flatMap((section) => section.rows)[0];
+    expect(row?.canFollowUp).toBe(true);
   });
 
   test("nothing inline on a running, needing, done or cancelled task, where Follow up is the only act", () => {
