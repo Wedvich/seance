@@ -938,6 +938,16 @@ describe("the card's inline action", () => {
     expect(inline(task("x", { state: "cancelled" }))).toBeNull();
   });
 
+  test("Follow up on a lost task, and on one whose machine is asleep", () => {
+    expect(inline(task("l", { state: "lost", assignment: placedAt }))).toBe("follow-up");
+    const asleep = machine({ connected: false, lastSeen: NOW - 600_000 });
+    const row = deriveQueue(
+      state(ok([task("a", { state: "running", assignment: placedAt })]), {}, { machines: [asleep] }),
+      NOW,
+    ).sections.flatMap((section) => section.rows)[0];
+    expect(row?.inline).toBe("follow-up");
+  });
+
   test("precedence holds whatever else is offered", () => {
     const all = { canContinue: true, canRunNow: true, canFollowUp: true };
     expect(primaryAction(all)).toBe("continue");
