@@ -68,8 +68,10 @@ export type DaemonCapability = (ctx: WiringCtx) => Started;
  * and the broker is its only way to other machines. Anywhere else it reads the
  * key itself, so a broker would only widen what a same-uid process can do
  * without touching the key store — and keep an app-role surface in the daemon.
- * Built over the key imported above — never a second lookup — and dials
- * nothing until a peer first asks it to reach another machine. Its app-role
+ * Built over the PSK resolved above — never a second lookup — and dials
+ * nothing until a peer first asks it to reach another machine or the
+ * scheduler. It also reads `account:` records, so a keyless peer can resolve an
+ * account alias. Its app-role
  * socket and timers go with the daemon's handle: a reload builds a fresh
  * broker, and an orphaned one would hold a relay socket forever.
  */
@@ -77,7 +79,7 @@ const fleetBroker: DaemonCapability = (ctx) => {
   if (ctx.resolved.source !== "credential") return { stop: (): void => {} };
   const broker = createBroker({
     selfDeviceId: ctx.deviceId,
-    relay: brokerRelay(ctx.config, ctx.key),
+    relay: brokerRelay(ctx.config, ctx.resolved.psk),
     auditSink: daemonSink,
   });
   return { stop: broker.stop, local: { broker: broker.handle } };

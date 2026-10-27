@@ -948,6 +948,13 @@ export interface MachineInfo {
  * leader acts on `TaskSpec.until` and `after: "done"` — what a client checks
  * of the verified leader before writing either, since an older leader strips
  * `until` on its first write and holds a `done` edge unreadable.
+ * `pinAccount`: as a leader, routes on `TaskSpec.pin.account` and
+ * `TaskSpec.avoid` — what a client checks of the verified leader before writing
+ * either. An older leader would rebuild the spec without both; the record's
+ * `PIN_SENTINEL` makes it unreadable to one instead (`TaskSpec.pin`).
+ * `continueTask`: as a daemon, spawns `mode: "continue"`; as a leader, routes and
+ * dispatches a continue task — what a client checks of the verified leader before
+ * writing one (an older leader refuses the mode, holding the record unreadable).
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -955,6 +962,8 @@ export const CAPABILITIES = {
   baseBranch: "baseBranch",
   exitStatus: "exitStatus",
   reportedDone: "reportedDone",
+  pinAccount: "pinAccount",
+  continueTask: "continueTask",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -1198,7 +1207,13 @@ export const METRIC_NAMES = {
 
 export type MetricName = (typeof METRIC_NAMES)[keyof typeof METRIC_NAMES];
 
-export type SpawnMode = "worktree" | "here";
+/**
+ * `continue` resumes a failed task's session (`claude --continue`) in the worktree
+ * this machine's launch ledger noted for `SpawnRequest.continues`. It comes only
+ * from the leader's dispatch of a continue task (DESIGN.md, Daemon, "Continuing a
+ * failed task"); no direct client sends it.
+ */
+export type SpawnMode = "worktree" | "here" | "continue";
 
 /**
  * Client names our own senders stamp into `SpawnRequest.client` — compile-time
@@ -1257,6 +1272,13 @@ export interface SpawnRequest {
    * none.
    */
   readonly baseBranch?: string;
+  /**
+   * The failed task whose worktree the session resumes. Required exactly when
+   * `mode` is `"continue"`. Bounded by `TASK_ID_PATTERN`; resolved against the
+   * receiving daemon's own launch ledger, never a path from the wire. An older
+   * daemon refuses the mode as malformed.
+   */
+  readonly continues?: string;
 }
 
 /**
@@ -1282,6 +1304,17 @@ export const SPAWN_ERROR_CODES = [
   "no_default_branch",
   /** `baseBranch` names no branch on origin (M4, stacking). */
   "base_not_found",
+  /**
+   * A `mode: "continue"` spawn that cannot resume: not sealed by the scheduler, no
+   * task id of its own or naming itself, no ledger record of the continued task, its
+   * launch still in flight, no worktree noted (a `here` run), a different clone from
+   * the one `repo` resolved to, a path outside `<clone>/.claude/worktrees/` or not
+   * canonical, the worktree gone, a live session still in it, or a lock on it that is
+   * not a stale Claude one. Nothing launched. The refusals up to the path check come
+   * before the write-ahead launch record; the backend's (worktree gone again, live
+   * pane, lock) come after it, and the handler retracts the entry, so none stays.
+   */
+  "not_continuable",
   "launch_error",
   "claude_died",
   "timeout",
@@ -1420,20 +1453,35 @@ export interface TaskProgress {
   readonly reported?: true;
   /**
    * The session's exit status once its pane died (tmux's `pane_dead_status`,
-   * 0–255), for `failed` from exit status (M4). Here rather than on `ended`,
+   * 0–255), for `failed` from exit status (M4). A signal death is `128 + signal`
+   * (`exitStatus` in `daemon/src/sessions.ts`). Here rather than on `ended`,
    * whose entries are bare ids an older leader reads as such, and on the ledger
    * entry that already survives restarts, so the sweep and a takeover read one
-   * value. Absent while the pane lives, for a status tmux did not give (a
-   * signal), after a clean exit (its window keeps only a failed pane, so a 0 is
-   * never seen), and from older daemons — a reader then settles as today.
+   * value. Absent while the pane lives, for a signal death on a tmux that gives
+   * no `pane_dead_signal` (before 3.3), after a clean exit (its window keeps only
+   * a failed pane, so a 0 is never seen), and from older daemons — a reader then
+   * settles as today.
    */
   readonly exit?: number;
+  /**
+   * With `exit: SIGKILL_STATUS` only, on Linux with cgroup v2: whether the
+   * kernel counted an OOM kill (`memory.events` `oom_kill`) in the session's
+   * cgroup between the last time the daemon saw it alive and the pass that
+   * found it dead (`daemon/src/oom-kill.ts`). `true` says an OOM kill landed
+   * there then, not that this session was its victim — on a unit install every
+   * session shares the cgroup. `false` says no kernel OOM kill did. Absent:
+   * unknown (no sample, unreadable, macOS, an older daemon).
+   */
+  readonly oomKill?: boolean;
   /** When any of these last changed, ms (an unchanged state is not re-stamped). */
   readonly at: number;
 }
 
 /** Exit statuses `TaskProgress.exit` may hold: a process's, 0–255. */
 export const EXIT_STATUS_MAX = 255;
+
+/** A SIGKILL death as `TaskProgress.exit` holds it (`128 + 9`): the OOM killer's signal, and the only status `oomKill` rides with. */
+export const SIGKILL_STATUS = 137;
 
 /**
  * What a session is doing, as `session-event` reports it (docs/scheduler.md).
@@ -1596,25 +1644,25 @@ export interface Placement {
 }
 
 /**
- * How a batch's members share the fleet. `sequential`: one at a time, in
- * `index` order. `parallel`: at most `max` at once. `auto`: no batch-level
- * bound — deps and the global and per-account caps decide.
+ * What every `BatchMembership.strategy` holds. A batch is a group, not a
+ * scheduling primitive (2026-10-26): order is `after`, concurrency the caps.
+ * The field stays only because an older `parseBatch` nulls a batch without a
+ * strategy, and the whole spec with it; `auto` is the one value an older
+ * leader applies no batch bound to. Dropped once no pre-change leader, app or
+ * daemon remains (docs/scheduler.md, M4 "Batches are a group").
  */
-export type BatchStrategy =
-  | { readonly mode: "sequential" }
-  | { readonly mode: "parallel"; readonly max: number }
-  | { readonly mode: "auto" };
+export const BATCH_STRATEGY = { mode: "auto" } as const;
 
 /**
- * A task's place in a batch. Every member carries the strategy, since there is
- * no batch record — one client creates a batch's members together, so they
- * agree; where they do not, the earliest-created member's wins.
+ * A task's place in a batch: a group with no record of its own, so a batch is
+ * the tasks that name its id. It holds no order and no bound.
  */
 export interface BatchMembership {
   /** `TASK_ID_PATTERN`, minted by the client like a task id. */
   readonly id: string;
   readonly index: number;
-  readonly strategy: BatchStrategy;
+  /** `BATCH_STRATEGY` always: whatever an older writer stored reads as it. */
+  readonly strategy: typeof BATCH_STRATEGY;
 }
 
 /**
@@ -1676,11 +1724,27 @@ export interface LinearLink {
 export const TASK_SPEC_LIMITS = {
   client: 64,
   deps: 16,
-  parallel: 16,
   linearIssue: 64,
   placement: ROUTING_ID_MAX_LENGTH,
   batchIndex: MAX_TASKS,
+  /** `ExclaveInfo.accountId` is `org:account`, two UUIDs; past this it is no id. */
+  account: 128,
+  /**
+   * Machines a task may avoid: a few to steer around, not a fleet to list. Four
+   * keeps the record at every bound, the longest account pin included, under
+   * `STORE_MAX_CT_LENGTH` with ten candidates beside it (measured in parse.test.ts).
+   */
+  avoid: 4,
 } as const;
+
+/**
+ * Sealed into a task record's `pin.exclave` whenever its spec carries
+ * `pin.account` or `avoid` (`sealTaskRecord`). An older leader's parser refuses
+ * an empty exclave, so it holds such a record unreadable — never strips the
+ * restriction by re-sealing what it parsed. This build's parser ignores
+ * `exclave` (exclave pins are gone), so the parsed spec never carries it.
+ */
+export const PIN_SENTINEL = "";
 
 /**
  * What settles a task (M4, #21). `merged`, the default: its merge, as today.
@@ -1693,8 +1757,19 @@ export type TaskUntil = (typeof TASK_UNTIL)[number];
 
 /** What was asked for, plus what the scheduler itself may add. Everything the spawn carries except where it lands. */
 export interface TaskSpec extends TaskRequest {
-  /** Restrict to a machine, an exclave name, or both; absent fields are free. */
-  readonly pin?: { readonly deviceId?: string; readonly exclave?: string };
+  /**
+   * Restrict to a machine, an account (`ExclaveInfo.accountId`), or both;
+   * absent fields are free. No exclave: an exclave id is machine-local — `abc`
+   * on two machines may be two accounts — so it pins nothing fleet-wide. A
+   * client writes `account` only to a leader advertising `CAPABILITIES.pinAccount`.
+   */
+  readonly pin?: { readonly deviceId?: string; readonly account?: string };
+  /**
+   * Machines (deviceIds) the task must not run on, at most
+   * `TASK_SPEC_LIMITS.avoid`. Avoiding every machine leaves it waiting, as a
+   * pin to an absent machine does. Gated as `pin.account` is.
+   */
+  readonly avoid?: readonly string[];
   /** The session this one continues — its owner gets the sticky bonus. */
   readonly lineage?: Placement;
   /** Where the work this task builds on lives (M4's stacking fills it; unset today); drives `dependency_distance`. */
@@ -1712,6 +1787,14 @@ export interface TaskSpec extends TaskRequest {
   /** At most `TASK_SPEC_LIMITS.deps`; the leader holds the task `blocked` until every edge releases. */
   readonly deps?: readonly TaskDep[];
   readonly linear?: LinearLink;
+  /**
+   * The failed task this one resumes and where its worktree is: its id and its
+   * `assignment` as a `Target`, copied by the app at enqueue so the old record may
+   * be pruned. Present exactly when `mode === "continue"` (the parser requires
+   * both), which an older leader refuses, so it holds the record unreadable rather
+   * than strip this. Routing and display only: the daemon never reads a path from it.
+   */
+  readonly continues?: { readonly task: string; readonly at: Target };
   /**
    * Which app-role client enqueued it, as `SpawnRequest.client` — audit trail
    * only (the leader's admit line), at most `TASK_SPEC_LIMITS.client`. Absent
@@ -1758,8 +1841,14 @@ export type Reason =
   | { readonly code: "exclaves_unknown" }
   | { readonly code: "disk_low"; readonly freeMib: number }
   | { readonly code: "pressure_unknown" }
-  | { readonly code: "pin_mismatch"; readonly field: "deviceId" | "exclave" }
+  | { readonly code: "pin_mismatch"; readonly field: "deviceId" | "account" }
+  /** The machine is in the task's `avoid` list. */
+  | { readonly code: "avoided" }
   | { readonly code: "repo_absent" }
+  /** A continue task's target is exactly one (machine, exclave, clone); this is another. */
+  | { readonly code: "continue_elsewhere" }
+  /** The target machine does not advertise `CAPABILITIES.continueTask`. */
+  | { readonly code: "continue_unsupported" }
   | { readonly code: "auth_missing" }
   /** M4, Auth health: the exclave is listed in its status's `ax`. */
   | { readonly code: "auth_expired" }
@@ -1789,21 +1878,15 @@ export type Reason =
   | { readonly code: "model_not_included"; readonly model: string }
   /**
    * `scope` absent is `global`, as M2's leaders sent it. M3's: `account`, the
-   * per-account cap; `batch`, the task's batch at its strategy's bound
-   * (`sequential` is a bound of 1).
+   * per-account cap. (Scope `batch` and the `batch_order` reason went with
+   * batch strategies; a reader drops either as a reason it does not know.)
    */
   | {
       readonly code: "cap_reached";
       readonly inFlight: number;
       readonly max: number;
-      readonly scope?: "global" | "account" | "batch";
+      readonly scope?: "global" | "account";
     }
-  /**
-   * A `sequential` batch member held for order: the member at `index`, the
-   * nearest lower one the scheduler holds, has not ended yet — running, or
-   * still `blocked` or unroutable itself.
-   */
-  | { readonly code: "batch_order"; readonly index: number }
   /**
    * A pause holds dispatch (`PauseHold`): the whole queue, or the candidate's
    * account. Set by the leader since M3 item 5.
@@ -1914,9 +1997,19 @@ export interface Task {
   /**
    * A daemon's `SpawnErrorCode`, or a `TaskFailureCode`; a string, so a code
    * minted later still parses. Bounded by `TASK_FAILURE_LIMITS`: the message is
-   * often a daemon's, and it is stored.
+   * often a daemon's, and it is stored. `exit`, with `session_failed` only: the
+   * session's exit status (`TaskProgress.exit`, 1–`EXIT_STATUS_MAX`), so a reader
+   * words how it ended without parsing the message. Display-only; a reader drops
+   * one out of range and keeps the failure, and an older one ignores it.
+   * `oomKill`, with `exit: SIGKILL_STATUS` only: `TaskProgress.oomKill`, read
+   * the same way and dropped the same way.
    */
-  readonly failure?: { readonly code: string; readonly message: string };
+  readonly failure?: {
+    readonly code: string;
+    readonly message: string;
+    readonly exit?: number;
+    readonly oomKill?: boolean;
+  };
   /** With `lost`: when the scheduler first saw the task's machine absent, ms. */
   readonly absentSince?: number;
   /**

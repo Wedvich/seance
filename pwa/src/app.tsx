@@ -44,14 +44,13 @@ export function App(props: { store: Store }): JSX.Element {
         // entrance. transition.ts's screenKey mirrors this key.
         key={verdict.kind === "queued" ? `queued:${verdict.task.id}` : verdict}
         verdict={verdict}
-        machineName={view.machine?.name ?? "that machine"}
         machines={state.relay.machines}
+        aliases={state.accounts.aliases}
         now={now}
         onQueue={wide ? undefined : actions.openQueue}
         waitingNote={view.autoAvailability.note}
         onRetry={() => store.retrySpawn(verdict)}
         onAnother={() => store.startAnother()}
-        onReuse={() => store.reusePrompt(verdict)}
         onBack={() => store.dismissLayer()}
       />
     ) : (
@@ -63,7 +62,6 @@ export function App(props: { store: Store }): JSX.Element {
         sheet={state.sheet}
         machines={state.relay.machines}
         now={now}
-        rescan={state.rescan}
         preview={state.preview}
         afterSheet={state.sheet === "after" ? deriveAfterSheet(state, now) : null}
         columns={wide}
@@ -80,6 +78,7 @@ export function App(props: { store: Store }): JSX.Element {
       onRefresh={() => void store.refreshQueue()}
       onCancel={(id) => void store.cancelTask(id)}
       onMarkDone={(id) => void store.markDone(id)}
+      onContinue={(id) => void store.continueTask(id)}
       onFollowUp={(id) => store.followUp(id)}
       onPause={() => void store.pauseQueue()}
       onResume={(account) => void store.resumeQueue(account)}
@@ -243,19 +242,19 @@ function useSpawnActions(store: Store): SpawnActions {
       toggleWorktree: () => store.toggleWorktree(),
       spawn: () => void store.spawn(),
       dismissLayer: () => store.dismissLayer(),
-      selectMachine: (deviceId) => store.selectMachine(deviceId),
-      selectAuto: () => store.selectAuto(),
+      pickMachine: (deviceId) => store.pickMachine(deviceId),
+      pickAccount: (accountId) => store.pickAccount(accountId),
       refreshPreview: () => void store.refreshPreview(),
       removeMachine: (deviceId) => store.removeMachine(deviceId),
       selectRepo: (repo) => store.selectRepo(repo),
-      rescan: () => void store.rescan(),
+      rescan: (deviceId) => void store.rescan(deviceId),
       setModel: (model) => store.setModel(model),
       setEffort: (effort) => store.setEffort(effort),
       addAfter: (taskId, after) => store.addAfter(taskId, after),
       removeAfter: (taskId) => store.removeAfter(taskId),
       setUntil: (until) => store.setUntil(until),
       setLinearIssue: (issue) => store.setLinearIssue(issue),
-      startBatch: (strategy) => store.startBatch(strategy),
+      startBatch: () => store.startBatch(),
       endBatch: () => store.endBatch(),
     }),
     [store],

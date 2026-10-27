@@ -8,18 +8,22 @@ import type {
   TaskRequest,
 } from "@seance/shared";
 import {
+  continuationSpec,
+  continueOffer,
   failureReasonText,
   isSettled,
   isTransportError,
   QUEUE_MAX_TASKS,
+  queuedTask,
   RequestFailure,
   schedulerErrorText,
   sentence,
+  storeErrorText,
   type RelayClient,
 } from "@seance/shared";
 import type { FollowEnd, PersistedForm, PreviewState, QueueState, TaskAction } from "./state.ts";
 import type { AppState } from "./view.ts";
-import { autoRepos, deriveAutoAvailability, resolveAutoRepo } from "./view.ts";
+import { deriveAutoAvailability, deriveContinueAvailability, previewAsked, resolveRepo, scopedRepos } from "./view.ts";
 
 /**
  * The app's side of the scheduler, apart from `Store`'s layers, form and
@@ -29,6 +33,11 @@ import { autoRepos, deriveAutoAvailability, resolveAutoRepo } from "./view.ts";
  * are only the bookkeeping behind them (timers, read sequences, what was last
  * asked). Enqueueing stays in `Store`: its verdict is a layer.
  */
+
+export const STORE_UNREADABLE = "Couldn't read the relay's answer. Update the app and the relay to matching versions.";
+
+const CONTINUE_UNAVAILABLE =
+  "No verified scheduler that can continue a session is leading right now. Try again once one is.";
 
 const SCHEDULER_UNREADABLE = "Couldn't read the scheduler's answer. Update seanced and the app to matching versions.";
 
@@ -174,7 +183,7 @@ export class SchedulerStore {
   /** A relay change with the socket open: `reopened` when it had been closed. */
   onOpen(relay: RelayState, reopened: boolean): void {
     this.#catchUpQueue(relay.scheduler, reopened);
-    if (!this.#state.form.auto) return;
+    if (!previewAsked(this.#state.form)) return;
     if (schedulerKey(relay.scheduler) !== this.#previewedLeader) void this.refreshPreview();
     else if (fleetKey(relay.machines) !== this.#previewedFleet) this.#askPreviewSoon();
   }
@@ -280,8 +289,8 @@ export class SchedulerStore {
     const { form, relay } = this.#state;
     this.#previewedLeader = schedulerKey(relay.scheduler);
     this.#previewedFleet = fleetKey(relay.machines);
-    const repo = resolveAutoRepo(autoRepos(relay.machines), form);
-    if (!form.auto || !deriveAutoAvailability(relay).available || repo === null) {
+    const repo = resolveRepo(scopedRepos(relay.machines, form), form);
+    if (!previewAsked(form) || !deriveAutoAvailability(relay).available || repo === null) {
       this.#patch({ preview: null });
       return;
     }
@@ -429,7 +438,7 @@ export class SchedulerStore {
       this.#patch({ queueView: next, ...(nudged && !this.#noticeFromRead ? {} : { queueNotice: null }) });
       // Another device's pause or resume, or a reset lifting a hold. A first read has nothing to
       // compare: the preview was asked under whatever holds stood.
-      if (this.#state.form.auto && before?.kind === "ok" && holdsKey(before.holds) !== holdsKey(next.holds)) {
+      if (previewAsked(this.#state.form) && before?.kind === "ok" && holdsKey(before.holds) !== holdsKey(next.holds)) {
         this.#askPreviewSoon();
       }
       return;
@@ -477,11 +486,40 @@ export class SchedulerStore {
     return this.#actOnTask({ taskId, op: "mark-done" });
   }
 
+  /**
+   * Writes a new task that picks up a failed one's session where it stopped, through the same
+   * `createTask` an enqueue uses: the leader dispatches it to the machine the old one ran on.
+   */
+  continueTask(taskId: string): Promise<void> {
+    return this.#actOnTask({ taskId, op: "continue" });
+  }
+
+  async #continue(taskId: string): Promise<string | null> {
+    const view = this.#state.queueView;
+    const failed = view?.kind === "ok" ? view.tasks.find((t) => t.id === taskId) : undefined;
+    if (failed === undefined) return "That task is no longer listed.";
+    // The button was gated on this when drawn; the leader may have changed or gone since the tap.
+    if (!deriveContinueAvailability(this.#state.relay)) return CONTINUE_UNAVAILABLE;
+    const offer = continueOffer(failed, this.#state.relay.machines, view?.kind === "ok" ? view.tasks : []);
+    if (!offer.ok) return sentence(offer.reason);
+    const task = queuedTask({ ...continuationSpec(failed, offer.at), client: "pwa" }, Date.now());
+    const reply = await this.#client.createTask(task);
+    if (reply === null) return `${STORE_UNREADABLE} ${MAY_HAVE_LANDED}`;
+    if (!reply.ok) return sentence(storeErrorText(reply.code));
+    this.#mergeTask(task);
+    return null;
+  }
+
   async #actOnTask(action: TaskAction): Promise<void> {
     if (this.#state.taskAction !== null) return;
     this.#patch({ taskAction: action, queueNotice: null });
     let notice: string | null = null;
     try {
+      if (action.op === "continue") {
+        notice = await this.#continue(action.taskId);
+        this.#patch({ taskAction: null, queueNotice: notice });
+        return;
+      }
       const reply =
         action.op === "cancel" ? await this.#client.cancel(action.taskId) : await this.#client.markDone(action.taskId);
       if (reply === null) notice = `${SCHEDULER_UNREADABLE} ${MAY_HAVE_LANDED}`;
@@ -535,7 +573,7 @@ export class SchedulerStore {
         const view = this.#state.queueView;
         if (view?.kind === "ok") this.#patch({ queueView: { ...view, holds: reply.holds } });
         else void this.refreshQueue();
-        if (this.#state.form.auto) void this.refreshPreview();
+        if (previewAsked(this.#state.form)) void this.refreshPreview();
       }
     } catch (err) {
       notice = this.#actionFailure(err);

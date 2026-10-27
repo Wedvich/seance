@@ -125,8 +125,9 @@ function SwapText(props: { as: "h2" | "p"; className: string; text: string }): J
 
 export function VerdictView(props: {
   verdict: Verdict;
-  machineName: string;
   machines: readonly Machine[];
+  /** Account aliases, for the queued verdict's pin line. */
+  aliases: Readonly<Record<string, string>>;
   now: number;
   /** The queued verdict's way to the Queue screen; absent where the queue is already on screen (wide). */
   onQueue?: () => void;
@@ -134,11 +135,10 @@ export function VerdictView(props: {
   waitingNote?: string | null;
   onRetry: () => void;
   onAnother: () => void;
-  onReuse: () => void;
   onBack: () => void;
 }): JSX.Element {
-  const { verdict, machineName, machines, now, onRetry, onAnother, onReuse, onBack } = props;
-  const content = describeVerdict(verdict, machineName, machines, now, props.waitingNote ?? null);
+  const { verdict, machines, aliases, now, onRetry, onAnother, onBack } = props;
+  const content = describeVerdict(verdict, machines, aliases, now, props.waitingNote ?? null);
   const onPrimary =
     content.primary.onClick === "retry" ? onRetry : content.primary.onClick === "back" ? onBack : onAnother;
 
@@ -161,11 +161,6 @@ export function VerdictView(props: {
         {verdict.kind === "queued" && props.onQueue !== undefined && (
           <button type="button" className="quiet" onClick={props.onQueue}>
             See the queue
-          </button>
-        )}
-        {verdict.kind === "ok" && verdict.prompt !== undefined && (
-          <button type="button" className="quiet" onClick={onReuse}>
-            Reuse this prompt
           </button>
         )}
         {content.showBack && (

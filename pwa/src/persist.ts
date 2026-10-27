@@ -1,11 +1,9 @@
-import { DEP_AFTER, isTaskId, parseBatchStrategy, TASK_SPEC_LIMITS, TASK_UNTIL, type TaskDep } from "@seance/shared";
-import { DEFAULT_FORM, isEffort, isModel, type OpenBatch, type PendingSpawn, type PersistedForm } from "./state.ts";
+import { DEP_AFTER, isTaskId, TASK_SPEC_LIMITS, TASK_UNTIL, type TaskDep } from "@seance/shared";
+import { DEFAULT_FORM, isEffort, isModel, type OpenBatch, type PersistedForm } from "./state.ts";
 
 /**
  * The form survives a reload because iOS kills backgrounded PWAs freely and the
- * prompt is the one thing here the user wrote. The pending spawn survives for
- * the same reason: reconciliation has to work across a kill, not just a
- * background, or it is useless in exactly the case it exists for.
+ * prompt is the one thing here the user wrote.
  *
  * The prompt therefore sits in plaintext localStorage, unlike the PSK. That is a
  * deliberate asymmetry — one message's worth of text on your own phone, versus
@@ -39,11 +37,6 @@ function asString(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
 
-function asRepoMap(value: unknown): Readonly<Record<string, string>> {
-  if (typeof value !== "object" || value === null) return {};
-  return Object.fromEntries(Object.entries(value).filter(([, repo]) => typeof repo === "string"));
-}
-
 function asDeps(value: unknown): readonly TaskDep[] {
   if (!Array.isArray(value)) return [];
   const deps: TaskDep[] = [];
@@ -57,16 +50,26 @@ function asDeps(value: unknown): readonly TaskDep[] {
   return deps;
 }
 
+function isAutoStrategy(strategy: unknown): boolean {
+  if (strategy === "auto") return true;
+  return typeof strategy === "object" && strategy !== null && Reflect.get(strategy, "mode") === "auto";
+}
+
+/**
+ * An older build's open batch also held a `strategy`. `auto` (or none) is a plain group and stays open;
+ * a sequential or parallel one is dropped, since further enqueues would join it with no order or bound.
+ */
 function asBatch(value: unknown): OpenBatch | null {
   if (typeof value !== "object" || value === null) return null;
   const id: unknown = Reflect.get(value, "id");
   const next: unknown = Reflect.get(value, "next");
-  const strategy = parseBatchStrategy(Reflect.get(value, "strategy"));
-  if (!isTaskId(id) || strategy === null) return null;
+  if (!isTaskId(id)) return null;
+  const strategy: unknown = Reflect.get(value, "strategy");
+  if (strategy !== undefined && !isAutoStrategy(strategy)) return null;
   // One past the bound is a full batch: the last member took `batchIndex`, and the form says so instead of forgetting it.
   if (typeof next !== "number" || !Number.isInteger(next) || next < 1 || next > TASK_SPEC_LIMITS.batchIndex + 1)
     return null;
-  return { id, strategy, next };
+  return { id, next };
 }
 
 /** Hand-validated rather than trusted: this is last week's build's output. */
@@ -75,10 +78,13 @@ export function readForm(): PersistedForm {
   if (typeof raw !== "object" || raw === null) return DEFAULT_FORM;
   const record = raw as Record<string, unknown>;
   return {
-    machineId: asString(record["machineId"]),
-    auto: record["auto"] === true,
-    autoRepo: asString(record["autoRepo"]),
-    repos: asRepoMap(record["repos"]),
+    // A legacy form's `machineId`, `auto` and `repos` are dropped on purpose: a saved machine
+    // pick becomes auto, since a silent pin would make a former direct spawner's next task
+    // wait on caps it never chose. Its `autoRepo` is the repo only when `auto` was true: with `auto`
+    // false it is a stale leftover from an earlier auto session, and a task queued there is a surprise.
+    machine: asString(record["machine"]),
+    account: asString(record["account"]),
+    repo: asString(record["repo"]) ?? (record["auto"] === true ? asString(record["autoRepo"]) : null),
     prompt: asString(record["prompt"]) ?? "",
     worktree: typeof record["worktree"] === "boolean" ? record["worktree"] : DEFAULT_FORM.worktree,
     model: isModel(record["model"]) ? record["model"] : DEFAULT_FORM.model,
@@ -94,19 +100,9 @@ export function writeForm(form: PersistedForm): void {
   writeJson(FORM_KEY, form);
 }
 
-export function readPending(): PendingSpawn | null {
-  const raw = readJson(PENDING_KEY);
-  if (typeof raw !== "object" || raw === null) return null;
-  const record = raw as Record<string, unknown>;
-  const machineId = asString(record["machineId"]);
-  const repo = asString(record["repo"]);
-  const requestedAt = record["requestedAt"];
-  if (machineId === null || repo === null || typeof requestedAt !== "number") return null;
-  return { machineId, repo, requestedAt };
-}
-
-export function writePending(pending: PendingSpawn | null): void {
-  writeJson(PENDING_KEY, pending);
+/** No spawn is sent directly any more, so a pending record has nothing left to reconcile; cleared like `dropLegacyHidden`. */
+export function dropLegacyPending(): void {
+  writeJson(PENDING_KEY, null);
 }
 
 /**

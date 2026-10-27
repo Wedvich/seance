@@ -1,7 +1,6 @@
 import { isSettled, TASK_PHASES, type Machine, type Task } from "@seance/shared";
-import { queuedBody, taskHeadline } from "./decision-view.ts";
+import { pinLine, queuedBody, taskHeadline, waitingText } from "./decision-view.ts";
 import type { FollowEnd, Verdict } from "./state.ts";
-import { failureBody } from "./view.ts";
 
 /**
  * The verdict screen as data, derived in one pure pass like `deriveView`, so
@@ -55,16 +54,33 @@ function followText(follow: FollowEnd | undefined): string {
   }
 }
 
+/** A pinned machine that is offline: nothing is wrong, the task waits for it (as `resolvePlacement` notes). */
+function offlinePinNote(task: Task, machines: readonly Machine[]): string | null {
+  if (TASK_PHASES[task.state] !== "waiting") return null;
+  const machine = machines.find((m) => m.deviceId === task.spec.pin?.deviceId);
+  return machine === undefined || machine.connected ? null : `${machine.name} is offline — the task waits for it.`;
+}
+
 export function describeVerdict(
   verdict: Verdict,
-  machineName: string,
   machines: readonly Machine[],
+  aliases: Readonly<Record<string, string>>,
   now: number,
   waitingNote: string | null,
 ): VerdictContent {
   if (verdict.kind === "queued") {
     const { task } = verdict;
     const settled = isSettled(task.state);
+    const pin = pinLine(task, machines, aliases);
+    const waiting = waitingText(task);
+    const parts = [
+      queuedBody(task),
+      pin === null ? null : `${pin}.`,
+      waiting === null ? null : `Waiting: ${waiting}.`,
+      offlinePinNote(task, machines),
+      // No leader to read it yet: the store holds it, and the note says so instead of promising a pickup.
+      task.state === "queued" && waitingNote !== null ? `${waitingNote}.` : null,
+    ].filter((part) => part !== null);
     return {
       // `lost` is unknown, not failed — the session may still be alive — so it reads like a dropped reply.
       glyph: task.state === "failed" ? "!" : task.state === "lost" ? "?" : settled ? "✓" : "…",
@@ -76,136 +92,27 @@ export function describeVerdict(
             : "verdict-glyph verdict-glyph-muted",
       stage: stageOf(task),
       headline: taskHeadline(task, machines, now),
-      // No leader to read it yet: the store holds it, and the note says so instead of promising a pickup.
-      body: `${queuedBody(task)}${task.state === "queued" && waitingNote !== null ? ` ${waitingNote}.` : ""}${followText(verdict.follow)}`,
+      body: `${parts.join(" ")}${followText(verdict.follow)}`,
       detail: task.failure === undefined ? null : `${task.failure.code}\n${task.failure.message}`,
       primary: { label: "Start another", onClick: "another" },
       showBack: true,
     };
   }
 
-  if (verdict.kind === "unqueued") {
-    return {
-      glyph: verdict.mayHaveLanded ? "?" : "!",
-      glyphClass: verdict.mayHaveLanded ? "verdict-glyph verdict-glyph-muted" : "verdict-glyph verdict-glyph-err",
-      headline: verdict.mayHaveLanded ? "The relay's answer was lost." : "It wasn't queued.",
-      // `message` says why the answer was lost, never that it may have queued: this is the one place that does.
-      body: verdict.mayHaveLanded
-        ? `${verdict.message} It may have queued anyway — trying again is safe: it re-sends the same task, which can't queue twice.`
-        : verdict.message,
-      detail: null,
-      stage: null,
-      primary:
-        verdict.retry === undefined
-          ? { label: "Back to the form", onClick: "back" }
-          : { label: "Try again", onClick: "retry" },
-      showBack: verdict.retry !== undefined,
-    };
-  }
-
-  if (verdict.kind === "ok" && verdict.pending === true) {
-    // The process is up, so this is not a failure — but "It's running" would be
-    // a lie about the only thing you came here to learn, and the detail below
-    // (the session's screen) is the whole point of the verdict.
-    return {
-      glyph: "…",
-      glyphClass: "verdict-glyph verdict-glyph-muted",
-      headline: `It started, but it's stuck on ${machineName}.`,
-      body: "Claude hasn't finished starting up — it's most likely waiting on a prompt that only someone at that machine can answer.",
-      detail: verdict.note === undefined ? verdict.window : `${verdict.window}\n${verdict.note}`,
-      stage: null,
-      // No "Start another": a retry meets the same prompt and leaves two stuck windows.
-      primary: { label: "Back to the form", onClick: "back" },
-      showBack: false,
-    };
-  }
-
-  if (verdict.kind === "ok") {
-    return {
-      glyph: "✓",
-      glyphClass: "verdict-glyph",
-      headline: `It's running on ${machineName}.`,
-      body: "Open Claude on your phone and continue the session from there.",
-      // A note is non-fatal detail about a spawn that worked — in the shipped
-      // daemon, a session that started but never registered, with the screen it
-      // is stuck on. Silence would be the wrong default for something a daemon
-      // went out of its way to say.
-      detail: verdict.note === undefined ? verdict.window : `${verdict.window}\n${verdict.note}`,
-      stage: null,
-      primary: { label: "Start another", onClick: "another" },
-      showBack: false,
-    };
-  }
-
-  if (verdict.kind === "failed") {
-    if (verdict.code === "repo_not_found" && verdict.rescan === "missing") {
-      return {
-        glyph: "!",
-        glyphClass: "verdict-glyph verdict-glyph-err",
-        headline: "It didn't take.",
-        body: `${verdict.repo} isn't on ${machineName} — a fresh scan doesn't find it either. Pick another repo and try again.`,
-        // Not the daemon's message: it ends in "try a rescan", the one thing this
-        // verdict has just ruled out. The code alone still carries the record.
-        detail: verdict.code,
-        stage: null,
-        primary: { label: "Back to the form", onClick: "back" },
-        showBack: false,
-      };
-    }
-    if (verdict.code === "repo_not_found" && verdict.rescan === "unreachable") {
-      return {
-        glyph: "!",
-        glyphClass: "verdict-glyph verdict-glyph-err",
-        headline: "The rescan didn't get through.",
-        body: `Couldn't reach ${machineName} to rescan its repos, so ${verdict.repo} wasn't tried again.`,
-        detail: `${verdict.code}\n${verdict.message}`,
-        stage: null,
-        primary: { label: "Rescan and try again", onClick: "retry" },
-        showBack: true,
-      };
-    }
-    return {
-      glyph: "!",
-      glyphClass: "verdict-glyph verdict-glyph-err",
-      headline: "It didn't take.",
-      body: failureBody(verdict.code, verdict.repo, machineName),
-      detail: `${verdict.code}\n${verdict.message}`,
-      stage: null,
-      primary: {
-        label: verdict.code === "repo_not_found" ? "Rescan and try again" : "Try again",
-        onClick: "retry",
-      },
-      showBack: true,
-    };
-  }
-
-  if (verdict.reason === "undelivered") {
-    return {
-      glyph: "!",
-      glyphClass: "verdict-glyph verdict-glyph-err",
-      headline: `It never reached ${verdict.machine}.`,
-      body: "The relay had nowhere to deliver it, so nothing was started.",
-      detail: null,
-      stage: null,
-      primary: { label: "Try again", onClick: "retry" },
-      showBack: true,
-    };
-  }
-
-  // Neither success nor failure: the reply was lost, so a session may well be
-  // running. Saying "it didn't take" here would be a lie.
-  const running =
-    verdict.sessionCount === null
-      ? `Open Claude to check whether the session on ${verdict.machine} started.`
-      : `${verdict.sessionCount} claude ${verdict.sessionCount === 1 ? "session is" : "sessions are"} running on ${verdict.machine} now. Open Claude to see whether yours is one of them.`;
   return {
-    glyph: "?",
-    glyphClass: "verdict-glyph verdict-glyph-muted",
-    headline: "The connection dropped.",
-    body: `Séance lost the reply while spawning. ${running}`,
+    glyph: verdict.mayHaveLanded ? "?" : "!",
+    glyphClass: verdict.mayHaveLanded ? "verdict-glyph verdict-glyph-muted" : "verdict-glyph verdict-glyph-err",
+    headline: verdict.mayHaveLanded ? "The relay's answer was lost." : "It wasn't queued.",
+    // `message` says why the answer was lost, never that it may have queued: this is the one place that does.
+    body: verdict.mayHaveLanded
+      ? `${verdict.message} It may have queued anyway — trying again is safe: it re-sends the same task, which can't queue twice.`
+      : verdict.message,
     detail: null,
     stage: null,
-    primary: { label: "Start another", onClick: "another" },
-    showBack: true,
+    primary:
+      verdict.retry === undefined
+        ? { label: "Back to the form", onClick: "back" }
+        : { label: "Try again", onClick: "retry" },
+    showBack: verdict.retry !== undefined,
   };
 }

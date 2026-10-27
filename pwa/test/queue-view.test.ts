@@ -12,9 +12,9 @@ import {
   type Task,
 } from "@seance/shared";
 import { deriveAfterSheet, deriveQueue } from "../src/queue-view.ts";
-import { DEFAULT_FORM, type QueueState } from "../src/state.ts";
-import { CAPABILITIES } from "@seance/shared";
-import { failedBody, type AppState } from "../src/view.ts";
+import { DEFAULT_FORM, RESCAN_IDLE, type QueueState } from "../src/state.ts";
+import { BATCH_STRATEGY, CAPABILITIES, reasonText } from "@seance/shared";
+import { deriveView, failedBody, type AppState } from "../src/view.ts";
 
 const NOW = 1_800_000_000_000;
 const ORIGIN = "github.com/acme/app";
@@ -60,8 +60,7 @@ function state(
     machines: false,
     history: null,
     spawning: false,
-    rescanning: false,
-    rescan: "idle",
+    rescan: RESCAN_IDLE,
     verdict: null,
     preview: null,
     sessions: {},
@@ -129,6 +128,109 @@ describe("deriveQueue", () => {
     expect(titles(only)).toEqual(["Waiting"]);
   });
 
+  test("tasks on an asleep machine leave Needs you and Running for Asleep, in their own order", () => {
+    const awake = machine();
+    const asleep = machine({ deviceId: "dev-b", name: "MacBook", connected: false, lastSeen: NOW - 600_000 });
+    const onB = { ...placedAt, deviceId: "dev-b" };
+    const onGone = { ...placedAt, deviceId: "dev-gone" };
+    const view = deriveQueue(
+      state(
+        ok([
+          task("lost", { state: "lost", assignment: onB }),
+          task("run", { state: "running", assignment: onB }),
+          task("dozing", { state: "needs-input", assignment: onB, escalated: true, needsInputSince: NOW - 3_600_000 }),
+          task("starting", { state: "reserved", reservation: { ...onB, expiresAt: NOW } }),
+          task("nodding", { state: "needs-input", assignment: onB }),
+          task("ask", { state: "needs-input", assignment: placedAt }),
+          task("back", { state: "lost", assignment: placedAt }),
+          task("nowhere", { state: "lost", assignment: onGone }),
+          task("liveRun", { state: "running", assignment: placedAt }),
+          task("goneRun", { state: "running", assignment: onGone }),
+          task("goneAsk", { state: "needs-input", assignment: onGone }),
+          task("w", { state: "ready" }),
+          task("merge", { state: "awaiting-merge", assignment: onB }),
+          task("done", { state: "done", assignment: onB }),
+        ]),
+        {},
+        { machines: [awake, asleep] },
+      ),
+      NOW,
+    );
+    expect(titles(view)).toEqual(["Needs you", "Running", "Waiting", "Asleep", "Awaiting merge", "Finished"]);
+    const ids = (title: string): string[] => view.sections.find((s) => s.title === title)?.rows.map((r) => r.id) ?? [];
+    // Connected or unlisted machines keep their tasks where they were.
+    expect(ids("Needs you")).toEqual(["ask", "goneAsk", "back", "nowhere"]);
+    expect(ids("Running")).toEqual(["liveRun", "goneRun"]);
+    // needs-input, then running/reserved, then lost; leader order within each.
+    expect(ids("Asleep")).toEqual(["dozing", "nodding", "run", "starting", "lost"]);
+    expect(ids("Awaiting merge")).toEqual(["merge"]);
+    expect(ids("Finished")).toEqual(["done"]);
+    expect(view.summary).toBe("2 running · 1 waiting");
+    // An escalated task asleep can't be answered now: it lights nothing.
+    expect(view.attention).toBe(false);
+
+    const rows = view.sections.find((s) => s.title === "Asleep")?.rows ?? [];
+    const settles = "Settles when its machine wakes; cancel or mark done to give up on it";
+    expect(rows[4]).toMatchObject({
+      headline: "Asleep on MacBook · default — its machine went to sleep 10m ago.",
+      body: settles,
+    });
+    const needs = view.sections.find((s) => s.title === "Needs you")?.rows ?? [];
+    expect(needs.map((r) => r.body)).not.toContain(settles);
+    // Dots are the leader's verdict, unchanged by the derived sleep.
+    expect(rows[0]?.dot).toBe("err");
+  });
+
+  test("reserved tasks stay in Running on a connected or an unlisted machine", () => {
+    const view = deriveQueue(
+      state(
+        ok([
+          task("here", { state: "reserved", reservation: { ...placedAt, expiresAt: NOW } }),
+          task("nowhere", { state: "reserved", reservation: { ...placedAt, deviceId: "dev-gone", expiresAt: NOW } }),
+        ]),
+      ),
+      NOW,
+    );
+    expect(titles(view)).toEqual(["Running"]);
+    expect(view.sections[0]?.rows.map((r) => r.id)).toEqual(["here", "nowhere"]);
+  });
+
+  test("when every task is asleep the screen is not empty, and only Asleep shows", () => {
+    const asleep = machine({ connected: false, lastSeen: NOW - 600_000 });
+    const view = deriveQueue(
+      state(ok([task("run", { state: "running", assignment: placedAt })]), {}, { machines: [asleep] }),
+      NOW,
+    );
+    expect(view.empty).toBeNull();
+    expect(titles(view)).toEqual(["Asleep"]);
+    expect(view.summary).toBe("0 running · 0 waiting");
+  });
+
+  test("the Queue chip's attention (queueAttention) skips escalated tasks on asleep machines", () => {
+    const asleep = machine({ connected: false, lastSeen: NOW - 600_000 });
+    const dozing = task("dozing", { state: "needs-input", assignment: placedAt, escalated: true });
+    const live = task("live", { state: "needs-input", escalated: true });
+    const relay = { machines: [asleep] };
+    expect(deriveView(state(ok([dozing]), {}, relay), NOW).queueAttention).toBe(false);
+    expect(deriveView(state(ok([dozing, live]), {}, relay), NOW).queueAttention).toBe(true);
+  });
+
+  test("an escalated task an awake machine holds still outranks plain needs-input", () => {
+    const awake = machine();
+    const view = deriveQueue(
+      state(
+        ok([
+          task("plain", { state: "needs-input", assignment: placedAt }),
+          task("stuck", { state: "needs-input", assignment: placedAt, escalated: true }),
+        ]),
+        {},
+        { machines: [awake] },
+      ),
+      NOW,
+    );
+    expect(view.sections[0]?.rows.map((r) => r.id)).toEqual(["stuck", "plain"]);
+  });
+
   test("an escalated task says how long it has waited, and attention follows it", () => {
     const stuck = task("stuck", { state: "needs-input", escalated: true, needsInputSince: NOW - 3 * 3_600_000 });
     const view = deriveQueue(state(ok([stuck])), NOW);
@@ -145,6 +247,42 @@ describe("deriveQueue", () => {
       expect(view.sections[0]?.rows[0]?.body).toBe(failedBody(code));
       expect(view.sections[0]?.rows[0]?.dot).toBe("err");
     }
+  });
+
+  test("a failed session's card says how it ended, from the exit status its failure carries", () => {
+    const failure = { code: "session_failed", message: "m", exit: 137 };
+    const view = deriveQueue(state(ok([task("f", { state: "failed", failure })])), NOW);
+    expect(view.sections[0]?.rows[0]?.body).toBe(failedBody("session_failed", 137));
+    expect(view.sections[0]?.rows[0]?.body).toContain("killed (SIGKILL), possibly out of memory");
+    const judged = { ...failure, oomKill: true };
+    const confirmed = deriveQueue(state(ok([task("f", { state: "failed", failure: judged })])), NOW);
+    expect(confirmed.sections[0]?.rows[0]?.body).toContain(
+      "killed (SIGKILL), out of memory (the kernel's OOM killer fired as it died),",
+    );
+  });
+
+  test("a ready card says why it waits, leaving out places cut only for the pin", () => {
+    const over = { code: "quota_over_line", window: "5h", projectedPct: 100 } as const;
+    const held = task("w", {
+      state: "ready",
+      decision: {
+        at: NOW,
+        chosen: null,
+        candidates: [
+          { deviceId: "full", machine: "FullBox", exclave: "default", rejected: [over] },
+          {
+            deviceId: "mac",
+            machine: "Mac",
+            exclave: "default",
+            rejected: [{ code: "pin_mismatch", field: "deviceId" }],
+          },
+        ],
+      },
+    });
+    const body = deriveQueue(state(ok([held])), NOW).sections[0]?.rows[0]?.body;
+    expect(body).toContain("Waiting: FullBox · default:");
+    expect(body).toContain(reasonText(over));
+    expect(body).not.toContain("Mac");
   });
 
   test("a row's title is the task's, else its prompt's first line cut to 80, else its window (unless it is the daemon's `session` fallback), else its repo", () => {
@@ -329,6 +467,46 @@ describe("deriveQueue", () => {
     expect(accountOnly.paused).toBe(false);
   });
 
+  test("holds tell apart one email signed in to two orgs, and held accounts no machine reports", () => {
+    const signedIn = (accountId: string, email: string): ExclaveInfo => ({
+      id: accountId,
+      authOk: true,
+      accountId,
+      email,
+      extraUsageEnabled: null,
+      skills: [],
+    });
+    const mac = machine({
+      exclaves: [
+        signedIn("1a2b3c4d-personal:acct-same", "me@acme.dev"),
+        signedIn("9f8e7d6c-team:acct-same", "me@acme.dev"),
+      ],
+    });
+    const view = deriveQueue(
+      state(
+        ok(
+          [],
+          [
+            { account: "1a2b3c4d-personal:acct-same", until: "resume", at: NOW },
+            { account: "9f8e7d6c-team:acct-same", until: "resume", at: NOW },
+            // No machine reports either: they read alike unless the hold list counts them.
+            { account: "org-p:abcdefgh-1", until: "resume", at: NOW },
+            { account: "org-q:abcdefgh-2", until: "resume", at: NOW },
+          ],
+        ),
+        {},
+        { machines: [mac] },
+      ),
+      NOW,
+    );
+    expect(view.holds.map((h) => h.text)).toEqual([
+      "me@acme.dev (org 1a2b3c4d) is paused until resumed",
+      "me@acme.dev (org 9f8e7d6c) is paused until resumed",
+      "acct abcdefgh (org org-p) is paused until resumed",
+      "acct abcdefgh (org org-q) is paused until resumed",
+    ]);
+  });
+
   test("a held account shows its alias in place of its email", () => {
     const exclave: ExclaveInfo = {
       id: "work",
@@ -409,7 +587,7 @@ describe("deriveQueue", () => {
 });
 
 describe("authoring on a row", () => {
-  const batch = { id: "b-1", index: 2, strategy: { mode: "sequential" } } as const;
+  const batch = { id: "b-1", index: 2, strategy: BATCH_STRATEGY } as const;
   const rowOf = (tasks: readonly Task[], id: string) =>
     deriveQueue(state(ok(tasks)), NOW)
       .sections.flatMap((section) => section.rows)
@@ -456,20 +634,68 @@ describe("authoring on a row", () => {
     expect(rowOf(tasks, "base")?.deps).toBeNull();
   });
 
-  test("a batch member shows its place and strategy", () => {
+  test("a batch member shows its place, and nothing about order or limits: a batch has none", () => {
     const member = task("m", { spec: { repo: ORIGIN, mode: "worktree", batch } });
-    expect(rowOf([member], "m")?.batch).toBe("Batch #2 · one at a time");
-    expect(
-      rowOf(
-        [
-          task("p", {
-            spec: { repo: ORIGIN, mode: "worktree", batch: { ...batch, strategy: { mode: "parallel", max: 3 } } },
-          }),
-        ],
-        "p",
-      )?.batch,
-    ).toBe("Batch #2 · up to 3 at once");
+    expect(rowOf([member], "m")?.batch).toBe("Batch #2");
     expect(rowOf([task("n")], "n")?.batch).toBeNull();
+  });
+
+  test("a pin and an avoid list read in the verdict's words on every state, by display label", () => {
+    const account = "org:acct-1234567890";
+    const exclave: ExclaveInfo = {
+      id: "work",
+      authOk: true,
+      accountId: account,
+      email: "me@acme.dev",
+      extraUsageEnabled: null,
+      skills: [],
+    };
+    const machines = [machine({ exclaves: [exclave] }), machine({ deviceId: "dev-b", name: "WSL" })];
+    const placed = (fields: Partial<Task["spec"]>, taskState: Task["state"] = "ready"): string | null | undefined => {
+      const t = task("t", { state: taskState, spec: { repo: ORIGIN, mode: "worktree", ...fields } });
+      const accounts = { aliases: { [account]: "Acme" }, nameable: true, saving: null, notice: null };
+      return deriveQueue(state(ok([t]), { accounts }, { machines }), NOW).sections[0]?.rows[0]?.placement;
+    };
+    expect(placed({ pin: { deviceId: "dev-b" } })).toBe("Pinned to WSL");
+    expect(placed({ pin: { deviceId: "dev-b" } }, "running")).toBe("Pinned to WSL");
+    expect(placed({ pin: { deviceId: "dev-a", account } }, "done")).toBe("Pinned to Mac · Acme");
+    expect(placed({ avoid: ["dev-b", "ffffffff00001111"] }, "queued")).toBe("Avoids WSL, ffffffff");
+    expect(placed({ pin: { deviceId: "dev-a" }, avoid: ["dev-b"] })).toBe("Pinned to Mac. Avoids WSL");
+    expect(placed({ pin: { deviceId: "dev-a", account }, avoid: ["dev-b"] })).toBe("Pinned to Mac · Acme. Avoids WSL");
+    expect(placed({ avoid: ["dev-b", "a1", "b2", "c3", "d4"] })).toBe("Avoids WSL, a1, b2, +2 more");
+    expect(placed({ avoid: [] })).toBeNull();
+    expect(placed({ pin: { deviceId: "0123456789abcdef" } })).toBe("Pinned to 01234567");
+    expect(placed({})).toBeNull();
+  });
+
+  test("an account pin reads by its alias, else by the email a machine reports", () => {
+    const account = "org:acct-1234567890";
+    const exclave: ExclaveInfo = {
+      id: "work",
+      authOk: true,
+      accountId: account,
+      email: "me@acme.dev",
+      extraUsageEnabled: null,
+      skills: [],
+    };
+    const pinned = task("t", { spec: { repo: ORIGIN, mode: "worktree", pin: { account } } });
+    const row = (aliases: Readonly<Record<string, string>>): string | null | undefined =>
+      deriveQueue(
+        state(
+          ok([pinned]),
+          { accounts: { aliases, nameable: true, saving: null, notice: null } },
+          { machines: [machine({ exclaves: [exclave] })] },
+        ),
+        NOW,
+      ).sections[0]?.rows[0]?.placement;
+    expect(row({ [account]: "Acme" })).toBe("Pinned to Acme");
+    expect(row({})).toBe("Pinned to me@acme.dev");
+  });
+
+  test("an account pin no machine reports and no alias reads by accountNameIn's short-id fallback", () => {
+    const pinned = task("t", { spec: { repo: ORIGIN, mode: "worktree", pin: { account: "org:acct-1234567890" } } });
+    const placement = deriveQueue(state(ok([pinned])), NOW).sections[0]?.rows[0]?.placement;
+    expect(placement).toBe("Pinned to acct acct-123");
   });
 
   test("a task can be followed up while it can still be waited on, or once it is done; not after it failed or was cancelled", () => {
@@ -480,6 +706,92 @@ describe("authoring on a row", () => {
     expect(can({ state: "done", doneBy: "session" })).toBe(true);
     expect(can({ state: "failed", failure: { code: "repo_not_found", message: "x" } })).toBe(false);
     expect(can({ state: "cancelled" })).toBe(false);
+  });
+});
+
+describe("continuing a failed task", () => {
+  const CAN = [CAPABILITIES.continueTask];
+  const failed = task("f", {
+    state: "failed",
+    failure: { code: "session_failed", message: "the session ended with exit 137" },
+    spec: { repo: ORIGIN, mode: "worktree", title: "Fix the thing" },
+    assignment: placedAt,
+  });
+  const continuation = (fields: Partial<Task>): Task =>
+    task("c", { spec: { repo: ORIGIN, mode: "continue", continues: { task: "f", at: placedAt } }, ...fields });
+
+  /** The row for `id`, with the leader and the machine it ran on (both dev-a here) advertising `capabilities`. */
+  const rowOf = (tasks: readonly Task[], id: string, capabilities?: readonly string[], machines?: readonly Machine[]) =>
+    deriveQueue(
+      state(
+        ok(tasks),
+        {},
+        { machines: machines ?? [machine({ ...(capabilities === undefined ? {} : { capabilities }) })] },
+      ),
+      NOW,
+    )
+      .sections.flatMap((section) => section.rows)
+      .find((row) => row.id === id);
+
+  test("offered on a failed session when its machine and the leader both advertise it", () => {
+    expect(rowOf([failed], "f", CAN)?.canContinue).toBe(true);
+    expect(rowOf([failed], "f")?.canContinue).toBe(false);
+  });
+
+  test("a continuation the machine refused shows the daemon's reason", () => {
+    const refused = continuation({
+      state: "failed",
+      failure: { code: "not_continuable", message: "its worktree is locked (on a usb disk)" },
+    });
+    expect(rowOf([failed, refused], "c", CAN)?.body).toContain("its worktree is locked (on a usb disk)");
+  });
+
+  test("not offered when the leader cannot take a continue task, though the machine it ran on can", () => {
+    const leader = machine({ deviceId: "dev-leader", name: "Leader" });
+    const ran = machine({ capabilities: CAN });
+    const relay = { scheduler: { kind: "ready", deviceId: "dev-leader", term: 1 } } as const;
+    const row = deriveQueue(state(ok([failed]), {}, { machines: [ran, leader], ...relay }), NOW).sections[0]?.rows[0];
+    expect(row?.canContinue).toBe(false);
+  });
+
+  test("not offered while the leader is unverified or absent, or when the machine it ran on is gone", () => {
+    const unverified = { scheduler: { kind: "unverified", deviceId: "dev-a", term: 2 } } as const;
+    expect(
+      deriveQueue(state(ok([failed]), {}, { machines: [machine({ capabilities: CAN })], ...unverified }), NOW)
+        .sections[0]?.rows[0]?.canContinue,
+    ).toBe(false);
+    const elsewhere = machine({ deviceId: "dev-z", capabilities: CAN });
+    expect(rowOf([failed], "f", CAN, [elsewhere])?.canContinue).toBe(false);
+  });
+
+  test("only a failed session: not another failure, a task that ran in place, or one still going", () => {
+    const other = task("o", {
+      state: "failed",
+      failure: { code: "repo_not_found", message: "x" },
+      assignment: placedAt,
+    });
+    const inPlace = { ...failed, id: "p", spec: { repo: ORIGIN, mode: "here" } } satisfies Task;
+    const running = task("r", { state: "running", assignment: placedAt });
+    for (const t of [other, inPlace, running]) expect(rowOf([t], t.id, CAN)?.canContinue).toBe(false);
+  });
+
+  test("withdrawn once a continuation is past the queue in any state; a queued, blocked, failed or cancelled one does not hold it", () => {
+    for (const held of ["reserved", "running", "needs-input", "lost", "awaiting-merge", "done"] as const) {
+      expect(rowOf([failed, continuation({ state: held })], "f", CAN)?.canContinue, held).toBe(false);
+    }
+    for (const free of ["queued", "blocked", "ready", "failed", "cancelled"] as const) {
+      expect(rowOf([failed, continuation({ state: free })], "f", CAN)?.canContinue).toBe(true);
+    }
+  });
+
+  test("a continuation names what it continues, by title when listed, else by id; other rows carry no such line", () => {
+    expect(rowOf([failed, continuation({})], "c", CAN)?.continues).toBe("Continues Fix the thing");
+    expect(rowOf([continuation({})], "c", CAN)?.continues).toBe("Continues task f");
+    const long = continuation({
+      spec: { repo: ORIGIN, mode: "continue", continues: { task: "0123456789abcdef", at: placedAt } },
+    });
+    expect(rowOf([long], "c", CAN)?.continues).toBe("Continues task 01234567");
+    expect(rowOf([failed], "f", CAN)?.continues).toBeNull();
   });
 });
 

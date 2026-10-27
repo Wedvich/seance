@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ExclaveInfo, Machine } from "@seance/shared";
+import { CAPABILITIES, parseTask, type ExclaveInfo, type Machine } from "@seance/shared";
 import { DEFAULT_CONFIG, route, type Candidate, type Decision, type SchedulerConfig, type Task } from "../src/index.ts";
 import { accountResetAt } from "../src/route.ts";
 import { clone, exclave, machine, NOW, NOW_S, obs, spec, status } from "./fixtures.ts";
@@ -10,7 +10,12 @@ function task(fields: Partial<Task> = {}): Task {
 
 function decide(
   machines: readonly Machine[],
-  fields: { task?: Task; tasks?: readonly Task[]; config?: Partial<SchedulerConfig> } = {},
+  fields: {
+    task?: Task;
+    tasks?: readonly Task[];
+    config?: Partial<SchedulerConfig>;
+    released?: ReadonlySet<string>;
+  } = {},
 ): Decision {
   return route({
     task: fields.task ?? task(),
@@ -18,6 +23,7 @@ function decide(
     tasks: fields.tasks ?? [],
     now: NOW,
     config: { ...DEFAULT_CONFIG, ...fields.config },
+    ...(fields.released === undefined ? {} : { released: fields.released }),
   });
 }
 
@@ -150,23 +156,101 @@ describe("filter", () => {
     expect(codes(candidate)).toEqual(["pressure_unknown"]);
   });
 
-  test("pin_mismatch: by machine and by exclave", () => {
-    const fleet = [
-      machine("a", {
-        exclaves: [exclave("main", "org:a"), exclave("work", "org:w")],
-        repos: [clone("app", "main"), clone("app-1", "work")],
-        status: status({ quota: [obs(0), obs(1)] }),
-      }),
-      machine("b"),
-    ];
-    const decision = decide(fleet, { task: task({ spec: spec({ pin: { deviceId: "a", exclave: "work" } }) }) });
-    expect(decision.chosen).toEqual({ deviceId: "a", exclave: "work", clone: "app-1" });
-    const reasons = Object.fromEntries(decision.candidates.map((c) => [`${c.deviceId}/${c.exclave}`, c.rejected]));
-    expect(reasons["a/main"]).toEqual([{ code: "pin_mismatch", field: "exclave" }]);
-    expect(reasons["b/main"]).toEqual([
-      { code: "pin_mismatch", field: "deviceId" },
-      { code: "pin_mismatch", field: "exclave" },
-    ]);
+  describe("the task's own restrictions", () => {
+    /** `a` holds accounts `org:a` and `org:w`; `b` and `c` hold `org:w` too, each with a clone. */
+    function fleet(): Machine[] {
+      return [
+        machine("a", {
+          exclaves: [exclave("main", "org:a"), exclave("work", "org:w")],
+          repos: [clone("app", "main"), clone("app-1", "work")],
+          status: status({ quota: [obs(0), obs(1)] }),
+        }),
+        machine("b", { exclaves: [exclave("main", "org:w")] }),
+        machine("c", { exclaves: [exclave("main", "org:w")] }),
+      ];
+    }
+    const reasonsOf = (decision: Decision): Record<string, readonly unknown[]> =>
+      Object.fromEntries(decision.candidates.map((c) => [`${c.deviceId}/${c.exclave}`, c.rejected]));
+
+    test("pin_mismatch by machine and by account: only the pinned account on the pinned machine is left", () => {
+      const decision = decide(fleet(), { task: task({ spec: spec({ pin: { deviceId: "a", account: "org:w" } }) }) });
+      expect(decision.chosen).toEqual({ deviceId: "a", exclave: "work", clone: "app-1" });
+      const reasons = reasonsOf(decision);
+      expect(reasons["a/main"]).toEqual([{ code: "pin_mismatch", field: "account" }]);
+      expect(reasons["b/main"]).toEqual([{ code: "pin_mismatch", field: "deviceId" }]);
+    });
+
+    test("an account pin alone matches the account wherever it is signed in", () => {
+      const decision = decide(fleet(), { task: task({ spec: spec({ pin: { account: "org:w" } }) }) });
+      const reasons = reasonsOf(decision);
+      expect(reasons["a/main"]).toEqual([{ code: "pin_mismatch", field: "account" }]);
+      for (const where of ["a/work", "b/main", "c/main"]) expect(reasons[where]).toEqual([]);
+      expect(decision.chosen).not.toBeNull();
+      expect(decision.chosen).not.toMatchObject({ deviceId: "a", exclave: "main" });
+    });
+
+    test("an exclave signed in to no account never matches an account pin", () => {
+      const signedOut = machine("a", { exclaves: [exclave("main", null)] });
+      const candidate = only(decide([signedOut], { task: task({ spec: spec({ pin: { account: "org:a" } }) }) }));
+      expect(candidate.rejected).toContainEqual({ code: "pin_mismatch", field: "account" });
+    });
+
+    test("avoided: every exclave of an avoided machine is turned away, the rest are judged as before", () => {
+      const decision = decide(fleet(), { task: task({ spec: spec({ avoid: ["a", "b"] }) }) });
+      const reasons = reasonsOf(decision);
+      for (const where of ["a/main", "a/work", "b/main"]) expect(reasons[where]).toEqual([{ code: "avoided" }]);
+      expect(reasons["c/main"]).toEqual([]);
+      expect(decision.chosen?.deviceId).toBe("c");
+    });
+
+    test("a pin and an avoid list together: each candidate carries every restriction it breaks", () => {
+      const restricted = spec({ pin: { deviceId: "a", account: "org:w" }, avoid: ["b"] });
+      const decision = decide(fleet(), { task: task({ spec: restricted }) });
+      expect(decision.chosen).toEqual({ deviceId: "a", exclave: "work", clone: "app-1" });
+      expect(reasonsOf(decision)["b/main"]).toEqual([{ code: "pin_mismatch", field: "deviceId" }, { code: "avoided" }]);
+    });
+
+    test("avoiding every machine leaves nothing to choose: the task waits", () => {
+      const decision = decide(fleet(), { task: task({ spec: spec({ avoid: ["a", "b", "c"] }) }) });
+      expect(decision.chosen).toBeNull();
+      expect(decision.candidates.every((c) => c.rejected.some((r) => r.code === "avoided"))).toBe(true);
+    });
+
+    test("a machine pin never lifts a limit: the pinned machine keeps its disk, quota and cap reasons, and the others only pin_mismatch", () => {
+      const pinned = task({ spec: spec({ pin: { deviceId: "a" } }) });
+      const cases: [string, Machine, Partial<SchedulerConfig>, Task[], string][] = [
+        ["disk_low", machine("a", { status: status({ free: 1023, quota: [obs(0)] }) }), {}, [], "disk_low"],
+        [
+          "quota_over_line",
+          machine("a", { status: status({ quota: [obs(0, { h: 95 })] }) }),
+          {},
+          [],
+          "quota_over_line",
+        ],
+        ["cap_reached", machine("a"), { globalMax: 1 }, [held("x", "b")], "cap_reached"],
+      ];
+      for (const [, held_a, config, tasks, code] of cases) {
+        const decision = decide([held_a, machine("b")], { task: pinned, tasks, config });
+        const reasons = reasonsOf(decision);
+        const onA = decision.candidates.find((c) => c.deviceId === "a");
+        expect(onA === undefined ? [] : codes(onA)).toContain(code);
+        expect(reasons["b/main"]).toEqual(
+          code === "cap_reached"
+            ? [
+                { code: "cap_reached", inFlight: 1, max: 1 },
+                { code: "pin_mismatch", field: "deviceId" },
+              ]
+            : [{ code: "pin_mismatch", field: "deviceId" }],
+        );
+        expect(decision.chosen).toBeNull();
+      }
+    });
+
+    test("unrestricted, the same fleet is judged with no restriction reason at all", () => {
+      const decision = decide(fleet());
+      expect(decision.candidates.every((c) => c.rejected.length === 0)).toBe(true);
+      expect(decision.chosen).not.toBeNull();
+    });
   });
 
   test("repo_absent: an exclave with no clone of the task's origin, whatever the local name", () => {
@@ -588,6 +672,57 @@ describe("filter", () => {
     });
   });
 
+  describe("a machine asleep past slotReleaseAfterMs holds no slot", () => {
+    /** Machine `s`, asleep, signed in to `org:a` as `a` is. */
+    const asleep = machine("s", { connected: false, exclaves: [exclave("main", "org:a")] });
+    const released = new Set(["s"]);
+
+    test("its in-flight tasks, reserved included, leave the global count; the rest still count", () => {
+      const tasks = [held("x", "s"), held("y", "s", "reserved"), held("z", "b")];
+      const candidate = only(decide([machine("a")], { tasks, config: { globalMax: 1 }, released }));
+      expect(candidate.rejected).toEqual([{ code: "cap_reached", inFlight: 1, max: 1 }]);
+      expect(only(decide([machine("a")], { tasks, config: { globalMax: 2 }, released })).rejected).toEqual([]);
+    });
+
+    test("its tasks leave its account's count, so another machine on the account gets the work", () => {
+      const tasks = [held("x", "s"), held("y", "s", "needs-input")];
+      const fleet = [machine("a", { exclaves: [exclave("main", "org:a")] }), asleep];
+      const holding = decide(fleet, { tasks, config: { accountMax: 2 } });
+      expect(byExclave(holding, "main")?.rejected).toEqual([
+        { code: "cap_reached", inFlight: 2, max: 2, scope: "account" },
+      ]);
+      const freed = decide(fleet, { tasks, config: { accountMax: 2 }, released });
+      expect(freed.chosen).toEqual({ deviceId: "a", exclave: "main", clone: "app" });
+    });
+
+    test("an old record's batch bound is gone: the next member meets only what the caps define", () => {
+      // Raw, as an older writer sealed it, through the parser every reader uses.
+      const member = (id: string, index: number, strategy: unknown, fields: Record<string, unknown> = {}): Task => {
+        const body = parseTask({
+          id,
+          spec: { ...spec(), batch: { id: "b1", index, strategy } },
+          state: "ready",
+          createdAt: NOW,
+          ...fields,
+        });
+        if (body === null) throw new Error(`${id} does not parse`);
+        return body;
+      };
+      for (const strategy of [{ mode: "parallel", max: 1 }, { mode: "sequential" }]) {
+        const running = member("x", 0, strategy, {
+          state: "running",
+          assignment: { deviceId: "s", exclave: "main", clone: "app" },
+        });
+        const next = member("n", 1, strategy);
+        const one = { task: next, tasks: [running], config: { globalMax: 1 } };
+        // Asleep past the grace, the first holds no slot and nothing else holds the next.
+        expect(only(decide([machine("a")], { ...one, released })).rejected).toEqual([]);
+        // Awake, it holds the global slot as any task does, and nothing batch-shaped.
+        expect(only(decide([machine("a")], one)).rejected).toEqual([{ code: "cap_reached", inFlight: 1, max: 1 }]);
+      }
+    });
+  });
+
   describe("paused", () => {
     const fleet = [machine("a"), machine("b")];
 
@@ -637,6 +772,10 @@ describe("filter", () => {
       expect(accountResetAt("org:a", [reading], inFlight, NOW, DEFAULT_CONFIG)).toBe((NOW_S + 7200) * 1000);
       // Alone it is under the line everywhere: the earliest reset.
       expect(accountResetAt("org:a", [reading], [], NOW, DEFAULT_CONFIG)).toBe((NOW_S + 3600) * 1000);
+      // Their machine asleep past the grace: they hold no projected usage, as in routing.
+      expect(accountResetAt("org:a", [reading], inFlight, NOW, DEFAULT_CONFIG, [], new Set(["a"]))).toBe(
+        (NOW_S + 3600) * 1000,
+      );
     });
 
     test("a standard seat's estimate is scaled, as routing scales it", () => {
@@ -844,6 +983,65 @@ describe("stickiness", () => {
       task: task({ spec: spec({ lineage: { deviceId: "owner", exclave: "main" } }) }),
     });
     expect(decision.chosen?.deviceId).toBe("other");
+  });
+});
+
+describe("a continue task", () => {
+  const capable = [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.continueTask];
+  const continuing = (at: { deviceId: string; exclave: string; clone: string }): Task =>
+    task({ spec: spec({ mode: "continue", continues: { task: "t-old", at } }) });
+  const reasonsOf = (decision: Decision): Record<string, readonly unknown[]> =>
+    Object.fromEntries(decision.candidates.map((c) => [`${c.deviceId}/${c.exclave}`, c.rejected]));
+  /** `a` is the target; two exclaves, and a second clone of the same repo in `main` that skills would prefer. */
+  const fleet = (): Machine[] => [
+    machine("a", {
+      capabilities: capable,
+      exclaves: [exclave("main", "org:a"), exclave("work", "org:w", { skills: ["ship"] })],
+      repos: [clone("app", "main"), clone("app-2", "main"), clone("app-w", "work")],
+      status: status({ quota: [obs(0), obs(1)] }),
+    }),
+    machine("b", { capabilities: capable }),
+  ];
+
+  test("only the exact machine, exclave and clone is left; the rest say it ran elsewhere", () => {
+    const decision = decide(fleet(), { task: continuing({ deviceId: "a", exclave: "main", clone: "app-2" }) });
+    expect(decision.chosen).toEqual({ deviceId: "a", exclave: "main", clone: "app-2" });
+    const reasons = reasonsOf(decision);
+    expect(reasons["a/main"]).toEqual([]);
+    expect(reasons["a/work"]).toContainEqual({ code: "continue_elsewhere" });
+    expect(reasons["b/main"]).toContainEqual({ code: "continue_elsewhere" });
+  });
+
+  test("the named clone is judged on its own skills: another clone's project skill does not stand in", () => {
+    const at = { deviceId: "a", exclave: "main", clone: "app-2" };
+    const withSkill = [{ ...clone("app", "main"), skills: ["ship"] }, clone("app-2", "main")];
+    const decision = decide(
+      [machine("a", { capabilities: capable, repos: withSkill, exclaves: [exclave("main", "org:a")] })],
+      { task: task({ spec: spec({ mode: "continue", prompt: "/ship it", continues: { task: "t-old", at } }) }) },
+    );
+    expect(decision.chosen).toBeNull();
+    expect(only(decision).rejected).toEqual([{ code: "skill_absent", skill: "ship" }]);
+    expect(only(decision).clone).toBe("app-2");
+  });
+
+  test("a target without the capability is continue_unsupported, and never chosen", () => {
+    const old = machine("a", { capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId] });
+    const decision = decide([old], { task: continuing({ deviceId: "a", exclave: "main", clone: "app" }) });
+    expect(decision.chosen).toBeNull();
+    expect(only(decision).rejected).toEqual([{ code: "continue_unsupported" }]);
+  });
+
+  test("a clone the target no longer has is repo_absent", () => {
+    const decision = decide(fleet(), { task: continuing({ deviceId: "a", exclave: "main", clone: "gone" }) });
+    expect(decision.chosen).toBeNull();
+    expect(reasonsOf(decision)["a/main"]).toEqual([{ code: "repo_absent" }]);
+  });
+
+  test("an ordinary task is not held to any of it", () => {
+    const decision = decide(fleet());
+    expect(decision.candidates.flatMap((c) => c.rejected.map((r) => r.code))).not.toContain("continue_elsewhere");
+    expect(decision.candidates.flatMap((c) => c.rejected.map((r) => r.code))).not.toContain("continue_unsupported");
+    expect(decision.chosen).not.toBeNull();
   });
 });
 

@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { toBase64, type SessionsResponse } from "@seance/shared";
 import { createBackend } from "../src/backend-default.ts";
-import { BrokerError, brokerMachines } from "../src/broker-client.ts";
+import { BrokerError, brokerMachines, brokerSchedulerCall } from "../src/broker-client.ts";
+import { brokerFleet } from "../src/fleet.ts";
 import type { Config, PskSource } from "../src/config.ts";
 import { localRequest } from "../src/local-client.ts";
 import { startDaemon, type DaemonHandle } from "../src/run.ts";
@@ -80,6 +81,13 @@ describe("the broker runs only where the key is service-delivered", () => {
         const err = await brokerMachines({ path }).catch((caught: unknown) => caught);
         expect(err).toBeInstanceOf(BrokerError);
         expect(err).toMatchObject({ code: "broker_disabled" });
+        // The scheduler's actions are refused the same way, and never dial.
+        const queue = await brokerSchedulerCall({ schedulerOp: "queue" }, { path }).catch((caught: unknown) => caught);
+        expect(queue).toMatchObject({ code: "broker_disabled" });
+        const fleet = await brokerFleet({ path })
+          .open()
+          .catch((caught: unknown) => caught);
+        expect(fleet).toMatchObject({ code: "broker_disabled" });
         // The local op path is untouched by the refusal.
         const reply = await localRequest<SessionsResponse>("sessions", {}, { path });
         if ("ok" in reply) throw new Error(reply.message);

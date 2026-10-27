@@ -1383,10 +1383,7 @@
   transition: transform 150ms ease;
 }
 
-.disclosure[aria-expanded="true"] > .disclosure-chevron {
-  transform: rotate(90deg);
-}
-
+.disclosure[aria-expanded="true"] > .disclosure-chevron,
 .fleet-note {
   margin: 0;
   font-size: 13px;
@@ -2092,6 +2089,34 @@
   gap: var(--gap);
 }
 
+/* The heading's own type, made tappable; padding grows the target, negative margins take it back (the column's gutter absorbs the sideways give-back). */
+.queue-section-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  padding: 8px 4px;
+  margin: -8px -4px;
+}
+
+@media (hover: hover) {
+  .queue-section-toggle:hover {
+    color: var(--acc);
+  }
+}
+
+.queue-section-toggle:focus-visible {
+  color: var(--acc);
+}
+
+.queue-section-toggle[aria-expanded="true"] > .disclosure-chevron {
+  transform: rotate(90deg);
+}
+
 .fleet-card-body {
   margin: 0;
   font-size: 13px;
@@ -2363,41 +2388,4 @@
   gap: 8px;
   padding: 14px 16px;
   border-radius: 14px;
-}
-
-.sheet-max {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 13px;
-  border-radius: 10px;
-  font-size: 15.5px;
-  font-weight: 500;
-}
-
-.sheet-max input {
-  width: 4.5rem;
-  padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--bg);
-  color: var(--fg);
-  font-family: var(--mono);
-  font-size: 15px;
-  outline: none;
-}
-
-.sheet-max input:focus {
-  border-color: var(--acc);
-}
-
-.sheet-max .quiet {
-  width: auto;
-  margin-left: auto;
-  padding: 8px 12px;
-  color: var(--acc);
-}
-
-.sheet-max .quiet:disabled {
-  opacity: 0.5;
 }

@@ -8,6 +8,8 @@ import {
   liveStatus,
   newestQuotaByAccount,
   sameCreditMonth,
+  SKILL_TOKEN,
+  trimSkillName,
   type Candidate,
   type Decision,
   type ExclaveInfo,
@@ -22,7 +24,6 @@ import {
   type RepoEntry,
   type ScoreComponents,
 } from "@seance/shared";
-import { batchCap } from "./batch.ts";
 import type { SchedulerConfig, SeatProfile, WindowSpan } from "./config.ts";
 import { codeUnitOrder } from "./order.ts";
 import { accountPause, activeHolds, queuePause } from "./pause.ts";
@@ -49,6 +50,11 @@ export interface RouteInput {
   readonly holds?: readonly PauseHold[];
   /** The fleet quota record's entries (`Fleet.fleetQuota`), folded with every status. */
   readonly fleetQuota?: readonly FleetQuotaEntry[];
+  /**
+   * Machines absent past `slotReleaseAfterMs`: their in-flight tasks hold no
+   * slot and no projected usage here.
+   */
+  readonly released?: ReadonlySet<string>;
 }
 
 const SPAN_MS: Readonly<Record<WindowSpan, number>> = { "5h": 5 * 3600_000, "7d": 7 * 86_400_000 };
@@ -85,7 +91,7 @@ interface Pass {
 
 export function route(input: RouteInput): Decision {
   const { task, machines, now, config } = input;
-  const inFlight = input.tasks.filter((t) => t.id !== task.id && IN_FLIGHT.includes(t.state));
+  const inFlight = holdingSlots(input.tasks, input.released).filter((t) => t.id !== task.id);
   const newest = newestQuotaByAccount(machines, input.fleetQuota);
   const pass: Pass = {
     task,
@@ -101,11 +107,11 @@ export function route(input: RouteInput): Decision {
     holds: activeHolds(input.holds ?? [], now),
     skills: knownSkills(task, machines),
   };
-  const caps = [queuePause(pass.holds), pass.capReached, batchCap(task, input.tasks)].filter((r) => r !== null);
+  const caps = [queuePause(pass.holds), pass.capReached].filter((r) => r !== null);
 
   const candidates: Candidate[] = [];
   for (const machine of machines) {
-    const machineReasons = [...machineFilter(machine, now, config), ...caps];
+    const machineReasons = [...machineFilter(machine, now, config), ...continueFilter(task, machine), ...caps];
     if (machine.exclaves === undefined || machine.exclaves.length === 0) {
       candidates.push({ deviceId: machine.deviceId, machine: machine.name, exclave: null, rejected: machineReasons });
       continue;
@@ -135,12 +141,21 @@ function judge(pass: Pass, machine: Machine, machineReasons: readonly Reason[], 
   const { task, config, inFlight } = pass;
   const { skills } = pass;
   const clones = machine.repos.filter((r) => r.exclave === exclave.id && r.origin === task.spec.repo);
+  // A continuation resumes one worktree, in one clone: the daemon's own check wants the very clone it ran in.
+  const at = task.spec.continues?.at;
   // An exclave's skill serves any clone, so only a skill the exclave lacks picks among clones: the first
   // clone that, with the exclave, has every required skill; none does, the first match.
   const lacking = (r: RepoEntry | undefined): string | undefined =>
     skills.find((s) => !exclave.skills.includes(s) && r?.skills?.includes(s) !== true);
-  const clone = clones.find((r) => lacking(r) === undefined) ?? clones[0];
-  const rejected: Reason[] = [...machineReasons, ...pinFilter(task, machine, exclave)];
+  const clone =
+    at === undefined
+      ? (clones.find((r) => lacking(r) === undefined) ?? clones[0])
+      : clones.find((r) => r.name === at.clone);
+  const rejected: Reason[] = [...machineReasons, ...placementFilter(task, machine, exclave)];
+  // Once per candidate: another machine already carries it from `continueFilter`.
+  if (at !== undefined && exclave.id !== at.exclave && !rejected.some((r) => r.code === "continue_elsewhere")) {
+    rejected.push({ code: "continue_elsewhere" });
+  }
   if (clone === undefined) rejected.push({ code: "repo_absent" });
   const missing = lacking(clone);
   if (missing !== undefined) rejected.push({ code: "skill_absent", skill: missing });
@@ -194,6 +209,19 @@ interface AccountJudgement {
   readonly quota?: QuotaBasis;
   readonly spill?: Candidate["spill"];
   readonly pressure: number;
+}
+
+/**
+ * What the caps and projected usage count: in flight, and not placed on a
+ * machine asleep past `slotReleaseAfterMs`. Nothing runs there while it
+ * sleeps; once it is back its tasks count again, over a cap or not.
+ */
+function holdingSlots(tasks: readonly Task[], released: ReadonlySet<string> = new Set()): Task[] {
+  return tasks.filter((t) => {
+    if (!IN_FLIGHT.includes(t.state)) return false;
+    const at = t.assignment ?? t.reservation;
+    return at === undefined || !released.has(at.deviceId);
+  });
 }
 
 /**
@@ -282,13 +310,20 @@ function machineFilter(machine: Machine, now: number, config: SchedulerConfig): 
 }
 
 /**
- * `/name` tokens: the PWA picker's rule, widened for wrapping — a `/` at the
- * start, after whitespace or after an opening wrapper (`` ` " ' ( [ ``), the name running to the
- * next whitespace with no second `/` (`and/or`, `https://a/b`, `/tmp/x` are none).
- * Closing wrappers and trailing sentence punctuation are not part of the name
- * (a token ending in `:` cannot be a `plugin:name`, but `:` stays inside one).
+ * A continue task (DESIGN.md, Daemon, "Continuing a failed task") has one
+ * acceptable target, in the clone and exclave `judge` checks. Here, the machine:
+ * another is `continue_elsewhere`, and the target must be a daemon that spawns
+ * the mode at all, or it would refuse the request as malformed.
  */
-const SKILL_TOKEN = /(?<![^\s`"'([])\/([^\s/]+)(?=\s|$)/gu;
+function continueFilter(task: Task, machine: Machine): Reason[] {
+  const at = task.spec.continues?.at;
+  if (at === undefined) return [];
+  const reasons: Reason[] = [];
+  if (machine.deviceId !== at.deviceId) reasons.push({ code: "continue_elsewhere" });
+  if (machine.capabilities?.includes(CAPABILITIES.continueTask) !== true)
+    reasons.push({ code: "continue_unsupported" });
+  return reasons;
+}
 
 /**
  * The names a task may mean (DESIGN.md, Scheduler, "Skills filter"): declared,
@@ -297,8 +332,9 @@ const SKILL_TOKEN = /(?<![^\s`"'([])\/([^\s/]+)(?=\s|$)/gu;
  */
 function skillCandidates(task: Task): readonly string[] {
   if (task.spec.skill !== undefined) return [task.spec.skill];
+  // `/name` tokens by the rule the PWA picker completes (shared/src/skill-token.ts).
   return [...(task.spec.prompt ?? "").matchAll(SKILL_TOKEN)]
-    .map((m) => (m[1] ?? "").replace(/[.,;!?:`"')\]]+$/u, ""))
+    .map((m) => trimSkillName(m[1] ?? ""))
     .filter((name) => isSkillName(name));
 }
 
@@ -320,13 +356,15 @@ function knownSkills(task: Task, machines: readonly Machine[]): readonly string[
   return [...new Set(skillCandidates(task).filter(known))];
 }
 
-function pinFilter(task: Task, machine: Machine, exclave: ExclaveInfo): Reason[] {
-  const pin = task.spec.pin;
+/** The task's own restrictions: its pin, and the machines it avoids. An exclave signed in to no account matches no account pin. */
+function placementFilter(task: Task, machine: Machine, exclave: ExclaveInfo): Reason[] {
+  const { pin, avoid } = task.spec;
   const reasons: Reason[] = [];
   if (pin?.deviceId !== undefined && pin.deviceId !== machine.deviceId)
     reasons.push({ code: "pin_mismatch", field: "deviceId" });
-  if (pin?.exclave !== undefined && pin.exclave !== exclave.id)
-    reasons.push({ code: "pin_mismatch", field: "exclave" });
+  if (pin?.account !== undefined && pin.account !== exclave.accountId)
+    reasons.push({ code: "pin_mismatch", field: "account" });
+  if (avoid?.includes(machine.deviceId) === true) reasons.push({ code: "avoided" });
   return reasons;
 }
 
@@ -373,6 +411,7 @@ export function accountResetAt(
   now: number,
   config: SchedulerConfig,
   fleetQuota: readonly FleetQuotaEntry[] = [],
+  released: ReadonlySet<string> = new Set(),
 ): number | null {
   const account = accountQuota(accountId, machines, newestQuotaByAccount(machines, fleetQuota));
   if (!account.known) return null;
@@ -380,7 +419,7 @@ export function accountResetAt(
     w.resetsAt !== undefined && w.resetsAt * 1000 > now ? [w.resetsAt * 1000] : [];
   const sharing = accountInFlight(
     {
-      inFlight: tasks.filter((t) => IN_FLIGHT.includes(t.state)),
+      inFlight: holdingSlots(tasks, released),
       accountAt: (placement) => accountOfPlacement(machines, placement),
     },
     accountId,

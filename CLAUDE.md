@@ -124,11 +124,12 @@ green:
   shell string is the tmux inner command, every wire-supplied value through `shq()`), `spawn`
   resolves repos by name against the cached scan set, every spawn, despawn and reap path audits
   through its one formatter under its own origin (`relay`, `cli`, `local`, `local-broker` for
-  requests the daemon forwards to other machines for a keyless `seanced mcp`, `schedule` for
+  requests the daemon forwards to other machines, or makes of the scheduler (enqueue, queue, cancel,
+  account list), for a keyless `seanced mcp` or `seanced spawn`, `schedule` for
   the daemon's reap timer, `harvest` for the daemon closing a dead task pane after noting its exit
   status, `leader` for the scheduler loop dispatching to its own machine in
-  process and admitting a task, `mcp` for `seanced mcp`'s own `auto` enqueue line, and `cli` for
-  anything typed at this machine's shell, its `spawn --auto` enqueue line included — a new
+  process and admitting a task, `mcp` for `seanced mcp`'s own `spawn_session`/`queue_batch`/`continue_task` enqueue lines, and `cli` for
+  anything typed at this machine's shell, its `spawn` enqueue line included — a new
   surface adds an origin, never reuses one),
   prompt text is never logged, a service-delivered credential never leaves the daemon process
   (`exec.ts` strips `CREDENTIALS_DIRECTORY`, or the tmux server it boots hands the PSK's path to
@@ -155,7 +156,11 @@ green:
   disk before its spawn runs, a spawn whose id it cannot record is refused, and `since` only
   moves forward — since it is what makes `ledgerSince` a proof that a spawn never landed — and a
   scheduler spawn for a task id the ledger holds as launched is refused `task_launched`, audited,
-  never run again, and the leader's version floor (`daemon/src/version-floor.ts`) is one per
+  never run again, and a continuation (`mode: "continue"`) runs only for a spawn sealed `from` the
+  scheduler with `client: "scheduler"` (or the leader's in-process dispatch), in the worktree this
+  machine's own launch ledger noted for the continued task id — never a path from a frame — under the
+  clone its `repo` name resolved to, and a task record carrying `continues` always carries
+  `mode: "continue"`, which an older leader's parser refuses, and the leader's version floor (`daemon/src/version-floor.ts`) is one per
   process like `schedulerGuard`, persisted 0600, and only ever raised by a read (the leader's own
   pause write alone may set it lower): a task record below it is `version_regressed`, a pause
   below it or missing holds the whole queue, and a task record that vanishes without the
@@ -185,22 +190,29 @@ green:
   through `openFleetQuotaRecord` — and a tombstone lives exactly as long as
   admission's age limit (`STORE_TOMBSTONE_MS` for both: the relay's tombstone, `isExpired` in
   `scheduler/src/deps.ts`), since a pruned task's version-1 blob put back after its tombstone
-  lapses must be too old to admit, and a `branch-state` is never accepted from an app, and an
+  lapses must be too old to admit, and every task record carrying `pin.account` or `avoid` is sealed through the one task sealer (`taskRecordAtRest`/`sealTaskRecord`), which emits `pin.exclave: ""` for an older leader to refuse, and the parser never nulls a spec over `pin.exclave`, and a `branch-state` is never accepted from an app, and an
   event — a session event or a branch state — moves only a task placed (or, for a session event,
   reserved) on the machine that sealed it, and a PR status is read only by the leader's own `gh`,
   bound to the `prUrl` the record holds, its values passed as GraphQL variables, and no frame
   carries one, and the settings record (`settings:main`) is written only by the leader, held to
   the version floor, never regenerated nor written over when it cannot be read or has regressed,
   and never logged nor put in `queue`, MCP or `status`. Don't let changes drift from them.
-- The daemon's local op socket (`daemon/src/local-socket.ts`) is what makes an MCP spawn aimed at
-  this machine skip the relay. Its access control is the **0700 `stateDir()/run` directory**, not
+- The daemon's local op socket (`daemon/src/local-socket.ts`) is what makes MCP's `get_sessions` and
+  `despawn_session` aimed at this machine skip the relay (`spawn` stays on its allowlist only for a
+  `seanced mcp` started before spawns became tasks). Its access control is the **0700 `stateDir()/run` directory**, not
   the socket's own mode — `Bun.listen({ unix })` creates it 0755 and the `chmod` races. Its op
   allowlist is `sessions`, `spawn` and `despawn` only; widening it is a threat-model change, not a
   tweak (DESIGN.md's "Local op socket" records why `despawn` got in). On a daemon whose key is
   service-delivered (`source: "credential"`) — and only there — the same socket carries the
-  fleet broker (`broker.ts`): its own frame kind, never a `Plain` or an `OpName`, two actions and
-  the same three remote ops — DESIGN.md's "Fleet broker" is the record, and any widening of it,
-  including running it on other daemons, is the same kind of change. The socket's third frame
+  fleet broker (`broker.ts`): its own frame kind, never a `Plain` or an `OpName`, four actions —
+  `machines`, `fleet`, `request` (the same three remote ops) and `scheduler` (`enqueue`, `queue`,
+  `cancel`, `accounts`) — DESIGN.md's "Fleet broker" is the record, and any widening of it,
+  including running it on other daemons, is the same kind of change. A brokered enqueue is a create
+  at `expect: 0` of a task the daemon sealed itself from a parsed spec, with the daemon's own
+  `createdAt`, no lineage or base (a continue spec's `continues` is carried, and only while the
+  leader advertises `continueTask`), and a client of `mcp` or `cli` only, audited as `claimed_client`
+  (the peer's unverified word); a `landedEarlier` on it is the relay's answer for a peer-chosen id:
+  it may stand for a tombstone or another client's task, never an overwrite. The socket's third frame
   kind, `session-event` (`session-events.ts`, DESIGN.md "Session events"), is ingest-only and
   bound to the sender's pane by its kernel-reported peer pid, never by a field it sends — the
   frame's `pane` decides only on a host that names no peer at all (`peerPidSupported`), never for

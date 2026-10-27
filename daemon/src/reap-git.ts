@@ -86,26 +86,14 @@ export interface WorktreeRecord {
 }
 
 /**
- * Pure parser over `git worktree list --porcelain -z` — exported for unit
- * tests. NUL-terminated attributes, an empty one ending each record, so a path
- * holding a newline can't split one. The main worktree comes first; callers
- * that want linked worktrees only drop it.
+ * The attributes of each record of `git worktree list --porcelain -z`: NUL-terminated,
+ * an empty one ending each record, so a path holding a newline can't split one.
  */
-export function parseWorktreeList(raw: string): readonly WorktreeRecord[] {
-  const records: WorktreeRecord[] = [];
+function splitRecords(raw: string): readonly (readonly string[])[] {
+  const records: string[][] = [];
   let fields: string[] = [];
   const flush = (): void => {
-    const path = fields.find((field) => field.startsWith("worktree "))?.slice("worktree ".length);
-    if (path !== undefined) {
-      const branchRef = fields.find((field) => field.startsWith("branch "))?.slice("branch ".length);
-      records.push({
-        path,
-        head: fields.find((field) => field.startsWith("HEAD "))?.slice("HEAD ".length) ?? "",
-        branch: branchRef?.startsWith("refs/heads/") === true ? branchRef.slice("refs/heads/".length) : null,
-        locked: fields.some((field) => field === "locked" || field.startsWith("locked ")),
-        prunable: fields.some((field) => field === "prunable" || field.startsWith("prunable ")),
-      });
-    }
+    if (fields.length > 0) records.push(fields);
     fields = [];
   };
   for (const field of raw.split("\0")) {
@@ -114,6 +102,47 @@ export function parseWorktreeList(raw: string): readonly WorktreeRecord[] {
   }
   flush();
   return records;
+}
+
+function attribute(fields: readonly string[], name: string): string | undefined {
+  return fields.find((field) => field.startsWith(`${name} `))?.slice(name.length + 1);
+}
+
+/**
+ * Pure parser over `git worktree list --porcelain -z` — exported for unit
+ * tests. The main worktree comes first; callers that want linked worktrees
+ * only drop it.
+ */
+export function parseWorktreeList(raw: string): readonly WorktreeRecord[] {
+  return splitRecords(raw).flatMap((fields): WorktreeRecord[] => {
+    const path = attribute(fields, "worktree");
+    if (path === undefined) return [];
+    const branchRef = attribute(fields, "branch");
+    return [
+      {
+        path,
+        head: attribute(fields, "HEAD") ?? "",
+        branch: branchRef?.startsWith("refs/heads/") === true ? branchRef.slice("refs/heads/".length) : null,
+        locked: fields.some((field) => field === "locked" || field.startsWith("locked ")),
+        prunable: fields.some((field) => field === "prunable" || field.startsWith("prunable ")),
+      },
+    ];
+  });
+}
+
+/**
+ * The lock on the worktree at `path` in the same output: null when it has none,
+ * else its reason ("" when the lock names none). Separate from `WorktreeRecord`
+ * since reap reads only whether a lock exists.
+ */
+export function parseWorktreeLock(raw: string, path: string): { readonly reason: string } | null {
+  for (const fields of splitRecords(raw)) {
+    if (attribute(fields, "worktree") !== path) continue;
+    if (fields.includes("locked")) return { reason: "" };
+    const reason = attribute(fields, "locked");
+    return reason === undefined ? null : { reason };
+  }
+  return null;
 }
 
 export async function listWorktrees(repoPath: string): Promise<readonly WorktreeRecord[] | null> {
@@ -126,17 +155,24 @@ export interface BranchRecord {
   readonly sha: string;
   /** Its upstream is configured but the remote branch is gone (`[gone]`) — what a merged PR's deleted branch leaves. */
   readonly upstreamGone: boolean;
+  /** Any upstream is configured — false is a branch never pushed, local-only work. */
+  readonly hasUpstream: boolean;
 }
 
-const BRANCH_FORMAT = "%(refname)%00%(objectname)%00%(upstream:track)";
+const BRANCH_FORMAT = "%(refname)%00%(objectname)%00%(upstream:track)%00%(upstream)";
 
 /** Pure parser over `for-each-ref` in `BRANCH_FORMAT` — exported for unit tests. */
 export function parseBranches(raw: string): readonly BranchRecord[] {
   const branches: BranchRecord[] = [];
   for (const line of raw.split("\n")) {
-    const [ref, sha, track] = line.split("\0");
+    const [ref, sha, track, upstream] = line.split("\0");
     if (ref === undefined || sha === undefined || !ref.startsWith("refs/heads/")) continue;
-    branches.push({ name: ref.slice("refs/heads/".length), sha, upstreamGone: track === "[gone]" });
+    branches.push({
+      name: ref.slice("refs/heads/".length),
+      sha,
+      upstreamGone: track === "[gone]",
+      hasUpstream: upstream !== undefined && upstream !== "",
+    });
   }
   return branches;
 }
@@ -271,10 +307,10 @@ export async function classifyTip(
   return (await patches.landedSince(mergeBase, patchId)) ? "squash" : "unmerged-gone";
 }
 
-/** Commits on `tip` that aren't in `base` by sha — the count a kept branch is reported with. */
-export async function commitsAhead(repoPath: string, tip: string, base: string): Promise<number> {
+/** Commits on `tip` that aren't in `base` by sha — the count a kept branch is reported with. Null when rev-list failed: unknown, not zero. */
+export async function commitsAhead(repoPath: string, tip: string, base: string): Promise<number | null> {
   const result = await hardenedGit(repoPath, ["rev-list", "--count", `${base}..${tip}`]);
-  return result.exitCode === 0 ? Number(result.stdout.trim()) : 0;
+  return result.exitCode === 0 ? Number(result.stdout.trim()) : null;
 }
 
 /**

@@ -38,6 +38,19 @@ export function liveStatus(machine: Pick<Machine, "connected" | "status">): Mach
 }
 
 /**
+ * When the machine was last heard from: the later of `lastSeen` and the kept
+ * `status.at`. While the relay still lists a slept socket, `lastSeen` is the
+ * register's time, hours or days old; the last `status` beat is within one
+ * beat of the sleep either way (docs/scheduler.md, "Asleep machines").
+ * `status.at` is the daemon's clock: a fast one understates the age by its
+ * skew, accepted for a display-only "last seen".
+ */
+export function lastHeardAt(machine: Pick<Machine, "lastSeen" | "status">): number {
+  const beat = machine.status === undefined ? 0 : machine.status.at * 1000;
+  return Math.max(machine.lastSeen, beat);
+}
+
+/**
  * True when the daemon trimmed this status to fit the relay's bound. Its
  * quota is then incomplete: an exclave without an observation is unknown, not
  * unobserved, and an observation may lack its per-model windows and resets.

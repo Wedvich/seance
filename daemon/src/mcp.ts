@@ -3,9 +3,12 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
 import {
+  accountNameIn,
+  continueOffer,
   DEP_AFTER,
+  knownAccounts,
+  type KnownAccount,
   failureReasonText,
-  importPsk,
   isTransportError,
   reasonText,
   RequestFailure,
@@ -20,7 +23,7 @@ import {
   TASK_SPEC_LIMITS,
   TASK_UNTIL,
   withReportInstruction,
-  type BatchStrategy,
+  BATCH_STRATEGY,
   type Candidate,
   type Decision,
   type DespawnRequest,
@@ -33,23 +36,29 @@ import {
   type SchedulerAvailability,
   type SessionsResponse,
   type SpawnClient,
-  type SpawnRequest,
-  type SpawnResponse,
   type Task,
   type TaskDep,
-  type TaskSpec,
   type TaskUntil,
+  lastHeardAt,
 } from "@seance/shared";
-import { appRelayClient, LazyRelay } from "./app-relay.ts";
+import { appRelayClient, importAppKeys, LazyRelay, type AppKeys } from "./app-relay.ts";
 import { cliSink, type AuditSink } from "./audit.ts";
 import {
+  continueAuto,
   enqueueAuto,
   leaderTakesReported,
-  pinExclaveError,
+  MCP_PLACEMENT_NAMES,
+  pinAccountGateError,
+  placementInputError,
+  placementNeedsPinAccount,
+  resolveMachine,
   resolveOrigin,
+  resolvePlacement,
   specError,
   usesReported,
   type AutoSpec,
+  type PlacementInput,
+  type PlacementNames,
 } from "./auto.ts";
 import { BrokerError } from "./broker-client.ts";
 import type { Check } from "./check.ts";
@@ -61,6 +70,7 @@ import {
   brokerFleet,
   FleetUnreachable,
   relayFleet,
+  SCHEDULER_NEEDS_NEWER_DAEMON,
   selectFleet,
   type Fleet,
   type FleetLease,
@@ -79,6 +89,9 @@ import { readState } from "./state.ts";
  * what lets a local request fail with "the daemon isn't running" instead of
  * quietly paying a round trip to Cloudflare to be told the same thing.
  *
+ * Only `get_sessions` and `despawn_session` use it: a spawn always queues, so it
+ * needs the key or the broker.
+ *
  * `request` is injectable so the tools can be driven without a socket; in
  * production it is `localRequest`.
  */
@@ -88,8 +101,10 @@ export interface LocalMachine {
   readonly platform: string;
   /**
    * Re-read per call, not snapshotted: the daemon rewrites state.json on every
-   * rescan and `seanced mcp` outlives many of them. A snapshot rejects a repo
-   * cloned since startup, and rejects every repo if the first scan hadn't landed.
+   * rescan and `seanced mcp` outlives many of them. Its one user is the
+   * list_machines fallback, which lists this machine's repos when the relay is
+   * unreachable; a snapshot would miss a repo cloned since startup, or every repo
+   * if the first scan hadn't landed.
    */
   readonly repos: () => Promise<readonly RepoEntry[]>;
   /** Any op may answer with an `ErrorResponse`, as over the relay. */
@@ -110,124 +125,59 @@ export function isLocalRef(local: LocalMachine, ref: string): boolean {
   return ref === local.deviceId || ref.toLowerCase() === local.name.toLowerCase();
 }
 
-/**
- * `machine` is the human name from the target's config, resolved against the
- * live registry; a deviceId is accepted as the exact-match escape hatch for
- * names that collide. Misses come back with the candidates, because the model
- * on the other end of this tool can correct itself from a good error.
- */
-export function resolveMachine(
-  machines: readonly Machine[],
-  ref: string,
-): { readonly machine: Machine } | { readonly error: string } {
-  const byId = machines.find((machine) => machine.deviceId === ref);
-  if (byId !== undefined) return { machine: byId };
-  const named = machines.filter((machine) => machine.name.toLowerCase() === ref.toLowerCase());
-  const [only] = named;
-  if (named.length === 1 && only !== undefined) return { machine: only };
-  if (named.length > 1) {
-    const ids = named.map((machine) => `${machine.name} (${machine.deviceId})`).join(", ");
-    return { error: `"${ref}" names more than one machine — use a deviceId: ${ids}` };
-  }
-  const known = machines.map((machine) => machine.name).join(", ");
-  return { error: `no machine named "${ref}" — known machines: ${known === "" ? "(none registered)" : known}` };
-}
-
-/** `pin` as a tool takes it: a machine by name or deviceId, which the spec holds only as a deviceId. */
+/** `pin` as a tool takes it: a machine by name or deviceId, an account by alias, email or id; the spec holds ids only. */
 interface PinInput {
   readonly machine?: string | undefined;
-  readonly exclave?: string | undefined;
-}
-
-/** What a pin needs before the fleet is known, refused before anything dials the relay. */
-function pinInputError(pin: PinInput | undefined): string | null {
-  if (pin === undefined) return null;
-  if (pin.machine === undefined && pin.exclave === undefined) return "pin names neither a machine nor an exclave";
-  if (pin.machine === "") return "pin.machine is empty";
-  if (pin.machine !== undefined && pin.machine.length > TASK_SPEC_LIMITS.placement) {
-    return `pin.machine is ${pin.machine.length} characters; at most ${TASK_SPEC_LIMITS.placement}`;
-  }
-  return pin.exclave === undefined ? null : pinExclaveError(pin.exclave);
+  readonly account?: string | undefined;
+  /** Only to refuse it: the exclave pin is gone, and zod would otherwise strip the key without a word. */
+  readonly exclave?: unknown;
 }
 
 /**
- * A pin resolved at submit time: the machine name becomes the deviceId the
- * scheduler matches (a name is not stable, nor unique), and `machines` is the
- * pinned scope — the pinned machine, its clones cut to the pinned exclave — a
- * repo name is read against, since a name can be ambiguous across the fleet yet
- * mean one clone where the task may run.
- *
- * A machine that reports no exclaves is never a candidate for `auto`
- * (`exclaves_unknown`), and its clones carry no exclave either, so a pin that
- * names it — or an exclave while no machine reports any — could never place and
- * is refused.
+ * `pin` and `avoid` as one placement, refused before anything dials the relay when malformed.
+ * `machinePin` is spawn_session's top-level `machine`, merged in only after the pin itself
+ * is checked, so it cannot turn an empty `pin: {}` into a valid one.
  */
-export function resolvePin(
-  machines: readonly Machine[],
-  input: PinInput,
-):
-  | {
-      readonly pin: NonNullable<TaskSpec["pin"]>;
-      readonly machines: readonly Machine[];
-      /** What `resolveOrigin` names the scope by. */
-      readonly scope: string;
-    }
-  | { readonly error: string } {
-  const { exclave } = input;
-  // Strict, as the scheduler's clone match is: a clone from a daemon predating exclaves is in none.
-  const inExclave = (machine: Machine): Machine =>
-    exclave === undefined ? machine : { ...machine, repos: machine.repos.filter((entry) => entry.exclave === exclave) };
-  if (input.machine !== undefined) {
-    const resolved = resolveMachine(machines, input.machine);
-    if ("error" in resolved) return { error: `pin.machine: ${resolved.error}` };
-    const target = resolved.machine;
-    const ids = (target.exclaves ?? []).map((info) => info.id);
-    if (ids.length === 0) {
-      return {
-        error: `pin.machine: ${target.name} (${target.deviceId}) reports no exclaves, so auto cannot place there — its daemon needs \`seanced update\``,
-      };
-    }
-    if (exclave !== undefined && !ids.includes(exclave)) {
-      return {
-        error: `pin.exclave "${exclave}" is not an exclave of ${target.name} (${target.deviceId}) — its exclaves: ${ids.join(", ")}`,
-      };
-    }
-    return {
-      pin: { deviceId: target.deviceId, ...(exclave === undefined ? {} : { exclave }) },
-      machines: [inExclave(target)],
-      scope: `auto pinned to ${exclave === undefined ? target.name : `${target.name}/${exclave}`}`,
-    };
+function placementInput(
+  pin: PinInput | undefined,
+  avoid: readonly string[] | undefined,
+  names: PlacementNames = MCP_PLACEMENT_NAMES,
+  machinePin?: string,
+): { readonly input: PlacementInput } | { readonly error: string } {
+  if (pin !== undefined && "exclave" in pin) {
+    return { error: "exclave pins are gone — pin an account (list_machines shows each exclave's account)" };
   }
-  if (exclave === undefined) return { error: "pin names neither a machine nor an exclave" };
-  const reported = [...new Set(machines.flatMap((machine) => (machine.exclaves ?? []).map((info) => info.id)))];
-  if (reported.length === 0) {
-    return {
-      error:
-        "pin.exclave: no machine reports exclaves, so auto cannot place anywhere yet — daemons need `seanced update`",
-    };
+  if (pin !== undefined && pin.machine === undefined && pin.account === undefined) {
+    return { error: "pin names neither a machine nor an account" };
   }
-  if (!reported.includes(exclave)) {
-    return {
-      error: `pin.exclave "${exclave}" is on no machine — the fleet's exclaves: ${reported.toSorted().join(", ")}`,
-    };
-  }
-  return { pin: { exclave }, machines: machines.map(inExclave), scope: `auto pinned to exclave ${exclave}` };
+  const input: PlacementInput = {
+    machine: machinePin ?? pin?.machine,
+    account: pin?.account,
+    ...(avoid === undefined ? {} : { avoid }),
+  };
+  const invalid = placementInputError(input, names);
+  return invalid === null ? { input } : { error: invalid };
 }
 
-/** `repo` as the scheduler keys it, and the pin as the spec holds it: the repo read within the pin's scope. */
-function autoTarget(
-  machines: readonly Machine[],
+/**
+ * `repo` as the scheduler keys it, and the placement as the spec holds it: the
+ * repo read within the pin's scope, since a name ambiguous across the fleet can
+ * still mean one clone where the task may run. `echo` names a resolved account.
+ */
+async function autoTarget(
+  lease: { readonly machines: readonly Machine[]; readonly scheduler: SchedulerLeg },
   repo: string,
-  pin: PinInput | undefined,
-): { readonly fields: Pick<AutoSpec, "repo" | "pin"> } | { readonly error: string } {
-  if (pin === undefined) {
-    const resolved = resolveOrigin(machines, repo);
-    return "error" in resolved ? resolved : { fields: { repo: resolved.origin } };
-  }
-  const pinned = resolvePin(machines, pin);
-  if ("error" in pinned) return pinned;
-  const resolved = resolveOrigin(pinned.machines, repo, pinned.scope);
-  return "error" in resolved ? resolved : { fields: { repo: resolved.origin, pin: pinned.pin } };
+  input: PlacementInput,
+  names: PlacementNames = MCP_PLACEMENT_NAMES,
+): Promise<
+  | { readonly fields: Pick<AutoSpec, "repo" | "pin" | "avoid">; readonly echo: string | null }
+  | { readonly error: string }
+> {
+  const placed = await resolvePlacement(lease.machines, lease.scheduler.accounts, input, names);
+  if ("error" in placed) return placed;
+  const resolved = resolveOrigin(placed.machines, repo, placed.scope);
+  if ("error" in resolved) return resolved;
+  return { fields: { repo: resolved.origin, ...placed.fields }, echo: placed.echo };
 }
 
 interface ToolResult {
@@ -239,12 +189,80 @@ interface ToolResult {
 const textResult = (text: string): ToolResult => ({ content: [{ type: "text", text }] });
 const errorResult = (text: string): ToolResult => ({ content: [{ type: "text", text }], isError: true });
 
+/**
+ * What names an account to a person: alias, else email, else short id (`accountNameIn`). `aliases`
+ * is empty wherever none could be read; a label is all it ever decides.
+ */
+interface AccountNames {
+  readonly known: readonly KnownAccount[];
+  readonly aliases: ReadonlyMap<string, string>;
+}
+
+const nameOf = (names: AccountNames, accountId: string): string =>
+  accountNameIn(names.known, accountId, names.aliases.get(accountId));
+
+/**
+ * How long a label waits for the listing. A lost one would otherwise hold the call for
+ * `STORE_LIST_TIMEOUT_MS` (30 s) on every call; an alias is not worth that. Not applied to a pin's
+ * resolution, which needs the real answer.
+ */
+export const ACCOUNT_LABEL_DEADLINE_MS = 1_500;
+
+/**
+ * The aliases set on `accountIds`, from the lease's cached listing (`AccountCache`: once per
+ * socket, as the PWA lists, since the `account:` list bucket is shared). None through the broker
+ * (`brokerScheduler`), and no listing spent when nothing needs a name. A refused, lost, failed or
+ * slow (past `ACCOUNT_LABEL_DEADLINE_MS`) listing is no aliases: a label never fails or stalls a call.
+ */
+async function accountAliases(lease: FleetLease, accountIds: readonly string[]): Promise<ReadonlyMap<string, string>> {
+  const aliases = new Map<string, string>();
+  if (lease.scheduler === null || accountIds.length === 0) return aliases;
+  const { accounts } = lease.scheduler;
+  const listing = (async (): Promise<Awaited<ReturnType<SchedulerLeg["accounts"]>>> => {
+    try {
+      return await accounts({ label: true });
+    } catch (err) {
+      // A bug, not a lost listing: the label still never fails, but the cache rethrows it on
+      // purpose. stderr, never `log.ts`: stdout is the JSON-RPC channel.
+      if (!(err instanceof RequestFailure)) console.error("seanced mcp: account listing failed:", err);
+      return null;
+    }
+  })();
+  // The listing keeps running past the deadline and fills the cache for the next call.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), ACCOUNT_LABEL_DEADLINE_MS);
+  });
+  const records = await Promise.race([listing, deadline]);
+  clearTimeout(timer);
+  const wanted = new Set(accountIds);
+  for (const record of records ?? []) {
+    if (record.alias !== null && wanted.has(record.accountId)) aliases.set(record.accountId, record.alias);
+  }
+  return aliases;
+}
+
+/**
+ * Every account the registry reports plus `extraIds` (which count as twins too), with the aliases
+ * of those `shown` names — every known one by default. One listing at most.
+ */
+async function accountNames(
+  lease: FleetLease,
+  extraIds: readonly string[] = [],
+  shown?: readonly string[],
+): Promise<AccountNames> {
+  const known = knownAccounts(lease.machines, extraIds);
+  const ids = shown ?? known.map((account) => account.accountId);
+  return { known, aliases: await accountAliases(lease, ids) };
+}
+
 function describeMachine(
   machine: Machine,
   local: LocalMachine | null,
   scheduler: SchedulerAvailability | null,
+  names: AccountNames,
 ): Record<string, unknown> {
-  // Null when this transport has no view of the scheduler at all (the broker path).
+  // Null when this transport has no view of the scheduler at all (a broker daemon that predates brokered scheduler access).
   const role = scheduler === null ? null : schedulerRole(machine.deviceId, scheduler);
   const { source, lastUpdate } = machine;
   return {
@@ -252,12 +270,21 @@ function describeMachine(
     deviceId: machine.deviceId,
     platform: machine.platform,
     connected: machine.connected,
-    lastSeen: new Date(machine.lastSeen).toISOString(),
+    lastSeen: new Date(lastHeardAt(machine)).toISOString(),
     repos: machine.repos.map((repo) => repo.name),
-    // Absent, not empty, on a daemon predating exclaves: no pin can target it.
-    ...(machine.exclaves === undefined ? {} : { exclaves: machine.exclaves.map((info) => info.id) }),
-    // Named so the model knows which target costs nothing to reach; spawning
-    // there goes straight to the daemon on this box.
+    // Absent, not empty, on a daemon predating exclaves: the scheduler cannot place there.
+    ...(machine.exclaves === undefined
+      ? {}
+      : {
+          exclaves: machine.exclaves.map((info) => ({
+            id: info.id,
+            ...(info.accountId === null ? {} : { accountId: info.accountId }),
+            ...(info.email === undefined ? {} : { email: info.email }),
+            ...(info.accountId === null ? {} : describeName(names, info.accountId)),
+          })),
+        }),
+    // Named so the model knows which target costs nothing to reach; get_sessions
+    // and despawn_session there go straight to the daemon on this box.
     local: local !== null && machine.deviceId === local.deviceId,
     ...(role === null ? {} : { scheduler: role }),
     ...(source === undefined
@@ -308,9 +335,8 @@ function fallbackNote(err: unknown, reachable: boolean): string {
   if (err instanceof FleetUnreachable) return `${err.message} Only this machine is listed.`;
   const why = `the relay is unreachable (${failureText("connect", err)})`;
   return reachable
-    ? `${why} — only this machine is listed (without its exclaves: auto needs the relay), and only local spawns will work`
-    : `${why} — only this machine is listed (without its exclaves: auto needs the relay), and its daemon is not listening either, so nothing will spawn until ` +
-        "seanced is running (`seanced status`)";
+    ? `${why} — only this machine is listed (without its exclaves: the scheduler needs the relay); get_sessions and despawn_session still work here, but spawn_session queues through the relay, so nothing can be spawned until it is back`
+    : `${why} — only this machine is listed (without its exclaves: the scheduler needs the relay), and its daemon is not listening either, so no op on this machine works until seanced is running (\`seanced status\`)`;
 }
 
 /** `LocalUnavailable` is the one worth naming a fix for — here, so every flavour of it carries the advice. */
@@ -352,8 +378,8 @@ function openFailureText(err: unknown): string {
 }
 
 /**
- * `machine: "auto"`: the scheduler places the spawn. Matched in any case, as
- * names are; a machine actually named "auto" is still reached by its deviceId.
+ * `machine: "auto"`: no machine pin, the scheduler places the spawn. Matched in
+ * any case, as names are; a machine actually named "auto" is pinned by its deviceId.
  */
 export const AUTO_MACHINE = "auto";
 
@@ -367,16 +393,18 @@ function isAutoRef(ref: string): boolean {
  * task survives a leader change (docs/scheduler.md, M3).
  */
 const AUTO_LIMITS =
-  "The scheduler's queue is held by the relay: a task waits there for capacity, survives leader changes (every relay deploy and daemon self-update), and runs once a scheduler leads. A task already placed is an ordinary session. Dependencies, batches, Linear links and pins are set with spawn_session's after, until, linear and pin fields and with queue_batch.";
+  "The scheduler's queue is held by the relay: a task waits there for capacity, survives leader changes (every relay deploy and daemon self-update), and runs once a scheduler leads. A task already placed is an ordinary session. Dependencies, batches, Linear links, pins and avoided machines are set with spawn_session's after, until, linear, pin and avoid fields and with queue_batch.";
 
-/** What `schedulerFailureText` and `keylessText` name a scheduler call by. */
+/** What `schedulerFailureText` and `olderDaemonText` name a scheduler call by. */
 type SchedulerCall = "get_queue" | "cancel_task";
-type SchedulerTool = "auto" | "queue_batch" | SchedulerCall;
+type SchedulerTool = "spawn_session" | "queue_batch" | "continue_task" | SchedulerCall;
 
-/** The broker's actions are fixed (DESIGN.md "Fleet broker"), so a keyless box gets no scheduler — and no fallback. */
-function keylessText(op: SchedulerTool): string {
-  const instead = op === "auto" ? " — name a machine instead (list_machines)" : "";
-  return `${op} needs this machine's own key; unavailable through the broker${instead}`;
+/**
+ * A keyless box's daemon brokers the scheduler (DESIGN.md "Fleet broker"), so a
+ * lease with no scheduler leg means that daemon predates it, or was restarting.
+ */
+function olderDaemonText(op: SchedulerTool): string {
+  return `${op} unavailable: ${SCHEDULER_NEEDS_NEWER_DAEMON}`;
 }
 
 /**
@@ -420,7 +448,8 @@ export function decisionText(decision: Decision): string {
     .filter((c) => c !== winner)
     .map((c) => {
       if (c.rejected.length > 0) return `${candidateWhere(c)}: ${c.rejected.map(reasonText).join(", ")}`;
-      if (c.score === undefined) return `${candidateWhere(c)}: rejected for a reason this seanced cannot read`;
+      if (c.score === undefined)
+        return `${candidateWhere(c)}: rejected for a reason this seanced can't read; the leader may run another version`;
       // With nothing chosen a scored candidate lost to something other than its score (a hold, a race).
       const lost = chosen === null ? "scored but not chosen" : "scored higher";
       return `${candidateWhere(c)}: ${lost}, ${c.score.total.toFixed(2)}`;
@@ -447,15 +476,30 @@ function machineName(task: Task, machines: readonly Machine[], deviceId: string)
   );
 }
 
-/** A task's pin, its deviceId named where this view knows the machine. */
-function describePin(task: Task, machines: readonly Machine[]): Record<string, string> | null {
+/** An account's label, plus its alias where one is set: a pin takes the alias too. */
+function describeName(names: AccountNames, accountId: string): Record<string, string> {
+  const alias = names.aliases.get(accountId);
+  return { account: nameOf(names, accountId), ...(alias === undefined ? {} : { alias }) };
+}
+
+/** An account by its label beside its id. */
+function describeAccount(names: AccountNames, accountId: string): Record<string, string> {
+  return { account: nameOf(names, accountId), accountId };
+}
+
+/** A machine by deviceId, named where this view knows it. */
+function describeDevice(task: Task, machines: readonly Machine[], deviceId: string): Record<string, string> {
+  const machine = machineName(task, machines, deviceId);
+  return { ...(machine === undefined ? {} : { machine }), deviceId };
+}
+
+/** A task's pin: its machine named where this view knows it, its account by label beside the id. */
+function describePin(task: Task, machines: readonly Machine[], names: AccountNames): Record<string, string> | null {
   const { pin } = task.spec;
   if (pin === undefined) return null;
-  const machine = pin.deviceId === undefined ? undefined : machineName(task, machines, pin.deviceId);
   return {
-    ...(machine === undefined ? {} : { machine }),
-    ...(pin.deviceId === undefined ? {} : { deviceId: pin.deviceId }),
-    ...(pin.exclave === undefined ? {} : { exclave: pin.exclave }),
+    ...(pin.deviceId === undefined ? {} : describeDevice(task, machines, pin.deviceId)),
+    ...(pin.account === undefined ? {} : describeAccount(names, pin.account)),
   };
 }
 
@@ -472,15 +516,17 @@ function placementOf(task: Task, machines: readonly Machine[]): TaskPlacement | 
 /**
  * A scheduler-set code leads with its shared wording, but keeps the raw message: it alone names
  * the failed dependency, the loop, or why a dispatch went unconfirmed. A daemon refusal's is its own.
+ * A `session_failed` with its status drops it: the wording already says all the message does.
  */
-function failureMessage(failure: NonNullable<Task["failure"]>): string {
-  const worded = taskFailureText(failure.code);
-  return worded === null ? failure.message : `${worded} (${failure.message})`;
+function failureMessage(task: Task, failure: NonNullable<Task["failure"]>): string {
+  const worded = taskFailureText(failure.code, failure.exit, task.spec.until, failure.oomKill);
+  if (worded === null) return failure.message;
+  return failure.code === "session_failed" && failure.exit !== undefined ? worded : `${worded} (${failure.message})`;
 }
 
-function describeHold(hold: PauseHold): Record<string, unknown> {
+function describeHold(hold: PauseHold, names: AccountNames): Record<string, unknown> {
   return {
-    ...(hold.account === undefined ? {} : { account: hold.account }),
+    ...(hold.account === undefined ? {} : describeAccount(names, hold.account)),
     until: hold.until,
     since: new Date(hold.at).toISOString(),
     ...(hold.resumeAt === undefined ? {} : { resumeAt: new Date(hold.resumeAt).toISOString() }),
@@ -521,22 +567,31 @@ const PIN_FIELD = z
       .describe(
         `Machine name (or deviceId) from list_machines. A name two machines share is refused: use a deviceId. At most ${TASK_SPEC_LIMITS.placement} characters`,
       ),
-    exclave: z
+    account: z
       .string()
       .optional()
       .describe(
-        `An exclave id (the account's home, e.g. "default") on that machine — or, with no machine, on any machine that has it; list_machines lists each machine's exclaves. At most ${TASK_SPEC_LIMITS.placement} characters`,
+        "A Claude account: its alias (as the PWA names it), its email, or its accountId (organization:account) — list_machines lists each exclave's accountId, email and alias (not its `account` label, which is no value to pass). Only an account some machine reports signed in is taken; the task stores its accountId, never the alias or email",
       ),
   })
+  // Loose so a stale `exclave` key reaches `placementInput` and is refused, not stripped.
+  .loose()
   .optional()
   .describe(
-    'Machine "auto" only: restrict where the scheduler may place the task — to one machine, one exclave, or both; give at least one. An unknown machine, a name two machines share, or an exclave the machine (or fleet) does not report is refused, naming the choices. A pinned task waits in the queue for a slot where it is pinned rather than going elsewhere. Give its repo as the pinned machine lists it, or by origin',
+    "Restrict where the scheduler may place the task — to one machine, one account, or both; give at least one. An unknown machine, a name two machines share, an account no machine (or not the pinned one) reports signed in, or an alias or email two accounts share is refused, naming the choices. A pinned task waits in the queue for a slot where it is pinned rather than going elsewhere. Give its repo as the pinned machine (or the account's clones) list it, or by origin",
+  );
+
+const AVOID_FIELD = z
+  .array(z.string())
+  .optional()
+  .describe(
+    `Machines (name or deviceId) the scheduler must not place the task on, at most ${TASK_SPEC_LIMITS.avoid}. Naming the pinned machine is refused; avoiding every other machine is not — the task waits`,
   );
 
 const REPORTED_GATE =
-  "auto refused: the scheduler's leader does not take until: reported / after: done yet — its daemon needs `seanced update`";
+  "spawn refused: the scheduler's leader does not take until: reported / after: done yet — its daemon needs `seanced update`";
 const REPORTED_UNKNOWN =
-  "auto refused: no verified scheduler is leading, so it cannot be confirmed to take until: reported / after: done — try again once one leads (list_machines shows it)";
+  "spawn refused: no verified scheduler is leading, so it cannot be confirmed to take until: reported / after: done — try again once one leads (list_machines shows it)";
 
 /** Why an `until: "reported"` / `after: "done"` spec is not written to this lease's scheduler. */
 function reportedGateError(lease: Parameters<typeof leaderTakesReported>[0]): string {
@@ -604,29 +659,20 @@ function withReportedPrompt(
 /** A batch is at most this many members: one tool call, and `queue_batch` creates them one by one. */
 const BATCH_TASKS_MAX = 16;
 
-function batchStrategy(
-  strategy: "sequential" | "parallel" | "auto",
-  max: number | undefined,
-): { readonly strategy: BatchStrategy } | { readonly error: string } {
-  if (strategy === "parallel") {
-    return max === undefined ? { error: 'strategy "parallel" needs max' } : { strategy: { mode: "parallel", max } };
-  }
-  return max === undefined ? { strategy: { mode: strategy } } : { error: `max applies to strategy "parallel" only` };
-}
-
-function describeStrategy(strategy: BatchStrategy): string {
-  return strategy.mode === "parallel" ? `parallel, at most ${strategy.max} at once` : strategy.mode;
-}
-
 /** Under `until: "reported"` the prompt the author wrote is not the one that is bounded. */
 function lengthNote(invalid: string, until: TaskUntil | undefined): string {
   if (until !== "reported" || !invalid.startsWith("the prompt is")) return "";
   return " (the instruction to report is appended to the prompt and counts)";
 }
 
-function describeTask(task: Task, machines: readonly Machine[]): Record<string, unknown> {
+function describeTask(
+  task: Task,
+  machines: readonly Machine[],
+  names: AccountNames,
+  tasks: readonly Task[],
+): Record<string, unknown> {
   const placement = placementOf(task, machines);
-  const pin = describePin(task, machines);
+  const pin = describePin(task, machines, names);
   const { spec } = task;
   return {
     id: task.id,
@@ -638,8 +684,9 @@ function describeTask(task: Task, machines: readonly Machine[]): Record<string, 
     createdAt: new Date(task.createdAt).toISOString(),
     ...(placement === null ? {} : { placement }),
     ...(pin === null ? {} : { pin }),
+    ...(spec.avoid === undefined ? {} : { avoid: spec.avoid.map((id) => describeDevice(task, machines, id)) }),
     ...(task.decision === undefined ? {} : { decision: decisionText(task.decision) }),
-    ...(task.failure === undefined ? {} : { failure: `${task.failure.code}: ${failureMessage(task.failure)}` }),
+    ...(task.failure === undefined ? {} : { failure: `${task.failure.code}: ${failureMessage(task, task.failure)}` }),
     // A `manual` mark reads apart from a finish: a person settled it, nothing observed it end.
     ...(task.state === "done" && task.doneBy !== undefined ? { doneBy: task.doneBy } : {}),
     ...(task.escalated === true ? { escalated: true } : {}),
@@ -647,9 +694,12 @@ function describeTask(task: Task, machines: readonly Machine[]): Record<string, 
     ...(spec.until === "reported" ? { until: spec.until } : {}),
     // A merge under `until: "reported"` settles nothing, so it is told apart from a finish here too.
     ...(task.merged === true ? { merged: true } : {}),
-    ...(spec.batch === undefined ? {} : { batch: spec.batch }),
+    ...(spec.batch === undefined ? {} : { batch: { id: spec.batch.id, index: spec.batch.index } }),
     ...(spec.deps === undefined ? {} : { after: spec.deps.map((dep) => ({ task: dep.task, when: dep.after })) }),
     ...(spec.linear === undefined ? {} : { linear: spec.linear }),
+    ...(spec.continues === undefined ? {} : { continues: spec.continues.task }),
+    // The same offer the app's Continue button follows; `continue_task` still re-checks the leader.
+    ...(continueOffer(task, machines, tasks).ok ? { continuable: true } : {}),
   };
 }
 
@@ -688,7 +738,7 @@ function renderCancelled(task: Task, machines: readonly Machine[]): ToolResult {
 
 /**
  * The MCP face of Séance: tools mapping 1:1 onto the registry and the
- * `sessions`/`spawn`/`despawn` ops, plus the scheduler behind `machine: "auto"` (a
+ * `sessions`/`despawn` ops, plus the scheduler behind `spawn_session` (a
  * store-put the relay answers), `get_queue` and `cancel_task`. Anything this hands to the relay rides the same
  * envelope crypto as the PWA — there is no separate MCP wire surface, whether
  * this process seals it or the daemon's broker does (`fleet.ts`).
@@ -699,9 +749,11 @@ function renderCancelled(task: Task, machines: readonly Machine[]): ToolResult {
  * and audit trail — only tagged `origin=local`. Null on a box with no daemon
  * state, where every target is remote by definition.
  *
- * `audit` takes the `origin=mcp` enqueue line (`enqueueAudit`): an `auto`
- * enqueue reaches no daemon, so this process records it in the audit log itself,
- * as `seanced spawn` does — never on stdout, the JSON-RPC channel.
+ * `audit` takes the `origin=mcp` enqueue line (`enqueueAudit`): this process
+ * records its own spawn enqueue in the audit log, as `seanced spawn` does —
+ * never on stdout, the JSON-RPC channel. When the daemon's broker makes the
+ * enqueue for a keyless process, the daemon adds its own `origin=local-broker`
+ * line beside it.
  */
 export function buildMcpServer(
   fleet: Fleet,
@@ -732,7 +784,7 @@ export function buildMcpServer(
     {
       title: "List machines",
       description:
-        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclave ids (the accounts' homes), the values an auto task's pin.exclave takes; a machine with the field absent or empty reports none, so no pin can target it until its daemon updates. Offline machines are listed with their last-seen time. `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that `auto` tasks go through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue and cancel_task refuse to ask it; no mark on any entry means no verified leader. On a box whose daemon brokers for it (no readable PSK) the scheduler is not visible and no entry is marked.",
+        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any, plus `account`, the name every Séance client shows for it (its alias where one is set, else the email, else a short id; tagged where two accounts would read alike; no alias on a box whose daemon brokers for it, with no readable PSK) — a display name only, never a value for pin.account — and `alias` where one is set: a spawn's pin.account takes the `accountId`, the `email` or the `alias`, not `account`; a machine with the field absent or empty reports none, so the scheduler cannot place there until its daemon updates. Offline machines are listed with their last-seen time: `lastSeen` is when the machine was last heard from (its last register or status beat, whichever is later). `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that every spawn goes through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue and cancel_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
       annotations: { readOnlyHint: true },
     },
     async () => {
@@ -755,7 +807,8 @@ export function buildMcpServer(
       }
       try {
         const scheduler = lease.scheduler?.availability() ?? null;
-        const machines = lease.machines.map((machine) => describeMachine(machine, local, scheduler));
+        const names = await accountNames(lease);
+        const machines = lease.machines.map((machine) => describeMachine(machine, local, scheduler, names));
         return textResult(JSON.stringify(machines, null, 2));
       } finally {
         lease.release();
@@ -796,12 +849,12 @@ export function buildMcpServer(
     "get_queue",
     {
       title: "List the scheduler's queue",
-      description: `List the scheduler's queue — the tasks spawn_session with machine "auto" queued from any client, and what holds dispatch (a paused queue or account) — with each one's state, its pin (whichever of machine and exclave it pins: the machine by name where known, plus its deviceId, and the exclave), where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). ${AUTO_LIMITS}`,
+      description: `List the scheduler's queue — the tasks spawn_session and queue_batch queued, and other clients' (the app, the CLI), and what holds dispatch (a paused queue, or an account named as a pin names it) — with each one's state, its pin (whichever of machine and account it pins: the machine by name where known, plus its deviceId; the account by its alias where one is set (none on a box whose daemon brokers for it), else the email a machine reports, else a short id, plus its accountId; an email or short id two accounts share, case aside, gains a tag telling them apart: the org's short id, or more of it where that still collides; pinned and held accounts no machine reports count as accounts too), the machines it avoids, where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). ${AUTO_LIMITS}`,
       annotations: { readOnlyHint: true },
     },
     async () =>
       withFleet(async (lease) => {
-        if (lease.scheduler === null) return errorResult(keylessText("get_queue"));
+        if (lease.scheduler === null) return errorResult(olderDaemonText("get_queue"));
         let reply: Awaited<ReturnType<SchedulerLeg["queue"]>>;
         try {
           reply = await lease.scheduler.queue();
@@ -811,8 +864,15 @@ export function buildMcpServer(
         if (reply === null)
           return errorResult("get_queue: the scheduler's answer was unreadable (a seanced version mismatch?)");
         if ("ok" in reply) return errorResult(`get_queue failed (${reply.code}): ${schedulerErrorText(reply.code)}`);
-        const tasks = reply.tasks.map((task) => describeTask(task, lease.machines));
-        const holds = (reply.holds ?? []).map(describeHold);
+        // Pinned and held accounts no machine reports count too: two such read alike without a tag.
+        const named = [
+          ...reply.tasks.flatMap((task) => (task.spec.pin?.account === undefined ? [] : [task.spec.pin.account])),
+          ...(reply.holds ?? []).flatMap((hold) => (hold.account === undefined ? [] : [hold.account])),
+        ];
+        // Only a pin or a hold names an account here: no listing for a queue that names none.
+        const names = await accountNames(lease, named, named);
+        const tasks = reply.tasks.map((task) => describeTask(task, lease.machines, names, reply.tasks));
+        const holds = (reply.holds ?? []).map((hold) => describeHold(hold, names));
         return textResult(JSON.stringify({ at: new Date(reply.at).toISOString(), holds, tasks }, null, 2));
       }),
   );
@@ -822,13 +882,13 @@ export function buildMcpServer(
     {
       title: "Cancel a scheduler task",
       description:
-        'Cancel a task that spawn_session with machine "auto" submitted, by its id from get_queue. A task still waiting is taken out of the queue; one running is despawned on its machine first. A task whose machine stopped answering (lost) is cancelled as it stands, and its session may outlive the cancel there. A task mid-dispatch is refused; ask again in a moment.',
+        "Cancel a scheduler task (one spawn_session or queue_batch queued, or another client's) by its id from get_queue. A task still waiting is taken out of the queue; one running is despawned on its machine first. A task whose machine stopped answering (lost) is cancelled as it stands, and its session may outlive the cancel there. A task mid-dispatch is refused; ask again in a moment.",
       inputSchema: z.object({ taskId: z.string().describe("The task's id from get_queue") }),
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
     async ({ taskId }) =>
       withFleet(async (lease) => {
-        if (lease.scheduler === null) return errorResult(keylessText("cancel_task"));
+        if (lease.scheduler === null) return errorResult(olderDaemonText("cancel_task"));
         let reply: Awaited<ReturnType<SchedulerLeg["cancel"]>>;
         try {
           reply = await lease.scheduler.cancel(taskId);
@@ -856,18 +916,46 @@ export function buildMcpServer(
   );
 
   server.registerTool(
+    "continue_task",
+    {
+      title: "Continue a failed scheduler task",
+      description: `Resume a task whose session ended in failure (get_queue marks one \`continuable\`): the same conversation, in the same worktree on the same machine, as a new task the scheduler dispatches there. Only for a session that was killed, crashed or ran out of memory partway; the old task stays failed, and so do the tasks that wait on it. The new task waits in the queue like any other, and fails if the worktree is gone (reaped), a session is open in it, or the machine no longer holds the launch record (kept a week, at most 128 launches). \`prompt\` is an optional note the resumed session is told, within the ${TASK_REQUEST_LIMITS.prompt}-character prompt bound. Answers with the new task id; get_queue shows where it lands. ${AUTO_LIMITS}`,
+      inputSchema: z.object({
+        taskId: z.string().describe("The failed task's id from get_queue"),
+        prompt: z.string().optional().describe("Optional: a note for the resumed session, from the user"),
+      }),
+      annotations: { readOnlyHint: false },
+    },
+    async ({ taskId, prompt }) =>
+      withFleet(async (lease) => {
+        if (lease.scheduler === null) return errorResult(olderDaemonText("continue_task"));
+        const outcome = await continueAuto(
+          { machines: lease.machines, scheduler: lease.scheduler },
+          taskId,
+          prompt,
+          audit,
+          "mcp",
+        );
+        return outcome.ok ? textResult(outcome.text) : errorResult(outcome.text);
+      }),
+  );
+
+  server.registerTool(
     "spawn_session",
     {
       title: "Spawn a Claude Code session",
-      description: `Spawn a remote-controlled Claude Code session on a machine, in a named repo. Defaults to a fresh git worktree; mode "here" runs in the repo's main checkout instead. Naming this machine goes straight to the local daemon, with no relay round trip; if a remote machine shares this one's name, reach it by deviceId. machine "auto" queues the spawn for the scheduler, which picks the machine and account (under a pin, only what the pin leaves open), and answers with the task id once it is queued — get_queue shows where it lands and why; it needs this machine's own key and the relay, and caps the prompt at ${TASK_REQUEST_LIMITS.prompt} characters. ${AUTO_LIMITS}`,
+      description: `Queue a remote-controlled Claude Code session in a named repo for the scheduler, which picks the machine and account — under a pin, only what it leaves open. machine (or pin.machine) pins it to one machine, pin.account to one account, avoid keeps it off machines. Every scheduler limit still applies to a pinned task (the in-flight caps, the quota line, the disk floor): it waits for a slot where it is pinned rather than going elsewhere, and get_queue says why. Defaults to a fresh git worktree; mode "here" runs in the repo's main checkout instead. Answers with the task id once it is queued, never with a session: get_queue shows where it lands, and get_sessions on that machine shows it running. Goes through this machine's daemon when this process cannot read the key, and caps the prompt at ${TASK_REQUEST_LIMITS.prompt} characters. ${AUTO_LIMITS}`,
       inputSchema: z.object({
         machine: z
           .string()
-          .describe('Machine name (or deviceId) from list_machines, or "auto" to let the scheduler place the session'),
+          .optional()
+          .describe(
+            'Optional: pin the task to one machine — a name or deviceId from list_machines (a name two machines share is refused: use a deviceId). Omitted or "auto": the scheduler picks any machine. The same as pin.machine; give one or the other',
+          ),
         repo: z
           .string()
           .describe(
-            "Repo name from that machine's repo list. With machine \"auto\": a repo name from list_machines that means one repo across the fleet, or the repo's origin when it does not (host/path, or the remote URL as git prints it; case does not matter). With a pin, the name is read only where the pin points: the pinned machine's repo list (its clones in the pinned exclave), or the origin",
+            "A repo name from list_machines that means one repo across the fleet, or the repo's origin when it does not (host/path, or the remote URL as git prints it; case does not matter). Under a machine or account pin, the name is read only where the pin points: the pinned machine's repo list (cut to its clones where the pinned account is signed in), the pinned account's clones, or the origin",
           ),
         prompt: z.string().optional().describe("The task for the spawned session"),
         title: z
@@ -895,117 +983,59 @@ export function buildMcpServer(
           .max(TASK_SPEC_LIMITS.deps)
           .optional()
           .describe(
-            'Machine "auto" only: hold this task until each listed task releases it, so the scheduler runs the work in order. A task that failed or was cancelled fails its dependents',
+            "Hold this task until each listed task releases it, so the scheduler runs the work in order. A task that failed or was cancelled fails its dependents",
           ),
         until: UNTIL_FIELD,
         linear: LINEAR_FIELD,
         pin: PIN_FIELD,
+        avoid: AVOID_FIELD,
       }),
       annotations: { readOnlyHint: false },
     },
-    async ({ machine, repo, prompt, title, mode, model, effort, plan, after, until, linear, pin }) => {
-      if (isAutoRef(machine)) {
-        const reported = withReportedPrompt(until, prompt);
-        if ("error" in reported) return errorResult(`auto refused: ${reported.error}`);
-        const pinInvalid = pinInputError(pin);
-        if (pinInvalid !== null) return errorResult(`auto refused: ${pinInvalid}`);
-        // `client` is not a TaskRequest field: the leader stamps its own
-        // dispatch `client=scheduler`, so the target audits the session as the
-        // scheduler's.
-        const spec: AutoSpec = {
-          repo,
-          ...requestFields({ prompt: reported.prompt, title, mode, model, effort, plan }),
-          ...authoredFields(
-            (after ?? []).map(({ task, when }) => ({ task, after: when })),
-            until,
-            linear,
-          ),
-        };
-        // Refused before the fleet opens: no relay round trip to learn the prompt is too long.
-        const invalid = specError(spec);
-        if (invalid !== null) return errorResult(`auto refused: ${invalid}${lengthNote(invalid, until)}`);
-        return withFleet(async (lease) => {
-          // Never a fallback: through the broker there is no scheduler leg at all.
-          if (lease.scheduler === null) return errorResult(keylessText("auto"));
-          const leg = { machines: lease.machines, scheduler: lease.scheduler };
-          if (usesReported(spec) && !leaderTakesReported(leg)) return errorResult(reportedGateError(leg));
-          const resolved = autoTarget(lease.machines, repo, pin);
-          if ("error" in resolved) return errorResult(resolved.error);
-          // The origin a clone name resolved to is what the leader bounds, not the name.
-          const resolvedSpec: AutoSpec = { ...spec, ...resolved.fields };
-          const longOrigin = specError(resolvedSpec);
-          if (longOrigin !== null) return errorResult(`auto refused: ${longOrigin}${lengthNote(longOrigin, until)}`);
-          const enqueued = await enqueueAuto(lease.scheduler, resolvedSpec, audit, "mcp");
-          return enqueued.ok ? textResult(enqueued.text) : errorResult(enqueued.text);
-        });
+    async ({ machine, repo, prompt, title, mode, model, effort, plan, after, until, linear, pin, avoid }) => {
+      const machinePin = machine === undefined || isAutoRef(machine) ? undefined : machine;
+      if (machinePin !== undefined && pin?.machine !== undefined) {
+        return errorResult("spawn refused: give the machine once — machine or pin.machine, not both");
       }
-      // `until: "merged"` and an empty `after` are the defaults, which a named machine honours trivially.
-      if (
-        (after !== undefined && after.length > 0) ||
-        until === "reported" ||
-        linear !== undefined ||
-        pin !== undefined
-      ) {
-        return errorResult(
-          'after, until, linear and pin apply to machine "auto" only — a named machine starts the session there now, with nothing to wait for or place',
-        );
-      }
-      const request: SpawnRequest = {
+      // Errors name the field the caller wrote.
+      const names: PlacementNames =
+        machinePin === undefined ? MCP_PLACEMENT_NAMES : { ...MCP_PLACEMENT_NAMES, machine: "machine" };
+      const reported = withReportedPrompt(until, prompt);
+      if ("error" in reported) return errorResult(`spawn refused: ${reported.error}`);
+      const placement = placementInput(pin, avoid, names, machinePin);
+      if ("error" in placement) return errorResult(`spawn refused: ${placement.error}`);
+      // `client` is not a TaskRequest field: the leader stamps its own
+      // dispatch `client=scheduler`, so the target audits the session as the
+      // scheduler's.
+      const spec: AutoSpec = {
         repo,
-        mode,
-        client: "mcp" satisfies SpawnClient,
-        ...(prompt === undefined ? {} : { prompt }),
-        ...(title === undefined ? {} : { title }),
-        ...(model === undefined ? {} : { model }),
-        ...(effort === undefined ? {} : { effort }),
-        ...(plan === undefined ? {} : { plan }),
+        ...requestFields({ prompt: reported.prompt, title, mode, model, effort, plan }),
+        ...authoredFields(
+          (after ?? []).map(({ task, when }) => ({ task, after: when })),
+          until,
+          linear,
+        ),
       };
-      const rendered = (reply: SpawnResponse, where: string): ToolResult => {
-        if (!reply.ok) {
-          // `too_large` judges the reply, not the spawn: a success embeds the
-          // session list, so an agent must look before it retries.
-          const look = reply.code === "too_large" ? " — it may be running; check get_sessions" : "";
-          return errorResult(`spawn failed (${reply.code}): ${reply.message}${look}`);
-        }
-        const note = reply.note === undefined ? "" : `\nnote: ${reply.note}`;
-        const state = reply.pending === true ? " (started, not registered yet)" : "";
-        return textResult(`spawned window ${reply.window} on ${where} at ${reply.path}${state}${note}`);
-      };
-
-      if (local !== null && isLocalRef(local, machine)) {
-        // Same pre-check as the relay path and for the same reason — the daemon
-        // resolves the repo authoritatively, this just answers with candidates
-        // instead of costing a round trip to be told `repo_not_found`. An empty
-        // set means the first scan hasn't landed, not that there are no repos:
-        // deny nothing then, and let the daemon answer.
-        const repos = await local.repos();
-        if (repos.length > 0 && !repos.some((entry) => entry.name === repo)) {
-          const known = repos.map((entry) => entry.name).join(", ");
-          return errorResult(`${local.name} has no repo named "${repo}" — its repos: ${known}`);
-        }
-        try {
-          return rendered(await local.request<SpawnResponse>("spawn", request), local.name);
-        } catch (err) {
-          return errorResult(localFailureText("spawn_session", err));
-        }
-      }
-
+      // Refused before the fleet opens: no relay round trip to learn the prompt is too long.
+      const invalid = specError(spec);
+      if (invalid !== null) return errorResult(`spawn refused: ${invalid}${lengthNote(invalid, until)}`);
       return withFleet(async (lease) => {
-        const resolved = resolveMachine(lease.machines, machine);
-        if ("error" in resolved) return errorResult(resolved.error);
-        const target = resolved.machine;
-        if (!target.connected) {
-          return errorResult(`${target.name} is not connected — last seen ${new Date(target.lastSeen).toISOString()}`);
-        }
-        if (!target.repos.some((entry) => entry.name === repo)) {
-          const known = target.repos.map((entry) => entry.name).join(", ");
-          return errorResult(`${target.name} has no repo named "${repo}" — its repos: ${known}`);
-        }
-        try {
-          return rendered(await lease.request<SpawnResponse>(target.deviceId, "spawn", request), target.name);
-        } catch (err) {
-          return errorResult(failureText("spawn_session", err));
-        }
+        // Never a fallback: a lease with no scheduler leg belongs to a daemon too old to broker one.
+        if (lease.scheduler === null) return errorResult(olderDaemonText("spawn_session"));
+        const leg = { machines: lease.machines, scheduler: lease.scheduler };
+        if (usesReported(spec) && !leaderTakesReported(leg)) return errorResult(reportedGateError(leg));
+        // Before any account listing: a leader that cannot route on them never gets the fields.
+        const gate = placementNeedsPinAccount(placement.input) ? pinAccountGateError(leg, "pin.account / avoid") : null;
+        if (gate !== null) return errorResult(gate);
+        const resolved = await autoTarget(leg, repo, placement.input, names);
+        if ("error" in resolved) return errorResult(`spawn refused: ${resolved.error}`);
+        // The origin a clone name resolved to is what the leader bounds, not the name.
+        const resolvedSpec: AutoSpec = { ...spec, ...resolved.fields };
+        const longOrigin = specError(resolvedSpec);
+        if (longOrigin !== null) return errorResult(`spawn refused: ${longOrigin}${lengthNote(longOrigin, until)}`);
+        const enqueued = await enqueueAuto(lease.scheduler, resolvedSpec, audit, "mcp");
+        if (!enqueued.ok) return errorResult(enqueued.text);
+        return textResult(resolved.echo === null ? enqueued.text : `${enqueued.text}\n${resolved.echo}`);
       });
     },
   );
@@ -1014,16 +1044,11 @@ export function buildMcpServer(
     "queue_batch",
     {
       title: "Queue a batch of tasks",
-      description: `Queue several tasks for the scheduler at once, as one batch with a shared strategy: "sequential" runs them one at a time in the order given, "parallel" runs at most max at once, "auto" leaves it to the dependencies and the fleet's capacity. Always machine "auto". Name a task's own dependencies with after: another member by its ref (an earlier one only), or an existing task by its id. Pin a member to a machine, an exclave or both with its pin, as spawn_session's: an unknown or ambiguous machine or an unknown exclave refuses the whole batch, and a pinned member waits for a slot where it is pinned. Answers with the batch id and each member's task id, or names the member that failed and the ones that had already queued. ${AUTO_LIMITS}`,
+      description: `Queue several tasks for the scheduler at once, as one batch: a group that shows together in get_queue and the app, numbered in the order given. A batch sets no order and no limit of its own — members run as soon as their dependencies and the fleet's and accounts' concurrency caps allow, side by side unless told otherwise. To run members in order, give each its after: another member by its ref (an earlier one only), or an existing task by its id. Pin a member to a machine, an account or both with its pin, and keep it off machines with its avoid, as spawn_session's: an unknown or ambiguous machine or account refuses the whole batch, and a pinned member waits for a slot where it is pinned; each account a member is pinned to is named in the answer. Answers with the batch id and each member's task id, or names the member that failed and the ones that had already queued. The old strategy and max fields are retired. ${AUTO_LIMITS}`,
       inputSchema: z.object({
-        strategy: z.enum(["sequential", "parallel", "auto"]),
-        max: z
-          .number()
-          .int()
-          .min(1)
-          .max(TASK_SPEC_LIMITS.parallel)
-          .optional()
-          .describe('At most this many members run at once. Required with strategy "parallel", refused otherwise'),
+        // Retired, still parsed: zod drops unknown keys, which would turn a stale caller's order into a silent plain group.
+        strategy: z.unknown().optional().describe("Retired: refused unless absent or auto"),
+        max: z.unknown().optional().describe("Retired: refused"),
         tasks: z
           .array(
             z.object({
@@ -1031,7 +1056,7 @@ export function buildMcpServer(
                 .string()
                 .optional()
                 .describe("A name for this task within the batch, for later members' after to point at"),
-              repo: z.string().describe("As spawn_session's repo with machine \"auto\", read within this member's pin"),
+              repo: z.string().describe("As spawn_session's repo, read within this member's pin"),
               prompt: z.string().optional().describe("The task for the spawned session"),
               title: z.string().optional().describe("Name for the spawned session, its window and its worktree branch"),
               mode: z.enum(["worktree", "here"]).default("worktree"),
@@ -1052,6 +1077,7 @@ export function buildMcpServer(
               until: UNTIL_FIELD,
               linear: LINEAR_FIELD,
               pin: PIN_FIELD,
+              avoid: AVOID_FIELD,
             }),
           )
           .min(1)
@@ -1060,14 +1086,17 @@ export function buildMcpServer(
       annotations: { readOnlyHint: false },
     },
     async ({ strategy, max, tasks }) => {
-      const shared = batchStrategy(strategy, max);
-      if ("error" in shared) return errorResult(`queue_batch: ${shared.error}`);
+      if ((strategy !== undefined && strategy !== "auto") || max !== undefined) {
+        return errorResult(
+          "queue_batch refused: a batch no longer orders or limits its members, so strategy and max are retired. Give each member its after to order them; concurrency is the fleet's and accounts' caps",
+        );
+      }
       const batchId = crypto.randomUUID();
       const planned: {
         readonly id: string;
         readonly ref: string | undefined;
         readonly spec: AutoSpec;
-        readonly pin: PinInput | undefined;
+        readonly placement: PlacementInput;
       }[] = [];
       const refs = new Map<string, string>();
       for (const [i, member] of tasks.entries()) {
@@ -1101,31 +1130,38 @@ export function buildMcpServer(
         }
         const reported = withReportedPrompt(member.until, member.prompt);
         if ("error" in reported) return errorResult(`queue_batch refused: task ${n}: ${reported.error}`);
-        const pinInvalid = pinInputError(member.pin);
-        if (pinInvalid !== null) return errorResult(`queue_batch refused: task ${n}: ${pinInvalid}`);
+        const placement = placementInput(member.pin, member.avoid);
+        if ("error" in placement) return errorResult(`queue_batch refused: task ${n}: ${placement.error}`);
         const spec: AutoSpec = {
           repo: member.repo,
           ...requestFields({ ...member, prompt: reported.prompt }),
           ...authoredFields(deps, member.until, member.linear),
-          batch: { id: batchId, index: n, strategy: shared.strategy },
+          batch: { id: batchId, index: n, strategy: BATCH_STRATEGY },
         };
         const invalid = specError(spec);
         if (invalid !== null) {
           return errorResult(`queue_batch refused: task ${n}: ${invalid}${lengthNote(invalid, member.until)}`);
         }
-        planned.push({ id, ref: member.ref, spec, pin: member.pin });
+        planned.push({ id, ref: member.ref, spec, placement: placement.input });
       }
       return withFleet(async (lease) => {
-        if (lease.scheduler === null) return errorResult(keylessText("queue_batch"));
+        if (lease.scheduler === null) return errorResult(olderDaemonText("queue_batch"));
         const leg = { machines: lease.machines, scheduler: lease.scheduler };
         if (planned.some(({ spec }) => usesReported(spec)) && !leaderTakesReported(leg)) {
           return errorResult(reportedGateError(leg));
         }
+        if (planned.some(({ placement }) => placementNeedsPinAccount(placement))) {
+          const gate = pinAccountGateError(leg, "pin.account / avoid");
+          if (gate !== null) return errorResult(gate);
+        }
         // All resolved and bounded before the first create, so a batch is never half-written for want of a repo name or a pin.
         const resolvedPlan: { readonly id: string; readonly ref: string | undefined; readonly spec: AutoSpec }[] = [];
+        const echoes: { readonly task: number; readonly text: string }[] = [];
         for (const [i, member] of planned.entries()) {
-          const resolved = autoTarget(lease.machines, member.spec.repo, member.pin);
+          // oxlint-disable-next-line no-await-in-loop -- the account cache lists once; later members read what it holds
+          const resolved = await autoTarget(leg, member.spec.repo, member.placement);
           if ("error" in resolved) return errorResult(`queue_batch refused: task ${i + 1}: ${resolved.error}`);
+          if (resolved.echo !== null) echoes.push({ task: i + 1, text: `task ${i + 1}: ${resolved.echo}` });
           const spec: AutoSpec = { ...member.spec, ...resolved.fields };
           const invalid = specError(spec);
           if (invalid !== null) {
@@ -1142,15 +1178,20 @@ export function buildMcpServer(
           const enqueued = await enqueueAuto(lease.scheduler, member.spec, audit, "mcp", member.id);
           if (!enqueued.ok) {
             const queued = landed.length === 0 ? "none had queued" : `already queued: ${landed.join(", ")}`;
+            const pinned = echoes.filter(({ task }) => task <= landed.length).map(({ text }) => text);
             return errorResult(
-              `queue_batch failed at task ${i + 1} of ${resolvedPlan.length} (${queued}; cancel_task takes them out if the batch is unwanted) — ${enqueued.text}`,
+              [
+                `queue_batch failed at task ${i + 1} of ${resolvedPlan.length} (${queued}; cancel_task takes them out if the batch is unwanted) — ${enqueued.text}`,
+                ...pinned,
+              ].join("\n"),
             );
           }
           landed.push(member.id);
         }
         const lines = [
-          `batch ${batchId}: ${resolvedPlan.length} tasks queued (${describeStrategy(shared.strategy)})`,
+          `batch ${batchId}: ${resolvedPlan.length} tasks queued`,
           ...resolvedPlan.map(({ id, ref }, i) => `task ${i + 1}${ref === undefined ? "" : ` (${ref})`}: ${id}`),
+          ...echoes.map(({ text }) => text),
           "The scheduler places them as capacity and their dependencies allow; get_queue shows where each lands and why, and cancel_task takes one out.",
         ];
         if (schedulerRefusal(lease.scheduler.availability()) !== null) {
@@ -1201,7 +1242,9 @@ export function buildMcpServer(
         if ("error" in resolved) return errorResult(resolved.error);
         const target = resolved.machine;
         if (!target.connected) {
-          return errorResult(`${target.name} is not connected — last seen ${new Date(target.lastSeen).toISOString()}`);
+          return errorResult(
+            `${target.name} is not connected — last seen ${new Date(lastHeardAt(target)).toISOString()}`,
+          );
         }
         try {
           return rendered(await lease.request<DespawnResponse>(target.deviceId, "despawn", request), target.name);
@@ -1258,9 +1301,9 @@ export async function localMachine(config: Config): Promise<LocalMachine | null>
  */
 function mcpFleet(config: Config): Fleet {
   return selectFleet({
-    key: async (): Promise<CryptoKey | null> => {
+    key: async (): Promise<AppKeys | null> => {
       const resolved = await loadPsk(config);
-      return resolved === null ? null : importPsk(resolved.psk);
+      return resolved === null ? null : importAppKeys(resolved.psk);
     },
     direct: (key) =>
       relayFleet(

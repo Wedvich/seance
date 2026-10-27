@@ -26,6 +26,7 @@ import {
   readPruneLog,
   removeWorktree,
   resolveRemoteHead,
+  type BranchRecord,
   type BranchVerdict,
   type FetchOutcome,
   type Merged,
@@ -98,13 +99,41 @@ export interface RepoReport {
   readonly pruned: readonly string[];
   readonly dirty: readonly { readonly path: string; readonly changes: number }[];
   /** Upstream gone, commits on it nowhere upstream: unpushed work, kept. */
-  readonly keptBranches: readonly { readonly name: string; readonly ahead: number }[];
+  readonly keptBranches: readonly { readonly name: string; readonly ahead: number | null }[];
+  /** Linked worktrees on unpushed work — upstream gone, never pushed, or detached past the default branch. Kept. */
+  readonly keptWorktrees: readonly {
+    readonly path: string;
+    readonly branch: string | null;
+    readonly why: KeptWorktreeWhy;
+    readonly ahead: number | null;
+  }[];
   /** Worktrees whose pane is open in tmux — someone is in them. */
   readonly inUse: readonly string[];
   readonly locked: readonly string[];
   /** Merged and clean, but touched more recently than the age gate. */
   readonly young: number;
+  /** Unmerged worktrees on a branch whose upstream is still live: in-flight work, counted only. */
+  readonly active: number;
   readonly failed: readonly { readonly what: string; readonly detail: string }[];
+}
+
+export type KeptWorktreeWhy = "upstream-gone" | "never-pushed" | "detached";
+
+const KEPT_WORKTREE_TEXT: Readonly<Record<KeptWorktreeWhy, string>> = {
+  "upstream-gone": "upstream gone",
+  "never-pushed": "never pushed",
+  detached: "detached",
+};
+
+/** Why an unmerged worktree is listed, or null for one on a live upstream (counted `active`). */
+function keptWorktreeWhy(
+  branch: string | null,
+  verdict: BranchVerdict,
+  byName: ReadonlyMap<string, BranchRecord>,
+): KeptWorktreeWhy | null {
+  if (branch === null) return "detached";
+  if (verdict === "unmerged-gone") return "upstream-gone";
+  return byName.get(branch)?.hasUpstream === false ? "never-pushed" : null;
 }
 
 export interface PaneNote {
@@ -457,6 +486,7 @@ type ListKey =
   | "pruned"
   | "dirty"
   | "keptBranches"
+  | "keptWorktrees"
   | "inUse"
   | "locked"
   | "failed";
@@ -475,6 +505,7 @@ function emptyLists(): RepoLists {
     pruned: [],
     dirty: [],
     keptBranches: [],
+    keptWorktrees: [],
     inUse: [],
     locked: [],
     failed: [],
@@ -482,7 +513,7 @@ function emptyLists(): RepoLists {
 }
 
 function emptyRepoReport(repo: string): RepoReport {
-  return { repo, ...emptyLists(), young: 0 };
+  return { repo, ...emptyLists(), young: 0, active: 0 };
 }
 
 interface Target {
@@ -564,6 +595,7 @@ async function reapRepo(
 
   const report = emptyLists();
   let young = 0;
+  let active = 0;
 
   const byName = new Map(branches.map((branch) => [branch.name, branch]));
   const verdicts = new Map<string, BranchVerdict>();
@@ -606,7 +638,20 @@ async function reapRepo(
     }
     // oxlint-disable-next-line no-await-in-loop
     const verdict = await verdictFor(worktree.head, worktree.branch);
-    if (!isMerged(verdict)) continue;
+    if (!isMerged(verdict)) {
+      // Checked-out branch is skipped by the branch pass, so this row is its only report; a detached tip is never
+      // patch-checked (verdict active), listed here because no branch holds its commits. A branch missing from
+      // `byName` claims nothing and stays counted.
+      const why = keptWorktreeWhy(worktree.branch, verdict, byName);
+      if (why === null) {
+        active += 1;
+        continue;
+      }
+      // oxlint-disable-next-line no-await-in-loop
+      const ahead = await commitsAhead(repo.path, worktree.head, base);
+      report.keptWorktrees.push({ path: worktree.path, branch: worktree.branch, why, ahead });
+      continue;
+    }
     // oxlint-disable-next-line no-await-in-loop
     const gitDir = await gitDirOf(worktree.path);
     if (gitDir === null) {
@@ -631,7 +676,6 @@ async function reapRepo(
       continue;
     }
     const idleDays = Math.floor((now - touched) / DAY_MS);
-    // oxlint-disable-next-line no-await-in-loop
     // oxlint-disable-next-line no-await-in-loop
     if (monitors !== null) await stopMonitor(monitors, worktree.path, real, opts);
     if (!opts.dryRun) {
@@ -661,7 +705,7 @@ async function reapRepo(
       what: "worktree list",
       detail: "git could not list worktrees again before deleting branches",
     });
-    return { repo: repo.name, ...(fetch === undefined ? {} : { fetch }), ...report, young };
+    return { repo: repo.name, ...(fetch === undefined ? {} : { fetch }), ...report, young, active };
   }
   const checkedOut = new Set(current.flatMap((worktree) => (worktree.branch === null ? [] : [worktree.branch])));
   for (const branch of branches) {
@@ -687,7 +731,7 @@ async function reapRepo(
     report.deletedBranches.push({ name: branch.name, sha: branch.sha, why: verdict });
   }
 
-  return { repo: repo.name, ...(fetch === undefined ? {} : { fetch }), ...report, young };
+  return { repo: repo.name, ...(fetch === undefined ? {} : { fetch }), ...report, young, active };
 }
 
 function tilde(path: string): string {
@@ -701,6 +745,12 @@ function row(label: string, rest: string): string {
 
 function megabytes(kb: number): string {
   return `${(kb / 1024).toFixed(1)} MB`;
+}
+
+function aheadText(ahead: number | null): string {
+  return ahead === null
+    ? "commits not on the default branch (count unavailable)"
+    : `${plural(ahead, "commit")} not on the default branch`;
 }
 
 function plural(count: number, noun: string, nouns = `${noun}s`): string {
@@ -735,9 +785,12 @@ export function formatReport(report: ReapReport): readonly string[] {
       rows.push(row("dirty worktree", `${tilde(dirty.path)}   ${plural(dirty.changes, "change")} — kept`));
     }
     for (const kept of repo.keptBranches) {
-      rows.push(
-        row("kept branch", `${kept.name}   upstream gone, ${plural(kept.ahead, "commit")} not on the default branch`),
-      );
+      rows.push(row("kept branch", `${kept.name}   upstream gone, ${aheadText(kept.ahead)}`));
+    }
+    for (const kept of repo.keptWorktrees) {
+      const text = KEPT_WORKTREE_TEXT[kept.why];
+      const why = kept.branch === null ? text : `${kept.branch}   ${text}`;
+      rows.push(row("kept worktree", `${tilde(kept.path)}   ${why}, ${aheadText(kept.ahead)}`));
     }
     for (const path of repo.inUse) rows.push(row("in use", `${tilde(path)}   a tmux pane is inside it`));
     for (const path of repo.locked) rows.push(row("locked worktree", tilde(path)));
@@ -797,6 +850,11 @@ export function formatReport(report: ReapReport): readonly string[] {
             )})`,
           ]),
       `${sum((repo) => repo.dirty.length)} dirty`,
+      plural(
+        sum((repo) => repo.keptWorktrees.length),
+        "kept worktree",
+      ),
+      `${sum((repo) => repo.active)} active`,
       `${plural(report.openPanes.length, "session")} left open`,
       `${sum((repo) => repo.young)} younger than ${report.minAgeDays}d`,
     ].join(" · "),

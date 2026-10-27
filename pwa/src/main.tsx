@@ -2,7 +2,7 @@ import { render } from "preact";
 import "./base.css";
 import { App } from "./app.tsx";
 import { Setup } from "./components/setup.tsx";
-import { dropLegacyHidden, readForm, readPending, writeForm, writePending } from "./persist.ts";
+import { dropLegacyHidden, dropLegacyPending, readForm, writeForm } from "./persist.ts";
 import { deriveAccountKey, FLEET_QUOTA_INTERVAL_MS, RelayClient } from "@seance/shared";
 import { loadPsk, loadPskBase, readBearer, readRelayUrl } from "./relay/keys.ts";
 import "./screen.css";
@@ -38,6 +38,7 @@ if (key === null || token === null) {
   );
 } else {
   dropLegacyHidden();
+  dropLegacyPending();
   // No base on an install saved before account records: it works, without aliases, until the PSK is re-entered.
   // A derivation that throws degrades the same way: naming is an extra, and must not take the app down.
   const accountKey = base === null ? null : await deriveAccountKey(base).catch(() => null);
@@ -49,7 +50,7 @@ if (key === null || token === null) {
     fleetQuotaRefreshMs: FLEET_QUOTA_INTERVAL_MS,
     ...(accountKey === null ? {} : { accountKey }),
   });
-  const store = new Store(client, readForm(), readPending());
+  const store = new Store(client, readForm());
 
   // Debounced because the store notifies on every keystroke in the prompt.
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -57,7 +58,6 @@ if (key === null || token === null) {
     if (timer !== null) clearTimeout(timer);
     timer = setTimeout(() => {
       writeForm(store.getState().form);
-      writePending(store.pendingSpawn);
     }, PERSIST_DEBOUNCE_MS);
   });
 

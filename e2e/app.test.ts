@@ -21,15 +21,7 @@ import { pollUntil } from "../daemon/test/fixtures.ts";
 import { connectApp } from "../relay/test/harness.ts";
 import { deriveMachines } from "../pwa/src/machines-view.ts";
 import type { AppState } from "../pwa/src/view.ts";
-import {
-  E2E_ACCOUNT_ID,
-  killWindow,
-  listRegisteredWindows,
-  listWindows,
-  ownMachine,
-  startApp,
-  type Stack,
-} from "./harness.ts";
+import { E2E_ACCOUNT_ID, killWindow, listWindows, ownMachine, startApp, type Stack } from "./harness.ts";
 import { startSuite, type Suite } from "./suite.ts";
 
 let suite: Suite | undefined;
@@ -228,30 +220,28 @@ describe("daemon ↔ relay ↔ app", () => {
     }
   });
 
-  test("spawn happy path: worktree mode lands a verdict and a real tmux window", async () => {
-    const app = startApp(stack, {
-      machineId: stack.deviceId,
-      repos: { [stack.deviceId]: "myrepo" },
-      prompt: "port the pane",
-      worktree: true,
-    });
+  // The PWA no longer sends `spawn` (every PWA spawn is a task), but the daemon still answers it for
+  // older apps, older MCP clients and `seanced spawn --now`: these two keep that op honest.
+  test("the spawn op: worktree mode lands a reply and a real tmux window", async () => {
+    const app = startApp(stack);
     let window: string | null = null;
     try {
       await app.waitForApp(spawnReady, "machine ready to spawn");
-      await app.store.spawn();
-
-      const { verdict, form } = app.store.getState();
-      if (verdict?.kind !== "ok") throw new Error(`expected ok verdict, got ${JSON.stringify(verdict)}`);
-      window = verdict.window;
+      const reply = await app.client.request<SpawnResponse>(stack.deviceId, "spawn", {
+        repo: "myrepo",
+        mode: "worktree",
+        prompt: "port the pane",
+        client: "pwa",
+      });
+      if (!reply.ok) throw new Error(`expected ok reply, got ${JSON.stringify(reply)}`);
+      window = reply.window;
       expect(window).toBe("port-the-pane");
-      expect(form.prompt).toBe("");
 
-      // Not just a verdict: the window is really running on the tmux server.
+      // Not just a reply: the window is really running on the tmux server.
       expect(await listWindows()).toContain(window);
 
-      // The reply embeds a refreshed session list and the Store adopts it.
-      const sessions = sessionsView(app.store.getState(), stack.deviceId);
-      const entry = sessions.find((s) => s.window === window);
+      // The reply embeds a refreshed session list.
+      const entry = reply.sessions.find((s) => s.window === window);
       expect(entry?.repo).toBe("myrepo");
     } finally {
       if (window !== null) await killWindow(window);
@@ -259,13 +249,8 @@ describe("daemon ↔ relay ↔ app", () => {
     }
   });
 
-  test("spawn failure: claude dying becomes a failed verdict carrying the captured error", async () => {
-    const app = startApp(stack, {
-      machineId: stack.deviceId,
-      repos: { [stack.deviceId]: "myrepo" },
-      prompt: "doomed",
-      worktree: false,
-    });
+  test("the spawn op: claude dying becomes a failed reply carrying the captured error", async () => {
+    const app = startApp(stack);
     process.env["SEANCE_CLAUDE_BIN"] = stack.stub.failing;
     try {
       // Only a death is asserted here, and the daemon reports one as soon as the pane
@@ -277,12 +262,15 @@ describe("daemon ↔ relay ↔ app", () => {
       // finally never restores the default budget for the spawns that follow.
       await stack.restartDaemon({ spawnWaitMs: 8_000 });
       await app.waitForApp(spawnReady, "machine ready to spawn");
-      await app.store.spawn();
-
-      const { verdict } = app.store.getState();
-      if (verdict?.kind !== "failed") throw new Error(`expected failed verdict, got ${JSON.stringify(verdict)}`);
-      expect(verdict.code).toBe("claude_died");
-      expect(verdict.message).toContain("boom: untrusted workspace");
+      const reply = await app.client.request<SpawnResponse>(stack.deviceId, "spawn", {
+        repo: "myrepo",
+        mode: "here",
+        prompt: "doomed",
+        client: "pwa",
+      });
+      if (reply.ok || !("message" in reply)) throw new Error(`expected a failed reply, got ${JSON.stringify(reply)}`);
+      expect(reply.code).toBe("claude_died");
+      expect(reply.message).toContain("boom: untrusted workspace");
 
       // The daemon killed the dead window rather than leaving a corpse.
       expect(await listWindows()).not.toContain("doomed");
@@ -294,61 +282,8 @@ describe("daemon ↔ relay ↔ app", () => {
     }
   });
 
-  test("dropped reply mid-spawn: reconciliation asks the machine and finds the live session", async () => {
-    const form = {
-      machineId: stack.deviceId,
-      repos: { [stack.deviceId]: "myrepo" },
-      prompt: "recover me",
-      worktree: false,
-    };
-    const app = startApp(stack, form);
-    let recovered: ReturnType<typeof startApp> | null = null;
-    let window: string | null = null;
-    try {
-      await app.waitForApp(spawnReady, "machine ready to spawn");
-
-      // Close the app after the request is in flight but well before the
-      // daemon's reply (>= 1500ms spawnWaitMs) — the iOS-kill-mid-spawn shape.
-      const spawning = app.store.spawn();
-      await Bun.sleep(300);
-      app.stop();
-      await spawning;
-
-      const { verdict } = app.store.getState();
-      if (verdict?.kind !== "unknown") throw new Error(`expected unknown verdict, got ${JSON.stringify(verdict)}`);
-      expect(verdict.reason).toBe("dropped");
-      const pending = app.store.pendingSpawn;
-      expect(pending).not.toBeNull();
-
-      // Let the daemon finish the spawn nobody heard the answer to. The window
-      // exists from new-window time, well before the verdict, but the session
-      // list admits it only once the stub has titled its pane — and that list
-      // is what the relaunched app asks for.
-      await pollUntil(async () => {
-        window = (await listRegisteredWindows()).find((name) => name === "recover-me") ?? null;
-        return window !== null;
-      }, "the recover-me window on the tmux server");
-
-      // Relaunch: a fresh client + Store seeded with the persisted pending
-      // spawn, exactly main.tsx's readPending() path.
-      recovered = startApp(stack, form, pending);
-      const state = await recovered.waitForApp(
-        (s) => s.verdict?.kind === "unknown" && s.verdict.sessionCount !== null,
-        "reconciled verdict",
-      );
-      if (state.verdict?.kind !== "unknown") throw new Error("unreachable");
-      expect(state.verdict.reason).toBe("dropped");
-      expect(state.verdict.sessionCount).toBeGreaterThanOrEqual(1);
-      expect(sessionsView(state, stack.deviceId).some((s) => s.window === window)).toBe(true);
-    } finally {
-      if (window !== null) await killWindow(window);
-      recovered?.stop();
-      app.stop();
-    }
-  });
-
   test("resume: re-dialling re-asks every machine, so a session started elsewhere is picked up", async () => {
-    const app = startApp(stack, { machineId: stack.deviceId });
+    const app = startApp(stack);
     let window: string | null = null;
     try {
       await app.waitForApp((s) => typeof s.sessions[stack.deviceId] === "object", "sessions answered");
@@ -380,7 +315,7 @@ describe("daemon ↔ relay ↔ app", () => {
   });
 
   test("taskId: advertised, listed with the session, and a duplicate refused — before and after a daemon restart", async () => {
-    const app = startApp(stack, { machineId: stack.deviceId });
+    const app = startApp(stack);
     let window: string | null = null;
     try {
       const ready = await app.waitForApp((s) => ownMachine(s, stack.deviceId)?.connected === true, "machine online");
@@ -409,7 +344,7 @@ describe("daemon ↔ relay ↔ app", () => {
   });
 
   test("rescan: a new clone reaches the app through re-register and a registry push", async () => {
-    const app = startApp(stack, { machineId: stack.deviceId });
+    const app = startApp(stack);
     const clonePath = join(stack.fixture.root, "newrepo");
     try {
       await app.waitForApp(
