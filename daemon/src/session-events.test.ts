@@ -363,6 +363,44 @@ describe("EndedTasks interrupted launches and the drain", () => {
     });
   });
 
+  test("the gate's state is visible and each change heard once; a final drain is never heard reopening", async () => {
+    const ended = new EndedTasks();
+    const heard: boolean[] = [];
+    const unsubscribe = ended.onGate((closed) => heard.push(closed));
+    expect(ended.draining).toBe(false);
+    ended.reopen();
+    expect(await ended.drain(1_000)).toBe(true);
+    expect(await ended.drain(1_000)).toBe(true);
+    expect(ended.draining).toBe(true);
+    ended.reopen();
+    expect(ended.draining).toBe(false);
+    expect(heard).toEqual([true, false]);
+
+    await ended.drain(1_000, { final: true });
+    ended.reopen();
+    expect(ended.draining).toBe(true);
+    expect(heard).toEqual([true, false, true]);
+
+    unsubscribe();
+    const fresh = new EndedTasks();
+    const off = fresh.onGate((closed) => heard.push(closed));
+    off();
+    await fresh.drain(1_000);
+    expect(heard).toEqual([true, false, true]);
+  });
+
+  test("a throwing gate listener neither stops the drain nor the listeners after it", async () => {
+    const ended = new EndedTasks();
+    const heard: boolean[] = [];
+    ended.onGate(() => {
+      throw new Error("listener broke");
+    });
+    ended.onGate((closed) => heard.push(closed));
+    expect(await ended.drain(1_000)).toBe(true);
+    expect(heard).toEqual([true]);
+    await expect(ended.launch("t1")).rejects.toBeInstanceOf(LaunchesClosed);
+  });
+
   test("drain resolves true only once the launch in flight settled, its pending clear on disk by then", async () => {
     await inTmp(async (path) => {
       const ended = new EndedTasks(await LaunchLedger.open(path));
