@@ -3,7 +3,14 @@ import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseTaskProgressList } from "@seance/shared";
-import { LaunchLedger, LEDGER_MAX, LEDGER_MAX_AGE_MS, type TaskNote } from "./launch-ledger.ts";
+import {
+  LaunchLedger,
+  LEDGER_MAX,
+  pathOwners,
+  type NotedTask,
+  LEDGER_MAX_AGE_MS,
+  type TaskNote,
+} from "./launch-ledger.ts";
 import { OOM_REFRESH_MS } from "./oom-kill.ts";
 
 let dir: string;
@@ -546,5 +553,28 @@ describe("LaunchLedger reported notes (#21)", () => {
     const file = JSON.parse(await readFile(path, "utf8"));
     expect(file.tasks).toEqual([["t1", 9]]);
     expect(file.progress[0]).toMatchObject({ taskId: "t1", reported: true });
+  });
+});
+
+describe("pathOwners", () => {
+  const note = (taskId: string, at: string | undefined, siteAt?: number): NotedTask => ({
+    taskId,
+    at: 0,
+    ...(at === undefined ? {} : { path: at }),
+    ...(siteAt === undefined ? {} : { siteAt }),
+  });
+
+  test("the newer site owns a path, whatever the order", () => {
+    expect(pathOwners([note("a", "/p", 5), note("b", "/p", 3)]).get("/p")?.taskId).toBe("a");
+    expect(pathOwners([note("b", "/p", 3), note("a", "/p", 5)]).get("/p")?.taskId).toBe("a");
+  });
+
+  test("a tie goes to the later note, and a missing siteAt counts as oldest", () => {
+    expect(pathOwners([note("a", "/p", 5), note("b", "/p", 5)]).get("/p")?.taskId).toBe("b");
+    expect(pathOwners([note("a", "/p", 1), note("b", "/p")]).get("/p")?.taskId).toBe("a");
+  });
+
+  test("notes without a path are skipped", () => {
+    expect(pathOwners([note("a", undefined, 5)]).size).toBe(0);
   });
 });

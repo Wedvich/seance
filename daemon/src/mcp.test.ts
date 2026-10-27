@@ -2351,11 +2351,18 @@ describe("continue_task", () => {
   });
 
   /** The leader (device-1) and the machine the task ran on (device-2), each advertising `continueTask` unless held back. */
-  function continuingMachines(advertising: { readonly leader?: boolean; readonly box?: boolean } = {}): Machine[] {
+  function continuingMachines(
+    advertising: { readonly leader?: boolean; readonly box?: boolean; readonly cancelled?: boolean } = {},
+  ): Machine[] {
     const [leader, box] = autoMachines();
-    const advertise = (m: Machine | undefined, on: boolean | undefined): Machine =>
-      machine({ ...m, ...(on === false ? {} : { capabilities: [CAPABILITIES.continueTask] }) });
-    return [advertise(leader, advertising.leader), advertise(box, advertising.box)];
+    const advertise = (m: Machine | undefined, on: boolean | undefined, cancelled = false): Machine =>
+      machine({
+        ...m,
+        ...(on === false
+          ? {}
+          : { capabilities: [CAPABILITIES.continueTask, ...(cancelled ? [CAPABILITIES.continueCancelled] : [])] }),
+      });
+    return [advertise(leader, advertising.leader), advertise(box, advertising.box, advertising.cancelled)];
   }
 
   async function callContinue(
@@ -2427,7 +2434,9 @@ describe("continue_task", () => {
     expect(missing.error).toBe(true);
     expect(missing.text).toContain(`not in the leader's list (pruned, or past the ${QUEUE_MAX_TASKS} most relevant)`);
     const finished = await callContinue([task({ ...failedTask, state: "done", failure: undefined })]);
-    expect(finished.text).toContain("only a task whose session ended in failure can be continued");
+    expect(finished.text).toContain(
+      "only a task whose session failed, or that was cancelled after it started, can be continued",
+    );
     const hereRun = await callContinue([task({ ...failedTask, spec: { repo: ORIGIN, mode: "here" } })]);
     expect(hereRun.text).toContain("no worktree of its own");
     const other = await callContinue([task({ ...failedTask, failure: { code: "queue_expired", message: "x" } })]);
@@ -2503,6 +2512,36 @@ describe("continue_task", () => {
     expect(queue.tasks.find((t) => t["id"] === "t-1")).not.toHaveProperty("continues");
     expect(queue.tasks.find((t) => t["id"] === "t-2")).toMatchObject({ continues: "t-1" });
     expect(queue.tasks.find((t) => t["id"] === "t-2")).not.toHaveProperty("continuable");
+    lazy.stop();
+  });
+
+  test("a cancelled task with an assignment is continued only on a box advertising continueCancelled", async () => {
+    const cancelled = task({ ...failedTask, state: "cancelled", failure: undefined });
+    const queued = await callContinue([cancelled], continuingMachines({ cancelled: true }));
+    expect(queued.error).toBe(false);
+    expect(queued.fake.creates).toHaveLength(1);
+    const refused = await callContinue([cancelled], continuingMachines());
+    expect(refused.error).toBe(true);
+    expect(refused.text).toContain("seanced update");
+    expect(refused.fake.creates).toEqual([]);
+  });
+
+  test("get_queue moves continuable to a continuation that failed after landing", async () => {
+    const y = task({
+      id: "t-2",
+      state: "failed",
+      failure: { code: "session_failed", message: "exit 137" },
+      assignment: { ...AT, window: "fix-it" },
+      spec: { repo: ORIGIN, mode: "continue", continues: { task: "t-1", at: AT } },
+    });
+    const fake = leaderRelay([{ tasks: [failedTask, y], at: 6_000 }], continuingMachines());
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const queue = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} }))) as {
+      tasks: Record<string, unknown>[];
+    };
+    expect(queue.tasks.find((t) => t["id"] === "t-1")).not.toHaveProperty("continuable");
+    expect(queue.tasks.find((t) => t["id"] === "t-2")).toMatchObject({ continuable: true });
     lazy.stop();
   });
 
