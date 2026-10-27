@@ -168,7 +168,7 @@ Edit `~/.config/seance/config.json`:
   Claude Code registers, so the Claude UIs read `fix-the-thing (thad)`. The tmux window
   name stays bare — locally the machine is never in question. Leave it empty for
   unsuffixed names.
-- `reap` — optional: `{ "intervalHours": 24, "minAgeDays": 7 }` runs `seanced reap`
+- `reap` — optional: `{ "intervalHours": 24, "minAgeDays": 4 }` runs `seanced reap`
   from the daemon every day, with its report in the log. Without `intervalHours` the
   schedule is off (the default); `minAgeDays` also sets the CLI's age gate.
 - `quota` — optional: `{ "staleAfterMinutes": 10 }` (the default) is how old an
@@ -437,8 +437,8 @@ the way out, so the work stays where it was; cleaning up worktrees and branches 
 
 `reap` cleans up after sessions across every repo the daemon scans. It removes a
 linked worktree only when no tmux pane is inside it, it is clean, its branch is merged
-(including squash-merged — checked locally, no `gh`), and nothing has touched it for a
-week (`--min-age-days` to change). It deletes merged branches, closes séance windows
+(including squash-merged — checked locally, no `gh`), and nothing has touched it for
+four days (`--min-age-days` to change). It deletes merged branches, closes séance windows
 that are dead or sitting on claude's "keep or remove this worktree?" prompt, and
 reports what it left: dirty worktrees, branches and worktrees whose upstream is gone but
 which hold unpushed commits, worktrees on a never-pushed branch, detached worktrees with
