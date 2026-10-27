@@ -728,7 +728,11 @@ export class Scheduler {
     // usage and the caps. The spawns are not awaited: one slow machine
     // must not hold every other placement, TTL and absence check behind its 90s
     // timeout.
-    for (const task of ready) {
+    for (const seen of ready) {
+      // A `runNow` may have placed it while an earlier reservation was awaited: its decision must not
+      // be overwritten with this snapshot's, which nothing would clear while it runs.
+      const task = this.task(seen.id);
+      if (task?.state !== "ready" || this.#dispatches.has(task.id)) continue;
       const now = this.#now();
       const decision = this.#route(task, now);
       this.#decisions.set(task.id, decision);

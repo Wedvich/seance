@@ -1127,6 +1127,39 @@ describe("run now", () => {
     expect(await scheduler.cancel(fresh.id)).toMatchObject({ ok: true });
     expect(await scheduler.runNow(fresh.id)).toEqual({ ok: false, code: "finished" });
   });
+
+  test("a task it placed while a pass awaited an earlier reservation keeps its own decision", async () => {
+    class Gated extends MemoryQueueStore {
+      readonly held = Promise.withResolvers<void>();
+      override async put(id: string, version: number, body: Task): ReturnType<MemoryQueueStore["put"]> {
+        if (id === "x" && body.state === "reserved") await this.held.promise;
+        return super.put(id, version, body);
+      }
+    }
+    const store = new Gated();
+    const fleet = new FakeFleet([machine("a"), machine("b")]);
+    const scheduler = new Scheduler({ store, fleet, config: { ...DEFAULT_CONFIG, accountMax: 1 }, now: () => NOW });
+    await enqueue(store, scheduler, spec({ pin: { deviceId: "a" } }), "first", NOW - 3);
+    await pass(scheduler);
+    await enqueue(store, scheduler, spec({ pin: { deviceId: "b" } }), "x", NOW - 2);
+    await enqueue(store, scheduler, spec({ pin: { deviceId: "a" } }), "y", NOW - 1);
+
+    // The pass routes `x` first (oldest) and waits on its write with `y` still in its snapshot.
+    const ticking = scheduler.tick();
+    await until(() => scheduler.task("y")?.state === "ready", "y admitted");
+    expect(await scheduler.runNow("y")).toMatchObject({ ok: true, task: { state: "reserved" } });
+    store.held.resolve();
+    await ticking;
+    await scheduler.drain();
+
+    expect(scheduler.task("x")?.state).toBe("running");
+    expect(scheduler.task("y")?.state).toBe("running");
+    const decision = scheduler.lastDecision("y");
+    expect(decision?.chosen?.deviceId).toBe("a");
+    expect(decision?.candidates.flatMap((c) => c.rejected)).not.toContainEqual(
+      expect.objectContaining({ code: "cap_reached" }),
+    );
+  });
 });
 
 describe("cancel", () => {
