@@ -155,7 +155,8 @@ const endedTasksByLedger = new Map<string, Promise<EndedTasks>>();
  */
 const schedulerGuard = new ReplayGuard();
 
-function endedTasksFor(path: string): Promise<EndedTasks> {
+/** Exported so a test can hold a launch open on the very instance a daemon's updater drains. */
+export function endedTasksFor(path: string): Promise<EndedTasks> {
   let tasks = endedTasksByLedger.get(path);
   if (tasks === undefined) {
     tasks = LaunchLedger.open(path).then(
