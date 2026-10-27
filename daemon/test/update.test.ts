@@ -25,6 +25,10 @@ import { startTestRelay, type TestRelay } from "./harness.ts";
 
 const PSK = toBase64(new Uint8Array(32).fill(7));
 const TOKEN = "test-bearer";
+/** Held-gate tests: a beat far past any test window, so a `drn` status is the gate-change refresh or nothing. */
+const LONG_BEAT_MS = 600_000;
+/** The relay double's status floor and the loop's own, so the register-then-drain ordering is the real one. */
+const FLOOR_MS = 400;
 let base: string;
 let appKey: CryptoKey;
 
@@ -71,13 +75,14 @@ async function startTestDaemon(
   relay: TestRelay,
   name: string,
   selfUpdate: SelfUpdateOpts,
-  telemetryIntervalMs?: number,
+  statusFloorMs?: number,
 ): Promise<TestDaemon> {
   // Fresh state dir per test: announce compares against the previous run's
   // sha, so sharing state across fixtures would cross-talk.
   process.env["SEANCE_STATE_DIR"] = join(base, name, "state");
   const roots = join(base, name, "roots");
   await mkdir(roots, { recursive: true });
+  if (statusFloorMs !== undefined) relay.statusFloorMs = statusFloorMs;
   const config: Config = {
     name: "UpdateBox",
     relayUrl: relay.url,
@@ -94,7 +99,7 @@ async function startTestDaemon(
     pingIntervalMs: 60_000,
     pongTimeoutMs: 1_000,
     baseBackoffMs: 20,
-    ...(telemetryIntervalMs === undefined ? {} : { telemetryIntervalMs }),
+    ...(statusFloorMs === undefined ? {} : { statusFloorMs, telemetryIntervalMs: LONG_BEAT_MS }),
     selfUpdate: {
       debounceMs: 0,
       effects: {
@@ -219,8 +224,8 @@ describe("self-update over the relay", () => {
   test("an ok update holds its restart until a task launch in flight on this daemon has settled", async () => {
     const relay = startTestRelay(TOKEN);
     const { upstream, checkout } = await makePair("quiesce");
-    // A short beat, so the test reads a status inside the hold without waiting out the relay's floor.
-    const { daemon, calls } = await startTestDaemon(relay, "quiesce", { root: checkout }, 200);
+    // A beat far past the test, and a floored relay double: the `drn` status is the gate-change refresh.
+    const { daemon, calls } = await startTestDaemon(relay, "quiesce", { root: checkout }, FLOOR_MS);
     try {
       const { deviceId } = await relay.registers.next();
       await daemon.updater?.settled();
@@ -271,7 +276,7 @@ describe("self-update over the relay", () => {
           },
         },
       },
-      200,
+      FLOOR_MS,
     );
     try {
       const { deviceId } = await relay.registers.next();

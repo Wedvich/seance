@@ -5227,7 +5227,13 @@ relay state unnecessary).
   close and reopen (`EndedTasks.onGate`) asks the status loop for a fresh status (`StatusLoop.refresh`),
   sent at once or, inside the relay's `STATUS_MIN_INTERVAL_MS` floor after the last one, once it
   passes: the update's report re-registers, and so sends a status, just before the drain, and a
-  status sent at once would be dropped. A shutdown's final drain shows too, when it lasts past the
+  status sent at once would be dropped. The refresh waits for any sample in flight (that register's,
+  which read the gate still open) to land, measures the floor from the latest send, re-decides when
+  its timer fires, and then takes a **fresh** sample (`tick`'s `fresh`, queued behind rather than
+  joining one in flight), so the status that follows the gate change is never one that began before
+  it. The send resolves when the frame is handed to the socket, not when the relay accepts it, and
+  the margin (5% over the floor) assumes steady latency: a refresh the relay still drops is not
+  retried, and the flag then waits for the next beat, at most 30 s. A shutdown's final drain shows too, when it lasts past the
   floor; otherwise the socket closes first and the machine reads `offline`.
 - **Reporting rides the register blob** (`source`, `lastUpdate` —
   `Presence & identity`), `current` excluded: the steady state would rewrite

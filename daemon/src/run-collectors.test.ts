@@ -42,15 +42,28 @@ afterEach(() => {
   running = null;
 });
 
+interface Holds {
+  /** The first `sessions` read (so the first tick) waits for it. */
+  readonly tick?: Promise<void>;
+  /** The first send waits for it before it lands. */
+  readonly send?: Promise<void>;
+}
+
 /** A loop whose beat never fires within a test, so every send is `sampleNow` or `refresh`. */
-function start(draining: () => boolean): { readonly loop: StatusLoop; readonly sent: Sent[] } {
+function start(draining: () => boolean, holds: Holds = {}): { readonly loop: StatusLoop; readonly sent: Sent[] } {
   const sent: Sent[] = [];
+  let reads = 0;
+  let sends = 0;
   const loop = startStatusLoop(
     MetricsStore.memory(),
     {
       config,
       registered: () => registered,
-      sessions: async () => [],
+      sessions: async () => {
+        reads += 1;
+        if (reads === 1) await holds.tick;
+        return [];
+      },
       now: Date.now,
       httpFetch: () => Promise.reject(new Error("no network in this test")),
       probe,
@@ -61,6 +74,8 @@ function start(draining: () => boolean): { readonly loop: StatusLoop; readonly s
       floorMs: FLOOR_MS,
       connected: () => true,
       send: async (status) => {
+        sends += 1;
+        if (sends === 1) await holds.send;
         sent.push({ status, atMs: Date.now() });
         return true;
       },
@@ -116,5 +131,46 @@ describe("startStatusLoop refresh", () => {
     loop.stop();
     await Bun.sleep(FLOOR_MS * 2); // a non-event can't be polled
     expect(sent).toHaveLength(1);
+  });
+
+  // The register-then-drain ordering: the register's sample is under way when the gate closes.
+  describe.each(["tick", "send"] as const)("a refresh while the register's %s is in flight", (held) => {
+    test("sends a new sample with the gate, outside the relay's floor of the one in flight", async () => {
+      let draining = false;
+      const release = Promise.withResolvers<void>();
+      const { loop, sent } = start(() => draining, { [held]: release.promise });
+      loop.sampleNow();
+      await Bun.sleep(50); // a non-event can't be polled: the held sample has to still be in flight
+      draining = true;
+      loop.refresh();
+      release.resolve();
+
+      await pollUntil(() => sent.some((one) => one.status.drn === true), "a status carrying the gate");
+      // The relay drops what lands within its floor of an accepted status, so what it keeps is what counts.
+      const kept: Sent[] = [];
+      for (const one of sent) {
+        const last = kept.at(-1);
+        if (last === undefined || one.atMs - last.atMs >= FLOOR_MS) kept.push(one);
+      }
+      expect(kept.at(-1)?.status.drn).toBe(true);
+      expect(sent).toHaveLength(2);
+      expect((sent[1]?.atMs ?? 0) - (sent[0]?.atMs ?? 0)).toBeGreaterThanOrEqual(FLOOR_MS);
+    });
+  });
+
+  test("a send landing while the wait runs moves the wait past its own floor", async () => {
+    let draining = false;
+    const { loop, sent } = start(() => draining);
+    loop.sampleNow();
+    await pollUntil(() => sent.length === 1, "the first status");
+    loop.refresh(); // a timer armed against the first send
+    await Bun.sleep(FLOOR_MS * 0.6); // a non-event can't be polled
+    loop.sampleNow(); // a register's sample: accepted meanwhile, since a register clears the relay's floor
+    await pollUntil(() => sent.length === 2, "the register's status");
+    draining = true;
+
+    await pollUntil(() => sent.length === 3, "the refreshed status");
+    expect(sent[2]?.status.drn).toBe(true);
+    expect((sent[2]?.atMs ?? 0) - (sent[1]?.atMs ?? 0)).toBeGreaterThanOrEqual(FLOOR_MS);
   });
 });

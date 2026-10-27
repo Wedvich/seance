@@ -76,6 +76,8 @@ export interface RunOpts {
   readonly reapCheckIntervalMs?: number;
   /** Telemetry sample period; defaults to the `status` cadence. Tests shorten it. */
   readonly telemetryIntervalMs?: number;
+  /** How long after a sent status the loop holds a gate-change refresh; defaults to the relay's floor. Tests only. */
+  readonly statusFloorMs?: number;
   /**
    * A psk the caller already resolved, to skip re-reading the platform store.
    * The supervisor passes it so a reload spawns one `security`/DPAPI read
@@ -401,6 +403,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     },
     {
       intervalMs: opts.telemetryIntervalMs ?? STATUS_INTERVAL_MS,
+      ...(opts.statusFloorMs === undefined ? {} : { floorMs: opts.statusFloorMs }),
       connected: () => client.connected,
       send: (snapshot, current) => client.sendStatus(snapshot, current),
       // Late-bound: the writer is built after the loop it reads.

@@ -127,6 +127,11 @@ export interface TestRelay {
   refuseRegisters: boolean;
   /** Refuse this many registers as `refuseRegisters` does, then admit — no race with a redial. */
   refuseNextRegisters: number;
+  /**
+   * The real DO's per-socket status floor (`STATUS_MIN_INTERVAL_MS`, which a register clears), opt-in and
+   * 0 (none) by default: a status arriving within it of the last accepted one is dropped, not queued.
+   */
+  statusFloorMs: number;
   /** Close every app socket on open with 4401, as the real relay answers a bad `?t=` token. */
   rejectApps: boolean;
   rejectedCount: () => number;
@@ -185,6 +190,7 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
   const appEvents = new AsyncQueue<"open" | "close">("appEvents");
   const daemons = new Map<string, Bun.ServerWebSocket<Role>>();
   const socketDevices = new Map<Bun.ServerWebSocket<Role>, string>();
+  const lastStatusAt = new Map<Bun.ServerWebSocket<Role>, number>();
   const apps = new Set<Bun.ServerWebSocket<Role>>();
   let rejected = 0;
   let connections = 0;
@@ -203,6 +209,7 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
     autoPong: boolean;
     refuseRegisters: boolean;
     refuseNextRegisters: number;
+    statusFloorMs: number;
     rejectApps: boolean;
     schedulerTerm: number | null;
     holdStoreReplies: boolean;
@@ -210,6 +217,7 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
     autoPong: true,
     refuseRegisters: false,
     refuseNextRegisters: 0,
+    statusFloorMs: 0,
     rejectApps: false,
     schedulerTerm: null,
     holdStoreReplies: false,
@@ -301,8 +309,13 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
       }
       daemons.set(frame.deviceId, ws);
       socketDevices.set(ws, frame.deviceId);
+      lastStatusAt.delete(ws);
       registers.push(frame);
     } else if (frame.t === "status") {
+      const at = Date.now();
+      const last = lastStatusAt.get(ws);
+      if (last !== undefined && at - last < relay.statusFloorMs) return;
+      lastStatusAt.set(ws, at);
       statuses.push(frame.env);
     } else if (
       frame.t === "store-list" ||
@@ -406,6 +419,12 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
     },
     set refuseRegisters(value: boolean) {
       relay.refuseRegisters = value;
+    },
+    get statusFloorMs() {
+      return relay.statusFloorMs;
+    },
+    set statusFloorMs(value: number) {
+      relay.statusFloorMs = value;
     },
     get refuseNextRegisters() {
       return relay.refuseNextRegisters;
