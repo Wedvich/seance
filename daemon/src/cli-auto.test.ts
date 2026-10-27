@@ -481,7 +481,10 @@ describe("continueTaskAuto", () => {
   test("refuses a task nobody lists, one that is not a failed session, and a leader that cannot continue; nothing is queued", async () => {
     const cases: [string, Awaited<ReturnType<typeof runContinue>>][] = [
       ["not in the leader's list", await runContinue([])],
-      ["only a task whose session ended in failure", await runContinue([{ ...failedTask, state: "done" }])],
+      [
+        "only a task whose session failed, or that was cancelled",
+        await runContinue([{ ...failedTask, state: "done" }]),
+      ],
       [
         "the scheduler's leader cannot continue a session yet",
         await runContinue([failedTask], machines({ leader: false })),
