@@ -5,6 +5,7 @@ import {
   type DiscardResult,
   type MarkDoneResult,
   type PauseResult,
+  type RunNowResult,
   type Scheduler,
   winnerOnly,
 } from "@seance/scheduler";
@@ -203,6 +204,18 @@ const MARK_DONE_REFUSALS: Record<Exclude<MarkDoneResult, { readonly ok: true }>[
   ),
 };
 
+const RUN_NOW_REFUSALS: Record<Exclude<RunNowResult, { readonly ok: true }>["code"], SchedulerError> = {
+  not_found: schedulerError("task_not_found", "the leader holds no task by that id"),
+  dispatching: schedulerError("dispatching", "its spawn is in flight; ask again once it lands"),
+  finished: schedulerError("finished", "the task has already finished"),
+  not_waiting: schedulerError("not_waiting", "the task is not ready: it waits on admission or its deps, or is placed"),
+  unplaceable: schedulerError(
+    "unplaceable",
+    "past the concurrency caps it still places nowhere; its decision says why",
+  ),
+  conflict: schedulerError("conflict", "the task changed while it was placed; ask again"),
+};
+
 const DISCARD_REFUSALS: Record<Exclude<DiscardResult, { readonly ok: true }>["code"], SchedulerError> = {
   not_found: schedulerError("task_not_found", "the leader holds no unreadable record by that id"),
   conflict: schedulerError("conflict", "the record is at another version now; read the queue again"),
@@ -279,6 +292,19 @@ async function answer(asked: Asked, op: SchedulerOp, payload: unknown): Promise<
       await audit.markedDone(id, result.task);
       // What waited on it (an `after: merged` dependent) is released now rather than on the next 30s tick.
       tick();
+      const reply: TaskResponse = { task: result.task };
+      return reply;
+    }
+    case "run-now": {
+      const ref = parseTaskRef(payload);
+      if (ref === null) return schedulerError("invalid_request", "malformed run-now request");
+      const result = await scheduler.runNow(ref.taskId);
+      if (!result.ok) {
+        await audit.refused("run-now", id, result.code, { taskId: ref.taskId });
+        return RUN_NOW_REFUSALS[result.code];
+      }
+      // The spawn line on the chosen machine joins this by `task=`.
+      await audit.ranNow(id, result.task);
       const reply: TaskResponse = { task: result.task };
       return reply;
     }

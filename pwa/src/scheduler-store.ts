@@ -486,6 +486,11 @@ export class SchedulerStore {
     return this.#actOnTask({ taskId, op: "mark-done" });
   }
 
+  /** Places a task the concurrency caps alone hold, past them; the reply is the task as reserved. */
+  runNow(taskId: string): Promise<void> {
+    return this.#actOnTask({ taskId, op: "run-now" });
+  }
+
   /**
    * Writes a new task that picks up a failed or cancelled one's session where it stopped, through the same
    * `createTask` an enqueue uses: the leader dispatches it to the machine the old one ran on.
@@ -520,8 +525,8 @@ export class SchedulerStore {
         this.#patch({ taskAction: null, queueNotice: notice });
         return;
       }
-      const reply =
-        action.op === "cancel" ? await this.#client.cancel(action.taskId) : await this.#client.markDone(action.taskId);
+      const send = { cancel: "cancel", "mark-done": "markDone", "run-now": "runNow" } as const;
+      const reply = await this.#client[send[action.op]](action.taskId);
       if (reply === null) notice = `${SCHEDULER_UNREADABLE} ${MAY_HAVE_LANDED}`;
       else if ("ok" in reply) {
         const text = sentence(schedulerErrorText(reply.code));

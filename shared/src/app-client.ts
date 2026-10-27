@@ -1546,6 +1546,15 @@ export class RelayClient {
     return this.#schedule("mark-done", ref, parseTaskReply);
   }
 
+  /**
+   * Places a `ready` task now, past the concurrency caps and nothing else; the
+   * reply is the task as reserved. Only to a leader advertising `CAPABILITIES.runNow`.
+   */
+  runNow(taskId: string): Promise<TaskReply | null> {
+    const ref: TaskRef = { taskId };
+    return this.#schedule("run-now", ref, parseTaskReply);
+  }
+
   pause(request: PauseRequest): Promise<PauseReply | null> {
     return this.#schedule("pause", request, parsePauseReply);
   }

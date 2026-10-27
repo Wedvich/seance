@@ -412,6 +412,10 @@ class ScriptedClient extends RelayClient {
   onMarkDone: (taskId: string) => Promise<TaskReply | null> = async (id) => ({
     task: { ...QUEUED, id, state: "done", doneBy: "manual" },
   });
+  readonly runNows: string[] = [];
+  onRunNow: (taskId: string) => Promise<TaskReply | null> = async (id) => ({
+    task: { ...QUEUED, id, state: "reserved" },
+  });
   onPause: (request: PauseRequest) => Promise<PauseReply | null> = async () => ({
     holds: [{ until: "resume", at: 5 }],
   });
@@ -476,6 +480,11 @@ class ScriptedClient extends RelayClient {
 
   override markDone(taskId: string): Promise<TaskReply | null> {
     return this.onMarkDone(taskId);
+  }
+
+  override runNow(taskId: string): Promise<TaskReply | null> {
+    this.runNows.push(taskId);
+    return this.onRunNow(taskId);
   }
 
   override pause(request: PauseRequest): Promise<PauseReply | null> {
@@ -1282,6 +1291,22 @@ describe("the queue screen", () => {
     client.onCancel = async () => ({ task: { ...waiting, state: "cancelled" } });
     await store.cancelTask("w-1");
     expect(store.getState().queueNotice).toBeNull();
+  });
+
+  test("run now asks the leader for that task and merges it as reserved; a refusal is the notice", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+
+    await store.runNow("w-1");
+    expect(client.runNows).toEqual(["w-1"]);
+    expect(store.getState().queueView).toMatchObject({ tasks: [{ id: "w-1", state: "reserved" }, { id: "r-1" }] });
+    expect(store.getState().taskAction).toBeNull();
+
+    client.onRunNow = async () => ({ ok: false, code: "unplaceable", message: "held" });
+    await store.runNow("w-1");
+    expect(store.getState().queueNotice).toBe(
+      "Something besides the concurrency caps keeps it from every machine — see why it waits.",
+    );
   });
 
   describe("continueTask", () => {

@@ -1057,6 +1057,78 @@ describe("a reply lost, then the session ends", () => {
   });
 });
 
+describe("run now", () => {
+  const ONE_SLOT = { ...DEFAULT_CONFIG, globalMax: 1, accountMax: 1 };
+
+  /** One task running on `a`, a second `ready` and held by both caps. */
+  async function capped() {
+    const env = setup(new FakeFleet([machine("a")]), ONE_SLOT);
+    const first = await enqueue(env.store, env.scheduler, spec());
+    await pass(env.scheduler);
+    const second = await enqueue(env.store, env.scheduler, spec());
+    await pass(env.scheduler);
+    expect(env.scheduler.task(second.id)?.state).toBe("ready");
+    expect(env.scheduler.lastDecision(second.id)?.candidates.flatMap((c) => c.rejected)).toEqual([
+      { code: "cap_reached", inFlight: 1, max: 1 },
+      { code: "cap_reached", inFlight: 1, max: 1, scope: "account" },
+    ]);
+    return { ...env, first, second };
+  }
+
+  test("places a task past both caps; it then counts, so the next waits over the cap", async () => {
+    const { fleet, scheduler, store, first, second } = await capped();
+    const ran = await scheduler.runNow(second.id);
+    expect(ran).toMatchObject({ ok: true, task: { state: "reserved", reservation: { deviceId: "a" } } });
+    await scheduler.drain();
+    expect(scheduler.task(second.id)?.state).toBe("running");
+    expect(scheduler.task(first.id)?.state).toBe("running");
+    expect(fleet.spawns).toHaveLength(2);
+    expect((await stored(store, second.id))?.body.state).toBe("running");
+
+    const third = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    expect(scheduler.task(third.id)?.state).toBe("ready");
+    expect(scheduler.lastDecision(third.id)?.candidates.flatMap((c) => c.rejected)).toContainEqual({
+      code: "cap_reached",
+      inFlight: 2,
+      max: 1,
+    });
+  });
+
+  test("every other filter still holds: a paused queue is unplaceable and nothing is written or sent", async () => {
+    const { fleet, scheduler, store, second } = await capped();
+    expect(await scheduler.pause({ until: "resume" })).toMatchObject({ ok: true });
+    const before = await stored(store, second.id);
+    expect(await scheduler.runNow(second.id)).toEqual({ ok: false, code: "unplaceable" });
+    expect(await stored(store, second.id)).toEqual(before);
+    expect(fleet.spawns).toHaveLength(1);
+    // The held decision is still the pass's, not the uncapped one.
+    expect(scheduler.lastDecision(second.id)?.candidates.flatMap((c) => c.rejected)).toContainEqual(
+      expect.objectContaining({ code: "cap_reached" }),
+    );
+  });
+
+  test("refuses what is not a ready task: unknown, not admitted, placed, in flight, finished", async () => {
+    const { fleet, scheduler, store, first, second } = await capped();
+    expect(await scheduler.runNow("nobody")).toEqual({ ok: false, code: "not_found" });
+    expect(await scheduler.runNow(first.id)).toEqual({ ok: false, code: "not_waiting" });
+    const fresh = await enqueue(store, scheduler, spec());
+    expect(await scheduler.runNow(fresh.id)).toEqual({ ok: false, code: "not_waiting" });
+
+    const hung = Promise.withResolvers<TaskSpawnReply>();
+    fleet.scripts.set("a", () => hung.promise);
+    expect(await scheduler.runNow(second.id)).toMatchObject({ ok: true });
+    expect(await scheduler.runNow(second.id)).toEqual({ ok: false, code: "dispatching" });
+    const sent = fleet.spawns[1]?.request;
+    if (sent === undefined) throw new Error("no spawn was sent");
+    hung.resolve(fleet.start("a", sent));
+    await scheduler.drain();
+
+    expect(await scheduler.cancel(fresh.id)).toMatchObject({ ok: true });
+    expect(await scheduler.runNow(fresh.id)).toEqual({ ok: false, code: "finished" });
+  });
+});
+
 describe("cancel", () => {
   test("a ready task is cancelled; a running one is despawned first; a finished one is refused", async () => {
     const { fleet, scheduler, store } = setup(new FakeFleet([machine("a", { connected: false })]));

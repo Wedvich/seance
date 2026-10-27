@@ -78,6 +78,7 @@ export function App(props: { store: Store }): JSX.Element {
       onRefresh={() => void store.refreshQueue()}
       onCancel={(id) => void store.cancelTask(id)}
       onMarkDone={(id) => void store.markDone(id)}
+      onRunNow={(id) => void store.runNow(id)}
       onContinue={(id) => void store.continueTask(id)}
       onFollowUp={(id) => store.followUp(id)}
       onPause={() => void store.pauseQueue()}

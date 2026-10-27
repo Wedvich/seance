@@ -8,7 +8,7 @@ import {
   taskFailureText,
   type TaskUntil,
 } from "@seance/shared";
-import type { KnownAccount, Machine, RelayState } from "@seance/shared";
+import type { Capability, KnownAccount, Machine, RelayState } from "@seance/shared";
 import {
   EFFORT_LABELS,
   MODEL_LABELS,
@@ -281,10 +281,19 @@ export function deriveReportedAvailability(relay: RelayState): boolean {
  * no leader (or an unverified one) says no.
  */
 export function deriveContinueAvailability(relay: RelayState): boolean {
+  return verifiedLeaderAdvertises(relay, CAPABILITIES.continueTask);
+}
+
+/** Whether the verified leader answers `run-now`; an older one refuses it as an op it does not know. */
+export function deriveRunNowAvailability(relay: RelayState): boolean {
+  return verifiedLeaderAdvertises(relay, CAPABILITIES.runNow);
+}
+
+function verifiedLeaderAdvertises(relay: RelayState, capability: Capability): boolean {
   const { scheduler } = relay;
   if (relay.status !== "open" || scheduler.kind !== "ready") return false;
   const leader = relay.machines.find((m) => m.deviceId === scheduler.deviceId);
-  return leader?.capabilities?.includes(CAPABILITIES.continueTask) === true;
+  return leader?.capabilities?.includes(capability) === true;
 }
 
 function afterValue(after: PersistedForm["after"]): string {

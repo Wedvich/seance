@@ -1257,7 +1257,7 @@ export function parseSettingsRecord(value: unknown): SettingsRecord | null {
   };
 }
 
-/** `cancel` and `mark-done`, at the leader: the one field, nothing else carried on. */
+/** `cancel`, `mark-done` and `run-now`, at the leader: the one field, nothing else carried on. */
 export function parseTaskRef(value: unknown): TaskRef | null {
   return isRecord(value) && isTaskId(value["taskId"]) ? { taskId: value["taskId"] } : null;
 }
@@ -1331,7 +1331,7 @@ export function parseDiscardReply(value: unknown): DiscardReply | null {
   return isRecord(value) && isTaskId(value["taskId"]) ? { taskId: value["taskId"] } : null;
 }
 
-/** `cancel` and `mark-done` replies. */
+/** `cancel`, `mark-done` and `run-now` replies. */
 export function parseTaskReply(value: unknown): TaskReply | null {
   if (isRecord(value) && value["ok"] === false) return parseSchedulerError(value);
   const task = isRecord(value) ? parseTask(value["task"]) : null;

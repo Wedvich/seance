@@ -8,6 +8,7 @@ import {
   type Machine,
   type PauseHold,
   type PrStatus,
+  type Reason,
   type RelayState,
   type Task,
 } from "@seance/shared";
@@ -808,6 +809,49 @@ describe("continuing a failed task", () => {
     });
     expect(rowOf([long], "c", CAN)?.continues).toBe("Continues task 01234567");
     expect(rowOf([failed], "f", CAN)?.continues).toBeNull();
+  });
+});
+
+describe("run now", () => {
+  const CAN = [CAPABILITIES.runNow];
+  const GLOBAL: Reason = { code: "cap_reached", inFlight: 8, max: 8 };
+  const ACCOUNT: Reason = { code: "cap_reached", inFlight: 4, max: 4, scope: "account" };
+  const DISK: Reason = { code: "disk_low", freeMib: 10 };
+  const waiting = (rejected: readonly (readonly Reason[])[]): Task =>
+    task("w", {
+      decision: {
+        at: NOW,
+        chosen: null,
+        candidates: rejected.map((r, i) => ({ deviceId: `d${i}`, machine: `m${i}`, exclave: "main", rejected: r })),
+      },
+    });
+  const canRunNow = (t: Task, capabilities: readonly string[] = CAN): boolean | undefined =>
+    deriveQueue(state(ok([t]), {}, { machines: [machine({ capabilities })] }), NOW)
+      .sections.flatMap((section) => section.rows)
+      .find((row) => row.id === t.id)?.canRunNow;
+
+  test("offered on a ready task some machine turns down for the caps alone, either cap or both", () => {
+    expect(canRunNow(waiting([[GLOBAL]]))).toBe(true);
+    expect(canRunNow(waiting([[ACCOUNT]]))).toBe(true);
+    expect(
+      canRunNow(
+        waiting([
+          [GLOBAL, ACCOUNT],
+          [GLOBAL, DISK],
+        ]),
+      ),
+    ).toBe(true);
+  });
+
+  test("withheld where it would not place: another reason on every candidate, no decision, or not ready", () => {
+    expect(canRunNow(waiting([[GLOBAL, DISK]]))).toBe(false);
+    expect(canRunNow(waiting([[]]))).toBe(false);
+    expect(canRunNow(task("w"))).toBe(false);
+    expect(canRunNow({ ...waiting([[GLOBAL]]), state: "queued" })).toBe(false);
+  });
+
+  test("withheld from a leader that does not advertise runNow", () => {
+    expect(canRunNow(waiting([[GLOBAL]]), [])).toBe(false);
   });
 });
 

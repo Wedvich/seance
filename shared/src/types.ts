@@ -677,7 +677,16 @@ export type RequestOp = Exclude<OpName, AtRestOp | EventOp>;
  * The leader answers every one. Enqueue is not among them — an app
  * `store-put`s the task itself.
  */
-export const SCHEDULER_OPS = ["queue", "route-preview", "cancel", "mark-done", "pause", "resume", "discard"] as const;
+export const SCHEDULER_OPS = [
+  "queue",
+  "route-preview",
+  "cancel",
+  "mark-done",
+  "run-now",
+  "pause",
+  "resume",
+  "discard",
+] as const;
 
 export type SchedulerOp = (typeof SCHEDULER_OPS)[number];
 
@@ -698,6 +707,7 @@ export const OP_TIMEOUT_MS = {
   "route-preview": 10_000,
   cancel: 25_000,
   "mark-done": 10_000,
+  "run-now": 10_000,
   pause: 10_000,
   resume: 10_000,
   discard: 10_000,
@@ -955,6 +965,8 @@ export interface MachineInfo {
  * was placed. It refuses a continuation when a newer launch noted the same
  * worktree, and words the seed from the old note's exit. Clients offer Continue
  * on a cancelled task only on a machine advertising it.
+ * `runNow`: as a leader, answers `run-now` — what a client checks of the
+ * verified leader before offering it (an older one refuses the op as unknown).
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -965,6 +977,7 @@ export const CAPABILITIES = {
   pinAccount: "pinAccount",
   continueTask: "continueTask",
   continueCancelled: "continueCancelled",
+  runNow: "runNow",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -2343,16 +2356,20 @@ export const SCHEDULER_ERROR_CODES = [
   "not_leader",
   "not_ready",
   "invalid_request",
-  /** `cancel`, `mark-done`: the leader holds no task by that id. `discard`: no unreadable record by that id. */
+  /** `cancel`, `mark-done`, `run-now`: the leader holds no task by that id. `discard`: no unreadable record by that id. */
   "task_not_found",
-  /** `cancel`: the task is `reserved`, its spawn in flight — refused rather than raced; ask again. */
+  /** `cancel`, `mark-done`, `run-now`: the task is `reserved`, its spawn in flight — refused rather than raced; ask again. */
   "dispatching",
-  /** `cancel`, `mark-done`: the task is already `done`, `failed` or `cancelled`. */
+  /** `cancel`, `mark-done`, `run-now`: the task is already `done`, `failed` or `cancelled`. */
   "finished",
+  /** `run-now`: the task is not `ready` — waiting on admission or its deps, or already placed. */
+  "not_waiting",
+  /** `run-now`: something besides the concurrency caps (a pause, quota, a pin, …) keeps it from every machine. */
+  "unplaceable",
   /** `cancel`, `mark-done` of a running task: its machine answered the despawn with a refusal; the task is unchanged. */
   "despawn_failed",
   /**
-   * `cancel`, `mark-done`, `pause`, `resume`: the record changed under the
+   * `cancel`, `mark-done`, `run-now`, `pause`, `resume`: the record changed under the
    * request (a lost store race); ask again. `discard`: the unreadable record is
    * at another version than the one asked for — re-read the queue first.
    */
@@ -2434,12 +2451,12 @@ export interface DiscardResponse {
   readonly taskId: string;
 }
 
-/** `op: "cancel"` and `op: "mark-done"`: the task, by id. */
+/** `op: "cancel"`, `op: "mark-done"` and `op: "run-now"`: the task, by id. */
 export interface TaskRef {
   readonly taskId: string;
 }
 
-/** `cancel` and `mark-done` → the task as it now stands. */
+/** `cancel`, `mark-done` and `run-now` → the task as it now stands. */
 export interface TaskResponse {
   readonly task: Task;
 }

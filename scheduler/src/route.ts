@@ -55,6 +55,8 @@ export interface RouteInput {
    * slot and no projected usage here.
    */
   readonly released?: ReadonlySet<string>;
+  /** `runNow`: neither concurrency cap (`cap_reached`) applies; every other filter does. */
+  readonly uncapped?: boolean;
 }
 
 const SPAN_MS: Readonly<Record<WindowSpan, number>> = { "5h": 5 * 3600_000, "7d": 7 * 86_400_000 };
@@ -84,6 +86,7 @@ interface Pass {
   readonly quotaOf: (accountId: string) => AccountQuota;
   readonly accountAt: (placement: Placement) => string | null;
   readonly capReached: Reason | null;
+  readonly uncapped: boolean;
   readonly holds: readonly PauseHold[];
   /** The task's skills the inventory knows, in prompt order: each restricts. Empty when nothing does. */
   readonly skills: readonly string[];
@@ -100,8 +103,9 @@ export function route(input: RouteInput): Decision {
     inFlight,
     quotaOf: cached((accountId) => accountQuota(accountId, machines, newest)),
     accountAt: (placement) => accountOfPlacement(machines, placement),
+    uncapped: input.uncapped === true,
     capReached:
-      inFlight.length >= config.globalMax
+      input.uncapped !== true && inFlight.length >= config.globalMax
         ? { code: "cap_reached", inFlight: inFlight.length, max: config.globalMax }
         : null,
     holds: activeHolds(input.holds ?? [], now),
@@ -167,7 +171,7 @@ function judge(pass: Pass, machine: Machine, machineReasons: readonly Reason[], 
   const account =
     exclave.accountId === null ? null : judgeAccount(pass, exclave, exclave.accountId, sharing, seat.capacity);
   if (account?.reason !== undefined) rejected.push(account.reason);
-  if (sharing >= config.accountMax) {
+  if (!pass.uncapped && sharing >= config.accountMax) {
     rejected.push({ code: "cap_reached", inFlight: sharing, max: config.accountMax, scope: "account" });
   }
   const paused = exclave.accountId === null ? null : accountPause(pass.holds, exclave.accountId);
