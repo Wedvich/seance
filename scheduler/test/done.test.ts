@@ -1003,6 +1003,9 @@ describe("PR status", () => {
     await scheduler.onPrStatus("t", PR, reading("merged", READ + 1_000));
     expect(scheduler.task("t")).toMatchObject({ state: "done", doneBy: "merged" });
     expect(scheduler.task("t")?.pr).toEqual({ state: "merged", at: READ + 1_000 });
+    // An ended session parked on a stacked merge is unstuck the same way (a stack merged in cascade).
+    await scheduler.onPrStatus("wait", PR, reading("merged", READ + 1_000));
+    expect(scheduler.task("wait")).toMatchObject({ state: "done", doneBy: "merged" });
   });
 
   test("(8) closed is recorded and moves nothing", async () => {
