@@ -4801,8 +4801,9 @@ fields carry over), under the same gates.
   since its note has the same path. The old note's `prUrl`, `branch` and `tip` are not carried:
   branch-state re-reads the live worktree, and a `session_failed` task under the default `until:
   "merged"` had no PR by definition.
-- **The link is display-only.** `continues.task` shows "Continues …" on the new card and hides the
-  button while a live continuation exists; nothing routes by it, so the old record may be pruned. A
+- **The link is display-only.** `continues.task` shows "Continues …" on the new card, "Continuing as … ·
+  waiting" on the old one while the new one waits, and hides the button while a waiting or live
+  continuation exists; nothing routes by it, so the old record may be pruned. A
   continuation is an ordinary new task: it counts against the global, account and quota caps, and
   `until` and `linear` carry over (under `until: "reported"` the resumed conversation already holds the
   report instruction). `deps`, `batch`, `skill`, `pin`, `avoid`, `lineage` and `base` do not: the target
@@ -4819,9 +4820,14 @@ fields carry over), under the same gates.
   over" strands the conversation), and not `cancelled` without an assignment. So the button moves to the
   newest continuation that landed: when Y fails `session_failed` or is cancelled after placement,
   Continue disappears from X and appears on Y, and a Y that failed `continue_expired` or
-  `not_continuable` leaves X offered. The PWA's button, `continue_task`, `seanced continue` and
+  `not_continuable` leaves X offered. A Y still `queued`, `blocked` or `ready` has not taken over (it may
+  never land) but withholds the offer all the same (`waitingContinuation`, the reason naming Y): a second
+  tap would only race it for the path, and the daemon refuses whichever lands second. A landed taker's
+  reason wins when both exist. When Y fails unplaced or is cancelled before placement, X is offered
+  again. The PWA's button, `continue_task`, `seanced continue` and
   `get_queue`'s `continuable` share that one rule. The button shows only while the task was not `here`
-  and has an assignment. Two taps from two clients make two tasks, and the daemon's per-path lock and
+  and has an assignment. Two taps from two clients that have not yet read each other's continuation make
+  two tasks, and the daemon's per-path lock and
   live-pane check refuse the second with `not_continuable`. Residuals, each accepted:
   - _A `ready` continuation that is never placed_ (the target re-keyed, the clone gone, a daemon rolled
     back; reasons `continue_elsewhere`, `repo_absent` or `continue_unsupported`) no longer waits for a hand
@@ -4832,7 +4838,9 @@ fields carry over), under the same gates.
     config-relation test guards only a continuation made soon after the old launch). Existing stuck continuations fail in the first pass of a
     new leader, which is the clean-up, and visible.
   - _The list a client sees is at most `QUEUE_MAX_TASKS`_, so a finished continuation fallen off it no
-    longer holds the old task; the daemon's ledger rule (the newest note on the path owns it) now refuses
+    longer holds the old task, and a waiting one fallen off it neither withholds the offer nor shows on
+    the old card (a second Continue then races it, and whichever lands second is refused
+    `not_continuable`); the daemon's ledger rule (the newest note on the path owns it) now refuses
     that tap, naming the owner, for the whole ledger horizon.
   - _A cancelled task with an assignment is not proof it landed._ A `lost`-from-`reserved` task carries
     `assignment` and cancel drops `reservedAt`. Such an X is offered and the daemon refuses it ("no worktree
@@ -5642,8 +5650,11 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   `continueOffer` allows it (the task was not `here`, has an assignment, its machine is listed and
   advertises `continueTask`, and for a cancelled one `continueCancelled`), the verified leader advertises
   it (`deriveContinueAvailability`), and no continuation of it took over the session (`continueOffer`'s
-  `tookOver` rule: the button moves along the chain to the newest landed continuation; a `ready` one does
-  not hide it, until it expires `continue_expired`). The tap re-checks the leader and the offer before
+  `tookOver` rule: the button moves along the chain to the newest landed continuation) or still waits
+  in the queue. A waiting one hides the button and puts "Continuing as <its title> · waiting" on the old
+  card, a line that scrolls the queue to its card (centred in the list's own scroll container, not
+  `scrollIntoView`, which would shift the page on a phone); when it fails unplaced (`not_continuable`,
+  `continue_expired`) or is cancelled before placement, the button comes back. The tap re-checks the leader and the offer before
   writing, since either may have changed since the card was drawn, then writes the continuation spec with
   `client: "pwa"` through `createTask`, merged into the list as any enqueue is; a refused gate or offer or
   a store answer becomes the screen's notice. The continuation's card
@@ -5906,7 +5917,8 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   the task (an id it does not list is "not in the leader's list (pruned, or past the N most relevant)"),
   asks `continueOffer` (shared with the PWA) whether it can be continued, writes the spec
   `continuationSpec` makes with `client: "mcp"`, and enqueues it through `enqueueAuto` under the `mcp`
-  origin, as `spawn_session` does. Gated like `until: "reported"`: the verified leader must advertise
+  origin, as `spawn_session` does. A continuation of it still waiting in the queue refuses it, naming
+  that task. Gated like `until: "reported"`: the verified leader must advertise
   `continueTask`, else the refusal says so ("ready" or "none" wording, as the account-pin gate). Keyless
   boxes broker it ("Fleet broker"). `get_queue` shows `continues` on a continuation and `continuable:
   true` on a task that can be continued. Needs `mcp__seance__continue_task` allowed where an agent calls
