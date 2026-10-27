@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { CAPABILITIES, MAX_TASKS, REPLAY_WINDOW_MS, type DespawnRequest, type DespawnResponse } from "@seance/shared";
+import {
+  CAPABILITIES,
+  MAX_TASKS,
+  REPLAY_WINDOW_MS,
+  type DespawnRequest,
+  type DespawnResponse,
+  type SessionState,
+} from "@seance/shared";
 import {
   DEFAULT_CONFIG,
   MemoryQueueStore,
@@ -772,6 +779,141 @@ describe("a machine asleep past slotReleaseAfterMs", () => {
       ok: true,
       holds: [{ resumeAt: (NOW_S + 3600) * 1000 }],
     });
+  });
+});
+
+describe("a session idle past idleReleaseAfterMs", () => {
+  const GRACE = DEFAULT_CONFIG.idleReleaseAfterMs;
+
+  /** One task running on `a` under a global max of 1, a second waiting behind it. */
+  async function holdingTheSlot() {
+    const env = setup(new FakeFleet([machine("a"), machine("b")]), { ...DEFAULT_CONFIG, globalMax: 1 });
+    const first = await enqueue(env.store, env.scheduler, spec({ pin: { deviceId: "a" } }));
+    await pass(env.scheduler);
+    const pane = env.scheduler.task(first.id)?.assignment?.pane;
+    if (pane === undefined) throw new Error("first has no pane");
+    const second = await enqueue(env.store, env.scheduler, spec());
+    const report = (state: SessionState, deviceId = "a") =>
+      env.scheduler.onSession(first.id, state, { deviceId, pane });
+    return { ...env, first, second, report };
+  }
+
+  async function at(env: { clock: { now: number }; fleet: FakeFleet; scheduler: Scheduler }, now: number) {
+    env.clock.now = now;
+    env.fleet.beat(now);
+    await pass(env.scheduler);
+  }
+
+  function capped(scheduler: Scheduler, id: string, inFlight: number): void {
+    expect(scheduler.task(id)?.state).toBe("ready");
+    const rejected = scheduler.lastDecision(id)?.candidates.flatMap((c) => c.rejected);
+    expect(rejected).toContainEqual({ code: "cap_reached", inFlight, max: 1 });
+  }
+
+  test("short of the grace it holds the slot; past it the next task runs, the idle one untouched", async () => {
+    const env = await holdingTheSlot();
+    const { fleet, scheduler, first, second, report } = env;
+    await report("idle");
+    await at(env, NOW + GRACE - 1);
+    capped(scheduler, second.id, 1);
+
+    await at(env, NOW + GRACE);
+    expect(scheduler.task(second.id)).toMatchObject({ state: "running" });
+    expect(scheduler.task(first.id)).toMatchObject({ state: "running", assignment: { deviceId: "a" } });
+    expect(fleet.despawns).toEqual([]);
+  });
+
+  test("a repeated idle keeps its deadline", async () => {
+    const env = await holdingTheSlot();
+    const { scheduler, second, report } = env;
+    await report("idle");
+    env.clock.now = NOW + GRACE - 1;
+    await report("idle");
+    await at(env, NOW + GRACE);
+    expect(scheduler.task(second.id)?.state).toBe("running");
+  });
+
+  test("busy stops the clock, and the next idle starts over", async () => {
+    const env = await holdingTheSlot();
+    const { scheduler, second, report } = env;
+    await report("idle");
+    env.clock.now = NOW + GRACE - 1;
+    await report("busy");
+    await at(env, NOW + GRACE);
+    capped(scheduler, second.id, 1);
+
+    const again = NOW + GRACE + 1;
+    env.clock.now = again;
+    await report("idle");
+    await at(env, again + GRACE - 1);
+    capped(scheduler, second.id, 1);
+    await at(env, again + GRACE);
+    expect(scheduler.task(second.id)?.state).toBe("running");
+  });
+
+  test("back from lost, an idle starts a fresh grace, not the one it left with", async () => {
+    const env = await holdingTheSlot();
+    const { fleet, scheduler, store, first, report } = env;
+    await report("idle");
+    fleet.fleet = [machine("a", { connected: false }), machine("b")];
+    await at(env, NOW + 1);
+    await at(env, NOW + 1 + DEFAULT_CONFIG.lostAfterMs);
+    expect(scheduler.task(first.id)?.state).toBe("lost");
+
+    fleet.fleet = [machine("a"), machine("b")];
+    const back = NOW + 2 + DEFAULT_CONFIG.lostAfterMs;
+    env.clock.now = back;
+    await report("idle");
+    expect(scheduler.task(first.id)?.state).toBe("running");
+    // The second took `b` while `a` slept; the first counts again beside it until its new grace runs out.
+    const third = await enqueue(store, scheduler, spec());
+    await at(env, back + 1);
+    capped(scheduler, third.id, 2);
+    await at(env, back + GRACE);
+    capped(scheduler, third.id, 1);
+  });
+
+  test("needs-input keeps its slot, however long it waits", async () => {
+    const env = await holdingTheSlot();
+    const { scheduler, first, second, report } = env;
+    await report("idle");
+    await report("needs-input");
+    await at(env, NOW + GRACE * 3);
+    expect(scheduler.task(first.id)?.state).toBe("needs-input");
+    capped(scheduler, second.id, 1);
+  });
+
+  test("busy again after its release: over the cap, nothing killed, nothing placed until the count drops", async () => {
+    const env = await holdingTheSlot();
+    const { fleet, scheduler, store, second, report } = env;
+    await report("idle");
+    await at(env, NOW + GRACE);
+    expect(scheduler.task(second.id)?.state).toBe("running");
+
+    await report("busy");
+    const third = await enqueue(store, scheduler, spec());
+    await at(env, NOW + GRACE + 1);
+    capped(scheduler, third.id, 2);
+    expect(fleet.despawns).toEqual([]);
+  });
+
+  test("an idle from another machine, or from a sender that names none, frees nothing", async () => {
+    const env = await holdingTheSlot();
+    const { scheduler, first, second, report } = env;
+    await report("idle", "b");
+    await scheduler.onSession(first.id, "idle");
+    await at(env, NOW + GRACE);
+    capped(scheduler, second.id, 1);
+  });
+
+  test("another machine's busy does not stop its clock", async () => {
+    const env = await holdingTheSlot();
+    const { scheduler, second, report } = env;
+    await report("idle");
+    env.clock.now = NOW + GRACE - 1;
+    await report("busy", "b");
+    await at(env, NOW + GRACE);
+    expect(scheduler.task(second.id)?.state).toBe("running");
   });
 });
 

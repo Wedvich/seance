@@ -37,7 +37,7 @@ stay as they are; the table says which word each one means.
 | Deps              | Per edge `after: opened` (stacked, default) or `after: merged`; Linear relations + hand-declared                                                                                                                                                                                                                                                                                            |
 | Done signal       | Layered: PR merged (leader, forge: GitHub via `gh`) / PR merged (daemon, local git) / Linear Done → session ended → manual                                                                                                                                                                                                                                                                  |
 | Quota exhausted   | Spill into credits, loudly (Web Push), with pause: until resume / until next reset                                                                                                                                                                                                                                                                                                          |
-| Concurrency       | Global max, per-account max; a batch is a group with no bound or order (2026-10-26); `run-now` lifts both for one task (2026-10-27)                                                                                                                                                                                                                                                         |
+| Concurrency       | Global max, per-account max; a batch is a group with no bound or order (2026-10-26); asleep or idle-at-prompt tasks hold no slot past a grace (18, 20); `run-now` lifts both for one task (2026-10-27)                                                                                                                                                                                      |
 | Alerts            | Web Push (VAPID) from the leader to subscribed PWAs (M4; key sealed in the DO, see _Secrets_)                                                                                                                                                                                                                                                                                               |
 | Needs input       | `needs-input` state, alert, keeps its slot; idle timeout escalates, never kills                                                                                                                                                                                                                                                                                                             |
 | Event ingest      | New ingest-only `session-event` frame kind on the local socket, after the fleet broker's precedent (threat-model widening, recorded)                                                                                                                                                                                                                                                        |
@@ -1037,6 +1037,14 @@ same PR, with the reason.
     ceiling is the launch ledger's age (7 days): past it the target daemon refuses the continuation anyway,
     so failing earlier is never premature; a test pins the relation. A pinned (`pin.deviceId`) `ready`
     task without `continues` gets no expiry; a continuation expires pinned or not.
+
+20. **A session idle at its prompt 10 min holds no concurrency slot** (`idleReleaseAfterMs`, owner,
+    2026-10-27). A `running` task whose own machine reported `idle` (main turn ended, no dialog open)
+    and nothing since stops counting toward `globalMax`, `accountMax` and projected usage, its state
+    unchanged — the "done, want a follow-up?" session that was never settled. Its next state counts it
+    again, over a cap or not, as item 18's do on return. `needs-input` keeps its slot: a dialog is
+    mid-task, so work resumes for certain when it is answered. Detected from the mod's `idle`, never
+    from what the session wrote. DESIGN.md "Routing caps" has the rule and the residuals.
 
 ## Risks / unknowns
 

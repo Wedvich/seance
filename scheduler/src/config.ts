@@ -71,6 +71,14 @@ export interface SchedulerConfig {
    */
   readonly slotReleaseAfterMs: number;
   /**
+   * A `running` task whose session has sat idle at its prompt this long (its
+   * own machine's `idle` event, nothing since) stops counting toward the
+   * caps and projected usage, as `slotReleaseAfterMs` does: nothing bills
+   * while it waits for a reply. Counted again on its next state, over a cap
+   * or not. `needs-input` keeps its slot: a dialog is mid-task.
+   */
+  readonly idleReleaseAfterMs: number;
+  /**
    * A `lost` task whose machine went away (`absentSince`, else `createdAt`)
    * longer ago than this, and is disconnected now (a connected machine's
    * `sessions` is about to settle it), is `failed` `lost_expired`. Never pruned while `lost`,
@@ -150,6 +158,8 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   reservationTtlMs: 120_000,
   lostAfterMs: 15 * 60_000,
   slotReleaseAfterMs: 2 * 60_000,
+  // docs/scheduler.md, Settled defaults 20.
+  idleReleaseAfterMs: 10 * 60_000,
   lostExpiryMs: 7 * 24 * 60 * 60_000,
   // Tied to the ledger: past its age no machine can report the merge (`mergeExpiryMs` doc).
   mergeExpiryMs: LAUNCH_LEDGER_MAX_AGE_MS,
