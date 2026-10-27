@@ -512,6 +512,111 @@ describe("daemon ↔ relay integration", () => {
     }
   });
 
+  // A restart's drain waits on `replied` so a finishing spawn's reply is out before the daemon goes.
+  describe("the handler's `replied` promise", () => {
+    async function withClient(
+      handle: (plain: Plain, from: string, replied: Promise<void>) => Promise<Plain | null>,
+      run: (ctx: { relay: TestRelay; client: RelayClient; deviceId: string }) => Promise<void>,
+    ): Promise<void> {
+      const relay = startTestRelay(TOKEN);
+      const identity = await identityFromSeed(generateIdentitySeed());
+      const client = new RelayClient({
+        url: relay.url,
+        bearerToken: TOKEN,
+        identity,
+        key: appKey,
+        buildInfo: () =>
+          seal(
+            appKey,
+            { to: APP_ID, from: identity.deviceId },
+            { id: crypto.randomUUID(), ts: Date.now(), op: "machine-info", payload: {} },
+          ),
+        handle,
+      });
+      client.start();
+      try {
+        await relay.registers.next();
+        await run({ relay, client, deviceId: identity.deviceId });
+      } finally {
+        client.stop();
+        relay.stop();
+      }
+    }
+    const answer = (request: Plain): Plain => ({
+      id: crypto.randomUUID(),
+      ts: Date.now(),
+      op: request.op,
+      re: request.id,
+      payload: { ok: true },
+    });
+    const settledFlag = (promise: Promise<void>): { readonly done: () => boolean } => {
+      let done = false;
+      void promise.finally(() => {
+        done = true;
+      });
+      return { done: () => done };
+    };
+
+    test("stays pending until the reply has reached the socket, then resolves", async () => {
+      const release = Promise.withResolvers<void>();
+      const seen = Promise.withResolvers<{ readonly done: () => boolean }>();
+      // Sealing reads the payload; the AES step after it is a macrotask, so a `replied` resolved before the
+      // send (right after the handler returns) is already settled a few microtasks later.
+      let atSeal: boolean | undefined;
+      await withClient(
+        async (plain, _from, replied) => {
+          const flag = settledFlag(replied);
+          seen.resolve(flag);
+          await release.promise;
+          const response = answer(plain);
+          return {
+            ...response,
+            payload: {
+              get ok(): boolean {
+                let ticks = 0;
+                const probe = (): void => {
+                  if (++ticks < 8) queueMicrotask(probe);
+                  else atSeal = flag.done();
+                };
+                queueMicrotask(probe);
+                return true;
+              },
+            },
+          };
+        },
+        async ({ relay, deviceId }) => {
+          await appRequest(relay, deviceId, "sessions", {});
+          const flag = await seen.promise;
+          await Bun.sleep(50); // a non-event can't be polled
+          expect(flag.done()).toBe(false); // the handler is still running
+          release.resolve();
+          expect((await appReceive(relay)).re).toBeDefined();
+          await pollUntil(flag.done, "replied to resolve once the reply was sent");
+          expect(atSeal).toBe(false); // not resolved while the reply was still being sealed
+        },
+      );
+    });
+
+    test("resolves, with nothing sent, when the socket is gone by the time the handler returns", async () => {
+      const seen = Promise.withResolvers<{ readonly done: () => boolean }>();
+      let client: RelayClient | undefined;
+      await withClient(
+        (plain, _from, replied) => {
+          seen.resolve(settledFlag(replied));
+          client?.stop(); // the connection ends while the handler runs
+          return Promise.resolve(answer(plain));
+        },
+        async (ctx) => {
+          client = ctx.client;
+          await appRequest(ctx.relay, ctx.deviceId, "sessions", {});
+          const flag = await seen.promise;
+          await pollUntil(flag.done, "replied to resolve although the reply could not be sent");
+          expect(ctx.relay.messages.size).toBe(0);
+        },
+      );
+    });
+  });
+
   test("a session event leaves sealed to the scheduler as `session-event`, from this machine", async () => {
     const relay = startTestRelay(TOKEN);
     const identity = await identityFromSeed(generateIdentitySeed());
