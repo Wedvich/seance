@@ -651,6 +651,7 @@
 }
 
 .split .primary:enabled:active {
+  background: color-mix(in srgb, var(--acc-fg) 14%, var(--acc));
   transform: none;
 }
 

@@ -406,7 +406,6 @@ function QueueButton(props: {
   onStartNow: () => void;
 }): JSX.Element {
   const { button, startNow } = props.view;
-  const menu = useMenu<HTMLDivElement>();
   const face = (
     <button
       type="button"
@@ -418,16 +417,37 @@ function QueueButton(props: {
     </button>
   );
   if (!startNow) return face;
+  return (
+    <SplitQueueButton
+      face={face}
+      enabled={button.enabled}
+      busy={button.busy}
+      preview={props.preview}
+      onStartNow={props.onStartNow}
+    />
+  );
+}
+
+/** Its own component so the menu's open state mounts and unmounts with the split: a popover removed while open fires no toggle. */
+function SplitQueueButton(props: {
+  face: JSX.Element;
+  enabled: boolean;
+  busy: boolean;
+  preview: PreviewState | null;
+  onStartNow: () => void;
+}): JSX.Element {
+  const { face, enabled, busy } = props;
+  const menu = useMenu<HTMLDivElement>();
   const item = startNowItem(props.preview);
   return (
     <>
-      <div ref={menu.anchor} className={button.busy ? "split split-busy" : "split"}>
+      <div ref={menu.anchor} className={busy ? "split split-busy" : "split"}>
         {face}
         <span className="split-divider" aria-hidden="true" />
         <button
           type="button"
           className="split-more"
-          disabled={!button.enabled}
+          disabled={!enabled}
           popovertarget={menu.id}
           aria-label="More ways to start"
           aria-haspopup="menu"

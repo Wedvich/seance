@@ -537,6 +537,14 @@ describe("startNowItem", () => {
     expect(startNowItem(two)).toEqual({ sub: "Skip the queue — past the concurrency caps", enabled: true });
   });
 
+  test("a chosen target is not named while a cap-held candidate, unscored, may win run-now", () => {
+    const preview = ok({ deviceId: "mac", exclave: "default", clone: "app" }, [
+      scored("mac", "Mac", 1),
+      rejected("lxc", "LXC", [GLOBAL]),
+    ]);
+    expect(startNowItem(preview)).toEqual({ sub: "Skip the queue — past the concurrency caps", enabled: true });
+  });
+
   test("with no answer to go by it offers a plain skip", () => {
     const plain = { sub: "Skip the queue", enabled: true };
     expect(startNowItem(null)).toEqual(plain);

@@ -2454,8 +2454,10 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   takeover but needs the record schema widened and an older leader made to refuse it, for a tap
   that a person can repeat. Deferred: also lifting the quota line, for spending credits on purpose.
   The Spawn screen's **Start now** is the same op, not a new one: it creates the task as Queue
-  does, then sends `run-now` once a follow read first shows it `ready` — sent with the create it
-  would race admission and be refused `not_waiting`. Rejected for the same reason as above: a
+  does, then sends `run-now` once a read first shows it `ready` — sent with the create it
+  would race admission and be refused `not_waiting`. A pass that places the task meanwhile
+  answers `dispatching`, `not_waiting` or `finished`: the task is on its way, so no note, one read.
+  Rejected for the same reason as above: a
   flag on the create the leader would honour at admission.
   **A session idle at its prompt past a grace holds no slot** (2026-10-27, docs/scheduler.md
   Settled defaults 20). A `running` task whose session reported `idle` ("Where the states come
@@ -5450,14 +5452,20 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   button — two sibling buttons in one pill, never nested — whose chevron opens the shared menu
   (`components/menu.tsx`) upward with one item, Start now; without it the chevron is not
   rendered. The item's sub-line names where the placement preview would start it (`startNowItem`
-  in `decision-view.ts`), and it is disabled when the preview turns every candidate down for
+  in `decision-view.ts`; with a cap-held candidate beside the chosen one it stays generic, since
+  `run-now` weighs both and the held one has no score), and it is disabled when the preview turns every candidate down for
   more than the caps; a candidate held by `cap_reached` alone keeps it on, since that is what
   `run-now` lifts, and no preview (asking, failed, a pinned form) leaves it on as plain "Skip the
   queue". A tap enqueues exactly as Queue, then `SchedulerStore` holds a one-shot intent for that
-  task id: the first follow read (poll, nudge or reconnect) showing it `ready` sends `run-now`;
-  `queued` and `blocked` wait, any other state drops it (a pass placed it first), and so does a
-  new enqueue or the follow ending. A refusal shows on the queued verdict, worded as the Queue
-  screen's Run now notice. The intent is in memory: a reload leaves the task queued, as a
+  task id: the first read (follow poll, nudge or reconnect, or the intent's own poll chain, which
+  covers a verdict dismissed before the task was `ready`) showing it `ready` sends `run-now`, if
+  the leader still advertises it; `queued` and `blocked` wait, any other state drops it (a pass
+  placed it first), and so does a new enqueue or the polls running out. A `conflict`, `not_leader`
+  or `not_ready` refusal re-arms it once for the next `ready` sighting. A refusal shows on the
+  queued verdict of its own task, worded as the Queue screen's Run now notice (a busy one points
+  at that screen's Run now), and clears once the task is seen past waiting; with no verdict
+  showing it goes on the Queue screen's notice. A reply that succeeds restarts the verdict's
+  follow with a fresh budget, so the task is seen running. The intent is in memory: a reload leaves the task queued, as a
   takeover between the route and the write would. Rejected: sending `run-now` with the create
   (refused before admission) and a wire flag on the record (above, "Run now lifts both caps").
   The daemon still answers `spawn` (older apps, older MCP clients) and `seanced spawn --now` is

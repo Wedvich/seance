@@ -19,11 +19,19 @@ import {
   schedulerErrorText,
   sentence,
   storeErrorText,
+  TASK_PHASES,
   type RelayClient,
 } from "@seance/shared";
 import type { FollowEnd, PersistedForm, PreviewState, QueueState, TaskAction } from "./state.ts";
 import type { AppState } from "./view.ts";
-import { deriveAutoAvailability, deriveContinueAvailability, previewAsked, resolveRepo, scopedRepos } from "./view.ts";
+import {
+  deriveAutoAvailability,
+  deriveContinueAvailability,
+  deriveRunNowAvailability,
+  previewAsked,
+  resolveRepo,
+  scopedRepos,
+} from "./view.ts";
 
 /**
  * The app's side of the scheduler, apart from `Store`'s layers, form and
@@ -51,6 +59,15 @@ function actionReplyText(reply: { readonly ok: false; readonly code: string } | 
   const text = sentence(schedulerErrorText(reply.code));
   return isTransportError(reply.code) ? `${text} ${MAY_HAVE_LANDED}` : text;
 }
+
+/** A Start now's refusals worth one more ask on the next `ready` sighting: the leader was changing or busy. */
+const RUN_NOW_RETRYABLE: ReadonlySet<string> = new Set(["conflict", "not_leader", "not_ready"]);
+
+/** A pass got to the task first or is placing it: `run-now` has nothing to add, the task is on its way. */
+const RUN_NOW_ON_ITS_WAY: ReadonlySet<string> = new Set(["dispatching", "not_waiting", "finished"]);
+
+const RUN_NOW_BUSY = "The scheduler was busy. Use Run now on the Queue screen to start it.";
+const RUN_NOW_UNSUPPORTED = "This leader can't start tasks past the queue; it stays queued.";
 
 /**
  * A scheduler read's failure, shown alone. A read has nothing to land, so the
@@ -148,10 +165,19 @@ export class SchedulerStore {
   /**
    * The followed task a Start now asked to skip the queue for. `run-now` takes
    * only a `ready` task, and an app's create is not admitted yet, so it goes
-   * once a follow read first shows it `ready`. In memory only: a reload leaves
+   * once a read first shows it `ready`. In memory only: a reload leaves
    * the task queued, as a lost `run-now` would.
    */
   #runNowFor: string | null = null;
+  /**
+   * The intent's own poll chain: it reads the task while no verdict shows it
+   * (dismissed with "Start another" or back), when no follow read would.
+   */
+  #runNowTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Moves when the intent is replaced or the follow stopped: a `run-now` answer from before it has no say. */
+  #runNowEpoch = 0;
+  /** One more ask is allowed after a refusal that says the leader was busy. */
+  #runNowRetried = false;
   /** The leader the Queue screen last read from: a new one asks again. */
   #queueLeader = "";
   /** The socket dropped since the last catch-up read: nudges sent meanwhile are lost, so the next verified leader is read whole. */
@@ -211,8 +237,13 @@ export class SchedulerStore {
   /** Starts following a task just queued, with the whole poll budget; `runNow` for a Start now. */
   startFollowing(taskId: string, runNow = false): void {
     this.#follow(taskId, QUEUE_POLLS);
-    this.#runNowFor = runNow ? taskId : null;
+    this.#dropRunNow();
+    this.#runNowEpoch += 1;
+    this.#runNowRetried = false;
     this.#patch({ startNowRefusal: null });
+    if (!runNow) return;
+    this.#runNowFor = taskId;
+    this.#armRunNow(taskId, QUEUE_POLLS);
   }
 
   /**
@@ -262,13 +293,16 @@ export class SchedulerStore {
       return view?.kind === "ok" ? view.tasks.find((t) => t.id === taskId) : undefined;
     };
     if (read === null) return this.#refreshTask(taskId, null);
+    const seq = ++this.#taskReadSeq;
     const before = listed();
     await read;
     const fresh = listed();
     if (fresh === undefined || fresh === before) return this.#refreshTask(taskId, null);
     const verdict = this.#state.verdict;
     if (verdict?.kind !== "queued" || verdict.task.id !== taskId || isSettled(verdict.task.state)) return;
-    this.#taskReadApplied = ++this.#taskReadSeq;
+    // A newer read (a `run-now` reply, a poll) landed while this one was out: its copy is the older.
+    if (seq < this.#taskReadApplied) return;
+    this.#taskReadApplied = seq;
     if (isSettled(fresh.state)) this.stopFollowing();
     if (fresh !== verdict.task) this.#patch({ verdict: { kind: "queued", task: fresh } });
     this.#sawFollowed(fresh);
@@ -280,9 +314,49 @@ export class SchedulerStore {
    * pass placed it first (or it ended), and there is no queue left to skip.
    */
   #sawFollowed(task: Task): void {
+    const refusal = this.#state.startNowRefusal;
+    // A task past waiting has moved on: its refusal must not come back if a lapsed reservation returns it to `ready`.
+    if (refusal?.taskId === task.id && TASK_PHASES[task.state] !== "waiting") this.#patch({ startNowRefusal: null });
     if (this.#runNowFor !== task.id || task.state === "queued" || task.state === "blocked") return;
-    this.#runNowFor = null;
+    this.#dropRunNow();
     if (task.state === "ready") void this.#startNow(task.id);
+  }
+
+  #showing(taskId: string): boolean {
+    const verdict = this.#state.verdict;
+    return verdict?.kind === "queued" && verdict.task.id === taskId;
+  }
+
+  #armRunNow(taskId: string, left: number): void {
+    this.#clearRunNowTimer();
+    if (left <= 0) {
+      if (this.#runNowFor === taskId) this.#dropRunNow();
+      return;
+    }
+    this.#runNowTimer = setTimeout(() => {
+      this.#runNowTimer = null;
+      void this.#runNowTick(taskId, left - 1);
+    }, QUEUE_POLL_MS);
+  }
+
+  /** One read for the intent while no verdict shows the task; a showing verdict's follow reads for it. */
+  async #runNowTick(taskId: string, left: number): Promise<void> {
+    if (this.#runNowFor !== taskId) return;
+    if (!this.#showing(taskId)) {
+      let task: Task | undefined;
+      try {
+        const reply = await this.#client.queue({ tasks: [taskId] });
+        if (reply !== null && !("ok" in reply)) task = reply.tasks.find((t) => t.id === taskId);
+      } catch {
+        // No answer is a poll spent: the next one asks again.
+      }
+      if (this.#runNowFor !== taskId) return;
+      if (task !== undefined) {
+        this.#sawFollowed(task);
+        if (this.#runNowFor !== taskId) return;
+      }
+    }
+    this.#armRunNow(taskId, left);
   }
 
   /**
@@ -291,6 +365,12 @@ export class SchedulerStore {
    * as a read's would be, so a poll still out cannot walk it back to `ready`.
    */
   async #startNow(taskId: string): Promise<void> {
+    // The button was gated on this when drawn; the leader may have changed since.
+    if (!deriveRunNowAvailability(this.#state.relay)) {
+      this.#startNowNote(taskId, RUN_NOW_UNSUPPORTED);
+      return;
+    }
+    const epoch = this.#runNowEpoch;
     let refusal: string;
     try {
       const reply = await this.#client.runNow(taskId);
@@ -300,14 +380,46 @@ export class SchedulerStore {
         if (verdict?.kind === "queued" && verdict.task.id === taskId && !isSettled(verdict.task.state)) {
           this.#taskReadApplied = ++this.#taskReadSeq;
           this.#patch({ verdict: { kind: "queued", task: reply.task } });
+          // The follow may have run out while this was out; it goes on to see the task running.
+          if (!isSettled(reply.task.state)) this.#follow(taskId, QUEUE_POLLS);
         }
         return;
       }
-      refusal = actionReplyText(reply);
+      const code = reply === null ? null : reply.code;
+      if (code !== null && RUN_NOW_ON_ITS_WAY.has(code)) {
+        // Placed by a pass meanwhile: no note, only a read so the verdict advances.
+        void this.#refreshTask(taskId, null);
+        return;
+      }
+      if (epoch !== this.#runNowEpoch) return;
+      if (code !== null && RUN_NOW_RETRYABLE.has(code)) {
+        if (!this.#runNowRetried) {
+          this.#runNowRetried = true;
+          this.#runNowFor = taskId;
+          this.#armRunNow(taskId, QUEUE_POLLS);
+          return;
+        }
+        refusal = RUN_NOW_BUSY;
+      } else refusal = actionReplyText(reply);
     } catch (err) {
+      if (epoch !== this.#runNowEpoch) return;
       refusal = this.#actionFailure(err);
     }
-    this.#patch({ startNowRefusal: { taskId, message: refusal } });
+    this.#startNowNote(taskId, refusal);
+  }
+
+  /**
+   * Where a Start now's refusal shows: on its task's queued verdict, else (the
+   * verdict dismissed) on the Queue screen's notice. A verdict showing another
+   * task has no room for it.
+   */
+  #startNowNote(taskId: string, message: string): void {
+    const verdict = this.#state.verdict;
+    if (verdict?.kind !== "queued") {
+      this.#patch({ queueNotice: message });
+      return;
+    }
+    if (verdict.task.id === taskId) this.#patch({ startNowRefusal: { taskId, message } });
   }
 
   /**
@@ -771,14 +883,25 @@ export class SchedulerStore {
 
   /** Out of polls: what was last known stays, and so does no Start now still waiting on it. */
   #endFollow(task: Task, follow: FollowEnd): void {
-    this.#runNowFor = null;
+    this.#dropRunNow();
     this.#patch({ verdict: { kind: "queued", task, follow } });
   }
 
   /** Ends the follow, and with it any Start now still waiting to see its task `ready`. */
   stopFollowing(): void {
     this.#clearFollowTimer();
+    this.#dropRunNow();
+    this.#runNowEpoch += 1;
+  }
+
+  #dropRunNow(): void {
+    this.#clearRunNowTimer();
     this.#runNowFor = null;
+  }
+
+  #clearRunNowTimer(): void {
+    if (this.#runNowTimer !== null) clearTimeout(this.#runNowTimer);
+    this.#runNowTimer = null;
   }
 
   #clearFollowTimer(): void {

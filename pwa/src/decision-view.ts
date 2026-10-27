@@ -190,7 +190,7 @@ export function describeDecision(
       omitted,
     };
   }
-  const name = chosenName(decision) ?? chosen.deviceId;
+  const name = winner === undefined ? chosen.deviceId : where(winner);
   return {
     headline: tense === "would" ? `Would start on ${name}.` : `Placed on ${name}.`,
     chosen:
@@ -201,6 +201,8 @@ export function describeDecision(
     omitted,
   };
 }
+
+const CAPS_ONLY_SUB = "Skip the queue — past the concurrency caps";
 
 /** The footer menu's Start now row: what skipping the queue would do, read off the placement preview. */
 export interface StartNowItem {
@@ -219,13 +221,17 @@ export function startNowItem(preview: PreviewState | null): StartNowItem {
   if (preview?.kind !== "ok") return plain;
   const { decision } = preview;
   const chosen = chosenName(decision);
-  if (chosen !== null) return { sub: `Skip the queue — spawn on ${chosen}`, enabled: true };
   const capped = decision.candidates.filter(heldByCapsAlone);
+  // `run-now` weighs the cap-held candidates too, unscored in the preview, so the target it picks is unknown.
+  if (chosen !== null)
+    return {
+      sub: capped.length === 0 ? `Skip the queue — spawn on ${chosen}` : CAPS_ONLY_SUB,
+      enabled: true,
+    };
   const [only] = capped;
   if (only === undefined) return { sub: "No machine can take it right now", enabled: false };
   return {
-    sub:
-      capped.length === 1 ? `Skip the queue — spawn on ${where(only)}` : "Skip the queue — past the concurrency caps",
+    sub: capped.length === 1 ? `Skip the queue — spawn on ${where(only)}` : CAPS_ONLY_SUB,
     enabled: true,
   };
 }
