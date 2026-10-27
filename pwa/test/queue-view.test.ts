@@ -13,7 +13,7 @@ import {
   type RelayState,
   type Task,
 } from "@seance/shared";
-import { deriveAfterSheet, deriveQueue } from "../src/queue-view.ts";
+import { armTap, deriveAfterSheet, deriveQueue, disarmRow, primaryAction } from "../src/queue-view.ts";
 import { DEFAULT_FORM, RESCAN_IDLE, type QueueState } from "../src/state.ts";
 import { BATCH_STRATEGY, CAPABILITIES, reasonText } from "@seance/shared";
 import { deriveView, failedBody, type AppState } from "../src/view.ts";
@@ -898,6 +898,82 @@ describe("run now", () => {
 
   test("withheld from a leader that does not advertise runNow", () => {
     expect(canRunNow(waiting([[GLOBAL]]), [])).toBe(false);
+  });
+});
+
+describe("the card's inline action", () => {
+  const inline = (t: Task, capabilities: readonly string[] = []) =>
+    deriveQueue(state(ok([t]), {}, { machines: [machine({ capabilities })] }), NOW)
+      .sections.flatMap((section) => section.rows)
+      .find((row) => row.id === t.id)?.inline;
+
+  test("Continue on a failed session that offers it, where Follow up never is", () => {
+    const failed = task("f", {
+      state: "failed",
+      failure: { code: "session_failed", message: "exit 137" },
+      assignment: placedAt,
+    });
+    expect(inline(failed, [CAPABILITIES.continueTask])).toBe("continue");
+    expect(inline(failed)).toBeNull();
+  });
+
+  test("Run now outranks Follow up on a ready task the caps alone hold", () => {
+    const capped = task("w", {
+      decision: {
+        at: NOW,
+        chosen: null,
+        candidates: [
+          { deviceId: "d", machine: "m", exclave: "main", rejected: [{ code: "cap_reached", inFlight: 8, max: 8 }] },
+        ],
+      },
+    });
+    expect(inline(capped, [CAPABILITIES.runNow])).toBe("run-now");
+    expect(inline(capped)).toBe("follow-up");
+  });
+
+  test("Follow up on a running, needing or done task; nothing on a cancelled one without Continue", () => {
+    expect(inline(task("r", { state: "running", assignment: placedAt }))).toBe("follow-up");
+    expect(inline(task("n", { state: "needs-input", assignment: placedAt }))).toBe("follow-up");
+    expect(inline(task("d", { state: "done", doneBy: "session" }))).toBe("follow-up");
+    expect(inline(task("x", { state: "cancelled" }))).toBeNull();
+  });
+
+  test("precedence holds whatever else is offered", () => {
+    const all = { canContinue: true, canRunNow: true, canFollowUp: true };
+    expect(primaryAction(all)).toBe("continue");
+    expect(primaryAction({ ...all, canContinue: false })).toBe("run-now");
+    expect(primaryAction({ ...all, canContinue: false, canRunNow: false })).toBe("follow-up");
+    expect(primaryAction({ canContinue: false, canRunNow: false, canFollowUp: false })).toBeNull();
+  });
+});
+
+describe("arming a session-ending act in the card's menu", () => {
+  const live = { id: "a", cancelEndsSession: true, markDoneEndsSession: true };
+  const queued = { id: "a", cancelEndsSession: false, markDoneEndsSession: false };
+
+  test("a first tap arms and keeps the menu open; the second fires and disarms", () => {
+    const first = armTap(live, "cancel", null);
+    expect(first).toEqual({ fire: false, armed: "cancel:a" });
+    expect(armTap(live, "cancel", first.armed)).toEqual({ fire: true, armed: null });
+  });
+
+  test("one act's arm doesn't fire the other, nor another row's, nor Clear's", () => {
+    expect(armTap(live, "mark-done", "cancel:a")).toEqual({ fire: false, armed: "mark-done:a" });
+    expect(armTap(live, "cancel", "cancel:b")).toEqual({ fire: false, armed: "cancel:a" });
+    expect(armTap(live, "cancel", "discard")).toEqual({ fire: false, armed: "cancel:a" });
+  });
+
+  test("an act that ends no session fires on the first tap, and the menu closes", () => {
+    expect(armTap(queued, "cancel", null)).toEqual({ fire: true, armed: null });
+    expect(armTap(queued, "mark-done", "discard")).toEqual({ fire: true, armed: null });
+  });
+
+  test("the menu closing disarms only its own row's acts", () => {
+    expect(disarmRow("a", "cancel:a")).toBeNull();
+    expect(disarmRow("a", "mark-done:a")).toBeNull();
+    expect(disarmRow("a", "cancel:b")).toBe("cancel:b");
+    expect(disarmRow("a", "discard")).toBe("discard");
+    expect(disarmRow("a", null)).toBeNull();
   });
 });
 
