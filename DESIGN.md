@@ -2610,9 +2610,20 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   observed transition, so it costs one store write, and a `running` written first would
   record a state nobody observed. A reserved task refuses `cancel` (`dispatching`) rather
   than racing its spawn; a finished one is `finished`; `queued`, `blocked` and
-  `awaiting-merge` have no session, so they are cancelled with no despawn. A task that
-  finishes while its despawn is out (its `ended` outran the reply) is answered as the task
-  it now is, not `conflict`. Which states are placed, finished, still waiting and so on is
+  `awaiting-merge` have no session, so they are cancelled with no despawn. While a cancel's
+  despawn is out, the end of the session it stops settles nothing (`#yieldToCancel`, 2026-10-27):
+  an `ended` event, a `done` report, a `sessions` answer with the exit, the `#ending` deadline and
+  `#markAbsent`'s settle each decline a `failed`, or a `done` by anything but a merge, so the cancel's
+  own write lands `cancelled`, its assignment kept and no `endedAt`. Before that a cancel of a running
+  task read `done` (doneBy `session`) whenever the `ended` outran the despawn's reply, which is nearly
+  always (the despawn waits for the pane), releasing `after: "done"` dependents a cancel should fail
+  and hiding the cancelled task's Continue. A merge or an open PR is a fact the forge shows and is not
+  held. A session whose `ended` was deferred awaiting its exit before the cancel began ended first and
+  is not held either (whichever write lands first stands); one settled before it answers `finished`.
+  The held settle is noted in `#ending`, so a despawn that fails leaves the next pass to settle it.
+  In memory only: a leader change mid-cancel lets the new leader's takeover settle the gone session
+  `done` or `failed`, a residual accepted. A task that finishes anyway (a merge) is answered as the
+  task it now is, not `conflict`. Which states are placed, finished, still waiting and so on is
   one table shared with the apps (`TASK_PHASES`, `shared/src/task-phase.ts`); `task.ts`
   derives `PLACED` and `FINISHED` from it.
 - **Admission and dependencies** (`deps.ts`, M3 item 4a). Every pass, after its
@@ -4658,6 +4669,9 @@ fields carry over), under the same gates.
   - _A note without `siteAt`_ (written by an older daemon, e.g. after a rollback and re-upgrade) counts as
     oldest, so a newer continuation noted by the old daemon loses ownership to an older note with `siteAt`:
     the same rule branch-state uses; accepted.
+  - _A cancel cut by a leader change_ (the despawn ran, the term ended before the write) leaves the task
+    to the new leader, whose takeover settles the gone session `done` or `failed` by its exit
+    (Scheduler, "States"): Continue is then offered only for a nonzero exit.
   - _A cancelled task stopped before it committed_ has a clean worktree whose tip is merged by reap's rules,
     so reap (default `minAgeDays`) may remove it while Continue is still offered; the daemon then refuses
     "its worktree … is gone (removed or reaped)", an expected refusal.

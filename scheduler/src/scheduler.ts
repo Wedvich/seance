@@ -198,6 +198,12 @@ export class Scheduler {
   /** Task id → when its PR-less `ended` was deferred to its machine's next answer. */
   readonly #ending = new Map<string, number>();
   /**
+   * Task id → its cancels still out (`cancel`): the session end a cancel's own
+   * despawn causes is left to the cancel's write (`#yieldToCancel`). Memory
+   * only: a new leader mid-cancel may still settle it as its session ended.
+   */
+  readonly #cancelling = new Map<string, number>();
+  /**
    * Finished records whose leaning write (`#leanFinished`) did not land this
    * term: a refusal repeats, so retrying would take a slot of every pass and
    * log every time. Cleared on takeover.
@@ -559,7 +565,7 @@ export class Scheduler {
     let defers = false;
     await this.#update(taskId, (task) => {
       defers = waitsForExit(task, state, from, prUrl, awaitsExit);
-      return sessionChange(task, state, from, prUrl, awaitsExit);
+      return this.#yieldToCancel(taskId, sessionChange(task, state, from, prUrl, awaitsExit));
     });
     this.#idleClock(taskId, state, from);
     this.#syncIdle();
@@ -622,23 +628,52 @@ export class Scheduler {
    * stands. A `lost` task whose
    * machine is back is despawned like a running one; with its machine still
    * gone nothing can be despawned, so it is cancelled as it stands and marked
-   * `leftRunning` — the record says plainly that a session may outlive it. A
-   * task that finishes while the despawn is out (its session reported `ended`
-   * first) is answered as it finished. A despawn that ran and then lost the
-   * right to write `cancelled` is `unrecorded`: the session is gone, the term
-   * ends, and asking again is safe (the despawn finds no session).
+   * `leftRunning` — the record says plainly that a session may outlive it.
+   * While the despawn is out, the session's end it causes (`ended`, a `done`
+   * report, its machine's answer) settles nothing (`#yieldToCancel`), so the
+   * task reads `cancelled`, never `done` or `failed`: its dependents fail, and
+   * it is continuable. One whose `ended` was already deferred (`#ending`) when
+   * the cancel began ended first, and is not held; a merge or a PR open is a
+   * fact, not held either. A task that finished anyway is answered as it
+   * finished. A despawn that ran and then lost the right to write `cancelled`
+   * is `unrecorded`: the session is gone, the term ends, and asking again is
+   * safe (the despawn finds no session).
    */
   async cancel(taskId: string): Promise<CancelResult> {
-    return this.#byHand(taskId, (current, { task, live }) => {
-      if (FINISHED.includes(current.state)) return { ok: true, task: current };
-      if (current.state === "reserved") return { ok: false, code: "dispatching" };
-      const leftRunning = task.state === "lost" && task.assignment !== undefined && !live;
-      // What was despawned, or found gone, must still be what is cancelled.
-      if (leftRunning ? current.state !== "lost" : current.assignment?.deviceId !== task.assignment?.deviceId) {
-        return null;
+    const held = !this.#ending.has(taskId);
+    if (held) this.#cancelling.set(taskId, (this.#cancelling.get(taskId) ?? 0) + 1);
+    try {
+      return await this.#byHand(taskId, (current, { task, live }) => {
+        if (FINISHED.includes(current.state)) return { ok: true, task: current };
+        if (current.state === "reserved") return { ok: false, code: "dispatching" };
+        const leftRunning = task.state === "lost" && task.assignment !== undefined && !live;
+        // What was despawned, or found gone, must still be what is cancelled.
+        if (leftRunning ? current.state !== "lost" : current.assignment?.deviceId !== task.assignment?.deviceId) {
+          return null;
+        }
+        return advance(current, "cancelled", leftRunning ? { leftRunning: true } : {});
+      });
+    } finally {
+      if (held) {
+        const left = (this.#cancelling.get(taskId) ?? 1) - 1;
+        if (left > 0) this.#cancelling.set(taskId, left);
+        else this.#cancelling.delete(taskId);
       }
-      return advance(current, "cancelled", leftRunning ? { leftRunning: true } : {});
-    });
+    }
+  }
+
+  /**
+   * `next`, unless it settles a task whose cancel is out (`#cancelling`) as its
+   * session ended — `failed`, or `done` by anything but a merge: the cancel's
+   * own despawn ends that session, and its write says `cancelled`. Noted in
+   * `#ending`, so a cancel that writes nothing (`despawn_failed`) leaves the
+   * next pass to ask its machine again.
+   */
+  #yieldToCancel(id: string, next: Task | null): Task | null {
+    if (next === null || !this.#cancelling.has(id)) return next;
+    if (next.state !== "failed" && (next.state !== "done" || next.doneBy === "merged")) return next;
+    if (!this.#ending.has(id)) this.#ending.set(id, this.#now());
+    return null;
   }
 
   /**
@@ -718,7 +753,7 @@ export class Scheduler {
    */
   async markDone(taskId: string): Promise<MarkDoneResult> {
     return this.#byHand(taskId, (current, { task, live, despawned }) => {
-      // The despawn's `ended` event may have settled it first: as for cancel, that is the answer.
+      // The despawn's `ended` event may have settled it first: unlike for cancel, that is the answer.
       if (FINISHED.includes(current.state))
         return despawned ? { ok: true, task: current } : { ok: false, code: "finished" };
       if (current.state === "reserved") return { ok: false, code: "dispatching" };
@@ -986,12 +1021,14 @@ export class Scheduler {
         if (task.state === "lost" || since === undefined || now - since < this.#config.lostAfterMs) return;
         // Its session ended, and only its exit was awaited: `lost` would fail dependents at `lost_expired` for a session that is over.
         const settling = this.#ending.has(task.id);
+        // Before the write, so a settle held for a cancel (`#yieldToCancel`) notes it again.
+        if (settling) this.#ending.delete(task.id);
         await this.#update(task.id, (current) => {
           if (current.state === "lost" || !PLACED.includes(current.state)) return null;
           if (current.assignment?.deviceId !== deviceId) return null;
-          return settling ? settledEnd(current, undefined) : advance(current, "lost", { absentSince: since });
+          if (!settling) return advance(current, "lost", { absentSince: since });
+          return this.#yieldToCancel(current.id, settledEnd(current, undefined));
         });
-        if (settling) this.#ending.delete(task.id);
       }),
     );
   }
@@ -1009,7 +1046,9 @@ export class Scheduler {
     await Promise.all(
       due.map(async ([id]) => {
         this.#ending.delete(id);
-        await this.#update(id, (current) => (PLACED.includes(current.state) ? settledEnd(current, undefined) : null));
+        await this.#update(id, (current) =>
+          PLACED.includes(current.state) ? this.#yieldToCancel(id, settledEnd(current, undefined)) : null,
+        );
       }),
     );
   }
@@ -1103,13 +1142,16 @@ export class Scheduler {
       tasks.map((seen) =>
         this.#update(seen.id, (current) =>
           asSeen(current, seen)
-            ? settle(current, reply, {
-                now: this.#now(),
-                connected: this.#connected(deviceId),
-                unansweredSince: this.#unansweredSince.get(deviceId),
-                reservationTtlMs: this.#config.reservationTtlMs,
-                lostAfterMs: this.#config.lostAfterMs,
-              })
+            ? this.#yieldToCancel(
+                current.id,
+                settle(current, reply, {
+                  now: this.#now(),
+                  connected: this.#connected(deviceId),
+                  unansweredSince: this.#unansweredSince.get(deviceId),
+                  reservationTtlMs: this.#config.reservationTtlMs,
+                  lostAfterMs: this.#config.lostAfterMs,
+                }),
+              )
             : null,
         ),
       ),

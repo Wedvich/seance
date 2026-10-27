@@ -1420,20 +1420,87 @@ describe("cancel", () => {
     expect(fleet.spawns.map((s) => s.request.taskId)).toEqual(["t1"]);
   });
 
-  test("a session that reports ended before the despawn's reply lands is answered as the finished task", async () => {
-    let scheduler: Scheduler | null = null;
+  /**
+   * A fleet whose despawn ends the pane: its `ended` event (and with `exitStatus`, the
+   * machine's answer carrying the exit) outruns the despawn's reply: `reply`, else one that ended the pane.
+   */
+  function endingFleet(machines: Parameters<typeof machine>[1] = {}, reply?: DespawnResponse) {
+    const box: { scheduler: Scheduler | null; seen: Task | undefined } = { scheduler: null, seen: undefined };
     class EndingFleet extends FakeFleet {
       override async despawn(deviceId: string, request: DespawnRequest): Promise<DespawnResponse> {
-        // The pane exits on the despawn, and its `ended` event outruns the reply.
-        await scheduler?.onSession(request.id === "%1" ? "t1" : "", "ended", { deviceId, pane: request.id });
-        return super.despawn(deviceId, request);
+        this.despawns.push({ deviceId, id: request.id });
+        const taskId = this.running.get(deviceId)?.find((s) => s.id === request.id)?.taskId ?? "";
+        this.end(deviceId, taskId);
+        this.sessionsReply = () => ({
+          ok: true,
+          sessions: [],
+          ended: [taskId],
+          progress: [{ taskId, at: NOW, exit: 1 }],
+        });
+        await box.scheduler?.onSession(taskId, "ended", { deviceId, pane: request.id });
+        // A deferred `ended` asks its machine at once: let that answer land before the reply.
+        await box.scheduler?.drain();
+        box.seen = box.scheduler?.task(taskId);
+        return reply ?? { ok: true, window: "w", outcome: "exited", sessions: [] };
       }
     }
-    const env = setup(new EndingFleet([machine("a")]));
-    scheduler = env.scheduler;
-    const task = await enqueue(env.store, env.scheduler, spec());
-    await pass(env.scheduler);
-    expect(await env.scheduler.cancel(task.id)).toMatchObject({ ok: true, task: { id: task.id, state: "done" } });
+    const env = setup(new EndingFleet([machine("a", machines)]));
+    box.scheduler = env.scheduler;
+    return { ...env, box };
+  }
+
+  test("a session that ends while the despawn is out settles cancelled, and its after-done dependent fails", async () => {
+    const { scheduler, store, box } = endingFleet();
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    const dependent = await enqueue(store, scheduler, spec({ deps: [{ task: task.id, after: "done" }] }));
+    await pass(scheduler);
+    expect(scheduler.task(dependent.id)?.state).toBe("blocked");
+
+    const result = await scheduler.cancel(task.id);
+    expect(box.seen?.state).toBe("running");
+    expect(result).toMatchObject({
+      ok: true,
+      task: { id: task.id, state: "cancelled", assignment: { deviceId: "a" } },
+    });
+    expect(result.ok ? result.task.endedAt : "refused").toBeUndefined();
+    await pass(scheduler);
+    expect(scheduler.task(task.id)?.state).toBe("cancelled");
+    expect(scheduler.task(dependent.id)).toMatchObject({ state: "failed", failure: { code: "dependency_failed" } });
+  });
+
+  test("a machine reporting exit statuses: its answer with a nonzero exit, landing while the despawn is out, is not failed but cancelled", async () => {
+    const { scheduler, store, box } = endingFleet({
+      capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.exitStatus],
+    });
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    const result = await scheduler.cancel(task.id);
+    expect(box.seen?.state).toBe("running");
+    expect(result).toMatchObject({ ok: true, task: { state: "cancelled" } });
+    expect(result.ok ? result.task.failure : "refused").toBeUndefined();
+  });
+
+  test("a session that ended and was settled before the cancel stays done: the cancel answers finished", async () => {
+    const { fleet, scheduler, store } = setup();
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    fleet.end("a", task.id);
+    await scheduler.onSession(task.id, "ended", { deviceId: "a", pane: "%1" });
+    expect(await scheduler.cancel(task.id)).toEqual({ ok: false, code: "finished" });
+    expect(scheduler.task(task.id)).toMatchObject({ state: "done", doneBy: "session" });
+    expect(fleet.despawns).toEqual([]);
+  });
+
+  test("a despawn that fails holds nothing: the session's end it outran settles on the next pass", async () => {
+    const { scheduler, store, box } = endingFleet({}, { ok: false, code: "internal_error", message: "refused" });
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    expect(await scheduler.cancel(task.id)).toEqual({ ok: false, code: "despawn_failed" });
+    expect(box.seen?.state).toBe("running");
+    expect(scheduler.task(task.id)?.state).toBe("running");
+    await pass(scheduler);
+    expect(scheduler.task(task.id)).toMatchObject({ state: "failed", failure: { code: "session_failed", exit: 1 } });
   });
 
   test("queued, blocked and awaiting-merge tasks have no session to stop: cancelled as they stand", async () => {
