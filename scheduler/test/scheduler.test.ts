@@ -17,6 +17,7 @@ import {
   type StoredTask,
   type Task,
   type TaskSpawnReply,
+  type CancelResult,
 } from "../src/index.ts";
 import { advance } from "../src/task.ts";
 import { enqueue, FakeFleet, machine, NOW, NOW_S, obs, readerChecked, spec, status, unreachable } from "./fixtures.ts";
@@ -1420,20 +1421,269 @@ describe("cancel", () => {
     expect(fleet.spawns.map((s) => s.request.taskId)).toEqual(["t1"]);
   });
 
-  test("a session that reports ended before the despawn's reply lands is answered as the finished task", async () => {
-    let scheduler: Scheduler | null = null;
+  const EXIT_STATUS = [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.exitStatus];
+  type During = (ctx: {
+    fleet: FakeFleet;
+    scheduler: Scheduler;
+    clock: { now: number };
+    deviceId: string;
+    taskId: string;
+    pane: string;
+    call: number;
+  }) => Promise<void>;
+
+  const settleEnd =
+    (exits: boolean): During =>
+    async ({ fleet, scheduler, deviceId, taskId, pane }) => {
+      fleet.end(deviceId, taskId);
+      fleet.sessionsReply = () => ({
+        ok: true,
+        sessions: [],
+        ended: [taskId],
+        ...(exits ? { progress: [{ taskId, at: NOW, exit: 1 }] } : {}),
+      });
+      await scheduler.onSession(taskId, "ended", { deviceId, pane });
+      // A deferred `ended` asks its machine at once: let that answer land before the reply.
+      await scheduler.drain();
+    };
+
+  /**
+   * A fleet whose despawn ends the pane and runs `during` while it is out; `reply` is the despawn's
+   * answer (per call). By default (`settleEnd`) the session's `ended` outruns the reply, and a machine
+   * advertising `exitStatus` answers `sessions` with the exit too; a machine that does not never
+   * carries a status.
+   */
+  function cancelFleet(
+    machines: Parameters<typeof machine>[1] = {},
+    reply?: (call: number) => DespawnResponse,
+    during?: During,
+  ) {
+    const box: { env: ReturnType<typeof setup> | null; seen: Task | undefined; calls: number } = {
+      env: null,
+      seen: undefined,
+      calls: 0,
+    };
+    const exits = machines.capabilities?.includes(CAPABILITIES.exitStatus) === true;
     class EndingFleet extends FakeFleet {
       override async despawn(deviceId: string, request: DespawnRequest): Promise<DespawnResponse> {
-        // The pane exits on the despawn, and its `ended` event outruns the reply.
-        await scheduler?.onSession(request.id === "%1" ? "t1" : "", "ended", { deviceId, pane: request.id });
-        return super.despawn(deviceId, request);
+        this.despawns.push({ deviceId, id: request.id });
+        const taskId = this.running.get(deviceId)?.find((s) => s.id === request.id)?.taskId ?? "";
+        const env = box.env;
+        if (env === null) throw new Error("fleet used before setup");
+        const call = (box.calls += 1);
+        await (during ?? settleEnd(exits))({
+          fleet: this,
+          scheduler: env.scheduler,
+          clock: env.clock,
+          deviceId,
+          taskId,
+          pane: request.id,
+          call,
+        });
+        box.seen = env.scheduler.task(taskId);
+        return reply?.(call) ?? { ok: true, window: "w", outcome: "exited", sessions: [] };
       }
     }
-    const env = setup(new EndingFleet([machine("a")]));
-    scheduler = env.scheduler;
-    const task = await enqueue(env.store, env.scheduler, spec());
-    await pass(env.scheduler);
-    expect(await env.scheduler.cancel(task.id)).toMatchObject({ ok: true, task: { id: task.id, state: "done" } });
+    box.env = setup(new EndingFleet([machine("a", machines)]));
+    return { ...box.env, box };
+  }
+  const refused = (): DespawnResponse => ({ ok: false, code: "internal_error", message: "refused" });
+
+  test("a session that ends while the despawn is out settles cancelled, and its after-done dependent fails", async () => {
+    const { scheduler, store, box } = cancelFleet();
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    const dependent = await enqueue(store, scheduler, spec({ deps: [{ task: task.id, after: "done" }] }));
+    await pass(scheduler);
+    expect(scheduler.task(dependent.id)?.state).toBe("blocked");
+
+    const result = await scheduler.cancel(task.id);
+    expect(box.seen?.state).toBe("running");
+    expect(result).toMatchObject({
+      ok: true,
+      task: { id: task.id, state: "cancelled", assignment: { deviceId: "a" } },
+    });
+    expect(result.ok ? result.task.endedAt : "refused").toBeUndefined();
+    await pass(scheduler);
+    expect(scheduler.task(task.id)?.state).toBe("cancelled");
+    expect(scheduler.task(dependent.id)).toMatchObject({ state: "failed", failure: { code: "dependency_failed" } });
+  });
+
+  test("a machine reporting exit statuses: its answer with a nonzero exit, landing while the despawn is out, is not failed but cancelled", async () => {
+    const { scheduler, store, box } = cancelFleet({ capabilities: EXIT_STATUS });
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    const result = await scheduler.cancel(task.id);
+    expect(box.seen?.state).toBe("running");
+    expect(result).toMatchObject({ ok: true, task: { state: "cancelled" } });
+    expect(result.ok ? result.task.failure : "refused").toBeUndefined();
+  });
+
+  test("a session that ended and was settled before the cancel stays done: the cancel answers finished", async () => {
+    const { fleet, scheduler, store } = setup();
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    fleet.end("a", task.id);
+    await scheduler.onSession(task.id, "ended", { deviceId: "a", pane: "%1" });
+    expect(await scheduler.cancel(task.id)).toEqual({ ok: false, code: "finished" });
+    expect(scheduler.task(task.id)).toMatchObject({ state: "done", doneBy: "session" });
+    expect(fleet.despawns).toEqual([]);
+  });
+
+  test("a despawn that fails holds nothing: the session's end it outran settles on the next pass", async () => {
+    const { scheduler, store, box } = cancelFleet({ capabilities: EXIT_STATUS }, refused);
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    expect(await scheduler.cancel(task.id)).toEqual({ ok: false, code: "despawn_failed" });
+    expect(box.seen?.state).toBe("running");
+    // The held settle is asked again at once, not at the next sweep.
+    await scheduler.drain();
+    expect(scheduler.task(task.id)).toMatchObject({ state: "failed", failure: { code: "session_failed", exit: 1 } });
+  });
+
+  test("a held settle's facts are still written, the state kept: the remote session the end carried", async () => {
+    const { scheduler, store, box } = cancelFleet({}, refused, async (ctx) => {
+      ctx.fleet.end(ctx.deviceId, ctx.taskId);
+      await ctx.scheduler.onSession(ctx.taskId, "ended", {
+        deviceId: ctx.deviceId,
+        pane: ctx.pane,
+        remoteSession: "session_abc",
+      });
+    });
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    expect(await scheduler.cancel(task.id)).toEqual({ ok: false, code: "despawn_failed" });
+    expect(box.seen).toMatchObject({ state: "running", remoteSession: "session_abc" });
+    expect(box.seen?.doneBy).toBeUndefined();
+  });
+
+  test("a deadline passing while the cancel is out settles nothing: cancelled", async () => {
+    const { scheduler, store, box } = cancelFleet({ capabilities: EXIT_STATUS }, undefined, async (ctx) => {
+      // Its session still listed (no exit to read), so only the deadline can settle the deferred `ended`.
+      await ctx.scheduler.onSession(ctx.taskId, "ended", { deviceId: ctx.deviceId, pane: ctx.pane });
+      await ctx.scheduler.drain();
+      ctx.clock.now += DEFAULT_CONFIG.endingTimeoutMs;
+      await pass(ctx.scheduler);
+      await pass(ctx.scheduler);
+    });
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    const result = await scheduler.cancel(task.id);
+    expect(box.seen?.state).toBe("running");
+    expect(result).toMatchObject({ ok: true, task: { state: "cancelled" } });
+  });
+
+  test("a machine absent past the loss window while the cancel is out: its awaited end settles cancelled, not done", async () => {
+    const { scheduler, store, box } = cancelFleet({ capabilities: EXIT_STATUS }, undefined, async (ctx) => {
+      ctx.fleet.end(ctx.deviceId, ctx.taskId);
+      ctx.fleet.sessionsReply = () => unreachable;
+      await ctx.scheduler.onSession(ctx.taskId, "ended", { deviceId: ctx.deviceId, pane: ctx.pane });
+      await ctx.scheduler.drain();
+      ctx.fleet.fleet = [machine("a", { capabilities: EXIT_STATUS, connected: false })];
+      await pass(ctx.scheduler);
+      ctx.clock.now += DEFAULT_CONFIG.lostAfterMs;
+      await pass(ctx.scheduler);
+    });
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    const result = await scheduler.cancel(task.id);
+    expect(box.seen?.state).toBe("running");
+    expect(result).toMatchObject({ ok: true, task: { state: "cancelled" } });
+  });
+
+  test("the session's own done report, landing while the despawn is out, stands: it is not the despawn's end", async () => {
+    const { scheduler, store, box } = cancelFleet({}, undefined, async (ctx) => {
+      await ctx.scheduler.onSession(ctx.taskId, "done", { deviceId: ctx.deviceId, pane: ctx.pane });
+    });
+    const task = await enqueue(store, scheduler, spec({ until: "reported" }));
+    await pass(scheduler);
+    const result = await scheduler.cancel(task.id);
+    expect(box.seen).toMatchObject({ state: "done", doneBy: "reported" });
+    expect(result).toMatchObject({ ok: true, task: { state: "done", doneBy: "reported" } });
+  });
+
+  test("a PR opened while the despawn is out stands: awaiting-merge, then cancelled as it stands", async () => {
+    const { scheduler, store, box } = cancelFleet({}, undefined, async (ctx) => {
+      await ctx.scheduler.onSession(
+        ctx.taskId,
+        "ended",
+        { deviceId: ctx.deviceId, pane: ctx.pane },
+        "https://github.com/o/r/pull/1",
+      );
+    });
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    const result = await scheduler.cancel(task.id);
+    expect(box.seen).toMatchObject({ state: "awaiting-merge", prUrl: "https://github.com/o/r/pull/1" });
+    expect(result).toMatchObject({ ok: true, task: { state: "cancelled" } });
+  });
+
+  test("a merge reported while the despawn is out stands: done by merged", async () => {
+    const { scheduler, store, box } = cancelFleet({}, undefined, async (ctx) => {
+      await ctx.scheduler.onBranchState(
+        { taskId: ctx.taskId, repo: "app", branch: "b", pushed: true, merged: true, at: NOW_S },
+        ctx.deviceId,
+      );
+    });
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    const result = await scheduler.cancel(task.id);
+    expect(box.seen).toMatchObject({ state: "done", doneBy: "merged" });
+    expect(result).toMatchObject({ ok: true, task: { state: "done", doneBy: "merged" } });
+  });
+
+  test("an `ended` deferred before the cancel began ended first: not held, whichever write lands first stands", async () => {
+    const { scheduler, store } = cancelFleet({ capabilities: EXIT_STATUS });
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    // Its session still listed, so the deferral stays unanswered until the despawn.
+    await scheduler.onSession(task.id, "ended", { deviceId: "a", pane: "%1" });
+    await scheduler.drain();
+    expect(scheduler.task(task.id)?.state).toBe("running");
+    const result = await scheduler.cancel(task.id);
+    expect(result).toMatchObject({ ok: true, task: { state: "failed", failure: { exit: 1 } } });
+  });
+
+  test("a cancel retried after despawn_failed is held again", async () => {
+    // The machine answers with the exit only while a despawn is out; past it the session reads as alive, so only a hold's note is left.
+    let despawning = false;
+    const { scheduler, store } = cancelFleet(
+      { capabilities: EXIT_STATUS },
+      (call) => (call === 1 ? refused() : { ok: true, window: "w", outcome: "exited", sessions: [] }),
+      async (ctx) => {
+        const alive = ctx.fleet.running.get(ctx.deviceId) ?? [];
+        despawning = true;
+        await settleEnd(true)(ctx);
+        const answer = ctx.fleet.sessionsReply;
+        ctx.fleet.sessionsReply = (deviceId) =>
+          despawning && answer !== null ? answer(deviceId) : { ok: true, sessions: alive };
+        despawning = false;
+        // The despawn failed: the pane is still there for the retry to name.
+        ctx.fleet.running.set(ctx.deviceId, alive);
+      },
+    );
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    expect(await scheduler.cancel(task.id)).toEqual({ ok: false, code: "despawn_failed" });
+    await scheduler.drain();
+    expect(scheduler.task(task.id)?.state).toBe("running");
+    expect(await scheduler.cancel(task.id)).toMatchObject({ ok: true, task: { state: "cancelled" } });
+  });
+
+  test("two cancels at once: the second's hold does not ride on the first's, which fails", async () => {
+    let second: Promise<CancelResult> | undefined;
+    const { scheduler, store } = cancelFleet(
+      { capabilities: EXIT_STATUS },
+      (call) => (call === 1 ? refused() : { ok: true, window: "w", outcome: "exited", sessions: [] }),
+      async (ctx) => {
+        await settleEnd(true)(ctx);
+        if (ctx.call === 1) second = scheduler.cancel(ctx.taskId);
+      },
+    );
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    expect(await scheduler.cancel(task.id)).toEqual({ ok: false, code: "despawn_failed" });
+    expect(await second).toMatchObject({ ok: true, task: { state: "cancelled" } });
   });
 
   test("queued, blocked and awaiting-merge tasks have no session to stop: cancelled as they stand", async () => {
