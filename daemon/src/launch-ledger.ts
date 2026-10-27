@@ -486,6 +486,20 @@ export class LaunchLedger {
   }
 
   /**
+   * The launch recorded for this id ended with no verdict (the spawn backend crashed): it may have left a
+   * window, so it moves from `pending` to `interrupted`, as if the process had died launching it.
+   * Best-effort like `clearPending`; nothing to do for an id no longer recorded.
+   */
+  async markInterrupted(taskId: string): Promise<void> {
+    if (!this.#tasks.has(taskId)) return;
+    this.#pending.delete(taskId);
+    this.#interrupted.add(taskId);
+    await this.#persist().catch((err: unknown) => {
+      log.warn(`launch ledger: could not mark a crashed launch interrupted (${String(err)})`);
+    });
+  }
+
+  /**
    * Ids a previous process died launching, still in the ledger: what
    * `SessionsResponse.interrupted` carries.
    */

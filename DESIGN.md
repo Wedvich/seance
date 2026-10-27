@@ -5181,8 +5181,15 @@ relay state unnecessary).
   restart that lands inside a task's spawn leaves its launch recorded in the ledger but its session
   half-made, and a leader whose reply was cut reads the id in `ended` as ran — `done` with no session.
   So after the `ok` is reported and before `selfRestart`, the daemon closes a gate on task launches and
-  waits for each one in flight to finish (its ledger write included), capped at `UPDATE_DRAIN_MS`
-  (120 s: past `OP_TIMEOUT_MS.spawn`, 90 s, no launch is one its leader still waits on). A task launch
+  waits for each one in flight to finish (its ledger write included) **and for its spawn handler's reply
+  to be handed to the transport** (`EndedTasks.hold`, released by the relay client right after
+  `ws.send` and its `wire send` line; for the leader's own in-process dispatch, when the handler
+  returns, which is the reply), capped at `UPDATE_DRAIN_MS`
+  (120 s: past `OP_TIMEOUT_MS.spawn`, 90 s, no launch is one its leader still waits on). The hold is a
+  set of its own that only `drain` waits on: `settled()`, which a `sessions` reply and so the handler's
+  own `sessionsAfter` wait on, must not wait for the reply it is part of. `ws.send` hands the frame to
+  the socket without flushing it, so the last bytes are not proven out; that is as close as the
+  transport lets the drain get. A task launch
   that arrives while the gate is closed is **never parked**: it is answered at once with the transport
   code `internal_error` (`LaunchesClosed`), unrecorded and never run. Parked and resumed later, it would
   read as never-landed in `sessions` (it is in no `#inFlight`), and a leader that had already
@@ -5195,6 +5202,11 @@ relay state unnecessary).
   drain, capped at `SHUTDOWN_DRAIN_MS` (15 s: under launchd's default `ExitTimeOut` of 20 s, which the
   plist leaves unset, and systemd's 90 s `TimeoutStopSec` with `KillMode=process`) and run before
   `daemon.stop()`, so a finishing spawn's reply still reaches its leader; a second signal exits at once.
+  That drain is **final**: an update's release (a thrown restart, the grace) cannot reopen the gate
+  during a shutdown. `stop` throwing still exits (`shutdown.ts`). `seanced install` on macOS waits
+  `SHUTDOWN_DRAIN_MS` plus 10 s for `bootout` to unload the job (`launchd.ts`), so it never
+  bootstraps over a job still draining; systemd's 30 s relaunch wait in `signalRestart` already
+  covers 15 s plus `RestartSec=5`.
   Spawns with no `taskId` are not held. The pre-update process does the restart, so the wave that ships
   this is unprotected: protection starts with the next one. A launch cut off anyway (a `kill -9`, a
   power cut, a drain past its cap) is covered by the ledger's `interrupted` ("Session events").
@@ -6826,19 +6838,25 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   a leader read both as `done` — a task marked done with no session, found out only by its
   owner. The file now also keeps a top-level `pending` array, written in the **same durable
   write** as the `tasks` entry by `record`. A launch that settles (landed, retracted, refused
-  or crashed) leaves `pending` in `finish`, durably, before the launch counts as over — so a
+  or crashed) leaves `pending` in `finish`, durably, before the launch counts as over — except a crash
+  with no verdict (a backend that threw something that is no refusal: a window may exist untagged),
+  which moves the id to `interrupted` instead, as if the process had died launching it (a refusal other than
+  `task_running` is still retracted) — so a
   drain that resolves has left nothing pending; `startNote` clears it too, since a `here`
   launch with no PR writes no note. On open, every id still `pending` is promoted to a
   persisted `interrupted` set (one `warn` naming the ids; no write at open). The id stays in
   `tasks` and in `ended`, and `since` does not move: **`interrupted` is always a subset of
   `ended`**, and the reply names it in `SessionsResponse.interrupted` (scheduler only, at most
-  `SESSIONS_MAX_PROGRESS`, absent when empty). A reader that predates the field reads the id
+  `SESSIONS_MAX_PROGRESS`, absent when empty; the daemon slices to it, and a test holds `LEDGER_MAX` under it,
+  since `parseInterrupted` drops a longer list whole). A reader that predates the field reads the id
   in `ended` as ran, and never as never-landed, which would re-dispatch a twin.
   An id is cleared, best-effort and persisted, when a `sessions` listing carries it, when
   harvest notes its exit, when a later launch of it lands, or when a session event binds to a
-  pane carrying it. That last clear is **ingest, not a new act**: the id comes from the
+  pane carrying it on an `ended` or `done` frame. That last clear is **ingest, not a new act**: the id comes from the
   kernel-bound pane and never from the frame, it only removes the mark of the bound pane's
-  own task, and it exists because a clean exit closes the window with no exit note. Despawn and reap's `closing`
+  own task, and it exists because a clean exit closes the window with no exit note. A stateless or
+  live-state frame does not clear (a live session is cleared by the `sessions` listing once it
+  registers), nor does any frame after ingest stopped. Despawn and reap's `closing`
   do not clear it. The leader (Scheduler, "Reserve, then dispatch") does not count an
   interrupted id as `known` while its reservation lives, since a pane tagged before the
   crash may be on a startup dialog `sessions` does not list yet, and past the TTL with no

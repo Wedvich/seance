@@ -45,8 +45,11 @@ export interface RelayClientOpts {
   readonly key: CryptoKey;
   /** Fresh encrypted machine-info blob — called on every register. */
   readonly buildInfo: () => Promise<Envelope>;
-  /** Op dispatch, with the envelope's AAD-bound sealer; a returned Plain is sealed and sent back to it. */
-  readonly handle: (plain: Plain, from: string) => Promise<Plain | null>;
+  /**
+   * Op dispatch, with the envelope's AAD-bound sealer; a returned Plain is sealed and sent back to it.
+   * `replied` settles once that reply has been sent or given up on: what a restart's drain waits for.
+   */
+  readonly handle: (plain: Plain, from: string, replied: Promise<void>) => Promise<Plain | null>;
   /** Once per socket, after its first register frame has left. */
   readonly onConnect?: () => void;
   /**
@@ -601,27 +604,32 @@ export class RelayClient {
     // scope. Logging the pair here is what lets a relay line — which can only
     // ever name the `iv` — be joined to an op end to end. Never the payload.
     log.info(`wire recv iv=${quote(env.iv)} id=${quote(plain.id)} op=${quote(plain.op)}`);
-    const response = await this.#opts.handle(plain, env.from);
-    // A broadcast is never answered: the sender is not waiting, and the reply
-    // would be daemon→daemon traffic no route is meant to carry.
-    if (broadcast || response === null) return;
-    if (!this.connected) {
-      // The socket died while the handler ran. The op did happen — a spawn is
-      // already spawned — so this line is the only record that its reply is lost.
-      log.warn(`wire unsent id=${quote(plain.id)} op=${quote(plain.op)} reason=disconnected`);
-      return;
+    const replied = Promise.withResolvers<void>();
+    try {
+      const response = await this.#opts.handle(plain, env.from, replied.promise);
+      // A broadcast is never answered: the sender is not waiting, and the reply
+      // would be daemon→daemon traffic no route is meant to carry.
+      if (broadcast || response === null) return;
+      if (!this.connected) {
+        // The socket died while the handler ran. The op did happen — a spawn is
+        // already spawned — so this line is the only record that its reply is lost.
+        log.warn(`wire unsent id=${quote(plain.id)} op=${quote(plain.op)} reason=disconnected`);
+        return;
+      }
+      const sealed = await this.#sealReply(env.from, response);
+      const frame: DaemonFrame = { t: "msg", env: sealed };
+      const ws = this.#ws;
+      if (ws === null) {
+        log.warn(`wire unsent id=${quote(plain.id)} op=${quote(plain.op)} reason=socket-gone`);
+        return;
+      }
+      ws.send(JSON.stringify(frame));
+      // Logged after the send, so the line never claims a frame that never left.
+      // A reply carries a fresh iv, so the two directions join through `re`, not the iv.
+      log.info(`wire send iv=${quote(sealed.iv)} re=${quote(response.re ?? "")} to=${quote(env.from)}`);
+    } finally {
+      replied.resolve();
     }
-    const sealed = await this.#sealReply(env.from, response);
-    const frame: DaemonFrame = { t: "msg", env: sealed };
-    const ws = this.#ws;
-    if (ws === null) {
-      log.warn(`wire unsent id=${quote(plain.id)} op=${quote(plain.op)} reason=socket-gone`);
-      return;
-    }
-    ws.send(JSON.stringify(frame));
-    // Logged after the send, so the line never claims a frame that never left.
-    // A reply carries a fresh iv, so the two directions join through `re`, not the iv.
-    log.info(`wire send iv=${quote(sealed.iv)} re=${quote(response.re ?? "")} to=${quote(env.from)}`);
   }
 
   /**

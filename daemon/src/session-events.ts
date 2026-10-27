@@ -5,6 +5,7 @@ import {
   isSessionState,
   isTaskId,
   quote,
+  SESSIONS_MAX_PROGRESS,
   type SessionEvent,
   type SessionState,
   type TaskProgress,
@@ -155,6 +156,11 @@ export const ENDED_MAX = 128;
 export type SettleLaunch = (
   launched: boolean,
   landed?: { readonly site?: LaunchSite; readonly server?: number },
+  /**
+   * `unknown`: the backend crashed (threw something that is no refusal), so a window may exist untagged. With
+   * `launched: true`; the id is then marked `interrupted` rather than cleared, like a launch the process died in.
+   */
+  outcome?: { readonly unknown?: true },
 ) => Promise<void>;
 
 /**
@@ -184,6 +190,9 @@ interface Launches {
   open: number;
   retractable: boolean;
   landed: boolean;
+  /** One of them crashed with no verdict (`SettleLaunch`'s `unknown`) and none was seen to land. */
+  crashed: boolean;
+  confirmed: boolean;
   /** Newest PR URL a session reported while one of them was in flight: the landed launch's note keeps it. */
   prUrl?: string;
 }
@@ -216,6 +225,10 @@ export class LaunchesClosed extends Error {
 
 export class EndedTasks {
   #closed = false;
+  /** Set by `drain(_, { final: true })`: the daemon is exiting, so `reopen` no longer undoes the close. */
+  #final = false;
+  /** Spawn handlers a launch was accepted for, until their reply is out. Only `drain` waits on these. */
+  readonly #holds = new Set<Promise<void>>();
   readonly #ended = new Map<string, number>();
   readonly #ledger: LaunchLedger;
   readonly #inFlight = new Set<Promise<void>>();
@@ -265,7 +278,13 @@ export class EndedTasks {
     if (this.#closed) throw new LaunchesClosed();
     const over = Promise.withResolvers<void>();
     this.#inFlight.add(over.promise);
-    const launches = this.#launches.get(taskId) ?? { open: 0, retractable: false, landed: false };
+    const launches = this.#launches.get(taskId) ?? {
+      open: 0,
+      retractable: false,
+      landed: false,
+      crashed: false,
+      confirmed: false,
+    };
     this.#launches.set(taskId, launches);
     launches.open += 1;
     // Retracted before the launch stops counting as in flight, so no `sessions` reply sees it half-done.
@@ -275,7 +294,9 @@ export class EndedTasks {
         if (launches.open > 0) return;
         this.#launches.delete(taskId);
         if (launches.retractable && !launches.landed) await this.#ledger.retract(taskId);
+        // A crash with no landed launch beside it may have left a window: interrupted, not ran-and-ended.
         // On disk before `over` resolves, so a drain that returns has left nothing pending.
+        else if (launches.crashed && !launches.confirmed) await this.#ledger.markInterrupted(taskId);
         else await this.#ledger.clearPending(taskId);
       } finally {
         this.#inFlight.delete(over.promise);
@@ -289,8 +310,10 @@ export class EndedTasks {
       await finish();
       throw err;
     }
-    return async (launched, landed) => {
+    return async (launched, landed, outcome) => {
       if (launched) launches.landed = true;
+      if (outcome?.unknown === true) launches.crashed = true;
+      if (launched && landed !== undefined) launches.confirmed = true;
       let sample = false;
       try {
         const site = landed?.site;
@@ -315,30 +338,58 @@ export class EndedTasks {
   }
 
   /**
-   * Stops accepting task launches (`LaunchesClosed`) and resolves once those in flight are over, or
-   * `timeoutMs` has passed. True when they finished, false on the timeout. Idempotent.
+   * A spawn handler whose task launch was accepted: `drain` also waits for the returned release, which
+   * the handler calls once its reply is handed to the transport. Apart from `#inFlight` on purpose: that
+   * ends when the ledger write does, and `settled()` — what a `sessions` reply, and so the handler's own
+   * `sessionsAfter`, waits on — must not wait for the reply it is part of. Idempotent.
    */
-  async drain(timeoutMs: number): Promise<boolean> {
+  hold(): () => void {
+    const over = Promise.withResolvers<void>();
+    this.#holds.add(over.promise);
+    return () => {
+      this.#holds.delete(over.promise);
+      over.resolve();
+    };
+  }
+
+  /**
+   * Stops accepting task launches (`LaunchesClosed`) and resolves once those in flight are over and
+   * their spawn handlers' replies are out (`hold`), or `timeoutMs` has passed. True when they finished,
+   * false on the timeout. Idempotent. `final`: the daemon is exiting, so a later `reopen` (an update's
+   * release) cannot undo this close.
+   */
+  async drain(timeoutMs: number, opts?: { readonly final?: boolean }): Promise<boolean> {
     this.#closed = true;
-    if (this.#inFlight.size > 0) {
-      log.info(`holding task launches: waiting up to ${timeoutMs / 1000}s for ${this.#inFlight.size} in flight`);
+    if (opts?.final === true) this.#final = true;
+    const waiting = this.#inFlight.size + this.#holds.size;
+    if (waiting > 0) {
+      log.info(`holding task launches: waiting up to ${timeoutMs / 1000}s for ${waiting} in flight`);
     }
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<false>((resolve) => {
       timer = setTimeout(() => resolve(false), timeoutMs);
     });
     try {
-      const done = await Promise.race([this.settled().then(() => true as const), timeout]);
-      if (!done) log.warn(`task launches still in flight after ${timeoutMs / 1000}s: ${this.#inFlight.size}`);
+      const done = await Promise.race([this.#quiet().then(() => true as const), timeout]);
+      if (!done) {
+        log.warn(
+          `task launches still in flight after ${timeoutMs / 1000}s: ${this.#inFlight.size} launching, ${this.#holds.size} replying`,
+        );
+      }
       return done;
     } finally {
       clearTimeout(timer);
     }
   }
 
-  /** Takes task launches again. Only launches that arrive later: a refused one was never parked. */
+  /** Takes task launches again. Only launches that arrive later: a refused one was never parked. Not after a final drain. */
   reopen(): void {
-    this.#closed = false;
+    if (!this.#final) this.#closed = false;
+  }
+
+  async #quiet(): Promise<void> {
+    // oxlint-disable-next-line no-await-in-loop -- a launch or reply begun while waiting is waited for too
+    while (this.#inFlight.size > 0 || this.#holds.size > 0) await Promise.all([...this.#inFlight, ...this.#holds]);
   }
 
   /**
@@ -489,7 +540,8 @@ export class EndedTasks {
     const out = new Set<string>();
     for (const id of [...this.#ended.keys(), ...this.#ledger.ids()]) if (!carried.has(id)) out.add(id);
     const marked = this.#ledger.interrupted();
-    const interrupted = marked.filter((id) => !carried.has(id));
+    // Capped here too: `parseInterrupted` drops the whole list past `SESSIONS_MAX_PROGRESS`.
+    const interrupted = marked.filter((id) => !carried.has(id)).slice(0, SESSIONS_MAX_PROGRESS);
     void this.#ledger.clearInterrupted(marked.filter((id) => carried.has(id)));
     return { ended: [...out], ledgerSince: this.#ledger.since(), ...(interrupted.length === 0 ? {} : { interrupted }) };
   }
@@ -649,8 +701,6 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
         log.info(`local socket: session-event from pid=${peer ?? "unknown"} matched no live pane — dropped`);
         return { ok: false, code: "unbound" };
       }
-      // Ingest, not a new act: the id is the kernel-bound pane's own, never the frame's, and it only lifts that task's mark.
-      if (pane.taskId !== null) void deps.ended.sessionSeen(pane.taskId);
       const at = now();
       const exclave = exclaveOf(pane.path, deps.exclaves());
       if (!stopped) deps.onActivity?.(exclave);
@@ -658,6 +708,10 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
       if (frame.state === undefined || pane.taskId === null) return { ok: true };
       // A stopped ingest sends nothing, so a report must not be told it went.
       if (stopped) return frame.state === "done" ? { ok: false, code: "stopping" } : { ok: true };
+      // Ingest, not a new act: the id is the kernel-bound pane's own, never the frame's. Only `ended` and `done`
+      // prove the session ran and may leave no exit note (a clean exit closes the window); a live one is cleared
+      // by the `sessions` listing once it registers, which a bare `running` frame does not show.
+      if (frame.state === "ended" || frame.state === "done") void deps.ended.sessionSeen(pane.taskId);
       if (frame.state === "ended") deps.ended.ended(pane.taskId);
       // Before the reply, so `ok` tells the session its report is on disk — or says it is not.
       let reported: NoteOutcome | null = null;

@@ -226,7 +226,8 @@ green:
   only, and answers `untasked` for a pane with none and `unrecorded` for a task its ledger holds
   no launch of (nothing sent); the leader settles that task only under `until: "reported"` and
   only from the machine it was placed or reserved on — and clearing its own pane's task's
-  `interrupted` mark in the launch ledger, bound to the pane like the `done` report (including on a
+  `interrupted` mark in the launch ledger, only on an `ended` or `done` frame (proof the session ran;
+  never when ingest is stopped), bound to the pane like the `done` report (including on a
   host with no peer pid) and never to an id from the frame.
   The frame's one other carried claim is `remoteSession`, Remote Control's id for the session:
   display-only (the PWA's claude.ai link), kept only as `isRemoteSessionId` passes it, and

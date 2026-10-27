@@ -177,7 +177,7 @@ export function endedTasksFor(path: string): Promise<EndedTasks> {
 export async function drainTaskLaunches(timeoutMs: number): Promise<boolean> {
   try {
     const all = await Promise.all([...endedTasksByLedger.values()]);
-    const drained = await Promise.all(all.map((tasks) => tasks.drain(timeoutMs)));
+    const drained = await Promise.all(all.map((tasks) => tasks.drain(timeoutMs, { final: true })));
     return drained.every(Boolean);
   } catch (err) {
     log.warn(`could not drain task launches: ${String(err)}`);

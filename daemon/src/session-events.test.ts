@@ -2,9 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { SessionEvent } from "@seance/shared";
+import { SESSIONS_MAX_PROGRESS, type SessionEvent } from "@seance/shared";
 import { pollUntil } from "../test/fixtures.ts";
-import { LaunchLedger } from "./launch-ledger.ts";
+import { LaunchLedger, LEDGER_MAX } from "./launch-ledger.ts";
 import { parseProcStatPpid, parsePsParents } from "./peer.ts";
 import {
   createSessionEvents,
@@ -416,12 +416,78 @@ describe("EndedTasks interrupted launches and the drain", () => {
     await ended.settled();
   });
 
-  test("a bound session event from the pane of an interrupted task clears its mark", async () => {
+  test("drain waits for a held reply after the launch settled, but settled() does not", async () => {
+    const ended = new EndedTasks();
+    const settle = await ended.launch("t1");
+    const release = ended.hold();
+    await settle(true, {});
+    await ended.settled(); // what the handler's own `sessionsAfter` waits on: must not wait for the reply
+    let drained: boolean | null = null;
+    const draining = ended.drain(10_000).then((ok) => (drained = ok));
+    await Bun.sleep(20); // a non-event can't be polled
+    expect(drained).toBeNull();
+    release();
+    release(); // idempotent
+    expect(await draining).toBe(true);
+  });
+
+  test("drain times out on a reply never handed over", async () => {
+    const ended = new EndedTasks();
+    ended.hold();
+    expect(await ended.drain(20)).toBe(false);
+  });
+
+  test("a final drain cannot be reopened; a plain one can", async () => {
+    const ended = new EndedTasks();
+    await ended.drain(1_000, { final: true });
+    ended.reopen();
+    await expect(ended.launch("late")).rejects.toBeInstanceOf(LaunchesClosed);
+  });
+
+  test("a crash with no verdict marks the launch interrupted on disk; a refusal and a landed launch do not", async () => {
+    await inTmp(async (path) => {
+      const ended = new EndedTasks(await LaunchLedger.open(path));
+      await (
+        await ended.launch("crashed")
+      )(true, undefined, { unknown: true });
+      expect(await fileOf(path)).toMatchObject({ interrupted: ["crashed"] });
+      expect(await fileOf(path)).not.toHaveProperty("pending");
+      expect(ended.report(new Set())).toMatchObject({ ended: ["crashed"], interrupted: ["crashed"] });
+      await (
+        await ended.launch("running")
+      )(true); // task_running: an earlier launch's session stands
+      await (
+        await ended.launch("landed")
+      )(true, {});
+      expect((await fileOf(path)).interrupted).toEqual(["crashed"]);
+      // A fresh id whose launch never ran is still retracted, not marked.
+      await (
+        await ended.launch("refused")
+      )(false);
+      expect(ended.launched("refused")).toBe(false);
+      expect((await fileOf(path)).interrupted).toEqual(["crashed"]);
+      // A restart reads the mark back as interrupted, and a later landed launch of the id clears it.
+      const restarted = new EndedTasks(await LaunchLedger.open(path));
+      expect(restarted.report(new Set())).toMatchObject({ interrupted: ["crashed"] });
+      await (
+        await restarted.launch("crashed")
+      )(true, {});
+      expect(restarted.report(new Set())).not.toHaveProperty("interrupted");
+    });
+  });
+
+  test("the ledger never holds more ids than a sessions reply may name as interrupted", () => {
+    // `report` slices to the cap as well, but `parseInterrupted` drops the whole list past it, so a raise of
+    // LEDGER_MAX alone would silently turn every interrupted launch back into `done`.
+    expect(LEDGER_MAX).toBeLessThanOrEqual(SESSIONS_MAX_PROGRESS);
+  });
+
+  test("a bound ended event from the pane of an interrupted task clears its mark", async () => {
     await inTmp(async (path) => {
       const restarted = await afterCrash(path, "t1");
       const events = paneEvents(restarted, { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" });
       try {
-        await events.handle(frame({ pane: "%1", state: "busy" }), null);
+        await events.handle(frame({ pane: "%1", state: "ended" }), null);
         await pollUntil(() => restarted.ledger.interrupted().length === 0, "the mark cleared");
         await pollUntil(() => markless(path), "the clear on disk");
       } finally {
@@ -430,13 +496,39 @@ describe("EndedTasks interrupted launches and the drain", () => {
     });
   });
 
+  test("a bound busy or stateless event leaves the mark: a live session is cleared by the listing", async () => {
+    await inTmp(async (path) => {
+      const restarted = await afterCrash(path, "t1");
+      const events = paneEvents(restarted, { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" });
+      try {
+        await events.handle(frame({ pane: "%1", state: "busy" }), null);
+        await events.handle(frame({ pane: "%1" }), null);
+        await Bun.sleep(30); // a non-event can't be polled
+        expect(restarted.ledger.interrupted()).toEqual(["t1"]);
+      } finally {
+        events.stop();
+      }
+    });
+  });
+
+  test("an ended event after the ingest stopped leaves the mark", async () => {
+    await inTmp(async (path) => {
+      const restarted = await afterCrash(path, "t1");
+      const events = paneEvents(restarted, { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" });
+      events.stop();
+      await events.handle(frame({ pane: "%1", state: "ended" }), null);
+      await Bun.sleep(30); // a non-event can't be polled
+      expect(restarted.ledger.interrupted()).toEqual(["t1"]);
+    });
+  });
+
   test("an unbound event, and one from another task's pane, clear nothing", async () => {
     await inTmp(async (path) => {
       const restarted = await afterCrash(path, "t1");
       const events = paneEvents(restarted, { id: "%2", pid: 20, dead: false, taskId: "other", path: "/home" });
       try {
-        await events.handle(frame({ pane: "%9", state: "busy" }), null);
-        await events.handle(frame({ pane: "%2", state: "busy" }), null);
+        await events.handle(frame({ pane: "%9", state: "ended" }), null);
+        await events.handle(frame({ pane: "%2", state: "ended" }), null);
         await Bun.sleep(30); // a non-event can't be polled
         expect(restarted.ledger.interrupted()).toEqual(["t1"]);
       } finally {
