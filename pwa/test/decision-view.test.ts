@@ -8,7 +8,15 @@ import {
   type Reason,
   type Task,
 } from "@seance/shared";
-import { describeDecision, isPlaced, pinLine, queuedBody, taskHeadline, waitingText } from "../src/decision-view.ts";
+import {
+  describeDecision,
+  isPlaced,
+  pinLine,
+  queuedBody,
+  startNowItem,
+  taskHeadline,
+  waitingText,
+} from "../src/decision-view.ts";
 import { machineAsleep } from "../src/asleep.ts";
 
 const NOW = 1_800_000_000_000;
@@ -499,5 +507,40 @@ describe("waitingText and pinLine", () => {
     expect(pinLine(pinned, machines, { "acct-1": "Work" })).toBe("Pinned to Mac · Work");
     const machineOnly = { ...plain, spec: { ...plain.spec, pin: { deviceId: "mac" } } };
     expect(pinLine(machineOnly, machines, {})).toBe("Pinned to Mac");
+  });
+});
+
+describe("startNowItem", () => {
+  const GLOBAL: Reason = { code: "cap_reached", inFlight: 8, max: 8 };
+  const ACCOUNT: Reason = { code: "cap_reached", inFlight: 2, max: 2, scope: "account" };
+  const ok = (chosen: Decision["chosen"], candidates: readonly Candidate[]) =>
+    ({ kind: "ok", repo: "app", decision: { at: NOW, chosen, candidates } }) as const;
+
+  test("names the machine and account the preview chose", () => {
+    const preview = ok({ deviceId: "mac", exclave: "default", clone: "app" }, [scored("mac", "Mac", 1)]);
+    expect(startNowItem(preview)).toEqual({ sub: "Skip the queue — spawn on Mac · default", enabled: true });
+  });
+
+  test("is disabled when the preview turns every candidate down for more than the caps", () => {
+    const preview = ok(null, [
+      rejected("lxc", "LXC", [{ code: "offline" }]),
+      rejected("mac", "Mac", [GLOBAL, { code: "offline" }]),
+    ]);
+    expect(startNowItem(preview)).toEqual({ sub: "No machine can take it right now", enabled: false });
+    expect(startNowItem(ok(null, []))).toEqual({ sub: "No machine can take it right now", enabled: false });
+  });
+
+  test("stays enabled where only the caps hold it, which is what run-now lifts", () => {
+    const one = ok(null, [rejected("mac", "Mac", [GLOBAL, ACCOUNT]), rejected("lxc", "LXC", [{ code: "offline" }])]);
+    expect(startNowItem(one)).toEqual({ sub: "Skip the queue — spawn on Mac · work", enabled: true });
+    const two = ok(null, [rejected("mac", "Mac", [GLOBAL]), rejected("wsl", "WSL", [ACCOUNT])]);
+    expect(startNowItem(two)).toEqual({ sub: "Skip the queue — past the concurrency caps", enabled: true });
+  });
+
+  test("with no answer to go by it offers a plain skip", () => {
+    const plain = { sub: "Skip the queue", enabled: true };
+    expect(startNowItem(null)).toEqual(plain);
+    expect(startNowItem({ kind: "loading", repo: "app" })).toEqual(plain);
+    expect(startNowItem({ kind: "failed", repo: "app", message: "No leader." })).toEqual(plain);
   });
 });

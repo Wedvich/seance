@@ -1,7 +1,7 @@
 import type { JSX, TargetedKeyboardEvent } from "preact";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { TASK_SPEC_LIMITS, type DepAfter, type Machine, type TaskUntil } from "@seance/shared";
-import { describeDecision } from "../decision-view.ts";
+import { describeDecision, startNowItem } from "../decision-view.ts";
 import type { AfterSheetView } from "../queue-view.ts";
 import {
   EFFORTS,
@@ -18,6 +18,7 @@ import { completeSkill, matchSkills, promptSegments, skillIndex, skillToken } fr
 import { formatSeen, type Tile, type ViewModel } from "../view.ts";
 import { DecisionCard } from "./decision.tsx";
 import { HeaderMenu } from "./header-menu.tsx";
+import { Menu, MenuItem, useMenu } from "./menu.tsx";
 import { Seg } from "./seg.tsx";
 import { dotClass, Sheet, SheetItem } from "./sheet.tsx";
 import { SkillPicker, skillOptionId } from "./skill-picker.tsx";
@@ -52,6 +53,8 @@ export interface SpawnActions {
   readonly openSheet: (sheet: SheetKind) => void;
   readonly toggleWorktree: () => void;
   readonly spawn: () => void;
+  /** Queues as `spawn` does, then asks the leader to skip the queue for it. */
+  readonly startNow: () => void;
   readonly dismissLayer: () => void;
   readonly pickMachine: (deviceId: string | null) => void;
   readonly pickAccount: (accountId: string | null) => void;
@@ -391,6 +394,92 @@ function PreviewCard(props: {
   );
 }
 
+/**
+ * The footer's Queue, split when the leader answers `run-now`: two sibling
+ * buttons in one pill, never nested, so Tab reaches both and a press on one
+ * never fires the other. Without `run-now` it is the one button, unchanged.
+ */
+function QueueButton(props: {
+  view: ViewModel;
+  preview: PreviewState | null;
+  onQueue: () => void;
+  onStartNow: () => void;
+}): JSX.Element {
+  const { button, startNow } = props.view;
+  const menu = useMenu<HTMLDivElement>();
+  const face = (
+    <button
+      type="button"
+      className={button.busy ? "primary primary-busy" : "primary"}
+      disabled={!button.enabled}
+      onClick={props.onQueue}
+    >
+      {button.label}
+    </button>
+  );
+  if (!startNow) return face;
+  const item = startNowItem(props.preview);
+  return (
+    <>
+      <div ref={menu.anchor} className={button.busy ? "split split-busy" : "split"}>
+        {face}
+        <span className="split-divider" aria-hidden="true" />
+        <button
+          type="button"
+          className="split-more"
+          disabled={!button.enabled}
+          popovertarget={menu.id}
+          aria-label="More ways to start"
+          aria-haspopup="menu"
+          aria-expanded={menu.open}
+        >
+          <svg
+            className="split-chevron"
+            viewBox="0 0 24 24"
+            width="20"
+            height="20"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M6 15l6-6 6 6" />
+          </svg>
+        </button>
+      </div>
+      <Menu menu={menu} label="More ways to start" direction="up">
+        <MenuItem
+          label="Start now"
+          icon={<BoltIcon />}
+          sub={item.sub}
+          disabled={!item.enabled}
+          onClick={props.onStartNow}
+        />
+      </Menu>
+    </>
+  );
+}
+
+function BoltIcon(): JSX.Element {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="18"
+      height="18"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.8"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M13 3 4 14h7l-1 7 9-11h-7z" />
+    </svg>
+  );
+}
+
 export function SpawnScreen(props: {
   actions: SpawnActions;
   view: ViewModel;
@@ -727,14 +816,12 @@ export function SpawnScreen(props: {
 
       <footer className="footer">
         <p className="footer-status">{view.footerStatus}</p>
-        <button
-          type="button"
-          className={view.button.busy ? "primary primary-busy" : "primary"}
-          disabled={!view.button.enabled}
-          onClick={actions.spawn}
-        >
-          {view.button.label}
-        </button>
+        <QueueButton
+          view={view}
+          preview={view.previewShown ? preview : null}
+          onQueue={actions.spawn}
+          onStartNow={actions.startNow}
+        />
       </footer>
 
       {renderedSheet !== null && (

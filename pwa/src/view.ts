@@ -20,6 +20,7 @@ import {
   type RescanState,
   type SessionsView,
   type SheetKind,
+  type StartNowRefusal,
   type TaskAction,
   type Verdict,
 } from "./state.ts";
@@ -126,6 +127,8 @@ export interface ViewModel {
   readonly worktreeHint: string;
   readonly footerStatus: string;
   readonly button: PrimaryButton;
+  /** The button's chevron and its Start now menu: only while the verified leader answers `run-now`. */
+  readonly startNow: boolean;
   readonly ignoredNote: string | null;
   /** The pinned machine; null on auto, or when the pin names one the registry no longer lists. */
   readonly machine: Machine | null;
@@ -177,6 +180,7 @@ export interface AppState {
   readonly taskAction: TaskAction | null;
   /** The last queue action's refusal or failure, as a sentence; cleared by the next action or refresh. */
   readonly queueNotice: string | null;
+  readonly startNowRefusal: StartNowRefusal | null;
   /** A pause or resume in flight. */
   readonly pausing: boolean;
   /** Unreadable records being discarded. */
@@ -654,6 +658,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
     worktreeHint: form.worktree ? "Branches off the default branch on origin" : "Runs in the repo as it stands",
     footerStatus: deriveFooterStatus(state, machine, problem),
     button: deriveButton(state, machine, repo, problem),
+    startNow: deriveRunNowAvailability(relay),
     ignoredNote: deriveIgnoredNote(relay),
     machine,
     account,

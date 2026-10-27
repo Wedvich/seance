@@ -628,6 +628,86 @@
   }
 }
 
+/* Queue split when the leader answers run-now: two sibling buttons in one pill,
+   the face and a chevron opening the footer menu. Each paints its own half (no
+   overflow clip, which would cut their focus rings) and tints alone on press;
+   the press-down moves to the pill. */
+.split {
+  display: flex;
+  align-items: stretch;
+  border-radius: 12px;
+  background: var(--acc);
+  transition: transform 0.12s ease;
+}
+
+.split:has(:enabled:active) {
+  transform: scale(0.98);
+}
+
+.split .primary {
+  flex: 1;
+  min-width: 0;
+  border-radius: 12px 0 0 12px;
+}
+
+.split .primary:enabled:active {
+  transform: none;
+}
+
+/* A ring drawn over the neighbouring half rather than under it. */
+.split > :focus-visible {
+  position: relative;
+  z-index: 1;
+}
+
+.split-divider {
+  width: 1px;
+  margin: 9px 0;
+  background: color-mix(in srgb, var(--acc-fg) 28%, transparent);
+}
+
+.split-more {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 54px;
+  padding: 0;
+  border: 0;
+  border-radius: 0 12px 12px 0;
+  background: var(--acc);
+  color: var(--acc-fg);
+}
+
+.split-more:enabled:active,
+.split-more[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--acc-fg) 14%, var(--acc));
+}
+
+/* Points the way the menu opens; base.css's reduced-motion rule makes the turn instant. */
+.split-chevron {
+  transition: transform 0.14s ease;
+}
+
+.split-more[aria-expanded="true"] .split-chevron {
+  transform: rotate(180deg);
+}
+
+/* Disabled and busy: both halves the lone button's disabled tone. */
+.split:has(.primary:disabled),
+.split-more:disabled {
+  background: var(--sur2);
+  color: var(--fg2);
+  cursor: default;
+}
+
+.split:has(.primary:disabled) .split-divider {
+  background: var(--line);
+}
+
+.split-busy .split-more {
+  opacity: 0.5;
+}
+
 .quiet {
   display: block;
   width: 100%;

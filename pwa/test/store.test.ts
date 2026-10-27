@@ -1108,6 +1108,119 @@ describe("auto's error paths", () => {
   });
 });
 
+describe("start now", () => {
+  let timers: ReturnType<typeof captureTimers>;
+
+  beforeEach(() => {
+    timers = captureTimers();
+  });
+
+  afterEach(() => timers.restore());
+
+  /** One follow poll answered with `task`, run to the end of its chain. */
+  async function poll(client: ScriptedClient, task: Task): Promise<void> {
+    client.onQueue = async () => ({ tasks: [task], at: 2 });
+    const asked = client.queueRequests.length;
+    timers.fire(QUEUE_POLL_MS);
+    await until(() => client.queueRequests.length > asked, "the poll");
+    await drain();
+  }
+
+  test("queues as Queue does, then sends run-now once, on the first read that shows the task ready", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+    expect(created).toMatchObject({ state: "queued", spec: { repo: ORIGIN, prompt: "fix it" } });
+    expect(store.getState().verdict).toEqual({ kind: "queued", task: created });
+    // Not admitted yet: run-now would be refused not_waiting, so nothing goes with the create.
+    expect(client.runNows).toEqual([]);
+
+    await poll(client, { ...created, state: "queued" });
+    expect(client.runNows).toEqual([]);
+
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toEqual([created.id]);
+    await until(() => queuedState(store) === "reserved", "the reply shown");
+    expect(store.getState().startNowRefusal).toBeNull();
+
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toEqual([created.id]);
+  });
+
+  test("waits through blocked, and is never sent once a pass placed the task on its own", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+
+    await poll(client, { ...created, state: "blocked" });
+    await poll(client, {
+      ...created,
+      state: "reserved",
+      reservation: { deviceId: "dev-a", exclave: "default", clone: "app", expiresAt: 9 },
+    });
+    expect(queuedState(store)).toBe("reserved");
+    // Back to ready (a reservation that lapsed): the intent went with the placement.
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toEqual([]);
+  });
+
+  test("Queue never sends run-now, and a new enqueue drops a Start now still waiting", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    store.setPrompt("and this");
+    await store.spawn();
+    const second = client.creates[1];
+    if (second === undefined) throw new Error("second create missing");
+
+    await poll(client, { ...second, state: "ready" });
+    expect(queuedState(store)).toBe("ready");
+    expect(client.runNows).toEqual([]);
+  });
+
+  test("a refusal says why on the queued verdict; a nudge's read sends it as a poll's does", async () => {
+    const client = new ScriptedClient();
+    client.onRunNow = async () => ({ ok: false, code: "unplaceable", message: "held" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.startNow();
+    const created = firstCreate(client);
+
+    client.onQueue = async () => ({ tasks: [{ ...created, state: "ready" }], at: 2 });
+    client.nudge({ at: 2, tasks: [created.id] });
+    await until(() => store.getState().startNowRefusal !== null, "the refusal");
+    const message = "Something besides the concurrency caps keeps it from every machine — see why it waits.";
+    expect(store.getState().startNowRefusal).toEqual({ taskId: created.id, message });
+    expect(queuedState(store)).toBe("ready");
+    const verdict = store.getState().verdict;
+    if (verdict === null) throw new Error("verdict missing");
+    const body = describeVerdict(verdict, [], {}, 1, null, store.getState().startNowRefusal).body;
+    expect(body).toEndWith(`Couldn't start it at once: ${message}`);
+    // Nothing queues the Queue screen's notice for it: the verdict is where it was asked.
+    expect(store.getState().queueNotice).toBeNull();
+    detach();
+  });
+
+  test("a create whose answer was lost keeps the Start now for its retry", async () => {
+    const client = new ScriptedClient();
+    client.onCreate = async () => {
+      throw new RequestFailure("timeout", "store-put timed out after 10000ms", "relay");
+    };
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const verdict = store.getState().verdict;
+    if (verdict?.kind !== "unqueued") throw new Error("expected unqueued");
+    expect(verdict.runNow).toBe(true);
+
+    client.onCreate = async () => ({ ok: true, landedEarlier: true });
+    await store.retryEnqueue(verdict);
+    await poll(client, { ...firstCreate(client), state: "ready" });
+    expect(client.runNows).toEqual([firstCreate(client).id]);
+  });
+});
+
 describe("the queue screen", () => {
   let timers: ReturnType<typeof captureTimers>;
   let fake: ReturnType<typeof fakeHistory>;

@@ -1,6 +1,6 @@
 import { isSettled, TASK_PHASES, type Machine, type Task } from "@seance/shared";
 import { pinLine, queuedBody, taskHeadline, waitingText } from "./decision-view.ts";
-import type { FollowEnd, Verdict } from "./state.ts";
+import type { FollowEnd, StartNowRefusal, Verdict } from "./state.ts";
 
 /**
  * The verdict screen as data, derived in one pure pass like `deriveView`, so
@@ -67,6 +67,7 @@ export function describeVerdict(
   aliases: Readonly<Record<string, string>>,
   now: number,
   waitingNote: string | null,
+  startNowRefusal: StartNowRefusal | null = null,
 ): VerdictContent {
   if (verdict.kind === "queued") {
     const { task } = verdict;
@@ -80,6 +81,10 @@ export function describeVerdict(
       offlinePinNote(task, machines),
       // No leader to read it yet: the store holds it, and the note says so instead of promising a pickup.
       task.state === "queued" && waitingNote !== null ? `${waitingNote}.` : null,
+      // Moot once the task is on its way: a pass placed it after all.
+      startNowRefusal?.taskId === task.id && TASK_PHASES[task.state] === "waiting"
+        ? `Couldn't start it at once: ${startNowRefusal.message}`
+        : null,
     ].filter((part) => part !== null);
     return {
       // `lost` is unknown, not failed — the session may still be alive — so it reads like a dropped reply.

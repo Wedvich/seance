@@ -102,3 +102,20 @@ describe("a queued verdict's body", () => {
     expect(body).toContain("FullBox is offline — the task waits for it.");
   });
 });
+
+describe("a Start now refusal on the queued verdict", () => {
+  const refusal = { taskId: "t", message: "Something besides the concurrency caps keeps it from every machine." };
+  const body = (t: Task, r: typeof refusal | null): string =>
+    describeVerdict({ kind: "queued", task: t }, [], {}, NOW, null, r).body;
+
+  test("is said on its own task's verdict while the task still waits", () => {
+    expect(body(task("ready"), refusal)).toEndWith(`Couldn't start it at once: ${refusal.message}`);
+  });
+
+  test("is not said for another task, nor once a pass placed it after all", () => {
+    expect(body(task("ready"), { ...refusal, taskId: "other" })).not.toContain("Couldn't start it");
+    const reserved = task("reserved", { reservation: { ...at, expiresAt: NOW + 60_000 } });
+    expect(body(reserved, refusal)).not.toContain("Couldn't start it");
+    expect(body(task("ready"), null)).not.toContain("Couldn't start it");
+  });
+});

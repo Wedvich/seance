@@ -63,13 +63,21 @@ export type Verdict =
   /**
    * The store refused the task, or its answer never came; `message` says which.
    * `retry` is the task to put again: the same id, so a retry cannot queue twice.
+   * `runNow`: it was a Start now, and a retry is one too.
    */
   | {
       readonly kind: "unqueued";
       readonly message: string;
       readonly mayHaveLanded: boolean;
       readonly retry?: Task;
+      readonly runNow?: true;
     };
+
+/** Why a Start now's `run-now` left its task where it was, as a sentence, for the queued verdict of `taskId`. */
+export interface StartNowRefusal {
+  readonly taskId: string;
+  readonly message: string;
+}
 
 /**
  * Why a queued verdict stopped following its task before it settled.

@@ -105,8 +105,9 @@ export function Menu<T extends HTMLElement>(props: {
 
   const onToggle = (newState: string): void => {
     menu.onToggle(newState);
-    // Focus moves only for a keyboard open; a tap shows no highlighted row.
-    if (newState !== "open" || !menu.anchor.current?.matches(":focus-visible")) return;
+    // Focus moves only for a keyboard open; a tap shows no highlighted row. A
+    // group anchor holds its trigger, so focus inside it counts too.
+    if (newState !== "open" || !menu.anchor.current?.matches(":focus-visible, :has(:focus-visible)")) return;
     // preventScroll: a scroll here would trip the close-on-scroll listener.
     enabledItems(node.current)[0]?.focus({ preventScroll: true });
   };

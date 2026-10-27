@@ -14,7 +14,7 @@ import {
   type Task,
 } from "@seance/shared";
 import { machineAsleep, needsAttention } from "./asleep.ts";
-import { avoidLine, pinLine, taskHeadline, waitingText } from "./decision-view.ts";
+import { avoidLine, heldByCapsAlone, pinLine, taskHeadline, waitingText } from "./decision-view.ts";
 import { accountDisplayName, formatUntil } from "./machines-view.ts";
 import {
   deriveContinueAvailability,
@@ -275,7 +275,7 @@ function placementLine(task: Task, state: AppState): string | null {
 function heldByCapsOnly(task: Task): boolean {
   const { decision } = task;
   if (task.state !== "ready" || decision === undefined || decision.chosen !== null) return false;
-  return decision.candidates.some((c) => c.rejected.length > 0 && c.rejected.every((r) => r.code === "cap_reached"));
+  return decision.candidates.some(heldByCapsAlone);
 }
 
 function rowOf(
