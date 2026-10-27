@@ -638,7 +638,7 @@ nothing checked it. The last is the gap they leave.
 - `spawn` resolves `repo` by **name lookup against the cached scan set**
   (`repos.find(r => r.name === request.repo)`). A wire-supplied string is never
   joined onto a path root. `repo_not_found` is a security outcome, not just UX.
-  A continuation (`mode: "continue"`, Daemon, "Continuing a failed task") is the one spawn
+  A continuation (`mode: "continue"`, Daemon, "Continuing a session") is the one spawn
   with a cwd that is not the clone or a name beneath it, and that cwd comes only from this
   machine's own launch ledger, keyed by the continued task id (bounded by `TASK_ID_PATTERN`),
   never from the frame. The noted path must also be a worktree of the clone the `repo` name
@@ -1095,7 +1095,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | `forget-refused`                                                    | `relay/src/hub.ts`                                                                                                                                                                                                                                                                                                                                                                 | `shared/src/app-client.ts` — logged, never modelled                                                                                                                                                                                                                                                                                      |
 | `"ping"` / `"pong"`                                                 | both socket legs                                                                                                                                                                                                                                                                                                                                                                   | DO auto-response — answered without waking `hub.ts`; sweep reads the timestamps                                                                                                                                                                                                                                                          |
 | envelope `seal`/`open`, AAD, replay                                 | `shared/src/crypto.ts`                                                                                                                                                                                                                                                                                                                                                             | same file — both ends share it, or nothing decrypts                                                                                                                                                                                                                                                                                      |
-| ops `sessions` / `spawn`                                            | `sessions`: `pwa/src/store.ts` via `shared/src/app-client.ts`; `spawn`: no PWA sender since M4 PR 2 (older apps, `seanced spawn --now`)                                                                                                                                                                                                                                            | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`; a `mode: "continue"` spawn (the leader's dispatch of a continue task, sealed `from: "scheduler"`) resolves its worktree from the launch ledger first (Daemon, "Continuing a failed task")                                                                         |
+| ops `sessions` / `spawn`                                            | `sessions`: `pwa/src/store.ts` via `shared/src/app-client.ts`; `spawn`: no PWA sender since M4 PR 2 (older apps, `seanced spawn --now`)                                                                                                                                                                                                                                            | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`; a `mode: "continue"` spawn (the leader's dispatch of a continue task, sealed `from: "scheduler"`) resolves its worktree from the launch ledger first (Daemon, "Continuing a session")                                                                             |
 | op `rescan`                                                         | `pwa/src/store.ts` via `shared/src/app-client.ts`, from a Machine-sheet row                                                                                                                                                                                                                                                                                                        | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                                                                                                                                                                                                                                            |
 | op `despawn`                                                        | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                                                 | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                                                                                                                                                                                                                                                   |
 | `status` (daemon→relay)                                             | `daemon/src/run-collectors.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register                                                                                                                                                                                                                                                                                | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest on the socket attachment, kept in the entry on close/sweep until the next register                                                                                                                                                                                    |
@@ -1543,7 +1543,7 @@ an old peer's frames parse as before. Mixed versions:
   fields: an older daemon's parser skips them and its next write drops them, so after a downgrade
   and upgrade a running session is sampled again on the next pass, and an `oom` of any other
   shape reads as no sample. No rollout order.
-- `TaskSpec.continues` and `mode: "continue"` (2026-10-26, Daemon, "Continuing a failed task"):
+- `TaskSpec.continues` and `mode: "continue"` (2026-10-26, Daemon, "Continuing a session"):
   the mode is the gate. An older leader's `parseTaskRequest` refuses it, so a record carrying
   `continues` (which always carries the mode, the parser requires both together) is held unreadable
   rather than stripped and spawned as a fresh worktree; an older daemon's `isSpawnRequest` refuses the
@@ -1551,6 +1551,13 @@ an old peer's frames parse as before. Mixed versions:
   only to a verified leader advertising it. An older app drops the task from its list (the lenient
   queue parser, as for `pinAccount`). The reasons `continue_elsewhere` and `continue_unsupported` are
   dropped by an older reader like any unknown reason. No rollout order.
+- `CAPABILITIES.continueCancelled` and the failure code `continue_expired` (2026-10-27, Daemon,
+  "Continuing a session"): the capability is an unknown string to an older reader, which keeps the machine
+  (`isStringArray`), and a new client offers Continue on a cancelled task only to a machine advertising
+  it. `continue_expired` lives inside the sealed task record and parses as any bounded name; an older PWA
+  words it as a spawn refusal ("The machine refused the spawn", with the leader's message as text), an
+  older MCP prints the message, the same residual as `session_failed`. An older leader never expires a
+  continuation (today's behaviour). No relay change and no rollout order.
 - Reasons `skill_absent { skill }`, `auth_expired` and `base_unpushed`: an older app or
   leader drops an unknown reason from a decision and keeps the candidate.
 - `session-event` `done`: ingested since 2026-10-23 (Local op socket, "Session events"). A daemon
@@ -2356,14 +2363,15 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   (g) a clone without `refs/remotes/origin/HEAD` (no resolvable default branch) advertises no
   project skills.
 
-- **Continue routing** (2026-10-26, Daemon, "Continuing a failed task"). A task with
+- **Continue routing** (2026-10-26, Daemon, "Continuing a session"). A task with
   `spec.continues` has exactly one acceptable candidate, the `(deviceId, exclave, clone)` in
   `continues.at`: every other machine is `continue_elsewhere` (`continueFilter` in `route.ts`), a
   machine that does not advertise `CAPABILITIES.continueTask` is `continue_unsupported` (so an older
   daemon is never routed one), `judge` picks the clone by name rather than by skills and rejects another
   exclave `continue_elsewhere`, and a clone the machine no longer has is `repo_absent`. Every other filter,
   cap and score applies as to any task. The dispatch adds `continues: <old id>` to the spawn request.
-  A `not_continuable` reply fails the task with that code and message (`settle.ts` verdict).
+  A `not_continuable` reply fails the task with that code and message (`settle.ts` verdict). A continuation
+  that stays unplaceable expires `continue_expired` after `continueExpiryMs` ("Expiry").
 - **Routing caps** (M2's global, M3 item 5's per account). Both count `IN_FLIGHT` — reserved, running
   and `needs-input`, which keeps its slot — and neither counts `lost` ("`lost`" below).
   `globalMax` (8) puts `cap_reached` with no `scope` on every candidate, as M2's leaders sent
@@ -2537,7 +2545,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
 - **States** (`task.ts`; M2 item 1, M3's added in M3 item 4a, 2026-10-17): `queued →
   blocked → ready → reserved → running ⇄ needs-input → awaiting-merge → done`, with
   `failed`, `cancelled` and `lost` off-path, one transition table, an illegal move a thrown
-  bug. `awaiting-merge → failed` is merge expiry, and `lost → failed` covers `lost_expired` beside
+  bug. `awaiting-merge → failed` is merge expiry, `ready → failed` is a continuation's expiry (its alone), and `lost → failed` covers `lost_expired` beside
   `dispatch_unconfirmed` ("Expiry"). An app creates `queued`; only admission moves it ("Admission and dependencies").
   `reserved` also reaches `needs-input`, `awaiting-merge` and `done` directly. The
   alternative was a two-step through `running`. An event for a reserved task is one
@@ -2811,7 +2819,15 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   `ok: true`, as it does for any task that finished meanwhile. A machine that returns after expiry: its session keeps running
   there, untracked — nothing resurrects it or despawns it (`sessionChange`, `branchChange` and
   `settle` decline for a `failed` task), `cancel` answers `finished`, and it is ended by hand.
-  No alert and no audit line: nothing spawns or despawns, and the record is the trace.
+  A third arm (2026-10-27): a `ready` task with `spec.continues` more than `continueExpiryMs` (4 days,
+  docs/scheduler.md Settled defaults 19) past `createdAt` fails `continue_expired`, so an unplaceable
+  continuation no longer waits for a hand cancel; a task without `continues` is never expired, and a
+  pinned `ready` task gets none. Fixed in `DEFAULT_CONFIG`, not per machine or fleet setting: expiry runs
+  in the leader and leadership moves. It stays below the launch ledger's age, since past it the target
+  daemon would refuse anyway, so failing earlier is never premature. The message names the target
+  machine's rejection reasons from the leader's last in-memory decision for the task (`lastDecision`,
+  else the persisted one), or "its machine never took it"; a queue pause or other fleet-wide hold does not
+  stop the clock. Dependents fail `dependency_failed` in the same pass. No alert and no audit line: nothing spawns or despawns, and the record is the trace.
   Mixed versions: a leader older than this change reads `endedAt` as
   an unknown field and drops it on its next write of that record, so the new leader ages that task
   from `createdAt`, which is never later, so expiry only comes earlier; an older leader never
@@ -2846,7 +2862,7 @@ reuses the record helpers.
 - **A continuation's link** (2026-10-26): `TaskSpec.continues { task, at }` rides the sealed record
   as any spec field, parsed field by field by `parseTaskSpec` (and so by `createTask`, which seals the
   parsed copy, and every reseal by the leader). It is present exactly with `mode: "continue"`, which
-  gates older leaders (Daemon, "Continuing a failed task"). `at` is the old task's assignment copied at
+  gates older leaders (Daemon, "Continuing a session"). `at` is the old task's assignment copied at
   enqueue; the old record may be pruned.
 - **Unreadable is reported, never fatal, never deleted.** `RelayClient.listTasks` returns the
   tasks that bound beside `{ key, version, reason }` for each that did not; `getTask` returns
@@ -3792,7 +3808,7 @@ for the lot with its own `gh`.
   starts at the repo root and moves into the worktree after the trust
   check. A continuation is the exception: it starts in the worktree itself, so
   `spawnContinued` trusts that path in the clone's exclave config file, one more
-  `projects[<path>]` entry per continued worktree (Daemon, "Continuing a failed task").
+  `projects[<path>]` entry per continued worktree (Daemon, "Continuing a session").
   Memoized in-process per (config, repo) pair, so it costs one
   config read per repo per daemon run. Rejected: caching trust in
   state.json or `RepoEntry` (stale in the dangerous direction — revoking
@@ -4416,11 +4432,11 @@ for the lot with its own `gh`.
 - Config file: relay URL, bearer token, PSK, machine name, repo roots; the
   deviceId's seed lives in state.json.
 
-### Continuing a failed task (mode `"continue"`) — designed 2026-10-26
+### Continuing a session (mode `"continue"`) — designed 2026-10-26, widened 2026-10-27
 
-A task that failed `session_failed` (an OOM SIGKILL, a crash) leaves its worktree and its
-Claude conversation on disk. **Continue** queues a _new_ task that resumes that conversation
-(`claude --continue`) in the same worktree, on the same machine and clone. The PWA's failed card
+A task that failed `session_failed` (an OOM SIGKILL, a crash), or was cancelled after it was placed,
+leaves its worktree and its Claude conversation on disk. **Continue** queues a _new_ task that resumes that conversation
+(`claude --continue`) in the same worktree, on the same machine and clone. The PWA's failed or cancelled card
 carries the button, MCP has `continue_task { taskId, prompt? }` and the shell has `seanced
 continue <task-id> [--prompt …]`; all three write the same spec (`continuationSpec`,
 `shared/src/continue-task.ts`, the one place that says which tasks offer it — `continueOffer` — and which
@@ -4446,7 +4462,9 @@ fields carry over), under the same gates.
   the scheduler (`from` other than `"scheduler"`, the local socket, or a `client` other than
   `"scheduler"`), one without its own task id, or one naming itself as the task it continues; no
   ledger record of the old id (the ledger keeps a week or 128 launches, so continuing works only while
-  it holds the old launch); the old launch still in flight; a note with no path (a `here` launch, or
+  it holds the old launch); the old launch still in flight; a later launch in the ledger having noted the same worktree
+  (`EndedTasks.continuation`, below, "Two notes on one path": `--continue` would resume that later
+  session, so the message names its task id and the path); a note with no path (a `here` launch, or
   one from a daemon predating site notes); the noted repo not being the clone `repo` resolved to; a
   noted path that is not canonical (a symlink anywhere on it) or not under
   `<clone>/.claude/worktrees/`; the path gone; and `repo_not_found` for a repo the scan set no longer
@@ -4471,10 +4489,14 @@ fields carry over), under the same gates.
   conversation. The tmux window is named by `-n` and tagged with the new task id as ever.
 - **The seed is always written.** A continuation's stdin carries a fixed preamble (and `From the user:
   <prompt>` when one was given): "This session was resumed by séance in the same git worktree at
-  <path>, after the previous session ended unexpectedly (killed, crashed or out of memory) partway
-  through. Its last tool call may not have finished, and processes it started in the background may
-  still be running (only claude itself was killed): check the worktree's state and running processes
-  before restarting anything, then carry on where it left off." It never claims that background work is
+  <path>, after the previous session …", in one of two wordings chosen by the old task's own ledger
+  note `exit` (`Continuation.exit`, from the ledger and never a frame): nonzero says it "ended
+  unexpectedly (killed, crashed or out of memory) partway through", zero or none says it "was stopped
+  before it finished (cancelled from séance)". Both go on: "Its last tool call may not have finished, and
+  processes it started in the background may still be running (only claude itself was killed/stopped):
+  check the worktree's state and running processes before restarting anything, then carry on where it
+  left off." Whether a cancelled pane's exit is noted depends on harvest seeing it before despawn's
+  `kill-pane`; either outcome gives the "stopped" wording. It never claims that background work is
   gone: the pane checks see claude, not its surviving children. Two reasons, both load-bearing: the
   model should be told what happened, and Claude Code 2.1.310 shows a blocking "Resume from summary /
   full session" dialog on a resume of a session at least 70 minutes old and 100k tokens big (the typical
@@ -4498,8 +4520,10 @@ fields carry over), under the same gates.
   worktree is kept and reported. The new session locks nothing (it is `--continue`, not `--worktree`),
   so reap's live-pane rule is what protects the worktree while it runs.
 - **Two notes on one path.** The new task's ledger note records the same `path`, with a newer `siteAt`,
-  and branch-state gives a path to its newest `siteAt` (`daemon/src/branch-state.ts`), so the new task owns
-  the worktree's branch state while it runs. The old note stays until eviction; its late events fall on a
+  and branch-state gives a path to its newest `siteAt` (`pathOwners`, `daemon/src/launch-ledger.ts`, tie to
+  the later launch), so the new task owns the worktree's branch state while it runs. Continuation uses the
+  same rule: only the path's owner may be continued, so continuing the old task again after the new one
+  landed is refused `not_continuable` naming the owner, whatever the client saw. The old note stays until eviction; its late events fall on a
   `failed` task, which the leader ignores. A continuation that is itself killed can be continued again,
   since its note has the same path. The old note's `prUrl`, `branch` and `tip` are not carried:
   branch-state re-reads the live worktree, and a `session_failed` task under the default `until:
@@ -4512,24 +4536,52 @@ fields carry over), under the same gates.
   is exact, and the old task's dependents stay `dependency_failed`.
 - **Gates.** A client writes a continue spec only to a verified leader advertising `continueTask` (the
   PWA's `deriveContinueAvailability`, the MCP tool's and the CLI's `leaderAdvertises`, the broker before
-  it forwards), and `continueOffer` needs the task's machine to be listed and advertising it as well.
-  The same function, given the list the caller read the task from, also refuses a task that already has a
-  continuation in any state but `queued`, `blocked`, `ready`, `failed` or `cancelled` (so `reserved`,
-  `running`, `needs-input`, `lost`, `awaiting-merge` and `done` all hold it): the PWA's button, `continue_task`,
-  `seanced continue` and `get_queue`'s `continuable` share that one rule. The button shows only while the
-  failed task was not `here` and has an assignment. A `ready` continuation does not hide it: one can sit unplaceable
-  forever (the target re-keyed, the clone gone, a daemon rolled back — `queue_expired` applies only at
-  admission and `ready → failed` is illegal, so it waits until cancelled by hand, its reasons
-  `continue_elsewhere`, `repo_absent` or `continue_unsupported` saying why; a known residual). Two taps
-  from two clients make two tasks, and the daemon's per-path lock and live-pane check refuse the second
-  with `not_continuable`. The rule sees only the list it was given (at most `QUEUE_MAX_TASKS`), so a
-  finished continuation that has fallen off it no longer holds the old task, and a tap resumes the
-  conversation again once no pane runs in the worktree — a known residual. Rejected: the daemon refusing
-  any task whose path a newer ledger note owns. A continuation cancelled or failed by the scheduler after
-  it ran is offered no Continue itself, so that rule would strand the conversation for good.
-- **Not offered:** failures other than `session_failed` (`dispatch_unconfirmed` and `lost_expired` may
-  never have launched, and the daemon's ledger check would refuse anyway; a follow-up could widen
-  `continueOffer`), `here` runs, and an automatic continue after an OOM kill — continuing is a manual act.
+  it forwards), and `continueOffer` needs the task's machine to be listed and advertising it as well. A
+  `cancelled` task (with an assignment) additionally needs the machine to advertise
+  `CAPABILITIES.continueCancelled`: an older daemon has `continueTask` but applies neither the
+  ledger-owner rule nor the seed wording. The same function, given the list the caller read the task from,
+  also refuses a task whose session a continuation took over (`tookOver`): one that is not `queued`,
+  `blocked` or `ready`, not `failed` with a code outside {`session_failed`, `lost_expired`,
+  `merge_expired`} (a positive list: a false "did not take over" costs one daemon refusal, a false "took
+  over" strands the conversation), and not `cancelled` without an assignment. So the button moves to the
+  newest continuation that landed: when Y fails `session_failed` or is cancelled after placement,
+  Continue disappears from X and appears on Y, and a Y that failed `continue_expired` or
+  `not_continuable` leaves X offered. The PWA's button, `continue_task`, `seanced continue` and
+  `get_queue`'s `continuable` share that one rule. The button shows only while the task was not `here`
+  and has an assignment. Two taps from two clients make two tasks, and the daemon's per-path lock and
+  live-pane check refuse the second with `not_continuable`. Residuals, each accepted:
+  - _A `ready` continuation that is never placed_ (the target re-keyed, the clone gone, a daemon rolled
+    back; reasons `continue_elsewhere`, `repo_absent` or `continue_unsupported`) no longer waits for a hand
+    cancel: past `SchedulerConfig.continueExpiryMs` (4 days, fixed in `DEFAULT_CONFIG`, below the ledger's
+    age, docs/scheduler.md Settled defaults 19) since `createdAt` it fails `continue_expired` (Scheduler,
+    "Expiry"). The old task is then offered again. Existing stuck continuations fail in the first pass of a
+    new leader, which is the clean-up, and visible.
+  - _The list a client sees is at most `QUEUE_MAX_TASKS`_, so a finished continuation fallen off it no
+    longer holds the old task; the daemon's ledger rule (the newest note on the path owns it) now refuses
+    that tap, naming the owner, for the whole ledger horizon.
+  - _A cancelled task with an assignment is not proof it landed._ A `lost`-from-`reserved` task carries
+    `assignment` and cancel drops `reservedAt`. Such an X is offered and the daemon refuses it ("no worktree
+    of it was noted" / "holds no launch"), harmless; a Y in that state counts as having taken over and hides
+    X, a narrow stranding.
+  - _`createdAt` is client-written_, so a client clock days behind shortens the 4-day window, as it already
+    does `queue_expired`'s 30.
+  - _A continuation that landed but ended with a code outside the landed list_ (`dispatch_unconfirmed` on a
+    daemon whose ledger doesn't reach the reservation, a `task_launched` re-dispatch refusal) owns the path
+    under the ledger rule while being offered nowhere: that worktree's conversation is unreachable through
+    séance until the ledger forgets it. Rare; `claude --continue` by hand still works.
+  - _A cancelled task stopped before it committed_ has a clean worktree whose tip is merged by reap's rules,
+    so reap (default `minAgeDays`) may remove it while Continue is still offered; the daemon then refuses
+    "its worktree … is gone (removed or reaped)", an expected refusal.
+    Moved out of Rejected: the daemon refusing any task whose path a newer ledger note owns. The objection
+    was that a continuation cancelled or failed after it ran would be offered no Continue itself and the
+    conversation stranded; every terminal state that can still land a continuation now offers Continue itself.
+- **Not offered:** a task cancelled before it was placed (no session), a task cancelled after its session
+  had finished (`endedAt`, from `awaiting-merge`: Follow up's job, like `done`), `done`, `here` runs, an
+  automatic continue after an OOM kill (manual by decision), and failures other than `session_failed`:
+  `lost_expired`, `merge_expired` and `dispatch_unconfirmed` all fire after the ledger's 7-day eviction
+  clock or mean the ledger proved nothing, so the daemon would refuse. The relation is pinned by a test
+  (`scheduler/test/expiry.test.ts`: `continueExpiryMs` below `LAUNCH_LEDGER_MAX_AGE_MS`, `lostExpiryMs` and
+  `mergeExpiryMs` at or above it); shortening either side means revisiting this paragraph.
 - **Rollout.** No relay change (the app leg already creates under `task:`). The new mode is the
   forward-compat gate: an older leader's `parseTaskRequest` refuses `"continue"`, so a record carrying
   `continues` (which always carries the mode) is held unreadable there, never spawned as a fresh worktree
@@ -5242,12 +5294,13 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   relevant `QUEUE_MAX_TASKS`. Each row shows what it waits on ("After <title> (opened)") and its batch place ("Batch #2"), and offers **Follow up** while the task can still be waited on or once it
   is `done`: the form takes that task as its After edge at `opened`. See
   "Authoring from the auto form" below.
-- **Continue on the Queue screen** (2026-10-26, Daemon, "Continuing a failed task"). A failed
-  `session_failed` card carries a single-tap **Continue** when `continueOffer` allows it (the task was
-  not `here`, has an assignment, its machine is listed and advertises `continueTask`), the verified
-  leader advertises it (`deriveContinueAvailability`), and no continuation of it has the session
-  (`continueOffer`'s rule: any state but `queued`, `blocked`, `ready`, `failed` or `cancelled`; a `ready` one
-  does not hide it, since it may never be placeable). The tap re-checks the leader and the offer before
+- **Continue on the Queue screen** (2026-10-26, widened 2026-10-27, Daemon, "Continuing a session"). A failed
+  `session_failed` card, or a cancelled one that was placed, carries a single-tap **Continue** when
+  `continueOffer` allows it (the task was not `here`, has an assignment, its machine is listed and
+  advertises `continueTask`, and for a cancelled one `continueCancelled`), the verified leader advertises
+  it (`deriveContinueAvailability`), and no continuation of it took over the session (`continueOffer`'s
+  `tookOver` rule: the button moves along the chain to the newest landed continuation; a `ready` one does
+  not hide it, until it expires `continue_expired`). The tap re-checks the leader and the offer before
   writing, since either may have changed since the card was drawn, then writes the continuation spec with
   `client: "pwa"` through `createTask`, merged into the list as any enqueue is; a refused gate or offer or
   a store answer becomes the screen's notice. The continuation's card
@@ -5501,9 +5554,9 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   install` does per exclave, and the tool allowed there (`mcp__seance__report_task_done` in its
   permissions): a call stopped at a permission prompt is no report. Without either the report is
   never made and the task waits for `mark-done`, its exit, or `merge_expired`.
-- **`continue_task { taskId, prompt? }`** (2026-10-26, Daemon, "Continuing a failed task"). Enqueues
-  a continuation of a `session_failed` task: the session's conversation is resumed in its worktree, on
-  the same machine and clone, as a new task (the old one stays failed). It reads the leader's queue for
+- **`continue_task { taskId, prompt? }`** (2026-10-26, Daemon, "Continuing a session"). Enqueues
+  a continuation of a `session_failed` or cancelled (after placement) task, the newest in a chain: the session's conversation is resumed in its worktree, on
+  the same machine and clone, as a new task (the old one stays as it was). It reads the leader's queue for
   the task (an id it does not list is "not in the leader's list (pruned, or past the N most relevant)"),
   asks `continueOffer` (shared with the PWA) whether it can be continued, writes the spec
   `continuationSpec` makes with `client: "mcp"`, and enqueues it through `enqueueAuto` under the `mcp`
@@ -5739,8 +5792,8 @@ names the app's queue, not `get_queue`/`cancel_task`, which a shell cannot call.
   The hint does not suggest cancelling: an app's cancel needs a verified leader, and apps cannot delete `task:` records.
 - _Prompt bound:_ a prompt over the scheduler's bound is refused naming `--now` as the way past it, since
   a direct spawn is not bound by it. MCP has no such escape.
-- _`seanced continue <task-id> [--prompt <text>]`_ (2026-10-26, Daemon, "Continuing a failed task"):
-  `continueAuto` in `cli-auto.ts` does what MCP's `continue_task` does (leader gate, `queue()` lookup,
+- _`seanced continue <task-id> [--prompt <text>]`_ (2026-10-26, Daemon, "Continuing a session"):
+  `continueAuto` in `cli-auto.ts` does what MCP's `continue_task` does for a failed or cancelled task, the newest in a chain (leader gate, `queue()` lookup,
   `continueOffer`, `continuationSpec` with `client: "cli"`, `enqueueAuto` under `origin=cli`) through
   `autoFleet`, so a keyless box brokers it. It never touches the local op socket's `spawn`: a continue
   spawn stays scheduler-only, and a continue from a terminal is a tracked task, not a hand-run `claude
@@ -6039,8 +6092,7 @@ app-role relay client with the key it imported at start.
   spawn is the scheduler's, and `cleanSpawn` drops `continues`). What the keyless process gains is queueing
   a continuation of a task the leader lists, nothing a keyed client could not already write; the
   daemon that runs it still resolves the worktree from its own ledger and takes the spawn from the
-  scheduler only. A hand-run `claude --continue` is untracked by design (Daemon, "Continuing a failed
-  task"). The parsed value, a fresh object
+  scheduler only. A hand-run `claude --continue` is untracked by design (Daemon, "Continuing a session"). The parsed value, a fresh object
   holding known fields only, is what is sealed. `cancel` takes a parsed task ref. `queue` and
   `accounts` take no payload and anything extra is dropped. The gates `leaderTakesReported` and
   `pinAccountGateError` stay in the client, as on the keyed path. Rejected: duplicating them

@@ -550,7 +550,7 @@ of M4 has landed.
   - A spawn that times out before claude registers and then dies untitled gets no status
     (harvest takes only titled panes; reap closes it), so its task settles `done` as before.
 
-- **Continue a failed task (new, 2026-10-26).** A task that failed `session_failed` (an OOM
+- **Continue a failed task (new, 2026-10-26; widened 2026-10-27).** A task that failed `session_failed` (an OOM
   kill) leaves its worktree and its conversation on disk, and the only remedy was a new task from
   scratch. A **Continue** action queues a new task that resumes the conversation (`claude --continue`)
   in the same worktree.
@@ -566,7 +566,11 @@ of M4 has landed.
     `claude session … (pid N start …)` form with a dead pid unlocked, any other lock refused; manual only, for
     `session_failed` alone (not `here` runs, not an automatic continue after an OOM kill). Surfaces: the
     PWA's failed card, MCP's `continue_task`, the CLI.
-  - _As built:_ DESIGN.md, _Daemon_, "Continuing a failed task", records it and what was rejected.
+  - _Follow-up (2026-10-27), landed:_ a `ready` continuation expires `continue_expired` after 4 days, a task
+    cancelled after placement is continuable (`continueCancelled`), the offer moves to the newest landed
+    continuation and the daemon refuses an older task whose worktree a later launch noted, and the seed is
+    worded from the old note's exit.
+  - _As built:_ DESIGN.md, _Daemon_, "Continuing a session", records it and what was rejected.
 
 - **Asleep machines on the Queue screen (new, 2026-10-26) — Done.** A task placed on a MacBook whose
   lid closes keeps reading "It's waiting for input on MacBook M4 Pro · default" until
@@ -1025,6 +1029,14 @@ same PR, with the reason.
     the slots come back only after the connected-read window (~2.5 min, DESIGN.md) plus the grace; `lostAfterMs` (10)
     stays 15 min, because `lost` writes records and settles reservations. Nothing else counts them:
     the batch-bound carve-out went with batch strategies (2026-10-26). DESIGN.md "Routing caps" has the rule and the rejected alternative.
+
+19. **A continuation `ready` over 4 days fails `continue_expired`** (`continueExpiryMs`, owner,
+    2026-10-27). Without it an unplaceable continuation (target re-keyed, clone gone, daemon rolled back)
+    waits until cancelled by hand. Fixed in `DEFAULT_CONFIG`, not per machine: expiry runs in the leader and
+    leadership moves. Not tied to reap's `minAgeDays`, which is about worktrees, not queue entries. The
+    ceiling is the launch ledger's age (7 days): past it the target daemon refuses the continuation anyway,
+    so failing earlier is never premature; a test pins the relation. A pinned (`pin.deviceId`) `ready`
+    task gets no expiry.
 
 ## Risks / unknowns
 
