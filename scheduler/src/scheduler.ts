@@ -95,6 +95,18 @@ export type ByHandResult =
 export type CancelResult = ByHandResult;
 export type MarkDoneResult = ByHandResult;
 
+/**
+ * `runNow`: the task as reserved, or why not. `not_waiting`: it is not `ready`
+ * (waiting on admission or deps, or already placed). `unplaceable`: something
+ * besides the caps holds it. `conflict`: it moved under the write.
+ */
+export type RunNowResult =
+  | { readonly ok: true; readonly task: Task }
+  | {
+      readonly ok: false;
+      readonly code: "not_found" | "dispatching" | "finished" | "not_waiting" | "unplaceable" | "conflict";
+    };
+
 /** What a settle by hand knew before its write: the task as it was, whether its session was live, and whether one was despawned. */
 interface ByHand {
   readonly task: Task;
@@ -401,6 +413,11 @@ export class Scheduler {
   preview(spec: TaskSpec): Decision {
     const now = this.#now();
     const task: Task = { id: "", spec, state: "ready", createdAt: now };
+    return this.#route(task, now);
+  }
+
+  /** `task` routed over the current fleet and queue, as a pass would. */
+  #route(task: Task, now: number, uncapped = false): Decision {
     return capped(
       route({
         task,
@@ -411,6 +428,7 @@ export class Scheduler {
         holds: this.#pause.holds,
         fleetQuota: this.#fleetQuota(),
         released: this.#released(now),
+        uncapped,
       }),
     );
   }
@@ -641,6 +659,31 @@ export class Scheduler {
     });
   }
 
+  /**
+   * Places a `ready` task now, past both concurrency caps (`RouteInput.uncapped`)
+   * and nothing else: a pause, the quota line, disk, a pin and every other filter
+   * still hold it, answered `unplaceable` with nothing written. Once placed it
+   * counts toward the caps like any task, so the fleet may run over them until
+   * the count drains — as when a machine wakes with released slots. One-shot:
+   * nothing on the record says it was forced, so a takeover mid-way leaves it
+   * `ready`, waiting as before.
+   */
+  async runNow(taskId: string): Promise<RunNowResult> {
+    const task = this.task(taskId);
+    if (task === undefined) return { ok: false, code: "not_found" };
+    if (FINISHED.includes(task.state)) return { ok: false, code: "finished" };
+    if (task.state === "reserved" || this.#dispatches.has(taskId)) return { ok: false, code: "dispatching" };
+    if (task.state !== "ready") return { ok: false, code: "not_waiting" };
+    const now = this.#now();
+    const decision = this.#route(task, now, true);
+    if (decision.chosen === null) return { ok: false, code: "unplaceable" };
+    const reserved = await this.#reserve(taskId, decision.chosen, decision, now);
+    if (reserved !== null) return { ok: true, task: reserved };
+    // A pass may have placed it meanwhile, which is what was asked.
+    const current = this.task(taskId);
+    return current?.state === "reserved" ? { ok: true, task: current } : { ok: false, code: "conflict" };
+  }
+
   #connected(deviceId: string): boolean {
     return this.#fleet.machines().some((m) => m.deviceId === deviceId && m.connected);
   }
@@ -685,31 +728,17 @@ export class Scheduler {
     // usage and the caps. The spawns are not awaited: one slow machine
     // must not hold every other placement, TTL and absence check behind its 90s
     // timeout.
-    for (const task of ready) {
+    for (const seen of ready) {
+      // A `runNow` may have placed it while an earlier reservation was awaited: its decision must not
+      // be overwritten with this snapshot's, which nothing would clear while it runs.
+      const task = this.task(seen.id);
+      if (task?.state !== "ready" || this.#dispatches.has(task.id)) continue;
       const now = this.#now();
-      const decision = capped(
-        route({
-          task,
-          machines: this.#fleet.machines(),
-          tasks: this.tasks(),
-          now,
-          config: this.#config,
-          holds: this.#pause.holds,
-          fleetQuota: this.#fleetQuota(),
-          released: this.#released(now),
-        }),
-      );
+      const decision = this.#route(task, now);
       this.#decisions.set(task.id, decision);
       if (decision.chosen === null) continue;
-      const reservation: Reservation = { ...decision.chosen, expiresAt: now + this.#config.reservationTtlMs };
       // oxlint-disable-next-line no-await-in-loop -- each route must see the reservation before it
-      const reserved = await this.#update(task.id, (current) =>
-        // Routed from a snapshot: a task that moved meanwhile (a cancel) keeps what it moved to.
-        current.state === "ready" ? advance(current, "reserved", { reservation, decision, reservedAt: now }) : null,
-      );
-      if (reserved === null) continue;
-      this.#decisions.delete(task.id);
-      this.#launch(reserved, reservation, decision);
+      await this.#reserve(task.id, decision.chosen, decision, now);
     }
     // Lazily: a finished task an app is about to name in `deps` must outlive the refresh that tells us of it.
     await this.#pruneDue();
@@ -779,6 +808,27 @@ export class Scheduler {
    */
   async #pruneDue(): Promise<void> {
     if (this.#held.size + this.#unreadable.size >= this.#config.pruneAt) await this.prune();
+  }
+
+  /**
+   * Reserves a `ready` task where `decision` chose and sends its spawn: the
+   * task as reserved, or null when it moved since it was routed (a cancel, or
+   * another reservation) and keeps what it moved to.
+   */
+  async #reserve(
+    id: string,
+    chosen: NonNullable<Decision["chosen"]>,
+    decision: Decision,
+    now: number,
+  ): Promise<Task | null> {
+    const reservation: Reservation = { ...chosen, expiresAt: now + this.#config.reservationTtlMs };
+    const reserved = await this.#update(id, (current) =>
+      current.state === "ready" ? advance(current, "reserved", { reservation, decision, reservedAt: now }) : null,
+    );
+    if (reserved === null) return null;
+    this.#decisions.delete(id);
+    this.#launch(reserved, reservation, decision);
+    return reserved;
   }
 
   /**

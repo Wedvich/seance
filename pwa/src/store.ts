@@ -503,6 +503,10 @@ export class Store {
     return this.#queue.markDone(taskId);
   }
 
+  runNow(taskId: string): Promise<void> {
+    return this.#queue.runNow(taskId);
+  }
+
   continueTask(taskId: string): Promise<void> {
     return this.#queue.continueTask(taskId);
   }

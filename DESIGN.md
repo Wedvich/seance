@@ -1106,7 +1106,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | `store-listed` / `store-record` / `store-written` / `store-refused` | `relay/src/hub.ts` `#onStoreFrame`, answering from `relay/src/store.ts`                                                                                                                                                                                                                                                                                                            | `parseStoreReply` in `shared/src/parse.ts`; correlated on `re` by the app-client, which settles a reply it cannot read as `null` at once, and by the queue store                                                                                                                                                                         |
 | `store-changed`                                                     | `relay/src/hub.ts` `#nudgeLeader`, to the leader's term socket after a write it did not make; `#nudgeApps`, to other apps after an `account:` write                                                                                                                                                                                                                                | `daemon/src/relay-client.ts` `onStoreChanged` → `daemon/src/leader.ts` `Leader.onStoreChanged`, via `parseStoreChanged` (`task:` keys only); `shared/src/app-client.ts`, via `parseStoreChanged`, to `onStoreChanged` listeners (`pwa/src/account-store.ts` re-reads an `account:` key on one)                                           |
 | records `task` / `pause-state` (at rest)                            | `task`: `sealTaskRecord` (`shared/src/task-record.ts`), by the app-client's `createTask` and the queue store; a continue task (`TaskSpec.continues`, from `shared/src/continue-task.ts`) is written the same way, and the leader dispatches it as a `spawn` with `mode: "continue"` (`#dispatch` in `scheduler/src/scheduler.ts`); `pause-state`: `sealAtRest`, by the queue store | `task`: `openTaskRecord` (`shared/src/task-record.ts`) — `openAtRest`, no replay guard, sealed `to: "scheduler"`, then `bindTaskRecord`; `pause-state`: `openAtRest` and `parsePauseRecord` in the queue store, held by `Scheduler.load`                                                                                                 |
-| ops `mark-done` / `pause` / `resume` / `discard`                    | an app via `shared/src/app-client.ts`: `pwa/src/scheduler-store.ts` (the Queue screen)                                                                                                                                                                                                                                                                                             | `daemon/src/leader-requests.ts` `answer`, parsed by `parsePauseRequest` / `parseResumeRequest` / `parseDiscardRequest`, run by `Scheduler.pause` / `resume`, `Scheduler.markDone` and `Scheduler.discard`                                                                                                                                |
+| ops `mark-done` / `run-now` / `pause` / `resume` / `discard`        | an app via `shared/src/app-client.ts`: `pwa/src/scheduler-store.ts` (the Queue screen)                                                                                                                                                                                                                                                                                             | `daemon/src/leader-requests.ts` `answer`, parsed by `parsePauseRequest` / `parseResumeRequest` / `parseDiscardRequest`, run by `Scheduler.pause` / `resume`, `Scheduler.markDone`, `Scheduler.runNow` and `Scheduler.discard`                                                                                                            |
 | op `queue-changed` (→`"app"`)                                       | `daemon/src/leader.ts` on the term's leg, as `from: "scheduler"`, coalesced to one per 500 ms                                                                                                                                                                                                                                                                                      | `shared/src/app-client.ts`, via `parseQueueChanged`: heard only by an app client (one with no term) and only `from: "scheduler"`, handed to `onQueueChanged` listeners — `pwa/src/scheduler-store.ts` re-reads on it                                                                                                                     |
 | op `branch-state` (→`"scheduler"`)                                  | `daemon/src/branch-state.ts` via `RelayClient.sendBranchState()`; on the leader's own machine `run-capabilities.ts` hands it in process to `leader.onBranchState` instead (Scheduler, "Branch state")                                                                                                                                                                              | `daemon/src/leader.ts` `onEvent`, via `parseBranchState`, into the one `onBranchState` sink, which feeds the library                                                                                                                                                                                                                     |
 | record `quota` (at rest)                                            | `sealFleetQuotaRecord` (`shared/src/fleet-quota.ts`), by each daemon's fleet quota writer (`daemon/src/fleet-quota.ts`) on its own socket                                                                                                                                                                                                                                          | `openFleetQuotaRecord` (`shared/src/fleet-quota.ts`) — `openAtRest`, sealed `to: "app"`, `parseFleetQuotaRecord`, sealed `version` the store's — by the app-client's `refreshFleetQuota` (the PWA and the leader's leg) and the writer; stored under `quota:fleet` (_Scheduler_, "Fleet quota record")                                   |
@@ -1465,6 +1465,14 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   `after: "merged"` dependent. Refused `task_not_found`, `dispatching` (`reserved`: its spawn
   is in flight), `finished`, `conflict`, and, for a live session, `despawn_failed` (its
   machine refused; the task is unchanged), as `cancel` is.
+- `run-now { taskId }` (`TaskRef`) → `{ task }`, the task as reserved: `Scheduler.runNow`
+  (2026-10-27; Scheduler, "Routing caps"). Routes one `ready` task at once with neither
+  concurrency cap applied, and reserves and dispatches it as a pass would. Refused
+  `task_not_found`, `finished`, `dispatching` (`reserved`, or its spawn still out), `not_waiting`
+  (not `ready`: waiting on admission or deps, or placed), `unplaceable` (another reason holds it
+  from every candidate — nothing is written, and the held decision stays the pass's), and
+  `conflict`. Only to a leader advertising `CAPABILITIES.runNow`; an older one refuses the op
+  as unknown.
 - `pause { until, account? }` (`PauseRequest`) and `resume { account? }` (`ResumeRequest`) →
   `{ holds }` (`PauseResponse`), every hold in force after the change (M3 item 5; Scheduler,
   "Pause"). `queue` replies carry the same `holds`.
@@ -2098,7 +2106,7 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   build's `submit` is refused.
   The payload is parsed into a fresh value before anything reads it, each op by its own parser
   (`parseQueueRequest`, `parseTaskRequest` for `route-preview`, bounded by `TASK_REQUEST_LIMITS`,
-  `parseTaskRef` for `cancel` and `mark-done`, `parsePauseRequest`, `parseResumeRequest`): the
+  `parseTaskRef` for `cancel`, `mark-done` and `run-now`, `parsePauseRequest`, `parseResumeRequest`): the
   leader is a PSK holder that reserves, holds and spawns from it.
   The answer is sealed from this machine to `env.from` and goes out on the daemon socket
   (`RelayClient.reply`, sized like every daemon reply, so an oversized one is `too_large`), not on
@@ -2106,7 +2114,7 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   daemon's own state writes nothing the term fence exists to stop. Every reply is
   `T | SchedulerError` (`SCHEDULER_ERROR_CODES`): `invalid_request`, `not_ready` while takeover
   runs (the queue is the store's unreconciled view until then), `cancel`'s and `mark-done`'s own (`task_not_found`, `dispatching`, `finished`,
-  `despawn_failed`, `conflict`), `internal_error` when the handler throws or a cancel's despawn
+  `despawn_failed`, `conflict`), `run-now`'s `not_waiting` and `unplaceable`, `internal_error` when the handler throws or a cancel's despawn
   ran and the `cancelled` write was then revoked (`unrecorded` in the library: the session may
   already have ended, the term ends, and MCP shows that message, which says so), and
   `not_leader` (below). `queue`
@@ -2131,15 +2139,16 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   task as it now stands and ticking, since what waited on a merged dependency is released by it;
   its refusals are `task_not_found`, `dispatching`, `finished`, `conflict` and, where
   it ends a live session first, `despawn_failed`, with a revoked write after the despawn `unrecorded`, as
-  for `cancel`. `pause` and `resume` (M3 item 5) are `Scheduler.pause` and
+  for `cancel`. `run-now` is `Scheduler.runNow`, answered with the task as reserved; it does not
+  tick, since its own dispatch is the work. `pause` and `resume` (M3 item 5) are `Scheduler.pause` and
   `resume` (_The library_, "Pause"), answered with every hold in force after the change;
   `resume` ticks, so what the hold kept waiting is placed at once. Their refusals:
   `reset_unknown` (a reset hold on an account no reading gives a reset for), `conflict` (the
   record kept changing under the write), and `invalid_request` past `MAX_PAUSE_HOLDS - 1` account holds. `queue`
   carries the holds in force (`QueueResponse.holds`, absent only from M2's leaders); they come
   off `REPLY_JSON_BUDGET` before any task, since a reader refuses a reply whose holds do not
-  parse — 32 at every bound still seal under the envelope. **All four are audited** (`queueAudit`
-  in `audit.ts`) as `audit queue origin=relay op=cancel|mark-done|pause|resume id=<request>`, with
+  parse — 32 at every bound still seal under the envelope. **All five are audited** (`queueAudit`
+  in `audit.ts`) as `audit queue origin=relay op=cancel|mark-done|run-now|pause|resume id=<request>`, with
   `task=<task>` or `account=<account>` where one applies, and `ok` or `refused
   code=…`: the request id finds the app's side, and the task id joins the line to the
   `task=` on the spawn it leads to, on whichever machine runs it. The prompt is never on it —
@@ -2408,6 +2417,19 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   writes and a misleading label; releasing slots needs none of that. The decision's
   `cap_reached` count is the released-free one and does not say how many were left out: saying
   so would take a wire field on `Reason`.
+  **Run now lifts both caps for one task** (2026-10-27). The `run-now` op (`Scheduler.runNow`)
+  routes a `ready` task with `RouteInput.uncapped`, which leaves out the global and the account
+  `cap_reached` and nothing else: a pause, the quota line and spill, disk, pins, skills and every
+  machine filter still hold it, and then it is refused `unplaceable` with nothing written. Placed,
+  it counts toward both caps like any task, so the fleet runs over them and nothing new is placed
+  until the count drains, as when a machine wakes with released slots. One-shot: the record keeps no
+  mark of it beyond its decision (with no `cap_reached` on the winner), so a takeover between the
+  route and the write leaves the task `ready`, waiting as before; the audit line is the record that
+  a person forced it. Why: a person sometimes wants one task started past a cap they set for
+  unattended work, and lowering the cap for it and raising it again is two config changes and a
+  race. Rejected: a lasting flag on the task record (`spec.uncapped`), which would survive a
+  takeover but needs the record schema widened and an older leader made to refuse it, for a tap
+  that a person can repeat. Deferred: also lifting the quota line, for spending credits on purpose.
 - **Pause** (`pause.ts`, M3 item 5). `queue:pause` holds the holds (`PauseHold`): one on the
   whole queue, one per account, at most `MAX_PAUSE_HOLDS` — account holds stop one short of
   it, so a whole-queue pause always fits. The library reads it on `load()` —
@@ -5304,7 +5326,11 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   queue. The same cap applies as in the leader's reply: a full reply says it shows the most
   relevant `QUEUE_MAX_TASKS`. Each row shows what it waits on ("After <title> (opened)") and its batch place ("Batch #2"), and offers **Follow up** while the task can still be waited on or once it
   is `done`: the form takes that task as its After edge at `opened`. See
-  "Authoring from the auto form" below.
+  "Authoring from the auto form" below. A `ready` card whose latest decision turned some
+  candidate down for `cap_reached` alone carries a single-tap **Run now** (`heldByCapsOnly` in
+  `queue-view.ts`) while the verified leader advertises `runNow`; it sends `run-now` and merges
+  the reply, the task as reserved. The leader routes again on the tap, so a stale card costs a
+  refusal (its notice), never a placement the cap-free route would not make.
 - **Continue on the Queue screen** (2026-10-26, widened 2026-10-27, Daemon, "Continuing a session"). A failed
   `session_failed` card, or a cancelled one that was placed, carries a single-tap **Continue** when
   `continueOffer` allows it (the task was not `here`, has an assignment, its machine is listed and

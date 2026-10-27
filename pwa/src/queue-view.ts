@@ -19,6 +19,7 @@ import { accountDisplayName, formatUntil } from "./machines-view.ts";
 import {
   deriveContinueAvailability,
   deriveReportedAvailability,
+  deriveRunNowAvailability,
   failedBody,
   formatSeen,
   originLabel,
@@ -53,6 +54,8 @@ export interface QueueRow {
    * advertises it, the leader does too, and no continuation of it is already live or settled.
    */
   readonly canContinue: boolean;
+  /** A `ready` task only the concurrency caps hold: "Run now" places it past them. */
+  readonly canRunNow: boolean;
   /** What it waits on, one line; null when it waits on nothing. */
   readonly deps: string | null;
   /** The earlier session it continues, one line; null for any other task. */
@@ -263,6 +266,16 @@ function placementLine(task: Task, state: AppState): string | null {
   return parts.length === 0 ? null : parts.join(". ");
 }
 
+/**
+ * Some candidate of its latest decision was turned down for `cap_reached` and nothing else. The
+ * leader routes again on the tap, so a decision gone stale costs a refusal, never a wrong placement.
+ */
+function heldByCapsOnly(task: Task): boolean {
+  const { decision } = task;
+  if (task.state !== "ready" || decision === undefined || decision.chosen !== null) return false;
+  return decision.candidates.some((c) => c.rejected.length > 0 && c.rejected.every((r) => r.code === "cap_reached"));
+}
+
 function rowOf(
   task: Task,
   state: AppState,
@@ -286,6 +299,7 @@ function rowOf(
     markDoneEndsSession: task.state === "running" || task.state === "needs-input" || task.state === "lost",
     canFollowUp: phase !== "finished" || task.state === "done",
     canContinue: continueOffer(task, state.relay.machines, tasks).ok && deriveContinueAvailability(state.relay),
+    canRunNow: heldByCapsOnly(task) && deriveRunNowAvailability(state.relay),
     deps: depsLine(task, titles),
     continues: continuesLine(task, titles),
     placement: placementLine(task, state),

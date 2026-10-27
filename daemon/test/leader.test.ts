@@ -420,7 +420,7 @@ describe("leader requests", () => {
     expect(boundedQueue(named, () => undefined, 0).tasks.map((t) => t.id)).toEqual(["merge", "f0"]);
   });
 
-  test("cancel and mark-done audit the request id with the task id, so an app's request joins the task's record", async () => {
+  test("cancel, mark-done and run-now audit the request id with the task id, so an app's request joins the task's record", async () => {
     const relay = startTestRelay(TOKEN);
     const store = new MemoryQueueStore();
     await store.put(
@@ -429,6 +429,7 @@ describe("leader requests", () => {
       task("c1", { state: "queued", spec: { repo: "github.com/acme/app", mode: "worktree", prompt: "secret" } }),
     );
     await store.put("m1", 0, task("m1", { state: "queued" }));
+    await store.put("r1", 0, task("r1", { state: "queued" }));
     const { leader, replies } = leaderOver(relay, store);
     const ids: Record<string, string> = {};
     const ask = async (name: string, op: OpName, payload: unknown): Promise<unknown> => {
@@ -454,6 +455,10 @@ describe("leader requests", () => {
           code: "task_not_found",
         });
         expect(await ask("malformed", "mark-done", { id: "m1" })).toMatchObject({ ok: false, code: "invalid_request" });
+        // Ready, but with no machine nothing places it, caps or not.
+        expect(await ask("run", "run-now", { taskId: "r1" })).toMatchObject({ ok: false, code: "unplaceable" });
+        expect(await ask("ranDone", "run-now", { taskId: "m1" })).toMatchObject({ ok: false, code: "finished" });
+        expect(await ask("runBad", "run-now", { taskId: 1 })).toMatchObject({ ok: false, code: "invalid_request" });
       } finally {
         leader.stop();
         relay.stop();
@@ -468,6 +473,9 @@ describe("leader requests", () => {
     );
     expect(audits).toContainEqual(
       expect.stringContaining(`op=mark-done id="${ids["nobody"]}" task="nobody" refused code=not_found`),
+    );
+    expect(audits).toContainEqual(
+      expect.stringContaining(`op=run-now id="${ids["run"]}" task="r1" refused code=unplaceable`),
     );
     // The prompt is the spawn line's to fingerprint, never this one's to carry.
     expect(lines.some((line) => line.includes("secret"))).toBe(false);

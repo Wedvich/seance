@@ -193,10 +193,10 @@ export interface AccountsState {
   readonly notice: string | null;
 }
 
-/** A cancel or mark-done on its way to the leader; the row shows it busy. */
+/** A task's action on its way to the leader (a continue: to the store); the row shows it busy. */
 export interface TaskAction {
   readonly taskId: string;
-  readonly op: "cancel" | "mark-done" | "continue";
+  readonly op: "cancel" | "mark-done" | "run-now" | "continue";
 }
 
 export type HistoryResult =

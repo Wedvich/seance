@@ -24,6 +24,8 @@ export function QueueScreen(props: {
   onRefresh: () => void;
   onCancel: (taskId: string) => void;
   onMarkDone: (taskId: string) => void;
+  /** Places a task the concurrency caps alone hold, past them. */
+  onRunNow: (taskId: string) => void;
   /** Queues a task that resumes this failed or cancelled one's session in its worktree, on its machine. */
   onContinue: (taskId: string) => void;
   /** Starts a new task that waits on this one: the form opens on `auto` with it in After. */
@@ -186,7 +188,12 @@ export function QueueScreen(props: {
                     {row.placement !== null && <p className="fleet-card-body">{row.placement}</p>}
                     {row.batch !== null && <p className="fleet-card-body">{row.batch}</p>}
                     {row.body !== null && <p className="fleet-card-body">{row.body}</p>}
-                    {(row.pr !== null || row.canMarkDone || row.canCancel || row.canFollowUp || row.canContinue) && (
+                    {(row.pr !== null ||
+                      row.canMarkDone ||
+                      row.canCancel ||
+                      row.canFollowUp ||
+                      row.canContinue ||
+                      row.canRunNow) && (
                       <div className="queue-actions">
                         {row.pr !== null && (
                           <a
@@ -205,6 +212,16 @@ export function QueueScreen(props: {
                         {row.canFollowUp && (
                           <button type="button" className="quiet" onClick={() => props.onFollowUp(row.id)}>
                             Follow up
+                          </button>
+                        )}
+                        {row.canRunNow && (
+                          <button
+                            type="button"
+                            className="quiet"
+                            disabled={!view.available || row.busy}
+                            onClick={() => props.onRunNow(row.id)}
+                          >
+                            Run now
                           </button>
                         )}
                         {row.canContinue && (

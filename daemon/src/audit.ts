@@ -236,14 +236,16 @@ export function despawnAudit(origin: SpawnOrigin, sink: AuditSink): DespawnAudit
 
 export interface QueueAudit {
   readonly markedDone: (id: string, task: { readonly id: string }) => Promise<void>;
+  /** A `run-now` that reserved the task past the concurrency caps. */
+  readonly ranNow: (id: string, task: { readonly id: string }) => Promise<void>;
   readonly cancelled: (id: string, task: { readonly id: string; readonly leftRunning?: boolean }) => Promise<void>;
   /** A `discard` that deleted the unreadable record at `task` and `version`. */
   readonly discarded: (id: string, taskId: string, version: number) => Promise<void>;
   readonly refused: (
-    op: "cancel" | "mark-done" | "pause" | "resume" | "discard",
+    op: "cancel" | "mark-done" | "run-now" | "pause" | "resume" | "discard",
     id: string,
     code: string,
-    /** What the request named: a `cancel` or `mark-done`'s task, a `pause` or `resume`'s account (absent: the whole queue). */
+    /** What the request named: a `cancel`, `mark-done` or `run-now`'s task, a `pause` or `resume`'s account (absent: the whole queue). */
     subject?: { readonly taskId?: string; readonly account?: string },
   ) => Promise<void>;
   /** A `pause` or `resume` answered with the holds; `account` absent is the whole queue. */
@@ -263,6 +265,7 @@ export function queueAudit(sink: AuditSink): QueueAudit {
   };
   return {
     markedDone: (id, task) => emit(`op=mark-done id=${quote(id)} task=${quote(task.id)} ok`),
+    ranNow: (id, task) => emit(`op=run-now id=${quote(id)} task=${quote(task.id)} ok`),
     cancelled: (id, task) =>
       emit(
         `op=cancel id=${quote(id)} task=${quote(task.id)} ok${task.leftRunning === true ? " leftRunning=true" : ""}`,
