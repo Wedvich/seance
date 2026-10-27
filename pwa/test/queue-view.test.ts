@@ -136,6 +136,20 @@ describe("deriveQueue", () => {
     expect(titles(only)).toEqual(["Waiting"]);
   });
 
+  test("Waiting lists oldest first, the order the scheduler routes it", () => {
+    const view = deriveQueue(
+      state(
+        ok([
+          task("newest", { createdAt: NOW - 1_000 }),
+          task("oldest", { state: "queued", createdAt: NOW - 90_000 }),
+          task("middle", { state: "blocked", createdAt: NOW - 30_000 }),
+        ]),
+      ),
+      NOW,
+    );
+    expect(view.sections[0]?.rows.map((r) => r.id)).toEqual(["oldest", "middle", "newest"]);
+  });
+
   test("tasks on an asleep machine leave Needs you and Running for Asleep, in their own order", () => {
     const awake = machine();
     const asleep = machine({ deviceId: "dev-b", name: "MacBook", connected: false, lastSeen: NOW - 600_000 });
