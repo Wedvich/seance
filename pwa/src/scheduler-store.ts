@@ -665,6 +665,7 @@ export class SchedulerStore {
           holds: reply.holds ?? [],
           unreadable: reply.unreadable ?? [],
           idle: reply.idle ?? [],
+          ...(reply.globalMax === undefined ? {} : { globalMax: reply.globalMax }),
           at: reply.at,
           skew: reply.at - Date.now(),
         };
@@ -691,6 +692,7 @@ export class SchedulerStore {
           holds: reply.holds ?? [],
           unreadable: reply.unreadable ?? [],
           idle: reply.idle ?? [],
+          ...(reply.globalMax === undefined ? {} : { globalMax: reply.globalMax }),
           at: reply.at,
           skew: reply.at - Date.now(),
         };

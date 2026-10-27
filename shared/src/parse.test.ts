@@ -837,6 +837,13 @@ describe("scheduler ops", () => {
     expect(parseQueueReply({ tasks: [], at: 5, holds: [{ until: "never", at: 1 }] })).toBeNull();
   });
 
+  test("queue carries the leader's cap; one that is not a positive integer is dropped, not the reply", () => {
+    expect(parseQueueReply({ tasks: [], at: 5, globalMax: 8 })).toEqual({ tasks: [], at: 5, globalMax: 8 });
+    for (const bad of [0, -1, 1.5, "8", null]) {
+      expect(parseQueueReply({ tasks: [], at: 5, globalMax: bad })).toEqual({ tasks: [], at: 5 });
+    }
+  });
+
   test("queue-changed is a stamp and which tasks changed; an unreadable list costs the list, not the nudge", () => {
     expect(parseQueueChanged({ at: 9, tasks: ["t-1"], extra: 1 })).toEqual({ at: 9, tasks: ["t-1"] });
     expect(parseQueueChanged({ at: 9 })).toEqual({ at: 9 });
