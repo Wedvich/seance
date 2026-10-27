@@ -11,6 +11,7 @@ import {
   type ResumeRequest,
   type SessionState,
 } from "@seance/shared";
+import { isDeepStrictEqual } from "node:util";
 import { escalation, inputClock, SpillAlerts, type SchedulerAlert } from "./alerts.ts";
 import { dispatchOrder } from "./batch.ts";
 import { DEFAULT_CONFIG, type SchedulerConfig } from "./config.ts";
@@ -199,10 +200,19 @@ export class Scheduler {
   readonly #ending = new Map<string, number>();
   /**
    * Task id → its cancels still out (`cancel`): the session end a cancel's own
-   * despawn causes is left to the cancel's write (`#yieldToCancel`). Memory
-   * only: a new leader mid-cancel may still settle it as its session ended.
+   * despawn causes is left to the cancel's write (`#yieldToCancel`). It catches
+   * an end reaching the scheduler while the despawn is out, not one that ended
+   * on its own and is still queued or in flight there (a `cancelled` write may
+   * win over it). Memory only: a new leader mid-cancel may still settle it as
+   * its session ended.
    */
   readonly #cancelling = new Map<string, number>();
+  /**
+   * `#ending` notes made by a hold (`#yieldToCancel`), not by a session's own
+   * deferred `ended`: only the latter means "ended first" to a cancel. Cleared
+   * with the note (`#clearEnding`), so a retry after `despawn_failed` holds again.
+   */
+  readonly #heldNotes = new Set<string>();
   /**
    * Finished records whose leaning write (`#leanFinished`) did not land this
    * term: a refusal repeats, so retrying would take a slot of every pass and
@@ -565,7 +575,7 @@ export class Scheduler {
     let defers = false;
     await this.#update(taskId, (task) => {
       defers = waitsForExit(task, state, from, prUrl, awaitsExit);
-      return this.#yieldToCancel(taskId, sessionChange(task, state, from, prUrl, awaitsExit));
+      return this.#yieldToCancel(task, sessionChange(task, state, from, prUrl, awaitsExit));
     });
     this.#idleClock(taskId, state, from);
     this.#syncIdle();
@@ -629,21 +639,25 @@ export class Scheduler {
    * machine is back is despawned like a running one; with its machine still
    * gone nothing can be despawned, so it is cancelled as it stands and marked
    * `leftRunning` — the record says plainly that a session may outlive it.
-   * While the despawn is out, the session's end it causes (`ended`, a `done`
-   * report, its machine's answer) settles nothing (`#yieldToCancel`), so the
+   * While the despawn is out, the session's end it causes (`ended`, its machine's
+   * answer, the `#ending` deadline) settles nothing (`#yieldToCancel`), so the
    * task reads `cancelled`, never `done` or `failed`: its dependents fail, and
-   * it is continuable. One whose `ended` was already deferred (`#ending`) when
-   * the cancel began ended first, and is not held; a merge or a PR open is a
-   * fact, not held either. A task that finished anyway is answered as it
-   * finished. A despawn that ran and then lost the right to write `cancelled`
+   * it is continuable. Only an `ended` already deferred on a machine reporting
+   * exit statuses (`#ending`, noted by `onSession`, not by a hold) when the
+   * cancel began ended first, and is not held. One sent on its own but still
+   * queued or in flight (or, there, a real crash in that window) is written
+   * `cancelled`: the window is inherent. A merge, a PR open and the session's
+   * own `done` report are facts or its statement, not held. A task that
+   * finished anyway is answered as it finished. A despawn that ran and then lost the right to write `cancelled`
    * is `unrecorded`: the session is gone, the term ends, and asking again is
    * safe (the despawn finds no session).
    */
   async cancel(taskId: string): Promise<CancelResult> {
-    const held = !this.#ending.has(taskId);
+    const held = !this.#ending.has(taskId) || this.#heldNotes.has(taskId);
     if (held) this.#cancelling.set(taskId, (this.#cancelling.get(taskId) ?? 0) + 1);
+    let result: CancelResult;
     try {
-      return await this.#byHand(taskId, (current, { task, live }) => {
+      result = await this.#byHand(taskId, (current, { task, live }) => {
         if (FINISHED.includes(current.state)) return { ok: true, task: current };
         if (current.state === "reserved") return { ok: false, code: "dispatching" };
         const leftRunning = task.state === "lost" && task.assignment !== undefined && !live;
@@ -660,20 +674,39 @@ export class Scheduler {
         else this.#cancelling.delete(taskId);
       }
     }
+    // A settle held for this cancel waits on the machine's answer: ask now, not at the next sweep.
+    if (!result.ok && result.code === "despawn_failed" && this.#heldNotes.has(taskId)) {
+      this.tick().catch(this.#onError);
+    }
+    return result;
   }
 
   /**
    * `next`, unless it settles a task whose cancel is out (`#cancelling`) as its
-   * session ended — `failed`, or `done` by anything but a merge: the cancel's
-   * own despawn ends that session, and its write says `cancelled`. Noted in
-   * `#ending`, so a cancel that writes nothing (`despawn_failed`) leaves the
-   * next pass to ask its machine again.
+   * session ended — `failed`, or `done` by `session`: the cancel's own despawn
+   * ends that session, and its write says `cancelled`. A merge and the
+   * session's own `done` report are its statement, not the despawn's. The
+   * state stands and only the facts `next` carried are written (null when
+   * none is new). Noted in `#ending`, so a cancel that writes nothing
+   * (`despawn_failed`) leaves the next pass to ask its machine again.
    */
-  #yieldToCancel(id: string, next: Task | null): Task | null {
-    if (next === null || !this.#cancelling.has(id)) return next;
-    if (next.state !== "failed" && (next.state !== "done" || next.doneBy === "merged")) return next;
+  #yieldToCancel(current: Task, next: Task | null): Task | null {
+    const id = current.id;
+    if (next === null || current.state === "reserved" || !this.#cancelling.has(id)) return next;
+    if (next.state !== "failed" && (next.state !== "done" || next.doneBy === "merged" || next.doneBy === "reported")) {
+      return next;
+    }
     if (!this.#ending.has(id)) this.#ending.set(id, this.#now());
-    return null;
+    // Even for a note an `ended` made during the cancel: it began held, so a retry holds too.
+    this.#heldNotes.add(id);
+    const { state: _state, doneBy: _doneBy, failure: _failure, ...facts } = next;
+    const kept: Task = { ...current, ...facts };
+    return isDeepStrictEqual(kept, current) ? null : kept;
+  }
+
+  #clearEnding(id: string): void {
+    this.#ending.delete(id);
+    this.#heldNotes.delete(id);
   }
 
   /**
@@ -1022,12 +1055,12 @@ export class Scheduler {
         // Its session ended, and only its exit was awaited: `lost` would fail dependents at `lost_expired` for a session that is over.
         const settling = this.#ending.has(task.id);
         // Before the write, so a settle held for a cancel (`#yieldToCancel`) notes it again.
-        if (settling) this.#ending.delete(task.id);
+        if (settling) this.#clearEnding(task.id);
         await this.#update(task.id, (current) => {
           if (current.state === "lost" || !PLACED.includes(current.state)) return null;
           if (current.assignment?.deviceId !== deviceId) return null;
           if (!settling) return advance(current, "lost", { absentSince: since });
-          return this.#yieldToCancel(current.id, settledEnd(current, undefined));
+          return this.#yieldToCancel(current, settledEnd(current, undefined));
         });
       }),
     );
@@ -1045,9 +1078,9 @@ export class Scheduler {
     );
     await Promise.all(
       due.map(async ([id]) => {
-        this.#ending.delete(id);
+        this.#clearEnding(id);
         await this.#update(id, (current) =>
-          PLACED.includes(current.state) ? this.#yieldToCancel(id, settledEnd(current, undefined)) : null,
+          PLACED.includes(current.state) ? this.#yieldToCancel(current, settledEnd(current, undefined)) : null,
         );
       }),
     );
@@ -1095,7 +1128,7 @@ export class Scheduler {
     this.#returned = new Set([...returned].filter(skipped));
     for (const id of this.#ending.keys()) {
       const task = this.#held.get(id)?.task;
-      if (task === undefined || !PLACED.includes(task.state)) this.#ending.delete(id);
+      if (task === undefined || !PLACED.includes(task.state)) this.#clearEnding(id);
     }
     return this.tasks().filter((t) => {
       const deviceId = deviceOf(t);
@@ -1143,7 +1176,7 @@ export class Scheduler {
         this.#update(seen.id, (current) =>
           asSeen(current, seen)
             ? this.#yieldToCancel(
-                current.id,
+                current,
                 settle(current, reply, {
                   now: this.#now(),
                   connected: this.#connected(deviceId),
