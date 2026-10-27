@@ -68,7 +68,7 @@ const RUN_NOW_RETRYABLE: ReadonlySet<string> = new Set(["conflict", "not_leader"
 /** A Start now asks `run-now` at most this often, whatever answers it gets. */
 const RUN_NOW_ASKS = 2;
 
-const RUN_NOW_BUSY = "The scheduler was busy. Use Run now on the Queue screen to start it.";
+const RUN_NOW_BUSY = "The scheduler was busy. Use Start now on the Queue screen to start it.";
 const RUN_NOW_UNSUPPORTED = "This leader can't start tasks past the queue; it stays queued.";
 
 /** Refused unsent (`shared/src/app-client.ts`): no leader heard it, so it spends no poll and proves nothing sent. */

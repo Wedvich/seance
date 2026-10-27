@@ -14,7 +14,15 @@ import {
   type Task,
 } from "@seance/shared";
 import { machineAsleep, needsAttention } from "./asleep.ts";
-import { avoidLine, heldByCapsAlone, pinLine, taskHeadline, waitingText } from "./decision-view.ts";
+import {
+  avoidLine,
+  decisionStartNowItem,
+  heldByCapsAlone,
+  pinLine,
+  taskHeadline,
+  waitingText,
+  type StartNowItem,
+} from "./decision-view.ts";
 import { accountDisplayName, formatUntil } from "./machines-view.ts";
 import {
   deriveContinueAvailability,
@@ -87,15 +95,17 @@ export interface QueueRow {
   readonly cancelEndsSession: boolean;
   /** Mark done may despawn a session (live, or `lost` with its machine back; the PWA can't tell which): asks twice. */
   readonly markDoneEndsSession: boolean;
-  /** Offered while the task can still be waited on, or finished done: "Follow up" prefills the form's After. */
+  /** Offered while the task can still be waited on; a finished one has nothing left to wait for. "Follow up" prefills the form's After. */
   readonly canFollowUp: boolean;
   /**
    * A failed or cancelled session that can be picked up where it stopped: its machine is present and
    * advertises it, the leader does too, and no continuation of it is already live or settled.
    */
   readonly canContinue: boolean;
-  /** A `ready` task only the concurrency caps hold: "Run now" places it past them. */
+  /** A `ready` task only the concurrency caps hold: "Start now" places it past them. */
   readonly canRunNow: boolean;
+  /** A waiting task's Start now menu item: always shown, greyed (`enabled`) by the split button's rules; null once it is no longer waiting. */
+  readonly startNow: StartNowItem | null;
   /** `primaryAction` of the flags above: the card's one inline button. */
   readonly inline: QueueInlineAction | null;
   /** What it waits on, one line; null when it waits on nothing. */
@@ -333,9 +343,12 @@ function rowOf(
   const phase = TASK_PHASES[task.state];
   const idleSince = idle.get(task.id);
   const actionable = phase !== "dispatching" && phase !== "finished";
-  const canFollowUp = phase !== "finished" || task.state === "done";
+  const canFollowUp = phase !== "finished";
   const canContinue = continueOffer(task, state.relay.machines, tasks).ok && deriveContinueAvailability(state.relay);
   const canRunNow = heldByCapsOnly(task) && deriveRunNowAvailability(state.relay);
+  const waiting = task.state === "queued" || task.state === "blocked" || task.state === "ready";
+  const item = decisionStartNowItem(task.decision ?? null);
+  const startNow = waiting ? { ...item, enabled: item.enabled && deriveRunNowAvailability(state.relay) } : null;
   return {
     id: task.id,
     title: taskTitle(task),
@@ -350,6 +363,7 @@ function rowOf(
     canFollowUp,
     canContinue,
     canRunNow,
+    startNow,
     inline: primaryAction({ canContinue, canRunNow }),
     deps: depsLine(task, titles),
     continues: continuesLine(task, titles),

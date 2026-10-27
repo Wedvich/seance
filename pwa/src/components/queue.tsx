@@ -201,7 +201,7 @@ export function QueueScreen(props: {
 
 const INLINE_LABEL: Record<NonNullable<QueueRow["inline"]>, string> = {
   continue: "Continue",
-  "run-now": "Run now",
+  "run-now": "Start now",
 };
 
 /**
@@ -231,7 +231,7 @@ function QueueCard(props: {
     },
   };
   const disabled = !props.available || row.busy;
-  const opens = row.canFollowUp || row.canRunNow || row.canContinue || row.session !== null;
+  const opens = row.canFollowUp || row.startNow !== null || row.canContinue || row.session !== null;
   const ends = row.canMarkDone || row.canCancel;
   const hasMenu = opens || ends;
   // Removing an open popover fires no `toggle`, so a card that unmounts (a poll moving its task
@@ -301,11 +301,12 @@ function QueueCard(props: {
               {row.canFollowUp && (
                 <MenuItem label="Follow up" icon={<FollowUpIcon />} onClick={() => props.onFollowUp(row.id)} />
               )}
-              {row.canRunNow && (
+              {row.startNow !== null && (
                 <MenuItem
-                  label="Run now"
+                  label="Start now"
                   icon={<RunNowIcon />}
-                  disabled={disabled}
+                  sub={row.startNow.sub}
+                  disabled={disabled || !row.startNow.enabled}
                   onClick={() => props.onRunNow(row.id)}
                 />
               )}
@@ -366,7 +367,7 @@ function MenuGlyph(props: { children: ComponentChildren }): JSX.Element {
 function FollowUpIcon(): JSX.Element {
   return (
     <MenuGlyph>
-      <path d="M21 12a8 8 0 0 1-11.6 7.1L4 21l1.9-5.4A8 8 0 1 1 21 12z" />
+      <path d="M5 12h14M13 6l6 6-6 6" />
     </MenuGlyph>
   );
 }

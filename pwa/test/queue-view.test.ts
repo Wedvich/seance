@@ -745,12 +745,12 @@ describe("authoring on a row", () => {
     expect(placement).toBe("Pinned to acct acct-123");
   });
 
-  test("a task can be followed up while it can still be waited on, or once it is done; not after it failed or was cancelled", () => {
+  test("a task can be followed up only while it can still be waited on, not once it has finished", () => {
     const can = (fields: Partial<Task>): boolean | undefined => rowOf([task("t", fields)], "t")?.canFollowUp;
     expect(can({ state: "queued" })).toBe(true);
     expect(can({ state: "running", assignment: placedAt })).toBe(true);
     expect(can({ state: "awaiting-merge" })).toBe(true);
-    expect(can({ state: "done", doneBy: "session" })).toBe(true);
+    expect(can({ state: "done", doneBy: "session" })).toBe(false);
     expect(can({ state: "failed", failure: { code: "repo_not_found", message: "x" } })).toBe(false);
     expect(can({ state: "cancelled" })).toBe(false);
   });
@@ -917,7 +917,7 @@ describe("the card's inline action", () => {
     expect(inline(failed)).toBeNull();
   });
 
-  test("Run now on a ready task the caps alone hold; Follow up is never inline", () => {
+  test("Start now on a ready task the caps alone hold; Follow up is never inline", () => {
     const capped = task("w", {
       decision: {
         at: NOW,
@@ -1031,5 +1031,37 @@ describe("deriveAfterSheet", () => {
     expect(deriveAfterSheet(state(ok([]), { form }), NOW).doneAvailable).toBe(false);
     const capable = machine({ capabilities: [CAPABILITIES.reportedDone] });
     expect(deriveAfterSheet(state(ok([]), { form }, { machines: [capable] }), NOW).doneAvailable).toBe(true);
+  });
+});
+
+describe("the Start now menu item", () => {
+  const CAN = [CAPABILITIES.runNow];
+  const capped: Reason = { code: "cap_reached", inFlight: 8, max: 8 };
+  const disk: Reason = { code: "disk_low", freeMib: 10 };
+  const rejecting = (reason: Reason): Task =>
+    task("w", {
+      decision: {
+        at: NOW,
+        chosen: null,
+        candidates: [{ deviceId: "d", machine: "m", exclave: "main", rejected: [reason] }],
+      },
+    });
+  const item = (t: Task, capabilities: readonly string[] = CAN) =>
+    deriveQueue(state(ok([t]), {}, { machines: [machine({ capabilities })] }), NOW)
+      .sections.flatMap((section) => section.rows)
+      .find((row) => row.id === t.id)?.startNow;
+
+  test("on a waiting task, enabled as the split button's menu is", () => {
+    expect(item(rejecting(capped))?.enabled).toBe(true);
+    expect(item(task("w"))?.enabled).toBe(true);
+  });
+
+  test("shown but disabled where nothing could take it, or the leader lacks runNow", () => {
+    expect(item(rejecting(disk))?.enabled).toBe(false);
+    expect(item(rejecting(capped), [])?.enabled).toBe(false);
+  });
+
+  test("absent once the task is not waiting", () => {
+    expect(item({ ...task("w"), state: "failed" })).toBeNull();
   });
 });
