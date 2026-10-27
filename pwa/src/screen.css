@@ -2256,7 +2256,7 @@
   color: var(--fg2);
 }
 
-/* ---- phone header menu: queue, machines, settings ---- */
+/* ---- header menu trigger ---- */
 
 /* An escalated task, on the closed menu's face. */
 .menu-badge {
@@ -2295,6 +2295,11 @@
 .menu[data-direction="up"] {
   --menu-slide: 4px;
   transform-origin: bottom right;
+}
+
+/* Fading out still takes taps otherwise; a double tap would re-run an item. */
+.menu:not(:popover-open) {
+  pointer-events: none;
 }
 
 .menu:popover-open {
@@ -2370,7 +2375,7 @@
 
 .menu-divider {
   height: 1px;
-  margin: 4px 8px;
+  margin: 2px 8px; /* the flex gap adds 2px each side */
   background: var(--line);
 }
 

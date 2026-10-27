@@ -25,7 +25,9 @@ describe("menuPlacement", () => {
     expect(menuPlacement("up", { top: 756, bottom: 800, right: 400 }, viewport).right).toBe(0);
   });
 
-  test("an anchor at the viewport's bottom still leaves the offset", () => {
-    expect(menuPlacement("up", { top: 800, bottom: 844, right: 200 }, viewport).bottom).toBe(6);
+  test("a mid-screen anchor: down pins by top only, up by bottom only", () => {
+    const anchor = { top: 380, bottom: 424, right: 200 };
+    expect(menuPlacement("down", anchor, viewport)).toEqual({ top: 430, bottom: null, right: 200 });
+    expect(menuPlacement("up", anchor, viewport)).toEqual({ top: null, bottom: 426, right: 200 });
   });
 });

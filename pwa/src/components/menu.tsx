@@ -1,5 +1,5 @@
 import { createContext, type ComponentChildren, type JSX, type RefObject } from "preact";
-import { useCallback, useContext, useId, useRef, useState } from "preact/hooks";
+import { useCallback, useContext, useEffect, useId, useRef, useState } from "preact/hooks";
 import { menuPlacement, type MenuDirection } from "../menu-placement.ts";
 
 export type { MenuDirection } from "../menu-placement.ts";
@@ -19,6 +19,22 @@ export function useMenu<T extends HTMLElement = HTMLButtonElement>(): MenuHandle
   const anchor = useRef<T>(null);
   const [open, setOpen] = useState(false);
   return { id, open, anchor, onToggle: (newState) => setOpen(newState === "open") };
+}
+
+function enabledItems(panel: HTMLElement | null): HTMLElement[] {
+  if (panel === null) return [];
+  return [...panel.querySelectorAll<HTMLElement>('[role="menuitem"]')].filter(
+    (item) => !item.matches(':disabled, [aria-disabled="true"]'),
+  );
+}
+
+/** Roving-focus target for a menu key; null for keys that aren't navigation. */
+function nextIndex(key: string, at: number, count: number): number | null {
+  if (key === "Home") return 0;
+  if (key === "End") return count - 1;
+  if (key === "ArrowDown") return at < 0 ? 0 : (at + 1) % count;
+  if (key === "ArrowUp") return at < 0 ? count - 1 : (at - 1 + count) % count;
+  return null;
 }
 
 const CloseMenu = createContext<() => void>(() => {});
@@ -48,10 +64,12 @@ export function Menu<T extends HTMLElement>(props: {
     const anchor = menu.anchor.current;
     const el = node.current;
     if (newState !== "open" || anchor === null || el === null) return;
-    const root = document.documentElement;
+    // Width from clientWidth so `right` excludes a scrollbar; height from
+    // innerHeight because `position: fixed; bottom` resolves against the
+    // viewport, which clientHeight diverges from under a collapsing toolbar.
     const at = menuPlacement(direction, anchor.getBoundingClientRect(), {
-      width: root.clientWidth,
-      height: root.clientHeight,
+      width: document.documentElement.clientWidth,
+      height: window.innerHeight,
     });
     el.style.top = at.top === null ? "" : `${at.top}px`;
     el.style.bottom = at.bottom === null ? "" : `${at.bottom}px`;
@@ -59,6 +77,36 @@ export function Menu<T extends HTMLElement>(props: {
   };
 
   const close = useCallback((): void => node.current?.hidePopover(), []);
+
+  // Placed once on open, so it would detach from a scrolled anchor. Closing on
+  // scroll is what native Android menus do. Capture catches nested scrollers.
+  useEffect(() => {
+    if (!menu.open) return;
+    const dismiss = (): void => close();
+    window.addEventListener("scroll", dismiss, { capture: true, passive: true });
+    window.addEventListener("resize", dismiss);
+    return () => {
+      window.removeEventListener("scroll", dismiss, { capture: true });
+      window.removeEventListener("resize", dismiss);
+    };
+  }, [menu.open, close]);
+
+  const onToggle = (newState: string): void => {
+    menu.onToggle(newState);
+    // Focus moves only for a keyboard open; a tap shows no highlighted row.
+    if (newState !== "open" || !menu.anchor.current?.matches(":focus-visible")) return;
+    enabledItems(node.current)[0]?.focus();
+  };
+
+  const onKeyDown = (event: KeyboardEvent): void => {
+    const items = enabledItems(node.current);
+    if (items.length === 0) return;
+    const at = items.findIndex((item) => item === document.activeElement);
+    const next = nextIndex(event.key, at, items.length);
+    if (next === null) return;
+    event.preventDefault();
+    items[next]?.focus();
+  };
 
   return (
     <div
@@ -70,7 +118,8 @@ export function Menu<T extends HTMLElement>(props: {
       role="menu"
       aria-label={props.label}
       onBeforeToggle={(event) => place(event.newState)}
-      onToggle={(event) => menu.onToggle(event.newState)}
+      onToggle={(event) => onToggle(event.newState)}
+      onKeyDown={onKeyDown}
     >
       <CloseMenu.Provider value={close}>{props.children}</CloseMenu.Provider>
     </div>
@@ -102,7 +151,12 @@ export function MenuItem(props: {
     .filter(Boolean)
     .join(" ");
   const disabled = props.disabled === true;
-  const pick = (): void => {
+  const pick = (event: Event): void => {
+    // The panel takes taps through its fade-out; a second tap must not re-run.
+    if (!(event.currentTarget instanceof Element) || !event.currentTarget.closest(":popover-open")) {
+      event.preventDefault();
+      return;
+    }
     if (props.keepOpen !== true) close();
     props.onClick?.();
   };
