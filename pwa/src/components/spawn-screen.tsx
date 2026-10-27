@@ -763,7 +763,7 @@ export function SpawnScreen(props: {
       </div>
 
       <footer className="footer">
-        <p className="footer-status">{view.footerStatus}</p>
+        {view.footerStatus !== null && <p className="footer-status">{view.footerStatus}</p>}
         <button
           type="button"
           className={view.button.busy ? "primary primary-busy" : "primary"}

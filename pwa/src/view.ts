@@ -114,7 +114,8 @@ export interface ViewModel {
   /** The verified leader takes `until: "reported"` and `after: "done"` (DESIGN.md, capabilities). */
   readonly reportedAvailable: boolean;
   readonly worktreeHint: string;
-  readonly footerStatus: string;
+  /** Null when there is nothing to warn about, so the footer holds the button alone. */
+  readonly footerStatus: string | null;
   readonly button: PrimaryButton;
   readonly ignoredNote: string | null;
   /** The pinned machine; null on auto, or when the pin names one the registry no longer lists. */
@@ -519,7 +520,7 @@ function deriveBanner(state: AppState): Banner | null {
 }
 
 /** An offline pin is not a block: the task waits for the machine, as `resolvePlacement` notes. */
-function deriveFooterStatus(state: AppState, machine: Machine | null, problem: PinProblem | null): string {
+function deriveFooterStatus(state: AppState, machine: Machine | null, problem: PinProblem | null): string | null {
   const { reason, note } = deriveAutoAvailability(state.relay);
   if (reason !== null) return reason;
   if (problem !== null) return problem.text;
@@ -527,7 +528,7 @@ function deriveFooterStatus(state: AppState, machine: Machine | null, problem: P
   if (state.form.machine !== null && machine === null) return "The pinned machine isn't listed";
   if (machine !== null && !machine.connected) return `${machine.name} is offline — the task waits for it`;
   if (note !== null) return note;
-  return machine === null ? "The scheduler picks the machine" : `Pinned to ${machine.name}`;
+  return machine === null ? null : `Pinned to ${machine.name}`;
 }
 
 const blocked = (label: string): PrimaryButton => ({ label, enabled: false, busy: false });
