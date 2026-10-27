@@ -156,6 +156,8 @@ export function MenuItem(props: {
   icon?: JSX.Element;
   sub?: string;
   href?: string;
+  /** With `href`: opens in a new tab, without handing the page a reference back. */
+  external?: boolean;
   onClick?: () => void;
   disabled?: boolean;
   destructive?: boolean;
@@ -198,6 +200,8 @@ export function MenuItem(props: {
         className={className}
         role="menuitem"
         href={disabled ? undefined : props.href}
+        target={props.external === true ? "_blank" : undefined}
+        rel={props.external === true ? "noopener noreferrer" : undefined}
         aria-disabled={disabled ? "true" : undefined}
         onClick={disabled ? undefined : pick}
       >
