@@ -5583,7 +5583,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   into what it holds), on a reconnect and on a leader change. A named task the reply leaves out
   is dropped only if the store holds no record of it, the same rule as the verdict's. Tasks group by what each needs from
   the owner: Needs you (escalated first, then `needs-input`, then `lost`), Running, Idle, Waiting,
-  Asleep (collapsed; below), Awaiting merge, Finished, in the leader's order within each (`queue-view.ts`). Idle holds the
+  Asleep (collapsed; below), Awaiting merge, Finished, in the leader's order within each (`queue-view.ts`), except Waiting, oldest first: the order the scheduler routes it. Idle holds the
   `running` tasks the reply's `idle` lists (an entry for a task no longer running is ignored, so an
   action's own reply wins), each saying "Idle at its prompt since … — its slot is free", and the
   summary counts them ("2 running · 3 idle · 1 waiting", the idle count only when there are some).

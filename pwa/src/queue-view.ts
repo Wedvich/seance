@@ -344,7 +344,7 @@ export const ASLEEP_SECTION = "Asleep";
 
 const IDLE_SECTION = "Idle";
 
-const SECTIONS: readonly { readonly title: string; readonly pick: Pick }[] = [
+const SECTIONS: readonly { readonly title: string; readonly pick: Pick; readonly oldestFirst?: true }[] = [
   { title: "Needs you", pick: needsYou },
   {
     title: "Running",
@@ -353,7 +353,12 @@ const SECTIONS: readonly { readonly title: string; readonly pick: Pick }[] = [
   },
   // Done its turn and waiting on a reply nobody owes it, so it holds no slot (DESIGN.md, "Routing caps").
   { title: IDLE_SECTION, pick: (t, machines, idle) => (idle.has(t.id) && !machineAsleep(t, machines) ? 0 : null) },
-  { title: "Waiting", pick: (t) => (t.state === "queued" || t.state === "blocked" || t.state === "ready" ? 0 : null) },
+  {
+    title: "Waiting",
+    pick: (t) => (t.state === "queued" || t.state === "blocked" || t.state === "ready" ? 0 : null),
+    // The scheduler routes oldest first, so the top row is the next to go.
+    oldestFirst: true,
+  },
   { title: ASLEEP_SECTION, pick: asleep },
   { title: "Awaiting merge", pick: (t) => (t.state === "awaiting-merge" ? 0 : null) },
   { title: "Finished", pick: (t) => (TASK_PHASES[t.state] === "finished" ? 0 : null) },
@@ -375,12 +380,12 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
   const running = new Set(tasks.filter((t) => t.state === "running").map((t) => t.id));
   const idle = new Map((ok?.idle ?? []).filter((r) => running.has(r.taskId)).map((r) => [r.taskId, r.since]));
 
-  const sections = SECTIONS.map(({ title, pick }) => {
+  const sections = SECTIONS.map(({ title, pick, oldestFirst }) => {
     const members = tasks
       .map((task) => ({ task, rank: pick(task, state.relay.machines, idle) }))
       .filter((entry): entry is { task: Task; rank: number } => entry.rank !== null)
       // Stable: equal ranks keep the leader's order.
-      .toSorted((a, b) => a.rank - b.rank);
+      .toSorted((a, b) => a.rank - b.rank || (oldestFirst ? a.task.createdAt - b.task.createdAt : 0));
     return { title, rows: members.map(({ task }) => rowOf(task, state, now, skew, titles, tasks, idle)) };
   }).filter((section) => section.rows.length > 0);
 
