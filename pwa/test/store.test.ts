@@ -3,7 +3,6 @@ import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:te
 import {
   CAPABILITIES,
   accountRecord,
-  BATCH_STRATEGY,
   QUEUE_MAX_TASKS,
   RelayClient,
   RequestFailure,
@@ -2417,7 +2416,7 @@ describe("authoring a task from the auto form", () => {
       client: "pwa",
       prompt: "fix it",
       deps: [{ task: "base", after: "merged" }],
-      batch: { id: "b-1", index: 1, strategy: BATCH_STRATEGY },
+      batch: { id: "b-1", index: 1 },
       linear: { issue: "ENG-7" },
     });
     expect(firstCreate(client).spec).not.toHaveProperty("until");

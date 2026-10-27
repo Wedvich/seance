@@ -1,7 +1,6 @@
 import { REPLAY_WINDOW_MS } from "./crypto.ts";
 import {
   ACCOUNT_ALIAS_MAX_LENGTH,
-  BATCH_STRATEGY,
   BRANCH_MAX_LENGTH,
   CANDIDATE_MAX_REASONS,
   DECISION_MAX_CANDIDATES,
@@ -690,15 +689,15 @@ function parseAvoid(value: unknown): readonly string[] | null {
 }
 
 /**
- * Whatever `strategy` an older writer stored — `sequential`, `parallel`, none
- * — is read as `BATCH_STRATEGY`: no batch schedules, so a live record from
- * before the change must still read rather than null its spec.
+ * A `strategy` an older writer stored (`sequential`, `parallel`, `auto`) is
+ * ignored and dropped: no batch schedules, so a live record from before must
+ * still read rather than null its spec.
  */
 function parseBatch(value: unknown): BatchMembership | null {
   if (!isRecord(value)) return null;
   const { id, index } = value;
   if (!isTaskId(id) || !isUint(index) || index > TASK_SPEC_LIMITS.batchIndex) return null;
-  return { id, index, strategy: BATCH_STRATEGY };
+  return { id, index };
 }
 
 function parseDep(value: unknown): TaskDep | null {

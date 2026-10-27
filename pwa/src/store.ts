@@ -11,7 +11,6 @@ import type {
   TaskUntil,
 } from "@seance/shared";
 import {
-  BATCH_STRATEGY,
   failureReasonText,
   queuedTask,
   RequestFailure,
@@ -749,9 +748,7 @@ export class Store {
       ...(form.machine === null && form.account === null ? {} : { pin }),
       client: "pwa" satisfies SpawnClient,
       ...(form.after.length === 0 ? {} : { deps: form.after }),
-      ...(form.batch === null
-        ? {}
-        : { batch: { id: form.batch.id, index: form.batch.next, strategy: BATCH_STRATEGY } }),
+      ...(form.batch === null ? {} : { batch: { id: form.batch.id, index: form.batch.next } }),
       ...(reported ? { until: form.until } : {}),
       ...(issue === "" ? {} : { linear: { issue } }),
     };

@@ -1665,16 +1665,6 @@ export interface Placement {
 }
 
 /**
- * What every `BatchMembership.strategy` holds. A batch is a group, not a
- * scheduling primitive (2026-10-26): order is `after`, concurrency the caps.
- * The field stays only because an older `parseBatch` nulls a batch without a
- * strategy, and the whole spec with it; `auto` is the one value an older
- * leader applies no batch bound to. Dropped once no pre-change leader, app or
- * daemon remains (docs/scheduler.md, M4 "Batches are a group").
- */
-export const BATCH_STRATEGY = { mode: "auto" } as const;
-
-/**
  * A task's place in a batch: a group with no record of its own, so a batch is
  * the tasks that name its id. It holds no order and no bound.
  */
@@ -1682,8 +1672,6 @@ export interface BatchMembership {
   /** `TASK_ID_PATTERN`, minted by the client like a task id. */
   readonly id: string;
   readonly index: number;
-  /** `BATCH_STRATEGY` always: whatever an older writer stored reads as it. */
-  readonly strategy: typeof BATCH_STRATEGY;
 }
 
 /**

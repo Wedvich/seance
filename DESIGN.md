@@ -1524,10 +1524,10 @@ an old peer's frames parse as before. Mixed versions:
   and every record carrying either also carries `pin.exclave: ""`, which an older `parsePin`
   refuses — an older leader that takes over later holds the record unreadable instead
   (Scheduler, "`pin` and `avoid` on auto"). A stored `pin.exclave` is ignored by the current parser.
-- `TaskSpec.batch.strategy` (2026-10-26, not an M4 shape but the same kind of skew): batches
-  stopped scheduling, and every writer emits the one value `{ mode: "auto" }` because an older
-  `parseBatch` nulls a batch without a strategy; the current parser ignores any stored value
-  (Scheduler, "Batches").
+- `TaskSpec.batch.strategy` (gone 2026-10-27, not an M4 shape but the same kind of skew): no
+  writer emits it and the current parser ignores a stored one. A pre-2026-10-26 `parseBatch`
+  nulls a batch without one, so such a reader cannot read a batched task written since: an old
+  client leaves it out of its list, an old leader leaves the record unread (Scheduler, "Batches").
 - `RepoEntry.skills` (a clone's project skills, at most `REPO_MAX_SKILLS`): lenient, so a bad
   list costs the field, never the entry or the machine. Scanned and routed on since
   2026-10-25 (Daemon, "Exclaves"; Scheduler, "Skills filter"). `MachineStatus.ax` (the exclave
@@ -2701,25 +2701,18 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   unroutable this pass does not hold the next. `parseBatch` bounds `index` at `MAX_TASKS`
   (`TASK_SPEC_LIMITS.batchIndex`): the store holds no more task records, so no batch held at
   once has more members.
-  **Mixed versions.** `BatchMembership.strategy` stays on the wire as the one value
-  `BATCH_STRATEGY` (`{ mode: "auto" }`): an older `parseBatch` nulls a batch without a valid
-  strategy, and its `parseTaskSpec` then nulls the whole spec, so a record without one would
-  be unreadable to every pre-change leader and app, and dropped from an older app's queue. It
-  is a field of the type, not added at serialization, so the store record, the leader's
-  `queue`/`cancel`/`mark-done` replies and the broker's enqueue frame all carry it without a
-  per-path emitter. `auto` is the value an older leader applies no batch bound to, so one
-  leading over a batch all of whose members new code wrote already behaves as this one. A batch
-  begun by old code with `sequential` or `parallel` and continued by new code is not: the old
-  `strategyOf` takes the earliest-created member's strategy, so an old leader still serialises or
-  bounds the whole batch. The PWA drops a persisted open batch carrying such a strategy, so its
-  next enqueue starts a new batch. The parser ignores whatever an older
-  writer stored (`sequential`, `parallel` with `max`, garbage, none) and reads it as
-  `BATCH_STRATEGY`, so a live record from before keeps its group and loses its strategy at
-  the next leader write; an older PWA or MCP may still write `sequential` during a rollout,
-  and this leader ignores it. A reader drops an older leader's `batch_order` and `cap_reached`
+  **Mixed versions.** `BatchMembership` is `{ id, index }`: no writer puts a `strategy` on
+  the wire (store record, leader replies, broker enqueue). The parser accepts and drops
+  whatever an older writer stored (`sequential`, `parallel` with `max`, `auto`, garbage, none),
+  so a live record from before keeps its group and loses its strategy at the next leader write,
+  and an older PWA or MCP still writing one is ignored. A pre-change reader's `parseBatch`
+  nulls a batch without a strategy, and its `parseTaskSpec` the whole spec, so it cannot read a
+  batched task written since: an old client drops it from its list (per task, the rest still
+  show), an old leader reads the record as malformed and leaves it (owner accepted the window,
+  2026-10-27). The PWA drops a persisted open batch carrying a non-`auto` strategy, so its next
+  enqueue starts a new batch. A reader drops an older leader's `batch_order` and `cap_reached`
   `scope: "batch"` as unknown reasons — the reason, never the candidate or the decision (as
-  for any reason a leader ahead mints) — so dropping them needed no tolerant step. Removing
-  the constant is a follow-up (docs/scheduler.md, M4 "Batches are a group").
+  for any reason a leader ahead mints) — so dropping them needed no tolerant step.
   Rejected (owner, 2026-10-26), both built in M3 and removed:
   - _`sequential`_ (one member in flight, in `index` order, held with `batch_order`): an
     implicit dependency chain. The explicit form says the same thing and is the one the

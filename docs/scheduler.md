@@ -903,11 +903,7 @@ of M4 has landed.
   the global and per-account caps. #318's carve-out (a batch bound counting members on an asleep
   machine) went with them. DESIGN.md "Batches" is the record, with both strategies as rejected
   alternatives.
-  - _Follow-up:_ stop emitting `strategy: { mode: "auto" }` (`BATCH_STRATEGY`) and drop the field
-    from `BatchMembership` once no pre-change leader, app or daemon can still read a record — an
-    older `parseBatch` nulls a batch without one. The parser already ignores it, so this is a
-    type and writer change only. The `batch_order` and `cap_reached` `scope: "batch"` reasons an
-    older leader sends need no step: readers already drop them as unknown.
+  The `strategy` field left the wire 2026-10-27; the parser still drops a stored one.
 
 ## Settled defaults (interview, 2026-10-15)
 

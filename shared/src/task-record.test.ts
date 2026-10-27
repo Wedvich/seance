@@ -4,7 +4,6 @@ import { openTaskListing, openTaskRecord, queuedTask, sealTaskRecord, taskKey } 
 import {
   APP_ID,
   AT_REST_OPS,
-  BATCH_STRATEGY,
   PIN_SENTINEL,
   SCHEDULER_ID,
   TASK_SPEC_LIMITS,
@@ -32,8 +31,18 @@ describe("task records at rest", () => {
     expect(await openTaskRecord(key, { key: taskKey(task.id), version: 1, env }, NOW + 20 * DAY_MS)).toEqual(record);
   });
 
+  test("a batched record is sealed without a strategy and round-trips as its group", async () => {
+    const task = queued();
+    const record: TaskRecord = {
+      version: 1,
+      task: { ...task, spec: { ...task.spec, batch: { id: crypto.randomUUID(), index: 3 } } },
+    };
+    const env = await sealTaskRecord(key, APP_ID, record);
+    expect(await openTaskRecord(key, { key: taskKey(task.id), version: 1, env }, NOW)).toEqual(record);
+  });
+
   test("a record an older writer sealed with a sequential or parallel batch strategy opens as a plain group", async () => {
-    for (const strategy of [{ mode: "sequential" }, { mode: "parallel", max: 2 }]) {
+    for (const strategy of [{ mode: "sequential" }, { mode: "parallel", max: 2 }, { mode: "auto" }]) {
       const task = queued();
       // Raw, as the older writer's sealer emitted it: this build's types cannot carry the old strategy.
       const raw = {
@@ -43,7 +52,8 @@ describe("task records at rest", () => {
       const env = await sealAtRest(key, { to: SCHEDULER_ID, from: APP_ID }, AT_REST_OPS.task, raw);
       const read = await openTaskRecord(key, { key: taskKey(task.id), version: 1, env }, NOW);
       if (typeof read === "string") throw new Error(`unreadable: ${read}`);
-      expect(read.task.spec.batch).toEqual({ id: raw.task.spec.batch.id, index: 1, strategy: BATCH_STRATEGY });
+      expect(read.task.spec.batch).toEqual({ id: raw.task.spec.batch.id, index: 1 });
+      expect(read.task.spec.batch).not.toHaveProperty("strategy");
     }
   });
 
