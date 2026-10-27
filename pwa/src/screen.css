@@ -2449,6 +2449,15 @@
   opacity: 0.5;
 }
 
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .menu-item .dot {
   margin-left: auto;
 }
@@ -2482,6 +2491,10 @@
 }
 
 @media (hover: hover) {
+  .queue-more:hover {
+    background: var(--sur2);
+  }
+
   .menu-item:not(:disabled, [aria-disabled="true"]):hover {
     background: var(--sur2);
   }

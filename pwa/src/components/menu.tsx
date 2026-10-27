@@ -1,6 +1,6 @@
 import { createContext, type ComponentChildren, type JSX, type RefObject } from "preact";
 import { useCallback, useContext, useEffect, useId, useRef, useState } from "preact/hooks";
-import { menuPlacement, type MenuDirection } from "../menu-placement.ts";
+import { menuDirection, menuPlacement, type MenuDirection } from "../menu-placement.ts";
 
 export type { MenuDirection } from "../menu-placement.ts";
 
@@ -48,7 +48,8 @@ const CloseMenu = createContext<() => void>(() => {});
  * menu needs no history entry of its own. The top layer lifts it out of its
  * anchor's box, so it is pinned there by hand on open; CSS anchor positioning
  * isn't in every browser this runs in. Opens down under the anchor or up above
- * it, right edges aligned either way.
+ * it, right edges aligned either way; a `down` menu flips up when it would run
+ * past the viewport and fits better above (an `up` one never flips).
  */
 export function Menu<T extends HTMLElement>(props: {
   menu: MenuHandle<T>;
@@ -61,18 +62,23 @@ export function Menu<T extends HTMLElement>(props: {
   const node = useRef<HTMLDivElement>(null);
 
   const { anchor: anchorRef } = menu;
+  // `panelHeight` is null at beforetoggle, where the panel is still display:none
+  // and unmeasurable: the requested side stands, and the toggle that follows
+  // re-places with the real height. data-direction is set by hand to match so
+  // the CSS transform-origin follows the side actually used.
   const place = useCallback(
-    (newState: string): void => {
+    (panelHeight: number | null): void => {
       const anchor = anchorRef.current;
       const el = node.current;
-      if (newState !== "open" || anchor === null || el === null) return;
+      if (anchor === null || el === null) return;
+      const rect = anchor.getBoundingClientRect();
       // Width from clientWidth so `right` excludes a scrollbar; height from
       // innerHeight because `position: fixed; bottom` resolves against the
       // viewport, which clientHeight diverges from under a collapsing toolbar.
-      const at = menuPlacement(direction, anchor.getBoundingClientRect(), {
-        width: document.documentElement.clientWidth,
-        height: window.innerHeight,
-      });
+      const viewport = { width: document.documentElement.clientWidth, height: window.innerHeight };
+      const used = panelHeight === null ? direction : menuDirection(direction, rect, viewport, panelHeight);
+      const at = menuPlacement(used, rect, viewport);
+      el.dataset.direction = used;
       el.style.top = at.top === null ? "" : `${at.top}px`;
       el.style.bottom = at.bottom === null ? "" : `${at.bottom}px`;
       el.style.right = `${at.right}px`;
@@ -93,7 +99,7 @@ export function Menu<T extends HTMLElement>(props: {
     const dismiss = (): void => close();
     const onResize = (): void => {
       if (document.documentElement.clientWidth !== width) return close();
-      place("open");
+      place(node.current?.offsetHeight ?? null);
     };
     window.addEventListener("scroll", dismiss, { capture: true, passive: true });
     window.addEventListener("resize", onResize);
@@ -105,6 +111,7 @@ export function Menu<T extends HTMLElement>(props: {
 
   const onToggle = (newState: string): void => {
     menu.onToggle(newState);
+    if (newState === "open") place(node.current?.offsetHeight ?? null);
     // Focus moves only for a keyboard open; a tap shows no highlighted row. A
     // group anchor holds its trigger, so the focused element inside it counts too.
     // Not `:has(:focus-visible)`: it throws where `:has` is missing.
@@ -137,7 +144,7 @@ export function Menu<T extends HTMLElement>(props: {
       popover="auto"
       role="menu"
       aria-label={props.label}
-      onBeforeToggle={(event) => place(event.newState)}
+      onBeforeToggle={(event) => event.newState === "open" && place(null)}
       onToggle={(event) => onToggle(event.newState)}
       onKeyDown={onKeyDown}
     >
@@ -188,6 +195,7 @@ export function MenuItem(props: {
       <span className="menu-text">
         {props.label}
         {props.sub !== undefined && <span className="menu-sub">{props.sub}</span>}
+        {props.href !== undefined && props.external === true && <span className="sr-only"> (opens in a new tab)</span>}
       </span>
       {props.attention === true && <span className="dot dot-err" role="img" aria-label="needs you" />}
     </>

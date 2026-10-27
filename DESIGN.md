@@ -5603,7 +5603,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   them. Mark done sets the task `done` by hand, ending its session first when it is running,
   `needs-input` or `lost`. Either one that ends a live session takes a second tap within four
   seconds: the first relabels the item in place ("Tap again to cancel") and keeps the menu open,
-  and the menu closing any other way disarms it. A `done` or `cancelled` task with `leftRunning` says its session may still be running
+  and the menu closing any other way — or its card unmounting while open, which fires no `toggle` — disarms it. The menu opens down, flipping up when it would overrun the viewport and fits better above. A `done` or `cancelled` task with `leftRunning` says its session may still be running
   on its machine (M3 review Q8). Records the leader cannot read (`QueueResponse.unreadable`:
   junk, or sealed under an earlier PSK) show as one line, "N unreadable records hold queue
   slots", with **Clear** (M3 review S2). Clear takes a second tap, then sends `discard` for each
