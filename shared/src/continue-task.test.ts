@@ -88,7 +88,7 @@ describe("continueOffer, a cancelled task", () => {
   test("done and every failure but session_failed are never offered", () => {
     const refused: readonly Task[] = [
       failed({ state: "done", failure: undefined }),
-      ...["lost_expired", "merge_expired", "dispatch_unconfirmed", "continue_expired"].map((code) =>
+      ...["lost_expired", "merge_expired", "dispatch_unconfirmed", "continue_expired", "pin_expired"].map((code) =>
         failed({ failure: { code, message: "m" } }),
       ),
     ];

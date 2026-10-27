@@ -354,7 +354,8 @@ shows the decision behind it, and why it waits while it does. With no scheduler 
 can't be verified (its registry entry doesn't open with your key), the task still
 queues and waits there until one does; only the placement preview needs a leader.
 Queuing is greyed only when the app isn't connected to the relay. A pinned task waits for
-its machine or account when it is offline or over a limit, and says why; pinning an
+its machine or account when it is offline or over a limit, and says why; one still waiting
+after 30 days fails, so a machine back later never runs a month-old prompt. Pinning an
 account needs a leader that supports it, and says so otherwise. The **Queue screen** (a column on
 desktop, in the header menu on a phone) shows everything queued: what needs you, what
 is running or waiting, and what finished, with **Cancel** and **Mark done** (each takes

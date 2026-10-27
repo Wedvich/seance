@@ -1035,8 +1035,8 @@ same PR, with the reason.
     waits until cancelled by hand. Fixed in `DEFAULT_CONFIG`, not per machine: expiry runs in the leader and
     leadership moves. Not tied to reap's `minAgeDays`, which is about worktrees, not queue entries. The
     ceiling is the launch ledger's age (7 days): past it the target daemon refuses the continuation anyway,
-    so failing earlier is never premature; a test pins the relation. A pinned (`pin.deviceId`) `ready`
-    task without `continues` gets no expiry; a continuation expires pinned or not.
+    so failing earlier is never premature; a test pins the relation. A continuation expires at this bound
+    pinned or not; a pin without `continues` has its own (21).
 
 20. **A session idle at its prompt 10 min holds no concurrency slot** (`idleReleaseAfterMs`, owner,
     2026-10-27). A `running` task whose own machine reported `idle` (main turn ended, no dialog open)
@@ -1045,6 +1045,19 @@ same PR, with the reason.
     again, over a cap or not, as item 18's do on return. `needs-input` keeps its slot: a dialog is
     mid-task, so work resumes for certain when it is answered. Detected from the mod's `idle`, never
     from what the session wrote. DESIGN.md "Routing caps" has the rule and the residuals.
+
+21. **A pinned task `ready` over 30 days fails `pin_expired`** (`pinExpiryMs`, owner, 2026-10-27).
+    A pin (`pin.deviceId` or `pin.account`) to a machine retired or re-keyed, or an account signed out for
+    good, otherwise waits forever: never pruned, counted toward `MAX_TASKS`, holding a place in the
+    20-task `queue` reply, and liable to start a stale prompt if its machine ever returns. 30 days is
+    the tombstone's life (`STORE_TOMBSTONE_MS`), the month `queue_expired` names, by choice (admission
+    stops a day short of it for clock skew); from `createdAt`, as 19 is. A pin released from `blocked`
+    already past it fails before dispatch rather than launching. One bound and one code for
+    machine and account pins, the message saying which. Pins only: an unpinned `ready` task no machine can
+    take (a fleet-wide `repo_absent`, `avoid` of every machine) is out of scope on purpose, since a bound
+    there also fails tasks held only by quota or caps; decided separately. Rejected: hand cancel only,
+    ranking long-waiting pins below finished tasks, a shorter account-pin bound, a leader-written `readyAt`.
+    DESIGN.md "Expiry" has the record.
 
 ## Risks / unknowns
 

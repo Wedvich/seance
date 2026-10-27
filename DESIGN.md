@@ -1566,6 +1566,9 @@ an old peer's frames parse as before. Mixed versions:
   words it as a spawn refusal ("The machine refused the spawn", with the leader's message as text), an
   older MCP prints the message, the same residual as `session_failed`. An older leader never expires a
   continuation (today's behaviour). No relay change and no rollout order.
+- The failure code `pin_expired` (2026-10-27, Scheduler, "Expiry"): the same as `continue_expired` for
+  every older reader; an older leader never expires a pin. A new leader fails, in its first pass, every
+  pin already past 30 days: the clean-up, and visible.
 - Reasons `skill_absent { skill }`, `auth_expired` and `base_unpushed`: an older app or
   leader drops an unknown reason from a decision and keeps the candidate.
 - `session-event` `done`: ingested since 2026-10-23 (Local op socket, "Session events"). A daemon
@@ -2876,13 +2879,39 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   `settle` decline for a `failed` task), `cancel` answers `finished`, and it is ended by hand.
   A third arm (2026-10-27): a `ready` task with `spec.continues` more than `continueExpiryMs` (4 days,
   docs/scheduler.md Settled defaults 19) past `createdAt` fails `continue_expired`, so an unplaceable
-  continuation no longer waits for a hand cancel; a task without `continues` is never expired, and a
-  pinned `ready` task without `continues` gets none (a continuation expires pinned or not). Fixed in `DEFAULT_CONFIG`, not per machine or fleet setting: expiry runs
+  continuation no longer waits for a hand cancel (a continuation expires pinned or not). Fixed in `DEFAULT_CONFIG`, not per machine or fleet setting: expiry runs
   in the leader and leadership moves. It stays below the launch ledger's age, since past it the target
   daemon would refuse anyway, so failing earlier is never premature. The message names the target
   machine's rejection reasons from the leader's last in-memory decision for the task (`lastDecision`,
   else the persisted one), or "its machine never took it"; a queue pause or other fleet-wide hold does not
   stop the clock. Dependents fail `dependency_failed` in the same pass. No alert and no audit line: nothing spawns or despawns, and the record is the trace.
+  A fourth arm (2026-10-27): a pinned `ready` task (`pin.deviceId` or `pin.account`, no `continues`) more
+  than `pinExpiryMs` (30 days, docs/scheduler.md Settled defaults 21) past `createdAt` fails `pin_expired`.
+  A pin's target never goes stale the way a continuation's ledger note does, but a machine retired or
+  re-keyed, or an account signed out for good, otherwise leaves it `ready` forever: never pruned, counted
+  toward `MAX_TASKS`, and ranked with the unfinished ahead of every finished task in the 20-task `queue`
+  reply. And a machine back after longer would start a month-old prompt on today's default branch,
+  unannounced, which is `queue_expired`'s "too long to start safely". 30 days is the tombstone's life
+  (`STORE_TOMBSTONE_MS`) by choice, the month `queue_expired` names (admission itself stops a day short,
+  `ADMIT_MAX_AGE_MS`, for clock skew); nothing depends on the pairing (a pruned pin's version-1 blob put
+  back after its tombstone lapses is past admission's age whatever this bound is). A pinned task released
+  from `blocked` already past the bound fails in the same pass, before dispatch, rather than launching:
+  `#expire` runs again after admission. Machine and account pins share the bound and the code: the leader
+  cannot tell a retired machine from one asleep, nor an account signed out for good from an expired login,
+  and the latter is the most transient. The message, from the decision as for a continuation, says which:
+  a machine pin no decision lists "its machine was not seen"; an account pin every candidate rejects
+  `pin_mismatch` "no machine reports its account", or "its machine does not report its account" when it
+  also pins a machine; else the pinned candidates' own reasons. A decision cut to `DECISION_MAX_CANDIDATES`
+  (`trimmed`) proves no absence, so either absence message gives way to "no machine it is pinned to took
+  it". A machine reporting no exclaves is not judged on its account pin, so it counts as matching and
+  lends its own reasons. Like `continue_expired`, a pause does not
+  stop the clock, and a client clock ahead lengthens it (only a PSK holder writes `createdAt`). An unpinned
+  `ready` task, `avoid` alone included, is never expired: one no machine can take waits for a hand cancel,
+  since a bound there would also fail tasks held only by quota or caps (decided separately). Rejected: the
+  hand cancel alone (store room and the stale launch remain); ranking long-waiting pins below finished
+  tasks in `byRelevance` (frees reply places only, and hides a pin that will still fire); a shorter bound
+  for account pins; a leader-written `readyAt` (a new field an older leader strips, for a clock
+  `createdAt` only makes earlier).
   Mixed versions: a leader older than this change reads `endedAt` as
   an unknown field and drops it on its next write of that record, so the new leader ages that task
   from `createdAt`, which is never later, so expiry only comes earlier; an older leader never
@@ -5554,7 +5583,8 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   anything else is resolved like `pin.machine` and stored as `pin.deviceId`; giving both a machine
   and `pin.machine` is refused, and errors from the top-level field name `machine`, not
   `pin.machine`. `after`, `until`, `linear`, `pin` and `avoid` are accepted beside a named machine.
-  A pin to an offline machine queues, and the answer says the task waits for it. Every scheduler
+  A pin to an offline machine queues, and the answer says the task waits for it (up to 30 days, then
+  `pin_expired`: Scheduler, "Expiry"). Every scheduler
   limit still applies to a pinned task (_Decided_): `placementFilter` adds the pin reasons beside the
   cap, disk and quota checks, so a pin never lifts a limit — it waits for a slot where it is pinned.
   The answer is always the queued line, never a session. The enqueue: it builds a `queued` task from the request (`queuedTask`) and `createTask`s it
