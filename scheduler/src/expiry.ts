@@ -69,15 +69,15 @@ export function expiry(
   if (task.state === "ready" && task.spec.continues !== undefined) {
     if (now - task.createdAt <= config.continueExpiryMs) return null;
     const { at } = task.spec.continues;
-    const there = (decision?.candidates ?? []).filter((c) => c.deviceId === at.deviceId);
-    const exact = there.filter((c) => c.exclave === at.exclave);
-    const reasons = [...new Set((exact.length > 0 ? exact : there).flatMap((c) => c.rejected.map(reasonText)))];
+    // Exact target only: the device's other exclaves are rejected `continue_elsewhere`, which says nothing of why this one never took it.
+    const exact = (decision?.candidates ?? []).filter((c) => c.deviceId === at.deviceId && c.exclave === at.exclave);
+    const reasons = [...new Set(exact.flatMap((c) => c.rejected.map(reasonText)))];
     // A fleet-wide hold (pause, version floor, caps, quota) also keeps it `ready`, and the clock does not stop for it.
     const why = reasons.length > 0 ? reasons.join(", ") : "its machine never took it";
     return fail(
       task,
       "continue_expired",
-      `the session it continues was not resumed within ${days(config.continueExpiryMs)} days: ${why}; the task it continues can be continued again`,
+      `the session it continues was not resumed within ${days(config.continueExpiryMs)} days: ${why}; the task it continues may be continued again while its machine still holds its launch (a week)`,
     );
   }
   return null;

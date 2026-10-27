@@ -480,7 +480,7 @@ export function continueGateError(availability: SchedulerAvailability, advertise
 /**
  * Queues a task that resumes a failed or cancelled task's session (DESIGN.md, Daemon, "Continuing a
  * session"): the same gates as the app's Continue button — the leader and the machine it ran on
- * advertise `continueTask`, the task is a failed or cancelled session in a worktree — then a create
+ * advertise `continueTask` (and `continueCancelled` for a cancelled task), the task is a failed or cancelled session in a worktree — then a create
  * like `spawn_session`'s. `label` names the caller in refusals. Never logs, as `enqueueAuto`.
  */
 export async function continueAuto(

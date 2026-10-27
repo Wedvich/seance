@@ -73,15 +73,16 @@ describe("continueOffer, a cancelled task", () => {
   test("refused without continueCancelled, naming the update", () => {
     const offer = continueOffer(cancelled(), able, []);
     expect(offer.ok).toBe(false);
-    expect(offer.ok ? "" : offer.reason).toContain("seanced update");
+    expect(offer.ok ? "" : offer.reason).toContain("continue a cancelled session");
   });
 
   test("refused with no assignment, or when its session had already finished", () => {
-    for (const task of [cancelled({ assignment: undefined }), cancelled({ endedAt: 5 })]) {
+    const reasonOf = (task: Task): string => {
       const offer = continueOffer(task, both, []);
-      expect(offer.ok).toBe(false);
-      expect(offer.ok ? "" : offer.reason.length).toBeGreaterThan(0);
-    }
+      return offer.ok ? "" : offer.reason;
+    };
+    expect(reasonOf(cancelled({ assignment: undefined }))).toContain("cancelled before it started");
+    expect(reasonOf(cancelled({ endedAt: 5 }))).toContain("had already finished");
   });
 
   test("done and every failure but session_failed are never offered", () => {
@@ -135,6 +136,25 @@ describe("continueOffer, once", () => {
       const offer = continueOffer(old, both, [old, taker]);
       expect(offer.ok, taker.state).toBe(false);
       expect(offer.ok ? "" : offer.reason, taker.state).toContain(taker.id);
+    }
+  });
+
+  test("a finished taker is pointed at only when it could itself be continued", () => {
+    const reasonOf = (taker: Task): string => {
+      const offer = continueOffer(old, both, [old, taker]);
+      return offer.ok ? "" : offer.reason;
+    };
+    for (const taker of [failing("session_failed"), continuation("cancelled", { assignment })]) {
+      expect(reasonOf(taker)).toContain("continue that one instead");
+    }
+    for (const taker of [
+      failing("lost_expired"),
+      failing("merge_expired"),
+      continuation("cancelled", { assignment, endedAt: 5 }),
+    ]) {
+      const reason = reasonOf(taker);
+      expect(reason).toContain("nothing left to continue");
+      expect(reason).not.toContain("continue that one instead");
     }
   });
 

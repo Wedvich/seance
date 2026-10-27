@@ -2522,7 +2522,7 @@ describe("continue_task", () => {
     expect(queued.fake.creates).toHaveLength(1);
     const refused = await callContinue([cancelled], continuingMachines());
     expect(refused.error).toBe(true);
-    expect(refused.text).toContain("seanced update");
+    expect(refused.text).toContain("continue a cancelled session");
     expect(refused.fake.creates).toEqual([]);
   });
 

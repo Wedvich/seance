@@ -2822,7 +2822,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   A third arm (2026-10-27): a `ready` task with `spec.continues` more than `continueExpiryMs` (4 days,
   docs/scheduler.md Settled defaults 19) past `createdAt` fails `continue_expired`, so an unplaceable
   continuation no longer waits for a hand cancel; a task without `continues` is never expired, and a
-  pinned `ready` task gets none. Fixed in `DEFAULT_CONFIG`, not per machine or fleet setting: expiry runs
+  pinned `ready` task without `continues` gets none (a continuation expires pinned or not). Fixed in `DEFAULT_CONFIG`, not per machine or fleet setting: expiry runs
   in the leader and leadership moves. It stays below the launch ledger's age, since past it the target
   daemon would refuse anyway, so failing earlier is never premature. The message names the target
   machine's rejection reasons from the leader's last in-memory decision for the task (`lastDecision`,
@@ -4493,7 +4493,7 @@ fields carry over), under the same gates.
   note `exit` (`Continuation.exit`, from the ledger and never a frame): nonzero says it "ended
   unexpectedly (killed, crashed or out of memory) partway through", zero or none says it "was stopped
   before it finished (cancelled from séance)". Both go on: "Its last tool call may not have finished, and
-  processes it started in the background may still be running (only claude itself was killed/stopped):
+  processes it started in the background may still be running (only claude itself was killed, or was stopped, by the wording chosen):
   check the worktree's state and running processes before restarting anything, then carry on where it
   left off." Whether a cancelled pane's exit is noted depends on harvest seeing it before despawn's
   `kill-pane`; either outcome gives the "stopped" wording. It never claims that background work is
@@ -4554,7 +4554,9 @@ fields carry over), under the same gates.
     back; reasons `continue_elsewhere`, `repo_absent` or `continue_unsupported`) no longer waits for a hand
     cancel: past `SchedulerConfig.continueExpiryMs` (4 days, fixed in `DEFAULT_CONFIG`, below the ledger's
     age, docs/scheduler.md Settled defaults 19) since `createdAt` it fails `continue_expired` (Scheduler,
-    "Expiry"). The old task is then offered again. Existing stuck continuations fail in the first pass of a
+    "Expiry"). The old task may then be offered again, while its machine still holds its launch (the ledger
+    ages from the old launch, so a continuation made over 3 days after it may find it already evicted; the
+    config-relation test guards only a continuation made soon after the old launch). Existing stuck continuations fail in the first pass of a
     new leader, which is the clean-up, and visible.
   - _The list a client sees is at most `QUEUE_MAX_TASKS`_, so a finished continuation fallen off it no
     longer holds the old task; the daemon's ledger rule (the newest note on the path owns it) now refuses
@@ -4569,12 +4571,16 @@ fields carry over), under the same gates.
     daemon whose ledger doesn't reach the reservation, a `task_launched` re-dispatch refusal) owns the path
     under the ledger rule while being offered nowhere: that worktree's conversation is unreachable through
     séance until the ledger forgets it. Rare; `claude --continue` by hand still works.
+  - _A note without `siteAt`_ (written by an older daemon, e.g. after a rollback and re-upgrade) counts as
+    oldest, so a newer continuation noted by the old daemon loses ownership to an older note with `siteAt`:
+    the same rule branch-state uses; accepted.
   - _A cancelled task stopped before it committed_ has a clean worktree whose tip is merged by reap's rules,
     so reap (default `minAgeDays`) may remove it while Continue is still offered; the daemon then refuses
     "its worktree … is gone (removed or reaped)", an expected refusal.
-    Moved out of Rejected: the daemon refusing any task whose path a newer ledger note owns. The objection
-    was that a continuation cancelled or failed after it ran would be offered no Continue itself and the
-    conversation stranded; every terminal state that can still land a continuation now offers Continue itself.
+
+- **Moved out of Rejected:** the daemon refusing any task whose path a newer ledger note owns. The objection
+  was that a continuation cancelled or failed after it ran would be offered no Continue itself and the
+  conversation stranded; every terminal state that can still land a continuation now offers Continue itself.
 - **Not offered:** a task cancelled before it was placed (no session), a task cancelled after its session
   had finished (`endedAt`, from `awaiting-merge`: Follow up's job, like `done`), `done`, `here` runs, an
   automatic continue after an OOM kill (manual by decision), and failures other than `session_failed`:

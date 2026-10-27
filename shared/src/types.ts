@@ -1209,10 +1209,10 @@ export const METRIC_NAMES = {
 export type MetricName = (typeof METRIC_NAMES)[keyof typeof METRIC_NAMES];
 
 /**
- * `continue` resumes a failed task's session (`claude --continue`) in the worktree
- * this machine's launch ledger noted for `SpawnRequest.continues`. It comes only
+ * `continue` resumes a failed or cancelled task's session (`claude --continue`) in the
+ * worktree this machine's launch ledger noted for `SpawnRequest.continues`. It comes only
  * from the leader's dispatch of a continue task (DESIGN.md, Daemon, "Continuing a
- * failed task"); no direct client sends it.
+ * session"); no direct client sends it.
  */
 export type SpawnMode = "worktree" | "here" | "continue";
 

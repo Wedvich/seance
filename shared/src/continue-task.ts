@@ -39,6 +39,12 @@ function tookOver(y: Task): boolean {
   }
 }
 
+/** The task-level eligibility `continueOffer` applies, so it can tell whether a taker would itself pass it. */
+function sessionResumable(task: Task): boolean {
+  if (task.state === "cancelled") return task.assignment !== undefined && task.endedAt === undefined;
+  return task.state === "failed" && task.failure?.code === "session_failed";
+}
+
 /**
  * Whether a task's session can be resumed, and where: the one rule the PWA's button,
  * MCP's `continue_task` and `seanced continue` share so they cannot drift (DESIGN.md,
@@ -72,9 +78,11 @@ export function continueOffer(task: Task, machines: readonly Machine[], tasks: r
     const finished = taker.state === "failed" || taker.state === "cancelled";
     return {
       ok: false,
-      reason: finished
-        ? `its session was taken over by task ${taker.id}; continue that one instead`
-        : "a continuation of it is already underway or finished",
+      reason: !finished
+        ? "a continuation of it is already underway or finished"
+        : sessionResumable(taker)
+          ? `its session was taken over by task ${taker.id}; continue that one instead`
+          : `its session was taken over by task ${taker.id}, which finished, so there is nothing left to continue`,
     };
   }
   if (task.spec.mode === "here") {

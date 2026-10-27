@@ -334,6 +334,29 @@ describe("a ready continuation", () => {
     expect(message).not.toContain(": ;");
   });
 
+  test("rejections of the device's other exclaves are not borrowed", async () => {
+    const { scheduler, put } = setup();
+    const decision = {
+      at: NOW,
+      chosen: at,
+      candidates: [
+        {
+          deviceId: "a",
+          machine: "a",
+          exclave: "other",
+          clone: "app",
+          rejected: [{ code: "continue_elsewhere" as const }],
+        },
+      ],
+    };
+    await put("t", { ...continuing(NOW - CONTINUE_MS - 1), decision });
+    await scheduler.load();
+    await pass(scheduler);
+    const message = scheduler.task("t")?.failure?.message ?? "";
+    expect(message).toContain("its machine never took it");
+    expect(message).not.toContain(reasonText({ code: "continue_elsewhere" }));
+  });
+
   test("a ready task without continues is never expired", async () => {
     const { scheduler, put } = setup();
     await put("t", { state: "ready", createdAt: NOW - 30 * 24 * 60 * 60_000 });

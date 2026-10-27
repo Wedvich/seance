@@ -137,7 +137,7 @@ const RESUME_NEVER_ASKS = [
  * wording comes from the old task's own ledger note `exit`, never from a frame: nonzero
  * is a death, anything else (zero, or none noted) a cancel.
  */
-function continuePreamble(path: string, exit: number | undefined): string {
+export function continuePreamble(path: string, exit: number | undefined): string {
   const prefix = `This session was resumed by séance in the same git worktree at ${path}, after the previous session `;
   if (exit !== undefined && exit !== 0) {
     return (

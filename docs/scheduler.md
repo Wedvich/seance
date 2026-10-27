@@ -1036,7 +1036,7 @@ same PR, with the reason.
     leadership moves. Not tied to reap's `minAgeDays`, which is about worktrees, not queue entries. The
     ceiling is the launch ledger's age (7 days): past it the target daemon refuses the continuation anyway,
     so failing earlier is never premature; a test pins the relation. A pinned (`pin.deviceId`) `ready`
-    task gets no expiry.
+    task without `continues` gets no expiry; a continuation expires pinned or not.
 
 ## Risks / unknowns
 

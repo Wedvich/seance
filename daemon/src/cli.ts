@@ -273,7 +273,7 @@ export function parseContinueArgs(argv: readonly string[]): ContinueCliArgs {
 }
 
 /**
- * Queues a task that resumes a failed one's session (`cli-auto.ts`). Always a scheduler task,
+ * Queues a task that resumes a failed or cancelled one's session (`cli-auto.ts`). Always a scheduler task,
  * never the local op socket's `spawn`: a hand-run `claude --continue` is invisible to the scheduler.
  */
 export async function cmdContinue(argv: readonly string[]): Promise<void> {
