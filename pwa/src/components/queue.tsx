@@ -349,12 +349,7 @@ function QueueCard(props: {
             </a>
           )}
           {inline !== null && (
-            <button
-              type="button"
-              className="quiet"
-              disabled={disabled}
-              onClick={() => run[inline](row.id)}
-            >
+            <button type="button" className="quiet" disabled={disabled} onClick={() => run[inline](row.id)}>
               {INLINE_LABEL[inline]}
             </button>
           )}
