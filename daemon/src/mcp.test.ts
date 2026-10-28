@@ -1462,8 +1462,11 @@ describe("resolvePlacement", () => {
   });
 
   test("an alias equal to another account's id or email never redirects a pin that names it", async () => {
-    const squatter = [...ALIASES, { accountId: PERSONAL, alias: EMPLOYER, version: 2 }];
-    expect((await placed({ account: EMPLOYER }, squatter)).fields).toEqual({ pin: { account: EMPLOYER } });
+    const squatter = ALIASES.map((r) => (r.accountId === PERSONAL ? { ...r, alias: EMPLOYER.toUpperCase() } : r));
+    for (const input of [EMPLOYER, EMPLOYER.toUpperCase()]) {
+      // oxlint-disable-next-line no-await-in-loop -- one input each
+      expect((await placed({ account: input }, squatter)).fields).toEqual({ pin: { account: EMPLOYER } });
+    }
     const two = [
       machine({
         deviceId: "device-a",

@@ -6075,9 +6075,9 @@ and receives registry pushes. Zero relay/DO changes; every channel property
     name is refused listing the machines, a shared one listing their deviceIds, and a machine
     reporting no exclaves is refused (the leader never places there, `exclaves_unknown`). `account`
     is matched as a raw `accountId`, then by the email some registry entry reports
-    (`ExclaveInfo.email`), then by alias (the account records) — alias last, so an alias equal to
-    another account's id or email never redirects a pin that names it — and only an account a sealed registry entry
-    reports signed in matches — signed in nowhere, or not on the pinned machine, is refused. An
+    (`ExclaveInfo.email`), then by alias (the account records), each case-blind — alias last, so an
+    alias equal to another account's id or email never redirects a pin that names it — and only an
+    account a sealed registry entry reports signed in matches — signed in nowhere, or not on the pinned machine, is refused. An
     alias or email two accounts share (one person in two orgs) is refused listing each account by
     its full `accountId`, alias, email and machine/exclave places. Only the `accountId` is stored:
     the alias and the email never reach the record, a log or an audit line, and every account-pin
