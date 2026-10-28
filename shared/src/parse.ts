@@ -803,9 +803,9 @@ function isAttachmentsSentinel(value: unknown): boolean {
 
 // C0, DEL, C1, and the line and paragraph separators: a name stays one line in the seed.
 // oxlint-disable-next-line no-control-regex -- matching control characters is the point
-const ATTACHMENT_NAME_FORBIDDEN = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/u;
+export const ATTACHMENT_NAME_FORBIDDEN = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/u;
 // The type is ASCII by this pattern, so its length is its byte count.
-const ATTACHMENT_TYPE_PATTERN = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/u;
+export const ATTACHMENT_TYPE_PATTERN = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/u;
 
 /**
  * A task spec's or spawn request's `attachments`, every entry checked and bounded and

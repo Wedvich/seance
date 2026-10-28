@@ -25,6 +25,7 @@ import {
   type Verdict,
 } from "./state.ts";
 import { needsAttention } from "./asleep.ts";
+import { formatBytes, type PickedFile } from "./attachments.ts";
 
 /**
  * Everything the screen renders, derived in one pure pass. Components stay dumb
@@ -101,6 +102,19 @@ export interface AccountChoice {
   readonly dot: Dot;
 }
 
+/** The form's files: offered only while the verified leader takes them. */
+export interface AttachmentsView {
+  /** The attach button, paste and drop work. */
+  readonly offered: boolean;
+  readonly files: readonly { readonly key: string; readonly name: string; readonly size: string }[];
+  /** "3 files · 4.2 MB"; null with none. */
+  readonly summary: string | null;
+  /** Why files were not attached, or why attached ones can't go; cleared by the next pick. */
+  readonly notice: string | null;
+  /** Remove is off while an upload runs: the list is what is being sent. */
+  readonly locked: boolean;
+}
+
 /** Why the form's pins can't be queued, as the button's label and the sentence under it. */
 export interface PinProblem {
   readonly label: string;
@@ -146,6 +160,7 @@ export interface ViewModel {
   readonly previewShown: boolean;
   /** A task escalated for input is waiting: the phone's header menu says so. */
   readonly queueAttention: boolean;
+  readonly attachments: AttachmentsView;
 }
 
 export interface AppState {
@@ -187,6 +202,12 @@ export interface AppState {
   /** Unreadable records being discarded. */
   readonly discarding: boolean;
   readonly accounts: AccountsState;
+  /** Files on the form. Not in `form`: a `File` can't be persisted, and a reload drops them. */
+  readonly attachments: readonly PickedFile[];
+  /** Why the last pick or paste left files out; cleared by the next pick or a remove. */
+  readonly attachNotice: string | null;
+  /** The upload in flight: `done` files stored of `total` to send. */
+  readonly upload: { readonly done: number; readonly total: number } | null;
 }
 
 const MINUTE = 60_000;
@@ -292,6 +313,32 @@ export function deriveContinueAvailability(relay: RelayState): boolean {
 /** Whether the verified leader answers `run-now`; an older one refuses it as an op it does not know. */
 export function deriveRunNowAvailability(relay: RelayState): boolean {
   return verifiedLeaderAdvertises(relay, CAPABILITIES.runNow);
+}
+
+/**
+ * A task carrying attachments is written only to a verified leader that advertises
+ * `attachments`: an older one holds the record unreadable (the dep sentinel), and
+ * the relay may not even have the bucket.
+ */
+export function deriveAttachmentsAvailability(relay: RelayState): boolean {
+  return verifiedLeaderAdvertises(relay, CAPABILITIES.attachments);
+}
+
+export const ATTACHMENTS_UNAVAILABLE =
+  "The scheduler's leader doesn't take attachments yet. Update seanced on its machine, or remove the files";
+
+function deriveAttachments(state: AppState): AttachmentsView {
+  const offered = deriveAttachmentsAvailability(state.relay);
+  const files = state.attachments;
+  const total = files.reduce((sum, f) => sum + f.size, 0);
+  return {
+    offered,
+    files: files.map((f) => ({ key: f.key, name: f.name, size: formatBytes(f.size) })),
+    summary:
+      files.length === 0 ? null : `${files.length} ${files.length === 1 ? "file" : "files"} · ${formatBytes(total)}`,
+    notice: state.attachNotice,
+    locked: state.upload !== null,
+  };
 }
 
 function verifiedLeaderAdvertises(relay: RelayState, capability: Capability): boolean {
@@ -551,6 +598,7 @@ function deriveFooterStatus(state: AppState, machine: Machine | null, problem: P
   const { reason, note } = deriveAutoAvailability(state.relay);
   if (reason !== null) return reason;
   if (problem !== null) return problem.text;
+  if (state.attachments.length > 0 && !deriveAttachmentsAvailability(state.relay)) return ATTACHMENTS_UNAVAILABLE;
   // The tile says "Unknown machine" here, so the footer must not claim the scheduler picks.
   if (state.form.machine !== null && machine === null) return "The pinned machine isn't listed";
   if (machine !== null && !machine.connected) return `${machine.name} is offline — the task waits for it`;
@@ -576,9 +624,14 @@ function deriveButton(
     if (relay.unbound > 0) return blocked("Registry tampered");
     return blocked(relay.skewed > 0 ? "Version mismatch" : "No machines listed");
   }
+  if (state.upload !== null) {
+    const { done, total } = state.upload;
+    return { label: `Uploading ${Math.min(done + 1, total)} of ${total}…`, enabled: false, busy: true };
+  }
   if (state.spawning) return { label: "Queuing…", enabled: false, busy: true };
   if (!deriveAutoAvailability(relay).available) return blocked("Queuing is unavailable");
   if (problem !== null) return blocked(problem.label);
+  if (state.attachments.length > 0 && !deriveAttachmentsAvailability(relay)) return blocked("Can't attach files");
   if (repo === null) return blocked("No repo to run");
   return { label: machine === null ? "Queue" : `Queue on ${machine.name}`, enabled: true, busy: false };
 }
@@ -670,6 +723,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
     accountChoices: deriveAccountChoices(state),
     previewShown: previewAsked(form),
     queueAttention: state.queueView?.kind === "ok" && needsAttention(state.queueView.tasks, state.relay.machines),
+    attachments: deriveAttachments(state),
   };
 }
 

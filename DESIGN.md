@@ -1162,9 +1162,9 @@ Who owns each frame in code — the place to change when a frame changes:
 | record `quota` (at rest)                                            | `sealFleetQuotaRecord` (`shared/src/fleet-quota.ts`), by each daemon's fleet quota writer (`daemon/src/fleet-quota.ts`) on its own socket                                                                                                                                                                                                                                          | `openFleetQuotaRecord` (`shared/src/fleet-quota.ts`) — `openAtRest`, sealed `to: "app"`, `parseFleetQuotaRecord`, sealed `version` the store's — by the app-client's `refreshFleetQuota` (the PWA and the leader's leg) and the writer; stored under `quota:fleet` (_Scheduler_, "Fleet quota record")                                   |
 | records `account` / `settings` (at rest)                            | `account` written by `sealAccountRecord` (`shared/src/account-record.ts`) from the PWA's rename; `settings` unwritten so far                                                                                                                                                                                                                                                       | `account`: `openAccountRecord`, which opens at rest then `parseAccountRecord` and binds version and key; `settings`: `openAtRest` with its op, then `parseSettingsRecord` (`shared/src/parse.ts`); stored under `account:` and `settings:` (_Scheduler_, "The store")                                                                    |
 | op `push-subscribe` (→`"scheduler"`)                                | not yet sent (M4, Web Push)                                                                                                                                                                                                                                                                                                                                                        | not in `SCHEDULER_OPS`: `daemon/src/leader.ts` answers it `invalid_request` as any op it does not handle, and a non-leading daemon drops it (`daemon/src/relay-client.ts`: not a scheduler op), so the app sees a timeout, not `not_leader`, until the op joins `SCHEDULER_OPS`; its handler will parse with `parsePushSubscribeRequest` |
-| HTTP `PUT /attachments/<id>`                                        | designed, not built: the PWA's compose screen (`pwa/src/`), sealed by `sealAttachment` (`shared/src/crypto.ts`), with `Authorization: Bearer`                                                                                                                                                                                                                                      | built: `relay/src/attachments.ts`, after `Hub.reserveUpload` (`relay/src/allowance.ts`); into R2 through the `ATTACHMENTS` binding                                                                                                                                                                                                       |
+| HTTP `PUT /attachments/<id>`                                        | built: `RelayClient.uploadAttachment` (`shared/src/app-client.ts`) from the PWA's spawn form (`pwa/src/store.ts`), sealed by `sealAttachment`, with `Authorization: Bearer`                                                                                                                                                                                                        | built: `relay/src/attachments.ts`, after `Hub.reserveUpload` (`relay/src/allowance.ts`); into R2 through the `ATTACHMENTS` binding                                                                                                                                                                                                       |
 | HTTP `GET /attachments/<id>`                                        | designed, not built: `daemon/src/attachments.ts`, before the launch ledger's write-ahead record, at `attachmentUrl` of its own config's `relayUrl`                                                                                                                                                                                                                                 | built: `relay/src/attachments.ts`, streamed from R2                                                                                                                                                                                                                                                                                      |
-| field `attachments`                                                 | designed, not built: `TaskSpec` and `SpawnRequest`, from the PWA's `createTask` after every upload is `stored`; built: the leader's `#dispatch` (`scheduler/src/scheduler.ts`)                                                                                                                                                                                                     | `parseAttachmentManifest` (`shared/src/parse.ts`), in `parseTaskSpec` and the daemon's `isSpawnRequest`; acted on in `handleSpawn` (`daemon/src/handlers.ts`)                                                                                                                                                                            |
+| field `attachments`                                                 | built: `TaskSpec` and `SpawnRequest`, from the PWA's `createTask` after every upload is `stored` (`pwa/src/store.ts`); the leader's `#dispatch` (`scheduler/src/scheduler.ts`)                                                                                                                                                                                                     | `parseAttachmentManifest` (`shared/src/parse.ts`), in `parseTaskSpec` and the daemon's `isSpawnRequest`; acted on in `handleSpawn` (`daemon/src/handlers.ts`)                                                                                                                                                                            |
 
 `sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
 over the local op socket, arriving at the same `daemon/src/handlers.ts` routing.
@@ -4103,6 +4103,42 @@ Where the build adds to or departs from the wording above:
 - The Queue screen and verdict show a count ("3 files") on a task carrying attachments,
   never names, while the record holds the manifest.
 
+### The PWA: as built (task 6)
+
+Where the build adds to or departs from the wording above:
+
+- **The upload lives on the client**: `RelayClient.uploadAttachment(bytes)` in
+  `shared/src/app-client.ts` mints the id, seals, hashes and `PUT`s, answering
+  `{ ok: true, id, hash }` or a refusal: the relay's code (`allowance_exhausted` with
+  `window` and `retryAfter`), `unreachable` when no answer came, or `unreadable` for an
+  answer this build can't read. The key and token stay private to the client, as for
+  every other relay call. A retry is a new call, so a fresh id.
+- **Drop** on the prompt card joins the picker and paste (desktop). Paste takes the
+  clipboard's files; it suppresses the text paste only when there is no text.
+- **Progress is per file** ("Uploading 2 of 5…" on the Queue button). `fetch` reports no
+  upload progress, and the shared client also runs under Bun and Raycast, where
+  `XMLHttpRequest` does not exist.
+- **Limits at pick time** (`admitFiles`, `pwa/src/attachments.ts`): a file over 30 MiB is
+  skipped and the next tried; once 10 files are on the form nothing after is added; a
+  file that would pass 100 MiB in all is skipped. One line under the list names each
+  left out and why. The prompt bound is checked at submit, before any upload.
+- **Names**: control characters (the parser's forbidden set, now exported from
+  `shared/src/parse.ts` with the type pattern) become `_`, an empty name is `file`, and a
+  name past 100 units is cut in the stem, keeping an extension of up to 16 units, never
+  splitting a surrogate pair.
+- **Files are not persisted**: a `File` can't be, so a reload drops them, unlike the
+  prompt. They leave the form when a task carrying them is stored, matched by id.
+- **A refused upload** shows the unqueued verdict without **Try again**: back on the
+  form, Queue again uploads only the files not yet stored.
+- **Not offered, files listed**: if the leader stops advertising `attachments` with files
+  on the form, they stay listed (removable), the button reads "Can't attach files" and the
+  footer says why. `route-preview` carries `attachments: true` while files are listed.
+- **No count**: the Queue card and the verdict don't mention attachments. Names show only
+  on the form's chips.
+- **CSP**: `pwa/vite.config.ts` derives the `https:` origin with `attachmentUrl`, imported
+  by relative path: the config is bundled and loads under node, where the workspace
+  package's raw TS cannot.
+
 ### Rejected alternatives
 
 - **Inline files in the task record**: 30 MiB does not fit a 28 KiB create, and the store
@@ -4175,7 +4211,7 @@ of this section built.
    - A `GET /attachments/<id>` route on `daemon/test/harness.ts`'s relay double.
    - Tests for every refusal reason: wrong length, hash, auth, `404`, deadline, not
      scheduler.
-6. **PWA**:
+6. **PWA** — **built 2026-10-28**, with the notes under "The PWA: as built" above:
    - The picker and paste, the limits and the prompt bound.
    - Sealing and upload, progress, partial retry and the allowance message.
    - Creating the task with the manifest, and the count on queue cards.

@@ -15,7 +15,7 @@ import {
   type SheetKind,
 } from "../state.ts";
 import { completeSkill, matchSkills, promptSegments, skillIndex, skillToken } from "../skills.ts";
-import { formatSeen, type Tile, type ViewModel } from "../view.ts";
+import { formatSeen, type AttachmentsView, type Tile, type ViewModel } from "../view.ts";
 import { DecisionCard } from "./decision.tsx";
 import { HeaderMenu } from "./header-menu.tsx";
 import { Menu, MenuItem, useMenu } from "./menu.tsx";
@@ -69,6 +69,78 @@ export interface SpawnActions {
   readonly setUntil: (until: TaskUntil) => void;
   readonly startBatch: () => void;
   readonly endBatch: () => void;
+  /** Picked, pasted or dropped files; the store applies the limits. */
+  readonly addFiles: (files: readonly File[]) => void;
+  readonly removeFile: (key: string) => void;
+}
+
+/** Only drags that carry files light the card up: a dragged text selection is the textarea's. */
+function carriesFiles(event: DragEvent): boolean {
+  return event.dataTransfer?.types.includes("Files") === true;
+}
+
+/**
+ * The prompt card's files: chips with remove, and ATTACH, which opens the picker.
+ * Rendered only while attaching is offered, or while files picked earlier are
+ * still listed (the leader changed under them), so they can still be removed.
+ */
+function AttachmentList(props: {
+  view: AttachmentsView;
+  onAdd: (files: readonly File[]) => void;
+  onRemove: (key: string) => void;
+}): JSX.Element | null {
+  const { view, onAdd, onRemove } = props;
+  const picker = useRef<HTMLInputElement>(null);
+  if (!view.offered && view.files.length === 0) return null;
+  return (
+    <div className="attach">
+      {view.files.length > 0 && (
+        <ul className="attach-list" aria-label={view.summary ?? undefined}>
+          {view.files.map((file) => (
+            <li key={file.key} className="attach-chip">
+              <span className="attach-name">{file.name}</span>
+              <span className="attach-size">{file.size}</span>
+              <button
+                type="button"
+                className="attach-remove"
+                aria-label={`Remove ${file.name}`}
+                disabled={view.locked}
+                onClick={() => onRemove(file.key)}
+              >
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="attach-foot">
+        <span className="attach-summary">{view.summary ?? ""}</span>
+        {view.offered && (
+          <button
+            type="button"
+            className="prompt-action"
+            disabled={view.locked}
+            onClick={() => picker.current?.click()}
+          >
+            ATTACH
+          </button>
+        )}
+        <input
+          ref={picker}
+          type="file"
+          multiple
+          hidden
+          onChange={(event) => {
+            const input = event.currentTarget;
+            onAdd([...(input.files ?? [])]);
+            // Cleared so picking the same file again still fires a change.
+            input.value = "";
+          }}
+        />
+      </div>
+      {view.notice !== null && <p className="attach-notice">{view.notice}</p>}
+    </div>
+  );
 }
 
 /**
@@ -516,6 +588,8 @@ export function SpawnScreen(props: {
   columns: boolean;
 }): JSX.Element {
   const { actions, view, form, promptUndo, sheet, machines, now, preview, afterSheet, columns } = props;
+  const [dropping, setDropping] = useState(false);
+  const attachOffered = view.attachments.offered;
   const offline = view.machine !== null && !view.machine.connected;
   const [renderedSheet, sheetClosing, unmountSheet] = useSheetExit(sheet);
   const promptInput = useRef<HTMLTextAreaElement>(null);
@@ -670,7 +744,25 @@ export function SpawnScreen(props: {
       </header>
 
       <div className="column">
-        <div className="prompt-card card">
+        <div
+          className={dropping ? "prompt-card card prompt-card-drop" : "prompt-card card"}
+          onDragOver={(event) => {
+            if (!attachOffered || !carriesFiles(event)) return;
+            event.preventDefault();
+            setDropping(true);
+          }}
+          onDragLeave={(event) => {
+            // Leaving for a child is still inside the card.
+            if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
+            setDropping(false);
+          }}
+          onDrop={(event) => {
+            setDropping(false);
+            if (!attachOffered || !carriesFiles(event)) return;
+            event.preventDefault();
+            actions.addFiles([...(event.dataTransfer?.files ?? [])]);
+          }}
+        >
           <div className="prompt-head">
             <span className="label" id="prompt-label">
               PROMPT
@@ -716,6 +808,13 @@ export function SpawnScreen(props: {
                 actions.setPrompt(event.currentTarget.value);
                 readCaret();
               }}
+              onPaste={(event) => {
+                // A screenshot pastes as a file with no text; text keeps its normal paste.
+                const files = [...(event.clipboardData?.files ?? [])];
+                if (!attachOffered || files.length === 0) return;
+                if (event.clipboardData?.getData("text/plain") === "") event.preventDefault();
+                actions.addFiles(files);
+              }}
               onKeyUp={readCaret}
               onClick={readCaret}
               onPointerUp={readCaret}
@@ -735,6 +834,7 @@ export function SpawnScreen(props: {
           {pickerOpen && query !== null && (
             <SkillPicker id={SKILL_LIST_ID} query={query} items={matches} active={active} onPick={pickSkill} />
           )}
+          <AttachmentList view={view.attachments} onAdd={actions.addFiles} onRemove={actions.removeFile} />
         </div>
 
         {view.banner !== null &&

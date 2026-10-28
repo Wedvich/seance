@@ -258,6 +258,8 @@ function useSpawnActions(store: Store): SpawnActions {
       setUntil: (until) => store.setUntil(until),
       startBatch: () => store.startBatch(),
       endBatch: () => store.endBatch(),
+      addFiles: (files) => store.addFiles(files),
+      removeFile: (key) => store.removeFile(key),
     }),
     [store],
   );
