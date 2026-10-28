@@ -1011,10 +1011,10 @@ describe("auto's error paths", () => {
     client.onQueue = async () => ({ tasks: [placed], at: 3 });
     client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 1 } });
     await until(() => queuedState(store) === "ready", "read once a leader leads");
-    // The waiting read spent nothing: the leader's read was the first of the whole budget.
+    // The waiting read spent nothing, nor did the arrival's: the chain re-arms on the whole budget.
     expect(timers.armed(QUEUE_POLL_MS)).toBe(1);
     const rearmed = (): boolean => timers.armed(QUEUE_POLL_MS) === 1;
-    for (let poll = 2; poll < QUEUE_POLLS; poll += 1) {
+    for (let poll = 1; poll < QUEUE_POLLS; poll += 1) {
       timers.fire(QUEUE_POLL_MS);
       // oxlint-disable-next-line no-await-in-loop -- each poll follows the one before
       await until(rearmed, "the next poll armed");
@@ -1160,6 +1160,75 @@ describe("auto's error paths", () => {
     await drain();
     expect(queuedState(store)).toBe("ready");
     expect(timers.armed(QUEUE_POLL_MS)).toBe(1);
+    detach();
+  });
+
+  test("a leader the relay calls offline while the scheduler reads ready spends polls, so the follow ends", async () => {
+    const client = new ScriptedClient();
+    client.onQueue = async () => {
+      throw new RequestFailure("no_leader", "the relay has no leader to route to");
+    };
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.spawn();
+    for (let n = 0; n < QUEUE_POLLS; n += 1) {
+      timers.fire(QUEUE_POLL_MS);
+      // oxlint-disable-next-line no-await-in-loop -- one poll at a time
+      await drain();
+    }
+    expect(followEnd(store)).toBeDefined();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+    detach();
+  });
+
+  test("a leader arriving at a parked follow after a reopen reads the followed task once and re-arms the chain", async () => {
+    const client = new ScriptedClient({ scheduler: { kind: "none" } });
+    client.onQueue = async () => {
+      throw new RequestFailure("no_leader", "no scheduler is leading");
+    };
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.spawn();
+    const created = firstCreate(client);
+    timers.fire(QUEUE_POLL_MS);
+    await until(() => client.queueRequests.length === 1, "the leaderless poll");
+    await drain();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+
+    client.onQueue = async () => ({ tasks: [created], at: 3 });
+    client.emit({ status: "retrying" });
+    client.emit({ status: "open", scheduler: { kind: "ready", deviceId: "dev-a", term: 1 } });
+    await until(() => client.queueRequests.length === 2, "the arrival's read");
+    await drain();
+    expect(client.queueRequests).toHaveLength(2);
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(1);
+    detach();
+  });
+
+  test("a nudge for the followed task shown with no verified leader is read once one verifies", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.spawn();
+    const created = firstCreate(client);
+    await drain();
+    client.emit({ scheduler: { kind: "none" } });
+    const asked = client.queueRequests.length;
+    try {
+      setVisibility("hidden");
+      client.nudge({ at: 3, tasks: [created.id] });
+      await drain();
+    } finally {
+      setVisibility("visible");
+    }
+    await drain();
+    // Refused unsent would have recorded nothing: no read goes out while nobody can answer.
+    expect(client.queueRequests).toHaveLength(asked);
+
+    const running: Task = { ...created, state: "running" };
+    client.onQueue = async () => ({ tasks: [running], at: 4 });
+    client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 1 } });
+    await until(() => queuedState(store) === "running", "the nudged task read on the leader's arrival");
     detach();
   });
 });
@@ -1414,8 +1483,10 @@ describe("start now", () => {
   test("a long stretch with no leader spends no reads, and the ready after it still sends", async () => {
     const client = capable();
     const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
     await store.startNow();
     const created = firstCreate(client);
+    client.emit({ scheduler: { kind: "none" } });
     client.onQueue = async () => {
       throw new RequestFailure("no_leader", "no scheduler is leading");
     };
@@ -1424,8 +1495,11 @@ describe("start now", () => {
       // oxlint-disable-next-line no-await-in-loop -- one poll at a time
       await drain();
     }
-    await poll(client, { ...created, state: "ready" });
+    client.onQueue = async () => ({ tasks: [{ ...created, state: "ready" }], at: 2 });
+    client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 1 } });
+    await until(() => client.runNows.length === 1, "the run-now");
     expect(client.runNows).toEqual([created.id]);
+    detach();
   });
 
   test("reads that reach a leader spend the budget: once spent, the intent lapses unsent and silent", async () => {
@@ -2308,6 +2382,28 @@ describe("the queue screen", () => {
     client.emit({ status: "retrying" });
     client.emit({ status: "open" });
     await until(() => client.queueRequests.length === asked + 1, "the reopen's read");
+    detach();
+  });
+
+  test("a tab hidden again before its resume's pong keeps what it missed for the next show", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+    const detach = store.attach();
+    await drain();
+    const asked = client.queueRequests.length;
+    const pong = Promise.withResolvers<ResumeOutcome>();
+    client.onShown = () => pong.promise;
+    setVisibility("hidden");
+    client.nudge({ at: 2 });
+    setVisibility("visible");
+    setVisibility("hidden");
+    pong.resolve("live");
+    await drain();
+    expect(client.queueRequests).toHaveLength(asked);
+
+    client.onShown = async () => "live";
+    setVisibility("visible");
+    await until(() => client.queueRequests.length === asked + 1, "the catch-up on the next show");
     detach();
   });
 

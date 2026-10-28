@@ -479,6 +479,24 @@ describe("account aliases in the store", () => {
     expect(socket !== undefined && double.sockets.has(socket)).toBe(true);
   });
 
+  test("a hidden echo of the version already held is no news: showing the tab lists nothing", async () => {
+    const double = startDouble();
+    const held = await planted(double, ACCOUNT, "work");
+    const store = await openStore(double);
+    await pollUntil(() => store.getState().accounts.aliases[ACCOUNT] === "work", "the listing to land");
+    try {
+      setVisibility("hidden");
+      nudge(double, held, 1);
+      // A non-event can't be polled for.
+      await Bun.sleep(50);
+    } finally {
+      setVisibility("visible");
+    }
+    await Bun.sleep(100);
+    expect(lists(double)).toBe(1);
+    expect(gets(double)).toBe(0);
+  });
+
   test("dispose clears an armed retry, and a refusal landing after it arms none", async () => {
     const timer = stubRetryTimer();
     try {

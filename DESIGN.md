@@ -1029,7 +1029,8 @@ The Durable Object persists a machine registry:
   missed pong makes the daemon close and redial; a daemon socket that stops
   pinging is swept by the relay's alarm.
 - **The app socket heartbeats too**, same 30s ping / 10s pong, answered by the
-  same DO auto-response. It is the app leg's only liveness signal: presence is
+  same DO auto-response. It is the app leg's liveness signal while the page runs
+  (a resume adds its own probe, below, under "Sessions are fanned out"): presence is
   pushed, not polled, so a silently dead app socket (network switch, mobile
   doze with the screen on) would otherwise freeze the machine list with no
   symptom until a spawn failed into it. A missed pong re-dials, and the fresh
@@ -5388,12 +5389,22 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   when a machine wakes. A resume from background is not a fan-out of its own:
   a suspended PWA's socket can die silently while still reading open, so showing
   the tab probes it (`RelayClient.reconnectIfStale`) — one `ping`, re-dial unless
-  its `pong` comes back within 1.5s, and re-dial outright after a hide as long as
-  a heartbeat interval or of unknown length. A dead socket is replaced within the
-  probe's deadline and its re-dial fans out as any connect does; a live one kept
-  receiving registry pushes while hidden, so its counts are as fresh as a tab
-  that never left. Re-dialling on every resume cost a TLS handshake, the
-  registry push, `sessions` to every machine and every reopen read each time.
+  its `pong` comes back within 1.5s. Pings and pongs are counted per socket (the
+  edge answers in order), so the probe settles only on the answer to its own
+  ping: a pong buffered from before the hide, which iOS dispatches on resume,
+  proves nothing, and neither does it clear a heartbeat deadline armed for a
+  newer ping. A hide of a heartbeat interval or longer (or of unknown length)
+  re-dials outright, but only when nothing was heard for an interval plus the pong
+  timeout — a frozen page sent no beats, whereas a desktop tab's heartbeat kept
+  running while hidden and is probed instead. Requests made while a probe is out
+  wait for it and go on whatever socket is current, so none strands on a socket the
+  probe is about to replace. A dead socket is replaced within the probe's deadline
+  and its re-dial fans out as any connect does. **A resume on a live socket after
+  a hide shorter than the heartbeat interval does not re-fan `sessions`**, so the
+  counts may miss sessions started or ended elsewhere meanwhile until the next
+  connect or machine wake — a deliberate trade: re-dialling on every resume cost a
+  TLS handshake, the registry push, `sessions` to every machine and every reopen
+  read each time, the bulk of a resume's cost.
 - **A gap in the relay socket is held back for 1.5s before it is shown.** The app is
   legitimately not connected for a moment on the way in — a refresh dials from
   scratch, and the resume above re-dials whenever its probe goes unanswered — so rendering the status
@@ -5713,8 +5724,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   and follows it (2026-10-19: as one screen that moves, not three — it is keyed on the task id so
   refreshes update it in place; three tiles, Queued · Placed · Running, each a
   glyph squircle, stand in for the glyph until the task settles, since an outcome is a glyph and
-  a stage is not, and `lost` is a `?` not a third tile; the waiting tile pulses and a tile that
-  stops waiting lets its pulse finish; the headline and body slide and crossfade on change. The
+  a stage is not, and `lost` is a `?` not a third tile; the waiting tile's ring swells three
+  times, then rests as a held ring (a wait can last hours), and a tile that stops waiting lets
+  a swell in progress finish, while a ring already at rest goes at once; the headline and body slide and crossfade on change. The
   decision card is not on the verdict at all — the owner's call: the form's preview says where
   it would go and the verdict says only that it is running; `verdict-view.ts` derives the rest.
   The Queue screen's rows once carried it too, behind a "Why there" disclosure, removed
