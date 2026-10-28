@@ -88,8 +88,18 @@ an error. The PSK is the actual trust boundary; the relay never sees it.
 cd relay
 bun run wrangler login                     # once
 bun run wrangler secret put BEARER_TOKEN   # paste the bearer token
+bun run wrangler r2 bucket create seance-attachments
+bun run wrangler r2 bucket lifecycle add seance-attachments expire-30d --expire-days 30
 bun run deploy                             # prints https://seance-relay.<subdomain>.workers.dev
 ```
+
+The bucket holds attachments (files sent with a task), sealed under the PSK before
+they leave the phone. The lifecycle rule deletes each object 30 days after upload:
+nothing else ever does, and the relay's upload allowance assumes it (DESIGN.md,
+"Attachments"). The relay binds the bucket by name (`seance-attachments`), so a deploy
+fails until the bucket exists. Create both once, before the first deploy that binds it.
+If `lifecycle add` prompts, accept. Don't let `bucket create` edit `wrangler.jsonc`: the
+binding is already committed.
 
 This first deploy is by hand; afterwards CI redeploys the relay on every push to
 `main` that touches it, which needs a `CLOUDFLARE_API_TOKEN` repository secret and a
@@ -521,6 +531,12 @@ never forced — and reports why; `seanced status` on that machine shows its ver
 and its last update outcome. The relay and the app deploy themselves from CI on a
 push to `main` that touches them (`Deploy` in Actions also runs on demand, per
 component), so deploying either by hand would race that.
+
+The relay that brings in attachments (October 2026) binds the `seance-attachments` R2
+bucket, so create the bucket and its lifecycle rule (step 2) **before** that deploy
+lands, or CI's relay deploy fails until you do. The CI token (`CLOUDFLARE_API_TOKEN`)
+must also be allowed to edit R2 (Cloudflare's _Edit Cloudflare Workers_ token template
+includes Workers R2 Storage).
 
 The relay that brought in the leader allowlist (October 2026) nominates nobody
 until `SCHEDULER_LEADERS` is set, so put the secret (step 4) **before** that
