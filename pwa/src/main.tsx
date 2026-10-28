@@ -6,6 +6,7 @@ import { dropLegacyHidden, dropLegacyPending, readForm, writeForm } from "./pers
 import { deriveAccountKey, FLEET_QUOTA_INTERVAL_MS, RelayClient } from "@seance/shared";
 import { loadPsk, loadPskBase, readBearer, readRelayUrl } from "./relay/keys.ts";
 import "./screen.css";
+import type { PersistedForm } from "./state.ts";
 import { Store } from "./store.ts";
 import { registerServiceWorker } from "./sw.ts";
 import { watchSystemTheme } from "./theme.ts";
@@ -52,12 +53,18 @@ if (key === null || token === null) {
   });
   const store = new Store(client, readForm());
 
-  // Debounced because the store notifies on every keystroke in the prompt.
+  // Debounced because the store notifies on every keystroke in the prompt. Only a new
+  // form is written: most notifies (relay status beats) leave it the same object. The
+  // first is written whatever it is, so a legacy saved shape `readForm` dropped fields
+  // from is rewritten once per load, as before.
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let written: PersistedForm | null = null;
   store.subscribe(() => {
+    if (store.getState().form === written) return;
     if (timer !== null) clearTimeout(timer);
     timer = setTimeout(() => {
-      writeForm(store.getState().form);
+      written = store.getState().form;
+      writeForm(written);
     }, PERSIST_DEBOUNCE_MS);
   });
 

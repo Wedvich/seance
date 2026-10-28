@@ -341,13 +341,23 @@ const BACKOFF_CAP_MS = 15_000;
 
 /**
  * How long a gap in the socket is allowed to go unreported. A refresh dials from
- * scratch and a resume re-dials unconditionally (the socket dies silently while an
- * installed PWA is suspended), so the app is legitimately not open for a moment on
- * the way in — and rendering that immediately flashed "Relay unreachable" for a
- * frame or two every single time. Anything that recovers inside this window is
- * never shown at all; a real outage lasts far longer than it.
+ * scratch and a resume can re-dial (`reconnectIfStale`: the socket dies silently
+ * while an installed PWA is suspended), so the app is legitimately not open for a
+ * moment on the way in — and rendering that immediately flashed "Relay unreachable"
+ * for a frame or two every single time. Anything that recovers inside this window
+ * is never shown at all; a real outage lasts far longer than it.
  */
 const SETTLE_MS = 1_500;
+
+/**
+ * How long a resume waits for its probe's pong before re-dialling. An RTT on a
+ * phone network, with room for the radio waking up; far below the heartbeat's
+ * own pong timeout, since a resume is when someone is looking at the screen.
+ */
+const RESUME_PROBE_MS = 1_500;
+
+/** What `reconnectIfStale` found: the socket answered, or a re-dial (whose reopen catches up) replaced it. */
+export type ResumeOutcome = "live" | "redialed";
 
 /**
  * How long after `open` to wait for the registry push before declaring the
@@ -635,12 +645,30 @@ export class RelayClient {
   #pingTimer: ReturnType<typeof setInterval> | null = null;
   #pongDeadline: ReturnType<typeof setTimeout> | null = null;
   #fleetQuotaTimer: ReturnType<typeof setInterval> | null = null;
+  /** The resume probe out on the current socket; settled by its pong, its deadline, or the socket going. */
+  #probe: {
+    readonly socket: WebSocket;
+    readonly done: Promise<ResumeOutcome>;
+    readonly settle: (outcome: ResumeOutcome) => void;
+    /** Pongs received on `socket` that mean the probe's own ping was answered: the edge answers in order. */
+    readonly needs: number;
+    readonly timer: ReturnType<typeof setTimeout>;
+  } | null = null;
   /** The store version `fleetQuota` was read at, so an unchanged record keeps its array (and its subscribers quiet). */
   #fleetQuotaVersion = 0;
   /** The newest store version any answer showed (a record's, readable or not): reads can finish out of order. */
   #fleetQuotaStoreVersion = 0;
   /** When the current socket last delivered anything — pong or frame. Uplink evidence for timeout blame. */
   #lastFrameAt = 0;
+  /**
+   * Pings sent and pongs received on the current socket. The edge answers each ping in
+   * order, so a pong settles a deadline only once the count reaches the ping it was armed
+   * for: a buffered answer to an older ping (iOS dispatches them on resume) proves nothing.
+   */
+  #pingsSent = 0;
+  #pongsSeen = 0;
+  /** The ping count `#pongDeadline` was armed at. */
+  #pongNeeds = 0;
   #stopped = false;
 
   readonly #timeouts: Partial<Record<RequestOp, number>>;
@@ -650,6 +678,7 @@ export class RelayClient {
   readonly #registrySettleMs: number;
   readonly #pingIntervalMs: number;
   readonly #pongTimeoutMs: number;
+  readonly #resumeProbeMs: number;
   readonly #fleetQuotaRefreshMs: number | null;
   readonly #log: (line: string) => void;
   /** Set only on a scheduler leader's leg: requests go `from: SCHEDULER_ID` under this term. */
@@ -676,6 +705,8 @@ export class RelayClient {
     /** Overrides for the shared heartbeat cadence; tests use them to avoid real 30s beats. */
     readonly pingIntervalMs?: number;
     readonly pongTimeoutMs?: number;
+    /** Override for RESUME_PROBE_MS; tests use it to avoid a real 1.5s wait. */
+    readonly resumeProbeMs?: number;
     /**
      * Read the fleet quota record (`refreshFleetQuota`) on every open and then
      * this often while the socket stays up (`FLEET_QUOTA_INTERVAL_MS` in
@@ -715,6 +746,7 @@ export class RelayClient {
     this.#registrySettleMs = opts.registrySettleMs ?? REGISTRY_SETTLE_MS;
     this.#pingIntervalMs = opts.pingIntervalMs ?? HEARTBEAT_INTERVAL_MS;
     this.#pongTimeoutMs = opts.pongTimeoutMs ?? HEARTBEAT_PONG_TIMEOUT_MS;
+    this.#resumeProbeMs = opts.resumeProbeMs ?? RESUME_PROBE_MS;
     this.#fleetQuotaRefreshMs = opts.fleetQuotaRefreshMs ?? null;
     this.#log = opts.log ?? ((line) => console.log(line));
     this.#term = opts.scheduler?.term ?? null;
@@ -843,11 +875,71 @@ export class RelayClient {
   }
 
   /**
+   * The app is showing again after `hiddenMs` hidden (`Infinity` when unknown).
+   * An installed PWA is suspended constantly and its socket can die silently
+   * while still reading open, so a resume does not trust it: a ping has to come
+   * back within RESUME_PROBE_MS, or this re-dials as a missed heartbeat does.
+   * Hidden for a heartbeat interval or longer AND nothing heard for that interval
+   * plus the pong timeout re-dials outright: a frozen page sent no beats, and a
+   * probe would only add its wait. A page whose heartbeat kept running while hidden
+   * (desktop) has a fresh `#lastFrameAt` and is probed instead. Re-dialling from
+   * scratch on every resume cost a handshake, the registry push and every reopen read.
+   * Calls while a probe is out share it, unless the hide was long enough to re-dial.
+   */
+  reconnectIfStale(hiddenMs: number): Promise<ResumeOutcome> {
+    const socket = this.#socket;
+    const frozen =
+      hiddenMs >= this.#pingIntervalMs && Date.now() - this.#lastFrameAt > this.#pingIntervalMs + this.#pongTimeoutMs;
+    if (socket === null || socket.readyState !== WebSocket.OPEN || frozen) {
+      // Settles a probe still out "redialed" through the heartbeat teardown.
+      this.reconnect();
+      return Promise.resolve("redialed");
+    }
+    if (this.#probe !== null) return this.#probe.done;
+    const probe: { settle: (outcome: ResumeOutcome) => void } = { settle: () => {} };
+    const done = new Promise<ResumeOutcome>((resolve) => {
+      probe.settle = resolve;
+    });
+    const timer = setTimeout(() => {
+      if (this.#probe?.socket !== socket) return;
+      this.#wireLog("heartbeat", `no pong within ${this.#resumeProbeMs}ms of a resume`);
+      // Settles the probe "redialed" through the heartbeat teardown.
+      this.reconnect();
+    }, this.#resumeProbeMs);
+    this.#probe = { socket, done, settle: probe.settle, needs: this.#pingsSent + 1, timer };
+    this.#ping(socket);
+    return done;
+  }
+
+  #ping(socket: WebSocket): void {
+    socket.send("ping");
+    this.#pingsSent += 1;
+  }
+
+  /** Waits until no probe is out; one can start while another's waiters wake, so it re-checks. */
+  async #probeSettled(): Promise<void> {
+    // oxlint-disable-next-line no-await-in-loop -- each wait decides whether another is due
+    while (this.#probe !== null) await this.#probe.done;
+  }
+
+  #settleProbe(outcome: ResumeOutcome): void {
+    const probe = this.#probe;
+    if (probe === null) return;
+    this.#probe = null;
+    clearTimeout(probe.timer);
+    probe.settle(outcome);
+  }
+
+  /**
    * One op to one machine. `T` is the op's own reply; any op can instead answer
    * with an `ErrorResponse` (a crashed handler, an oversized reply), so callers
    * check before reading fields. Throws `RequestFailure` when nothing answered.
    */
   async request<T>(deviceId: string, op: RequestOp, payload: unknown): Promise<T | ErrorResponse> {
+    // A resume probe is deciding whether this socket lives: sending now could strand the request
+    // on a dead one for its full timeout. The socket current once it settles carries it, and
+    // after a re-dial that is one still connecting, so the request fails `disconnected` below.
+    await this.#probeSettled();
     const socket = this.#socket;
     if (socket === null || socket.readyState !== WebSocket.OPEN) {
       throw new RequestFailure("disconnected", "no socket to the relay");
@@ -894,7 +986,7 @@ export class RelayClient {
       // A probe: its pong (answered at the edge) is the uplink evidence the blame
       // check above needs, without waiting for the next 30s heartbeat beat. A
       // healthy socket produces it within an RTT; a dead one produces nothing.
-      socket.send("ping");
+      this.#ping(socket);
       this.#wireLog("send", `iv=${quote(env.iv)} id=${quote(id)} op=${quote(op)} to=${quote(deviceId)}`);
     });
   }
@@ -947,6 +1039,10 @@ export class RelayClient {
 
   #connect(): void {
     if (this.#stopped) return;
+    this.#pingsSent = 0;
+    this.#pongsSeen = 0;
+    // The previous socket's last frame is no evidence about this one: frozen check and timeout blame read it.
+    this.#lastFrameAt = 0;
     const url = new URL(this.#url);
     url.searchParams.set(TOKEN_PARAM, this.#token);
     const socket = this.#createSocket(url.href);
@@ -969,8 +1065,13 @@ export class RelayClient {
       // Stale sockets don't count: their late frames say nothing about this one.
       if (this.#socket === socket) this.#lastFrameAt = Date.now();
       if (event.data === "pong") {
-        if (this.#pongDeadline !== null) clearTimeout(this.#pongDeadline);
-        this.#pongDeadline = null;
+        if (this.#socket !== socket) return;
+        this.#pongsSeen += 1;
+        if (this.#pongDeadline !== null && this.#pongsSeen >= this.#pongNeeds) {
+          clearTimeout(this.#pongDeadline);
+          this.#pongDeadline = null;
+        }
+        if (this.#probe?.socket === socket && this.#pongsSeen >= this.#probe.needs) this.#settleProbe("live");
         return;
       }
       void this.#onFrame(event.data, socket);
@@ -1049,8 +1150,10 @@ export class RelayClient {
     this.#teardownHeartbeat();
     this.#pingTimer = setInterval(() => {
       if (this.#socket !== socket || socket.readyState !== WebSocket.OPEN) return;
-      socket.send("ping");
-      this.#pongDeadline ??= setTimeout(() => {
+      this.#ping(socket);
+      if (this.#pongDeadline !== null) return;
+      this.#pongNeeds = this.#pingsSent;
+      this.#pongDeadline = setTimeout(() => {
         this.#pongDeadline = null;
         if (this.#socket !== socket) return;
         this.#wireLog("heartbeat", `no pong within ${this.#pongTimeoutMs}ms`);
@@ -1062,7 +1165,7 @@ export class RelayClient {
     }, this.#pingIntervalMs);
   }
 
-  /** Every timer bound to the current socket: the heartbeat's, and the record poll's. */
+  /** Every timer bound to the current socket: the heartbeat's, the record poll's, and a resume probe's. */
   #teardownHeartbeat(): void {
     if (this.#pingTimer !== null) clearInterval(this.#pingTimer);
     if (this.#pongDeadline !== null) clearTimeout(this.#pongDeadline);
@@ -1070,6 +1173,8 @@ export class RelayClient {
     this.#pingTimer = null;
     this.#pongDeadline = null;
     this.#fleetQuotaTimer = null;
+    // The socket it probed is going: whatever replaces it reopens, and the reopen catches up.
+    this.#settleProbe("redialed");
   }
 
   /** Polled, not pushed: the relay nudges apps only for `account:`, never `quota:`. */
@@ -1616,6 +1721,8 @@ export class RelayClient {
    * cannot read. Throws `RequestFailure` when nothing answered.
    */
   #store(frame: AppStoreRequestFrame): Promise<StoreReplyFrame | null> {
+    // Held for a resume probe, as `request` is; its failure paths apply once it settles.
+    if (this.#probe !== null) return this.#probeSettled().then(() => this.#store(frame));
     const socket = this.#socket;
     if (socket === null || socket.readyState !== WebSocket.OPEN) {
       return Promise.reject(new RequestFailure("disconnected", "no socket to the relay", "relay"));

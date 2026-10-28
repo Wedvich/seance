@@ -115,7 +115,9 @@ export class Store {
    * connected flag, so a proven-offline mark clearing does not read as a wake —
    * blaming a slow machine, re-polling it, and timing out again is a loop.
    * Entries survive a machine going offline for the same reason. Emptied
-   * whenever the socket isn't open, which keeps every re-dial a full refresh.
+   * whenever the socket isn't open, which keeps every re-dial a full refresh;
+   * a resume that finds the socket live keeps it, since the registry pushes
+   * kept coming on that socket.
    */
   #wokenAt = new Map<string, number>();
   /** The last range picked, so opening another chart keeps it; a reload starts on a day again. */
@@ -180,13 +182,30 @@ export class Store {
   /** Wires up relay and lifecycle listeners; returns a disposer. */
   attach(): () => void {
     const unsubscribe = this.#client.subscribe(() => this.#onRelay());
-    const onVisible = (): void => {
-      if (document.visibilityState !== "visible") return;
+    let hiddenAt: number | null = null;
+    let attached = true;
+    const onVisibility = (): void => {
+      if (document.visibilityState !== "visible") {
+        hiddenAt = Date.now();
+        return;
+      }
       // An installed PWA is suspended constantly and the socket dies silently,
-      // so a resume has to re-dial before anything else can be trusted.
-      this.#client.reconnect();
+      // so a resume can't trust it: the client probes it, or re-dials outright
+      // after a long hide. Wall-clock time, since a suspended page's timers and
+      // monotonic clocks may not have moved; unknown counts as long.
+      const hiddenMs = hiddenAt === null ? Infinity : Date.now() - hiddenAt;
+      hiddenAt = null;
+      void this.#client.reconnectIfStale(hiddenMs).then((outcome) => {
+        // A re-dial's reopen (`#onRelay`) reads everything again by itself, and a
+        // tab hidden again before the pong keeps what it missed for the next show.
+        if (outcome !== "live" || !attached || document.visibilityState !== "visible") return;
+        const relay = this.#client.getState();
+        if (relay.status !== "open") return;
+        this.#queue.onShown(relay);
+        this.#accounts.onShown();
+      });
     };
-    document.addEventListener("visibilitychange", onVisible);
+    document.addEventListener("visibilitychange", onVisibility);
     const unsubscribeQueue = this.#client.onQueueChanged((change) => this.#queue.onQueueChanged(change));
     const unsubscribeAccounts = this.#client.onStoreChanged((key, version) =>
       this.#accounts.onStoreChanged(key, version),
@@ -197,7 +216,8 @@ export class Store {
       unsubscribe();
       unsubscribeQueue();
       unsubscribeAccounts();
-      document.removeEventListener("visibilitychange", onVisible);
+      attached = false;
+      document.removeEventListener("visibilitychange", onVisibility);
       this.#disarmUndo();
       this.#queue.dispose();
       this.#accounts.dispose();
@@ -221,10 +241,10 @@ export class Store {
     // `machines` means "no push yet", not "every machine vanished".
     this.#patch({ relay, ...(relay.registrySettled ? this.#pruneGone(relay.machines) : {}) });
     if (relay.status !== "open") {
-      // Forgotten rather than kept: a resume re-dials unconditionally and the
-      // registry that follows names the same machines, so leaving the map in
-      // place means nothing ever counts as woken again and the session lists
-      // stay at whatever the very first connect saw.
+      // Forgotten rather than kept: the re-dial's registry names the same
+      // machines, so leaving the map in place means nothing ever counts as
+      // woken again and the session lists stay at whatever the very first
+      // connect saw.
       this.#wokenAt = new Map();
       this.#queue.onDrop();
       this.#wasOpen = false;

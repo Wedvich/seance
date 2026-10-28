@@ -299,9 +299,9 @@ describe("daemon ↔ relay ↔ app", () => {
       window = reply.window;
       expect(sessionsView(app.store.getState(), stack.deviceId).some((s) => s.window === window)).toBe(false);
 
-      // attach()'s visibilitychange handler does exactly this: an installed PWA
-      // is suspended constantly and the socket dies without a close frame, so a
-      // resume re-dials whether or not the old one looked alive.
+      // What attach()'s visibilitychange handler does when the resume probe goes
+      // unanswered or the tab was hidden past a heartbeat interval: an installed
+      // PWA is suspended constantly and the socket dies without a close frame.
       app.client.reconnect();
       const state = await app.waitForApp(
         (s) => sessionsFor(s, stack.deviceId).some((entry) => entry.window === window),
