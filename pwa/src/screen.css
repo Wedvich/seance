@@ -154,10 +154,19 @@
   border: 2px solid var(--err);
 }
 
-/* Sonar ring behind the steady dot — it precedes it in the DOM, so it paints under. */
+/*
+ * Sonar ring behind the steady dot — it precedes it in the DOM, so it paints under.
+ * A few swells, then a still halo: an endless ring kept the compositor busy for as
+ * long as the state lasted. The rest animation is listed last, so it wins once its
+ * delay is up; before that it has no fill and the swells show.
+ */
 .relay-sonar {
+  --sonar-cycle: 1.4s;
+  --sonar-cycles: 3;
   background: color-mix(in srgb, var(--warn) 50%, transparent);
-  animation: relay-sonar 1.4s ease-out infinite;
+  animation:
+    relay-sonar var(--sonar-cycle) ease-out var(--sonar-cycles) forwards,
+    relay-sonar-rest 0.6s ease-out calc(var(--sonar-cycle) * var(--sonar-cycles)) forwards;
 }
 
 /*
@@ -180,6 +189,17 @@
   to {
     transform: scale(2.4);
     opacity: 0;
+  }
+}
+
+@keyframes relay-sonar-rest {
+  from {
+    transform: scale(1);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1.8);
+    opacity: 0.35;
   }
 }
 
@@ -1109,14 +1129,19 @@
   }
 }
 
-/* The relay dot's sonar, behind the waiting tile. A gentler swell than the
-   dot's: on a 40px tile the dot's 2.4× ring would reach the neighbours. */
+/* The relay dot's sonar, behind the waiting tile, and like it a few swells
+   that come to rest: a wait can last hours. A gentler swell than the dot's:
+   on a 40px tile the dot's 2.4× ring would reach the neighbours. */
 .stage-sonar {
+  --sonar-cycle: 1.6s;
+  --sonar-cycles: 3;
   position: absolute;
   inset: 0;
   border-radius: 12px;
   background: color-mix(in srgb, var(--acc) 35%, transparent);
-  animation: stage-sonar 1.6s ease-out infinite;
+  animation:
+    stage-sonar var(--sonar-cycle) ease-out var(--sonar-cycles) forwards,
+    stage-sonar-rest 0.6s ease-out calc(var(--sonar-cycle) * var(--sonar-cycles)) forwards;
 }
 
 /* Like the dot's: the global clamp would freeze the ring at full size, so drop it. */
@@ -1135,6 +1160,17 @@
   to {
     transform: scale(1.35);
     opacity: 0;
+  }
+}
+
+@keyframes stage-sonar-rest {
+  from {
+    transform: scale(1);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1.15);
+    opacity: 0.45;
   }
 }
 

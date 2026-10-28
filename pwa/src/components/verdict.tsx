@@ -18,12 +18,15 @@ function StageTrack(props: { stage: VerdictStage }): JSX.Element {
   // cycle ends: cut mid-swell it would vanish at full size. The next bead's
   // ring starts at once; only the old one is let finish. Decided in render,
   // not an effect, so the ring is the same element across the step and its
-  // animation runs on rather than restarting.
+  // animation runs on rather than restarting. A ring that already came to rest
+  // (screen.css bounds the swells) has no cycle left to finish and goes at once.
   const previous = useRef(reached);
   const finishing = useRef<number | null>(null);
+  const rested = useRef(false);
   const [, rerender] = useState(0);
   if (previous.current !== reached) {
-    finishing.current = previous.current < 2 ? previous.current : null;
+    finishing.current = previous.current < 2 && !rested.current ? previous.current : null;
+    rested.current = false;
     previous.current = reached;
   }
   const finished = (): void => {
@@ -50,6 +53,11 @@ function StageTrack(props: { stage: VerdictStage }): JSX.Element {
                   className="stage-sonar"
                   onAnimationIteration={() => {
                     if (finishing.current === i) finished();
+                  }}
+                  onAnimationEnd={(event) => {
+                    // The last swell ends with no iteration event after it.
+                    if (event.animationName === "stage-sonar" && finishing.current === i) finished();
+                    if (event.animationName === "stage-sonar-rest" && i === reached) rested.current = true;
                   }}
                 />
               )}
