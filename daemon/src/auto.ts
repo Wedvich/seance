@@ -230,8 +230,10 @@ function describeAccount(
 }
 
 /**
- * An account by alias (account records), then email (what the registry's
- * exclaves report), then its exact `accountId`. Only an account some sealed
+ * An account by its `accountId`, then email (what the registry's exclaves
+ * report), then alias (account records), each case-blind. Alias last: it is
+ * free text from a record the relay may serve stale, so it must never take a
+ * string that names another account by id or email. Only an account some sealed
  * registry entry reports signed in can match: an alias record names any id a
  * PSK holder wrote, and the relay may serve a stale one, so the registry is the
  * authority on which accounts exist. `records` null is a listing that failed:
@@ -268,8 +270,11 @@ export function resolveAccount(
   const byEmail = [...signedIn]
     .filter(([, held]) => [...held.emails].some((email) => email.toLowerCase() === wanted))
     .map(([id]) => id);
-  const byId = signedIn.has(input.trim()) || records?.some((r) => r.accountId === input.trim()) === true;
-  const found = pick(byAlias, "alias") ?? pick(byEmail, "email") ?? (byId ? pick([input.trim()], "id") : null);
+  // Case-blind like alias and email: an id typed in another case must not fall through to an alias squatting it.
+  const byId = [...signedIn.keys(), ...(records ?? []).map((r) => r.accountId)].filter(
+    (id) => id.toLowerCase() === wanted,
+  );
+  const found = pick(byId, "id") ?? pick(byEmail, "email") ?? pick(byAlias, "alias");
   if (found !== null) return found;
   if (records === null) {
     return {

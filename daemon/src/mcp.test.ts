@@ -1461,6 +1461,30 @@ describe("resolvePlacement", () => {
     expect(await refused({ account: "old" }, records)).toContain("which no machine reports signed in");
   });
 
+  test("an alias equal to another account's id or email never redirects a pin that names it", async () => {
+    const squatter = ALIASES.map((r) => (r.accountId === PERSONAL ? { ...r, alias: EMPLOYER.toUpperCase() } : r));
+    for (const input of [EMPLOYER, EMPLOYER.toUpperCase()]) {
+      // oxlint-disable-next-line no-await-in-loop -- one input each
+      expect((await placed({ account: input }, squatter)).fields).toEqual({ pin: { account: EMPLOYER } });
+    }
+    const two = [
+      machine({
+        deviceId: "device-a",
+        name: "A",
+        exclaves: [{ ...exclave("default"), accountId: "org-a:x", email: "a@a.no" }],
+      }),
+      machine({
+        deviceId: "device-b",
+        name: "B",
+        exclaves: [{ ...exclave("default"), accountId: "org-b:x", email: "b@b.no" }],
+      }),
+    ];
+    const records = [{ accountId: "org-a:x", alias: "b@b.no", version: 1 }];
+    expect(await resolvePlacement(two, listed(records).accounts, { account: "B@b.no" })).toMatchObject({
+      fields: { pin: { account: "org-b:x" } },
+    });
+  });
+
   test("an account matches any email a machine reports for it", async () => {
     const mixed = [
       machine({ deviceId: "device-a", name: "A", exclaves: [{ ...exclave("default"), email: "first@a.no" }] }),
