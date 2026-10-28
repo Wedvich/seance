@@ -3100,7 +3100,8 @@ error.
   after an `account:` write. It is relay plaintext, so the client checks the prefix and
   `isStoreKey` before using the key, uses the version only to skip a re-read it already holds, and
   reads through `getAccountRecord`, the same open path as a listing. On open (and on every re-dial,
-  since nudges sent while down are lost) the PWA lists `account:` once; a first listing the relay
+  since nudges sent while down are lost, and on showing a tab that ignored one while hidden) the
+  PWA lists `account:` once; a first listing the relay
   refused is retried once after a few seconds, since the list bucket is shared by every app. A
   rename made before a listing landed reads its key first, so it does not report a conflict with
   a record the client never saw. The PWA keeps the version of every key it has seen, unreadable
@@ -5383,12 +5384,19 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   narrows what is offered to the picked machine and account. A pick that leaves the origin
   no clone drops it. The per-machine map could only drift against that.
 - **Sessions are fanned out, not polled.** The header total spans every online
-  machine, so `sessions` is sent to each on connect, when a machine wakes, and
-  on resume from background — that last one because a suspended PWA's socket
-  dies silently and stale counts under a green dot are worse than none.
+  machine, so `sessions` is sent to each on connect (every re-dial included) and
+  when a machine wakes. A resume from background is not a fan-out of its own:
+  a suspended PWA's socket can die silently while still reading open, so showing
+  the tab probes it (`RelayClient.reconnectIfStale`) — one `ping`, re-dial unless
+  its `pong` comes back within 1.5s, and re-dial outright after a hide as long as
+  a heartbeat interval or of unknown length. A dead socket is replaced within the
+  probe's deadline and its re-dial fans out as any connect does; a live one kept
+  receiving registry pushes while hidden, so its counts are as fresh as a tab
+  that never left. Re-dialling on every resume cost a TLS handshake, the
+  registry push, `sessions` to every machine and every reopen read each time.
 - **A gap in the relay socket is held back for 1.5s before it is shown.** The app is
   legitimately not connected for a moment on the way in — a refresh dials from
-  scratch, and the resume above re-dials unconditionally — so rendering the status
+  scratch, and the resume above re-dials whenever its probe goes unanswered — so rendering the status
   as it stands flashed "Relay unreachable" for a frame or two on every refresh and
   every foregrounding. `RelayState.settling` marks that window: the screen reads
   "connecting…" with the pulsing amber dot and no banner, and anything that recovers inside
@@ -5429,8 +5437,11 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   whole pill is a single `<button>`, so the 4px padding around a 36px face gives
   a 44px tap target without the old hit-area overlay, and the split makes plain
   that the dot reports and the cog acts. The three states differ by shape as well
-  as hue — solid green with a glow, steady amber behind an expanding sonar ring,
-  hollow red ring — so the failed state is not carried by colour alone. The ring
+  as hue — solid green with a glow, steady amber behind a sonar ring, hollow red
+  ring — so the failed state is not carried by colour alone. The sonar swells
+  three times and then rests as a still halo, as the queued verdict's stage ring
+  does: a ring that never stops keeps the compositor producing frames for as
+  long as its state lasts, and a task can wait for hours behind the caps. The ring
   is dropped outright under `prefers-reduced-motion` rather than left to the
   global clamp, which would freeze it at full size over the dot. The settings
   header's own status line renders the same three dots from the same component:
@@ -5721,7 +5732,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   screen applies the same rule. A read the leader
   refuses, or whose reply cannot be read, ends the follow and says why. With no leader or an
   unverified one the read is "waiting", and spends no poll: the verdict says the task waits in the
-  queue until one leads, and it follows the task as soon as one does. Polls that run out on a miss
+  queue until one leads, stops polling (a read now would be refused unsent, and the wait can be
+  hours), and reads the task as soon as a verified leader shows up, with the polls it had left. A
+  Start now's own reads wait the same way. Polls that run out on a miss
   say the screen may be out of date and point at the Queue screen. A lost create (`timeout`,
   `dropped`, a transport error) says it may have queued anyway, once: the reason it gives never
   says so too, nor names the store frame. It offers **Try again**, which
@@ -5729,8 +5742,10 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   (`landedEarlier`), so it cannot queue twice. One that never left (`disconnected`) says it was
   not queued, with the same retry. A `store_full` refusal names the unreadable records the last
   queue read listed, when there are any, since no prune frees those (M3 review S2). No
-  `queue-changed` is read while the tab is hidden (M3 review P5): showing it re-dials, and the
-  reopen reads the queue and the followed task whole. A pending enqueue is not persisted across a reload: a lost
+  `queue-changed` is read while the tab is hidden (M3 review P5): one that came is noted, and
+  showing the tab reads the queue whole and, if the nudge could name it, the followed task — on a
+  socket the resume probe found live, or through the reopen when it re-dialled. An `account:`
+  `store-changed` ignored while hidden lists the accounts again the same way. A pending enqueue is not persisted across a reload: a lost
   reply there leaves the task queued and visible on the Queue screen, which is the way back to it.
   A picked machine or account is a pin on the same task (above).
 - **The Queue screen** (M3 item 6) is the app's view of the relay's queue, opened from the
