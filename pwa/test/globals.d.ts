@@ -11,6 +11,7 @@ declare var document: {
   visibilityState: "visible" | "hidden";
   addEventListener(type: string, listener: () => void): void;
   removeEventListener(type: string, listener: () => void): void;
+  dispatchEvent(event: Event): boolean;
 };
 
 declare var history: {

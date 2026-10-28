@@ -51,6 +51,8 @@ export class AccountStore {
   /** Bumped on every reopen: a listing sent on an earlier socket answers for a view since replaced. */
   #generation = 0;
   #retry: ReturnType<typeof setTimeout> | null = null;
+  /** A nudge came while the tab was hidden: showing it again lists whole, as a reopen does. */
+  #missedHidden = false;
 
   constructor(client: RelayClient, getState: () => AppState, patch: (next: Partial<AppState>) => void) {
     this.#client = client;
@@ -68,7 +70,17 @@ export class AccountStore {
 
   /** A relay change with the socket open: a reopen lists again, since nudges sent meanwhile are lost. */
   onOpen(reopened: boolean): void {
-    if (!reopened || !this.#client.accountsNamed) return;
+    if (reopened) this.#relist();
+  }
+
+  /** Shown again on the same socket (`reconnectIfStale` found it live): lists again if a nudge was ignored meanwhile. */
+  onShown(): void {
+    if (this.#missedHidden) this.#relist();
+  }
+
+  #relist(): void {
+    this.#missedHidden = false;
+    if (!this.#client.accountsNamed) return;
     this.#generation += 1;
     this.#listed = false;
     this.#read.clear();
@@ -151,8 +163,11 @@ export class AccountStore {
   onStoreChanged(key: string, version: number): void {
     if (!key.startsWith(STORE_PREFIXES.account.prefix) || !isStoreKey(key)) return;
     if (!this.#client.accountsNamed) return;
-    // Showing the tab again re-dials (`attach`), and the reopen lists whole.
-    if (document.visibilityState !== "visible") return;
+    // Read once the tab shows again: by `onShown` on a live socket, by the reopen after a re-dial.
+    if (document.visibilityState !== "visible") {
+      this.#missedHidden = true;
+      return;
+    }
     if (version <= (this.#versions.get(key) ?? 0)) return;
     void this.#refresh(key);
   }
