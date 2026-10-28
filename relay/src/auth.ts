@@ -16,6 +16,11 @@ export function presentedToken(req: Request, role: Role): string | null {
     const token = new URL(req.url).searchParams.get(TOKEN_PARAM);
     return token === "" ? null : token;
   }
+  return bearerToken(req);
+}
+
+/** The header only: the attachment routes take no `?t=`, so a token never rides a URL `fetch` could log or cache. */
+export function bearerToken(req: Request): string | null {
   const match = /^Bearer +(.+)$/iu.exec(req.headers.get("authorization") ?? "");
   return match?.[1] ?? null;
 }

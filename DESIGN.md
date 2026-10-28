@@ -123,7 +123,7 @@ its Tailscale lockdown defeats the relay's purpose).
   read every record and create a `task:` one (`STORE_PREFIXES`), never
   overwrite or delete. Anti-junk hygiene only — the PSK is the trust boundary;
   readers skip registry entries and records that don't decrypt or bind
-  (`bindTaskRecord`). Attachments (designed 2026-10-28, not built) give it two HTTP routes:
+  (`bindTaskRecord`). Attachments (designed 2026-10-28; the relay's half built) give it two HTTP routes:
   upload sealed objects within the Hub's allowance, and download one by id (Attachments).
 
 ## Threat model
@@ -527,7 +527,7 @@ Séance's noise is cover for a real intruder.
    see the registry — but all they send the scheduler is fire-and-forget
    `session-event`s, sealed under the PSK, so such a leader learns their timing
    and nothing else.
-   **Attachments** (designed 2026-10-28, not built; Attachments). A holder
+   **Attachments** (designed 2026-10-28, the relay's half built; Attachments). A holder
    can `PUT` junk objects and `GET` any object whose id it knows. The junk is bounded by the
    Hub's upload allowance: 9.5 GB in any trailing 30 days, 1 GB and 300 uploads an hour, so
    R2 stays inside its free tier and the DO's row writes stay well under the day's. Rotating
@@ -1159,8 +1159,8 @@ Who owns each frame in code — the place to change when a frame changes:
 | record `quota` (at rest)                                            | `sealFleetQuotaRecord` (`shared/src/fleet-quota.ts`), by each daemon's fleet quota writer (`daemon/src/fleet-quota.ts`) on its own socket                                                                                                                                                                                                                                          | `openFleetQuotaRecord` (`shared/src/fleet-quota.ts`) — `openAtRest`, sealed `to: "app"`, `parseFleetQuotaRecord`, sealed `version` the store's — by the app-client's `refreshFleetQuota` (the PWA and the leader's leg) and the writer; stored under `quota:fleet` (_Scheduler_, "Fleet quota record")                                   |
 | records `account` / `settings` (at rest)                            | `account` written by `sealAccountRecord` (`shared/src/account-record.ts`) from the PWA's rename; `settings` unwritten so far                                                                                                                                                                                                                                                       | `account`: `openAccountRecord`, which opens at rest then `parseAccountRecord` and binds version and key; `settings`: `openAtRest` with its op, then `parseSettingsRecord` (`shared/src/parse.ts`); stored under `account:` and `settings:` (_Scheduler_, "The store")                                                                    |
 | op `push-subscribe` (→`"scheduler"`)                                | not yet sent (M4, Web Push)                                                                                                                                                                                                                                                                                                                                                        | not in `SCHEDULER_OPS`: `daemon/src/leader.ts` answers it `invalid_request` as any op it does not handle, and a non-leading daemon drops it (`daemon/src/relay-client.ts`: not a scheduler op), so the app sees a timeout, not `not_leader`, until the op joins `SCHEDULER_OPS`; its handler will parse with `parsePushSubscribeRequest` |
-| HTTP `PUT /attachments/<id>`                                        | designed, not built: the PWA's compose screen (`pwa/src/`), sealed by `sealAttachment` (`shared/src/crypto.ts`), with `Authorization: Bearer`                                                                                                                                                                                                                                      | `relay/src/attachments.ts`, after `Hub.reserveUpload` (`relay/src/allowance.ts`); into R2 through the `ATTACHMENTS` binding                                                                                                                                                                                                              |
-| HTTP `GET /attachments/<id>`                                        | designed, not built: `daemon/src/attachments.ts`, before the launch ledger's write-ahead record, at `attachmentUrl` of its own config's `relayUrl`                                                                                                                                                                                                                                 | `relay/src/attachments.ts`, streamed from R2                                                                                                                                                                                                                                                                                             |
+| HTTP `PUT /attachments/<id>`                                        | designed, not built: the PWA's compose screen (`pwa/src/`), sealed by `sealAttachment` (`shared/src/crypto.ts`), with `Authorization: Bearer`                                                                                                                                                                                                                                      | built: `relay/src/attachments.ts`, after `Hub.reserveUpload` (`relay/src/allowance.ts`); into R2 through the `ATTACHMENTS` binding                                                                                                                                                                                                       |
+| HTTP `GET /attachments/<id>`                                        | designed, not built: `daemon/src/attachments.ts`, before the launch ledger's write-ahead record, at `attachmentUrl` of its own config's `relayUrl`                                                                                                                                                                                                                                 | built: `relay/src/attachments.ts`, streamed from R2                                                                                                                                                                                                                                                                                      |
 | field `attachments`                                                 | designed, not built: `TaskSpec` and `SpawnRequest`, from the PWA's `createTask` after every upload is `stored`; the leader's `#dispatch` (`scheduler/src/scheduler.ts`)                                                                                                                                                                                                            | `parseAttachmentManifest` (`shared/src/parse.ts`), in `parseTaskSpec` and the daemon's `isSpawnRequest`; acted on in `handleSpawn` (`daemon/src/handlers.ts`)                                                                                                                                                                            |
 
 `sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
@@ -3757,7 +3757,7 @@ export interface AttachmentRef {
   - A key derived for attachments by HKDF: the AAD already separates the domain, and
     random 96-bit IVs stay far below GCM's per-key limit at this volume.
 
-### The relay: R2 and the routes (`relay/src/attachments.ts`)
+### The relay: R2 and the routes (`relay/src/attachments.ts`) — built 2026-10-28
 
 - **Binding**: `ATTACHMENTS: R2Bucket` in `relay/src/env.ts`, from
   `"r2_buckets": [{ "binding": "ATTACHMENTS", "bucket_name": "seance-attachments" }]` in
@@ -3845,7 +3845,39 @@ export interface AttachmentRef {
     limit.
   - A listing route: nothing needs one, and it would hand a token holder every id.
 
-### The upload allowance (the Hub, `relay/src/allowance.ts`)
+### The relay: as built (task 3)
+
+Where the build adds to or departs from the wording above:
+
+- **Create-only holds under Miniflare**: the binding honours `If-None-Match: *`, a second
+  `PUT` resolves `null` and answers `409 exists`, and the stored bytes stay the first's.
+  The `head`-then-`put` fallback was not needed. Task 7 proves it end to end.
+- **`401` logs no line**, as a refused socket upgrade logs none: the id an unauthenticated
+  caller sends is its own junk. Every other refusal logs as tabled. `err=` is quoted.
+- **Extra headers**: a `405` carries `Allow: GET, PUT, OPTIONS`, and a `429` carries
+  `Retry-After` equal to the body's `retryAfter`. Every answer carries `Cache-Control:
+  no-store`. A malformed `Content-Length` (not 1–12 decimal digits) is `invalid_length`,
+  though Miniflare's front server and Cloudflare's edge refuse one before the Worker.
+- **When both windows refuse, `month` answers.** The first hour at which the month window
+  admits also opens a fresh hour bucket, so its wait is the longer. `retryAfter` is that
+  hour boundary for `month` and the next hour for `hour`, in whole seconds, at least 1. A
+  reservation larger than all of `windowBytes`, possible only under a test override, waits
+  one full window.
+- **Test-only bounds**: `UPLOAD_WINDOW_BYTES`, `UPLOAD_HOUR_BYTES` and
+  `UPLOAD_HOUR_UPLOADS` in `Env`, the same pattern as `STORE_TOMBSTONE_MS`, so the suite
+  can reach each `429` in a few small uploads. Unset in production. They join the layering
+  test's env list. `windowHours` has no override: the window's length is tested on an
+  injected clock (`relay/test/allowance.test.ts`).
+- **The Hub keeps its `#ctx` field** beside `DurableObject`'s own protected `ctx`, so the
+  change to `extends DurableObject` touches nothing else in it. The harness bundles with
+  `cloudflare:workers` external, which workerd resolves at load.
+- **A Hub that throws on `reserveUpload` answers `503 storage_error`** with a `failed`
+  line, rather than an uncaught `500`.
+- **`storage_error` from a short body is untested.** Miniflare's front server drops a
+  request whose body ends before its `Content-Length` before workerd sees it, so the
+  `503` path cannot be driven there. Task 7 or a deploy check can.
+
+### The upload allowance (the Hub, `relay/src/allowance.ts`) — built 2026-10-28
 
 - The Hub DO extends `DurableObject` (`cloudflare:workers`) to take one RPC,
   `reserveUpload(bytes: number): Promise<UploadVerdict>`. `bytes` is the declared object
@@ -4049,7 +4081,8 @@ of this section built.
    - A test that an older leader's parser refuses an attachment record. It holds the
      sealed record against a `parseDep` that refuses `""`, which every build does.
    - Not `OP_TIMEOUT_MS`: that moves with the TTL in task 4.
-3. **relay**:
+3. **relay** — **built 2026-10-28**, with the departures listed under "The relay: as
+   built" above:
    - `relay/src/attachments.ts`, the routes as tabled, with CORS and logging.
    - The `/attachments/` branch in `index.ts`.
    - The Hub as `DurableObject` with `reserveUpload`, and `relay/src/allowance.ts`.
@@ -4057,8 +4090,9 @@ of this section built.
      env list and no-body-read rule.
    - `startRelay` in `relay/test/harness.ts` reads `r2_buckets` from `wrangler.jsonc` and
      passes `r2Buckets`.
-   - `relay/test/attachments.test.ts`: every status, the preflight, create-only, the
-     count limit (301 empty uploads), and that a captured log holds no id beyond refusals.
+   - `relay/test/attachments.test.ts`: every status but `storage_error`, the preflight,
+     create-only, the count limit (under a lowered `UPLOAD_HOUR_UPLOADS`; the unit tests
+     spend the real 300), and that a captured log holds no id beyond refusals.
    - Unit tests for the allowance's byte windows on an injected clock.
    - Map rows marked built.
    - The owner creates the bucket before this merges: CI deploys the relay on merge, and a

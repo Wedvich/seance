@@ -23,6 +23,15 @@ import {
   type StoreRequestFrame,
   type UndeliverableCode,
 } from "@seance/shared";
+import { DurableObject } from "cloudflare:workers";
+import {
+  ALLOWANCE_KEY,
+  allowanceLimits,
+  reserve,
+  type AllowanceLimits,
+  type HourBucket,
+  type UploadVerdict,
+} from "./allowance.ts";
 import { roleForPath, type Role } from "./auth.ts";
 import type { Env } from "./env.ts";
 import {
@@ -228,8 +237,9 @@ interface RegisterRate {
  * registry. Blind by construction — it never holds the PSK, so `info` blobs and
  * op payloads are unreadable here.
  */
-export class Hub implements DurableObject {
+export class Hub extends DurableObject<Env> {
   readonly #ctx: DurableObjectState;
+  readonly #allowance: AllowanceLimits;
   readonly #sweepIntervalMs: number;
   readonly #silenceLimitMs: number;
   /** Who may be nominated. Parsed per wake: a secret change rolls a new version, so it cannot change under one. */
@@ -254,7 +264,13 @@ export class Hub implements DurableObject {
   readonly #listBuckets = new Map<string, ListBucket>();
 
   constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
     this.#ctx = ctx;
+    this.#allowance = allowanceLimits({
+      windowBytes: env.UPLOAD_WINDOW_BYTES,
+      hourBytes: env.UPLOAD_HOUR_BYTES,
+      hourUploads: env.UPLOAD_HOUR_UPLOADS,
+    });
     this.#sweepIntervalMs = msOverride(env.SWEEP_INTERVAL_MS) ?? SWEEP_INTERVAL_MS;
     this.#silenceLimitMs = msOverride(env.SWEEP_SILENCE_LIMIT_MS) ?? SWEEP_SILENCE_LIMIT_MS;
     this.#schedulerReplyWindowMs = msOverride(env.SCHEDULER_REPLY_WINDOW_MS) ?? SCHEDULER_REPLY_WINDOW_MS;
@@ -280,6 +296,18 @@ export class Hub implements DurableObject {
     // Presence needs no polling: the app gets the registry before its first send.
     if (role === "app") await this.#pushRegistry([pair[1]]);
     return new Response(null, { status: 101, webSocket: pair[0] });
+  }
+
+  /**
+   * The upload allowance (DESIGN.md, "The upload allowance"), over RPC from the
+   * Worker once a `PUT`'s token, id and declared length hold. Storage is the only
+   * await between the read and the write, so input gates keep the two atomic.
+   */
+  async reserveUpload(bytes: number): Promise<UploadVerdict> {
+    const stored = (await this.#ctx.storage.get<HourBucket[]>(ALLOWANCE_KEY)) ?? [];
+    const { verdict, buckets } = reserve(stored, bytes, Date.now(), this.#allowance);
+    if (buckets !== null) await this.#ctx.storage.put(ALLOWANCE_KEY, buckets);
+    return verdict;
   }
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
