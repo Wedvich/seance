@@ -163,12 +163,13 @@ export class AccountStore {
   onStoreChanged(key: string, version: number): void {
     if (!key.startsWith(STORE_PREFIXES.account.prefix) || !isStoreKey(key)) return;
     if (!this.#client.accountsNamed) return;
+    // An echo of what is held (this tab's own write) is no news, hidden or not.
+    if (version <= (this.#versions.get(key) ?? 0)) return;
     // Read once the tab shows again: by `onShown` on a live socket, by the reopen after a re-dial.
     if (document.visibilityState !== "visible") {
       this.#missedHidden = true;
       return;
     }
-    if (version <= (this.#versions.get(key) ?? 0)) return;
     void this.#refresh(key);
   }
 

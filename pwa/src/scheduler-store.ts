@@ -210,6 +210,8 @@ export class SchedulerStore {
   #queueMissed = false;
   /** A `queue-changed` came while the tab was hidden; `followed` when it could name the followed task. Read on showing. */
   #missedHidden: { readonly followed: boolean } | null = null;
+  /** A nudge or reopen wanted the followed task re-read, but no verified leader could be asked yet: kept until a read goes out. */
+  #followPending = false;
   /**
    * Whether the notice up now is one a queue read set. Any read that lands
    * clears it, nudged or not: only an action's notice outlives a nudge's read.
@@ -261,8 +263,8 @@ export class SchedulerStore {
   onOpen(relay: RelayState, reopened: boolean): void {
     // The reopen reads all of it anyway.
     if (reopened) this.#missedHidden = null;
-    this.#catchUpQueue(relay.scheduler, reopened);
-    if (relay.scheduler.kind === "ready") this.#leaderVerified();
+    const refollowed = this.#catchUpQueue(relay.scheduler, reopened);
+    if (relay.scheduler.kind === "ready") this.#leaderVerified(refollowed);
     if (!previewAsked(this.#state.form)) return;
     if (schedulerKey(relay.scheduler) !== this.#previewedLeader) void this.refreshPreview();
     else if (fleetKey(relay.machines) !== this.#previewedFleet) this.#askPreviewSoon();
@@ -280,12 +282,17 @@ export class SchedulerStore {
     this.#catchUpQueue(relay.scheduler, missed.followed);
   }
 
-  /** Takes up whatever waited for a verified leader: the follow's polls and a Start now's reads. */
-  #leaderVerified(): void {
+  /**
+   * Takes up whatever waited for a verified leader: the follow's polls and a Start now's reads.
+   * `refollowed` when the catch-up just read the followed task: the chain re-arms on its
+   * remaining budget rather than reading again in the same tick.
+   */
+  #leaderVerified(refollowed: boolean): void {
     const parked = this.#parked;
     if (parked !== null) {
       this.#parked = null;
-      void this.#refreshTask(parked.taskId, parked.left - 1);
+      if (refollowed) this.#follow(parked.taskId, parked.left);
+      else void this.#refreshTask(parked.taskId, parked.left - 1);
     }
     const intent = this.#intent;
     if (intent?.parked === true) {
@@ -332,21 +339,23 @@ export class SchedulerStore {
    * leader changed: nudges sent meanwhile are lost, and the merge of named ids
    * never heals a task it was not told about, so the screen reads whole again.
    */
-  #catchUpQueue(scheduler: SchedulerAvailability, refollow: boolean): void {
+  #catchUpQueue(scheduler: SchedulerAvailability, refollow: boolean): boolean {
+    if (refollow) this.#followPending = true;
     // Only a verified leader is asked: anything else is refused unsent, which
     // tells the screen nothing its status line doesn't — and every new term is
     // unverified until its `lead-proof` lands, so asking then raised a notice
     // on each takeover. The catch-up waits for the leader to verify instead.
-    const due =
-      scheduler.kind === "ready" &&
-      this.#watchesQueue() &&
-      (this.#queueMissed || schedulerKey(scheduler) !== this.#queueLeader);
+    if (scheduler.kind !== "ready") return false;
+    const due = this.#watchesQueue() && (this.#queueMissed || schedulerKey(scheduler) !== this.#queueLeader);
     if (due) this.#queueMissed = false;
     const read = due ? this.refreshQueue(undefined, true) : null;
+    // A parked follow is read here too, so the leader's arrival costs one read of it, not two.
+    if (!this.#followPending && this.#parked === null) return false;
+    this.#followPending = false;
     const verdict = this.#state.verdict;
-    if (refollow && verdict?.kind === "queued" && !isSettled(verdict.task.state)) {
-      void this.#followedVia(verdict.task.id, read);
-    }
+    if (verdict?.kind !== "queued" || isSettled(verdict.task.state)) return false;
+    void this.#followedVia(verdict.task.id, read);
+    return true;
   }
 
   onQueueChanged(change: QueueChanged): void {
@@ -438,12 +447,14 @@ export class SchedulerStore {
     const seq = ++this.#taskReadSeq;
     let task: Task | undefined;
     let reached = true;
+    const led = this.#leads();
     try {
       const reply = await this.#client.queue({ tasks: [intent.taskId] });
       // An older leader ignores the filter, so the reply is searched.
       if (reply !== null && !("ok" in reply)) task = reply.tasks.find((t) => t.id === intent.taskId);
     } catch (err) {
-      reached = !isLeaderless(err);
+      // A leader that was leading when this went out and still read as leaderless is the relay's `offline`: a spent poll.
+      reached = led || !isLeaderless(err);
     }
     if (this.#intent !== intent) return;
     if (reached) intent.left -= 1;
@@ -971,6 +982,7 @@ export class SchedulerStore {
     if (showing() === null) return;
     const seq = ++this.#taskReadSeq;
     let read: FollowRead;
+    const led = this.#leads();
     try {
       const reply = await this.#client.queue({ tasks: [taskId] });
       if (reply === null) read = { kind: "refused", message: SCHEDULER_UNREADABLE };
@@ -992,7 +1004,9 @@ export class SchedulerStore {
       }
     } catch (err) {
       // No leader to ask is no poll spent: the task waits in the relay's queue, and so does this.
-      read = isLeaderless(err) ? "waiting" : "missed";
+      // Unless one led when this went out: then the leaderless answer is the relay's `offline`, an ordinary missed poll
+      // (re-arming it unspent would poll every interval for as long as the relay says offline).
+      read = !led && isLeaderless(err) ? "waiting" : "missed";
     }
     const shown = showing();
     // A settled verdict is never walked back by a reply that was in flight when it settled.

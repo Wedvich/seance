@@ -55,9 +55,11 @@ function StageTrack(props: { stage: VerdictStage }): JSX.Element {
                     if (finishing.current === i) finished();
                   }}
                   onAnimationEnd={(event) => {
-                    // The last swell ends with no iteration event after it.
-                    if (event.animationName === "stage-sonar" && finishing.current === i) finished();
-                    if (event.animationName === "stage-sonar-rest" && i === reached) rested.current = true;
+                    if (event.animationName !== "stage-sonar") return;
+                    // The last swell ends with no iteration event after it. Rest is marked here, not when the
+                    // fade-in ends: a step during the fade-in would otherwise wait on an event that never comes.
+                    if (finishing.current === i) finished();
+                    else if (i === reached) rested.current = true;
                   }}
                 />
               )}
