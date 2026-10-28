@@ -279,7 +279,9 @@ export class SchedulerStore {
     if (missed === null) return;
     this.#missedHidden = null;
     this.#queueMissed = true;
-    this.#catchUpQueue(relay.scheduler, missed.followed);
+    const refollowed = this.#catchUpQueue(relay.scheduler, missed.followed);
+    // A chain parked behind a leaderless read resumes as onOpen's does.
+    if (refollowed && relay.scheduler.kind === "ready") this.#leaderVerified(true);
   }
 
   /**
@@ -316,6 +318,8 @@ export class SchedulerStore {
 
   /** Starts following a task just queued, with the whole poll budget; `runNow` for a Start now. */
   startFollowing(task: Task, runNow = false): void {
+    // A read owed to the previous task must not land on this one's arrival.
+    this.#followPending = false;
     this.#follow(task.id, QUEUE_POLLS);
     this.#endIntent();
     this.#patch({ startNowRefusal: null });
@@ -447,6 +451,7 @@ export class SchedulerStore {
     const seq = ++this.#taskReadSeq;
     let task: Task | undefined;
     let reached = true;
+    let leaderless = false;
     const led = this.#leads();
     try {
       const reply = await this.#client.queue({ tasks: [intent.taskId] });
@@ -454,7 +459,8 @@ export class SchedulerStore {
       if (reply !== null && !("ok" in reply)) task = reply.tasks.find((t) => t.id === intent.taskId);
     } catch (err) {
       // A leader that was leading when this went out and still read as leaderless is the relay's `offline`: a spent poll.
-      reached = led || !isLeaderless(err);
+      leaderless = isLeaderless(err);
+      reached = led || !leaderless;
     }
     if (this.#intent !== intent) return;
     if (reached) intent.left -= 1;
@@ -465,7 +471,8 @@ export class SchedulerStore {
     }
     if (this.#intent !== intent || intent.asking) return;
     // Unless one verified while the read was out, the next read waits for a leader (`#leaderVerified`).
-    if (!reached && !this.#leads()) intent.parked = true;
+    // Also a spent last poll: arming would end the intent unsent, forgetting the Start now.
+    if (leaderless && !this.#leads() && (!reached || intent.left <= 0)) intent.parked = true;
     else this.#armIntent(intent);
   }
 
@@ -1006,7 +1013,8 @@ export class SchedulerStore {
       // No leader to ask is no poll spent: the task waits in the relay's queue, and so does this.
       // Unless one led when this went out: then the leaderless answer is the relay's `offline`, an ordinary missed poll
       // (re-arming it unspent would poll every interval for as long as the relay says offline).
-      read = !led && isLeaderless(err) ? "waiting" : "missed";
+      // The last poll falls to `waiting` too once no leader leads any more: ending there would strand the follow.
+      read = isLeaderless(err) && (!led || (left === 0 && !this.#leads())) ? "waiting" : "missed";
     }
     const shown = showing();
     // A settled verdict is never walked back by a reply that was in flight when it settled.
@@ -1060,6 +1068,7 @@ export class SchedulerStore {
 
   /** Ends the follow; a Start now is not its to end. */
   stopFollowing(): void {
+    this.#followPending = false;
     this.#clearFollowTimer();
   }
 

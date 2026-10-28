@@ -918,6 +918,7 @@ export class RelayClient {
 
   /** Waits until no probe is out; one can start while another's waiters wake, so it re-checks. */
   async #probeSettled(): Promise<void> {
+    // oxlint-disable-next-line no-await-in-loop -- each wait decides whether another is due
     while (this.#probe !== null) await this.#probe.done;
   }
 

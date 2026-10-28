@@ -1181,6 +1181,64 @@ describe("auto's error paths", () => {
     detach();
   });
 
+  test("a last poll that finds the leader gone parks the follow rather than ending it", async () => {
+    const client = new ScriptedClient();
+    client.onQueue = async () => {
+      throw new RequestFailure("no_leader", "the relay has no leader to route to");
+    };
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.spawn();
+    const created = firstCreate(client);
+    for (let n = 1; n < QUEUE_POLLS; n += 1) {
+      timers.fire(QUEUE_POLL_MS);
+      // oxlint-disable-next-line no-await-in-loop -- one poll at a time
+      await drain();
+    }
+    // The leader is lost while the last poll is out: its leaderless answer is no longer the relay's `offline`.
+    client.onQueue = async () => {
+      client.emit({ scheduler: { kind: "none" } });
+      throw new RequestFailure("no_leader", "no scheduler is leading");
+    };
+    timers.fire(QUEUE_POLL_MS);
+    await drain();
+    expect(followEnd(store)).toBeUndefined();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+
+    client.onQueue = async () => ({ tasks: [{ ...created, state: "ready" }], at: 3 });
+    client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 1 } });
+    await until(() => queuedState(store) === "ready", "the parked last poll read on the leader's arrival");
+    detach();
+  });
+
+  test("a followed task nudged while hidden with no leader is not read on the leader's arrival once another is followed", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.spawn();
+    const created = firstCreate(client);
+    await drain();
+    client.emit({ scheduler: { kind: "none" } });
+    try {
+      setVisibility("hidden");
+      client.nudge({ at: 3, tasks: [created.id] });
+      await drain();
+    } finally {
+      setVisibility("visible");
+    }
+    await drain();
+
+    await store.spawn();
+    await drain();
+    const followReads = (): number => client.queueRequests.filter((r) => r.tasks !== undefined).length;
+    const asked = followReads();
+    client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 1 } });
+    await drain();
+    // The owed read belonged to the first task; the second's chain is on its own timer.
+    expect(followReads()).toBe(asked);
+    detach();
+  });
+
   test("a leader arriving at a parked follow after a reopen reads the followed task once and re-arms the chain", async () => {
     const client = new ScriptedClient({ scheduler: { kind: "none" } });
     client.onQueue = async () => {
@@ -1620,6 +1678,35 @@ describe("start now", () => {
     // The follow's poll and the intent's read both come due, and both find nobody to ask.
     timers.fire(QUEUE_POLL_MS);
     await until(() => client.queueRequests.length === asked + 2, "both reads");
+    await drain();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+
+    client.onQueue = async () => ({ tasks: [{ ...created, state: "ready" }], at: 2 });
+    client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 3 } });
+    await until(() => client.runNows.length === 1, "the run-now once a leader leads");
+    expect(client.runNows).toEqual([created.id]);
+    detach();
+  });
+
+  test("a Start now whose last read finds the leader gone is parked, not forgotten, and asks once a leader leads", async () => {
+    const client = capable();
+    client.onQueue = async () => {
+      throw new RequestFailure("no_leader", "the relay has no leader to route to");
+    };
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.startNow();
+    const created = firstCreate(client);
+    for (let n = 1; n < QUEUE_POLLS; n += 1) {
+      timers.fire(QUEUE_POLL_MS);
+      // oxlint-disable-next-line no-await-in-loop -- one round at a time
+      await drain();
+    }
+    client.onQueue = async () => {
+      client.emit({ scheduler: { kind: "none" } });
+      throw new RequestFailure("no_leader", "no scheduler is leading");
+    };
+    timers.fire(QUEUE_POLL_MS);
     await drain();
     expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
 
