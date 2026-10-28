@@ -650,6 +650,8 @@ export class RelayClient {
     readonly socket: WebSocket;
     readonly done: Promise<ResumeOutcome>;
     readonly settle: (outcome: ResumeOutcome) => void;
+    /** Pongs received on `socket` that mean the probe's own ping was answered: the edge answers in order. */
+    readonly needs: number;
     readonly timer: ReturnType<typeof setTimeout>;
   } | null = null;
   /** The store version `fleetQuota` was read at, so an unchanged record keeps its array (and its subscribers quiet). */
@@ -658,6 +660,15 @@ export class RelayClient {
   #fleetQuotaStoreVersion = 0;
   /** When the current socket last delivered anything — pong or frame. Uplink evidence for timeout blame. */
   #lastFrameAt = 0;
+  /**
+   * Pings sent and pongs received on the current socket. The edge answers each ping in
+   * order, so a pong settles a deadline only once the count reaches the ping it was armed
+   * for: a buffered answer to an older ping (iOS dispatches them on resume) proves nothing.
+   */
+  #pingsSent = 0;
+  #pongsSeen = 0;
+  /** The ping count `#pongDeadline` was armed at. */
+  #pongNeeds = 0;
   #stopped = false;
 
   readonly #timeouts: Partial<Record<RequestOp, number>>;
@@ -868,18 +879,23 @@ export class RelayClient {
    * An installed PWA is suspended constantly and its socket can die silently
    * while still reading open, so a resume does not trust it: a ping has to come
    * back within RESUME_PROBE_MS, or this re-dials as a missed heartbeat does.
-   * Hidden for a heartbeat interval or longer re-dials outright: beats went
-   * unsent, and a probe would only add its wait. Re-dialling from scratch on
-   * every resume cost a handshake, the registry push and every reopen read.
-   * Calls while a probe is out share it.
+   * Hidden for a heartbeat interval or longer AND nothing heard for that interval
+   * plus the pong timeout re-dials outright: a frozen page sent no beats, and a
+   * probe would only add its wait. A page whose heartbeat kept running while hidden
+   * (desktop) has a fresh `#lastFrameAt` and is probed instead. Re-dialling from
+   * scratch on every resume cost a handshake, the registry push and every reopen read.
+   * Calls while a probe is out share it, unless the hide was long enough to re-dial.
    */
   reconnectIfStale(hiddenMs: number): Promise<ResumeOutcome> {
-    if (this.#probe !== null) return this.#probe.done;
     const socket = this.#socket;
-    if (socket === null || socket.readyState !== WebSocket.OPEN || hiddenMs >= this.#pingIntervalMs) {
+    const frozen =
+      hiddenMs >= this.#pingIntervalMs && Date.now() - this.#lastFrameAt > this.#pingIntervalMs + this.#pongTimeoutMs;
+    if (socket === null || socket.readyState !== WebSocket.OPEN || frozen) {
+      // Settles a probe still out "redialed" through the heartbeat teardown.
       this.reconnect();
       return Promise.resolve("redialed");
     }
+    if (this.#probe !== null) return this.#probe.done;
     const probe: { settle: (outcome: ResumeOutcome) => void } = { settle: () => {} };
     const done = new Promise<ResumeOutcome>((resolve) => {
       probe.settle = resolve;
@@ -890,9 +906,14 @@ export class RelayClient {
       // Settles the probe "redialed" through the heartbeat teardown.
       this.reconnect();
     }, this.#resumeProbeMs);
-    this.#probe = { socket, done, settle: probe.settle, timer };
-    socket.send("ping");
+    this.#probe = { socket, done, settle: probe.settle, needs: this.#pingsSent + 1, timer };
+    this.#ping(socket);
     return done;
+  }
+
+  #ping(socket: WebSocket): void {
+    socket.send("ping");
+    this.#pingsSent += 1;
   }
 
   #settleProbe(outcome: ResumeOutcome): void {
@@ -909,6 +930,9 @@ export class RelayClient {
    * check before reading fields. Throws `RequestFailure` when nothing answered.
    */
   async request<T>(deviceId: string, op: RequestOp, payload: unknown): Promise<T | ErrorResponse> {
+    // A resume probe is deciding whether this socket lives: sending now could strand the request
+    // on a dead one for its full timeout. Whatever socket is current once it settles carries it.
+    if (this.#probe !== null) await this.#probe.done;
     const socket = this.#socket;
     if (socket === null || socket.readyState !== WebSocket.OPEN) {
       throw new RequestFailure("disconnected", "no socket to the relay");
@@ -955,7 +979,7 @@ export class RelayClient {
       // A probe: its pong (answered at the edge) is the uplink evidence the blame
       // check above needs, without waiting for the next 30s heartbeat beat. A
       // healthy socket produces it within an RTT; a dead one produces nothing.
-      socket.send("ping");
+      this.#ping(socket);
       this.#wireLog("send", `iv=${quote(env.iv)} id=${quote(id)} op=${quote(op)} to=${quote(deviceId)}`);
     });
   }
@@ -1008,6 +1032,8 @@ export class RelayClient {
 
   #connect(): void {
     if (this.#stopped) return;
+    this.#pingsSent = 0;
+    this.#pongsSeen = 0;
     const url = new URL(this.#url);
     url.searchParams.set(TOKEN_PARAM, this.#token);
     const socket = this.#createSocket(url.href);
@@ -1030,9 +1056,13 @@ export class RelayClient {
       // Stale sockets don't count: their late frames say nothing about this one.
       if (this.#socket === socket) this.#lastFrameAt = Date.now();
       if (event.data === "pong") {
-        if (this.#pongDeadline !== null) clearTimeout(this.#pongDeadline);
-        this.#pongDeadline = null;
-        if (this.#probe?.socket === socket) this.#settleProbe("live");
+        if (this.#socket !== socket) return;
+        this.#pongsSeen += 1;
+        if (this.#pongDeadline !== null && this.#pongsSeen >= this.#pongNeeds) {
+          clearTimeout(this.#pongDeadline);
+          this.#pongDeadline = null;
+        }
+        if (this.#probe?.socket === socket && this.#pongsSeen >= this.#probe.needs) this.#settleProbe("live");
         return;
       }
       void this.#onFrame(event.data, socket);
@@ -1111,8 +1141,10 @@ export class RelayClient {
     this.#teardownHeartbeat();
     this.#pingTimer = setInterval(() => {
       if (this.#socket !== socket || socket.readyState !== WebSocket.OPEN) return;
-      socket.send("ping");
-      this.#pongDeadline ??= setTimeout(() => {
+      this.#ping(socket);
+      if (this.#pongDeadline !== null) return;
+      this.#pongNeeds = this.#pingsSent;
+      this.#pongDeadline = setTimeout(() => {
         this.#pongDeadline = null;
         if (this.#socket !== socket) return;
         this.#wireLog("heartbeat", `no pong within ${this.#pongTimeoutMs}ms`);
@@ -1680,6 +1712,8 @@ export class RelayClient {
    * cannot read. Throws `RequestFailure` when nothing answered.
    */
   #store(frame: AppStoreRequestFrame): Promise<StoreReplyFrame | null> {
+    // Held for a resume probe, as `request` is; its failure paths apply once it settles.
+    if (this.#probe !== null) return this.#probe.done.then(() => this.#store(frame));
     const socket = this.#socket;
     if (socket === null || socket.readyState !== WebSocket.OPEN) {
       return Promise.reject(new RequestFailure("disconnected", "no socket to the relay", "relay"));
