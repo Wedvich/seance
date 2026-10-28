@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { importPsk, openAtRest, sealAtRest, toBase64 } from "./crypto.ts";
 import { openTaskListing, openTaskRecord, queuedTask, sealTaskRecord, taskKey } from "./task-record.ts";
+import { isTaskId } from "./parse.ts";
 import {
   APP_ID,
   AT_REST_OPS,
+  ATTACHMENTS_DEP_SENTINEL,
   PIN_SENTINEL,
   SCHEDULER_ID,
   TASK_SPEC_LIMITS,
@@ -16,6 +18,10 @@ const otherKey = await importPsk(toBase64(new Uint8Array(32).fill(9)));
 
 const NOW = 1_760_000_000_000;
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+function field(value: unknown, name: string): unknown {
+  return typeof value === "object" && value !== null ? Object.entries(value).find(([k]) => k === name)?.[1] : undefined;
+}
 
 function queued(id: string = crypto.randomUUID()): Task {
   return { id, state: "queued", createdAt: NOW, spec: { repo: "git@github.com:m/seance.git", mode: "worktree" } };
@@ -124,6 +130,39 @@ describe("task records at rest", () => {
     // Nothing an older leader can keep is sealed differently than before.
     expect(await sealedPin(base)).toBeUndefined();
     expect(await sealedPin({ ...base, pin: { deviceId: "dev-a" } })).toEqual({ deviceId: "dev-a" });
+  });
+
+  test("a manifest is sealed with the dep sentinel an older leader refuses, and reads back without it", async () => {
+    const attachments = [
+      {
+        id: "0b6f0c9e-1a2b-4c3d-8e9f-001122334455",
+        name: "trace.txt",
+        type: "text/plain",
+        size: 12,
+        hash: "A".repeat(43),
+      },
+    ];
+    const base = queued();
+    const sealedDeps = async (spec: Task["spec"]): Promise<unknown> => {
+      const task = { ...base, spec };
+      const env = await sealTaskRecord(key, APP_ID, { version: 1, task });
+      expect(await openTaskRecord(key, { key: taskKey(task.id), version: 1, env }, NOW)).toEqual({ version: 1, task });
+      const { payload } = await openAtRest(key, env, "task");
+      return field(field(field(payload, "task"), "spec"), "deps");
+    };
+    // Every leader's dep parser since task records began refuses a dep whose task is no task id,
+    // and one malformed dep nulls its spec: such a leader holds the record unreadable.
+    const olderDepParses = (dep: unknown): boolean => isTaskId(field(dep, "task"));
+    const withDeps = { ...base.spec, attachments, deps: [{ task: "t-1", after: "opened" as const }] };
+    for (const spec of [{ ...base.spec, attachments }, withDeps]) {
+      // oxlint-disable-next-line no-await-in-loop -- one spec at a time
+      const deps = await sealedDeps(spec);
+      expect(deps).toEqual([...(spec.deps ?? []), ATTACHMENTS_DEP_SENTINEL]);
+      expect(Array.isArray(deps) && deps.every(olderDepParses)).toBe(false);
+    }
+    // Without a manifest nothing changes.
+    expect(await sealedDeps(base.spec)).toBeUndefined();
+    expect(await sealedDeps({ ...base.spec, deps: withDeps.deps })).toEqual(withDeps.deps);
   });
 
   test("a continuation keeps its mode and link through seal and open; the link without the mode is unreadable", async () => {

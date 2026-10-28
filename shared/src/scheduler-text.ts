@@ -111,6 +111,8 @@ export function reasonText(reason: Reason): string {
       return "the session it continues ran elsewhere";
     case "continue_unsupported":
       return "its daemon can't continue a session yet (needs seanced update)";
+    case "attachments_unsupported":
+      return "its daemon can't fetch attachments yet (needs seanced update)";
     case "auth_missing":
       return "not signed in";
     case "auth_expired":

@@ -105,6 +105,12 @@ describe("reasonText", () => {
     expect(reasonText({ code: "continue_elsewhere" })).toBe("the session it continues ran elsewhere");
     expect(reasonText({ code: "continue_unsupported" })).toContain("seanced update");
   });
+
+  test("a machine whose daemon can't fetch attachments says it needs an update", () => {
+    expect(reasonText({ code: "attachments_unsupported" })).toBe(
+      "its daemon can't fetch attachments yet (needs seanced update)",
+    );
+  });
 });
 
 describe("storeErrorText", () => {

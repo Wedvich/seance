@@ -3605,7 +3605,12 @@ as follows, without reopening the decision.
   type 127 bytes, the dep sentinel below included, beside every other field at its bound:
   27,692 bytes, 980 under the cap. A name bound of 128 measured 28,436, too close to keep.
   Three-byte text fits less, as it already does for the prompt (the sealer's length check
-  refuses it, `STORE_CREATE_MAX_CT_LENGTH`). Rejected: dropping the per-file `id` for
+  refuses it, `STORE_CREATE_MAX_CT_LENGTH`). With the leader's writes on top at every
+  bound and ten candidates, an unfinished record carrying the manifest seals to 40,108
+  bytes against `STORE_MAX_CT_LENGTH`'s 40,960 (task 2, `parse.test.ts`). A `failure` at
+  its bound would push it over, but only a `failed` record carries one, and the write
+  that finishes a task drops the manifest (`lean`, below); past the cap, the leader's
+  `too_large` retry cuts the decision to its winner regardless. Rejected: dropping the per-file `id` for
   `<taskId>.<index>` (saves ~40 bytes an entry, but reopens a decided field and ties
   uploads to a task id minted before any upload succeeds), and shorter JSON keys (the
   saving is a few bytes an entry, at the price of a second naming scheme).
@@ -3619,9 +3624,12 @@ as follows, without reopening the decision.
   to `spec.deps` whenever the spec carries `attachments`. Every `parseDep` since task
   records began (M3 item 2, #161) refuses a dep whose `task` fails `isTaskId`, and any
   malformed dep nulls the whole spec. So every older leader holds the record unreadable,
-  whatever it ignores. This build's `parseTaskSpec` drops a dep whose `task` is `""`
-  before applying the `TASK_SPEC_LIMITS.deps` bound, so a spec never carries it. Any other
-  malformed dep still nulls the spec. The sentinel is a sealing artifact like
+  whatever it ignores. This build's `parseTaskSpec` drops the sentinel (exactly
+  `task: ""` with `after: "merged"`) before applying the `TASK_SPEC_LIMITS.deps` bound, so
+  a spec never carries it, and deps that were the sentinel alone read as absent, as the
+  spec was sealed. It drops it only beside a manifest: a sentinel without `attachments` is
+  a record something stripped the files from, and nulls the spec. Any other malformed dep
+  still nulls the spec. The sentinel is a sealing artifact like
   `pin.exclave`, and the `pin.account` sentinel stays as it is. An older PWA lists such a
   record as unreadable and offers **Clear**. That is harmless: the new leader reads the
   record, so its `discard` answers `task_not_found`.
@@ -3686,7 +3694,9 @@ export interface AttachmentRef {
 - `TaskSpec.attachments?: readonly AttachmentRef[]` and
   `SpawnRequest.attachments?: readonly AttachmentRef[]` share one parser,
   `parseAttachmentManifest` (`shared/src/parse.ts`): `parseTaskSpec` uses it, and so does the
-  daemon's `isSpawnRequest`. Its rules:
+  daemon's `isSpawnRequest` from task 5. Until then `isSpawnRequest` refuses any
+  `attachments` as malformed, as it refuses `baseBranch` until stacking lands: a daemon of
+  tasks 2–4 must not launch a session without the files it was sent. Its rules:
   - Absent means none, and an empty array is refused.
   - 1 to `files` entries, ids unique within the manifest.
   - Every `size` is a non-negative integer up to `fileBytes`, and their sum is at most
@@ -3730,14 +3740,17 @@ export interface AttachmentRef {
   the manifest entry, which is sealed inside the task record, to one exact object, so a
   relay serving any other bytes under the id fails before AES runs.
 - Functions:
+  - `mintAttachmentId(): string` is `crypto.randomUUID()`, the one way an id is minted.
   - `sealAttachment(key, id, bytes): Promise<Uint8Array>` returns the object.
   - `openAttachment(key, id, object): Promise<Uint8Array>` throws on a wrong length,
-    auth failure or wrong id.
+    auth failure or wrong id. Both refuse an id outside `ATTACHMENT_ID_PATTERN` before
+    any AES runs.
   - `attachmentHash(object): Promise<string>`.
   - `attachmentUrl(relayUrl, id): string` lives in `shared/src/relay-url.ts`, beside
     `appRelayUrl`. It maps `ws:` to `http:` and `wss:` to `https:`, strips a trailing
-    `DAEMON_PATH` or `APP_PATH`, and appends `ATTACHMENT_PATH + id`. The daemon calls it
-    on its config's `relayUrl`, and the PWA on `VITE_RELAY_URL`.
+    `DAEMON_PATH` or `APP_PATH`, and appends `ATTACHMENT_PATH + id`, dropping any query or
+    fragment so no token rides the URL. The daemon calls it on its config's `relayUrl`, and
+    the PWA on `VITE_RELAY_URL`.
 - Rejected:
   - Sealing through the JSON envelope: base64 inside JSON costs a third more bytes on a
     30 MiB file and needs the whole string in memory twice.
@@ -4017,7 +4030,9 @@ export interface AttachmentRef {
 Each task is stacked on the previous one's branch, ships its own tests, and marks its part
 of this section built.
 
-2. **shared**, the types and their parsers:
+2. **shared**, the types and their parsers — **built 2026-10-28**, with `mintAttachmentId`
+   and the daemon's interim refusal in `isSpawnRequest` (task 5 replaces it with
+   `parseAttachmentManifest`):
    - In `shared/src/types.ts`: `ATTACHMENT_LIMITS` and the other constants above,
      `AttachmentRef`, `TaskSpec.attachments`, `SpawnRequest.attachments`,
      `CAPABILITIES.attachments`, `attachment_unavailable` in `SPAWN_ERROR_CODES`, the
