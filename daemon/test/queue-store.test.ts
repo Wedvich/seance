@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, spyOn, test } from "bun:test";
 import {
   APP_ID,
   AT_REST_OPS,
+  ATTACHMENTS_DEP_SENTINEL,
   generateIdentitySeed,
   identityFromSeed,
   importPsk,
@@ -157,6 +158,53 @@ describe("round trip", () => {
       expect(await store.put("p", 1, done)).toEqual({ ok: true, version: 2 });
       expect(await store.get("p")).toEqual({ id: "p", version: 2, body: done });
       expect(await store.list()).toEqual([{ id: "p", version: 2, body: done }]);
+    });
+  });
+});
+
+describe("attachments", () => {
+  const files = [
+    {
+      id: "0b6f0c9e-1a2b-4c3d-8e9f-000000000000",
+      name: "screenshot.png",
+      type: "image/png",
+      size: 1024,
+      hash: "A".repeat(43),
+    },
+  ];
+
+  test("every write before the finishing one keeps the manifest beside the sealed dep sentinel; the finishing one seals neither", async () => {
+    await withRig(async ({ relay, store, deviceId }) => {
+      const at = { deviceId, exclave: "default", clone: "app" };
+      const body = task("m", { spec: { ...task("m").spec, attachments: files } });
+      const writes: Task[] = [
+        body,
+        { ...body, state: "ready" },
+        { ...body, state: "reserved", reservation: { ...at, expiresAt: Date.now() + 60_000 }, reservedAt: Date.now() },
+        { ...body, state: "running", assignment: { ...at, pane: "%1", window: "w1" } },
+      ];
+      for (const [version, write] of writes.entries()) {
+        // oxlint-disable-next-line no-await-in-loop -- each write expects the last one's version
+        expect(await store.put("m", version, write)).toEqual({ ok: true, version: version + 1 });
+        // oxlint-disable-next-line no-await-in-loop -- read back before the next write
+        expect((await store.get("m"))?.body).toEqual(write);
+      }
+      const { prompt: _prompt, attachments: _attachments, ...lean } = body.spec;
+      const done: Task = { ...body, spec: lean, state: "done", doneBy: "session" };
+      expect(await store.put("m", 4, done)).toEqual({ ok: true, version: 5 });
+      expect((await store.get("m"))?.body).toEqual(done);
+
+      const sealed = await Promise.all(
+        (await drain(relay))
+          .flatMap((f) => (f.t === "store-put" ? [f.env] : []))
+          .map(async (env) => (await openAtRest(key, env, AT_REST_OPS.task)).payload),
+      );
+      expect(sealed).toHaveLength(5);
+      for (const payload of sealed.slice(0, 4))
+        expect(payload).toMatchObject({ task: { spec: { attachments: files, deps: [ATTACHMENTS_DEP_SENTINEL] } } });
+      expect(sealed[4]).toHaveProperty("task.spec");
+      expect(sealed[4]).not.toHaveProperty("task.spec.deps");
+      expect(sealed[4]).not.toHaveProperty("task.spec.attachments");
     });
   });
 });

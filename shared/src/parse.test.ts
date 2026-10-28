@@ -42,6 +42,7 @@ import {
   parseTaskRef,
   parseTaskReply,
   UPDATE_DETAIL_MAX,
+  parseRoutePreviewRequest,
   parseTaskRequest,
   parseAttachmentManifest,
   parseTaskSpec,
@@ -411,6 +412,18 @@ describe("metrics", () => {
     expect(parseMetricsResponse({ series: [{ metric: "cpu", labels: {}, points: [[1, Infinity]] }] })).toBeNull();
     expect(parseMetricsResponse({ series: [{ metric: "cpu", labels: {}, points: [[1, Number.NaN]] }] })).toBeNull();
     expect(parseMetricsResponse({ rows: [] })).toBeNull();
+  });
+});
+
+describe("parseRoutePreviewRequest", () => {
+  const minimal: TaskRequest = { repo: "github.com/acme/app", mode: "worktree" };
+
+  test("keeps the attachments flag only as true; a manifest or anything else is malformed", () => {
+    expect(parseRoutePreviewRequest(minimal)).toEqual(minimal);
+    expect(parseRoutePreviewRequest({ ...minimal, attachments: true })).toEqual({ ...minimal, attachments: true });
+    for (const attachments of [false, [attachment(0)], "yes", 1])
+      expect(parseRoutePreviewRequest({ ...minimal, attachments })).toBeNull();
+    expect(parseRoutePreviewRequest({ ...minimal, mode: "continue", attachments: true })).toBeNull();
   });
 });
 

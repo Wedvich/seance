@@ -857,6 +857,9 @@ nothing checked it. The last is the gap they leave.
   - The relay never reads a body and logs no accepted transfer.
   - The audit holds counts and bytes, never names.
   - An older leader holds an attachment record unreadable (`ATTACHMENTS_DEP_SENTINEL`).
+  - The leader dispatches a task carrying them only to a machine advertising
+    `CAPABILITIES.attachments`, with the manifest unchanged, and the write that finishes
+    the task drops it.
 - The log is local and rewritable by whoever compromised the machine, so it is
   evidence for the honest-machine case only. There is no off-box copy in v1.
 
@@ -1161,7 +1164,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | op `push-subscribe` (→`"scheduler"`)                                | not yet sent (M4, Web Push)                                                                                                                                                                                                                                                                                                                                                        | not in `SCHEDULER_OPS`: `daemon/src/leader.ts` answers it `invalid_request` as any op it does not handle, and a non-leading daemon drops it (`daemon/src/relay-client.ts`: not a scheduler op), so the app sees a timeout, not `not_leader`, until the op joins `SCHEDULER_OPS`; its handler will parse with `parsePushSubscribeRequest` |
 | HTTP `PUT /attachments/<id>`                                        | designed, not built: the PWA's compose screen (`pwa/src/`), sealed by `sealAttachment` (`shared/src/crypto.ts`), with `Authorization: Bearer`                                                                                                                                                                                                                                      | built: `relay/src/attachments.ts`, after `Hub.reserveUpload` (`relay/src/allowance.ts`); into R2 through the `ATTACHMENTS` binding                                                                                                                                                                                                       |
 | HTTP `GET /attachments/<id>`                                        | designed, not built: `daemon/src/attachments.ts`, before the launch ledger's write-ahead record, at `attachmentUrl` of its own config's `relayUrl`                                                                                                                                                                                                                                 | built: `relay/src/attachments.ts`, streamed from R2                                                                                                                                                                                                                                                                                      |
-| field `attachments`                                                 | designed, not built: `TaskSpec` and `SpawnRequest`, from the PWA's `createTask` after every upload is `stored`; the leader's `#dispatch` (`scheduler/src/scheduler.ts`)                                                                                                                                                                                                            | `parseAttachmentManifest` (`shared/src/parse.ts`), in `parseTaskSpec` and the daemon's `isSpawnRequest`; acted on in `handleSpawn` (`daemon/src/handlers.ts`)                                                                                                                                                                            |
+| field `attachments`                                                 | designed, not built: `TaskSpec` and `SpawnRequest`, from the PWA's `createTask` after every upload is `stored`; built: the leader's `#dispatch` (`scheduler/src/scheduler.ts`)                                                                                                                                                                                                     | `parseAttachmentManifest` (`shared/src/parse.ts`), in `parseTaskSpec` and the daemon's `isSpawnRequest`; acted on in `handleSpawn` (`daemon/src/handlers.ts`)                                                                                                                                                                            |
 
 `sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
 over the local op socket, arriving at the same `daemon/src/handlers.ts` routing.
@@ -1390,8 +1393,8 @@ requesting socket only.
   opened but was not shaped like a `MachineInfo`, names its sender instead.
   Payloads are never logged, on any tier.
 - **`OP_TIMEOUT_MS`** lives in `shared/` (sessions 10s, rescan 15s, spawn
-  90s, despawn 20s, metrics 15s) because the right values derive from daemon internals — `exec.ts`'s 60s
-  command timeout plus `spawn.ts`'s 3s pane-death check — and would silently
+  210s, despawn 20s, metrics 15s) because the right values derive from daemon internals — an attachment
+  download's 120s deadline plus `exec.ts`'s 60s command timeout and `spawn.ts`'s 3s pane-death check — and would silently
   drift if kept in PWA code. It is a backstop; the daemon returns a structured
   error on its own.
 - **An oversized reply becomes `too_large`, for every op.** The relay drops an
@@ -2607,7 +2610,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   one store write carrying the decision; an unplaceable task's decision stays in memory
   (`lastDecision`), so the store sees one write per transition and none per tick. **The
   pass never awaits a spawn** (M2 review, 2026-10-17): each is launched and tracked, so one
-  machine slow to answer (a spawn's 90s timeout) holds no other placement, TTL or absence
+  machine slow to answer (a spawn's 210s timeout) holds no other placement, TTL or absence
   check behind it, and one that throws cuts no pass short — its fault goes to the host's
   `onError`. A verdict applies only to the reservation it answers (same machine, same
   expiry), and a reservation whose spawn is still out skips the TTL check below, its
@@ -2904,7 +2907,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   never pruned, so they expire instead ("Expiry", below). `MemoryQueueStore` refuses
   creates past `maxTasks` (`MAX_TASKS`) as the relay does, tombstones counting toward
   nothing.
-- **A finished task keeps no prompt** (2026-10-18, owner), **and only its decision's winner**
+- **A finished task keeps no prompt** (2026-10-18, owner), **nor attachment manifest** ("Attachments", 2026-10-28), **and only its decision's winner**
   (M3 review P4, 2026-10-18). `lean` — `forgetPrompt` (`task.ts`) plus the cut to the winner
   `too_large` already made — runs in `#update`, the one write path, as for the clocks, so the
   write that moves a task to `done`, `failed` or `cancelled` carries `spec` without `prompt`
@@ -3909,7 +3912,7 @@ Where the build adds to or departs from the wording above:
   window but not yet out of the bucket. R2 bills storage as a monthly average, so such an
   overshoot costs a fraction of a cent.
 
-### Routing and the leader (`scheduler/`, `daemon/src/leader*.ts`)
+### Routing and the leader (`scheduler/`, `daemon/src/leader*.ts`) — built 2026-10-28
 
 - `attachmentsFilter` in `scheduler/src/route.ts`, beside `continueFilter`: a task whose
   spec carries `attachments` rejects a machine without `CAPABILITIES.attachments` with
@@ -3926,6 +3929,19 @@ Where the build adds to or departs from the wording above:
   the directory from the worktree (below).
 - Timing: `OP_TIMEOUT_MS.spawn` 210 s, `reservationTtlMs` 240 s, and a test that holds
   `reservationTtlMs > OP_TIMEOUT_MS.spawn` and `OP_TIMEOUT_MS.spawn >= ATTACHMENT_FETCH_DEADLINE_MS + 90_000`.
+
+### Routing and the leader: as built (task 4)
+
+- **The preview flag** is `RoutePreviewRequest` (`TaskRequest` plus `attachments?: true`),
+  read by `parseRoutePreviewRequest`; anything but `true` or absent is `invalid_request`.
+  The leader hands it to `Scheduler.preview` as a boolean, and `route` takes it as
+  `RouteInput.attachments`, so a preview routes as though the spec carried a manifest.
+- **`forgetPrompt` drops the manifest** beside the prompt, rather than a second function:
+  `lean` already runs it on every write that finishes a task, and on the passes that
+  strip finished records written before.
+- **The record round trip** is held at both layers: the scheduler's writes (reserve, place,
+  finish) through `readerChecked`, and the daemon's adapter (`daemon/test/queue-store.test.ts`)
+  sealing the sentinel on every write that carries the manifest and none on the finishing one.
 
 ### The daemon (`daemon/src/attachments.ts`)
 
@@ -4097,7 +4113,8 @@ of this section built.
    - Map rows marked built.
    - The owner creates the bucket before this merges: CI deploys the relay on merge, and a
      binding to a missing bucket fails that deploy.
-4. **scheduler and leader**:
+4. **scheduler and leader** — **built 2026-10-28**, with the notes under "Routing and the
+   leader: as built" above:
    - `attachmentsFilter` and the reason, and the `route-preview` flag.
    - `#dispatch` copying the manifest, and `lean` dropping it.
    - `OP_TIMEOUT_MS.spawn` 210 s and `reservationTtlMs` 240 s with their ordering test.
