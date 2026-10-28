@@ -1151,6 +1151,93 @@ describe("heartbeat", () => {
   });
 });
 
+describe("resume", () => {
+  /** Every status the client reports from here on that is not `open`. */
+  function drops(client: RelayClient): { readonly seen: string[]; readonly stop: () => void } {
+    const seen: string[] = [];
+    const stop = client.subscribe(() => {
+      const { status } = client.getState();
+      if (status !== "open") seen.push(status);
+    });
+    return { seen, stop };
+  }
+
+  test("a live socket answers the probe and is kept; calls while it is out share it", async () => {
+    const { client, waitFor } = startClient();
+    try {
+      await waitFor((s) => s.status === "open", "open");
+      const watch = drops(client);
+      const outcomes = await Promise.all([client.reconnectIfStale(0), client.reconnectIfStale(5_000)]);
+      watch.stop();
+      expect(outcomes).toEqual(["live", "live"]);
+      expect(watch.seen).toEqual([]);
+    } finally {
+      client.stop();
+    }
+  });
+
+  test("hidden for a heartbeat interval or longer re-dials without probing", async () => {
+    const { client, waitFor } = startClient({ pingIntervalMs: 1_000 });
+    try {
+      await waitFor((s) => s.status === "open", "open");
+      const watch = drops(client);
+      // Resolved before any pong could come back: nothing was asked.
+      expect(await client.reconnectIfStale(1_000)).toBe("redialed");
+      expect(watch.seen).toEqual(["connecting"]);
+      await waitFor((s) => s.status === "open", "open again");
+      watch.stop();
+    } finally {
+      client.stop();
+    }
+  });
+
+  test("a socket that reads open but answers nothing is re-dialled once the probe's deadline passes", async () => {
+    let dials = 0;
+    const mute = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(req, server) {
+        if (server.upgrade(req)) return undefined;
+        return new Response("expected websocket upgrade", { status: 426 });
+      },
+      websocket: {
+        open() {
+          dials += 1;
+        },
+        message() {},
+      },
+    });
+    // The heartbeat is far off, so only the probe can be what re-dials.
+    const client = new RelayClient({
+      url: `ws://127.0.0.1:${mute.port}/app`,
+      token: TOKEN,
+      key,
+      pingIntervalMs: 60_000,
+      resumeProbeMs: 80,
+    });
+    try {
+      client.start();
+      await pollUntil(() => client.getState().status === "open" && dials === 1, "the first dial open");
+      expect(await client.reconnectIfStale(0)).toBe("redialed");
+      await pollUntil(() => dials >= 2, "a second dial after the unanswered probe");
+    } finally {
+      client.stop();
+      mute.stop(true);
+    }
+  });
+
+  test("no socket at all re-dials at once, as a rejected or stopped client did on every resume", async () => {
+    const { client, waitFor } = startClient({ token: "wrong" });
+    try {
+      await waitFor((s) => s.status === "rejected", "rejected");
+      expect(await client.reconnectIfStale(0)).toBe("redialed");
+      expect(client.getState().status).not.toBe("rejected");
+    } finally {
+      client.stop();
+    }
+  });
+});
+
 /**
  * Store orchestration against the real relay. These live here rather than in
  * their own file: each file booting its own workerd trips the boot-after-dispose
