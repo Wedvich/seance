@@ -1,4 +1,5 @@
 import type { RepoEntry } from "@seance/shared";
+import { attachmentsRoot } from "./attachments.ts";
 import { daemonSink, reapAudit } from "./audit.ts";
 import type { SessionBackend } from "./backend.ts";
 import { createBranchStates, type BranchStateDeps } from "./branch-state.ts";
@@ -177,6 +178,7 @@ const reapSchedule: DaemonCapability = (ctx) => {
           closing: (id) => ctx.endedTasks.closing(id),
           signal: abort.signal,
           pruneLogPath: pruneLogPath(),
+          attachments: attachmentsRoot(),
           fsmonitor: platformFsmonitor(),
         }),
       );

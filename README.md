@@ -411,7 +411,7 @@ seanced spawn --now seance --here   # run in the checkout as it stands, no workt
 seanced continue 3f2a…        # resume a failed (e.g. OOM-killed) or cancelled task's conversation in its worktree, as a new task (--prompt <text> to add a note)
 seanced sessions              # running claude windows: id, window, repo, path
 seanced despawn %12           # end one by id: asks claude to exit, kills the pane after ~5s (--force: now)
-seanced reap --dry-run        # what clean-up would remove: worktrees, branches, dead windows
+seanced reap --dry-run        # what clean-up would remove: worktrees, branches, dead windows, fetched attachments
 seanced status                # this machine: service, relay, repo count, running vs on-disk sha
 seanced doctor                # preflight config, binaries, roots, relay, service
 seanced help                  # every command
@@ -459,7 +459,9 @@ which hold unpushed commits, worktrees on a never-pushed branch, detached worktr
 commits on no branch, a count of worktrees on a branch whose upstream is still live, and live sessions with the id `despawn` takes. Where git runs
 `core.fsmonitor=true` daemons (macOS), it also stops every one with no tmux pane in its
 checkout and an hour unused, and any on a directory gone or no longer a repo, reporting
-the memory freed; git starts a new one when a repo next needs it. Every deleted branch
+the memory freed; git starts a new one when a repo next needs it. It also removes a task's fetched
+attachments once its worktree is gone, or once they are 30 days old and no session is
+using them. Every deleted branch
 is in the audit log with its sha, so `git branch <name> <sha>` brings it back. It acts
 by default; run `--dry-run` first.
 
