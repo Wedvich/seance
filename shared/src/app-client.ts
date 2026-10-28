@@ -916,6 +916,11 @@ export class RelayClient {
     this.#pingsSent += 1;
   }
 
+  /** Waits until no probe is out; one can start while another's waiters wake, so it re-checks. */
+  async #probeSettled(): Promise<void> {
+    while (this.#probe !== null) await this.#probe.done;
+  }
+
   #settleProbe(outcome: ResumeOutcome): void {
     const probe = this.#probe;
     if (probe === null) return;
@@ -931,8 +936,9 @@ export class RelayClient {
    */
   async request<T>(deviceId: string, op: RequestOp, payload: unknown): Promise<T | ErrorResponse> {
     // A resume probe is deciding whether this socket lives: sending now could strand the request
-    // on a dead one for its full timeout. Whatever socket is current once it settles carries it.
-    if (this.#probe !== null) await this.#probe.done;
+    // on a dead one for its full timeout. The socket current once it settles carries it, and
+    // after a re-dial that is one still connecting, so the request fails `disconnected` below.
+    await this.#probeSettled();
     const socket = this.#socket;
     if (socket === null || socket.readyState !== WebSocket.OPEN) {
       throw new RequestFailure("disconnected", "no socket to the relay");
@@ -1034,6 +1040,8 @@ export class RelayClient {
     if (this.#stopped) return;
     this.#pingsSent = 0;
     this.#pongsSeen = 0;
+    // The previous socket's last frame is no evidence about this one: frozen check and timeout blame read it.
+    this.#lastFrameAt = 0;
     const url = new URL(this.#url);
     url.searchParams.set(TOKEN_PARAM, this.#token);
     const socket = this.#createSocket(url.href);
@@ -1713,7 +1721,7 @@ export class RelayClient {
    */
   #store(frame: AppStoreRequestFrame): Promise<StoreReplyFrame | null> {
     // Held for a resume probe, as `request` is; its failure paths apply once it settles.
-    if (this.#probe !== null) return this.#probe.done.then(() => this.#store(frame));
+    if (this.#probe !== null) return this.#probeSettled().then(() => this.#store(frame));
     const socket = this.#socket;
     if (socket === null || socket.readyState !== WebSocket.OPEN) {
       return Promise.reject(new RequestFailure("disconnected", "no socket to the relay", "relay"));

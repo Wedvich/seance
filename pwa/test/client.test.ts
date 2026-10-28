@@ -1256,12 +1256,18 @@ describe("resume", () => {
     }
   });
 
+  // The ping a request sends is the "earlier ping" below: the heartbeat stays out of the way at
+  // its default interval, so the ping count is the test's alone.
+  function pingEarlier(client: RelayClient): void {
+    client.request("whoever", "sessions", {}).catch(() => {});
+  }
+
   test("a pong answering a ping sent before the probe does not settle it: the dead socket is re-dialled", async () => {
     const peer = startPeer();
-    // The beat's ping is out unanswered when the resume comes; its late pong is all the peer ever sends.
-    const client = await openAgainst(peer, { pingIntervalMs: 40, pongTimeoutMs: 60_000, resumeProbeMs: 200 });
+    const client = await openAgainst(peer, { resumeProbeMs: 200 });
     try {
-      await pollUntil(() => peer.pings >= 1, "the heartbeat's ping");
+      pingEarlier(client);
+      await pollUntil(() => peer.pings >= 1, "the earlier ping");
       const probe = client.reconnectIfStale(0);
       await pollUntil(() => peer.pings >= 2, "the probe's ping");
       peer.pong();
@@ -1275,9 +1281,10 @@ describe("resume", () => {
 
   test("the probe settles live once the pongs cover its own ping", async () => {
     const peer = startPeer();
-    const client = await openAgainst(peer, { pingIntervalMs: 40, pongTimeoutMs: 60_000, resumeProbeMs: 2_000 });
+    const client = await openAgainst(peer, { resumeProbeMs: 2_000 });
     try {
-      await pollUntil(() => peer.pings >= 1, "the heartbeat's ping");
+      pingEarlier(client);
+      await pollUntil(() => peer.pings >= 1, "the earlier ping");
       const probe = client.reconnectIfStale(0);
       await pollUntil(() => peer.pings >= 2, "the probe's ping");
       peer.pong();
@@ -1292,8 +1299,8 @@ describe("resume", () => {
 
   test("hidden for a heartbeat interval or longer with nothing heard re-dials without probing", async () => {
     const peer = startPeer();
-    // The peer sends nothing, so the page's last frame predates any hide of this length.
-    const client = await openAgainst(peer, { pingIntervalMs: 1_000, pongTimeoutMs: 1_000 });
+    // The peer sends nothing, so no frame was ever heard on this socket.
+    const client = await openAgainst(peer);
     try {
       const watch = drops(client);
       expect(await client.reconnectIfStale(Infinity)).toBe("redialed");
@@ -1309,7 +1316,8 @@ describe("resume", () => {
 
   test("a long hide whose heartbeat kept running (frames still arriving) probes rather than re-dials", async () => {
     const peer = startPeer(true);
-    const client = await openAgainst(peer, { pingIntervalMs: 100, pongTimeoutMs: 100 });
+    // The long pong timeout keeps "heard recently" true however slow the run.
+    const client = await openAgainst(peer, { pingIntervalMs: 100, pongTimeoutMs: 60_000 });
     try {
       await pollUntil(() => peer.pings >= 2, "two heartbeats answered");
       expect(await client.reconnectIfStale(10_000)).toBe("live");
@@ -1322,7 +1330,7 @@ describe("resume", () => {
 
   test("a long hide with a stale probe still out re-dials, and the old probe settles redialed", async () => {
     const peer = startPeer();
-    const client = await openAgainst(peer, { pingIntervalMs: 1_000, pongTimeoutMs: 1_000, resumeProbeMs: 5_000 });
+    const client = await openAgainst(peer, { resumeProbeMs: 5_000 });
     try {
       const first = client.reconnectIfStale(0);
       await pollUntil(() => peer.pings >= 1, "the probe's ping");

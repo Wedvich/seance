@@ -5397,8 +5397,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   re-dials outright, but only when nothing was heard for an interval plus the pong
   timeout — a frozen page sent no beats, whereas a desktop tab's heartbeat kept
   running while hidden and is probed instead. Requests made while a probe is out
-  wait for it and go on whatever socket is current, so none strands on a socket the
-  probe is about to replace. A dead socket is replaced within the probe's deadline
+  wait for it and go on the socket current once it settles, so none strands on a
+  socket the probe is about to replace; after a re-dial that socket is still
+  connecting, so the request fails `disconnected` as any made during a handshake. A dead socket is replaced within the probe's deadline
   and its re-dial fans out as any connect does. **A resume on a live socket after
   a hide shorter than the heartbeat interval does not re-fan `sessions`**, so the
   counts may miss sessions started or ended elsewhere meanwhile until the next
