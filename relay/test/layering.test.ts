@@ -35,7 +35,7 @@ describe("relay/src stays blind", () => {
     expect(files.length).toBeGreaterThan(0);
     const offenders: string[] = [];
     for (const name of files) {
-      // oxlint-disable-next-line no-await-in-loop -- seven small files; concurrency buys nothing
+      // oxlint-disable-next-line no-await-in-loop -- a handful of small files; concurrency buys nothing
       const source = await readFile(join(SRC, name), "utf8");
       // The package index is the only door: a deep path would skirt this list.
       if (/["']@seance\/shared\/.+["']/u.test(source)) offenders.push(`${name}: deep import into shared`);
@@ -58,7 +58,7 @@ describe("relay/src stays blind", () => {
     const files = (await readdir(SRC)).filter((name) => name.endsWith(".ts"));
     const offenders: string[] = [];
     for (const name of files) {
-      // oxlint-disable-next-line no-await-in-loop -- seven small files; concurrency buys nothing
+      // oxlint-disable-next-line no-await-in-loop -- a handful of small files; concurrency buys nothing
       const source = await readFile(join(SRC, name), "utf8");
       const reads = [...source.matchAll(/\.ct\b|\[["']ct["']\]/gu)].length;
       const bounds = name === "wire.ts" ? [...source.matchAll(/\b(?:boundedString|fitsBytes)\(env\.ct,/gu)].length : 0;

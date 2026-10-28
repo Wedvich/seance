@@ -1790,10 +1790,11 @@ export const TASK_SPEC_LIMITS = {
 
 /**
  * Sealed into a task record's `pin.exclave` whenever its spec carries
- * `pin.account` or `avoid` (`sealTaskRecord`). An older leader's parser refuses
- * an empty exclave, so it holds such a record unreadable — never strips the
- * restriction by re-sealing what it parsed. This build's parser ignores
- * `exclave` (exclave pins are gone), so the parsed spec never carries it.
+ * `pin.account` or `avoid` (`sealTaskRecord`). A leader older than `pinAccount`
+ * (#303) refuses an empty exclave, so it holds such a record unreadable — never
+ * strips the restriction by re-sealing what it parsed. Every leader since ignores
+ * `exclave` (exclave pins are gone), so this stops only those: a new gated field
+ * needs a sentinel of its own, as `ATTACHMENTS_DEP_SENTINEL` is.
  */
 export const PIN_SENTINEL = "";
 

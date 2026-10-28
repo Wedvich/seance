@@ -292,10 +292,10 @@ export async function attachmentDirsFor(root: string, worktree: string): Promise
   return found.filter((dir) => dir !== null).toSorted();
 }
 
-export type AttachmentPruneReason = "worktree-gone" | "aged" | "staging";
+export type AttachmentPruneReason = "worktree-gone" | "aged" | "staging" | "orphan-sidecar";
 
 export interface PrunedAttachments {
-  /** The task id, or for `staging` the staging directory's name. */
+  /** The task id, or for `staging` the staging directory's name. For `orphan-sidecar`, only the sidecar goes. */
   readonly task: string;
   readonly reason: AttachmentPruneReason;
 }
@@ -330,7 +330,8 @@ function inside(dir: string, path: string): boolean {
  * Reap's attachment pass: a task's directory goes once the worktree its session ran in is
  * gone, or once it is older than the bucket keeps the object and no live pane carries the
  * task or sits in its worktree — the rule that covers here-mode tasks. Staging a crashed
- * fetch left goes after an hour. Each removal is audited; a dry run only lists.
+ * fetch left goes after an hour, and a sidecar whose directory a crash already removed goes
+ * at once. Each removal is audited; a dry run only lists.
  */
 export async function pruneAttachments(opts: PruneAttachmentsOptions): Promise<readonly PrunedAttachments[]> {
   const { root, now } = opts;
@@ -357,16 +358,23 @@ export async function pruneAttachments(opts: PruneAttachmentsOptions): Promise<r
     return held ? null : "aged";
   };
 
-  const names = entries
+  const dirs = entries
     .filter((entry) => entry.isDirectory() && (entry.name.startsWith(".") || isTaskId(entry.name)))
     .map((entry) => entry.name);
-  const verdicts = await Promise.all(names.map(async (task) => ({ task, reason: await judge(task) })));
-  const doomed = verdicts.filter((verdict): verdict is PrunedAttachments => verdict.reason !== null);
+  const present = new Set(dirs);
+  // A crash between prune's two removals leaves a sidecar with no directory; a fetch writes its sidecar only after the rename.
+  const orphans = entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+    .map((entry) => entry.name.slice(0, -".json".length))
+    .filter((task) => isTaskId(task) && !present.has(task))
+    .map((task): PrunedAttachments => ({ task, reason: "orphan-sidecar" }));
+  const verdicts = await Promise.all(dirs.map(async (task) => ({ task, reason: await judge(task) })));
+  const doomed = [...verdicts.filter((verdict): verdict is PrunedAttachments => verdict.reason !== null), ...orphans];
   if (opts.dryRun) return doomed;
   for (const { task, reason } of doomed) {
     // The directory before its sidecar: a sidecar alone is harmless, a directory alone would be judged by mtime.
     // oxlint-disable-next-line no-await-in-loop -- one line per removal, in order, after it happened
-    await rm(join(root, task), { recursive: true, force: true });
+    if (reason !== "orphan-sidecar") await rm(join(root, task), { recursive: true, force: true });
     // oxlint-disable-next-line no-await-in-loop
     if (reason !== "staging") await rm(sidecarPath(root, task), { force: true });
     // oxlint-disable-next-line no-await-in-loop
