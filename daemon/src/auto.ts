@@ -230,8 +230,10 @@ function describeAccount(
 }
 
 /**
- * An account by alias (account records), then email (what the registry's
- * exclaves report), then its exact `accountId`. Only an account some sealed
+ * An account by its exact `accountId`, then email (what the registry's exclaves
+ * report), then alias (account records). Alias last: it is free text from a
+ * record the relay may serve stale, so it must never take a string that names
+ * another account by id or email. Only an account some sealed
  * registry entry reports signed in can match: an alias record names any id a
  * PSK holder wrote, and the relay may serve a stale one, so the registry is the
  * authority on which accounts exist. `records` null is a listing that failed:
@@ -269,7 +271,7 @@ export function resolveAccount(
     .filter(([, held]) => [...held.emails].some((email) => email.toLowerCase() === wanted))
     .map(([id]) => id);
   const byId = signedIn.has(input.trim()) || records?.some((r) => r.accountId === input.trim()) === true;
-  const found = pick(byAlias, "alias") ?? pick(byEmail, "email") ?? (byId ? pick([input.trim()], "id") : null);
+  const found = (byId ? pick([input.trim()], "id") : null) ?? pick(byEmail, "email") ?? pick(byAlias, "alias");
   if (found !== null) return found;
   if (records === null) {
     return {
