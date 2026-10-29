@@ -715,8 +715,9 @@ export const OP_TIMEOUT_MS = {
 } as const satisfies Record<RequestOp, number>;
 
 /**
- * Status cadence. The relay floors it per socket at STATUS_MIN_INTERVAL_MS, as
- * it rate-limits `register`; a sender below the floor is dropped, not closed.
+ * Status cadence, on wall-clock slots shared with app pings (`startSlotTimer`). The relay
+ * floors it per socket at STATUS_MIN_INTERVAL_MS, as it rate-limits `register`; a sender
+ * below the floor is dropped, not closed.
  */
 export const STATUS_INTERVAL_MS = 30_000;
 export const STATUS_MIN_INTERVAL_MS = 10_000;
@@ -753,7 +754,8 @@ export const REPLY_JSON_BUDGET = 44_000;
 
 /**
  * Heartbeat cadence, shared by both socket legs (daemon↔relay and app↔relay):
- * a bare "ping" every interval, "pong" expected within the deadline, a miss
+ * a bare "ping" every interval (on the app leg, a second into the status beats'
+ * wall-clock slot: `startSlotTimer`), "pong" expected within the deadline, a miss
  * closes/redials. The relay sweeps a daemon socket silent for
  * HEARTBEAT_MISSES_TO_SWEEP beats — derived from the interval there, so
  * slowing the beat can never silently outpace the sweep.

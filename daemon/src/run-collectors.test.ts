@@ -49,8 +49,20 @@ interface Holds {
   readonly send?: Promise<void>;
 }
 
-/** A loop whose beat never fires within a test, so every send is `sampleNow` or `refresh`. */
-function start(draining: () => boolean, holds: Holds = {}): { readonly loop: StatusLoop; readonly sent: Sent[] } {
+/** Long enough that the beat never fires within a test. */
+const QUIET: Cadence = { intervalMs: 60_000, floorMs: FLOOR_MS };
+
+interface Cadence {
+  readonly intervalMs: number;
+  readonly floorMs: number;
+}
+
+/** By default (`QUIET`) every send is `sampleNow` or `refresh`. */
+function start(
+  draining: () => boolean,
+  holds: Holds = {},
+  cadence: Cadence = QUIET,
+): { readonly loop: StatusLoop; readonly sent: Sent[] } {
   const sent: Sent[] = [];
   let reads = 0;
   let sends = 0;
@@ -70,8 +82,7 @@ function start(draining: () => boolean, holds: Holds = {}): { readonly loop: Sta
       draining,
     },
     {
-      intervalMs: 60_000,
-      floorMs: FLOOR_MS,
+      ...cadence,
       connected: () => true,
       send: async (status) => {
         sends += 1;
@@ -172,5 +183,43 @@ describe("startStatusLoop refresh", () => {
     await pollUntil(() => sent.length === 3, "the refreshed status");
     expect(sent[2]?.status.drn).toBe(true);
     expect((sent[2]?.atMs ?? 0) - (sent[1]?.atMs ?? 0)).toBeGreaterThanOrEqual(FLOOR_MS);
+  });
+});
+
+describe("startStatusLoop beat", () => {
+  const INTERVAL_MS = 500;
+  const onSlot = (atMs: number): boolean => atMs % INTERVAL_MS < INTERVAL_MS / 2;
+
+  /** Waits for the wall clock to reach `fromMs` into the interval: a time condition, not an event. */
+  async function untilPhase(fromMs: number): Promise<void> {
+    while (Date.now() % INTERVAL_MS < fromMs || Date.now() % INTERVAL_MS >= fromMs + 50) await Bun.sleep(5);
+  }
+
+  test("beats on wall-clock slots, and a register between them does not move the next", async () => {
+    const { loop, sent } = start(() => false, {}, { intervalMs: INTERVAL_MS, floorMs: 50 });
+    loop.sampleNow();
+    await pollUntil(() => sent.length === 2, "the first beat");
+    expect(onSlot(sent[1]?.atMs ?? 1)).toBe(true);
+
+    await untilPhase(INTERVAL_MS / 2);
+    loop.sampleNow();
+    await pollUntil(() => sent.length === 4, "the register's status and the beat after it");
+    expect(onSlot(sent[2]?.atMs ?? 0)).toBe(false);
+    expect(onSlot(sent[3]?.atMs ?? 1)).toBe(true);
+    expect((sent[3]?.atMs ?? 0) - (sent[2]?.atMs ?? 0)).toBeLessThan(INTERVAL_MS);
+  });
+
+  test("skips a slot within the relay's floor of a register's status, keeping the next", async () => {
+    const floorMs = 200;
+    const { loop, sent } = start(() => false, {}, { intervalMs: INTERVAL_MS, floorMs });
+    loop.sampleNow();
+    await pollUntil(() => sent.length === 2, "the first beat");
+
+    await untilPhase(INTERVAL_MS - 150);
+    loop.sampleNow();
+    await pollUntil(() => sent.length === 4, "the register's status and the beat after it");
+    const gap = (sent[3]?.atMs ?? 0) - (sent[2]?.atMs ?? 0);
+    expect(gap).toBeGreaterThan(INTERVAL_MS - 150);
+    expect(onSlot(sent[3]?.atMs ?? 1)).toBe(true);
   });
 });
