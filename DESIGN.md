@@ -2801,8 +2801,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   nulls a batch without a strategy, and its `parseTaskSpec` the whole spec, so it cannot read a
   batched task written since: an old client drops it from its list (per task, the rest still
   show), an old leader reads the record as malformed and leaves it (owner accepted the window,
-  2026-10-27). The PWA drops a persisted open batch carrying a non-`auto` strategy, so its next
-  enqueue starts a new batch. A reader drops an older leader's `batch_order` and `cap_reached`
+  2026-10-27). The PWA dropped a persisted open batch carrying a non-`auto` strategy, so its next
+  enqueue started a new batch (since 2026-10-29 it authors no batches and drops any open one). A reader drops an older leader's `batch_order` and `cap_reached`
   `scope: "batch"` as unknown reasons — the reason, never the candidate or the decision (as
   for any reason a leader ahead mints) — so dropping them needed no tolerant step.
   Rejected (owner, 2026-10-26), both built in M3 and removed:
@@ -4155,7 +4155,7 @@ Where the build adds to or departs from the wording above:
   form, Queue again uploads only the files not yet stored.
 - **Not offered, files listed**: if the leader stops advertising `attachments` with files
   on the form, they stay listed (removable), the button reads "Can't attach files" and the
-  footer says why. `route-preview` carries `attachments: true` while files are listed.
+  status line under the prompt says why. `route-preview` carries `attachments: true` while files are listed.
 - **No count**: the Queue card and the verdict don't mention attachments. Names show only
   on the form's chips.
 - **CSP**: `pwa/vite.config.ts` derives the `https:` origin with `attachmentUrl`, imported
@@ -6379,7 +6379,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   verified leader advertising `pinAccount`, since an older one would drop it from the spec; with
   no verified leader it can't be confirmed, so it is refused ("try again once one leads") rather
   than queued, unlike a plain task. A machine pin has no gate. An offline pinned machine is not a
-  block: the task waits for it, and the footer and verdict say so. Rows the other pick rules out
+  block: the task waits for it, and the status line under the prompt and the verdict say so. Rows the other pick rules out
   are disabled with their reason ("work@acme.dev isn't signed in here"). The repo list is
   `scopedRepos`: origins across the fleet, narrowed to the picked machine and to the exclaves of
   the picked account, strictly (a clone from a daemon predating exclaves is in no account, as
@@ -6389,7 +6389,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   call, D2): it was a machine to spawn on directly, not a placement the owner asked for.
   **Start now** (2026-10-27): while the verified leader advertises `runNow`, the button is a split
   button — two sibling buttons in one pill, never nested — whose chevron opens the shared menu
-  (`components/menu.tsx`) upward with one item, Start now; without it the chevron is not
+  (`components/menu.tsx`) with one item, Start now; without it the chevron is not
   rendered. The item's sub-line names where the placement preview would start it (`startNowItem`
   in `decision-view.ts`; with a cap-held candidate beside the chosen one it stays generic, since
   `run-now` weighs both and the held one has no score, so it is plain "Skip the queue", naming
@@ -6618,26 +6618,21 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   flag alone (each app-role client holds its own marks — Presence & identity); `absentSince` as
   the "since" — it starts a pass after the leader's own view flipped, exists only on `lost`, and
   would make the same card change its age at the 15-minute mark.
-- **Authoring from the auto form** (2026-10-23, M4 #21). The form adds AFTER and BATCH
-  tiles, a "Settle on its done report" switch. (A Linear issue field, unused, was removed 2026-10-27; the
+- **Authoring from the auto form** (2026-10-23, M4 #21). The form adds an AFTER
+  tile and a "Settle on its done report" switch. (A Linear issue field, unused, was removed 2026-10-27; the
   spec's `linear` stays on the wire, and a persisted form's `linearIssue` is ignored.) **AFTER** opens a sheet of
   the tasks the leader holds that have not failed or been cancelled (read when the sheet opens),
   each with an Opened, Merged or Done choice; Done is offered only while the verified leader
   advertises `reportedDone`, as is the switch. An edge on a task the list no longer shows stays, by id, so it can
-  be removed. **BATCH** is an _open batch_: Start batch,
-  and the next enqueues join it, numbered from 1, until End batch; the sheet says a batch sets
-  no order or limit, and that After is how to run tasks in turn ("Batches"). It is `{id, next}`
-  in the persisted form (an older build's `strategy` there: `auto` is kept as the open batch, anything else drops the
-  batch, so the next enqueue starts a new one): each enqueue takes index `next`, and the counter moves only for the
-  member it numbered, so a retry that lands twice moves it once (`landedEarlier`). Start batch
-  while one is open keeps it, so a tap cannot renumber one in flight. (Until 2026-10-26 the sheet
-  picked One at a time, Up to N at once or No limit.) Deps and `until` belong to one
-  task and reset after each enqueue; the batch persists. **Follow up** on a queue row is the
+  be removed. (A BATCH tile — an open batch the next enqueues joined, numbered from 1, until
+  End batch — was removed 2026-10-29: never used by hand, and it cost the form a row. Batches
+  stay MCP's `queue_batch`; a persisted form's `batch` is ignored, so an open one ends rather
+  than grouping tasks with no tile left to end it.) Deps and `until` belong to one
+  task and reset after each enqueue. **Follow up** on a queue row is the
   chain's shortcut: the form with that task as its one `opened` edge, and both pickers reset to Auto (the scheduler places a follow-up; the pins of whatever the form held are not inherited). Settling on the report appends the
   report instruction to the prompt on the client (`withReportInstruction`, so the stored task
   carries what the session reads), and the bound on the prompt is checked on the combined text; it also needs a prompt, since
-  the session is told in it. A leader that does not advertise the capability, a full batch
-  (`TASK_SPEC_LIMITS.batchIndex`) and an over-long combined prompt are refused before anything is
+  the session is told in it. A leader that does not advertise the capability and an over-long combined prompt are refused before anything is
   put, as unqueued verdicts. Rejected: a screen that builds the whole batch as a list (a second
   editor beside a form that already makes one task at a time; Follow up chains the rest);
   naming batch members by `ref` (the open batch's index order is the identity). A report needs
@@ -6652,6 +6647,12 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   on screen. Columns are not layers, so they carry no back button and push no history entry. The
   store keeps the queue read while it is on screen without its layer (`AppState.wide`), since the
   column is never opened.
+- **Queue sits in the prompt card, not a footer** (2026-10-29). The card's bottom row is a
+  chat composer's: a paperclip at the left (only while attaching is offered) and Queue, sized to
+  its label, at the right; picked files' chips sit above the text. A full-width footer button
+  cost a phone screen a band at the bottom that the form scrolled under. The footer's status
+  line moved to just under the card, and the files' count and size line was dropped: the chips
+  carry each size, and the summary stays only as the list's accessible name.
 - **Clearing the prompt is undoable, not confirmed.** CLEAR shows in the prompt
   header only once there is something to clear — an always-present greyed control
   is noise — and empties the field on the first tap. It is replaced in the same
