@@ -1156,7 +1156,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | `store-listed` / `store-record` / `store-written` / `store-refused` | `relay/src/hub.ts` `#onStoreFrame`, answering from `relay/src/store.ts`                                                                                                                                                                                                                                                                                                            | `parseStoreReply` in `shared/src/parse.ts`; correlated on `re` by the app-client, which settles a reply it cannot read as `null` at once, and by the queue store                                                                                                                                                                         |
 | `store-changed`                                                     | `relay/src/hub.ts` `#nudgeLeader`, to the leader's term socket after a write it did not make; `#nudgeApps`, to other apps after an `account:` write                                                                                                                                                                                                                                | `daemon/src/relay-client.ts` `onStoreChanged` → `daemon/src/leader.ts` `Leader.onStoreChanged`, via `parseStoreChanged` (`task:` keys only); `shared/src/app-client.ts`, via `parseStoreChanged`, to `onStoreChanged` listeners (`pwa/src/account-store.ts` re-reads an `account:` key on one)                                           |
 | records `task` / `pause-state` (at rest)                            | `task`: `sealTaskRecord` (`shared/src/task-record.ts`), by the app-client's `createTask` and the queue store; a continue task (`TaskSpec.continues`, from `shared/src/continue-task.ts`) is written the same way, and the leader dispatches it as a `spawn` with `mode: "continue"` (`#dispatch` in `scheduler/src/scheduler.ts`); `pause-state`: `sealAtRest`, by the queue store | `task`: `openTaskRecord` (`shared/src/task-record.ts`) — `openAtRest`, no replay guard, sealed `to: "scheduler"`, then `bindTaskRecord`; `pause-state`: `openAtRest` and `parsePauseRecord` in the queue store, held by `Scheduler.load`                                                                                                 |
-| ops `mark-done` / `run-now` / `pause` / `resume` / `discard`        | an app via `shared/src/app-client.ts`: `pwa/src/scheduler-store.ts` (the Queue screen; `run-now` also the Spawn screen's Start now)                                                                                                                                                                                                                                                | `daemon/src/leader-requests.ts` `answer`, parsed by `parsePauseRequest` / `parseResumeRequest` / `parseDiscardRequest`, run by `Scheduler.pause` / `resume`, `Scheduler.markDone`, `Scheduler.runNow` and `Scheduler.discard`                                                                                                            |
+| ops `mark-done` / `run-now` / `pause` / `resume` / `discard`        | an app via `shared/src/app-client.ts`: `pwa/src/scheduler-store.ts` (the Queue screen; `run-now` also the Spawn screen's Start now); `run-now` also `daemon/src/auto.ts` (`startAuto`, `startQueuedAuto`: MCP's `start_task` and `spawn_session` `start`, `seanced start` and `spawn --start`)                                                                                     | `daemon/src/leader-requests.ts` `answer`, parsed by `parsePauseRequest` / `parseResumeRequest` / `parseDiscardRequest`, run by `Scheduler.pause` / `resume`, `Scheduler.markDone`, `Scheduler.runNow` and `Scheduler.discard`                                                                                                            |
 | op `queue-changed` (→`"app"`)                                       | `daemon/src/leader.ts` on the term's leg, as `from: "scheduler"`, coalesced to one per 500 ms                                                                                                                                                                                                                                                                                      | `shared/src/app-client.ts`, via `parseQueueChanged`: heard only by an app client (one with no term) and only `from: "scheduler"`, handed to `onQueueChanged` listeners — `pwa/src/scheduler-store.ts` re-reads on it                                                                                                                     |
 | op `branch-state` (→`"scheduler"`)                                  | `daemon/src/branch-state.ts` via `RelayClient.sendBranchState()`; on the leader's own machine `run-capabilities.ts` hands it in process to `leader.onBranchState` instead (Scheduler, "Branch state")                                                                                                                                                                              | `daemon/src/leader.ts` `onEvent`, via `parseBranchState`, into the one `onBranchState` sink, which feeds the library                                                                                                                                                                                                                     |
 | record `quota` (at rest)                                            | `sealFleetQuotaRecord` (`shared/src/fleet-quota.ts`), by each daemon's fleet quota writer (`daemon/src/fleet-quota.ts`) on its own socket                                                                                                                                                                                                                                          | `openFleetQuotaRecord` (`shared/src/fleet-quota.ts`) — `openAtRest`, sealed `to: "app"`, `parseFleetQuotaRecord`, sealed `version` the store's — by the app-client's `refreshFleetQuota` (the PWA and the leader's leg) and the writer; stored under `quota:fleet` (_Scheduler_, "Fleet quota record")                                   |
@@ -2532,6 +2532,21 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   it short of `ready` (admission, deps) or already ran it, so the app reads on (PWA, "Every PWA
   spawn is a task", has the lifecycle). Rejected for the same reason as above: a flag on the
   create the leader would honour at admission.
+  **MCP and the CLI start too** (2026-10-29), as the same op: `start_task` and `seanced start
+  <task-id>` send one `run-now` for a task already queued (the Queue screen's Start now), and
+  `spawn_session`'s `start` and `seanced spawn --start` the Spawn screen's (`startQueuedAuto` in
+  `daemon/src/auto.ts`): the create, then reads of the queue every `START_POLL_MS` (2 s), at most
+  `START_POLLS` (15), until it is `ready`, then `run-now` once; `not_waiting` reads on, a task a
+  pass placed meanwhile needs nothing, and anything else ends it with the answer said. Both are
+  refused before the create, writing nothing, unless the verified leader advertises `runNow` — a
+  person who asked for now should not find a task left waiting in the queue instead. A start that
+  does not land after its create still exits 0 / answers without `isError`: the task is queued,
+  and a failed answer would invite a retry that queues it twice. A lost `run-now` answer reads
+  "may have landed", never retried. On a keyless box `run-now` is a broker scheduler op ("Fleet
+  broker"); the leader's `op=run-now` audit line stays the record that a person forced it. The CLI
+  flag is `--start`, not `--now`, which keeps meaning the relay-free direct spawn, and the two
+  are refused together. Rejected: a lasting wait in the MCP call for a task held by its deps (the
+  call would block for as long as they take); it gives up after the budget and names the retry.
   **A session idle at its prompt past a grace holds no slot** (2026-10-27, docs/scheduler.md
   Settled defaults 20). A `running` task whose session reported `idle` ("Where the states come
   from": main turn ended, no dialog open) from the machine it runs on, with no other state since,
@@ -7252,7 +7267,7 @@ app-role relay client with the key it imported at start.
   what `list_machines`' leader mark and a brokered `auto` need), `request` (`remoteOp` ∈
   `sessions`/`spawn`/`despawn`, to an exact `deviceId` this daemon's key can read — never a
   name, `"app"`, `"machines"`, or the daemon's own id, which belongs on the local op path)
-  and `scheduler` (`schedulerOp` ∈ `enqueue`/`queue`/`cancel`/`accounts`). The payload is
+  and `scheduler` (`schedulerOp` ∈ `enqueue`/`queue`/`cancel`/`run-now`/`accounts`). The payload is
   validated with the handler's own checks and rebuilt from the validated fields, so nothing
   else a peer adds reaches the wire. For `request`, `client` is stamped `"mcp"` by the
   broker, never copied from the peer, so the target audits the spawn as
@@ -7277,7 +7292,7 @@ app-role relay client with the key it imported at start.
 - **Its own audit origin.** `audit broker origin=local-broker` with action, op, target
   and client — never the payload, so never the prompt. Not `local`: a `local` line
   says this box's tmux was touched, and a brokered spawn touches someone else's. A
-  scheduler frame logs `action=scheduler op="enqueue|queue|cancel|accounts"` with the task id
+  scheduler frame logs `action=scheduler op="enqueue|queue|cancel|run-now|accounts"` with the task id
   and, for an enqueue, `claimed_client` (and `continues=<old id>` on a continue spec); `fleet` logs `action=fleet`. An enqueue also writes
   `audit enqueue origin=local-broker claimed_client=<mcp|cli> task="…" createdAt=<ms> queued`
   (or `queued landedEarlier=true`, `refused code="…"`, `unanswered`), one per try the relay
@@ -7326,8 +7341,8 @@ app-role relay client with the key it imported at start.
 
 ### The scheduler actions (2026-10-25, M4)
 
-`spawn_session`, `queue_batch`, `get_queue` and `cancel_task` in a keyless `seanced mcp`, and
-`seanced spawn`, run through `fleet` and `scheduler` frames. The decisions:
+`spawn_session`, `queue_batch`, `get_queue`, `cancel_task` and `start_task` in a keyless `seanced mcp`, and
+`seanced spawn` and `seanced start`, run through `fleet` and `scheduler` frames. The decisions:
 
 - **The daemon seals, the peer never does.** The peer sends `{taskId, spec}`; the broker parses
   the spec, builds the task record itself and calls its own app-role client's `createTask`,
@@ -7358,7 +7373,7 @@ app-role relay client with the key it imported at start.
   a continuation of a task the leader lists, nothing a keyed client could not already write; the
   daemon that runs it still resolves the worktree from its own ledger and takes the spawn from the
   scheduler only. A hand-run `claude --resume` is untracked by design (Daemon, "Continuing a session"). The parsed value, a fresh object
-  holding known fields only, is what is sealed. `cancel` takes a parsed task ref. `queue` and
+  holding known fields only, is what is sealed. `cancel` and `run-now` take a parsed task ref. `queue` and
   `accounts` take no payload and anything extra is dropped. The gates `leaderTakesReported` and
   `pinAccountGateError` stay in the client, as on the keyed path. Rejected: duplicating them
   in the broker — any app can write those fields anyway, and the record's `PIN_SENTINEL`
@@ -7393,7 +7408,9 @@ app-role relay client with the key it imported at start.
   toward "update your daemon".
 - **Threat-model delta.** For the same-uid process on a credential-delivered box, new: it can
   create `task:` records sealed `from: "app"` and bounded as above; read the fleet queue,
-  including other clients' titles and prompt previews; cancel any task; read account records
+  including other clients' titles and prompt previews; cancel any task; start any `ready` task past
+  the concurrency cap (`run-now`, 2026-10-29: what the app's Start now already lets any key holder
+  do, and nothing past the cap — pauses, the quota line and pins still hold); read account records
   (aliases and accountIds — the emails are already in `list_machines`' exclaves); and spend the
   broker socket's relay write floor (60 creates per 60 s, shared by every keyless process on the
   box) and the store's caps — an availability concern it shares with any key holder. A

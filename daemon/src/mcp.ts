@@ -54,6 +54,9 @@ import {
   resolveOrigin,
   resolvePlacement,
   specError,
+  startAuto,
+  startGateError,
+  startQueuedAuto,
   usesReported,
   type AutoSpec,
   type PlacementInput,
@@ -396,7 +399,7 @@ const AUTO_LIMITS =
 
 /** What `schedulerFailureText` and `olderDaemonText` name a scheduler call by. */
 type SchedulerCall = "get_queue" | "cancel_task";
-type SchedulerTool = "spawn_session" | "queue_batch" | "continue_task" | SchedulerCall;
+type SchedulerTool = "spawn_session" | "queue_batch" | "continue_task" | "start_task" | SchedulerCall;
 
 /**
  * A keyless box's daemon brokers the scheduler (DESIGN.md "Fleet broker"), so a
@@ -784,7 +787,7 @@ export function buildMcpServer(
     {
       title: "List machines",
       description:
-        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any, plus `account`, the name every Séance client shows for it (its alias where one is set, else the email, else a short id; tagged where two accounts would read alike; no alias on a box whose daemon brokers for it, with no readable PSK) — a display name only, never a value for pin.account — and `alias` where one is set: a spawn's pin.account takes the `accountId`, the `email` or the `alias`, not `account`; a machine with the field absent or empty reports none, so the scheduler cannot place there until its daemon updates. Offline machines are listed with their last-seen time: `lastSeen` is when the machine was last heard from (its last register or status beat, whichever is later). `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that every spawn goes through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue and cancel_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
+        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any, plus `account`, the name every Séance client shows for it (its alias where one is set, else the email, else a short id; tagged where two accounts would read alike; no alias on a box whose daemon brokers for it, with no readable PSK) — a display name only, never a value for pin.account — and `alias` where one is set: a spawn's pin.account takes the `accountId`, the `email` or the `alias`, not `account`; a machine with the field absent or empty reports none, so the scheduler cannot place there until its daemon updates. Offline machines are listed with their last-seen time: `lastSeen` is when the machine was last heard from (its last register or status beat, whichever is later). `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that every spawn goes through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue, cancel_task and start_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
       annotations: { readOnlyHint: true },
     },
     async () => {
@@ -916,6 +919,23 @@ export function buildMcpServer(
   );
 
   server.registerTool(
+    "start_task",
+    {
+      title: "Start a queued scheduler task now",
+      description:
+        "Start a task waiting in the scheduler's queue right away, past the fleet's concurrency cap — the app's Start now. Only the cap is lifted: a paused queue or account, the quota line, the disk floor, a pin or an avoid still hold it, and then it is refused unplaceable (get_queue's decision says why). The task must be ready — admitted, its dependencies released — so one still waiting on admission or its after is refused not_waiting; a task mid-dispatch is refused dispatching. Placed, it counts toward the cap like any task, so nothing new is placed until the count drains. Needs a scheduler leader whose daemon supports it. Answers with where it is starting.",
+      inputSchema: z.object({ taskId: z.string().describe("The waiting task's id from get_queue") }),
+      annotations: { readOnlyHint: false },
+    },
+    async ({ taskId }) =>
+      withFleet(async (lease) => {
+        if (lease.scheduler === null) return errorResult(olderDaemonText("start_task"));
+        const outcome = await startAuto({ machines: lease.machines, scheduler: lease.scheduler }, taskId, "mcp");
+        return outcome.ok ? textResult(outcome.text) : errorResult(outcome.text);
+      }),
+  );
+
+  server.registerTool(
     "continue_task",
     {
       title: "Continue a failed or cancelled scheduler task",
@@ -944,7 +964,7 @@ export function buildMcpServer(
     "spawn_session",
     {
       title: "Spawn a Claude Code session",
-      description: `Queue a remote-controlled Claude Code session in a named repo for the scheduler, which picks the machine and account — under a pin, only what it leaves open. machine (or pin.machine) pins it to one machine, pin.account to one account, avoid keeps it off machines. Every scheduler limit still applies to a pinned task (the in-flight caps, the quota line, the disk floor): it waits for a slot where it is pinned rather than going elsewhere, and get_queue says why. Defaults to a fresh git worktree; mode "here" runs in the repo's main checkout instead. Answers with the task id once it is queued, never with a session: get_queue shows where it lands, and get_sessions on that machine shows it running. Goes through this machine's daemon when this process cannot read the key, and caps the prompt at ${TASK_REQUEST_LIMITS.prompt} characters. ${AUTO_LIMITS}`,
+      description: `Queue a remote-controlled Claude Code session in a named repo for the scheduler, which picks the machine and account — under a pin, only what it leaves open. machine (or pin.machine) pins it to one machine, pin.account to one account, avoid keeps it off machines. Every scheduler limit still applies to a pinned task (the in-flight caps, the quota line, the disk floor): it waits for a slot where it is pinned rather than going elsewhere, and get_queue says why. Defaults to a fresh git worktree; mode "here" runs in the repo's main checkout instead. Answers with the task id once it is queued (with start, also whether it started), never with a session: get_queue shows where it lands, and get_sessions on that machine shows it running. Goes through this machine's daemon when this process cannot read the key, and caps the prompt at ${TASK_REQUEST_LIMITS.prompt} characters. ${AUTO_LIMITS}`,
       inputSchema: z.object({
         machine: z
           .string()
@@ -989,10 +1009,16 @@ export function buildMcpServer(
         linear: LINEAR_FIELD,
         pin: PIN_FIELD,
         avoid: AVOID_FIELD,
+        start: z
+          .boolean()
+          .optional()
+          .describe(
+            "Start it now, past the fleet's concurrency cap, as start_task does — once the scheduler admits it (up to about 30 s; until then the call waits). Only the cap is lifted. Set this only when the user asks for the task to start immediately rather than wait its turn",
+          ),
       }),
       annotations: { readOnlyHint: false },
     },
-    async ({ machine, repo, prompt, title, mode, model, effort, plan, after, until, linear, pin, avoid }) => {
+    async ({ machine, repo, prompt, title, mode, model, effort, plan, after, until, linear, pin, avoid, start }) => {
       const machinePin = machine === undefined || isAutoRef(machine) ? undefined : machine;
       if (machinePin !== undefined && pin?.machine !== undefined) {
         return errorResult("spawn refused: give the machine once — machine or pin.machine, not both");
@@ -1024,6 +1050,9 @@ export function buildMcpServer(
         if (lease.scheduler === null) return errorResult(olderDaemonText("spawn_session"));
         const leg = { machines: lease.machines, scheduler: lease.scheduler };
         if (usesReported(spec) && !leaderTakesReported(leg)) return errorResult(reportedGateError(leg));
+        // Before the create: a start that cannot be sent should not leave a task queued behind it.
+        const startGate = start === true ? startGateError(leg) : null;
+        if (startGate !== null) return errorResult(`spawn refused: start: ${startGate}`);
         // Before any account listing: a leader that cannot route on them never gets the fields.
         const gate = placementNeedsPinAccount(placement.input) ? pinAccountGateError(leg, "pin.account / avoid") : null;
         if (gate !== null) return errorResult(gate);
@@ -1033,9 +1062,11 @@ export function buildMcpServer(
         const resolvedSpec: AutoSpec = { ...spec, ...resolved.fields };
         const longOrigin = specError(resolvedSpec);
         if (longOrigin !== null) return errorResult(`spawn refused: ${longOrigin}${lengthNote(longOrigin, until)}`);
-        const enqueued = await enqueueAuto(lease.scheduler, resolvedSpec, audit, "mcp");
+        const id = crypto.randomUUID();
+        const enqueued = await enqueueAuto(lease.scheduler, resolvedSpec, audit, "mcp", id);
         if (!enqueued.ok) return errorResult(enqueued.text);
-        return textResult(resolved.echo === null ? enqueued.text : `${enqueued.text}\n${resolved.echo}`);
+        const started = start === true ? (await startQueuedAuto(leg, id, "mcp")).text : null;
+        return textResult([enqueued.text, resolved.echo, started].filter((line) => line !== null).join("\n"));
       });
     },
   );
