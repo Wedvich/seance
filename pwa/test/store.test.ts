@@ -2727,15 +2727,13 @@ describe("authoring a task from the auto form", () => {
     new ScriptedClient({
       machines: [autoMachine("dev-a", { capabilities: [CAPABILITIES.reportedDone] }), autoMachine("dev-b")],
     });
-  const BATCH = { id: "b-1", next: 1 } as const;
   const form = { ...DEFAULT_FORM, prompt: "fix it" };
 
-  test("deps and batch go into the spec, with no `until` unless it was changed, and then reset or advance", async () => {
+  test("deps go into the spec, with no `until` unless it was changed, and then reset", async () => {
     const client = new ScriptedClient();
     const store = new Store(client, {
       ...form,
       after: [{ task: "base", after: "merged" }],
-      batch: BATCH,
     });
     await store.spawn();
 
@@ -2743,15 +2741,10 @@ describe("authoring a task from the auto form", () => {
       client: "pwa",
       prompt: "fix it",
       deps: [{ task: "base", after: "merged" }],
-      batch: { id: "b-1", index: 1 },
     });
     expect(firstCreate(client).spec).not.toHaveProperty("until");
-    // What belongs to the task just stored is cleared; the batch stays open, one further on.
-    expect(store.getState().form).toMatchObject({
-      after: [],
-      until: "merged",
-      batch: { ...BATCH, next: 2 },
-    });
+    // What belongs to the task just stored is cleared.
+    expect(store.getState().form).toMatchObject({ after: [], until: "merged" });
   });
 
   test("a plain form writes none of the authoring fields", async () => {
@@ -2759,22 +2752,6 @@ describe("authoring a task from the auto form", () => {
     await new Store(client, form).spawn();
     for (const field of ["deps", "batch", "until", "linear"])
       expect(firstCreate(client).spec).not.toHaveProperty(field);
-  });
-
-  test("a retry after an unreadable answer re-puts the same member and moves the counter once", async () => {
-    const client = new ScriptedClient();
-    client.onCreate = async () => null;
-    const store = new Store(client, { ...form, batch: { ...BATCH, next: 3 } });
-    await store.spawn();
-    const verdict = store.getState().verdict;
-    if (verdict?.kind !== "unqueued") throw new Error("expected unqueued");
-    expect(store.getState().form.batch?.next).toBe(3);
-
-    client.onCreate = async () => ({ ok: true, landedEarlier: true });
-    await store.retryEnqueue(verdict);
-    expect(client.creates).toHaveLength(2);
-    expect(client.creates[1]?.spec.batch?.index).toBe(3);
-    expect(store.getState().form.batch?.next).toBe(4);
   });
 
   test("settling on the done report appends the instruction, writes `until`, and resets to merged", async () => {
@@ -2818,14 +2795,6 @@ describe("authoring a task from the auto form", () => {
     expect(long.getState().form.prompt).toBe(prompt);
   });
 
-  test("a batch with no index left is refused", async () => {
-    const client = new ScriptedClient();
-    const store = new Store(client, { ...form, batch: { ...BATCH, next: TASK_SPEC_LIMITS.batchIndex + 1 } });
-    await store.spawn();
-    expect(client.creates).toHaveLength(0);
-    expect(store.getState().verdict).toMatchObject({ kind: "unqueued", message: expect.stringContaining("full") });
-  });
-
   test("an edge on a task replaces the one held, and sixteen is the most", () => {
     const store = new Store(new ScriptedClient(), form);
     store.addAfter("a", "opened");
@@ -2840,35 +2809,10 @@ describe("authoring a task from the auto form", () => {
     expect(store.getState().form.after.some((dep) => dep.task === "a")).toBe(false);
   });
 
-  test("starting a batch while one is open keeps its id and counter; after End batch a start is a new batch", () => {
-    const store = new Store(new ScriptedClient(), form);
-    const start = (): void => {
-      store.openSheet("batch");
-      store.startBatch();
-      fake.settle(store);
-    };
-    start();
-    const first = store.getState().form.batch;
-    expect(first).toMatchObject({ next: 1 });
-    expect(store.getState().sheet).toBeNull();
-
-    start();
-    expect(store.getState().form.batch).toBe(first);
-
-    store.openSheet("batch");
-    store.endBatch();
-    fake.settle(store);
-    expect(store.getState().form.batch).toBeNull();
-    expect(store.getState().sheet).toBeNull();
-
-    start();
-    expect(store.getState().form.batch?.id).not.toBe(first?.id);
-  });
-
   test("opening the After sheet reads the queue; other sheets do not", async () => {
     const client = new ScriptedClient();
     const store = new Store(client, form);
-    store.openSheet("batch");
+    store.openSheet("effort");
     await drain();
     expect(client.queueRequests).toHaveLength(0);
     store.openSheet("after");
@@ -3011,7 +2955,7 @@ describe("attachments", () => {
     client.emit({ machines: [autoMachine("dev-a"), autoMachine("dev-b")] });
     const view = deriveView(store.getState(), 0);
     expect(view.button).toMatchObject({ label: "Can't attach files", enabled: false });
-    expect(view.footerStatus).toContain("doesn't take attachments yet");
+    expect(view.formStatus).toContain("doesn't take attachments yet");
     await store.spawn();
     expect(client.uploads).toEqual([]);
     expect(client.creates).toEqual([]);

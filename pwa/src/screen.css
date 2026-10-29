@@ -215,6 +215,11 @@
   padding: var(--gap) var(--gutter);
 }
 
+/* A column with no footer under it keeps the home indicator's inset itself. */
+.column-last {
+  padding-bottom: max(var(--gap), env(safe-area-inset-bottom));
+}
+
 .card {
   background: var(--sur);
   border: 1px solid var(--line);
@@ -296,6 +301,8 @@
   display: flex;
   flex: 1;
   min-height: 0;
+  /* Below the fitted textarea is still the prompt: a tap there focuses it. */
+  cursor: text;
 }
 
 /* Shared by the textarea and its backdrop mirror: anything that moves a glyph
@@ -333,6 +340,12 @@
   caret-color: var(--fg);
 }
 
+/* Bounds the fitted height (`fitPrompt`): a long prompt scrolls rather than pushing
+   Queue, which sits under it, off a phone screen with the keyboard up. */
+.prompt-field:not(.prompt-field-compact) .prompt-text {
+  max-height: 45dvh;
+}
+
 /* Colour only: a weight or padding change would reflow the mirror off the caret. */
 .prompt-skill {
   background: none;
@@ -363,19 +376,27 @@
   gap: 8px;
 }
 
+/* Two chips a row, each half the card; a lone chip sizes to its name, up to the
+   card's full width, so it isn't cut at half when there's room. */
 .attach-list {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
   margin: 0;
   padding: 0;
   list-style: none;
 }
 
+.attach-chip:only-child {
+  grid-column: 1 / -1;
+  justify-self: start;
+}
+
 .attach-chip {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
   max-width: 100%;
   padding: 4px 4px 4px 10px;
   border: 1px solid var(--line);
@@ -385,6 +406,7 @@
 }
 
 .attach-name {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -422,22 +444,92 @@
   }
 }
 
-.attach-foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-height: 28px;
-}
-
-.attach-summary {
-  font-size: 12.5px;
-  color: var(--fg2);
-}
-
 .attach-notice {
   margin: 0;
   font-size: 12.5px;
   color: var(--err);
+}
+
+/* ---- composer bar ---- */
+
+/* Attach at the left, Queue at the right, as chat composers put them. */
+.compose-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.compose-attach {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--fg2);
+  transition: transform 0.12s ease;
+}
+
+.compose-attach:disabled {
+  opacity: 0.4;
+}
+
+.compose-attach:enabled:active {
+  transform: scale(0.94);
+}
+
+@media (hover: hover) {
+  .compose-attach:hover:not(:disabled) {
+    color: var(--acc);
+    border-color: var(--acc);
+  }
+}
+
+/* Sized to its label rather than the card; a long blocked label ("Waiting for the
+   relay", "Queue on <machine>") ellipsizes instead of pushing the paperclip out. */
+.compose-bar > .primary,
+.compose-bar > .split {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-left: auto;
+}
+
+.compose-bar .primary {
+  width: auto;
+  min-width: 0;
+  padding: 10px 18px;
+  border-radius: 10px;
+  font-size: 15px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.compose-bar .split {
+  border-radius: 10px;
+}
+
+.compose-bar .split .primary {
+  border-radius: 10px 0 0 10px;
+}
+
+.compose-bar .split-divider {
+  margin: 7px 0;
+}
+
+.compose-bar .split-more {
+  width: 38px;
+  border-radius: 0 10px 10px 0;
+}
+
+.compose-status {
+  margin: -4px 0 0;
+  font-size: 13px;
+  color: var(--fg2);
 }
 
 /* ---- skill picker ---- */
@@ -684,12 +776,6 @@
   border-top: 1px solid var(--line);
 }
 
-.footer-status {
-  font-size: 13px;
-  color: var(--fg2);
-  min-height: 19px;
-}
-
 .primary {
   width: 100%;
   padding: 15px;
@@ -741,7 +827,7 @@
 }
 
 /* Queue split when the leader answers run-now: two sibling buttons in one pill,
-   the face and a chevron opening the footer menu. Each paints its own half (no
+   the face and a chevron opening the Start now menu. Each paints its own half (no
    overflow clip, which would cut their focus rings) and tints alone on press;
    the press-down moves to the pill. */
 .split {

@@ -1,5 +1,4 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { TASK_SPEC_LIMITS } from "@seance/shared";
 
 /**
  * localStorage is an external boundary Bun does not provide, so it is faked here
@@ -37,7 +36,6 @@ describe("form persistence", () => {
       effort: "max",
       after: [{ task: TASK, after: "done" }],
       until: "reported",
-      batch: { id: TASK, next: 4 },
     } as const;
     writeForm(form);
     expect(readForm()).toEqual(form);
@@ -61,7 +59,7 @@ describe("form persistence", () => {
 
   test("a form from before authoring reads with the authoring fields at their defaults", () => {
     store.set("seance:form", JSON.stringify({ prompt: "old", worktree: true, model: "opus", effort: "high" }));
-    expect(readForm()).toMatchObject({ after: [], until: "merged", batch: null, prompt: "old" });
+    expect(readForm()).toMatchObject({ after: [], until: "merged", prompt: "old" });
   });
 
   test("authoring fields are validated one by one: junk entries drop, the rest stay", () => {
@@ -81,40 +79,10 @@ describe("form persistence", () => {
     expect(form).not.toHaveProperty("linearIssue");
   });
 
-  test("a batch that parseTaskSpec would refuse is dropped whole", () => {
-    const good = { id: TASK, next: 2 };
-    for (const batch of [
-      { ...good, id: "has space" },
-      { ...good, next: 0 },
-      { ...good, next: 1.5 },
-      { ...good, next: TASK_SPEC_LIMITS.batchIndex + 2 },
-      { ...good, next: 100_000 },
-      "batch",
-    ]) {
-      store.set("seance:form", JSON.stringify({ batch }));
-      expect(readForm().batch).toBeNull();
-    }
-    store.set("seance:form", JSON.stringify({ batch: good }));
-    expect(readForm().batch).toEqual(good);
-  });
-
-  test("an older build's open batch with an order or a bound is dropped; auto or none stays open", () => {
-    for (const strategy of [{ mode: "sequential" }, { mode: "parallel", max: 99 }, "sequential", "parallel", 7]) {
-      store.set("seance:form", JSON.stringify({ batch: { id: TASK, strategy, next: 3 } }));
-      expect(readForm().batch).toBeNull();
-    }
-    for (const strategy of [{ mode: "auto" }, "auto", undefined]) {
-      store.set("seance:form", JSON.stringify({ batch: { id: TASK, strategy, next: 3 } }));
-      expect(readForm().batch).toEqual({ id: TASK, next: 3 });
-    }
-  });
-
-  test("a full batch (next one past the last index) survives a reload, so the form still says it is full", () => {
-    for (const next of [TASK_SPEC_LIMITS.batchIndex, TASK_SPEC_LIMITS.batchIndex + 1]) {
-      const batch = { id: TASK, next };
-      store.set("seance:form", JSON.stringify({ batch }));
-      expect(readForm().batch).toEqual(batch);
-    }
+  test("an older build's open batch is dropped: the form no longer authors batches", () => {
+    store.set("seance:form", JSON.stringify({ prompt: "old", batch: { id: TASK, next: 3 } }));
+    expect(readForm()).not.toHaveProperty("batch");
+    expect(readForm().prompt).toBe("old");
   });
 
   test("returns the defaults with nothing stored", () => {

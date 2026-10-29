@@ -204,7 +204,7 @@ export function describeDecision(
 
 const CAPS_ONLY_SUB = "Skip the queue — past the concurrency caps";
 
-/** The footer menu's Start now row: what skipping the queue would do, read off the placement preview. */
+/** The Queue button's Start now row: what skipping the queue would do, read off the placement preview. */
 export interface StartNowItem {
   readonly sub: string;
   readonly enabled: boolean;

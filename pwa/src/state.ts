@@ -38,7 +38,7 @@ export const MODEL_LABELS: Record<Model, string> = {
   haiku: "Haiku",
 };
 
-export type SheetKind = "machine" | "account" | "repo" | "model" | "effort" | "after" | "batch";
+export type SheetKind = "machine" | "account" | "repo" | "model" | "effort" | "after";
 
 /**
  * The Machine sheet's rescan action: inline scanning/failure state on the row it
@@ -110,19 +110,6 @@ export interface PersistedForm {
   readonly after: readonly TaskDep[];
   /** Per task: what settles it. `reported` waits for its session's own done report. */
   readonly until: TaskUntil;
-  /** Per task: the Linear issue it is for; empty is none. */
-  /** Spans enqueues: the batch the next one joins, until it is ended. */
-  readonly batch: OpenBatch | null;
-}
-
-/**
- * A batch has no record of its own: each member carries the id, so the form
- * keeps it and numbers the next member. `next` moves only when a member is
- * stored, so a retry re-sends the same index.
- */
-export interface OpenBatch {
-  readonly id: string;
-  readonly next: number;
 }
 
 export interface SessionsView {
@@ -241,7 +228,6 @@ export const DEFAULT_FORM: PersistedForm = {
   effort: DEFAULT_EFFORT,
   after: [],
   until: "merged",
-  batch: null,
 };
 
 export function isModel(value: unknown): value is Model {

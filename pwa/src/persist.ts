@@ -1,5 +1,5 @@
 import { DEP_AFTER, isTaskId, TASK_SPEC_LIMITS, TASK_UNTIL, type TaskDep } from "@seance/shared";
-import { DEFAULT_FORM, isEffort, isModel, type OpenBatch, type PersistedForm } from "./state.ts";
+import { DEFAULT_FORM, isEffort, isModel, type PersistedForm } from "./state.ts";
 
 /**
  * The form survives a reload because iOS kills backgrounded PWAs freely and the
@@ -50,34 +50,14 @@ function asDeps(value: unknown): readonly TaskDep[] {
   return deps;
 }
 
-function isAutoStrategy(strategy: unknown): boolean {
-  if (strategy === "auto") return true;
-  return typeof strategy === "object" && strategy !== null && Reflect.get(strategy, "mode") === "auto";
-}
-
-/**
- * An older build's open batch also held a `strategy`. `auto` (or none) is a plain group and stays open;
- * a sequential or parallel one is dropped, since further enqueues would join it with no order or bound.
- */
-function asBatch(value: unknown): OpenBatch | null {
-  if (typeof value !== "object" || value === null) return null;
-  const id: unknown = Reflect.get(value, "id");
-  const next: unknown = Reflect.get(value, "next");
-  if (!isTaskId(id)) return null;
-  const strategy: unknown = Reflect.get(value, "strategy");
-  if (strategy !== undefined && !isAutoStrategy(strategy)) return null;
-  // One past the bound is a full batch: the last member took `batchIndex`, and the form says so instead of forgetting it.
-  if (typeof next !== "number" || !Number.isInteger(next) || next < 1 || next > TASK_SPEC_LIMITS.batchIndex + 1)
-    return null;
-  return { id, next };
-}
-
 /** Hand-validated rather than trusted: this is last week's build's output. */
 export function readForm(): PersistedForm {
   const raw = readJson(FORM_KEY);
   if (typeof raw !== "object" || raw === null) return DEFAULT_FORM;
   const record = raw as Record<string, unknown>;
   return {
+    // An older build's open `batch` is dropped: the form no longer authors batches, and a
+    // silent one would keep grouping tasks with no tile left to end it.
     // A legacy form's `machineId`, `auto` and `repos` are dropped on purpose: a saved machine
     // pick becomes auto, since a silent pin would make a former direct spawner's next task
     // wait on caps it never chose. Its `autoRepo` is the repo only when `auto` was true: with `auto`
@@ -91,7 +71,6 @@ export function readForm(): PersistedForm {
     effort: isEffort(record["effort"]) ? record["effort"] : DEFAULT_FORM.effort,
     after: asDeps(record["after"]),
     until: TASK_UNTIL.find((until) => until === record["until"]) ?? DEFAULT_FORM.until,
-    batch: asBatch(record["batch"]),
   };
 }
 

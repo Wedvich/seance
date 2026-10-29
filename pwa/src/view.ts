@@ -133,14 +133,13 @@ export interface ViewModel {
   readonly repoTile: Tile;
   readonly modelTile: Tile;
   readonly effortTile: Tile;
-  /** The authoring tiles: the tasks this one waits on, and the batch it joins. */
+  /** The authoring tile: the tasks this one waits on. */
   readonly afterTile: Tile;
-  readonly batchTile: Tile;
   /** The verified leader takes `until: "reported"` and `after: "done"` (DESIGN.md, capabilities). */
   readonly reportedAvailable: boolean;
   readonly worktreeHint: string;
-  /** Null when there is nothing to warn about, so the footer holds the button alone. */
-  readonly footerStatus: string | null;
+  /** The line under the prompt card; null when there is nothing to say. */
+  readonly formStatus: string | null;
   readonly button: PrimaryButton;
   /** The button's chevron and its Start now menu: only while the verified leader answers `run-now`. */
   readonly startNow: boolean;
@@ -594,12 +593,12 @@ function deriveBanner(state: AppState): Banner | null {
 }
 
 /** An offline pin is not a block: the task waits for the machine, as `resolvePlacement` notes. */
-function deriveFooterStatus(state: AppState, machine: Machine | null, problem: PinProblem | null): string | null {
+function deriveFormStatus(state: AppState, machine: Machine | null, problem: PinProblem | null): string | null {
   const { reason, note } = deriveAutoAvailability(state.relay);
   if (reason !== null) return reason;
   if (problem !== null) return problem.text;
   if (state.attachments.length > 0 && !deriveAttachmentsAvailability(state.relay)) return ATTACHMENTS_UNAVAILABLE;
-  // The tile says "Unknown machine" here, so the footer must not claim the scheduler picks.
+  // The tile says "Unknown machine" here, so the status line must not claim the scheduler picks.
   if (state.form.machine !== null && machine === null) return "The pinned machine isn't listed";
   if (machine !== null && !machine.connected) return `${machine.name} is offline — the task waits for it`;
   if (note !== null) return note;
@@ -702,15 +701,9 @@ export function deriveView(state: AppState, now: number): ViewModel {
       dot: null,
     },
     afterTile: { label: "AFTER", value: afterValue(form.after), mono: false, dot: null },
-    batchTile: {
-      label: "BATCH",
-      value: form.batch === null ? "Off" : `#${form.batch.next}`,
-      mono: false,
-      dot: null,
-    },
     reportedAvailable: deriveReportedAvailability(relay),
     worktreeHint: form.worktree ? "Branches off the default branch on origin" : "Runs in the repo as it stands",
-    footerStatus: deriveFooterStatus(state, machine, problem),
+    formStatus: deriveFormStatus(state, machine, problem),
     button: deriveButton(state, machine, repo, problem),
     startNow: deriveRunNowAvailability(relay),
     ignoredNote: deriveIgnoredNote(relay),
