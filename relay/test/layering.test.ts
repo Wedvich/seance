@@ -67,18 +67,41 @@ describe("relay/src stays blind", () => {
     expect(offenders).toEqual([]);
   });
 
-  test("the Worker's env holds no key: one secret, the leader allowlist and test-only timings", async () => {
+  test("the Worker's env holds no key: one secret, the leader allowlist, the attachment bucket and test-only bounds", async () => {
     // A new binding is where a PSK would arrive; pinning the list makes adding one a reviewed change.
     const env = await readFile(join(SRC, "env.ts"), "utf8");
     const fields = [...env.matchAll(/^\s*readonly\s+([A-Z_]+)\??:/gmu)].map((m) => m[1]);
     expect(fields).toEqual([
       "HUB",
+      // A bucket binding carries no key in, only the bucket's own ciphertext (DESIGN.md, "Attachments").
+      "ATTACHMENTS",
       "BEARER_TOKEN",
       "SCHEDULER_LEADERS",
       "SWEEP_INTERVAL_MS",
       "SWEEP_SILENCE_LIMIT_MS",
       "STORE_TOMBSTONE_MS",
       "SCHEDULER_REPLY_WINDOW_MS",
+      "UPLOAD_WINDOW_BYTES",
+      "UPLOAD_HOUR_BYTES",
+      "UPLOAD_HOUR_UPLOADS",
     ]);
+  });
+
+  test("never reads a request or object body: attachments stream through untouched", async () => {
+    // Socket frames arrive as strings, so nothing here has a reason to buffer a body;
+    // the first that did would hold an attachment's bytes where a log line could reach them.
+    const files = (await readdir(SRC)).filter((name) => name.endsWith(".ts"));
+    const offenders: string[] = [];
+    for (const name of files) {
+      // oxlint-disable-next-line no-await-in-loop -- a handful of small files; concurrency buys nothing
+      const source = await readFile(join(SRC, name), "utf8");
+      // `Response.json(` builds a body; it reads none.
+      for (const match of source.matchAll(
+        /(?<!\bResponse)\.(?:arrayBuffer|bytes|text|blob|formData|json|getReader)\(/gu,
+      )) {
+        offenders.push(`${name}: ${match[0]}`);
+      }
+    }
+    expect(offenders).toEqual([]);
   });
 });
