@@ -1,6 +1,7 @@
 import { importPsk, toBase64 } from "@seance/shared";
 import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import {
+  ATTACHMENT_LIMITS,
   CAPABILITIES,
   accountRecord,
   QUEUE_MAX_TASKS,
@@ -10,6 +11,8 @@ import {
   TASK_SPEC_LIMITS,
   withReportInstruction,
   type Decision,
+  type AttachmentRefusal,
+  type AttachmentUploaded,
   type DiscardReply,
   type DiscardRequest,
   type ExclaveInfo,
@@ -467,6 +470,19 @@ class ScriptedClient extends RelayClient {
   override createTask(task: Task): Promise<TaskCreated | StoreRefusal | null> {
     this.creates.push(task);
     return this.onCreate(task);
+  }
+
+  /** Every upload's plaintext, in order: a retry shows only the files that hadn't stored. */
+  readonly uploads: Uint8Array[] = [];
+  onUpload: (bytes: Uint8Array) => Promise<AttachmentUploaded | AttachmentRefusal> = async () => ({
+    ok: true,
+    id: crypto.randomUUID(),
+    hash: "h".repeat(43),
+  });
+
+  override uploadAttachment(bytes: Uint8Array<ArrayBuffer>): Promise<AttachmentUploaded | AttachmentRefusal> {
+    this.uploads.push(bytes);
+    return this.onUpload(bytes);
   }
 
   override queue(request: QueueRequest = {}): Promise<QueueReply | null> {
@@ -2903,5 +2919,105 @@ describe("authoring a task from the auto form", () => {
       prompt: "keep",
       after: [{ task: "base", after: "opened" }],
     });
+  });
+});
+
+describe("attachments", () => {
+  /** A fleet whose verified leader advertises attachments. */
+  function capable(): ScriptedClient {
+    return new ScriptedClient({
+      machines: [autoMachine("dev-a", { capabilities: [CAPABILITIES.attachments] }), autoMachine("dev-b")],
+    });
+  }
+
+  const file = (name: string, text: string, type = "text/plain"): File => new File([text], name, { type });
+
+  test("are offered only while the verified leader advertises them", () => {
+    expect(deriveView(new Store(capable()).getState(), 0).attachments.offered).toBe(true);
+    expect(deriveView(new Store(new ScriptedClient()).getState(), 0).attachments.offered).toBe(false);
+    const unverified = capable();
+    unverified.relay = { ...unverified.relay, scheduler: { kind: "unverified", deviceId: "dev-a", term: 1 } };
+    expect(deriveView(new Store(unverified).getState(), 0).attachments.offered).toBe(false);
+  });
+
+  test("upload in order, then the task is created with their manifest and they leave the form", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "look at these" });
+    store.addFiles([file("a.txt", "first"), file("b.png", "second", "image/png")]);
+    expect(deriveView(store.getState(), 0).attachments.summary).toBe("2 files · 11 B");
+
+    const labels: string[] = [];
+    store.subscribe(() => labels.push(deriveView(store.getState(), 0).button.label));
+    await store.spawn();
+
+    expect(client.uploads.map((bytes) => new TextDecoder().decode(bytes))).toEqual(["first", "second"]);
+    expect(labels).toContain("Uploading 1 of 2…");
+    expect(labels).toContain("Uploading 2 of 2…");
+    const created = firstCreate(client);
+    expect(created.spec.attachments?.map(({ name, type, size }) => ({ name, type, size }))).toEqual([
+      { name: "a.txt", type: "text/plain", size: 5 },
+      { name: "b.png", type: "image/png", size: 6 },
+    ]);
+    expect(store.getState().verdict?.kind).toBe("queued");
+    expect(store.getState().attachments).toEqual([]);
+    // The preview is told files ride along, as a flag: never the manifest.
+    expect(client.previews.at(-1)).toMatchObject({ attachments: true });
+  });
+
+  test("a refused upload creates no task and says why; the retry sends only the files that hadn't stored", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "go" });
+    store.addFiles([file("a.txt", "first"), file("b.txt", "second"), file("c.txt", "third")]);
+    client.onUpload = async (bytes) =>
+      new TextDecoder().decode(bytes) === "second"
+        ? { ok: false, code: "allowance_exhausted", window: "month", retryAfter: 7200 }
+        : { ok: true, id: crypto.randomUUID(), hash: "h".repeat(43) };
+
+    await store.spawn();
+    expect(client.creates).toEqual([]);
+    const verdict = store.getState().verdict;
+    expect(verdict).toMatchObject({ kind: "unqueued", mayHaveLanded: false });
+    expect(verdict?.kind === "unqueued" ? verdict.message : "").toContain(
+      "30-day allowance is spent. Try again in 2 hours",
+    );
+    expect(store.getState().spawning).toBe(false);
+
+    client.uploads.length = 0;
+    client.onUpload = async () => ({ ok: true, id: crypto.randomUUID(), hash: "h".repeat(43) });
+    store.dismissLayer();
+    await store.spawn();
+    expect(client.uploads.map((bytes) => new TextDecoder().decode(bytes))).toEqual(["second", "third"]);
+    expect(firstCreate(client).spec.attachments?.map((ref) => ref.name)).toEqual(["a.txt", "b.txt", "c.txt"]);
+  });
+
+  test("with files the prompt takes the lower bound, refused before anything uploads", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "x".repeat(ATTACHMENT_LIMITS.prompt + 1) });
+    store.addFiles([file("a.txt", "first")]);
+    await store.spawn();
+    expect(client.uploads).toEqual([]);
+    expect(client.creates).toEqual([]);
+    const verdict = store.getState().verdict;
+    expect(verdict?.kind === "unqueued" ? verdict.message : "").toContain(
+      `at most ${ATTACHMENT_LIMITS.prompt} beside attached files`,
+    );
+  });
+
+  test("files on the form block the button once the leader stops taking them, and nothing uploads", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "go" });
+    const detach = store.attach();
+    store.addFiles([file("a.txt", "first")]);
+    client.emit({ machines: [autoMachine("dev-a"), autoMachine("dev-b")] });
+    const view = deriveView(store.getState(), 0);
+    expect(view.button).toMatchObject({ label: "Can't attach files", enabled: false });
+    expect(view.footerStatus).toContain("doesn't take attachments yet");
+    await store.spawn();
+    expect(client.uploads).toEqual([]);
+    expect(client.creates).toEqual([]);
+    // Still listed, so they can be removed; removing them frees the form.
+    store.removeFile(store.getState().attachments[0]?.key ?? "");
+    expect(deriveView(store.getState(), 0).button.enabled).toBe(true);
+    detach();
   });
 });

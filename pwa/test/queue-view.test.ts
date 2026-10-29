@@ -75,6 +75,9 @@ function state(
     pausing: false,
     discarding: false,
     accounts: { aliases: {}, nameable: true, saving: null, notice: null },
+    attachments: [],
+    attachNotice: null,
+    upload: null,
     ...overrides,
   };
 }
@@ -702,6 +705,20 @@ describe("authoring on a row", () => {
     const member = task("m", { spec: { repo: ORIGIN, mode: "worktree", batch } });
     expect(rowOf([member], "m")?.batch).toBe("Batch #2");
     expect(rowOf([task("n")], "n")?.batch).toBeNull();
+  });
+
+  test("a task carrying files never shows their names", () => {
+    const ref = (name: string, i: number) => ({
+      id: `0000000${i}-0000-4000-8000-000000000000`,
+      name,
+      type: "image/png",
+      size: 1,
+      hash: "h".repeat(43),
+    });
+    const attached = task("f", {
+      spec: { repo: ORIGIN, mode: "worktree", attachments: [ref("secret.png", 1), ref("b.png", 2)] },
+    });
+    expect(JSON.stringify(rowOf([attached], "f"))).not.toContain("secret.png");
   });
 
   test("a pin and an avoid list read in the verdict's words on every state, by display label", () => {
