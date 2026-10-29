@@ -1035,6 +1035,28 @@ The Durable Object persists a machine registry:
   symptom until a spawn failed into it. A missed pong re-dials, and the fresh
   socket gets a fresh registry. The relay does not sweep app sockets — nothing
   server-side depends on their liveness.
+- **Status beats and app pings share wall-clock slots** (2026-10-29, `startSlotTimer` in
+  `shared/src/slot-timer.ts`). Each daemon beats at `k × STATUS_INTERVAL_MS` since the
+  epoch, and each app pings a second into the same slot (`SLOT_OFFSET_MS` in
+  `app-client.ts`). The PWA's fleet quota read lands on that slot too. Before this, every
+  daemon beat on its own phase, and each register re-phased it. On cellular each push wakes
+  the phone's radio into its high-power state for a tail of several seconds. N machines out
+  of phase, plus the app's own ping, kept it up almost continuously while the PWA was open,
+  and the phone ran hot. Aligned, the fleet costs one wake per interval, whatever its size.
+  A register or a drain refresh still samples at once. The slot is not re-phased: a slot
+  beat within the relay's floor of a recent sample is skipped, since the relay would drop
+  it as `status-rate`. The first slot is at least one interval away, as `setInterval`'s
+  was. Alignment is an optimisation only: a skewed clock costs an extra wake, never
+  correctness, and the fan-out is unchanged, so the leader still hears `drn` the moment it
+  is sent.
+  Rejected: the relay batching app-bound statuses on its alarm. The flush is still out of
+  phase with each app's ping, which the edge answers without waking the DO, so that is two
+  wakes. It also delays `drn` to the leader, whose term leg the relay cannot tell from
+  other app sockets. Rejected: an app frame asking for the latest statuses beside its ping.
+  It needs a new frame, a rate floor and a DO wake per app per beat, and a status read just
+  before the next request is up to 60 s old against `STATUS_STALE_MS`'s 90. Rejected:
+  live status only while a screen subscribes. Every screen that reads status (spawn sheet
+  quota, Machines) would have to declare it, and would show stale data on entry.
 - Daemon sockets use DO WebSocket hibernation. No connection state in class
   fields (`state.getWebSockets()` + DO storage are truth), heartbeats via
   `setWebSocketAutoResponse()` so pings don't wake the DO. Wake is

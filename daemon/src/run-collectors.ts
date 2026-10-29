@@ -1,4 +1,4 @@
-import { STATUS_MIN_INTERVAL_MS, type MachineStatus, type SessionEntry } from "@seance/shared";
+import { startSlotTimer, STATUS_MIN_INTERVAL_MS, type MachineStatus, type SessionEntry } from "@seance/shared";
 import type { Config } from "./config.ts";
 import { log } from "./log.ts";
 import type { MetricsStore } from "./metrics-store.ts";
@@ -38,9 +38,9 @@ export interface StatusLoopDeps {
 
 export interface StatusLoop {
   /**
-   * Samples at once and re-arms the beat, so the next lands past the relay's floor.
-   * Run on every register: it changed the blob a status indexes, and the registry
-   * push an app got carries no snapshot until this one.
+   * Samples at once, and starts the beat on its first call. Run on every register: it changed the
+   * blob a status indexes, and the registry push an app got carries no snapshot until this one.
+   * The beat keeps its wall-clock slot; one the relay's floor would drop is skipped instead.
    */
   readonly sampleNow: () => void;
   /**
@@ -54,7 +54,8 @@ export interface StatusLoop {
 }
 
 /**
- * Telemetry over the registered collectors, sampled on a beat, each sample
+ * Telemetry over the registered collectors, sampled on a beat aligned to the wall clock
+ * (`startSlotTimer`: every machine's beat in the same second, one radio wake on a phone), each sample
  * going out as `status` while the socket is up — whether or not anyone is
  * watching, so a freshly opened app finds the latest on the relay instead of
  * waiting a beat.
@@ -83,9 +84,10 @@ export function startStatusLoop(metrics: MetricsStore, collectors: CollectorDeps
   // the next beat carries the flag, at most one beat late.
   const floorMs = loop.floorMs ?? Math.min(STATUS_MIN_INTERVAL_MS, loop.intervalMs) * 1.05;
   let stopped = false;
-  let timer: ReturnType<typeof setInterval> | null = null;
+  let stopBeat: (() => void) | null = null;
   let trimWarned = false;
   let lastSentAt: number | null = null;
+  let lastStartedAt: number | null = null;
   let refreshPending = false;
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
   // Samples started and not yet resolved (tick and send both), and the latest of them: ticks queue in
@@ -95,6 +97,7 @@ export function startStatusLoop(metrics: MetricsStore, collectors: CollectorDeps
   const sample = (fresh = false): void => {
     if (stopped) return;
     active += 1;
+    lastStartedAt = collectors.now();
     lastSample = telemetry
       .tick(collectors.now(), fresh)
       .then((snapshot) => {
@@ -125,10 +128,18 @@ export function startStatusLoop(metrics: MetricsStore, collectors: CollectorDeps
         active -= 1;
       });
   };
+  // Skipped rather than re-phased: a sample just sent or recently begun (a register's, a refresh's)
+  // already carries what this one would, and the relay would drop this one under its floor. Judged by
+  // time, not by `active`, so a hung tick costs its own beat and not every one after it.
+  const beat = (): void => {
+    const now = collectors.now();
+    const recent = (at: number | null): boolean => at !== null && now - at < floorMs;
+    if (recent(lastSentAt) || recent(lastStartedAt)) return;
+    sample();
+  };
   const sampleNow = (fresh = false): void => {
     if (stopped) return;
-    if (timer !== null) clearInterval(timer);
-    timer = setInterval(() => sample(), loop.intervalMs);
+    stopBeat ??= startSlotTimer({ intervalMs: loop.intervalMs }, beat);
     sample(fresh);
   };
   // Re-decided each time it wakes: a send in flight (a register's, just before the drain) lands later
@@ -160,7 +171,7 @@ export function startStatusLoop(metrics: MetricsStore, collectors: CollectorDeps
     latest: () => telemetry.latest(),
     stop: (): void => {
       stopped = true;
-      if (timer !== null) clearInterval(timer);
+      stopBeat?.();
       if (refreshTimer !== null) clearTimeout(refreshTimer);
     },
   };

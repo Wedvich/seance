@@ -73,6 +73,7 @@ import {
   parseTaskReply,
 } from "./parse.ts";
 import { open as openEnvelope, OpMismatchError, openAtRest, ReplayGuard, seal } from "./crypto.ts";
+import { startSlotTimer } from "./slot-timer.ts";
 import { sanitizeStatus } from "./status-reader.ts";
 import { quote } from "./fmt.ts";
 import { openFleetQuotaRecord } from "./fleet-quota.ts";
@@ -338,6 +339,12 @@ export interface RelayState {
 
 const BACKOFF_BASE_MS = 500;
 const BACKOFF_CAP_MS = 15_000;
+
+/**
+ * Where in its slot a ping (and the fleet quota read) goes: a second after daemons beat on the
+ * slot's start (`startSlotTimer`), so on a phone the beats and the pong share one radio wake.
+ */
+const SLOT_OFFSET_MS = 1_000;
 
 /**
  * How long a gap in the socket is allowed to go unreported. A refresh dials from
@@ -632,9 +639,9 @@ export class RelayClient {
   #retryTimer: ReturnType<typeof setTimeout> | null = null;
   #settleTimer: ReturnType<typeof setTimeout> | null = null;
   #registrySettleTimer: ReturnType<typeof setTimeout> | null = null;
-  #pingTimer: ReturnType<typeof setInterval> | null = null;
+  #stopPing: (() => void) | null = null;
   #pongDeadline: ReturnType<typeof setTimeout> | null = null;
-  #fleetQuotaTimer: ReturnType<typeof setInterval> | null = null;
+  #stopFleetQuota: (() => void) | null = null;
   /** The store version `fleetQuota` was read at, so an unchanged record keeps its array (and its subscribers quiet). */
   #fleetQuotaVersion = 0;
   /** The newest store version any answer showed (a record's, readable or not): reads can finish out of order. */
@@ -1047,7 +1054,7 @@ export class RelayClient {
    */
   #startHeartbeat(socket: WebSocket): void {
     this.#teardownHeartbeat();
-    this.#pingTimer = setInterval(() => {
+    this.#stopPing = startSlotTimer({ intervalMs: this.#pingIntervalMs, offsetMs: SLOT_OFFSET_MS }, () => {
       if (this.#socket !== socket || socket.readyState !== WebSocket.OPEN) return;
       socket.send("ping");
       this.#pongDeadline ??= setTimeout(() => {
@@ -1059,27 +1066,28 @@ export class RelayClient {
         // new socket — replies fan out to every open app socket.
         this.reconnect();
       }, this.#pongTimeoutMs);
-    }, this.#pingIntervalMs);
+    });
   }
 
   /** Every timer bound to the current socket: the heartbeat's, and the record poll's. */
   #teardownHeartbeat(): void {
-    if (this.#pingTimer !== null) clearInterval(this.#pingTimer);
+    this.#stopPing?.();
     if (this.#pongDeadline !== null) clearTimeout(this.#pongDeadline);
-    if (this.#fleetQuotaTimer !== null) clearInterval(this.#fleetQuotaTimer);
-    this.#pingTimer = null;
+    this.#stopFleetQuota?.();
+    this.#stopPing = null;
     this.#pongDeadline = null;
-    this.#fleetQuotaTimer = null;
+    this.#stopFleetQuota = null;
   }
 
   /** Polled, not pushed: the relay nudges apps only for `account:`, never `quota:`. */
   #startFleetQuota(socket: WebSocket): void {
     const every = this.#fleetQuotaRefreshMs;
     if (every === null) return;
-    if (this.#fleetQuotaTimer !== null) clearInterval(this.#fleetQuotaTimer);
-    this.#fleetQuotaTimer = setInterval(() => {
+    this.#stopFleetQuota?.();
+    // On a ping's slot: one more radio wake every interval otherwise.
+    this.#stopFleetQuota = startSlotTimer({ intervalMs: every, offsetMs: SLOT_OFFSET_MS }, () => {
       if (this.#socket === socket) void this.refreshFleetQuota();
-    }, every);
+    });
     void this.refreshFleetQuota();
   }
 
