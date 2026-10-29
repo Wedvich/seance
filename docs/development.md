@@ -9,6 +9,14 @@ stays unavailable. Outside production builds the app
 defaults to `ws://127.0.0.1:8787/app`, so no `VITE_RELAY_URL` is needed for local
 work.
 
+Attachments (designed in DESIGN.md, built from its task 3 on) need no Cloudflare account locally. `wrangler dev` serves the `ATTACHMENTS`
+R2 binding from a local simulation under `relay/.wrangler/state/`, so the bucket and its
+lifecycle rule exist only in production. Nothing expires locally: delete
+`relay/.wrangler/state/` to start empty. The app's uploads go to
+`http://127.0.0.1:8787/attachments/<id>`. The dev server sends no CSP: only a build
+writes `_headers`, and a build's `connect-src` names the relay's `https:` origin beside
+its `wss:` one (DESIGN.md, "Attachments").
+
 ## Commands
 
 | Command                | What it does                                       |
@@ -83,6 +91,9 @@ key's version at 1, which reopens alias rollback unless the PSK changes too: rot
   their `makeGhStub` explicitly.
   The relay double (`daemon/test/harness.ts`) also carries a store double — term fence,
   tombstones, `store-changed` — for the leader's queue-store adapter and its term tests.
+  For attachments (once built) it also serves `GET /attachments/<id>` from objects a test puts in
+  directly. It is a double like the rest: the routes' real rules live in
+  `relay/src/attachments.ts`, and e2e is where the two meet.
   Three fixtures stand in for what lies outside a machine, importable from daemon suites and e2e alike (no e2e file uses them yet):
   `makeSecurityShim` (`daemon/test/security-shim.ts`) puts a `security` first on PATH that
   serves keychain items from files, so a keychain read needs no keychain (the daemon calls
@@ -99,7 +110,13 @@ key's version at 1, which reopens alias rollback unless the PSK changes too: rot
   out, the binding is unset and nobody leads. `startRelay({ tombstoneMs })` sets
   `STORE_TOMBSTONE_MS` for a suite that must watch a tombstone expire, and
   `startRelay({ schedulerReplyWindowMs })` sets `SCHEDULER_REPLY_WINDOW_MS` for one that must watch a
-  scheduler reply credit lapse. `startRelay({ captureLogs })` collects the worker's
+  scheduler reply credit lapse. Once the relay binds it, the `ATTACHMENTS` R2 bucket comes from `r2_buckets` in
+  `wrangler.jsonc` as Miniflare's `r2Buckets`, in memory and empty at each boot. Never
+  hand-roll a binding: drift from the config is what the harness exists to catch. The
+  upload allowance's byte windows are unit-tested on `relay/src/allowance.ts` with an
+  injected clock, since filling 1 GB under workerd is no test. Its upload count is
+  reachable (301 empty uploads), so the relay suite proves the `429` end to end.
+  `startRelay({ captureLogs })` collects the worker's
   console lines for `logs()`, which is how the relay and store suites prove ciphertext
   never reaches a log line; `relay/test/layering.test.ts` is the structural half of
   "the relay is blind" (DESIGN.md, _Security model_). A new suite file in
@@ -132,6 +149,10 @@ key's version at 1, which reopens alias rollback unless the PSK changes too: rot
   stub, and `SEANCE_E2E_SPAWN_WAIT_MS`, its spawn registration budget), and `beforeBoot` runs
   with its state dir before it boots (a pre-seeded launch ledger, say), so a test can hold a
   spawn mid-flight and still have the ledger prove what the next term needs.
+  Attachments (`e2e/attachments.test.ts`, once built) upload through the shared sealing helpers to
+  the real relay's Miniflare R2, and the daemon fetches from it at `attachmentUrl` of its
+  `ws://` config URL. A test that must see a tampered object rewrites it through
+  Miniflare's bucket handle, behind the relay, as only a compromised relay could.
 - **scheduler** — the library alone, over an in-memory `QueueStore` and the `Fleet`
   double in `scheduler/test/fixtures.ts`: every filter reason, score component and
   stickiness case as fixture decisions, the reserve/dispatch lifecycle on a fake clock,
