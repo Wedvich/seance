@@ -119,3 +119,14 @@ describe("a Start now refusal on the queued verdict", () => {
     expect(body(task("ready"), null)).not.toContain("Couldn't start it");
   });
 });
+
+describe("a held verdict", () => {
+  // Nothing sends it in the background, so the screen has to say the app must be open for it to go.
+  test("says it waits on the phone for the app to reconnect, and offers another", () => {
+    const content = describeVerdict({ kind: "held", task: task("queued") }, [], {}, NOW, null);
+    expect(content.headline).toBe("Held on this phone.");
+    expect(content.body).toContain("Keep the app open");
+    expect(content.stage).toBeNull();
+    expect(content.primary).toEqual({ label: "Start another", onClick: "another" });
+  });
+});

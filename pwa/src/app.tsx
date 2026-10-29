@@ -260,6 +260,8 @@ function useSpawnActions(store: Store): SpawnActions {
       endBatch: () => store.endBatch(),
       addFiles: (files) => store.addFiles(files),
       removeFile: (key) => store.removeFile(key),
+      retryHeld: (taskId) => store.retryHeld(taskId),
+      discardHeld: (taskId) => store.discardHeld(taskId),
     }),
     [store],
   );

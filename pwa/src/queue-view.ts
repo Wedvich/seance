@@ -27,7 +27,7 @@ import {
 import { accountDisplayName, formatUntil } from "./machines-view.ts";
 import {
   deriveContinueAvailability,
-  deriveReportedAvailability,
+  deriveReportedOffered,
   deriveRunNowAvailability,
   failedBody,
   formatSeen,
@@ -549,7 +549,7 @@ export function deriveAfterSheet(state: AppState, now: number): AfterSheetView {
   return {
     options,
     full: state.form.after.length >= TASK_SPEC_LIMITS.deps,
-    doneAvailable: deriveReportedAvailability(state.relay),
+    doneAvailable: deriveReportedOffered(state.relay),
     note,
   };
 }

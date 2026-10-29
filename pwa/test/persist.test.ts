@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { TASK_SPEC_LIMITS } from "@seance/shared";
+import { parseTask, TASK_SPEC_LIMITS } from "@seance/shared";
+// Type-only, so erased: the module itself loads below, after the localStorage fake.
+import type { HeldTask } from "../src/state.ts";
 
 /**
  * localStorage is an external boundary Bun does not provide, so it is faked here
@@ -18,8 +20,9 @@ Object.defineProperty(globalThis, "localStorage", {
   },
 });
 
-const { dropLegacyHidden, dropLegacyPending, readForm, writeForm } = await import("../src/persist.ts");
-const { DEFAULT_FORM } = await import("../src/state.ts");
+const { dropLegacyHidden, dropLegacyPending, readForm, readHeld, writeForm, writeHeld } =
+  await import("../src/persist.ts");
+const { DEFAULT_FORM, HELD_MAX } = await import("../src/state.ts");
 
 beforeEach(() => store.clear());
 
@@ -138,6 +141,78 @@ describe("form persistence", () => {
   test("ignores wrongly typed fields rather than trusting them", () => {
     store.set("seance:form", JSON.stringify({ machine: 7, account: false, repo: 3, prompt: null, worktree: "yes" }));
     expect(readForm()).toEqual({ ...DEFAULT_FORM, prompt: "" });
+  });
+});
+
+describe("held tasks", () => {
+  const OTHER = "7b0e4c1d-2f3a-4b5c-9d6e-1a2b3c4d5e6f";
+  const held = (id: string, failure: string | null = null): HeldTask => ({
+    task: {
+      id,
+      spec: { repo: "github.com/acme/app", mode: "worktree", prompt: "port it" },
+      state: "queued",
+      createdAt: 5,
+    },
+    failure,
+    sending: true,
+  });
+
+  test("round-trip with their failures, never as sending", () => {
+    writeHeld([held(TASK), held(OTHER, "Refused.")]);
+    expect(readHeld()).toEqual([
+      { ...held(TASK), sending: false },
+      { ...held(OTHER, "Refused."), sending: false },
+    ]);
+  });
+
+  test("clear the key once none are left", () => {
+    writeHeld([held(TASK)]);
+    writeHeld([]);
+    expect(store.get("seance:held")).toBeUndefined();
+  });
+
+  // Sent as it stands, so anything this build can't parse is dropped rather than sent.
+  test("drop entries that don't parse, aren't queued, or repeat an id", () => {
+    store.set(
+      "seance:held",
+      JSON.stringify([
+        held(TASK),
+        { task: { ...held(OTHER).task, state: "running" } },
+        { task: { id: "not a task" } },
+        held(TASK, "dup"),
+        "junk",
+      ]),
+    );
+    expect(readHeld().map((entry) => entry.task.id)).toEqual([TASK]);
+  });
+
+  // Files go only to a leader verified to take them, which holding never checks.
+  test("drop one carrying files, though it parses", () => {
+    const ref = {
+      id: "0b6f0c9e-1a2b-4c3d-8e9f-000000000000",
+      name: "a.png",
+      type: "image/png",
+      size: 1024,
+      hash: "A".repeat(43),
+    };
+    const { task } = held(OTHER);
+    store.set(
+      "seance:held",
+      JSON.stringify([held(TASK), { task: { ...task, spec: { ...task.spec, attachments: [ref] } } }]),
+    );
+    expect(parseTask({ ...task, spec: { ...task.spec, attachments: [ref] } })).not.toBeNull();
+    expect(readHeld().map((entry) => entry.task.id)).toEqual([TASK]);
+  });
+
+  test("stop at the cap", () => {
+    const ids = Array.from({ length: HELD_MAX + 2 }, (_, i) => `${TASK.slice(0, -2)}${String(i).padStart(2, "0")}`);
+    store.set("seance:held", JSON.stringify(ids.map((id) => held(id))));
+    expect(readHeld()).toHaveLength(HELD_MAX);
+  });
+
+  test("survive corrupt JSON", () => {
+    store.set("seance:held", "[{");
+    expect(readHeld()).toEqual([]);
   });
 });
 

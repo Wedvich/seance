@@ -38,6 +38,8 @@ afterEach(async () => {
   backend?.stop?.();
   backend = null;
   await tmux(["kill-server"]);
+  // `kill-server` returns before the server exits; the next test's start would reach the dying one (macOS CI).
+  await pollUntil(async () => !(await serverUp()), "the tmux server gone");
 });
 
 async function started(): Promise<SessionBackend> {
