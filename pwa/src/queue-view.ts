@@ -18,7 +18,6 @@ import { machineAsleep, needsAttention } from "./asleep.ts";
 import {
   avoidLine,
   decisionStartNowItem,
-  heldByCapsAlone,
   pinLine,
   taskHeadline,
   waitingText,
@@ -44,16 +43,15 @@ import {
 export type QueueDot = "ok" | "auto" | "err";
 
 /** The one action a card shows inline; the rest sit behind its ⋯ menu. */
-export type QueueInlineAction = "continue" | "run-now";
+export type QueueInlineAction = "continue";
 
 /**
- * The likeliest next step that acts on the task itself. Follow up, Mark done and Cancel are never
- * inline: Follow up starts another task, so it lives only in the menu.
+ * The likeliest next step that acts on the task itself. Follow up, Start now, Mark done and Cancel
+ * are never inline: Follow up starts another task, and Start now jumps the queue, so both live only
+ * in the menu.
  */
-export function primaryAction(row: Pick<QueueRow, "canContinue" | "canRunNow">): QueueInlineAction | null {
-  if (row.canContinue) return "continue";
-  if (row.canRunNow) return "run-now";
-  return null;
+export function primaryAction(row: Pick<QueueRow, "canContinue">): QueueInlineAction | null {
+  return row.canContinue ? "continue" : null;
 }
 
 export type ArmOp = "cancel" | "mark-done";
@@ -103,8 +101,6 @@ export interface QueueRow {
    * advertises it, the leader does too, and no continuation of it is already waiting, live or settled.
    */
   readonly canContinue: boolean;
-  /** A `ready` task only the concurrency caps hold: "Start now" places it past them. */
-  readonly canRunNow: boolean;
   /** A waiting task's Start now menu item: always shown, greyed (`enabled`) by the split button's rules; null once it is no longer waiting. */
   readonly startNow: StartNowItem | null;
   /** `primaryAction` of the flags above: the card's one inline button. */
@@ -329,16 +325,6 @@ function placementLine(task: Task, state: AppState): string | null {
   return parts.length === 0 ? null : parts.join(". ");
 }
 
-/**
- * Some candidate of its latest decision was turned down for `cap_reached` and nothing else. The
- * leader routes again on the tap, so a decision gone stale costs a refusal, never a wrong placement.
- */
-function heldByCapsOnly(task: Task): boolean {
-  const { decision } = task;
-  if (task.state !== "ready" || decision === undefined || decision.chosen !== null) return false;
-  return decision.candidates.some(heldByCapsAlone);
-}
-
 function rowOf(
   task: Task,
   state: AppState,
@@ -353,7 +339,6 @@ function rowOf(
   const actionable = phase !== "dispatching" && phase !== "finished";
   const canFollowUp = phase !== "finished";
   const canContinue = continueOffer(task, state.relay.machines, tasks).ok && deriveContinueAvailability(state.relay);
-  const canRunNow = heldByCapsOnly(task) && deriveRunNowAvailability(state.relay);
   const waiting = task.state === "queued" || task.state === "blocked" || task.state === "ready";
   const item = decisionStartNowItem(task.decision ?? null);
   const startNow = waiting ? { ...item, enabled: item.enabled && deriveRunNowAvailability(state.relay) } : null;
@@ -370,9 +355,8 @@ function rowOf(
     markDoneEndsSession: task.state === "running" || task.state === "needs-input" || task.state === "lost",
     canFollowUp,
     canContinue,
-    canRunNow,
     startNow,
-    inline: primaryAction({ canContinue, canRunNow }),
+    inline: primaryAction({ canContinue }),
     deps: depsLine(task, titles),
     continues: continuesLine(task, titles),
     continuing: continuingOf(task, tasks),

@@ -2501,12 +2501,18 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   and `needs-input`, which keeps its slot — and neither counts `lost` ("`lost`" below), nor a
   released task (asleep or idle, below).
   `globalMax` (8) puts `cap_reached` with no `scope` on every candidate, as M2's leaders sent
-  it. `accountMax` (4, docs/scheduler.md Settled defaults 8) puts `cap_reached` with `scope:
-  "account"` on each candidate whose exclave's account already holds that many, counted by
-  the account of each task's reservation or assignment exactly as projected usage counts
-  "each in-flight one billed to the same account" — one count, `accountInFlight` in
-  `route.ts`. A task whose machine has left the registry has no account to read and counts
-  toward neither; its machine's absence makes it `lost` anyway.
+  it. `accountMax` (per seat, below) puts `cap_reached` with `scope: "account"` on each
+  candidate whose exclave's account already holds that many, counted by the account of each
+  task's reservation or assignment exactly as projected usage counts "each in-flight one billed
+  to the same account" — one count, `accountInFlight` in `route.ts`. A task whose machine has
+  left the registry has no account to read and counts toward neither; its machine's absence
+  makes it `lost` anyway.
+  **The account cap is per seat** (owner, 2026-10-29; docs/scheduler.md Settled defaults 8 and
+  17): `SeatProfile.accountMax`, read off the candidate exclave's `seatTier` as the estimate's
+  `capacity` is — 4 on a premium seat and on a tier the table doesn't name, 2 on a standard one.
+  Why: a standard seat has a fifth of a premium seat's room, so four of its tasks project its 5h
+  window full before they start. Rejected: scaling the cap by `capacity` (0.8 on a standard
+  seat), which leaves it none.
   **A machine asleep past a grace holds no slot** (2026-10-26, docs/scheduler.md Settled
   defaults 18). An in-flight task placed (assignment, else reservation) on a machine the leader
   has seen absent for `slotReleaseAfterMs` (2 min) counts toward neither cap nor projected usage

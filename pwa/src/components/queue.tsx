@@ -222,7 +222,6 @@ export function QueueScreen(props: {
 
 const INLINE_LABEL: Record<NonNullable<QueueRow["inline"]>, string> = {
   continue: "Continue",
-  "run-now": "Start now",
 };
 
 /**
@@ -266,7 +265,6 @@ function QueueCard(props: {
   }, [hasMenu, row.id, onMenuClosed]);
   const run: Record<NonNullable<QueueRow["inline"]>, (taskId: string) => void> = {
     continue: props.onContinue,
-    "run-now": props.onRunNow,
   };
   const armItem = (op: ArmOp, label: string, armedLabel: string, icon: JSX.Element, destructive: boolean) => (
     <MenuItem
