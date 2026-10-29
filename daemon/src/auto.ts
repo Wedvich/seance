@@ -12,6 +12,7 @@ import {
   schedulerErrorText,
   schedulerRefusal,
   storeErrorText,
+  TASK_PHASES,
   TASK_REQUEST_LIMITS,
   TASK_SPEC_LIMITS,
   type AccountRecord,
@@ -19,6 +20,7 @@ import {
   type Machine,
   type SchedulerAvailability,
   type SpawnClient,
+  type Task,
   type TaskRequest,
   type TaskSpec,
   lastHeardAt,
@@ -537,6 +539,132 @@ export function pinAccountGateError(lease: SchedulerLease, fields: string): stri
   return lease.scheduler.availability().kind === "ready"
     ? `spawn refused: the scheduler's leader does not route on ${fields} yet — its daemon needs \`seanced update\``
     : `spawn refused: no verified scheduler is leading, so it cannot be confirmed to route on ${fields} — try again once one leads`;
+}
+
+/** The submit-time gate for a start: a leader without `runNow` refuses the op as unknown. */
+export function startGateError(lease: SchedulerLease): string | null {
+  if (leaderAdvertises(lease, CAPABILITIES.runNow)) return null;
+  return lease.scheduler.availability().kind === "ready"
+    ? "the scheduler's leader cannot start a task past the queue yet — its daemon needs `seanced update`"
+    : "no verified scheduler is leading, so nothing can start a task now — try again once one leads";
+}
+
+/** What a start's reply leaves to check when it was lost: the run-now may have reserved the task anyway. */
+const START_CHECK: Readonly<Record<EnqueueSurface, string>> = {
+  mcp: "check get_queue",
+  cli: "check the app's queue",
+};
+
+/** Where a task is going, by registry name where this lease has it. */
+function reservedWhere(lease: SchedulerLease, task: Task): string {
+  const target = task.reservation ?? task.assignment;
+  if (target === undefined) return "";
+  const name = lease.machines.find((m) => m.deviceId === target.deviceId)?.name ?? target.deviceId;
+  return ` on ${name}/${target.exclave}`;
+}
+
+/** A start's answer; `not_waiting` apart, since `startQueuedAuto` reads on for a task not admitted yet. */
+type StartAnswer = { readonly kind: "answered"; readonly result: AutoEnqueued } | { readonly kind: "not_waiting" };
+
+async function sendRunNow(lease: SchedulerLease, taskId: string, surface: EnqueueSurface): Promise<StartAnswer> {
+  const label = surface === "mcp" ? "start_task" : "start";
+  const mayHave = `the start may have landed anyway — ${START_CHECK[surface]}`;
+  const answered = (result: AutoEnqueued): StartAnswer => ({ kind: "answered", result });
+  let reply: Awaited<ReturnType<SchedulerLeg["runNow"]>>;
+  try {
+    reply = await lease.scheduler.runNow(taskId);
+  } catch (err) {
+    if (!(err instanceof RequestFailure)) {
+      const detail = err instanceof Error ? err.message : String(err);
+      return answered(failed(`${label}: ${detail} — ${mayHave}`));
+    }
+    // Lost after it left (a timeout or a drop, the daemon's own fault included): it may have reserved the task.
+    if (err.reason === "timeout" || err.reason === "dropped") {
+      return answered(failed(`${label}: no answer from the scheduler (${err.message}) — ${mayHave}`));
+    }
+    return answered(failed(`${label} failed: ${failureReasonText(err)}`));
+  }
+  if (reply === null) {
+    return answered(
+      failed(`${label}: the scheduler's answer was unreadable (a seanced version mismatch?) — ${mayHave}`),
+    );
+  }
+  if ("ok" in reply) {
+    if (reply.code === "not_waiting") return { kind: "not_waiting" };
+    // The transport swaps only a successful reply for `too_large`: the task was reserved.
+    if (reply.code === "too_large") return answered(done(`task ${taskId}: started (its answer was too large to show)`));
+    return answered(failed(`${label} refused (${reply.code}): ${schedulerErrorText(reply.code)}`));
+  }
+  return answered(done(`task ${taskId}: started past the queue${reservedWhere(lease, reply.task)}`));
+}
+
+/**
+ * `start_task` / `seanced start`: the Queue screen's Start now — one `run-now` for a task already
+ * queued, placing it past the concurrency cap and nothing else (DESIGN.md "Run now lifts the cap
+ * for one task"). Sent once, never retried: a lost answer may have reserved it. Never logs; the
+ * leader's own `op=run-now` audit line, and the broker's where it carried it, are the record.
+ */
+export async function startAuto(lease: SchedulerLease, taskId: string, surface: EnqueueSurface): Promise<AutoEnqueued> {
+  const label = surface === "mcp" ? "start_task" : "start";
+  const shown = JSON.stringify(taskId.slice(0, 64));
+  if (!isTaskId(taskId)) return failed(`${label} refused: ${shown} is not a task id`);
+  const gate = startGateError(lease);
+  if (gate !== null) return failed(`${label} refused: ${gate}`);
+  const answer = await sendRunNow(lease, taskId, surface);
+  if (answer.kind === "answered") return answer.result;
+  return failed(`${label} refused (not_waiting): ${schedulerErrorText("not_waiting")}`);
+}
+
+/** The reads between a `--start` spawn's create and its `run-now`, as the PWA's Start now waits for `ready`. */
+export const START_POLL_MS = 2_000;
+export const START_POLLS = 15;
+
+/**
+ * The Spawn screen's Start now for `spawn_session start` / `seanced spawn --start`: the task just
+ * created waits for the leader to admit it (`run-now` before `ready` is refused `not_waiting`),
+ * so this reads the queue until it is `ready`, then sends `run-now` once. A task a pass placed
+ * meanwhile needs nothing; a spent budget leaves it queued, which the answer says. Always `ok`:
+ * the task is queued either way, so only the text says whether it started — a failed exit would
+ * invite a retry that queues it twice.
+ */
+export async function startQueuedAuto(
+  lease: SchedulerLease,
+  taskId: string,
+  surface: EnqueueSurface,
+  opts: { readonly pollMs?: number; readonly polls?: number } = {},
+): Promise<AutoEnqueued> {
+  const polls = opts.polls ?? START_POLLS;
+  for (let poll = 0; poll < polls; poll += 1) {
+    // oxlint-disable-next-line no-await-in-loop -- the wait between reads
+    if (poll > 0) await Bun.sleep(opts.pollMs ?? START_POLL_MS);
+    let reply: Awaited<ReturnType<SchedulerLeg["queue"]>>;
+    try {
+      // oxlint-disable-next-line no-await-in-loop -- each read follows the one before
+      reply = await lease.scheduler.queue();
+    } catch {
+      // A lost read changes nothing; the next one may land.
+      continue;
+    }
+    if (reply === null || "ok" in reply) continue;
+    const task = reply.tasks.find((t) => t.id === taskId);
+    // Not in the leader's view yet: it reads the store on the create's nudge.
+    if (task === undefined || task.state === "queued" || task.state === "blocked") continue;
+    if (task.state !== "ready") {
+      return done(
+        TASK_PHASES[task.state] === "finished"
+          ? `not started: it finished first (${task.state})`
+          : `the scheduler had already placed it (${task.state})`,
+      );
+    }
+    // oxlint-disable-next-line no-await-in-loop -- the one send this loop exists for
+    const answer = await sendRunNow(lease, taskId, surface);
+    if (answer.kind === "not_waiting") continue;
+    // A refusal is the start's, not the enqueue's: the task is queued, so it is said, not failed.
+    return done(answer.result.text);
+  }
+  const again = surface === "mcp" ? `start_task ${taskId}` : `\`seanced start ${taskId}\``;
+  const waited = Math.round((polls * (opts.pollMs ?? START_POLL_MS)) / 1000);
+  return done(`not started: it was not ready to start within ${waited} s; it stays queued — ${again} tries again`);
 }
 
 /** Tries at one create: each re-sends the same task, so a lost reply can never queue it twice. */

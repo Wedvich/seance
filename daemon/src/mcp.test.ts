@@ -2372,6 +2372,88 @@ describe("cancel_task", () => {
   });
 });
 
+describe("start_task", () => {
+  /** The leader (device-1) advertising `runNow` unless held back. */
+  function startingMachines(runNow = true): Machine[] {
+    const [leader, box] = autoMachines();
+    return [machine({ ...leader, ...(runNow ? { capabilities: [CAPABILITIES.runNow] } : {}) }), machine({ ...box })];
+  }
+
+  const reserved = task({
+    state: "reserved",
+    reservation: { deviceId: "device-2", exclave: "work", clone: "seance", expiresAt: 65_000 },
+  });
+
+  async function callStart(
+    answer: () => unknown,
+    machines: readonly Machine[] = startingMachines(),
+  ): Promise<{ text: string; error: boolean; fake: FakeRelay }> {
+    const fake = fakeRelay(machines, (op) => (op === "run-now" ? answer() : new Error(`unexpected ${op}`)));
+    fake.setState({ scheduler: LEADING });
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    try {
+      const result = await client.callTool({ name: "start_task", arguments: { taskId: "t-1" } });
+      return { text: toolText(result), error: result.isError === true, fake };
+    } finally {
+      lazy.stop();
+    }
+  }
+
+  test("sends run-now for the task and says where it is starting", async () => {
+    const { text, error, fake } = await callStart(() => ({ task: reserved }));
+    expect(error).toBe(false);
+    expect(text).toBe("task t-1: started past the queue on Linux Box/work");
+    expect(fake.requests).toEqual([{ deviceId: SCHEDULER_ID, op: "run-now", payload: { taskId: "t-1" } }]);
+  });
+
+  test("a leader without runNow, or none, is refused with nothing sent", async () => {
+    const old = await callStart(() => ({ task: reserved }), startingMachines(false));
+    expect(old).toMatchObject({ error: true, text: expect.stringContaining("its daemon needs `seanced update`") });
+    expect(old.fake.requests).toEqual([]);
+  });
+
+  test("refusals are worded, and a lost answer may have started it", async () => {
+    const waiting = await callStart(() => ({ ok: false, code: "not_waiting", message: "not ready" }));
+    expect(waiting).toMatchObject({ error: true, text: expect.stringContaining("start_task refused (not_waiting)") });
+    const stuck = await callStart(() => ({ ok: false, code: "unplaceable", message: "held" }));
+    expect(stuck.text).toContain("something besides the concurrency cap");
+    const lost = await callStart(() => new RequestFailure("timeout", "no reply within 10000ms"));
+    expect(lost).toMatchObject({
+      error: true,
+      text: expect.stringContaining("the start may have landed anyway — check get_queue"),
+    });
+  });
+
+  test("spawn_session start queues the task, reads it ready, then sends run-now for it", async () => {
+    const fake = fakeRelay(startingMachines(), (op, payload) => {
+      const created = fake.creates[0];
+      if (created === undefined) return new Error("no create yet");
+      if (op === "queue") return { tasks: [{ ...created, state: "ready" }], at: 6_000 };
+      if (op === "run-now") {
+        expect(payload).toEqual({ taskId: created.id });
+        return { task: { ...reserved, id: created.id } };
+      }
+      return new Error(`unexpected ${op}`);
+    });
+    fake.setState({ scheduler: LEADING });
+    const { text, error } = await callAuto(fake, { start: true });
+    expect(error).toBe(false);
+    const id = fake.creates[0]?.id;
+    expect(text).toContain(`task ${id}: queued`);
+    expect(text).toContain(`task ${id}: started past the queue on Linux Box/work`);
+    expect(fake.requests.map((r) => r.op)).toEqual(["queue", "run-now"]);
+  });
+
+  test("spawn_session start with a leader that cannot start writes nothing", async () => {
+    const fake = leaderRelay([], startingMachines(false));
+    const { text, error } = await callAuto(fake, { start: true });
+    expect(error).toBe(true);
+    expect(text).toContain("spawn refused: start: the scheduler's leader cannot start a task past the queue yet");
+    expect(fake.creates).toEqual([]);
+  });
+});
+
 describe("continue_task", () => {
   const AT = { deviceId: "device-2", exclave: "work", clone: "seance" };
   const failedTask = task({

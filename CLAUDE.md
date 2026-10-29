@@ -125,7 +125,7 @@ green:
   resolves repos by name against the cached scan set, every spawn, despawn and reap path audits
   through its one formatter under its own origin (`relay`, `cli`, `local`, `local-broker` for
   requests the daemon forwards to other machines, or makes of the scheduler (enqueue, queue, cancel,
-  account list), for a keyless `seanced mcp` or `seanced spawn`, `schedule` for
+  run-now, account list), for a keyless `seanced mcp`, `seanced spawn` or `seanced start`, `schedule` for
   the daemon's reap timer, `harvest` for the daemon closing a dead task pane after noting its exit
   status, `leader` for the scheduler loop dispatching to its own machine in
   process and admitting a task, `mcp` for `seanced mcp`'s own `spawn_session`/`queue_batch`/`continue_task` enqueue lines, and `cli` for
@@ -210,7 +210,7 @@ green:
   service-delivered (`source: "credential"`) — and only there — the same socket carries the
   fleet broker (`broker.ts`): its own frame kind, never a `Plain` or an `OpName`, four actions —
   `machines`, `fleet`, `request` (the same three remote ops) and `scheduler` (`enqueue`, `queue`,
-  `cancel`, `accounts`) — DESIGN.md's "Fleet broker" is the record, and any widening of it,
+  `cancel`, `run-now`, `accounts`) — DESIGN.md's "Fleet broker" is the record, and any widening of it,
   including running it on other daemons, is the same kind of change. A brokered enqueue is a create
   at `expect: 0` of a task the daemon sealed itself from a parsed spec, with the daemon's own
   `createdAt`, no lineage or base (a continue spec's `continues` is carried, and only while the

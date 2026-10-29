@@ -43,6 +43,7 @@ export interface AppRelay {
   readonly createTask: (task: Task) => Promise<TaskCreated | StoreRefusal | null>;
   readonly queue: () => Promise<QueueReply | null>;
   readonly cancel: (taskId: string) => Promise<TaskReply | null>;
+  readonly runNow: (taskId: string) => Promise<TaskReply | null>;
   /** As `RelayClient.listAccounts`: throws `unsupported` on a client built without an account key. */
   readonly listAccounts: () => Promise<AccountListing | StoreRefusal | null>;
   readonly onStoreChanged: (listener: (key: string, version: number) => void) => () => void;
