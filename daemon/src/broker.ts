@@ -38,7 +38,7 @@ import { log } from "./log.ts";
 /**
  * The daemon side of the fleet broker: a keyless `seanced mcp` or `seanced spawn`
  * on this box asks for the registry, for one of three ops on one other
- * machine, or for the scheduler's enqueue, queue, cancel and account read, and
+ * machine, or for the scheduler's enqueue, queue, cancel, run-now and account read, and
  * the daemon makes that app-role request itself with the key it already holds.
  *
  * Why a separate app-role connection: the daemon's own relay socket is
@@ -156,7 +156,8 @@ function cleanDespawn(p: DespawnRequest): DespawnRequest {
  * `mcp` or `cli` — the peer's unverifiable claim, since the daemon cannot tell
  * the two apart, kept in the record and audited as `claimed_client`. It may
  * continue a task (`mode: "continue"` with `continues`, paired by the parser). Never
- * `pwa`, `raycast` or `scheduler`. `queue` and `accounts` take no payload, and
+ * `pwa`, `raycast` or `scheduler`. `cancel` and `run-now` take a task id alone (a leader
+ * without `runNow` refuses that op as unknown, so it needs no gate here), `queue` and `accounts` no payload, and
  * whatever else the frame carries is never forwarded.
  */
 function parseSchedulerRequest(raw: Record<string, unknown>, id: string): Parsed {
@@ -167,7 +168,7 @@ function parseSchedulerRequest(raw: Record<string, unknown>, id: string): Parsed
   const head = { v: BROKER_VERSION, kind: "broker", id, action: "scheduler" } as const;
   if (schedulerOp === "queue" || schedulerOp === "accounts") return { request: { ...head, schedulerOp } };
   const { taskId } = raw;
-  if (schedulerOp === "cancel") {
+  if (schedulerOp === "cancel" || schedulerOp === "run-now") {
     const ref = parseTaskRef({ taskId });
     if (ref === null) return { code: "invalid_request", message: "taskId is not a task id" };
     return { request: { ...head, schedulerOp, taskId: ref.taskId } };
@@ -313,8 +314,10 @@ export function createBroker(opts: BrokerOpts): Broker {
           ? await client.queue()
           : request.schedulerOp === "cancel"
             ? await client.cancel(request.taskId)
-            : // Only a pin's resolution asks (labels never come through here), so the label hold does not apply.
-              await cacheOf(client).read();
+            : request.schedulerOp === "run-now"
+              ? await client.runNow(request.taskId)
+              : // Only a pin's resolution asks (labels never come through here), so the label hold does not apply.
+                await cacheOf(client).read();
       await audit.ok(id);
       return brokerOk(id, data);
     } catch (err) {
@@ -375,7 +378,7 @@ export function createBroker(opts: BrokerOpts): Broker {
       if (request.action === "machines") await audit.machines(id);
       else if (request.action === "fleet") await audit.fleet(id);
       else if (request.action === "scheduler") {
-        const task = request.schedulerOp === "enqueue" || request.schedulerOp === "cancel" ? request.taskId : undefined;
+        const task = "taskId" in request ? request.taskId : undefined;
         await audit.scheduler(
           id,
           request.schedulerOp,

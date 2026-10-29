@@ -20,7 +20,7 @@ import { startBrokerDouble } from "../test/broker-double.ts";
 import { fakeRelay, machine } from "../test/fake-app-relay.ts";
 import { LazyRelay } from "./app-relay.ts";
 import { brokerFail, brokerOk } from "./broker-protocol.ts";
-import { autoFleet, continueTaskAuto, spawnAuto } from "./cli-auto.ts";
+import { autoFleet, continueTaskAuto, spawnAuto, startTaskAuto } from "./cli-auto.ts";
 import type { ContinueCliArgs, SpawnCliArgs } from "./cli.ts";
 import type { Config } from "./config.ts";
 import { relayFleet, SCHEDULER_NEEDS_NEWER_DAEMON } from "./fleet.ts";
@@ -584,5 +584,134 @@ describe("continueTaskAuto", () => {
         await double.stop();
       }
     });
+  });
+});
+
+describe("start", () => {
+  const reservedOn = (id: string): Task => ({
+    id,
+    state: "reserved",
+    createdAt: 4_000,
+    spec: { repo: ORIGIN, mode: "worktree" },
+    reservation: { deviceId: "device-2", exclave: "work", clone: "seance", expiresAt: 65_000 },
+  });
+
+  /** The leader (device-1), advertising `runNow` unless held back, and the box tasks start on. */
+  const machines = (runNow = true): Machine[] => [
+    machine({
+      deviceId: "device-1",
+      name: "Leader",
+      repos: [{ name: "seance", path: "/repos/seance", defaultBranch: "main", origin: ORIGIN }],
+      ...(runNow ? { capabilities: [CAPABILITIES.runNow] } : {}),
+    }),
+    machine({ deviceId: "device-2", name: "Linux Box" }),
+  ];
+
+  async function runSpawnStart(fake: ReturnType<typeof fakeRelay>, polls = 3): Promise<{ ok: boolean; text: string }> {
+    const lazy = new LazyRelay({ create: () => fake });
+    try {
+      return await spawnAuto(
+        { repo: "seance", here: false, prompt: "fix it", start: true },
+        relayFleet(lazy),
+        () => {},
+        { self: async () => "device-self", startPolls: { pollMs: 1, polls } },
+      );
+    } finally {
+      lazy.stop();
+    }
+  }
+
+  test("spawn --start reads the new task until it is ready, then sends run-now for it once", async () => {
+    let reads = 0;
+    const fake = fakeRelay(machines(), (op, payload) => {
+      const created = fake.creates[0];
+      if (created === undefined) return new Error("no create yet");
+      // Not yet in the leader's view, then queued, then admitted: as a leader's passes would show it.
+      if (op === "queue") {
+        reads += 1;
+        if (reads === 1) return { tasks: [], at: 6_000 };
+        return { tasks: [{ ...created, state: reads === 2 ? "queued" : "ready" }], at: 6_000 };
+      }
+      if (op === "run-now") {
+        expect(payload).toEqual({ taskId: created.id });
+        return { task: reservedOn(created.id) };
+      }
+      return new Error(`unexpected ${op}`);
+    });
+    fake.setState({ scheduler: LEADING });
+    const { ok, text } = await runSpawnStart(fake);
+    expect(ok).toBe(true);
+    const id = fake.creates[0]?.id;
+    expect(text).toContain(`task ${id}: queued`);
+    expect(text).toContain(`task ${id}: started past the queue on Linux Box/work`);
+    expect(fake.requests.map((r) => r.op)).toEqual(["queue", "queue", "queue", "run-now"]);
+  });
+
+  test("spawn --start that never sees the task ready leaves it queued, says so, and still exits ok", async () => {
+    const fake = fakeRelay(machines(), (op) => {
+      const created = fake.creates[0];
+      if (op === "queue" && created !== undefined) return { tasks: [{ ...created, state: "blocked" }], at: 6_000 };
+      return new Error(`unexpected ${op}`);
+    });
+    fake.setState({ scheduler: LEADING });
+    const { ok, text } = await runSpawnStart(fake, 2);
+    // The task is queued: a failed exit would invite a retry that queues it twice.
+    expect(ok).toBe(true);
+    expect(text).toContain("not started: it was not ready to start within");
+    expect(text).toContain(`\`seanced start ${fake.creates[0]?.id}\` tries again`);
+    expect(fake.requests.map((r) => r.op)).toEqual(["queue", "queue"]);
+  });
+
+  test("spawn --start with a leader that cannot start, or none, queues nothing", async () => {
+    for (const [fleetMachines, scheduler] of [
+      [machines(false), LEADING],
+      [machines(), { kind: "none" }],
+    ] as const) {
+      const fake = fakeRelay(fleetMachines);
+      fake.setState({ scheduler });
+      const { ok, text } = await runSpawnStart(fake);
+      expect(ok).toBe(false);
+      expect(text).toStartWith("spawn refused: --start: ");
+      expect(fake.creates).toEqual([]);
+    }
+  });
+
+  test("seanced start sends run-now once, through the daemon's broker for a shell that cannot read the key", async () => {
+    const frames: Record<string, unknown>[] = [];
+    const double = await startBrokerDouble((raw, id) => {
+      if (!isRecord(raw)) return brokerFail(id, "invalid_request", "not a frame");
+      frames.push(raw);
+      if (raw["action"] === "fleet") return brokerOk(id, { machines: machines(), scheduler: LEADING });
+      if (raw["schedulerOp"] === "run-now") return brokerOk(id, { task: reservedOn("t-1") });
+      return brokerFail(id, "unsupported", "not in this double");
+    });
+    try {
+      const built = await autoFleet(config({ psk: "" }), { stores: [], broker: { path: double.path } });
+      const outcome = await startTaskAuto({ taskId: "t-1" }, built.fleet, { keyless: built.keyless });
+      expect(outcome).toEqual({ ok: true, text: "task t-1: started past the queue on Linux Box/work" });
+      expect(frames.filter((frame) => frame["action"] === "scheduler")).toEqual([
+        expect.objectContaining({ schedulerOp: "run-now", taskId: "t-1" }),
+      ]);
+    } finally {
+      await double.stop();
+    }
+  });
+
+  test("seanced start refuses a malformed id before anything is sent, and words a refusal", async () => {
+    const fake = fakeRelay(machines(), () => ({ ok: false, code: "unplaceable", message: "held" }));
+    fake.setState({ scheduler: LEADING });
+    const lazy = new LazyRelay({ create: () => fake });
+    try {
+      const bad = await startTaskAuto({ taskId: "not a task id!" }, relayFleet(lazy));
+      expect(bad).toEqual({ ok: false, text: 'start refused: "not a task id!" is not a task id' });
+      expect(fake.requests).toEqual([]);
+      const held = await startTaskAuto({ taskId: "t-1" }, relayFleet(lazy));
+      expect(held.ok).toBe(false);
+      expect(held.text).toStartWith("start refused (unplaceable): something besides the concurrency cap");
+      // Not a lost answer: nothing to check.
+      expect(held.text).not.toContain("may have landed");
+    } finally {
+      lazy.stop();
+    }
   });
 });
