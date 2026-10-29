@@ -9,6 +9,8 @@ export interface SeatProfile {
   readonly capacity: number;
   /** `gatedModels` families this seat's quota covers; any other gated one is billed to credits. */
   readonly includes: readonly string[];
+  /** In-flight scheduler tasks per account on this seat, by the account of each task's placement. */
+  readonly accountMax: number;
 }
 
 /**
@@ -50,8 +52,6 @@ export interface SchedulerConfig {
   readonly minFreeMib: number;
   /** In-flight (`IN_FLIGHT`: reserved, running, needs-input) scheduler tasks across the fleet. */
   readonly globalMax: number;
-  /** The same count per account, by the account of each task's placement. */
-  readonly accountMax: number;
   /** A task in `needs-input` this long is escalated once: re-alerted, never killed, its slot kept. */
   readonly needsInputEscalateMs: number;
   readonly reservationTtlMs: number;
@@ -63,7 +63,7 @@ export interface SchedulerConfig {
   readonly lostAfterMs: number;
   /**
    * An in-flight task whose machine has been absent this long stops counting
-   * toward `globalMax`, `accountMax` and projected usage, its state unchanged:
+   * toward `globalMax`, its seat's `accountMax` and projected usage, its state unchanged:
    * nothing runs there while it sleeps. Short of `lostAfterMs`, which settles
    * reservations and writes a record. A blip or reconnect frees nothing; a
    * dark wake restarts the clock, so slots return only after the
@@ -151,17 +151,17 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   quotaLinePct: 90,
   resetGraceMs: 15 * 60_000,
   taskEstimatePct: { "5h": 5, "7d": 1 },
-  // Premium seats have 5× a standard seat's limits, and only they cover Fable from quota.
+  // Premium seats have 5× a standard seat's limits, and only they cover Fable from quota. `accountMax`:
+  // half the fleet's slots on a premium seat, since one account's sessions draw on its 5h window
+  // together; two on a standard one, where each task projects a quarter of that window.
   seats: {
-    team_tier_1: { capacity: 1, includes: ["fable"] },
-    team_standard: { capacity: 1 / 5, includes: [] },
+    team_tier_1: { capacity: 1, includes: ["fable"], accountMax: 4 },
+    team_standard: { capacity: 1 / 5, includes: [], accountMax: 2 },
   },
-  unknownSeat: { capacity: 1, includes: [] },
+  unknownSeat: { capacity: 1, includes: [], accountMax: 4 },
   gatedModels: ["fable"],
   minFreeMib: MIN_FREE_MIB,
   globalMax: 8,
-  // Half the fleet's slots: one account's sessions draw on its 5h window together.
-  accountMax: 4,
   needsInputEscalateMs: 30 * 60_000,
   // Outlives the leader's wait for a spawn reply (`OP_TIMEOUT_MS.spawn`): a daemon past its fetch deadline launches nothing.
   reservationTtlMs: 240_000,

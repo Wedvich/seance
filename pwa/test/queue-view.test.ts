@@ -931,49 +931,6 @@ describe("continuing a failed task", () => {
   });
 });
 
-describe("run now", () => {
-  const CAN = [CAPABILITIES.runNow];
-  const GLOBAL: Reason = { code: "cap_reached", inFlight: 8, max: 8 };
-  const ACCOUNT: Reason = { code: "cap_reached", inFlight: 4, max: 4, scope: "account" };
-  const DISK: Reason = { code: "disk_low", freeMib: 10 };
-  const waiting = (rejected: readonly (readonly Reason[])[]): Task =>
-    task("w", {
-      decision: {
-        at: NOW,
-        chosen: null,
-        candidates: rejected.map((r, i) => ({ deviceId: `d${i}`, machine: `m${i}`, exclave: "main", rejected: r })),
-      },
-    });
-  const canRunNow = (t: Task, capabilities: readonly string[] = CAN): boolean | undefined =>
-    deriveQueue(state(ok([t]), {}, { machines: [machine({ capabilities })] }), NOW)
-      .sections.flatMap((section) => section.rows)
-      .find((row) => row.id === t.id)?.canRunNow;
-
-  test("offered on a ready task some machine turns down for the caps alone, either cap or both", () => {
-    expect(canRunNow(waiting([[GLOBAL]]))).toBe(true);
-    expect(canRunNow(waiting([[ACCOUNT]]))).toBe(true);
-    expect(
-      canRunNow(
-        waiting([
-          [GLOBAL, ACCOUNT],
-          [GLOBAL, DISK],
-        ]),
-      ),
-    ).toBe(true);
-  });
-
-  test("withheld where it would not place: another reason on every candidate, no decision, or not ready", () => {
-    expect(canRunNow(waiting([[GLOBAL, DISK]]))).toBe(false);
-    expect(canRunNow(waiting([[]]))).toBe(false);
-    expect(canRunNow(task("w"))).toBe(false);
-    expect(canRunNow({ ...waiting([[GLOBAL]]), state: "queued" })).toBe(false);
-  });
-
-  test("withheld from a leader that does not advertise runNow", () => {
-    expect(canRunNow(waiting([[GLOBAL]]), [])).toBe(false);
-  });
-});
-
 describe("the card's inline action", () => {
   const inline = (t: Task, capabilities: readonly string[] = []) =>
     deriveQueue(state(ok([t]), {}, { machines: [machine({ capabilities })] }), NOW)
@@ -990,7 +947,7 @@ describe("the card's inline action", () => {
     expect(inline(failed)).toBeNull();
   });
 
-  test("Start now on a ready task the caps alone hold; Follow up is never inline", () => {
+  test("never Start now, even on a ready task the caps alone hold, nor Follow up", () => {
     const capped = task("w", {
       decision: {
         at: NOW,
@@ -1000,8 +957,7 @@ describe("the card's inline action", () => {
         ],
       },
     });
-    expect(inline(capped, [CAPABILITIES.runNow])).toBe("run-now");
-    expect(inline(capped)).toBeNull();
+    expect(inline(capped, [CAPABILITIES.runNow])).toBeNull();
     const row = deriveQueue(state(ok([capped])), NOW).sections.flatMap((section) => section.rows)[0];
     expect(row?.canFollowUp).toBe(true);
   });
@@ -1024,11 +980,9 @@ describe("the card's inline action", () => {
     expect(row?.inline).toBeNull();
   });
 
-  test("precedence holds whatever else is offered", () => {
-    const all = { canContinue: true, canRunNow: true };
-    expect(primaryAction(all)).toBe("continue");
-    expect(primaryAction({ ...all, canContinue: false })).toBe("run-now");
-    expect(primaryAction({ canContinue: false, canRunNow: false })).toBeNull();
+  test("Continue whenever it is offered, nothing otherwise", () => {
+    expect(primaryAction({ canContinue: true })).toBe("continue");
+    expect(primaryAction({ canContinue: false })).toBeNull();
   });
 });
 

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { CAPABILITIES, parseTask, type ExclaveInfo, type Machine } from "@seance/shared";
 import { DEFAULT_CONFIG, route, type Candidate, type Decision, type SchedulerConfig, type Task } from "../src/index.ts";
 import { accountResetAt } from "../src/route.ts";
-import { attachment, clone, exclave, machine, NOW, NOW_S, obs, spec, status } from "./fixtures.ts";
+import { accountMax, attachment, clone, exclave, machine, NOW, NOW_S, obs, spec, status } from "./fixtures.ts";
 
 function task(fields: Partial<Task> = {}): Task {
   return { id: "t", spec: spec(), state: "ready", createdAt: NOW, ...fields };
@@ -676,7 +676,7 @@ describe("filter", () => {
   describe("cap_reached scope account", () => {
     test("rejects only the full account's candidates, counting reserved and needs-input tasks", () => {
       const tasks = [held("x", "a", "reserved"), held("y", "a", "needs-input"), held("z", "a", "awaiting-merge")];
-      const decision = decide([twoAccounts()], { tasks, config: { accountMax: 2 } });
+      const decision = decide([twoAccounts()], { tasks, config: accountMax(2) });
       const main = decision.candidates.find((c) => c.exclave === "main");
       expect(main?.rejected).toEqual([{ code: "cap_reached", inFlight: 2, max: 2, scope: "account" }]);
       expect(decision.chosen).toEqual({ deviceId: "a", exclave: "alt", clone: "app2" });
@@ -684,12 +684,28 @@ describe("filter", () => {
 
     test("a task on a machine gone from the registry has no account to count", () => {
       const tasks = [held("x", "gone"), held("y", "gone")];
-      expect(only(decide([machine("a")], { tasks, config: { accountMax: 2 } })).rejected).toEqual([]);
+      expect(only(decide([machine("a")], { tasks, config: accountMax(2) })).rejected).toEqual([]);
+    });
+
+    test("the seat sets it: a standard account holds two, a premium one four", () => {
+      const two = [held("x", "a"), held("y", "a")];
+      expect(only(decide([standardSeat(obs(0))], { tasks: two })).rejected).toEqual([
+        { code: "cap_reached", inFlight: 2, max: 2, scope: "account" },
+      ]);
+      const premium = machine("a", {
+        exclaves: [exclave("main", "org:a", { seatTier: "team_tier_1" })],
+        status: status({ quota: [obs(0)] }),
+      });
+      expect(only(decide([premium], { tasks: two })).rejected).toEqual([]);
+      const four = [...two, held("z", "a"), held("w", "a")];
+      expect(only(decide([premium], { tasks: four })).rejected).toEqual([
+        { code: "cap_reached", inFlight: 4, max: 4, scope: "account" },
+      ]);
     });
 
     test("the global cap stays unscoped and sits beside the account's", () => {
       const tasks = [held("x", "a"), held("y", "a")];
-      const candidate = only(decide([machine("a")], { tasks, config: { globalMax: 2, accountMax: 2 } }));
+      const candidate = only(decide([machine("a")], { tasks, config: { globalMax: 2, ...accountMax(2) } }));
       expect(candidate.rejected).toEqual([
         { code: "cap_reached", inFlight: 2, max: 2 },
         { code: "cap_reached", inFlight: 2, max: 2, scope: "account" },
@@ -713,11 +729,11 @@ describe("filter", () => {
     test("it leaves its account's count, so another machine on the account gets the work", () => {
       const tasks = [held("x", "s"), held("y", "s", "needs-input")];
       const fleet = [machine("a", { exclaves: [exclave("main", "org:a")] }), asleep];
-      const holding = decide(fleet, { tasks, config: { accountMax: 2 } });
+      const holding = decide(fleet, { tasks, config: accountMax(2) });
       expect(byExclave(holding, "main")?.rejected).toEqual([
         { code: "cap_reached", inFlight: 2, max: 2, scope: "account" },
       ]);
-      const freed = decide(fleet, { tasks, config: { accountMax: 2 }, released });
+      const freed = decide(fleet, { tasks, config: accountMax(2), released });
       expect(freed.chosen).toEqual({ deviceId: "a", exclave: "main", clone: "app" });
     });
 
@@ -888,10 +904,11 @@ describe("filter", () => {
 
     test("in-flight tasks on a standard seat each count at its scaled estimate", () => {
       const standard = standardSeat(obs(0, { h: 20 }));
-      // 20% + 2 × 25% is under; one more in flight makes it 95%.
+      // 20% + 2 × 25% is under; one more in flight makes it 95%, and fills the seat's two slots.
       expect(only(decide([standard], { tasks: [held("x", "a")] })).rejected).toEqual([]);
       expect(only(decide([standard], { tasks: [held("x", "a"), held("y", "a")] })).rejected).toEqual([
         { code: "quota_over_line", window: "5h", projectedPct: 95 },
+        { code: "cap_reached", inFlight: 2, max: 2, scope: "account" },
       ]);
     });
   });

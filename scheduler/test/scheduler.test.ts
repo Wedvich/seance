@@ -23,6 +23,7 @@ import {
 } from "../src/index.ts";
 import { advance } from "../src/task.ts";
 import {
+  accountMax,
   attachment,
   enqueue,
   FakeFleet,
@@ -1310,7 +1311,7 @@ describe("a reply lost, then the session ends", () => {
 });
 
 describe("run now", () => {
-  const ONE_SLOT = { ...DEFAULT_CONFIG, globalMax: 1, accountMax: 1 };
+  const ONE_SLOT = { ...DEFAULT_CONFIG, globalMax: 1, ...accountMax(1) };
 
   /** One task running on `a`, a second `ready` and held by both caps. */
   async function capped() {
@@ -1390,7 +1391,7 @@ describe("run now", () => {
     }
     const store = new Gated();
     const fleet = new FakeFleet([machine("a"), machine("b")]);
-    const scheduler = new Scheduler({ store, fleet, config: { ...DEFAULT_CONFIG, accountMax: 1 }, now: () => NOW });
+    const scheduler = new Scheduler({ store, fleet, config: { ...DEFAULT_CONFIG, ...accountMax(1) }, now: () => NOW });
     await enqueue(store, scheduler, spec({ pin: { deviceId: "a" } }), "first", NOW - 3);
     await pass(scheduler);
     await enqueue(store, scheduler, spec({ pin: { deviceId: "b" } }), "x", NOW - 2);

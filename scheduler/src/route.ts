@@ -183,8 +183,8 @@ function judge(pass: Pass, machine: Machine, machineReasons: readonly Reason[], 
   const account =
     exclave.accountId === null ? null : judgeAccount(pass, exclave, exclave.accountId, sharing, seat.capacity);
   if (account?.reason !== undefined) rejected.push(account.reason);
-  if (!pass.uncapped && sharing >= config.accountMax) {
-    rejected.push({ code: "cap_reached", inFlight: sharing, max: config.accountMax, scope: "account" });
+  if (!pass.uncapped && sharing >= seat.accountMax) {
+    rejected.push({ code: "cap_reached", inFlight: sharing, max: seat.accountMax, scope: "account" });
   }
   const paused = exclave.accountId === null ? null : accountPause(pass.holds, exclave.accountId);
   if (paused !== null) rejected.push(paused);
