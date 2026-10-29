@@ -693,14 +693,15 @@ export type SchedulerOp = (typeof SCHEDULER_OPS)[number];
 /**
  * App-side response deadlines. A backstop rather than the primary error path —
  * the daemon returns a structured error on its own — so spawn's ceiling clears
- * exec.ts's 60s command timeout plus spawn.ts's 3s pane-death check, and
+ * an attachment download (`ATTACHMENT_FETCH_DEADLINE_MS`) plus exec.ts's 60s
+ * command timeout and spawn.ts's 3s pane-death check, and
  * despawn's clears its ~5s graceful exit plus the kill and its escalation.
  * `cancel` may despawn on the task's machine first, so it clears `despawn`'s.
  */
 export const OP_TIMEOUT_MS = {
   sessions: 10_000,
   rescan: 15_000,
-  spawn: 90_000,
+  spawn: 210_000,
   despawn: 20_000,
   metrics: 15_000,
   queue: 10_000,
@@ -2132,7 +2133,7 @@ export const PR_STATUS_STALE_MS = 10 * 60_000;
 
 export interface Task {
   readonly id: string;
-  /** What was asked for. Its `prompt` is dropped on the write that finishes the task (`forgetPrompt`). */
+  /** What was asked for. Its `prompt` and `attachments` are dropped on the write that finishes the task (`forgetPrompt`). */
   readonly spec: TaskSpec;
   readonly state: TaskState;
   readonly createdAt: number;
@@ -2654,7 +2655,16 @@ export interface QueueChanged {
   readonly tasks?: readonly string[];
 }
 
-/** `op: "route-preview"` (a `TaskRequest`) → what routing would decide now, reserving nothing. */
+/**
+ * `op: "route-preview"`'s request: a `TaskRequest`, and `attachments` when the task
+ * will carry some — a flag, never the manifest, so the preview applies
+ * `attachments_unsupported`. An older leader ignores it.
+ */
+export interface RoutePreviewRequest extends TaskRequest {
+  readonly attachments?: true;
+}
+
+/** `op: "route-preview"` (a `RoutePreviewRequest`) → what routing would decide now, reserving nothing. */
 export interface RoutePreviewResponse {
   readonly decision: Decision;
 }

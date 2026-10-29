@@ -448,15 +448,18 @@ export class Scheduler {
     return this.#decisions.get(id) ?? this.#held.get(id)?.task.decision;
   }
 
-  /** A dry run over the current fleet: what `tick` would decide for this spec now. */
-  preview(spec: TaskSpec): Decision {
+  /**
+   * A dry run over the current fleet: what `tick` would decide for this spec now.
+   * `attachments`: route-preview's flag, as though the spec carried a manifest.
+   */
+  preview(spec: TaskSpec, attachments = false): Decision {
     const now = this.#now();
     const task: Task = { id: "", spec, state: "ready", createdAt: now };
-    return this.#route(task, now);
+    return this.#route(task, now, false, attachments);
   }
 
   /** `task` routed over the current fleet and queue, as a pass would. */
-  #route(task: Task, now: number, uncapped = false): Decision {
+  #route(task: Task, now: number, uncapped = false, attachments = false): Decision {
     return capped(
       route({
         task,
@@ -469,6 +472,7 @@ export class Scheduler {
         // Per route, not per pass: each reservation's await can land a `busy` or a reconnect that counts a task again.
         released: this.#released(now),
         uncapped,
+        attachments,
       }),
     );
   }
@@ -1018,6 +1022,7 @@ export class Scheduler {
       ...(spec.effort === undefined ? {} : { effort: spec.effort }),
       ...(spec.plan === undefined ? {} : { plan: spec.plan }),
       ...(spec.continues === undefined ? {} : { continues: spec.continues.task }),
+      ...(spec.attachments === undefined ? {} : { attachments: spec.attachments }),
       client: SCHEDULER_CLIENT,
       taskId: task.id,
     });

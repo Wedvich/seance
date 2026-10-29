@@ -39,6 +39,7 @@ import {
   type RescanResponse,
   type ResumeRequest,
   type RoutePreviewReply,
+  type RoutePreviewRequest,
   type SchedulerLeader,
   type SchedulerOp,
   type SourceInfo,
@@ -48,7 +49,6 @@ import {
   type TaskRecord,
   type TaskRef,
   type TaskReply,
-  type TaskRequest,
   type UndeliverableCode,
   type UpdateReport,
 } from "./types.ts";
@@ -1627,7 +1627,7 @@ export class RelayClient {
   }
 
   /** What routing would decide for `request` now; reserves nothing. */
-  routePreview(request: TaskRequest): Promise<RoutePreviewReply | null> {
+  routePreview(request: RoutePreviewRequest): Promise<RoutePreviewReply | null> {
     return this.#schedule("route-preview", request, parseRoutePreviewReply);
   }
 

@@ -57,12 +57,14 @@ export const FINISHED: readonly TaskState[] = statesIn("finished");
 /**
  * A finished task keeps no prompt: nothing left reads it. The transcript on
  * the machine is the copy from when the task ran; one that never ran has none
- * (DESIGN.md, Threat model, "Assets"). Returns `task` itself when there is
- * nothing to drop, so callers can tell.
+ * (DESIGN.md, Threat model, "Assets"). Its attachment manifest goes too: names
+ * are prompt text, and a continuation finds its files by worktree, not manifest.
+ * Returns `task` itself when there is nothing to drop, so callers can tell.
  */
 export function forgetPrompt(task: Task): Task {
-  if (!FINISHED.includes(task.state) || task.spec.prompt === undefined) return task;
-  const { prompt: _prompt, ...rest } = task.spec;
+  const { spec } = task;
+  if (!FINISHED.includes(task.state) || (spec.prompt === undefined && spec.attachments === undefined)) return task;
+  const { prompt: _prompt, attachments: _attachments, ...rest } = spec;
   return { ...task, spec: rest };
 }
 

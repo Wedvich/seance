@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { CAPABILITIES, parseTask, type ExclaveInfo, type Machine } from "@seance/shared";
 import { DEFAULT_CONFIG, route, type Candidate, type Decision, type SchedulerConfig, type Task } from "../src/index.ts";
 import { accountResetAt } from "../src/route.ts";
-import { clone, exclave, machine, NOW, NOW_S, obs, spec, status } from "./fixtures.ts";
+import { attachment, clone, exclave, machine, NOW, NOW_S, obs, spec, status } from "./fixtures.ts";
 
 function task(fields: Partial<Task> = {}): Task {
   return { id: "t", spec: spec(), state: "ready", createdAt: NOW, ...fields };
@@ -15,6 +15,7 @@ function decide(
     tasks?: readonly Task[];
     config?: Partial<SchedulerConfig>;
     released?: ReadonlySet<string>;
+    attachments?: boolean;
   } = {},
 ): Decision {
   return route({
@@ -24,6 +25,7 @@ function decide(
     now: NOW,
     config: { ...DEFAULT_CONFIG, ...fields.config },
     ...(fields.released === undefined ? {} : { released: fields.released }),
+    ...(fields.attachments === undefined ? {} : { attachments: fields.attachments }),
   });
 }
 
@@ -1073,6 +1075,46 @@ describe("a continue task", () => {
     expect(decision.candidates.flatMap((c) => c.rejected.map((r) => r.code))).not.toContain("continue_elsewhere");
     expect(decision.candidates.flatMap((c) => c.rejected.map((r) => r.code))).not.toContain("continue_unsupported");
     expect(decision.chosen).not.toBeNull();
+  });
+});
+
+describe("attachments", () => {
+  const fetches = [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.attachments];
+  const reasonsOf = (decision: Decision): Record<string, readonly unknown[]> =>
+    Object.fromEntries(decision.candidates.map((c) => [`${c.deviceId}/${c.exclave}`, c.rejected]));
+  const attached = (fields: Partial<Task> = {}): Task =>
+    task({ spec: spec({ attachments: [attachment(0)] }), ...fields });
+
+  test("a machine whose daemon can't fetch them is attachments_unsupported; one that can is chosen", () => {
+    const decision = decide([machine("old"), machine("new", { capabilities: fetches })], { task: attached() });
+    expect(decision.chosen?.deviceId).toBe("new");
+    expect(reasonsOf(decision)["old/main"]).toEqual([{ code: "attachments_unsupported" }]);
+  });
+
+  test("no capable machine chooses nothing, and every reason applies beside it", () => {
+    const decision = decide([machine("a", { connected: false })], { task: attached() });
+    expect(decision.chosen).toBeNull();
+    expect(codes(only(decision))).toContain("attachments_unsupported");
+    expect(codes(only(decision))).toContain("offline");
+  });
+
+  test("a pin on an incapable machine waits there rather than going elsewhere", () => {
+    const pinned = attached({ spec: spec({ attachments: [attachment(0)], pin: { deviceId: "old" } }) });
+    const decision = decide([machine("old"), machine("new", { capabilities: fetches })], { task: pinned });
+    expect(decision.chosen).toBeNull();
+    expect(reasonsOf(decision)["old/main"]).toEqual([{ code: "attachments_unsupported" }]);
+  });
+
+  test("route-preview's flag applies the filter to a spec with no manifest", () => {
+    const decision = decide([machine("old"), machine("new", { capabilities: fetches })], { attachments: true });
+    expect(decision.chosen?.deviceId).toBe("new");
+    expect(reasonsOf(decision)["old/main"]).toEqual([{ code: "attachments_unsupported" }]);
+  });
+
+  test("a task without them is not held to the capability", () => {
+    const decision = decide([machine("old")]);
+    expect(decision.candidates.flatMap(codes)).not.toContain("attachments_unsupported");
+    expect(decision.chosen?.deviceId).toBe("old");
   });
 });
 

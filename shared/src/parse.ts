@@ -95,6 +95,7 @@ import {
   type Reason,
   type Reservation,
   type RoutePreviewReply,
+  type RoutePreviewRequest,
   type SchedulerError,
   type SchedulerOp,
   type Score,
@@ -629,6 +630,15 @@ function isBoundedString(value: unknown, max: number): value is string {
  */
 export function parseTaskRequest(value: unknown): TaskRequest | null {
   return parseRequestFields(value, ["worktree", "here"]);
+}
+
+/** `parseTaskRequest`, plus route-preview's `attachments` flag: `true` or absent. */
+export function parseRoutePreviewRequest(value: unknown): RoutePreviewRequest | null {
+  const request = parseTaskRequest(value);
+  if (request === null || !isRecord(value)) return null;
+  const { attachments } = value;
+  if (attachments === undefined) return request;
+  return attachments === true ? { ...request, attachments } : null;
 }
 
 /**
