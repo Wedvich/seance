@@ -262,6 +262,8 @@ function useSpawnActions(store: Store): SpawnActions {
       setUntil: (until) => store.setUntil(until),
       addFiles: (files) => store.addFiles(files),
       removeFile: (key) => store.removeFile(key),
+      retryHeld: (taskId) => store.retryHeld(taskId),
+      discardHeld: (taskId) => store.discardHeld(taskId),
     }),
     [store],
   );

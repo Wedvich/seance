@@ -36,6 +36,7 @@ function state(overrides: Partial<AppState> = {}): AppState {
     spawning: false,
     rescan: RESCAN_IDLE,
     verdict: null,
+    held: [],
     preview: null,
     sessions: {},
     queue: false,

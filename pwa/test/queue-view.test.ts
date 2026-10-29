@@ -64,6 +64,7 @@ function state(
     spawning: false,
     rescan: RESCAN_IDLE,
     verdict: null,
+    held: [],
     preview: null,
     sessions: {},
     queue: true,

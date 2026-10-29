@@ -1,6 +1,7 @@
 import type { JSX } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { PUSH_MAX_SUBSCRIPTIONS, type PushDevice } from "@seance/shared";
+import { describeLaunch, readLaunches } from "../launch.ts";
 import {
   deviceRows,
   disablePush,
@@ -57,6 +58,7 @@ export function Settings(props: {
   const creds = useCredentials({ relayUrl: props.relayUrl, hasBearer: true, hasPsk: true });
   const [theme, setTheme] = useState<ThemePref>(readPref);
   const [reconnecting, setReconnecting] = useState(false);
+  const [launches] = useState(readLaunches);
 
   // The client never reports a dial as failed — it just backs off and retries —
   // so the settle window is the honest bound on how long a tap can claim to be
@@ -139,6 +141,18 @@ export function Settings(props: {
         </div>
 
         <NotificationsCard push={props.push} />
+        {launches.length > 0 && (
+          <div className="launch-card card">
+            <span className="theme-title">Recent launches</span>
+            <ul className="launch-list">
+              {launches.map((launch) => (
+                <li key={launch.at} className="launch-row mono">
+                  {describeLaunch(launch)}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </form>
 
       <footer className="footer">
