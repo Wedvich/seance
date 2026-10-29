@@ -10,7 +10,19 @@ import {
 } from "../src/index.ts";
 import { escalation, inputClock } from "../src/alerts.ts";
 import { advance } from "../src/task.ts";
-import { accountMax, enqueue, exclave, FakeFleet, machine, NOW, NOW_S, obs, readerChecked, spec, status } from "./fixtures.ts";
+import {
+  accountMax,
+  enqueue,
+  exclave,
+  FakeFleet,
+  machine,
+  NOW,
+  NOW_S,
+  obs,
+  readerChecked,
+  spec,
+  status,
+} from "./fixtures.ts";
 
 const MINUTE = 60_000;
 
