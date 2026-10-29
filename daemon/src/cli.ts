@@ -11,7 +11,7 @@ import {
 import { attachmentsRoot } from "./attachments.ts";
 import { auditLogChecks, cliSink, despawnAudit, reapAudit, spawnAudit } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
-import { cmdContinueAuto, cmdSpawnAuto } from "./cli-auto.ts";
+import { cmdContinueAuto, cmdSpawnAuto, cmdStartAuto } from "./cli-auto.ts";
 import { installMods, modChecks, uninstallMods } from "./claude-mod.ts";
 import { DespawnFailure, SpawnFailure } from "./backend.ts";
 import {
@@ -114,10 +114,12 @@ export interface SpawnCliArgs {
   readonly account?: string;
   /** Queued spawn only (refused with `--now`): machines to keep it off, each as `machine` takes one; present only when given. */
   readonly not?: readonly string[];
+  /** Queued spawn only (refused with `--now`): start it past the concurrency cap once admitted, as `seanced start`; present only when given. */
+  readonly start?: true;
 }
 
 const SPAWN_USAGE =
-  "usage: seanced spawn [--now | [--machine <name|here>] [--account <alias|email|id>] [--not <machine|here>]...] <repo> [--here] [-t <title>] [[-p] <task>]";
+  "usage: seanced spawn [--now | [--start] [--machine <name|here>] [--account <alias|email|id>] [--not <machine|here>]...] <repo> [--here] [-t <title>] [[-p] <task>]";
 
 /** The flags that take a value, and the field each fills. */
 const SPAWN_VALUE_FLAGS = {
@@ -136,8 +138,8 @@ function isSpawnValueFlag(arg: string): arg is SpawnValueFlag {
 
 /**
  * Mirrors /spawn: -p is optional, bare words join into the prompt. The
- * placement flags pin a queued spawn, so `--now` — which runs here, right
- * away — refuses them; each takes a value, and `--machine` and `--account`
+ * placement flags and `--start` shape a queued spawn, so `--now` — which runs
+ * here, right away — refuses them; each takes a value, and `--machine` and `--account`
  * are given at most once. `--auto` is a no-op kept for old muscle memory,
  * refused only beside `--now`. Exported for tests.
  */
@@ -145,6 +147,7 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
   let repo: string | undefined;
   let here = false;
   let now = false;
+  let start = false;
   let auto = false;
   let title: string | undefined;
   let machine: string | undefined;
@@ -164,6 +167,8 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
       here = true;
     } else if (arg === "--now") {
       now = true;
+    } else if (arg === "--start") {
+      start = true;
     } else if (arg === "--auto") {
       auto = true;
     } else if (isSpawnValueFlag(arg)) {
@@ -187,6 +192,11 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
       `--now spawns on this machine now; --machine, --account and --not pin a queued spawn\n${SPAWN_USAGE}`,
     );
   }
+  if (now && start) {
+    throw new Error(
+      `--now spawns here directly; --start starts a queued spawn past the scheduler's cap — give one\n${SPAWN_USAGE}`,
+    );
+  }
   if (now && auto) {
     throw new Error(`--now and --auto contradict: --now spawns here directly, a plain spawn queues\n${SPAWN_USAGE}`);
   }
@@ -197,6 +207,7 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
     ...(title !== undefined ? { title } : {}),
     ...(prompt !== "" ? { prompt } : {}),
     ...(now ? { now } : {}),
+    ...(start ? { start } : {}),
     ...(machine === undefined ? {} : { machine }),
     ...(account === undefined ? {} : { account }),
     ...(not.length === 0 ? {} : { not }),
@@ -272,6 +283,24 @@ export function parseContinueArgs(argv: readonly string[]): ContinueCliArgs {
   if (taskId === undefined || expectPrompt) throw new Error(CONTINUE_USAGE);
   const prompt = promptParts.join(" ");
   return { taskId, ...(prompt === "" ? {} : { prompt }) };
+}
+
+export interface StartCliArgs {
+  readonly taskId: string;
+}
+
+const START_USAGE = "usage: seanced start <task-id>";
+
+/** Exported for tests. */
+export function parseStartArgs(argv: readonly string[]): StartCliArgs {
+  const [taskId] = argv;
+  if (taskId === undefined || argv.length !== 1 || taskId.startsWith("-")) throw new Error(START_USAGE);
+  return { taskId };
+}
+
+/** Starts a queued task now, past the concurrency cap (`cli-auto.ts`) — the app's Start now. */
+export async function cmdStart(argv: readonly string[]): Promise<void> {
+  return cmdStartAuto(parseStartArgs(argv));
 }
 
 /**

@@ -416,6 +416,9 @@ seanced spawn --account work --not here seance -p "rerun the slow suite"
 seanced spawn --now seance -t "flaky test" -p "fix the flaky spawn test"
 #   spawned 'flaky test' (~/repos/seance/.claude/worktrees/flaky-test)
 seanced spawn --now seance --here   # run in the checkout as it stands, no worktree
+seanced spawn --start seance -p "fix the flaky spawn test"
+#   queued, then started as soon as the scheduler admits it, past its concurrency cap (the app's Start now)
+seanced start 3f2a…           # start a task already waiting in the queue now, past the concurrency cap
 seanced continue 3f2a…        # resume a failed (e.g. OOM-killed) or cancelled task's conversation in its worktree, as a new task (--prompt <text> to add a note)
 seanced sessions              # running claude windows: id, window, repo, path
 seanced despawn %12           # end one by id: asks claude to exit, kills the pane after ~5s (--force: now)
@@ -481,7 +484,7 @@ versus the one on disk, which is how you spot a `git pull` that still needs a
 
 With `seanced mcp install` done (step 6), a local Claude Code can list machines,
 query running sessions, and spawn and end sessions on other machines through the relay:
-`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`, `continue_task` (resume a failed or cancelled task's session in its worktree, as a new task), `queue_batch` (several tasks queued as one group, ordered only by the dependencies between them) and, for a session settling its own task, `report_task_done`. The server reads the daemon's own
+`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`, `start_task` (start a queued task now, past the concurrency cap — the app's Start now; `spawn_session`'s `start` does the same for a new one), `continue_task` (resume a failed or cancelled task's session in its worktree, as a new task), `queue_batch` (several tasks queued as one group, ordered only by the dependencies between them) and, for a session settling its own task, `report_task_done`. The server reads the daemon's own
 config and speaks to the relay exactly like the phone does.
 
 `spawn_session` always queues the task in the relay, as the app's **auto** does: it answers
@@ -504,7 +507,7 @@ On a box where only the daemon can read the key (below), a spawn goes through th
 On a Linux box whose PSK is TPM-sealed and delivered only to the daemon's system unit,
 the server can't read the key — so it asks the running daemon to make those requests
 for it, over the same local socket, and the key never leaves the daemon. Every tool,
-`spawn_session`, `get_queue` and `cancel_task` included, still works for every machine, with the same
+`spawn_session`, `get_queue`, `cancel_task` and `start_task` included, still works for every machine, with the same
 registration; a server that started before the daemon was updated keeps the old "needs this machine's own
 key" answer for spawns until its Claude session restarts. `seanced doctor` says which
 path MCP takes from your shell. Only such a daemon brokers: wherever the server can
