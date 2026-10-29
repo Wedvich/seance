@@ -87,6 +87,8 @@ interface Repo {
   readonly path: string;
   /** This repo's own prune log, so no test reads another's — or the developer's. */
   readonly pruneLog: string;
+  /** Its own attachments root, for the same reason. */
+  readonly attachments: string;
 }
 
 /** A clone of its own origin, logged as just pruned — the run fetches only where a test ages that. */
@@ -99,6 +101,7 @@ async function freshRepo(): Promise<Repo> {
     repos: await scanRepos([fixture.root]),
     path: fixture.repoPath,
     pruneLog: join(base, `prune-log-${fixtures}.json`),
+    attachments: join(base, `attachments-${fixtures}`),
   };
   await logPrune(repo, Date.now());
   return repo;
@@ -163,6 +166,7 @@ async function reap(repo: Repo, overrides: Partial<ReapOptions> = {}): Promise<R
     deadPaneMinAgeMs: 0,
     pruneLogPath: repo.pruneLog,
     fsmonitor: null,
+    attachments: repo.attachments,
     ...overrides,
   });
 }

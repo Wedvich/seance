@@ -3943,7 +3943,7 @@ Where the build adds to or departs from the wording above:
   finish) through `readerChecked`, and the daemon's adapter (`daemon/test/queue-store.test.ts`)
   sealing the sentinel on every write that carries the manifest and none on the finishing one.
 
-### The daemon (`daemon/src/attachments.ts`)
+### The daemon (`daemon/src/attachments.ts`) — built 2026-10-28
 
 - **Who may hand it files.** `attachments` is accepted only on a spawn sealed
   `from: "scheduler"` with `client: SCHEDULER_CLIENT`, or the leader's in-process dispatch:
@@ -4032,6 +4032,50 @@ Where the build adds to or departs from the wording above:
 - `CAPABILITIES.attachments` is added to the list in `daemon/src/run.ts` by this part, once
   the leader half (task 4) is in the same build.
 
+### The daemon: as built (task 5)
+
+Where the build adds to or departs from the wording above:
+
+- **The backend contract** (`daemon/src/backend.ts`) gains `SessionAttachments`
+  (`dirs`, and `files` with path, name, type and size), the fourth argument of
+  `SessionBackend.spawn`. The handler fetches and resolves; the backend only quotes the
+  directories onto the command line and lists the files in the seed. A continuation gets
+  `dirs` and no `files`.
+- **The gate refuses two more shapes** `attachment_unavailable`, before anything is read
+  or fetched: a scheduler spawn with no task id (nothing to name the directory by), and any
+  spawn on a daemon whose handler context has no fetcher (`seanced spawn`'s, which no
+  scheduler reaches). `isSpawnRequest` refuses a manifest beside `mode: "continue"` as
+  malformed, as `parseTaskSpec` does.
+- **Refusal reasons**, each after `attachment <i> of <n>: `: `not found (expired or never
+  stored)` (`404`), `relay answered <status>` (any other non-`200`, the second `5xx`
+  included), `wrong length (<got>, not <want>)`, `body longer than its length`, `body
+  ended at <k> of <n> bytes` (retried once, as a network error is), `fetch failed: …`,
+  `deadline passed`, `hash mismatch`, `did not decrypt`, `wrong size after decryption`.
+  A write failure is `could not write them: …`, with no index. A refusal also clears an
+  earlier `<taskId>` directory and its sidecar, so a refused task leaves nothing.
+- **Memory**: a file is held whole between download and write, at most `fileBytes` plus
+  overhead, one file at a time.
+- **The sidecar** is written by temp file and rename. A continuation that cannot read the
+  sidecars resumes without `--add-dir`, as none found does.
+- **Prune**: staging removals audit too, as `removed-attachments task=<staging name>
+  reason=staging`, since reap audits everything it destroys. Every verdict is read first,
+  then removed in order, so a dry run lists exactly what a run removes. Reap's `done`
+  line gains `attachments=<n>`, and `formatReport` an "attachments" block.
+  `ReapOptions.attachments` (the root) is required, like `pruneLogPath`, so a test that
+  forgot it cannot prune the developer's own.
+- **The extension map** covers `png`, `jpg`, `gif`, `webp`, `heic`, `svg`, `pdf`, `txt`,
+  `md`, `csv`, `html`, `css`, `js`, `json`, `xml` (two types), `yaml` (two types), `zip`,
+  `gz`, `tar`, `mp4`, `mov`, `mp3` and `wav`.
+- **The harness's `GET`** (`daemon/test/harness.ts`) serves planted objects with the
+  header token only, and can queue failure statuses; it has no `PUT`, id pattern, CORS or
+  allowance. `relay/test/attachments.test.ts` holds the real route.
+- **Tests** (`daemon/test/attachments.test.ts`): the happy path through the leader's
+  in-process dispatch with real tmux and the claude stub (files, modes, `--add-dir` before
+  `--model`, the seed, an audit line without names, ids or hashes), the worktree note a
+  continuation reads, and every refusal: hash, `404`, length, `5xx` retried once then
+  refused, unreachable relay, wrong token, deadline (a fetch seam that never answers), and
+  the scheduler gate on the relay leg and the local socket. Prune runs against live panes.
+
 ### The PWA (`pwa/src/`)
 
 - **Offered** only when `deriveAttachmentsAvailability(relay)` (`pwa/src/view.ts`, through
@@ -4119,7 +4163,7 @@ of this section built.
    - `#dispatch` copying the manifest, and `lean` dropping it.
    - `OP_TIMEOUT_MS.spawn` 210 s and `reservationTtlMs` 240 s with their ordering test.
    - The fixture decisions in `scheduler/test/`.
-5. **daemon**:
+5. **daemon** — **built 2026-10-28**, with the notes under "The daemon: as built" above:
    - `daemon/src/attachments.ts`: the fetch, staging, sidecar, extension map and
      `pruneAttachments`.
    - In `handleSpawn`: the gate and the order.

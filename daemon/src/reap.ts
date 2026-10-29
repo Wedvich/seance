@@ -2,6 +2,7 @@ import { link, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { RepoEntry } from "@seance/shared";
+import { pruneAttachments, type AttachmentPruneReason, type PrunedAttachments } from "./attachments.ts";
 import type { ReapAudit } from "./audit.ts";
 import { mapLimit } from "./concurrency.ts";
 import { answerKeepWorktree } from "./despawn.ts";
@@ -88,6 +89,13 @@ export interface ReapOptions {
    */
   readonly fsmonitor: FsmonitorSeams | null;
   readonly monitorIdleMs?: number;
+  /**
+   * Where fetched attachments live (`attachmentsRoot()`). Required for the same reason as
+   * `pruneLogPath`: a test that forgot it would prune the developer's own.
+   */
+  readonly attachments: string;
+  /** `ATTACHMENT_RETENTION_MS` unless a test shortens it. */
+  readonly attachmentRetentionMs?: number;
 }
 
 export interface RepoReport {
@@ -189,6 +197,8 @@ export interface ReapReport {
     readonly kept: KeptMonitors;
     readonly idleMs: number;
   };
+  /** Fetched attachments removed (or, dry, that would be). */
+  readonly attachments: readonly PrunedAttachments[];
 }
 
 export class ReapBusy extends Error {
@@ -268,6 +278,15 @@ export async function runReap(opts: ReapOptions): Promise<ReapReport> {
   const repos = [...reaped, ...refused];
   // After the repos, so a worktree this run removed whose daemon `stop` missed is swept too.
   const kept = monitors === null ? NO_KEPT_MONITORS : await sweepMonitors(monitors, opts, now);
+  // After the worktree pass too, so a worktree it removed reads gone.
+  const attachments = await pruneAttachments({
+    root: opts.attachments,
+    now,
+    dryRun: opts.dryRun,
+    audit: opts.audit,
+    panes: await listPanes(),
+    ...(opts.attachmentRetentionMs === undefined ? {} : { retentionMs: opts.attachmentRetentionMs }),
+  });
 
   if (!opts.dryRun) {
     const pruned = targets.filter((_, i) => reaped[i]?.fetch?.kind === "fetched");
@@ -281,6 +300,7 @@ export async function runReap(opts: ReapOptions): Promise<ReapReport> {
       branches: repos.reduce((sum, repo) => sum + repo.deletedBranches.length, 0),
       panes: panes.closedPanes.length,
       monitors: monitors?.stopped.length ?? 0,
+      attachments: attachments.length,
     });
   }
   return {
@@ -289,6 +309,7 @@ export async function runReap(opts: ReapOptions): Promise<ReapReport> {
     repos,
     ...panes,
     monitors: { stopped: monitors?.stopped ?? [], kept, idleMs: opts.monitorIdleMs ?? MONITOR_IDLE_MS },
+    attachments,
   };
 }
 
@@ -842,6 +863,11 @@ export function formatReport(report: ReapReport): readonly string[] {
   if (keptTotal > 0) monitorRows.push(row("left running", `${plural(keptTotal, "daemon")}: ${keptParts.join(", ")}`));
   if (monitorRows.length > 0) lines.push("fsmonitor daemons", ...monitorRows);
 
+  const attachmentRows = report.attachments.map((entry) =>
+    row(removed, `${entry.task}   ${ATTACHMENT_LABELS[entry.reason]}`),
+  );
+  if (attachmentRows.length > 0) lines.push("attachments", ...attachmentRows);
+
   const sum = (pick: (repo: RepoReport) => number): number =>
     report.repos.reduce((total, repo) => total + pick(repo), 0);
   lines.push(
@@ -882,6 +908,12 @@ const MONITOR_LABELS: Readonly<Record<MonitorReason, string>> = {
   gone: "its directory is gone",
   "no-repo": "no repo there any more",
   idle: "unused, no tmux pane inside",
+};
+
+const ATTACHMENT_LABELS: Readonly<Record<AttachmentPruneReason, string>> = {
+  "worktree-gone": "its worktree is gone",
+  aged: "past retention, no session using it",
+  staging: "an interrupted download",
 };
 
 const PANE_LABELS: Readonly<Record<PaneState, string>> = {

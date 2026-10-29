@@ -21,6 +21,7 @@ import {
   isMetricsRequest,
   isRecord,
   isTaskId,
+  parseAttachmentManifest,
   quote,
   REPLY_JSON_BUDGET,
   SCHEDULER_CLIENT,
@@ -39,9 +40,11 @@ import {
   SpawnFailure,
   type Continuation,
   type DespawnResult,
+  type SessionAttachments,
   type SessionBackend,
   type SpawnOutcome,
 } from "./backend.ts";
+import { AttachmentUnavailable } from "./attachments.ts";
 import { canonical } from "./gitdir.ts";
 import { log } from "./log.ts";
 import { LaunchesClosed, type SettleLaunch } from "./session-events.ts";
@@ -69,6 +72,18 @@ export interface HandlerContext {
   readonly tasks?: TaskLaunches;
   /** Present only when self-update is wired; a broadcast with no consumer is dropped here. */
   readonly updateAvailable?: (notice: UpdateAvailable) => void;
+  /** Fetching a spawn's attachments (`attachments.ts`); absent, a spawn carrying any is refused. */
+  readonly attachments?: TaskAttachments;
+}
+
+/** What the handlers need of `attachments.ts`, bound to the daemon's own relay origin, token and key. */
+export interface TaskAttachments {
+  /** Fetches, verifies and writes them; throws `AttachmentUnavailable`, leaving nothing behind. */
+  readonly fetch: (taskId: string, refs: NonNullable<SpawnRequest["attachments"]>) => Promise<SessionAttachments>;
+  /** Notes the worktree the task's session landed in. Best effort. */
+  readonly landed: (taskId: string, worktree: string) => Promise<void>;
+  /** The directories earlier tasks in `worktree` fetched, for a continuation. */
+  readonly dirsFor: (worktree: string) => Promise<readonly string[]>;
 }
 
 /** What the handlers need of `EndedTasks` (`session-events.ts`). */
@@ -130,9 +145,13 @@ export function isSpawnRequest(payload: unknown): payload is SpawnRequest {
   // is the hazard the `baseBranch` capability exists for. Stacking lifts this refusal and
   // holds the name to `isBranchName` instead.
   if (obj["baseBranch"] !== undefined) return false;
-  // Fail closed the same way until the fetch lands: launching without the files is the hazard.
-  // The fetch build holds the field to `parseAttachmentManifest` instead.
-  if (obj["attachments"] !== undefined) return false;
+  // Malformed is never dropped: a session must not start without the files it was given. A
+  // continuation carries none — it finds its directories by worktree.
+  if (
+    obj["attachments"] !== undefined &&
+    (parseAttachmentManifest(obj["attachments"]) === null || obj["mode"] === "continue")
+  )
+    return false;
   // `continues` is the one field of a continuation and only of one. It is a ledger key: the
   // worktree comes from this machine's own record of that task, never from the request.
   if (obj["continues"] !== undefined && !isTaskId(obj["continues"])) return false;
@@ -215,6 +234,24 @@ async function relaunchRefusal(
 
 type SpawnRefusal = Extract<SpawnResponse, { readonly ok: false }>;
 
+function attachmentUnavailable(message: string): SpawnRefusal {
+  return { ok: false, code: "attachment_unavailable", message };
+}
+
+/**
+ * Who may hand a session files: the scheduler's own task spawn, the same gate as a
+ * continuation. Before anything is read, fetched or recorded.
+ */
+function attachmentsRefusal(ctx: HandlerContext, request: SpawnRequest, scheduler: boolean): SpawnRefusal | null {
+  if (request.attachments === undefined) return null;
+  if (!scheduler || request.client !== SCHEDULER_CLIENT)
+    return attachmentUnavailable("only the scheduler hands a session attachments");
+  if (request.taskId === undefined)
+    return attachmentUnavailable("attachments need the id of the task that carries them");
+  if (ctx.attachments === undefined) return attachmentUnavailable("this daemon cannot fetch attachments");
+  return null;
+}
+
 function notContinuable(message: string): SpawnRefusal {
   return { ok: false, code: "not_continuable", message };
 }
@@ -292,6 +329,11 @@ async function handleSpawn(
       return refusal;
     }
   }
+  const gate = attachmentsRefusal(ctx, payload, scheduler);
+  if (gate !== null) {
+    await audit.failed(gate.code);
+    return gate;
+  }
   const refused = await relaunchRefusal(ctx, payload);
   if (refused !== null) {
     await audit.failed(refused.code, refused.id);
@@ -307,6 +349,23 @@ async function handleSpawn(
       return site;
     }
     continuation = site;
+  }
+  // Before the write-ahead record: a refused or abandoned fetch then leaves no ledger entry, and
+  // the leader's TTL check proves the task never landed. Past its deadline nothing launches.
+  let attachments: SessionAttachments | undefined;
+  if (payload.attachments !== undefined && payload.taskId !== undefined && ctx.attachments !== undefined) {
+    try {
+      attachments = await ctx.attachments.fetch(payload.taskId, payload.attachments);
+    } catch (err) {
+      const message = err instanceof AttachmentUnavailable ? err.message : String(err);
+      log.warn(`spawn refused: task ${quote(payload.taskId)} ${message}`);
+      await audit.failed("attachment_unavailable");
+      return attachmentUnavailable(message);
+    }
+  } else if (continuation !== undefined && ctx.attachments !== undefined) {
+    // None found is no refusal: the transcript holds the paths, still there or reaped.
+    const dirs = await ctx.attachments.dirsFor(continuation.path).catch(() => []);
+    if (dirs.length > 0) attachments = { dirs, files: [] };
   }
   let settle: SettleLaunch | undefined;
   let unhold: (() => void) | undefined;
@@ -334,7 +393,7 @@ async function handleSpawn(
   try {
     let outcome: SpawnOutcome;
     try {
-      outcome = await ctx.backend.spawn(payload, repos, continuation);
+      outcome = await ctx.backend.spawn(payload, repos, continuation, attachments);
     } catch (err) {
       // A refusal launched nothing, except `task_running`: its session is an earlier launch of this task.
       // Neither it nor a crash starts a note: the earlier launch's stays. A crash is no verdict — a window
@@ -358,6 +417,12 @@ async function handleSpawn(
           }),
       ...(outcome.server === undefined ? {} : { server: outcome.server }),
     });
+    // A continuation finds the directory by this note; `here` has no worktree, and the age prune covers it.
+    if (payload.attachments !== undefined && payload.taskId !== undefined && payload.mode === "worktree") {
+      await ctx.attachments?.landed(payload.taskId, outcome.path).catch((err: unknown) => {
+        log.warn(`could not note the worktree of task ${quote(payload.taskId ?? "")}'s attachments: ${String(err)}`);
+      });
+    }
     await audit.ok(outcome);
     // The app writes this list straight into its cache, so it is read only now,
     // after the backend has watched the new window register (or give up): a
