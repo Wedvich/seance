@@ -130,6 +130,9 @@ export function isSpawnRequest(payload: unknown): payload is SpawnRequest {
   // is the hazard the `baseBranch` capability exists for. Stacking lifts this refusal and
   // holds the name to `isBranchName` instead.
   if (obj["baseBranch"] !== undefined) return false;
+  // Fail closed the same way until the fetch lands: launching without the files is the hazard.
+  // The fetch build holds the field to `parseAttachmentManifest` instead.
+  if (obj["attachments"] !== undefined) return false;
   // `continues` is the one field of a continuation and only of one. It is a ledger key: the
   // worktree comes from this machine's own record of that task, never from the request.
   if (obj["continues"] !== undefined && !isTaskId(obj["continues"])) return false;

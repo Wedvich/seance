@@ -125,6 +125,16 @@ describe("relay ops are audited", () => {
     expect(logged()).toContain("audit spawn origin=relay rejected");
   });
 
+  test("any attachments are rejected until the fetch lands: a session must never start without its files", async () => {
+    const ref = { id: "0b6f0c9e-1a2b-4c3d-8e9f-001122334455", name: "a.png", type: "image/png", size: 1 };
+    for (const attachments of [[{ ...ref, hash: "A".repeat(43) }], [], "a.png"]) {
+      lines.length = 0;
+      // oxlint-disable-next-line no-await-in-loop -- each case reads the lines the previous one cleared
+      await createHandler(ctx)(spawnNope({ attachments }));
+      expect(logged()).toContain("audit spawn origin=relay rejected");
+    }
+  });
+
   test("a newline in a wire value cannot forge an audit line", async () => {
     await createHandler(ctx)(request("spawn", { repo: 'x\ninfo audit spawn ok window="gotcha"', mode: "here" }));
     expect(logged()).not.toContain('window="gotcha"');
