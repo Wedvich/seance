@@ -350,9 +350,10 @@ export async function pruneAttachments(opts: PruneAttachmentsOptions): Promise<r
     if (worktree !== undefined && !(await exists(worktree))) return "worktree-gone";
     const at = sidecar?.at ?? (await mtimeOf(dir));
     if (at === null || now - at <= retention) return null;
-    const held =
-      live.some((pane) => pane.taskId === name) ||
-      (worktree !== undefined && liveDirs.some((path) => inside(worktree, path)));
+    if (live.some((pane) => pane.taskId === name)) return null;
+    // Canonical like the pane paths: tmux reports a realpath, and a worktree under a link (macOS's /var) is spelled otherwise.
+    const real = worktree === undefined ? undefined : await canonical(worktree);
+    const held = real !== undefined && liveDirs.some((path) => inside(real, path));
     return held ? null : "aged";
   };
 

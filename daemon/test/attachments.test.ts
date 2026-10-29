@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, realpath, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -311,8 +311,11 @@ describe("pruneAttachments", () => {
   test("removes a gone worktree's and an aged unused task's files, keeps the rest, audits ids only", async () => {
     const root = join(base, "prune");
     const now = Date.now();
+    // Reached through a link on every platform, as macOS's tmpdir is: the sidecar spells the
+    // link, tmux reports the realpath, and prune must still see the pane inside.
     const live = join(base, "live-worktree");
-    await mkdir(live, { recursive: true });
+    await mkdir(join(base, "live-target"), { recursive: true });
+    await symlink(join(base, "live-target"), live);
     await plant(root, "gone", { at: now, worktree: join(base, "no-such-worktree") });
     await plant(root, "fresh", { at: now, worktree: live });
     await plant(root, "aged-here", { at: now - 31 * DAY_MS });
@@ -333,10 +336,11 @@ describe("pruneAttachments", () => {
     await tmuxOk(["new-window", "-d", "-t", "prune:", "-c", live, "sleep 60"]);
     try {
       // A new pane reports the server's cwd until its child has changed directory.
+      const real = await realpath(live);
       let panes = await listPanes();
       await pollUntil(async () => {
         panes = await listPanes();
-        return panes.some((pane) => pane.path === live);
+        return panes.some((pane) => pane.path === real);
       }, "the pane inside the worktree");
       expect(panes.find((pane) => pane.paneId === tagged)?.taskId).toBe("aged-running");
 
