@@ -19,6 +19,7 @@
     "format:check": "oxfmt --check .",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
+    "perf": "bun e2e/perf.ts",
     "test": "bun scripts/test.ts",
     "typecheck": "tsc --noEmit && bun run --filter '*' typecheck"
   },

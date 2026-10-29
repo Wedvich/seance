@@ -25,6 +25,7 @@ its `wss:` one (DESIGN.md, "Attachments").
 | `bun run typecheck`    | root `tsc --noEmit` plus each workspace's own      |
 | `bun run lint`         | oxlint (`lint:fix` to apply)                       |
 | `bun run format:check` | oxfmt (`format` to apply)                          |
+| `bun run perf`         | PWA idle/resume cost, opt-in (see below)           |
 
 The daemon CLI runs straight from source: `bun daemon/src/main.ts <command>` (`help`
 lists the commands).
@@ -32,6 +33,45 @@ lists the commands).
 Narrow the suite to one shard by naming a file: `bun run test daemon/test/spawn.test.ts`.
 The runner is `scripts/test.ts`, which also raises bun's 5s hook timeout — the suites
 that boot workerd need the headroom.
+
+## Measuring the PWA
+
+`bun run perf [A|B|C|D|all] [--runs N] [--duration S] [--cpu X] [--daemons N]`
+(defaults: all, 2 runs, 60s, 4x, 4 daemons) is a developer tool for before/after
+battery and CPU comparisons. It is not a test: `bun run test` and CI never run it.
+`e2e/perf.ts` boots the e2e stack (`startSuite` plus second daemons), runs
+`vite build` and `vite preview` of `pwa/` against that relay, and drives headless
+Chromium through `playwright-core` under CPU throttling. Each run gets a fresh browser
+context, signs in through Setup, and measures one window:
+
+- **A**: idle on home.
+- **B**: the verdict screen of a task held by a paused queue, leader up.
+- **C**: 5s hidden, then 5s visible.
+- **D**: a verdict with no leader at all.
+
+The build goes into `pwa/dist`, pinned to a throwaway relay, so the script refuses to
+start while that directory exists and removes it afterwards. Chromium is a one-time
+`bun x playwright-core install --only-shell chromium` (a no-op once cached); set
+`PERF_CHROMIUM` to use another executable.
+
+Results go to stdout and logs go to stderr. A JSON block between `JSON_BEGIN` and
+`JSON_END` holds every field, and a table follows it. The table's columns:
+
+- `taskPct`: main-thread task time as a share of the window. `taskDurationS`,
+  `scriptDurationS`, `layoutCount` and `recalcStyleCount` come from CDP
+  `Performance.getMetrics` deltas.
+- `drawFrames` and `drawFramesPerSec`: compositor frames from the trace.
+- `ws*`: WebSocket frames and bytes.
+- `lsSetItem`: localStorage writes.
+
+Read the numbers as comparisons, not absolutes. Run before and after a change on the
+same machine:
+
+- Headless Chromium renders in software, so frame and swap counts say how often the
+  page paints, not what that costs a GPU.
+- The CPU throttle scales timings off whatever machine runs it.
+- C fakes a tab switch by overriding `document.visibilityState` and dispatching
+  `visibilitychange`. It is not a mobile OS freezing or suspending the page.
 
 ## Deploying
 
