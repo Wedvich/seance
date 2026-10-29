@@ -58,6 +58,11 @@ export interface RouteInput {
   readonly released?: ReadonlySet<string>;
   /** `runNow`: neither concurrency cap (`cap_reached`) applies; every other filter does. */
   readonly uncapped?: boolean;
+  /**
+   * Route as though the task carried attachments: `route-preview`'s flag, since a
+   * preview has no manifest. A task's own `spec.attachments` applies regardless.
+   */
+  readonly attachments?: boolean;
 }
 
 const SPAN_MS: Readonly<Record<WindowSpan, number>> = { "5h": 5 * 3600_000, "7d": 7 * 86_400_000 };
@@ -113,10 +118,16 @@ export function route(input: RouteInput): Decision {
     skills: knownSkills(task, machines),
   };
   const caps = [queuePause(pass.holds), pass.capReached].filter((r) => r !== null);
+  const attached = input.attachments === true || task.spec.attachments !== undefined;
 
   const candidates: Candidate[] = [];
   for (const machine of machines) {
-    const machineReasons = [...machineFilter(machine, now, config), ...continueFilter(task, machine), ...caps];
+    const machineReasons = [
+      ...machineFilter(machine, now, config),
+      ...continueFilter(task, machine),
+      ...attachmentsFilter(attached, machine),
+      ...caps,
+    ];
     if (machine.exclaves === undefined || machine.exclaves.length === 0) {
       candidates.push({ deviceId: machine.deviceId, machine: machine.name, exclave: null, rejected: machineReasons });
       continue;
@@ -328,6 +339,15 @@ function continueFilter(task: Task, machine: Machine): Reason[] {
   if (caps?.includes(CAPABILITIES.continueTask) !== true || !caps.includes(CAPABILITIES.continueSession))
     reasons.push({ code: "continue_unsupported" });
   return reasons;
+}
+
+/**
+ * Only a daemon advertising the capability fetches a manifest; any other would
+ * refuse the spawn as malformed. A pin on such a machine waits, as on one offline.
+ */
+function attachmentsFilter(attached: boolean, machine: Machine): Reason[] {
+  if (!attached || machine.capabilities?.includes(CAPABILITIES.attachments) === true) return [];
+  return [{ code: "attachments_unsupported" }];
 }
 
 /**

@@ -486,10 +486,10 @@ of M4 has landed.
   placement restriction; added 2026-10-23, the account form replacing the exclave one 2026-10-25)
   and `avoid` (machines to keep it off), and `queue_batch`; `seanced spawn` takes the
   same placement as `--machine`, `--account` and `--not` (DESIGN.md "`pin` and `avoid` on a spawn"). PWA: the
-  auto form's AFTER and BATCH tiles, the settle-on-report switch (and, until 2026-10-27, a Linear field), and Follow
+  auto form's AFTER tile (and, until 2026-10-29, a BATCH tile), the settle-on-report switch (and, until 2026-10-27, a Linear field), and Follow
   up on queue rows. DESIGN.md records both ("MCP server", "PWA"). Exit, met in `e2e/authoring.test.ts`: a task enqueued from MCP
-  and from the PWA with an `after: opened` dep and a batch is stored with both and held `blocked`
-  until its predecessor is done.
+  with an `after: opened` dep and a batch, and one from the PWA with the dep, is stored with them
+  and held `blocked` until its predecessor is done.
   Linear's own relations are not read yet: that is the Linear item below.
   - _Decided (#21), done by self-report:_ a task can stay open past its merge until its own
     session says it is done — "after X is in prod" is X's session merging, watching the deploy
@@ -956,8 +956,10 @@ same PR, with the reason.
 8. **Score weights and the rest of `SchedulerConfig`** (set with the library, 2026-10-16;
    `scheduler/src/config.ts` is the copy that runs): weights account 1, machine 4,
    dependency 4, queue 1; sticky bonus 2; per-task estimate 5% of a 5h window and 1% of a
-   weekly (all-models or per-model); global max 8 in-flight tasks; a reservation's TTL 120 s
-   (`reservationTtlMs`, twice the replay window, so a spawn that ever runs has begun by half of it). The estimate is per span
+   weekly (all-models or per-model); global max 8 in-flight tasks; a reservation's TTL 240 s
+   (`reservationTtlMs`; 120 s, twice the replay window, until attachments (DESIGN.md, 2026-10-28)
+   put a download of up to 120 s before launch: it outlives the leader's 210 s wait for a spawn
+   reply, so no launch can start after the TTL check has proved the task never landed). The estimate is per span
    (owner, 2026-10-18): one number for both added a task's 5h share to every week, so a
    standard seat (then ×6.25, item 17) at 41% weekly with one task in flight projected 104% and
    scored ~8000× worse than any other account. 1% is a guess at a week's share; tune both

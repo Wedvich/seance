@@ -16,8 +16,8 @@ import {
   parsePauseRequest,
   parseQueueRequest,
   parseResumeRequest,
+  parseRoutePreviewRequest,
   parseTaskRef,
-  parseTaskRequest,
   QUEUE_MAX_TASKS,
   QUEUE_PROMPT_PREVIEW,
   quote,
@@ -264,9 +264,10 @@ async function answer(asked: Asked, op: SchedulerOp, payload: unknown): Promise<
       return queueView(scheduler, asked.now, request.tasks);
     }
     case "route-preview": {
-      const request = parseTaskRequest(payload);
+      const request = parseRoutePreviewRequest(payload);
       if (request === null) return schedulerError("invalid_request", "malformed route-preview request");
-      const reply: RoutePreviewResponse = { decision: scheduler.preview(request) };
+      const { attachments, ...spec } = request;
+      const reply: RoutePreviewResponse = { decision: scheduler.preview(spec, attachments === true) };
       return reply;
     }
     case "cancel": {

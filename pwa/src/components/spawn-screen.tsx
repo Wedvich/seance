@@ -15,7 +15,7 @@ import {
   type SheetKind,
 } from "../state.ts";
 import { completeSkill, matchSkills, promptSegments, skillIndex, skillToken } from "../skills.ts";
-import { formatSeen, type Tile, type ViewModel } from "../view.ts";
+import { formatSeen, type AttachmentsView, type Tile, type ViewModel } from "../view.ts";
 import { DecisionCard } from "./decision.tsx";
 import { HeaderMenu } from "./header-menu.tsx";
 import { Menu, MenuItem, useMenu } from "./menu.tsx";
@@ -32,7 +32,6 @@ const SHEET_TITLES: Record<SheetKind, string> = {
   model: "Which model?",
   effort: "How much effort?",
   after: "Wait for which tasks?",
-  batch: "Batch these tasks",
 };
 
 const WHEN_LABELS: Record<DepAfter, string> = { opened: "Opened", merged: "Merged", done: "Done" };
@@ -67,8 +66,117 @@ export interface SpawnActions {
   readonly addAfter: (taskId: string, after: DepAfter) => void;
   readonly removeAfter: (taskId: string) => void;
   readonly setUntil: (until: TaskUntil) => void;
-  readonly startBatch: () => void;
-  readonly endBatch: () => void;
+  /** Picked, pasted or dropped files; the store applies the limits. */
+  readonly addFiles: (files: readonly File[]) => void;
+  readonly removeFile: (key: string) => void;
+}
+
+/**
+ * Grows the prompt to its text, as chat composers do; CSS caps it, past which it
+ * scrolls. Height is cleared first so a shortened prompt shrinks back. While the
+ * skill picker is open the field is one row, so it is left unsized.
+ *
+ * The mirror is sized with it: its `inset: 0` follows the field's box, which a
+ * stretched card makes taller than the textarea, and a taller mirror scrolls less
+ * far and draws lines the textarea clips. The momentary collapse clamps both the
+ * textarea's scroll and the column's, so both are put back, or an edit mid-way
+ * down a long prompt jumps.
+ */
+function fitPrompt(field: HTMLTextAreaElement, mirror: HTMLElement | null, compact: boolean): void {
+  const column = field.closest(".column");
+  const fieldTop = field.scrollTop;
+  const columnTop = column?.scrollTop ?? 0;
+  field.style.height = "";
+  if (mirror !== null) mirror.style.height = "";
+  if (!compact) {
+    field.style.height = `${field.scrollHeight}px`;
+    if (mirror !== null) mirror.style.height = `${field.offsetHeight}px`;
+  }
+  field.scrollTop = fieldTop;
+  if (column !== null) column.scrollTop = columnTop;
+}
+
+/** Only drags that carry files light the card up: a dragged text selection is the textarea's. */
+function carriesFiles(event: DragEvent): boolean {
+  return event.dataTransfer?.types.includes("Files") === true;
+}
+
+/**
+ * The prompt card's files, above the text: chips with remove. Still listed after
+ * attaching stops being offered (the leader changed under them), so they can be
+ * removed.
+ */
+function AttachmentChips(props: { view: AttachmentsView; onRemove: (key: string) => void }): JSX.Element | null {
+  const { view, onRemove } = props;
+  if (view.files.length === 0 && view.notice === null) return null;
+  return (
+    <div className="attach">
+      {view.files.length > 0 && (
+        <ul className="attach-list" aria-label={view.summary ?? undefined}>
+          {view.files.map((file) => (
+            <li key={file.key} className="attach-chip">
+              <span className="attach-name">{file.name}</span>
+              <span className="attach-size">{file.size}</span>
+              <button
+                type="button"
+                className="attach-remove"
+                aria-label={`Remove ${file.name}`}
+                disabled={view.locked}
+                onClick={() => onRemove(file.key)}
+              >
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {view.notice !== null && <p className="attach-notice">{view.notice}</p>}
+    </div>
+  );
+}
+
+/** The composer bar's paperclip, opening the picker; rendered only while attaching is offered. */
+function AttachButton(props: { locked: boolean; onAdd: (files: readonly File[]) => void }): JSX.Element {
+  const { locked, onAdd } = props;
+  const picker = useRef<HTMLInputElement>(null);
+  return (
+    <>
+      <button
+        type="button"
+        className="compose-attach"
+        aria-label="Attach files"
+        title="Attach files"
+        disabled={locked}
+        onClick={() => picker.current?.click()}
+      >
+        <svg
+          viewBox="0 0 24 24"
+          width="20"
+          height="20"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.8"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M21 11.5l-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l8.6-8.6a3.7 3.7 0 0 1 5.2 5.2l-8.6 8.6a1.8 1.8 0 0 1-2.6-2.6l8-8" />
+        </svg>
+      </button>
+      <input
+        ref={picker}
+        type="file"
+        multiple
+        hidden
+        onChange={(event) => {
+          const input = event.currentTarget;
+          onAdd([...(input.files ?? [])]);
+          // Cleared so picking the same file again still fires a change.
+          input.value = "";
+        }}
+      />
+    </>
+  );
 }
 
 /**
@@ -123,32 +231,17 @@ function ActiveSheet(props: {
   kind: SheetKind;
   model: Model;
   effort: Effort;
-  batch: PersistedForm["batch"];
   /** Derived while the After sheet is open, so the list is not rebuilt on every keystroke. */
   afterSheet: AfterSheetView | null;
   /** True while the exit animation plays; the sheet is already popped from state. */
   closing: boolean;
   onExited: () => void;
 }): JSX.Element {
-  const {
-    actions,
-    view,
-    kind,
-    model: selectedModel,
-    effort: selectedEffort,
-    batch,
-    afterSheet,
-    closing,
-    onExited,
-  } = props;
+  const { actions, view, kind, model: selectedModel, effort: selectedEffort, afterSheet, closing, onExited } = props;
   const close = actions.dismissLayer;
 
   if (kind === "after" && afterSheet !== null) {
     return <AfterSheet actions={actions} sheet={afterSheet} closing={closing} onExited={onExited} />;
-  }
-
-  if (kind === "batch") {
-    return <BatchSheet actions={actions} batch={batch} closing={closing} onExited={onExited} />;
   }
 
   if (kind === "machine") {
@@ -320,33 +413,6 @@ function AfterSheet(props: {
   );
 }
 
-function BatchSheet(props: {
-  actions: SpawnActions;
-  batch: PersistedForm["batch"];
-  closing: boolean;
-  onExited: () => void;
-}): JSX.Element {
-  const { actions, batch, closing, onExited } = props;
-  return (
-    <Sheet title={SHEET_TITLES.batch} closing={closing} onExited={onExited} onClose={actions.dismissLayer}>
-      <SheetItem
-        label={batch === null ? "Off" : "End batch"}
-        sub={batch === null ? "each task is queued on its own" : `the next task starts a fresh numbering`}
-        selected={batch === null}
-        onClick={actions.endBatch}
-      />
-      <SheetItem
-        label={batch === null ? "Start batch" : "Batch open"}
-        sub="the next tasks are grouped and numbered together"
-        selected={batch !== null}
-        onClick={actions.startBatch}
-      />
-      {batch !== null && <p className="sheet-note">Open, next is #{batch.next}.</p>}
-      <p className="sheet-note">A batch sets no order or limit: to run tasks in turn, give each its After.</p>
-    </Sheet>
-  );
-}
-
 /**
  * What `auto` would do with the form as it stands, before anything is queued
  * (DESIGN.md, PWA). Shown only while the form is on `auto`.
@@ -394,7 +460,7 @@ function PreviewCard(props: {
 }
 
 /**
- * The footer's Queue, split when the leader answers `run-now`: two sibling
+ * The composer's Queue, split when the leader answers `run-now`: two sibling
  * buttons in one pill, never nested, so Tab reaches both and a press on one
  * never fires the other. Without `run-now` it is the one button, unchanged.
  */
@@ -464,11 +530,11 @@ function SplitQueueButton(props: {
             stroke-linejoin="round"
             aria-hidden="true"
           >
-            <path d="M6 15l6-6 6 6" />
+            <path d="M6 9l6 6 6-6" />
           </svg>
         </button>
       </div>
-      <Menu menu={menu} label="More ways to start" direction="up">
+      <Menu menu={menu} label="More ways to start">
         <MenuItem
           label="Start now"
           icon={<StartNowIcon />}
@@ -516,6 +582,8 @@ export function SpawnScreen(props: {
   columns: boolean;
 }): JSX.Element {
   const { actions, view, form, promptUndo, sheet, machines, now, preview, afterSheet, columns } = props;
+  const [dropping, setDropping] = useState(false);
+  const attachOffered = view.attachments.offered;
   const offline = view.machine !== null && !view.machine.connected;
   const [renderedSheet, sheetClosing, unmountSheet] = useSheetExit(sheet);
   const promptInput = useRef<HTMLTextAreaElement>(null);
@@ -590,6 +658,7 @@ export function SpawnScreen(props: {
       pendingCaret.current = null;
       field.setSelectionRange(pending.caret, pending.caret);
     }
+    if (field !== null) fitPrompt(field, promptBackdrop.current, pickerOpen);
     // Collapsing to one row keeps the scroll offset clamped to the last line,
     // not the caret's, so a token edited mid-prompt would be off view: scroll
     // to where the mirror draws it.
@@ -602,6 +671,29 @@ export function SpawnScreen(props: {
     }
     syncBackdrop();
   }, [form.prompt, pickerOpen, token?.start]);
+  // A rewrap stales the fitted height: a width change (window, column layout) or
+  // a web font landing after the first fit. Width only, since the fit itself
+  // changes the height and would otherwise observe its own write.
+  useEffect(() => {
+    const field = promptInput.current;
+    if (field === null) return;
+    const refit = (): void => {
+      fitPrompt(field, promptBackdrop.current, pickerOpen);
+      syncBackdrop();
+    };
+    let width = field.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (field.clientWidth === width) return;
+      width = field.clientWidth;
+      refit();
+    });
+    observer.observe(field);
+    document.fonts.addEventListener("loadingdone", refit);
+    return () => {
+      observer.disconnect();
+      document.fonts.removeEventListener("loadingdone", refit);
+    };
+  }, [pickerOpen]);
   const pickSkill = (name: string): void => {
     if (token === null) return;
     const next = completeSkill(form.prompt, token, name);
@@ -669,15 +761,44 @@ export function SpawnScreen(props: {
         )}
       </header>
 
-      <div className="column">
-        <div className="prompt-card card">
+      <div className="column column-last">
+        <div
+          className={dropping ? "prompt-card card prompt-card-drop" : "prompt-card card"}
+          onDragOver={(event) => {
+            if (!attachOffered || !carriesFiles(event)) return;
+            event.preventDefault();
+            setDropping(true);
+          }}
+          onDragLeave={(event) => {
+            // Leaving for a child is still inside the card.
+            if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
+            setDropping(false);
+          }}
+          onDrop={(event) => {
+            setDropping(false);
+            if (!attachOffered || !carriesFiles(event)) return;
+            event.preventDefault();
+            actions.addFiles([...(event.dataTransfer?.files ?? [])]);
+          }}
+        >
           <div className="prompt-head">
             <span className="label" id="prompt-label">
               PROMPT
             </span>
             <PromptAction onClear={clearPrompt} onUndo={undoClear} prompt={form.prompt} undo={promptUndo} />
           </div>
-          <div className={pickerOpen ? "prompt-field prompt-field-compact" : "prompt-field"}>
+          <AttachmentChips view={view.attachments} onRemove={actions.removeFile} />
+          <div
+            className={pickerOpen ? "prompt-field prompt-field-compact" : "prompt-field"}
+            onClick={(event) => {
+              // A stretched card leaves the field taller than the fitted textarea; a tap
+              // on that blank stretch is still a tap on the prompt.
+              const input = promptInput.current;
+              if (event.target !== event.currentTarget || input === null) return;
+              input.focus();
+              input.setSelectionRange(input.value.length, input.value.length);
+            }}
+          >
             <div ref={promptBackdrop} className="prompt-input prompt-backdrop" aria-hidden="true">
               {segments.map((segment) => {
                 const ref = segment.anchor ? tokenAnchor : undefined;
@@ -716,6 +837,13 @@ export function SpawnScreen(props: {
                 actions.setPrompt(event.currentTarget.value);
                 readCaret();
               }}
+              onPaste={(event) => {
+                // A screenshot pastes as a file with no text; text keeps its normal paste.
+                const files = [...(event.clipboardData?.files ?? [])];
+                if (!attachOffered || files.length === 0) return;
+                if (event.clipboardData?.getData("text/plain") === "") event.preventDefault();
+                actions.addFiles(files);
+              }}
               onKeyUp={readCaret}
               onClick={readCaret}
               onPointerUp={readCaret}
@@ -735,7 +863,18 @@ export function SpawnScreen(props: {
           {pickerOpen && query !== null && (
             <SkillPicker id={SKILL_LIST_ID} query={query} items={matches} active={active} onPick={pickSkill} />
           )}
+          <div className="compose-bar">
+            {attachOffered && <AttachButton locked={view.attachments.locked} onAdd={actions.addFiles} />}
+            <QueueButton
+              view={view}
+              preview={view.previewShown ? preview : null}
+              onQueue={actions.spawn}
+              onStartNow={actions.startNow}
+            />
+          </div>
         </div>
+
+        {view.formStatus !== null && <p className="compose-status">{view.formStatus}</p>}
 
         {view.banner !== null &&
           (view.banner.opensSettings ? (
@@ -770,7 +909,6 @@ export function SpawnScreen(props: {
           <TileButton tile={view.modelTile} onClick={() => actions.openSheet("model")} />
           <TileButton tile={view.effortTile} onClick={() => actions.openSheet("effort")} />
           <TileButton tile={view.afterTile} onClick={() => actions.openSheet("after")} />
-          <TileButton tile={view.batchTile} onClick={() => actions.openSheet("batch")} />
         </div>
 
         {view.ignoredNote !== null && <p className="ignored-note">{view.ignoredNote}</p>}
@@ -819,16 +957,6 @@ export function SpawnScreen(props: {
         </button>
       </div>
 
-      <footer className="footer">
-        {view.footerStatus !== null && <p className="footer-status">{view.footerStatus}</p>}
-        <QueueButton
-          view={view}
-          preview={view.previewShown ? preview : null}
-          onQueue={actions.spawn}
-          onStartNow={actions.startNow}
-        />
-      </footer>
-
       {renderedSheet !== null && (
         <ActiveSheet
           actions={actions}
@@ -836,7 +964,6 @@ export function SpawnScreen(props: {
           kind={renderedSheet}
           model={form.model}
           effort={form.effort}
-          batch={form.batch}
           afterSheet={lastAfterSheet.current}
           closing={sheetClosing}
           onExited={unmountSheet}

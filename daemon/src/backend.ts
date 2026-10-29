@@ -88,6 +88,24 @@ export interface Continuation {
   readonly vanished?: true;
 }
 
+/** One fetched attachment, for the seed: `name` is display text only, never part of `path`. */
+export interface StagedFile {
+  readonly path: string;
+  readonly name: string;
+  readonly type: string;
+  readonly size: number;
+}
+
+/**
+ * What the frontend fetched for a spawn (`attachments.ts`): directories the session may read
+ * (`--add-dir`), and the files to list in its seed. A continuation gets the directories its
+ * worktree's earlier tasks fetched and no files. Daemon paths, never wire values.
+ */
+export interface SessionAttachments {
+  readonly dirs: readonly string[];
+  readonly files: readonly StagedFile[];
+}
+
 export interface SessionBackend {
   /**
    * Resolves `request.repo` by name against `repos` — the cached scan set, never
@@ -100,11 +118,15 @@ export interface SessionBackend {
    * worktree, from its launch ledger and already checked — it never rides the wire
    * request; its `exit` comes from the ledger too. A backend that cannot continue a session throws
    * `SpawnFailure("not_continuable")`.
+   *
+   * `attachments` is what the frontend already fetched and verified; a backend hands the session
+   * every directory and lists every file, or must not start it.
    */
   readonly spawn: (
     request: SpawnRequest,
     repos: readonly RepoEntry[],
     continuation?: Continuation,
+    attachments?: SessionAttachments,
   ) => Promise<SpawnOutcome>;
   readonly sessions: (repos: readonly RepoEntry[]) => Promise<readonly SessionEntry[]>;
   /**

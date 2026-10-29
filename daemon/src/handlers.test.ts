@@ -125,6 +125,42 @@ describe("relay ops are audited", () => {
     expect(logged()).toContain("audit spawn origin=relay rejected");
   });
 
+  test("a malformed manifest is rejected, never dropped: a session must not start without its files", async () => {
+    const ref = { id: "0b6f0c9e-1a2b-4c3d-8e9f-001122334455", name: "a.png", type: "image/png", size: 1 };
+    const good = [{ ...ref, hash: "A".repeat(43) }];
+    for (const extra of [
+      { attachments: [{ ...ref, hash: "short" }] },
+      { attachments: [] },
+      { attachments: "a.png" },
+      // A continuation finds its directories by worktree and carries none.
+      { attachments: good, mode: "continue", continues: "t-1", taskId: "t-2" },
+    ]) {
+      lines.length = 0;
+      // oxlint-disable-next-line no-await-in-loop -- each case reads the lines the previous one cleared
+      await createHandler(ctx)(spawnNope(extra));
+      expect(logged()).toContain("audit spawn origin=relay rejected");
+    }
+  });
+
+  test("a daemon with no fetcher refuses attachments even from the scheduler, before anything runs", async () => {
+    const ref = {
+      id: "0b6f0c9e-1a2b-4c3d-8e9f-001122334455",
+      name: "a.png",
+      type: "image/png",
+      size: 1,
+      hash: "A".repeat(43),
+    };
+    const reply = await createLocalOps(ctx, "leader").spawn({
+      repo: "nope",
+      mode: "here",
+      client: SCHEDULER_CLIENT,
+      taskId: "t-1",
+      attachments: [ref],
+    });
+    expect(reply).toMatchObject({ ok: false, code: "attachment_unavailable" });
+    expect(logged()).toContain("audit spawn origin=leader failed code=attachment_unavailable");
+  });
+
   test("a newline in a wire value cannot forge an audit line", async () => {
     await createHandler(ctx)(request("spawn", { repo: 'x\ninfo audit spawn ok window="gotcha"', mode: "here" }));
     expect(logged()).not.toContain('window="gotcha"');

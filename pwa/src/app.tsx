@@ -256,8 +256,8 @@ function useSpawnActions(store: Store): SpawnActions {
       addAfter: (taskId, after) => store.addAfter(taskId, after),
       removeAfter: (taskId) => store.removeAfter(taskId),
       setUntil: (until) => store.setUntil(until),
-      startBatch: () => store.startBatch(),
-      endBatch: () => store.endBatch(),
+      addFiles: (files) => store.addFiles(files),
+      removeFile: (key) => store.removeFile(key),
     }),
     [store],
   );

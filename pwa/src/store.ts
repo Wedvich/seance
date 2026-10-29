@@ -1,4 +1,5 @@
 import type {
+  AttachmentRef,
   DepAfter,
   MetricsErrorCode,
   MetricsReply,
@@ -11,6 +12,7 @@ import type {
   TaskUntil,
 } from "@seance/shared";
 import {
+  ATTACHMENT_LIMITS,
   failureReasonText,
   queuedTask,
   RequestFailure,
@@ -39,10 +41,13 @@ import {
   type Verdict,
 } from "./state.ts";
 import { AccountStore } from "./account-store.ts";
+import { admitFiles, manifestOf, uploadRefusalText } from "./attachments.ts";
 import { accountSeries } from "./chart.ts";
 import { SchedulerStore, STORE_UNREADABLE, taskRequest } from "./scheduler-store.ts";
 import type { AppState } from "./view.ts";
 import {
+  ATTACHMENTS_UNAVAILABLE,
+  deriveAttachmentsAvailability,
   deriveAutoAvailability,
   derivePinProblem,
   deriveReportedAvailability,
@@ -115,7 +120,9 @@ export class Store {
    * connected flag, so a proven-offline mark clearing does not read as a wake —
    * blaming a slow machine, re-polling it, and timing out again is a loop.
    * Entries survive a machine going offline for the same reason. Emptied
-   * whenever the socket isn't open, which keeps every re-dial a full refresh.
+   * whenever the socket isn't open, which keeps every re-dial a full refresh;
+   * a resume that finds the socket live keeps it, since the registry pushes
+   * kept coming on that socket.
    */
   #wokenAt = new Map<string, number>();
   /** The last range picked, so opening another chart keeps it; a reload starts on a day again. */
@@ -167,6 +174,9 @@ export class Store {
       pausing: false,
       discarding: false,
       accounts: { aliases: {}, nameable: client.accountsNamed, saving: null, notice: null },
+      attachments: [],
+      attachNotice: null,
+      upload: null,
     };
   }
 
@@ -180,13 +190,30 @@ export class Store {
   /** Wires up relay and lifecycle listeners; returns a disposer. */
   attach(): () => void {
     const unsubscribe = this.#client.subscribe(() => this.#onRelay());
-    const onVisible = (): void => {
-      if (document.visibilityState !== "visible") return;
+    let hiddenAt: number | null = null;
+    let attached = true;
+    const onVisibility = (): void => {
+      if (document.visibilityState !== "visible") {
+        hiddenAt = Date.now();
+        return;
+      }
       // An installed PWA is suspended constantly and the socket dies silently,
-      // so a resume has to re-dial before anything else can be trusted.
-      this.#client.reconnect();
+      // so a resume can't trust it: the client probes it, or re-dials outright
+      // after a long hide. Wall-clock time, since a suspended page's timers and
+      // monotonic clocks may not have moved; unknown counts as long.
+      const hiddenMs = hiddenAt === null ? Infinity : Date.now() - hiddenAt;
+      hiddenAt = null;
+      void this.#client.reconnectIfStale(hiddenMs).then((outcome) => {
+        // A re-dial's reopen (`#onRelay`) reads everything again by itself, and a
+        // tab hidden again before the pong keeps what it missed for the next show.
+        if (outcome !== "live" || !attached || document.visibilityState !== "visible") return;
+        const relay = this.#client.getState();
+        if (relay.status !== "open") return;
+        this.#queue.onShown(relay);
+        this.#accounts.onShown();
+      });
     };
-    document.addEventListener("visibilitychange", onVisible);
+    document.addEventListener("visibilitychange", onVisibility);
     const unsubscribeQueue = this.#client.onQueueChanged((change) => this.#queue.onQueueChanged(change));
     const unsubscribeAccounts = this.#client.onStoreChanged((key, version) =>
       this.#accounts.onStoreChanged(key, version),
@@ -197,7 +224,8 @@ export class Store {
       unsubscribe();
       unsubscribeQueue();
       unsubscribeAccounts();
-      document.removeEventListener("visibilitychange", onVisible);
+      attached = false;
+      document.removeEventListener("visibilitychange", onVisibility);
       this.#disarmUndo();
       this.#queue.dispose();
       this.#accounts.dispose();
@@ -221,10 +249,10 @@ export class Store {
     // `machines` means "no push yet", not "every machine vanished".
     this.#patch({ relay, ...(relay.registrySettled ? this.#pruneGone(relay.machines) : {}) });
     if (relay.status !== "open") {
-      // Forgotten rather than kept: a resume re-dials unconditionally and the
-      // registry that follows names the same machines, so leaving the map in
-      // place means nothing ever counts as woken again and the session lists
-      // stay at whatever the very first connect saw.
+      // Forgotten rather than kept: the re-dial's registry names the same
+      // machines, so leaving the map in place means nothing ever counts as
+      // woken again and the session lists stay at whatever the very first
+      // connect saw.
       this.#wokenAt = new Map();
       this.#queue.onDrop();
       this.#wasOpen = false;
@@ -319,6 +347,26 @@ export class Store {
     this.#undoTimer = null;
   }
 
+  /**
+   * Adds picked, pasted or dropped files as far as the limits allow, and says
+   * why the rest were left out. Ignored mid-submit: the list is what is being sent.
+   */
+  addFiles(files: readonly File[]): void {
+    if (files.length === 0 || this.#state.spawning) return;
+    const before = this.#state.attachments;
+    const { files: next, notice } = admitFiles(before, files);
+    this.#patch({ attachments: next, attachNotice: notice });
+    // route-preview filters on the flag; it changes only when the list empties or fills.
+    if (before.length === 0 && next.length > 0) void this.refreshPreview();
+  }
+
+  removeFile(key: string): void {
+    if (this.#state.spawning) return;
+    const next = this.#state.attachments.filter((f) => f.key !== key);
+    this.#patch({ attachments: next, attachNotice: null });
+    if (next.length === 0) void this.refreshPreview();
+  }
+
   /** Pins the machine (null is auto) and clears any verdict. The account pick stays: neither picker resets the other. */
   pickMachine(machine: string | null): void {
     this.#pick({ machine });
@@ -409,21 +457,6 @@ export class Store {
 
   setUntil(until: TaskUntil): void {
     this.#patch({ form: { ...this.#state.form, until } });
-  }
-
-  /**
-   * The next enqueues join a new batch, numbered from 1. An open batch stays
-   * open: a second tap must not renumber a batch already in flight.
-   */
-  startBatch(): void {
-    const { form } = this.#state;
-    if (form.batch === null) this.#patch({ form: { ...form, batch: { id: crypto.randomUUID(), next: 1 } } });
-    this.dismissLayer();
-  }
-
-  endBatch(): void {
-    this.#patch({ form: { ...this.#state.form, batch: null } });
-    this.dismissLayer();
   }
 
   /**
@@ -717,21 +750,27 @@ export class Store {
       refusal("A task that settles on its done report needs a prompt: the session is told in it to report.");
       return;
     }
-    if (form.batch !== null && form.batch.next > TASK_SPEC_LIMITS.batchIndex) {
-      refusal("This batch is full. End it and start another.");
+    const attaching = this.#state.attachments.length > 0;
+    if (attaching && !deriveAttachmentsAvailability(relay)) {
+      refusal(`${ATTACHMENTS_UNAVAILABLE}.`);
       return;
     }
     const request = taskRequest(form, repo.origin, true);
     // Appended here so the length below is the one the leader reads; it never rewrites a prompt.
     const prompt = reported && request.prompt !== undefined ? withReportInstruction(request.prompt) : request.prompt;
     const length = prompt?.length ?? 0;
-    if (length > TASK_REQUEST_LIMITS.prompt) {
+    // A task carrying files takes a shorter prompt: the manifest shares the record's create cap.
+    const bound = attaching ? ATTACHMENT_LIMITS.prompt : TASK_REQUEST_LIMITS.prompt;
+    if (length > bound) {
       const instruction = reported ? " (with the instruction to report, which is added)" : "";
+      const files = attaching ? " beside attached files" : "";
       refusal(
-        `The prompt is ${length} characters${instruction}; the scheduler takes at most ${TASK_REQUEST_LIMITS.prompt}. Shorten it, or use \`seanced spawn --now\` on the machine.`,
+        `The prompt is ${length} characters${instruction}; the scheduler takes at most ${bound}${files}. Shorten it, or use \`seanced spawn --now\` on the machine.`,
       );
       return;
     }
+    const attachments = attaching ? await this.#upload() : undefined;
+    if (attachments === null) return;
     // Only ids: an alias or email is display text and never goes in a record.
     const pin = {
       ...(form.machine === null ? {} : { deviceId: form.machine }),
@@ -743,10 +782,57 @@ export class Store {
       ...(form.machine === null && form.account === null ? {} : { pin }),
       client: "pwa" satisfies SpawnClient,
       ...(form.after.length === 0 ? {} : { deps: form.after }),
-      ...(form.batch === null ? {} : { batch: { id: form.batch.id, index: form.batch.next } }),
       ...(reported ? { until: form.until } : {}),
+      ...(attachments === undefined ? {} : { attachments }),
     };
     await this.#enqueue(queuedTask(spec, Date.now()), runNow);
+  }
+
+  /**
+   * Seals and uploads every file not yet stored, in order, then answers the
+   * manifest. The first refusal stops the run and shows why; what was stored
+   * stays stored for the next try, which mints fresh ids for the rest only.
+   * Null: nothing is to be queued, and the verdict already says why.
+   */
+  async #upload(): Promise<readonly AttachmentRef[] | null> {
+    const pending = this.#state.attachments.filter((f) => f.stored === null);
+    this.#patch({ spawning: true, verdict: null, upload: { done: 0, total: pending.length } });
+    let failure: string | null = null;
+    for (const [done, picked] of pending.entries()) {
+      this.#patch({ upload: { done, total: pending.length } });
+      let bytes: Uint8Array<ArrayBuffer>;
+      try {
+        // oxlint-disable-next-line no-await-in-loop -- one file in memory at a time, in order
+        bytes = new Uint8Array(await picked.file.arrayBuffer());
+      } catch {
+        failure = `Couldn't read ${picked.name} from this device. Remove it and attach it again. Nothing was queued.`;
+        break;
+      }
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      const reply = await this.#client.uploadAttachment(bytes);
+      if (!reply.ok) {
+        failure = uploadRefusalText(picked.name, reply);
+        break;
+      }
+      const stored = { id: reply.id, hash: reply.hash };
+      // By key: the list can't change mid-run (add and remove wait), but the identity is what's kept.
+      this.#patch({
+        attachments: this.#state.attachments.map((f) => (f.key === picked.key ? { ...f, stored } : f)),
+      });
+    }
+    const manifest = manifestOf(this.#state.attachments);
+    // Still spawning on success: the create follows at once, and the button must not offer a second submit between.
+    if (failure === null && manifest !== null) {
+      this.#patch({ upload: null });
+      return manifest;
+    }
+    this.#patch({ upload: null, spawning: false });
+    this.#showVerdict({
+      kind: "unqueued",
+      message: failure ?? "Not every file uploaded. Nothing was queued.",
+      mayHaveLanded: false,
+    });
+    return null;
   }
 
   /**
@@ -778,19 +864,19 @@ export class Store {
       } else {
         this.#disarmUndo();
         const { form } = this.#state;
-        // Deps, Linear and `until` belong to the task just stored; a batch spans enqueues, and its
-        // counter moves only for the member it numbered, so a retry that lands twice moves it once.
-        const { batch } = form;
-        const counted = batch !== null && task.spec.batch?.id === batch.id && task.spec.batch.index === batch.next;
+        // Deps and `until` belong to the task just stored.
+        // Only the files this task carries leave the form: a retry's task names the ones it was built with.
+        const sent = new Set(task.spec.attachments?.map((ref) => ref.id));
         this.#patch({
           form: {
             ...form,
             prompt: "",
             after: [],
             until: "merged",
-            batch: counted ? { ...batch, next: batch.next + 1 } : batch,
           },
           promptUndo: null,
+          attachments: this.#state.attachments.filter((f) => f.stored === null || !sent.has(f.stored.id)),
+          attachNotice: null,
         });
         this.#showVerdict({ kind: "queued", task });
         this.#queue.startFollowing(task, runNow);

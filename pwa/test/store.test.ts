@@ -1,6 +1,7 @@
 import { importPsk, toBase64 } from "@seance/shared";
 import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import {
+  ATTACHMENT_LIMITS,
   CAPABILITIES,
   accountRecord,
   QUEUE_MAX_TASKS,
@@ -10,6 +11,8 @@ import {
   TASK_SPEC_LIMITS,
   withReportInstruction,
   type Decision,
+  type AttachmentRefusal,
+  type AttachmentUploaded,
   type DiscardReply,
   type DiscardRequest,
   type ExclaveInfo,
@@ -23,6 +26,7 @@ import {
   type QueueReply,
   type QueueRequest,
   type RelayState,
+  type ResumeOutcome,
   type ResumeRequest,
   type RoutePreviewReply,
   type StoreRefusal,
@@ -38,7 +42,7 @@ import { deriveView } from "../src/view.ts";
 import { describeVerdict } from "../src/verdict-view.ts";
 import { PREVIEW_DEBOUNCE_MS, PREVIEW_RETRY_MS, QUEUE_POLL_MS, QUEUE_POLLS } from "../src/scheduler-store.ts";
 import { Store, UNDO_WINDOW_MS } from "../src/store.ts";
-import { fakeHistory, installBrowserGlobals } from "./stubs.ts";
+import { fakeHistory, installBrowserGlobals, setVisibility } from "./stubs.ts";
 
 installBrowserGlobals();
 
@@ -443,6 +447,16 @@ class ScriptedClient extends RelayClient {
 
   override reconnect(): void {}
 
+  /** The hidden time each tab resume reported. */
+  readonly shownAfter: number[] = [];
+  /** What a tab resume's probe finds: by default the socket answered. */
+  onShown: () => Promise<ResumeOutcome> = async () => "live";
+
+  override reconnectIfStale(hiddenMs: number): Promise<ResumeOutcome> {
+    this.shownAfter.push(hiddenMs);
+    return this.onShown();
+  }
+
   emit(next: Partial<RelayState>): void {
     this.relay = { ...this.relay, ...next };
     for (const listener of this.listeners) listener();
@@ -456,6 +470,19 @@ class ScriptedClient extends RelayClient {
   override createTask(task: Task): Promise<TaskCreated | StoreRefusal | null> {
     this.creates.push(task);
     return this.onCreate(task);
+  }
+
+  /** Every upload's plaintext, in order: a retry shows only the files that hadn't stored. */
+  readonly uploads: Uint8Array[] = [];
+  onUpload: (bytes: Uint8Array) => Promise<AttachmentUploaded | AttachmentRefusal> = async () => ({
+    ok: true,
+    id: crypto.randomUUID(),
+    hash: "h".repeat(43),
+  });
+
+  override uploadAttachment(bytes: Uint8Array<ArrayBuffer>): Promise<AttachmentUploaded | AttachmentRefusal> {
+    this.uploads.push(bytes);
+    return this.onUpload(bytes);
   }
 
   override queue(request: QueueRequest = {}): Promise<QueueReply | null> {
@@ -978,29 +1005,53 @@ describe("auto's error paths", () => {
     expect(store.getState().verdict).toEqual({ kind: "queued", task: created, follow: { kind: "unanswered" } });
   });
 
-  test("with no leader the task still queues, the follow waits without spending polls, and a leader's arrival places it", async () => {
+  test("with no leader the task still queues, the follow stops polling without spending a poll, and a leader's arrival reads it at once", async () => {
     const client = new ScriptedClient({ scheduler: { kind: "none" } });
     client.onQueue = async () => {
       throw new RequestFailure("no_leader", "no scheduler is leading");
     };
     const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
     await store.spawn();
     expect(store.getState().verdict).toMatchObject({ kind: "queued" });
     expect(client.creates).toHaveLength(1);
 
-    // More polls than the budget: none of them counted, so it never gives up.
-    const nextArmed = (): boolean => timers.armed(QUEUE_POLL_MS) === 1;
-    for (let poll = 0; poll < QUEUE_POLLS + 3; poll += 1) {
-      timers.fire(QUEUE_POLL_MS);
-      // oxlint-disable-next-line no-await-in-loop -- each poll follows the one before
-      await until(nextArmed, "the next poll armed");
-    }
+    timers.fire(QUEUE_POLL_MS);
+    await until(() => client.queueRequests.length === 1, "the first poll");
+    await drain();
+    // Nothing would hear another read until a leader leads, so none is armed.
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
     expect(followEnd(store)).toBeUndefined();
 
-    const placed: Task = { ...firstCreate(client), state: "running" };
+    const placed: Task = { ...firstCreate(client), state: "ready" };
     client.onQueue = async () => ({ tasks: [placed], at: 3 });
+    client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 1 } });
+    await until(() => queuedState(store) === "ready", "read once a leader leads");
+    // The waiting read spent nothing, nor did the arrival's: the chain re-arms on the whole budget.
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(1);
+    const rearmed = (): boolean => timers.armed(QUEUE_POLL_MS) === 1;
+    for (let poll = 1; poll < QUEUE_POLLS; poll += 1) {
+      timers.fire(QUEUE_POLL_MS);
+      // oxlint-disable-next-line no-await-in-loop -- each poll follows the one before
+      await until(rearmed, "the next poll armed");
+    }
     timers.fire(QUEUE_POLL_MS);
-    await until(() => queuedState(store) === "running", "placed");
+    await until(() => followEnd(store) !== undefined, "the budget spent");
+    detach();
+  });
+
+  test("a leader that verifies while the leaderless read is out keeps the follow polling", async () => {
+    const client = new ScriptedClient({ scheduler: { kind: "none" } });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.spawn();
+    client.onQueue = async () => {
+      client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 1 } });
+      throw new RequestFailure("no_leader", "no scheduler is leading");
+    };
+    timers.fire(QUEUE_POLL_MS);
+    await until(() => timers.armed(QUEUE_POLL_MS) === 1, "the next poll armed");
+    detach();
   });
 
   test("the preview still says there is no leader, though queueing needs none", async () => {
@@ -1036,6 +1087,28 @@ describe("auto's error paths", () => {
     expect(client.queueRequests).toContainEqual({ tasks: [created.id] });
     // Settled by the nudge: the poll that was waiting is gone.
     expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+    detach();
+  });
+
+  test("a nudge naming the followed task while the tab is hidden is read once it shows on a live socket", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.spawn();
+    const created = firstCreate(client);
+    await drain();
+    const asked = client.queueRequests.length;
+    const running: Task = { ...created, state: "running" };
+    client.onQueue = async () => ({ tasks: [running], at: 3 });
+    try {
+      setVisibility("hidden");
+      client.nudge({ at: 3, tasks: [created.id] });
+      await drain();
+      expect(client.queueRequests).toHaveLength(asked);
+    } finally {
+      setVisibility("visible");
+    }
+    await until(() => queuedState(store) === "running", "read on showing");
     detach();
   });
 
@@ -1103,6 +1176,133 @@ describe("auto's error paths", () => {
     await drain();
     expect(queuedState(store)).toBe("ready");
     expect(timers.armed(QUEUE_POLL_MS)).toBe(1);
+    detach();
+  });
+
+  test("a leader the relay calls offline while the scheduler reads ready spends polls, so the follow ends", async () => {
+    const client = new ScriptedClient();
+    client.onQueue = async () => {
+      throw new RequestFailure("no_leader", "the relay has no leader to route to");
+    };
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.spawn();
+    for (let n = 0; n < QUEUE_POLLS; n += 1) {
+      timers.fire(QUEUE_POLL_MS);
+      // oxlint-disable-next-line no-await-in-loop -- one poll at a time
+      await drain();
+    }
+    expect(followEnd(store)).toBeDefined();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+    detach();
+  });
+
+  test("a last poll that finds the leader gone parks the follow rather than ending it", async () => {
+    const client = new ScriptedClient();
+    client.onQueue = async () => {
+      throw new RequestFailure("no_leader", "the relay has no leader to route to");
+    };
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.spawn();
+    const created = firstCreate(client);
+    for (let n = 1; n < QUEUE_POLLS; n += 1) {
+      timers.fire(QUEUE_POLL_MS);
+      // oxlint-disable-next-line no-await-in-loop -- one poll at a time
+      await drain();
+    }
+    // The leader is lost while the last poll is out: its leaderless answer is no longer the relay's `offline`.
+    client.onQueue = async () => {
+      client.emit({ scheduler: { kind: "none" } });
+      throw new RequestFailure("no_leader", "no scheduler is leading");
+    };
+    timers.fire(QUEUE_POLL_MS);
+    await drain();
+    expect(followEnd(store)).toBeUndefined();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+
+    client.onQueue = async () => ({ tasks: [{ ...created, state: "ready" }], at: 3 });
+    client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 1 } });
+    await until(() => queuedState(store) === "ready", "the parked last poll read on the leader's arrival");
+    detach();
+  });
+
+  test("a followed task nudged while hidden with no leader is not read on the leader's arrival once another is followed", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.spawn();
+    const created = firstCreate(client);
+    await drain();
+    client.emit({ scheduler: { kind: "none" } });
+    try {
+      setVisibility("hidden");
+      client.nudge({ at: 3, tasks: [created.id] });
+      await drain();
+    } finally {
+      setVisibility("visible");
+    }
+    await drain();
+
+    await store.spawn();
+    await drain();
+    const followReads = (): number => client.queueRequests.filter((r) => r.tasks !== undefined).length;
+    const asked = followReads();
+    client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 1 } });
+    await drain();
+    // The owed read belonged to the first task; the second's chain is on its own timer.
+    expect(followReads()).toBe(asked);
+    detach();
+  });
+
+  test("a leader arriving at a parked follow after a reopen reads the followed task once and re-arms the chain", async () => {
+    const client = new ScriptedClient({ scheduler: { kind: "none" } });
+    client.onQueue = async () => {
+      throw new RequestFailure("no_leader", "no scheduler is leading");
+    };
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.spawn();
+    const created = firstCreate(client);
+    timers.fire(QUEUE_POLL_MS);
+    await until(() => client.queueRequests.length === 1, "the leaderless poll");
+    await drain();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+
+    client.onQueue = async () => ({ tasks: [created], at: 3 });
+    client.emit({ status: "retrying" });
+    client.emit({ status: "open", scheduler: { kind: "ready", deviceId: "dev-a", term: 1 } });
+    await until(() => client.queueRequests.length === 2, "the arrival's read");
+    await drain();
+    expect(client.queueRequests).toHaveLength(2);
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(1);
+    detach();
+  });
+
+  test("a nudge for the followed task shown with no verified leader is read once one verifies", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.spawn();
+    const created = firstCreate(client);
+    await drain();
+    client.emit({ scheduler: { kind: "none" } });
+    const asked = client.queueRequests.length;
+    try {
+      setVisibility("hidden");
+      client.nudge({ at: 3, tasks: [created.id] });
+      await drain();
+    } finally {
+      setVisibility("visible");
+    }
+    await drain();
+    // Refused unsent would have recorded nothing: no read goes out while nobody can answer.
+    expect(client.queueRequests).toHaveLength(asked);
+
+    const running: Task = { ...created, state: "running" };
+    client.onQueue = async () => ({ tasks: [running], at: 4 });
+    client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 1 } });
+    await until(() => queuedState(store) === "running", "the nudged task read on the leader's arrival");
     detach();
   });
 });
@@ -1357,8 +1557,10 @@ describe("start now", () => {
   test("a long stretch with no leader spends no reads, and the ready after it still sends", async () => {
     const client = capable();
     const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
     await store.startNow();
     const created = firstCreate(client);
+    client.emit({ scheduler: { kind: "none" } });
     client.onQueue = async () => {
       throw new RequestFailure("no_leader", "no scheduler is leading");
     };
@@ -1367,8 +1569,11 @@ describe("start now", () => {
       // oxlint-disable-next-line no-await-in-loop -- one poll at a time
       await drain();
     }
-    await poll(client, { ...created, state: "ready" });
+    client.onQueue = async () => ({ tasks: [{ ...created, state: "ready" }], at: 2 });
+    client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 1 } });
+    await until(() => client.runNows.length === 1, "the run-now");
     expect(client.runNows).toEqual([created.id]);
+    detach();
   });
 
   test("reads that reach a leader spend the budget: once spent, the intent lapses unsent and silent", async () => {
@@ -1471,6 +1676,59 @@ describe("start now", () => {
 
     client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 2 } });
     await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toEqual([created.id]);
+    detach();
+  });
+
+  test("with no leader the Start now stops reading too, and asks on the first ready sighting once one leads", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.startNow();
+    const created = firstCreate(client);
+    client.emit({ scheduler: { kind: "none" } });
+    client.onQueue = async () => {
+      throw new RequestFailure("no_leader", "no scheduler is leading");
+    };
+    const asked = client.queueRequests.length;
+    // The follow's poll and the intent's read both come due, and both find nobody to ask.
+    timers.fire(QUEUE_POLL_MS);
+    await until(() => client.queueRequests.length === asked + 2, "both reads");
+    await drain();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+
+    client.onQueue = async () => ({ tasks: [{ ...created, state: "ready" }], at: 2 });
+    client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 3 } });
+    await until(() => client.runNows.length === 1, "the run-now once a leader leads");
+    expect(client.runNows).toEqual([created.id]);
+    detach();
+  });
+
+  test("a Start now whose last read finds the leader gone is parked, not forgotten, and asks once a leader leads", async () => {
+    const client = capable();
+    client.onQueue = async () => {
+      throw new RequestFailure("no_leader", "the relay has no leader to route to");
+    };
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.startNow();
+    const created = firstCreate(client);
+    for (let n = 1; n < QUEUE_POLLS; n += 1) {
+      timers.fire(QUEUE_POLL_MS);
+      // oxlint-disable-next-line no-await-in-loop -- one round at a time
+      await drain();
+    }
+    client.onQueue = async () => {
+      client.emit({ scheduler: { kind: "none" } });
+      throw new RequestFailure("no_leader", "no scheduler is leading");
+    };
+    timers.fire(QUEUE_POLL_MS);
+    await drain();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+
+    client.onQueue = async () => ({ tasks: [{ ...created, state: "ready" }], at: 2 });
+    client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 3 } });
+    await until(() => client.runNows.length === 1, "the run-now once a leader leads");
     expect(client.runNows).toEqual([created.id]);
     detach();
   });
@@ -2179,21 +2437,76 @@ describe("the queue screen", () => {
     expect(store.getState().queueView?.kind).not.toBe("loading");
   });
 
-  test("a nudge while the tab is hidden reads nothing: showing it again re-dials, and the reopen reads", async () => {
+  test("a nudge while the tab is hidden reads nothing; showing it on a live socket reads the whole queue once", async () => {
     const client = new ScriptedClient();
     const store = await loaded(client);
     const detach = store.attach();
     await drain();
     const asked = client.queueRequests.length;
-    document.visibilityState = "hidden";
     try {
+      setVisibility("hidden");
       client.nudge({ at: 2, tasks: ["w-1"] });
       client.nudge({ at: 3 });
       await drain();
       expect(client.queueRequests).toHaveLength(asked);
     } finally {
-      document.visibilityState = "visible";
+      setVisibility("visible");
     }
+    await until(() => client.queueRequests.length === asked + 1, "the catch-up read");
+    expect(client.queueRequests.at(-1)).toEqual({});
+    expect(client.shownAfter).toHaveLength(1);
+    expect(client.shownAfter[0]).toBeLessThan(Infinity);
+
+    // Caught up: showing it again with nothing missed reads nothing more.
+    setVisibility("hidden");
+    setVisibility("visible");
+    await drain();
+    expect(client.queueRequests).toHaveLength(asked + 1);
+    detach();
+  });
+
+  test("a resume that re-dials leaves the catch-up to the reopen; a tab never seen hidden counts as hidden long", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+    const detach = store.attach();
+    await drain();
+    const asked = client.queueRequests.length;
+    setVisibility("visible");
+    await drain();
+    expect(client.shownAfter).toEqual([Infinity]);
+
+    client.onShown = async () => "redialed";
+    setVisibility("hidden");
+    client.nudge({ at: 2 });
+    setVisibility("visible");
+    await drain();
+    expect(client.queueRequests).toHaveLength(asked);
+    // The reopen reads it whole, as it does after any drop.
+    client.emit({ status: "retrying" });
+    client.emit({ status: "open" });
+    await until(() => client.queueRequests.length === asked + 1, "the reopen's read");
+    detach();
+  });
+
+  test("a tab hidden again before its resume's pong keeps what it missed for the next show", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+    const detach = store.attach();
+    await drain();
+    const asked = client.queueRequests.length;
+    const pong = Promise.withResolvers<ResumeOutcome>();
+    client.onShown = () => pong.promise;
+    setVisibility("hidden");
+    client.nudge({ at: 2 });
+    setVisibility("visible");
+    setVisibility("hidden");
+    pong.resolve("live");
+    await drain();
+    expect(client.queueRequests).toHaveLength(asked);
+
+    client.onShown = async () => "live";
+    setVisibility("visible");
+    await until(() => client.queueRequests.length === asked + 1, "the catch-up on the next show");
     detach();
   });
 
@@ -2414,15 +2727,13 @@ describe("authoring a task from the auto form", () => {
     new ScriptedClient({
       machines: [autoMachine("dev-a", { capabilities: [CAPABILITIES.reportedDone] }), autoMachine("dev-b")],
     });
-  const BATCH = { id: "b-1", next: 1 } as const;
   const form = { ...DEFAULT_FORM, prompt: "fix it" };
 
-  test("deps and batch go into the spec, with no `until` unless it was changed, and then reset or advance", async () => {
+  test("deps go into the spec, with no `until` unless it was changed, and then reset", async () => {
     const client = new ScriptedClient();
     const store = new Store(client, {
       ...form,
       after: [{ task: "base", after: "merged" }],
-      batch: BATCH,
     });
     await store.spawn();
 
@@ -2430,15 +2741,10 @@ describe("authoring a task from the auto form", () => {
       client: "pwa",
       prompt: "fix it",
       deps: [{ task: "base", after: "merged" }],
-      batch: { id: "b-1", index: 1 },
     });
     expect(firstCreate(client).spec).not.toHaveProperty("until");
-    // What belongs to the task just stored is cleared; the batch stays open, one further on.
-    expect(store.getState().form).toMatchObject({
-      after: [],
-      until: "merged",
-      batch: { ...BATCH, next: 2 },
-    });
+    // What belongs to the task just stored is cleared.
+    expect(store.getState().form).toMatchObject({ after: [], until: "merged" });
   });
 
   test("a plain form writes none of the authoring fields", async () => {
@@ -2446,22 +2752,6 @@ describe("authoring a task from the auto form", () => {
     await new Store(client, form).spawn();
     for (const field of ["deps", "batch", "until", "linear"])
       expect(firstCreate(client).spec).not.toHaveProperty(field);
-  });
-
-  test("a retry after an unreadable answer re-puts the same member and moves the counter once", async () => {
-    const client = new ScriptedClient();
-    client.onCreate = async () => null;
-    const store = new Store(client, { ...form, batch: { ...BATCH, next: 3 } });
-    await store.spawn();
-    const verdict = store.getState().verdict;
-    if (verdict?.kind !== "unqueued") throw new Error("expected unqueued");
-    expect(store.getState().form.batch?.next).toBe(3);
-
-    client.onCreate = async () => ({ ok: true, landedEarlier: true });
-    await store.retryEnqueue(verdict);
-    expect(client.creates).toHaveLength(2);
-    expect(client.creates[1]?.spec.batch?.index).toBe(3);
-    expect(store.getState().form.batch?.next).toBe(4);
   });
 
   test("settling on the done report appends the instruction, writes `until`, and resets to merged", async () => {
@@ -2505,14 +2795,6 @@ describe("authoring a task from the auto form", () => {
     expect(long.getState().form.prompt).toBe(prompt);
   });
 
-  test("a batch with no index left is refused", async () => {
-    const client = new ScriptedClient();
-    const store = new Store(client, { ...form, batch: { ...BATCH, next: TASK_SPEC_LIMITS.batchIndex + 1 } });
-    await store.spawn();
-    expect(client.creates).toHaveLength(0);
-    expect(store.getState().verdict).toMatchObject({ kind: "unqueued", message: expect.stringContaining("full") });
-  });
-
   test("an edge on a task replaces the one held, and sixteen is the most", () => {
     const store = new Store(new ScriptedClient(), form);
     store.addAfter("a", "opened");
@@ -2527,35 +2809,10 @@ describe("authoring a task from the auto form", () => {
     expect(store.getState().form.after.some((dep) => dep.task === "a")).toBe(false);
   });
 
-  test("starting a batch while one is open keeps its id and counter; after End batch a start is a new batch", () => {
-    const store = new Store(new ScriptedClient(), form);
-    const start = (): void => {
-      store.openSheet("batch");
-      store.startBatch();
-      fake.settle(store);
-    };
-    start();
-    const first = store.getState().form.batch;
-    expect(first).toMatchObject({ next: 1 });
-    expect(store.getState().sheet).toBeNull();
-
-    start();
-    expect(store.getState().form.batch).toBe(first);
-
-    store.openSheet("batch");
-    store.endBatch();
-    fake.settle(store);
-    expect(store.getState().form.batch).toBeNull();
-    expect(store.getState().sheet).toBeNull();
-
-    start();
-    expect(store.getState().form.batch?.id).not.toBe(first?.id);
-  });
-
   test("opening the After sheet reads the queue; other sheets do not", async () => {
     const client = new ScriptedClient();
     const store = new Store(client, form);
-    store.openSheet("batch");
+    store.openSheet("effort");
     await drain();
     expect(client.queueRequests).toHaveLength(0);
     store.openSheet("after");
@@ -2606,5 +2863,105 @@ describe("authoring a task from the auto form", () => {
       prompt: "keep",
       after: [{ task: "base", after: "opened" }],
     });
+  });
+});
+
+describe("attachments", () => {
+  /** A fleet whose verified leader advertises attachments. */
+  function capable(): ScriptedClient {
+    return new ScriptedClient({
+      machines: [autoMachine("dev-a", { capabilities: [CAPABILITIES.attachments] }), autoMachine("dev-b")],
+    });
+  }
+
+  const file = (name: string, text: string, type = "text/plain"): File => new File([text], name, { type });
+
+  test("are offered only while the verified leader advertises them", () => {
+    expect(deriveView(new Store(capable()).getState(), 0).attachments.offered).toBe(true);
+    expect(deriveView(new Store(new ScriptedClient()).getState(), 0).attachments.offered).toBe(false);
+    const unverified = capable();
+    unverified.relay = { ...unverified.relay, scheduler: { kind: "unverified", deviceId: "dev-a", term: 1 } };
+    expect(deriveView(new Store(unverified).getState(), 0).attachments.offered).toBe(false);
+  });
+
+  test("upload in order, then the task is created with their manifest and they leave the form", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "look at these" });
+    store.addFiles([file("a.txt", "first"), file("b.png", "second", "image/png")]);
+    expect(deriveView(store.getState(), 0).attachments.summary).toBe("2 files · 11 B");
+
+    const labels: string[] = [];
+    store.subscribe(() => labels.push(deriveView(store.getState(), 0).button.label));
+    await store.spawn();
+
+    expect(client.uploads.map((bytes) => new TextDecoder().decode(bytes))).toEqual(["first", "second"]);
+    expect(labels).toContain("Uploading 1 of 2…");
+    expect(labels).toContain("Uploading 2 of 2…");
+    const created = firstCreate(client);
+    expect(created.spec.attachments?.map(({ name, type, size }) => ({ name, type, size }))).toEqual([
+      { name: "a.txt", type: "text/plain", size: 5 },
+      { name: "b.png", type: "image/png", size: 6 },
+    ]);
+    expect(store.getState().verdict?.kind).toBe("queued");
+    expect(store.getState().attachments).toEqual([]);
+    // The preview is told files ride along, as a flag: never the manifest.
+    expect(client.previews.at(-1)).toMatchObject({ attachments: true });
+  });
+
+  test("a refused upload creates no task and says why; the retry sends only the files that hadn't stored", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "go" });
+    store.addFiles([file("a.txt", "first"), file("b.txt", "second"), file("c.txt", "third")]);
+    client.onUpload = async (bytes) =>
+      new TextDecoder().decode(bytes) === "second"
+        ? { ok: false, code: "allowance_exhausted", window: "month", retryAfter: 7200 }
+        : { ok: true, id: crypto.randomUUID(), hash: "h".repeat(43) };
+
+    await store.spawn();
+    expect(client.creates).toEqual([]);
+    const verdict = store.getState().verdict;
+    expect(verdict).toMatchObject({ kind: "unqueued", mayHaveLanded: false });
+    expect(verdict?.kind === "unqueued" ? verdict.message : "").toContain(
+      "30-day allowance is spent. Try again in 2 hours",
+    );
+    expect(store.getState().spawning).toBe(false);
+
+    client.uploads.length = 0;
+    client.onUpload = async () => ({ ok: true, id: crypto.randomUUID(), hash: "h".repeat(43) });
+    store.dismissLayer();
+    await store.spawn();
+    expect(client.uploads.map((bytes) => new TextDecoder().decode(bytes))).toEqual(["second", "third"]);
+    expect(firstCreate(client).spec.attachments?.map((ref) => ref.name)).toEqual(["a.txt", "b.txt", "c.txt"]);
+  });
+
+  test("with files the prompt takes the lower bound, refused before anything uploads", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "x".repeat(ATTACHMENT_LIMITS.prompt + 1) });
+    store.addFiles([file("a.txt", "first")]);
+    await store.spawn();
+    expect(client.uploads).toEqual([]);
+    expect(client.creates).toEqual([]);
+    const verdict = store.getState().verdict;
+    expect(verdict?.kind === "unqueued" ? verdict.message : "").toContain(
+      `at most ${ATTACHMENT_LIMITS.prompt} beside attached files`,
+    );
+  });
+
+  test("files on the form block the button once the leader stops taking them, and nothing uploads", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "go" });
+    const detach = store.attach();
+    store.addFiles([file("a.txt", "first")]);
+    client.emit({ machines: [autoMachine("dev-a"), autoMachine("dev-b")] });
+    const view = deriveView(store.getState(), 0);
+    expect(view.button).toMatchObject({ label: "Can't attach files", enabled: false });
+    expect(view.formStatus).toContain("doesn't take attachments yet");
+    await store.spawn();
+    expect(client.uploads).toEqual([]);
+    expect(client.creates).toEqual([]);
+    // Still listed, so they can be removed; removing them frees the form.
+    store.removeFile(store.getState().attachments[0]?.key ?? "");
+    expect(deriveView(store.getState(), 0).button.enabled).toBe(true);
+    detach();
   });
 });

@@ -1,4 +1,5 @@
 import type {
+  AttachmentRef,
   DespawnRequest,
   DespawnResponse,
   ExclaveInfo,
@@ -60,6 +61,17 @@ export function machine(deviceId: string, fields: Partial<Machine> = {}): Machin
     exclaves: [exclave("main", `org:${deviceId}`)],
     status: status({ quota: [obs(0)] }),
     ...fields,
+  };
+}
+
+/** A manifest entry as the PWA would mint it; the scheduler reads none of its fields. */
+export function attachment(i: number): AttachmentRef {
+  return {
+    id: `0b6f0c9e-1a2b-4c3d-8e9f-${i.toString(16).padStart(12, "0")}`,
+    name: `screenshot ${i}.png`,
+    type: "image/png",
+    size: 1024,
+    hash: "A".repeat(43),
   };
 }
 

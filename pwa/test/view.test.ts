@@ -86,6 +86,9 @@ function state(overrides: Partial<AppState> = {}, form: Partial<PersistedForm> =
     pausing: false,
     discarding: false,
     accounts: { aliases: {}, nameable: true, saving: null, notice: null },
+    attachments: [],
+    attachNotice: null,
+    upload: null,
     ...overrides,
   };
 }
@@ -228,7 +231,7 @@ describe("banner and button", () => {
     );
     expect(view.machine).toBeNull();
     expect(view.machineTile).toMatchObject({ value: "Unknown machine", dot: "off" });
-    expect(view.footerStatus).toBe("The pinned machine isn't listed");
+    expect(view.formStatus).toBe("The pinned machine isn't listed");
     expect(view.meta).toBe("0 online · 1 asleep · 0 sessions");
   });
 
@@ -237,13 +240,13 @@ describe("banner and button", () => {
   });
 
   // The task waits for it, so an offline pin is a note, never a block.
-  test("an offline pinned machine still queues, and the footer says the task waits for it", () => {
+  test("an offline pinned machine still queues, and the status line says the task waits for it", () => {
     const asleep = machine({ connected: false, lastSeen: NOW - 3 * 86_400_000, exclaves: [exclave("default")] });
     const view = deriveView(state({ relay: relay({ machines: [asleep] }) }, { machine: "dev-1" }), NOW);
     expect(view.banner).toBeNull();
     expect(view.button).toEqual({ label: "Queue on MacBook Pro", enabled: true, busy: false });
     expect(view.machineTile.dot).toBe("off");
-    expect(view.footerStatus).toBe("MacBook Pro is offline — the task waits for it");
+    expect(view.formStatus).toBe("MacBook Pro is offline — the task waits for it");
   });
 
   test("queuing outranks the other labels", () => {
@@ -415,7 +418,7 @@ describe("the pickers", () => {
     for (const [scheduler, note] of cases) {
       const view = deriveView(state({ relay: relay({ machines: [machine()], scheduler }) }), NOW);
       expect(view.autoAvailability).toEqual({ available: true, reason: null, note });
-      expect(view.footerStatus).toBe(note);
+      expect(view.formStatus).toBe(note);
       expect(view.button).toEqual({ label: "Queue", enabled: true, busy: false });
       expect(view.machineTile).toMatchObject({ value: "Auto", dot: "auto" });
       expect(view.accountTile).toMatchObject({ label: "ACCOUNT", value: "Auto", dot: "auto" });
@@ -426,14 +429,14 @@ describe("the pickers", () => {
     const down = deriveView(state({ relay: { ...leader([mac]), status: "retrying" } }), NOW);
     expect(down.autoAvailability).toEqual({ available: false, reason: "Not connected to the relay", note: null });
     expect(down.machineTile).toMatchObject({ dot: "off" });
-    expect(down.footerStatus).toBe("Not connected to the relay");
+    expect(down.formStatus).toBe("Not connected to the relay");
   });
 
-  test("a machine pin names the machine on the button and in the footer", () => {
+  test("a machine pin names the machine on the button and in the status line", () => {
     const view = deriveView(state({ relay: leader([mac, wsl]) }, { machine: "wsl" }), NOW);
     expect(view.machineTile).toMatchObject({ value: "WSL", dot: "ok" });
     expect(view.button).toEqual({ label: "Queue on WSL", enabled: true, busy: false });
-    expect(view.footerStatus).toBe("Pinned to WSL");
+    expect(view.formStatus).toBe("Pinned to WSL");
   });
 
   test("an account pin shows the account by its alias, else its email", () => {
@@ -460,16 +463,16 @@ describe("the pickers", () => {
     expect(view.accountTile.value).toEndWith("signed in nowhere");
     expect(view.accountTile.dot).toBe("off");
     expect(view.button).toEqual({ label: "Account not signed in", enabled: false, busy: false });
-    expect(view.footerStatus).toEndWith("isn't signed in on any machine");
+    expect(view.formStatus).toEndWith("isn't signed in on any machine");
   });
 
   test("the account gate: an unsupported leader and no leader are refused in their own words", () => {
     const unsupported = deriveView(state({ relay: leader([mac], []) }, { account: "acct-work" }), NOW);
     expect(unsupported.button).toEqual({ label: "Can't pin an account", enabled: false, busy: false });
-    expect(unsupported.footerStatus).toContain("update seanced");
+    expect(unsupported.formStatus).toContain("update seanced");
     const noLeader = deriveView(state({ relay: relay({ machines: [mac] }) }, { account: "acct-work" }), NOW);
     expect(noLeader.button).toEqual({ label: "Can't pin an account", enabled: false, busy: false });
-    expect(noLeader.footerStatus).toContain("No verified scheduler is leading");
+    expect(noLeader.formStatus).toContain("No verified scheduler is leading");
     // A machine pin alone needs no gate.
     expect(deriveView(state({ relay: relay({ machines: [mac] }) }, { machine: "mac" }), NOW).button.enabled).toBe(true);
   });
@@ -660,22 +663,11 @@ describe("deriveReportedAvailability", () => {
     );
   });
 
-  test("the authoring tiles say what is set", () => {
-    const view = deriveView(
-      state(
-        {},
-        {
-          after: [{ task: "t-1", after: "merged" }],
-          batch: { id: "b", next: 3 },
-        },
-      ),
-      NOW,
-    );
+  test("the After tile says what is set", () => {
+    const view = deriveView(state({}, { after: [{ task: "t-1", after: "merged" }] }), NOW);
     expect(view.afterTile).toMatchObject({ label: "AFTER", value: "1 task · merged" });
-    expect(view.batchTile).toMatchObject({ label: "BATCH", value: "#3" });
     const bare = deriveView(state(), NOW);
     expect(bare.afterTile.value).toBe("None");
-    expect(bare.batchTile.value).toBe("Off");
   });
 });
 

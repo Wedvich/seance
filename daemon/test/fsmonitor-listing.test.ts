@@ -25,8 +25,13 @@ describe.skipIf(seams === null || Bun.which("lsof") === null)("fsmonitor listing
     await mkdir(root);
     await mkdir(join(base, "bin"));
     const script = join(base, "bin", "git");
-    await writeFile(script, '#!/bin/sh\nexec 4<"$STANDIN_ROOT"\nwhile :; do sleep 1; done\n');
+    await writeFile(
+      script,
+      '#!/bin/sh\n[ "$1" = warm ] && exit 0\nexec 4<"$STANDIN_ROOT"\nwhile :; do sleep 1; done\n',
+    );
     await chmod(script, 0o755);
+    // macOS scans a never-executed file on first exec, queued machine-wide behind other shards' (CLAUDE.md, Testing): pay it here, outside the poll's window.
+    await Bun.spawn([script, "warm"], { stdout: "ignore", stderr: "ignore" }).exited;
     standIn = Bun.spawn([script, "fsmonitor--daemon", "run", "--detach", "--ipc-threads=8"], {
       env: { ...process.env, STANDIN_ROOT: root },
       stdout: "ignore",

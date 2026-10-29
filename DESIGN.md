@@ -123,7 +123,8 @@ its Tailscale lockdown defeats the relay's purpose).
   read every record and create a `task:` one (`STORE_PREFIXES`), never
   overwrite or delete. Anti-junk hygiene only — the PSK is the trust boundary;
   readers skip registry entries and records that don't decrypt or bind
-  (`bindTaskRecord`).
+  (`bindTaskRecord`). Attachments (built 2026-10-28) give it two HTTP routes:
+  upload sealed objects within the Hub's allowance, and download one by id (Attachments).
 
 ## Threat model
 
@@ -162,8 +163,13 @@ task that never ran (cancelled or marked done while waiting, `queue_expired`,
 record's tombstone keeps its key and version for `STORE_TOMBSTONE_MS` (30 days)
 but no envelope. Residual: Cloudflare's point-in-time recovery can restore an
 earlier store state for up to 30 days, so a stripped prompt stays recoverable
-that long — still sealed under the PSK. The bearer
-token is not an asset in the same sense — see its blast radius above.
+that long — still sealed under the PSK. Attachments (built 2026-10-28) add three
+resting places, all for a file a PSK holder chose. The contents sit sealed in R2 for 30 days
+plus R2's lifecycle lag of about a day. The names, types and sizes sit in the task record's
+sealed manifest until the leader leans the finished task. The plaintext sits on the machine
+that ran the task, in a 0700 `stateDir()/attachments/<taskId>`, until reap finds its worktree
+gone or it is 30 days old. Claude's transcript keeps whatever the session read, as it keeps
+the prompt. The bearer token is not an asset in the same sense — see its blast radius above.
 
 **Séance's own footprint.** The daemon is structurally a remote access tool and
 reads as one to any EDR:
@@ -521,6 +527,18 @@ Séance's noise is cover for a real intruder.
    see the registry — but all they send the scheduler is fire-and-forget
    `session-event`s, sealed under the PSK, so such a leader learns their timing
    and nothing else.
+   **Attachments** (built 2026-10-28; Attachments). A holder
+   can `PUT` junk objects and `GET` any object whose id it knows. The junk is bounded by the
+   Hub's upload allowance: 9.5 GB in any trailing 30 days, 1 GB and 300 uploads an hour, so
+   R2 stays inside its free tier and the DO's row writes stay well under the day's. Rotating
+   the token stops more junk, and R2's lifecycle rule removes it within 30 days. The same
+   allowance is the owner's too, so a holder spending it denies uploads until the window
+   rolls: availability, as `store_full` is. A download is ciphertext under the PSK. Ids
+   are random UUIDs and no route lists them; the relay's failure lines name an id, as its
+   store refusals name a key. There is no line for an accepted upload or download, which
+   would be the timeline this item refuses. What stays visible is the store's metadata
+   class: each object's length (its plaintext length plus 28, unpadded) and, by timing,
+   how many files one task carried.
 4. **Relay compromise** (T1557 — the relay _is_ the AiTM position). Handled:
    AAD binding makes re-addressing fail closed. Residual is availability and
    traffic analysis, both accepted — the accepted kind is a relay that stops
@@ -587,6 +605,14 @@ Séance's noise is cover for a real intruder.
    it or no longer holds it (a week, 128 launches). It needs the relay
    itself, the task is one a PSK holder once enqueued, and nothing here forges
    a task or reads a prompt.
+   Attachments (built 2026-10-28) add nothing the relay can read or forge. Each
+   object is AES-GCM under the PSK with its id in the AAD, and its SHA-256 sits in the
+   manifest, sealed inside the task record. A relay serving other bytes, an old object, or
+   one re-filed under another id is refused by the hash before decryption, and the spawn is
+   refused `attachment_unavailable`. That is availability, the residual this item already
+   accepts. Rolling a task record back to an older version carries that version's manifest,
+   whose objects still match their hashes. That is the rollback above, closed by the same
+   floor and ledger refusal.
 5. **Supply chain** (T1195.001). `git pull` + `launchctl kickstart -k` is
    unsigned; a compromised repo is RCE on every machine, onto boxes that
    already carry launchd persistence. Bounded by 2FA and branch protection
@@ -620,6 +646,11 @@ Séance's noise is cover for a real intruder.
    or worktree config sets such a family, or whose `info/attributes` names a
    merge driver, and name the family in their failure (Reap, "Repo-local
    config"). The owner's global and system config still apply.
+   An attachment (built 2026-10-28) is one more thing a PSK holder hands the
+   session, read under the same permission mode as the prompt. Its name reaches the seed only
+   as one `JSON.stringify`'d line that refuses control characters. Its file lands under a fixed
+   `<index>.<ext>`, so no upload becomes a `CLAUDE.md`, a `.claude/` path or a separator in a
+   directory Claude Code was told to read (Attachments, "The daemon").
 
 **What "structured payloads only" does and does not mean.** It stops wire input
 being interpolated into the daemon's own shell construction. It is not a
@@ -816,6 +847,19 @@ nothing checked it. The last is the gap they leave.
   `github.com`'s pull-request shape. The residual: a session can make the leader read any PR
   in any repo the operator's token can see, and the result lands only in a sealed record, so the worst
   case is a session settling its own task early by naming a merged PR. `gh`'s stderr is never logged.
+- **Attachments** (built 2026-10-28) carry invariants of their own, recorded under
+  Attachments and as requirements in `CLAUDE.md`. In short:
+  - A daemon fetches only from its own config's relay origin, by an id held to
+    `ATTACHMENT_ID_PATTERN`, and only for a spawn sealed by the scheduler.
+  - The hash is checked before decryption, and any failure refuses the spawn.
+  - Files land under fixed names, and the directory reaches the command line only
+    through `shq()`.
+  - The relay never reads a body and logs no accepted transfer.
+  - The audit holds counts and bytes, never names.
+  - An older leader holds an attachment record unreadable (`ATTACHMENTS_DEP_SENTINEL`).
+  - The leader dispatches a task carrying them only to a machine advertising
+    `CAPABILITIES.attachments`, with the manifest unchanged, and the write that finishes
+    the task drops it.
 - The log is local and rewritable by whoever compromised the machine, so it is
   evidence for the honest-machine case only. There is no off-box copy in v1.
 
@@ -1029,7 +1073,8 @@ The Durable Object persists a machine registry:
   missed pong makes the daemon close and redial; a daemon socket that stops
   pinging is swept by the relay's alarm.
 - **The app socket heartbeats too**, same 30s ping / 10s pong, answered by the
-  same DO auto-response. It is the app leg's only liveness signal: presence is
+  same DO auto-response. It is the app leg's liveness signal while the page runs
+  (a resume adds its own probe, below, under "Sessions are fanned out"): presence is
   pushed, not polled, so a silently dead app socket (network switch, mobile
   doze with the screen on) would otherwise freeze the machine list with no
   symptom until a spawn failed into it. A missed pong re-dials, and the fresh
@@ -1139,6 +1184,9 @@ Who owns each frame in code — the place to change when a frame changes:
 | record `quota` (at rest)                                            | `sealFleetQuotaRecord` (`shared/src/fleet-quota.ts`), by each daemon's fleet quota writer (`daemon/src/fleet-quota.ts`) on its own socket                                                                                                                                                                                                                                          | `openFleetQuotaRecord` (`shared/src/fleet-quota.ts`) — `openAtRest`, sealed `to: "app"`, `parseFleetQuotaRecord`, sealed `version` the store's — by the app-client's `refreshFleetQuota` (the PWA and the leader's leg) and the writer; stored under `quota:fleet` (_Scheduler_, "Fleet quota record")                                   |
 | records `account` / `settings` (at rest)                            | `account` written by `sealAccountRecord` (`shared/src/account-record.ts`) from the PWA's rename; `settings` unwritten so far                                                                                                                                                                                                                                                       | `account`: `openAccountRecord`, which opens at rest then `parseAccountRecord` and binds version and key; `settings`: `openAtRest` with its op, then `parseSettingsRecord` (`shared/src/parse.ts`); stored under `account:` and `settings:` (_Scheduler_, "The store")                                                                    |
 | op `push-subscribe` (→`"scheduler"`)                                | not yet sent (M4, Web Push)                                                                                                                                                                                                                                                                                                                                                        | not in `SCHEDULER_OPS`: `daemon/src/leader.ts` answers it `invalid_request` as any op it does not handle, and a non-leading daemon drops it (`daemon/src/relay-client.ts`: not a scheduler op), so the app sees a timeout, not `not_leader`, until the op joins `SCHEDULER_OPS`; its handler will parse with `parsePushSubscribeRequest` |
+| HTTP `PUT /attachments/<id>`                                        | built: `RelayClient.uploadAttachment` (`shared/src/app-client.ts`) from the PWA's spawn form (`pwa/src/store.ts`), sealed by `sealAttachment`, with `Authorization: Bearer`                                                                                                                                                                                                        | built: `relay/src/attachments.ts`, after `Hub.reserveUpload` (`relay/src/allowance.ts`); into R2 through the `ATTACHMENTS` binding                                                                                                                                                                                                       |
+| HTTP `GET /attachments/<id>`                                        | built: `daemon/src/attachments.ts`, before the launch ledger's write-ahead record, at `attachmentUrl` of its own config's `relayUrl`                                                                                                                                                                                                                                               | built: `relay/src/attachments.ts`, streamed from R2                                                                                                                                                                                                                                                                                      |
+| field `attachments`                                                 | built: `TaskSpec` and `SpawnRequest`, from the PWA's `createTask` after every upload is `stored` (`pwa/src/store.ts`); the leader's `#dispatch` (`scheduler/src/scheduler.ts`)                                                                                                                                                                                                     | `parseAttachmentManifest` (`shared/src/parse.ts`), in `parseTaskSpec` and the daemon's `isSpawnRequest`; acted on in `handleSpawn` (`daemon/src/handlers.ts`)                                                                                                                                                                            |
 
 `sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
 over the local op socket, arriving at the same `daemon/src/handlers.ts` routing.
@@ -1367,8 +1415,8 @@ requesting socket only.
   opened but was not shaped like a `MachineInfo`, names its sender instead.
   Payloads are never logged, on any tier.
 - **`OP_TIMEOUT_MS`** lives in `shared/` (sessions 10s, rescan 15s, spawn
-  90s, despawn 20s, metrics 15s) because the right values derive from daemon internals — `exec.ts`'s 60s
-  command timeout plus `spawn.ts`'s 3s pane-death check — and would silently
+  210s, despawn 20s, metrics 15s) because the right values derive from daemon internals — an attachment
+  download's 120s deadline plus `exec.ts`'s 60s command timeout and `spawn.ts`'s 3s pane-death check — and would silently
   drift if kept in PWA code. It is a backstop; the daemon returns a structured
   error on its own.
 - **An oversized reply becomes `too_large`, for every op.** The relay drops an
@@ -2584,7 +2632,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   one store write carrying the decision; an unplaceable task's decision stays in memory
   (`lastDecision`), so the store sees one write per transition and none per tick. **The
   pass never awaits a spawn** (M2 review, 2026-10-17): each is launched and tracked, so one
-  machine slow to answer (a spawn's 90s timeout) holds no other placement, TTL or absence
+  machine slow to answer (a spawn's 210s timeout) holds no other placement, TTL or absence
   check behind it, and one that throws cuts no pass short — its fault goes to the host's
   `onError`. A verdict applies only to the reservation it answers (same machine, same
   expiry), and a reservation whose spawn is still out skips the TTL check below, its
@@ -2760,8 +2808,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   nulls a batch without a strategy, and its `parseTaskSpec` the whole spec, so it cannot read a
   batched task written since: an old client drops it from its list (per task, the rest still
   show), an old leader reads the record as malformed and leaves it (owner accepted the window,
-  2026-10-27). The PWA drops a persisted open batch carrying a non-`auto` strategy, so its next
-  enqueue starts a new batch. A reader drops an older leader's `batch_order` and `cap_reached`
+  2026-10-27). The PWA dropped a persisted open batch carrying a non-`auto` strategy, so its next
+  enqueue started a new batch (since 2026-10-29 it authors no batches and drops any open one). A reader drops an older leader's `batch_order` and `cap_reached`
   `scope: "batch"` as unknown reasons — the reason, never the candidate or the decision (as
   for any reason a leader ahead mints) — so dropping them needed no tolerant step.
   Rejected (owner, 2026-10-26), both built in M3 and removed:
@@ -2881,7 +2929,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   never pruned, so they expire instead ("Expiry", below). `MemoryQueueStore` refuses
   creates past `maxTasks` (`MAX_TASKS`) as the relay does, tombstones counting toward
   nothing.
-- **A finished task keeps no prompt** (2026-10-18, owner), **and only its decision's winner**
+- **A finished task keeps no prompt** (2026-10-18, owner), **nor attachment manifest** ("Attachments", 2026-10-28), **and only its decision's winner**
   (M3 review P4, 2026-10-18). `lean` — `forgetPrompt` (`task.ts`) plus the cut to the winner
   `too_large` already made — runs in `#update`, the one write path, as for the clocks, so the
   write that moves a task to `done`, `failed` or `cancelled` carries `spec` without `prompt`
@@ -3122,7 +3170,8 @@ error.
   after an `account:` write. It is relay plaintext, so the client checks the prefix and
   `isStoreKey` before using the key, uses the version only to skip a re-read it already holds, and
   reads through `getAccountRecord`, the same open path as a listing. On open (and on every re-dial,
-  since nudges sent while down are lost) the PWA lists `account:` once; a first listing the relay
+  since nudges sent while down are lost, and on showing a tab that ignored one while hidden) the
+  PWA lists `account:` once; a first listing the relay
   refused is retried once after a few seconds, since the list bucket is shared by every app. A
   rename made before a listing landed reads its key first, so it does not report a conflict with
   a record the client never saw. The PWA keeps the version of every key it has seen, unreadable
@@ -3518,6 +3567,700 @@ for the lot with its own `gh`.
   fact only one reader needs. Webhooks: the relay is blind and holds no secrets worth a
   GitHub-facing endpoint; later, if polling's latency ever matters. REST per PR: one call each,
   three for checks, against one per fifty.
+
+## Attachments — built 2026-10-28
+
+Files a task carries to its session: picked or pasted in the PWA, sealed there under the
+PSK, stored in R2 behind the relay Worker, downloaded by the daemon the leader placed the
+task on, and handed to the Claude session as local paths. This section is the contract
+the build (tasks 2–7, "Who builds what" below) works against. Until a part lands, its
+names exist only here. Each task marks its part built in this section and adds the
+invariants it makes true to the list in `CLAUDE.md`, as earlier milestones did.
+
+### Decided by the owner (2026-10-28)
+
+- **PWA only** for now: no MCP, CLI or Raycast surface. Any file type. Originals are
+  uploaded unmodified, with no recompression and no conversion.
+- **Limits**: 30 MiB a file (plaintext), at most 10 files and 100 MiB a task.
+- **The manifest** (per file: id, display name, MIME type, size, hash) rides the task
+  spec and the spawn request the leader dispatches. Since M4 the PWA sends no direct
+  spawn, so a task record is the only path in.
+- **Storage**: an R2 bucket bound to the relay Worker. The Worker proxies uploads and
+  downloads through the binding, with no presigned URLs. Objects expire by a 30-day
+  bucket lifecycle rule, the same as admission's age limit (`STORE_TOMBSTONE_MS`), and
+  are never deleted on fetch, so a task placed again can fetch again.
+- **Blindness**: the PWA seals each file under the PSK before upload. Raw-bytes AES-GCM,
+  not the JSON envelope, under its own AAD.
+- **Relay routes**: `PUT` and `GET /attachments/<id>`, with the bearer token in the
+  `Authorization` header (`fetch` can set one, unlike a WebSocket). Ids follow a fixed
+  pattern, uploads are create-only, and the size is checked against the declared length
+  before any byte is read.
+- **Upload allowance**, checked in the Hub DO before an upload is accepted: at most 9.5 GB
+  in any trailing 30 days and 1 GB an hour. Objects expire at 30 days, so the first bound
+  keeps live storage under R2's 10 GB free tier. A refused upload gets its own status.
+- **Order**: upload every file, then create the task with the manifest. A failed upload
+  creates no task.
+- **Capability `attachments`**: advertised by a daemon that fetches them. The leader routes
+  an attachment task only to such daemons, and the PWA offers attaching only when the
+  verified leader advertises it. An older leader must find the record unreadable rather
+  than strip the field.
+- **Daemon**: downloads before launch, from the relay origin in its own config only. It
+  verifies, decrypts and writes under `stateDir()/attachments/`, passes the directory with
+  `--add-dir`, and refuses the spawn `attachment_unavailable` on any failure: there is
+  never a session without its files. It audits the count and total bytes, never names. A
+  continuation reuses the directory. Cleanup happens at reap and by age.
+- **No Cloudflare operation by any build task**: the owner creates the bucket and its
+  lifecycle rule (README, setup step 2).
+
+### Where the decisions met the code
+
+Three decisions could not stand as worded once measured against the code. Each was fixed
+as follows, without reopening the decision.
+
+- **The manifest does not fit the create cap at the decided bounds.** `parse.test.ts`
+  seals a create with every field at its bound, two UTF-8 bytes a character, to 26,932
+  bytes against `STORE_CREATE_MAX_CT_LENGTH`'s 28,672: 1,740 bytes of room. Ten manifest
+  entries with _empty_ names and a 127-byte type already seal to 30,448. The id (36), hash
+  (43), size and keys cost about 140 bytes an entry before any name. Tightening the name
+  alone cannot fit, and the owner ruled out raising the cap: the 12 KiB above it is what
+  the leader's writes need (`STORE_MAX_CT_LENGTH`). **Fix: a task that carries
+  attachments takes a lower prompt bound**, `ATTACHMENT_LIMITS.prompt` (6,144 UTF-16
+  units, against `TASK_REQUEST_LIMITS.prompt`'s 8,192), and names are bounded at 100
+  units. Measured 2026-10-28 with ten entries, each name 100 two-byte characters and each
+  type 127 bytes, the dep sentinel below included, beside every other field at its bound:
+  27,692 bytes, 980 under the cap. A name bound of 128 measured 28,436, too close to keep.
+  Three-byte text fits less, as it already does for the prompt (the sealer's length check
+  refuses it, `STORE_CREATE_MAX_CT_LENGTH`). With the leader's writes on top at every
+  bound and ten candidates, an unfinished record carrying the manifest seals to 40,108
+  bytes against `STORE_MAX_CT_LENGTH`'s 40,960 (task 2, `parse.test.ts`). A `failure` at
+  its bound would push it over, but only a `failed` record carries one, and the write
+  that finishes a task drops the manifest (`lean`, below); past the cap, the leader's
+  `too_large` retry cuts the decision to its winner regardless. Rejected: dropping the per-file `id` for
+  `<taskId>.<index>` (saves ~40 bytes an entry, but reopens a decided field and ties
+  uploads to a task id minted before any upload succeeds), and shorter JSON keys (the
+  saving is a few bytes an entry, at the price of a second naming scheme).
+- **The `pin.exclave` sentinel would not stop today's leader.** `PIN_SENTINEL` works
+  because a leader older than `pinAccount` (#303) refuses an empty exclave. This build's
+  `parsePin` ignores `exclave` altogether, so a leader on today's code, the one an
+  `attachments` build upgrades from, would parse the spec without `attachments`. Every write it
+  makes (reserve, place, settle) would then seal that stripped spec back, and the task would
+  run without its files. **Fix: a dep sentinel.** The one task sealer
+  (`taskRecordAtRest`) appends `ATTACHMENTS_DEP_SENTINEL`, `{ task: "", after: "merged" }`,
+  to `spec.deps` whenever the spec carries `attachments`. Every `parseDep` since task
+  records began (M3 item 2, #161) refuses a dep whose `task` fails `isTaskId`, and any
+  malformed dep nulls the whole spec. So every older leader holds the record unreadable,
+  whatever it ignores. This build's `parseTaskSpec` drops the sentinel (exactly
+  `task: ""` with `after: "merged"`) before applying the `TASK_SPEC_LIMITS.deps` bound, so
+  a spec never carries it, and deps that were the sentinel alone read as absent, as the
+  spec was sealed. It drops it only beside a manifest: a sentinel without `attachments` is
+  a record something stripped the files from, and nulls the spec. Any other malformed dep
+  still nulls the spec. The sentinel is a sealing artifact like
+  `pin.exclave`, and the `pin.account` sentinel stays as it is. An older PWA lists such a
+  record as unreadable and offers **Clear**. That is harmless: the new leader reads the
+  record, so its `discard` answers `task_not_found`.
+- **The spawn timing needs a write-ahead order, not only a longer timeout.** The launch
+  ledger is write-ahead (`ctx.tasks.launch` in `handleSpawn`), and a leader whose
+  reservation outlives its TTL asks `sessions`. A task in neither the ledger nor a live
+  pane is proof it never landed, and the task goes back to `ready`. **Fix**:
+  - The download runs **before** the write-ahead record. A refused fetch then leaves no
+    ledger entry, and a restart mid-download leaves nothing `interrupted` (a leader never
+    re-dispatches an interrupted task). The next TTL check proves the task never landed and
+    routes it again.
+  - The daemon abandons the download at `ATTACHMENT_FETCH_DEADLINE_MS` (120 s, all files
+    together). The leader's wait for a spawn reply covers that plus today's launch budget:
+    `OP_TIMEOUT_MS.spawn` goes from 90 s to 210 s.
+  - The reservation outlives the reply wait: `reservationTtlMs` goes from 120 s to 240 s.
+    A daemon past its deadline launches nothing, so no launch can start after the TTL check
+    has proved the task never landed.
+  - 120 s covers 100 MiB at about 7 Mbit/s. A slower link refuses the spawn, so the task
+    fails and is not silently retried.
+  - Both changes are uniform rather than per task. A dispatch whose reply goes missing
+    now waits 240 s for its TTL check instead of 120 s. A dispatch that provably never
+    arrived still returns to `ready` at once.
+  - `UPDATE_DRAIN_MS` (120 s) is unchanged: the restart drain holds a launch from its
+    record on, which comes after the download.
+
+### Limits and names (shared, `shared/src/types.ts`)
+
+```ts
+export const ATTACHMENT_LIMITS = {
+  files: 10,
+  fileBytes: 30 * 1024 * 1024, // plaintext, per file
+  totalBytes: 100 * 1024 * 1024, // plaintext, per task
+  name: 100, // UTF-16 units
+  type: 127, // ASCII
+  prompt: 6_144, // TaskSpec.prompt bound for a task carrying attachments
+} as const;
+export const ATTACHMENT_OVERHEAD_BYTES = 28; // IV_BYTES + AEAD_TAG_BYTES
+export const ATTACHMENT_MAX_OBJECT_BYTES = ATTACHMENT_LIMITS.fileBytes + ATTACHMENT_OVERHEAD_BYTES;
+export const ATTACHMENT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+export const ATTACHMENT_HASH_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
+export const ATTACHMENT_PATH = "/attachments/";
+export const ATTACHMENT_OP = "attachment";
+export const ATTACHMENT_FETCH_DEADLINE_MS = 120_000;
+export const ATTACHMENT_RETENTION_MS = STORE_TOMBSTONE_MS;
+export const ATTACHMENT_ALLOWANCE = {
+  windowHours: 720, // 30 days; summed over 721 hour buckets, so any trailing 30 days is covered
+  windowBytes: 9_500_000_000,
+  hourBytes: 1_000_000_000,
+  hourUploads: 300,
+} as const;
+export const ATTACHMENTS_DEP_SENTINEL = { task: "", after: "merged" } as const;
+
+export interface AttachmentRef {
+  readonly id: string; // ATTACHMENT_ID_PATTERN: a crypto.randomUUID() the PWA mints per file
+  readonly name: string; // display only: the seed text, the PWA
+  readonly type: string; // MIME, lowercase type/subtype, no parameters
+  readonly size: number; // plaintext bytes
+  readonly hash: string; // base64url SHA-256 of the stored object
+}
+```
+
+- `TaskSpec.attachments?: readonly AttachmentRef[]` and
+  `SpawnRequest.attachments?: readonly AttachmentRef[]` share one parser,
+  `parseAttachmentManifest` (`shared/src/parse.ts`): `parseTaskSpec` uses it, and so does the
+  daemon's `isSpawnRequest` from task 5. Until then `isSpawnRequest` refuses any
+  `attachments` as malformed, as it refuses `baseBranch` until stacking lands: a daemon of
+  tasks 2–4 must not launch a session without the files it was sent. Its rules:
+  - Absent means none, and an empty array is refused.
+  - 1 to `files` entries, ids unique within the manifest.
+  - Every `size` is a non-negative integer up to `fileBytes`, and their sum is at most
+    `totalBytes`.
+  - `name` is 1 to `name` units with no C0 or C1 control character, no DEL and no
+    U+2028/U+2029, so it stays one line in the seed.
+  - `type` is at most `type` bytes and matches
+    `^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$`.
+  - `hash` matches `ATTACHMENT_HASH_PATTERN`.
+  - Anything malformed nulls the spec or request, never drops the field: a task without
+    the files it was given must not run.
+- `parseTaskSpec` also refuses `attachments` with `mode: "continue"`, and a prompt longer
+  than `ATTACHMENT_LIMITS.prompt` when `attachments` is present. The prompt bound applies
+  to the combined text, the report instruction included, as `TASK_REQUEST_LIMITS.prompt`
+  does.
+- `CAPABILITIES.attachments = "attachments"`. A daemon fetches and seeds attachments, and a
+  leader routes, dispatches and leans them. One build does both, and a daemon advertises it
+  only from the build that has both parts (task 5).
+- `SPAWN_ERROR_CODES` gains `"attachment_unavailable"`, placed before `launch_error`. It
+  is a daemon refusal, so the leader settles the task `failed` (`verdict` in
+  `scheduler/src/settle.ts`), with a message naming the file by index and the reason, never
+  by name.
+- `Reason` gains `{ code: "attachments_unsupported" }` (filtered: the machine does not
+  advertise `attachments`). `parseReason` and `scheduler-text.ts` render it as "its daemon
+  can't fetch attachments yet (needs seanced update)".
+
+### Sealing (`shared/src/crypto.ts`)
+
+- **Object**: `iv (12 bytes) ‖ AES-256-GCM ciphertext ‖ tag (16 bytes)`, under the PSK's
+  AES key (`importPsk`). A stored object is plaintext length plus
+  `ATTACHMENT_OVERHEAD_BYTES`.
+- **AAD**: the UTF-8 bytes of `` `${ATTACHMENT_OP}|1|${id}` `` (`attachment|1|<id>`). It
+  binds the op and the id: an object re-filed under another id does not open. An envelope's
+  AAD is `` `${v}|${to}|${from}` ``, which always starts with the decimal protocol version,
+  so no envelope AAD can equal an attachment's. A raw object therefore cannot open as an
+  envelope, nor an envelope as an object. `ATTACHMENT_OP` is **not** added to
+  `AT_REST_OPS`: those name the `op` inside an envelope's plaintext, and an attachment has
+  no envelope. Its op lives in the AAD, where no other blob's can.
+- **Hash**: base64url, unpadded, SHA-256 of the **whole stored object**. Taking it over
+  the ciphertext lets the daemon check what it downloaded before it decrypts. It also pins
+  the manifest entry, which is sealed inside the task record, to one exact object, so a
+  relay serving any other bytes under the id fails before AES runs.
+- Functions:
+  - `mintAttachmentId(): string` is `crypto.randomUUID()`, the one way an id is minted.
+  - `sealAttachment(key, id, bytes): Promise<Uint8Array>` returns the object.
+  - `openAttachment(key, id, object): Promise<Uint8Array>` throws on a wrong length,
+    auth failure or wrong id. Both refuse an id outside `ATTACHMENT_ID_PATTERN` before
+    any AES runs.
+  - `attachmentHash(object): Promise<string>`.
+  - `attachmentUrl(relayUrl, id): string` lives in `shared/src/relay-url.ts`, beside
+    `appRelayUrl`. It maps `ws:` to `http:` and `wss:` to `https:`, strips a trailing
+    `DAEMON_PATH` or `APP_PATH`, and appends `ATTACHMENT_PATH + id`, dropping any query or
+    fragment so no token rides the URL. The daemon calls it on its config's `relayUrl`, and
+    the PWA on `VITE_RELAY_URL`.
+- Rejected:
+  - Sealing through the JSON envelope: base64 inside JSON costs a third more bytes on a
+    30 MiB file and needs the whole string in memory twice.
+  - A key derived for attachments by HKDF: the AAD already separates the domain, and
+    random 96-bit IVs stay far below GCM's per-key limit at this volume.
+
+### The relay: R2 and the routes (`relay/src/attachments.ts`) — built 2026-10-28
+
+- **Binding**: `ATTACHMENTS: R2Bucket` in `relay/src/env.ts`, from
+  `"r2_buckets": [{ "binding": "ATTACHMENTS", "bucket_name": "seance-attachments" }]` in
+  `relay/wrangler.jsonc`. The R2 key is the attachment id as it stands. The bucket holds
+  nothing else, and an object carries no `httpMetadata` or `customMetadata`, so no name or
+  type reaches R2. `relay/test/layering.test.ts` pins the env's fields: `ATTACHMENTS` joins
+  that list deliberately. A bucket binding can carry no key in, only the bucket's own
+  ciphertext. The same test gains a rule that no file under `relay/src` reads a body:
+  no `.arrayBuffer(`, `.bytes(`, `.text(`, `.blob(`, `.formData(`, `.json(` or
+  `.getReader(`.
+- **Routing** (`relay/src/index.ts`): a path starting with `ATTACHMENT_PATH` goes to
+  `handleAttachment(req, env)` before `roleForPath`. Order:
+  1. **`OPTIONS`**: the CORS preflight, answered `204` with no token (a preflight never
+     carries one) and without waking the DO.
+  2. **The token**, from `Authorization: Bearer` only (never `?t=`), through
+     `tokenMatches`.
+  3. **The method**.
+  4. **The id**, against `ATTACHMENT_ID_PATTERN`.
+  5. **For a `PUT`, the length**: `Content-Length` must be present and between
+     `ATTACHMENT_OVERHEAD_BYTES` and `ATTACHMENT_MAX_OBJECT_BYTES`.
+  6. **For a `PUT`, the allowance** (the Hub, below).
+  7. **For a `PUT`, the put**: `req.body` goes straight to `env.ATTACHMENTS.put(id, req.body,
+     { onlyIf: new Headers({ "if-none-match": "*" }) })`. The runtime holds the stream to
+     its declared length and no JS touches the bytes. A put whose precondition fails
+     resolves `null`, which is `exists`.
+
+  An unauthenticated caller never wakes the DO, as with the sockets.
+
+- **Create-only is defence in depth, not integrity.** The hash check is what refuses
+  substituted bytes. If the binding turns out not to honour `If-None-Match: *` (task 3
+  proves it under Miniflare and task 7 end to end), the fallback is `head` then `put`. Its
+  race lets a token holder who already knows a fresh id overwrite it with junk, which the
+  daemon refuses `attachment_unavailable`: availability, the class item 3 already
+  accepts.
+- **`GET`**: `env.ATTACHMENTS.get(id)` → `200`, the object's body streamed with
+  `Content-Type: application/octet-stream`, `Content-Length` and `Cache-Control: no-store`.
+  Absent or expired is `404 not_found`. No DO, no allowance: the Workers free plan's
+  100,000 requests a day already caps reads below R2's 10 million Class B operations a
+  month.
+- **Statuses**: every non-`2xx` body, and the `PUT`'s `201`, is JSON
+  `{ "code": AttachmentHttpCode }` (`ATTACHMENT_HTTP_CODES` in `shared/src/types.ts`):
+
+  | Status | `code`                | When                                                                                    |
+  | ------ | --------------------- | --------------------------------------------------------------------------------------- |
+  | 201    | `stored`              | `PUT` stored                                                                            |
+  | 400    | `invalid_length`      | `Content-Length` below `ATTACHMENT_OVERHEAD_BYTES`                                      |
+  | 401    | `unauthorized`        | missing or wrong token                                                                  |
+  | 404    | `invalid_id`          | id outside `ATTACHMENT_ID_PATTERN`                                                      |
+  | 404    | `not_found`           | `GET` of an id the bucket does not hold                                                 |
+  | 405    | `method_not_allowed`  | anything but `PUT`, `GET`, `OPTIONS`                                                    |
+  | 409    | `exists`              | `PUT` of an id already stored                                                           |
+  | 411    | `length_required`     | `PUT` without `Content-Length`                                                          |
+  | 413    | `too_large`           | `Content-Length` past `ATTACHMENT_MAX_OBJECT_BYTES`                                     |
+  | 429    | `allowance_exhausted` | the Hub refused (below); the body adds `window: "hour" \| "month"` and `retryAfter` (s) |
+  | 503    | `storage_error`       | R2 threw, a body shorter than its `Content-Length` included                             |
+
+  The allowance answers `429`, which nothing else on the route returns, so the PWA can
+  name it: "upload limit reached, try again in N minutes".
+
+- **CORS**: the PWA is another origin, and a `PUT` with `Authorization` needs a preflight.
+  - The preflight's answer: `Access-Control-Allow-Origin: *`,
+    `Access-Control-Allow-Methods: PUT`,
+    `Access-Control-Allow-Headers: authorization, content-type` and
+    `Access-Control-Max-Age: 7200` (Chromium's cap).
+  - Every `PUT` response carries `Access-Control-Allow-Origin: *`, so the PWA can read its
+    status and code.
+  - `GET` responses carry no CORS header: only daemons download, and no browser page needs
+    to read an object.
+  - Why `*`, not the PWA's origin: the WebSocket upgrade already accepts any origin
+    holding the token, so pinning the origin here would protect nothing the socket
+    leaves open. The relay also never learns the PWA's origin. `*` is safe because nothing
+    rides on ambient credentials: no cookie, no HTTP auth, and the token travels only in
+    a header the caller's code sets.
+  - Rejected: an `APP_ORIGIN` var. It adds a deploy-time coupling and a field to the
+    pinned env list for no gain over the token.
+- **Logging**: no line for an accepted `PUT` or `GET`, as for every accepted store read or
+  write (threat model, item 3). A refusal or failure logs as store refusals do:
+  `attachment refused method=<m> id=<quoted> code=<code>` and
+  `attachment failed method=<m> id=<quoted> err=<…>`. That is the id and nothing more: no
+  body, no length, no name (the relay never has one), no token.
+- Rejected:
+  - Presigned R2 URLs: they would need R2 API credentials as a Worker secret, a key
+    arriving in a binding that `layering.test.ts` exists to refuse.
+  - Multipart upload: 30 MiB fits one request under the Workers free plan's 100 MB body
+    limit.
+  - A listing route: nothing needs one, and it would hand a token holder every id.
+
+### The relay: as built (task 3)
+
+Where the build adds to or departs from the wording above:
+
+- **Create-only holds under Miniflare**: the binding honours `If-None-Match: *`, a second
+  `PUT` resolves `null` and answers `409 exists`, and the stored bytes stay the first's.
+  The `head`-then-`put` fallback was not needed. Task 7 holds it over the whole stack
+  (`e2e/attachments.test.ts`): a second `PUT` of an id the PWA stored answers `409`, and
+  the object still hashes to its manifest entry. Real R2 is a post-deploy check.
+- **`401` logs no line**, as a refused socket upgrade logs none: the id an unauthenticated
+  caller sends is its own junk. Every other refusal logs as tabled. `err=` is quoted.
+- **Extra headers**: a `405` carries `Allow: GET, PUT, OPTIONS`, and a `429` carries
+  `Retry-After` equal to the body's `retryAfter`. Every answer carries `Cache-Control:
+  no-store`. A malformed `Content-Length` (not 1–12 decimal digits) is `invalid_length`,
+  though Miniflare's front server and Cloudflare's edge refuse one before the Worker.
+- **When both windows refuse, `month` answers.** The first hour at which the month window
+  admits also opens a fresh hour bucket, so its wait is the longer. `retryAfter` is that
+  hour boundary for `month` and the next hour for `hour`, in whole seconds, at least 1. A
+  reservation larger than all of `windowBytes`, possible only under a test override, waits
+  one full window.
+- **Test-only bounds**: `UPLOAD_WINDOW_BYTES`, `UPLOAD_HOUR_BYTES` and
+  `UPLOAD_HOUR_UPLOADS` in `Env`, the same pattern as `STORE_TOMBSTONE_MS`, so the suite
+  can reach each `429` in a few small uploads. Unset in production. They join the layering
+  test's env list. `windowHours` has no override: the window's length is tested on an
+  injected clock (`relay/test/allowance.test.ts`).
+- **The Hub keeps its `#ctx` field** beside `DurableObject`'s own protected `ctx`, so the
+  change to `extends DurableObject` touches nothing else in it. The harness bundles with
+  `cloudflare:workers` external, which workerd resolves at load.
+- **A Hub that throws on `reserveUpload` answers `503 storage_error`** with a `failed`
+  line, rather than an uncaught `500`.
+- **`storage_error` from a short body is untested.** Miniflare's front server drops a
+  request whose body ends before its `Content-Length` before workerd sees it, so the
+  `503` path cannot be driven there, nor from e2e, which boots the same front server. Only
+  a post-deploy check can.
+
+### The upload allowance (the Hub, `relay/src/allowance.ts`) — built 2026-10-28
+
+- The Hub DO extends `DurableObject` (`cloudflare:workers`) to take one RPC,
+  `reserveUpload(bytes: number): Promise<UploadVerdict>`. `bytes` is the declared object
+  length. The answer is `{ ok: true }` or
+  `{ ok: false, window: "hour" | "month", retryAfter: number }`. Nothing is refunded: a
+  reservation whose put fails or answers `exists` stays spent, which fails toward
+  the bound.
+- State is **one storage key, `upload-allowance`**, holding hour buckets
+  `[hourIndex, bytes, uploads][]`, where `hourIndex` is `Math.floor(now / 3_600_000)`. Its
+  own key, so it aliases no `device:`, `scheduler:term` or store namespace. It is pruned to
+  the last 721 buckets on each write.
+- **The rule**, with no await but storage between the read and the write, so input gates
+  keep it atomic. Refuse when any of these holds:
+  - The sum over the 721 newest buckets plus `bytes` exceeds `windowBytes`.
+  - The current bucket's bytes plus `bytes` exceed `hourBytes`.
+  - The current bucket's uploads plus one exceed `hourUploads`.
+
+  Otherwise add the reservation and write the key. Summing 721 buckets rather than 720
+  makes "any trailing 30 days" hold strictly at hour granularity.
+
+- **Cost**: one row read (cached in memory after the first) and one row written per
+  accepted upload. `hourUploads` exists for that row and for R2's Class A operations. 300 an
+  hour is 7,200 row writes a day against the free plan's 100,000. It is 216,000 puts in 30
+  days against R2's 1 million Class A operations a month. The owner's byte bounds do not
+  limit how often a token holder can upload tiny objects, so this bound was added here, and
+  it is still 30 full ten-file tasks an hour.
+- **Lifecycle lag, accepted**: R2 applies lifecycle expiry within about a day, so live
+  storage can sit above `windowBytes` by up to a day's uploads that have aged out of the
+  window but not yet out of the bucket. R2 bills storage as a monthly average, so such an
+  overshoot costs a fraction of a cent.
+
+### Routing and the leader (`scheduler/`, `daemon/src/leader*.ts`) — built 2026-10-28
+
+- `attachmentsFilter` in `scheduler/src/route.ts`, beside `continueFilter`: a task whose
+  spec carries `attachments` rejects a machine without `CAPABILITIES.attachments` with
+  `attachments_unsupported`. A pinned task waits, as a pin on a machine that is offline
+  or over a limit does, until `pin_expired`.
+- `route-preview` takes `attachments?: true` (a flag, never the manifest), so the PWA's
+  preview applies the same filter. An older leader ignores the flag. That leader cannot be
+  reached anyway: the PWA offers attaching only to a leader advertising the capability.
+- `#dispatch` in `scheduler/src/scheduler.ts` copies `spec.attachments` into the
+  `SpawnRequest`.
+- `lean` drops `spec.attachments` on the write that finishes a task, as `forgetPrompt` drops
+  the prompt: names are treated as prompt text. A finished record then no longer needs the
+  dep sentinel, and the sealer emits none. A continuation never needs the manifest: it finds
+  the directory from the worktree (below).
+- Timing: `OP_TIMEOUT_MS.spawn` 210 s, `reservationTtlMs` 240 s, and a test that holds
+  `reservationTtlMs > OP_TIMEOUT_MS.spawn` and `OP_TIMEOUT_MS.spawn >= ATTACHMENT_FETCH_DEADLINE_MS + 90_000`.
+
+### Routing and the leader: as built (task 4)
+
+- **The preview flag** is `RoutePreviewRequest` (`TaskRequest` plus `attachments?: true`),
+  read by `parseRoutePreviewRequest`; anything but `true` or absent is `invalid_request`.
+  The leader hands it to `Scheduler.preview` as a boolean, and `route` takes it as
+  `RouteInput.attachments`, so a preview routes as though the spec carried a manifest.
+- **`forgetPrompt` drops the manifest** beside the prompt, rather than a second function:
+  `lean` already runs it on every write that finishes a task, and on the passes that
+  strip finished records written before.
+- **The record round trip** is held at both layers: the scheduler's writes (reserve, place,
+  finish) through `readerChecked`, and the daemon's adapter (`daemon/test/queue-store.test.ts`)
+  sealing the sentinel on every write that carries the manifest and none on the finishing one.
+
+### The daemon (`daemon/src/attachments.ts`) — built 2026-10-28
+
+- **Who may hand it files.** `attachments` is accepted only on a spawn sealed
+  `from: "scheduler"` with `client: SCHEDULER_CLIENT`, or the leader's in-process dispatch:
+  the same `scheduler` gate as a continuation. On the local op socket, a direct `spawn` op
+  or any other `from`, it is refused `attachment_unavailable` ("only the scheduler hands a
+  session attachments"), audited, with nothing fetched or recorded.
+- **Order in `handleSpawn`**: parse (`isSpawnRequest` runs `parseAttachmentManifest`, and
+  a malformed manifest is `internal_error`, as any malformed request), the continuation
+  refusal, `relaunchRefusal`, the continuation site, then **the fetch**, then the
+  write-ahead `ctx.tasks.launch`, then the backend. If the backend refuses later
+  (`repo_not_found`, `claude_died`), the directory stays for the age prune: the task may
+  be placed here again.
+- **The fetch**, sequentially, one file at a time, under one `AbortSignal` at
+  `ATTACHMENT_FETCH_DEADLINE_MS`:
+  1. Request `attachmentUrl(config.relayUrl, id)` with `Authorization: Bearer <token>`
+     and `redirect: "error"`. The origin comes only from the daemon's own config, and only
+     the id from the manifest, already held to `ATTACHMENT_ID_PATTERN`. No URL ever comes
+     from a frame.
+  2. Require `200` and `Content-Length` equal to `size + ATTACHMENT_OVERHEAD_BYTES`. The
+     body is read up to that length and no further.
+  3. Check `attachmentHash` against the manifest's `hash`, then `openAttachment`, and
+     require the plaintext length to equal `size`.
+  4. Write under fixed names. A network error or `5xx` is retried once inside the
+     deadline, and anything else refuses at once.
+
+  Every failure refuses the spawn `attachment_unavailable`. Its message names the file by
+  index (`attachment 3 of 5: hash mismatch`) and is logged with the task id.
+
+- **Files**: `stateDir()/attachments/` is created 0700, like `runDir()`, since `stateDir()`
+  is 0755.
+  - Files are written into a staging directory, `attachments/.<taskId>.<random>`, as
+    `<index>.<ext>` with `index` 1-based in manifest order, each file 0600.
+  - The staging directory is then renamed over `attachments/<taskId>` (0700). An existing
+    `<taskId>` directory can only come from a launch that never landed, since a landed one
+    is `task_launched` before the fetch, so it is replaced.
+  - `ext` comes from `ATTACHMENT_EXTENSIONS`, a fixed MIME-to-extension map in the
+    module (`image/png` → `png`, `image/jpeg` → `jpg`, `application/pdf` → `pdf`,
+    `text/plain` → `txt`, `text/markdown` → `md`, `application/json` → `json`, and so on).
+    An unmapped type gets no extension.
+  - The extension matters because Claude's Read tool picks image and PDF handling by it.
+  - The original name appears only in the seed text. A fixed name also means no
+    attachment can land as a `CLAUDE.md` or a `.claude/` path in a directory Claude
+    Code was told to read, nor carry a path separator.
+- **Sidecar**: `attachments/<taskId>.json` (0600) holds `{ v: 1, at, worktree? }`. `at` is
+  the download time. `worktree` is the outcome's path, noted after a worktree spawn lands,
+  best effort. It lives outside the directory so the session never sees it, and it is what
+  cleanup and continuations read. The launch ledger is untouched, and reap from the CLI,
+  which does not own the ledger, can read it.
+- **The command line** (`daemon/src/spawn.ts`): ` --add-dir ${shq(dir)}` per directory,
+  placed directly before `--model`. `--add-dir <directories...>` is variadic in
+  `claude --help` (checked 2026-10-28, Claude Code 2.1.312), so a value is bounded only
+  by the next flag, and `--model` always follows. The path is the daemon's own, never a
+  wire value, but it goes through `shq()` like every path. A working directory added this
+  way lets the session read the files with no permission prompt.
+- **The seed**: an attachment spawn always writes a seed file, even with no prompt. After
+  the `Task:` line, or after the preamble when there is no prompt, it adds:
+
+  ```text
+  Attached files (the user's originals, at these paths):
+  - /…/attachments/<taskId>/1.png — "screenshot.png", image/png, 245312 bytes
+  ```
+
+  The name is written `JSON.stringify`'d. The seed travels on stdin like the prompt, so
+  names never reach argv.
+
+- **Audit**: the spawn request line gains `attachments=<n> attachmentBytes=<sum>`, only
+  when present, beside `promptLen`. No names, no ids, no hashes: names are treated as
+  prompt text. A refusal is `failed code=attachment_unavailable`, as every code is.
+- **Continuation**: a continue spec carries no manifest (the parser refuses one). The
+  daemon adds ` --add-dir` for every `attachments/<id>` whose sidecar's `worktree` is the
+  worktree the continuation resumes in. That covers a chain of continuations, since they
+  share the worktree. None found is not a refusal: the session's transcript holds the
+  paths, and they are either still there or reaped.
+- **Cleanup** (`pruneAttachments`, run by reap after its worktree pass, under the timer
+  and from the CLI, and listed by `--dry-run`). It removes `attachments/<id>` and its
+  sidecar when:
+  - the sidecar's `worktree` is set and no longer exists, whether reap removed it or
+    anyone else did; or
+  - its `at` (or, with no sidecar, the directory's mtime) is older than
+    `ATTACHMENT_RETENTION_MS`, and no live tmux pane carries the task id or has its cwd
+    inside the sidecar's worktree. Here-mode tasks are covered by this rule.
+
+  Staging directories older than an hour go too. Each removal audits as
+  `audit reap removed-attachments task=<id> reason=worktree-gone|aged`.
+
+- `CAPABILITIES.attachments` is added to the list in `daemon/src/run.ts` by this part, once
+  the leader half (task 4) is in the same build.
+
+### The daemon: as built (task 5)
+
+Where the build adds to or departs from the wording above:
+
+- **The backend contract** (`daemon/src/backend.ts`) gains `SessionAttachments`
+  (`dirs`, and `files` with path, name, type and size), the fourth argument of
+  `SessionBackend.spawn`. The handler fetches and resolves; the backend only quotes the
+  directories onto the command line and lists the files in the seed. A continuation gets
+  `dirs` and no `files`.
+- **The gate refuses two more shapes** `attachment_unavailable`, before anything is read
+  or fetched: a scheduler spawn with no task id (nothing to name the directory by), and any
+  spawn on a daemon whose handler context has no fetcher (`seanced spawn`'s, which no
+  scheduler reaches). `isSpawnRequest` refuses a manifest beside `mode: "continue"` as
+  malformed, as `parseTaskSpec` does.
+- **Refusal reasons**, each after `attachment <i> of <n>: `: `not found (expired or never
+  stored)` (`404`), `relay answered <status>` (any other non-`200`, the second `5xx`
+  included), `wrong length (<got>, not <want>)`, `body longer than its length`, `body
+  ended at <k> of <n> bytes` (retried once, as a network error is), `fetch failed: …`,
+  `deadline passed`, `hash mismatch`, `did not decrypt`, `wrong size after decryption`.
+  A write failure is `could not write them: …`, with no index. A refusal also clears an
+  earlier `<taskId>` directory and its sidecar, so a refused task leaves nothing.
+- **Memory**: a file is held whole between download and write, at most `fileBytes` plus
+  overhead, one file at a time.
+- **The sidecar** is written by temp file and rename. A continuation that cannot read the
+  sidecars resumes without `--add-dir`, as none found does.
+- **Prune**: staging removals audit too, as `removed-attachments task=<staging name>
+  reason=staging`, since reap audits everything it destroys. Every verdict is read first,
+  then removed in order, so a dry run lists exactly what a run removes. Reap's `done`
+  line gains `attachments=<n>`, and `formatReport` an "attachments" block.
+  `ReapOptions.attachments` (the root) is required, like `pruneLogPath`, so a test that
+  forgot it cannot prune the developer's own.
+- **Prune, after task 7**: a sidecar whose directory is gone (a crash between prune's two
+  removals) goes at once, audited `reason=orphan-sidecar`; a fetch writes its sidecar only
+  after the rename, so no live fetch has one. The sidecar's `worktree` is compared
+  canonical, as the panes' paths are: on macOS a pane under `/var` reports `/private/var`,
+  and the raw path would let an aged task's files go from under a live session.
+- **The extension map** covers `png`, `jpg`, `gif`, `webp`, `heic`, `svg`, `pdf`, `txt`,
+  `md`, `csv`, `html`, `css`, `js`, `json`, `xml` (two types), `yaml` (two types), `zip`,
+  `gz`, `tar`, `mp4`, `mov`, `mp3` and `wav`.
+- **The harness's `GET`** (`daemon/test/harness.ts`) serves planted objects with the
+  header token only, and can queue failure statuses; it has no `PUT`, id pattern, CORS or
+  allowance. `relay/test/attachments.test.ts` holds the real route.
+- **Tests** (`daemon/test/attachments.test.ts`): the happy path through the leader's
+  in-process dispatch with real tmux and the claude stub (files, modes, `--add-dir` before
+  `--model`, the seed, an audit line without names, ids or hashes), the worktree note a
+  continuation reads, and every refusal: hash, `404`, length, `5xx` retried once then
+  refused, unreachable relay, wrong token, deadline (a fetch seam that never answers), and
+  the scheduler gate on the relay leg and the local socket. Prune runs against live panes.
+
+### The PWA (`pwa/src/`)
+
+- **Offered** only when `deriveAttachmentsAvailability(relay)` (`pwa/src/view.ts`, through
+  `verifiedLeaderAdvertises(relay, CAPABILITIES.attachments)`) is true. Files come from a
+  file picker (`<input type="file" multiple>`) and from paste into the prompt.
+- **Before any upload** it checks the limits and says which one was hit. While files are
+  attached, the prompt counts against `ATTACHMENT_LIMITS.prompt`. `type` is `File.type`
+  lowercased with any parameters stripped, or `application/octet-stream` when empty or
+  outside the pattern. A name past 100 units is cut in the stem, keeping the extension.
+- **Upload**: for each file in order:
+  1. Mint `crypto.randomUUID()` as its id.
+  2. `sealAttachment`, then `attachmentHash`.
+  3. `PUT` the object with `Content-Type: application/octet-stream`.
+
+  It shows "uploading 2 of 5". It keeps the id and hash of every `201` for the compose
+  session and re-uploads only the rest under fresh ids on a retry. Any non-`201` stops the
+  run and creates no task. `429` shows the allowance message with `retryAfter`. Once every
+  file is `stored`, it creates the task (`createTask`) with `attachments` in the spec.
+  Objects of a run that never became a task stay until the lifecycle rule expires them,
+  counted against the allowance.
+
+- **CSP**: `connect-src` gains the relay's `https:` origin (`http:` in dev) beside its
+  `wss:` one (`securityHeaders` in `pwa/vite.config.ts`). Browsers' scheme upgrade from
+  `wss:` to `https:` in source matching is not relied on.
+- The Queue screen and verdict show a count ("3 files") on a task carrying attachments,
+  never names, while the record holds the manifest.
+
+### The PWA: as built (task 6)
+
+Where the build adds to or departs from the wording above:
+
+- **The upload lives on the client**: `RelayClient.uploadAttachment(bytes)` in
+  `shared/src/app-client.ts` mints the id, seals, hashes and `PUT`s, answering
+  `{ ok: true, id, hash }` or a refusal: the relay's code (`allowance_exhausted` with
+  `window` and `retryAfter`), `unreachable` when no answer came, or `unreadable` for an
+  answer this build can't read. The key and token stay private to the client, as for
+  every other relay call. A retry is a new call, so a fresh id.
+- **Drop** on the prompt card joins the picker and paste (desktop). Paste takes the
+  clipboard's files; it suppresses the text paste only when there is no text.
+- **Progress is per file** ("Uploading 2 of 5…" on the Queue button). `fetch` reports no
+  upload progress, and the shared client also runs under Bun and Raycast, where
+  `XMLHttpRequest` does not exist.
+- **Limits at pick time** (`admitFiles`, `pwa/src/attachments.ts`): a file over 30 MiB is
+  skipped and the next tried; once 10 files are on the form nothing after is added; a
+  file that would pass 100 MiB in all is skipped. One line under the list names each
+  left out and why. The prompt bound is checked at submit, before any upload.
+- **Names**: control characters (the parser's forbidden set, now exported from
+  `shared/src/parse.ts` with the type pattern) become `_`, an empty name is `file`, and a
+  name past 100 units is cut in the stem, keeping an extension of up to 16 units, never
+  splitting a surrogate pair.
+- **Files are not persisted**: a `File` can't be, so a reload drops them, unlike the
+  prompt. They leave the form when a task carrying them is stored, matched by id.
+- **A refused upload** shows the unqueued verdict without **Try again**: back on the
+  form, Queue again uploads only the files not yet stored.
+- **Not offered, files listed**: if the leader stops advertising `attachments` with files
+  on the form, they stay listed (removable), the button reads "Can't attach files" and the
+  status line under the prompt says why. `route-preview` carries `attachments: true` while files are listed.
+- **No count**: the Queue card and the verdict don't mention attachments. Names show only
+  on the form's chips.
+- **CSP**: `pwa/vite.config.ts` derives the `https:` origin with `attachmentUrl`, imported
+  by relative path: the config is bundled and loads under node, where the workspace
+  package's raw TS cannot.
+
+### Rejected alternatives
+
+- **Inline files in the task record**: 30 MiB does not fit a 28 KiB create, and the store
+  is the DO's SQLite, not a blob store.
+- **Daemon-to-daemon or phone-to-daemon transfer**: there is no channel but the relay, and
+  it is blind and stateless per frame.
+- **Deleting on fetch**: a task re-routed after a `never landed` proof, or retried after a
+  failed spawn on another machine, would find nothing.
+- **Deleting at task end**: the relay cannot read which task an object belongs to, and
+  the leader holding the R2 binding's rights would be a new principal. Expiry is the
+  bucket's.
+- **Recompressing images on the phone**: an original is what was asked for, and a
+  screenshot's text is what recompression damages first.
+
+### Who builds what
+
+Each task is stacked on the previous one's branch, ships its own tests, and marks its part
+of this section built.
+
+2. **shared**, the types and their parsers — **built 2026-10-28**, with `mintAttachmentId`
+   and the daemon's interim refusal in `isSpawnRequest` (task 5 replaces it with
+   `parseAttachmentManifest`):
+   - In `shared/src/types.ts`: `ATTACHMENT_LIMITS` and the other constants above,
+     `AttachmentRef`, `TaskSpec.attachments`, `SpawnRequest.attachments`,
+     `CAPABILITIES.attachments`, `attachment_unavailable` in `SPAWN_ERROR_CODES`, the
+     `attachments_unsupported` reason, `ATTACHMENT_HTTP_CODES` and `AttachmentHttpCode`.
+   - `parseAttachmentManifest`, plus `parseTaskSpec`'s rules: the mode, the prompt bound,
+     dropping the dep sentinel.
+   - In `taskRecordAtRest`: emitting `ATTACHMENTS_DEP_SENTINEL`.
+   - In `shared/src/continue-task.ts`: never copying `attachments`.
+   - `parseReason` and `scheduler-text.ts` for the new reason.
+   - In `shared/src/crypto.ts`: `sealAttachment`, `openAttachment`, `attachmentHash`.
+   - In `shared/src/relay-url.ts`: `attachmentUrl`.
+   - In `parse.test.ts`: the bound measurement with a full manifest (the create cap), and
+     with the leader's writes on top (`STORE_MAX_CT_LENGTH`).
+   - A test that an older leader's parser refuses an attachment record. It holds the
+     sealed record against a `parseDep` that refuses `""`, which every build does.
+   - Not `OP_TIMEOUT_MS`: that moves with the TTL in task 4.
+3. **relay** — **built 2026-10-28**, with the departures listed under "The relay: as
+   built" above:
+   - `relay/src/attachments.ts`, the routes as tabled, with CORS and logging.
+   - The `/attachments/` branch in `index.ts`.
+   - The Hub as `DurableObject` with `reserveUpload`, and `relay/src/allowance.ts`.
+   - The `ATTACHMENTS` binding in `env.ts` and `wrangler.jsonc`, and the layering test's
+     env list and no-body-read rule.
+   - `startRelay` in `relay/test/harness.ts` reads `r2_buckets` from `wrangler.jsonc` and
+     passes `r2Buckets`.
+   - `relay/test/attachments.test.ts`: every status but `storage_error`, the preflight,
+     create-only, the count limit (under a lowered `UPLOAD_HOUR_UPLOADS`; the unit tests
+     spend the real 300), and that a captured log holds no id beyond refusals.
+   - Unit tests for the allowance's byte windows on an injected clock.
+   - Map rows marked built.
+   - The owner creates the bucket before this merges: CI deploys the relay on merge, and a
+     binding to a missing bucket fails that deploy.
+4. **scheduler and leader** — **built 2026-10-28**, with the notes under "Routing and the
+   leader: as built" above:
+   - `attachmentsFilter` and the reason, and the `route-preview` flag.
+   - `#dispatch` copying the manifest, and `lean` dropping it.
+   - `OP_TIMEOUT_MS.spawn` 210 s and `reservationTtlMs` 240 s with their ordering test.
+   - The fixture decisions in `scheduler/test/`.
+5. **daemon** — **built 2026-10-28**, with the notes under "The daemon: as built" above:
+   - `daemon/src/attachments.ts`: the fetch, staging, sidecar, extension map and
+     `pruneAttachments`.
+   - In `handleSpawn`: the gate and the order.
+   - In `spawn.ts`: `--add-dir` and the seed block.
+   - In `audit.ts`: the counts.
+   - The reap step, and continuations finding directories by sidecar.
+   - The `drain-limits.ts` comment.
+   - The capability in `run.ts`.
+   - A `GET /attachments/<id>` route on `daemon/test/harness.ts`'s relay double.
+   - Tests for every refusal reason: wrong length, hash, auth, `404`, deadline, not
+     scheduler.
+6. **PWA** — **built 2026-10-28**, with the notes under "The PWA: as built" above:
+   - The picker and paste, the limits and the prompt bound.
+   - Sealing and upload, progress, partial retry and the allowance message.
+   - Creating the task with the manifest, and the count on queue cards.
+   - `deriveAttachmentsAvailability`, and the CSP's `https:` origin.
+   - README's _From the phone_ usage text.
+7. **end to end** (`e2e/attachments.test.ts`) — **built 2026-10-28**:
+   - Files added to the PWA's real `Store`, sealed and uploaded by `RelayClient` to the
+     relay's Miniflare R2, the task created with the manifest, placed by the leader, and
+     fetched by the daemon: the decrypted files under `attachments/<taskId>`, `--add-dir`
+     before `--model`, and the names in the seed. Create-only over the same route.
+   - The refusal is a manifest naming an id the bucket never held: the task fails
+     `attachment_unavailable` (`not found`), nothing launches, nothing is left on disk,
+     and the finishing write drops the manifest. Departing from the plan, no test rewrites
+     an object behind the relay: the hash check is the daemon suite's
+     (`daemon/test/attachments.test.ts`), and the real-versus-double seam it would cross,
+     the `GET`, is the one the missing object already crosses.
+   - The capability filter stays the scheduler suite's: every daemon of this build
+     advertises `attachments`, so e2e has no machine to filter.
+   - No fake-versus-real mismatch turned up. The chain's follow-ups were decided in its PR.
 
 ## Daemon (`seanced`, Bun)
 
@@ -5405,12 +6148,30 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   narrows what is offered to the picked machine and account. A pick that leaves the origin
   no clone drops it. The per-machine map could only drift against that.
 - **Sessions are fanned out, not polled.** The header total spans every online
-  machine, so `sessions` is sent to each on connect, when a machine wakes, and
-  on resume from background — that last one because a suspended PWA's socket
-  dies silently and stale counts under a green dot are worse than none.
+  machine, so `sessions` is sent to each on connect (every re-dial included) and
+  when a machine wakes. A resume from background is not a fan-out of its own:
+  a suspended PWA's socket can die silently while still reading open, so showing
+  the tab probes it (`RelayClient.reconnectIfStale`) — one `ping`, re-dial unless
+  its `pong` comes back within 1.5s. Pings and pongs are counted per socket (the
+  edge answers in order), so the probe settles only on the answer to its own
+  ping: a pong buffered from before the hide, which iOS dispatches on resume,
+  proves nothing, and neither does it clear a heartbeat deadline armed for a
+  newer ping. A hide of a heartbeat interval or longer (or of unknown length)
+  re-dials outright, but only when nothing was heard for an interval plus the pong
+  timeout — a frozen page sent no beats, whereas a desktop tab's heartbeat kept
+  running while hidden and is probed instead. Requests made while a probe is out
+  wait for it and go on the socket current once it settles, so none strands on a
+  socket the probe is about to replace; after a re-dial that socket is still
+  connecting, so the request fails `disconnected` as any made during a handshake. A dead socket is replaced within the probe's deadline
+  and its re-dial fans out as any connect does. **A resume on a live socket after
+  a hide shorter than the heartbeat interval does not re-fan `sessions`**, so the
+  counts may miss sessions started or ended elsewhere meanwhile until the next
+  connect or machine wake — a deliberate trade: re-dialling on every resume cost a
+  TLS handshake, the registry push, `sessions` to every machine and every reopen
+  read each time, the bulk of a resume's cost.
 - **A gap in the relay socket is held back for 1.5s before it is shown.** The app is
   legitimately not connected for a moment on the way in — a refresh dials from
-  scratch, and the resume above re-dials unconditionally — so rendering the status
+  scratch, and the resume above re-dials whenever its probe goes unanswered — so rendering the status
   as it stands flashed "Relay unreachable" for a frame or two on every refresh and
   every foregrounding. `RelayState.settling` marks that window: the screen reads
   "connecting…" with the pulsing amber dot and no banner, and anything that recovers inside
@@ -5451,8 +6212,11 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   whole pill is a single `<button>`, so the 4px padding around a 36px face gives
   a 44px tap target without the old hit-area overlay, and the split makes plain
   that the dot reports and the cog acts. The three states differ by shape as well
-  as hue — solid green with a glow, steady amber behind an expanding sonar ring,
-  hollow red ring — so the failed state is not carried by colour alone. The ring
+  as hue — solid green with a glow, steady amber behind a sonar ring, hollow red
+  ring — so the failed state is not carried by colour alone. The sonar swells
+  three times and then rests as a still halo, as the queued verdict's stage ring
+  does: a ring that never stops keeps the compositor producing frames for as
+  long as its state lasts, and a task can wait for hours behind the caps. The ring
   is dropped outright under `prefers-reduced-motion` rather than left to the
   global clamp, which would freeze it at full size over the dot. The settings
   header's own status line renders the same three dots from the same component:
@@ -5622,7 +6386,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   verified leader advertising `pinAccount`, since an older one would drop it from the spec; with
   no verified leader it can't be confirmed, so it is refused ("try again once one leads") rather
   than queued, unlike a plain task. A machine pin has no gate. An offline pinned machine is not a
-  block: the task waits for it, and the footer and verdict say so. Rows the other pick rules out
+  block: the task waits for it, and the status line under the prompt and the verdict say so. Rows the other pick rules out
   are disabled with their reason ("work@acme.dev isn't signed in here"). The repo list is
   `scopedRepos`: origins across the fleet, narrowed to the picked machine and to the exclaves of
   the picked account, strictly (a clone from a daemon predating exclaves is in no account, as
@@ -5632,7 +6396,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   call, D2): it was a machine to spawn on directly, not a placement the owner asked for.
   **Start now** (2026-10-27): while the verified leader advertises `runNow`, the button is a split
   button — two sibling buttons in one pill, never nested — whose chevron opens the shared menu
-  (`components/menu.tsx`) upward with one item, Start now; without it the chevron is not
+  (`components/menu.tsx`) with one item, Start now; without it the chevron is not
   rendered. The item's sub-line names where the placement preview would start it (`startNowItem`
   in `decision-view.ts`; with a cap-held candidate beside the chosen one it stays generic, since
   `run-now` weighs both and the held one has no score, so it is plain "Skip the queue", naming
@@ -5724,8 +6488,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   and follows it (2026-10-19: as one screen that moves, not three — it is keyed on the task id so
   refreshes update it in place; three tiles, Queued · Placed · Running, each a
   glyph squircle, stand in for the glyph until the task settles, since an outcome is a glyph and
-  a stage is not, and `lost` is a `?` not a third tile; the waiting tile pulses and a tile that
-  stops waiting lets its pulse finish; the headline and body slide and crossfade on change. The
+  a stage is not, and `lost` is a `?` not a third tile; the waiting tile's ring swells three
+  times, then rests as a held ring (a wait can last hours), and a tile that stops waiting lets
+  a swell in progress finish, while a ring already at rest goes at once; the headline and body slide and crossfade on change. The
   decision card is not on the verdict at all — the owner's call: the form's preview says where
   it would go and the verdict says only that it is running; `verdict-view.ts` derives the rest.
   The Queue screen's rows once carried it too, behind a "Why there" disclosure, removed
@@ -5743,7 +6508,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   screen applies the same rule. A read the leader
   refuses, or whose reply cannot be read, ends the follow and says why. With no leader or an
   unverified one the read is "waiting", and spends no poll: the verdict says the task waits in the
-  queue until one leads, and it follows the task as soon as one does. Polls that run out on a miss
+  queue until one leads, stops polling (a read now would be refused unsent, and the wait can be
+  hours), and reads the task as soon as a verified leader shows up, with the polls it had left. A
+  Start now's own reads wait the same way. Polls that run out on a miss
   say the screen may be out of date and point at the Queue screen. A lost create (`timeout`,
   `dropped`, a transport error) says it may have queued anyway, once: the reason it gives never
   says so too, nor names the store frame. It offers **Try again**, which
@@ -5751,8 +6518,10 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   (`landedEarlier`), so it cannot queue twice. One that never left (`disconnected`) says it was
   not queued, with the same retry. A `store_full` refusal names the unreadable records the last
   queue read listed, when there are any, since no prune frees those (M3 review S2). No
-  `queue-changed` is read while the tab is hidden (M3 review P5): showing it re-dials, and the
-  reopen reads the queue and the followed task whole. A pending enqueue is not persisted across a reload: a lost
+  `queue-changed` is read while the tab is hidden (M3 review P5): one that came is noted, and
+  showing the tab reads the queue whole and, if the nudge could name it, the followed task — on a
+  socket the resume probe found live, or through the reopen when it re-dialled. An `account:`
+  `store-changed` ignored while hidden lists the accounts again the same way. A pending enqueue is not persisted across a reload: a lost
   reply there leaves the task queued and visible on the Queue screen, which is the way back to it.
   A picked machine or account is a pin on the same task (above).
 - **The Queue screen** (M3 item 6) is the app's view of the relay's queue, opened from the
@@ -5856,26 +6625,21 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   flag alone (each app-role client holds its own marks — Presence & identity); `absentSince` as
   the "since" — it starts a pass after the leader's own view flipped, exists only on `lost`, and
   would make the same card change its age at the 15-minute mark.
-- **Authoring from the auto form** (2026-10-23, M4 #21). The form adds AFTER and BATCH
-  tiles, a "Settle on its done report" switch. (A Linear issue field, unused, was removed 2026-10-27; the
+- **Authoring from the auto form** (2026-10-23, M4 #21). The form adds an AFTER
+  tile and a "Settle on its done report" switch. (A Linear issue field, unused, was removed 2026-10-27; the
   spec's `linear` stays on the wire, and a persisted form's `linearIssue` is ignored.) **AFTER** opens a sheet of
   the tasks the leader holds that have not failed or been cancelled (read when the sheet opens),
   each with an Opened, Merged or Done choice; Done is offered only while the verified leader
   advertises `reportedDone`, as is the switch. An edge on a task the list no longer shows stays, by id, so it can
-  be removed. **BATCH** is an _open batch_: Start batch,
-  and the next enqueues join it, numbered from 1, until End batch; the sheet says a batch sets
-  no order or limit, and that After is how to run tasks in turn ("Batches"). It is `{id, next}`
-  in the persisted form (an older build's `strategy` there: `auto` is kept as the open batch, anything else drops the
-  batch, so the next enqueue starts a new one): each enqueue takes index `next`, and the counter moves only for the
-  member it numbered, so a retry that lands twice moves it once (`landedEarlier`). Start batch
-  while one is open keeps it, so a tap cannot renumber one in flight. (Until 2026-10-26 the sheet
-  picked One at a time, Up to N at once or No limit.) Deps and `until` belong to one
-  task and reset after each enqueue; the batch persists. **Follow up** on a queue row is the
+  be removed. (A BATCH tile — an open batch the next enqueues joined, numbered from 1, until
+  End batch — was removed 2026-10-29: never used by hand, and it cost the form a row. Batches
+  stay MCP's `queue_batch`; a persisted form's `batch` is ignored, so an open one ends rather
+  than grouping tasks with no tile left to end it.) Deps and `until` belong to one
+  task and reset after each enqueue. **Follow up** on a queue row is the
   chain's shortcut: the form with that task as its one `opened` edge, and both pickers reset to Auto (the scheduler places a follow-up; the pins of whatever the form held are not inherited). Settling on the report appends the
   report instruction to the prompt on the client (`withReportInstruction`, so the stored task
   carries what the session reads), and the bound on the prompt is checked on the combined text; it also needs a prompt, since
-  the session is told in it. A leader that does not advertise the capability, a full batch
-  (`TASK_SPEC_LIMITS.batchIndex`) and an over-long combined prompt are refused before anything is
+  the session is told in it. A leader that does not advertise the capability and an over-long combined prompt are refused before anything is
   put, as unqueued verdicts. Rejected: a screen that builds the whole batch as a list (a second
   editor beside a form that already makes one task at a time; Follow up chains the rest);
   naming batch members by `ref` (the open batch's index order is the identity). A report needs
@@ -5890,6 +6654,12 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   on screen. Columns are not layers, so they carry no back button and push no history entry. The
   store keeps the queue read while it is on screen without its layer (`AppState.wide`), since the
   column is never opened.
+- **Queue sits in the prompt card, not a footer** (2026-10-29). The card's bottom row is a
+  chat composer's: a paperclip at the left (only while attaching is offered) and Queue, sized to
+  its label, at the right; picked files' chips sit above the text. A full-width footer button
+  cost a phone screen a band at the bottom that the form scrolled under. The footer's status
+  line moved to just under the card, and the files' count and size line was dropped: the chips
+  carry each size, and the summary stays only as the list's accessible name.
 - **Clearing the prompt is undoable, not confirmed.** CLEAR shows in the prompt
   header only once there is something to clear — an always-present greyed control
   is noise — and empties the field on the first tap. It is replaced in the same

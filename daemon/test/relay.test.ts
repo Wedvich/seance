@@ -714,6 +714,7 @@ describe("daemon ↔ relay integration", () => {
         "continueCancelled",
         "continueSession",
         "runNow",
+        "attachments",
       ]);
       // A status leaves only after its tick wrote the store, so one in hand
       // means there is history to ask for.
