@@ -327,6 +327,7 @@ describe("pruneAttachments", () => {
     await mkdir(join(root, ".stale.123"));
     await utimes(join(root, ".stale.123"), new Date(now - 2 * 3_600_000), new Date(now - 2 * 3_600_000));
     await mkdir(join(root, ".busy.456"));
+    await writeFile(join(root, "orphan.json"), JSON.stringify({ v: 1, at: now }));
 
     // A live pane tagged with one task, and one sitting in the other's worktree.
     const tagged = (
@@ -354,6 +355,7 @@ describe("pruneAttachments", () => {
         { task: "aged-here", reason: "aged" },
         { task: "gone", reason: "worktree-gone" },
         { task: "no-sidecar", reason: "aged" },
+        { task: "orphan", reason: "orphan-sidecar" },
       ]);
       expect(dry).toEqual(pruned);
       expect((await readdir(root)).toSorted()).toEqual([

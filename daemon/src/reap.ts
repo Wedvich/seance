@@ -914,6 +914,7 @@ const ATTACHMENT_LABELS: Readonly<Record<AttachmentPruneReason, string>> = {
   "worktree-gone": "its worktree is gone",
   aged: "past retention, no session using it",
   staging: "an interrupted download",
+  "orphan-sidecar": "a note whose files are already gone",
 };
 
 const PANE_LABELS: Readonly<Record<PaneState, string>> = {

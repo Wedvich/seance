@@ -91,7 +91,7 @@ key's version at 1, which reopens alias rollback unless the PSK changes too: rot
   their `makeGhStub` explicitly.
   The relay double (`daemon/test/harness.ts`) also carries a store double — term fence,
   tombstones, `store-changed` — for the leader's queue-store adapter and its term tests.
-  For attachments (once built) it also serves `GET /attachments/<id>` from objects a test puts in
+  For attachments it also serves `GET /attachments/<id>` from objects a test puts in
   directly. It is a double like the rest: the routes' real rules live in
   `relay/src/attachments.ts`, and e2e is where the two meet.
   Three fixtures stand in for what lies outside a machine, importable from daemon suites and e2e alike (no e2e file uses them yet):
@@ -149,10 +149,10 @@ key's version at 1, which reopens alias rollback unless the PSK changes too: rot
   stub, and `SEANCE_E2E_SPAWN_WAIT_MS`, its spawn registration budget), and `beforeBoot` runs
   with its state dir before it boots (a pre-seeded launch ledger, say), so a test can hold a
   spawn mid-flight and still have the ledger prove what the next term needs.
-  Attachments (`e2e/attachments.test.ts`, once built) upload through the shared sealing helpers to
+  Attachments (`e2e/attachments.test.ts`) upload through the shared sealing helpers to
   the real relay's Miniflare R2, and the daemon fetches from it at `attachmentUrl` of its
-  `ws://` config URL. A test that must see a tampered object rewrites it through
-  Miniflare's bucket handle, behind the relay, as only a compromised relay could.
+  `ws://` config URL. Its refusal case is an id the bucket never held; a tampered object
+  is the daemon suite's, against its double.
 - **scheduler** — the library alone, over an in-memory `QueueStore` and the `Fleet`
   double in `scheduler/test/fixtures.ts`: every filter reason, score component and
   stickiness case as fixture decisions, the reserve/dispatch lifecycle on a fake clock,

@@ -123,7 +123,7 @@ its Tailscale lockdown defeats the relay's purpose).
   read every record and create a `task:` one (`STORE_PREFIXES`), never
   overwrite or delete. Anti-junk hygiene only — the PSK is the trust boundary;
   readers skip registry entries and records that don't decrypt or bind
-  (`bindTaskRecord`). Attachments (designed 2026-10-28; the relay's half built) give it two HTTP routes:
+  (`bindTaskRecord`). Attachments (built 2026-10-28) give it two HTTP routes:
   upload sealed objects within the Hub's allowance, and download one by id (Attachments).
 
 ## Threat model
@@ -163,7 +163,7 @@ task that never ran (cancelled or marked done while waiting, `queue_expired`,
 record's tombstone keeps its key and version for `STORE_TOMBSTONE_MS` (30 days)
 but no envelope. Residual: Cloudflare's point-in-time recovery can restore an
 earlier store state for up to 30 days, so a stripped prompt stays recoverable
-that long — still sealed under the PSK. Attachments (designed 2026-10-28, not built) add three
+that long — still sealed under the PSK. Attachments (built 2026-10-28) add three
 resting places, all for a file a PSK holder chose. The contents sit sealed in R2 for 30 days
 plus R2's lifecycle lag of about a day. The names, types and sizes sit in the task record's
 sealed manifest until the leader leans the finished task. The plaintext sits on the machine
@@ -527,7 +527,7 @@ Séance's noise is cover for a real intruder.
    see the registry — but all they send the scheduler is fire-and-forget
    `session-event`s, sealed under the PSK, so such a leader learns their timing
    and nothing else.
-   **Attachments** (designed 2026-10-28, the relay's half built; Attachments). A holder
+   **Attachments** (built 2026-10-28; Attachments). A holder
    can `PUT` junk objects and `GET` any object whose id it knows. The junk is bounded by the
    Hub's upload allowance: 9.5 GB in any trailing 30 days, 1 GB and 300 uploads an hour, so
    R2 stays inside its free tier and the DO's row writes stay well under the day's. Rotating
@@ -605,7 +605,7 @@ Séance's noise is cover for a real intruder.
    it or no longer holds it (a week, 128 launches). It needs the relay
    itself, the task is one a PSK holder once enqueued, and nothing here forges
    a task or reads a prompt.
-   Attachments (designed 2026-10-28, not built) add nothing the relay can read or forge. Each
+   Attachments (built 2026-10-28) add nothing the relay can read or forge. Each
    object is AES-GCM under the PSK with its id in the AAD, and its SHA-256 sits in the
    manifest, sealed inside the task record. A relay serving other bytes, an old object, or
    one re-filed under another id is refused by the hash before decryption, and the spawn is
@@ -646,7 +646,7 @@ Séance's noise is cover for a real intruder.
    or worktree config sets such a family, or whose `info/attributes` names a
    merge driver, and name the family in their failure (Reap, "Repo-local
    config"). The owner's global and system config still apply.
-   An attachment (designed 2026-10-28, not built) is one more thing a PSK holder hands the
+   An attachment (built 2026-10-28) is one more thing a PSK holder hands the
    session, read under the same permission mode as the prompt. Its name reaches the seed only
    as one `JSON.stringify`'d line that refuses control characters. Its file lands under a fixed
    `<index>.<ext>`, so no upload becomes a `CLAUDE.md`, a `.claude/` path or a separator in a
@@ -847,8 +847,8 @@ nothing checked it. The last is the gap they leave.
   `github.com`'s pull-request shape. The residual: a session can make the leader read any PR
   in any repo the operator's token can see, and the result lands only in a sealed record, so the worst
   case is a session settling its own task early by naming a merged PR. `gh`'s stderr is never logged.
-- **Attachments** (designed 2026-10-28, not built) carry invariants of their own, recorded under
-  Attachments; each becomes a requirement here as its part lands. In short:
+- **Attachments** (built 2026-10-28) carry invariants of their own, recorded under
+  Attachments and as requirements in `CLAUDE.md`. In short:
   - A daemon fetches only from its own config's relay origin, by an id held to
     `ATTACHMENT_ID_PATTERN`, and only for a spawn sealed by the scheduler.
   - The hash is checked before decryption, and any failure refuses the spawn.
@@ -1163,7 +1163,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | records `account` / `settings` (at rest)                            | `account` written by `sealAccountRecord` (`shared/src/account-record.ts`) from the PWA's rename; `settings` unwritten so far                                                                                                                                                                                                                                                       | `account`: `openAccountRecord`, which opens at rest then `parseAccountRecord` and binds version and key; `settings`: `openAtRest` with its op, then `parseSettingsRecord` (`shared/src/parse.ts`); stored under `account:` and `settings:` (_Scheduler_, "The store")                                                                    |
 | op `push-subscribe` (→`"scheduler"`)                                | not yet sent (M4, Web Push)                                                                                                                                                                                                                                                                                                                                                        | not in `SCHEDULER_OPS`: `daemon/src/leader.ts` answers it `invalid_request` as any op it does not handle, and a non-leading daemon drops it (`daemon/src/relay-client.ts`: not a scheduler op), so the app sees a timeout, not `not_leader`, until the op joins `SCHEDULER_OPS`; its handler will parse with `parsePushSubscribeRequest` |
 | HTTP `PUT /attachments/<id>`                                        | built: `RelayClient.uploadAttachment` (`shared/src/app-client.ts`) from the PWA's spawn form (`pwa/src/store.ts`), sealed by `sealAttachment`, with `Authorization: Bearer`                                                                                                                                                                                                        | built: `relay/src/attachments.ts`, after `Hub.reserveUpload` (`relay/src/allowance.ts`); into R2 through the `ATTACHMENTS` binding                                                                                                                                                                                                       |
-| HTTP `GET /attachments/<id>`                                        | designed, not built: `daemon/src/attachments.ts`, before the launch ledger's write-ahead record, at `attachmentUrl` of its own config's `relayUrl`                                                                                                                                                                                                                                 | built: `relay/src/attachments.ts`, streamed from R2                                                                                                                                                                                                                                                                                      |
+| HTTP `GET /attachments/<id>`                                        | built: `daemon/src/attachments.ts`, before the launch ledger's write-ahead record, at `attachmentUrl` of its own config's `relayUrl`                                                                                                                                                                                                                                               | built: `relay/src/attachments.ts`, streamed from R2                                                                                                                                                                                                                                                                                      |
 | field `attachments`                                                 | built: `TaskSpec` and `SpawnRequest`, from the PWA's `createTask` after every upload is `stored` (`pwa/src/store.ts`); the leader's `#dispatch` (`scheduler/src/scheduler.ts`)                                                                                                                                                                                                     | `parseAttachmentManifest` (`shared/src/parse.ts`), in `parseTaskSpec` and the daemon's `isSpawnRequest`; acted on in `handleSpawn` (`daemon/src/handlers.ts`)                                                                                                                                                                            |
 
 `sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
@@ -3546,7 +3546,7 @@ for the lot with its own `gh`.
   GitHub-facing endpoint; later, if polling's latency ever matters. REST per PR: one call each,
   three for checks, against one per fifty.
 
-## Attachments — designed 2026-10-28, not built
+## Attachments — built 2026-10-28
 
 Files a task carries to its session: picked or pasted in the PWA, sealed there under the
 PSK, stored in R2 behind the relay Worker, downloaded by the daemon the leader placed the
@@ -3854,7 +3854,9 @@ Where the build adds to or departs from the wording above:
 
 - **Create-only holds under Miniflare**: the binding honours `If-None-Match: *`, a second
   `PUT` resolves `null` and answers `409 exists`, and the stored bytes stay the first's.
-  The `head`-then-`put` fallback was not needed. Task 7 proves it end to end.
+  The `head`-then-`put` fallback was not needed. Task 7 holds it over the whole stack
+  (`e2e/attachments.test.ts`): a second `PUT` of an id the PWA stored answers `409`, and
+  the object still hashes to its manifest entry. Real R2 is a post-deploy check.
 - **`401` logs no line**, as a refused socket upgrade logs none: the id an unauthenticated
   caller sends is its own junk. Every other refusal logs as tabled. `err=` is quoted.
 - **Extra headers**: a `405` carries `Allow: GET, PUT, OPTIONS`, and a `429` carries
@@ -3878,7 +3880,8 @@ Where the build adds to or departs from the wording above:
   line, rather than an uncaught `500`.
 - **`storage_error` from a short body is untested.** Miniflare's front server drops a
   request whose body ends before its `Content-Length` before workerd sees it, so the
-  `503` path cannot be driven there. Task 7 or a deploy check can.
+  `503` path cannot be driven there, nor from e2e, which boots the same front server. Only
+  a post-deploy check can.
 
 ### The upload allowance (the Hub, `relay/src/allowance.ts`) — built 2026-10-28
 
@@ -4063,6 +4066,11 @@ Where the build adds to or departs from the wording above:
   line gains `attachments=<n>`, and `formatReport` an "attachments" block.
   `ReapOptions.attachments` (the root) is required, like `pruneLogPath`, so a test that
   forgot it cannot prune the developer's own.
+- **Prune, after task 7**: a sidecar whose directory is gone (a crash between prune's two
+  removals) goes at once, audited `reason=orphan-sidecar`; a fetch writes its sidecar only
+  after the rename, so no live fetch has one. The sidecar's `worktree` is compared
+  canonical, as the panes' paths are: on macOS a pane under `/var` reports `/private/var`,
+  and the raw path would let an aged task's files go from under a live session.
 - **The extension map** covers `png`, `jpg`, `gif`, `webp`, `heic`, `svg`, `pdf`, `txt`,
   `md`, `csv`, `html`, `css`, `js`, `json`, `xml` (two types), `yaml` (two types), `zip`,
   `gz`, `tar`, `mp4`, `mov`, `mp3` and `wav`.
@@ -4217,13 +4225,20 @@ of this section built.
    - Creating the task with the manifest, and the count on queue cards.
    - `deriveAttachmentsAvailability`, and the CSP's `https:` origin.
    - README's _From the phone_ usage text.
-7. **end to end** (`e2e/attachments.test.ts`):
-   - An upload through the shared helpers, the task, the leader's routing, the daemon's
-     fetch, and a session stub that sees `--add-dir` and the paths in its seed.
-   - An object replaced in Miniflare's R2 behind the relay, refused
-     `attachment_unavailable`.
-   - A machine without the capability filtered.
-   - Gathering the chain's follow-ups.
+7. **end to end** (`e2e/attachments.test.ts`) — **built 2026-10-28**:
+   - Files added to the PWA's real `Store`, sealed and uploaded by `RelayClient` to the
+     relay's Miniflare R2, the task created with the manifest, placed by the leader, and
+     fetched by the daemon: the decrypted files under `attachments/<taskId>`, `--add-dir`
+     before `--model`, and the names in the seed. Create-only over the same route.
+   - The refusal is a manifest naming an id the bucket never held: the task fails
+     `attachment_unavailable` (`not found`), nothing launches, nothing is left on disk,
+     and the finishing write drops the manifest. Departing from the plan, no test rewrites
+     an object behind the relay: the hash check is the daemon suite's
+     (`daemon/test/attachments.test.ts`), and the real-versus-double seam it would cross,
+     the `GET`, is the one the missing object already crosses.
+   - The capability filter stays the scheduler suite's: every daemon of this build
+     advertises `attachments`, so e2e has no machine to filter.
+   - No fake-versus-real mismatch turned up. The chain's follow-ups were decided in its PR.
 
 ## Daemon (`seanced`, Bun)
 
