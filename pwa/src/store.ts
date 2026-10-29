@@ -7,7 +7,9 @@ import type {
   RescanResponse,
   SessionsResponse,
   SpawnClient,
+  StoreRefusal,
   Task,
+  TaskCreated,
   TaskSpec,
   TaskUntil,
 } from "@seance/shared";
@@ -27,10 +29,12 @@ import {
 import {
   DEFAULT_FORM,
   DEFAULT_HISTORY_RANGE,
+  HELD_MAX,
   RANGE_SPANS,
   RESCAN_IDLE,
   TARGET_METRICS,
   type Effort,
+  type HeldTask,
   type HistoryRange,
   type HistoryResult,
   type HistoryTarget,
@@ -46,7 +50,9 @@ import { accountSeries } from "./chart.ts";
 import { SchedulerStore, STORE_UNREADABLE, taskRequest } from "./scheduler-store.ts";
 import type { AppState } from "./view.ts";
 import {
+  ATTACHMENTS_NOT_HELD,
   ATTACHMENTS_UNAVAILABLE,
+  canHold,
   deriveAttachmentsAvailability,
   deriveAutoAvailability,
   derivePinProblem,
@@ -106,6 +112,8 @@ function enqueueFailureText(failure: RequestFailure): string {
   return sentence(failureReasonText(failure));
 }
 
+const REPORTED_UNAVAILABLE = "The scheduler's leader doesn't take tasks that settle on a done report yet.";
+
 /** How long a cleared prompt stays recoverable. Undo instead of a confirm dialog. */
 export const UNDO_WINDOW_MS = 6000;
 
@@ -137,10 +145,19 @@ export class Store {
   #held = false;
   /** Whether the socket was open at the last relay change, so a re-dial reads as one. */
   #wasOpen = false;
+  /**
+   * Held tasks go out once per socket, when its registry settles (the leader's
+   * capabilities are read from it), never on every relay change: a send that
+   * timed out would otherwise go again on each status beat.
+   */
+  #sentOnSettle = false;
+  #sendingHeld = false;
+  /** Held task ids sent on this socket; a retry takes its own back out. */
+  #triedOnSocket = new Set<string>();
   readonly #queue: SchedulerStore;
   readonly #accounts: AccountStore;
 
-  constructor(client: RelayClient, form: PersistedForm = DEFAULT_FORM) {
+  constructor(client: RelayClient, form: PersistedForm = DEFAULT_FORM, held: readonly HeldTask[] = []) {
     this.#client = client;
     this.#queue = new SchedulerStore(
       client,
@@ -163,6 +180,7 @@ export class Store {
       spawning: false,
       rescan: RESCAN_IDLE,
       verdict: null,
+      held,
       preview: null,
       sessions: {},
       queue: false,
@@ -256,7 +274,13 @@ export class Store {
       this.#wokenAt = new Map();
       this.#queue.onDrop();
       this.#wasOpen = false;
+      this.#sentOnSettle = false;
+      this.#triedOnSocket = new Set();
       return;
+    }
+    if (relay.registrySettled && !this.#sentOnSettle) {
+      this.#sentOnSettle = true;
+      void this.#sendHeld();
     }
     const reopened = !this.#wasOpen;
     this.#wasOpen = true;
@@ -738,10 +762,13 @@ export class Store {
    * answers for itself: no leader need be up, and whichever one leads next reads
    * it. A picked machine or account is a pin on it, never a direct spawn.
    * `runNow`: a Start now, the same task with a `run-now` once it is `ready`.
+   * With the socket down the task is held instead (`canHold`), and a Start now is a plain queue:
+   * a `run-now` sent whenever the app next reconnects would skip the caps at a moment nobody chose.
    */
   async #submit(runNow: boolean): Promise<void> {
     const { relay, form } = this.#state;
-    if (!deriveAutoAvailability(relay).available || this.#state.spawning) return;
+    const holding = canHold(relay);
+    if ((!holding && !deriveAutoAvailability(relay).available) || this.#state.spawning) return;
     // The leader bounds what it reads; past the bound it would skip the task, and the store's refusal blames versions.
     const refusal = (message: string): void => this.#showVerdict({ kind: "unqueued", message, mayHaveLanded: false });
     // The button blocks these too; a form that changed since it rendered is stopped here. Before the repo
@@ -755,10 +782,13 @@ export class Store {
     if (repo === null) return;
     const reported = form.until === "reported";
     // An older leader would drop `until` and hold a `done` edge unreadable, so neither is written to one.
-    if ((reported || form.after.some((dep) => dep.after === "done")) && !deriveReportedAvailability(relay)) {
-      refusal(
-        "The scheduler's leader doesn't take tasks that settle on a done report yet. Update seanced on its machine, or pick another setting.",
-      );
+    // A held task is checked when it is sent: no relay, no leader to ask.
+    if (
+      !holding &&
+      (reported || form.after.some((dep) => dep.after === "done")) &&
+      !deriveReportedAvailability(relay)
+    ) {
+      refusal(`${REPORTED_UNAVAILABLE} Update seanced on its machine, or pick another setting.`);
       return;
     }
     if (reported && form.prompt.trim() === "") {
@@ -771,7 +801,7 @@ export class Store {
     }
     const attaching = this.#state.attachments.length > 0;
     if (attaching && !deriveAttachmentsAvailability(relay)) {
-      refusal(`${ATTACHMENTS_UNAVAILABLE}.`);
+      refusal(`${holding ? ATTACHMENTS_NOT_HELD : ATTACHMENTS_UNAVAILABLE}.`);
       return;
     }
     const request = taskRequest(form, repo.origin, true);
@@ -805,7 +835,148 @@ export class Store {
       ...(reported ? { until: form.until } : {}),
       ...(attachments === undefined ? {} : { attachments }),
     };
-    await this.#enqueue(queuedTask(spec, Date.now()), runNow);
+    const task = queuedTask(spec, Date.now());
+    if (holding) this.#hold(task);
+    else await this.#enqueue(task, runNow);
+  }
+
+  /** Keeps `task` on this phone, clearing the form as a stored one does; it is sent when a registry next settles. */
+  #hold(task: Task): void {
+    const { held } = this.#state;
+    if (held.length >= HELD_MAX) {
+      this.#showVerdict({
+        kind: "unqueued",
+        message: `${HELD_MAX} tasks are held on this phone already. Discard one, or wait for the relay.`,
+        mayHaveLanded: false,
+      });
+      return;
+    }
+    this.#queue.stopFollowing();
+    this.#patch({ held: [...held, { task, failure: null, sending: false }] });
+    this.#clearFormFor(task);
+    this.#showVerdict({ kind: "held", task });
+  }
+
+  /**
+   * The form after `task` was stored or held. Deps, Linear and `until` belong to that task; a batch
+   * spans enqueues, and its counter moves only for the member it numbered, so a retry that lands
+   * twice moves it once.
+   */
+  #clearFormFor(task: Task): void {
+    this.#disarmUndo();
+    const { form } = this.#state;
+    const { batch } = form;
+    const counted = batch !== null && task.spec.batch?.id === batch.id && task.spec.batch.index === batch.next;
+    // Only the files this task carries leave the form: a retry's task names the ones it was built with.
+    const sent = new Set(task.spec.attachments?.map((ref) => ref.id));
+    this.#patch({
+      form: {
+        ...form,
+        prompt: "",
+        after: [],
+        until: "merged",
+        batch: counted ? { ...batch, next: batch.next + 1 } : batch,
+      },
+      promptUndo: null,
+      attachments: this.#state.attachments.filter((f) => f.stored === null || !sent.has(f.stored.id)),
+      attachNotice: null,
+    });
+  }
+
+  /** Why the store refused a create, as the verdict and a held row say it. */
+  #refusalText(code: StoreRefusal["code"]): string {
+    const unreadable = code === "store_full" ? this.#queue.unreadableCount() : 0;
+    return unreadable > 0
+      ? `${sentence(storeFullUnreadableText(unreadable))} Clear them on the Queue screen, then try again.`
+      : sentence(storeErrorText(code));
+  }
+
+  /**
+   * Sends every held task that has not failed, oldest first, one at a time, so a batch lands in the
+   * order it was numbered. Single-flight; a task retried mid-pass is picked up by the same pass.
+   * A send whose answer never came stays held without a failure, and is not sent again on this
+   * socket: its resend on the next answers `landedEarlier` if it had landed.
+   */
+  async #sendHeld(): Promise<void> {
+    if (this.#sendingHeld) return;
+    this.#sendingHeld = true;
+    const tried = this.#triedOnSocket;
+    try {
+      for (;;) {
+        const { relay } = this.#state;
+        if (relay.status !== "open" || !relay.registrySettled) return;
+        const next = this.#state.held.find((entry) => entry.failure === null && !tried.has(entry.task.id));
+        if (next === undefined) return;
+        tried.add(next.task.id);
+        // oxlint-disable-next-line no-await-in-loop -- sequential on purpose: batch order, one create at a time
+        await this.#sendOne(next.task);
+      }
+    } finally {
+      this.#sendingHeld = false;
+    }
+  }
+
+  async #sendOne(task: Task): Promise<void> {
+    const reported = task.spec.until === "reported" || task.spec.deps?.some((dep) => dep.after === "done") === true;
+    if (reported && !deriveReportedAvailability(this.#state.relay)) {
+      this.#heldFailed(task, `${REPORTED_UNAVAILABLE} Try again once it does, or discard it.`);
+      return;
+    }
+    this.#patchHeld(task.id, { sending: true });
+    let reply: TaskCreated | StoreRefusal | null;
+    try {
+      reply = await this.#client.createTask(task);
+    } catch {
+      // Timed out or dropped: it may have landed, and the resend on the next socket says which.
+      this.#patchHeld(task.id, { sending: false });
+      return;
+    }
+    if (reply === null) this.#heldFailed(task, STORE_UNREADABLE);
+    else if (!reply.ok) this.#heldFailed(task, this.#refusalText(reply.code));
+    else this.#heldLanded(task);
+  }
+
+  #patchHeld(taskId: string, next: Partial<Pick<HeldTask, "failure" | "sending">>): void {
+    const held = this.#state.held.map((entry) => (entry.task.id === taskId ? { ...entry, ...next } : entry));
+    this.#patch({ held });
+  }
+
+  #heldFailed(task: Task, failure: string): void {
+    this.#patchHeld(task.id, { failure, sending: false });
+    const { verdict } = this.#state;
+    if (verdict?.kind !== "held" || verdict.task.id !== task.id) return;
+    this.#patch({
+      verdict: {
+        kind: "unqueued",
+        message: `${failure} It's kept on this phone: retry or discard it on the form.`,
+        mayHaveLanded: false,
+      },
+    });
+  }
+
+  /** Stored: off the phone, and a held verdict still up for it follows it as a queued one. */
+  #heldLanded(task: Task): void {
+    this.#patch({ held: this.#state.held.filter((entry) => entry.task.id !== task.id) });
+    const { verdict } = this.#state;
+    if (verdict?.kind !== "held" || verdict.task.id !== task.id) return;
+    this.#queue.stopFollowing();
+    this.#patch({ verdict: { kind: "queued", task } });
+    this.#queue.startFollowing(task, false);
+  }
+
+  /** Clears a held task's failure and sends it if the relay is up; otherwise it waits like any held task. */
+  retryHeld(taskId: string): void {
+    const entry = this.#state.held.find((candidate) => candidate.task.id === taskId);
+    if (entry === undefined || entry.sending) return;
+    this.#patchHeld(taskId, { failure: null });
+    this.#triedOnSocket.delete(taskId);
+    void this.#sendHeld();
+  }
+
+  /** Never one being sent: its create is already out, and dropping it here would not stop it landing. */
+  discardHeld(taskId: string): void {
+    const held = this.#state.held.filter((entry) => entry.task.id !== taskId || entry.sending);
+    this.#patch({ held: held.length === this.#state.held.length ? this.#state.held : held });
   }
 
   /**
@@ -871,37 +1042,14 @@ export class Store {
       } else if (!reply.ok) {
         // A refusal says nothing was stored. Only a full store or a busy minute is worth asking again.
         const retryable = reply.code === "rate_limited" || reply.code === "store_full";
-        const unreadable = reply.code === "store_full" ? this.#queue.unreadableCount() : 0;
         this.#showVerdict({
           kind: "unqueued",
-          message:
-            unreadable > 0
-              ? `${sentence(storeFullUnreadableText(unreadable))} Clear them on the Queue screen, then try again.`
-              : sentence(storeErrorText(reply.code)),
+          message: this.#refusalText(reply.code),
           mayHaveLanded: false,
           ...(retryable ? { retry: task, ...again } : {}),
         });
       } else {
-        this.#disarmUndo();
-        const { form } = this.#state;
-        // Deps, Linear and `until` belong to the task just stored; a batch spans enqueues, and its
-        // counter moves only for the member it numbered, so a retry that lands twice moves it once.
-        const { batch } = form;
-        const counted = batch !== null && task.spec.batch?.id === batch.id && task.spec.batch.index === batch.next;
-        // Only the files this task carries leave the form: a retry's task names the ones it was built with.
-        const sent = new Set(task.spec.attachments?.map((ref) => ref.id));
-        this.#patch({
-          form: {
-            ...form,
-            prompt: "",
-            after: [],
-            until: "merged",
-            batch: counted ? { ...batch, next: batch.next + 1 } : batch,
-          },
-          promptUndo: null,
-          attachments: this.#state.attachments.filter((f) => f.stored === null || !sent.has(f.stored.id)),
-          attachNotice: null,
-        });
+        this.#clearFormFor(task);
         this.#showVerdict({ kind: "queued", task });
         this.#queue.startFollowing(task, runNow);
       }

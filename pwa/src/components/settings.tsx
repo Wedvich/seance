@@ -1,5 +1,6 @@
 import type { JSX } from "preact";
 import { useEffect, useState } from "preact/hooks";
+import { describeLaunch, readLaunches } from "../launch.ts";
 import { readPref, setPref, THEME_PREFS, type ThemePref } from "../theme.ts";
 import type { ConnectionState } from "../view.ts";
 import { RelayDot } from "./relay-dot.tsx";
@@ -36,6 +37,7 @@ export function Settings(props: {
   const creds = useCredentials({ relayUrl: props.relayUrl, hasBearer: true, hasPsk: true });
   const [theme, setTheme] = useState<ThemePref>(readPref);
   const [reconnecting, setReconnecting] = useState(false);
+  const [launches] = useState(readLaunches);
 
   // The client never reports a dial as failed — it just backs off and retries —
   // so the settle window is the honest bound on how long a tap can claim to be
@@ -116,6 +118,19 @@ export function Settings(props: {
             }}
           />
         </div>
+
+        {launches.length > 0 && (
+          <div className="launch-card card">
+            <span className="theme-title">Recent launches</span>
+            <ul className="launch-list">
+              {launches.map((launch) => (
+                <li key={launch.at} className="launch-row mono">
+                  {describeLaunch(launch)}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </form>
 
       <footer className="footer">

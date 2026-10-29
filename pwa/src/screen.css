@@ -618,6 +618,111 @@
   color: var(--fg2);
 }
 
+/* ---- recent launches (settings) ---- */
+
+.launch-card {
+  padding: 14px 16px;
+  border-radius: 14px;
+}
+
+.launch-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.launch-row {
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--fg2);
+  overflow-wrap: anywhere;
+}
+
+/* ---- booting ---- */
+
+.booting {
+  justify-content: center;
+  align-items: center;
+}
+
+.booting-text {
+  font-size: 13px;
+  color: var(--fg2);
+  animation: prompt-action-in 400ms ease;
+}
+
+/* ---- held tasks ---- */
+
+.held {
+  padding: 13px 14px;
+  border-radius: 14px;
+}
+
+.held-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.held-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 8px 0;
+}
+
+.held-row + .held-row {
+  border-top: 1px solid var(--line);
+}
+
+.held-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.held-title {
+  display: block;
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.held-sub,
+.held-status {
+  display: block;
+  margin-top: 2px;
+  font-size: 12.5px;
+  color: var(--fg2);
+  overflow-wrap: anywhere;
+}
+
+.held-status-err {
+  color: var(--err);
+}
+
+.held-actions {
+  display: flex;
+  gap: 4px;
+  flex: none;
+}
+
+.held-action {
+  font-family: var(--mono);
+  font-variant-ligatures: none;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--fg2);
+  background: transparent;
+  border: 0;
+  padding: 8px 6px;
+}
+
+.held-action:disabled {
+  opacity: 0.4;
+}
+
 /* ---- worktree row ---- */
 
 .worktree {

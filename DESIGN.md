@@ -6118,6 +6118,40 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   persisted too (`seance:pending`) so a lost reply could be reconciled; every spawn is a
   queued task now, whose record is the relay's, so nothing pending is kept and
   `dropLegacyPending` clears the old key on start.
+- **Queue works with the relay unreachable: the task is held on the phone and sent
+  on reconnect** (2026-10-29). Held only once this document has seen a registry
+  (`canHold`): the repo and pins resolve against the machines the socket left in
+  memory, and a cold launch with no relay has nothing to pick from, so its button
+  still waits. The task is whole at the tap, its id minted and `createdAt` stamped
+  then, and kept in `seance:held` (at most `HELD_MAX`, written on every change, never
+  debounced). It goes out once per socket, when that socket's registry settles,
+  oldest first and one create at a time so a batch lands in order. A send whose
+  answer never came stays held and goes again on the next socket: the id is the key,
+  so the resend answers `landedEarlier` if the first landed. A refusal fails it in
+  place, with a retry and a discard on the form; a failed one is never resent by
+  itself. What needs a verified leader is checked at send, not at the tap: a task
+  settling on its done report, or with a `done` edge, fails there if the leader
+  doesn't advertise `reportedDone`. A Start now held this way is a plain queue,
+  since a `run-now` fired whenever the app next reconnects would skip the caps at a
+  moment nobody chose. A task with files is never held: files upload at the tap and
+  go only to a leader verified to advertise `attachments`, which a dropped socket
+  can't verify, so the form refuses them until they are removed, and `readHeld`
+  drops a stored one carrying a manifest. Only the create is held: every other write is a leader op
+  under the replay window, or an account overwrite at a version, and neither keeps.
+  Rejected: sealing held tasks at rest (the key is usable by anything running in
+  the origin, which is the reader that matters; the draft beside it is plaintext
+  already, and a PSK re-entered before the send would strand them); sending from
+  the service worker with Background Sync (the worker holds no PSK — _Scheduler_
+  M4, #11 — and cannot read the bearer token in `localStorage`); a cached registry
+  for cold offline launches (deferred: a new kind of relay data at rest in the
+  browser, for a case the in-memory registry already covers once the app has
+  connected).
+- **The app renders before the key store is read** (2026-10-29). `main.tsx` used
+  to await the PSK's IndexedDB read before its first render, so a slow read was a
+  blank screen. It renders `Booting` first, which names the wait after two
+  seconds. A cold launch's timings (the HTML via the service worker, the module,
+  the key store) are kept in `seance:launches` and listed in Settings, so a slow
+  launch can be read afterwards instead of caught live.
 - **The repo selection is one origin, scoped by the pins, not one per machine.** It
   used to be remembered per machine (`PersistedForm.repos`, deviceId to repo name), because
   each machine had its own clone set and a direct spawn named a machine. A task names a

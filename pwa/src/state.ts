@@ -71,7 +71,25 @@ export type Verdict =
       readonly mayHaveLanded: boolean;
       readonly retry?: Task;
       readonly runNow?: true;
-    };
+    }
+  /** Queued with no relay to take it: kept on this phone (`HeldTask`) and sent when the app reconnects. */
+  | { readonly kind: "held"; readonly task: Task };
+
+/**
+ * A task queued while the relay was unreachable, kept on this phone until it is
+ * sent. The task is whole (its id minted at the tap), so a resend after a lost
+ * reply answers `landedEarlier` and cannot queue it twice. `failure`: the send
+ * was refused, as a sentence; it waits for a retry instead of being sent again
+ * by itself. `sending` is never persisted.
+ */
+export interface HeldTask {
+  readonly task: Task;
+  readonly failure: string | null;
+  readonly sending: boolean;
+}
+
+/** Plaintext prompts at rest, like the draft: bounded so a dead relay can't grow it without limit. */
+export const HELD_MAX = 10;
 
 /** Why a Start now's `run-now` left its task where it was, as a sentence, for the queued verdict of `taskId`. */
 export interface StartNowRefusal {

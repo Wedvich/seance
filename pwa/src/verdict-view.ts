@@ -104,6 +104,20 @@ export function describeVerdict(
     };
   }
 
+  if (verdict.kind === "held") {
+    return {
+      glyph: "…",
+      glyphClass: "verdict-glyph verdict-glyph-muted",
+      stage: null,
+      headline: "Held on this phone.",
+      // No background sync: the page sends it, so the app has to be open when the relay comes back.
+      body: "The app isn't connected to the relay right now, so it waits here and is queued as soon as it reconnects. Keep the app open, or come back to it.",
+      detail: null,
+      primary: { label: "Start another", onClick: "another" },
+      showBack: true,
+    };
+  }
+
   return {
     glyph: verdict.mayHaveLanded ? "?" : "!",
     glyphClass: verdict.mayHaveLanded ? "verdict-glyph verdict-glyph-muted" : "verdict-glyph verdict-glyph-err",

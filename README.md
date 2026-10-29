@@ -351,6 +351,12 @@ the session in the Claude app like any other. The header counts sessions across 
 machine (`2 online · 1 asleep · 3 sessions`), and the footer says who places the task —
 the scheduler, or the machine you pinned.
 
+Lost the relay? Queue still works once the app has connected since it opened: the button
+reads **Queue when connected**, and the task waits on the phone, listed above the tiles,
+until the app reconnects (with the app open — nothing sends it in the background). One the
+relay or the scheduler's leader then refuses stays there with the reason, to retry or
+discard.
+
 A machine you have retired keeps its place in the picker with a stale last-seen —
 the relay never expires an entry. The bin on an offline row deletes it there, so it
 disappears on every device you use the app from, and returns only if that machine's

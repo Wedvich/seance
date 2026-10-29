@@ -1,5 +1,13 @@
-import { DEP_AFTER, isTaskId, TASK_SPEC_LIMITS, TASK_UNTIL, type TaskDep } from "@seance/shared";
-import { DEFAULT_FORM, isEffort, isModel, type OpenBatch, type PersistedForm } from "./state.ts";
+import { DEP_AFTER, isTaskId, parseTask, TASK_SPEC_LIMITS, TASK_UNTIL, type TaskDep } from "@seance/shared";
+import {
+  DEFAULT_FORM,
+  HELD_MAX,
+  isEffort,
+  isModel,
+  type HeldTask,
+  type OpenBatch,
+  type PersistedForm,
+} from "./state.ts";
 
 /**
  * The form survives a reload because iOS kills backgrounded PWAs freely and the
@@ -7,11 +15,14 @@ import { DEFAULT_FORM, isEffort, isModel, type OpenBatch, type PersistedForm } f
  *
  * The prompt therefore sits in plaintext localStorage, unlike the PSK. That is a
  * deliberate asymmetry — one message's worth of text on your own phone, versus
- * permanent authority over every machine you own.
+ * permanent authority over every machine you own. Held tasks (`HeldTask`) extend
+ * it to at most `HELD_MAX` prompts, sealed only when sent: sealing them at rest
+ * would stop nobody running code in the app, since the key is usable there.
  */
 
 const FORM_KEY = "seance:form";
 const PENDING_KEY = "seance:pending";
+const HELD_KEY = "seance:held";
 /** Only cleared now — machines are forgotten at the relay, not hidden per browser. */
 const HIDDEN_KEY = "seance:hidden";
 
@@ -97,6 +108,30 @@ export function readForm(): PersistedForm {
 
 export function writeForm(form: PersistedForm): void {
   writeJson(FORM_KEY, form);
+}
+
+/** Stricter than the form: a held task is sent as it stands, so one this build can't parse is dropped, not sent. */
+export function readHeld(): readonly HeldTask[] {
+  const raw = readJson(HELD_KEY);
+  if (!Array.isArray(raw)) return [];
+  const held: HeldTask[] = [];
+  const ids = new Set<string>();
+  for (const entry of raw) {
+    if (held.length === HELD_MAX) break;
+    if (typeof entry !== "object" || entry === null) continue;
+    const task = parseTask(Reflect.get(entry, "task"));
+    // Never one with files: those go only to a leader verified to take them, which holding never sees.
+    if (task === null || task.state !== "queued" || task.spec.attachments !== undefined || ids.has(task.id)) continue;
+    const failure: unknown = Reflect.get(entry, "failure");
+    ids.add(task.id);
+    held.push({ task, failure: typeof failure === "string" ? failure : null, sending: false });
+  }
+  return held;
+}
+
+/** Written on every change, never debounced: a held task lost to a kill is a task that never runs. */
+export function writeHeld(held: readonly HeldTask[]): void {
+  writeJson(HELD_KEY, held.length === 0 ? null : held.map(({ task, failure }) => ({ task, failure })));
 }
 
 /** No spawn is sent directly any more, so a pending record has nothing left to reconcile; cleared like `dropLegacyHidden`. */

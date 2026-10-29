@@ -36,7 +36,7 @@ import {
   type TaskReply,
   type TaskRequest,
 } from "@seance/shared";
-import { DEFAULT_FORM } from "../src/state.ts";
+import { DEFAULT_FORM, HELD_MAX, type HeldTask } from "../src/state.ts";
 import { deriveQueue } from "../src/queue-view.ts";
 import { deriveView } from "../src/view.ts";
 import { describeVerdict } from "../src/verdict-view.ts";
@@ -658,6 +658,201 @@ function followEnd(store: Store): unknown {
   const verdict = store.getState().verdict;
   return verdict?.kind === "queued" ? verdict.follow : undefined;
 }
+
+describe("holding a task while the relay is down", () => {
+  let timers: ReturnType<typeof captureTimers>;
+
+  beforeEach(() => {
+    // The follow loop a landed task starts polls on timers; held here so nothing runs on the clock.
+    timers = captureTimers();
+  });
+
+  afterEach(() => timers.restore());
+
+  /** A socket that dropped after its registry: the machines are still known. */
+  const DOWN: Partial<RelayState> = { status: "retrying", registrySettled: false };
+
+  function attached(client: ScriptedClient, held: readonly HeldTask[] = []): Store {
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" }, held);
+    store.attach();
+    return store;
+  }
+
+  function reconnect(client: ScriptedClient): void {
+    client.emit({ status: "retrying", registrySettled: false });
+    client.emit({ status: "open", registrySettled: true });
+  }
+
+  function heldTask(store: Store, index = 0): Task {
+    const entry = store.getState().held[index];
+    if (entry === undefined) throw new Error(`nothing held at ${index}`);
+    return entry.task;
+  }
+
+  test("is kept on the phone with the form cleared, and nothing is sent", async () => {
+    const client = new ScriptedClient(DOWN);
+    const store = attached(client);
+    await store.spawn();
+
+    const task = heldTask(store);
+    expect(client.creates).toEqual([]);
+    expect(task.spec.prompt).toBe("fix it");
+    expect(store.getState().verdict).toEqual({ kind: "held", task });
+    expect(store.getState().form.prompt).toBe("");
+  });
+
+  test("is sent once the next registry settles, and its verdict follows it as queued", async () => {
+    const client = new ScriptedClient(DOWN);
+    const store = attached(client);
+    await store.spawn();
+    const task = heldTask(store);
+
+    // Open is not enough: the leader's capabilities come with the registry.
+    client.emit({ status: "open", registrySettled: false });
+    await drain();
+    expect(client.creates).toEqual([]);
+
+    client.emit({ registrySettled: true });
+    await until(() => store.getState().held.length === 0, "the held task sent");
+    expect(client.creates).toEqual([task]);
+    expect(store.getState().verdict).toEqual({ kind: "queued", task });
+  });
+
+  test("with no registry seen yet, nothing is held", async () => {
+    const client = new ScriptedClient({ ...DOWN, machines: [], registrySize: 0 });
+    const store = attached(client);
+    await store.spawn();
+
+    expect(store.getState().held).toEqual([]);
+    expect(store.getState().verdict).toBeNull();
+    expect(store.getState().form.prompt).toBe("fix it");
+  });
+
+  // The id is minted at the tap, so the resend is the same create, and `landedEarlier` means it is stored.
+  test("a send whose answer never came stays held, is not resent on that socket, and goes again on the next", async () => {
+    const client = new ScriptedClient(DOWN);
+    const store = attached(client);
+    await store.spawn();
+    const { id } = heldTask(store);
+    client.onCreate = async () => {
+      throw new RequestFailure("timeout", "the relay did not answer");
+    };
+
+    client.emit({ status: "open", registrySettled: true });
+    await until(() => client.creates.length === 1 && store.getState().held[0]?.sending === false, "the first send");
+    expect(store.getState().held[0]?.failure).toBeNull();
+
+    // Any later relay change on the same socket, a status beat say, sends nothing.
+    client.emit({ fleetQuota: [] });
+    await drain();
+    expect(client.creates).toHaveLength(1);
+
+    client.onCreate = async () => ({ ok: true, landedEarlier: true });
+    reconnect(client);
+    await until(() => store.getState().held.length === 0, "the resend");
+    expect(client.creates.map((task) => task.id)).toEqual([id, id]);
+  });
+
+  test("a refused send fails it in place with the reason, and a retry sends it again", async () => {
+    const client = new ScriptedClient(DOWN);
+    const store = attached(client);
+    await store.spawn();
+    client.onCreate = async () => ({ ok: false, code: "rate_limited" });
+
+    client.emit({ status: "open", registrySettled: true });
+    await until(() => store.getState().held[0]?.failure !== null, "the refusal");
+    const verdict = store.getState().verdict;
+    expect(verdict?.kind === "unqueued" && verdict.message.includes("kept on this phone")).toBe(true);
+
+    // A failed one is not sent again by itself, not even on a new socket.
+    reconnect(client);
+    await drain();
+    expect(client.creates).toHaveLength(1);
+
+    client.onCreate = async () => ({ ok: true, landedEarlier: false });
+    store.retryHeld(heldTask(store).id);
+    await until(() => store.getState().held.length === 0, "the retried send");
+    expect(client.creates).toHaveLength(2);
+  });
+
+  test("one that settles on a done report is checked against the leader when sent, not when held", async () => {
+    const client = new ScriptedClient(DOWN);
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it", until: "reported" });
+    store.attach();
+    await store.spawn();
+    expect(store.getState().held).toHaveLength(1);
+
+    // dev-a leads without advertising `reportedDone`.
+    client.emit({ status: "open", registrySettled: true });
+    await until(() => store.getState().held[0]?.failure !== null, "the send-time check");
+    expect(store.getState().held[0]?.failure).toContain("doesn't take tasks that settle on a done report");
+    expect(client.creates).toEqual([]);
+
+    client.emit({
+      machines: [autoMachine("dev-a", { capabilities: [CAPABILITIES.reportedDone] }), autoMachine("dev-b")],
+    });
+    store.retryHeld(heldTask(store).id);
+    await until(() => store.getState().held.length === 0, "the send once the leader takes it");
+    expect(client.creates[0]?.spec.until).toBe("reported");
+  });
+
+  // A run-now sent whenever the app next reconnects would skip the caps at a moment nobody chose.
+  test("Start now with the relay down is a plain queue", async () => {
+    const client = new ScriptedClient(DOWN);
+    const store = attached(client);
+    await store.startNow();
+    client.emit({ status: "open", registrySettled: true });
+    await until(() => store.getState().held.length === 0, "the held task sent");
+    await drain();
+    expect(client.runNows).toEqual([]);
+  });
+
+  test("go out oldest first, one at a time", async () => {
+    const client = new ScriptedClient(DOWN);
+    const store = attached(client);
+    await store.spawn();
+    store.setPrompt("and the next");
+    await store.spawn();
+    const [first, second] = [heldTask(store, 0), heldTask(store, 1)];
+
+    let answer: (reply: TaskCreated) => void = () => {};
+    client.onCreate = () =>
+      new Promise((resolve) => {
+        answer = resolve;
+      });
+    client.emit({ status: "open", registrySettled: true });
+    await until(() => client.creates.length === 1, "the first send");
+    await drain();
+    expect(client.creates).toEqual([first]);
+
+    answer({ ok: true, landedEarlier: false });
+    await until(() => client.creates.length === 2, "the second send");
+    expect(client.creates).toEqual([first, second]);
+  });
+
+  test("past the cap another is refused; discard frees a slot, but never takes back one being sent", async () => {
+    const client = new ScriptedClient(DOWN);
+    const held = Array.from({ length: HELD_MAX }, (_, i) => ({
+      task: { ...QUEUED, id: `t-held-${i}`, state: "queued" as const },
+      failure: null,
+      sending: false,
+    }));
+    const store = attached(client, held);
+    await store.spawn();
+    expect(store.getState().held).toHaveLength(HELD_MAX);
+    expect(store.getState().verdict).toMatchObject({ kind: "unqueued", mayHaveLanded: false });
+    expect(store.getState().form.prompt).toBe("fix it");
+
+    store.discardHeld("t-held-9");
+    expect(store.getState().held).toHaveLength(HELD_MAX - 1);
+
+    client.onCreate = () => new Promise(() => {});
+    client.emit({ status: "open", registrySettled: true });
+    await until(() => store.getState().held[0]?.sending === true, "the first send out");
+    store.discardHeld("t-held-0");
+    expect(store.getState().held[0]?.task.id).toBe("t-held-0");
+  });
+});
 
 describe("auto's error paths", () => {
   let timers: ReturnType<typeof captureTimers>;
@@ -3018,6 +3213,27 @@ describe("attachments", () => {
     // Still listed, so they can be removed; removing them frees the form.
     store.removeFile(store.getState().attachments[0]?.key ?? "");
     expect(deriveView(store.getState(), 0).button.enabled).toBe(true);
+    detach();
+  });
+
+  // Files go only to a leader verified to take them, and holding never sees one: they'd go unchecked.
+  test("are never held: with the socket down they block the queue until removed, and then it holds", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "go" });
+    const detach = store.attach();
+    store.addFiles([file("a.txt", "first")]);
+    client.emit({ status: "retrying", registrySettled: false });
+    const view = deriveView(store.getState(), 0);
+    expect(view.button).toMatchObject({ label: "Can't attach files", enabled: false });
+    expect(view.footerStatus).toBe("Files go only while connected. Remove them to keep the task on this phone");
+    await store.spawn();
+    expect(client.uploads).toEqual([]);
+    expect(store.getState().held).toEqual([]);
+    expect(store.getState().form.prompt).toBe("go");
+
+    store.removeFile(store.getState().attachments[0]?.key ?? "");
+    await store.spawn();
+    expect(store.getState().held.map(({ task }) => task.spec.attachments)).toEqual([undefined]);
     detach();
   });
 });

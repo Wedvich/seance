@@ -72,6 +72,8 @@ export interface SpawnActions {
   /** Picked, pasted or dropped files; the store applies the limits. */
   readonly addFiles: (files: readonly File[]) => void;
   readonly removeFile: (key: string) => void;
+  readonly retryHeld: (taskId: string) => void;
+  readonly discardHeld: (taskId: string) => void;
 }
 
 /** Only drags that carry files light the card up: a dragged text selection is the textarea's. */
@@ -140,6 +142,45 @@ function AttachmentList(props: {
       </div>
       {view.notice !== null && <p className="attach-notice">{view.notice}</p>}
     </div>
+  );
+}
+
+/** Tasks queued with the relay unreachable, waiting on this phone; a refused one offers a retry. */
+function HeldList(props: {
+  rows: ViewModel["held"];
+  onRetry: (taskId: string) => void;
+  onDiscard: (taskId: string) => void;
+}): JSX.Element {
+  return (
+    <section className="held card" aria-label="Held on this phone">
+      <p className="label">HELD ON THIS PHONE</p>
+      <ul className="held-list">
+        {props.rows.map((row) => (
+          <li key={row.taskId} className="held-row">
+            <span className="held-text">
+              <span className="held-title">{row.title}</span>
+              <span className="held-sub mono">{row.repo}</span>
+              <span className={row.failed ? "held-status held-status-err" : "held-status"}>{row.status}</span>
+            </span>
+            <span className="held-actions">
+              {row.failed && (
+                <button type="button" className="held-action" onClick={() => props.onRetry(row.taskId)}>
+                  Retry
+                </button>
+              )}
+              <button
+                type="button"
+                className="held-action"
+                disabled={row.sending}
+                onClick={() => props.onDiscard(row.taskId)}
+              >
+                Discard
+              </button>
+            </span>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
@@ -862,6 +903,10 @@ export function SpawnScreen(props: {
               </span>
             </div>
           ))}
+
+        {view.held.length > 0 && (
+          <HeldList rows={view.held} onRetry={actions.retryHeld} onDiscard={actions.discardHeld} />
+        )}
 
         <div className="grid">
           <TileButton tile={view.machineTile} offline={offline} onClick={() => actions.openSheet("machine")} />

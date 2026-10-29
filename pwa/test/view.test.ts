@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { CAPABILITIES, type ExclaveInfo, type Machine, type RelayState } from "@seance/shared";
-import { DEFAULT_FORM, RESCAN_IDLE, type PersistedForm, type SessionsView } from "../src/state.ts";
+import { DEFAULT_FORM, HELD_MAX, RESCAN_IDLE, type PersistedForm, type SessionsView } from "../src/state.ts";
 import {
   derivePinProblem,
   deriveReportedAvailability,
@@ -75,6 +75,7 @@ function state(overrides: Partial<AppState> = {}, form: Partial<PersistedForm> =
     spawning: false,
     rescan: RESCAN_IDLE,
     verdict: null,
+    held: [],
     preview: null,
     sessions: {},
     queue: false,
@@ -118,22 +119,85 @@ describe("formatSeen", () => {
 });
 
 describe("banner and button", () => {
-  test("relay down blocks the spawn and keeps the prompt", () => {
-    const view = deriveView(state({ relay: relay({ status: "retrying" }) }, { prompt: "do the thing" }), NOW);
+  // A cold launch with no relay: no registry seen, so no repo to hold a task for.
+  test("relay down before any registry blocks the spawn and keeps the prompt", () => {
+    const down = relay({ status: "retrying", machines: [], registrySize: 0, registrySettled: false });
+    const view = deriveView(state({ relay: down }, { prompt: "do the thing" }), NOW);
     expect(view.banner?.title).toBe("Relay unreachable");
+    expect(view.banner?.body).toContain("until the app has reached the relay once");
     expect(view.button).toEqual({ label: "Waiting for the relay", enabled: false, busy: false });
     expect(view.meta).toBe("relay unreachable · retrying");
     expect(view.relayLine).toBe("relay unreachable · retrying");
   });
 
+  test("relay down after a registry holds the task on the phone instead", () => {
+    const view = deriveView(state({ relay: relay({ status: "retrying", registrySettled: false }) }), NOW);
+    expect(view.banner?.body).toContain("kept on this phone");
+    expect(view.button).toEqual({ label: "Queue when connected", enabled: true, busy: false });
+    expect(view.footerStatus).toBe("Not connected — a task you queue waits on this phone");
+    // The leader's capability is read when the task is sent.
+    expect(view.reportedAvailable).toBe(true);
+  });
+
+  test("a full hold blocks another, and the footer says what to do", () => {
+    const task = {
+      id: "t-held",
+      spec: { repo: "github.com/acme/app", mode: "worktree" as const },
+      state: "queued" as const,
+      createdAt: 1,
+    };
+    const held = Array.from({ length: HELD_MAX }, (_, i) => ({
+      task: { ...task, id: `t-${i}` },
+      failure: null,
+      sending: false,
+    }));
+    const view = deriveView(state({ relay: relay({ status: "retrying" }), held }), NOW);
+    expect(view.button).toEqual({ label: "Too many held", enabled: false, busy: false });
+    expect(view.footerStatus).toBe(`${HELD_MAX} tasks are held already. Discard one to hold another`);
+    expect(view.held).toHaveLength(HELD_MAX);
+  });
+
+  test("a held row shows the prompt's first line, its repo path and why it waits", () => {
+    const task = {
+      id: "t-held",
+      spec: { repo: "github.com/acme/app", mode: "worktree" as const, prompt: "port the pane\nand more" },
+      state: "queued" as const,
+      createdAt: 1,
+    };
+    const held = [
+      { task, failure: null, sending: false },
+      { task: { ...task, id: "t-2", spec: { ...task.spec, prompt: "" } }, failure: "Refused.", sending: false },
+    ];
+    const view = deriveView(state({ relay: relay({ status: "retrying" }), held }), NOW);
+    expect(view.held).toEqual([
+      {
+        taskId: "t-held",
+        title: "port the pane",
+        repo: "acme/app",
+        status: "Waiting for the relay",
+        failed: false,
+        sending: false,
+      },
+      { taskId: "t-2", title: "No prompt", repo: "acme/app", status: "Refused.", failed: true, sending: false },
+    ]);
+  });
+
   // A refresh and every resume start here, and the screen must not shout on the way in.
   test("a settling relay reads as connecting, with no banner and no red dot", () => {
-    const view = deriveView(state({ relay: relay({ status: "connecting", settling: true }) }), NOW);
+    const settling = relay({ status: "connecting", settling: true, machines: [], registrySize: 0 });
+    const view = deriveView(state({ relay: settling }), NOW);
     expect(view.banner).toBeNull();
     expect(view.meta).toBe("connecting…");
     expect(view.relayLine).toBe("connecting…");
     expect(view.relayState).toBe("connecting");
     expect(view.button).toEqual({ label: "Connecting…", enabled: false, busy: false });
+  });
+
+  // A resume's re-dial: a task held in it goes out within a second, so the button doesn't flicker.
+  test("a settling relay after a registry keeps the plain Queue", () => {
+    const view = deriveView(state({ relay: relay({ status: "connecting", settling: true }) }), NOW);
+    expect(view.button).toEqual({ label: "Queue", enabled: true, busy: false });
+    expect(view.footerStatus).toBeNull();
   });
 
   test("a rejected token is reported as such, not as an unreachable relay", () => {
@@ -429,7 +493,7 @@ describe("the pickers", () => {
     const down = deriveView(state({ relay: { ...leader([mac]), status: "retrying" } }), NOW);
     expect(down.autoAvailability).toEqual({ available: false, reason: "Not connected to the relay", note: null });
     expect(down.machineTile).toMatchObject({ dot: "off" });
-    expect(down.footerStatus).toBe("Not connected to the relay");
+    expect(down.footerStatus).toBe("Not connected — a task you queue waits on this phone");
   });
 
   test("a machine pin names the machine on the button and in the footer", () => {
