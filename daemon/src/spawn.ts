@@ -2,7 +2,7 @@ import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { DEFAULT_EFFORT, DEFAULT_MODEL, isTaskId, type RepoEntry, type SpawnRequest } from "@seance/shared";
-import { SpawnFailure, type Continuation, type SpawnOutcome } from "./backend.ts";
+import { SpawnFailure, type Continuation, type SessionAttachments, type SpawnOutcome } from "./backend.ts";
 import { freshenBase } from "./base-fetch.ts";
 import { git } from "./exec.ts";
 import { whileRegistering } from "./exit-status.ts";
@@ -241,7 +241,24 @@ function sessionFlag(session: Prepared["session"]): string {
   return ` ${session.resume ? "--resume" : "--session-id"} ${shq(session.id)}`;
 }
 
-async function buildInnerCommand(prepared: Prepared, session: string, request: SpawnRequest): Promise<InnerCommand> {
+/**
+ * The seed's list of fetched files. The name is `JSON.stringify`'d display text (the parser
+ * already kept it to one line); the path is the daemon's own.
+ */
+function attachmentsBlock(attachments: SessionAttachments | undefined): string {
+  if (attachments === undefined || attachments.files.length === 0) return "";
+  const rows = attachments.files.map(
+    (file) => `- ${file.path} — ${JSON.stringify(file.name)}, ${file.type}, ${file.size} bytes\n`,
+  );
+  return `\nAttached files (the user's originals, at these paths):\n${rows.join("")}`;
+}
+
+async function buildInnerCommand(
+  prepared: Prepared,
+  session: string,
+  request: SpawnRequest,
+  attachments?: SessionAttachments,
+): Promise<InnerCommand> {
   const claude = process.env["SEANCE_CLAUDE_BIN"] ?? "claude";
   const caffeinate = process.platform === "darwin" ? "caffeinate -is " : "";
   // `exec` keeps the pane's process-group-leader pid on claude itself — a
@@ -258,8 +275,11 @@ async function buildInnerCommand(prepared: Prepared, session: string, request: S
   // name and the session started idle. The seed is off argv entirely now (see
   // below), so `--` guards nothing today — it stays as the standing terminator
   // for whatever lands at the tail next.
+  // `--add-dir <directories...>` is variadic, so it sits directly before `--model`, which ends it.
+  // Daemon paths, never wire values, quoted like every path.
+  const addDirs = (attachments?.dirs ?? []).map((dir) => `--add-dir ${shq(dir)} `).join("");
   const base =
-    `exec ${caffeinate}${claude} -n ${shq(session)} --remote-control ` +
+    `exec ${caffeinate}${claude} -n ${shq(session)} --remote-control ${addDirs}` +
     `--model ${shq(request.model ?? DEFAULT_MODEL)} --effort ${shq(request.effort ?? DEFAULT_EFFORT)}` +
     // literal value, so nothing wire-supplied reaches the command line — no shq() needed
     `${request.plan === true ? " --permission-mode plan" : ""}` +
@@ -272,7 +292,9 @@ async function buildInnerCommand(prepared: Prepared, session: string, request: S
   const prompt = request.prompt === undefined || request.prompt === "" ? undefined : request.prompt;
   // A resume always gets a seed, even with no prompt: the preamble tells the model what happened, and
   // an initial message is what keeps claude off its blocking stale-resume dialog (`RESUME_NEVER_ASKS`).
-  if (prompt === undefined && !resume) {
+  // So do fetched files: the seed is the only place their paths are listed.
+  const listed = attachmentsBlock(attachments);
+  if (prompt === undefined && !resume && listed === "") {
     return { command: base, seedDir: null };
   }
 
@@ -280,7 +302,7 @@ async function buildInnerCommand(prepared: Prepared, session: string, request: S
   const seedFile = join(seedDir, "seed.txt");
   const seed = resume
     ? `${prepared.preamble}\n${prompt === undefined ? "" : `\nFrom the user: ${prompt}\n`}`
-    : `${prepared.preamble}\n\nTask: ${prompt}\n`;
+    : `${prepared.preamble}\n${prompt === undefined ? "" : `\nTask: ${prompt}\n`}${listed}`;
   await Bun.write(seedFile, seed);
   // Redirect, not an operand: an argv operand would be the expanded prompt in
   // every local process list for the session's whole life — the same text the
@@ -445,12 +467,13 @@ export async function spawnSession(
   repos: readonly RepoEntry[],
   opts: SpawnOptions,
   continuation?: Continuation,
+  attachments?: SessionAttachments,
 ): Promise<SpawnOutcome> {
   const { taskId } = request;
   if (request.mode === "continue" && (continuation === undefined || request.continues === undefined)) {
     throw new SpawnFailure("not_continuable", "this machine's session backend cannot continue a session");
   }
-  if (taskId === undefined) return spawnUntracked(request, repos, opts);
+  if (taskId === undefined) return spawnUntracked(request, repos, opts, attachments);
   const prior = taskSpawns.get(taskId) ?? Promise.resolve();
   const run = prior
     .catch(() => undefined)
@@ -462,9 +485,9 @@ export async function spawnSession(
         throw new SpawnFailure("task_running", `task ${taskId} is already running in ${where}`, running.paneId);
       }
       if (request.mode === "continue" && continuation !== undefined && request.continues !== undefined) {
-        return spawnContinued(request, request.continues, repos, opts, continuation);
+        return spawnContinued(request, request.continues, repos, opts, continuation, attachments);
       }
-      return spawnUntracked(request, repos, opts);
+      return spawnUntracked(request, repos, opts, attachments);
     });
   taskSpawns.set(taskId, run);
   try {
@@ -560,10 +583,13 @@ async function spawnContinued(
   repos: readonly RepoEntry[],
   opts: SpawnOptions,
   continuation: Continuation,
+  attachments?: SessionAttachments,
 ): Promise<SpawnOutcome> {
   const { path } = continuation;
   const prior = pathSpawns.get(path) ?? Promise.resolve();
-  const run = prior.catch(() => undefined).then(() => continueLocked(request, continues, repos, opts, continuation));
+  const run = prior
+    .catch(() => undefined)
+    .then(() => continueLocked(request, continues, repos, opts, continuation, attachments));
   pathSpawns.set(path, run);
   try {
     return await run;
@@ -578,6 +604,7 @@ async function continueLocked(
   repos: readonly RepoEntry[],
   opts: SpawnOptions,
   continuation: Continuation,
+  attachments?: SessionAttachments,
 ): Promise<SpawnOutcome> {
   const { path } = continuation;
   const repo = repos.find((r) => r.name === request.repo);
@@ -610,7 +637,7 @@ async function continueLocked(
   const name = basename(path);
   const windowName = sanitizeWindowName(request.title ?? name);
   const prepared = prepareContinue(continuation);
-  const inner = await buildInnerCommand(prepared, sessionName(name, opts.machineTag), request);
+  const inner = await buildInnerCommand(prepared, sessionName(name, opts.machineTag), request, attachments);
   return launchWindow(prepared, inner, windowName, request, opts);
 }
 
@@ -618,6 +645,7 @@ async function spawnUntracked(
   request: SpawnRequest,
   repos: readonly RepoEntry[],
   opts: SpawnOptions,
+  attachments?: SessionAttachments,
 ): Promise<SpawnOutcome> {
   const repo = repos.find((r) => r.name === request.repo);
   if (repo === undefined) {
@@ -642,7 +670,7 @@ async function spawnUntracked(
   // Every task gets an id of the daemon's own, so a continuation can name the conversation it resumes.
   const session = request.taskId === undefined ? undefined : crypto.randomUUID();
   const prepared = request.mode === "here" ? prepareHere(repo, session) : prepareWorktree(repo, worktreeName, session);
-  const inner = await buildInnerCommand(prepared, sessionName(worktreeName, opts.machineTag), request);
+  const inner = await buildInnerCommand(prepared, sessionName(worktreeName, opts.machineTag), request, attachments);
   // Before launch: claude reads the tracking ref, and `FETCH_HEAD`'s age, at startup.
   const note = await freshened;
   return launchWindow(prepared, inner, windowName, request, opts, note);

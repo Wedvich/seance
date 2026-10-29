@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
+  ATTACHMENT_FETCH_DEADLINE_MS,
   CAPABILITIES,
   MAX_TASKS,
+  OP_TIMEOUT_MS,
   REPLAY_WINDOW_MS,
   type DespawnRequest,
   type DespawnResponse,
@@ -20,7 +22,19 @@ import {
   type CancelResult,
 } from "../src/index.ts";
 import { advance } from "../src/task.ts";
-import { enqueue, FakeFleet, machine, NOW, NOW_S, obs, readerChecked, spec, status, unreachable } from "./fixtures.ts";
+import {
+  attachment,
+  enqueue,
+  FakeFleet,
+  machine,
+  NOW,
+  NOW_S,
+  obs,
+  readerChecked,
+  spec,
+  status,
+  unreachable,
+} from "./fixtures.ts";
 
 function setup(fleet = new FakeFleet([machine("a")]), config = DEFAULT_CONFIG) {
   const store = new MemoryQueueStore();
@@ -112,6 +126,50 @@ describe("dispatch", () => {
     expect(scheduler.task(task.id)).toMatchObject({ state: "failed", failure: { code: "repo_not_found" } });
   });
 
+  describe("a task carrying attachments", () => {
+    const files = [attachment(0), attachment(1)];
+    const capable = (): ReturnType<typeof machine> =>
+      machine("a", { capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.attachments] });
+
+    test("is spawned with its manifest unchanged, which every write keeps until the one that finishes it", async () => {
+      const { fleet, scheduler, store } = setup(new FakeFleet([capable()]));
+      const hung = Promise.withResolvers<TaskSpawnReply>();
+      fleet.scripts.set("a", () => hung.promise);
+      const task = await enqueue(store, scheduler, spec({ attachments: files }));
+      await scheduler.tick();
+      expect((await stored(store, task.id))?.body).toMatchObject({ state: "reserved", spec: { attachments: files } });
+
+      const sent = fleet.spawns[0]?.request;
+      if (sent === undefined) throw new Error("no spawn was sent");
+      expect(sent).toEqual({
+        repo: "app",
+        mode: "worktree",
+        prompt: "do it",
+        attachments: files,
+        client: SCHEDULER_CLIENT,
+        taskId: task.id,
+      });
+      hung.resolve(fleet.start("a", sent));
+      await scheduler.drain();
+      expect((await stored(store, task.id))?.body).toMatchObject({ state: "running", spec: { attachments: files } });
+
+      await scheduler.onSession(task.id, "ended", { deviceId: "a", pane: "%1" });
+      const done = (await stored(store, task.id))?.body;
+      expect(done?.state).toBe("done");
+      expect(done?.spec).not.toHaveProperty("attachments");
+      expect(done?.spec).not.toHaveProperty("prompt");
+    });
+
+    test("waits on a fleet whose daemons can't fetch them, and is never spawned there", async () => {
+      const { fleet, scheduler, store } = setup();
+      const task = await enqueue(store, scheduler, spec({ attachments: files }));
+      await pass(scheduler);
+      expect(fleet.spawns).toEqual([]);
+      expect(scheduler.task(task.id)?.state).toBe("ready");
+      expect(scheduler.lastDecision(task.id)?.candidates[0]?.rejected).toEqual([{ code: "attachments_unsupported" }]);
+    });
+  });
+
   describe("a continue task", () => {
     const at = { deviceId: "a", exclave: "main", clone: "app" };
     const continuing = spec({ mode: "continue", continues: { task: "t-old", at } });
@@ -188,6 +246,12 @@ describe("dispatch", () => {
 });
 
 describe("reservation TTL", () => {
+  test("outlives the wait for a spawn reply, which covers an attachment download and the launch", () => {
+    expect(DEFAULT_CONFIG.reservationTtlMs).toBeGreaterThan(OP_TIMEOUT_MS.spawn);
+    // 90 s: the launch budget before attachments (exec.ts's 60 s command timeout and the pane-death check, with margin).
+    expect(OP_TIMEOUT_MS.spawn).toBeGreaterThanOrEqual(ATTACHMENT_FETCH_DEADLINE_MS + 90_000);
+  });
+
   test("no answer keeps the reservation; past the TTL a session carrying the taskId makes it running", async () => {
     const { fleet, clock, scheduler, store } = setup();
     // The spawn lands but its reply is lost.
@@ -199,7 +263,7 @@ describe("reservation TTL", () => {
     await pass(scheduler);
     expect(scheduler.task(task.id)?.state).toBe("reserved");
 
-    clock.now += 119_000;
+    clock.now += DEFAULT_CONFIG.reservationTtlMs - 1_000;
     await pass(scheduler);
     expect(fleet.sessionCalls).toEqual([]);
     expect(scheduler.task(task.id)?.state).toBe("reserved");
@@ -217,7 +281,7 @@ describe("reservation TTL", () => {
     const task = await enqueue(store, scheduler, spec());
     await pass(scheduler);
     fleet.scripts.delete("a");
-    clock.now += 120_000;
+    clock.now += DEFAULT_CONFIG.reservationTtlMs;
     fleet.beat(clock.now);
     await pass(scheduler);
     expect(fleet.spawns).toHaveLength(2);
@@ -233,7 +297,7 @@ describe("reservation TTL", () => {
       const task = await enqueue(store, scheduler, spec());
       // oxlint-disable-next-line no-await-in-loop -- the clock moves between passes
       await pass(scheduler);
-      clock.now += 120_000;
+      clock.now += DEFAULT_CONFIG.reservationTtlMs;
       fleet.beat(clock.now);
       // oxlint-disable-next-line no-await-in-loop -- the clock moves between passes
       await pass(scheduler);
@@ -255,7 +319,7 @@ describe("reservation TTL", () => {
     const task = await enqueue(store, scheduler, spec());
     await pass(scheduler);
     fleet.scripts.delete("a");
-    clock.now += 120_000;
+    clock.now += DEFAULT_CONFIG.reservationTtlMs;
     fleet.beat(clock.now);
     await pass(scheduler);
     expect(scheduler.task(task.id)?.state).toBe("running");
@@ -269,7 +333,7 @@ describe("reservation TTL", () => {
     fleet.sessionsReply = () => unreachable;
     const task = await enqueue(store, scheduler, spec());
     await pass(scheduler);
-    clock.now += 120_000;
+    clock.now += DEFAULT_CONFIG.reservationTtlMs;
     await pass(scheduler);
     expect(scheduler.task(task.id)?.state).toBe("reserved");
 
@@ -333,7 +397,7 @@ function unconfirmedOnA(id: string): Task {
     state: "lost",
     createdAt: NOW,
     reservedAt: NOW,
-    absentSince: NOW + 120_000,
+    absentSince: NOW + DEFAULT_CONFIG.reservationTtlMs,
     assignment: { deviceId: "a", exclave: "main", clone: "app" },
   };
 }
@@ -348,7 +412,7 @@ describe("a reservation whose machine went away", () => {
     await pass(env.scheduler);
     fleet.scripts.delete("a");
     fleet.fleet = [machine("a", { connected: false }), machine("b")];
-    env.clock.now += 120_000;
+    env.clock.now += DEFAULT_CONFIG.reservationTtlMs;
     fleet.beat(env.clock.now);
     await pass(env.scheduler);
     expect(env.scheduler.task(task.id)?.state).toBe("lost");
@@ -397,7 +461,7 @@ describe("a reservation whose machine went away", () => {
       // oxlint-disable-next-line no-await-in-loop -- one scenario at a time
       await back();
       expect(scheduler.task(task.id)).toMatchObject({ state: "failed", failure: { code: "dispatch_unconfirmed" } });
-      clock.now += 120_000;
+      clock.now += DEFAULT_CONFIG.reservationTtlMs;
       fleet.beat(clock.now);
       // oxlint-disable-next-line no-await-in-loop -- one scenario at a time
       await pass(scheduler);
@@ -484,7 +548,7 @@ describe("cancelling a lost task", () => {
     const task = await enqueue(store, scheduler, spec());
     await pass(scheduler);
     fleet.fleet = [machine("a", { connected: false }), machine("b", { connected: false })];
-    clock.now += 120_000;
+    clock.now += DEFAULT_CONFIG.reservationTtlMs;
     await pass(scheduler);
     expect(scheduler.task(task.id)).toMatchObject({ state: "lost", assignment: { deviceId: "a" } });
     expect(scheduler.task(task.id)?.assignment?.pane).toBeUndefined();
@@ -504,7 +568,7 @@ describe("cancelling a lost task", () => {
     const task = await enqueue(store, scheduler, spec());
     await pass(scheduler);
     fleet.fleet = [machine("a", { connected: false })];
-    clock.now += 120_000;
+    clock.now += DEFAULT_CONFIG.reservationTtlMs;
     await pass(scheduler);
     fleet.fleet = [machine("a")];
     fleet.sessionsReply = () => unreachable;
@@ -1181,7 +1245,7 @@ describe("a reply lost, then the session ends", () => {
       assignment: { deviceId: "a", exclave: "main", clone: "app", pane: "%1" },
     });
 
-    clock.now += 120_000;
+    clock.now += DEFAULT_CONFIG.reservationTtlMs;
     fleet.beat(clock.now);
     await pass(scheduler);
     expect(fleet.spawns).toHaveLength(1);
@@ -1194,7 +1258,7 @@ describe("a reply lost, then the session ends", () => {
     await pass(scheduler);
     fleet.end("a", task.id);
 
-    clock.now += 120_000;
+    clock.now += DEFAULT_CONFIG.reservationTtlMs;
     fleet.beat(clock.now);
     await pass(scheduler);
     expect(fleet.sessionCalls).toEqual(["a"]);
@@ -1212,7 +1276,7 @@ describe("a reply lost, then the session ends", () => {
     fleet.ended.set("a", [task.id]);
     fleet.interrupted.set("a", [task.id]);
 
-    clock.now += 120_000;
+    clock.now += DEFAULT_CONFIG.reservationTtlMs;
     fleet.beat(clock.now);
     await pass(scheduler);
     expect(scheduler.task(task.id)).toMatchObject({ state: "failed", failure: { code: "dispatch_unconfirmed" } });
@@ -1779,7 +1843,7 @@ describe("takeover", () => {
     expect(successor.task(ended.id)?.state).toBe("done");
 
     // Past the TTL with still no session, it is released and dispatched once.
-    clock.now += 120_000;
+    clock.now += DEFAULT_CONFIG.reservationTtlMs;
     fleet.beat(clock.now);
     await pass(successor);
     expect(fleet.spawns.map((s) => s.request.taskId)).toEqual([lost.id]);

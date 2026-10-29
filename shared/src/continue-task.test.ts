@@ -250,6 +250,16 @@ describe("continuationSpec", () => {
         batch: { id: "b", index: 1 },
         deps: [{ task: "t-0", after: "merged" }],
         client: "pwa",
+        // The files were the first launch's; a continuation finds them in the worktree, and the mode refuses them.
+        attachments: [
+          {
+            id: "0b6f0c9e-1a2b-4c3d-8e9f-001122334455",
+            name: "a.png",
+            type: "image/png",
+            size: 1,
+            hash: "A".repeat(43),
+          },
+        ],
       },
     );
     const spec = continuationSpec(task, at);

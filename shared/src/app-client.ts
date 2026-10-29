@@ -1,5 +1,6 @@
 import {
   APP_ID,
+  ATTACHMENT_HTTP_CODES,
   CAPABILITIES,
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_PONG_TIMEOUT_MS,
@@ -17,6 +18,7 @@ import {
   type AccountRecord,
   type AppStoreRequestFrame,
   type AppFrame,
+  type AttachmentHttpCode,
   type DiscardReply,
   type DiscardRequest,
   type Envelope,
@@ -39,6 +41,7 @@ import {
   type RescanResponse,
   type ResumeRequest,
   type RoutePreviewReply,
+  type RoutePreviewRequest,
   type SchedulerLeader,
   type SchedulerOp,
   type SourceInfo,
@@ -48,7 +51,6 @@ import {
   type TaskRecord,
   type TaskRef,
   type TaskReply,
-  type TaskRequest,
   type UndeliverableCode,
   type UpdateReport,
 } from "./types.ts";
@@ -72,7 +74,17 @@ import {
   parseStoreReply,
   parseTaskReply,
 } from "./parse.ts";
-import { open as openEnvelope, OpMismatchError, openAtRest, ReplayGuard, seal } from "./crypto.ts";
+import {
+  attachmentHash,
+  mintAttachmentId,
+  open as openEnvelope,
+  OpMismatchError,
+  openAtRest,
+  ReplayGuard,
+  seal,
+  sealAttachment,
+} from "./crypto.ts";
+import { attachmentUrl } from "./relay-url.ts";
 import { sanitizeStatus } from "./status-reader.ts";
 import { quote } from "./fmt.ts";
 import { openFleetQuotaRecord } from "./fleet-quota.ts";
@@ -236,6 +248,39 @@ export interface AccountWritten {
   /** The record as sealed: version `expect + 1`. */
   readonly record: AccountRecord;
 }
+
+type UploadRefusalCode = Exclude<AttachmentHttpCode, "stored" | "allowance_exhausted">;
+
+function isUploadRefusalCode(code: unknown): code is UploadRefusalCode {
+  return (
+    typeof code === "string" &&
+    code !== "stored" &&
+    code !== "allowance_exhausted" &&
+    (ATTACHMENT_HTTP_CODES as readonly string[]).includes(code)
+  );
+}
+
+/** A file the relay stored: the manifest entry's `id` and `hash` (`AttachmentRef`). */
+export interface AttachmentUploaded {
+  readonly ok: true;
+  readonly id: string;
+  readonly hash: string;
+}
+
+/**
+ * A `PUT` that stored nothing: the relay's code, or `unreachable` when no answer
+ * came (offline, a CSP block, a dropped connection) and `unreadable` when one came
+ * this build can't read. Nothing ties a refused id to a task, so it is never reused.
+ */
+export type AttachmentRefusal =
+  | { readonly ok: false; readonly code: UploadRefusalCode | "unreachable" | "unreadable" }
+  | {
+      readonly ok: false;
+      readonly code: "allowance_exhausted";
+      readonly window: "hour" | "month";
+      /** Seconds until the window admits again. */
+      readonly retryAfter: number;
+    };
 
 /** A registry entry whose `info` decrypted. Entries that don't are counted, not shown. */
 export interface Machine {
@@ -1627,7 +1672,7 @@ export class RelayClient {
   }
 
   /** What routing would decide for `request` now; reserves nothing. */
-  routePreview(request: TaskRequest): Promise<RoutePreviewReply | null> {
+  routePreview(request: RoutePreviewRequest): Promise<RoutePreviewReply | null> {
     return this.#schedule("route-preview", request, parseRoutePreviewReply);
   }
 
@@ -1820,6 +1865,38 @@ export class RelayClient {
     if (reply?.t === "store-written") return { ok: true, landedEarlier: false };
     if (reply?.t !== "store-refused") return this.#storeKindMismatch(reply);
     return reply.code === "version_conflict" ? { ok: true, landedEarlier: true } : { ok: false, code: reply.code };
+  }
+
+  /**
+   * Seals `bytes` under a freshly minted id and `PUT`s the object to the relay
+   * (DESIGN.md, "Attachments"). The token rides the `Authorization` header, never
+   * the URL. A retry is a new call, so a new id: the relay's uploads are create-only.
+   */
+  async uploadAttachment(bytes: Uint8Array<ArrayBuffer>): Promise<AttachmentUploaded | AttachmentRefusal> {
+    const id = mintAttachmentId();
+    const object = await sealAttachment(this.#key, id, bytes);
+    const hash = await attachmentHash(object);
+    let res: Response;
+    try {
+      res = await fetch(attachmentUrl(this.#url, id), {
+        method: "PUT",
+        headers: { authorization: `Bearer ${this.#token}`, "content-type": "application/octet-stream" },
+        body: object,
+      });
+    } catch {
+      return { ok: false, code: "unreachable" };
+    }
+    const body: unknown = await res.json().catch(() => null);
+    const code = isRecord(body) ? body["code"] : undefined;
+    if (res.status === 201 && code === "stored") return { ok: true, id, hash };
+    if (code === "allowance_exhausted" && isRecord(body)) {
+      const { window, retryAfter } = body;
+      if ((window === "hour" || window === "month") && typeof retryAfter === "number" && retryAfter > 0) {
+        return { ok: false, code, window, retryAfter };
+      }
+      return { ok: false, code: "unreadable" };
+    }
+    return { ok: false, code: isUploadRefusalCode(code) ? code : "unreadable" };
   }
 
   /** Whether this client can read and write account records. */

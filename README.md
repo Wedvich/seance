@@ -88,8 +88,18 @@ an error. The PSK is the actual trust boundary; the relay never sees it.
 cd relay
 bun run wrangler login                     # once
 bun run wrangler secret put BEARER_TOKEN   # paste the bearer token
+bun run wrangler r2 bucket create seance-attachments
+bun run wrangler r2 bucket lifecycle add seance-attachments expire-30d --expire-days 30
 bun run deploy                             # prints https://seance-relay.<subdomain>.workers.dev
 ```
+
+The bucket holds attachments (files sent with a task), sealed under the PSK before
+they leave the phone. The lifecycle rule deletes each object 30 days after upload:
+nothing else ever does, and the relay's upload allowance assumes it (DESIGN.md,
+"Attachments"). The relay binds the bucket by name (`seance-attachments`), so a deploy
+fails until the bucket exists. Create both once, before the first deploy that binds it.
+If `lifecycle add` prompts, accept. Don't let `bucket create` edit `wrangler.jsonc`: the
+binding is already committed.
 
 This first deploy is by hand; afterwards CI redeploys the relay on every push to
 `main` that touches it, which needs a `CLOUDFLARE_API_TOKEN` repository secret and a
@@ -327,6 +337,14 @@ session in the repo as it stands. Then queue it — or, from the chevron beside 
 **Start now**, which queues it and asks the scheduler to place it at once, past its
 concurrency caps (shown only while the scheduler's leader supports it).
 
+**Attach** files to the task from the prompt card — the **ATTACH** picker, a pasted
+screenshot, or a drop on desktop — up to 10 files, 30 MB each and 100 MB in all, sent as
+they are, never recompressed. Each is sealed under the PSK on the phone before it goes
+to the relay's bucket, and the machine the task lands on fetches them and hands the
+session their paths. With files attached the prompt takes at most 6,144 characters.
+Offered only while the scheduler's leader supports it; a failed upload queues nothing,
+and queuing again sends only the files that didn't make it.
+
 Every spawn from the phone is a queued task: the app never starts a session on a machine
 itself. The verdict names the task and follows it until it is running, then you continue
 the session in the Claude app like any other. The header counts sessions across every
@@ -401,7 +419,7 @@ seanced spawn --now seance --here   # run in the checkout as it stands, no workt
 seanced continue 3f2a…        # resume a failed (e.g. OOM-killed) or cancelled task's conversation in its worktree, as a new task (--prompt <text> to add a note)
 seanced sessions              # running claude windows: id, window, repo, path
 seanced despawn %12           # end one by id: asks claude to exit, kills the pane after ~5s (--force: now)
-seanced reap --dry-run        # what clean-up would remove: worktrees, branches, dead windows
+seanced reap --dry-run        # what clean-up would remove: worktrees, branches, dead windows, fetched attachments
 seanced status                # this machine: service, relay, repo count, running vs on-disk sha
 seanced doctor                # preflight config, binaries, roots, relay, service
 seanced help                  # every command
@@ -449,7 +467,9 @@ which hold unpushed commits, worktrees on a never-pushed branch, detached worktr
 commits on no branch, a count of worktrees on a branch whose upstream is still live, and live sessions with the id `despawn` takes. Where git runs
 `core.fsmonitor=true` daemons (macOS), it also stops every one with no tmux pane in its
 checkout and an hour unused, and any on a directory gone or no longer a repo, reporting
-the memory freed; git starts a new one when a repo next needs it. Every deleted branch
+the memory freed; git starts a new one when a repo next needs it. It also removes a task's fetched
+attachments once its worktree is gone, or once they are 30 days old and no session is
+using them. Every deleted branch
 is in the audit log with its sha, so `git branch <name> <sha>` brings it back. It acts
 by default; run `--dry-run` first.
 
@@ -521,6 +541,12 @@ never forced — and reports why; `seanced status` on that machine shows its ver
 and its last update outcome. The relay and the app deploy themselves from CI on a
 push to `main` that touches them (`Deploy` in Actions also runs on demand, per
 component), so deploying either by hand would race that.
+
+The relay that brings in attachments (October 2026) binds the `seance-attachments` R2
+bucket, so create the bucket and its lifecycle rule (step 2) **before** that deploy
+lands, or CI's relay deploy fails until you do. The CI token (`CLOUDFLARE_API_TOKEN`)
+must also be allowed to edit R2 (Cloudflare's _Edit Cloudflare Workers_ token template
+includes Workers R2 Storage).
 
 The relay that brought in the leader allowlist (October 2026) nominates nobody
 until `SCHEDULER_LEADERS` is set, so put the secret (step 4) **before** that

@@ -163,7 +163,8 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   // Half the fleet's slots: one account's sessions draw on its 5h window together.
   accountMax: 4,
   needsInputEscalateMs: 30 * 60_000,
-  reservationTtlMs: 120_000,
+  // Outlives the leader's wait for a spawn reply (`OP_TIMEOUT_MS.spawn`): a daemon past its fetch deadline launches nothing.
+  reservationTtlMs: 240_000,
   lostAfterMs: 15 * 60_000,
   slotReleaseAfterMs: 2 * 60_000,
   // docs/scheduler.md, Settled defaults 20.

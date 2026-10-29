@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { preact } from "@preact/preset-vite";
 import { defineConfig, loadEnv, type Plugin } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
+// Relative, not `@seance/shared`: the config is bundled, and the package's raw TS can't load under node.
+import { attachmentUrl } from "../shared/src/relay-url.ts";
 
 const DEV_RELAY_URL = "ws://127.0.0.1:8787/app";
 
@@ -79,7 +81,9 @@ function securityHeaders(outDir: string, relay: string): Plugin {
         "style-src 'self'",
         "font-src 'self'",
         "img-src 'self' data:",
-        `connect-src 'self' ${relayOrigin(relay)}`,
+        // The socket's wss: origin and the attachment uploads' https: one: browsers' scheme
+        // upgrade between the two in source matching is not relied on.
+        `connect-src 'self' ${relayOrigin(relay)} ${relayOrigin(attachmentUrl(relay, ""))}`,
         "worker-src 'self'",
         "manifest-src 'self'",
         "frame-ancestors 'none'",

@@ -9,6 +9,14 @@ stays unavailable. Outside production builds the app
 defaults to `ws://127.0.0.1:8787/app`, so no `VITE_RELAY_URL` is needed for local
 work.
 
+Attachments (designed in DESIGN.md, built from its task 3 on) need no Cloudflare account locally. `wrangler dev` serves the `ATTACHMENTS`
+R2 binding from a local simulation under `relay/.wrangler/state/`, so the bucket and its
+lifecycle rule exist only in production. Nothing expires locally: delete
+`relay/.wrangler/state/` to start empty. The app's uploads go to
+`http://127.0.0.1:8787/attachments/<id>`. The dev server sends no CSP: only a build
+writes `_headers`, and a build's `connect-src` names the relay's `https:` origin beside
+its `wss:` one (DESIGN.md, "Attachments").
+
 ## Commands
 
 | Command                | What it does                                       |
@@ -17,6 +25,7 @@ work.
 | `bun run typecheck`    | root `tsc --noEmit` plus each workspace's own      |
 | `bun run lint`         | oxlint (`lint:fix` to apply)                       |
 | `bun run format:check` | oxfmt (`format` to apply)                          |
+| `bun run perf`         | PWA idle/resume cost, opt-in (see below)           |
 
 The daemon CLI runs straight from source: `bun daemon/src/main.ts <command>` (`help`
 lists the commands).
@@ -24,6 +33,60 @@ lists the commands).
 Narrow the suite to one shard by naming a file: `bun run test daemon/test/spawn.test.ts`.
 The runner is `scripts/test.ts`, which also raises bun's 5s hook timeout — the suites
 that boot workerd need the headroom.
+
+## Measuring the PWA
+
+`bun run perf [A|B|C|D|all] [--runs N] [--duration S] [--cpu X] [--daemons N]`
+(defaults: all, 2 runs, 60s, 4x, 4 daemons) is a developer tool for before/after
+battery and CPU comparisons. It is not a test: `bun run test` and CI never run it.
+One scenario (or `all`) per invocation; `--runs` and `--daemons` take whole numbers,
+`--daemons` 1 to 5. `e2e/perf.ts` boots the e2e stack (`startSuite` plus second daemons), runs
+`vite build` and `vite preview` of `pwa/` against that relay, and drives headless
+Chromium through `playwright-core` under CPU throttling. Each run gets a fresh browser
+context, signs in through Setup, and measures one window:
+
+- **A**: idle on home.
+- **B**: the verdict screen of a task held by a paused queue, leader up.
+- **C**: 5s hidden, then 5s visible: one fixed 10s window, `--duration` does not apply.
+- **D**: a verdict with no leader at all. The leaders are restarted afterwards and
+  anything still queued is cancelled, so later runs start clean.
+
+The build goes into `pwa/dist`, pinned to a throwaway relay, so the script refuses to
+start while that directory exists. It moves the output into its own temp directory
+right after the build and serves it from there, so `pwa/dist` is occupied only for the
+build; the script removes it only if it made it. Chromium is a one-time
+`bun x playwright-core install --only-shell chromium`, run from the repo root (elsewhere
+`bun x` may fetch a different playwright-core than the one the harness drives; a no-op
+once cached); set `PERF_CHROMIUM` to use another executable. Ctrl-C tears everything
+down (a second one exits at once); a signal in the first moments of the relay's boot is
+honoured once it is up.
+
+Results go to stdout and logs go to stderr. A JSON block between `JSON_BEGIN` and
+`JSON_END` holds every field, and a table follows it. The table's columns:
+
+- `durationMs`: the measured window.
+- `taskPct`: main-thread task time as a share of the window. `taskDurationS`,
+  `scriptDurationS`, `layoutCount`, `recalcStyleCount` and `threadTimeS` come from CDP
+  `Performance.getMetrics` deltas; a metric the browser did not report reads `-`
+  (`null` in the JSON), never 0.
+- `drawFrames` and `drawFramesPerSec`: compositor frames from the trace; `swaps`:
+  `DrawAndSwap` events. `traceDataLoss` is `true` when the trace dropped events, and
+  those counts then undercount.
+- `ws*`: WebSocket frames and bytes over the whole window (C's hidden and visible
+  halves are split out under its `phases` line); `wsCreated` counts sockets opened.
+- `lsSetItem`: localStorage writes.
+
+If restoring the leaders after D fails, later runs are skipped and the report says so
+under `stopped`.
+
+Read the numbers as comparisons, not absolutes. Run before and after a change on the
+same machine:
+
+- Headless Chromium renders in software, so frame and swap counts say how often the
+  page paints, not what that costs a GPU.
+- The CPU throttle scales timings off whatever machine runs it.
+- C fakes a tab switch by overriding `document.visibilityState` and dispatching
+  `visibilitychange`. It is not a mobile OS freezing or suspending the page.
 
 ## Deploying
 
@@ -83,6 +146,9 @@ key's version at 1, which reopens alias rollback unless the PSK changes too: rot
   their `makeGhStub` explicitly.
   The relay double (`daemon/test/harness.ts`) also carries a store double — term fence,
   tombstones, `store-changed` — for the leader's queue-store adapter and its term tests.
+  For attachments it also serves `GET /attachments/<id>` from objects a test puts in
+  directly. It is a double like the rest: the routes' real rules live in
+  `relay/src/attachments.ts`, and e2e is where the two meet.
   Three fixtures stand in for what lies outside a machine, importable from daemon suites and e2e alike (no e2e file uses them yet):
   `makeSecurityShim` (`daemon/test/security-shim.ts`) puts a `security` first on PATH that
   serves keychain items from files, so a keychain read needs no keychain (the daemon calls
@@ -99,7 +165,13 @@ key's version at 1, which reopens alias rollback unless the PSK changes too: rot
   out, the binding is unset and nobody leads. `startRelay({ tombstoneMs })` sets
   `STORE_TOMBSTONE_MS` for a suite that must watch a tombstone expire, and
   `startRelay({ schedulerReplyWindowMs })` sets `SCHEDULER_REPLY_WINDOW_MS` for one that must watch a
-  scheduler reply credit lapse. `startRelay({ captureLogs })` collects the worker's
+  scheduler reply credit lapse. Once the relay binds it, the `ATTACHMENTS` R2 bucket comes from `r2_buckets` in
+  `wrangler.jsonc` as Miniflare's `r2Buckets`, in memory and empty at each boot. Never
+  hand-roll a binding: drift from the config is what the harness exists to catch. The
+  upload allowance's byte windows are unit-tested on `relay/src/allowance.ts` with an
+  injected clock, since filling 1 GB under workerd is no test. Its upload count is
+  reachable (301 empty uploads), so the relay suite proves the `429` end to end.
+  `startRelay({ captureLogs })` collects the worker's
   console lines for `logs()`, which is how the relay and store suites prove ciphertext
   never reaches a log line; `relay/test/layering.test.ts` is the structural half of
   "the relay is blind" (DESIGN.md, _Security model_). A new suite file in
@@ -132,6 +204,10 @@ key's version at 1, which reopens alias rollback unless the PSK changes too: rot
   stub, and `SEANCE_E2E_SPAWN_WAIT_MS`, its spawn registration budget), and `beforeBoot` runs
   with its state dir before it boots (a pre-seeded launch ledger, say), so a test can hold a
   spawn mid-flight and still have the ledger prove what the next term needs.
+  Attachments (`e2e/attachments.test.ts`) upload through the shared sealing helpers to
+  the real relay's Miniflare R2, and the daemon fetches from it at `attachmentUrl` of its
+  `ws://` config URL. Its refusal case is an id the bucket never held; a tampered object
+  is the daemon suite's, against its double.
 - **scheduler** — the library alone, over an in-memory `QueueStore` and the `Fleet`
   double in `scheduler/test/fixtures.ts`: every filter reason, score component and
   stickiness case as fixture decisions, the reserve/dispatch lifecycle on a fake clock,

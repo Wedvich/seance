@@ -47,6 +47,9 @@ function state(overrides: Partial<AppState> = {}): AppState {
     pausing: false,
     discarding: false,
     accounts: { aliases: {}, nameable: true, saving: null, notice: null },
+    attachments: [],
+    attachNotice: null,
+    upload: null,
     ...overrides,
   };
 }

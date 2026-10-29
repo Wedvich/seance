@@ -27,6 +27,7 @@ import { exclaveInfoEqual, scanExclaves, tagExclaves, type ExclaveScan } from ".
 import { appRelayClient } from "./app-relay.ts";
 import type { BranchStateDeps } from "./branch-state.ts";
 import { UPDATE_DRAIN_MS } from "./drain-limits.ts";
+import { attachmentsRoot, taskAttachments } from "./attachments.ts";
 import { createHandler, createLocalOps, type HandlerContext } from "./handlers.ts";
 import { createFleetQuotaWriter, newestReadings } from "./fleet-quota.ts";
 import { createLeader, type Leader, type QueueStore } from "./leader.ts";
@@ -278,6 +279,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         CAPABILITIES.continueCancelled,
         CAPABILITIES.continueSession,
         CAPABILITIES.runNow,
+        CAPABILITIES.attachments,
       ],
     };
     const candidate: Registered = { scan: info.scannedAt, exclaves: exclaveScan };
@@ -380,6 +382,12 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     auditSink: daemonSink,
     metrics: (request) => metrics.query(request),
     tasks: endedTasks,
+    attachments: taskAttachments({
+      relayUrl: config.relayUrl,
+      bearerToken: config.bearerToken,
+      key,
+      root: attachmentsRoot(),
+    }),
     ...(opts.selfUpdate !== undefined && source !== null
       ? {
           updateAvailable: (notice: UpdateAvailable): void => {

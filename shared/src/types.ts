@@ -693,14 +693,15 @@ export type SchedulerOp = (typeof SCHEDULER_OPS)[number];
 /**
  * App-side response deadlines. A backstop rather than the primary error path —
  * the daemon returns a structured error on its own — so spawn's ceiling clears
- * exec.ts's 60s command timeout plus spawn.ts's 3s pane-death check, and
+ * an attachment download (`ATTACHMENT_FETCH_DEADLINE_MS`) plus exec.ts's 60s
+ * command timeout and spawn.ts's 3s pane-death check, and
  * despawn's clears its ~5s graceful exit plus the kill and its escalation.
  * `cancel` may despawn on the task's machine first, so it clears `despawn`'s.
  */
 export const OP_TIMEOUT_MS = {
   sessions: 10_000,
   rescan: 15_000,
-  spawn: 90_000,
+  spawn: 210_000,
   despawn: 20_000,
   metrics: 15_000,
   queue: 10_000,
@@ -972,6 +973,9 @@ export interface MachineInfo {
  * leader routes a continuation, only to a machine advertising it.
  * `runNow`: as a leader, answers `run-now` — what a client checks of the
  * verified leader before offering it (an older one refuses the op as unknown).
+ * `attachments`: as a daemon, fetches and seeds `SpawnRequest.attachments`; as a
+ * leader, routes, dispatches and leans them — what the PWA checks of the verified
+ * leader before offering to attach. One build does both halves.
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -984,6 +988,7 @@ export const CAPABILITIES = {
   continueCancelled: "continueCancelled",
   continueSession: "continueSession",
   runNow: "runNow",
+  attachments: "attachments",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -1307,6 +1312,12 @@ export interface SpawnRequest {
    * daemon refuses the mode as malformed.
    */
   readonly continues?: string;
+  /**
+   * The task's files, copied from its spec by the leader's dispatch. The daemon
+   * fetches and verifies every one before launch, or refuses `attachment_unavailable`;
+   * sent only to a daemon advertising `CAPABILITIES.attachments`.
+   */
+  readonly attachments?: readonly AttachmentRef[];
 }
 
 /**
@@ -1343,6 +1354,12 @@ export const SPAWN_ERROR_CODES = [
    * pane, lock) come after it, and the handler retracts the entry, so none stays.
    */
   "not_continuable",
+  /**
+   * An attachment would not fetch, verify or decrypt before its deadline, or the spawn
+   * carrying them was not the scheduler's. Nothing launched, nothing recorded: there is
+   * never a session without its files. The message names the file by index, never by name.
+   */
+  "attachment_unavailable",
   "launch_error",
   "claude_died",
   "timeout",
@@ -1773,12 +1790,98 @@ export const TASK_SPEC_LIMITS = {
 
 /**
  * Sealed into a task record's `pin.exclave` whenever its spec carries
- * `pin.account` or `avoid` (`sealTaskRecord`). An older leader's parser refuses
- * an empty exclave, so it holds such a record unreadable — never strips the
- * restriction by re-sealing what it parsed. This build's parser ignores
- * `exclave` (exclave pins are gone), so the parsed spec never carries it.
+ * `pin.account` or `avoid` (`sealTaskRecord`). A leader older than `pinAccount`
+ * (#303) refuses an empty exclave, so it holds such a record unreadable — never
+ * strips the restriction by re-sealing what it parsed. Every leader since ignores
+ * `exclave` (exclave pins are gone), so this stops only those: a new gated field
+ * needs a sentinel of its own, as `ATTACHMENTS_DEP_SENTINEL` is.
  */
 export const PIN_SENTINEL = "";
+
+/**
+ * Bounds on a task's attachments (DESIGN.md, "Attachments"). Sizes are plaintext.
+ * `name` and `prompt` are UTF-16 units: a manifest at its bounds fits the create
+ * cap only beside a prompt shorter than `TASK_REQUEST_LIMITS.prompt` (measured in
+ * parse.test.ts), so a spec carrying attachments takes `prompt` instead.
+ */
+export const ATTACHMENT_LIMITS = {
+  files: 10,
+  fileBytes: 30 * 1024 * 1024,
+  totalBytes: 100 * 1024 * 1024,
+  name: 100,
+  type: 127,
+  prompt: 6_144,
+} as const;
+
+/** A stored object's bytes past its plaintext: the IV and the GCM tag (`sealAttachment`). */
+export const ATTACHMENT_OVERHEAD_BYTES = 28;
+export const ATTACHMENT_MAX_OBJECT_BYTES = ATTACHMENT_LIMITS.fileBytes + ATTACHMENT_OVERHEAD_BYTES;
+/** A v4 UUID, lowercase, as `crypto.randomUUID()` mints it: the R2 key as it stands. */
+export const ATTACHMENT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+/** Unpadded base64url of a SHA-256 (`attachmentHash`). */
+export const ATTACHMENT_HASH_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
+export const ATTACHMENT_PATH = "/attachments/";
+/** Bound into an object's AAD, never an envelope's `op`: not an `AT_REST_OPS` member. */
+export const ATTACHMENT_OP = "attachment";
+/** All of a spawn's downloads together; the leader's spawn wait covers it plus the launch budget. */
+export const ATTACHMENT_FETCH_DEADLINE_MS = 120_000;
+/** The bucket's lifecycle rule: as long as admission's age limit, so a task still admissible finds its files. */
+export const ATTACHMENT_RETENTION_MS = STORE_TOMBSTONE_MS;
+/**
+ * The relay's upload allowance (the Hub). `windowHours` is summed over one more
+ * hour bucket than it names, so any trailing 30 days is covered. `windowBytes`
+ * keeps live storage under R2's 10 GB free tier, since objects expire at 30 days.
+ */
+export const ATTACHMENT_ALLOWANCE = {
+  windowHours: 720,
+  windowBytes: 9_500_000_000,
+  hourBytes: 1_000_000_000,
+  hourUploads: 300,
+} as const;
+
+/**
+ * Sealed into `spec.deps` whenever a spec carries `attachments` (`taskRecordAtRest`).
+ * Every older leader's dep parser refuses a `task` that is no task id, and a malformed
+ * dep nulls the spec, so such a leader holds the record unreadable rather than seal it
+ * back without the files. `PIN_SENTINEL` would not do: today's parser ignores `exclave`.
+ * This build's parser drops it before the deps bound applies.
+ */
+export const ATTACHMENTS_DEP_SENTINEL = { task: "", after: "merged" } as const;
+
+/** One file a task carries: uploaded sealed before the task was created. */
+export interface AttachmentRef {
+  /** `ATTACHMENT_ID_PATTERN`: minted by the PWA per file (`mintAttachmentId`). */
+  readonly id: string;
+  /** Display only, as prompt text is: the session's seed and the PWA, never a path. */
+  readonly name: string;
+  /** MIME, lowercase `type/subtype`, no parameters. */
+  readonly type: string;
+  /** Plaintext bytes. */
+  readonly size: number;
+  /** `attachmentHash` of the stored object: pins the entry to one exact ciphertext. */
+  readonly hash: string;
+}
+
+/**
+ * The relay's answers on `ATTACHMENT_PATH`, each a JSON body `{ code }` (the table
+ * in DESIGN.md, "The relay: R2 and the routes"). `allowance_exhausted` adds
+ * `window` and `retryAfter`.
+ */
+export const ATTACHMENT_HTTP_CODES = [
+  "stored",
+  "invalid_length",
+  "unauthorized",
+  "invalid_id",
+  "not_found",
+  "method_not_allowed",
+  "exists",
+  "length_required",
+  "too_large",
+  "allowance_exhausted",
+  "storage_error",
+] as const;
+
+export type AttachmentHttpCode = (typeof ATTACHMENT_HTTP_CODES)[number];
 
 /**
  * What settles a task (M4, #21). `merged`, the default: its merge, as today.
@@ -1829,6 +1932,13 @@ export interface TaskSpec extends TaskRequest {
    * than strip this. Routing and display only: the daemon never reads a path from it.
    */
   readonly continues?: { readonly task: string; readonly at: Target };
+  /**
+   * The files the session gets (`parseAttachmentManifest`). Never with `mode:
+   * "continue"`, and the prompt is held to `ATTACHMENT_LIMITS.prompt` beside it. An
+   * older leader holds the record unreadable (`ATTACHMENTS_DEP_SENTINEL`); a client
+   * writes it only when the verified leader advertises `CAPABILITIES.attachments`.
+   */
+  readonly attachments?: readonly AttachmentRef[];
   /**
    * Which app-role client enqueued it, as `SpawnRequest.client` — audit trail
    * only (the leader's admit line), at most `TASK_SPEC_LIMITS.client`. Absent
@@ -1885,6 +1995,8 @@ export type Reason =
   | { readonly code: "continue_elsewhere" }
   /** The target machine does not advertise both `CAPABILITIES.continueTask` and `continueSession`. */
   | { readonly code: "continue_unsupported" }
+  /** The task carries attachments and the machine does not advertise `CAPABILITIES.attachments`. */
+  | { readonly code: "attachments_unsupported" }
   | { readonly code: "auth_missing" }
   /** M4, Auth health: the exclave is listed in its status's `ax`. */
   | { readonly code: "auth_expired" }
@@ -2022,7 +2134,7 @@ export const PR_STATUS_STALE_MS = 10 * 60_000;
 
 export interface Task {
   readonly id: string;
-  /** What was asked for. Its `prompt` is dropped on the write that finishes the task (`forgetPrompt`). */
+  /** What was asked for. Its `prompt` and `attachments` are dropped on the write that finishes the task (`forgetPrompt`). */
   readonly spec: TaskSpec;
   readonly state: TaskState;
   readonly createdAt: number;
@@ -2544,7 +2656,16 @@ export interface QueueChanged {
   readonly tasks?: readonly string[];
 }
 
-/** `op: "route-preview"` (a `TaskRequest`) → what routing would decide now, reserving nothing. */
+/**
+ * `op: "route-preview"`'s request: a `TaskRequest`, and `attachments` when the task
+ * will carry some — a flag, never the manifest, so the preview applies
+ * `attachments_unsupported`. An older leader ignores it.
+ */
+export interface RoutePreviewRequest extends TaskRequest {
+  readonly attachments?: true;
+}
+
+/** `op: "route-preview"` (a `RoutePreviewRequest`) → what routing would decide now, reserving nothing. */
 export interface RoutePreviewResponse {
   readonly decision: Decision;
 }

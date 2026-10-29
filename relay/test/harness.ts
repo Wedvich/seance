@@ -16,11 +16,17 @@ import { join } from "node:path";
  * tests exercise the shipped relay rather than a double. Bindings and
  * compatibility date are read from wrangler.jsonc — a drift there fails here.
  */
+export interface ProbeInit {
+  readonly method?: string;
+  readonly headers?: Record<string, string>;
+  readonly body?: Uint8Array;
+}
+
 export interface TestRelay {
   readonly url: URL;
   readonly token: string;
   /** HTTP-level probe; the only way to observe upgrade rejections as status codes. */
-  readonly probe: (path: string, init?: { readonly headers?: Record<string, string> }) => Promise<Response>;
+  readonly probe: (path: string, init?: ProbeInit) => Promise<Response>;
   readonly dispose: () => Promise<void>;
   /** The worker's console lines so far — only with `captureLogs`, which keeps them off the test output. */
   readonly logs: () => readonly string[];
@@ -30,6 +36,7 @@ interface WranglerConfig {
   readonly compatibility_date: string;
   readonly compatibility_flags?: readonly string[];
   readonly durable_objects: { readonly bindings: readonly { readonly name: string; readonly class_name: string }[] };
+  readonly r2_buckets?: readonly { readonly binding: string; readonly bucket_name: string }[];
 }
 
 /** wrangler.jsonc is real jsonc: oxfmt keeps line comments and trailing commas, JSON.parse takes neither. */
@@ -52,7 +59,12 @@ let bundlePromise: Promise<string> | null = null;
 
 function workerBundle(): Promise<string> {
   bundlePromise ??= (async () => {
-    const built = await Bun.build({ entrypoints: [join(import.meta.dir, "../src/index.ts")], target: "browser" });
+    const built = await Bun.build({
+      entrypoints: [join(import.meta.dir, "../src/index.ts")],
+      target: "browser",
+      // A workerd built-in, resolved at load as wrangler's bundle leaves it.
+      external: ["cloudflare:workers"],
+    });
     const bundle = built.outputs[0];
     if (!built.success || bundle === undefined) {
       throw new Error(`bundling the worker failed: ${built.logs.join("\n")}`);
@@ -82,10 +94,16 @@ export interface RelayOptions {
   readonly tombstoneMs?: number;
   /** `SCHEDULER_REPLY_WINDOW_MS`: how long a delivered scheduler request quiets its reply, so a test can watch one lapse. */
   readonly schedulerReplyWindowMs?: number;
+  /** `UPLOAD_*`: the upload allowance's bounds, lowered so a test can exhaust a window in a few small uploads. */
+  readonly uploadAllowance?: {
+    readonly windowBytes?: number;
+    readonly hourBytes?: number;
+    readonly hourUploads?: number;
+  };
 }
 
 export async function startRelay(token: string, opts: RelayOptions = {}): Promise<TestRelay> {
-  const { sweep, leaders, captureLogs, tombstoneMs, schedulerReplyWindowMs } = opts;
+  const { sweep, leaders, captureLogs, tombstoneMs, schedulerReplyWindowMs, uploadAllowance } = opts;
   const logs: string[] = [];
   const config = await readWranglerConfig();
   const binding = config.durable_objects.bindings[0];
@@ -104,11 +122,20 @@ export async function startRelay(token: string, opts: RelayOptions = {}): Promis
       compatibilityFlags: [...(config.compatibility_flags ?? [])],
       // Free-tier Durable Objects are SQLite-backed; match that here.
       durableObjects: { [binding.name]: { className: binding.class_name, useSQLite: true } },
+      // In memory and per instance: each boot starts with an empty bucket.
+      r2Buckets: Object.fromEntries((config.r2_buckets ?? []).map((bucket) => [bucket.binding, bucket.bucket_name])),
       bindings: {
         BEARER_TOKEN: token,
         ...(leaders === undefined ? {} : { SCHEDULER_LEADERS: leaders.join(",") }),
         ...(tombstoneMs === undefined ? {} : { STORE_TOMBSTONE_MS: String(tombstoneMs) }),
         ...(schedulerReplyWindowMs === undefined ? {} : { SCHEDULER_REPLY_WINDOW_MS: String(schedulerReplyWindowMs) }),
+        ...(uploadAllowance?.windowBytes === undefined
+          ? {}
+          : { UPLOAD_WINDOW_BYTES: String(uploadAllowance.windowBytes) }),
+        ...(uploadAllowance?.hourBytes === undefined ? {} : { UPLOAD_HOUR_BYTES: String(uploadAllowance.hourBytes) }),
+        ...(uploadAllowance?.hourUploads === undefined
+          ? {}
+          : { UPLOAD_HOUR_UPLOADS: String(uploadAllowance.hourUploads) }),
         ...(sweep === undefined
           ? {}
           : {

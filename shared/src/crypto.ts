@@ -1,4 +1,12 @@
-import { PROTOCOL_VERSION, type AtRestOp, type Envelope, type Plain } from "./types.ts";
+import {
+  ATTACHMENT_ID_PATTERN,
+  ATTACHMENT_OP,
+  ATTACHMENT_OVERHEAD_BYTES,
+  PROTOCOL_VERSION,
+  type AtRestOp,
+  type Envelope,
+  type Plain,
+} from "./types.ts";
 
 const IV_BYTES = 12;
 const PSK_BYTES = 32;
@@ -152,6 +160,60 @@ export async function openAtRest(key: CryptoKey, env: Envelope, op: AtRestOp): P
   const plain = await open(key, env);
   if (plain.op !== op) throw new OpMismatchError(op, plain.op);
   return plain;
+}
+
+/** An attachment's id, minted per file before its upload: what `ATTACHMENT_ID_PATTERN` admits. */
+export function mintAttachmentId(): string {
+  return crypto.randomUUID();
+}
+
+// Starts with the op, where every envelope AAD starts with its decimal version, so neither
+// opens as the other; the id in it means an object re-filed under another id does not open.
+function attachmentAad(id: string): Uint8Array<ArrayBuffer> {
+  if (!ATTACHMENT_ID_PATTERN.test(id)) throw new Error("malformed attachment id");
+  return new Uint8Array(new TextEncoder().encode(`${ATTACHMENT_OP}|1|${id}`));
+}
+
+/**
+ * One file as the relay stores it: `iv ‖ ciphertext ‖ tag`, raw bytes rather than an
+ * envelope, so a 30 MiB file costs no base64 and no second copy as a string.
+ */
+export async function sealAttachment(
+  key: CryptoKey,
+  id: string,
+  bytes: Uint8Array<ArrayBuffer>,
+): Promise<Uint8Array<ArrayBuffer>> {
+  const additionalData = attachmentAad(id);
+  const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
+  const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData }, key, bytes);
+  const object = new Uint8Array(IV_BYTES + ct.byteLength);
+  object.set(iv);
+  object.set(new Uint8Array(ct), IV_BYTES);
+  return object;
+}
+
+/** Throws on a malformed id, an object too short for IV and tag, or auth failure (tampering / another id / wrong key). */
+export async function openAttachment(
+  key: CryptoKey,
+  id: string,
+  object: Uint8Array<ArrayBuffer>,
+): Promise<Uint8Array<ArrayBuffer>> {
+  const additionalData = attachmentAad(id);
+  if (object.byteLength < ATTACHMENT_OVERHEAD_BYTES) {
+    throw new Error(`attachment object must be at least ${ATTACHMENT_OVERHEAD_BYTES} bytes, got ${object.byteLength}`);
+  }
+  const iv = object.subarray(0, IV_BYTES);
+  const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv, additionalData }, key, object.subarray(IV_BYTES));
+  return new Uint8Array(pt);
+}
+
+/**
+ * Unpadded base64url SHA-256 of the whole stored object, so a download is checked
+ * before AES runs and a manifest entry names one exact ciphertext.
+ */
+export async function attachmentHash(object: Uint8Array<ArrayBuffer>): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", object));
+  return toBase64(digest).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
 }
 
 export type ReplayReason = "stale" | "future" | "replayed";

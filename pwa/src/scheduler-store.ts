@@ -643,7 +643,12 @@ export class SchedulerStore {
     this.#patch({ preview: asked });
     let result: PreviewState;
     try {
-      const reply = await this.#client.routePreview(taskRequest(this.#state.form, repo.origin, false));
+      // A flag, never the manifest: the leader filters on it as it would route the task.
+      const attaching = this.#state.attachments.length > 0 ? { attachments: true as const } : {};
+      const reply = await this.#client.routePreview({
+        ...taskRequest(this.#state.form, repo.origin, false),
+        ...attaching,
+      });
       if (reply === null) result = { kind: "failed", repo: repo.origin, message: SCHEDULER_UNREADABLE };
       else if ("ok" in reply) {
         // A leader that has just taken the role answers this until its takeover ends — seconds,

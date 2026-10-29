@@ -32,6 +32,10 @@
   "durable_objects": {
     "bindings": [{ "name": "HUB", "class_name": "Hub" }],
   },
+  // Sealed attachment objects (DESIGN.md, "Attachments"). The owner creates the
+  // bucket and its 30-day lifecycle rule (README, setup); a deploy binding a
+  // missing bucket fails.
+  "r2_buckets": [{ "binding": "ATTACHMENTS", "bucket_name": "seance-attachments" }],
   // Free-tier Durable Objects must be SQLite-backed.
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Hub"] }],
   // BEARER_TOKEN is deliberately absent: it is a secret, not a var.

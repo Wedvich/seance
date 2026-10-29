@@ -2,7 +2,10 @@
 // relay via relay/test/harness.ts, an import direction shared/ must not take on.
 import {
   APP_ID,
+  attachmentHash,
+  attachmentUrl,
   DAEMON_ROLES,
+  openAttachment,
   importPsk,
   isRecord,
   newestQuotaByAccount,
@@ -43,6 +46,8 @@ const TOKEN = "test-bearer-token";
 const PSK = toBase64(new Uint8Array(32).fill(7));
 const OTHER_PSK = toBase64(new Uint8Array(32).fill(9));
 
+const ATTACHMENT_HOUR_UPLOADS = 3;
+
 let relay: TestRelay;
 let key: CryptoKey;
 let otherKey: CryptoKey;
@@ -55,7 +60,11 @@ let listed: { readonly legLeader: string; readonly stolenSeed: string; readonly 
 beforeAll(async () => {
   const [legLeader, stolenSeed, autoLeader] = await Promise.all([newDeviceId(), newDeviceId(), newDeviceId()]);
   listed = { legLeader, stolenSeed, autoLeader };
-  relay = await startRelay(TOKEN, { leaders: [legLeader, stolenSeed, autoLeader] });
+  // Only the attachment suite uploads; a low count bound lets it reach the allowance's 429 in a few puts.
+  relay = await startRelay(TOKEN, {
+    leaders: [legLeader, stolenSeed, autoLeader],
+    uploadAllowance: { hourUploads: ATTACHMENT_HOUR_UPLOADS },
+  });
   key = await importPsk(PSK);
   otherKey = await importPsk(OTHER_PSK);
 });
@@ -2028,5 +2037,49 @@ describe("malformed frames", () => {
       client.stop();
       await peer.stop();
     }
+  });
+});
+
+describe("uploadAttachment", () => {
+  // One test on purpose: its puts spend one hour bucket of the shared relay's allowance.
+  test("stores a sealed object the key opens under the answered id and hash, then refuses past the allowance", async () => {
+    const { client } = startClient();
+    const bytes = new Uint8Array(new TextEncoder().encode("a screenshot, honestly"));
+    const stored = await client.uploadAttachment(bytes);
+    if (!stored.ok) throw new Error(`not stored: ${stored.code}`);
+
+    // What the relay holds is ciphertext under the answered id: the hash pins it, the key opens it.
+    const res = await fetch(attachmentUrl(appUrl(), stored.id), { headers: { authorization: `Bearer ${TOKEN}` } });
+    expect(res.status).toBe(200);
+    const object = new Uint8Array(await res.arrayBuffer());
+    expect(object.byteLength).toBeGreaterThan(bytes.byteLength);
+    expect(await attachmentHash(object)).toBe(stored.hash);
+    expect(await openAttachment(key, stored.id, object)).toEqual(bytes);
+
+    // A retry is a new call, so a new id: uploads are create-only.
+    const again = await client.uploadAttachment(bytes);
+    expect(again.ok && again.id !== stored.id).toBe(true);
+    for (let put = 2; put < ATTACHMENT_HOUR_UPLOADS; put += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- spends the bucket in order
+      expect((await client.uploadAttachment(bytes)).ok).toBe(true);
+    }
+    expect(await client.uploadAttachment(bytes)).toEqual({
+      ok: false,
+      code: "allowance_exhausted",
+      window: "hour",
+      retryAfter: expect.any(Number),
+    });
+  });
+
+  test("a wrong token is unauthorized, and an unreachable relay says so", async () => {
+    const bytes = new Uint8Array(4);
+    expect(await startClient({ token: "wrong" }).client.uploadAttachment(bytes)).toEqual({
+      ok: false,
+      code: "unauthorized",
+    });
+    expect(await startClient({ url: "ws://127.0.0.1:1/app" }).client.uploadAttachment(bytes)).toEqual({
+      ok: false,
+      code: "unreachable",
+    });
   });
 });

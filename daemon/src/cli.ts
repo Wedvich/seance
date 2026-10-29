@@ -8,6 +8,7 @@ import {
   type DespawnRequest,
   type SpawnRequest,
 } from "@seance/shared";
+import { attachmentsRoot } from "./attachments.ts";
 import { auditLogChecks, cliSink, despawnAudit, reapAudit, spawnAudit } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
 import { cmdContinueAuto, cmdSpawnAuto } from "./cli-auto.ts";
@@ -386,6 +387,7 @@ export async function cmdReap(argv: readonly string[]): Promise<void> {
         minAgeMs: minAgeDays * DAY_MS,
         audit: reapAudit("cli", cliSink),
         pruneLogPath: pruneLogPath(),
+        attachments: attachmentsRoot(),
         fsmonitor: platformFsmonitor(),
       }),
     );
