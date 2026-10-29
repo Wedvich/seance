@@ -486,10 +486,10 @@ of M4 has landed.
   placement restriction; added 2026-10-23, the account form replacing the exclave one 2026-10-25)
   and `avoid` (machines to keep it off), and `queue_batch`; `seanced spawn` takes the
   same placement as `--machine`, `--account` and `--not` (DESIGN.md "`pin` and `avoid` on a spawn"). PWA: the
-  auto form's AFTER and BATCH tiles, the settle-on-report switch (and, until 2026-10-27, a Linear field), and Follow
+  auto form's AFTER tile (and, until 2026-10-29, a BATCH tile), the settle-on-report switch (and, until 2026-10-27, a Linear field), and Follow
   up on queue rows. DESIGN.md records both ("MCP server", "PWA"). Exit, met in `e2e/authoring.test.ts`: a task enqueued from MCP
-  and from the PWA with an `after: opened` dep and a batch is stored with both and held `blocked`
-  until its predecessor is done.
+  with an `after: opened` dep and a batch, and one from the PWA with the dep, is stored with them
+  and held `blocked` until its predecessor is done.
   Linear's own relations are not read yet: that is the Linear item below.
   - _Decided (#21), done by self-report:_ a task can stay open past its merge until its own
     session says it is done — "after X is in prod" is X's session merging, watching the deploy

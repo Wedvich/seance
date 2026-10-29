@@ -460,21 +460,6 @@ export class Store {
   }
 
   /**
-   * The next enqueues join a new batch, numbered from 1. An open batch stays
-   * open: a second tap must not renumber a batch already in flight.
-   */
-  startBatch(): void {
-    const { form } = this.#state;
-    if (form.batch === null) this.#patch({ form: { ...form, batch: { id: crypto.randomUUID(), next: 1 } } });
-    this.dismissLayer();
-  }
-
-  endBatch(): void {
-    this.#patch({ form: { ...this.#state.form, batch: null } });
-    this.dismissLayer();
-  }
-
-  /**
    * "Follow up" on a queue row: the form takes that task as its one dependency.
    * The queue (and a verdict under it) closes like a machine pick's sheet does,
    * so the form is what shows; in the desktop layout the queue is a column and stays.
@@ -765,10 +750,6 @@ export class Store {
       refusal("A task that settles on its done report needs a prompt: the session is told in it to report.");
       return;
     }
-    if (form.batch !== null && form.batch.next > TASK_SPEC_LIMITS.batchIndex) {
-      refusal("This batch is full. End it and start another.");
-      return;
-    }
     const attaching = this.#state.attachments.length > 0;
     if (attaching && !deriveAttachmentsAvailability(relay)) {
       refusal(`${ATTACHMENTS_UNAVAILABLE}.`);
@@ -801,7 +782,6 @@ export class Store {
       ...(form.machine === null && form.account === null ? {} : { pin }),
       client: "pwa" satisfies SpawnClient,
       ...(form.after.length === 0 ? {} : { deps: form.after }),
-      ...(form.batch === null ? {} : { batch: { id: form.batch.id, index: form.batch.next } }),
       ...(reported ? { until: form.until } : {}),
       ...(attachments === undefined ? {} : { attachments }),
     };
@@ -884,10 +864,7 @@ export class Store {
       } else {
         this.#disarmUndo();
         const { form } = this.#state;
-        // Deps, Linear and `until` belong to the task just stored; a batch spans enqueues, and its
-        // counter moves only for the member it numbered, so a retry that lands twice moves it once.
-        const { batch } = form;
-        const counted = batch !== null && task.spec.batch?.id === batch.id && task.spec.batch.index === batch.next;
+        // Deps and `until` belong to the task just stored.
         // Only the files this task carries leave the form: a retry's task names the ones it was built with.
         const sent = new Set(task.spec.attachments?.map((ref) => ref.id));
         this.#patch({
@@ -896,7 +873,6 @@ export class Store {
             prompt: "",
             after: [],
             until: "merged",
-            batch: counted ? { ...batch, next: batch.next + 1 } : batch,
           },
           promptUndo: null,
           attachments: this.#state.attachments.filter((f) => f.stored === null || !sent.has(f.stored.id)),
