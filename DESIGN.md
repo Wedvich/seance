@@ -4223,14 +4223,25 @@ plain bookmark ignore the manifest member, and nothing replaces it there.
   appended to the prompt after a blank line, never over it. A drain deletes each meta, so
   a reload repeats nothing, but not the files: the form's `File`s are backed by them, and
   whether a deleted entry's blob stays readable is the browser's business. The next drain
-  sweeps file entries with no meta. The marker is stripped with
-  `history.replaceState(history.state, …)` (the layers live in that state); a marker with
-  an empty inbox, or `unreadable`, shows a sentence saying the share was lost.
+  sweeps file entries with no meta, but only those whose id's timestamp (`<Date.now()>-…`)
+  is over a day old: another tab's form may still be backed by a newer one, and the worker
+  writes files before the meta, so a young meta-less entry may be a share in flight, and
+  tabs can't be asked. The drain runs after the first render (`deliverShare`), so a Cache
+  Storage that never answers costs the share, not the app: its files wait in the inbox for
+  a later boot. A delete that rejects keeps what was read and adds a sentence that it may
+  arrive again. The marker is stripped with `history.replaceState(history.state, …)` (the
+  layers live in that state) on a store boot; Setup's boot leaves it, so the boot Setup's
+  save reloads into reports a lost share. A marker with an empty inbox, or `unreadable`,
+  shows a sentence saying the share was lost.
+  A share posted with no controlling worker (never installed, or cleared) reaches no
+  handler and is lost: nothing server-side takes a `POST`.
 - **Attaching not offered**: shared files are listed like any others, so the existing
   "Not offered, files listed" rule applies; nothing waits for leadership to settle.
 - **A share reloads the document**, so files already on the form drop and a submit in
   flight is cut off. `persist.ts` keeps the form's file count and a submitting flag under
   `seance:form-files` (apart from the form), and a share boot names both in the notice.
+  The facts are stamped and restamped on `pagehide`, and read only within a minute: a
+  cold-start share after the app was closed long ago replaced no document.
 - **`/share` must keep answering `303`** even if the feature is ever removed, until every
   installed WebAPK has refreshed its manifest: otherwise a share posts to static assets,
   which won't take a `POST`, and the files are lost without a word.

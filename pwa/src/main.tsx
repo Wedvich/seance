@@ -2,12 +2,12 @@ import { render } from "preact";
 import "./base.css";
 import { App } from "./app.tsx";
 import { Setup } from "./components/setup.tsx";
-import { dropLegacyHidden, dropLegacyPending, readForm, readFormFiles, writeForm, writeFormFiles } from "./persist.ts";
+import { dropLegacyHidden, dropLegacyPending, readForm, readFormFiles, trackFormFiles, writeForm } from "./persist.ts";
 import { deriveAccountKey, FLEET_QUOTA_INTERVAL_MS, RelayClient } from "@seance/shared";
 import { loadPsk, loadPskBase, readBearer, readRelayUrl } from "./relay/keys.ts";
 import "./screen.css";
 import type { PersistedForm } from "./state.ts";
-import { receiveOnBoot, reloadCostText, shareMarker } from "./share-inbox.ts";
+import { deliverShare, shareMarker } from "./share-inbox.ts";
 import { Store } from "./store.ts";
 import { registerServiceWorker } from "./sw.ts";
 import { watchSystemTheme } from "./theme.ts";
@@ -20,10 +20,8 @@ registerServiceWorker();
 // Prompts are the one thing here the user authored, so make eviction unlikely.
 void navigator.storage?.persist?.();
 
-// A share lands here by the worker's 303 (share-handler.ts). Cleaned at once, so a reload
-// is no share; the history state is passed through, since the store's layers live in it.
+// A share lands here by the worker's 303 (share-handler.ts).
 const marker = shareMarker(location.search);
-if (marker !== null) history.replaceState(history.state, "", "/");
 
 const container = document.querySelector("#root");
 if (container === null) throw new Error("#root is missing from index.html");
@@ -32,6 +30,7 @@ const [key, base] = await Promise.all([loadPsk(), loadPskBase()]);
 const token = readBearer();
 
 if (key === null || token === null) {
+  // The marker stays in the URL: Setup's save reloads into the boot that reports it.
   render(
     <main className="screen">
       <Setup
@@ -44,6 +43,8 @@ if (key === null || token === null) {
     container,
   );
 } else {
+  // Cleaned at once, so a reload is no share; the history state is passed through, since the store's layers live in it.
+  if (marker !== null) history.replaceState(history.state, "", "/");
   dropLegacyHidden();
   dropLegacyPending();
   // No base on an install saved before account records: it works, without aliases, until the PSK is re-entered.
@@ -60,15 +61,8 @@ if (key === null || token === null) {
   const store = new Store(client, readForm());
 
   // Read before the first write below: it is the replaced document's, and only a share boot reports it.
-  const before = marker === null ? null : readFormFiles();
-  let formFiles = { files: 0, submitting: false };
-  writeFormFiles(formFiles);
-  store.subscribe(() => {
-    const { attachments, spawning } = store.getState();
-    if (attachments.length === formFiles.files && spawning === formFiles.submitting) return;
-    formFiles = { files: attachments.length, submitting: spawning };
-    writeFormFiles(formFiles);
-  });
+  const before = readFormFiles();
+  trackFormFiles(store, (flush) => addEventListener("pagehide", flush));
 
   // Debounced because the store notifies on every keystroke in the prompt. Only a new
   // form is written: most notifies (relay status beats) leave it the same object. The
@@ -85,11 +79,10 @@ if (key === null || token === null) {
     }, PERSIST_DEBOUNCE_MS);
   });
 
-  // After the form's writer, so appended share text is saved; before the first render, so
-  // the form opens with the files on it. Setup drains nothing: its save reloads into this.
-  const share = await receiveOnBoot("caches" in globalThis ? caches : undefined, marker);
-  if (share !== null) store.receiveShare({ ...share, problems: [...share.problems, ...reloadCostText(before)] });
-
   client.start();
   render(<App store={store} />, container);
+
+  // After the form's writer, so appended share text is saved. The form is up first: Cache Storage
+  // can stall, and the files stay in the inbox for a later boot, never dropped.
+  void deliverShare("caches" in globalThis ? caches : undefined, marker, before, (share) => store.receiveShare(share));
 }

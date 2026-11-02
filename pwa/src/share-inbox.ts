@@ -1,3 +1,4 @@
+import type { FormBeforeShare } from "./persist.ts";
 import { attachmentName, pastTotalText, tooLargeText, tooManyText } from "./attachments.ts";
 import { SHARE_INBOX, SHARE_INBOX_PATH, SHARE_MARKER, SHARE_UNREADABLE } from "./share.ts";
 
@@ -56,7 +57,7 @@ function isCount(value: unknown): value is number {
 }
 
 function record(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
+  return typeof value === "object" && value !== null ? Object.fromEntries(Object.entries(value)) : null;
 }
 
 /** Hand-validated: written by whichever worker build took the share. Null on any malformed field. */
@@ -81,12 +82,13 @@ function parseMeta(raw: unknown): Meta | null {
   return { at, files: fileList, skipped: skippedList, lost, title, text, url };
 }
 
-function skippedText({ name, size, reason }: Meta["skipped"][number]): string | null {
+function skippedText({ name, size, reason }: Meta["skipped"][number]): string {
   const shown = attachmentName(name);
   if (reason === "file") return tooLargeText(shown, size);
   if (reason === "count") return tooManyText();
   if (reason === "total") return pastTotalText(shown);
-  return null;
+  // A reason another worker build wrote: the file is still named, never dropped.
+  return `${shown} was left out by the share`;
 }
 
 /**
@@ -104,8 +106,11 @@ export function sharedText(title: string, text: string, url: string): string {
 
 function lostText(names: readonly string[]): string {
   const them = names.length === 1 ? "it" : "them";
-  return `Not received from the share: ${names.map(attachmentName).join(", ")}; this device's storage refused ${them}. Share again, or attach ${them} from the prompt card.`;
+  return `Not received from the share: ${names.map(attachmentName).join(", ")}; this device's storage didn't keep ${them}. Share again, or attach ${them} from the prompt card.`;
 }
+
+const STUCK_TEXT =
+  "Part of the share couldn't be cleared from this device's storage and may arrive again after a reload.";
 
 /** A boot whose share could not be read at all: the marker alone says one was sent. */
 function failedShare(marker: ShareMarker): ReceivedShare | null {
@@ -134,11 +139,36 @@ export async function receiveOnBoot(
   }
 }
 
+/**
+ * The boot's whole share step: drain, add what the reload cost (only on a share boot, whose
+ * `before` is the replaced document's), hand it on. Runs after the first render, so a
+ * Cache Storage that never answers costs the share, never the app.
+ */
+export async function deliverShare(
+  storage: InboxStorage | undefined,
+  marker: ShareMarker,
+  before: FormBeforeShare | null,
+  receive: (share: ReceivedShare) => void,
+): Promise<void> {
+  const share = await receiveOnBoot(storage, marker);
+  if (share === null) return;
+  receive({ ...share, problems: [...share.problems, ...reloadCostText(marker === null ? null : before)] });
+}
+
 interface Drained {
   readonly files: readonly File[];
   readonly refused: readonly string[];
   readonly lost: readonly string[];
   readonly text: string;
+}
+
+/** Longer than any share's write and than a form is likely to hold its files; an orphan lingers this long at most. */
+const ORPHAN_MIN_AGE_MS = 24 * 60 * 60 * 1000;
+
+/** The worker's id is `<Date.now()>-<uuid>`; one that doesn't parse is no worker's live write. */
+function isOrphanOldEnough(metaPath: string, now: number): boolean {
+  const stamp = Number(metaPath.slice(SHARE_INBOX_PATH.length).split("-")[0]);
+  return !Number.isFinite(stamp) || now - stamp > ORPHAN_MIN_AGE_MS;
 }
 
 async function drainOne(cache: InboxCache, url: string, meta: Meta): Promise<Drained> {
@@ -157,7 +187,7 @@ async function drainOne(cache: InboxCache, url: string, meta: Meta): Promise<Dra
     if (blob === undefined) lost.push(name);
     else files.push(new File([blob], name, { type }));
   }
-  const refused = meta.skipped.map(skippedText).filter((clause) => clause !== null);
+  const refused = meta.skipped.map(skippedText);
   return { files, refused, lost, text: sharedText(meta.title, meta.text, meta.url) };
 }
 
@@ -168,7 +198,11 @@ async function drainOne(cache: InboxCache, url: string, meta: Meta): Promise<Dra
  * the browser's business. They are swept as orphans by the next drain instead.
  * Null when there was nothing to drain and the boot is no share.
  */
-export async function drainShareInbox(storage: InboxStorage, marker: ShareMarker): Promise<ReceivedShare | null> {
+export async function drainShareInbox(
+  storage: InboxStorage,
+  marker: ShareMarker,
+  now: number = Date.now(),
+): Promise<ReceivedShare | null> {
   const cache = await storage.open(SHARE_INBOX);
   const metas: string[] = [];
   const metaPaths = new Set<string>();
@@ -184,9 +218,14 @@ export async function drainShareInbox(storage: InboxStorage, marker: ShareMarker
     metas.push(url);
     metaPaths.add(path);
   }
-  // Files with no meta: a previous drain's, which backed that boot's form, or a share the worker never finished.
+  // Files with no meta: a previous drain's, which backed some document's form, or a share the
+  // worker is still writing (files first, meta last). Another tab can't be asked which, so
+  // only entries past `ORPHAN_MIN_AGE_MS` go, by the timestamp in the id; a failed delete
+  // just leaves the entry for the next drain.
   await Promise.all(
-    fileEntries.filter((entry) => !metaPaths.has(entry.metaPath)).map((entry) => cache.delete(entry.url)),
+    fileEntries
+      .filter((entry) => !metaPaths.has(entry.metaPath) && isOrphanOldEnough(entry.metaPath, now))
+      .map((entry) => cache.delete(entry.url).catch(() => false)),
   );
 
   const read = await Promise.all(
@@ -199,15 +238,20 @@ export async function drainShareInbox(storage: InboxStorage, marker: ShareMarker
     }),
   );
   const ordered = read.toSorted((a, b) => (a.meta?.at ?? 0) - (b.meta?.at ?? 0));
+  let stuck = 0;
   const drained = await Promise.all(
     ordered.map(async ({ url, meta }) => {
       const one = meta === null ? null : await drainOne(cache, url, meta);
-      await cache.delete(url);
+      // Whatever was read is kept: a rejected delete costs a repeat after a reload, not the share.
+      await cache.delete(url).catch(() => {
+        stuck += 1;
+      });
       return one;
     }),
   );
 
   const problems: string[] = [];
+  if (stuck > 0) problems.push(STUCK_TEXT);
   const lost = drained.flatMap((one) => one?.lost ?? []);
   if (lost.length > 0) problems.push(lostText(lost));
   if (marker === "unreadable" || drained.includes(null)) problems.push(SHARE_UNREADABLE_TEXT);
@@ -229,12 +273,6 @@ export function shareMarker(search: string): ShareMarker {
   const value = new URLSearchParams(search).get(SHARE_MARKER);
   if (value === null) return null;
   return value === SHARE_UNREADABLE ? "unreadable" : "received";
-}
-
-/** What the form held when the document a share replaced went away (persist.ts). */
-export interface FormBeforeShare {
-  readonly files: number;
-  readonly submitting: boolean;
 }
 
 /** Sentences for what a share's reload cost: unpersisted files, and a submit cut short. */

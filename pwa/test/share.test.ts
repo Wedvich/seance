@@ -3,7 +3,9 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { pastTotalText, tooLargeText, tooManyText } from "../src/attachments.ts";
 import { matchShare, receiveShare } from "../src/share-handler.ts";
 import {
+  deliverShare,
   drainShareInbox,
+  type ReceivedShare,
   receiveOnBoot,
   reloadCostText,
   SHARE_MISSING_TEXT,
@@ -218,9 +220,67 @@ describe("drainShareInbox", () => {
     // The meta is gone, the files backing the form are not, and still read.
     expect(storage.cache.paths()).toHaveLength(2);
     expect(await share?.files[0]?.text()).toBe("first");
-    // The next boot (a reload) is no share, and sweeps them.
+    // A reload is no share. It leaves the files alone while they may still back a form in
+    // another tab, or be a share the worker is mid-way through writing...
     expect(await drainShareInbox(storage, null)).toBeNull();
+    expect(storage.cache.paths()).toHaveLength(2);
+    // ...and sweeps them once they are old enough to be nobody's.
+    expect(await drainShareInbox(storage, null, Date.now() + 25 * 60 * 60 * 1000)).toBeNull();
     expect(storage.cache.paths()).toEqual([]);
+  });
+
+  test("a delete that rejects keeps what was read and says it may repeat", async () => {
+    const meta = (name: string): Blob =>
+      new Blob([JSON.stringify({ at: 1, files: [], skipped: [], lost: [], title: "", text: name, url: "" })]);
+    storage.cache.bodies.set(`${ORIGIN}${SHARE_INBOX_PATH}a`, meta("one"));
+    storage.cache.bodies.set(`${ORIGIN}${SHARE_INBOX_PATH}b`, meta("two"));
+    const realDelete = storage.cache.delete.bind(storage.cache);
+    storage.cache.delete = async (request) => {
+      if (request.endsWith("/b")) throw new Error("QuotaExceededError");
+      return realDelete(request);
+    };
+    const share = await drainShareInbox(storage, null);
+    expect(share?.text).toBe("one\n\ntwo");
+    expect(share?.problems).toEqual([expect.stringContaining("may arrive again")]);
+  });
+
+  test("a skipped file with a reason this build doesn't know is still named", async () => {
+    storage.cache.bodies.set(
+      `${ORIGIN}${SHARE_INBOX_PATH}q`,
+      new Blob([
+        JSON.stringify({
+          at: 1,
+          files: [],
+          skipped: [{ name: "odd.bin", size: 5, reason: "type" }],
+          lost: [],
+          title: "",
+          text: "",
+          url: "",
+        }),
+      ]),
+    );
+    expect((await drainShareInbox(storage, null))?.refused).toEqual(["odd.bin was left out by the share"]);
+  });
+
+  test("deliverShare reports the reload's cost only on a share boot, and never throws", async () => {
+    const before = { files: 2, submitting: false };
+    const got: ReceivedShare[] = [];
+    await deliverShare(storage, null, before, (share) => void got.push(share));
+    expect(got).toEqual([]);
+
+    storage.cache.bodies.set(
+      `${ORIGIN}${SHARE_INBOX_PATH}1`,
+      new Blob([JSON.stringify({ at: 1, files: [], skipped: [], lost: [], title: "", text: "hi", url: "" })]),
+    );
+    await deliverShare(storage, null, before, (share) => void got.push(share));
+    expect(got[0]?.problems).toEqual([]);
+
+    await deliverShare(storage, "received", before, (share) => void got.push(share));
+    expect(got[1]?.problems).toEqual([SHARE_MISSING_TEXT, ...reloadCostText(before)]);
+
+    storage.failOpen = true;
+    await deliverShare(storage, "unreadable", null, (share) => void got.push(share));
+    expect(got[2]?.problems).toEqual([SHARE_UNREADABLE_TEXT]);
   });
 
   test("drains every waiting share, oldest first", async () => {

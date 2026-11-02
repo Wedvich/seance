@@ -373,7 +373,9 @@ export class Store {
   #admit(files: readonly File[], refusedBefore: readonly string[], problems: readonly string[]): void {
     const before = this.#state.attachments;
     const { files: next, refused } = admitFiles(before, files);
-    const sentences = [notAttachedText([...refusedBefore, ...refused]), ...problems].filter((s) => s !== null);
+    const sentences = [notAttachedText([...new Set([...refusedBefore, ...refused])]), ...problems].filter(
+      (s) => s !== null,
+    );
     this.#patch({ attachments: next, attachNotice: sentences.length === 0 ? null : sentences.join(" ") });
     // route-preview filters on the flag; it changes only when the list empties or fills.
     if (before.length === 0 && next.length > 0) void this.refreshPreview();
