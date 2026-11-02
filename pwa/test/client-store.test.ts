@@ -133,7 +133,12 @@ function startDouble(): StoreDouble {
   return double;
 }
 
-async function connect(double: StoreDouble, storeTimeoutMs = 5_000, withAccountKey = false): Promise<RelayClient> {
+async function connect(
+  double: StoreDouble,
+  storeTimeoutMs = 5_000,
+  withAccountKey = false,
+  lines: string[] = [],
+): Promise<RelayClient> {
   const client = new RelayClient({
     url: double.url,
     token: TOKEN,
@@ -141,7 +146,7 @@ async function connect(double: StoreDouble, storeTimeoutMs = 5_000, withAccountK
     ...(withAccountKey ? { accountKey } : {}),
     storeTimeoutMs,
     createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
-    log: () => {},
+    log: (line) => void lines.push(line),
   });
   clients.push(client);
   client.start();
@@ -482,8 +487,11 @@ describe("store transport", () => {
     const timedOut = await client.getTask(crypto.randomUUID()).catch((err: unknown) => err);
     if (!(timedOut instanceof RequestFailure)) throw new Error("expected a RequestFailure");
     expect(failureReasonText(timedOut)).toContain("the relay did not answer");
+
+    // A close must never race a short timer: a stall past 50ms reads it as a timeout.
+    const patient = await connect(double, 60_000);
     double.answer = () => "close";
-    expect(await failure(client.createTask(queued()))).toBe("dropped");
+    expect(await failure(patient.createTask(queued()))).toBe("dropped");
   });
 
   test("a reconnect fails the store request sent on the replaced socket at once", async () => {
@@ -500,14 +508,18 @@ describe("store transport", () => {
 
   test("a reply after the timeout settles nothing and throws nothing", async () => {
     const double = startDouble();
-    const client = await connect(double, 50);
+    const lines: string[] = [];
+    const client = await connect(double, 50, false, lines);
     double.answer = () => "silent";
     expect(await failure(client.getTask(crypto.randomUUID()))).toBe("timeout");
     const [late] = double.received;
-    for (const ws of double.sockets) ws.send(JSON.stringify({ t: "store-record", re: late?.["id"], record: null }));
-    // The socket orders frames, so once this answers, the late reply has been handled.
-    double.answer = null;
-    expect(await client.getTask(crypto.randomUUID())).toEqual({ ok: true, task: null });
+    const re = String(late?.["id"]);
+    for (const ws of double.sockets) ws.send(JSON.stringify({ t: "store-record", re, record: null }));
+    // Waits on the client's own record of handling it: a follow-up request would race the 50ms timer.
+    await pollUntil(
+      () => lines.some((line) => line.includes(re) && line.includes("pending=no")),
+      "the late reply to be handled",
+    );
   });
 });
 
@@ -526,7 +538,7 @@ describe("fleet quota record", () => {
     };
   }
 
-  function polling(double: StoreDouble, storeTimeoutMs = 5_000): RelayClient {
+  function polling(double: StoreDouble, storeTimeoutMs = 5_000, lines: string[] = []): RelayClient {
     const client = new RelayClient({
       url: double.url,
       token: TOKEN,
@@ -534,7 +546,7 @@ describe("fleet quota record", () => {
       storeTimeoutMs,
       fleetQuotaRefreshMs: 60_000,
       createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
-      log: () => {},
+      log: (line) => void lines.push(line),
     });
     clients.push(client);
     client.start();
@@ -609,28 +621,24 @@ describe("fleet quota record", () => {
     const double = startDouble();
     double.records.set(QUOTA_KEY, await quotaRecord(3));
     const lines: string[] = [];
-    const client = new RelayClient({
-      url: double.url,
-      token: TOKEN,
-      key,
-      storeTimeoutMs: 50,
-      fleetQuotaRefreshMs: 60_000,
-      createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
-      log: (line) => void lines.push(line),
-    });
-    clients.push(client);
-    client.start();
+    const client = polling(double, 5_000, lines);
     await pollUntil(() => client.getState().fleetQuota.length === 1, "the read on open");
     expect(lines).toEqual([]);
+
+    // A silent relay from the start, so no answer races the 50ms timer.
     double.answer = () => "silent";
-    await client.refreshFleetQuota();
-    expect(lines.filter((line) => line.includes("timeout"))).toHaveLength(1);
+    const failing: string[] = [];
+    polling(double, 50, failing);
+    await pollUntil(() => failing.some((line) => line.includes("timeout")), "the read on open to time out");
+    expect(failing.filter((line) => line.includes("timeout"))).toHaveLength(1);
   });
 
   test("a read with no answer resolves at the store timeout and keeps the last copy", async () => {
     const double = startDouble();
     double.records.set(QUOTA_KEY, await quotaRecord(3));
-    const client = polling(double, 50);
+    // One client must both read and time out, so its timer has to outlast a stalled reply:
+    // ~800x the ~1.2ms measured, where 50ms flaked on macOS CI.
+    const client = polling(double, 1_000);
     await pollUntil(() => client.getState().fleetQuota.length === 1, "the read on open");
     double.answer = () => "silent";
     await client.refreshFleetQuota();
