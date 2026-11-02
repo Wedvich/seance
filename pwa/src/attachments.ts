@@ -65,6 +65,24 @@ export function formatBytes(bytes: number): string {
   return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
 }
 
+/** Why a file past the per-file bound was left out; a clause of `notAttachedText`. */
+export function tooLargeText(name: string, size: number): string {
+  return `${name} is ${formatBytes(size)}; a file can be at most ${formatBytes(ATTACHMENT_LIMITS.fileBytes)}`;
+}
+
+export function tooManyText(): string {
+  return `a task takes at most ${ATTACHMENT_LIMITS.files} files`;
+}
+
+export function pastTotalText(name: string): string {
+  return `${name} would take the task past ${formatBytes(ATTACHMENT_LIMITS.totalBytes)} in all`;
+}
+
+/** One sentence naming every file left out; null with none. */
+export function notAttachedText(refused: readonly string[]): string | null {
+  return refused.length === 0 ? null : `Not attached: ${refused.join("; ")}.`;
+}
+
 /**
  * Adds what fits the limits, in order, and says why the rest didn't. A file over
  * the per-file bound is skipped and the next still tried; once the count or total
@@ -74,31 +92,28 @@ export function admitFiles(
   current: readonly PickedFile[],
   incoming: readonly File[],
   mintKey: () => string = () => crypto.randomUUID(),
-): { readonly files: readonly PickedFile[]; readonly notice: string | null } {
+): { readonly files: readonly PickedFile[]; readonly refused: readonly string[]; readonly notice: string | null } {
   const files = [...current];
   const refused: string[] = [];
   let total = files.reduce((sum, f) => sum + f.size, 0);
   for (const file of incoming) {
     const name = attachmentName(file.name);
     if (file.size > ATTACHMENT_LIMITS.fileBytes) {
-      refused.push(
-        `${name} is ${formatBytes(file.size)}; a file can be at most ${formatBytes(ATTACHMENT_LIMITS.fileBytes)}`,
-      );
+      refused.push(tooLargeText(name, file.size));
       continue;
     }
     if (files.length >= ATTACHMENT_LIMITS.files) {
-      refused.push(`a task takes at most ${ATTACHMENT_LIMITS.files} files`);
+      refused.push(tooManyText());
       break;
     }
     if (total + file.size > ATTACHMENT_LIMITS.totalBytes) {
-      refused.push(`${name} would take the task past ${formatBytes(ATTACHMENT_LIMITS.totalBytes)} in all`);
+      refused.push(pastTotalText(name));
       continue;
     }
     total += file.size;
     files.push({ key: mintKey(), file, name, type: attachmentType(file.type), size: file.size, stored: null });
   }
-  if (refused.length === 0) return { files, notice: null };
-  return { files, notice: `Not attached: ${refused.join("; ")}.` };
+  return { files, refused, notice: notAttachedText(refused) };
 }
 
 /** The manifest once every file is stored; null while any is not. */

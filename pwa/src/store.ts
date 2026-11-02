@@ -41,7 +41,8 @@ import {
   type Verdict,
 } from "./state.ts";
 import { AccountStore } from "./account-store.ts";
-import { admitFiles, manifestOf, uploadRefusalText } from "./attachments.ts";
+import { admitFiles, manifestOf, notAttachedText, uploadRefusalText } from "./attachments.ts";
+import type { ReceivedShare } from "./share-inbox.ts";
 import { accountSeries } from "./chart.ts";
 import { SchedulerStore, STORE_UNREADABLE, taskRequest } from "./scheduler-store.ts";
 import type { AppState } from "./view.ts";
@@ -353,9 +354,29 @@ export class Store {
    */
   addFiles(files: readonly File[]): void {
     if (files.length === 0 || this.#state.spawning) return;
+    this.#admit(files, [], []);
+  }
+
+  /**
+   * A share from the OS share sheet, drained at boot (share-inbox.ts). Its text goes
+   * after the prompt, never over it; its files meet the same limits as a pick, and the
+   * notice adds the clauses the worker refused and whatever of the share didn't arrive.
+   */
+  receiveShare(share: ReceivedShare): void {
+    if (share.text !== "") {
+      const { prompt } = this.#state.form;
+      this.setPrompt(prompt === "" ? share.text : `${prompt}\n\n${share.text}`);
+    }
+    this.#admit(share.files, share.refused, share.problems);
+  }
+
+  #admit(files: readonly File[], refusedBefore: readonly string[], problems: readonly string[]): void {
     const before = this.#state.attachments;
-    const { files: next, notice } = admitFiles(before, files);
-    this.#patch({ attachments: next, attachNotice: notice });
+    const { files: next, refused } = admitFiles(before, files);
+    const sentences = [notAttachedText([...new Set([...refusedBefore, ...refused])]), ...problems].filter(
+      (s) => s !== null,
+    );
+    this.#patch({ attachments: next, attachNotice: sentences.length === 0 ? null : sentences.join(" ") });
     // route-preview filters on the flag; it changes only when the list empties or fills.
     if (before.length === 0 && next.length > 0) void this.refreshPreview();
   }

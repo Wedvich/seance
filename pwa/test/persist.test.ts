@@ -17,7 +17,16 @@ Object.defineProperty(globalThis, "localStorage", {
   },
 });
 
-const { dropLegacyHidden, dropLegacyPending, readForm, writeForm } = await import("../src/persist.ts");
+const {
+  dropLegacyHidden,
+  dropLegacyPending,
+  FORM_FILES_FRESH_MS,
+  readForm,
+  readFormFiles,
+  trackFormFiles,
+  writeForm,
+  writeFormFiles,
+} = await import("../src/persist.ts");
 const { DEFAULT_FORM } = await import("../src/state.ts");
 
 beforeEach(() => store.clear());
@@ -127,5 +136,54 @@ describe("the legacy hidden-machine list", () => {
   test("is safe to clear when nothing was stored", () => {
     dropLegacyHidden();
     expect(store.get("seance:hidden")).toBeUndefined();
+  });
+});
+
+describe("the form's files before a share", () => {
+  test("round-trip, apart from the form", () => {
+    writeForm(DEFAULT_FORM);
+    writeFormFiles({ files: 2, submitting: true });
+    expect(readFormFiles()).toEqual({ files: 2, submitting: true });
+    expect(readForm()).toEqual(DEFAULT_FORM);
+  });
+
+  test("read as nothing when absent or malformed", () => {
+    expect(readFormFiles()).toBeNull();
+    store.set("seance:form-files", JSON.stringify({ files: -1, submitting: false, at: Date.now() }));
+    expect(readFormFiles()).toBeNull();
+    store.set("seance:form-files", "{");
+    expect(readFormFiles()).toBeNull();
+  });
+
+  test("a closed document's facts are not a share's cost", () => {
+    writeFormFiles({ files: 3, submitting: true }, 1_000);
+    expect(readFormFiles(1_000 + FORM_FILES_FRESH_MS)).toEqual({ files: 3, submitting: true });
+    expect(readFormFiles(1_001 + FORM_FILES_FRESH_MS)).toBeNull();
+    store.set("seance:form-files", JSON.stringify({ files: 3, submitting: true }));
+    expect(readFormFiles()).toBeNull();
+  });
+
+  test("tracks the form, and restamps on hide", () => {
+    let attachments: readonly unknown[] = [];
+    let spawning = false;
+    const listeners: (() => void)[] = [];
+    let flush = (): void => {};
+    trackFormFiles(
+      {
+        subscribe: (listener) => void listeners.push(listener),
+        getState: () => ({ attachments, spawning }),
+      },
+      (hide) => {
+        flush = hide;
+      },
+    );
+    expect(readFormFiles()).toEqual({ files: 0, submitting: false });
+    attachments = [1, 2];
+    spawning = true;
+    for (const listener of listeners) listener();
+    expect(readFormFiles()).toEqual({ files: 2, submitting: true });
+    store.clear();
+    flush();
+    expect(readFormFiles()).toEqual({ files: 2, submitting: true });
   });
 });

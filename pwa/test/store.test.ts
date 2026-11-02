@@ -2964,4 +2964,36 @@ describe("attachments", () => {
     expect(deriveView(store.getState(), 0).button.enabled).toBe(true);
     detach();
   });
+
+  test("a share appends its text to the draft and its files meet the pick's limits, in one notice", () => {
+    const store = new Store(capable(), { ...DEFAULT_FORM, prompt: "draft" });
+    const big = new File([], "big.mov");
+    Object.defineProperty(big, "size", { value: ATTACHMENT_LIMITS.fileBytes + 1 });
+    store.receiveShare({
+      files: [file("a.txt", "first"), big],
+      refused: ["a task takes at most 10 files"],
+      problems: ["Not received from the share: c.png."],
+      text: "https://x.test",
+    });
+    const state = store.getState();
+    expect(state.form.prompt).toBe("draft\n\nhttps://x.test");
+    expect(state.attachments.map((f) => f.name)).toEqual(["a.txt"]);
+    expect(state.attachNotice).toBe(
+      "Not attached: a task takes at most 10 files; big.mov is 30 MB; a file can be at most 30 MB. Not received from the share: c.png.",
+    );
+  });
+
+  test("a share with no leader taking attachments keeps its files listed, with the reason shown", () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "" });
+    const detach = store.attach();
+    client.emit({ machines: [autoMachine("dev-a"), autoMachine("dev-b")] });
+    store.receiveShare({ files: [file("rec.mp4", "video")], refused: [], problems: [], text: "" });
+    const view = deriveView(store.getState(), 0);
+    expect(view.attachments.files.map((f) => f.name)).toEqual(["rec.mp4"]);
+    expect(view.attachments.offered).toBe(false);
+    expect(view.button).toMatchObject({ label: "Can't attach files", enabled: false });
+    expect(store.getState().form.prompt).toBe("");
+    detach();
+  });
 });

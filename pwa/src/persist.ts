@@ -91,3 +91,59 @@ export function dropLegacyPending(): void {
 export function dropLegacyHidden(): void {
   writeJson(HIDDEN_KEY, null);
 }
+
+const FORM_FILES_KEY = "seance:form-files";
+/** The unload of a document a share replaced and the boot that follows are seconds apart; older facts are a closed document's. */
+export const FORM_FILES_FRESH_MS = 60_000;
+
+/** What the form held when the document a share replaced went away. */
+export interface FormBeforeShare {
+  readonly files: number;
+  readonly submitting: boolean;
+}
+
+/**
+ * How many files the form held and whether a submit was in flight, kept for one reader:
+ * a share is a navigation, so it reloads the document and drops both (a `File` can't be
+ * persisted), and the boot it lands on says so (share-inbox.ts, `reloadCostText`).
+ * Stamped, so that boot can tell a document the share replaced from one closed long ago.
+ */
+export function writeFormFiles(state: FormBeforeShare, now: number = Date.now()): void {
+  writeJson(FORM_FILES_KEY, { ...state, at: now });
+}
+
+/** Null when absent, malformed, or older than `FORM_FILES_FRESH_MS`: then no live document was replaced. */
+export function readFormFiles(now: number = Date.now()): FormBeforeShare | null {
+  const raw = readJson(FORM_FILES_KEY);
+  if (typeof raw !== "object" || raw === null) return null;
+  const files: unknown = Reflect.get(raw, "files");
+  const submitting: unknown = Reflect.get(raw, "submitting");
+  const at: unknown = Reflect.get(raw, "at");
+  if (typeof files !== "number" || !Number.isSafeInteger(files) || files < 0 || typeof submitting !== "boolean") {
+    return null;
+  }
+  if (typeof at !== "number" || now - at > FORM_FILES_FRESH_MS) return null;
+  return { files, submitting };
+}
+
+/**
+ * Keeps the facts current as the form changes, and restamps them when the page goes
+ * away: a share's navigation fires `pagehide` just before the boot that reads them.
+ */
+export function trackFormFiles(
+  source: {
+    subscribe(listener: () => void): unknown;
+    getState(): { readonly attachments: readonly unknown[]; readonly spawning: boolean };
+  },
+  onHide: (flush: () => void) => void,
+): void {
+  let facts: FormBeforeShare = { files: 0, submitting: false };
+  writeFormFiles(facts);
+  source.subscribe(() => {
+    const { attachments, spawning } = source.getState();
+    if (attachments.length === facts.files && spawning === facts.submitting) return;
+    facts = { files: attachments.length, submitting: spawning };
+    writeFormFiles(facts);
+  });
+  onHide(() => writeFormFiles(facts));
+}
