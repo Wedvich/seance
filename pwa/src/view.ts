@@ -326,6 +326,13 @@ export function deriveAttachmentsAvailability(relay: RelayState): boolean {
 export const ATTACHMENTS_UNAVAILABLE =
   "The scheduler's leader doesn't take attachments yet. Update seanced on its machine, or remove the files";
 
+/** Files wait on a leader not yet verified (a re-dial) rather than being told it lacks attachments. */
+export const ATTACHMENTS_VERIFYING = "Checking that the scheduler's leader takes attachments…";
+
+function leaderVerified(relay: RelayState): boolean {
+  return relay.status === "open" && relay.scheduler.kind === "ready";
+}
+
 function deriveAttachments(state: AppState): AttachmentsView {
   const offered = deriveAttachmentsAvailability(state.relay);
   const files = state.attachments;
@@ -597,7 +604,9 @@ function deriveFormStatus(state: AppState, machine: Machine | null, problem: Pin
   const { reason, note } = deriveAutoAvailability(state.relay);
   if (reason !== null) return reason;
   if (problem !== null) return problem.text;
-  if (state.attachments.length > 0 && !deriveAttachmentsAvailability(state.relay)) return ATTACHMENTS_UNAVAILABLE;
+  if (state.attachments.length > 0 && !deriveAttachmentsAvailability(state.relay)) {
+    return leaderVerified(state.relay) ? ATTACHMENTS_UNAVAILABLE : ATTACHMENTS_VERIFYING;
+  }
   // The tile says "Unknown machine" here, so the status line must not claim the scheduler picks.
   if (state.form.machine !== null && machine === null) return "The pinned machine isn't listed";
   if (machine !== null && !machine.connected) return `${machine.name} is offline — the task waits for it`;
@@ -630,7 +639,9 @@ function deriveButton(
   if (state.spawning) return { label: "Queuing…", enabled: false, busy: true };
   if (!deriveAutoAvailability(relay).available) return blocked("Queuing is unavailable");
   if (problem !== null) return blocked(problem.label);
-  if (state.attachments.length > 0 && !deriveAttachmentsAvailability(relay)) return blocked("Can't attach files");
+  if (state.attachments.length > 0 && !deriveAttachmentsAvailability(relay)) {
+    return blocked(leaderVerified(relay) ? "Can't attach files" : "Checking leader…");
+  }
   if (repo === null) return blocked("No repo to run");
   return { label: machine === null ? "Queue" : `Queue on ${machine.name}`, enabled: true, busy: false };
 }
