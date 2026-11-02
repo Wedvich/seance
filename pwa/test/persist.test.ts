@@ -17,7 +17,8 @@ Object.defineProperty(globalThis, "localStorage", {
   },
 });
 
-const { dropLegacyHidden, dropLegacyPending, readForm, writeForm } = await import("../src/persist.ts");
+const { dropLegacyHidden, dropLegacyPending, readForm, readFormFiles, writeForm, writeFormFiles } =
+  await import("../src/persist.ts");
 const { DEFAULT_FORM } = await import("../src/state.ts");
 
 beforeEach(() => store.clear());
@@ -127,5 +128,22 @@ describe("the legacy hidden-machine list", () => {
   test("is safe to clear when nothing was stored", () => {
     dropLegacyHidden();
     expect(store.get("seance:hidden")).toBeUndefined();
+  });
+});
+
+describe("the form's files before a share", () => {
+  test("round-trip, apart from the form", () => {
+    writeForm(DEFAULT_FORM);
+    writeFormFiles({ files: 2, submitting: true });
+    expect(readFormFiles()).toEqual({ files: 2, submitting: true });
+    expect(readForm()).toEqual(DEFAULT_FORM);
+  });
+
+  test("read as nothing when absent or malformed", () => {
+    expect(readFormFiles()).toBeNull();
+    store.set("seance:form-files", JSON.stringify({ files: -1, submitting: false }));
+    expect(readFormFiles()).toBeNull();
+    store.set("seance:form-files", "{");
+    expect(readFormFiles()).toBeNull();
   });
 });

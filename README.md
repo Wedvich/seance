@@ -338,7 +338,9 @@ session in the repo as it stands. Then queue it — or, from the chevron beside 
 concurrency caps (shown only while the scheduler's leader supports it).
 
 **Attach** files to the task from the prompt card — the **ATTACH** picker, a pasted
-screenshot, or a drop on desktop — up to 10 files, 30 MB each and 100 MB in all, sent as
+screenshot, or a drop on desktop — or share them into Séance from Android's share sheet
+(the app installed from Chrome only; after an update, Chrome picks the share target up
+when it next refreshes the app, or on reinstall). Up to 10 files, 30 MB each and 100 MB in all, sent as
 they are, never recompressed. Each is sealed under the PSK on the phone before it goes
 to the relay's bucket, and the machine the task lands on fetches them and hands the
 session their paths. With files attached the prompt takes at most 6,144 characters.

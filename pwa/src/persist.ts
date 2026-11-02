@@ -1,4 +1,5 @@
 import { DEP_AFTER, isTaskId, TASK_SPEC_LIMITS, TASK_UNTIL, type TaskDep } from "@seance/shared";
+import type { FormBeforeShare } from "./share-inbox.ts";
 import { DEFAULT_FORM, isEffort, isModel, type PersistedForm } from "./state.ts";
 
 /**
@@ -90,4 +91,26 @@ export function dropLegacyPending(): void {
  */
 export function dropLegacyHidden(): void {
   writeJson(HIDDEN_KEY, null);
+}
+
+const FORM_FILES_KEY = "seance:form-files";
+
+/**
+ * How many files the form held and whether a submit was in flight, kept for one reader:
+ * a share is a navigation, so it reloads the document and drops both (a `File` can't be
+ * persisted), and the boot it lands on says so (share-inbox.ts, `reloadCostText`).
+ */
+export function writeFormFiles(state: FormBeforeShare): void {
+  writeJson(FORM_FILES_KEY, state);
+}
+
+export function readFormFiles(): FormBeforeShare | null {
+  const raw = readJson(FORM_FILES_KEY);
+  if (typeof raw !== "object" || raw === null) return null;
+  const files: unknown = Reflect.get(raw, "files");
+  const submitting: unknown = Reflect.get(raw, "submitting");
+  if (typeof files !== "number" || !Number.isSafeInteger(files) || files < 0 || typeof submitting !== "boolean") {
+    return null;
+  }
+  return { files, submitting };
 }

@@ -2,11 +2,12 @@ import { render } from "preact";
 import "./base.css";
 import { App } from "./app.tsx";
 import { Setup } from "./components/setup.tsx";
-import { dropLegacyHidden, dropLegacyPending, readForm, writeForm } from "./persist.ts";
+import { dropLegacyHidden, dropLegacyPending, readForm, readFormFiles, writeForm, writeFormFiles } from "./persist.ts";
 import { deriveAccountKey, FLEET_QUOTA_INTERVAL_MS, RelayClient } from "@seance/shared";
 import { loadPsk, loadPskBase, readBearer, readRelayUrl } from "./relay/keys.ts";
 import "./screen.css";
 import type { PersistedForm } from "./state.ts";
+import { receiveOnBoot, reloadCostText, shareMarker } from "./share-inbox.ts";
 import { Store } from "./store.ts";
 import { registerServiceWorker } from "./sw.ts";
 import { watchSystemTheme } from "./theme.ts";
@@ -18,6 +19,11 @@ registerServiceWorker();
 
 // Prompts are the one thing here the user authored, so make eviction unlikely.
 void navigator.storage?.persist?.();
+
+// A share lands here by the worker's 303 (share-handler.ts). Cleaned at once, so a reload
+// is no share; the history state is passed through, since the store's layers live in it.
+const marker = shareMarker(location.search);
+if (marker !== null) history.replaceState(history.state, "", "/");
 
 const container = document.querySelector("#root");
 if (container === null) throw new Error("#root is missing from index.html");
@@ -53,6 +59,17 @@ if (key === null || token === null) {
   });
   const store = new Store(client, readForm());
 
+  // Read before the first write below: it is the replaced document's, and only a share boot reports it.
+  const before = marker === null ? null : readFormFiles();
+  let formFiles = { files: 0, submitting: false };
+  writeFormFiles(formFiles);
+  store.subscribe(() => {
+    const { attachments, spawning } = store.getState();
+    if (attachments.length === formFiles.files && spawning === formFiles.submitting) return;
+    formFiles = { files: attachments.length, submitting: spawning };
+    writeFormFiles(formFiles);
+  });
+
   // Debounced because the store notifies on every keystroke in the prompt. Only a new
   // form is written: most notifies (relay status beats) leave it the same object. The
   // first is written whatever it is, so a legacy saved shape `readForm` dropped fields
@@ -67,6 +84,11 @@ if (key === null || token === null) {
       writeForm(written);
     }, PERSIST_DEBOUNCE_MS);
   });
+
+  // After the form's writer, so appended share text is saved; before the first render, so
+  // the form opens with the files on it. Setup drains nothing: its save reloads into this.
+  const share = await receiveOnBoot("caches" in globalThis ? caches : undefined, marker);
+  if (share !== null) store.receiveShare({ ...share, problems: [...share.problems, ...reloadCostText(before)] });
 
   client.start();
   render(<App store={store} />, container);

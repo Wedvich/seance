@@ -4131,7 +4131,8 @@ Where the build adds to or departs from the wording above:
 
 - **Offered** only when `deriveAttachmentsAvailability(relay)` (`pwa/src/view.ts`, through
   `verifiedLeaderAdvertises(relay, CAPABILITIES.attachments)`) is true. Files come from a
-  file picker (`<input type="file" multiple>`) and from paste into the prompt.
+  file picker (`<input type="file" multiple>`) and from paste into the prompt, and since
+  2026-11-02 from Android's share sheet (Share target, below).
 - **Before any upload** it checks the limits and says which one was hit. While files are
   attached, the prompt counts against `ATTACHMENT_LIMITS.prompt`. `type` is `File.type`
   lowercased with any parameters stripped, or `application/octet-stream` when empty or
@@ -4189,6 +4190,56 @@ Where the build adds to or departs from the wording above:
 - **CSP**: `pwa/vite.config.ts` derives the `https:` origin with `attachmentUrl`, imported
   by relative path: the config is bundled and loads under node, where the workspace
   package's raw TS cannot.
+
+### Share target (`pwa/src/share*.ts`) — built 2026-11-02
+
+Files shared from Android's share sheet land on the form as if picked, skipping the
+system chooser and file browser the paperclip goes through. Web Share Target is
+Chromium-only and needs the app installed from Chrome (a WebAPK): Firefox, Safari and a
+plain bookmark ignore the manifest member, and nothing replaces it there.
+
+- **Manifest**: `share_target` posts `multipart/form-data` to `/share` (`SHARE_ACTION`),
+  with `title`, `text`, `url` and `files` accepting `*/*`, so Séance is a target for links
+  and text too. An installed app learns it only when Chrome refreshes the WebAPK from the
+  new manifest, or on reinstall.
+- **The worker stays `generateSW`**: the route is one `workbox.runtimeCaching` entry with
+  `method: "POST"` whose `urlPattern` and `handler` are functions (`matchShare`,
+  `receiveShare` in `share-handler.ts`). workbox-build copies them into `sw.js` as source
+  text, so that module holds those two functions and nothing else, every value a literal;
+  `share.test.ts` fails on any other top-level statement and holds the literals to
+  `share.ts` and `ATTACHMENT_LIMITS`. Bun's `toString` inlines module constants and
+  rolldown's does not, so running the rebuilt function alone would not catch a stray name.
+- **The handler** stores each file in Cache Storage (`seance-share-inbox`, its own name:
+  `cleanupOutdatedCaches` deletes only workbox's) at `/share-inbox/<id>/<n>`, the `File` as
+  the body so it streams to disk, then a JSON meta entry at `/share-inbox/<id>`. It applies
+  the attachment limits first, as `admitFiles` does, so a file past them costs no write;
+  skipped files and files the cache refused are named in the meta. It answers `303` to
+  `/?shared` whatever happens: a throw (an unparseable body, no Cache Storage) redirects
+  to `/?shared=unreadable`.
+- **The app drains at boot** (`share-inbox.ts`, `main.tsx`), only once a store exists:
+  Setup drains nothing, and the boot its save reloads into takes what waits. Every meta,
+  oldest first, goes to `Store.receiveShare`: files through the same door as a pick (the
+  form's limits again, one "Not attached" notice with the worker's clauses first), text
+  appended to the prompt after a blank line, never over it. A drain deletes each meta, so
+  a reload repeats nothing, but not the files: the form's `File`s are backed by them, and
+  whether a deleted entry's blob stays readable is the browser's business. The next drain
+  sweeps file entries with no meta. The marker is stripped with
+  `history.replaceState(history.state, …)` (the layers live in that state); a marker with
+  an empty inbox, or `unreadable`, shows a sentence saying the share was lost.
+- **Attaching not offered**: shared files are listed like any others, so the existing
+  "Not offered, files listed" rule applies; nothing waits for leadership to settle.
+- **A share reloads the document**, so files already on the form drop and a submit in
+  flight is cut off. `persist.ts` keeps the form's file count and a submitting flag under
+  `seance:form-files` (apart from the form), and a share boot names both in the notice.
+- **`/share` must keep answering `303`** even if the feature is ever removed, until every
+  installed WebAPK has refreshed its manifest: otherwise a share posts to static assets,
+  which won't take a `POST`, and the files are lost without a word.
+- **Rejected**: `injectManifest` (the output is named after the source, so it needs a
+  second `sw.ts`, workbox as direct deps, a WebWorker tsconfig and a hand copy of the
+  update lifecycle below); `importScripts` of a `public/` script (untyped, untested);
+  posting the files to an open client (a cold start has none, and the worker may be
+  stopped before the page loads); holding files until leadership is known (the form
+  already lists files it can't send, with the reason).
 
 ### Rejected alternatives
 
@@ -6207,7 +6258,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   `src/sw.ts` for two things the injected script cannot do: check for an update on
   resume, because an installed PWA can go days without a navigation, and reload
   only on a visibility change, so a new build lands like a cold launch instead of
-  yanking the screen mid-use.
+  yanking the screen mid-use. The worker stays `generateSW` output; the share target's
+  `POST /share` route is one `runtimeCaching` entry (Attachments, "Share target").
 - **Every layer is exactly one history entry, owned by the store.** Sheets, the
   verdict, the Settings dialog and the phone's Queue and Machines screens all push on open and are cleared by
   `popstate`, so Android back dismisses the layer instead of exiting the app.

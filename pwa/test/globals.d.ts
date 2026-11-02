@@ -21,3 +21,8 @@ declare var history: {
   back(): void;
   go(delta: number): void;
 };
+
+/** Just enough of Cache Storage for share-handler.ts; share.test.ts installs a double. */
+declare var caches: {
+  open(name: string): Promise<{ put(request: string, response: Response): Promise<void> }>;
+};
