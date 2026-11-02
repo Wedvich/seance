@@ -2965,6 +2965,22 @@ describe("attachments", () => {
     detach();
   });
 
+  test("files picked while a re-dial's leader is unverified wait for it, then go", () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "go" });
+    const detach = store.attach();
+    const term = client.getState().scheduler;
+    client.emit({ scheduler: { kind: "unverified", deviceId: "dev-a", term: 2 } });
+    store.addFiles([file("a.txt", "first"), file("b.txt", "second")]);
+    const waiting = deriveView(store.getState(), 0);
+    expect(waiting.attachments.files.map((f) => f.name)).toEqual(["a.txt", "b.txt"]);
+    expect(waiting.button).toMatchObject({ label: "Checking leader…", enabled: false });
+    expect(waiting.formStatus).not.toContain("doesn't take attachments yet");
+    client.emit({ scheduler: term });
+    expect(deriveView(store.getState(), 0).button.enabled).toBe(true);
+    detach();
+  });
+
   test("a share appends its text to the draft and its files meet the pick's limits, in one notice", () => {
     const store = new Store(capable(), { ...DEFAULT_FORM, prompt: "draft" });
     const big = new File([], "big.mov");

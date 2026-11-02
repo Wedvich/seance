@@ -135,34 +135,45 @@ function AttachmentChips(props: { view: AttachmentsView; onRemove: (key: string)
   );
 }
 
-/** The composer bar's paperclip, opening the picker; rendered only while attaching is offered. */
-function AttachButton(props: { locked: boolean; onAdd: (files: readonly File[]) => void }): JSX.Element {
-  const { locked, onAdd } = props;
+/**
+ * The composer bar's paperclip, shown only while attaching is offered. The input stays
+ * mounted regardless: returning from a slow pick (Android's multi-select) re-dials the
+ * relay, `offered` drops until the leader re-verifies, and an input unmounted then
+ * loses the pick's `change`.
+ */
+function AttachButton(props: {
+  offered: boolean;
+  locked: boolean;
+  onAdd: (files: readonly File[]) => void;
+}): JSX.Element {
+  const { offered, locked, onAdd } = props;
   const picker = useRef<HTMLInputElement>(null);
   return (
     <>
-      <button
-        type="button"
-        className="compose-attach"
-        aria-label="Attach files"
-        title="Attach files"
-        disabled={locked}
-        onClick={() => picker.current?.click()}
-      >
-        <svg
-          viewBox="0 0 24 24"
-          width="20"
-          height="20"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.8"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true"
+      {offered && (
+        <button
+          type="button"
+          className="compose-attach"
+          aria-label="Attach files"
+          title="Attach files"
+          disabled={locked}
+          onClick={() => picker.current?.click()}
         >
-          <path d="M21 11.5l-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l8.6-8.6a3.7 3.7 0 0 1 5.2 5.2l-8.6 8.6a1.8 1.8 0 0 1-2.6-2.6l8-8" />
-        </svg>
-      </button>
+          <svg
+            viewBox="0 0 24 24"
+            width="20"
+            height="20"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M21 11.5l-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l8.6-8.6a3.7 3.7 0 0 1 5.2 5.2l-8.6 8.6a1.8 1.8 0 0 1-2.6-2.6l8-8" />
+          </svg>
+        </button>
+      )}
       <input
         ref={picker}
         type="file"
@@ -765,7 +776,8 @@ export function SpawnScreen(props: {
         <div
           className={dropping ? "prompt-card card prompt-card-drop" : "prompt-card card"}
           onDragOver={(event) => {
-            if (!attachOffered || !carriesFiles(event)) return;
+            if (!carriesFiles(event)) return;
+            // Cancelled even when attaching isn't offered: an uncancelled file drop navigates away from the PWA.
             event.preventDefault();
             setDropping(true);
           }}
@@ -776,8 +788,9 @@ export function SpawnScreen(props: {
           }}
           onDrop={(event) => {
             setDropping(false);
-            if (!attachOffered || !carriesFiles(event)) return;
+            if (!carriesFiles(event)) return;
             event.preventDefault();
+            // Not gated on `offered`, which drops during a re-dial; the status line says if they can't go.
             actions.addFiles([...(event.dataTransfer?.files ?? [])]);
           }}
         >
@@ -840,7 +853,7 @@ export function SpawnScreen(props: {
               onPaste={(event) => {
                 // A screenshot pastes as a file with no text; text keeps its normal paste.
                 const files = [...(event.clipboardData?.files ?? [])];
-                if (!attachOffered || files.length === 0) return;
+                if (files.length === 0) return;
                 if (event.clipboardData?.getData("text/plain") === "") event.preventDefault();
                 actions.addFiles(files);
               }}
@@ -864,7 +877,7 @@ export function SpawnScreen(props: {
             <SkillPicker id={SKILL_LIST_ID} query={query} items={matches} active={active} onPick={pickSkill} />
           )}
           <div className="compose-bar">
-            {attachOffered && <AttachButton locked={view.attachments.locked} onAdd={actions.addFiles} />}
+            <AttachButton offered={attachOffered} locked={view.attachments.locked} onAdd={actions.addFiles} />
             <QueueButton
               view={view}
               preview={view.previewShown ? preview : null}
