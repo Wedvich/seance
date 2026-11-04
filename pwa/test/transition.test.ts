@@ -43,9 +43,13 @@ function state(overrides: Partial<AppState> = {}): AppState {
     queueView: null,
     taskAction: null,
     queueNotice: null,
+    startNowRefusal: null,
     pausing: false,
     discarding: false,
     accounts: { aliases: {}, nameable: true, saving: null, notice: null },
+    attachments: [],
+    attachNotice: null,
+    upload: null,
     ...overrides,
   };
 }

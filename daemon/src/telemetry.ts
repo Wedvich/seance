@@ -71,6 +71,8 @@ export interface TelemetrySources {
   readonly probe?: HostProbe;
   /** The clock a `tick` without an explicit time reads; defaults to `Date.now`. */
   readonly now?: () => number;
+  /** True while the daemon refuses task launches (`EndedTasks.draining`); absent reads as never. */
+  readonly draining?: () => boolean;
   /** Outbound HTTP for a collector that polls an endpoint; defaults to the global `fetch`. */
   readonly httpFetch?: Fetch;
   /**
@@ -88,7 +90,11 @@ export interface Telemetry {
    * `registered`; otherwise it runs after it, so a status sent after a
    * register carries that register's stamp.
    */
-  readonly tick: (nowMs?: number) => Promise<Snapshot>;
+  /**
+   * `fresh`: a sample started now, queued behind any in flight rather than joining it — for a caller
+   * whose inputs changed after that one began.
+   */
+  readonly tick: (nowMs?: number, fresh?: boolean) => Promise<Snapshot>;
   readonly latest: () => Snapshot | null;
 }
 
@@ -150,9 +156,9 @@ export function createTelemetry(
   };
 
   return {
-    tick: (nowMs = now()): Promise<Snapshot> => {
+    tick: (nowMs = now(), fresh = false): Promise<Snapshot> => {
       const registered = sources.registered();
-      if (inFlight?.registered === registered) return inFlight.snapshot;
+      if (!fresh && inFlight?.registered === registered) return inFlight.snapshot;
       // Queued behind the one in flight, never beside it: the cpu and I/O
       // deltas and the averages assume one sample at a time.
       const before = inFlight?.snapshot.catch(() => null);

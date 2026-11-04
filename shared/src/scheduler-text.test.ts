@@ -9,6 +9,7 @@ describe("taskFailureText", () => {
     expect(texts.every((t) => t !== null && t.length > 0)).toBe(true);
     expect(new Set(texts).size).toBe(TASK_FAILURE_CODES.length);
     expect(taskFailureText("queue_expired")).toContain("30 days");
+    expect(taskFailureText("pin_expired")).toContain("30 days");
     expect(taskFailureText("lost_expired")).toContain("may still be running");
     expect(taskFailureText("repo_not_found")).toBeNull();
     expect(taskFailureText("minted_later")).toBeNull();
@@ -29,6 +30,16 @@ describe("taskFailureText", () => {
     }
     expect(taskFailureText("merge_expired", 137)).toBe(taskFailureText("merge_expired"));
     expect(taskFailureText("repo_not_found", 137)).toBeNull();
+  });
+
+  test("a session_closed is worded by what it lacked, and ignores any exit status", () => {
+    expect(taskFailureText("session_closed")).toBe(
+      "its window was closed before its session ended and it reported no pull request",
+    );
+    expect(taskFailureText("session_closed", undefined, "merged")).toBe(taskFailureText("session_closed"));
+    expect(taskFailureText("session_closed", 137, "reported")).toBe(
+      "its window was closed before its session ended and it did not report done",
+    );
   });
 
   test("under until reported, the missing thing is the done report, not a pull request", () => {
@@ -86,9 +97,19 @@ describe("reasonText", () => {
     expect(reasonText({ code: "avoided" })).toBe("the task avoids this machine");
   });
 
+  test("a draining machine says it is restarting, not that it is unhealthy", () => {
+    expect(reasonText({ code: "draining" })).toBe("its daemon is restarting, so it takes no new tasks");
+  });
+
   test("a continuation says why a candidate is not the one it resumes on", () => {
     expect(reasonText({ code: "continue_elsewhere" })).toBe("the session it continues ran elsewhere");
     expect(reasonText({ code: "continue_unsupported" })).toContain("seanced update");
+  });
+
+  test("a machine whose daemon can't fetch attachments says it needs an update", () => {
+    expect(reasonText({ code: "attachments_unsupported" })).toBe(
+      "its daemon can't fetch attachments yet (needs seanced update)",
+    );
   });
 });
 

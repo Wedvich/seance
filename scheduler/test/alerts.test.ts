@@ -10,7 +10,19 @@ import {
 } from "../src/index.ts";
 import { escalation, inputClock } from "../src/alerts.ts";
 import { advance } from "../src/task.ts";
-import { enqueue, exclave, FakeFleet, machine, NOW, NOW_S, obs, readerChecked, spec, status } from "./fixtures.ts";
+import {
+  accountMax,
+  enqueue,
+  exclave,
+  FakeFleet,
+  machine,
+  NOW,
+  NOW_S,
+  obs,
+  readerChecked,
+  spec,
+  status,
+} from "./fixtures.ts";
 
 const MINUTE = 60_000;
 
@@ -225,7 +237,7 @@ describe("credits spill", () => {
     expect(alerts.map((a) => a.taskId)).toEqual([first.id, third.id]);
   });
 
-  const WIDE: SchedulerConfig = { ...DEFAULT_CONFIG, accountMax: 20, globalMax: 20 };
+  const WIDE: SchedulerConfig = { ...DEFAULT_CONFIG, ...accountMax(20), globalMax: 20 };
   const noReset = machine("a", {
     exclaves: [exclave("main", "org:a", { extraUsageEnabled: true })],
     status: status({ quota: [obs(0, { h: 95 })] }),

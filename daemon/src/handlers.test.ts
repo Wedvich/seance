@@ -24,12 +24,12 @@ import {
 } from "@seance/shared";
 import type { AuditSink } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
-import { SpawnFailure, type SessionBackend } from "./backend.ts";
+import { SpawnFailure, type Continuation, type SessionBackend } from "./backend.ts";
 import type { Config } from "./config.ts";
 import { createHandler, createLocalOps, fitProgress, type HandlerContext, type TaskLaunches } from "./handlers.ts";
 import { LaunchLedger } from "./launch-ledger.ts";
 import { MetricsStore, type Sample } from "./metrics-store.ts";
-import { EndedTasks } from "./session-events.ts";
+import { EndedTasks, LaunchesClosed } from "./session-events.ts";
 
 // The audit trail is what's under test, so collect it at the seam the daemon
 // injects rather than off stdout, which is only where daemonSink happens to
@@ -123,6 +123,42 @@ describe("relay ops are audited", () => {
     lines.length = 0;
     await createHandler(ctx)(spawnNope({ baseBranch: "martin/pen-1-stack" }));
     expect(logged()).toContain("audit spawn origin=relay rejected");
+  });
+
+  test("a malformed manifest is rejected, never dropped: a session must not start without its files", async () => {
+    const ref = { id: "0b6f0c9e-1a2b-4c3d-8e9f-001122334455", name: "a.png", type: "image/png", size: 1 };
+    const good = [{ ...ref, hash: "A".repeat(43) }];
+    for (const extra of [
+      { attachments: [{ ...ref, hash: "short" }] },
+      { attachments: [] },
+      { attachments: "a.png" },
+      // A continuation finds its directories by worktree and carries none.
+      { attachments: good, mode: "continue", continues: "t-1", taskId: "t-2" },
+    ]) {
+      lines.length = 0;
+      // oxlint-disable-next-line no-await-in-loop -- each case reads the lines the previous one cleared
+      await createHandler(ctx)(spawnNope(extra));
+      expect(logged()).toContain("audit spawn origin=relay rejected");
+    }
+  });
+
+  test("a daemon with no fetcher refuses attachments even from the scheduler, before anything runs", async () => {
+    const ref = {
+      id: "0b6f0c9e-1a2b-4c3d-8e9f-001122334455",
+      name: "a.png",
+      type: "image/png",
+      size: 1,
+      hash: "A".repeat(43),
+    };
+    const reply = await createLocalOps(ctx, "leader").spawn({
+      repo: "nope",
+      mode: "here",
+      client: SCHEDULER_CLIENT,
+      taskId: "t-1",
+      attachments: [ref],
+    });
+    expect(reply).toMatchObject({ ok: false, code: "attachment_unavailable" });
+    expect(logged()).toContain("audit spawn origin=leader failed code=attachment_unavailable");
   });
 
   test("a newline in a wire value cannot forge an audit line", async () => {
@@ -384,6 +420,7 @@ describe("a task's launch is recorded before it runs", () => {
       launch: () => Promise.reject(new Error("disk full")),
       launched: () => false,
       continuation: () => ({ refused: "unused" }),
+      closing: () => Promise.resolve(),
       settled: () => Promise.resolve(),
       report: () => ({ ended: [], ledgerSince: 0 }),
       progress: () => [],
@@ -394,6 +431,118 @@ describe("a task's launch is recorded before it runs", () => {
     expect(logged()).toContain("audit spawn origin=relay failed code=launch_error");
   });
 
+  test("a launch turned away by the restart drain is answered internal_error, never launch_error, and runs nothing", async () => {
+    let spawned = false;
+    const { backend } = taskBackend(() => {
+      spawned = true;
+      return Promise.resolve();
+    });
+    const tasks: TaskLaunches = {
+      launch: () => Promise.reject(new LaunchesClosed()),
+      launched: () => false,
+      continuation: () => ({ refused: "unused" }),
+      closing: () => Promise.resolve(),
+      settled: () => Promise.resolve(),
+      report: () => ({ ended: [], ledgerSince: 0 }),
+      progress: () => [],
+    };
+    const reply = await createHandler({ ...ctx, backend, tasks })(spawnTask("t-1"));
+    expect(reply?.payload).toMatchObject({ ok: false, code: "internal_error" });
+    expect(spawned).toBe(false);
+    expect(logged()).toContain("audit spawn origin=relay failed code=internal_error");
+    expect(logged()).not.toContain("launch_error");
+  });
+
+  test("a scheduler spawn after a real drain answers internal_error, leaves the ledger file as it was and runs nothing", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "seance-drained-"));
+    try {
+      const path = join(dir, "launched.json");
+      const tasks = new EndedTasks(await LaunchLedger.open(path));
+      let spawns = 0;
+      const { backend } = taskBackend(() => {
+        spawns += 1;
+        return Promise.resolve();
+      });
+      const handle = createHandler({ ...ctx, backend, tasks });
+      expect((await handle(spawnTask("early"), SCHEDULER_ID))?.payload).toMatchObject({ ok: true });
+      const before = await Bun.file(path).text();
+      expect(await tasks.drain(1_000)).toBe(true);
+      const reply = await handle(spawnTask("late"), SCHEDULER_ID);
+      expect(reply?.payload).toMatchObject({ ok: false, code: "internal_error" });
+      // The leader's own machine, in process, is turned away the same.
+      expect(
+        await createLocalOps({ ...ctx, backend, tasks }, "leader").spawn({
+          repo: "myrepo",
+          mode: "here",
+          taskId: "late",
+        }),
+      ).toMatchObject({ ok: false, code: "internal_error" });
+      expect(spawns).toBe(1);
+      expect(await Bun.file(path).text()).toBe(before);
+      expect(tasks.launched("late")).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a drain waits for the spawn's reply to be handed to the transport, not only for the launch to settle", async () => {
+    const tasks = new EndedTasks(LaunchLedger.memory());
+    const { backend } = taskBackend(() => Promise.resolve());
+    const sent = Promise.withResolvers<void>();
+    const handle = createHandler({ ...ctx, backend, tasks });
+    const reply = await handle(spawnTask("t-1"), SCHEDULER_ID, sent.promise);
+    expect(reply?.payload).toMatchObject({ ok: true });
+    await tasks.settled(); // the launch is over; the reply is not out yet
+    let drained: boolean | null = null;
+    const draining = tasks.drain(10_000).then((ok) => (drained = ok));
+    await Bun.sleep(20); // a non-event can't be polled
+    expect(drained).toBeNull();
+    sent.resolve();
+    expect(await draining).toBe(true);
+    // Without a transport to wait for (the local socket), the handler's return is as far as the hold goes.
+    await handle(spawnTask("t-2"), SCHEDULER_ID);
+    expect(await tasks.drain(1_000)).toBe(true);
+  });
+
+  test("a spawn that crashes is marked interrupted; a refusal is retracted and task_running just clears", async () => {
+    const ledger = LaunchLedger.memory();
+    const tasks = new EndedTasks(ledger);
+    const run = (backend: SessionBackend, id: string): Promise<Plain | null> =>
+      createHandler({ ...ctx, backend, tasks })(spawnTask(id), SCHEDULER_ID);
+    expect((await run(failing(new Error("boom")), "crashed"))?.payload).toMatchObject({
+      ok: false,
+      code: "internal_error",
+    });
+    await run(failing(new SpawnFailure("repo_not_found", "gone")), "refused");
+    await run(failing(new SpawnFailure("task_running", "already", "%3")), "dup");
+    expect(ledger.interrupted()).toEqual(["crashed"]);
+    expect(tasks.report(new Set())).toMatchObject({ ended: ["crashed", "dup"], interrupted: ["crashed"] });
+  });
+
+  test("interrupted from the ledger's report reaches the scheduler's sessions reply, never an app's or the local socket's", async () => {
+    const { backend } = taskBackend(() => Promise.resolve());
+    const tasks: TaskLaunches = {
+      launch: () => Promise.reject(new Error("unused")),
+      launched: () => false,
+      continuation: () => ({ refused: "unused" }),
+      closing: () => Promise.resolve(),
+      settled: () => Promise.resolve(),
+      report: () => ({ ended: ["t-1"], ledgerSince: 0, interrupted: ["t-1"] }),
+      progress: () => [],
+    };
+    const relay = createHandler({ ...ctx, backend, tasks });
+    expect(await sessionsOf(relay)).toMatchObject({ ended: ["t-1"], interrupted: ["t-1"] });
+    for (const reply of [
+      await sessionsOf(relay, APP_ID),
+      await sessionsOf(createHandler({ ...ctx, backend, tasks }, "local"), null),
+    ]) {
+      expect(reply.ended).toBeUndefined();
+      expect(reply).not.toHaveProperty("interrupted");
+    }
+    const empty: TaskLaunches = { ...tasks, report: () => ({ ended: [], ledgerSince: 0, interrupted: [] }) };
+    expect(await sessionsOf(createHandler({ ...ctx, backend, tasks: empty }))).not.toHaveProperty("interrupted");
+  });
+
   test("a sessions reply harvests after listing and before it reads progress, so a pane dying between is never in neither", async () => {
     const events: string[] = [];
     let harvested = false;
@@ -402,6 +551,7 @@ describe("a task's launch is recorded before it runs", () => {
       launch: () => Promise.reject(new Error("unused")),
       launched: () => false,
       continuation: () => ({ refused: "unused" }),
+      closing: () => Promise.resolve(),
       settled: () => Promise.resolve(),
       report: () => ({ ended: [], ledgerSince: 0 }),
       progress: () => {
@@ -424,6 +574,28 @@ describe("a task's launch is recorded before it runs", () => {
     const reply = await sessionsOf(createHandler({ ...ctx, backend: listing, tasks }));
     expect(events).toEqual(["list", "harvest", "progress"]);
     expect(reply.progress).toEqual([expect.objectContaining({ taskId: "t-1", exit: 3 })]);
+  });
+
+  test("a sessions reply carries vanished from the harvest it ran: a launched task whose pane is in no listing", async () => {
+    const ledger = LaunchLedger.memory();
+    const tasks = new EndedTasks(ledger, Date.now, {
+      list: () => Promise.resolve([]),
+      close: () => Promise.resolve(),
+      server: () => Promise.resolve(4321),
+      recorded: () => Promise.resolve({ exits: [], closes: [] }),
+      clearExit: () => Promise.resolve(),
+      clearClose: () => Promise.resolve(),
+    });
+    const { backend } = taskBackend(() => Promise.resolve());
+    const served: SessionBackend = {
+      ...backend,
+      spawn: () => Promise.resolve({ window: "w", path: "/p", registered: true, server: 4321 }),
+      sessions: () => Promise.resolve([]),
+    };
+    const handle = createHandler({ ...ctx, backend: served, tasks });
+    expect((await handle(spawnTask("t-gone")))?.payload).toMatchObject({ ok: true });
+    const reply = await sessionsOf(createHandler({ ...ctx, backend: served, tasks }));
+    expect(reply.progress).toEqual([expect.objectContaining({ taskId: "t-gone", vanished: true })]);
   });
 
   describe("a scheduler spawn for a task the ledger holds as launched", () => {
@@ -658,6 +830,37 @@ describe("despawn is audited and answers with the list it left", () => {
     expect(logged()).toContain('audit despawn origin=relay ok window="late-riser" outcome=exited');
   });
 
+  test("a despawn hands the backend a closing hook that notes the task on the ledger first", async () => {
+    const closedIds: string[] = [];
+    let seen: ((taskId: string) => Promise<unknown>) | undefined;
+    const tasks: TaskLaunches = {
+      launch: () => Promise.reject(new Error("unused")),
+      launched: () => false,
+      continuation: () => ({ refused: "unused" }),
+      closing: (taskId) => Promise.resolve(void closedIds.push(taskId)),
+      settled: () => Promise.resolve(),
+      report: () => ({ ended: [], ledgerSince: 0 }),
+      progress: () => [],
+    };
+    const backend: SessionBackend = {
+      spawn: () => Promise.reject(new Error("unused")),
+      sessions: () => Promise.resolve([]),
+      doctor: () => Promise.resolve([]),
+      despawn: (_id, opts) => {
+        seen = opts.closing;
+        return Promise.resolve({ window: "w", outcome: "killed" });
+      },
+    };
+    const reply = await createHandler({ ...ctx, backend, tasks })(request("despawn", { id: "%1" }));
+    expect(reply?.payload).toMatchObject({ ok: true });
+    await seen?.("t-1");
+    expect(closedIds).toEqual(["t-1"]);
+    // No ledger on this daemon: nothing to note, nothing passed.
+    seen = undefined;
+    await createHandler({ ...ctx, backend })(request("despawn", { id: "%1" }));
+    expect(seen).toBeUndefined();
+  });
+
   test("a backend that can't despawn answers with a code instead of dropping the request", async () => {
     const startOnly: SessionBackend = {
       spawn: () => Promise.reject(new Error("not under test")),
@@ -792,19 +995,36 @@ describe("a scheduler spawn that continues a failed task", () => {
   interface Noted {
     readonly repo?: string;
     readonly path?: string;
+    readonly exit?: number;
+    /** `null`: noted by a daemon predating session ids. */
+    readonly session?: string | null;
   }
+
+  const SESSION = "0b6e1c52-3f0d-4a8e-9c7b-2d5f4e6a1b90";
 
   /** A ledger holding OLD as launched (into `where`, unless null), and a backend recording what it is asked to spawn. */
   async function rig(where: Noted | null = {}) {
     const ledger = LaunchLedger.memory();
     await ledger.record(OLD);
-    if (where !== null) await ledger.note(OLD, { repo: where.repo ?? clone, path: where.path ?? site });
-    const calls: { readonly request: SpawnRequest; readonly continuation: { readonly path: string } | undefined }[] =
-      [];
+    const session = where?.session === undefined ? SESSION : where.session;
+    if (where !== null)
+      await ledger.note(OLD, {
+        repo: where.repo ?? clone,
+        path: where.path ?? site,
+        ...(session === null ? {} : { session }),
+        ...(where.exit === undefined ? {} : { exit: where.exit }),
+      });
+    const calls: { readonly request: SpawnRequest; readonly continuation: Continuation | undefined }[] = [];
     const backend: SessionBackend = {
       spawn: (spawn, _repos, continued) => {
         calls.push({ request: spawn, continuation: continued });
-        return Promise.resolve({ window: "fix", path: continued?.path ?? "/p", registered: true, handle: "@1" });
+        return Promise.resolve({
+          window: "fix",
+          path: continued?.path ?? "/p",
+          registered: true,
+          handle: "@1",
+          ...(continued === undefined ? {} : { session: continued.session }),
+        });
       },
       sessions: () => Promise.resolve([]),
       doctor: () => Promise.resolve([]),
@@ -813,19 +1033,36 @@ describe("a scheduler spawn that continues a failed task", () => {
     return { ledger, calls, handlerCtx };
   }
 
-  test("runs in the ledger's path: the backend is handed it, the new task notes it, the trail names both ids", async () => {
+  test("runs in the ledger's path under its session: the backend is handed both, the new task notes both, the trail names both ids", async () => {
     const { ledger, calls, handlerCtx } = await rig();
     const reply = await createHandler(handlerCtx)(continuation(), SCHEDULER_ID);
     expect(reply?.payload).toMatchObject({ ok: true, path: site });
+    expect(reply?.payload).not.toHaveProperty("session");
     expect(calls).toEqual([
-      { request: expect.objectContaining({ mode: "continue", continues: OLD }), continuation: { path: site } },
+      {
+        request: expect.objectContaining({ mode: "continue", continues: OLD }),
+        continuation: { path: site, session: SESSION },
+      },
     ]);
+    // The same id: continuing the continuation resumes the same conversation.
     expect(ledger.notes()).toEqual(
-      expect.arrayContaining([expect.objectContaining({ taskId: NEW, repo: clone, path: site })]),
+      expect.arrayContaining([expect.objectContaining({ taskId: NEW, repo: clone, path: site, session: SESSION })]),
     );
     expect(logged()).toContain(`mode=continue title="" `);
     expect(logged()).toContain(`task="${NEW}" continues="${OLD}" prompt=none`);
     expect(logged()).toContain(`ok window="fix" path="${site}"`);
+  });
+
+  test("the old note's exit reaches the backend with the path, never from the request", async () => {
+    const { calls, handlerCtx } = await rig({ exit: 137 });
+    const reply = await createHandler(handlerCtx)(continuation(), SCHEDULER_ID);
+    expect(reply?.payload).toMatchObject({ ok: true });
+    expect(calls).toEqual([
+      {
+        request: expect.objectContaining({ continues: OLD }),
+        continuation: { path: site, session: SESSION, exit: 137 },
+      },
+    ]);
   });
 
   test("the leader's own machine continues in process, under its own origin", async () => {
@@ -946,12 +1183,30 @@ describe("a scheduler spawn that continues a failed task", () => {
     test("it was a here run, or never landed: no worktree was noted", () =>
       refusedWith(null, /no worktree of it was noted/u));
 
+    test("a later task noted the same worktree: refused naming it, the new id never recorded", async () => {
+      const { ledger, calls, handlerCtx } = await rig();
+      await ledger.record("t-later");
+      await ledger.note("t-later", { repo: clone, path: site, session: SESSION });
+      const reply = await createHandler(handlerCtx)(continuation(), SCHEDULER_ID);
+      expect(reply?.payload).toMatchObject({
+        ok: false,
+        code: "not_continuable",
+        message: expect.stringMatching(/t-later took over its worktree/u),
+      });
+      expect(logged()).toContain("failed code=not_continuable");
+      expect(calls).toEqual([]);
+      expect(ledger.ids()).not.toContain(NEW);
+    });
+
     test("a daemon keeping no launch record", async () => {
       const { calls, handlerCtx } = await rig();
       const reply = await createHandler({ ...handlerCtx, tasks: undefined })(continuation(), SCHEDULER_ID);
       expect(reply?.payload).toMatchObject({ ok: false, code: "not_continuable" });
       expect(calls).toEqual([]);
     });
+
+    test("its worktree was noted with no session id (an older daemon's launch): no --continue fallback", () =>
+      refusedWith({ session: null }, /before this daemon noted session ids; resume it by hand/u));
 
     test("it ran in another clone of the repo", () => refusedWith({ repo: "/elsewhere/myrepo" }, /another clone/u));
 

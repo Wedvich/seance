@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { CAPABILITIES, parseTask, type ExclaveInfo, type Machine } from "@seance/shared";
 import { DEFAULT_CONFIG, route, type Candidate, type Decision, type SchedulerConfig, type Task } from "../src/index.ts";
 import { accountResetAt } from "../src/route.ts";
-import { clone, exclave, machine, NOW, NOW_S, obs, spec, status } from "./fixtures.ts";
+import { accountMax, attachment, clone, exclave, machine, NOW, NOW_S, obs, spec, status } from "./fixtures.ts";
 
 function task(fields: Partial<Task> = {}): Task {
   return { id: "t", spec: spec(), state: "ready", createdAt: NOW, ...fields };
@@ -15,6 +15,7 @@ function decide(
     tasks?: readonly Task[];
     config?: Partial<SchedulerConfig>;
     released?: ReadonlySet<string>;
+    attachments?: boolean;
   } = {},
 ): Decision {
   return route({
@@ -24,6 +25,7 @@ function decide(
     now: NOW,
     config: { ...DEFAULT_CONFIG, ...fields.config },
     ...(fields.released === undefined ? {} : { released: fields.released }),
+    ...(fields.attachments === undefined ? {} : { attachments: fields.attachments }),
   });
 }
 
@@ -154,6 +156,29 @@ describe("filter", () => {
   test("pressure_unknown: a status with neither cpu nor mem", () => {
     const candidate = only(decide([machine("a", { status: { at: NOW_S, scan: 1, quota: [obs(0)] } })]));
     expect(codes(candidate)).toEqual(["pressure_unknown"]);
+  });
+
+  test("draining: a restarting machine takes no task — not by run-now past the caps, not when pinned to it", () => {
+    const draining = machine("a", { status: status({ quota: [obs(0)], drn: true }) });
+    const healthy = machine("b", { exclaves: [exclave("main", "org:a")] });
+    const decision = decide([draining, healthy]);
+    expect(decision.chosen?.deviceId).toBe("b");
+    expect(codes(decision.candidates.find((c) => c.deviceId === "a")!)).toEqual(["draining"]);
+
+    const runNow = route({
+      task: task(),
+      machines: [draining],
+      tasks: [],
+      now: NOW,
+      config: DEFAULT_CONFIG,
+      uncapped: true,
+    });
+    expect(runNow.chosen).toBeNull();
+    expect(codes(only(runNow))).toEqual(["draining"]);
+
+    const pinned = decide([draining, healthy], { task: task({ spec: spec({ pin: { deviceId: "a" } }) }) });
+    expect(pinned.chosen).toBeNull();
+    expect(codes(pinned.candidates.find((c) => c.deviceId === "a")!)).toEqual(["draining"]);
   });
 
   describe("the task's own restrictions", () => {
@@ -651,7 +676,7 @@ describe("filter", () => {
   describe("cap_reached scope account", () => {
     test("rejects only the full account's candidates, counting reserved and needs-input tasks", () => {
       const tasks = [held("x", "a", "reserved"), held("y", "a", "needs-input"), held("z", "a", "awaiting-merge")];
-      const decision = decide([twoAccounts()], { tasks, config: { accountMax: 2 } });
+      const decision = decide([twoAccounts()], { tasks, config: accountMax(2) });
       const main = decision.candidates.find((c) => c.exclave === "main");
       expect(main?.rejected).toEqual([{ code: "cap_reached", inFlight: 2, max: 2, scope: "account" }]);
       expect(decision.chosen).toEqual({ deviceId: "a", exclave: "alt", clone: "app2" });
@@ -659,12 +684,28 @@ describe("filter", () => {
 
     test("a task on a machine gone from the registry has no account to count", () => {
       const tasks = [held("x", "gone"), held("y", "gone")];
-      expect(only(decide([machine("a")], { tasks, config: { accountMax: 2 } })).rejected).toEqual([]);
+      expect(only(decide([machine("a")], { tasks, config: accountMax(2) })).rejected).toEqual([]);
+    });
+
+    test("the seat sets it: a standard account holds two, a premium one four", () => {
+      const two = [held("x", "a"), held("y", "a")];
+      expect(only(decide([standardSeat(obs(0))], { tasks: two })).rejected).toEqual([
+        { code: "cap_reached", inFlight: 2, max: 2, scope: "account" },
+      ]);
+      const premium = machine("a", {
+        exclaves: [exclave("main", "org:a", { seatTier: "team_tier_1" })],
+        status: status({ quota: [obs(0)] }),
+      });
+      expect(only(decide([premium], { tasks: two })).rejected).toEqual([]);
+      const four = [...two, held("z", "a"), held("w", "a")];
+      expect(only(decide([premium], { tasks: four })).rejected).toEqual([
+        { code: "cap_reached", inFlight: 4, max: 4, scope: "account" },
+      ]);
     });
 
     test("the global cap stays unscoped and sits beside the account's", () => {
       const tasks = [held("x", "a"), held("y", "a")];
-      const candidate = only(decide([machine("a")], { tasks, config: { globalMax: 2, accountMax: 2 } }));
+      const candidate = only(decide([machine("a")], { tasks, config: { globalMax: 2, ...accountMax(2) } }));
       expect(candidate.rejected).toEqual([
         { code: "cap_reached", inFlight: 2, max: 2 },
         { code: "cap_reached", inFlight: 2, max: 2, scope: "account" },
@@ -672,26 +713,27 @@ describe("filter", () => {
     });
   });
 
-  describe("a machine asleep past slotReleaseAfterMs holds no slot", () => {
+  describe("a released task holds no slot", () => {
     /** Machine `s`, asleep, signed in to `org:a` as `a` is. */
     const asleep = machine("s", { connected: false, exclaves: [exclave("main", "org:a")] });
-    const released = new Set(["s"]);
+    // The leader's to say why; here `s` is asleep, and these are its tasks.
+    const released = new Set(["x", "y"]);
 
-    test("its in-flight tasks, reserved included, leave the global count; the rest still count", () => {
+    test("in flight, reserved included, it leaves the global count; the rest still count", () => {
       const tasks = [held("x", "s"), held("y", "s", "reserved"), held("z", "b")];
       const candidate = only(decide([machine("a")], { tasks, config: { globalMax: 1 }, released }));
       expect(candidate.rejected).toEqual([{ code: "cap_reached", inFlight: 1, max: 1 }]);
       expect(only(decide([machine("a")], { tasks, config: { globalMax: 2 }, released })).rejected).toEqual([]);
     });
 
-    test("its tasks leave its account's count, so another machine on the account gets the work", () => {
+    test("it leaves its account's count, so another machine on the account gets the work", () => {
       const tasks = [held("x", "s"), held("y", "s", "needs-input")];
       const fleet = [machine("a", { exclaves: [exclave("main", "org:a")] }), asleep];
-      const holding = decide(fleet, { tasks, config: { accountMax: 2 } });
+      const holding = decide(fleet, { tasks, config: accountMax(2) });
       expect(byExclave(holding, "main")?.rejected).toEqual([
         { code: "cap_reached", inFlight: 2, max: 2, scope: "account" },
       ]);
-      const freed = decide(fleet, { tasks, config: { accountMax: 2 }, released });
+      const freed = decide(fleet, { tasks, config: accountMax(2), released });
       expect(freed.chosen).toEqual({ deviceId: "a", exclave: "main", clone: "app" });
     });
 
@@ -772,8 +814,8 @@ describe("filter", () => {
       expect(accountResetAt("org:a", [reading], inFlight, NOW, DEFAULT_CONFIG)).toBe((NOW_S + 7200) * 1000);
       // Alone it is under the line everywhere: the earliest reset.
       expect(accountResetAt("org:a", [reading], [], NOW, DEFAULT_CONFIG)).toBe((NOW_S + 3600) * 1000);
-      // Their machine asleep past the grace: they hold no projected usage, as in routing.
-      expect(accountResetAt("org:a", [reading], inFlight, NOW, DEFAULT_CONFIG, [], new Set(["a"]))).toBe(
+      // Released: they hold no projected usage, as in routing.
+      expect(accountResetAt("org:a", [reading], inFlight, NOW, DEFAULT_CONFIG, [], new Set(["x", "y", "z"]))).toBe(
         (NOW_S + 3600) * 1000,
       );
     });
@@ -862,10 +904,11 @@ describe("filter", () => {
 
     test("in-flight tasks on a standard seat each count at its scaled estimate", () => {
       const standard = standardSeat(obs(0, { h: 20 }));
-      // 20% + 2 × 25% is under; one more in flight makes it 95%.
+      // 20% + 2 × 25% is under; one more in flight makes it 95%, and fills the seat's two slots.
       expect(only(decide([standard], { tasks: [held("x", "a")] })).rejected).toEqual([]);
       expect(only(decide([standard], { tasks: [held("x", "a"), held("y", "a")] })).rejected).toEqual([
         { code: "quota_over_line", window: "5h", projectedPct: 95 },
+        { code: "cap_reached", inFlight: 2, max: 2, scope: "account" },
       ]);
     });
   });
@@ -987,7 +1030,7 @@ describe("stickiness", () => {
 });
 
 describe("a continue task", () => {
-  const capable = [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.continueTask];
+  const capable = [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.continueTask, CAPABILITIES.continueSession];
   const continuing = (at: { deviceId: string; exclave: string; clone: string }): Task =>
     task({ spec: spec({ mode: "continue", continues: { task: "t-old", at } }) });
   const reasonsOf = (decision: Decision): Record<string, readonly unknown[]> =>
@@ -1031,6 +1074,13 @@ describe("a continue task", () => {
     expect(only(decision).rejected).toEqual([{ code: "continue_unsupported" }]);
   });
 
+  test("a target that continues but resumes no noted session id (an older daemon's --continue) is continue_unsupported", () => {
+    const old = machine("a", { capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.continueTask] });
+    const decision = decide([old], { task: continuing({ deviceId: "a", exclave: "main", clone: "app" }) });
+    expect(decision.chosen).toBeNull();
+    expect(only(decision).rejected).toEqual([{ code: "continue_unsupported" }]);
+  });
+
   test("a clone the target no longer has is repo_absent", () => {
     const decision = decide(fleet(), { task: continuing({ deviceId: "a", exclave: "main", clone: "gone" }) });
     expect(decision.chosen).toBeNull();
@@ -1042,6 +1092,46 @@ describe("a continue task", () => {
     expect(decision.candidates.flatMap((c) => c.rejected.map((r) => r.code))).not.toContain("continue_elsewhere");
     expect(decision.candidates.flatMap((c) => c.rejected.map((r) => r.code))).not.toContain("continue_unsupported");
     expect(decision.chosen).not.toBeNull();
+  });
+});
+
+describe("attachments", () => {
+  const fetches = [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.attachments];
+  const reasonsOf = (decision: Decision): Record<string, readonly unknown[]> =>
+    Object.fromEntries(decision.candidates.map((c) => [`${c.deviceId}/${c.exclave}`, c.rejected]));
+  const attached = (fields: Partial<Task> = {}): Task =>
+    task({ spec: spec({ attachments: [attachment(0)] }), ...fields });
+
+  test("a machine whose daemon can't fetch them is attachments_unsupported; one that can is chosen", () => {
+    const decision = decide([machine("old"), machine("new", { capabilities: fetches })], { task: attached() });
+    expect(decision.chosen?.deviceId).toBe("new");
+    expect(reasonsOf(decision)["old/main"]).toEqual([{ code: "attachments_unsupported" }]);
+  });
+
+  test("no capable machine chooses nothing, and every reason applies beside it", () => {
+    const decision = decide([machine("a", { connected: false })], { task: attached() });
+    expect(decision.chosen).toBeNull();
+    expect(codes(only(decision))).toContain("attachments_unsupported");
+    expect(codes(only(decision))).toContain("offline");
+  });
+
+  test("a pin on an incapable machine waits there rather than going elsewhere", () => {
+    const pinned = attached({ spec: spec({ attachments: [attachment(0)], pin: { deviceId: "old" } }) });
+    const decision = decide([machine("old"), machine("new", { capabilities: fetches })], { task: pinned });
+    expect(decision.chosen).toBeNull();
+    expect(reasonsOf(decision)["old/main"]).toEqual([{ code: "attachments_unsupported" }]);
+  });
+
+  test("route-preview's flag applies the filter to a spec with no manifest", () => {
+    const decision = decide([machine("old"), machine("new", { capabilities: fetches })], { attachments: true });
+    expect(decision.chosen?.deviceId).toBe("new");
+    expect(reasonsOf(decision)["old/main"]).toEqual([{ code: "attachments_unsupported" }]);
+  });
+
+  test("a task without them is not held to the capability", () => {
+    const decision = decide([machine("old")]);
+    expect(decision.candidates.flatMap(codes)).not.toContain("attachments_unsupported");
+    expect(decision.chosen?.deviceId).toBe("old");
   });
 });
 

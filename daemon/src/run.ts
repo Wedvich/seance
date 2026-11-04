@@ -26,6 +26,8 @@ import {
 import { exclaveInfoEqual, scanExclaves, tagExclaves, type ExclaveScan } from "./exclaves.ts";
 import { appRelayClient } from "./app-relay.ts";
 import type { BranchStateDeps } from "./branch-state.ts";
+import { UPDATE_DRAIN_MS } from "./drain-limits.ts";
+import { attachmentsRoot, taskAttachments } from "./attachments.ts";
 import { createHandler, createLocalOps, type HandlerContext } from "./handlers.ts";
 import { createFleetQuotaWriter, newestReadings } from "./fleet-quota.ts";
 import { createLeader, type Leader, type QueueStore } from "./leader.ts";
@@ -75,6 +77,8 @@ export interface RunOpts {
   readonly reapCheckIntervalMs?: number;
   /** Telemetry sample period; defaults to the `status` cadence. Tests shorten it. */
   readonly telemetryIntervalMs?: number;
+  /** How long after a sent status the loop holds a gate-change refresh; defaults to the relay's floor. Tests only. */
+  readonly statusFloorMs?: number;
   /**
    * A psk the caller already resolved, to skip re-reading the platform store.
    * The supervisor passes it so a reload spawns one `security`/DPAPI read
@@ -155,7 +159,8 @@ const endedTasksByLedger = new Map<string, Promise<EndedTasks>>();
  */
 const schedulerGuard = new ReplayGuard();
 
-function endedTasksFor(path: string): Promise<EndedTasks> {
+/** Exported so a test can hold a launch open on the very instance a daemon's updater drains. */
+export function endedTasksFor(path: string): Promise<EndedTasks> {
   let tasks = endedTasksByLedger.get(path);
   if (tasks === undefined) {
     tasks = LaunchLedger.open(path).then(
@@ -164,6 +169,24 @@ function endedTasksFor(path: string): Promise<EndedTasks> {
     endedTasksByLedger.set(path, tasks);
   }
   return tasks;
+}
+
+/**
+ * Holds task launches on every ledger this process opened and waits up to
+ * `timeoutMs` for those in flight: the SIGTERM/SIGINT path, which cannot reach
+ * the `EndedTasks` a daemon holds — it is per process across config reloads.
+ * True once all drained. Never rejects. Not for tests: a shard process hosts
+ * several daemons, and this closes every one.
+ */
+export async function drainTaskLaunches(timeoutMs: number): Promise<boolean> {
+  try {
+    const all = await Promise.all([...endedTasksByLedger.values()]);
+    const drained = await Promise.all(all.map((tasks) => tasks.drain(timeoutMs, { final: true })));
+    return drained.every(Boolean);
+  } catch (err) {
+    log.warn(`could not drain task launches: ${String(err)}`);
+    return false;
+  }
 }
 
 /**
@@ -253,6 +276,10 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         CAPABILITIES.reportedDone,
         CAPABILITIES.pinAccount,
         CAPABILITIES.continueTask,
+        CAPABILITIES.continueCancelled,
+        CAPABILITIES.continueSession,
+        CAPABILITIES.runNow,
+        CAPABILITIES.attachments,
       ],
     };
     const candidate: Registered = { scan: info.scannedAt, exclaves: exclaveScan };
@@ -355,6 +382,12 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     auditSink: daemonSink,
     metrics: (request) => metrics.query(request),
     tasks: endedTasks,
+    attachments: taskAttachments({
+      relayUrl: config.relayUrl,
+      bearerToken: config.bearerToken,
+      key,
+      root: attachmentsRoot(),
+    }),
     ...(opts.selfUpdate !== undefined && source !== null
       ? {
           updateAvailable: (notice: UpdateAvailable): void => {
@@ -374,16 +407,20 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       sessions: () => handlerCtx.backend.sessions(state.repos),
       now,
       httpFetch,
+      draining: () => endedTasks.draining,
       ...(opts.probe === undefined ? {} : { probe: opts.probe }),
     },
     {
       intervalMs: opts.telemetryIntervalMs ?? STATUS_INTERVAL_MS,
+      ...(opts.statusFloorMs === undefined ? {} : { floorMs: opts.statusFloorMs }),
       connected: () => client.connected,
       send: (snapshot, current) => client.sendStatus(snapshot, current),
       // Late-bound: the writer is built after the loop it reads.
       onSample: () => fleetQuota.sampled(),
     },
   );
+  // So the leader stops routing here while launches are refused, rather than reserving into the gate for a TTL.
+  const stopGateWatch = endedTasks.onGate(() => status.refresh());
 
   // Every daemon may be nominated; this is what runs if it is. Its app-role leg
   // is built per term over the key imported above, never the broker's.
@@ -486,6 +523,11 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       ...(su.effects !== undefined ? { effects: su.effects } : {}),
       sink: daemonSink,
       last: state.lastUpdate ?? null,
+      // A restart would cut off a spawn mid-flight, which then settles `done` with no session.
+      quiesce: async () => {
+        await endedTasks.drain(UPDATE_DRAIN_MS);
+        return () => endedTasks.reopen();
+      },
       report: async (report) => {
         state = { ...state, lastUpdate: report };
         await saveState(state);
@@ -559,6 +601,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     localSocket: local.path,
     stop: (): void => {
       stopped = true;
+      stopGateWatch();
       status.stop();
       fleetQuota.stop();
       handlerCtx.backend.stop?.();

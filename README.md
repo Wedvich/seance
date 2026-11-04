@@ -88,8 +88,18 @@ an error. The PSK is the actual trust boundary; the relay never sees it.
 cd relay
 bun run wrangler login                     # once
 bun run wrangler secret put BEARER_TOKEN   # paste the bearer token
+bun run wrangler r2 bucket create seance-attachments
+bun run wrangler r2 bucket lifecycle add seance-attachments expire-30d --expire-days 30
 bun run deploy                             # prints https://seance-relay.<subdomain>.workers.dev
 ```
+
+The bucket holds attachments (files sent with a task), sealed under the PSK before
+they leave the phone. The lifecycle rule deletes each object 30 days after upload:
+nothing else ever does, and the relay's upload allowance assumes it (DESIGN.md,
+"Attachments"). The relay binds the bucket by name (`seance-attachments`), so a deploy
+fails until the bucket exists. Create both once, before the first deploy that binds it.
+If `lifecycle add` prompts, accept. Don't let `bucket create` edit `wrangler.jsonc`: the
+binding is already committed.
 
 This first deploy is by hand; afterwards CI redeploys the relay on every push to
 `main` that touches it, which needs a `CLOUDFLARE_API_TOKEN` repository secret and a
@@ -168,7 +178,7 @@ Edit `~/.config/seance/config.json`:
   Claude Code registers, so the Claude UIs read `fix-the-thing (thad)`. The tmux window
   name stays bare — locally the machine is never in question. Leave it empty for
   unsuffixed names.
-- `reap` — optional: `{ "intervalHours": 24, "minAgeDays": 7 }` runs `seanced reap`
+- `reap` — optional: `{ "intervalHours": 24, "minAgeDays": 4 }` runs `seanced reap`
   from the daemon every day, with its report in the log. Without `intervalHours` the
   schedule is off (the default); `minAgeDays` also sets the CLI's age gate.
 - `quota` — optional: `{ "staleAfterMinutes": 10 }` (the default) is how old an
@@ -323,7 +333,19 @@ Type what the session should do — or leave the prompt blank to start an empty 
 then pick where it runs. Tiles open pickers: **machine**, **account**, **repository**,
 **model** (Fable / Opus / Sonnet / Haiku), and **effort** (Low through Max), plus the
 authoring ones below. **Fresh worktree** is on by default; switching it off runs the
-session in the repo as it stands. Then queue it.
+session in the repo as it stands. Then queue it — or, from the chevron beside **Queue**,
+**Start now**, which queues it and asks the scheduler to place it at once, past its
+concurrency caps (shown only while the scheduler's leader supports it).
+
+**Attach** files to the task from the prompt card — the **ATTACH** picker, a pasted
+screenshot, or a drop on desktop — or share them into Séance from Android's share sheet
+(the app installed from Chrome only; after an update, Chrome picks the share target up
+when it next refreshes the app, or on reinstall). Up to 10 files, 30 MB each and 100 MB in all, sent as
+they are, never recompressed. Each is sealed under the PSK on the phone before it goes
+to the relay's bucket, and the machine the task lands on fetches them and hands the
+session their paths. With files attached the prompt takes at most 6,144 characters.
+Offered only while the scheduler's leader supports it; a failed upload queues nothing,
+and queuing again sends only the files that didn't make it.
 
 Every spawn from the phone is a queued task: the app never starts a session on a machine
 itself. The verdict names the task and follows it until it is running, then you continue
@@ -354,11 +376,13 @@ shows the decision behind it, and why it waits while it does. With no scheduler 
 can't be verified (its registry entry doesn't open with your key), the task still
 queues and waits there until one does; only the placement preview needs a leader.
 Queuing is greyed only when the app isn't connected to the relay. A pinned task waits for
-its machine or account when it is offline or over a limit, and says why; pinning an
+its machine or account when it is offline or over a limit, and says why; one still waiting
+after 30 days fails, so a machine back later never runs a month-old prompt. Pinning an
 account needs a leader that supports it, and says so otherwise. The **Queue screen** (a column on
 desktop, in the header menu on a phone) shows everything queued: what needs you, what
-is running or waiting, and what finished, with **Cancel** and **Mark done** (each takes
-a second tap when it would end a running session), and **Pause** / **Resume**. The app
+is running or waiting, and what finished. Each card shows its likeliest next step and keeps
+every action behind its ⋯ menu, **Cancel** and **Mark done** included (each takes a second
+tap when it would end a running session); the footer has **Pause** / **Resume**. The app
 pauses the whole queue only; a hold on one account shows with its own **Resume**, but
 no client sets one yet. `seanced spawn --now` starts a session directly on a machine,
 with or without a scheduler.
@@ -394,10 +418,13 @@ seanced spawn --account work --not here seance -p "rerun the slow suite"
 seanced spawn --now seance -t "flaky test" -p "fix the flaky spawn test"
 #   spawned 'flaky test' (~/repos/seance/.claude/worktrees/flaky-test)
 seanced spawn --now seance --here   # run in the checkout as it stands, no worktree
-seanced continue 3f2a…        # resume a failed (e.g. OOM-killed) task's conversation in its worktree, as a new task (--prompt <text> to add a note)
+seanced spawn --start seance -p "fix the flaky spawn test"
+#   queued, then started as soon as the scheduler admits it, past its concurrency cap (the app's Start now)
+seanced start 3f2a…           # start a task already waiting in the queue now, past the concurrency cap
+seanced continue 3f2a…        # resume a failed (e.g. OOM-killed) or cancelled task's conversation in its worktree, as a new task (--prompt <text> to add a note)
 seanced sessions              # running claude windows: id, window, repo, path
 seanced despawn %12           # end one by id: asks claude to exit, kills the pane after ~5s (--force: now)
-seanced reap --dry-run        # what clean-up would remove: worktrees, branches, dead windows
+seanced reap --dry-run        # what clean-up would remove: worktrees, branches, dead windows, fetched attachments
 seanced status                # this machine: service, relay, repo count, running vs on-disk sha
 seanced doctor                # preflight config, binaries, roots, relay, service
 seanced help                  # every command
@@ -410,7 +437,7 @@ fleet, as below. Bare words after it become the prompt, which makes
 `-p` optional: `seanced spawn seance fix the flaky test` works.
 
 `seanced continue` queues a new task like a spawn does, so the scheduler tracks it. Running
-`claude --continue` by hand in the worktree works too, but séance does not see that session.
+`claude --resume` by hand in the worktree works too, but séance does not see that session.
 
 A spawn queues for the scheduler, as the app's and MCP's do: `<repo>` is a clone name or
 origin from any machine in the fleet, and the task waits in the relay's queue until a leader
@@ -437,15 +464,17 @@ the way out, so the work stays where it was; cleaning up worktrees and branches 
 
 `reap` cleans up after sessions across every repo the daemon scans. It removes a
 linked worktree only when no tmux pane is inside it, it is clean, its branch is merged
-(including squash-merged — checked locally, no `gh`), and nothing has touched it for a
-week (`--min-age-days` to change). It deletes merged branches, closes séance windows
+(including squash-merged — checked locally, no `gh`), and nothing has touched it for
+four days (`--min-age-days` to change). It deletes merged branches, closes séance windows
 that are dead or sitting on claude's "keep or remove this worktree?" prompt, and
 reports what it left: dirty worktrees, branches and worktrees whose upstream is gone but
 which hold unpushed commits, worktrees on a never-pushed branch, detached worktrees with
 commits on no branch, a count of worktrees on a branch whose upstream is still live, and live sessions with the id `despawn` takes. Where git runs
 `core.fsmonitor=true` daemons (macOS), it also stops every one with no tmux pane in its
 checkout and an hour unused, and any on a directory gone or no longer a repo, reporting
-the memory freed; git starts a new one when a repo next needs it. Every deleted branch
+the memory freed; git starts a new one when a repo next needs it. It also removes a task's fetched
+attachments once its worktree is gone, or once they are 30 days old and no session is
+using them. Every deleted branch
 is in the audit log with its sha, so `git branch <name> <sha>` brings it back. It acts
 by default; run `--dry-run` first.
 
@@ -457,7 +486,7 @@ versus the one on disk, which is how you spot a `git pull` that still needs a
 
 With `seanced mcp install` done (step 6), a local Claude Code can list machines,
 query running sessions, and spawn and end sessions on other machines through the relay:
-`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`, `continue_task` (resume a failed task's session in its worktree, as a new task), `queue_batch` (several tasks queued as one group, ordered only by the dependencies between them) and, for a session settling its own task, `report_task_done`. The server reads the daemon's own
+`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`, `start_task` (start a queued task now, past the concurrency cap — the app's Start now; `spawn_session`'s `start` does the same for a new one), `continue_task` (resume a failed or cancelled task's session in its worktree, as a new task), `queue_batch` (several tasks queued as one group, ordered only by the dependencies between them) and, for a session settling its own task, `report_task_done`. The server reads the daemon's own
 config and speaks to the relay exactly like the phone does.
 
 `spawn_session` always queues the task in the relay, as the app's **auto** does: it answers
@@ -480,7 +509,7 @@ On a box where only the daemon can read the key (below), a spawn goes through th
 On a Linux box whose PSK is TPM-sealed and delivered only to the daemon's system unit,
 the server can't read the key — so it asks the running daemon to make those requests
 for it, over the same local socket, and the key never leaves the daemon. Every tool,
-`spawn_session`, `get_queue` and `cancel_task` included, still works for every machine, with the same
+`spawn_session`, `get_queue`, `cancel_task` and `start_task` included, still works for every machine, with the same
 registration; a server that started before the daemon was updated keeps the old "needs this machine's own
 key" answer for spawns until its Claude session restarts. `seanced doctor` says which
 path MCP takes from your shell. Only such a daemon brokers: wherever the server can
@@ -517,6 +546,12 @@ never forced — and reports why; `seanced status` on that machine shows its ver
 and its last update outcome. The relay and the app deploy themselves from CI on a
 push to `main` that touches them (`Deploy` in Actions also runs on demand, per
 component), so deploying either by hand would race that.
+
+The relay that brings in attachments (October 2026) binds the `seance-attachments` R2
+bucket, so create the bucket and its lifecycle rule (step 2) **before** that deploy
+lands, or CI's relay deploy fails until you do. The CI token (`CLOUDFLARE_API_TOKEN`)
+must also be allowed to edit R2 (Cloudflare's _Edit Cloudflare Workers_ token template
+includes Workers R2 Storage).
 
 The relay that brought in the leader allowlist (October 2026) nominates nobody
 until `SCHEDULER_LEADERS` is set, so put the secret (step 4) **before** that

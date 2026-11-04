@@ -1,5 +1,4 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { TASK_SPEC_LIMITS } from "@seance/shared";
 
 /**
  * localStorage is an external boundary Bun does not provide, so it is faked here
@@ -18,7 +17,16 @@ Object.defineProperty(globalThis, "localStorage", {
   },
 });
 
-const { dropLegacyHidden, dropLegacyPending, readForm, writeForm } = await import("../src/persist.ts");
+const {
+  dropLegacyHidden,
+  dropLegacyPending,
+  FORM_FILES_FRESH_MS,
+  readForm,
+  readFormFiles,
+  trackFormFiles,
+  writeForm,
+  writeFormFiles,
+} = await import("../src/persist.ts");
 const { DEFAULT_FORM } = await import("../src/state.ts");
 
 beforeEach(() => store.clear());
@@ -37,8 +45,6 @@ describe("form persistence", () => {
       effort: "max",
       after: [{ task: TASK, after: "done" }],
       until: "reported",
-      linearIssue: "ENG-1",
-      batch: { id: TASK, next: 4 },
     } as const;
     writeForm(form);
     expect(readForm()).toEqual(form);
@@ -62,7 +68,7 @@ describe("form persistence", () => {
 
   test("a form from before authoring reads with the authoring fields at their defaults", () => {
     store.set("seance:form", JSON.stringify({ prompt: "old", worktree: true, model: "opus", effort: "high" }));
-    expect(readForm()).toMatchObject({ after: [], until: "merged", linearIssue: "", batch: null, prompt: "old" });
+    expect(readForm()).toMatchObject({ after: [], until: "merged", prompt: "old" });
   });
 
   test("authoring fields are validated one by one: junk entries drop, the rest stay", () => {
@@ -72,50 +78,20 @@ describe("form persistence", () => {
       JSON.stringify({
         after: [{ task: "has space", after: "opened" }, { task: TASK, after: "eventually" }, 7, null, ...tooMany],
         until: "whenever",
-        linearIssue: "E".repeat(100),
+        linearIssue: "ENG-1",
       }),
     );
     const form = readForm();
     expect(form.after).toHaveLength(16);
     expect(form.after.every((dep) => dep.task === TASK && dep.after === "opened")).toBe(true);
     expect(form.until).toBe("merged");
-    expect(form.linearIssue).toHaveLength(64);
+    expect(form).not.toHaveProperty("linearIssue");
   });
 
-  test("a batch that parseTaskSpec would refuse is dropped whole", () => {
-    const good = { id: TASK, next: 2 };
-    for (const batch of [
-      { ...good, id: "has space" },
-      { ...good, next: 0 },
-      { ...good, next: 1.5 },
-      { ...good, next: TASK_SPEC_LIMITS.batchIndex + 2 },
-      { ...good, next: 100_000 },
-      "batch",
-    ]) {
-      store.set("seance:form", JSON.stringify({ batch }));
-      expect(readForm().batch).toBeNull();
-    }
-    store.set("seance:form", JSON.stringify({ batch: good }));
-    expect(readForm().batch).toEqual(good);
-  });
-
-  test("an older build's open batch with an order or a bound is dropped; auto or none stays open", () => {
-    for (const strategy of [{ mode: "sequential" }, { mode: "parallel", max: 99 }, "sequential", "parallel", 7]) {
-      store.set("seance:form", JSON.stringify({ batch: { id: TASK, strategy, next: 3 } }));
-      expect(readForm().batch).toBeNull();
-    }
-    for (const strategy of [{ mode: "auto" }, "auto", undefined]) {
-      store.set("seance:form", JSON.stringify({ batch: { id: TASK, strategy, next: 3 } }));
-      expect(readForm().batch).toEqual({ id: TASK, next: 3 });
-    }
-  });
-
-  test("a full batch (next one past the last index) survives a reload, so the form still says it is full", () => {
-    for (const next of [TASK_SPEC_LIMITS.batchIndex, TASK_SPEC_LIMITS.batchIndex + 1]) {
-      const batch = { id: TASK, next };
-      store.set("seance:form", JSON.stringify({ batch }));
-      expect(readForm().batch).toEqual(batch);
-    }
+  test("an older build's open batch is dropped: the form no longer authors batches", () => {
+    store.set("seance:form", JSON.stringify({ prompt: "old", batch: { id: TASK, next: 3 } }));
+    expect(readForm()).not.toHaveProperty("batch");
+    expect(readForm().prompt).toBe("old");
   });
 
   test("returns the defaults with nothing stored", () => {
@@ -160,5 +136,54 @@ describe("the legacy hidden-machine list", () => {
   test("is safe to clear when nothing was stored", () => {
     dropLegacyHidden();
     expect(store.get("seance:hidden")).toBeUndefined();
+  });
+});
+
+describe("the form's files before a share", () => {
+  test("round-trip, apart from the form", () => {
+    writeForm(DEFAULT_FORM);
+    writeFormFiles({ files: 2, submitting: true });
+    expect(readFormFiles()).toEqual({ files: 2, submitting: true });
+    expect(readForm()).toEqual(DEFAULT_FORM);
+  });
+
+  test("read as nothing when absent or malformed", () => {
+    expect(readFormFiles()).toBeNull();
+    store.set("seance:form-files", JSON.stringify({ files: -1, submitting: false, at: Date.now() }));
+    expect(readFormFiles()).toBeNull();
+    store.set("seance:form-files", "{");
+    expect(readFormFiles()).toBeNull();
+  });
+
+  test("a closed document's facts are not a share's cost", () => {
+    writeFormFiles({ files: 3, submitting: true }, 1_000);
+    expect(readFormFiles(1_000 + FORM_FILES_FRESH_MS)).toEqual({ files: 3, submitting: true });
+    expect(readFormFiles(1_001 + FORM_FILES_FRESH_MS)).toBeNull();
+    store.set("seance:form-files", JSON.stringify({ files: 3, submitting: true }));
+    expect(readFormFiles()).toBeNull();
+  });
+
+  test("tracks the form, and restamps on hide", () => {
+    let attachments: readonly unknown[] = [];
+    let spawning = false;
+    const listeners: (() => void)[] = [];
+    let flush = (): void => {};
+    trackFormFiles(
+      {
+        subscribe: (listener) => void listeners.push(listener),
+        getState: () => ({ attachments, spawning }),
+      },
+      (hide) => {
+        flush = hide;
+      },
+    );
+    expect(readFormFiles()).toEqual({ files: 0, submitting: false });
+    attachments = [1, 2];
+    spawning = true;
+    for (const listener of listeners) listener();
+    expect(readFormFiles()).toEqual({ files: 2, submitting: true });
+    store.clear();
+    flush();
+    expect(readFormFiles()).toEqual({ files: 2, submitting: true });
   });
 });

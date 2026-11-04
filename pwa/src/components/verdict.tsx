@@ -1,7 +1,7 @@
 import type { JSX } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { Machine } from "@seance/shared";
-import type { Verdict } from "../state.ts";
+import type { StartNowRefusal, Verdict } from "../state.ts";
 import { describeVerdict, VERDICT_STAGES, type VerdictStage } from "../verdict-view.ts";
 
 /**
@@ -18,12 +18,15 @@ function StageTrack(props: { stage: VerdictStage }): JSX.Element {
   // cycle ends: cut mid-swell it would vanish at full size. The next bead's
   // ring starts at once; only the old one is let finish. Decided in render,
   // not an effect, so the ring is the same element across the step and its
-  // animation runs on rather than restarting.
+  // animation runs on rather than restarting. A ring that already came to rest
+  // (screen.css bounds the swells) has no cycle left to finish and goes at once.
   const previous = useRef(reached);
   const finishing = useRef<number | null>(null);
+  const rested = useRef(false);
   const [, rerender] = useState(0);
   if (previous.current !== reached) {
-    finishing.current = previous.current < 2 ? previous.current : null;
+    finishing.current = previous.current < 2 && !rested.current ? previous.current : null;
+    rested.current = false;
     previous.current = reached;
   }
   const finished = (): void => {
@@ -50,6 +53,13 @@ function StageTrack(props: { stage: VerdictStage }): JSX.Element {
                   className="stage-sonar"
                   onAnimationIteration={() => {
                     if (finishing.current === i) finished();
+                  }}
+                  onAnimationEnd={(event) => {
+                    if (event.animationName !== "stage-sonar") return;
+                    // The last swell ends with no iteration event after it. Rest is marked here, not when the
+                    // fade-in ends: a step during the fade-in would otherwise wait on an event that never comes.
+                    if (finishing.current === i) finished();
+                    else if (i === reached) rested.current = true;
                   }}
                 />
               )}
@@ -133,12 +143,21 @@ export function VerdictView(props: {
   onQueue?: () => void;
   /** `deriveAutoAvailability`'s note: set while no verified scheduler would read a queued task. */
   waitingNote?: string | null;
+  /** Why a Start now's `run-now` didn't place it; shown only on the verdict for that task. */
+  startNowRefusal?: StartNowRefusal | null;
   onRetry: () => void;
   onAnother: () => void;
   onBack: () => void;
 }): JSX.Element {
   const { verdict, machines, aliases, now, onRetry, onAnother, onBack } = props;
-  const content = describeVerdict(verdict, machines, aliases, now, props.waitingNote ?? null);
+  const content = describeVerdict(
+    verdict,
+    machines,
+    aliases,
+    now,
+    props.waitingNote ?? null,
+    props.startNowRefusal ?? null,
+  );
   const onPrimary =
     content.primary.onClick === "retry" ? onRetry : content.primary.onClick === "back" ? onBack : onAnother;
 

@@ -4,6 +4,10 @@ import { join } from "node:path";
 import { preact } from "@preact/preset-vite";
 import { defineConfig, loadEnv, type Plugin } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
+// Relative, not `@seance/shared`: the config is bundled, and the package's raw TS can't load under node.
+import { attachmentUrl } from "../shared/src/relay-url.ts";
+import { matchShare, receiveShare } from "./src/share-handler.ts";
+import { SHARE_ACTION, SHARE_FILES_FIELD } from "./src/share.ts";
 
 const DEV_RELAY_URL = "ws://127.0.0.1:8787/app";
 
@@ -79,7 +83,9 @@ function securityHeaders(outDir: string, relay: string): Plugin {
         "style-src 'self'",
         "font-src 'self'",
         "img-src 'self' data:",
-        `connect-src 'self' ${relayOrigin(relay)}`,
+        // The socket's wss: origin and the attachment uploads' https: one: browsers' scheme
+        // upgrade between the two in source matching is not relied on.
+        `connect-src 'self' ${relayOrigin(relay)} ${relayOrigin(attachmentUrl(relay, ""))}`,
         "worker-src 'self'",
         "manifest-src 'self'",
         "frame-ancestors 'none'",
@@ -141,6 +147,14 @@ export default defineConfig(({ mode }) => {
             { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
             { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
           ],
+          // Android's share sheet posts here; the worker's route below answers it (DESIGN.md,
+          // "Attachments", Share target). Any type, as the picker takes any.
+          share_target: {
+            action: SHARE_ACTION,
+            method: "POST",
+            enctype: "multipart/form-data",
+            params: { title: "title", text: "text", url: "url", files: [{ name: SHARE_FILES_FIELD, accept: ["*/*"] }] },
+          },
         },
         workbox: {
           // The plugin only derives these from registerType: "autoUpdate" when
@@ -154,6 +168,8 @@ export default defineConfig(({ mode }) => {
           // the app's own "relay unreachable" state, not the browser error page.
           globPatterns: ["**/*.{js,css,html,woff2,png,txt}"],
           globIgnores: ["**/_headers"],
+          // Copied into sw.js as source text, which is why share-handler.ts holds nothing else.
+          runtimeCaching: [{ urlPattern: matchShare, handler: receiveShare, method: "POST" }],
         },
       }),
       securityHeaders(outDir, relay),

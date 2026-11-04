@@ -63,6 +63,47 @@ export interface SpawnOutcome {
    * wire — `handleSpawn` builds the response field by field to keep it out.
    */
   readonly handle?: string;
+  /**
+   * The tmux server pid, present when the task's pane keeps its dead pane and its `pane-died` hook for
+   * harvest (`remain-on-exit on` past registration). Absent when it could not be read or the hook was
+   * not set: the task is then never judged `vanished`. Backend-scoped: never goes on the wire.
+   */
+  readonly server?: number;
+  /**
+   * The Claude session id the task's session runs under: chosen by the backend for a new task
+   * (`--session-id`), the continued one's for a continuation (`--resume`). Noted in the launch
+   * ledger; backend-scoped, never on the wire.
+   */
+  readonly session?: string;
+}
+
+/** What a frontend resolved of a continued task's last launch from its own ledger. */
+export interface Continuation {
+  readonly path: string;
+  /** The session id that launch's ledger note holds, which the continuation resumes. */
+  readonly session: string;
+  /** The continued task's exit status as its own ledger note recorded; absent when none was noted. Words the seed only. */
+  readonly exit?: number;
+  /** The earlier window was closed from outside (`TaskProgress.vanished`); worded in the preamble. */
+  readonly vanished?: true;
+}
+
+/** One fetched attachment, for the seed: `name` is display text only, never part of `path`. */
+export interface StagedFile {
+  readonly path: string;
+  readonly name: string;
+  readonly type: string;
+  readonly size: number;
+}
+
+/**
+ * What the frontend fetched for a spawn (`attachments.ts`): directories the session may read
+ * (`--add-dir`), and the files to list in its seed. A continuation gets the directories its
+ * worktree's earlier tasks fetched and no files. Daemon paths, never wire values.
+ */
+export interface SessionAttachments {
+  readonly dirs: readonly string[];
+  readonly files: readonly StagedFile[];
 }
 
 export interface SessionBackend {
@@ -75,13 +116,17 @@ export interface SessionBackend {
    *
    * `continuation` is the frontend's own resolution of a `mode: "continue"` request's
    * worktree, from its launch ledger and already checked — it never rides the wire
-   * request. A backend that cannot continue a session throws
+   * request; its `exit` comes from the ledger too. A backend that cannot continue a session throws
    * `SpawnFailure("not_continuable")`.
+   *
+   * `attachments` is what the frontend already fetched and verified; a backend hands the session
+   * every directory and lists every file, or must not start it.
    */
   readonly spawn: (
     request: SpawnRequest,
     repos: readonly RepoEntry[],
-    continuation?: { readonly path: string },
+    continuation?: Continuation,
+    attachments?: SessionAttachments,
   ) => Promise<SpawnOutcome>;
   readonly sessions: (repos: readonly RepoEntry[]) => Promise<readonly SessionEntry[]>;
   /**
@@ -90,7 +135,14 @@ export interface SessionBackend {
    * `DespawnFailure` with a wire code. Optional: a backend that can't stop a
    * session can still start them, and the frontend answers for it.
    */
-  readonly despawn?: (id: string, opts: { readonly force: boolean }) => Promise<DespawnResult>;
+  readonly despawn?: (
+    id: string,
+    opts: {
+      readonly force: boolean;
+      readonly closing?: (taskId: string) => Promise<unknown>;
+      readonly leaveDeadTask?: boolean;
+    },
+  ) => Promise<DespawnResult>;
   /** Backend-specific preflight for `seanced doctor`: binary presence, server probes. */
   readonly doctor: () => Promise<readonly Check[]>;
   /**

@@ -154,10 +154,19 @@
   border: 2px solid var(--err);
 }
 
-/* Sonar ring behind the steady dot — it precedes it in the DOM, so it paints under. */
+/*
+ * Sonar ring behind the steady dot — it precedes it in the DOM, so it paints under.
+ * A few swells, then a still halo: an endless ring kept the compositor busy for as
+ * long as the state lasted. The rest animation is listed last, so it wins once its
+ * delay is up; before that it has no fill and the swells show.
+ */
 .relay-sonar {
+  --sonar-cycle: 1.4s;
+  --sonar-cycles: 3;
   background: color-mix(in srgb, var(--warn) 50%, transparent);
-  animation: relay-sonar 1.4s ease-out infinite;
+  animation:
+    relay-sonar var(--sonar-cycle) ease-out var(--sonar-cycles) forwards,
+    relay-sonar-rest 0.6s ease-out calc(var(--sonar-cycle) * var(--sonar-cycles)) forwards;
 }
 
 /*
@@ -183,6 +192,17 @@
   }
 }
 
+@keyframes relay-sonar-rest {
+  from {
+    transform: scale(1);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1.8);
+    opacity: 0.35;
+  }
+}
+
 /* ---- scrolling middle ---- */
 
 .column {
@@ -193,6 +213,11 @@
   flex-direction: column;
   gap: var(--gap);
   padding: var(--gap) var(--gutter);
+}
+
+/* A column with no footer under it keeps the home indicator's inset itself. */
+.column-last {
+  padding-bottom: max(var(--gap), env(safe-area-inset-bottom));
 }
 
 .card {
@@ -210,12 +235,14 @@
   color: var(--fg2);
 }
 
-/* The prompt card absorbs leftover height so the screen always fills the viewport. */
+/* The prompt card absorbs leftover height so the screen always fills the viewport.
+   Its basis is its content, never 0: the column scrolls, so a zero basis pins the
+   card at its floor and the attachment list or skill rows squeeze the textarea. */
 .prompt-card {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  flex: 1;
+  flex: 1 0 auto;
   min-height: 170px;
   padding: 16px;
   border-radius: 16px;
@@ -274,6 +301,8 @@
   display: flex;
   flex: 1;
   min-height: 0;
+  /* Below the fitted textarea is still the prompt: a tap there focuses it. */
+  cursor: text;
 }
 
 /* Shared by the textarea and its backdrop mirror: anything that moves a glyph
@@ -311,6 +340,12 @@
   caret-color: var(--fg);
 }
 
+/* Bounds the fitted height (`fitPrompt`): a long prompt scrolls rather than pushing
+   Queue, which sits under it, off a phone screen with the keyboard up. */
+.prompt-field:not(.prompt-field-compact) .prompt-text {
+  max-height: 45dvh;
+}
+
 /* Colour only: a weight or padding change would reflow the mirror off the caret. */
 .prompt-skill {
   background: none;
@@ -326,6 +361,175 @@
    blurred textarea. It reads as "you can type here", so it tracks the field. */
 .prompt-card:has(.prompt-input:focus) {
   border-color: var(--acc);
+}
+
+/* ---- attachments ---- */
+
+.prompt-card-drop {
+  border-color: var(--acc);
+  border-style: dashed;
+}
+
+.attach {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Two chips a row, each half the card; a lone chip sizes to its name, up to the
+   card's full width, so it isn't cut at half when there's room. */
+.attach-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.attach-chip:only-child {
+  grid-column: 1 / -1;
+  justify-self: start;
+}
+
+.attach-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 4px 4px 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--sur2);
+  font-size: 12.5px;
+}
+
+.attach-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attach-size {
+  flex: none;
+  color: var(--fg2);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+/* Small glyph, finger-sized target, as `.prompt-action` does. */
+.attach-remove {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--fg2);
+  font-size: 15px;
+  line-height: 1;
+}
+
+.attach-remove:disabled {
+  opacity: 0.4;
+}
+
+@media (hover: hover) {
+  .attach-remove:hover:not(:disabled) {
+    color: var(--acc);
+  }
+}
+
+.attach-notice {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--err);
+}
+
+/* ---- composer bar ---- */
+
+/* Attach at the left, Queue at the right, as chat composers put them. */
+.compose-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.compose-attach {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--fg2);
+  transition: transform 0.12s ease;
+}
+
+.compose-attach:disabled {
+  opacity: 0.4;
+}
+
+.compose-attach:enabled:active {
+  transform: scale(0.94);
+}
+
+@media (hover: hover) {
+  .compose-attach:hover:not(:disabled) {
+    color: var(--acc);
+    border-color: var(--acc);
+  }
+}
+
+/* Sized to its label rather than the card; a long blocked label ("Waiting for the
+   relay", "Queue on <machine>") ellipsizes instead of pushing the paperclip out. */
+.compose-bar > .primary,
+.compose-bar > .split {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-left: auto;
+}
+
+.compose-bar .primary {
+  width: auto;
+  min-width: 0;
+  padding: 10px 18px;
+  border-radius: 10px;
+  font-size: 15px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.compose-bar .split {
+  border-radius: 10px;
+}
+
+.compose-bar .split .primary {
+  border-radius: 10px 0 0 10px;
+}
+
+.compose-bar .split-divider {
+  margin: 7px 0;
+}
+
+.compose-bar .split-more {
+  width: 38px;
+  border-radius: 0 10px 10px 0;
+}
+
+.compose-status {
+  margin: -4px 0 0;
+  font-size: 13px;
+  color: var(--fg2);
 }
 
 /* ---- skill picker ---- */
@@ -572,12 +776,6 @@
   border-top: 1px solid var(--line);
 }
 
-.footer-status {
-  font-size: 13px;
-  color: var(--fg2);
-  min-height: 19px;
-}
-
 .primary {
   width: 100%;
   padding: 15px;
@@ -626,6 +824,87 @@
   to {
     transform: translateX(100%);
   }
+}
+
+/* Queue split when the leader answers run-now: two sibling buttons in one pill,
+   the face and a chevron opening the Start now menu. Each paints its own half (no
+   overflow clip, which would cut their focus rings) and tints alone on press;
+   the press-down moves to the pill. */
+.split {
+  display: flex;
+  align-items: stretch;
+  border-radius: 12px;
+  background: var(--acc);
+  transition: transform 0.12s ease;
+}
+
+.split:has(:enabled:active) {
+  transform: scale(0.98);
+}
+
+.split .primary {
+  flex: 1;
+  min-width: 0;
+  border-radius: 12px 0 0 12px;
+}
+
+.split .primary:enabled:active {
+  background: color-mix(in srgb, var(--acc-fg) 14%, var(--acc));
+  transform: none;
+}
+
+/* A ring drawn over the neighbouring half rather than under it. */
+.split > :focus-visible {
+  position: relative;
+  z-index: 1;
+}
+
+.split-divider {
+  width: 1px;
+  margin: 9px 0;
+  background: color-mix(in srgb, var(--acc-fg) 28%, transparent);
+}
+
+.split-more {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 54px;
+  padding: 0;
+  border: 0;
+  border-radius: 0 12px 12px 0;
+  background: var(--acc);
+  color: var(--acc-fg);
+}
+
+.split-more:enabled:active,
+.split-more[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--acc-fg) 14%, var(--acc));
+}
+
+/* Points the way the menu opens; base.css's reduced-motion rule makes the turn instant. */
+.split-chevron {
+  transition: transform 0.14s ease;
+}
+
+.split-more[aria-expanded="true"] .split-chevron {
+  transform: rotate(180deg);
+}
+
+/* Disabled and busy: both halves the lone button's disabled tone. */
+.split:has(.primary:disabled),
+.split-more:disabled {
+  background: var(--sur2);
+  color: var(--fg2);
+  cursor: default;
+}
+
+.split:has(.primary:disabled) .split-divider {
+  background: var(--line);
+}
+
+.split-busy .split-more {
+  opacity: 0.5;
 }
 
 .quiet {
@@ -1028,14 +1307,19 @@
   }
 }
 
-/* The relay dot's sonar, behind the waiting tile. A gentler swell than the
-   dot's: on a 40px tile the dot's 2.4× ring would reach the neighbours. */
+/* The relay dot's sonar, behind the waiting tile, and like it a few swells
+   that come to rest: a wait can last hours. A gentler swell than the dot's:
+   on a 40px tile the dot's 2.4× ring would reach the neighbours. */
 .stage-sonar {
+  --sonar-cycle: 1.6s;
+  --sonar-cycles: 3;
   position: absolute;
   inset: 0;
   border-radius: 12px;
   background: color-mix(in srgb, var(--acc) 35%, transparent);
-  animation: stage-sonar 1.6s ease-out infinite;
+  animation:
+    stage-sonar var(--sonar-cycle) ease-out var(--sonar-cycles) forwards,
+    stage-sonar-rest 0.6s ease-out calc(var(--sonar-cycle) * var(--sonar-cycles)) forwards;
 }
 
 /* Like the dot's: the global clamp would freeze the ring at full size, so drop it. */
@@ -1054,6 +1338,17 @@
   to {
     transform: scale(1.35);
     opacity: 0;
+  }
+}
+
+@keyframes stage-sonar-rest {
+  from {
+    transform: scale(1);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1.15);
+    opacity: 0.45;
   }
 }
 
@@ -1326,6 +1621,11 @@
   display: flex;
   align-items: flex-start;
   gap: 10px;
+}
+
+/* A dot straight in the head (queue rows) centres on the first title line, as `.fleet-name-row` does. */
+.fleet-card-head > .dot {
+  margin-top: calc((var(--fleet-line) - 7px) / 2);
 }
 
 .fleet-card-title {
@@ -2130,7 +2430,7 @@
   gap: var(--gap);
 }
 
-/* The shared quiet button is full-width; in a row of two it sizes to its label. */
+/* The shared quiet button is full-width; beside the chip it sizes to its label. */
 .queue-actions .quiet {
   width: auto;
   padding: 8px 12px;
@@ -2139,6 +2439,27 @@
 
 .queue-actions .quiet:disabled {
   opacity: 0.5;
+}
+
+/* The card's ⋯: every action it allows (menu.tsx). Pulled into the card's padding so the dots sit
+   flush with its corner while the target stays 36px. */
+.queue-more {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  margin: -8px -8px 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--fg2);
+  cursor: pointer;
+}
+
+.queue-more[aria-expanded="true"] {
+  background: var(--sur2);
 }
 
 /* A task title that opens its session on claude.ai: still the title, so the underline is faint
@@ -2150,16 +2471,60 @@
   text-underline-offset: 3px;
 }
 
-.queue-session:hover,
+@media (hover: hover) {
+  .queue-session:hover {
+    text-decoration-color: currentColor;
+  }
+}
+
 .queue-session:focus-visible {
   text-decoration-color: currentColor;
+}
+
+/* A body line that scrolls to another card: reads as the line it is, underlined like the title link. */
+.queue-reveal {
+  position: relative;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: start;
+  text-decoration: underline;
+  text-decoration-color: var(--line);
+  text-underline-offset: 3px;
+}
+
+/* The pseudo-element takes the tap target toward 44px without growing the line. */
+.queue-reveal::before {
+  content: "";
+  position: absolute;
+  inset: -12px -4px;
+}
+
+@media (hover: hover) {
+  .queue-reveal:hover {
+    text-decoration-color: currentColor;
+  }
+}
+
+.queue-reveal:focus-visible {
+  text-decoration-color: currentColor;
+}
+
+/* Focused by script when a reveal lands on it: the ring shows for keyboard use only, never after a tap. */
+.fleet-card:focus {
+  outline: none;
+}
+
+.fleet-card:focus-visible {
+  outline: 2px solid var(--acc);
+  outline-offset: 2px;
 }
 
 /* The PR chip is a quiet outline, a rounded rectangle rather than the badge's pill: at this
    size it reads as a control, and its colour belongs to the icons alone. Sized near the buttons
    beside it (~34px tall); the pseudo-element takes the tap target to 44px without growing
-   the pill. Leads the actions row; the auto margin keeps the buttons right, and a finished
-   task's row holds the chip alone. */
+   the pill. Leads the actions row; the auto margin keeps the inline action right, and a row
+   with none holds the chip alone. */
 .queue-pr {
   position: relative;
   display: inline-flex;
@@ -2251,7 +2616,7 @@
   color: var(--fg2);
 }
 
-/* ---- phone header menu: queue, machines, settings ---- */
+/* ---- header menu trigger ---- */
 
 /* An escalated task, on the closed menu's face. */
 .menu-badge {
@@ -2261,12 +2626,16 @@
   box-shadow: 0 0 0 2px var(--sur3);
 }
 
-/* Top-layer popover; `top`/`right` are set under the pill on open. */
-.header-menu {
+/* ---- menu popover (menu.tsx): header menu, and any short command menu ---- */
+
+/* Top-layer popover; `top` or `bottom`, and `right`, are set from the anchor on
+   open. base.css's reduced-motion rule clamps the transitions to an instant. */
+.menu {
+  --menu-slide: -4px;
   position: fixed;
   inset: auto;
   margin: 0;
-  min-width: 196px;
+  min-width: 236px;
   padding: 6px;
   border: 1px solid var(--line);
   border-radius: 16px;
@@ -2274,7 +2643,7 @@
   color: var(--fg);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.3);
   opacity: 0;
-  transform: translateY(-4px) scale(0.98);
+  transform: translateY(var(--menu-slide)) scale(0.98);
   transform-origin: top right;
   transition:
     opacity 0.14s ease,
@@ -2283,21 +2652,32 @@
     display 0.14s allow-discrete;
 }
 
-.header-menu:popover-open {
+.menu[data-direction="up"] {
+  --menu-slide: 4px;
+  transform-origin: bottom right;
+}
+
+/* Fading out still takes taps otherwise; a double tap would re-run an item. */
+.menu:not(:popover-open) {
+  pointer-events: none;
+}
+
+.menu:popover-open {
   display: flex;
   flex-direction: column;
+  gap: 2px;
   opacity: 1;
   transform: none;
 }
 
 @starting-style {
-  .header-menu:popover-open {
+  .menu:popover-open {
     opacity: 0;
-    transform: translateY(-4px) scale(0.98);
+    transform: translateY(var(--menu-slide)) scale(0.98);
   }
 }
 
-.header-menu-item {
+.menu-item {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -2310,25 +2690,76 @@
   font-size: 15px;
   font-weight: 600;
   text-align: left;
+  text-decoration: none;
 }
 
-.header-menu-item .dot {
+.menu-item-with-sub {
+  min-height: 52px;
+  padding: 6px 12px;
+}
+
+.menu-item-destructive {
+  color: var(--err);
+}
+
+.menu-item:disabled,
+.menu-item[aria-disabled="true"] {
+  opacity: 0.5;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.menu-item .dot {
   margin-left: auto;
 }
 
-.header-menu-icon {
+.menu-icon {
   display: flex;
   color: var(--fg2);
 }
 
+/* The icon follows the label's red. */
+.menu-item-destructive .menu-icon {
+  color: currentColor;
+}
+
+.menu-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.menu-sub {
+  color: var(--fg2);
+  font-size: 12.5px;
+  font-weight: 400;
+}
+
+.menu-divider {
+  height: 1px;
+  margin: 2px 8px; /* the flex gap adds 2px each side */
+  background: var(--line);
+}
+
 @media (hover: hover) {
-  .header-menu-item:hover {
+  .queue-more:hover {
+    background: var(--sur2);
+  }
+
+  .menu-item:not(:disabled, [aria-disabled="true"]):hover {
     background: var(--sur2);
   }
 }
 
-.header-menu-item:active,
-.header-menu-item:focus-visible {
+.menu-item:not(:disabled, [aria-disabled="true"]):active,
+.menu-item:focus-visible {
   background: var(--sur2);
 }
 
@@ -2382,10 +2813,4 @@
 
 .after-when .seg {
   width: 100%;
-}
-
-.linear {
-  gap: 8px;
-  padding: 14px 16px;
-  border-radius: 14px;
 }

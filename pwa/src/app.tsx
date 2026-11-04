@@ -49,6 +49,7 @@ export function App(props: { store: Store }): JSX.Element {
         now={now}
         onQueue={wide ? undefined : actions.openQueue}
         waitingNote={view.autoAvailability.note}
+        startNowRefusal={state.startNowRefusal}
         onRetry={() => store.retrySpawn(verdict)}
         onAnother={() => store.startAnother()}
         onBack={() => store.dismissLayer()}
@@ -78,6 +79,7 @@ export function App(props: { store: Store }): JSX.Element {
       onRefresh={() => void store.refreshQueue()}
       onCancel={(id) => void store.cancelTask(id)}
       onMarkDone={(id) => void store.markDone(id)}
+      onRunNow={(id) => void store.runNow(id)}
       onContinue={(id) => void store.continueTask(id)}
       onFollowUp={(id) => store.followUp(id)}
       onPause={() => void store.pauseQueue()}
@@ -241,6 +243,7 @@ function useSpawnActions(store: Store): SpawnActions {
       openSheet: (sheet) => store.openSheet(sheet),
       toggleWorktree: () => store.toggleWorktree(),
       spawn: () => void store.spawn(),
+      startNow: () => void store.startNow(),
       dismissLayer: () => store.dismissLayer(),
       pickMachine: (deviceId) => store.pickMachine(deviceId),
       pickAccount: (accountId) => store.pickAccount(accountId),
@@ -253,9 +256,8 @@ function useSpawnActions(store: Store): SpawnActions {
       addAfter: (taskId, after) => store.addAfter(taskId, after),
       removeAfter: (taskId) => store.removeAfter(taskId),
       setUntil: (until) => store.setUntil(until),
-      setLinearIssue: (issue) => store.setLinearIssue(issue),
-      startBatch: () => store.startBatch(),
-      endBatch: () => store.endBatch(),
+      addFiles: (files) => store.addFiles(files),
+      removeFile: (key) => store.removeFile(key),
     }),
     [store],
   );

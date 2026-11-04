@@ -1,4 +1,5 @@
 import type {
+  AttachmentRef,
   DespawnRequest,
   DespawnResponse,
   ExclaveInfo,
@@ -10,9 +11,11 @@ import type {
 } from "@seance/shared";
 import { bindTaskRecord, CAPABILITIES, STORE_PREFIXES } from "@seance/shared";
 import {
+  DEFAULT_CONFIG,
   UNREACHABLE,
   type Fleet,
   type QueueStore,
+  type SchedulerConfig,
   type Unreachable,
   type TaskSessionsReply,
   type TaskSpawnReply,
@@ -24,6 +27,11 @@ import type { Task, TaskSpec } from "../src/task.ts";
 export const NOW = 1_800_000_000_000;
 export const NOW_S = NOW / 1000;
 export const REPO = "github.com/acme/app";
+
+/** Config that caps each account at `n` on the seat fixtures report (none: `unknownSeat`). */
+export function accountMax(n: number): Pick<SchedulerConfig, "unknownSeat"> {
+  return { unknownSeat: { ...DEFAULT_CONFIG.unknownSeat, accountMax: n } };
+}
 
 export function exclave(id: string, accountId: string | null, extra: Partial<ExclaveInfo> = {}): ExclaveInfo {
   return { id, accountId, extraUsageEnabled: false, authOk: accountId !== null, skills: [], ...extra };
@@ -63,6 +71,17 @@ export function machine(deviceId: string, fields: Partial<Machine> = {}): Machin
   };
 }
 
+/** A manifest entry as the PWA would mint it; the scheduler reads none of its fields. */
+export function attachment(i: number): AttachmentRef {
+  return {
+    id: `0b6f0c9e-1a2b-4c3d-8e9f-${i.toString(16).padStart(12, "0")}`,
+    name: `screenshot ${i}.png`,
+    type: "image/png",
+    size: 1024,
+    hash: "A".repeat(43),
+  };
+}
+
 export function spec(fields: Partial<TaskSpec> = {}): TaskSpec {
   return { repo: REPO, mode: "worktree", prompt: "do it", ...fields };
 }
@@ -83,6 +102,8 @@ export class FakeFleet implements Fleet {
   readonly running = new Map<string, SessionEntry[]>();
   /** Task ids each daemon would report in `sessions`' `ended`. */
   readonly ended = new Map<string, string[]>();
+  /** Task ids each daemon would report in `sessions`' `interrupted`: launches it died in the middle of. */
+  readonly interrupted = new Map<string, string[]>();
   /**
    * Each daemon's `ledgerSince`; null is a daemon that predates the ledger. A
    * day before `NOW` unless set: a ledger that long predates every reservation.
@@ -142,11 +163,13 @@ export class FakeFleet implements Fleet {
     // As the relay answers a request to a machine with no socket.
     if (!this.fleet.some((m) => m.deviceId === deviceId && m.connected)) return unreachable;
     const ended = this.ended.get(deviceId);
+    const interrupted = this.interrupted.get(deviceId);
     const since = this.ledgerSince.has(deviceId) ? this.ledgerSince.get(deviceId) : NOW - 86_400_000;
     return {
       ok: true,
       sessions: this.running.get(deviceId) ?? [],
       ...(ended === undefined ? {} : { ended }),
+      ...(interrupted === undefined ? {} : { interrupted }),
       ...(since === null || since === undefined ? {} : { ledgerSince: since }),
     };
   }

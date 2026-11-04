@@ -125,7 +125,7 @@ green:
   resolves repos by name against the cached scan set, every spawn, despawn and reap path audits
   through its one formatter under its own origin (`relay`, `cli`, `local`, `local-broker` for
   requests the daemon forwards to other machines, or makes of the scheduler (enqueue, queue, cancel,
-  account list), for a keyless `seanced mcp` or `seanced spawn`, `schedule` for
+  run-now, account list), for a keyless `seanced mcp`, `seanced spawn` or `seanced start`, `schedule` for
   the daemon's reap timer, `harvest` for the daemon closing a dead task pane after noting its exit
   status, `leader` for the scheduler loop dispatching to its own machine in
   process and admitting a task, `mcp` for `seanced mcp`'s own `spawn_session`/`queue_batch`/`continue_task` enqueue lines, and `cli` for
@@ -154,12 +154,18 @@ green:
   `daemon/src/run.ts`) — never a guard per term, which would let the relay replay a `cancel` into
   each, and the launch ledger (`daemon/src/launch-ledger.ts`) is write-ahead — a task id is on
   disk before its spawn runs, a spawn whose id it cannot record is refused, and `since` only
-  moves forward — since it is what makes `ledgerSince` a proof that a spawn never landed — and a
+  moves forward — since it is what makes `ledgerSince` a proof that a spawn never landed — and an id
+  still pending when the ledger opens is reported `interrupted`, never removed from `ended` (an older
+  leader would read the gap as never-landed), and a leader never re-dispatches an interrupted task, and
+  a task launch the restart drain turns away is answered `internal_error` unrecorded, never held and
+  run later, and a
   scheduler spawn for a task id the ledger holds as launched is refused `task_launched`, audited,
   never run again, and a continuation (`mode: "continue"`) runs only for a spawn sealed `from` the
   scheduler with `client: "scheduler"` (or the leader's in-process dispatch), in the worktree this
-  machine's own launch ledger noted for the continued task id — never a path from a frame — under the
-  clone its `repo` name resolved to, and a task record carrying `continues` always carries
+  machine's own launch ledger noted for the continued task id — never a path from a frame — resuming
+  the Claude session id this daemon chose at that launch (`--session-id`) and noted beside it — never
+  an id from a frame — under the
+  clone its `repo` name resolved to, and only while no later launch in that ledger noted the same worktree, and a task record carrying `continues` always carries
   `mode: "continue"`, which an older leader's parser refuses, and the leader's version floor (`daemon/src/version-floor.ts`) is one per
   process like `schedulerGuard`, persisted 0600, and only ever raised by a read (the leader's own
   pause write alone may set it lower): a task record below it is `version_regressed`, a pause
@@ -190,7 +196,7 @@ green:
   through `openFleetQuotaRecord` — and a tombstone lives exactly as long as
   admission's age limit (`STORE_TOMBSTONE_MS` for both: the relay's tombstone, `isExpired` in
   `scheduler/src/deps.ts`), since a pruned task's version-1 blob put back after its tombstone
-  lapses must be too old to admit, and every task record carrying `pin.account` or `avoid` is sealed through the one task sealer (`taskRecordAtRest`/`sealTaskRecord`), which emits `pin.exclave: ""` for an older leader to refuse, and the parser never nulls a spec over `pin.exclave`, and a `branch-state` is never accepted from an app, and an
+  lapses must be too old to admit, and every task record carrying `pin.account` or `avoid` is sealed through the one task sealer (`taskRecordAtRest`/`sealTaskRecord`), which emits `pin.exclave: ""` for an older leader to refuse, and the parser never nulls a spec over `pin.exclave`, and every task record carrying `attachments` is sealed through that same sealer, which appends `ATTACHMENTS_DEP_SENTINEL` to its deps for an older leader to refuse, and the parser drops that sentinel only beside a manifest and nulls the spec over any malformed manifest — never drops the field, and the leader dispatches such a task only to a machine advertising `CAPABILITIES.attachments` (`attachments_unsupported` otherwise), copying the manifest unchanged into the spawn, and drops it only on the write that finishes the task (`forgetPrompt`), and an attachment object opens only through `openAttachment` (`shared/src/crypto.ts`), its AAD bound to the op and its own id, and the relay's `/attachments/<id>` routes (`relay/src/attachments.ts`) read no body (`relay/test/layering.test.ts`), take the token from the `Authorization` header only, store create-only under an id held to `ATTACHMENT_ID_PATTERN`, refuse on the declared length and the Hub's upload allowance (`relay/src/allowance.ts`) before R2 sees a byte, and log no accepted transfer, and a daemon accepts `attachments` only on a spawn sealed `from` the scheduler with `client: "scheduler"` (or the leader's in-process dispatch), fetches each object only from `attachmentUrl` over its own config's `relayUrl` with the manifest's id, before the launch ledger's write-ahead record, checks its length and `attachmentHash` before `openAttachment`, writes it only as `<index>.<ext>` (`ATTACHMENT_EXTENSIONS`, never the name) under the 0700 `stateDir()/attachments/<taskId>`, refuses `attachment_unavailable` on any failure with nothing left behind, puts names only in the seed on stdin, and audits a count and total bytes, never names, ids or hashes (`daemon/src/attachments.ts`), and the PWA writes a task carrying `attachments` only to a verified leader advertising `CAPABILITIES.attachments`, only once every file in it answered `201 stored`, uploads only through `RelayClient.uploadAttachment` with the token in the `Authorization` header, and shows names only on the form, never on the Queue screen or verdict (`pwa/src/store.ts`), and a `branch-state` is never accepted from an app, and an
   event — a session event or a branch state — moves only a task placed (or, for a session event,
   reserved) on the machine that sealed it, and a PR status is read only by the leader's own `gh`,
   bound to the `prUrl` the record holds, its values passed as GraphQL variables, and no frame
@@ -206,7 +212,7 @@ green:
   service-delivered (`source: "credential"`) — and only there — the same socket carries the
   fleet broker (`broker.ts`): its own frame kind, never a `Plain` or an `OpName`, four actions —
   `machines`, `fleet`, `request` (the same three remote ops) and `scheduler` (`enqueue`, `queue`,
-  `cancel`, `accounts`) — DESIGN.md's "Fleet broker" is the record, and any widening of it,
+  `cancel`, `run-now`, `accounts`) — DESIGN.md's "Fleet broker" is the record, and any widening of it,
   including running it on other daemons, is the same kind of change. A brokered enqueue is a create
   at `expect: 0` of a task the daemon sealed itself from a parsed spec, with the daemon's own
   `createdAt`, no lineage or base (a continue spec's `continues` is carried, and only while the
@@ -216,14 +222,17 @@ green:
   kind, `session-event` (`session-events.ts`, DESIGN.md "Session events"), is ingest-only and
   bound to the sender's pane by its kernel-reported peer pid, never by a field it sends — the
   frame's `pane` decides only on a host that names no peer at all (`peerPidSupported`), never for
-  one connection whose pid came back null. Its two acts past ingest are poking the bound
+  one connection whose pid came back null. Its three acts past ingest are poking the bound
   exclave's `/usage` refresh (`usage-refresh.ts`), which spawns only on a stale reading, with
   fixed argv and an env built from the scan — no frame field reaches either — and a `done`
   report, which only `report_task_done` sends (`seanced session-event` drops a `done` unsent):
   the daemon notes it in the launch ledger and forwards it once, both for the pane's own task
   only, and answers `untasked` for a pane with none and `unrecorded` for a task its ledger holds
   no launch of (nothing sent); the leader settles that task only under `until: "reported"` and
-  only from the machine it was placed or reserved on.
+  only from the machine it was placed or reserved on — and clearing its own pane's task's
+  `interrupted` mark in the launch ledger, only on an `ended` or `done` frame (proof the session ran;
+  never when ingest is stopped), bound to the pane like the `done` report (including on a
+  host with no peer pid) and never to an id from the frame.
   The frame's one other carried claim is `remoteSession`, Remote Control's id for the session:
   display-only (the PWA's claude.ai link), kept only as `isRemoteSessionId` passes it, and
   never used to bind, route or move anything.

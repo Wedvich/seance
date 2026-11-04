@@ -1,16 +1,11 @@
 import type { JSX } from "preact";
-import { useRef } from "preact/hooks";
 import type { ConnectionState } from "../view.ts";
+import { Menu, MenuItem, useMenu } from "./menu.tsx";
 import { CogIcon, RelayDot } from "./relay-dot.tsx";
-
-const MENU_ID = "header-menu";
 
 /**
  * The phone's header pill: relay dot on the track, as on a desk, but the face
- * opens a menu of the screens a desk shows as columns, plus Settings. A native
- * `popover="auto"`: outside taps and Escape close it, and so does Android's
- * back, which Chrome routes to an open popover before history — so the menu
- * needs no history entry of its own.
+ * opens a menu of the screens a desk shows as columns, plus Settings.
  */
 export function HeaderMenu(props: {
   state: ConnectionState;
@@ -20,32 +15,17 @@ export function HeaderMenu(props: {
   onSettings: () => void;
 }): JSX.Element {
   const { state, queueAttention } = props;
-  const trigger = useRef<HTMLButtonElement>(null);
-  const menu = useRef<HTMLDivElement>(null);
-
-  // The top layer lifts the menu out of the header, so it is pinned under the
-  // pill by hand; CSS anchor positioning isn't in every browser this runs in.
-  const place = (newState: string): void => {
-    const button = trigger.current;
-    const node = menu.current;
-    if (newState !== "open" || button === null || node === null) return;
-    const rect = button.getBoundingClientRect();
-    node.style.top = `${rect.bottom + 6}px`;
-    node.style.right = `${document.documentElement.clientWidth - rect.right}px`;
-  };
-
-  const pick = (open: () => void) => (): void => {
-    menu.current?.hidePopover();
-    open();
-  };
+  const menu = useMenu();
 
   return (
     <>
       <button
-        ref={trigger}
+        ref={menu.anchor}
         type="button"
         className="relay-group"
-        popovertarget={MENU_ID}
+        popovertarget={menu.id}
+        aria-haspopup="menu"
+        aria-expanded={menu.open}
         aria-label={queueAttention ? "Menu, a queued task needs you" : "Menu"}
         title={`Relay: ${state}`}
       >
@@ -57,39 +37,12 @@ export function HeaderMenu(props: {
           {queueAttention && <span className="menu-badge dot dot-err" />}
         </span>
       </button>
-      <div
-        ref={menu}
-        id={MENU_ID}
-        className="header-menu"
-        popover="auto"
-        onBeforeToggle={(event) => place(event.newState)}
-      >
-        <MenuItem label="Queue" onClick={pick(props.onQueue)} attention={queueAttention}>
-          <QueueIcon />
-        </MenuItem>
-        <MenuItem label="Machines" onClick={pick(props.onMachines)}>
-          <MachinesIcon />
-        </MenuItem>
-        <MenuItem label="Settings" onClick={pick(props.onSettings)}>
-          <CogIcon size={18} />
-        </MenuItem>
-      </div>
+      <Menu menu={menu} label="Menu">
+        <MenuItem label="Queue" icon={<QueueIcon />} onClick={props.onQueue} attention={queueAttention} />
+        <MenuItem label="Machines" icon={<MachinesIcon />} onClick={props.onMachines} />
+        <MenuItem label="Settings" icon={<CogIcon size={18} />} onClick={props.onSettings} />
+      </Menu>
     </>
-  );
-}
-
-function MenuItem(props: {
-  label: string;
-  onClick: () => void;
-  attention?: boolean;
-  children: JSX.Element;
-}): JSX.Element {
-  return (
-    <button type="button" className="header-menu-item" onClick={props.onClick}>
-      <span className="header-menu-icon">{props.children}</span>
-      {props.label}
-      {props.attention === true && <span className="dot dot-err" role="img" aria-label="needs you" />}
-    </button>
   );
 }
 

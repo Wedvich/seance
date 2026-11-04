@@ -137,6 +137,7 @@ export function fakeRelay(
     },
     queue: () => schedule<QueueReply | null>("queue", {}),
     cancel: (taskId) => schedule<TaskReply | null>("cancel", { taskId }),
+    runNow: (taskId) => schedule<TaskReply | null>("run-now", { taskId }),
     accounts: [],
     accountLists: 0,
     listAccounts: async (): Promise<AccountListing | StoreRefusal | null> => {
