@@ -54,6 +54,7 @@ import {
   type Task,
 } from "../src/leader.ts";
 import type { PrPollerOpts } from "../src/pr-status.ts";
+import type { SettingsRead, SettingsStore } from "../src/settings-store.ts";
 import { startDaemon } from "../src/run.ts";
 import {
   captureLog,
@@ -122,6 +123,7 @@ function leaderOver(
   store: QueueStore = new MemoryQueueStore(),
   tickIntervalMs?: number,
   prStatus?: PrPollerOpts,
+  settings?: SettingsStore,
   storeTimeoutMs?: number,
   config?: SchedulerConfig,
 ) {
@@ -142,6 +144,7 @@ function leaderOver(
     ...(tickIntervalMs === undefined ? {} : { tickIntervalMs }),
     ...(prStatus === undefined ? {} : { prStatus }),
     ...(config === undefined ? {} : { config }),
+    ...(settings === undefined ? {} : { settings }),
     createRelay: (term, onEvent) => {
       const leg = new RelayClient({
         url: appRelayUrl(relay.url),
@@ -322,7 +325,7 @@ describe("queue-changed", () => {
     const store = new MemoryQueueStore();
     const assignment = { deviceId: "b", ...target, pane: "%3" };
     // No grace: the release is the event's own, so the test waits on no clock.
-    const { leader, replies } = leaderOver(relay, store, undefined, undefined, undefined, {
+    const { leader, replies } = leaderOver(relay, store, undefined, undefined, undefined, undefined, {
       ...DEFAULT_CONFIG,
       idleReleaseAfterMs: 0,
     });
@@ -973,6 +976,123 @@ describe("boundedQueue", () => {
   });
 });
 
+describe("leader settings", () => {
+  /** A settings store in memory; `fail` reads reject before any answer. */
+  const memorySettings = (fail = 0) => {
+    const calls = { gets: 0, puts: [] as number[] };
+    let held: SettingsRead = null;
+    let failing = fail;
+    const store: SettingsStore = {
+      get: async () => {
+        calls.gets += 1;
+        if (failing > 0) {
+          failing -= 1;
+          throw new Error("store-get: the reply was unreadable");
+        }
+        return held;
+      },
+      put: async (at, record) => {
+        calls.puts.push(at);
+        held = { version: at + 1, record: { ...record, version: at + 1 } };
+        return { ok: true, version: at + 1 };
+      },
+    };
+    return { store, calls };
+  };
+
+  test("a term creates the record once it has a registry, beside takeover and not ahead of it", async () => {
+    const relay = startTestRelay(TOKEN);
+    const settings = memorySettings();
+    const { leader } = leaderOver(relay, new MemoryQueueStore(), undefined, undefined, settings.store);
+    try {
+      leader.lead(1);
+      await leader.settled();
+      await pollUntil(() => settings.calls.puts.length === 1, "the settings create");
+      expect(settings.calls.puts).toEqual([0]);
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+
+  test("a read that is never answered does not hold up takeover, is retried on the tick, and warns once", async () => {
+    const relay = startTestRelay(TOKEN);
+    const settings = memorySettings(2);
+    const { leader } = leaderOver(relay, new MemoryQueueStore(), 40, undefined, settings.store);
+    const lines = await captureLog(async () => {
+      try {
+        leader.lead(1);
+        // Takeover settles while the first read has already failed.
+        await leader.settled();
+        await pollUntil(() => settings.calls.puts.length === 1, "the retried read to create the record", 5_000);
+        expect(settings.calls.gets).toBe(3);
+      } finally {
+        leader.stop();
+        relay.stop();
+      }
+    });
+    expect(lines.filter((line) => line.includes("could not load its settings"))).toHaveLength(1);
+    expect(lines.some((line) => line.includes("took over"))).toBe(true);
+  });
+
+  test("a read still pending does not hold up takeover; the create follows once it is answered", async () => {
+    const relay = startTestRelay(TOKEN);
+    const settings = memorySettings();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const pending: SettingsStore = {
+      get: async () => {
+        await gate;
+        return settings.store.get();
+      },
+      put: settings.store.put,
+    };
+    const { leader } = leaderOver(relay, new MemoryQueueStore(), undefined, undefined, pending);
+    const lines = await captureLog(async () => {
+      try {
+        leader.lead(1);
+        // `settled` ends with takeover's log line, and it must resolve while the read is unanswered.
+        await leader.settled();
+        expect(settings.calls.puts).toEqual([]);
+        release();
+        await pollUntil(() => settings.calls.puts.length === 1, "the settings create after the answer", 5_000);
+      } finally {
+        release();
+        leader.stop();
+        relay.stop();
+      }
+    });
+    expect(lines.some((line) => line.includes("took over"))).toBe(true);
+    expect(settings.calls.puts).toEqual([0]);
+  });
+
+  test("a record it cannot read is never written over: one warning, no create, and the queue runs", async () => {
+    const relay = startTestRelay(TOKEN);
+    const settings = memorySettings();
+    const unreadable: SettingsStore = {
+      get: () => Promise.resolve({ version: 3, reason: "unopenable" }),
+      put: settings.store.put,
+    };
+    const { leader } = leaderOver(relay, new MemoryQueueStore(), 40, undefined, unreadable);
+    const lines = await captureLog(async () => {
+      try {
+        leader.lead(1);
+        await leader.settled();
+        await pollUntil(() => leader.term() === 1, "the term");
+        // Several ticks pass: a retry that wrote would show.
+        await Bun.sleep(200);
+      } finally {
+        leader.stop();
+        relay.stop();
+      }
+    });
+    expect(settings.calls.puts).toEqual([]);
+    expect(lines.filter((line) => line.includes("settings unavailable (unopenable)"))).toHaveLength(1);
+  });
+});
+
 describe("leader lifecycle", () => {
   // Fake timers from before the leader exists, so every timer it or its leg
   // arms is one the clock below can fire and `getTimerCount` can see. Waits
@@ -1609,7 +1729,7 @@ describe("fleet quota record", () => {
     const relay = startTestRelay(TOKEN);
     relay.setRegistry([await routableEntry("b", false)]);
     relay.holdStoreReplies = true;
-    const { leader, legs } = leaderOver(relay, new MemoryQueueStore(), undefined, undefined, 100);
+    const { leader, legs } = leaderOver(relay, new MemoryQueueStore(), undefined, undefined, undefined, 100);
     try {
       leader.lead(1);
       await leader.settled();
