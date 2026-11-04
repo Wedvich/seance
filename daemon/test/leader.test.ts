@@ -325,7 +325,7 @@ describe("queue-changed", () => {
     const store = new MemoryQueueStore();
     const assignment = { deviceId: "b", ...target, pane: "%3" };
     // No grace: the release is the event's own, so the test waits on no clock.
-    const { leader, replies } = leaderOver(relay, store, undefined, undefined, undefined, {
+    const { leader, replies } = leaderOver(relay, store, undefined, undefined, undefined, undefined, {
       ...DEFAULT_CONFIG,
       idleReleaseAfterMs: 0,
     });
