@@ -21,6 +21,7 @@ import {
   isMetricsRequest,
   isRecord,
   isTaskId,
+  parseAttachmentManifest,
   quote,
   REPLY_JSON_BUDGET,
   SCHEDULER_CLIENT,
@@ -34,10 +35,19 @@ import {
   type SpawnAudit,
   type SpawnOrigin,
 } from "./audit.ts";
-import { DespawnFailure, SpawnFailure, type DespawnResult, type SessionBackend, type SpawnOutcome } from "./backend.ts";
+import {
+  DespawnFailure,
+  SpawnFailure,
+  type Continuation,
+  type DespawnResult,
+  type SessionAttachments,
+  type SessionBackend,
+  type SpawnOutcome,
+} from "./backend.ts";
+import { AttachmentUnavailable } from "./attachments.ts";
 import { canonical } from "./gitdir.ts";
 import { log } from "./log.ts";
-import type { SettleLaunch } from "./session-events.ts";
+import { LaunchesClosed, type SettleLaunch } from "./session-events.ts";
 
 export interface HandlerContext {
   readonly backend: SessionBackend;
@@ -56,12 +66,24 @@ export interface HandlerContext {
   readonly metrics?: (request: MetricsRequest) => readonly MetricsSeries[];
   /**
    * Task launches (`EndedTasks`): a spawn with a task id is recorded here before
-   * it runs, and the `sessions` reply's `ended` and `ledgerSince` come from it.
+   * it runs, and the `sessions` reply's `ended`, `ledgerSince` and `interrupted` come from it.
    * Absent, spawns record nothing and neither field is sent.
    */
   readonly tasks?: TaskLaunches;
   /** Present only when self-update is wired; a broadcast with no consumer is dropped here. */
   readonly updateAvailable?: (notice: UpdateAvailable) => void;
+  /** Fetching a spawn's attachments (`attachments.ts`); absent, a spawn carrying any is refused. */
+  readonly attachments?: TaskAttachments;
+}
+
+/** What the handlers need of `attachments.ts`, bound to the daemon's own relay origin, token and key. */
+export interface TaskAttachments {
+  /** Fetches, verifies and writes them; throws `AttachmentUnavailable`, leaving nothing behind. */
+  readonly fetch: (taskId: string, refs: NonNullable<SpawnRequest["attachments"]>) => Promise<SessionAttachments>;
+  /** Notes the worktree the task's session landed in. Best effort. */
+  readonly landed: (taskId: string, worktree: string) => Promise<void>;
+  /** The directories earlier tasks in `worktree` fetched, for a continuation. */
+  readonly dirsFor: (worktree: string) => Promise<readonly string[]>;
 }
 
 /** What the handlers need of `EndedTasks` (`session-events.ts`). */
@@ -71,14 +93,28 @@ export interface TaskLaunches {
   /** The ledger holds the task as launched here, and no launch of it is in flight. */
   readonly launched: (taskId: string) => boolean;
   /**
-   * Where the ledger noted `taskId`'s worktree, for a continuation; `refused` says why there
-   * is none. Never from the wire: the request names a task, this machine says where it ran.
+   * Where the ledger noted `taskId`'s worktree and the session id it ran under, for a
+   * continuation; `refused` says why there is none. Never from the wire: the request names a
+   * task, this machine says where it ran and which conversation it was.
    */
-  readonly continuation: (
-    taskId: string,
-  ) => { readonly repo: string; readonly path: string } | { readonly refused: string };
+  readonly continuation: (taskId: string) =>
+    | {
+        readonly repo: string;
+        readonly path: string;
+        readonly session: string;
+        readonly exit?: number;
+        readonly vanished?: true;
+      }
+    | { readonly refused: string };
+  /** The daemon is about to close this task's pane itself; never judged vanished. */
+  readonly closing: (taskId: string) => Promise<void>;
   /** Resolves once no launch is in flight. */
   readonly settled: () => Promise<void>;
+  /**
+   * Taken once a launch is accepted; the returned release is called when the spawn's reply is out, so a
+   * restart's drain waits for the reply too. Absent, the drain ends with the launch.
+   */
+  readonly hold?: () => () => void;
   /** What the ledger holds of each launched task's PR and branch, for the scheduler's `sessions`. */
   readonly progress: () => readonly TaskProgress[];
   /**
@@ -89,6 +125,8 @@ export interface TaskLaunches {
   readonly report: (carried: ReadonlySet<string>) => {
     readonly ended: readonly string[];
     readonly ledgerSince: number;
+    /** The part of `ended` a past process died launching (`SessionsResponse.interrupted`). */
+    readonly interrupted?: readonly string[];
   };
 }
 
@@ -107,6 +145,13 @@ export function isSpawnRequest(payload: unknown): payload is SpawnRequest {
   // is the hazard the `baseBranch` capability exists for. Stacking lifts this refusal and
   // holds the name to `isBranchName` instead.
   if (obj["baseBranch"] !== undefined) return false;
+  // Malformed is never dropped: a session must not start without the files it was given. A
+  // continuation carries none — it finds its directories by worktree.
+  if (
+    obj["attachments"] !== undefined &&
+    (parseAttachmentManifest(obj["attachments"]) === null || obj["mode"] === "continue")
+  )
+    return false;
   // `continues` is the one field of a continuation and only of one. It is a ledger key: the
   // worktree comes from this machine's own record of that task, never from the request.
   if (obj["continues"] !== undefined && !isTaskId(obj["continues"])) return false;
@@ -189,6 +234,24 @@ async function relaunchRefusal(
 
 type SpawnRefusal = Extract<SpawnResponse, { readonly ok: false }>;
 
+function attachmentUnavailable(message: string): SpawnRefusal {
+  return { ok: false, code: "attachment_unavailable", message };
+}
+
+/**
+ * Who may hand a session files: the scheduler's own task spawn, the same gate as a
+ * continuation. Before anything is read, fetched or recorded.
+ */
+function attachmentsRefusal(ctx: HandlerContext, request: SpawnRequest, scheduler: boolean): SpawnRefusal | null {
+  if (request.attachments === undefined) return null;
+  if (!scheduler || request.client !== SCHEDULER_CLIENT)
+    return attachmentUnavailable("only the scheduler hands a session attachments");
+  if (request.taskId === undefined)
+    return attachmentUnavailable("attachments need the id of the task that carries them");
+  if (ctx.attachments === undefined) return attachmentUnavailable("this daemon cannot fetch attachments");
+  return null;
+}
+
 function notContinuable(message: string): SpawnRefusal {
   return { ok: false, code: "not_continuable", message };
 }
@@ -208,7 +271,7 @@ function continuationRefusal(request: SpawnRequest, scheduler: boolean): SpawnRe
 
 /**
  * The worktree a continuation resumes in, from this machine's launch ledger and checked
- * before anything is recorded or run (DESIGN.md, Daemon, "Continuing a failed task"): the
+ * before anything is recorded or run (DESIGN.md, Daemon, "Continuing a session"): the
  * clone `repo` resolved to is the one the ledger noted, and the path is canonical and under
  * that clone's `.claude/worktrees/`, so a ledger written by anything else cannot aim a
  * session at an arbitrary directory.
@@ -217,7 +280,7 @@ async function continuationSite(
   ctx: HandlerContext,
   request: SpawnRequest,
   repos: readonly RepoEntry[],
-): Promise<{ readonly path: string } | SpawnRefusal> {
+): Promise<Continuation | SpawnRefusal> {
   const site = request.continues === undefined ? undefined : ctx.tasks?.continuation(request.continues);
   if (site === undefined) return notContinuable("this machine keeps no launch record to continue from");
   if ("refused" in site) return notContinuable(site.refused);
@@ -237,7 +300,12 @@ async function continuationSite(
   if (real !== site.path || !real.startsWith(join(entry.path, ".claude", "worktrees") + sep)) {
     return notContinuable(`its noted path ${site.path} is not a worktree of ${request.repo}`);
   }
-  return { path: real };
+  return {
+    path: real,
+    session: site.session,
+    ...(site.exit === undefined ? {} : { exit: site.exit }),
+    ...(site.vanished === true ? { vanished: true as const } : {}),
+  };
 }
 
 async function handleSpawn(
@@ -245,6 +313,8 @@ async function handleSpawn(
   audit: SpawnAudit,
   payload: unknown,
   scheduler: boolean,
+  /** Settles once the transport has sent (or given up on) this reply; absent, the handler's return is as far as the hold goes. */
+  replied?: Promise<unknown>,
 ): Promise<SpawnResponse> {
   if (!isSpawnRequest(payload)) {
     await audit.rejected("malformed request");
@@ -259,6 +329,11 @@ async function handleSpawn(
       return refusal;
     }
   }
+  const gate = attachmentsRefusal(ctx, payload, scheduler);
+  if (gate !== null) {
+    await audit.failed(gate.code);
+    return gate;
+  }
   const refused = await relaunchRefusal(ctx, payload);
   if (refused !== null) {
     await audit.failed(refused.code, refused.id);
@@ -266,7 +341,7 @@ async function handleSpawn(
   }
   // Read once: a rescan in between must not pair the spawn with another clone.
   const repos = ctx.getRepos();
-  let continuation: { readonly path: string } | undefined;
+  let continuation: Continuation | undefined;
   if (payload.mode === "continue") {
     const site = await continuationSite(ctx, payload, repos);
     if ("code" in site) {
@@ -275,11 +350,36 @@ async function handleSpawn(
     }
     continuation = site;
   }
+  // Before the write-ahead record: a refused or abandoned fetch then leaves no ledger entry, and
+  // the leader's TTL check proves the task never landed. Past its deadline nothing launches.
+  let attachments: SessionAttachments | undefined;
+  if (payload.attachments !== undefined && payload.taskId !== undefined && ctx.attachments !== undefined) {
+    try {
+      attachments = await ctx.attachments.fetch(payload.taskId, payload.attachments);
+    } catch (err) {
+      const message = err instanceof AttachmentUnavailable ? err.message : String(err);
+      log.warn(`spawn refused: task ${quote(payload.taskId)} ${message}`);
+      await audit.failed("attachment_unavailable");
+      return attachmentUnavailable(message);
+    }
+  } else if (continuation !== undefined && ctx.attachments !== undefined) {
+    // None found is no refusal: the transcript holds the paths, still there or reaped.
+    const dirs = await ctx.attachments.dirsFor(continuation.path).catch(() => []);
+    if (dirs.length > 0) attachments = { dirs, files: [] };
+  }
   let settle: SettleLaunch | undefined;
+  let unhold: (() => void) | undefined;
   if (payload.taskId !== undefined && ctx.tasks !== undefined) {
     try {
       settle = await ctx.tasks.launch(payload.taskId);
+      unhold = ctx.tasks.hold?.();
     } catch (err) {
+      // A restart in progress is no refusal: `internal_error` is a transport code, which a leader leaves
+      // reserved to the TTL (`launch_error` would settle the task `failed`). Nothing was recorded or run.
+      if (err instanceof LaunchesClosed) {
+        await audit.failed("internal_error");
+        return { ok: false, code: "internal_error", message: err.message };
+      }
       // Launched unrecorded, a lost reply could later read as proof it never ran.
       log.error(`spawn refused: could not record task ${quote(payload.taskId)} before launching it: ${String(err)}`);
       await audit.failed("launch_error");
@@ -293,17 +393,36 @@ async function handleSpawn(
   try {
     let outcome: SpawnOutcome;
     try {
-      outcome = await ctx.backend.spawn(payload, repos, continuation);
+      outcome = await ctx.backend.spawn(payload, repos, continuation, attachments);
     } catch (err) {
       // A refusal launched nothing, except `task_running`: its session is an earlier launch of this task.
-      // Neither it nor a crash starts a note: the earlier launch's stays.
-      await settle?.(!(err instanceof SpawnFailure) || err.code === "task_running");
+      // Neither it nor a crash starts a note: the earlier launch's stays. A crash is no verdict — a window
+      // may exist — so the ledger marks it interrupted instead of reading it as ran-and-ended.
+      if (err instanceof SpawnFailure) await settle?.(err.code === "task_running");
+      else await settle?.(true, undefined, { unknown: true });
       throw err;
     }
     // Only a worktree has a branch of its own to watch; `here` runs in the clone itself.
     // A continuation watches the worktree it resumed, under its new task id.
     const entry = payload.mode !== "here" ? repos.find((r) => r.name === payload.repo) : undefined;
-    await settle?.(true, entry === undefined ? {} : { site: { repo: entry.path, worktree: outcome.path } });
+    await settle?.(true, {
+      ...(entry === undefined
+        ? {}
+        : {
+            site: {
+              repo: entry.path,
+              worktree: outcome.path,
+              ...(outcome.session === undefined ? {} : { session: outcome.session }),
+            },
+          }),
+      ...(outcome.server === undefined ? {} : { server: outcome.server }),
+    });
+    // A continuation finds the directory by this note; `here` has no worktree, and the age prune covers it.
+    if (payload.attachments !== undefined && payload.taskId !== undefined && payload.mode === "worktree") {
+      await ctx.attachments?.landed(payload.taskId, outcome.path).catch((err: unknown) => {
+        log.warn(`could not note the worktree of task ${quote(payload.taskId ?? "")}'s attachments: ${String(err)}`);
+      });
+    }
     await audit.ok(outcome);
     // The app writes this list straight into its cache, so it is read only now,
     // after the backend has watched the new window register (or give up): a
@@ -328,6 +447,12 @@ async function handleSpawn(
     }
     log.error(`spawn crashed: ${String(err)}`);
     return { ok: false, code: "internal_error", message: String(err) };
+  } finally {
+    // The drain waits through the reply's send where the transport says when that was.
+    if (unhold !== undefined) {
+      if (replied === undefined) unhold();
+      else void replied.then(unhold, unhold);
+    }
   }
 }
 
@@ -342,8 +467,12 @@ async function handleDespawn(ctx: HandlerContext, audit: DespawnAudit, payload: 
     return { ok: false, code: "internal_error", message: "this machine's session backend cannot despawn" };
   }
   let result: DespawnResult;
+  const tasks = ctx.tasks;
   try {
-    result = await ctx.backend.despawn(payload.id, { force: payload.force === true });
+    result = await ctx.backend.despawn(payload.id, {
+      force: payload.force === true,
+      ...(tasks === undefined ? {} : { closing: (id: string) => tasks.closing(id) }),
+    });
   } catch (err) {
     if (err instanceof DespawnFailure) {
       await audit.failed(err.code);
@@ -394,7 +523,8 @@ async function auditRequest(ctx: HandlerContext, origin: SpawnOrigin, op: string
 /**
  * `ended` is reckoned from this reply's own `sessions`, not a second tmux read:
  * a session ending between two reads would otherwise be in neither, which is
- * what proves a spawn never landed.
+ * what proves a spawn never landed. `interrupted` is the part of `ended` a past
+ * process died launching, and goes with it.
  *
  * Only the scheduler waits out a launch in flight, which is what makes the two
  * fields a proof (DESIGN.md, "Session events"), and only it gets them. A spawn
@@ -414,8 +544,14 @@ async function listSessions(ctx: HandlerContext, scheduler: boolean): Promise<Se
   await ctx.tasks?.harvestExits?.();
   const at = Date.now();
   if (ctx.tasks === undefined || !scheduler) return { sessions, at };
-  const { ended, ledgerSince } = ctx.tasks.report(new Set(sessions.flatMap((s) => s.taskId ?? [])));
-  const base: SessionsResponse = { sessions, at, ...(ended.length === 0 ? {} : { ended }), ledgerSince };
+  const { ended, ledgerSince, interrupted } = ctx.tasks.report(new Set(sessions.flatMap((s) => s.taskId ?? [])));
+  const base: SessionsResponse = {
+    sessions,
+    at,
+    ...(ended.length === 0 ? {} : { ended }),
+    ledgerSince,
+    ...(interrupted === undefined || interrupted.length === 0 ? {} : { interrupted }),
+  };
   return fitProgress(base, ctx.tasks.progress());
 }
 
@@ -493,7 +629,11 @@ export function createLocalOps(ctx: HandlerContext, origin: SpawnOrigin): LocalO
     sessions: () => run("sessions", crypto.randomUUID(), () => listSessions(ctx, true)),
     spawn: (payload) => {
       const taskId = isRecord(payload) && isTaskId(payload["taskId"]) ? payload["taskId"] : crypto.randomUUID();
-      return run("spawn", taskId, () => handleSpawn(ctx, audit, payload, true));
+      // The reply is a return value here: handed over once the handler is done.
+      const replied = Promise.withResolvers<void>();
+      return run("spawn", taskId, () => handleSpawn(ctx, audit, payload, true, replied.promise)).finally(() =>
+        replied.resolve(),
+      );
     },
     despawn: (payload) => run("despawn", crypto.randomUUID(), () => handleDespawn(ctx, despawnTrail, payload)),
   };
@@ -520,10 +660,10 @@ async function guarded<T>(op: string, body: () => Promise<T>): Promise<T | Error
 export function createHandler(
   ctx: HandlerContext,
   origin: SpawnOrigin = "relay",
-): (plain: Plain, from?: string) => Promise<Plain | null> {
+): (plain: Plain, from?: string, replied?: Promise<unknown>) => Promise<Plain | null> {
   const audit = spawnAudit(origin, ctx.auditSink);
   const despawnTrail = despawnAudit(origin, ctx.auditSink);
-  return async (plain: Plain, from?: string): Promise<Plain | null> => {
+  return async (plain: Plain, from?: string, replied?: Promise<unknown>): Promise<Plain | null> => {
     await auditRequest(ctx, origin, plain.op, plain.id);
 
     const reply = (payload: unknown): Plain => ({
@@ -540,7 +680,7 @@ export function createHandler(
         case "sessions":
           return { payload: await listSessions(ctx, from === SCHEDULER_ID) };
         case "spawn":
-          return { payload: await handleSpawn(ctx, audit, plain.payload, from === SCHEDULER_ID) };
+          return { payload: await handleSpawn(ctx, audit, plain.payload, from === SCHEDULER_ID, replied) };
         case "despawn":
           return { payload: await handleDespawn(ctx, despawnTrail, plain.payload) };
         case "metrics":

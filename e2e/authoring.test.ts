@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { BATCH_STRATEGY, RelayClient, type Task } from "@seance/shared";
+import { RelayClient, type Task } from "@seance/shared";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { LazyRelay } from "../daemon/src/app-relay.ts";
@@ -57,7 +57,7 @@ async function runningPredecessor(app: AppHandle, prompt: string): Promise<{ id:
 describe("authoring: dependencies, batches and Linear links, from the PWA and from MCP", () => {
   // "opened" needs a PR and a pushed branch, which a stub session never makes, so a dependent
   // stays blocked until the predecessor is marked done — which releases every edge on it.
-  test("the PWA's After, Batch and Linear fields reach the stored task, which waits on its predecessor and then runs", async () => {
+  test("the PWA's After field reaches the stored task, which waits on its predecessor and then runs", async () => {
     const app = startApp(stack);
     const windows: string[] = [];
     try {
@@ -65,8 +65,6 @@ describe("authoring: dependencies, batches and Linear links, from the PWA and fr
       windows.push(p.window);
 
       app.store.addAfter(p.id, "opened");
-      app.store.startBatch();
-      app.store.setLinearIssue("ENG-123");
       app.store.setPrompt("authoring dependent (pwa)");
       await app.store.spawn();
       const queued = app.store.getState().verdict;
@@ -76,16 +74,11 @@ describe("authoring: dependencies, batches and Linear links, from the PWA and fr
 
       const stored = await taskOf(b);
       expect(stored?.spec.deps).toEqual([{ task: p.id, after: "opened" }]);
-      // The fixed strategy is stored for older readers, whose parser needs one.
-      expect(stored?.spec.batch).toMatchObject({ index: 1, strategy: BATCH_STRATEGY });
-      expect(stored?.spec.linear).toEqual({ issue: "ENG-123" });
+      expect(stored?.spec).not.toHaveProperty("batch");
+      expect(stored?.spec).not.toHaveProperty("linear");
       expect(stored?.spec.client).toBe("pwa");
-      // The form is ready for the next member: its per-task fields cleared, the batch one on.
-      expect(app.store.getState().form).toMatchObject({
-        after: [],
-        linearIssue: "",
-        batch: { id: stored?.spec.batch?.id, next: 2 },
-      });
+      // The form is ready for the next task: its per-task fields cleared.
+      expect(app.store.getState().form).toMatchObject({ after: [] });
 
       const done = await app.client.markDone(p.id);
       expect(done).toMatchObject({ task: { id: p.id, state: "done" } });

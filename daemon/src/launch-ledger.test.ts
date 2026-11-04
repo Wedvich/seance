@@ -3,7 +3,14 @@ import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseTaskProgressList } from "@seance/shared";
-import { LaunchLedger, LEDGER_MAX, LEDGER_MAX_AGE_MS, type TaskNote } from "./launch-ledger.ts";
+import {
+  LaunchLedger,
+  LEDGER_MAX,
+  pathOwners,
+  type NotedTask,
+  LEDGER_MAX_AGE_MS,
+  type TaskNote,
+} from "./launch-ledger.ts";
 import { OOM_REFRESH_MS } from "./oom-kill.ts";
 
 let dir: string;
@@ -152,9 +159,16 @@ describe("LaunchLedger progress notes", () => {
     expect(ledger.progress()).toEqual([]);
   });
 
-  test("an untouched ledger writes plain v1; a note adds only a top-level progress array", async () => {
+  test("a settled ledger writes plain v1; a note adds only a top-level progress array", async () => {
     const ledger = await LaunchLedger.open(path, () => 100);
     await ledger.record("t1");
+    expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
+      v: 1,
+      since: 100,
+      tasks: [["t1", 100]],
+      pending: ["t1"],
+    });
+    await ledger.clearPending("t1");
     expect(JSON.parse(await readFile(path, "utf8"))).toEqual({ v: 1, since: 100, tasks: [["t1", 100]] });
     await ledger.note("t1", { repo: "/r", path: "/r/.claude/worktrees/x", branch: "worktree-x" });
     const raw: unknown = JSON.parse(await readFile(path, "utf8"));
@@ -384,6 +398,34 @@ describe("LaunchLedger progress notes", () => {
     expect(parseTaskProgressList(progress)).not.toBeNull();
   });
 
+  test("a session id survives a reopen beside its site, sticks across notes, stays out of progress, and a malformed one is dropped", async () => {
+    const session = "0b6e1c52-3f0d-4a8e-9c7b-2d5f4e6a1b90";
+    const ledger = await LaunchLedger.open(path, () => 9);
+    for (const id of ["t1", "t2"]) await ledger.record(id);
+    await ledger.startNote("t1", { repo: "/r", path: "/r/.claude/worktrees/a", session });
+    // Not a UUID: never handed to `--resume`, so never noted.
+    await ledger.startNote("t2", { repo: "/r", path: "/r/.claude/worktrees/b", session: "--dangerous" });
+    await ledger.note("t1", { branch: "worktree-a" });
+    expect(ledger.notes()[0]?.session).toBe(session);
+    expect(ledger.notes()[1]).not.toHaveProperty("session");
+    expect(ledger.progress()).toEqual([{ taskId: "t1", at: 9, branch: "worktree-a" }]);
+
+    const reopened = await LaunchLedger.open(path, () => 10);
+    expect(reopened.notes()[0]).toMatchObject({ path: "/r/.claude/worktrees/a", session });
+    const file = JSON.parse(await readFile(path, "utf8"));
+    file.progress[0].session = `${session} --fork-session`;
+    file.progress[1].session = 42;
+    await writeFile(path, JSON.stringify(file));
+    const tampered = await LaunchLedger.open(path, () => 11);
+    expect(tampered.notes()[0]).toMatchObject({ path: "/r/.claude/worktrees/a" });
+    expect(tampered.notes()[0]).not.toHaveProperty("session");
+    expect(tampered.notes()[1]).not.toHaveProperty("session");
+
+    // A relaunch to no site starts without it.
+    await reopened.startNote("t1");
+    expect(reopened.notes().find((n) => n.taskId === "t1")).toBeUndefined();
+  });
+
   test("an exit status survives a reopen, reaches progress alone, and a relaunch starts without it", async () => {
     const ledger = await LaunchLedger.open(path, () => 9);
     await ledger.record("t1");
@@ -546,5 +588,256 @@ describe("LaunchLedger reported notes (#21)", () => {
     const file = JSON.parse(await readFile(path, "utf8"));
     expect(file.tasks).toEqual([["t1", 9]]);
     expect(file.progress[0]).toMatchObject({ taskId: "t1", reported: true });
+  });
+});
+
+describe("LaunchLedger vanished notes", () => {
+  async function opened(clock: { now: number }): Promise<LaunchLedger> {
+    const ledger = await LaunchLedger.open(path, () => clock.now);
+    await ledger.record("t1");
+    return ledger;
+  }
+
+  test("a here-mode launch with only a server still gets a note, and is unaccounted for", async () => {
+    const clock = { now: 10 };
+    const ledger = await opened(clock);
+    expect(ledger.unaccounted()).toEqual([]);
+    await ledger.startNote("t1", undefined, undefined, 4242);
+    expect(ledger.unaccounted()).toEqual([{ taskId: "t1", recordedAt: 10, server: 4242 }]);
+    // Neither the server nor anything else is progress.
+    expect(ledger.progress()).toEqual([]);
+  });
+
+  test("vanished is noted, durable across a reopen, reaches progress, and moves at; server and closedHere never do", async () => {
+    const clock = { now: 10 };
+    const ledger = await opened(clock);
+    await ledger.startNote("t1", undefined, undefined, 4242);
+    const startedAt = ledger.notes()[0]?.at;
+    clock.now = 20;
+    expect(await ledger.note("t1", { closedHere: true })).toBe(true);
+    expect(ledger.notes()[0]?.at).toBe(startedAt);
+    expect(ledger.progress()).toEqual([]);
+    // Closed here: never judged, and a second closedHere is no write.
+    expect(ledger.unaccounted()).toEqual([]);
+    expect(await ledger.noteVanished("t1", 10)).toBe(false);
+
+    const second = await opened({ now: 30 });
+    await second.record("t2");
+    await second.startNote("t2", undefined, undefined, 4242);
+    expect(await second.noteVanished("t2", 30)).toBe(true);
+    expect(second.progress()).toEqual([expect.objectContaining({ taskId: "t2", vanished: true })]);
+    expect(second.progress()[0]).not.toHaveProperty("server");
+    expect(second.progress()[0]).not.toHaveProperty("closedHere");
+    expect(await second.noteVanished("t2", 30)).toBe(false);
+
+    const reopened = await LaunchLedger.open(path, () => 99);
+    expect(reopened.progress()).toEqual([expect.objectContaining({ taskId: "t2", vanished: true })]);
+    expect(reopened.unaccounted()).toEqual([]);
+  });
+
+  test("noteVanished is refused after an exit, for a relaunch, an unknown id, or a launch with no server; progress drops it once an exit is noted", async () => {
+    const clock = { now: 10 };
+    const ledger = await opened(clock);
+    await ledger.startNote("t1", undefined, undefined, 7);
+    expect(await ledger.noteVanished("t1", 999)).toBe(false);
+    expect(await ledger.noteVanished("nope", 10)).toBe(false);
+    // A relaunch moves the record time, so a candidate snapshotted before it is refused.
+    clock.now = 50;
+    await ledger.record("t1");
+    expect(await ledger.noteVanished("t1", 10)).toBe(false);
+    await ledger.startNote("t1", undefined, undefined, 7);
+    await ledger.note("t1", { exit: 0 });
+    expect(await ledger.noteVanished("t1", 50)).toBe(false);
+
+    await ledger.record("t3");
+    await ledger.startNote("t3", undefined, undefined, 7);
+    expect(await ledger.noteVanished("t3", 50)).toBe(true);
+    await ledger.note("t3", { exit: 2 });
+    expect(ledger.progress().find((p) => p.taskId === "t3")).toEqual(expect.objectContaining({ exit: 2 }));
+    expect(ledger.progress().find((p) => p.taskId === "t3")?.vanished).toBeUndefined();
+
+    const bare = await opened({ now: 60 });
+    await bare.record("t4");
+    await bare.startNote("t4", { repo: "/r", path: "/r/wt" });
+    expect(await bare.noteVanished("t4", 60)).toBe(false);
+  });
+
+  test("a file from before these fields parses, a malformed server or flag is dropped, and the wire parser accepts a vanished entry", async () => {
+    await writeFile(
+      path,
+      JSON.stringify({
+        v: 1,
+        since: 1,
+        tasks: [["t1", 5]],
+        progress: [{ taskId: "t1", at: 5, branch: "b", server: -3, closedHere: "yes", vanished: 1 }],
+      }),
+    );
+    const ledger = await LaunchLedger.open(path, () => 9);
+    expect(ledger.notes()[0]).toEqual({ taskId: "t1", at: 5, branch: "b" });
+    await ledger.note("t1", { vanished: true });
+    expect(parseTaskProgressList(ledger.progress())).toEqual(ledger.progress());
+  });
+});
+
+describe("pathOwners", () => {
+  const note = (taskId: string, at: string | undefined, siteAt?: number): NotedTask => ({
+    taskId,
+    at: 0,
+    ...(at === undefined ? {} : { path: at }),
+    ...(siteAt === undefined ? {} : { siteAt }),
+  });
+
+  test("the newer site owns a path, whatever the order", () => {
+    expect(pathOwners([note("a", "/p", 5), note("b", "/p", 3)]).get("/p")?.taskId).toBe("a");
+    expect(pathOwners([note("b", "/p", 3), note("a", "/p", 5)]).get("/p")?.taskId).toBe("a");
+  });
+
+  test("a tie goes to the later note, and a missing siteAt counts as oldest", () => {
+    expect(pathOwners([note("a", "/p", 5), note("b", "/p", 5)]).get("/p")?.taskId).toBe("b");
+    expect(pathOwners([note("a", "/p", 1), note("b", "/p")]).get("/p")?.taskId).toBe("a");
+  });
+
+  test("notes without a path are skipped", () => {
+    expect(pathOwners([note("a", undefined, 5)]).size).toBe(0);
+  });
+});
+
+describe("LaunchLedger interrupted launches", () => {
+  const read = async (): Promise<unknown> => JSON.parse(await readFile(path, "utf8"));
+  const reopen = (now = 1_000): Promise<LaunchLedger> => LaunchLedger.open(path, () => now);
+
+  test("a launch recorded and never settled reads back interrupted, still in ids, with since unchanged", async () => {
+    const first = await reopen(100);
+    await first.record("t1");
+    const second = await reopen(5_000);
+    expect(second.ids()).toEqual(["t1"]);
+    expect(second.interrupted()).toEqual(["t1"]);
+    expect(second.since()).toBe(first.since());
+    // Opening writes nothing: the promotion is memory until something else persists it.
+    expect(await read()).toEqual({ v: 1, since: 100, tasks: [["t1", 100]], pending: ["t1"] });
+  });
+
+  test("a promoted id stays interrupted across further reopens until cleared", async () => {
+    const first = await reopen(100);
+    await first.record("t1");
+    const second = await reopen();
+    await second.record("t2");
+    await second.clearPending("t2");
+    expect((await reopen()).interrupted()).toEqual(["t1"]);
+  });
+
+  test("a landed launch is not interrupted: startNote with a site, and the no-site, no-PR form", async () => {
+    const ledger = await reopen(100);
+    await ledger.record("t1");
+    await ledger.startNote("t1", { repo: "/r", path: "/w" });
+    await ledger.record("t2");
+    await ledger.startNote("t2");
+    const reopened = await reopen();
+    expect(reopened.interrupted()).toEqual([]);
+    expect(reopened.ids()).toEqual(["t1", "t2"]);
+    expect(await read()).not.toHaveProperty("pending");
+  });
+
+  test("clearPending settles it: not interrupted after a reopen, and the file is plain v1", async () => {
+    const ledger = await reopen(100);
+    await ledger.record("t1");
+    await ledger.clearPending("t1");
+    expect(await read()).toEqual({ v: 1, since: 100, tasks: [["t1", 100]] });
+    expect((await reopen()).interrupted()).toEqual([]);
+  });
+
+  test("clearPending of an id that is not pending writes nothing", async () => {
+    const ledger = await reopen(100);
+    await ledger.record("t1");
+    await ledger.clearPending("t1");
+    await rm(path);
+    await ledger.clearPending("t1");
+    await ledger.clearPending("never");
+    await expect(readFile(path, "utf8")).rejects.toThrow();
+  });
+
+  test("retract clears the id from everything", async () => {
+    const first = await reopen(100);
+    await first.record("t1");
+    const second = await reopen();
+    expect(second.interrupted()).toEqual(["t1"]);
+    await second.record("t2");
+    await second.retract("t2");
+    await second.retract("t1");
+    expect(second.interrupted()).toEqual([]);
+    expect(await read()).toEqual({ v: 1, since: 100, tasks: [] });
+  });
+
+  test("clearInterrupted persists across a reopen, and removes the key once nothing is marked", async () => {
+    const first = await reopen(100);
+    await first.record("t1");
+    await first.record("t2");
+    const second = await reopen();
+    const cleared = second.clearInterrupted(["t1", "unknown"]);
+    // Memory changed before the first await.
+    expect(second.interrupted()).toEqual(["t2"]);
+    await cleared;
+    expect((await reopen()).interrupted()).toEqual(["t2"]);
+    await second.clearInterrupted(["t2"]);
+    expect(await read()).toEqual({
+      v: 1,
+      since: 100,
+      tasks: [
+        ["t1", 100],
+        ["t2", 100],
+      ],
+    });
+  });
+
+  test("clearInterrupted never rejects when the write fails", async () => {
+    const first = await reopen(100);
+    await first.record("t1");
+    const second = await reopen();
+    await rm(path);
+    await mkdir(path, { recursive: true });
+    await second.clearInterrupted(["t1"]);
+    expect(second.interrupted()).toEqual([]);
+  });
+
+  test("eviction drops the marks with the id", async () => {
+    const clock = { now: 100 };
+    const first = await LaunchLedger.open(path, () => clock.now);
+    await first.record("old");
+    const second = await LaunchLedger.open(path, () => clock.now);
+    expect(second.interrupted()).toEqual(["old"]);
+    clock.now += LEDGER_MAX_AGE_MS + 1;
+    expect(second.ids()).toEqual([]);
+    expect(second.interrupted()).toEqual([]);
+    await second.record("new");
+    expect(await read()).toMatchObject({ tasks: [["new", clock.now]], pending: ["new"] });
+    expect(await read()).not.toHaveProperty("interrupted");
+  });
+
+  test("malformed pending/interrupted never reset since: they are skipped", async () => {
+    for (const bad of ["x", 7, null, { a: 1 }, [1, null, "unknown", "bad id!"]]) {
+      await writeFile(
+        path,
+        `${JSON.stringify({ v: 1, since: 1234, tasks: [["t1", 2000]], pending: bad, interrupted: bad })}\n`,
+      );
+      const ledger = await reopen(5_000);
+      expect(ledger.since()).toBe(1234);
+      expect(ledger.ids()).toEqual(["t1"]);
+      expect(ledger.interrupted()).toEqual([]);
+    }
+  });
+
+  test("an old daemon's file (no pending) yields no interrupted ids", async () => {
+    await writeFile(path, '{"v":1,"since":1234,"tasks":[["t1",2000]]}\n');
+    expect((await reopen(5_000)).interrupted()).toEqual([]);
+  });
+
+  test("a failed record leaves nothing pending in memory", async () => {
+    const ledger = await reopen(100);
+    await mkdir(join(path, "x"), { recursive: true });
+    await ledger.record("t1").catch(() => undefined);
+    expect(ledger.ids()).toEqual([]);
+    await rm(path, { recursive: true, force: true });
+    await ledger.clearPending("t1");
+    await expect(readFile(path, "utf8")).rejects.toThrow();
   });
 });

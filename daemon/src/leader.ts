@@ -63,10 +63,12 @@ import type { VersionFloor } from "./version-floor.ts";
 // For the daemon's tests and its other modules (`sourceOf`: `run-capabilities.ts`), which the
 // layering rule keeps from importing `scheduler/` themselves.
 export {
+  DEFAULT_CONFIG,
   MemoryQueueStore,
   sourceOf,
   StoreRevoked,
   type QueueStore,
+  type SchedulerConfig,
   type StoreEntry,
   type Task,
 } from "@seance/scheduler";
@@ -544,6 +546,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
       if (settingsState !== "pending") pushSender.send(push);
       else if (parked.length < PARKED_ALERTS_MAX) parked.push(push);
     },
+    onIdleChange: nudge.note,
     ...(opts.config === undefined ? {} : { config: opts.config }),
   });
 

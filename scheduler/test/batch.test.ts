@@ -89,7 +89,7 @@ describe("batches", () => {
       // oxlint-disable-next-line no-await-in-loop -- one scheduler per strategy
       await pass(scheduler);
       expect(dispatched(fleet)).toEqual(["m0", "m1", "m2"]);
-      expect(scheduler.task("m0")?.spec.batch?.strategy).toEqual({ mode: "auto" });
+      expect(scheduler.task("m0")?.spec.batch).not.toHaveProperty("strategy");
       // No decision names a batch: no batch_order, no batch-scoped cap.
       for (const id of ["m0", "m1", "m2"]) {
         const decision = scheduler.task(id)?.decision;

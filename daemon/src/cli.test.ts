@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   cmdInstall,
   parseContinueArgs,
+  parseStartArgs,
   parseDespawnArgs,
   parseInstallArgs,
   parseModArgs,
@@ -50,6 +51,15 @@ describe("parseContinueArgs", () => {
   test("no id, a dangling flag, or an unknown flag is a usage error", () => {
     for (const argv of [[], ["-p", "x"], ["t-1", "-p"], ["t-1", "--now"]]) {
       expect(() => parseContinueArgs(argv)).toThrow("usage: seanced continue");
+    }
+  });
+});
+
+describe("parseStartArgs", () => {
+  test("takes exactly one task id", () => {
+    expect(parseStartArgs(["t-1"])).toEqual({ taskId: "t-1" });
+    for (const argv of [[], ["t-1", "t-2"], ["--now"]]) {
+      expect(() => parseStartArgs(argv)).toThrow("usage: seanced start");
     }
   });
 });
@@ -105,6 +115,17 @@ describe("parseSpawnArgs", () => {
       now: true,
     });
     expect(parseSpawnArgs(["seance", "go", "--now"])).toEqual({ repo: "seance", here: false, prompt: "go", now: true });
+  });
+
+  test("--start parses beside the pin flags, and is refused beside --now", () => {
+    expect(parseSpawnArgs(["--start", "--machine", "here", "seance", "go"])).toEqual({
+      repo: "seance",
+      here: false,
+      prompt: "go",
+      machine: "here",
+      start: true,
+    });
+    expect(() => parseSpawnArgs(["--now", "--start", "seance"])).toThrow("--now spawns here directly");
   });
 
   test("--machine, --account and repeatable --not need no flag, each taking the next word", () => {

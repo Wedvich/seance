@@ -5,15 +5,17 @@ import {
   PR_STATUS_STALE_MS,
   QUEUE_MAX_TASKS,
   type ExclaveInfo,
+  type IdleTaskRef,
   type Machine,
   type PauseHold,
   type PrStatus,
+  type Reason,
   type RelayState,
   type Task,
 } from "@seance/shared";
-import { deriveAfterSheet, deriveQueue } from "../src/queue-view.ts";
+import { armTap, deriveAfterSheet, deriveQueue, disarmRow, primaryAction } from "../src/queue-view.ts";
 import { DEFAULT_FORM, RESCAN_IDLE, type QueueState } from "../src/state.ts";
-import { BATCH_STRATEGY, CAPABILITIES, reasonText } from "@seance/shared";
+import { CAPABILITIES, reasonText } from "@seance/shared";
 import { deriveView, failedBody, type AppState } from "../src/view.ts";
 
 const NOW = 1_800_000_000_000;
@@ -69,9 +71,13 @@ function state(
     queueView,
     taskAction: null,
     queueNotice: null,
+    startNowRefusal: null,
     pausing: false,
     discarding: false,
     accounts: { aliases: {}, nameable: true, saving: null, notice: null },
+    attachments: [],
+    attachNotice: null,
+    upload: null,
     ...overrides,
   };
 }
@@ -82,8 +88,23 @@ function task(id: string, fields: Partial<Task> = {}): Task {
 
 const placedAt = { deviceId: "dev-a", exclave: "default", clone: "app", window: "w" };
 
-function ok(tasks: readonly Task[], holds: readonly PauseHold[] = [], skew = 0): QueueState {
-  return { kind: "ok", tasks, holds, unreadable: [], at: NOW + skew, skew };
+function ok(
+  tasks: readonly Task[],
+  holds: readonly PauseHold[] = [],
+  skew = 0,
+  idle: readonly IdleTaskRef[] = [],
+  globalMax?: number,
+): QueueState {
+  return {
+    kind: "ok",
+    tasks,
+    holds,
+    unreadable: [],
+    idle,
+    at: NOW + skew,
+    skew,
+    ...(globalMax === undefined ? {} : { globalMax }),
+  };
 }
 
 function titles(view: ReturnType<typeof deriveQueue>): string[] {
@@ -126,6 +147,20 @@ describe("deriveQueue", () => {
 
     const only = deriveQueue(state(ok([task("w1")])), NOW);
     expect(titles(only)).toEqual(["Waiting"]);
+  });
+
+  test("Waiting lists oldest first, the order the scheduler routes it", () => {
+    const view = deriveQueue(
+      state(
+        ok([
+          task("newest", { createdAt: NOW - 1_000 }),
+          task("oldest", { state: "queued", createdAt: NOW - 90_000 }),
+          task("middle", { state: "blocked", createdAt: NOW - 30_000 }),
+        ]),
+      ),
+      NOW,
+    );
+    expect(view.sections[0]?.rows.map((r) => r.id)).toEqual(["oldest", "middle", "newest"]);
   });
 
   test("tasks on an asleep machine leave Needs you and Running for Asleep, in their own order", () => {
@@ -551,6 +586,13 @@ describe("deriveQueue", () => {
     ]);
     expect(deriveQueue(state(list), NOW).summary).toBe("2 running · 1 waiting");
     expect(deriveQueue(state(ok([])), NOW).summary).toBe("0 running · 0 waiting");
+    // The cap is the denominator, and a run-now task can push the numerator past it.
+    const running = [
+      task("a", { state: "running", assignment: placedAt }),
+      task("b", { state: "running", assignment: placedAt }),
+    ];
+    expect(deriveQueue(state(ok(running, [], 0, [], 2)), NOW).summary).toBe("2/2 running · 0 waiting");
+    expect(deriveQueue(state(ok(running, [], 0, [], 1)), NOW).summary).toBe("2/1 running · 0 waiting");
     expect(deriveQueue(state(null), NOW).summary).toBeNull();
   });
 
@@ -567,12 +609,37 @@ describe("deriveQueue", () => {
     expect(deriveQueue(state(ok(many.slice(1))), NOW).partial).toBeNull();
   });
 
+  test("a task the leader released idle leaves Running for Idle, says since when on this device's clock, and counts in the summary", () => {
+    const at = { deviceId: "dev-a", exclave: "main", clone: "app" };
+    const idle = task("idle", { state: "running", assignment: at });
+    const busy = task("busy", { state: "running", assignment: at });
+    // A reply's idle entry for a task an action since settled: what it now is wins.
+    const settled = task("settled", { state: "done", assignment: at });
+    const skew = 60_000;
+    const released = [
+      { taskId: "idle", since: NOW + skew - 20 * 60_000 },
+      { taskId: "settled", since: NOW + skew - 20 * 60_000 },
+    ];
+    const view = deriveQueue(state(ok([idle, busy, settled], [], skew, released)), NOW);
+    expect(view.sections.map((s) => [s.title, s.rows.map((r) => r.id)])).toEqual([
+      ["Running", ["busy"]],
+      ["Idle", ["idle"]],
+      ["Finished", ["settled"]],
+    ]);
+    const row = view.sections.find((s) => s.title === "Idle")?.rows[0];
+    expect(row?.body).toBe("Idle at its prompt since 20m ago — its slot is free");
+    expect(row?.markDoneEndsSession).toBe(true);
+    expect(view.summary).toBe("1 running · 1 idle · 0 waiting");
+    expect(deriveQueue(state(ok([busy])), NOW).summary).toBe("1 running · 0 waiting");
+  });
+
   test("unreadable records get a line of their own, counted, and none gets none", () => {
     const listing = (count: number): QueueState => ({
       kind: "ok",
       tasks: [],
       holds: [],
       unreadable: Array.from({ length: count }, (_, i) => ({ taskId: `j${i}`, version: 1, reason: "unopenable" })),
+      idle: [],
       at: NOW,
       skew: 0,
     });
@@ -587,7 +654,7 @@ describe("deriveQueue", () => {
 });
 
 describe("authoring on a row", () => {
-  const batch = { id: "b-1", index: 2, strategy: BATCH_STRATEGY } as const;
+  const batch = { id: "b-1", index: 2 } as const;
   const rowOf = (tasks: readonly Task[], id: string) =>
     deriveQueue(state(ok(tasks)), NOW)
       .sections.flatMap((section) => section.rows)
@@ -638,6 +705,20 @@ describe("authoring on a row", () => {
     const member = task("m", { spec: { repo: ORIGIN, mode: "worktree", batch } });
     expect(rowOf([member], "m")?.batch).toBe("Batch #2");
     expect(rowOf([task("n")], "n")?.batch).toBeNull();
+  });
+
+  test("a task carrying files never shows their names", () => {
+    const ref = (name: string, i: number) => ({
+      id: `0000000${i}-0000-4000-8000-000000000000`,
+      name,
+      type: "image/png",
+      size: 1,
+      hash: "h".repeat(43),
+    });
+    const attached = task("f", {
+      spec: { repo: ORIGIN, mode: "worktree", attachments: [ref("secret.png", 1), ref("b.png", 2)] },
+    });
+    expect(JSON.stringify(rowOf([attached], "f"))).not.toContain("secret.png");
   });
 
   test("a pin and an avoid list read in the verdict's words on every state, by display label", () => {
@@ -698,19 +779,19 @@ describe("authoring on a row", () => {
     expect(placement).toBe("Pinned to acct acct-123");
   });
 
-  test("a task can be followed up while it can still be waited on, or once it is done; not after it failed or was cancelled", () => {
+  test("a task can be followed up only while it can still be waited on, not once it has finished", () => {
     const can = (fields: Partial<Task>): boolean | undefined => rowOf([task("t", fields)], "t")?.canFollowUp;
     expect(can({ state: "queued" })).toBe(true);
     expect(can({ state: "running", assignment: placedAt })).toBe(true);
     expect(can({ state: "awaiting-merge" })).toBe(true);
-    expect(can({ state: "done", doneBy: "session" })).toBe(true);
+    expect(can({ state: "done", doneBy: "session" })).toBe(false);
     expect(can({ state: "failed", failure: { code: "repo_not_found", message: "x" } })).toBe(false);
     expect(can({ state: "cancelled" })).toBe(false);
   });
 });
 
 describe("continuing a failed task", () => {
-  const CAN = [CAPABILITIES.continueTask];
+  const CAN = [CAPABILITIES.continueTask, CAPABILITIES.continueSession];
   const failed = task("f", {
     state: "failed",
     failure: { code: "session_failed", message: "the session ended with exit 137" },
@@ -775,13 +856,68 @@ describe("continuing a failed task", () => {
     for (const t of [other, inPlace, running]) expect(rowOf([t], t.id, CAN)?.canContinue).toBe(false);
   });
 
-  test("withdrawn once a continuation is past the queue in any state; a queued, blocked, failed or cancelled one does not hold it", () => {
-    for (const held of ["reserved", "running", "needs-input", "lost", "awaiting-merge", "done"] as const) {
+  test("withdrawn while a continuation waits or once one is past the queue; a failed or unplaced cancelled one gives it back", () => {
+    for (const held of [
+      "queued",
+      "blocked",
+      "ready",
+      "reserved",
+      "running",
+      "needs-input",
+      "lost",
+      "awaiting-merge",
+      "done",
+    ] as const) {
       expect(rowOf([failed, continuation({ state: held })], "f", CAN)?.canContinue, held).toBe(false);
     }
-    for (const free of ["queued", "blocked", "ready", "failed", "cancelled"] as const) {
-      expect(rowOf([failed, continuation({ state: free })], "f", CAN)?.canContinue).toBe(true);
+    const refused = continuation({ state: "failed", failure: { code: "not_continuable", message: "m" } });
+    for (const free of [refused, continuation({ state: "failed" }), continuation({ state: "cancelled" })]) {
+      expect(rowOf([failed, free], "f", CAN)?.canContinue, free.failure?.code ?? free.state).toBe(true);
     }
+  });
+
+  test("a waiting continuation shows on the earlier card by its title, pointing at its row; nowhere else", () => {
+    const waiting = continuation({
+      spec: { repo: ORIGIN, mode: "continue", title: "Fix the thing again", continues: { task: "f", at: placedAt } },
+    });
+    for (const held of ["queued", "blocked", "ready"] as const) {
+      expect(rowOf([failed, { ...waiting, state: held }], "f", CAN)?.continuing, held).toEqual({
+        id: "c",
+        text: "Continuing as Fix the thing again · waiting",
+      });
+    }
+    expect(rowOf([failed, waiting], "c", CAN)?.continuing).toBeNull();
+    const refused = continuation({ state: "failed", failure: { code: "not_continuable", message: "m" } });
+    const landed = continuation({ state: "running", assignment: placedAt });
+    for (const y of [refused, landed, continuation({ state: "cancelled" })]) {
+      expect(rowOf([failed, y], "f", CAN)?.continuing, y.state).toBeNull();
+    }
+    // A landed continuation outranks a waiting one, as in continueOffer: the line would name a task that can't take over.
+    const taker = task("y1", {
+      state: "failed",
+      failure: { code: "session_failed", message: "m" },
+      assignment: placedAt,
+      spec: { repo: ORIGIN, mode: "continue", continues: { task: "f", at: placedAt } },
+    });
+    expect(rowOf([failed, taker, waiting], "f", CAN)?.continuing).toBeNull();
+    // Past QUEUE_MAX_TASKS the continuation isn't listed: nothing to name, and the offer stands.
+    expect(rowOf([failed], "f", CAN)?.continuing).toBeNull();
+  });
+
+  test("a cancelled task with an assignment is continuable only on a machine advertising continueCancelled", () => {
+    const cancelled = task("x", { state: "cancelled", spec: { repo: ORIGIN, mode: "worktree" }, assignment: placedAt });
+    expect(rowOf([cancelled], "x", [...CAN, CAPABILITIES.continueCancelled])?.canContinue).toBe(true);
+    expect(rowOf([cancelled], "x", CAN)?.canContinue).toBe(false);
+  });
+
+  test("the button moves to a continuation that failed after landing", () => {
+    const landed = continuation({
+      state: "failed",
+      failure: { code: "session_failed", message: "exit 137" },
+      assignment: placedAt,
+    });
+    expect(rowOf([failed, landed], "f", CAN)?.canContinue).toBe(false);
+    expect(rowOf([failed, landed], "c", CAN)?.canContinue).toBe(true);
   });
 
   test("a continuation names what it continues, by title when listed, else by id; other rows carry no such line", () => {
@@ -792,6 +928,91 @@ describe("continuing a failed task", () => {
     });
     expect(rowOf([long], "c", CAN)?.continues).toBe("Continues task 01234567");
     expect(rowOf([failed], "f", CAN)?.continues).toBeNull();
+  });
+});
+
+describe("the card's inline action", () => {
+  const inline = (t: Task, capabilities: readonly string[] = []) =>
+    deriveQueue(state(ok([t]), {}, { machines: [machine({ capabilities })] }), NOW)
+      .sections.flatMap((section) => section.rows)
+      .find((row) => row.id === t.id)?.inline;
+
+  test("Continue on a failed session that offers it, where Follow up never is", () => {
+    const failed = task("f", {
+      state: "failed",
+      failure: { code: "session_failed", message: "exit 137" },
+      assignment: placedAt,
+    });
+    expect(inline(failed, [CAPABILITIES.continueTask, CAPABILITIES.continueSession])).toBe("continue");
+    expect(inline(failed)).toBeNull();
+  });
+
+  test("never Start now, even on a ready task the caps alone hold, nor Follow up", () => {
+    const capped = task("w", {
+      decision: {
+        at: NOW,
+        chosen: null,
+        candidates: [
+          { deviceId: "d", machine: "m", exclave: "main", rejected: [{ code: "cap_reached", inFlight: 8, max: 8 }] },
+        ],
+      },
+    });
+    expect(inline(capped, [CAPABILITIES.runNow])).toBeNull();
+    const row = deriveQueue(state(ok([capped])), NOW).sections.flatMap((section) => section.rows)[0];
+    expect(row?.canFollowUp).toBe(true);
+  });
+
+  test("nothing inline on a running, needing, done or cancelled task, where Follow up is the only act", () => {
+    expect(inline(task("r", { state: "running", assignment: placedAt }))).toBeNull();
+    expect(inline(task("n", { state: "needs-input", assignment: placedAt }))).toBeNull();
+    expect(inline(task("d", { state: "done", doneBy: "session" }))).toBeNull();
+    expect(inline(task("x", { state: "cancelled" }))).toBeNull();
+  });
+
+  test("nothing inline on a lost task, nor on one whose machine is asleep", () => {
+    expect(inline(task("l", { state: "lost", assignment: placedAt }))).toBeNull();
+    const asleep = machine({ connected: false, lastSeen: NOW - 600_000 });
+    const row = deriveQueue(
+      state(ok([task("a", { state: "running", assignment: placedAt })]), {}, { machines: [asleep] }),
+      NOW,
+    ).sections.flatMap((section) => section.rows)[0];
+    expect(row?.canFollowUp).toBe(true);
+    expect(row?.inline).toBeNull();
+  });
+
+  test("Continue whenever it is offered, nothing otherwise", () => {
+    expect(primaryAction({ canContinue: true })).toBe("continue");
+    expect(primaryAction({ canContinue: false })).toBeNull();
+  });
+});
+
+describe("arming a session-ending act in the card's menu", () => {
+  const live = { id: "a", cancelEndsSession: true, markDoneEndsSession: true };
+  const queued = { id: "a", cancelEndsSession: false, markDoneEndsSession: false };
+
+  test("a first tap arms and keeps the menu open; the second fires and disarms", () => {
+    const first = armTap(live, "cancel", null);
+    expect(first).toEqual({ fire: false, armed: "cancel:a" });
+    expect(armTap(live, "cancel", first.armed)).toEqual({ fire: true, armed: null });
+  });
+
+  test("one act's arm doesn't fire the other, nor another row's, nor Clear's", () => {
+    expect(armTap(live, "mark-done", "cancel:a")).toEqual({ fire: false, armed: "mark-done:a" });
+    expect(armTap(live, "cancel", "cancel:b")).toEqual({ fire: false, armed: "cancel:a" });
+    expect(armTap(live, "cancel", "discard")).toEqual({ fire: false, armed: "cancel:a" });
+  });
+
+  test("an act that ends no session fires on the first tap, and the menu closes", () => {
+    expect(armTap(queued, "cancel", null)).toEqual({ fire: true, armed: null });
+    expect(armTap(queued, "mark-done", "discard")).toEqual({ fire: true, armed: null });
+  });
+
+  test("the menu closing disarms only its own row's acts", () => {
+    expect(disarmRow("a", "cancel:a")).toBeNull();
+    expect(disarmRow("a", "mark-done:a")).toBeNull();
+    expect(disarmRow("a", "cancel:b")).toBe("cancel:b");
+    expect(disarmRow("a", "discard")).toBe("discard");
+    expect(disarmRow("a", null)).toBeNull();
   });
 });
 
@@ -837,5 +1058,37 @@ describe("deriveAfterSheet", () => {
     expect(deriveAfterSheet(state(ok([]), { form }), NOW).doneAvailable).toBe(false);
     const capable = machine({ capabilities: [CAPABILITIES.reportedDone] });
     expect(deriveAfterSheet(state(ok([]), { form }, { machines: [capable] }), NOW).doneAvailable).toBe(true);
+  });
+});
+
+describe("the Start now menu item", () => {
+  const CAN = [CAPABILITIES.runNow];
+  const capped: Reason = { code: "cap_reached", inFlight: 8, max: 8 };
+  const disk: Reason = { code: "disk_low", freeMib: 10 };
+  const rejecting = (reason: Reason): Task =>
+    task("w", {
+      decision: {
+        at: NOW,
+        chosen: null,
+        candidates: [{ deviceId: "d", machine: "m", exclave: "main", rejected: [reason] }],
+      },
+    });
+  const item = (t: Task, capabilities: readonly string[] = CAN) =>
+    deriveQueue(state(ok([t]), {}, { machines: [machine({ capabilities })] }), NOW)
+      .sections.flatMap((section) => section.rows)
+      .find((row) => row.id === t.id)?.startNow;
+
+  test("on a waiting task, enabled as the split button's menu is", () => {
+    expect(item(rejecting(capped))?.enabled).toBe(true);
+    expect(item(task("w"))?.enabled).toBe(true);
+  });
+
+  test("shown but disabled where nothing could take it, or the leader lacks runNow", () => {
+    expect(item(rejecting(disk))?.enabled).toBe(false);
+    expect(item(rejecting(capped), [])?.enabled).toBe(false);
+  });
+
+  test("absent once the task is not waiting", () => {
+    expect(item({ ...task("w"), state: "failed" })).toBeNull();
   });
 });

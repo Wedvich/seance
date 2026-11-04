@@ -29,6 +29,8 @@ const SCHEDULER_ERROR_TEXT: Record<SchedulerErrorCode, string> = {
   task_not_found: "the scheduler holds no such task",
   dispatching: "the task is starting on a machine right now; try again in a moment",
   finished: "the task has already finished",
+  not_waiting: "the task is not waiting for a slot — it is still waiting on its dependencies, or already placed",
+  unplaceable: "something besides the concurrency caps keeps it from every machine — see why it waits",
   despawn_failed: "its session could not be ended — its machine refused or is offline; nothing changed",
   conflict: "the task changed while this was on its way; try again",
   reset_unknown: "no quota reading says when that account resets, so it can't be paused until then",
@@ -91,6 +93,8 @@ export function reasonText(reason: Reason): string {
       return "offline";
     case "status_stale":
       return "no fresh status, so its load is unknown";
+    case "draining":
+      return "its daemon is restarting, so it takes no new tasks";
     case "task_id_unsupported":
       return "its daemon predates task ids";
     case "exclaves_unknown":
@@ -109,6 +113,8 @@ export function reasonText(reason: Reason): string {
       return "the session it continues ran elsewhere";
     case "continue_unsupported":
       return "its daemon can't continue a session yet (needs seanced update)";
+    case "attachments_unsupported":
+      return "its daemon can't fetch attachments yet (needs seanced update)";
     case "auth_missing":
       return "not signed in";
     case "auth_expired":
@@ -151,6 +157,9 @@ const TASK_FAILURE_TEXT: Record<TaskFailureCode, string> = {
     "its machine stayed away too long, so the scheduler stopped waiting for it — its session may still be running there",
   merge_expired: "no merge of its pull request was seen in time, so the scheduler stopped waiting for one",
   session_failed: "its session exited with an error and reported no pull request",
+  session_closed: "its window was closed before its session ended and it reported no pull request",
+  continue_expired: "the continuation was not placed in time, so the scheduler stopped waiting for it",
+  pin_expired: `the machine or account it is pinned to did not take it within ${Math.round(STORE_TOMBSTONE_MS / DAY_MS)} days, so the scheduler stopped waiting for it`,
   queue_expired: `it sat in the queue over ${Math.round(STORE_TOMBSTONE_MS / DAY_MS)} days, too long to start safely`,
 };
 
@@ -224,12 +233,13 @@ export function sessionExit(exit?: number, oomKill?: boolean): SessionExit {
 /**
  * A scheduler-set failure's line; null for any other code — a daemon's spawn refusal, or one minted later.
  * `exit` (`Task.failure.exit`) words a `session_failed` exactly, with `oomKill` (`Task.failure.oomKill`)
- * for a SIGKILL, and `until` (`TaskSpec.until`) what it lacked; without `exit`, or for any other code,
- * the line is the code's alone.
+ * for a SIGKILL, and `until` (`TaskSpec.until`) what it lacked, as it does for a `session_closed`;
+ * without `exit`, or for any other code, the line is the code's alone.
  */
 export function taskFailureText(code: string, exit?: number, until?: TaskUntil, oomKill?: boolean): string | null {
   const known = TASK_FAILURE_CODES.find((c) => c === code);
   if (known === undefined) return null;
+  if (known === "session_closed") return `its window was closed before its session ended and it ${missing(until)}`;
   if (known !== "session_failed") return TASK_FAILURE_TEXT[known];
   const { clause, hint } = sessionExit(exit, oomKill);
   return `its session ${clause}${hint === undefined ? "" : `, ${hint},`} and ${missing(until)}`;

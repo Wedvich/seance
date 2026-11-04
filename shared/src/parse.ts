@@ -1,7 +1,10 @@
 import { REPLAY_WINDOW_MS } from "./crypto.ts";
 import {
   ACCOUNT_ALIAS_MAX_LENGTH,
-  BATCH_STRATEGY,
+  ATTACHMENT_HASH_PATTERN,
+  ATTACHMENT_ID_PATTERN,
+  ATTACHMENT_LIMITS,
+  ATTACHMENTS_DEP_SENTINEL,
   BRANCH_MAX_LENGTH,
   CANDIDATE_MAX_REASONS,
   DECISION_MAX_CANDIDATES,
@@ -36,6 +39,7 @@ import {
   TASK_FAILURE_LIMITS,
   TASK_SPEC_LIMITS,
   type AccountRecord,
+  type AttachmentRef,
   type BatchMembership,
   type FleetQuotaEntry,
   type FleetQuotaRecord,
@@ -71,6 +75,7 @@ import {
   type TaskReply,
   type TaskSpec,
   type UnreadableTaskRef,
+  type IdleTaskRef,
   METRICS_ERROR_CODES,
   METRICS_MAX_FILTER_LENGTH,
   METRICS_MAX_FILTERS,
@@ -92,6 +97,7 @@ import {
   type Reason,
   type Reservation,
   type RoutePreviewReply,
+  type RoutePreviewRequest,
   type SchedulerError,
   type SchedulerOp,
   type Score,
@@ -450,6 +456,8 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
   if (ax === null || (ax !== undefined && (ax.length > STATUS_MAX_AUTH_EXPIRED || new Set(ax).size !== ax.length))) {
     return null;
   }
+  const { drn } = value;
+  if (drn !== undefined && drn !== true) return null;
   return {
     at: value["at"],
     scan: value["scan"],
@@ -463,6 +471,7 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
     ...(quota === undefined ? {} : { quota }),
     ...(tr === undefined ? {} : { tr }),
     ...(ax === undefined ? {} : { ax }),
+    ...(drn === undefined ? {} : { drn }),
   };
 }
 
@@ -625,6 +634,15 @@ export function parseTaskRequest(value: unknown): TaskRequest | null {
   return parseRequestFields(value, ["worktree", "here"]);
 }
 
+/** `parseTaskRequest`, plus route-preview's `attachments` flag: `true` or absent. */
+export function parseRoutePreviewRequest(value: unknown): RoutePreviewRequest | null {
+  const request = parseTaskRequest(value);
+  if (request === null || !isRecord(value)) return null;
+  const { attachments } = value;
+  if (attachments === undefined) return request;
+  return attachments === true ? { ...request, attachments } : null;
+}
+
 /**
  * `modes` is what the caller admits: route-preview takes no `continue` (it
  * routes by skills and has no target to preview), a stored spec does.
@@ -691,15 +709,15 @@ function parseAvoid(value: unknown): readonly string[] | null {
 }
 
 /**
- * Whatever `strategy` an older writer stored — `sequential`, `parallel`, none
- * — is read as `BATCH_STRATEGY`: no batch schedules, so a live record from
- * before the change must still read rather than null its spec.
+ * Any `strategy` an older writer stored (`sequential`, `parallel`, `auto`,
+ * malformed) is ignored and dropped: no batch schedules, so a live record from before must
+ * still read rather than null its spec.
  */
 function parseBatch(value: unknown): BatchMembership | null {
   if (!isRecord(value)) return null;
   const { id, index } = value;
   if (!isTaskId(id) || !isUint(index) || index > TASK_SPEC_LIMITS.batchIndex) return null;
-  return { id, index, strategy: BATCH_STRATEGY };
+  return { id, index };
 }
 
 function parseDep(value: unknown): TaskDep | null {
@@ -735,13 +753,16 @@ export function parseTaskSpec(value: unknown): TaskSpec | null {
   const resumes = continues === undefined ? undefined : parseContinues(continues);
   const builds = base === undefined ? undefined : parsePlacement(base);
   const member = batch === undefined ? undefined : parseBatch(batch);
-  const edges = deps === undefined ? undefined : parseList(deps, parseDep);
+  const files = value["attachments"] === undefined ? undefined : parseAttachmentManifest(value["attachments"]);
+  const edges = deps === undefined ? undefined : parseDeps(deps, files !== undefined);
   const issue = linear === undefined ? undefined : parseLinear(linear);
   if (pinned === null || avoids === null || lineal === null || builds === null || member === null) return null;
-  if (issue === null || resumes === null) return null;
+  if (issue === null || resumes === null || files === null) return null;
+  if (files !== undefined && (request.mode === "continue" || (request.prompt?.length ?? 0) > ATTACHMENT_LIMITS.prompt))
+    return null;
   // The mode is what an older leader refuses, so the field never travels without it.
   if ((request.mode === "continue") !== (resumes !== undefined)) return null;
-  if (edges === null || (edges !== undefined && edges.length > TASK_SPEC_LIMITS.deps)) return null;
+  if (edges === null) return null;
   if (client !== undefined && !isName(client, TASK_SPEC_LIMITS.client)) return null;
   const settles = until === undefined ? undefined : TASK_UNTIL.find((u) => u === until);
   if (until !== undefined && settles === undefined) return null;
@@ -757,7 +778,60 @@ export function parseTaskSpec(value: unknown): TaskSpec | null {
     ...(client === undefined ? {} : { client }),
     ...(settles === undefined ? {} : { until: settles }),
     ...(resumes === undefined ? {} : { continues: resumes }),
+    ...(files === undefined ? {} : { attachments: files }),
   };
+}
+
+/**
+ * `ATTACHMENTS_DEP_SENTINEL` is dropped before the bound applies, and only beside a
+ * manifest: one without it is a record something stripped the files from. Deps that
+ * were the sentinel alone read as none, as the spec was before sealing.
+ */
+function parseDeps(value: unknown, attached: boolean): readonly TaskDep[] | null | undefined {
+  if (!Array.isArray(value)) return null;
+  const real = attached ? value.filter((dep) => !isAttachmentsSentinel(dep)) : value;
+  if (real.length === 0 && value.length > 0) return undefined;
+  const edges = parseList(real, parseDep);
+  return edges === null || edges.length > TASK_SPEC_LIMITS.deps ? null : edges;
+}
+
+function isAttachmentsSentinel(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    value["task"] === ATTACHMENTS_DEP_SENTINEL.task &&
+    value["after"] === ATTACHMENTS_DEP_SENTINEL.after
+  );
+}
+
+// C0, DEL, C1, and the line and paragraph separators: a name stays one line in the seed.
+// oxlint-disable-next-line no-control-regex -- matching control characters is the point
+export const ATTACHMENT_NAME_FORBIDDEN = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/u;
+// The type is ASCII by this pattern, so its length is its byte count.
+export const ATTACHMENT_TYPE_PATTERN = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/u;
+
+/**
+ * A task spec's or spawn request's `attachments`, every entry checked and bounded and
+ * built field by field. Null for anything malformed, an empty list included: the caller
+ * nulls its spec or request rather than drop the field, since a task without the files
+ * it was given must not run.
+ */
+export function parseAttachmentManifest(value: unknown): readonly AttachmentRef[] | null {
+  const refs = parseList(value, parseAttachmentRef);
+  if (refs === null || refs.length === 0 || refs.length > ATTACHMENT_LIMITS.files) return null;
+  if (new Set(refs.map((ref) => ref.id)).size !== refs.length) return null;
+  const total = refs.reduce((sum, ref) => sum + ref.size, 0);
+  return total <= ATTACHMENT_LIMITS.totalBytes ? refs : null;
+}
+
+function parseAttachmentRef(value: unknown): AttachmentRef | null {
+  if (!isRecord(value)) return null;
+  const { id, name, type, size, hash } = value;
+  if (typeof id !== "string" || !ATTACHMENT_ID_PATTERN.test(id)) return null;
+  if (!isName(name, ATTACHMENT_LIMITS.name) || ATTACHMENT_NAME_FORBIDDEN.test(name)) return null;
+  if (!isBoundedString(type, ATTACHMENT_LIMITS.type) || !ATTACHMENT_TYPE_PATTERN.test(type)) return null;
+  if (!isUint(size) || size > ATTACHMENT_LIMITS.fileBytes) return null;
+  if (typeof hash !== "string" || !ATTACHMENT_HASH_PATTERN.test(hash)) return null;
+  return { id, name, type, size, hash };
 }
 
 function parseContinues(value: unknown): TaskSpec["continues"] | null {
@@ -799,12 +873,14 @@ function parseReason(value: unknown): Reason | null {
   switch (code) {
     case "offline":
     case "status_stale":
+    case "draining":
     case "task_id_unsupported":
     case "exclaves_unknown":
     case "pressure_unknown":
     case "repo_absent":
     case "continue_elsewhere":
     case "continue_unsupported":
+    case "attachments_unsupported":
     case "auth_missing":
     case "auth_expired":
     case "base_unpushed":
@@ -1317,7 +1393,7 @@ export function parseSettingsRecord(value: unknown): SettingsRecord | null {
   };
 }
 
-/** `cancel` and `mark-done`, at the leader: the one field, nothing else carried on. */
+/** `cancel`, `mark-done` and `run-now`, at the leader: the one field, nothing else carried on. */
 export function parseTaskRef(value: unknown): TaskRef | null {
   return isRecord(value) && isTaskId(value["taskId"]) ? { taskId: value["taskId"] } : null;
 }
@@ -1369,12 +1445,26 @@ export function parseQueueReply(value: unknown): QueueReply | null {
   }
   // Lenient per entry, as tasks are: a bad one costs its own discard, not the queue.
   const unreadable = listedUnreadable?.map(parseUnreadableTaskRef).filter((entry) => entry !== null);
+  const listedIdle = value["idle"];
+  if (listedIdle !== undefined && (!Array.isArray(listedIdle) || listedIdle.length > MAX_TASKS)) return null;
+  // Lenient per entry too: a bad one shows its task as running, which it is.
+  const idle = listedIdle?.map(parseIdleTaskRef).filter((entry) => entry !== null);
+  // Lenient: a cap that is not a positive integer only costs the header its denominator.
+  const globalMax = value["globalMax"];
+  const cap = typeof globalMax === "number" && Number.isInteger(globalMax) && globalMax > 0 ? globalMax : undefined;
   return {
     tasks,
     at: value["at"],
     ...(holds === undefined ? {} : { holds }),
     ...(unreadable === undefined || unreadable.length === 0 ? {} : { unreadable }),
+    ...(idle === undefined || idle.length === 0 ? {} : { idle }),
+    ...(cap === undefined ? {} : { globalMax: cap }),
   };
+}
+
+function parseIdleTaskRef(value: unknown): IdleTaskRef | null {
+  if (!isRecord(value) || !isTaskId(value["taskId"]) || !isFiniteNumber(value["since"])) return null;
+  return { taskId: value["taskId"], since: value["since"] };
 }
 
 function parseUnreadableTaskRef(value: unknown): UnreadableTaskRef | null {
@@ -1391,7 +1481,7 @@ export function parseDiscardReply(value: unknown): DiscardReply | null {
   return isRecord(value) && isTaskId(value["taskId"]) ? { taskId: value["taskId"] } : null;
 }
 
-/** `cancel` and `mark-done` replies. */
+/** `cancel`, `mark-done` and `run-now` replies. */
 export function parseTaskReply(value: unknown): TaskReply | null {
   if (isRecord(value) && value["ok"] === false) return parseSchedulerError(value);
   const task = isRecord(value) ? parseTask(value["task"]) : null;
@@ -1447,9 +1537,20 @@ export function parseTaskProgressList(value: unknown): readonly TaskProgress[] |
   return parseList(value, parseTaskProgress);
 }
 
+/**
+ * `SessionsResponse.interrupted`, at the leader: only task ids that are also in
+ * `ended`. The reply comes from a remote PSK holder, so a bad entry falls back
+ * to today's behaviour (`done`), never to a re-dispatch.
+ */
+export function parseInterrupted(value: unknown, ended: unknown): readonly string[] | undefined {
+  if (!Array.isArray(value) || !Array.isArray(ended) || value.length > SESSIONS_MAX_PROGRESS) return undefined;
+  const kept = value.filter((id): id is string => isTaskId(id) && ended.includes(id));
+  return kept.length === 0 ? undefined : kept;
+}
+
 function parseTaskProgress(value: unknown): TaskProgress | null {
   if (!isRecord(value)) return null;
-  const { taskId, prUrl, branch, pushed, merged, reported, exit, oomKill, at } = value;
+  const { taskId, prUrl, branch, pushed, merged, reported, exit, oomKill, vanished, at } = value;
   if (!isTaskId(taskId) || !isFiniteNumber(at)) return null;
   if (exit !== undefined && (!isUint(exit) || exit > EXIT_STATUS_MAX)) return null;
   const url = prUrl === undefined ? undefined : httpsUrl(prUrl);
@@ -1457,6 +1558,7 @@ function parseTaskProgress(value: unknown): TaskProgress | null {
   if (branch !== undefined && !isName(branch, BRANCH_MAX_LENGTH)) return null;
   if ((pushed !== undefined && pushed !== true) || (merged !== undefined && merged !== true)) return null;
   if (reported !== undefined && reported !== true) return null;
+  if (vanished !== undefined && vanished !== true) return null;
   return {
     taskId,
     at,
@@ -1466,6 +1568,7 @@ function parseTaskProgress(value: unknown): TaskProgress | null {
     ...(merged === undefined ? {} : { merged }),
     ...(reported === undefined ? {} : { reported }),
     ...(exit === undefined ? {} : { exit }),
+    ...(vanished === undefined ? {} : { vanished }),
     // Display-only: a bad one, or one beside another status, costs the field — never the entry, which would null the list.
     ...(exit === SIGKILL_STATUS && typeof oomKill === "boolean" ? { oomKill } : {}),
   };

@@ -15,7 +15,6 @@ import {
   storeErrorText,
   taskFailureText,
   withReportInstruction,
-  BATCH_STRATEGY,
   type AccountRecord,
   type Decision,
   type ExclaveInfo,
@@ -1462,6 +1461,30 @@ describe("resolvePlacement", () => {
     expect(await refused({ account: "old" }, records)).toContain("which no machine reports signed in");
   });
 
+  test("an alias equal to another account's id or email never redirects a pin that names it", async () => {
+    const squatter = ALIASES.map((r) => (r.accountId === PERSONAL ? { ...r, alias: EMPLOYER.toUpperCase() } : r));
+    for (const input of [EMPLOYER, EMPLOYER.toUpperCase()]) {
+      // oxlint-disable-next-line no-await-in-loop -- one input each
+      expect((await placed({ account: input }, squatter)).fields).toEqual({ pin: { account: EMPLOYER } });
+    }
+    const two = [
+      machine({
+        deviceId: "device-a",
+        name: "A",
+        exclaves: [{ ...exclave("default"), accountId: "org-a:x", email: "a@a.no" }],
+      }),
+      machine({
+        deviceId: "device-b",
+        name: "B",
+        exclaves: [{ ...exclave("default"), accountId: "org-b:x", email: "b@b.no" }],
+      }),
+    ];
+    const records = [{ accountId: "org-a:x", alias: "b@b.no", version: 1 }];
+    expect(await resolvePlacement(two, listed(records).accounts, { account: "B@b.no" })).toMatchObject({
+      fields: { pin: { account: "org-b:x" } },
+    });
+  });
+
   test("an account matches any email a machine reports for it", async () => {
     const mixed = [
       machine({ deviceId: "device-a", name: "A", exclaves: [{ ...exclave("default"), email: "first@a.no" }] }),
@@ -1774,9 +1797,9 @@ describe("queue_batch", () => {
     const batchId = first?.spec.batch?.id ?? "";
     expect(batchId).toMatch(/^[0-9a-f-]{36}$/u);
     expect(fake.creates.map((t) => t.spec.batch)).toEqual([
-      { id: batchId, index: 1, strategy: BATCH_STRATEGY },
-      { id: batchId, index: 2, strategy: BATCH_STRATEGY },
-      { id: batchId, index: 3, strategy: BATCH_STRATEGY },
+      { id: batchId, index: 1 },
+      { id: batchId, index: 2 },
+      { id: batchId, index: 3 },
     ]);
     expect(first?.spec.deps).toBeUndefined();
     expect(first?.spec.linear).toEqual({ issue: "ENG-1" });
@@ -1808,7 +1831,7 @@ describe("queue_batch", () => {
     const fake = leaderRelay();
     const ok = await callTool(fake, "queue_batch", { strategy: "auto", tasks: [member(), member()] });
     expect(ok.error).toBe(false);
-    expect(fake.creates.map((t) => t.spec.batch?.strategy)).toEqual([BATCH_STRATEGY, BATCH_STRATEGY]);
+    for (const t of fake.creates) expect(t.spec.batch).not.toHaveProperty("strategy");
   });
 
   test("a bad ref, a task waiting on itself, or an ambiguous edge refuses the whole batch before anything is stored", async () => {
@@ -2071,6 +2094,15 @@ describe("get_queue", () => {
               exit: 137,
             },
           }),
+          // A closed window says all its message does, so the line is the wording alone.
+          task({
+            id: "t-5",
+            state: "failed",
+            failure: {
+              code: "session_closed",
+              message: "its window was closed before its session ended and it reported no pull request",
+            },
+          }),
           // With the machine's OOM verdict beside it, the line says what the kernel counted.
           task({
             id: "t-4",
@@ -2094,6 +2126,7 @@ describe("get_queue", () => {
       `dispatch_unconfirmed: ${taskFailureText("dispatch_unconfirmed")} (the launch ledger no longer reaches back to its reservation)`,
       "repo_not_found: no such repo",
       "session_failed: its session was killed (SIGKILL), possibly out of memory, and reported no pull request",
+      "session_closed: its window was closed before its session ended and it reported no pull request",
       "session_failed: its session was killed (SIGKILL), out of memory (the kernel's OOM killer fired as it died), and reported no pull request",
     ]);
     lazy.stop();
@@ -2167,7 +2200,7 @@ describe("get_queue", () => {
   });
 
   test("shows a task's dependencies, batch, reported settle and Linear link", async () => {
-    const batch = { id: "b-1", index: 2, strategy: BATCH_STRATEGY } as const;
+    const batch = { id: "b-1", index: 2 } as const;
     const fake = leaderRelay([
       {
         tasks: [
@@ -2197,7 +2230,6 @@ describe("get_queue", () => {
       after: [{ task: "t-0", when: "done" }],
       linear: { issue: "ENG-9" },
     });
-    // The group only: the vestigial strategy stays off the agent's view.
     expect(tasks[0].batch).toEqual({ id: "b-1", index: 2 });
     expect(tasks[1].merged).toBe(true);
     expect(tasks[2].doneBy).toBe("reported");
@@ -2340,6 +2372,88 @@ describe("cancel_task", () => {
   });
 });
 
+describe("start_task", () => {
+  /** The leader (device-1) advertising `runNow` unless held back. */
+  function startingMachines(runNow = true): Machine[] {
+    const [leader, box] = autoMachines();
+    return [machine({ ...leader, ...(runNow ? { capabilities: [CAPABILITIES.runNow] } : {}) }), machine({ ...box })];
+  }
+
+  const reserved = task({
+    state: "reserved",
+    reservation: { deviceId: "device-2", exclave: "work", clone: "seance", expiresAt: 65_000 },
+  });
+
+  async function callStart(
+    answer: () => unknown,
+    machines: readonly Machine[] = startingMachines(),
+  ): Promise<{ text: string; error: boolean; fake: FakeRelay }> {
+    const fake = fakeRelay(machines, (op) => (op === "run-now" ? answer() : new Error(`unexpected ${op}`)));
+    fake.setState({ scheduler: LEADING });
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    try {
+      const result = await client.callTool({ name: "start_task", arguments: { taskId: "t-1" } });
+      return { text: toolText(result), error: result.isError === true, fake };
+    } finally {
+      lazy.stop();
+    }
+  }
+
+  test("sends run-now for the task and says where it is starting", async () => {
+    const { text, error, fake } = await callStart(() => ({ task: reserved }));
+    expect(error).toBe(false);
+    expect(text).toBe("task t-1: started past the queue on Linux Box/work");
+    expect(fake.requests).toEqual([{ deviceId: SCHEDULER_ID, op: "run-now", payload: { taskId: "t-1" } }]);
+  });
+
+  test("a leader without runNow, or none, is refused with nothing sent", async () => {
+    const old = await callStart(() => ({ task: reserved }), startingMachines(false));
+    expect(old).toMatchObject({ error: true, text: expect.stringContaining("its daemon needs `seanced update`") });
+    expect(old.fake.requests).toEqual([]);
+  });
+
+  test("refusals are worded, and a lost answer may have started it", async () => {
+    const waiting = await callStart(() => ({ ok: false, code: "not_waiting", message: "not ready" }));
+    expect(waiting).toMatchObject({ error: true, text: expect.stringContaining("start_task refused (not_waiting)") });
+    const stuck = await callStart(() => ({ ok: false, code: "unplaceable", message: "held" }));
+    expect(stuck.text).toContain("something besides the concurrency cap");
+    const lost = await callStart(() => new RequestFailure("timeout", "no reply within 10000ms"));
+    expect(lost).toMatchObject({
+      error: true,
+      text: expect.stringContaining("the start may have landed anyway — check get_queue"),
+    });
+  });
+
+  test("spawn_session start queues the task, reads it ready, then sends run-now for it", async () => {
+    const fake = fakeRelay(startingMachines(), (op, payload) => {
+      const created = fake.creates[0];
+      if (created === undefined) return new Error("no create yet");
+      if (op === "queue") return { tasks: [{ ...created, state: "ready" }], at: 6_000 };
+      if (op === "run-now") {
+        expect(payload).toEqual({ taskId: created.id });
+        return { task: { ...reserved, id: created.id } };
+      }
+      return new Error(`unexpected ${op}`);
+    });
+    fake.setState({ scheduler: LEADING });
+    const { text, error } = await callAuto(fake, { start: true });
+    expect(error).toBe(false);
+    const id = fake.creates[0]?.id;
+    expect(text).toContain(`task ${id}: queued`);
+    expect(text).toContain(`task ${id}: started past the queue on Linux Box/work`);
+    expect(fake.requests.map((r) => r.op)).toEqual(["queue", "run-now"]);
+  });
+
+  test("spawn_session start with a leader that cannot start writes nothing", async () => {
+    const fake = leaderRelay([], startingMachines(false));
+    const { text, error } = await callAuto(fake, { start: true });
+    expect(error).toBe(true);
+    expect(text).toContain("spawn refused: start: the scheduler's leader cannot start a task past the queue yet");
+    expect(fake.creates).toEqual([]);
+  });
+});
+
 describe("continue_task", () => {
   const AT = { deviceId: "device-2", exclave: "work", clone: "seance" };
   const failedTask = task({
@@ -2351,11 +2465,24 @@ describe("continue_task", () => {
   });
 
   /** The leader (device-1) and the machine the task ran on (device-2), each advertising `continueTask` unless held back. */
-  function continuingMachines(advertising: { readonly leader?: boolean; readonly box?: boolean } = {}): Machine[] {
+  function continuingMachines(
+    advertising: { readonly leader?: boolean; readonly box?: boolean; readonly cancelled?: boolean } = {},
+  ): Machine[] {
     const [leader, box] = autoMachines();
-    const advertise = (m: Machine | undefined, on: boolean | undefined): Machine =>
-      machine({ ...m, ...(on === false ? {} : { capabilities: [CAPABILITIES.continueTask] }) });
-    return [advertise(leader, advertising.leader), advertise(box, advertising.box)];
+    const advertise = (m: Machine | undefined, on: boolean | undefined, cancelled = false): Machine =>
+      machine({
+        ...m,
+        ...(on === false
+          ? {}
+          : {
+              capabilities: [
+                CAPABILITIES.continueTask,
+                CAPABILITIES.continueSession,
+                ...(cancelled ? [CAPABILITIES.continueCancelled] : []),
+              ],
+            }),
+      });
+    return [advertise(leader, advertising.leader), advertise(box, advertising.box, advertising.cancelled)];
   }
 
   async function callContinue(
@@ -2427,7 +2554,9 @@ describe("continue_task", () => {
     expect(missing.error).toBe(true);
     expect(missing.text).toContain(`not in the leader's list (pruned, or past the ${QUEUE_MAX_TASKS} most relevant)`);
     const finished = await callContinue([task({ ...failedTask, state: "done", failure: undefined })]);
-    expect(finished.text).toContain("only a task whose session ended in failure can be continued");
+    expect(finished.text).toContain(
+      "only a task whose session failed or whose window was closed, or that was cancelled after it started, can be continued",
+    );
     const hereRun = await callContinue([task({ ...failedTask, spec: { repo: ORIGIN, mode: "here" } })]);
     expect(hereRun.text).toContain("no worktree of its own");
     const other = await callContinue([task({ ...failedTask, failure: { code: "queue_expired", message: "x" } })]);
@@ -2445,9 +2574,17 @@ describe("continue_task", () => {
       expect(held.text, state).toContain("already underway or finished");
       expect(held.fake.creates, state).toEqual([]);
     }
-    // One still waiting leaves the offer open.
+    // One still waiting withholds it too, and the refusal names it.
     const waiting = await callContinue([failedTask, continuation("queued")]);
-    expect(waiting.error).toBe(false);
+    expect(waiting.error).toBe(true);
+    expect(waiting.text).toContain("already continuing as task t-2, which is still waiting in the queue");
+    expect(waiting.fake.creates).toEqual([]);
+    // One the machine refused gives it back.
+    const refused = await callContinue([
+      failedTask,
+      task({ ...continuation("failed"), failure: { code: "not_continuable", message: "x" } }),
+    ]);
+    expect(refused.error).toBe(false);
   });
 
   test("a note over the prompt bound is refused before anything is queued, and a malformed id is no task id", async () => {
@@ -2488,9 +2625,11 @@ describe("continue_task", () => {
   });
 
   test("get_queue marks a failed session continuable and names the task a continuation continues", async () => {
+    // Refused by the machine: it never held the session, so the old task stays continuable.
     const continuing = task({
       id: "t-2",
-      state: "ready",
+      state: "failed",
+      failure: { code: "not_continuable", message: "x" },
       spec: { repo: ORIGIN, mode: "continue", continues: { task: "t-1", at: AT } },
     });
     const fake = leaderRelay([{ tasks: [failedTask, continuing], at: 6_000 }], continuingMachines());
@@ -2506,19 +2645,56 @@ describe("continue_task", () => {
     lazy.stop();
   });
 
-  test("get_queue withdraws continuable once a continuation has the session", async () => {
-    const underway = task({
+  test("a cancelled task with an assignment is continued only on a box advertising continueCancelled", async () => {
+    const cancelled = task({ ...failedTask, state: "cancelled", failure: undefined });
+    const queued = await callContinue([cancelled], continuingMachines({ cancelled: true }));
+    expect(queued.error).toBe(false);
+    expect(queued.fake.creates).toHaveLength(1);
+    const refused = await callContinue([cancelled], continuingMachines());
+    expect(refused.error).toBe(true);
+    expect(refused.text).toContain("continue a cancelled session");
+    expect(refused.fake.creates).toEqual([]);
+  });
+
+  test("get_queue moves continuable to a continuation that failed after landing", async () => {
+    const y = task({
       id: "t-2",
-      state: "running",
+      state: "failed",
+      failure: { code: "session_failed", message: "exit 137" },
+      assignment: { ...AT, window: "fix-it" },
       spec: { repo: ORIGIN, mode: "continue", continues: { task: "t-1", at: AT } },
     });
-    const fake = leaderRelay([{ tasks: [failedTask, underway], at: 6_000 }], continuingMachines());
+    const fake = leaderRelay([{ tasks: [failedTask, y], at: 6_000 }], continuingMachines());
     const lazy = new LazyRelay({ create: () => fake });
     const client = await connectedClient(lazy);
     const queue = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} }))) as {
       tasks: Record<string, unknown>[];
     };
     expect(queue.tasks.find((t) => t["id"] === "t-1")).not.toHaveProperty("continuable");
+    expect(queue.tasks.find((t) => t["id"] === "t-2")).toMatchObject({ continuable: true });
     lazy.stop();
+  });
+
+  test("get_queue withdraws continuable while a continuation waits and once one has the session", async () => {
+    for (const state of ["ready", "running"] as const) {
+      const underway = task({
+        id: "t-2",
+        state,
+        spec: { repo: ORIGIN, mode: "continue", continues: { task: "t-1", at: AT } },
+      });
+      const fake = leaderRelay([{ tasks: [failedTask, underway], at: 6_000 }], continuingMachines());
+      const lazy = new LazyRelay({ create: () => fake });
+      // oxlint-disable-next-line no-await-in-loop -- one relay at a time
+      const client = await connectedClient(lazy);
+      // oxlint-disable-next-line no-await-in-loop -- one relay at a time
+      const queue = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} }))) as {
+        tasks: Record<string, unknown>[];
+      };
+      expect(
+        queue.tasks.find((t) => t["id"] === "t-1"),
+        state,
+      ).not.toHaveProperty("continuable");
+      lazy.stop();
+    }
   });
 });

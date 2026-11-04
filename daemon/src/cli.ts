@@ -8,9 +8,10 @@ import {
   type DespawnRequest,
   type SpawnRequest,
 } from "@seance/shared";
+import { attachmentsRoot } from "./attachments.ts";
 import { auditLogChecks, cliSink, despawnAudit, reapAudit, spawnAudit } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
-import { cmdContinueAuto, cmdSpawnAuto } from "./cli-auto.ts";
+import { cmdContinueAuto, cmdSpawnAuto, cmdStartAuto } from "./cli-auto.ts";
 import { installMods, modChecks, uninstallMods } from "./claude-mod.ts";
 import { DespawnFailure, SpawnFailure } from "./backend.ts";
 import {
@@ -29,6 +30,7 @@ import { localSocketReachable } from "./local-client.ts";
 import { localSocketChecks } from "./local-socket.ts";
 import { exec, execFailure } from "./exec.ts";
 import { scanExclaves, tagExclaves, userScopeTargets } from "./exclaves.ts";
+import { markClosed } from "./exit-status.ts";
 import { mcpFleetChecks } from "./fleet.ts";
 import { platformFsmonitor } from "./fsmonitor.ts";
 import { mcpChecks, runMcpServer } from "./mcp.ts";
@@ -112,10 +114,12 @@ export interface SpawnCliArgs {
   readonly account?: string;
   /** Queued spawn only (refused with `--now`): machines to keep it off, each as `machine` takes one; present only when given. */
   readonly not?: readonly string[];
+  /** Queued spawn only (refused with `--now`): start it past the concurrency cap once admitted, as `seanced start`; present only when given. */
+  readonly start?: true;
 }
 
 const SPAWN_USAGE =
-  "usage: seanced spawn [--now | [--machine <name|here>] [--account <alias|email|id>] [--not <machine|here>]...] <repo> [--here] [-t <title>] [[-p] <task>]";
+  "usage: seanced spawn [--now | [--start] [--machine <name|here>] [--account <alias|email|id>] [--not <machine|here>]...] <repo> [--here] [-t <title>] [[-p] <task>]";
 
 /** The flags that take a value, and the field each fills. */
 const SPAWN_VALUE_FLAGS = {
@@ -134,8 +138,8 @@ function isSpawnValueFlag(arg: string): arg is SpawnValueFlag {
 
 /**
  * Mirrors /spawn: -p is optional, bare words join into the prompt. The
- * placement flags pin a queued spawn, so `--now` — which runs here, right
- * away — refuses them; each takes a value, and `--machine` and `--account`
+ * placement flags and `--start` shape a queued spawn, so `--now` — which runs
+ * here, right away — refuses them; each takes a value, and `--machine` and `--account`
  * are given at most once. `--auto` is a no-op kept for old muscle memory,
  * refused only beside `--now`. Exported for tests.
  */
@@ -143,6 +147,7 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
   let repo: string | undefined;
   let here = false;
   let now = false;
+  let start = false;
   let auto = false;
   let title: string | undefined;
   let machine: string | undefined;
@@ -162,6 +167,8 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
       here = true;
     } else if (arg === "--now") {
       now = true;
+    } else if (arg === "--start") {
+      start = true;
     } else if (arg === "--auto") {
       auto = true;
     } else if (isSpawnValueFlag(arg)) {
@@ -185,6 +192,11 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
       `--now spawns on this machine now; --machine, --account and --not pin a queued spawn\n${SPAWN_USAGE}`,
     );
   }
+  if (now && start) {
+    throw new Error(
+      `--now spawns here directly; --start starts a queued spawn past the scheduler's cap — give one\n${SPAWN_USAGE}`,
+    );
+  }
   if (now && auto) {
     throw new Error(`--now and --auto contradict: --now spawns here directly, a plain spawn queues\n${SPAWN_USAGE}`);
   }
@@ -195,6 +207,7 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
     ...(title !== undefined ? { title } : {}),
     ...(prompt !== "" ? { prompt } : {}),
     ...(now ? { now } : {}),
+    ...(start ? { start } : {}),
     ...(machine === undefined ? {} : { machine }),
     ...(account === undefined ? {} : { account }),
     ...(not.length === 0 ? {} : { not }),
@@ -272,9 +285,27 @@ export function parseContinueArgs(argv: readonly string[]): ContinueCliArgs {
   return { taskId, ...(prompt === "" ? {} : { prompt }) };
 }
 
+export interface StartCliArgs {
+  readonly taskId: string;
+}
+
+const START_USAGE = "usage: seanced start <task-id>";
+
+/** Exported for tests. */
+export function parseStartArgs(argv: readonly string[]): StartCliArgs {
+  const [taskId] = argv;
+  if (taskId === undefined || argv.length !== 1 || taskId.startsWith("-")) throw new Error(START_USAGE);
+  return { taskId };
+}
+
+/** Starts a queued task now, past the concurrency cap (`cli-auto.ts`) — the app's Start now. */
+export async function cmdStart(argv: readonly string[]): Promise<void> {
+  return cmdStartAuto(parseStartArgs(argv));
+}
+
 /**
- * Queues a task that resumes a failed one's session (`cli-auto.ts`). Always a scheduler task,
- * never the local op socket's `spawn`: a hand-run `claude --continue` is invisible to the scheduler.
+ * Queues a task that resumes a failed or cancelled one's session (`cli-auto.ts`). Always a scheduler task,
+ * never the local op socket's `spawn`: a hand-run `claude --resume` is invisible to the scheduler.
  */
 export async function cmdContinue(argv: readonly string[]): Promise<void> {
   return cmdContinueAuto(parseContinueArgs(argv));
@@ -297,6 +328,15 @@ export function parseDespawnArgs(argv: readonly string[]): DespawnCliArgs {
 }
 
 /**
+ * The ledger is the daemon's, so a task pane's close is marked in tmux instead, for harvest to
+ * note: unmarked, a pane killed here would read as closed from outside (`session_closed`).
+ * Best-effort, as the daemon's own note is.
+ */
+async function markClosedOrWarn(taskId: string): Promise<void> {
+  if (!(await markClosed(taskId))) console.error(`warning: could not mark task ${taskId}'s close for the daemon`);
+}
+
+/**
  * The relay-free despawn, as `cmdSpawn` is the relay-free spawn: the same
  * backend call the app request runs, audited `origin=cli`.
  */
@@ -311,7 +351,11 @@ export async function cmdDespawn(argv: readonly string[]): Promise<void> {
     throw new Error("this machine's session backend cannot despawn");
   }
   try {
-    const result = await backend.despawn(args.id, { force: args.force });
+    const result = await backend.despawn(args.id, {
+      force: args.force,
+      closing: markClosedOrWarn,
+      leaveDeadTask: true,
+    });
     await audit.ok(result);
     console.log(`${result.outcome} '${result.window}' (${args.id})`);
   } catch (err) {
@@ -372,6 +416,7 @@ export async function cmdReap(argv: readonly string[]): Promise<void> {
         minAgeMs: minAgeDays * DAY_MS,
         audit: reapAudit("cli", cliSink),
         pruneLogPath: pruneLogPath(),
+        attachments: attachmentsRoot(),
         fsmonitor: platformFsmonitor(),
       }),
     );

@@ -2,7 +2,10 @@
 // relay via relay/test/harness.ts, an import direction shared/ must not take on.
 import {
   APP_ID,
+  attachmentHash,
+  attachmentUrl,
   DAEMON_ROLES,
+  openAttachment,
   importPsk,
   isRecord,
   newestQuotaByAccount,
@@ -43,6 +46,8 @@ const TOKEN = "test-bearer-token";
 const PSK = toBase64(new Uint8Array(32).fill(7));
 const OTHER_PSK = toBase64(new Uint8Array(32).fill(9));
 
+const ATTACHMENT_HOUR_UPLOADS = 3;
+
 let relay: TestRelay;
 let key: CryptoKey;
 let otherKey: CryptoKey;
@@ -55,7 +60,11 @@ let listed: { readonly legLeader: string; readonly stolenSeed: string; readonly 
 beforeAll(async () => {
   const [legLeader, stolenSeed, autoLeader] = await Promise.all([newDeviceId(), newDeviceId(), newDeviceId()]);
   listed = { legLeader, stolenSeed, autoLeader };
-  relay = await startRelay(TOKEN, { leaders: [legLeader, stolenSeed, autoLeader] });
+  // Only the attachment suite uploads; a low count bound lets it reach the allowance's 429 in a few puts.
+  relay = await startRelay(TOKEN, {
+    leaders: [legLeader, stolenSeed, autoLeader],
+    uploadAllowance: { hourUploads: ATTACHMENT_HOUR_UPLOADS },
+  });
   key = await importPsk(PSK);
   otherKey = await importPsk(OTHER_PSK);
 });
@@ -1151,6 +1160,331 @@ describe("heartbeat", () => {
   });
 });
 
+describe("resume", () => {
+  /** Every status the client reports from here on that is not `open`. */
+  function drops(client: RelayClient): { readonly seen: string[]; readonly stop: () => void } {
+    const seen: string[] = [];
+    const stop = client.subscribe(() => {
+      const { status } = client.getState();
+      if (status !== "open") seen.push(status);
+    });
+    return { seen, stop };
+  }
+
+  interface Peer {
+    readonly url: string;
+    /** "ping" frames received, across sockets. */
+    pings: number;
+    dials: number;
+    /** Every non-ping text frame received, in order. */
+    readonly frames: string[];
+    autoPong: boolean;
+    /** One pong on the newest socket. */
+    pong: () => void;
+    closeAll: () => void;
+    stop: () => void;
+  }
+
+  /** A bare socket peer: counts pings, answers none unless told to, speaks no protocol. */
+  function startPeer(autoPong = false): Peer {
+    const sockets = new Set<ServerWebSocket<undefined>>();
+    const peer: Peer = {
+      url: "",
+      pings: 0,
+      dials: 0,
+      frames: [],
+      autoPong,
+      pong: () => {
+        [...sockets].at(-1)?.send("pong");
+      },
+      closeAll: () => {
+        for (const socket of sockets) socket.close();
+      },
+      stop: () => server.stop(true),
+    };
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(req, srv) {
+        if (srv.upgrade(req)) return undefined;
+        return new Response("expected websocket upgrade", { status: 426 });
+      },
+      websocket: {
+        open(socket) {
+          sockets.add(socket);
+          peer.dials += 1;
+        },
+        close(socket) {
+          sockets.delete(socket);
+        },
+        message(socket, message) {
+          if (message === "ping") {
+            peer.pings += 1;
+            if (peer.autoPong) socket.send("pong");
+            return;
+          }
+          peer.frames.push(String(message));
+        },
+      },
+    });
+    Object.defineProperty(peer, "url", { value: `ws://127.0.0.1:${server.port}/app` });
+    return peer;
+  }
+
+  /** A client against a peer, open and with its first dial seen. */
+  async function openAgainst(
+    peer: Peer,
+    opts: { pingIntervalMs?: number; pongTimeoutMs?: number; resumeProbeMs?: number } = {},
+  ): Promise<RelayClient> {
+    const client = new RelayClient({
+      url: peer.url,
+      token: TOKEN,
+      key,
+      pingIntervalMs: 60_000,
+      ...opts,
+    });
+    client.start();
+    await pollUntil(() => client.getState().status === "open" && peer.dials >= 1, "the first dial open");
+    return client;
+  }
+
+  test("a live socket answers the probe and is kept; calls while it is out share one ping", async () => {
+    const peer = startPeer(true);
+    const client = await openAgainst(peer);
+    try {
+      const watch = drops(client);
+      const outcomes = await Promise.all([client.reconnectIfStale(0), client.reconnectIfStale(5_000)]);
+      watch.stop();
+      expect(outcomes).toEqual(["live", "live"]);
+      expect(watch.seen).toEqual([]);
+      expect(peer.pings).toBe(1);
+      expect(peer.dials).toBe(1);
+    } finally {
+      client.stop();
+      peer.stop();
+    }
+  });
+
+  // The ping a request sends is the "earlier ping" below: the heartbeat stays out of the way at
+  // its default interval, so the ping count is the test's alone.
+  function pingEarlier(client: RelayClient): void {
+    client.request("whoever", "sessions", {}).catch(() => {});
+  }
+
+  test("a pong answering a ping sent before the probe does not settle it: the dead socket is re-dialled", async () => {
+    const peer = startPeer();
+    const client = await openAgainst(peer, { resumeProbeMs: 200 });
+    try {
+      pingEarlier(client);
+      await pollUntil(() => peer.pings >= 1, "the earlier ping");
+      const probe = client.reconnectIfStale(0);
+      await pollUntil(() => peer.pings >= 2, "the probe's ping");
+      peer.pong();
+      expect(await probe).toBe("redialed");
+      await pollUntil(() => peer.dials >= 2, "the re-dial");
+    } finally {
+      client.stop();
+      peer.stop();
+    }
+  });
+
+  test("the probe settles live once the pongs cover its own ping", async () => {
+    const peer = startPeer();
+    const client = await openAgainst(peer, { resumeProbeMs: 2_000 });
+    try {
+      pingEarlier(client);
+      await pollUntil(() => peer.pings >= 1, "the earlier ping");
+      const probe = client.reconnectIfStale(0);
+      await pollUntil(() => peer.pings >= 2, "the probe's ping");
+      peer.pong();
+      peer.pong();
+      expect(await probe).toBe("live");
+      expect(peer.dials).toBe(1);
+    } finally {
+      client.stop();
+      peer.stop();
+    }
+  });
+
+  test("hidden for a heartbeat interval or longer with nothing heard re-dials without probing", async () => {
+    const peer = startPeer();
+    // The peer sends nothing, so no frame was ever heard on this socket.
+    const client = await openAgainst(peer);
+    try {
+      const watch = drops(client);
+      expect(await client.reconnectIfStale(Infinity)).toBe("redialed");
+      expect(watch.seen).toEqual(["connecting"]);
+      await pollUntil(() => peer.dials >= 2, "the re-dial");
+      watch.stop();
+      expect(peer.pings).toBe(0);
+    } finally {
+      client.stop();
+      peer.stop();
+    }
+  });
+
+  test("a long hide whose heartbeat kept running (frames still arriving) probes rather than re-dials", async () => {
+    const peer = startPeer(true);
+    // The long pong timeout keeps "heard recently" true however slow the run.
+    const client = await openAgainst(peer, { pingIntervalMs: 100, pongTimeoutMs: 60_000 });
+    try {
+      await pollUntil(() => peer.pings >= 2, "two heartbeats answered");
+      expect(await client.reconnectIfStale(10_000)).toBe("live");
+      expect(peer.dials).toBe(1);
+    } finally {
+      client.stop();
+      peer.stop();
+    }
+  });
+
+  test("a long hide with a stale probe still out re-dials, and the old probe settles redialed", async () => {
+    const peer = startPeer();
+    const client = await openAgainst(peer, { resumeProbeMs: 5_000 });
+    try {
+      const first = client.reconnectIfStale(0);
+      await pollUntil(() => peer.pings >= 1, "the probe's ping");
+      expect(await client.reconnectIfStale(Infinity)).toBe("redialed");
+      expect(await first).toBe("redialed");
+      await pollUntil(() => peer.dials >= 2, "the re-dial");
+    } finally {
+      client.stop();
+      peer.stop();
+    }
+  });
+
+  test("stop while a probe is out settles it redialed and dials nothing", async () => {
+    const peer = startPeer();
+    const client = await openAgainst(peer, { resumeProbeMs: 5_000 });
+    try {
+      const probe = client.reconnectIfStale(0);
+      client.stop();
+      expect(await probe).toBe("redialed");
+      // A non-event can't be polled for.
+      await Bun.sleep(100);
+      expect(peer.dials).toBe(1);
+    } finally {
+      client.stop();
+      peer.stop();
+    }
+  });
+
+  test("the socket closing while a probe is out settles it redialed", async () => {
+    const peer = startPeer();
+    const client = await openAgainst(peer, { resumeProbeMs: 5_000 });
+    try {
+      const probe = client.reconnectIfStale(0);
+      await pollUntil(() => peer.pings >= 1, "the probe's ping");
+      peer.closeAll();
+      expect(await probe).toBe("redialed");
+    } finally {
+      client.stop();
+      peer.stop();
+    }
+  });
+
+  test("a request made while a probe is out is sent only once it settles live", async () => {
+    const peer = startPeer();
+    const client = await openAgainst(peer, { resumeProbeMs: 5_000 });
+    try {
+      const probe = client.reconnectIfStale(0);
+      await pollUntil(() => peer.pings >= 1, "the probe's ping");
+      const reply = client.request("dev-x", "sessions", {}).catch((err: unknown) => err);
+      // A non-event can't be polled for.
+      await Bun.sleep(100);
+      expect(peer.frames).toEqual([]);
+      peer.pong();
+      expect(await probe).toBe("live");
+      await pollUntil(() => peer.frames.length === 1, "the request's frame after the probe");
+      client.stop();
+      expect(await reply).toBeInstanceOf(RequestFailure);
+    } finally {
+      client.stop();
+      peer.stop();
+    }
+  });
+
+  test("a request deferred behind a probe that re-dials never rides the dead socket, and fails as any without a socket", async () => {
+    const peer = startPeer();
+    const client = await openAgainst(peer, { resumeProbeMs: 100 });
+    try {
+      const probe = client.reconnectIfStale(0);
+      await pollUntil(() => peer.pings >= 1, "the probe's ping");
+      const reply = await client.request("dev-x", "sessions", {}).catch((err: unknown) => err);
+      expect(await probe).toBe("redialed");
+      expect(reply).toBeInstanceOf(RequestFailure);
+      if (!(reply instanceof RequestFailure)) throw new Error("expected a RequestFailure");
+      expect(reply.reason).toBe("disconnected");
+      expect(peer.frames).toEqual([]);
+    } finally {
+      client.stop();
+      peer.stop();
+    }
+  });
+
+  test("a request deferred behind a probe fails when the client is stopped meanwhile", async () => {
+    const peer = startPeer();
+    const client = await openAgainst(peer, { resumeProbeMs: 5_000 });
+    try {
+      const probe = client.reconnectIfStale(0);
+      await pollUntil(() => peer.pings >= 1, "the probe's ping");
+      const reply = client.request("dev-x", "sessions", {}).catch((err: unknown) => err);
+      client.stop();
+      await probe;
+      expect(await reply).toBeInstanceOf(RequestFailure);
+      expect(peer.frames).toEqual([]);
+    } finally {
+      client.stop();
+      peer.stop();
+    }
+  });
+
+  test("a socket that reads open but answers nothing is re-dialled once the probe's deadline passes", async () => {
+    let dials = 0;
+    const mute = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(req, server) {
+        if (server.upgrade(req)) return undefined;
+        return new Response("expected websocket upgrade", { status: 426 });
+      },
+      websocket: {
+        open() {
+          dials += 1;
+        },
+        message() {},
+      },
+    });
+    // The heartbeat is far off, so only the probe can be what re-dials.
+    const client = new RelayClient({
+      url: `ws://127.0.0.1:${mute.port}/app`,
+      token: TOKEN,
+      key,
+      pingIntervalMs: 60_000,
+      resumeProbeMs: 80,
+    });
+    try {
+      client.start();
+      await pollUntil(() => client.getState().status === "open" && dials === 1, "the first dial open");
+      expect(await client.reconnectIfStale(0)).toBe("redialed");
+      await pollUntil(() => dials >= 2, "a second dial after the unanswered probe");
+    } finally {
+      client.stop();
+      mute.stop(true);
+    }
+  });
+
+  test("no socket at all re-dials at once, as a rejected or stopped client did on every resume", async () => {
+    const { client, waitFor } = startClient({ token: "wrong" });
+    try {
+      await waitFor((s) => s.status === "rejected", "rejected");
+      expect(await client.reconnectIfStale(0)).toBe("redialed");
+      expect(client.getState().status).not.toBe("rejected");
+    } finally {
+      client.stop();
+    }
+  });
+});
+
 /**
  * Store orchestration against the real relay. These live here rather than in
  * their own file: each file booting its own workerd trips the boot-after-dispose
@@ -1703,5 +2037,49 @@ describe("malformed frames", () => {
       client.stop();
       await peer.stop();
     }
+  });
+});
+
+describe("uploadAttachment", () => {
+  // One test on purpose: its puts spend one hour bucket of the shared relay's allowance.
+  test("stores a sealed object the key opens under the answered id and hash, then refuses past the allowance", async () => {
+    const { client } = startClient();
+    const bytes = new Uint8Array(new TextEncoder().encode("a screenshot, honestly"));
+    const stored = await client.uploadAttachment(bytes);
+    if (!stored.ok) throw new Error(`not stored: ${stored.code}`);
+
+    // What the relay holds is ciphertext under the answered id: the hash pins it, the key opens it.
+    const res = await fetch(attachmentUrl(appUrl(), stored.id), { headers: { authorization: `Bearer ${TOKEN}` } });
+    expect(res.status).toBe(200);
+    const object = new Uint8Array(await res.arrayBuffer());
+    expect(object.byteLength).toBeGreaterThan(bytes.byteLength);
+    expect(await attachmentHash(object)).toBe(stored.hash);
+    expect(await openAttachment(key, stored.id, object)).toEqual(bytes);
+
+    // A retry is a new call, so a new id: uploads are create-only.
+    const again = await client.uploadAttachment(bytes);
+    expect(again.ok && again.id !== stored.id).toBe(true);
+    for (let put = 2; put < ATTACHMENT_HOUR_UPLOADS; put += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- spends the bucket in order
+      expect((await client.uploadAttachment(bytes)).ok).toBe(true);
+    }
+    expect(await client.uploadAttachment(bytes)).toEqual({
+      ok: false,
+      code: "allowance_exhausted",
+      window: "hour",
+      retryAfter: expect.any(Number),
+    });
+  });
+
+  test("a wrong token is unauthorized, and an unreachable relay says so", async () => {
+    const bytes = new Uint8Array(4);
+    expect(await startClient({ token: "wrong" }).client.uploadAttachment(bytes)).toEqual({
+      ok: false,
+      code: "unauthorized",
+    });
+    expect(await startClient({ url: "ws://127.0.0.1:1/app" }).client.uploadAttachment(bytes)).toEqual({
+      ok: false,
+      code: "unreachable",
+    });
   });
 });

@@ -179,12 +179,19 @@ export function spawnAudit(origin: SpawnOrigin, sink: AuditSink): SpawnAudit {
       const planNote = request.plan === true ? "plan=true " : "";
       const taskNote = request.taskId === undefined ? "" : `task=${quote(request.taskId)} `;
       const continuesNote = request.continues === undefined ? "" : `continues=${quote(request.continues)} `;
+      // Counts only: names are treated as prompt text, and ids and hashes say nothing an operator needs.
+      const files = request.attachments;
+      const attachmentsNote =
+        files === undefined
+          ? ""
+          : `attachments=${files.length} attachmentBytes=${files.reduce((sum, file) => sum + file.size, 0)} `;
       await emit(
         `${clientNote}repo=${quote(request.repo)} mode=${request.mode} title=${quote(request.title ?? "")} ` +
           `model=${quote(request.model ?? DEFAULT_MODEL)} effort=${quote(request.effort ?? DEFAULT_EFFORT)} ` +
           planNote +
           taskNote +
           continuesNote +
+          attachmentsNote +
           promptNote,
       );
     },
@@ -236,14 +243,16 @@ export function despawnAudit(origin: SpawnOrigin, sink: AuditSink): DespawnAudit
 
 export interface QueueAudit {
   readonly markedDone: (id: string, task: { readonly id: string }) => Promise<void>;
+  /** A `run-now` that reserved the task past the concurrency caps. */
+  readonly ranNow: (id: string, task: { readonly id: string }) => Promise<void>;
   readonly cancelled: (id: string, task: { readonly id: string; readonly leftRunning?: boolean }) => Promise<void>;
   /** A `discard` that deleted the unreadable record at `task` and `version`. */
   readonly discarded: (id: string, taskId: string, version: number) => Promise<void>;
   readonly refused: (
-    op: "cancel" | "mark-done" | "pause" | "resume" | "discard" | "push-subscribe",
+    op: "cancel" | "mark-done" | "run-now" | "pause" | "resume" | "discard" | "push-subscribe",
     id: string,
     code: string,
-    /** What the request named: a `cancel` or `mark-done`'s task, a `pause` or `resume`'s account (absent: the whole queue). */
+    /** What the request named: a `cancel`, `mark-done` or `run-now`'s task, a `pause` or `resume`'s account (absent: the whole queue). */
     subject?: { readonly taskId?: string; readonly account?: string },
   ) => Promise<void>;
   /** A `pause` or `resume` answered with the holds; `account` absent is the whole queue. */
@@ -265,6 +274,7 @@ export function queueAudit(sink: AuditSink): QueueAudit {
   };
   return {
     markedDone: (id, task) => emit(`op=mark-done id=${quote(id)} task=${quote(task.id)} ok`),
+    ranNow: (id, task) => emit(`op=run-now id=${quote(id)} task=${quote(task.id)} ok`),
     cancelled: (id, task) =>
       emit(
         `op=cancel id=${quote(id)} task=${quote(task.id)} ok${task.leftRunning === true ? " leftRunning=true" : ""}`,
@@ -434,11 +444,14 @@ export interface ReapAudit {
   readonly closedPane: (paneId: string, window: string, reason: string) => Promise<void>;
   /** A `git fsmonitor--daemon` asked to stop (`stop`) or signalled (`signal`); pid null when unmapped. */
   readonly stoppedMonitor: (path: string, pid: number | null, how: string, reason: string) => Promise<void>;
+  /** A task's fetched attachments (`pruneAttachments`); `task` is a staging directory's name for `staging`. */
+  readonly removedAttachments: (task: string, reason: string) => Promise<void>;
   readonly done: (counts: {
     readonly worktrees: number;
     readonly branches: number;
     readonly panes: number;
     readonly monitors: number;
+    readonly attachments: number;
   }) => Promise<void>;
 }
 
@@ -463,9 +476,10 @@ export function reapAudit(origin: ReapOrigin, sink: AuditSink): ReapAudit {
     closedPane: (paneId, window, reason) => emit(`closed-pane pane=${paneId} window=${quote(window)} reason=${reason}`),
     stoppedMonitor: (path, pid, how, reason) =>
       emit(`stopped-fsmonitor path=${quote(path)} pid=${pid ?? "(unknown)"} how=${how} reason=${reason}`),
+    removedAttachments: (task, reason) => emit(`removed-attachments task=${quote(task)} reason=${reason}`),
     done: (counts) =>
       emit(
-        `done worktrees=${counts.worktrees} branches=${counts.branches} panes=${counts.panes} monitors=${counts.monitors}`,
+        `done worktrees=${counts.worktrees} branches=${counts.branches} panes=${counts.panes} monitors=${counts.monitors} attachments=${counts.attachments}`,
       ),
   };
 }

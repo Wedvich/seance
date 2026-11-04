@@ -24,8 +24,10 @@ usage: seanced [command]
   sessions    list running claude tmux windows, each with the id despawn takes
   spawn       queue a session for the scheduler: seanced spawn <repo> [--here] [-t <title>] [[-p] <task>] (needs the relay, and a PSK this shell or its daemon holds)
               --machine <name|here> / --account <alias|email|id>: pin it; --not <machine|here>: keep it off (repeatable)
-              --now: spawn on this machine right away instead: no relay, key, leader or daemon needed; takes no pin flags
-  continue    resume a failed task's session in its worktree, as a new queued task: seanced continue <task-id> [-p <note>] (needs the relay, and a PSK this shell or its daemon holds)
+              --start: once the scheduler admits it, start it past the concurrency cap (as seanced start)
+              --now: spawn on this machine right away instead: no relay, key, leader or daemon needed; takes no pin flags or --start
+  continue    resume a failed or cancelled task's session in its worktree, as a new queued task: seanced continue <task-id> [-p <note>] (needs the relay, and a PSK this shell or its daemon holds)
+  start       start a queued task now, past the concurrency cap (the app's Start now): seanced start <task-id> (needs the relay, and a PSK this shell or its daemon holds)
   despawn     end a session: seanced despawn <id> [--force] — asks claude to exit (keeping its worktree), kills the pane after ~5s
   reap        clean up after sessions: merged, clean, idle worktrees, merged branches, dead windows — [--dry-run] [--min-age-days <n>]
   mcp         serve MCP over stdio for a local Claude Code; mcp install / mcp uninstall wire it into Claude's config
@@ -36,23 +38,35 @@ usage: seanced [command]
 `;
 
 async function runForeground(): Promise<void> {
-  const [{ log }, { startPowerLoop }, { startedBySupervisor }, { startSupervisor }] = await Promise.all([
+  const [
+    { log },
+    { startPowerLoop },
+    { startedBySupervisor },
+    { startSupervisor },
+    { drainTaskLaunches },
+    { SHUTDOWN_DRAIN_MS },
+    { createShutdown },
+  ] = await Promise.all([
     import("./log.ts"),
     import("./power.ts"),
     import("./service.ts"),
     import("./supervise.ts"),
+    import("./run.ts"),
+    import("./drain-limits.ts"),
+    import("./shutdown.ts"),
   ]);
   // Self-update only under the supervisor that can actually relaunch us.
   const supervised = startedBySupervisor();
   if (!supervised) log.info("not started by a service manager — self-update is off for this run");
   const daemon = await startSupervisor({ usageRefresh: {}, ...(supervised ? { selfUpdate: {} } : {}) });
   const stopPower = startPowerLoop();
-  const shutdown = (signal: string): void => {
-    log.info(`${signal} — shutting down`);
-    stopPower();
-    daemon.stop();
-    process.exit(0);
-  };
+  const shutdown = createShutdown({
+    info: (message) => log.info(message),
+    stopPower,
+    drain: () => drainTaskLaunches(SHUTDOWN_DRAIN_MS),
+    stop: () => daemon.stop(),
+    exit: (code) => process.exit(code),
+  });
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("SIGINT", () => shutdown("SIGINT"));
   await new Promise(() => {}); // run until signalled
@@ -99,6 +113,9 @@ async function runCommand(command: string, rest: readonly string[]): Promise<voi
       break;
     case "continue":
       await cli.cmdContinue(rest);
+      break;
+    case "start":
+      await cli.cmdStart(rest);
       break;
     case "despawn":
       await cli.cmdDespawn(rest);

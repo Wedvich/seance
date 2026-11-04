@@ -34,6 +34,15 @@ import { stateDir } from "./paths.ts";
  * the worktree directory and window name already do, never the prompt; the file
  * is 0600 in the state dir.
  *
+ * `pending` is the ids whose launch was recorded but has not yet settled
+ * (landed, retracted, refused or crashed), written in the same durable write as
+ * `tasks`. An id still pending when the file is opened is a launch the process
+ * died in the middle of: it becomes `interrupted` (persisted, and kept in
+ * `tasks`, so `since` and `ended` are untouched) until a listing carrying it, a
+ * harvested exit, a bound session event or a later landing of it clears it.
+ * Both are optional top-level arrays an older reader ignores, and neither may
+ * ever make a file corrupt: that would reset `since`.
+ *
  * Bounded by count and by age, and `since` moves past each entry evicted, so
  * the claim stays true as the file forgets. Count: eviction happens only
  * through this machine's own launches, and the task waiting on proof is one
@@ -57,6 +66,15 @@ export function launchLedgerPath(): string {
 export interface LaunchSite {
   readonly repo: string;
   readonly worktree: string;
+  /** The Claude session id this daemon chose for the launch (`--session-id`), or a continuation resumed. */
+  readonly session?: string;
+}
+
+/** What `crypto.randomUUID` makes, the only shape `--resume` is ever handed. */
+const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+
+export function isSessionId(value: unknown): value is string {
+  return typeof value === "string" && SESSION_ID_PATTERN.test(value);
 }
 
 /** What is known of a task's branch. `tip` and `ahead` are internal: never in `TaskProgress`. */
@@ -64,6 +82,11 @@ export interface TaskNote {
   readonly repo?: string;
   /** Absolute worktree path. */
   readonly path?: string;
+  /**
+   * The Claude session id the launch ran under, chosen by this daemon (`LaunchSite.session`): what a
+   * continuation resumes. Sticky; internal, never in `TaskProgress`, never read from a frame.
+   */
+  readonly session?: string;
   readonly branch?: string;
   /** The last tip that held own work (not in the default, and a net change from its fork), 40 or 64 hex: what merged and pushed are judged on once the branch is reset or gone. */
   readonly tip?: string;
@@ -76,6 +99,20 @@ export interface TaskNote {
   readonly prUrl?: string;
   /** The session's exit status, noted from its dead pane before the pane is closed (`exit-status.ts`). */
   readonly exit?: number;
+  /**
+   * The pid of the tmux server the task's pane was launched on, under `remain-on-exit on` with the
+   * per-pane `pane-died` hook (`spawn.ts`): what makes the task one harvest may judge `vanished`, and
+   * which server's listing may judge it. Sticky; internal, never in `TaskProgress`. A launch from
+   * before this field, or on another backend, has none and is never judged.
+   */
+  readonly server?: number;
+  /** This daemon closed the pane itself (despawn, reap, harvest): never judged `vanished`. Sticky; internal. */
+  readonly closedHere?: true;
+  /**
+   * The pane went from tmux with no exit status and no close of this daemon's own (`exit-status.ts`):
+   * `TaskProgress.vanished`, carried only while `exit` is absent. Sticky.
+   */
+  readonly vanished?: true;
   /**
    * Its pane's cgroup `oom_kill` count as last seen while the pane lived (`oom-kill.ts`), with the pane
    * it came from; internal, never in `TaskProgress`. Here so a restart keeps the baseline. Rewritten
@@ -101,6 +138,21 @@ export interface NotedTask extends TaskNote {
   readonly siteAt?: number;
 }
 
+/**
+ * The note that owns each path: of two tasks naming one, the newer site (`siteAt`, absent
+ * as 0) wins, and a tie goes to the later in `notes`. One rule for branch-state's live read
+ * and for continuation, so they cannot drift.
+ */
+export function pathOwners(notes: readonly NotedTask[]): ReadonlyMap<string, NotedTask> {
+  const newest = new Map<string, NotedTask>();
+  for (const note of notes) {
+    if (note.path === undefined) continue;
+    const held = newest.get(note.path);
+    if (held === undefined || (note.siteAt ?? 0) >= (held.siteAt ?? 0)) newest.set(note.path, note);
+  }
+  return newest;
+}
+
 interface LedgerFile {
   readonly v: typeof LEDGER_VERSION;
   readonly since: number;
@@ -108,6 +160,10 @@ interface LedgerFile {
   readonly tasks: readonly (readonly [string, number])[];
   /** Best-effort notes, outside the proof: an older reader ignores them. */
   readonly progress?: readonly NotedTask[];
+  /** Ids recorded whose launch had not settled when this was written. */
+  readonly pending?: readonly string[];
+  /** Ids a past process died launching: see the header. */
+  readonly interrupted?: readonly string[];
 }
 
 const PATH_MAX_LENGTH = 4096;
@@ -120,8 +176,27 @@ function boundedText(value: unknown, max: number): string | undefined {
 /** One entry, field by field: a bad field is dropped, a bad entry is skipped, never the file. */
 function parseNote(raw: unknown, ids: ReadonlySet<string>): NotedTask | null {
   if (!isRecord(raw)) return null;
-  const { taskId, at, siteAt, repo, path, branch, tip, ahead, pushed, merged, reported, prUrl, exit, oom, oomKill } =
-    raw;
+  const {
+    taskId,
+    at,
+    siteAt,
+    repo,
+    path,
+    session,
+    branch,
+    tip,
+    ahead,
+    pushed,
+    merged,
+    reported,
+    prUrl,
+    exit,
+    oom,
+    oomKill,
+    server,
+    closedHere,
+    vanished,
+  } = raw;
   if (typeof taskId !== "string" || !ids.has(taskId) || typeof at !== "number" || !Number.isFinite(at)) return null;
   const repoText = boundedText(repo, PATH_MAX_LENGTH);
   const pathText = boundedText(path, PATH_MAX_LENGTH);
@@ -134,6 +209,7 @@ function parseNote(raw: unknown, ids: ReadonlySet<string>): NotedTask | null {
     ...(typeof siteAt === "number" && Number.isFinite(siteAt) ? { siteAt } : {}),
     ...(repoText === undefined ? {} : { repo: repoText }),
     ...(pathText === undefined ? {} : { path: pathText }),
+    ...(isSessionId(session) ? { session } : {}),
     ...(branchText === undefined ? {} : { branch: branchText }),
     ...(tipText === undefined ? {} : { tip: tipText }),
     ...(ahead === true ? { ahead: true as const } : {}),
@@ -144,7 +220,18 @@ function parseNote(raw: unknown, ids: ReadonlySet<string>): NotedTask | null {
     ...(isExitStatus(exit) ? { exit } : {}),
     ...(isOomSample(oom) ? { oom } : {}),
     ...(typeof oomKill === "boolean" ? { oomKill } : {}),
+    ...(isServerPid(server) ? { server } : {}),
+    ...(closedHere === true ? { closedHere: true as const } : {}),
+    ...(vanished === true ? { vanished: true as const } : {}),
   };
+}
+
+function isServerPid(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function isUnaccounted(note: NotedTask): boolean {
+  return note.exit === undefined && note.closedHere === undefined && note.vanished === undefined;
 }
 
 function isExitStatus(value: unknown): value is number {
@@ -170,7 +257,20 @@ function parseLedger(raw: unknown): LedgerFile | null {
       if (note !== null) progress.push(note);
     }
   }
-  return { v: LEDGER_VERSION, since, tasks: entries, progress };
+  return {
+    v: LEDGER_VERSION,
+    since,
+    tasks: entries,
+    progress,
+    pending: knownIds(raw["pending"], ids),
+    interrupted: knownIds(raw["interrupted"], ids),
+  };
+}
+
+/** Lenient: a non-array is none, an entry that is no recorded task id is skipped. Never a reason to call the file corrupt. */
+function knownIds(value: unknown, ids: ReadonlySet<string>): readonly string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((id): id is string => isTaskId(id) && ids.has(id));
 }
 
 async function freshSince(path: string, now: () => number): Promise<number> {
@@ -196,6 +296,11 @@ function mergeNote(taskId: string, base: NotedTask | undefined, patch: TaskNote)
     ...(base?.siteAt === undefined ? {} : { siteAt: base.siteAt }),
     ...(patch.repo !== undefined ? { repo: patch.repo } : base?.repo !== undefined ? { repo: base.repo } : {}),
     ...(patch.path !== undefined ? { path: patch.path } : base?.path !== undefined ? { path: base.path } : {}),
+    ...(patch.session !== undefined
+      ? { session: patch.session }
+      : base?.session !== undefined
+        ? { session: base.session }
+        : {}),
     ...(patch.branch !== undefined
       ? { branch: patch.branch }
       : base?.branch !== undefined
@@ -216,6 +321,13 @@ function mergeNote(taskId: string, base: NotedTask | undefined, patch: TaskNote)
     ...(patch.pushed === true || base?.pushed === true ? { pushed: true as const } : {}),
     ...(patch.merged === true || base?.merged === true ? { merged: true as const } : {}),
     ...(patch.reported === true || base?.reported === true ? { reported: true as const } : {}),
+    ...(patch.server !== undefined
+      ? { server: patch.server }
+      : base?.server !== undefined
+        ? { server: base.server }
+        : {}),
+    ...(patch.closedHere === true || base?.closedHere === true ? { closedHere: true as const } : {}),
+    ...(patch.vanished === true || base?.vanished === true ? { vanished: true as const } : {}),
   };
 }
 
@@ -244,12 +356,20 @@ function sameProgress(a: NotedTask, b: NotedTask): boolean {
     a.pushed === b.pushed &&
     a.merged === b.merged &&
     a.reported === b.reported &&
-    a.oomKill === b.oomKill
+    a.oomKill === b.oomKill &&
+    a.vanished === b.vanished
   );
 }
 
+/** `server`, `closedHere` and `session` write but are no progress: they never move `at`. */
 function sameNote(a: NotedTask, b: NotedTask): boolean {
-  return sameProgress(a, b) && sameSample(a.oom, b.oom);
+  return (
+    sameProgress(a, b) &&
+    sameSample(a.oom, b.oom) &&
+    a.server === b.server &&
+    a.closedHere === b.closedHere &&
+    a.session === b.session
+  );
 }
 
 export class LaunchLedger {
@@ -261,6 +381,10 @@ export class LaunchLedger {
   readonly #notes: Map<string, NotedTask>;
   /** Records of each id not yet on disk or failed: a failure deletes the id only when it is the last. */
   readonly #recording = new Map<string, number>();
+  /** Recorded, launch not yet settled: written with `tasks`, so a process that dies mid-spawn leaves the id here. */
+  readonly #pending = new Set<string>();
+  /** Ids a previous process died launching; always a subset of `#tasks`. */
+  readonly #interrupted: Set<string>;
   #since: number;
   #writing: Promise<unknown> = Promise.resolve();
 
@@ -270,6 +394,7 @@ export class LaunchLedger {
     this.#since = file?.since ?? since;
     this.#tasks = new Map(file?.tasks ?? []);
     this.#notes = new Map((file?.progress ?? []).map((note) => [note.taskId, note]));
+    this.#interrupted = new Set([...(file?.interrupted ?? []), ...(file?.pending ?? [])]);
   }
 
   /**
@@ -301,7 +426,14 @@ export class LaunchLedger {
       // Falls through to the warning below.
     }
     if (parsed === null) log.warn(`launch ledger at ${path} is corrupt — starting it afresh`);
-    return new LaunchLedger(path, now, parsed === null ? await freshSince(path, now) : 0, parsed);
+    const ledger = new LaunchLedger(path, now, parsed === null ? await freshSince(path, now) : 0, parsed);
+    const promoted = parsed?.pending ?? [];
+    if (promoted.length > 0) {
+      log.warn(
+        `launch ledger: the previous process exited while launching ${promoted.join(", ")} — reporting them interrupted`,
+      );
+    }
+    return ledger;
   }
 
   /** No file: for tests and a host that keeps none. Proves only what this process saw. */
@@ -331,6 +463,7 @@ export class LaunchLedger {
     this.#tasks.set(taskId, this.#now());
     this.#evict();
     this.#recording.set(taskId, (this.#recording.get(taskId) ?? 0) + 1);
+    this.#pending.add(taskId);
     try {
       await this.#persist();
     } catch (err) {
@@ -338,7 +471,10 @@ export class LaunchLedger {
       // then put the ledger on disk without it and report success. If that one
       // fails too, the id stays in memory with nothing launched: it reads as
       // ran-and-ended, never as never-started.
-      if (fresh && this.#recording.get(taskId) === 1) this.#tasks.delete(taskId);
+      if (fresh && this.#recording.get(taskId) === 1) {
+        this.#tasks.delete(taskId);
+        this.#pending.delete(taskId);
+      }
       throw err;
     } finally {
       const left = (this.#recording.get(taskId) ?? 1) - 1;
@@ -356,8 +492,61 @@ export class LaunchLedger {
   async retract(taskId: string): Promise<void> {
     if (!this.#tasks.delete(taskId)) return;
     this.#notes.delete(taskId);
+    this.#pending.delete(taskId);
+    this.#interrupted.delete(taskId);
     await this.#persist().catch((err: unknown) => {
       log.warn(`launch ledger: could not retract a launch that never ran (${String(err)})`);
+    });
+  }
+
+  /**
+   * The launch recorded for this id settled: it left `pending`, so a restart no
+   * longer reads it as interrupted. Best-effort — a failed write costs only
+   * that, and the id is then reported interrupted after a restart, which is the
+   * safe side. Nothing to write when it was not pending.
+   */
+  async clearPending(taskId: string): Promise<void> {
+    if (!this.#pending.delete(taskId)) return;
+    await this.#persist().catch((err: unknown) => {
+      log.warn(`launch ledger: could not clear a settled launch's pending mark (${String(err)})`);
+    });
+  }
+
+  /**
+   * The launch recorded for this id ended with no verdict (the spawn backend crashed): it may have left a
+   * window, so it moves from `pending` to `interrupted`, as if the process had died launching it.
+   * Best-effort like `clearPending`; nothing to do for an id no longer recorded.
+   */
+  async markInterrupted(taskId: string): Promise<void> {
+    if (!this.#tasks.has(taskId)) return;
+    this.#pending.delete(taskId);
+    this.#interrupted.add(taskId);
+    await this.#persist().catch((err: unknown) => {
+      log.warn(`launch ledger: could not mark a crashed launch interrupted (${String(err)})`);
+    });
+  }
+
+  /**
+   * Ids a previous process died launching, still in the ledger: what
+   * `SessionsResponse.interrupted` carries.
+   */
+  interrupted(): readonly string[] {
+    this.#evict();
+    return [...this.#interrupted].filter((id) => this.#tasks.has(id));
+  }
+
+  /**
+   * The ids are accounted for (listed live, exited, bound to a pane, landed):
+   * no longer interrupted. Memory changes before the first await, so a reply
+   * built right after never repeats them; the write is best-effort and never
+   * rejects.
+   */
+  async clearInterrupted(ids: Iterable<string>): Promise<void> {
+    let removed = false;
+    for (const id of ids) if (this.#interrupted.delete(id)) removed = true;
+    if (!removed) return;
+    await this.#persist().catch((err: unknown) => {
+      log.warn(`launch ledger: could not clear an interrupted mark (${String(err)})`);
     });
   }
 
@@ -426,7 +615,7 @@ export class LaunchLedger {
 
   /**
    * A new launch of this id landed — never a refused or crashed one, whose
-   * earlier note stays: its note starts afresh — `{repo, path}` for a
+   * earlier note stays: its note starts afresh — `{repo, path, session}` for a
    * worktree launch, nothing for `here` — whatever an earlier launch of the id
    * left. Sticky `ahead`/`pushed`/`merged` and the PR URL describe a worktree
    * that no longer is this task's; carried over, they could settle it merged.
@@ -436,19 +625,26 @@ export class LaunchLedger {
    */
   async startNote(
     taskId: string,
-    site?: { readonly repo: string; readonly path: string },
+    site?: { readonly repo: string; readonly path: string; readonly session?: string },
     prUrl?: string,
+    server?: number,
   ): Promise<void> {
     if (!this.#tasks.has(taskId)) return;
-    if (site === undefined && prUrl === undefined) {
-      if (!this.#notes.delete(taskId)) return;
+    // The launch landed: both marks go with it, even where no note is written (a `here` launch with no PR).
+    const wasPending = this.#pending.delete(taskId);
+    const wasInterrupted = this.#interrupted.delete(taskId);
+    const unmarked = wasPending || wasInterrupted;
+    if (site === undefined && prUrl === undefined && server === undefined) {
+      if (!this.#notes.delete(taskId) && !unmarked) return;
     } else {
       const at = this.#now();
       this.#notes.set(taskId, {
         taskId,
         at,
         ...(site === undefined ? {} : { siteAt: at, repo: site.repo, path: site.path }),
+        ...(isSessionId(site?.session) ? { session: site.session } : {}),
         ...(prUrl === undefined ? {} : { prUrl }),
+        ...(server === undefined ? {} : { server }),
       });
     }
     try {
@@ -483,7 +679,8 @@ export class LaunchLedger {
         note.pushed === undefined &&
         note.merged === undefined &&
         note.reported === undefined &&
-        note.exit === undefined
+        note.exit === undefined &&
+        note.vanished === undefined
       )
         continue;
       const entry: TaskProgress = {
@@ -496,6 +693,8 @@ export class LaunchLedger {
         ...(note.reported === undefined ? {} : { reported: note.reported }),
         ...(note.exit === undefined ? {} : { exit: note.exit }),
         ...(note.oomKill === undefined || note.exit !== SIGKILL_STATUS ? {} : { oomKill: note.oomKill }),
+        // An exit always outranks it: a pane that left a status was not closed from outside.
+        ...(note.vanished === true && note.exit === undefined ? { vanished: true as const } : {}),
       };
       if (parseTaskProgressList([entry]) === null) {
         warnProgressDropped();
@@ -506,12 +705,49 @@ export class LaunchLedger {
     return out;
   }
 
+  /**
+   * Launches whose pane was kept under a known tmux server and that nothing has accounted for yet:
+   * no exit, no close of this daemon's own, not already vanished. `recordedAt` is the launch's
+   * `record` time, which `noteVanished` re-checks so a relaunch is never judged on its predecessor.
+   */
+  unaccounted(): readonly { readonly taskId: string; readonly recordedAt: number; readonly server: number }[] {
+    this.#evict();
+    const out: { taskId: string; recordedAt: number; server: number }[] = [];
+    for (const [taskId, recordedAt] of this.#tasks) {
+      const note = this.#notes.get(taskId);
+      if (note?.server === undefined || !isUnaccounted(note)) continue;
+      out.push({ taskId, recordedAt, server: note.server });
+    }
+    return out;
+  }
+
+  /**
+   * Notes `vanished` when the launch `recordedAt` still stands and nothing accounted for it meanwhile.
+   * The check and the staging are one synchronous span, so a despawn or reap that noted `closedHere`
+   * (or a relaunch) first always wins. False when it refused.
+   */
+  async noteVanished(taskId: string, recordedAt: number): Promise<boolean> {
+    if (this.#tasks.get(taskId) !== recordedAt) return false;
+    const note = this.#notes.get(taskId);
+    if (note?.server === undefined || !isUnaccounted(note)) return false;
+    if (this.#stage(taskId, { vanished: true }) !== "written") return false;
+    log.info(`launch ledger: task ${taskId}'s window closed with no exit status (vanished)`);
+    try {
+      await this.#persist();
+    } catch (err) {
+      log.warn(`launch ledger: could not record task progress (${String(err)})`);
+    }
+    return true;
+  }
+
   #evict(): void {
     const cutoff = this.#now() - LEDGER_MAX_AGE_MS;
     for (const [id, at] of this.#tasks) {
       if (at >= cutoff && this.#tasks.size <= LEDGER_MAX) break;
       this.#tasks.delete(id);
       this.#notes.delete(id);
+      this.#pending.delete(id);
+      this.#interrupted.delete(id);
       this.#since = Math.max(this.#since, at + 1);
     }
   }
@@ -523,13 +759,17 @@ export class LaunchLedger {
     const run = this.#writing
       .catch(() => undefined)
       .then(() => {
-        // Only when there are notes, so an untouched ledger stays byte-identical to the old v1.
+        // Only when there are notes or marks, so a settled ledger stays byte-identical to the old v1.
         const progress = [...this.#notes.values()];
+        const pending = [...this.#pending];
+        const interrupted = [...this.#interrupted];
         const file: LedgerFile = {
           v: LEDGER_VERSION,
           since: this.#since,
           tasks: [...this.#tasks],
           ...(progress.length === 0 ? {} : { progress }),
+          ...(pending.length === 0 ? {} : { pending }),
+          ...(interrupted.length === 0 ? {} : { interrupted }),
         };
         // Write-ahead means on disk before the launch, the rename included: synced without its
         // directory, a power cut can bring back the file before it, and `since` then "proves"

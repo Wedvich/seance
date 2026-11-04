@@ -5,6 +5,7 @@ import {
   TASK_SPEC_LIMITS,
   continueOffer,
   knownAccounts,
+  waitingContinuation,
   type DepAfter,
   type KnownAccount,
   type Machine,
@@ -14,11 +15,19 @@ import {
   type Task,
 } from "@seance/shared";
 import { machineAsleep, needsAttention } from "./asleep.ts";
-import { avoidLine, pinLine, taskHeadline, waitingText } from "./decision-view.ts";
+import {
+  avoidLine,
+  decisionStartNowItem,
+  pinLine,
+  taskHeadline,
+  waitingText,
+  type StartNowItem,
+} from "./decision-view.ts";
 import { accountDisplayName, formatUntil } from "./machines-view.ts";
 import {
   deriveContinueAvailability,
   deriveReportedAvailability,
+  deriveRunNowAvailability,
   failedBody,
   formatSeen,
   originLabel,
@@ -33,6 +42,45 @@ import {
 
 export type QueueDot = "ok" | "auto" | "err";
 
+/** The one action a card shows inline; the rest sit behind its ⋯ menu. */
+export type QueueInlineAction = "continue";
+
+/**
+ * The likeliest next step that acts on the task itself. Follow up, Start now, Mark done and Cancel
+ * are never inline: Follow up starts another task, and Start now jumps the queue, so both live only
+ * in the menu.
+ */
+export function primaryAction(row: Pick<QueueRow, "canContinue">): QueueInlineAction | null {
+  return row.canContinue ? "continue" : null;
+}
+
+export type ArmOp = "cancel" | "mark-done";
+
+/** Names the act and the row, so one item's tap can't arm another's. */
+export function armKey(op: ArmOp, rowId: string): string {
+  return `${op}:${rowId}`;
+}
+
+/**
+ * An act that ends a session asks twice: a first tap only arms (`fire` false, and the menu stays
+ * open to relabel), a second within the arm window fires. `armed` is what the screen holds next.
+ */
+export function armTap(
+  row: Pick<QueueRow, "id" | "cancelEndsSession" | "markDoneEndsSession">,
+  op: ArmOp,
+  armed: string | null,
+): { readonly fire: boolean; readonly armed: string | null } {
+  const key = armKey(op, row.id);
+  const endsSession = op === "cancel" ? row.cancelEndsSession : row.markDoneEndsSession;
+  if (endsSession && armed !== key) return { fire: false, armed: key };
+  return { fire: true, armed: null };
+}
+
+/** A row's menu closing, by any means, disarms that row's acts; Clear's arm and other rows' stay. */
+export function disarmRow(rowId: string, armed: string | null): string | null {
+  return armed === armKey("cancel", rowId) || armed === armKey("mark-done", rowId) ? null : armed;
+}
+
 export interface QueueRow {
   readonly id: string;
   readonly title: string;
@@ -46,17 +94,23 @@ export interface QueueRow {
   readonly cancelEndsSession: boolean;
   /** Mark done may despawn a session (live, or `lost` with its machine back; the PWA can't tell which): asks twice. */
   readonly markDoneEndsSession: boolean;
-  /** Offered while the task can still be waited on, or finished done: "Follow up" prefills the form's After. */
+  /** Offered while the task can still be waited on; a finished one has nothing left to wait for. "Follow up" prefills the form's After. */
   readonly canFollowUp: boolean;
   /**
-   * A failed session that can be picked up where it stopped: its machine is present and
-   * advertises it, the leader does too, and no continuation of it is already live or settled.
+   * A failed or cancelled session that can be picked up where it stopped: its machine is present and
+   * advertises it, the leader does too, and no continuation of it is already waiting, live or settled.
    */
   readonly canContinue: boolean;
+  /** A waiting task's Start now menu item: always shown, greyed (`enabled`) by the split button's rules; null once it is no longer waiting. */
+  readonly startNow: StartNowItem | null;
+  /** `primaryAction` of the flags above: the card's one inline button. */
+  readonly inline: QueueInlineAction | null;
   /** What it waits on, one line; null when it waits on nothing. */
   readonly deps: string | null;
   /** The earlier session it continues, one line; null for any other task. */
   readonly continues: string | null;
+  /** A continuation of it still in the queue, one line naming it, and its row's id to reveal on tap; null for any other task. */
+  readonly continuing: { readonly id: string; readonly text: string } | null;
   /** Its pin and avoid list, one line in the verdict's wording; null when it has neither. */
   readonly placement: string | null;
   /** Its place in a batch, one line; null outside one. */
@@ -95,7 +149,7 @@ export interface HoldRow {
 }
 
 export interface QueueScreenView {
-  /** The header's meta line, "2 running · 1 waiting"; null until a list has been read. */
+  /** The header's meta line, "2/8 running · 1 waiting"; null until a list has been read. */
   readonly summary: string | null;
   /** A verified leader answers and the socket is open. */
   readonly available: boolean;
@@ -148,7 +202,8 @@ function holdRow(hold: PauseHold, state: AppState, known: readonly KnownAccount[
 /** The window `daemon/src/spawn.ts` names a spawn with no title or prompt (`session`, `session-<n>`): says nothing about the task. */
 const NO_SLUG_WINDOW = /^session(?:-\d+)?$/u;
 
-function titleOf(task: Task): string {
+/** How a task is named wherever it is listed: its title, its prompt's first line, its window, else its repo. */
+export function taskTitle(task: Task): string {
   const { spec } = task;
   if (spec.title !== undefined && spec.title !== "") return spec.title;
   const first = spec.prompt
@@ -169,7 +224,8 @@ function dotOf(task: Task): QueueDot | null {
   return null;
 }
 
-function bodyOf(task: Task, machines: readonly Machine[], now: number): string | null {
+/** `idleSince`, on this device's clock, is set only for a task the leader released idle. */
+function bodyOf(task: Task, machines: readonly Machine[], now: number, idleSince?: number): string | null {
   // The leader's `lost` is the sleep itself: waking settles it, and giving up is all the phone can do.
   if (task.state === "lost" && machineAsleep(task, machines)) {
     return "Settles when its machine wakes; cancel or mark done to give up on it";
@@ -190,6 +246,7 @@ function bodyOf(task: Task, machines: readonly Machine[], now: number): string |
       ? "Waiting for input"
       : `Waiting for input since ${formatSeen(task.needsInputSince, now)}`;
   }
+  if (idleSince !== undefined) return `Idle at its prompt since ${formatSeen(idleSince, now)} — its slot is free`;
   return null;
 }
 
@@ -250,6 +307,11 @@ function continuesLine(task: Task, titles: ReadonlyMap<string, string>): string 
   return `Continues ${titles.get(earlier) ?? `task ${earlier.slice(0, 8)}`}`;
 }
 
+function continuingOf(task: Task, tasks: readonly Task[]): QueueRow["continuing"] {
+  const waiting = waitingContinuation(task, tasks);
+  return waiting === undefined ? null : { id: waiting.id, text: `Continuing as ${taskTitle(waiting)} · waiting` };
+}
+
 function batchLine(task: Task): string | null {
   const { batch } = task.spec;
   return batch === undefined ? null : `Batch #${batch.index}`;
@@ -270,24 +332,34 @@ function rowOf(
   skew: number,
   titles: ReadonlyMap<string, string>,
   tasks: readonly Task[],
+  idle: ReadonlyMap<string, number>,
 ): QueueRow {
   const phase = TASK_PHASES[task.state];
+  const idleSince = idle.get(task.id);
   const actionable = phase !== "dispatching" && phase !== "finished";
+  const canFollowUp = phase !== "finished";
+  const canContinue = continueOffer(task, state.relay.machines, tasks).ok && deriveContinueAvailability(state.relay);
+  const waiting = task.state === "queued" || task.state === "blocked" || task.state === "ready";
+  const item = decisionStartNowItem(task.decision ?? null);
+  const startNow = waiting ? { ...item, enabled: item.enabled && deriveRunNowAvailability(state.relay) } : null;
   return {
     id: task.id,
-    title: titleOf(task),
+    title: taskTitle(task),
     headline: taskHeadline(task, state.relay.machines, now),
-    body: bodyOf(task, state.relay.machines, now),
+    body: bodyOf(task, state.relay.machines, now, idleSince === undefined ? undefined : idleSince - skew),
     dot: dotOf(task),
     age: formatSeen(task.createdAt, now),
     canCancel: actionable,
     canMarkDone: actionable,
     cancelEndsSession: phase === "placed",
     markDoneEndsSession: task.state === "running" || task.state === "needs-input" || task.state === "lost",
-    canFollowUp: phase !== "finished" || task.state === "done",
-    canContinue: continueOffer(task, state.relay.machines, tasks).ok && deriveContinueAvailability(state.relay),
+    canFollowUp,
+    canContinue,
+    startNow,
+    inline: primaryAction({ canContinue }),
     deps: depsLine(task, titles),
     continues: continuesLine(task, titles),
+    continuing: continuingOf(task, tasks),
     placement: placementLine(task, state),
     batch: batchLine(task),
     busy: state.taskAction?.taskId === task.id,
@@ -296,13 +368,14 @@ function rowOf(
   };
 }
 
-type Pick = (task: Task, machines: readonly Machine[]) => number | null;
+/** `idle`: the running tasks the leader released for sitting idle at their prompt, by id. */
+type SectionPick = (task: Task, machines: readonly Machine[], idle: ReadonlyMap<string, number>) => number | null;
 
 /**
  * Escalated (past the leader's patience) first, then the rest of needs-input, then lost — a
  * lost task whose machine is back or gone, since one asleep is in Asleep.
  */
-const needsYou: Pick = (t, machines) => {
+const needsYou: SectionPick = (t, machines) => {
   if (machineAsleep(t, machines)) return null;
   if (t.state === "lost") return 2;
   if (t.state !== "needs-input") return null;
@@ -313,7 +386,7 @@ const needsYou: Pick = (t, machines) => {
  * Nothing on a sleeping machine can be acted on from the phone, so it leaves Needs you and
  * Running for a section of its own (DESIGN.md, "Asleep machines on the Queue screen").
  */
-const asleep: Pick = (t, machines) => {
+const asleep: SectionPick = (t, machines) => {
   if (!machineAsleep(t, machines)) return null;
   if (t.state === "needs-input") return 0;
   return t.state === "lost" ? 2 : 1;
@@ -322,14 +395,23 @@ const asleep: Pick = (t, machines) => {
 /** The one section the screen renders collapsed until tapped. */
 export const ASLEEP_SECTION = "Asleep";
 
-const SECTIONS: readonly { readonly title: string; readonly pick: Pick }[] = [
+const IDLE_SECTION = "Idle";
+
+const SECTIONS: readonly { readonly title: string; readonly pick: SectionPick; readonly oldestFirst?: true }[] = [
   { title: "Needs you", pick: needsYou },
   {
     title: "Running",
-    pick: (t, machines) =>
-      (t.state === "reserved" || t.state === "running") && !machineAsleep(t, machines) ? 0 : null,
+    pick: (t, machines, idle) =>
+      (t.state === "reserved" || t.state === "running") && !idle.has(t.id) && !machineAsleep(t, machines) ? 0 : null,
   },
-  { title: "Waiting", pick: (t) => (t.state === "queued" || t.state === "blocked" || t.state === "ready" ? 0 : null) },
+  // Done its turn and waiting on a reply nobody owes it, so it holds no slot (DESIGN.md, "Routing caps").
+  { title: IDLE_SECTION, pick: (t, machines, idle) => (idle.has(t.id) && !machineAsleep(t, machines) ? 0 : null) },
+  {
+    title: "Waiting",
+    pick: (t) => (t.state === "queued" || t.state === "blocked" || t.state === "ready" ? 0 : null),
+    // FIFO, as the scheduler routes ready tasks (batch grouping and blocked tasks aside).
+    oldestFirst: true,
+  },
   { title: ASLEEP_SECTION, pick: asleep },
   { title: "Awaiting merge", pick: (t) => (t.state === "awaiting-merge" ? 0 : null) },
   { title: "Finished", pick: (t) => (TASK_PHASES[t.state] === "finished" ? 0 : null) },
@@ -345,16 +427,19 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
   const view = state.queueView;
   const ok = view?.kind === "ok" ? view : null;
   const tasks = ok?.tasks ?? [];
-  const titles = new Map(tasks.map((task) => [task.id, titleOf(task)]));
+  const titles = new Map(tasks.map((task) => [task.id, taskTitle(task)]));
   const skew = ok?.skew ?? 0;
+  // Only while running: a task the reply's list outlived (settled by an action's own reply) is what it now is.
+  const running = new Set(tasks.filter((t) => t.state === "running").map((t) => t.id));
+  const idle = new Map((ok?.idle ?? []).filter((r) => running.has(r.taskId)).map((r) => [r.taskId, r.since]));
 
-  const sections = SECTIONS.map(({ title, pick }) => {
+  const sections = SECTIONS.map(({ title, pick, oldestFirst }) => {
     const members = tasks
-      .map((task) => ({ task, rank: pick(task, state.relay.machines) }))
+      .map((task) => ({ task, rank: pick(task, state.relay.machines, idle) }))
       .filter((entry): entry is { task: Task; rank: number } => entry.rank !== null)
       // Stable: equal ranks keep the leader's order.
-      .toSorted((a, b) => a.rank - b.rank);
-    return { title, rows: members.map(({ task }) => rowOf(task, state, now, skew, titles, tasks)) };
+      .toSorted((a, b) => a.rank - b.rank || (oldestFirst ? a.task.createdAt - b.task.createdAt : 0));
+    return { title, rows: members.map(({ task }) => rowOf(task, state, now, skew, titles, tasks, idle)) };
   }).filter((section) => section.rows.length > 0);
 
   // Once for every hold: a held account no machine reports still counts as a twin.
@@ -374,7 +459,14 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
   const count = (title: string): number => sections.find((s) => s.title === title)?.rows.length ?? 0;
 
   return {
-    summary: ok === null ? null : `${count("Running")} running · ${count("Waiting")} waiting`,
+    summary:
+      ok === null
+        ? null
+        : [
+            `${count("Running")}${ok.globalMax === undefined ? "" : `/${ok.globalMax}`} running`,
+            ...(count(IDLE_SECTION) === 0 ? [] : [`${count(IDLE_SECTION)} idle`]),
+            `${count("Waiting")} waiting`,
+          ].join(" · "),
     available,
     partial: tasks.length >= QUEUE_MAX_TASKS ? `Showing the ${QUEUE_MAX_TASKS} most relevant tasks` : null,
     holds,
@@ -417,7 +509,7 @@ export function deriveAfterSheet(state: AppState, now: number): AfterSheetView {
     .filter((task) => task.state !== "failed" && task.state !== "cancelled")
     .map((task) => ({
       id: task.id,
-      title: titleOf(task),
+      title: taskTitle(task),
       headline: taskHeadline(task, state.relay.machines, now),
       when: held.get(task.id) ?? null,
     }));

@@ -1,8 +1,8 @@
 import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { DEFAULT_EFFORT, DEFAULT_MODEL, type RepoEntry, type SpawnRequest } from "@seance/shared";
-import { SpawnFailure, type SpawnOutcome } from "./backend.ts";
+import { DEFAULT_EFFORT, DEFAULT_MODEL, isTaskId, type RepoEntry, type SpawnRequest } from "@seance/shared";
+import { SpawnFailure, type Continuation, type SessionAttachments, type SpawnOutcome } from "./backend.ts";
 import { freshenBase } from "./base-fetch.ts";
 import { git } from "./exec.ts";
 import { whileRegistering } from "./exit-status.ts";
@@ -14,6 +14,7 @@ import { parseWorktreeList, parseWorktreeLock } from "./reap-git.ts";
 import { isRegistered, listPanes, paneRunningTask, type PaneInfo } from "./sessions.ts";
 import {
   capturePane,
+  EXIT_OPTION_PREFIX,
   FIELD_SEP,
   PANE_TITLED,
   resolveTargetSession,
@@ -115,8 +116,12 @@ interface Prepared {
   readonly resultPath: string;
   readonly worktreeFlag: readonly string[];
   readonly preamble: string;
-  /** Resume the directory's newest conversation (`--continue`) instead of starting one. */
-  readonly resume: boolean;
+  /**
+   * The Claude session id: a task's new one (`--session-id`), or the one a continuation resumes
+   * (`--resume`, `resume: true`). Always a `crypto.randomUUID()` this daemon made — for a resume, the
+   * one its ledger noted at that launch — never a wire value. Absent for an untracked spawn.
+   */
+  readonly session?: { readonly id: string; readonly resume: boolean };
   /** Extra `NAME=value` pairs for the window's environment (tmux `-e`), literals only. */
   readonly env: readonly string[];
 }
@@ -133,15 +138,35 @@ const RESUME_NEVER_ASKS = [
 
 /**
  * Never asserts that the dead session's background work is gone: only claude itself
- * was killed, and a surviving child is not something the pane checks can see.
+ * was stopped, and a surviving child is not something the pane checks can see. The
+ * wording comes from the old task's own ledger note `exit`, never from a frame: nonzero
+ * is a death, anything else (zero, or none noted) a cancel.
  */
-function continuePreamble(path: string): string {
+export function continuePreamble(path: string, exit: number | undefined, vanished?: boolean): string {
+  const prefix = `This session was resumed by séance in the same git worktree at ${path}, after the previous session `;
+  if (exit === undefined && vanished === true) {
+    return (
+      prefix +
+      `ended when its window was closed (closed by hand, or its tmux server or machine stopped) partway ` +
+      `through. Its last tool call may not have finished, and processes it started in the background may ` +
+      `still be running: check the worktree's state and running processes before restarting anything, ` +
+      `then carry on where it left off.`
+    );
+  }
+  if (exit !== undefined && exit !== 0) {
+    return (
+      prefix +
+      `ended unexpectedly (killed, crashed or out of memory) partway through. Its last tool call may not ` +
+      `have finished, and processes it started in the background may still be running (only claude itself ` +
+      `was killed): check the worktree's state and running processes before restarting anything, then ` +
+      `carry on where it left off.`
+    );
+  }
   return (
-    `This session was resumed by séance in the same git worktree at ${path}, after the previous session ` +
-    `ended unexpectedly (killed, crashed or out of memory) partway through. Its last tool call may not ` +
-    `have finished, and processes it started in the background may still be running (only claude itself ` +
-    `was killed): check the worktree's state and running processes before restarting anything, then ` +
-    `carry on where it left off.`
+    prefix +
+    `was stopped before it finished (cancelled from séance). Its last tool call may not have finished, and ` +
+    `processes it started in the background may still be running (only claude itself was stopped): check ` +
+    `the worktree's state and running processes before restarting anything, then carry on where it left off.`
   );
 }
 
@@ -161,13 +186,13 @@ function continuePreamble(path: string): string {
  * another branch told the phone something untrue. Don't restore it — a remote
  * spawn has no business moving a local HEAD.
  */
-function prepareWorktree(repo: RepoEntry, worktreeName: string): Prepared {
+function prepareWorktree(repo: RepoEntry, worktreeName: string, session: string | undefined): Prepared {
   const worktreePath = join(repo.path, ".claude", "worktrees", worktreeName);
   return {
     launchDir: repo.path,
     resultPath: worktreePath,
     worktreeFlag: ["--worktree", worktreeName],
-    resume: false,
+    ...(session === undefined ? {} : { session: { id: session, resume: false } }),
     env: [],
     preamble:
       `You are a new independent Claude session in a FRESH git worktree at ${worktreePath}, ` +
@@ -177,26 +202,27 @@ function prepareWorktree(repo: RepoEntry, worktreeName: string): Prepared {
   };
 }
 
-function prepareHere(repo: RepoEntry): Prepared {
+function prepareHere(repo: RepoEntry, session: string | undefined): Prepared {
   return {
     launchDir: repo.path,
     resultPath: repo.path,
     worktreeFlag: [],
-    resume: false,
+    ...(session === undefined ? {} : { session: { id: session, resume: false } }),
     env: [],
     preamble: `You are a new independent Claude session running in the CURRENT worktree at ${repo.path}.`,
   };
 }
 
-/** `path` is the ledger's worktree, already canonical and checked (`spawnContinued`). */
-function prepareContinue(path: string): Prepared {
+/** `path` is the ledger's worktree, already canonical and checked (`spawnContinued`); `session` the id it noted there. */
+function prepareContinue(continuation: Continuation): Prepared {
+  const { path, session, exit, vanished } = continuation;
   return {
     launchDir: path,
     resultPath: path,
     worktreeFlag: [],
-    resume: true,
+    session: { id: session, resume: true },
     env: RESUME_NEVER_ASKS,
-    preamble: continuePreamble(path),
+    preamble: continuePreamble(path, exit, vanished),
   };
 }
 
@@ -210,7 +236,29 @@ interface InnerCommand {
   readonly seedDir: string | null;
 }
 
-async function buildInnerCommand(prepared: Prepared, session: string, request: SpawnRequest): Promise<InnerCommand> {
+function sessionFlag(session: Prepared["session"]): string {
+  if (session === undefined) return "";
+  return ` ${session.resume ? "--resume" : "--session-id"} ${shq(session.id)}`;
+}
+
+/**
+ * The seed's list of fetched files. The name is `JSON.stringify`'d display text (the parser
+ * already kept it to one line); the path is the daemon's own.
+ */
+function attachmentsBlock(attachments: SessionAttachments | undefined): string {
+  if (attachments === undefined || attachments.files.length === 0) return "";
+  const rows = attachments.files.map(
+    (file) => `- ${file.path} — ${JSON.stringify(file.name)}, ${file.type}, ${file.size} bytes\n`,
+  );
+  return `\nAttached files (the user's originals, at these paths):\n${rows.join("")}`;
+}
+
+async function buildInnerCommand(
+  prepared: Prepared,
+  session: string,
+  request: SpawnRequest,
+  attachments?: SessionAttachments,
+): Promise<InnerCommand> {
   const claude = process.env["SEANCE_CLAUDE_BIN"] ?? "claude";
   const caffeinate = process.platform === "darwin" ? "caffeinate -is " : "";
   // `exec` keeps the pane's process-group-leader pid on claude itself — a
@@ -227,26 +275,34 @@ async function buildInnerCommand(prepared: Prepared, session: string, request: S
   // name and the session started idle. The seed is off argv entirely now (see
   // below), so `--` guards nothing today — it stays as the standing terminator
   // for whatever lands at the tail next.
+  // `--add-dir <directories...>` is variadic, so it sits directly before `--model`, which ends it.
+  // Daemon paths, never wire values, quoted like every path.
+  const addDirs = (attachments?.dirs ?? []).map((dir) => `--add-dir ${shq(dir)} `).join("");
   const base =
-    `exec ${caffeinate}${claude} -n ${shq(session)} --remote-control ` +
+    `exec ${caffeinate}${claude} -n ${shq(session)} --remote-control ${addDirs}` +
     `--model ${shq(request.model ?? DEFAULT_MODEL)} --effort ${shq(request.effort ?? DEFAULT_EFFORT)}` +
     // literal value, so nothing wire-supplied reaches the command line — no shq() needed
     `${request.plan === true ? " --permission-mode plan" : ""}` +
     `${prepared.worktreeFlag.length > 0 ? ` --worktree ${shq(prepared.worktreeFlag[1] ?? "")}` : ""}` +
-    // a literal flag: `continues` is a ledger key and never reaches the command line
-    `${prepared.resume ? " --continue" : ""}`;
+    // A daemon-made UUID, never a wire value (`continues` is a ledger key and never reaches the command line).
+    // `--resume <id>`, not `--continue`: claude files a `--worktree` session under the project it started
+    // in, which may be the clone's, and `--continue` looks only in the cwd's (DESIGN.md, "Continuing a session").
+    `${sessionFlag(prepared.session)}`;
+  const resume = prepared.session?.resume === true;
   const prompt = request.prompt === undefined || request.prompt === "" ? undefined : request.prompt;
   // A resume always gets a seed, even with no prompt: the preamble tells the model what happened, and
   // an initial message is what keeps claude off its blocking stale-resume dialog (`RESUME_NEVER_ASKS`).
-  if (prompt === undefined && !prepared.resume) {
+  // So do fetched files: the seed is the only place their paths are listed.
+  const listed = attachmentsBlock(attachments);
+  if (prompt === undefined && !resume && listed === "") {
     return { command: base, seedDir: null };
   }
 
   const seedDir = await mkdtemp(join(tmpdir(), "seance-seed-"));
   const seedFile = join(seedDir, "seed.txt");
-  const seed = prepared.resume
+  const seed = resume
     ? `${prepared.preamble}\n${prompt === undefined ? "" : `\nFrom the user: ${prompt}\n`}`
-    : `${prepared.preamble}\n\nTask: ${prompt}\n`;
+    : `${prepared.preamble}\n${prompt === undefined ? "" : `\nTask: ${prompt}\n`}${listed}`;
   await Bun.write(seedFile, seed);
   // Redirect, not an operand: an argv operand would be the expanded prompt in
   // every local process list for the session's whole life — the same text the
@@ -285,11 +341,11 @@ export async function captureWindow(windowId: string, opts: { readonly history: 
  * registered", the shape of a claude sitting on a dialog no remote can answer.
  * Ported from /spawn.
  *
- * Past it a task's window keeps `remain-on-exit failed`: a clean exit closes it
- * as any window closes, and any other leaves the pane dead with its status for
- * `harvestExits` (`exit-status.ts`) to note before it closes it. A tmux older
- * than 3.2 refuses `failed`; that window gets `off`, and its task settles by
- * its PR alone, as before exit statuses.
+ * Past it a task's window keeps `remain-on-exit on`, so every exit, a clean one
+ * included, leaves a dead pane holding its status for `harvestExits`
+ * (`exit-status.ts`) to note before it closes it (`armTask` adds the hook that
+ * closes a clean one at once). A clean exit must leave a status: "no status" is
+ * how a window closed from outside reads. Any other window gets `off`.
  */
 async function awaitRegistration(windowId: string, waitMs: number, task: boolean): Promise<boolean> {
   await tmuxOk(["set-option", "-w", "-t", windowId, "remain-on-exit", "on"]);
@@ -318,8 +374,7 @@ async function awaitRegistration(windowId: string, waitMs: number, task: boolean
     await tmux(["kill-window", "-t", windowId]);
     throw new SpawnFailure("claude_died", `claude exited before the session started:\n${captured ?? "(no output)"}`);
   }
-  const kept = task && (await tmux(["set-option", "-w", "-t", windowId, "remain-on-exit", "failed"])).exitCode === 0;
-  if (!kept) await tmuxOk(["set-option", "-w", "-t", windowId, "remain-on-exit", "off"]);
+  if (!task) await tmuxOk(["set-option", "-w", "-t", windowId, "remain-on-exit", "off"]);
   return titled;
 }
 
@@ -340,6 +395,44 @@ async function tagTask(windowId: string, taskId: string): Promise<void> {
     }
     throw new SpawnFailure("launch_error", `could not record the task on the session: ${String(err)}`);
   }
+}
+
+/**
+ * The per-pane `pane-died` hook's one body: tmux commands only, no shell, the task id its only interpolation.
+ * A clean exit's pane is closed unless it is the server's last: the server would exit with it (`exit-empty`)
+ * and take the recorded option along, so that pane stays dead for harvest to note and close. A server whose
+ * sessions are all one group shares one set of windows, so it counts as one session.
+ */
+function exitHook(taskId: string): string {
+  const lastPane =
+    "#{&&:#{||:#{==:#{server_sessions},1},#{==:#{server_sessions},#{session_group_size}}},#{&&:#{==:#{session_windows},1},#{==:#{window_panes},1}}}";
+  return (
+    `set-option -gF ${EXIT_OPTION_PREFIX}${taskId} '#{pane_dead_status}:#{pane_dead_signal}' ; ` +
+    `if-shell -F '${lastPane}' '' 'if-shell -F "#{==:#{pane_dead_status},0}" kill-pane'`
+  );
+}
+
+/**
+ * Keeps a registered task's pane for harvest and hooks its death. Returns the tmux server's pid, which
+ * is what lets `harvestExits` judge the pane `vanished` later; undefined (never judged) when the id
+ * is not a task id, the hook could not be set, or no pid reads. Runs inside `whileRegistering`, so a
+ * harvest pass leaves the pane alone meanwhile.
+ *
+ * The hook is per pane, never `-g`/`-ga`: it shadows a global `pane-died` for this pane only (DESIGN.md,
+ * "Window closed from outside"). It records the death in a server-wide option, then closes a clean
+ * exit's pane (not the server's last). The pane option beats the window's, so a pane `join-pane`d elsewhere stays kept; a
+ * tmux without `-p` keeps the window-level `on` and hooks the window instead.
+ */
+async function armTask(windowId: string, taskId: string): Promise<number | undefined> {
+  if (!isTaskId(taskId)) return undefined;
+  const pane = (await tmux(["display-message", "-p", "-t", windowId, "#{pane_id}"])).stdout.trim();
+  if (!/^%\d+$/u.test(pane)) return undefined;
+  await tmux(["set-option", "-p", "-t", pane, "remain-on-exit", "on"]);
+  let hooked = (await tmux(["set-hook", "-p", "-t", pane, "pane-died", exitHook(taskId)])).exitCode === 0;
+  hooked ||= (await tmux(["set-hook", "-w", "-t", windowId, "pane-died", exitHook(taskId)])).exitCode === 0;
+  if (!hooked) return undefined;
+  const pid = Number((await tmux(["display-message", "-p", "#{pid}"])).stdout.trim());
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
 }
 
 export interface SpawnOptions {
@@ -373,13 +466,14 @@ export async function spawnSession(
   request: SpawnRequest,
   repos: readonly RepoEntry[],
   opts: SpawnOptions,
-  continuation?: { readonly path: string },
+  continuation?: Continuation,
+  attachments?: SessionAttachments,
 ): Promise<SpawnOutcome> {
   const { taskId } = request;
   if (request.mode === "continue" && (continuation === undefined || request.continues === undefined)) {
     throw new SpawnFailure("not_continuable", "this machine's session backend cannot continue a session");
   }
-  if (taskId === undefined) return spawnUntracked(request, repos, opts);
+  if (taskId === undefined) return spawnUntracked(request, repos, opts, attachments);
   const prior = taskSpawns.get(taskId) ?? Promise.resolve();
   const run = prior
     .catch(() => undefined)
@@ -391,9 +485,9 @@ export async function spawnSession(
         throw new SpawnFailure("task_running", `task ${taskId} is already running in ${where}`, running.paneId);
       }
       if (request.mode === "continue" && continuation !== undefined && request.continues !== undefined) {
-        return spawnContinued(request, request.continues, repos, opts, continuation.path);
+        return spawnContinued(request, request.continues, repos, opts, continuation, attachments);
       }
-      return spawnUntracked(request, repos, opts);
+      return spawnUntracked(request, repos, opts, attachments);
     });
   taskSpawns.set(taskId, run);
   try {
@@ -478,9 +572,9 @@ function liveInside(panes: readonly PaneInfo[], path: string): Promise<PaneInfo 
 }
 
 /**
- * Resumes a failed task's conversation in its worktree: `path` is what this machine's own
- * launch ledger noted for `continues`, canonical and checked by the handler (DESIGN.md,
- * Daemon, "Continuing a failed task"). No fetch and no new worktree — the session picks up
+ * Resumes a failed or cancelled task's conversation in its worktree: `continuation.path` is
+ * what this machine's own launch ledger noted for `continues`, canonical and checked by the
+ * handler (DESIGN.md, Daemon, "Continuing a session"). No fetch and no new worktree — the session picks up
  * what the dead one left.
  */
 async function spawnContinued(
@@ -488,10 +582,14 @@ async function spawnContinued(
   continues: string,
   repos: readonly RepoEntry[],
   opts: SpawnOptions,
-  path: string,
+  continuation: Continuation,
+  attachments?: SessionAttachments,
 ): Promise<SpawnOutcome> {
+  const { path } = continuation;
   const prior = pathSpawns.get(path) ?? Promise.resolve();
-  const run = prior.catch(() => undefined).then(() => continueLocked(request, continues, repos, opts, path));
+  const run = prior
+    .catch(() => undefined)
+    .then(() => continueLocked(request, continues, repos, opts, continuation, attachments));
   pathSpawns.set(path, run);
   try {
     return await run;
@@ -505,8 +603,10 @@ async function continueLocked(
   continues: string,
   repos: readonly RepoEntry[],
   opts: SpawnOptions,
-  path: string,
+  continuation: Continuation,
+  attachments?: SessionAttachments,
 ): Promise<SpawnOutcome> {
+  const { path } = continuation;
   const repo = repos.find((r) => r.name === request.repo);
   if (repo === undefined) {
     throw new SpawnFailure("repo_not_found", `no repo named "${request.repo}" — try a rescan`);
@@ -536,8 +636,8 @@ async function continueLocked(
 
   const name = basename(path);
   const windowName = sanitizeWindowName(request.title ?? name);
-  const prepared = prepareContinue(path);
-  const inner = await buildInnerCommand(prepared, sessionName(name, opts.machineTag), request);
+  const prepared = prepareContinue(continuation);
+  const inner = await buildInnerCommand(prepared, sessionName(name, opts.machineTag), request, attachments);
   return launchWindow(prepared, inner, windowName, request, opts);
 }
 
@@ -545,6 +645,7 @@ async function spawnUntracked(
   request: SpawnRequest,
   repos: readonly RepoEntry[],
   opts: SpawnOptions,
+  attachments?: SessionAttachments,
 ): Promise<SpawnOutcome> {
   const repo = repos.find((r) => r.name === request.repo);
   if (repo === undefined) {
@@ -566,8 +667,10 @@ async function spawnUntracked(
   const worktreeName = request.mode === "here" ? slug : await freeWorktreeName(repo, slug);
   const windowName = sanitizeWindowName(request.title ?? worktreeName);
 
-  const prepared = request.mode === "here" ? prepareHere(repo) : prepareWorktree(repo, worktreeName);
-  const inner = await buildInnerCommand(prepared, sessionName(worktreeName, opts.machineTag), request);
+  // Every task gets an id of the daemon's own, so a continuation can name the conversation it resumes.
+  const session = request.taskId === undefined ? undefined : crypto.randomUUID();
+  const prepared = request.mode === "here" ? prepareHere(repo, session) : prepareWorktree(repo, worktreeName, session);
+  const inner = await buildInnerCommand(prepared, sessionName(worktreeName, opts.machineTag), request, attachments);
   // Before launch: claude reads the tracking ref, and `FETCH_HEAD`'s age, at startup.
   const note = await freshened;
   return launchWindow(prepared, inner, windowName, request, opts, note);
@@ -593,6 +696,7 @@ async function launchWindow(
   const target = await resolveTargetSession(opts.tmuxSession);
   let windowId: string;
   let registered: boolean;
+  let server: number | undefined;
   try {
     try {
       windowId = (
@@ -617,9 +721,11 @@ async function launchWindow(
     }
     if (request.taskId !== undefined) await tagTask(windowId, request.taskId);
 
-    registered = await whileRegistering(windowId, () =>
-      awaitRegistration(windowId, opts.waitMs ?? 5_000, request.taskId !== undefined),
-    );
+    registered = await whileRegistering(windowId, async () => {
+      const titled = await awaitRegistration(windowId, opts.waitMs ?? 5_000, request.taskId !== undefined);
+      if (request.taskId !== undefined) server = await armTask(windowId, request.taskId);
+      return titled;
+    });
   } finally {
     if (inner.seedDir !== null) await rm(inner.seedDir, { recursive: true, force: true });
   }
@@ -630,5 +736,7 @@ async function launchWindow(
     registered,
     handle: windowId,
     ...(note === undefined ? {} : { note }),
+    ...(server === undefined ? {} : { server }),
+    ...(prepared.session === undefined ? {} : { session: prepared.session.id }),
   };
 }

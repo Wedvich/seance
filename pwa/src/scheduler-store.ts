@@ -5,6 +5,7 @@ import type {
   RelayState,
   SchedulerAvailability,
   Task,
+  TaskReply,
   TaskRequest,
 } from "@seance/shared";
 import {
@@ -19,11 +20,20 @@ import {
   schedulerErrorText,
   sentence,
   storeErrorText,
+  TASK_PHASES,
   type RelayClient,
 } from "@seance/shared";
 import type { FollowEnd, PersistedForm, PreviewState, QueueState, TaskAction } from "./state.ts";
+import { taskTitle } from "./queue-view.ts";
 import type { AppState } from "./view.ts";
-import { deriveAutoAvailability, deriveContinueAvailability, previewAsked, resolveRepo, scopedRepos } from "./view.ts";
+import {
+  deriveAutoAvailability,
+  deriveContinueAvailability,
+  deriveRunNowAvailability,
+  previewAsked,
+  resolveRepo,
+  scopedRepos,
+} from "./view.ts";
 
 /**
  * The app's side of the scheduler, apart from `Store`'s layers, form and
@@ -45,6 +55,49 @@ const SCHEDULER_UNREADABLE = "Couldn't read the scheduler's answer. Update seanc
 const REFRESH_HINT = "Refresh to see whether it did.";
 const MAY_HAVE_LANDED = `It may have landed anyway. ${REFRESH_HINT}`;
 
+/** A task action's refusal, or its lost answer, as the Queue screen's notice words it. */
+function actionReplyText(reply: { readonly ok: false; readonly code: string } | null): string {
+  if (reply === null) return `${SCHEDULER_UNREADABLE} ${MAY_HAVE_LANDED}`;
+  const text = sentence(schedulerErrorText(reply.code));
+  return isTransportError(reply.code) ? `${text} ${MAY_HAVE_LANDED}` : text;
+}
+
+/** A Start now's refusals worth one more ask on a later `ready` sighting: the leader was changing or busy. */
+const RUN_NOW_RETRYABLE: ReadonlySet<string> = new Set(["conflict", "not_leader", "not_ready"]);
+
+/** A Start now asks `run-now` at most this often, whatever answers it gets. */
+const RUN_NOW_ASKS = 2;
+
+const RUN_NOW_BUSY = "The scheduler was busy. Use Start now on the Queue screen to start it.";
+const RUN_NOW_UNSUPPORTED = "This leader can't start tasks past the queue; it stays queued.";
+
+/** Refused unsent (`shared/src/app-client.ts`): no leader heard it, so it spends no poll and proves nothing sent. */
+function isLeaderless(err: unknown): boolean {
+  return err instanceof RequestFailure && (err.reason === "no_leader" || err.reason === "leader_unverified");
+}
+
+/**
+ * A Start now waiting to send its `run-now`. `run-now` takes only a `ready`
+ * task, and an app's create is not admitted yet, so it goes on a read that
+ * shows the task `ready`. In memory only: a reload leaves the task queued, as
+ * a lost `run-now` would.
+ */
+interface StartNowIntent {
+  readonly taskId: string;
+  /** As last read, for the notice that names it. */
+  task: Task;
+  /** Reads that reach a leader still to spend before the intent lapses. */
+  left: number;
+  asks: number;
+  /** A refusal saying the leader was changing or busy has had its one more ask. */
+  retried: boolean;
+  /** A `run-now` is out: sightings meanwhile ask nothing, and its answer decides what follows. */
+  asking: boolean;
+  timer: ReturnType<typeof setTimeout> | null;
+  /** A read found no verified leader: the next waits for one (`#leaderVerified`) rather than polling. */
+  parked: boolean;
+}
+
 /**
  * A scheduler read's failure, shown alone. A read has nothing to land, so the
  * shared line's "may have landed" for a timeout or a drop would mislead.
@@ -63,7 +116,8 @@ function readFailureText(err: unknown, fallback: string): string {
  * settled. The poll is the fallback for a nudge that never came (a leader that
  * sends none, or one lost while the socket was down), and bounded so a task no
  * machine can take does not keep the phone asking. A poll that finds no leader
- * is not counted: the task waits in the relay's queue, and so does the verdict.
+ * is not counted: the task waits in the relay's queue, and so does the verdict,
+ * without polling, until a verified leader shows up (`#awaitLeader`).
  */
 export const QUEUE_POLL_MS = 2_000;
 export const QUEUE_POLLS = 30;
@@ -138,15 +192,36 @@ export class SchedulerStore {
   /** The fleet `auto` last previewed against (`fleetKey`). */
   #previewedFleet = "";
   #followTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * The follow's poll chain while no verified leader leads: held rather than
+   * polled, since every read would be refused unsent, and taken up again by the
+   * first `onOpen` that shows one. `left` is what the next `#follow` would arm.
+   */
+  #parked: { readonly taskId: string; readonly left: number } | null = null;
+  /**
+   * The one Start now in hand. A new enqueue replaces it and `dispose` ends it;
+   * the verdict's follow never does, so its own read chain carries it through a
+   * dismissed verdict or a follow that stopped or ran out.
+   */
+  #intent: StartNowIntent | null = null;
   /** The leader the Queue screen last read from: a new one asks again. */
   #queueLeader = "";
   /** The socket dropped since the last catch-up read: nudges sent meanwhile are lost, so the next verified leader is read whole. */
   #queueMissed = false;
+  /** A `queue-changed` came while the tab was hidden; `followed` when it could name the followed task. Read on showing. */
+  #missedHidden: { readonly followed: boolean } | null = null;
+  /** A nudge or reopen wanted the followed task re-read, but no verified leader could be asked yet: kept until a read goes out. */
+  #followPending = false;
   /**
    * Whether the notice up now is one a queue read set. Any read that lands
    * clears it, nudged or not: only an action's notice outlives a nudge's read.
    */
   #noticeFromRead = false;
+  /**
+   * Whether the notice up now is a Start now's, set with the Queue screen
+   * closed: it outlives reads until one asked with the screen open lands.
+   */
+  #noticeKept = false;
   /** The queue read loop while one is out: reads are single-flight, a later ask folds into `#queueTrailing`. */
   #queueRun: Promise<void> | null = null;
   /** What to read once the one in flight settles: the union of every ask meanwhile (null names the whole queue). */
@@ -161,9 +236,13 @@ export class SchedulerStore {
   constructor(client: RelayClient, getState: () => AppState, patch: (next: Partial<AppState>) => void) {
     this.#client = client;
     this.#getState = getState;
-    // A read that sets the notice marks it as its own after patching; every other notice write unmarks it.
+    // A read that sets the notice marks it as its own after patching, as a Start now's note marks it kept;
+    // every other notice write unmarks both.
     this.#patch = (next) => {
-      if ("queueNotice" in next) this.#noticeFromRead = false;
+      if ("queueNotice" in next) {
+        this.#noticeFromRead = false;
+        this.#noticeKept = false;
+      }
       patch(next);
     };
   }
@@ -182,21 +261,81 @@ export class SchedulerStore {
 
   /** A relay change with the socket open: `reopened` when it had been closed. */
   onOpen(relay: RelayState, reopened: boolean): void {
-    this.#catchUpQueue(relay.scheduler, reopened);
+    // The reopen reads all of it anyway.
+    if (reopened) this.#missedHidden = null;
+    const refollowed = this.#catchUpQueue(relay.scheduler, reopened);
+    if (relay.scheduler.kind === "ready") this.#leaderVerified(refollowed);
     if (!previewAsked(this.#state.form)) return;
     if (schedulerKey(relay.scheduler) !== this.#previewedLeader) void this.refreshPreview();
     else if (fleetKey(relay.machines) !== this.#previewedFleet) this.#askPreviewSoon();
   }
 
-  /** Stops every timer this holds: the follow's poll and the preview's retry or debounce. */
+  /**
+   * Shown again on the same socket (`reconnectIfStale` found it live): what a
+   * reopen would have read, if a nudge was ignored while hidden.
+   */
+  onShown(relay: RelayState): void {
+    const missed = this.#missedHidden;
+    if (missed === null) return;
+    this.#missedHidden = null;
+    this.#queueMissed = true;
+    const refollowed = this.#catchUpQueue(relay.scheduler, missed.followed);
+    // A chain parked behind a leaderless read resumes as onOpen's does.
+    if (refollowed && relay.scheduler.kind === "ready") this.#leaderVerified(true);
+  }
+
+  /**
+   * Takes up whatever waited for a verified leader: the follow's polls and a Start now's reads.
+   * `refollowed` when the catch-up just read the followed task: the chain re-arms on its
+   * remaining budget rather than reading again in the same tick.
+   */
+  #leaderVerified(refollowed: boolean): void {
+    const parked = this.#parked;
+    if (parked !== null) {
+      this.#parked = null;
+      if (refollowed) this.#follow(parked.taskId, parked.left);
+      else void this.#refreshTask(parked.taskId, parked.left - 1);
+    }
+    const intent = this.#intent;
+    if (intent?.parked === true) {
+      intent.parked = false;
+      void this.#readForIntent(intent);
+    }
+  }
+
+  /** Whether a scheduler read would go out now rather than be refused unsent. */
+  #leads(): boolean {
+    const { relay } = this.#state;
+    return relay.status === "open" && relay.scheduler.kind === "ready";
+  }
+
+  /** Stops every timer this holds: the follow's poll, a Start now's reads, and the preview's retry or debounce. */
   dispose(): void {
     this.stopFollowing();
+    this.#endIntent();
     this.stopPreviewRetry();
   }
 
-  /** Starts following a task just queued, with the whole poll budget. */
-  startFollowing(taskId: string): void {
-    this.#follow(taskId, QUEUE_POLLS);
+  /** Starts following a task just queued, with the whole poll budget; `runNow` for a Start now. */
+  startFollowing(task: Task, runNow = false): void {
+    // A read owed to the previous task must not land on this one's arrival.
+    this.#followPending = false;
+    this.#follow(task.id, QUEUE_POLLS);
+    this.#endIntent();
+    this.#patch({ startNowRefusal: null });
+    if (!runNow) return;
+    const intent: StartNowIntent = {
+      taskId: task.id,
+      task,
+      left: QUEUE_POLLS,
+      asks: 0,
+      retried: false,
+      asking: false,
+      timer: null,
+      parked: false,
+    };
+    this.#intent = intent;
+    this.#armIntent(intent);
   }
 
   /**
@@ -204,35 +343,43 @@ export class SchedulerStore {
    * leader changed: nudges sent meanwhile are lost, and the merge of named ids
    * never heals a task it was not told about, so the screen reads whole again.
    */
-  #catchUpQueue(scheduler: SchedulerAvailability, reopened: boolean): void {
+  #catchUpQueue(scheduler: SchedulerAvailability, refollow: boolean): boolean {
+    if (refollow) this.#followPending = true;
     // Only a verified leader is asked: anything else is refused unsent, which
     // tells the screen nothing its status line doesn't — and every new term is
     // unverified until its `lead-proof` lands, so asking then raised a notice
     // on each takeover. The catch-up waits for the leader to verify instead.
-    const due =
-      scheduler.kind === "ready" &&
-      this.#watchesQueue() &&
-      (this.#queueMissed || schedulerKey(scheduler) !== this.#queueLeader);
+    if (scheduler.kind !== "ready") return false;
+    const due = this.#watchesQueue() && (this.#queueMissed || schedulerKey(scheduler) !== this.#queueLeader);
     if (due) this.#queueMissed = false;
     const read = due ? this.refreshQueue(undefined, true) : null;
+    // A parked follow is read here too, so the leader's arrival costs one read of it, not two.
+    if (!this.#followPending && this.#parked === null) return false;
+    this.#followPending = false;
     const verdict = this.#state.verdict;
-    if (reopened && verdict?.kind === "queued" && !isSettled(verdict.task.state)) {
-      void this.#followedVia(verdict.task.id, read);
-    }
+    if (verdict?.kind !== "queued" || isSettled(verdict.task.state)) return false;
+    void this.#followedVia(verdict.task.id, read);
+    return true;
   }
 
   onQueueChanged(change: QueueChanged): void {
-    // Showing the tab again re-dials (`attach`), and the reopen reads the whole queue and the followed task.
-    if (document.visibilityState !== "visible") return;
+    // Read once the tab shows again: by `onShown` on a live socket, by the reopen after a re-dial.
+    if (document.visibilityState !== "visible") {
+      this.#missedHidden = { followed: this.#missedHidden?.followed === true || this.#namesFollowed(change) };
+      return;
+    }
     const read = this.#watchesQueue() ? this.refreshQueue(change.tasks, true) : null;
     const verdict = this.#state.verdict;
-    if (
+    if (verdict?.kind === "queued" && this.#namesFollowed(change)) void this.#followedVia(verdict.task.id, read);
+  }
+
+  #namesFollowed(change: QueueChanged): boolean {
+    const verdict = this.#state.verdict;
+    return (
       verdict?.kind === "queued" &&
       !isSettled(verdict.task.state) &&
       (change.tasks === undefined || change.tasks.includes(verdict.task.id))
-    ) {
-      void this.#followedVia(verdict.task.id, read);
-    }
+    );
   }
 
   /**
@@ -246,15 +393,205 @@ export class SchedulerStore {
       return view?.kind === "ok" ? view.tasks.find((t) => t.id === taskId) : undefined;
     };
     if (read === null) return this.#refreshTask(taskId, null);
+    const seq = ++this.#taskReadSeq;
     const before = listed();
     await read;
     const fresh = listed();
     if (fresh === undefined || fresh === before) return this.#refreshTask(taskId, null);
     const verdict = this.#state.verdict;
     if (verdict?.kind !== "queued" || verdict.task.id !== taskId || isSettled(verdict.task.state)) return;
-    this.#taskReadApplied = ++this.#taskReadSeq;
+    // A newer read (a `run-now` reply, a poll) landed while this one was out: its copy is the older.
+    if (seq < this.#taskReadApplied) return;
+    this.#taskReadApplied = seq;
     if (isSettled(fresh.state)) this.stopFollowing();
     if (fresh !== verdict.task) this.#patch({ verdict: { kind: "queued", task: fresh } });
+    this.#sawTask(fresh);
+  }
+
+  /**
+   * Every fresh copy of a task passes here, from the follow or the intent's own
+   * reads. A Start now's `run-now` goes on a sighting of its task `ready`;
+   * still `queued` or `blocked` waits for a later read, and anything else means
+   * a pass placed it first (or it ended), with no queue left to skip.
+   */
+  #sawTask(task: Task): void {
+    const refusal = this.#state.startNowRefusal;
+    // A task past waiting has moved on: its refusal must not come back if a lapsed reservation returns it to `ready`.
+    if (refusal?.taskId === task.id && TASK_PHASES[task.state] !== "waiting") this.#patch({ startNowRefusal: null });
+    const intent = this.#intent;
+    if (intent?.taskId !== task.id) return;
+    intent.task = task;
+    if (intent.asking || task.state === "queued" || task.state === "blocked") return;
+    if (task.state === "ready") void this.#startNow(intent);
+    else this.#endIntent();
+  }
+
+  #armIntent(intent: StartNowIntent): void {
+    if (intent.timer !== null) clearTimeout(intent.timer);
+    intent.timer = null;
+    intent.parked = false;
+    // Lapsed unsent: the verdict, or the Queue row, says what the task still waits for.
+    if (intent.left <= 0) {
+      this.#endIntent();
+      return;
+    }
+    intent.timer = setTimeout(() => {
+      intent.timer = null;
+      void this.#readForIntent(intent);
+    }, QUEUE_POLL_MS);
+  }
+
+  /**
+   * The intent's own read, shown wherever the follow's would be. A read with no
+   * leader to ask spends nothing: the task waits in the relay's queue, and so
+   * does the intent.
+   */
+  async #readForIntent(intent: StartNowIntent): Promise<void> {
+    if (this.#intent !== intent) return;
+    const seq = ++this.#taskReadSeq;
+    let task: Task | undefined;
+    let reached = true;
+    let leaderless = false;
+    const led = this.#leads();
+    try {
+      const reply = await this.#client.queue({ tasks: [intent.taskId] });
+      // An older leader ignores the filter, so the reply is searched.
+      if (reply !== null && !("ok" in reply)) task = reply.tasks.find((t) => t.id === intent.taskId);
+    } catch (err) {
+      // A leader that was leading when this went out and still read as leaderless is the relay's `offline`: a spent poll.
+      leaderless = isLeaderless(err);
+      reached = led || !leaderless;
+    }
+    if (this.#intent !== intent) return;
+    if (reached) intent.left -= 1;
+    if (task !== undefined && seq >= this.#taskReadApplied) {
+      this.#taskReadApplied = seq;
+      this.#landTask(task);
+      this.#sawTask(task);
+    }
+    if (this.#intent !== intent || intent.asking) return;
+    // Unless one verified while the read was out, the next read waits for a leader (`#leaderVerified`).
+    // Also a spent last poll: arming would end the intent unsent, forgetting the Start now.
+    if (leaderless && !this.#leads() && (!reached || intent.left <= 0)) intent.parked = true;
+    else this.#armIntent(intent);
+  }
+
+  /** A copy read outside the follow, newer than any shown: on its Queue row, and its verdict while unsettled. */
+  #landTask(task: Task): void {
+    this.#mergeTask(task);
+    const verdict = this.#state.verdict;
+    if (verdict?.kind !== "queued" || verdict.task.id !== task.id || verdict.task === task) return;
+    if (isSettled(verdict.task.state)) return;
+    if (isSettled(task.state)) this.stopFollowing();
+    this.#patch({ verdict: { ...verdict, task } });
+  }
+
+  /**
+   * Not through `#actOnTask`: that is single-flight for the Queue screen's
+   * buttons and would drop this silently behind one. No verified leader at the
+   * sighting asks nothing: the intent reads on, and asks on the first `ready`
+   * it sees once one leads.
+   */
+  async #startNow(intent: StartNowIntent): Promise<void> {
+    const { relay } = this.#state;
+    if (relay.status !== "open" || relay.scheduler.kind !== "ready") return;
+    // The button was gated on this when drawn; the leader may have changed since.
+    if (!deriveRunNowAvailability(relay)) {
+      this.#endIntent(RUN_NOW_UNSUPPORTED);
+      return;
+    }
+    intent.asks += 1;
+    intent.asking = true;
+    if (intent.timer !== null) clearTimeout(intent.timer);
+    intent.timer = null;
+    let reply: TaskReply | null;
+    try {
+      reply = await this.#client.runNow(intent.taskId);
+    } catch (err) {
+      if (this.#intent !== intent) return;
+      intent.asking = false;
+      if (isLeaderless(err)) this.#askAgain(intent, this.#actionFailure(err));
+      else this.#endIntent(this.#actionFailure(err));
+      return;
+    }
+    if (this.#intent !== intent) return;
+    intent.asking = false;
+    if (reply === null) {
+      this.#endIntent(actionReplyText(null));
+      return;
+    }
+    if (!("ok" in reply)) {
+      this.#endIntent();
+      // Shown as a read's would be, so a read still out cannot walk it back to `ready`.
+      this.#taskReadApplied = ++this.#taskReadSeq;
+      this.#landTask(reply.task);
+      this.#refollow(intent.taskId);
+      return;
+    }
+    // A pass is placing it, or a cancel or end got there first: it is on its way or over, with nothing to say.
+    if (reply.code === "dispatching" || reply.code === "finished") {
+      this.#endIntent();
+      this.#refollow(intent.taskId);
+      void this.#refreshTask(intent.taskId, null);
+      return;
+    }
+    // The leader holds it short of `ready` (admission, deps): a later `ready` sighting asks again.
+    if (reply.code === "not_waiting") {
+      if (intent.asks < RUN_NOW_ASKS) this.#readOn(intent);
+      else this.#endIntent();
+      return;
+    }
+    if (RUN_NOW_RETRYABLE.has(reply.code)) this.#askAgain(intent, RUN_NOW_BUSY);
+    else this.#endIntent(actionReplyText(reply));
+  }
+
+  /** One more ask on a later `ready` sighting, once; past that, `note` ends it. */
+  #askAgain(intent: StartNowIntent, note: string): void {
+    if (intent.retried || intent.asks >= RUN_NOW_ASKS) {
+      this.#endIntent(note);
+      return;
+    }
+    intent.retried = true;
+    this.#readOn(intent);
+  }
+
+  /** Reads on after an answer with a fresh budget: the follow may have run out while it was out. */
+  #readOn(intent: StartNowIntent): void {
+    intent.left = QUEUE_POLLS;
+    this.#armIntent(intent);
+  }
+
+  /** A task the verdict shows, on its way after a Start now: followed again with the whole budget. */
+  #refollow(taskId: string): void {
+    const verdict = this.#state.verdict;
+    if (verdict?.kind !== "queued" || verdict.task.id !== taskId || isSettled(verdict.task.state)) return;
+    if (verdict.follow !== undefined) this.#patch({ verdict: { kind: "queued", task: verdict.task } });
+    this.#follow(taskId, QUEUE_POLLS);
+  }
+
+  /** Ends the Start now in hand, with `note` saying why when it ends unsent or refused. */
+  #endIntent(note?: string): void {
+    const intent = this.#intent;
+    if (intent === null) return;
+    if (intent.timer !== null) clearTimeout(intent.timer);
+    intent.timer = null;
+    this.#intent = null;
+    if (note !== undefined) this.#startNowNote(intent.task, note);
+  }
+
+  /**
+   * Where a Start now's note shows: on its task's queued verdict, else on the
+   * Queue screen's notice, naming the task, kept until the screen has been open
+   * for a read.
+   */
+  #startNowNote(task: Task, message: string): void {
+    const verdict = this.#state.verdict;
+    if (verdict?.kind === "queued" && verdict.task.id === task.id) {
+      this.#patch({ startNowRefusal: { taskId: task.id, message } });
+      return;
+    }
+    this.#patch({ queueNotice: `Couldn't start "${taskTitle(task)}" at once: ${message}` });
+    this.#noticeKept = true;
   }
 
   /**
@@ -306,7 +643,12 @@ export class SchedulerStore {
     this.#patch({ preview: asked });
     let result: PreviewState;
     try {
-      const reply = await this.#client.routePreview(taskRequest(this.#state.form, repo.origin, false));
+      // A flag, never the manifest: the leader filters on it as it would route the task.
+      const attaching = this.#state.attachments.length > 0 ? { attachments: true as const } : {};
+      const reply = await this.#client.routePreview({
+        ...taskRequest(this.#state.form, repo.origin, false),
+        ...attaching,
+      });
       if (reply === null) result = { kind: "failed", repo: repo.origin, message: SCHEDULER_UNREADABLE };
       else if ("ok" in reply) {
         // A leader that has just taken the role answers this until its takeover ends — seconds,
@@ -387,6 +729,7 @@ export class SchedulerStore {
   async #readQueue(tasks: readonly string[] | null, nudged: boolean): Promise<void> {
     const current = this.#state.queueView;
     const named = tasks !== null && current?.kind === "ok" ? capNamed(tasks) : null;
+    const watched = this.#queueOnScreen();
     this.#showQueueLoading();
     let next: QueueState | { readonly notice: string } | null;
     try {
@@ -401,6 +744,8 @@ export class SchedulerStore {
           tasks: reply.tasks,
           holds: reply.holds ?? [],
           unreadable: reply.unreadable ?? [],
+          idle: reply.idle ?? [],
+          ...(reply.globalMax === undefined ? {} : { globalMax: reply.globalMax }),
           at: reply.at,
           skew: reply.at - Date.now(),
         };
@@ -420,12 +765,14 @@ export class SchedulerStore {
           return gone.has(t.id) ? [] : [t];
         });
         const added = fresh.filter((f) => !base.some((t) => t.id === f.id));
-        // Unreadable records come whole whatever was named, as holds do.
+        // Unreadable records and idle releases come whole whatever was named, as holds do.
         next = {
           kind: "ok",
           tasks: [...added, ...merged],
           holds: reply.holds ?? [],
           unreadable: reply.unreadable ?? [],
+          idle: reply.idle ?? [],
+          ...(reply.globalMax === undefined ? {} : { globalMax: reply.globalMax }),
           at: reply.at,
           skew: reply.at - Date.now(),
         };
@@ -435,7 +782,11 @@ export class SchedulerStore {
     }
     if (next !== null && !("notice" in next)) {
       const before = this.#state.queueView;
-      this.#patch({ queueView: next, ...(nudged && !this.#noticeFromRead ? {} : { queueNotice: null }) });
+      const kept = this.#noticeKept;
+      const keep = kept || (nudged && !this.#noticeFromRead);
+      this.#patch({ queueView: next, ...(keep ? {} : { queueNotice: null }) });
+      // A Start now's note has been seen once a read asked with the screen open lands under it.
+      if (kept && watched) this.#noticeKept = false;
       // Another device's pause or resume, or a reset lifting a hold. A first read has nothing to
       // compare: the preview was asked under whatever holds stood.
       if (previewAsked(this.#state.form) && before?.kind === "ok" && holdsKey(before.holds) !== holdsKey(next.holds)) {
@@ -486,8 +837,13 @@ export class SchedulerStore {
     return this.#actOnTask({ taskId, op: "mark-done" });
   }
 
+  /** Places a task the concurrency caps alone hold, past them; the reply is the task as reserved. */
+  runNow(taskId: string): Promise<void> {
+    return this.#actOnTask({ taskId, op: "run-now" });
+  }
+
   /**
-   * Writes a new task that picks up a failed one's session where it stopped, through the same
+   * Writes a new task that picks up a failed or cancelled one's session where it stopped, through the same
    * `createTask` an enqueue uses: the leader dispatches it to the machine the old one ran on.
    */
   continueTask(taskId: string): Promise<void> {
@@ -520,13 +876,10 @@ export class SchedulerStore {
         this.#patch({ taskAction: null, queueNotice: notice });
         return;
       }
-      const reply =
-        action.op === "cancel" ? await this.#client.cancel(action.taskId) : await this.#client.markDone(action.taskId);
-      if (reply === null) notice = `${SCHEDULER_UNREADABLE} ${MAY_HAVE_LANDED}`;
-      else if ("ok" in reply) {
-        const text = sentence(schedulerErrorText(reply.code));
-        notice = isTransportError(reply.code) ? `${text} ${MAY_HAVE_LANDED}` : text;
-      } else this.#mergeTask(reply.task);
+      const send = { cancel: "cancel", "mark-done": "markDone", "run-now": "runNow" } as const;
+      const reply = await this.#client[send[action.op]](action.taskId);
+      if (reply === null || "ok" in reply) notice = actionReplyText(reply);
+      else this.#mergeTask(reply.task);
     } catch (err) {
       notice = this.#actionFailure(err);
     }
@@ -620,7 +973,7 @@ export class SchedulerStore {
 
   /** Re-reads the queued task while its verdict is up and it has not reached a machine yet. */
   #follow(taskId: string, left: number): void {
-    this.stopFollowing();
+    this.#clearFollowTimer();
     if (left <= 0) return;
     this.#followTimer = setTimeout(() => {
       this.#followTimer = null;
@@ -641,6 +994,7 @@ export class SchedulerStore {
     if (showing() === null) return;
     const seq = ++this.#taskReadSeq;
     let read: FollowRead;
+    const led = this.#leads();
     try {
       const reply = await this.#client.queue({ tasks: [taskId] });
       if (reply === null) read = { kind: "refused", message: SCHEDULER_UNREADABLE };
@@ -662,10 +1016,10 @@ export class SchedulerStore {
       }
     } catch (err) {
       // No leader to ask is no poll spent: the task waits in the relay's queue, and so does this.
-      read =
-        err instanceof RequestFailure && (err.reason === "no_leader" || err.reason === "leader_unverified")
-          ? "waiting"
-          : "missed";
+      // Unless one led when this went out: then the leaderless answer is the relay's `offline`, an ordinary missed poll
+      // (re-arming it unspent would poll every interval for as long as the relay says offline).
+      // The last poll falls to `waiting` too once no leader leads any more: ending there would strand the follow.
+      read = isLeaderless(err) && (!led || (left === 0 && !this.#leads())) ? "waiting" : "missed";
     }
     const shown = showing();
     // A settled verdict is never walked back by a reply that was in flight when it settled.
@@ -673,13 +1027,16 @@ export class SchedulerStore {
     // Answered after a newer read landed: its task is older, but the poll chain it carries goes on.
     if (seq < this.#taskReadApplied) {
       if (left === null) return;
-      if (read === "waiting") this.#follow(taskId, left + 1);
+      if (read === "waiting") this.#awaitLeader(taskId, left + 1);
       else if (left > 0) this.#follow(taskId, left);
-      else this.#patch({ verdict: { kind: "queued", task: shown, follow: followEnd(read) } });
+      else this.#endFollow(shown, followEnd(read));
       return;
     }
     // Only a read that carried the task is newer news than another's: a missed one says nothing.
-    if (typeof read === "object" && "task" in read) this.#taskReadApplied = seq;
+    if (typeof read === "object" && "task" in read) {
+      this.#taskReadApplied = seq;
+      this.#sawTask(read.task);
+    }
     const task = typeof read === "object" && "task" in read ? read.task : shown;
     if (typeof read === "object" && !("task" in read)) {
       // A nudge's refused read leaves the poll chain to ask again; a task gone from the store is final.
@@ -698,7 +1055,7 @@ export class SchedulerStore {
       return;
     }
     if (read === "waiting") {
-      this.#follow(taskId, left + 1);
+      this.#awaitLeader(taskId, left + 1);
       return;
     }
     if (left > 0) {
@@ -706,11 +1063,38 @@ export class SchedulerStore {
       this.#follow(taskId, left);
       return;
     }
-    this.#patch({ verdict: { kind: "queued", task, follow: followEnd(read) } });
+    this.#endFollow(task, followEnd(read));
   }
 
+  /** Out of polls: what was last known stays. A Start now still waiting reads on by itself. */
+  #endFollow(task: Task, follow: FollowEnd): void {
+    this.#patch({ verdict: { kind: "queued", task, follow } });
+  }
+
+  /** Ends the follow; a Start now is not its to end. */
   stopFollowing(): void {
+    this.#followPending = false;
+    this.#clearFollowTimer();
+  }
+
+  /**
+   * No leader heard the read, so no poll was spent. Rather than poll a relay
+   * that can only refuse unsent until one leads (for hours, with nobody
+   * looking), the chain waits for one to verify; one that verified while the
+   * read was out polls on as before.
+   */
+  #awaitLeader(taskId: string, left: number): void {
+    if (this.#leads()) {
+      this.#follow(taskId, left);
+      return;
+    }
+    this.#clearFollowTimer();
+    this.#parked = { taskId, left };
+  }
+
+  #clearFollowTimer(): void {
     if (this.#followTimer !== null) clearTimeout(this.#followTimer);
     this.#followTimer = null;
+    this.#parked = null;
   }
 }

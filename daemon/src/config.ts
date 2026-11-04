@@ -63,7 +63,7 @@ export interface ReapConfig {
   readonly minAgeDays: number;
 }
 
-export const REAP_DEFAULTS: ReapConfig = { intervalHours: 0, minAgeDays: 7 };
+export const REAP_DEFAULTS: ReapConfig = { intervalHours: 0, minAgeDays: 4 };
 
 function parseReap(raw: unknown, path: string): ReapConfig | undefined {
   if (raw === undefined) return undefined;

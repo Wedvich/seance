@@ -10,12 +10,15 @@ import {
   resolveOrigin,
   resolvePlacement,
   specError,
+  startAuto,
+  startGateError,
+  startQueuedAuto,
   type AutoEnqueued,
   type AutoSpec,
   type PlacementInput,
   type PlacementNames,
 } from "./auto.ts";
-import type { ContinueCliArgs, SpawnCliArgs } from "./cli.ts";
+import type { ContinueCliArgs, SpawnCliArgs, StartCliArgs } from "./cli.ts";
 import { BrokerError, type BrokerCallOpts } from "./broker-client.ts";
 import { loadConfig, loadPsk, type Config } from "./config.ts";
 import {
@@ -109,6 +112,8 @@ export interface SpawnAutoOpts {
   readonly self?: () => Promise<string | null>;
   /** This shell read no key, so the fleet is the daemon's broker (`autoFleet`). */
   readonly keyless?: boolean;
+  /** `--start`'s reads while it waits for the task to be ready; tests shorten them. */
+  readonly startPolls?: { readonly pollMs?: number; readonly polls?: number };
 }
 
 /**
@@ -154,6 +159,9 @@ export async function spawnAuto(
   try {
     if (lease.scheduler === null) return failed(`spawn unavailable: ${SCHEDULER_NEEDS_NEWER_DAEMON}. ${NOW_HINT}`);
     const leg = { machines: lease.machines, scheduler: lease.scheduler };
+    // Before the create: a start that cannot be sent should not leave a task queued behind it.
+    const startGate = args.start === true ? startGateError(leg) : null;
+    if (startGate !== null) return failed(`spawn refused: --start: ${startGate}`);
     // Before any account listing: a leader that cannot route on them never gets the fields.
     if (placementNeedsPinAccount(placement.input)) {
       const gate = pinAccountGateError(leg, "--account / --not");
@@ -166,8 +174,11 @@ export async function spawnAuto(
     const resolvedSpec: AutoSpec = { ...spec, repo: resolved.origin, ...placed.fields };
     const longOrigin = specError(resolvedSpec, "cli");
     if (longOrigin !== null) return failed(`spawn refused: ${longOrigin}`);
-    const enqueued = await enqueueAuto(lease.scheduler, resolvedSpec, audit, "cli");
-    return placed.echo === null || !enqueued.ok ? enqueued : { ...enqueued, text: `${enqueued.text}\n${placed.echo}` };
+    const id = crypto.randomUUID();
+    const enqueued = await enqueueAuto(lease.scheduler, resolvedSpec, audit, "cli", id);
+    if (!enqueued.ok) return enqueued;
+    const started = args.start === true ? (await startQueuedAuto(leg, id, "cli", opts.startPolls)).text : null;
+    return { ...enqueued, text: [enqueued.text, placed.echo, started].filter((line) => line !== null).join("\n") };
   } finally {
     lease.release();
   }
@@ -206,6 +217,43 @@ export async function continueTaskAuto(
   } finally {
     lease.release();
   }
+}
+
+/** `seanced start`: MCP's `start_task` (`startAuto`) from this shell, through its key or the daemon's broker. */
+export async function startTaskAuto(
+  args: StartCliArgs,
+  fleet: Fleet,
+  opts: { readonly keyless?: boolean } = {},
+): Promise<AutoEnqueued> {
+  let lease: FleetLease;
+  try {
+    lease = await fleet.open();
+  } catch (err) {
+    const why = err instanceof BrokerError ? brokerFailureText(err) : err instanceof Error ? err.message : String(err);
+    return failed(
+      opts.keyless === true
+        ? `start: not sent — this shell could not read the PSK, so the daemon's broker was the only way to the scheduler, and it failed: ${why}`
+        : `start: not sent — ${why}`,
+    );
+  }
+  try {
+    if (lease.scheduler === null) return failed(`start unavailable: ${SCHEDULER_NEEDS_NEWER_DAEMON}`);
+    return await startAuto({ machines: lease.machines, scheduler: lease.scheduler }, args.taskId, "cli");
+  } finally {
+    lease.release();
+  }
+}
+
+export async function cmdStartAuto(args: StartCliArgs): Promise<void> {
+  const config = await loadConfig();
+  const built = await autoFleet(config);
+  const outcome = await startTaskAuto(args, built.fleet, { keyless: built.keyless }).finally(() => built.fleet.stop());
+  if (!outcome.ok) {
+    console.error(outcome.text);
+    process.exit(1);
+  }
+  console.log(outcome.text);
+  process.exit(0);
 }
 
 export async function cmdContinueAuto(args: ContinueCliArgs): Promise<void> {

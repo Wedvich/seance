@@ -11,6 +11,7 @@ import {
   type Task,
   type TaskDep,
   type TaskUntil,
+  type IdleTaskRef,
   type UnreadableTaskRef,
 } from "@seance/shared";
 
@@ -37,7 +38,7 @@ export const MODEL_LABELS: Record<Model, string> = {
   haiku: "Haiku",
 };
 
-export type SheetKind = "machine" | "account" | "repo" | "model" | "effort" | "after" | "batch";
+export type SheetKind = "machine" | "account" | "repo" | "model" | "effort" | "after";
 
 /**
  * The Machine sheet's rescan action: inline scanning/failure state on the row it
@@ -62,13 +63,21 @@ export type Verdict =
   /**
    * The store refused the task, or its answer never came; `message` says which.
    * `retry` is the task to put again: the same id, so a retry cannot queue twice.
+   * `runNow`: it was a Start now, and a retry is one too.
    */
   | {
       readonly kind: "unqueued";
       readonly message: string;
       readonly mayHaveLanded: boolean;
       readonly retry?: Task;
+      readonly runNow?: true;
     };
+
+/** Why a Start now's `run-now` left its task where it was, as a sentence, for the queued verdict of `taskId`. */
+export interface StartNowRefusal {
+  readonly taskId: string;
+  readonly message: string;
+}
 
 /**
  * Why a queued verdict stopped following its task before it settled.
@@ -101,20 +110,6 @@ export interface PersistedForm {
   readonly after: readonly TaskDep[];
   /** Per task: what settles it. `reported` waits for its session's own done report. */
   readonly until: TaskUntil;
-  /** Per task: the Linear issue it is for; empty is none. */
-  readonly linearIssue: string;
-  /** Spans enqueues: the batch the next one joins, until it is ended. */
-  readonly batch: OpenBatch | null;
-}
-
-/**
- * A batch has no record of its own: each member carries the id, so the form
- * keeps it and numbers the next member. `next` moves only when a member is
- * stored, so a retry re-sends the same index.
- */
-export interface OpenBatch {
-  readonly id: string;
-  readonly next: number;
 }
 
 export interface SessionsView {
@@ -170,6 +165,10 @@ export type QueueState =
       readonly holds: readonly PauseHold[];
       /** Records the leader cannot read: they hold store slots no prune frees, until a person discards them. */
       readonly unreadable: readonly UnreadableTaskRef[];
+      /** Running tasks the leader holds no slot for while they sit idle at their prompt (`QueueResponse.idle`). */
+      readonly idle: readonly IdleTaskRef[];
+      /** The leader's in-flight cap, the header's denominator; absent from an older leader. */
+      readonly globalMax?: number;
       /** The leader's clock when it answered, ms. */
       readonly at: number;
       /**
@@ -193,10 +192,10 @@ export interface AccountsState {
   readonly notice: string | null;
 }
 
-/** A cancel or mark-done on its way to the leader; the row shows it busy. */
+/** A task's action on its way to the leader (a continue: to the store); the row shows it busy. */
 export interface TaskAction {
   readonly taskId: string;
-  readonly op: "cancel" | "mark-done" | "continue";
+  readonly op: "cancel" | "mark-done" | "run-now" | "continue";
 }
 
 export type HistoryResult =
@@ -229,8 +228,6 @@ export const DEFAULT_FORM: PersistedForm = {
   effort: DEFAULT_EFFORT,
   after: [],
   until: "merged",
-  linearIssue: "",
-  batch: null,
 };
 
 export function isModel(value: unknown): value is Model {

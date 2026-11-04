@@ -51,10 +51,18 @@ export interface RouteInput {
   /** The fleet quota record's entries (`Fleet.fleetQuota`), folded with every status. */
   readonly fleetQuota?: readonly FleetQuotaEntry[];
   /**
-   * Machines absent past `slotReleaseAfterMs`: their in-flight tasks hold no
-   * slot and no projected usage here.
+   * Ids of in-flight tasks that hold no slot and no projected usage here: the
+   * leader's to say why (`Scheduler`'s `#released` — a machine asleep, a
+   * session idle at its prompt).
    */
   readonly released?: ReadonlySet<string>;
+  /** `runNow`: neither concurrency cap (`cap_reached`) applies; every other filter does. */
+  readonly uncapped?: boolean;
+  /**
+   * Route as though the task carried attachments: `route-preview`'s flag, since a
+   * preview has no manifest. A task's own `spec.attachments` applies regardless.
+   */
+  readonly attachments?: boolean;
 }
 
 const SPAN_MS: Readonly<Record<WindowSpan, number>> = { "5h": 5 * 3600_000, "7d": 7 * 86_400_000 };
@@ -84,6 +92,7 @@ interface Pass {
   readonly quotaOf: (accountId: string) => AccountQuota;
   readonly accountAt: (placement: Placement) => string | null;
   readonly capReached: Reason | null;
+  readonly uncapped: boolean;
   readonly holds: readonly PauseHold[];
   /** The task's skills the inventory knows, in prompt order: each restricts. Empty when nothing does. */
   readonly skills: readonly string[];
@@ -100,18 +109,25 @@ export function route(input: RouteInput): Decision {
     inFlight,
     quotaOf: cached((accountId) => accountQuota(accountId, machines, newest)),
     accountAt: (placement) => accountOfPlacement(machines, placement),
+    uncapped: input.uncapped === true,
     capReached:
-      inFlight.length >= config.globalMax
+      input.uncapped !== true && inFlight.length >= config.globalMax
         ? { code: "cap_reached", inFlight: inFlight.length, max: config.globalMax }
         : null,
     holds: activeHolds(input.holds ?? [], now),
     skills: knownSkills(task, machines),
   };
   const caps = [queuePause(pass.holds), pass.capReached].filter((r) => r !== null);
+  const attached = input.attachments === true || task.spec.attachments !== undefined;
 
   const candidates: Candidate[] = [];
   for (const machine of machines) {
-    const machineReasons = [...machineFilter(machine, now, config), ...continueFilter(task, machine), ...caps];
+    const machineReasons = [
+      ...machineFilter(machine, now, config),
+      ...continueFilter(task, machine),
+      ...attachmentsFilter(attached, machine),
+      ...caps,
+    ];
     if (machine.exclaves === undefined || machine.exclaves.length === 0) {
       candidates.push({ deviceId: machine.deviceId, machine: machine.name, exclave: null, rejected: machineReasons });
       continue;
@@ -167,8 +183,8 @@ function judge(pass: Pass, machine: Machine, machineReasons: readonly Reason[], 
   const account =
     exclave.accountId === null ? null : judgeAccount(pass, exclave, exclave.accountId, sharing, seat.capacity);
   if (account?.reason !== undefined) rejected.push(account.reason);
-  if (sharing >= config.accountMax) {
-    rejected.push({ code: "cap_reached", inFlight: sharing, max: config.accountMax, scope: "account" });
+  if (!pass.uncapped && sharing >= seat.accountMax) {
+    rejected.push({ code: "cap_reached", inFlight: sharing, max: seat.accountMax, scope: "account" });
   }
   const paused = exclave.accountId === null ? null : accountPause(pass.holds, exclave.accountId);
   if (paused !== null) rejected.push(paused);
@@ -212,16 +228,11 @@ interface AccountJudgement {
 }
 
 /**
- * What the caps and projected usage count: in flight, and not placed on a
- * machine asleep past `slotReleaseAfterMs`. Nothing runs there while it
- * sleeps; once it is back its tasks count again, over a cap or not.
+ * What the caps and projected usage count: in flight, and not released. A
+ * released task that counts again is counted over a cap or not.
  */
 function holdingSlots(tasks: readonly Task[], released: ReadonlySet<string> = new Set()): Task[] {
-  return tasks.filter((t) => {
-    if (!IN_FLIGHT.includes(t.state)) return false;
-    const at = t.assignment ?? t.reservation;
-    return at === undefined || !released.has(at.deviceId);
-  });
+  return tasks.filter((t) => IN_FLIGHT.includes(t.state) && !released.has(t.id));
 }
 
 /**
@@ -298,6 +309,8 @@ function machineFilter(machine: Machine, now: number, config: SchedulerConfig): 
   if (!machine.connected) reasons.push({ code: "offline" });
   else if (status === undefined || isStatusStale(status, now)) reasons.push({ code: "status_stale" });
   else {
+    // Its launch gate refuses a spawn `internal_error`, which leaves the task reserved for the whole TTL.
+    if (status.drn === true) reasons.push({ code: "draining" });
     // An absent `free` is a host with no statfs answer — unknown, and the floor guards a known-full disk only.
     if (status.free !== undefined && status.free < config.minFreeMib)
       reasons.push({ code: "disk_low", freeMib: status.free });
@@ -310,19 +323,31 @@ function machineFilter(machine: Machine, now: number, config: SchedulerConfig): 
 }
 
 /**
- * A continue task (DESIGN.md, Daemon, "Continuing a failed task") has one
+ * A continue task (DESIGN.md, Daemon, "Continuing a session") has one
  * acceptable target, in the clone and exclave `judge` checks. Here, the machine:
  * another is `continue_elsewhere`, and the target must be a daemon that spawns
- * the mode at all, or it would refuse the request as malformed.
+ * the mode at all, or it would refuse the request as malformed, and one that
+ * resumes the session id it noted: an older one runs `--continue`, which misses
+ * a worktree spawn's conversation.
  */
 function continueFilter(task: Task, machine: Machine): Reason[] {
   const at = task.spec.continues?.at;
   if (at === undefined) return [];
   const reasons: Reason[] = [];
   if (machine.deviceId !== at.deviceId) reasons.push({ code: "continue_elsewhere" });
-  if (machine.capabilities?.includes(CAPABILITIES.continueTask) !== true)
+  const caps = machine.capabilities;
+  if (caps?.includes(CAPABILITIES.continueTask) !== true || !caps.includes(CAPABILITIES.continueSession))
     reasons.push({ code: "continue_unsupported" });
   return reasons;
+}
+
+/**
+ * Only a daemon advertising the capability fetches a manifest; any other would
+ * refuse the spawn as malformed. A pin on such a machine waits, as on one offline.
+ */
+function attachmentsFilter(attached: boolean, machine: Machine): Reason[] {
+  if (!attached || machine.capabilities?.includes(CAPABILITIES.attachments) === true) return [];
+  return [{ code: "attachments_unsupported" }];
 }
 
 /**
