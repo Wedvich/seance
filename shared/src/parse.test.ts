@@ -2035,7 +2035,8 @@ describe("M4 shapes", () => {
     const full: SettingsRecord = {
       version: 1,
       vapid: { publicKey: b64url(65), privateKey: b64url(32) },
-      linearKey: "ø".repeat(LINEAR_KEY_MAX_LENGTH),
+      // The costliest character `linearKey` admits, as for a label: three bytes once JSON-encoded.
+      linearKey: "€".repeat(LINEAR_KEY_MAX_LENGTH),
       subscriptions: Array.from({ length: PUSH_MAX_SUBSCRIPTIONS }, (_, i) => ({
         endpoint: `https://fcm.googleapis.com/${"e".repeat(PUSH_ENDPOINT_MAX_LENGTH - 29)}${String(i).padStart(2, "0")}`,
         keys: { p256dh: b64url(65, true), auth: b64url(16, true) },
@@ -2050,6 +2051,14 @@ describe("M4 shapes", () => {
     };
     expect(parseSettingsRecord(full)).toEqual(full);
     expect(await sealedRecordLength("settings", full)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
+  });
+
+  test("a linearKey with a control, format or lone-surrogate character is refused, as a label is", () => {
+    const base = { version: 1, vapid: { publicKey: b64url(65), privateKey: b64url(32) } };
+    for (const linearKey of ["a\u0001b", "a\u200Bb", "a\uD800b", "a\uDC00b", "\u202Eabc"]) {
+      expect(parseSettingsRecord({ ...base, linearKey })).toBeNull();
+    }
+    expect(parseSettingsRecord({ ...base, linearKey: "lin_api_key" })).not.toBeNull();
   });
 });
 

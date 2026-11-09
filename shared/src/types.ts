@@ -2447,7 +2447,7 @@ export const PUSH_SERVICE_HOSTS = [
  * the cap is what keeps the settings record under the store's cap: 16
  * subscriptions at it, each with a `PUSH_LABEL_MAX_LENGTH` label and an `addedAt`, the
  * `DISK_ALERTS_MAX` disk alerts, the VAPID pair and a `LINEAR_KEY_MAX_LENGTH` key at
- * their bounds, seal to ~39.7 KB of `STORE_MAX_CT_LENGTH` (40 KiB), measured by the
+ * their bounds, seal to ~40.1 KB of `STORE_MAX_CT_LENGTH` (40 KiB), measured by the
  * bound test in parse.test.ts. Little headroom is left: grow nothing here unchecked.
  */
 export const PUSH_ENDPOINT_MAX_LENGTH = 1024;

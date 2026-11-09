@@ -1313,20 +1313,19 @@ export function pushServiceVendor(endpoint: string): string | null {
 }
 
 /**
- * A subscription label: a trimmed name with no control (`Cc`), format (`Cf`: bidi, zero-width)
- * or lone-surrogate character. `isName` alone admits characters JSON escapes to six
- * bytes, so sixteen crafted labels could seal the record over the store's cap;
- * and the label is shown on other devices, where a bidi or zero-width character
- * could disguise a row.
+ * No control (`Cc`), format (`Cf`: bidi, zero-width) or surrogate (`Cs`) character. `isName` alone
+ * admits characters JSON escapes to six bytes, so a few crafted fields could seal the settings
+ * record over the store's cap. `\p{Cs}` under `u` matches only a lone surrogate, and unlike
+ * `isWellFormed()` it runs in the browsers `shared/` also ships to.
  */
-const PUSH_LABEL_FORBIDDEN = /[\p{Cc}\p{Cf}]/u;
+const UNPRINTABLE = /[\p{Cc}\p{Cf}\p{Cs}]/u;
+function isPrintableName(value: unknown, max: number): value is string {
+  return isName(value, max) && !UNPRINTABLE.test(value);
+}
+
+/** A subscription label: printable and trimmed. Shown on other devices, where a bidi or zero-width character could disguise a row. */
 function isPushLabel(value: unknown): value is string {
-  return (
-    isName(value, PUSH_LABEL_MAX_LENGTH) &&
-    value === value.trim() &&
-    value.isWellFormed() &&
-    !PUSH_LABEL_FORBIDDEN.test(value)
-  );
+  return isPrintableName(value, PUSH_LABEL_MAX_LENGTH) && value === value.trim();
 }
 
 /** An uncompressed P-256 point, and RFC 8291's auth secret. */
@@ -1466,7 +1465,7 @@ export function parseSettingsRecord(value: unknown): SettingsRecord | null {
   const { vapid, linearKey, subscriptions, diskAlerts } = value;
   const keys = vapid === undefined ? undefined : parseVapidKeys(vapid);
   if (keys === null) return null;
-  if (linearKey !== undefined && !isName(linearKey, LINEAR_KEY_MAX_LENGTH)) return null;
+  if (linearKey !== undefined && !isPrintableName(linearKey, LINEAR_KEY_MAX_LENGTH)) return null;
   let subscribed: readonly PushSubscriptionEntry[] | undefined;
   if (subscriptions !== undefined) {
     if (!Array.isArray(subscriptions) || subscriptions.length > PUSH_MAX_SUBSCRIPTIONS) return null;
