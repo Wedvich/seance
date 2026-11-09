@@ -424,49 +424,60 @@ export default function Command(): React.JSX.Element {
         onChange={(prompt) => setValues((current) => ({ ...current, prompt }))}
       />
       <Form.Description title="Relay" text={statusLine(relay, machines)} />
-      <Form.Dropdown
-        id="machine"
-        title="Machine"
-        value={values.machineId ?? ""}
-        onChange={(machineId) =>
-          setValues(
-            (current) =>
-              // repo: null — switching machines consults the target machine's
-              // own remembered repo, never the previous machine's selection.
-              reconcile({ ...current, machineId, repo: null }, machines, {
-                cached: cachedRef.current,
-                lastUsed: lastUsedRef.current,
-                defaults,
-              }).values,
-          )
-        }
-      >
-        <Form.Dropdown.Item
-          value={AUTO}
-          title="Auto — the scheduler picks"
-          icon={{ source: Icon.CircleFilled, tintColor: Color.Blue }}
-        />
-        {machines.map((machine) => (
+      {/* Neither picker renders before the cached form lands. Raycast's host
+          keeps a field by its id, and one first shown empty then filled resets
+          to its first item through onChange, discarding the remembered value
+          (seen live: Auto's remembered origin replaced by the top of the list). */}
+      {ready ? (
+        <Form.Dropdown
+          id="machine"
+          title="Machine"
+          value={values.machineId ?? ""}
+          onChange={(machineId) =>
+            setValues((current) =>
+              // Raycast also fires this on mount with the value it already
+              // shows; only a real switch may drop the repo.
+              machineId === current.machineId
+                ? current
+                : // repo: null — switching machines consults the target machine's
+                  // own remembered repo, never the previous machine's selection.
+                  reconcile({ ...current, machineId, repo: null }, machines, {
+                    cached: cachedRef.current,
+                    lastUsed: lastUsedRef.current,
+                    defaults,
+                  }).values,
+            )
+          }
+        >
           <Form.Dropdown.Item
-            key={machine.deviceId}
-            value={machine.deviceId}
-            title={machine.connected ? machine.name : `${machine.name} — asleep`}
-            icon={{ source: Icon.CircleFilled, tintColor: machine.connected ? Color.Green : Color.SecondaryText }}
+            value={AUTO}
+            title="Auto — the scheduler picks"
+            icon={{ source: Icon.CircleFilled, tintColor: Color.Blue }}
           />
-        ))}
-      </Form.Dropdown>
+          {machines.map((machine) => (
+            <Form.Dropdown.Item
+              key={machine.deviceId}
+              value={machine.deviceId}
+              title={machine.connected ? machine.name : `${machine.name} — asleep`}
+              icon={{ source: Icon.CircleFilled, tintColor: machine.connected ? Color.Green : Color.SecondaryText }}
+            />
+          ))}
+        </Form.Dropdown>
+      ) : null}
       {accounts === null ? null : <Form.Description title="Accounts" text={accounts} />}
       {queueWait === null ? null : <Form.Description title="Scheduler" text={queueWait} />}
-      <Form.Dropdown
-        id="repo"
-        title="Repository"
-        value={values.repo ?? ""}
-        onChange={(repo) => setValues((current) => ({ ...current, repo }))}
-      >
-        {repoChoices(values.machineId, machines).map((repo) => (
-          <Form.Dropdown.Item key={repo.value} value={repo.value} title={repo.title} keywords={[...repo.keywords]} />
-        ))}
-      </Form.Dropdown>
+      {ready ? (
+        <Form.Dropdown
+          id="repo"
+          title="Repository"
+          value={values.repo ?? ""}
+          onChange={(repo) => setValues((current) => ({ ...current, repo }))}
+        >
+          {repoChoices(values.machineId, machines).map((repo) => (
+            <Form.Dropdown.Item key={repo.value} value={repo.value} title={repo.title} keywords={[...repo.keywords]} />
+          ))}
+        </Form.Dropdown>
+      ) : null}
       <Form.Dropdown
         id="model"
         title="Model"
