@@ -154,6 +154,11 @@ export function SheetItem(props: {
   /** Trailing remove button. A nested button would be invalid, so this splits the row in two. */
   onRemove?: (() => void) | null;
   removeLabel?: string;
+  /** A second trailing button beside `onRemove`: a row-level command, shown as `actionText`. */
+  onAction?: (() => void) | null;
+  actionLabel?: string;
+  actionText?: string;
+  actionDisabled?: boolean;
   onClick: () => void;
 }): JSX.Element {
   const {
@@ -166,6 +171,10 @@ export function SheetItem(props: {
     dot = null,
     onRemove = null,
     removeLabel = `Remove ${label}`,
+    onAction = null,
+    actionLabel = label,
+    actionText = "↻",
+    actionDisabled = false,
     onClick,
   } = props;
   const classes = ["sheet-item"];
@@ -188,13 +197,26 @@ export function SheetItem(props: {
     </button>
   );
 
-  if (onRemove === null) return item;
+  if (onRemove === null && onAction === null) return item;
   return (
     <div className="sheet-item-row">
       {item}
-      <button type="button" className="sheet-item-remove" onClick={onRemove} aria-label={removeLabel}>
-        <TrashIcon />
-      </button>
+      {onAction !== null && (
+        <button
+          type="button"
+          className="sheet-item-remove"
+          onClick={onAction}
+          disabled={actionDisabled}
+          aria-label={actionLabel}
+        >
+          {actionText}
+        </button>
+      )}
+      {onRemove !== null && (
+        <button type="button" className="sheet-item-remove" onClick={onRemove} aria-label={removeLabel}>
+          <TrashIcon />
+        </button>
+      )}
     </div>
   );
 }

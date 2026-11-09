@@ -1,11 +1,9 @@
-import { DEP_AFTER, isTaskId, parseBatchStrategy, TASK_SPEC_LIMITS, TASK_UNTIL, type TaskDep } from "@seance/shared";
-import { DEFAULT_FORM, isEffort, isModel, type OpenBatch, type PendingSpawn, type PersistedForm } from "./state.ts";
+import { DEP_AFTER, isTaskId, TASK_SPEC_LIMITS, TASK_UNTIL, type TaskDep } from "@seance/shared";
+import { DEFAULT_FORM, isEffort, isModel, type PersistedForm } from "./state.ts";
 
 /**
  * The form survives a reload because iOS kills backgrounded PWAs freely and the
- * prompt is the one thing here the user wrote. The pending spawn survives for
- * the same reason: reconciliation has to work across a kill, not just a
- * background, or it is useless in exactly the case it exists for.
+ * prompt is the one thing here the user wrote.
  *
  * The prompt therefore sits in plaintext localStorage, unlike the PSK. That is a
  * deliberate asymmetry — one message's worth of text on your own phone, versus
@@ -39,11 +37,6 @@ function asString(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
 
-function asRepoMap(value: unknown): Readonly<Record<string, string>> {
-  if (typeof value !== "object" || value === null) return {};
-  return Object.fromEntries(Object.entries(value).filter(([, repo]) => typeof repo === "string"));
-}
-
 function asDeps(value: unknown): readonly TaskDep[] {
   if (!Array.isArray(value)) return [];
   const deps: TaskDep[] = [];
@@ -57,36 +50,27 @@ function asDeps(value: unknown): readonly TaskDep[] {
   return deps;
 }
 
-function asBatch(value: unknown): OpenBatch | null {
-  if (typeof value !== "object" || value === null) return null;
-  const id: unknown = Reflect.get(value, "id");
-  const next: unknown = Reflect.get(value, "next");
-  const strategy = parseBatchStrategy(Reflect.get(value, "strategy"));
-  if (!isTaskId(id) || strategy === null) return null;
-  // One past the bound is a full batch: the last member took `batchIndex`, and the form says so instead of forgetting it.
-  if (typeof next !== "number" || !Number.isInteger(next) || next < 1 || next > TASK_SPEC_LIMITS.batchIndex + 1)
-    return null;
-  return { id, strategy, next };
-}
-
 /** Hand-validated rather than trusted: this is last week's build's output. */
 export function readForm(): PersistedForm {
   const raw = readJson(FORM_KEY);
   if (typeof raw !== "object" || raw === null) return DEFAULT_FORM;
   const record = raw as Record<string, unknown>;
   return {
-    machineId: asString(record["machineId"]),
-    auto: record["auto"] === true,
-    autoRepo: asString(record["autoRepo"]),
-    repos: asRepoMap(record["repos"]),
+    // An older build's open `batch` is dropped: the form no longer authors batches, and a
+    // silent one would keep grouping tasks with no tile left to end it.
+    // A legacy form's `machineId`, `auto` and `repos` are dropped on purpose: a saved machine
+    // pick becomes auto, since a silent pin would make a former direct spawner's next task
+    // wait on caps it never chose. Its `autoRepo` is the repo only when `auto` was true: with `auto`
+    // false it is a stale leftover from an earlier auto session, and a task queued there is a surprise.
+    machine: asString(record["machine"]),
+    account: asString(record["account"]),
+    repo: asString(record["repo"]) ?? (record["auto"] === true ? asString(record["autoRepo"]) : null),
     prompt: asString(record["prompt"]) ?? "",
     worktree: typeof record["worktree"] === "boolean" ? record["worktree"] : DEFAULT_FORM.worktree,
     model: isModel(record["model"]) ? record["model"] : DEFAULT_FORM.model,
     effort: isEffort(record["effort"]) ? record["effort"] : DEFAULT_FORM.effort,
     after: asDeps(record["after"]),
     until: TASK_UNTIL.find((until) => until === record["until"]) ?? DEFAULT_FORM.until,
-    linearIssue: (asString(record["linearIssue"]) ?? "").slice(0, TASK_SPEC_LIMITS.linearIssue),
-    batch: asBatch(record["batch"]),
   };
 }
 
@@ -94,19 +78,9 @@ export function writeForm(form: PersistedForm): void {
   writeJson(FORM_KEY, form);
 }
 
-export function readPending(): PendingSpawn | null {
-  const raw = readJson(PENDING_KEY);
-  if (typeof raw !== "object" || raw === null) return null;
-  const record = raw as Record<string, unknown>;
-  const machineId = asString(record["machineId"]);
-  const repo = asString(record["repo"]);
-  const requestedAt = record["requestedAt"];
-  if (machineId === null || repo === null || typeof requestedAt !== "number") return null;
-  return { machineId, repo, requestedAt };
-}
-
-export function writePending(pending: PendingSpawn | null): void {
-  writeJson(PENDING_KEY, pending);
+/** No spawn is sent directly any more, so a pending record has nothing left to reconcile; cleared like `dropLegacyHidden`. */
+export function dropLegacyPending(): void {
+  writeJson(PENDING_KEY, null);
 }
 
 /**
@@ -116,4 +90,60 @@ export function writePending(pending: PendingSpawn | null): void {
  */
 export function dropLegacyHidden(): void {
   writeJson(HIDDEN_KEY, null);
+}
+
+const FORM_FILES_KEY = "seance:form-files";
+/** The unload of a document a share replaced and the boot that follows are seconds apart; older facts are a closed document's. */
+export const FORM_FILES_FRESH_MS = 60_000;
+
+/** What the form held when the document a share replaced went away. */
+export interface FormBeforeShare {
+  readonly files: number;
+  readonly submitting: boolean;
+}
+
+/**
+ * How many files the form held and whether a submit was in flight, kept for one reader:
+ * a share is a navigation, so it reloads the document and drops both (a `File` can't be
+ * persisted), and the boot it lands on says so (share-inbox.ts, `reloadCostText`).
+ * Stamped, so that boot can tell a document the share replaced from one closed long ago.
+ */
+export function writeFormFiles(state: FormBeforeShare, now: number = Date.now()): void {
+  writeJson(FORM_FILES_KEY, { ...state, at: now });
+}
+
+/** Null when absent, malformed, or older than `FORM_FILES_FRESH_MS`: then no live document was replaced. */
+export function readFormFiles(now: number = Date.now()): FormBeforeShare | null {
+  const raw = readJson(FORM_FILES_KEY);
+  if (typeof raw !== "object" || raw === null) return null;
+  const files: unknown = Reflect.get(raw, "files");
+  const submitting: unknown = Reflect.get(raw, "submitting");
+  const at: unknown = Reflect.get(raw, "at");
+  if (typeof files !== "number" || !Number.isSafeInteger(files) || files < 0 || typeof submitting !== "boolean") {
+    return null;
+  }
+  if (typeof at !== "number" || now - at > FORM_FILES_FRESH_MS) return null;
+  return { files, submitting };
+}
+
+/**
+ * Keeps the facts current as the form changes, and restamps them when the page goes
+ * away: a share's navigation fires `pagehide` just before the boot that reads them.
+ */
+export function trackFormFiles(
+  source: {
+    subscribe(listener: () => void): unknown;
+    getState(): { readonly attachments: readonly unknown[]; readonly spawning: boolean };
+  },
+  onHide: (flush: () => void) => void,
+): void {
+  let facts: FormBeforeShare = { files: 0, submitting: false };
+  writeFormFiles(facts);
+  source.subscribe(() => {
+    const { attachments, spawning } = source.getState();
+    if (attachments.length === facts.files && spawning === facts.submitting) return;
+    facts = { files: attachments.length, submitting: spawning };
+    writeFormFiles(facts);
+  });
+  onHide(() => writeFormFiles(facts));
 }

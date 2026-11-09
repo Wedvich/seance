@@ -5,6 +5,7 @@ import {
   type DiscardResult,
   type MarkDoneResult,
   type PauseResult,
+  type RunNowResult,
   type Scheduler,
   winnerOnly,
 } from "@seance/scheduler";
@@ -17,8 +18,8 @@ import {
   parsePushUnsubscribeRequest,
   parseQueueRequest,
   parseResumeRequest,
+  parseRoutePreviewRequest,
   parseTaskRef,
-  parseTaskRequest,
   PUSH_MAX_SUBSCRIPTIONS,
   QUEUE_MAX_TASKS,
   QUEUE_PROMPT_PREVIEW,
@@ -27,6 +28,7 @@ import {
   TASK_FAILURE_LIMITS,
   type Decision,
   type DiscardResponse,
+  type IdleTaskRef,
   type PauseHold,
   type PauseResponse,
   type Plain,
@@ -64,7 +66,15 @@ function queueView(scheduler: Scheduler, now: number, only?: readonly string[]):
   const unreadable = scheduler
     .unreadable()
     .map(({ id, version, reason }): UnreadableTaskRef => ({ taskId: id, version, reason }));
-  return boundedQueue(tasks, (id) => scheduler.lastDecision(id), now, scheduler.holds(), unreadable);
+  return boundedQueue(
+    tasks,
+    (id) => scheduler.lastDecision(id),
+    now,
+    scheduler.holds(),
+    unreadable,
+    scheduler.idle(),
+    scheduler.globalMax(),
+  );
 }
 
 /** Where the decision is still live: why a task waits, or where it is going. */
@@ -100,7 +110,8 @@ function byRelevance(a: Task, b: Task): number {
  * Most relevant first (`byRelevance`) and bounded, prompts cut, with every hold in force (at most
  * `MAX_PAUSE_HOLDS`, taken off the budget first: a reader refuses a reply that
  * drops one) and every unreadable record (at most `MAX_TASKS`, the store's own
- * bound, also taken off first: each is one a person may discard). Full decisions are filled against
+ * bound, also taken off first: each is one a person may discard), and every idle release (one per
+ * task at most, taken off first as well: a reader shows a missing one as running). Full decisions are filled against
  * `REPLY_JSON_BUDGET`, live ones first and then newest first; the rest go out
  * `winnerOnly`. Where even those overrun it — every bounded field near its cap —
  * the oldest tasks are left out, finished ones before live ones. Exported for
@@ -112,6 +123,8 @@ export function boundedQueue(
   now: number,
   holds: readonly PauseHold[] = [],
   unreadable: readonly UnreadableTaskRef[] = [],
+  idle: readonly IdleTaskRef[] = [],
+  globalMax?: number,
 ): QueueResponse {
   const newest = all.toSorted(byRelevance).slice(0, QUEUE_MAX_TASKS).map(undecided);
   const decisions = new Map<string, { readonly whole: Decision; readonly cut: Decision }>();
@@ -127,6 +140,7 @@ export function boundedQueue(
     REPLY_JSON_BUDGET -
     jsonBytes(holds) -
     (unreadable.length === 0 ? 0 : jsonBytes(unreadable)) -
+    (idle.length === 0 ? 0 : jsonBytes(idle)) -
     newest.reduce((sum, task) => sum + (sizes.get(task.id) ?? 0), 0);
   const byClaim = [
     ...newest.filter((t) => LIVE_DECISION.has(t.state)),
@@ -159,6 +173,8 @@ export function boundedQueue(
     at: now,
     holds,
     ...(unreadable.length === 0 ? {} : { unreadable }),
+    ...(idle.length === 0 ? {} : { idle }),
+    ...(globalMax === undefined ? {} : { globalMax }),
   };
 }
 
@@ -209,6 +225,18 @@ const MARK_DONE_REFUSALS: Record<Exclude<MarkDoneResult, { readonly ok: true }>[
     "internal_error",
     "its session may already have ended, but marking it done was not recorded before this daemon's term ended; check the queue, then mark it done again if it still shows",
   ),
+};
+
+const RUN_NOW_REFUSALS: Record<Exclude<RunNowResult, { readonly ok: true }>["code"], SchedulerError> = {
+  not_found: schedulerError("task_not_found", "the leader holds no task by that id"),
+  dispatching: schedulerError("dispatching", "its spawn is in flight; ask again once it lands"),
+  finished: schedulerError("finished", "the task has already finished"),
+  not_waiting: schedulerError("not_waiting", "the task is not ready: it waits on admission or its deps, or is placed"),
+  unplaceable: schedulerError(
+    "unplaceable",
+    "past the concurrency caps it still places nowhere; its decision says why",
+  ),
+  conflict: schedulerError("conflict", "the task changed while it was placed; ask again"),
 };
 
 const DISCARD_REFUSALS: Record<Exclude<DiscardResult, { readonly ok: true }>["code"], SchedulerError> = {
@@ -280,9 +308,10 @@ async function answer(asked: Asked, op: SchedulerOp, payload: unknown): Promise<
       return queueView(scheduler, asked.now, request.tasks);
     }
     case "route-preview": {
-      const request = parseTaskRequest(payload);
+      const request = parseRoutePreviewRequest(payload);
       if (request === null) return schedulerError("invalid_request", "malformed route-preview request");
-      const reply: RoutePreviewResponse = { decision: scheduler.preview(request) };
+      const { attachments, ...spec } = request;
+      const reply: RoutePreviewResponse = { decision: scheduler.preview(spec, attachments === true) };
       return reply;
     }
     case "cancel": {
@@ -375,6 +404,19 @@ async function answer(asked: Asked, op: SchedulerOp, payload: unknown): Promise<
       if (!result.ok) return settingsRefused(op, id, result.code, "the subscription could not be removed");
       await audit.unsubscribed(id);
       const reply: PushUnsubscribeResponse = { endpoint: request.endpoint };
+      return reply;
+    }
+    case "run-now": {
+      const ref = parseTaskRef(payload);
+      if (ref === null) return schedulerError("invalid_request", "malformed run-now request");
+      const result = await scheduler.runNow(ref.taskId);
+      if (!result.ok) {
+        await audit.refused("run-now", id, result.code, { taskId: ref.taskId });
+        return RUN_NOW_REFUSALS[result.code];
+      }
+      // The spawn line on the chosen machine joins this by `task=`.
+      await audit.ranNow(id, result.task);
+      const reply: TaskResponse = { task: result.task };
       return reply;
     }
     case "discard": {

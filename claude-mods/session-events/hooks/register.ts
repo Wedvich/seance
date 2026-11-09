@@ -24,10 +24,12 @@ import type { EngineInterface, Register } from "claude-code";
  * Every `prUrl` goes with a state, since the daemon refuses a frame without one,
  * and the last one seen rides on `ended`.
  *
- * Auto mode also settles on `ask` (its classifier decides without a person), so
- * there each such call reports needs-input then busy within the classifier's
- * seconds: accepted, since no engine event says a dialog was shown and the leader
- * escalates only a needs-input that lasts.
+ * A dialog closes only when its `tool.call` settles, after the tool ran: core
+ * prompts and runs under one `next`, and no engine event says an ask was settled.
+ * So an approved call reads needs-input for its whole run, a person's approval or
+ * auto mode's classifier alike (core answers `ask` there too, and no event says a
+ * dialog was shown): accepted, since the leader escalates only a needs-input that
+ * lasts. Move the close once the engine signals a settled ask.
  * A plugin above this one may override the verdict this hook read: one that
  * asks over an allow is a missed needs-input; one that turns an ask into an
  * allow or deny is a brief needs-input with no dialog. No hook can see either.

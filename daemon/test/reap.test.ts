@@ -17,6 +17,7 @@ import {
   withReapLock,
   type ReapOptions,
   type ReapReport,
+  type RepoReport,
 } from "../src/reap.ts";
 import { transcriptDir } from "../src/reap-git.ts";
 import { scanRepos } from "../src/scan.ts";
@@ -86,6 +87,8 @@ interface Repo {
   readonly path: string;
   /** This repo's own prune log, so no test reads another's — or the developer's. */
   readonly pruneLog: string;
+  /** Its own attachments root, for the same reason. */
+  readonly attachments: string;
 }
 
 /** A clone of its own origin, logged as just pruned — the run fetches only where a test ages that. */
@@ -98,6 +101,7 @@ async function freshRepo(): Promise<Repo> {
     repos: await scanRepos([fixture.root]),
     path: fixture.repoPath,
     pruneLog: join(base, `prune-log-${fixtures}.json`),
+    attachments: join(base, `attachments-${fixtures}`),
   };
   await logPrune(repo, Date.now());
   return repo;
@@ -162,6 +166,7 @@ async function reap(repo: Repo, overrides: Partial<ReapOptions> = {}): Promise<R
     deadPaneMinAgeMs: 0,
     pruneLogPath: repo.pruneLog,
     fsmonitor: null,
+    attachments: repo.attachments,
     ...overrides,
   });
 }
@@ -315,6 +320,70 @@ describe("reap: worktrees and branches (real git)", () => {
     expect(result?.keptBranches).toEqual([{ name: "wip", ahead: 2 }]);
     expect(result?.deletedBranches).toEqual([]);
     expect(await git(repo.path, "rev-parse", "wip")).toBe(tip);
+  });
+
+  test("unmerged worktrees are kept: gone-upstream, never-pushed and detached ones listed, active ones counted", async () => {
+    const repo = await freshRepo();
+    const gone = join(repo.path, ".claude", "worktrees", "gone");
+    const detached = join(repo.path, ".claude", "worktrees", "detached");
+    const active = join(repo.path, ".claude", "worktrees", "active");
+    const locked = join(repo.path, ".claude", "worktrees", "locked");
+    const local = join(repo.path, ".claude", "worktrees", "local");
+    await addWorktree(repo.path, local);
+    const localTip = await commit(local, "local.txt");
+    await addWorktree(repo.path, gone);
+    await commit(gone, "pushed.txt");
+    await git(gone, "push", "-q", "-u", "origin", "wt-gone");
+    await commit(gone, "unpushed.txt");
+    await git(repo.path, "push", "-q", "origin", ":wt-gone");
+    await git(repo.path, "worktree", "add", "-q", "--detach", detached);
+    await commit(detached, "loose.txt");
+    await addWorktree(repo.path, active);
+    await commit(active, "wip.txt");
+    await git(active, "push", "-q", "-u", "origin", "wt-active");
+    await addWorktree(repo.path, locked);
+    await commit(locked, "held.txt");
+    await git(locked, "push", "-q", "-u", "origin", "wt-locked");
+    await commit(locked, "held-unpushed.txt");
+    await git(repo.path, "push", "-q", "origin", ":wt-locked");
+    await git(repo.path, "worktree", "lock", locked);
+    await git(repo.path, "fetch", "-q", "--prune", "origin");
+    for (const worktree of [gone, detached, active, locked, local]) {
+      // oxlint-disable-next-line no-await-in-loop
+      await age(worktree);
+    }
+
+    const preview = formatReport(await reap(repo, { dryRun: true })).join("\n");
+    expect(preview).toContain(
+      `kept worktree      ${gone}   wt-gone   upstream gone, 2 commits not on the default branch`,
+    );
+    expect(preview).toContain(`kept worktree      ${detached}   detached, 1 commit not on the default branch`);
+    expect(preview).toContain(
+      `kept worktree      ${local}   wt-local   never pushed, 1 commit not on the default branch`,
+    );
+    expect(preview).toContain("3 kept worktrees · 1 active");
+    expect(await exists(local)).toBe(true);
+
+    const report = await reap(repo);
+    const [result] = report.repos;
+    // `git worktree list` order is the filesystem's, not ours.
+    const expected: RepoReport["keptWorktrees"] = [
+      { path: detached, branch: null, why: "detached", ahead: 1 },
+      { path: gone, branch: "wt-gone", why: "upstream-gone", ahead: 2 },
+      { path: local, branch: "wt-local", why: "never-pushed", ahead: 1 },
+    ];
+    expect((result?.keptWorktrees ?? []).toSorted((a, b) => a.path.localeCompare(b.path))).toEqual(
+      expected.toSorted((a, b) => a.path.localeCompare(b.path)),
+    );
+    expect(result?.locked).toEqual([locked]);
+    expect(result?.active).toBe(1);
+    expect(result?.removedWorktrees).toEqual([]);
+    expect(result?.keptBranches).toEqual([]);
+    expect(await git(repo.path, "rev-parse", "refs/heads/wt-local")).toBe(localTip);
+    for (const worktree of [gone, detached, active, locked, local]) {
+      // oxlint-disable-next-line no-await-in-loop
+      expect(await exists(worktree)).toBe(true);
+    }
   });
 
   test("a dirty worktree is reported and left, whatever showUntrackedFiles says; ignored files alone don't make one dirty", async () => {
@@ -549,6 +618,46 @@ describe("reap: séance windows (real tmux, stub claude)", () => {
       expect(ledger.progress()).toEqual([expect.objectContaining({ taskId: "t-owes", exit: 2 })]);
       expect(await paneExists(dead)).toBe(false);
       expect(audited).toEqual([expect.stringContaining(`audit reap origin=harvest closed-pane pane=${dead} `)]);
+    },
+    DEATH_STAMP_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "a dead task pane that is harvest's is left even with closing; an untitled one is closed with closing called first, and left without it",
+    async () => {
+      const repo = await freshRepo();
+      const titled = await openWindow(`tmux wait-for reap-t; exec ${stub.failing} --remote-control`);
+      const untitled = await openWindow(`tmux wait-for reap-u; exec ${stub.failing} --remote-control`);
+      for (const [pane, id] of [
+        [titled, "t-titled"],
+        [untitled, "t-untitled"],
+      ] as const) {
+        // oxlint-disable-next-line no-await-in-loop -- tmux calls for one pane, in order
+        await tmuxOk(["set-option", "-w", "-t", pane, "remain-on-exit", "on"]);
+        // oxlint-disable-next-line no-await-in-loop
+        await tmuxOk(["set-option", "-p", "-t", pane, TASK_OPTION, id]);
+      }
+      await tmuxOk(["select-pane", "-t", titled, "-T", "claude session"]);
+      await tmuxOk(["wait-for", "-S", "reap-t"]);
+      await tmuxOk(["wait-for", "-S", "reap-u"]);
+      await untilDeathStamped(titled);
+      await untilDeathStamped(untitled);
+
+      // The CLI's reap passes no closing: it cannot note that it closed a task pane, so it leaves both.
+      await reap(repo);
+      expect(await paneExists(titled)).toBe(true);
+      expect(await paneExists(untitled)).toBe(true);
+
+      const events: string[] = [];
+      const closing = (taskId: string): Promise<void> => {
+        events.push(`closing ${taskId}`);
+        return paneExists(untitled).then((here) => void events.push(`untitled exists ${here}`));
+      };
+      await reap(repo, { closing });
+      expect(events).toEqual(["closing t-untitled", "untitled exists true"]);
+      expect(await paneExists(titled)).toBe(true);
+      expect(await paneExists(untitled)).toBe(false);
+      await tmuxOk(["kill-pane", "-t", titled]);
     },
     DEATH_STAMP_TEST_TIMEOUT_MS,
   );

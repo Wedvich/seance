@@ -1,5 +1,6 @@
 import {
   APP_ID,
+  ATTACHMENT_PATH,
   isStoreKey,
   SCHEDULER_ID,
   STORE_PREFIXES,
@@ -40,6 +41,12 @@ import {
  * (the leader's leg reads the fleet quota record at takeover), and the refusal
  * log. A test that needs an answer the rules would not give uses
  * `replyNextStore`.
+ *
+ * `GET /attachments/<id>` serves what `putAttachment` planted, token from the
+ * `Authorization` header only, `404 not_found` for anything else, and answers
+ * the statuses `failNextAttachmentGets` queues first. Absent: `PUT`, the id
+ * pattern, CORS, R2 and the allowance (relay/test/attachments.test.ts holds the
+ * real routes).
  *
  * Absent here: `/daemon` vs `/app` path roles (the token's carrier decides),
  * a registry derived from registers, broadcast to app sockets. Three
@@ -127,6 +134,11 @@ export interface TestRelay {
   refuseRegisters: boolean;
   /** Refuse this many registers as `refuseRegisters` does, then admit — no race with a redial. */
   refuseNextRegisters: number;
+  /**
+   * The real DO's per-socket status floor (`STATUS_MIN_INTERVAL_MS`, which a register clears), opt-in and
+   * 0 (none) by default: a status arriving within it of the last accepted one is dropped, not queued.
+   */
+  statusFloorMs: number;
   /** Close every app socket on open with 4401, as the real relay answers a bad `?t=` token. */
   rejectApps: boolean;
   rejectedCount: () => number;
@@ -171,6 +183,12 @@ export interface TestRelay {
   appWrite: (key: string, env: Envelope) => { ok: true; version: number } | { ok: false; code: string };
   /** Closes the daemon's socket from the relay's side, as a drop after a send. */
   dropDaemon: (deviceId: string) => void;
+  /** Stores an object for `GET /attachments/<id>`, as an upload would. */
+  putAttachment: (id: string, object: Uint8Array) => void;
+  /** The next GETs of any attachment answer these statuses, in order, before the object is looked up. */
+  failNextAttachmentGets: (...statuses: number[]) => void;
+  /** Every authorized attachment GET so far, failed ones included. */
+  attachmentGets: () => number;
   stop: () => void;
 }
 
@@ -185,6 +203,7 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
   const appEvents = new AsyncQueue<"open" | "close">("appEvents");
   const daemons = new Map<string, Bun.ServerWebSocket<Role>>();
   const socketDevices = new Map<Bun.ServerWebSocket<Role>, string>();
+  const lastStatusAt = new Map<Bun.ServerWebSocket<Role>, number>();
   const apps = new Set<Bun.ServerWebSocket<Role>>();
   let rejected = 0;
   let connections = 0;
@@ -198,11 +217,29 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
   /** Key → the version it was deleted at. Never expires here, unlike the DO's. */
   const tombstones = new Map<string, number>();
   const storeOverrides: ((frame: StoreRequestFrame) => unknown)[] = [];
+  const objects = new Map<string, Uint8Array>();
+  const attachmentFailures: number[] = [];
+  let attachmentGets = 0;
+
+  const serveAttachment = (req: Request, path: string): Response => {
+    const answer = (status: number, code: string): Response => Response.json({ code }, { status });
+    if (req.headers.get("authorization") !== `Bearer ${bearerToken}`) return answer(401, "unauthorized");
+    if (req.method !== "GET") return answer(405, "method_not_allowed");
+    attachmentGets += 1;
+    const failure = attachmentFailures.shift();
+    if (failure !== undefined) return answer(failure, "storage_error");
+    const object = objects.get(path.slice(ATTACHMENT_PATH.length));
+    if (object === undefined) return answer(404, "not_found");
+    return new Response(object, {
+      headers: { "content-type": "application/octet-stream", "content-length": String(object.byteLength) },
+    });
+  };
 
   const relay: {
     autoPong: boolean;
     refuseRegisters: boolean;
     refuseNextRegisters: number;
+    statusFloorMs: number;
     rejectApps: boolean;
     schedulerTerm: number | null;
     holdStoreReplies: boolean;
@@ -210,6 +247,7 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
     autoPong: true,
     refuseRegisters: false,
     refuseNextRegisters: 0,
+    statusFloorMs: 0,
     rejectApps: false,
     schedulerTerm: null,
     holdStoreReplies: false,
@@ -301,8 +339,13 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
       }
       daemons.set(frame.deviceId, ws);
       socketDevices.set(ws, frame.deviceId);
+      lastStatusAt.delete(ws);
       registers.push(frame);
     } else if (frame.t === "status") {
+      const at = Date.now();
+      const last = lastStatusAt.get(ws);
+      if (last !== undefined && at - last < relay.statusFloorMs) return;
+      lastStatusAt.set(ws, at);
       statuses.push(frame.env);
     } else if (
       frame.t === "store-list" ||
@@ -329,6 +372,8 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
     hostname: "127.0.0.1",
     port,
     fetch(req, srv) {
+      const { pathname } = new URL(req.url);
+      if (pathname.startsWith(ATTACHMENT_PATH)) return serveAttachment(req, pathname);
       // The app carries the token in the query (a browser cannot set a header on a WebSocket).
       const app = new URL(req.url).searchParams.get(TOKEN_PARAM) === bearerToken;
       if (!app && req.headers.get("authorization") !== `Bearer ${bearerToken}`) {
@@ -407,6 +452,12 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
     set refuseRegisters(value: boolean) {
       relay.refuseRegisters = value;
     },
+    get statusFloorMs() {
+      return relay.statusFloorMs;
+    },
+    set statusFloorMs(value: number) {
+      relay.statusFloorMs = value;
+    },
     get refuseNextRegisters() {
       return relay.refuseNextRegisters;
     },
@@ -451,6 +502,13 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
     dropDaemon: (deviceId): void => {
       daemons.get(deviceId)?.close(1000, "dropped by the test relay");
     },
+    putAttachment: (id, object): void => {
+      objects.set(id, object);
+    },
+    failNextAttachmentGets: (...codes): void => {
+      attachmentFailures.push(...codes);
+    },
+    attachmentGets: () => attachmentGets,
     rejectedCount: () => rejected,
     connectionCount: () => connections,
     appConnectionCount: () => appConnections,

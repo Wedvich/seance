@@ -1,7 +1,7 @@
 import type { JSX, TargetedKeyboardEvent } from "preact";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
-import { TASK_SPEC_LIMITS, type BatchStrategy, type DepAfter, type Machine, type TaskUntil } from "@seance/shared";
-import { describeDecision } from "../decision-view.ts";
+import { TASK_SPEC_LIMITS, type DepAfter, type Machine, type TaskUntil } from "@seance/shared";
+import { describeDecision, startNowItem } from "../decision-view.ts";
 import type { AfterSheetView } from "../queue-view.ts";
 import {
   EFFORTS,
@@ -12,29 +12,26 @@ import {
   type Model,
   type PersistedForm,
   type PreviewState,
-  type RescanState,
   type SheetKind,
 } from "../state.ts";
 import { completeSkill, matchSkills, promptSegments, skillIndex, skillToken } from "../skills.ts";
-import { abbreviatePaths, describeStrategy, formatSeen, type Tile, type ViewModel } from "../view.ts";
+import { formatSeen, type AttachmentsView, type Tile, type ViewModel } from "../view.ts";
 import { DecisionCard } from "./decision.tsx";
 import { HeaderMenu } from "./header-menu.tsx";
+import { Menu, MenuItem, useMenu } from "./menu.tsx";
 import { Seg } from "./seg.tsx";
 import { dotClass, Sheet, SheetItem } from "./sheet.tsx";
 import { SkillPicker, skillOptionId } from "./skill-picker.tsx";
 
 const SKILL_LIST_ID = "skill-list";
 
-/** One collator for every sheet sort; constructing one per comparison is not free. */
-const collator = new Intl.Collator();
-
 const SHEET_TITLES: Record<SheetKind, string> = {
   machine: "Where should it run?",
+  account: "Which account?",
   repo: "Which repo?",
   model: "Which model?",
   effort: "How much effort?",
   after: "Wait for which tasks?",
-  batch: "Batch these tasks",
 };
 
 const WHEN_LABELS: Record<DepAfter, string> = { opened: "Opened", merged: "Merged", done: "Done" };
@@ -55,21 +52,142 @@ export interface SpawnActions {
   readonly openSheet: (sheet: SheetKind) => void;
   readonly toggleWorktree: () => void;
   readonly spawn: () => void;
+  /** Queues as `spawn` does, then asks the leader to skip the queue for it. */
+  readonly startNow: () => void;
   readonly dismissLayer: () => void;
-  readonly selectMachine: (deviceId: string) => void;
-  readonly selectAuto: () => void;
+  readonly pickMachine: (deviceId: string | null) => void;
+  readonly pickAccount: (accountId: string | null) => void;
   readonly refreshPreview: () => void;
   readonly removeMachine: (deviceId: string) => void;
   readonly selectRepo: (repo: string) => void;
-  readonly rescan: () => void;
+  readonly rescan: (deviceId: string) => void;
   readonly setModel: (model: Model) => void;
   readonly setEffort: (effort: Effort) => void;
   readonly addAfter: (taskId: string, after: DepAfter) => void;
   readonly removeAfter: (taskId: string) => void;
   readonly setUntil: (until: TaskUntil) => void;
-  readonly setLinearIssue: (issue: string) => void;
-  readonly startBatch: (strategy: BatchStrategy) => void;
-  readonly endBatch: () => void;
+  /** Picked, pasted or dropped files; the store applies the limits. */
+  readonly addFiles: (files: readonly File[]) => void;
+  readonly removeFile: (key: string) => void;
+}
+
+/**
+ * Grows the prompt to its text, as chat composers do; CSS caps it, past which it
+ * scrolls. Height is cleared first so a shortened prompt shrinks back. While the
+ * skill picker is open the field is one row, so it is left unsized.
+ *
+ * The mirror is sized with it: its `inset: 0` follows the field's box, which a
+ * stretched card makes taller than the textarea, and a taller mirror scrolls less
+ * far and draws lines the textarea clips. The momentary collapse clamps both the
+ * textarea's scroll and the column's, so both are put back, or an edit mid-way
+ * down a long prompt jumps.
+ */
+function fitPrompt(field: HTMLTextAreaElement, mirror: HTMLElement | null, compact: boolean): void {
+  const column = field.closest(".column");
+  const fieldTop = field.scrollTop;
+  const columnTop = column?.scrollTop ?? 0;
+  field.style.height = "";
+  if (mirror !== null) mirror.style.height = "";
+  if (!compact) {
+    field.style.height = `${field.scrollHeight}px`;
+    if (mirror !== null) mirror.style.height = `${field.offsetHeight}px`;
+  }
+  field.scrollTop = fieldTop;
+  if (column !== null) column.scrollTop = columnTop;
+}
+
+/** Only drags that carry files light the card up: a dragged text selection is the textarea's. */
+function carriesFiles(event: DragEvent): boolean {
+  return event.dataTransfer?.types.includes("Files") === true;
+}
+
+/**
+ * The prompt card's files, above the text: chips with remove. Still listed after
+ * attaching stops being offered (the leader changed under them), so they can be
+ * removed.
+ */
+function AttachmentChips(props: { view: AttachmentsView; onRemove: (key: string) => void }): JSX.Element | null {
+  const { view, onRemove } = props;
+  if (view.files.length === 0 && view.notice === null) return null;
+  return (
+    <div className="attach">
+      {view.files.length > 0 && (
+        <ul className="attach-list" aria-label={view.summary ?? undefined}>
+          {view.files.map((file) => (
+            <li key={file.key} className="attach-chip">
+              <span className="attach-name">{file.name}</span>
+              <span className="attach-size">{file.size}</span>
+              <button
+                type="button"
+                className="attach-remove"
+                aria-label={`Remove ${file.name}`}
+                disabled={view.locked}
+                onClick={() => onRemove(file.key)}
+              >
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {view.notice !== null && <p className="attach-notice">{view.notice}</p>}
+    </div>
+  );
+}
+
+/**
+ * The composer bar's paperclip, shown only while attaching is offered. The input stays
+ * mounted regardless: returning from a slow pick (Android's multi-select) re-dials the
+ * relay, `offered` drops until the leader re-verifies, and an input unmounted then
+ * loses the pick's `change`.
+ */
+function AttachButton(props: {
+  offered: boolean;
+  locked: boolean;
+  onAdd: (files: readonly File[]) => void;
+}): JSX.Element {
+  const { offered, locked, onAdd } = props;
+  const picker = useRef<HTMLInputElement>(null);
+  return (
+    <>
+      {offered && (
+        <button
+          type="button"
+          className="compose-attach"
+          aria-label="Attach files"
+          title="Attach files"
+          disabled={locked}
+          onClick={() => picker.current?.click()}
+        >
+          <svg
+            viewBox="0 0 24 24"
+            width="20"
+            height="20"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M21 11.5l-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l8.6-8.6a3.7 3.7 0 0 1 5.2 5.2l-8.6 8.6a1.8 1.8 0 0 1-2.6-2.6l8-8" />
+          </svg>
+        </button>
+      )}
+      <input
+        ref={picker}
+        type="file"
+        multiple
+        hidden
+        onChange={(event) => {
+          const input = event.currentTarget;
+          onAdd([...(input.files ?? [])]);
+          // Cleared so picking the same file again still fires a change.
+          input.value = "";
+        }}
+      />
+    </>
+  );
 }
 
 /**
@@ -118,97 +236,23 @@ function TileButton(props: { tile: Tile; offline?: boolean; onClick: () => void 
   );
 }
 
-/**
- * Its own component so the labelling can sit behind a hook: the sheet re-renders
- * on every store patch, but the labels only move when the machine does.
- */
-function RepoSheet(props: {
-  actions: SpawnActions;
-  machine: Machine | null;
-  selected: string | null;
-  rescan: RescanState;
-  closing: boolean;
-  onExited: () => void;
-  now: number;
-}): JSX.Element {
-  const { actions, machine, selected, rescan, closing, onExited, now } = props;
-  // Keyed on the machine, which every finished rescan replaces (changed or
-  // not) — so rescans relabel, and unrelated store patches do not.
-  const items = useMemo(() => {
-    const repos = machine?.repos ?? [];
-    const labels = abbreviatePaths(repos.map((repo) => repo.path));
-    return repos
-      .map((repo) => ({ repo, label: labels.get(repo.path) ?? repo.path }))
-      .toSorted((a, b) => collator.compare(a.label, b.label));
-  }, [machine]);
-
-  return (
-    <Sheet title={SHEET_TITLES.repo} closing={closing} onExited={onExited} onClose={actions.dismissLayer}>
-      {items.map(({ repo, label }) => (
-        <SheetItem
-          key={repo.name}
-          label={label}
-          mono
-          selected={repo.name === selected}
-          onClick={() => actions.selectRepo(repo.name)}
-        />
-      ))}
-      <SheetItem
-        label="↻ Rescan repos"
-        action
-        disabled={rescan === "scanning"}
-        sub={
-          rescan === "scanning"
-            ? "scanning…"
-            : machine === null
-              ? null
-              : `last scanned ${formatSeen(machine.scannedAt, now)}`
-        }
-        onClick={actions.rescan}
-      />
-      {rescan === "failed" && <p className="sheet-note">Couldn't rescan — this is the last known list.</p>}
-    </Sheet>
-  );
-}
-
 function ActiveSheet(props: {
   actions: SpawnActions;
   view: ViewModel;
   kind: SheetKind;
-  machines: readonly Machine[];
   model: Model;
   effort: Effort;
-  rescan: RescanState;
-  batch: PersistedForm["batch"];
   /** Derived while the After sheet is open, so the list is not rebuilt on every keystroke. */
   afterSheet: AfterSheetView | null;
   /** True while the exit animation plays; the sheet is already popped from state. */
   closing: boolean;
   onExited: () => void;
-  now: number;
 }): JSX.Element {
-  const {
-    actions,
-    view,
-    kind,
-    machines,
-    model: selectedModel,
-    effort: selectedEffort,
-    batch,
-    afterSheet,
-    now,
-    rescan,
-    closing,
-    onExited,
-  } = props;
+  const { actions, view, kind, model: selectedModel, effort: selectedEffort, afterSheet, closing, onExited } = props;
   const close = actions.dismissLayer;
 
   if (kind === "after" && afterSheet !== null) {
     return <AfterSheet actions={actions} sheet={afterSheet} closing={closing} onExited={onExited} />;
-  }
-
-  if (kind === "batch") {
-    return <BatchSheet actions={actions} batch={batch} closing={closing} onExited={onExited} />;
   }
 
   if (kind === "machine") {
@@ -219,65 +263,76 @@ function ActiveSheet(props: {
           label="Auto"
           sub={auto.reason ?? auto.note ?? "the scheduler picks the machine"}
           dot={auto.available ? "auto" : "off"}
-          selected={view.auto !== null}
+          selected={view.machine === null}
           disabled={!auto.available}
-          onClick={actions.selectAuto}
+          onClick={() => actions.pickMachine(null)}
         />
-        {machines
-          .toSorted((a, b) => collator.compare(a.name, b.name))
-          .map((machine) => (
-            <SheetItem
-              key={machine.deviceId}
-              label={machine.name}
-              sub={
-                machine.connected
-                  ? `online · ${machine.repos.length} ${machine.repos.length === 1 ? "repo" : "repos"}`
-                  : `offline · last seen ${formatSeen(machine.lastSeen, now)}`
-              }
-              dot={machine.connected ? "ok" : "off"}
-              selected={view.auto === null && machine.deviceId === view.machine?.deviceId}
-              disabled={!machine.connected}
-              // Only offered while offline: the relay refuses to forget a machine
-              // it holds a socket for, so on a connected row it would do nothing.
-              onRemove={machine.connected ? null : () => actions.removeMachine(machine.deviceId)}
-              removeLabel={`Forget ${machine.name}`}
-              onClick={() => actions.selectMachine(machine.deviceId)}
-            />
-          ))}
+        {view.machineChoices.map(({ machine, sub, disabled, selected, canRescan, rescanDisabled }) => (
+          <SheetItem
+            key={machine.deviceId}
+            label={machine.name}
+            sub={sub}
+            dot={machine.connected ? "ok" : "off"}
+            selected={selected}
+            disabled={disabled}
+            // Only offered while offline: the relay refuses to forget a machine
+            // it holds a socket for, so on a connected row it would do nothing.
+            onRemove={machine.connected ? null : () => actions.removeMachine(machine.deviceId)}
+            removeLabel={`Forget ${machine.name}`}
+            onAction={canRescan ? () => actions.rescan(machine.deviceId) : null}
+            actionLabel={`Rescan ${machine.name}`}
+            actionDisabled={rescanDisabled}
+            onClick={() => actions.pickMachine(machine.deviceId)}
+          />
+        ))}
       </Sheet>
     );
   }
 
-  if (kind === "repo" && view.auto !== null) {
-    const selected = view.auto.repo?.origin ?? null;
+  if (kind === "account") {
     return (
-      <Sheet title={SHEET_TITLES.repo} closing={closing} onExited={onExited} onClose={close}>
-        {view.auto.repos.map((repo) => (
+      <Sheet title={SHEET_TITLES.account} closing={closing} onExited={onExited} onClose={close}>
+        <SheetItem
+          label="Auto"
+          sub="the scheduler picks the account"
+          dot={view.autoAvailability.available ? "auto" : "off"}
+          selected={view.account === null}
+          disabled={!view.autoAvailability.available}
+          onClick={() => actions.pickAccount(null)}
+        />
+        {view.accountChoices.map((choice) => (
           <SheetItem
-            key={repo.origin}
-            label={repo.label}
-            mono
-            sub={repo.origin === repo.label ? null : repo.origin}
-            selected={repo.origin === selected}
-            onClick={() => actions.selectRepo(repo.origin)}
+            key={choice.accountId}
+            label={choice.label}
+            sub={choice.sub}
+            dot={choice.dot}
+            selected={choice.selected}
+            disabled={choice.disabled}
+            onClick={() => actions.pickAccount(choice.accountId)}
           />
         ))}
-        {view.auto.repos.length === 0 && <p className="sheet-note">No machine reports a clone with an origin.</p>}
+        {view.accountChoices.length === 0 && <p className="sheet-note">No machine reports a signed-in account.</p>}
       </Sheet>
     );
   }
 
   if (kind === "repo") {
     return (
-      <RepoSheet
-        actions={actions}
-        machine={view.machine}
-        selected={view.repo?.name ?? null}
-        rescan={rescan}
-        closing={closing}
-        onExited={onExited}
-        now={now}
-      />
+      <Sheet title={SHEET_TITLES.repo} closing={closing} onExited={onExited} onClose={close}>
+        {view.repos.map((repo) => (
+          <SheetItem
+            key={repo.origin}
+            label={repo.label}
+            mono
+            sub={repo.origin === repo.label ? null : repo.origin}
+            selected={repo.origin === view.repo?.origin}
+            onClick={() => actions.selectRepo(repo.origin)}
+          />
+        ))}
+        {view.repos.length === 0 && (
+          <p className="sheet-note">No clone with an origin is in scope of the pinned machine and account.</p>
+        )}
+      </Sheet>
     );
   }
 
@@ -369,70 +424,6 @@ function AfterSheet(props: {
   );
 }
 
-const DEFAULT_PARALLEL = 3;
-
-function BatchSheet(props: {
-  actions: SpawnActions;
-  batch: PersistedForm["batch"];
-  closing: boolean;
-  onExited: () => void;
-}): JSX.Element {
-  const { actions, batch, closing, onExited } = props;
-  const mode = batch?.strategy.mode ?? null;
-  const current = batch?.strategy.mode === "parallel" ? batch.strategy.max : DEFAULT_PARALLEL;
-  const [max, setMax] = useState(String(current));
-  const parsed = Number(max);
-  const valid = max.trim() !== "" && Number.isInteger(parsed) && parsed >= 1 && parsed <= TASK_SPEC_LIMITS.parallel;
-  return (
-    <Sheet title={SHEET_TITLES.batch} closing={closing} onExited={onExited} onClose={actions.dismissLayer}>
-      <SheetItem
-        label={batch === null ? "Off" : "End batch"}
-        sub={batch === null ? "each task is queued on its own" : `the next task starts a fresh numbering`}
-        selected={batch === null}
-        onClick={actions.endBatch}
-      />
-      <SheetItem
-        label="One at a time"
-        sub="in the order queued"
-        selected={mode === "sequential"}
-        onClick={() => actions.startBatch({ mode: "sequential" })}
-      />
-      <SheetItem
-        label="No limit"
-        sub="only dependencies and capacity hold them"
-        selected={mode === "auto"}
-        onClick={() => actions.startBatch({ mode: "auto" })}
-      />
-      <div className={mode === "parallel" ? "sheet-max sheet-item-selected" : "sheet-max"}>
-        <label htmlFor="batch-max">Up to</label>
-        <input
-          id="batch-max"
-          type="number"
-          inputMode="numeric"
-          min={1}
-          max={TASK_SPEC_LIMITS.parallel}
-          value={max}
-          onInput={(event) => setMax(event.currentTarget.value)}
-        />
-        <span>at once</span>
-        <button
-          type="button"
-          className="quiet"
-          disabled={!valid}
-          onClick={() => actions.startBatch({ mode: "parallel", max: parsed })}
-        >
-          Use
-        </button>
-      </div>
-      {batch !== null && (
-        <p className="sheet-note">
-          Open: {describeStrategy(batch.strategy)}, next is #{batch.next}.
-        </p>
-      )}
-    </Sheet>
-  );
-}
-
 /**
  * What `auto` would do with the form as it stands, before anything is queued
  * (DESIGN.md, PWA). Shown only while the form is on `auto`.
@@ -479,6 +470,113 @@ function PreviewCard(props: {
   );
 }
 
+/**
+ * The composer's Queue, split when the leader answers `run-now`: two sibling
+ * buttons in one pill, never nested, so Tab reaches both and a press on one
+ * never fires the other. Without `run-now` it is the one button, unchanged.
+ */
+function QueueButton(props: {
+  view: ViewModel;
+  preview: PreviewState | null;
+  onQueue: () => void;
+  onStartNow: () => void;
+}): JSX.Element {
+  const { button, startNow } = props.view;
+  const face = (
+    <button
+      type="button"
+      className={button.busy ? "primary primary-busy" : "primary"}
+      disabled={!button.enabled}
+      onClick={props.onQueue}
+    >
+      {button.label}
+    </button>
+  );
+  if (!startNow) return face;
+  return (
+    <SplitQueueButton
+      face={face}
+      enabled={button.enabled}
+      busy={button.busy}
+      preview={props.preview}
+      onStartNow={props.onStartNow}
+    />
+  );
+}
+
+/** Its own component so the menu's open state mounts and unmounts with the split: a popover removed while open fires no toggle. */
+function SplitQueueButton(props: {
+  face: JSX.Element;
+  enabled: boolean;
+  busy: boolean;
+  preview: PreviewState | null;
+  onStartNow: () => void;
+}): JSX.Element {
+  const { face, enabled, busy } = props;
+  const menu = useMenu<HTMLDivElement>();
+  const item = startNowItem(props.preview);
+  return (
+    <>
+      <div ref={menu.anchor} className={busy ? "split split-busy" : "split"}>
+        {face}
+        <span className="split-divider" aria-hidden="true" />
+        <button
+          type="button"
+          className="split-more"
+          disabled={!enabled}
+          popovertarget={menu.id}
+          aria-label="More ways to start"
+          aria-haspopup="menu"
+          aria-expanded={menu.open}
+        >
+          <svg
+            className="split-chevron"
+            viewBox="0 0 24 24"
+            width="20"
+            height="20"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M6 9l6 6 6-6" />
+          </svg>
+        </button>
+      </div>
+      <Menu menu={menu} label="More ways to start">
+        <MenuItem
+          label="Start now"
+          icon={<StartNowIcon />}
+          sub={item.sub}
+          disabled={!item.enabled}
+          onClick={props.onStartNow}
+        />
+      </Menu>
+    </>
+  );
+}
+
+function StartNowIcon(): JSX.Element {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="18"
+      height="18"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.8"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M3 6l8 6-8 6z" />
+      <path d="M12 6l8 6-8 6z" />
+    </svg>
+  );
+}
+
 export function SpawnScreen(props: {
   actions: SpawnActions;
   view: ViewModel;
@@ -488,15 +586,16 @@ export function SpawnScreen(props: {
   sheet: SheetKind | null;
   machines: readonly Machine[];
   now: number;
-  rescan: RescanState;
   preview: PreviewState | null;
   /** The After sheet's list; non-null only while that sheet is open. */
   afterSheet: AfterSheetView | null;
   /** Desktop layout: the queue is a column of its own and the settings pill sits in its header. */
   columns: boolean;
 }): JSX.Element {
-  const { actions, view, form, promptUndo, sheet, machines, now, rescan, preview, afterSheet, columns } = props;
-  const offline = view.auto === null && view.machine !== null && !view.machine.connected;
+  const { actions, view, form, promptUndo, sheet, machines, now, preview, afterSheet, columns } = props;
+  const [dropping, setDropping] = useState(false);
+  const attachOffered = view.attachments.offered;
+  const offline = view.machine !== null && !view.machine.connected;
   const [renderedSheet, sheetClosing, unmountSheet] = useSheetExit(sheet);
   const promptInput = useRef<HTMLTextAreaElement>(null);
   // The list is derived only while its sheet is open; the exit animation still needs it.
@@ -570,6 +669,7 @@ export function SpawnScreen(props: {
       pendingCaret.current = null;
       field.setSelectionRange(pending.caret, pending.caret);
     }
+    if (field !== null) fitPrompt(field, promptBackdrop.current, pickerOpen);
     // Collapsing to one row keeps the scroll offset clamped to the last line,
     // not the caret's, so a token edited mid-prompt would be off view: scroll
     // to where the mirror draws it.
@@ -582,6 +682,29 @@ export function SpawnScreen(props: {
     }
     syncBackdrop();
   }, [form.prompt, pickerOpen, token?.start]);
+  // A rewrap stales the fitted height: a width change (window, column layout) or
+  // a web font landing after the first fit. Width only, since the fit itself
+  // changes the height and would otherwise observe its own write.
+  useEffect(() => {
+    const field = promptInput.current;
+    if (field === null) return;
+    const refit = (): void => {
+      fitPrompt(field, promptBackdrop.current, pickerOpen);
+      syncBackdrop();
+    };
+    let width = field.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (field.clientWidth === width) return;
+      width = field.clientWidth;
+      refit();
+    });
+    observer.observe(field);
+    document.fonts.addEventListener("loadingdone", refit);
+    return () => {
+      observer.disconnect();
+      document.fonts.removeEventListener("loadingdone", refit);
+    };
+  }, [pickerOpen]);
   const pickSkill = (name: string): void => {
     if (token === null) return;
     const next = completeSkill(form.prompt, token, name);
@@ -649,15 +772,46 @@ export function SpawnScreen(props: {
         )}
       </header>
 
-      <div className="column">
-        <div className="prompt-card card">
+      <div className="column column-last">
+        <div
+          className={dropping ? "prompt-card card prompt-card-drop" : "prompt-card card"}
+          onDragOver={(event) => {
+            if (!carriesFiles(event)) return;
+            // Cancelled even when attaching isn't offered: an uncancelled file drop navigates away from the PWA.
+            event.preventDefault();
+            setDropping(true);
+          }}
+          onDragLeave={(event) => {
+            // Leaving for a child is still inside the card.
+            if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
+            setDropping(false);
+          }}
+          onDrop={(event) => {
+            setDropping(false);
+            if (!carriesFiles(event)) return;
+            event.preventDefault();
+            // Not gated on `offered`, which drops during a re-dial; the status line says if they can't go.
+            actions.addFiles([...(event.dataTransfer?.files ?? [])]);
+          }}
+        >
           <div className="prompt-head">
             <span className="label" id="prompt-label">
               PROMPT
             </span>
             <PromptAction onClear={clearPrompt} onUndo={undoClear} prompt={form.prompt} undo={promptUndo} />
           </div>
-          <div className={pickerOpen ? "prompt-field prompt-field-compact" : "prompt-field"}>
+          <AttachmentChips view={view.attachments} onRemove={actions.removeFile} />
+          <div
+            className={pickerOpen ? "prompt-field prompt-field-compact" : "prompt-field"}
+            onClick={(event) => {
+              // A stretched card leaves the field taller than the fitted textarea; a tap
+              // on that blank stretch is still a tap on the prompt.
+              const input = promptInput.current;
+              if (event.target !== event.currentTarget || input === null) return;
+              input.focus();
+              input.setSelectionRange(input.value.length, input.value.length);
+            }}
+          >
             <div ref={promptBackdrop} className="prompt-input prompt-backdrop" aria-hidden="true">
               {segments.map((segment) => {
                 const ref = segment.anchor ? tokenAnchor : undefined;
@@ -696,6 +850,13 @@ export function SpawnScreen(props: {
                 actions.setPrompt(event.currentTarget.value);
                 readCaret();
               }}
+              onPaste={(event) => {
+                // A screenshot pastes as a file with no text; text keeps its normal paste.
+                const files = [...(event.clipboardData?.files ?? [])];
+                if (files.length === 0) return;
+                if (event.clipboardData?.getData("text/plain") === "") event.preventDefault();
+                actions.addFiles(files);
+              }}
               onKeyUp={readCaret}
               onClick={readCaret}
               onPointerUp={readCaret}
@@ -715,7 +876,18 @@ export function SpawnScreen(props: {
           {pickerOpen && query !== null && (
             <SkillPicker id={SKILL_LIST_ID} query={query} items={matches} active={active} onPick={pickSkill} />
           )}
+          <div className="compose-bar">
+            <AttachButton offered={attachOffered} locked={view.attachments.locked} onAdd={actions.addFiles} />
+            <QueueButton
+              view={view}
+              preview={view.previewShown ? preview : null}
+              onQueue={actions.spawn}
+              onStartNow={actions.startNow}
+            />
+          </div>
         </div>
+
+        {view.formStatus !== null && <p className="compose-status">{view.formStatus}</p>}
 
         {view.banner !== null &&
           (view.banner.opensSettings ? (
@@ -745,20 +917,16 @@ export function SpawnScreen(props: {
 
         <div className="grid">
           <TileButton tile={view.machineTile} offline={offline} onClick={() => actions.openSheet("machine")} />
+          <TileButton tile={view.accountTile} onClick={() => actions.openSheet("account")} />
           <TileButton tile={view.repoTile} onClick={() => actions.openSheet("repo")} />
           <TileButton tile={view.modelTile} onClick={() => actions.openSheet("model")} />
           <TileButton tile={view.effortTile} onClick={() => actions.openSheet("effort")} />
-          {view.auto !== null && (
-            <>
-              <TileButton tile={view.afterTile} onClick={() => actions.openSheet("after")} />
-              <TileButton tile={view.batchTile} onClick={() => actions.openSheet("batch")} />
-            </>
-          )}
+          <TileButton tile={view.afterTile} onClick={() => actions.openSheet("after")} />
         </div>
 
         {view.ignoredNote !== null && <p className="ignored-note">{view.ignoredNote}</p>}
 
-        {view.auto !== null && (
+        {view.previewShown && (
           <PreviewCard preview={preview} machines={machines} now={now} onRefresh={actions.refreshPreview} />
         )}
 
@@ -778,73 +946,38 @@ export function SpawnScreen(props: {
           </span>
         </button>
 
-        {view.auto !== null && (
-          <>
-            <button
-              type="button"
-              className="worktree card"
-              onClick={() => actions.setUntil(form.until === "reported" ? "merged" : "reported")}
-              role="switch"
-              aria-checked={form.until === "reported"}
-              disabled={!view.reportedAvailable && form.until !== "reported"}
-            >
-              <span className="worktree-text">
-                <span className="worktree-title">Settle on its done report</span>
-                <span className="worktree-hint">
-                  {view.reportedAvailable || form.until === "reported"
-                    ? form.until === "reported"
-                      ? "A merge alone won't settle it. The session is told to report when it is finished; it needs the seance MCP server"
-                      : "Settles when its PR merges or its session ends"
-                    : "The scheduler's leader doesn't take this yet — update seanced on its machine"}
-                </span>
-              </span>
-              <span className={form.until === "reported" ? "toggle toggle-on" : "toggle"} aria-hidden="true">
-                <span className="toggle-knob" />
-              </span>
-            </button>
-
-            <label className="field linear card" htmlFor="linear-issue">
-              <span className="label">LINEAR ISSUE</span>
-              <input
-                id="linear-issue"
-                type="text"
-                value={form.linearIssue}
-                maxLength={TASK_SPEC_LIMITS.linearIssue}
-                placeholder="ENG-123"
-                autoComplete="off"
-                autoCapitalize="characters"
-                spellcheck={false}
-                onInput={(event) => actions.setLinearIssue(event.currentTarget.value)}
-              />
-            </label>
-          </>
-        )}
-      </div>
-
-      <footer className="footer">
-        <p className="footer-status">{view.footerStatus}</p>
         <button
           type="button"
-          className={view.button.busy ? "primary primary-busy" : "primary"}
-          disabled={!view.button.enabled}
-          onClick={actions.spawn}
+          className="worktree card"
+          onClick={() => actions.setUntil(form.until === "reported" ? "merged" : "reported")}
+          role="switch"
+          aria-checked={form.until === "reported"}
+          disabled={!view.reportedAvailable && form.until !== "reported"}
         >
-          {view.button.label}
+          <span className="worktree-text">
+            <span className="worktree-title">Settle on its done report</span>
+            <span className="worktree-hint">
+              {view.reportedAvailable || form.until === "reported"
+                ? form.until === "reported"
+                  ? "A merge alone won't settle it. The session is told to report when it is finished; it needs the seance MCP server"
+                  : "Settles when its PR merges or its session ends"
+                : "The scheduler's leader doesn't take this yet — update seanced on its machine"}
+            </span>
+          </span>
+          <span className={form.until === "reported" ? "toggle toggle-on" : "toggle"} aria-hidden="true">
+            <span className="toggle-knob" />
+          </span>
         </button>
-      </footer>
+      </div>
 
       {renderedSheet !== null && (
         <ActiveSheet
           actions={actions}
           view={view}
           kind={renderedSheet}
-          machines={machines}
           model={form.model}
           effort={form.effort}
-          batch={form.batch}
           afterSheet={lastAfterSheet.current}
-          now={now}
-          rescan={rescan}
           closing={sheetClosing}
           onExited={unmountSheet}
         />

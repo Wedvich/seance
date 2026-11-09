@@ -1,5 +1,13 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
+  AT_REST_OPS,
+  openAtRest,
+  parseStoreReply,
+  taskKey,
   DAEMON_ROLES,
   RelayClient,
   SCHEDULER_ID,
@@ -13,11 +21,13 @@ import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { LazyRelay } from "../daemon/src/app-relay.ts";
 import { autoFleet, spawnAuto } from "../daemon/src/cli-auto.ts";
-import { relayFleet } from "../daemon/src/fleet.ts";
+import { brokerFleet, relayFleet, selectFleet } from "../daemon/src/fleet.ts";
 import { buildMcpServer } from "../daemon/src/mcp.ts";
 import { identityOfState, readState } from "../daemon/src/state.ts";
 import { pollUntil } from "../daemon/test/fixtures.ts";
-import { connectDaemon, newDeviceId, register } from "../relay/test/harness.ts";
+import { connectApp, connectDaemon, newDeviceId, register } from "../relay/test/harness.ts";
+import { deriveQueue } from "../pwa/src/queue-view.ts";
+import { describeVerdict } from "../pwa/src/verdict-view.ts";
 import { deriveView, type AppState } from "../pwa/src/view.ts";
 import {
   killWindow,
@@ -45,6 +55,19 @@ afterAll(async () => {
   await suite?.dispose();
 });
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** One machine's `exclaves` from a `list_machines` result, narrowed rather than cast; empty when the shape is off. */
+function exclavesOf(result: { readonly content: unknown }, deviceId: string): readonly unknown[] {
+  const [first] = Array.isArray(result.content) ? result.content : [];
+  if (!isRecord(first) || typeof first["text"] !== "string") return [];
+  const machines: unknown = JSON.parse(first["text"]);
+  if (!Array.isArray(machines)) return [];
+  const machine = machines.find((entry: unknown) => isRecord(entry) && entry["deviceId"] === deviceId);
+  return isRecord(machine) && Array.isArray(machine["exclaves"]) ? machine["exclaves"] : [];
+}
+
 async function heldBy(reply: Promise<QueueReply | null>): Promise<unknown> {
   const read = await reply;
   if (read === null || !("holds" in read)) throw new Error(`no queue: ${JSON.stringify(read)}`);
@@ -57,7 +80,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
   test("an auto spawn lands on the machine its decision names, and the record says why the other was rejected", async () => {
     // B is signed out: its only exclave has no account, so it can bill nothing.
     const second = await stack.startSecondDaemon({ name: "AutoBox" });
-    const app = startApp(stack, { auto: true, prompt: "route me" });
+    const app = startApp(stack, { prompt: "route me" });
     let window: string | null = null;
     try {
       await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
@@ -201,12 +224,446 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     }
   }, 60_000);
 
+  // The credential-delivered box: this process holds no key (`key` answers null), so
+  // `auto` reaches the scheduler only through the daemon's broker, over its real op
+  // socket. The daemon seals the task; `avoid` keeps it queued so cancel has one to end.
+  test("a keyless MCP auto spawn queues through the daemon's broker; get_queue shows it and cancel_task cancels it", async () => {
+    const fleet = selectFleet({
+      key: () => Promise.resolve(null),
+      direct: () => {
+        throw new Error("a keyless process must never dial the relay itself");
+      },
+      broker: brokerFleet(),
+    });
+    const surfaceAudit: string[] = [];
+    const client = new Client(
+      { name: "e2e-keyless-auto", version: "0.0.0" },
+      { versionNegotiation: { mode: { pin: "2026-07-28" } } },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    serveStdio(() => buildMcpServer(fleet, null, (line) => void surfaceAudit.push(line)), {
+      transport: serverTransport,
+    });
+    await client.connect(clientTransport);
+    const call = async (name: string, args: Record<string, unknown>): Promise<{ text: string; error: boolean }> => {
+      const result = await client.callTool({ name, arguments: args });
+      const content = result.content as { text: string }[];
+      return { text: content.map((entry) => entry.text).join("\n"), error: result.isError === true };
+    };
+    // The suite's daemon audits to its stdout, which in-process is console.log.
+    const audit = spyOn(console, "log");
+    let id: string | undefined;
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+
+      const spawned = await call("spawn_session", {
+        machine: "auto",
+        repo: "myrepo",
+        prompt: "keyless route me",
+        avoid: ["TestMac"],
+      });
+      expect(spawned.error).toBe(false);
+      expect(spawned.text).toMatch(/^task (\S+): queued/u);
+      id = /^task (\S+):/u.exec(spawned.text)?.[1];
+      if (id === undefined) throw new Error(`no task id in: ${spawned.text}`);
+      const taskId = id;
+
+      type Queue = { tasks: { id: string; state: string }[] };
+      await pollUntil(
+        async () => {
+          const queue = JSON.parse((await call("get_queue", {})).text) as Queue;
+          return queue.tasks.some((t) => t.id === taskId);
+        },
+        "get_queue to show the brokered task",
+        20_000,
+      );
+      // Sealed by the daemon with the app key it holds: the record reads as the MCP's.
+      const stored = (await stack.queue().get(taskId))?.body;
+      expect(stored?.spec.client).toBe("mcp");
+      expect(stored?.spec.avoid).toEqual([stack.deviceId]);
+      expect(stored?.state).not.toBe("running");
+
+      const cancelled = await call("cancel_task", { taskId });
+      expect(cancelled.error).toBe(false);
+      expect(cancelled.text).toContain("cancelled");
+      await pollUntil(
+        async () => (await stack.queue().get(taskId))?.body?.state === "cancelled",
+        "the brokered cancel to land",
+        20_000,
+      );
+
+      // The daemon's own trail names the origin and the peer's claimed client, never the prompt.
+      const lines = audit.mock.calls.map((args) => args.join(" "));
+      expect(
+        lines.some((line) => line.includes('audit broker origin=local-broker action=scheduler op="enqueue"')),
+      ).toBe(true);
+      const enqueued = lines.find((line) => line.includes("audit enqueue origin=local-broker"));
+      expect(enqueued).toContain("claimed_client=mcp");
+      expect(enqueued).toContain(`task=${JSON.stringify(taskId)}`);
+      expect(enqueued).toMatch(/ queued$/u);
+      expect(lines.some((line) => line.includes("keyless route me"))).toBe(false);
+      // The surface's own line is unchanged by the route.
+      expect(surfaceAudit).toEqual([
+        expect.stringMatching(/^audit enqueue origin=mcp client=mcp task="[^"]+" createdAt=\d+ queued$/u),
+      ]);
+    } finally {
+      audit.mockRestore();
+      await client.close();
+      fleet.stop();
+    }
+  }, 60_000);
+
+  // M4's account pin and avoid list, end to end: an alias another client wrote
+  // resolves at submit time to the accountId alone, the real leader rejects the
+  // machine signed in elsewhere, and the record at rest carries the sentinel an
+  // older leader would refuse. Then the CLI's --not keeps a task off the leader.
+  test("an alias-pinned MCP task and a CLI task avoiding the leader both land on the other machine", async () => {
+    const other = { organizationUuid: "e2e-org-b", accountUuid: "pinned", emailAddress: "pin@e2e.test" };
+    const otherId = `${other.organizationUuid}:${other.accountUuid}`;
+    const second = await stack.startSecondDaemon({
+      name: "PinBox",
+      exclaves: [{ id: "default", observedAtMs: Date.now() - 10 * 60_000, fiveHourPct: 20, account: other }],
+    });
+    const app = startApp(stack, {}, { accounts: true });
+    const lazy = new LazyRelay({
+      create: () =>
+        new RelayClient({
+          url: wsUrl(stack.relay, "/app"),
+          token: TOKEN,
+          key: stack.appKey,
+          accountKey: stack.accountKey,
+          createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
+        }),
+    });
+    const client = new Client(
+      { name: "e2e-pin", version: "0.0.0" },
+      { versionNegotiation: { mode: { pin: "2026-07-28" } } },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    serveStdio(() => buildMcpServer(relayFleet(lazy), null), { transport: serverTransport });
+    await client.connect(clientTransport);
+    const built = await autoFleet(stack.config, { stores: [] });
+    const raw = await connectApp(stack.relay);
+    const ids: string[] = [];
+    const windows: string[] = [];
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      await app.waitForApp(
+        (state) =>
+          state.relay.scheduler.kind === "ready" &&
+          state.relay.machines.some(
+            (m) =>
+              m.deviceId === second.deviceId &&
+              m.connected &&
+              m.repos.length > 0 &&
+              m.exclaves?.some((x) => x.accountId === otherId) === true &&
+              m.status !== undefined,
+          ),
+        "the second machine live, signed in as the other account",
+      );
+      const named = await app.client.putAccountAlias(otherId, "elsewhere", 0);
+      expect(named?.ok).toBe(true);
+
+      // The alias the app set names the account in list_machines too, beside its id and email.
+      const listing = await client.callTool({ name: "list_machines", arguments: {} });
+      expect(exclavesOf(listing, second.deviceId)).toContainEqual(
+        expect.objectContaining({
+          accountId: otherId,
+          email: "pin@e2e.test",
+          account: "elsewhere",
+          alias: "elsewhere",
+        }),
+      );
+
+      const placedOn = async (id: string, label: string): Promise<void> => {
+        await pollUntil(
+          async () => (await stack.queue().get(id))?.body?.state === "running",
+          `${label} to run`,
+          20_000,
+        );
+        const running = (await stack.queue().get(id))?.body;
+        expect(running?.assignment?.deviceId).toBe(second.deviceId);
+        const window = running?.assignment?.window;
+        if (window !== undefined) windows.push(window);
+      };
+
+      const result = await client.callTool({
+        name: "spawn_session",
+        arguments: { machine: "auto", repo: "myrepo", prompt: "pinned by alias", pin: { account: "elsewhere" } },
+      });
+      const text = (result.content as { text: string }[]).map((entry) => entry.text).join("\n");
+      expect(result.isError).not.toBe(true);
+      expect(text).toContain(`pinned to account ${otherId} (pin@e2e.test)`);
+      const pinnedId = /^task (\S+):/u.exec(text)?.[1];
+      if (pinnedId === undefined) throw new Error(`no task id in: ${text}`);
+      ids.push(pinnedId);
+      await placedOn(pinnedId, "the alias-pinned task");
+      const pinned = (await stack.queue().get(pinnedId))?.body;
+      expect(pinned?.spec.pin).toEqual({ account: otherId });
+      const rejected = pinned?.decision?.candidates.find((c) => c.deviceId === stack.deviceId)?.rejected;
+      expect(rejected).toContainEqual({ code: "pin_mismatch", field: "account" });
+
+      // At rest: the accountId and the sentinel, never the alias or the email.
+      raw.send({ t: "store-get", id: "get-pinned", key: taskKey(pinnedId) });
+      const stored = parseStoreReply(await raw.waitForRe<{ re: string }>("get-pinned", 10_000));
+      if (stored?.t !== "store-record" || stored.record === null) throw new Error("no stored record");
+      const atRest = JSON.stringify((await openAtRest(stack.appKey, stored.record.env, AT_REST_OPS.task)).payload);
+      expect(atRest).toContain(`"pin":{"account":"${otherId}","exclave":""}`);
+      expect(atRest).not.toContain("elsewhere");
+      expect(atRest).not.toContain("pin@e2e.test");
+
+      const outcome = await spawnAuto(
+        { repo: "myrepo", here: false, prompt: "keep off the leader", not: [stack.deviceId] },
+        built.fleet,
+        () => {},
+      );
+      expect(outcome.ok).toBe(true);
+      const avoidId = /^task (\S+): queued/u.exec(outcome.text)?.[1];
+      if (avoidId === undefined) throw new Error(`no task id in: ${outcome.text}`);
+      ids.push(avoidId);
+      await placedOn(avoidId, "the task avoiding the leader");
+      const avoided = (await stack.queue().get(avoidId))?.body;
+      expect(avoided?.spec.avoid).toEqual([stack.deviceId]);
+      expect(avoided?.decision?.candidates.find((c) => c.deviceId === stack.deviceId)?.rejected).toContainEqual({
+        code: "avoided",
+      });
+    } finally {
+      await Promise.all(ids.map((id) => app.client.cancel(id).catch(() => null)));
+      await Promise.all(windows.map((window) => killWindow(window).catch(() => {})));
+      raw.close();
+      built.fleet.stop();
+      await client.close();
+      lazy.stop();
+      app.stop();
+      await second.stop();
+    }
+  }, 90_000);
+
+  // `seanced spawn` in a shell with no key: `autoFleet` finds none and takes the
+  // broker. The alias is another client's write, resolved by the CLI from the broker's
+  // accounts read, so the stored record carries the accountId and the CLI's client.
+  test("a keyless CLI spawn resolves an account alias through the broker and records the pin", async () => {
+    const other = { organizationUuid: "e2e-org-c", accountUuid: "keyless", emailAddress: "keyless@e2e.test" };
+    const otherId = `${other.organizationUuid}:${other.accountUuid}`;
+    const second = await stack.startSecondDaemon({
+      name: "KeylessBox",
+      exclaves: [{ id: "default", observedAtMs: Date.now() - 10 * 60_000, fiveHourPct: 20, account: other }],
+    });
+    const app = startApp(stack, {}, { accounts: true });
+    const built = await autoFleet({ ...stack.config, psk: "" }, { stores: [] });
+    const enqueued: string[] = [];
+    let id: string | undefined;
+    let window: string | null = null;
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      await app.waitForApp(
+        (state) =>
+          state.relay.scheduler.kind === "ready" &&
+          state.relay.machines.some(
+            (m) =>
+              m.deviceId === second.deviceId &&
+              m.connected &&
+              m.repos.length > 0 &&
+              m.exclaves?.some((x) => x.accountId === otherId) === true &&
+              m.status !== undefined,
+          ),
+        "the second machine live, signed in as the other account",
+      );
+      const named = await app.client.putAccountAlias(otherId, "keyless-alias", 0);
+      expect(named?.ok).toBe(true);
+
+      const outcome = await spawnAuto(
+        {
+          repo: "myrepo",
+          here: false,
+          prompt: "keyless by alias",
+          account: "keyless-alias",
+          not: [stack.deviceId],
+        },
+        built.fleet,
+        (line) => {
+          enqueued.push(line);
+        },
+      );
+      expect(outcome.ok).toBe(true);
+      id = /^task (\S+): queued/u.exec(outcome.text)?.[1];
+      if (id === undefined) throw new Error(`no task id in: ${outcome.text}`);
+      const taskId = id;
+      await pollUntil(
+        async () => (await stack.queue().get(taskId))?.body?.state === "running",
+        "the keyless CLI's task to run",
+        20_000,
+      );
+      const running = (await stack.queue().get(taskId))?.body;
+      expect(running?.assignment?.deviceId).toBe(second.deviceId);
+      window = running?.assignment?.window ?? null;
+      expect(running?.spec.client).toBe("cli");
+      expect(running?.spec.pin).toEqual({ account: otherId });
+      // `--not` rides the broker's frame too: the suite's own daemon, which would otherwise be a candidate.
+      expect(running?.spec.avoid).toEqual([stack.deviceId]);
+      expect(enqueued).toEqual([
+        expect.stringMatching(/^audit enqueue origin=cli client=cli task="[^"]+" createdAt=\d+ queued$/u),
+      ]);
+    } finally {
+      if (id !== undefined) await app.client.cancel(id).catch(() => null);
+      if (window !== null) await killWindow(window).catch(() => {});
+      built.fleet.stop();
+      app.stop();
+      await second.stop();
+    }
+  }, 90_000);
+
+  // M4 PR 2's exit: the PWA's spawn is a task. With both pickers on auto it is the unpinned
+  // task `seanced spawn` writes; a machine pick is a pin, so it lands where the owner said.
+  test("the PWA's default spawn is an unpinned task of the PWA's, placed by the scheduler", async () => {
+    const app = startApp(stack, { prompt: "queue me" });
+    let window: string | null = null;
+    let taskId: string | null = null;
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      await app.waitForApp((state) => state.relay.scheduler.kind === "ready", "the leader verified");
+      await app.store.spawn();
+      const queued = await app.waitForApp(
+        (state) => state.verdict?.kind === "queued" && state.verdict.task.state === "running",
+        "the queued task to run",
+      );
+      if (queued.verdict?.kind !== "queued") throw new Error("no queued verdict");
+      taskId = queued.verdict.task.id;
+      const stored = (await stack.queue().get(taskId))?.body;
+      expect(stored?.spec).not.toHaveProperty("pin");
+      expect(stored?.spec.client).toBe("pwa");
+      expect(stored?.assignment?.deviceId).toBe(stack.deviceId);
+      window = stored?.assignment?.window ?? null;
+    } finally {
+      if (taskId !== null) await app.client.cancel(taskId).catch(() => null);
+      if (window !== null) await killWindow(window).catch(() => {});
+      app.stop();
+    }
+  }, 60_000);
+
+  test("a machine pick pins the task, and it runs on that machine", async () => {
+    const account = { organizationUuid: "e2e-org-pick", accountUuid: "picked", emailAddress: "pick@e2e.test" };
+    const second = await stack.startSecondDaemon({
+      name: "PickBox",
+      exclaves: [{ id: "default", observedAtMs: Date.now(), fiveHourPct: 60, account }],
+    });
+    const app = startApp(stack, { prompt: "put me there" });
+    let window: string | null = null;
+    let taskId: string | null = null;
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      await app.waitForApp(
+        (state) =>
+          state.relay.scheduler.kind === "ready" &&
+          state.relay.machines.some(
+            (m) =>
+              m.deviceId === second.deviceId &&
+              m.connected &&
+              m.repos.length > 0 &&
+              (m.exclaves ?? []).length > 0 &&
+              m.status !== undefined,
+          ),
+        "the picked machine live",
+      );
+      // Picked once it is listed, as from the sheet: a pin on a machine the registry lacks is reset.
+      app.store.pickMachine(second.deviceId);
+      await app.store.spawn();
+      const queued = await app.waitForApp(
+        (state) => state.verdict?.kind === "queued" && state.verdict.task.state === "running",
+        "the pinned task to run",
+      );
+      if (queued.verdict?.kind !== "queued") throw new Error("no queued verdict");
+      taskId = queued.verdict.task.id;
+      const stored = (await stack.queue().get(taskId))?.body;
+      expect(stored?.spec.pin).toEqual({ deviceId: second.deviceId });
+      expect(stored?.assignment?.deviceId).toBe(second.deviceId);
+      window = stored?.assignment?.window ?? null;
+      // The pin decided it: the suite's own machine lost for nothing else.
+      const ours = stored?.decision?.candidates.filter((c) => c.deviceId === stack.deviceId) ?? [];
+      expect(ours.length).toBeGreaterThan(0);
+      for (const candidate of ours) expect(candidate.rejected).toEqual([{ code: "pin_mismatch", field: "deviceId" }]);
+      expect(describeVerdict(queued.verdict, queued.relay.machines, {}, Date.now(), null).body).toContain(
+        "Pinned to PickBox",
+      );
+    } finally {
+      if (taskId !== null) await app.client.cancel(taskId).catch(() => null);
+      if (window !== null) await killWindow(window).catch(() => {});
+      app.stop();
+      await second.stop();
+    }
+  }, 60_000);
+
+  // The reason a pinned task waits is the news: the only machine it may use is over its line,
+  // and every other machine's rejection is the pin itself, which the owner already knows.
+  test("a task pinned to a machine over its quota line waits, and both surfaces say why", async () => {
+    const account = { organizationUuid: "e2e-org-full", accountUuid: "full", emailAddress: "full@e2e.test" };
+    const full = await stack.startSecondDaemon({
+      name: "FullBox",
+      exclaves: [{ id: "default", observedAtMs: Date.now(), fiveHourPct: 95, account }],
+    });
+    const app = startApp(stack, { prompt: "wait for me" });
+    let taskId: string | null = null;
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      await app.waitForApp(
+        (state) =>
+          state.relay.scheduler.kind === "ready" &&
+          state.relay.machines.some(
+            (m) => m.deviceId === full.deviceId && m.connected && m.repos.length > 0 && m.status !== undefined,
+          ),
+        "the full machine live",
+      );
+      app.store.pickMachine(full.deviceId);
+      await app.store.spawn();
+      const decided = await app.waitForApp(
+        // A decision made before FullBox's status counted as fresh lists it `status_stale`: wait for the quota one.
+        (state) =>
+          state.verdict?.kind === "queued" &&
+          (state.verdict.task.decision?.candidates ?? []).some(
+            (c) => c.deviceId === full.deviceId && c.rejected.some((r) => r.code === "quota_over_line"),
+          ),
+        "the leader's decision on the task, with FullBox over its line",
+      );
+      if (decided.verdict?.kind !== "queued") throw new Error("no queued verdict");
+      const { task } = decided.verdict;
+      taskId = task.id;
+      expect(task.spec.pin).toEqual({ deviceId: full.deviceId });
+      expect(task.state).toBe("ready");
+      const own = task.decision?.candidates.filter((c) => c.deviceId === full.deviceId) ?? [];
+      expect(own.flatMap((c) => c.rejected.map((r) => r.code))).toEqual(["quota_over_line"]);
+
+      const text = describeVerdict(decided.verdict, decided.relay.machines, {}, Date.now(), null).body;
+      expect(text).toContain("Waiting: FullBox");
+      expect(text).toContain("quota would reach");
+      expect(text).not.toContain("pinned machine");
+      expect(text).not.toContain("offline");
+
+      app.store.openQueue();
+      const withQueue = await app.waitForApp((state) => state.queueView?.kind === "ok", "the queue read");
+      const row = deriveQueue(withQueue, Date.now())
+        .sections.flatMap((section) => section.rows)
+        .find((r) => r.id === task.id);
+      expect(row?.body).toContain("Waiting: FullBox");
+      expect(row?.body).not.toContain("pinned machine");
+    } finally {
+      if (taskId !== null) await app.client.cancel(taskId).catch(() => null);
+      app.stop();
+      await full.stop();
+    }
+  }, 60_000);
+
   // An app's cancel of a task running on another machine: the leader despawns
   // it there through the relay, and that machine's audit trail says who asked —
   // origin=relay, client=scheduler — which only the target daemon can show.
   test("an app's cancel ends a task's session on another machine, audited there as the scheduler's", async () => {
     const taskId = "e2e-cancel-task";
-    const app = startApp(stack, { auto: true });
+    const app = startApp(stack);
     let second: SecondDaemon | null = null;
     let window: string | null = null;
     try {
@@ -267,7 +724,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
   // leader and the next one to lead runs it.
   test("a task enqueued while no daemon leads runs once one does", async () => {
     const id = crypto.randomUUID();
-    const app = startApp(stack, { auto: true });
+    const app = startApp(stack);
     let down = false;
     let window: string | null = null;
     try {
@@ -304,14 +761,13 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     }
   }, 60_000);
 
-  // docs/scheduler.md M4, CLI `auto`: `seanced spawn --auto` enqueues as an app
+  // docs/scheduler.md M4, CLI spawn: `seanced spawn` enqueues as an app
   // does, so it lands with no leader up and runs once one leads. Driven through
   // `autoFleet` (the config's PSK, its `/daemon` URL turned `/app`) and `spawnAuto`
   // over a real app socket — `cmdSpawnAuto` adds only the process exit.
-  test("a CLI auto spawn queues with no leader up and runs once one leads, recorded as the CLI's", async () => {
-    const app = startApp(stack, { auto: true });
+  test("a CLI spawn queues with no leader up and runs once one leads, recorded as the CLI's", async () => {
+    const app = startApp(stack);
     const built = await autoFleet(stack.config, { stores: [] });
-    if ("error" in built) throw new Error(built.error);
     const enqueued: string[] = [];
     let down = false;
     let id: string | undefined;
@@ -328,7 +784,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       await app.waitForApp((state) => state.relay.scheduler.kind === "none", "no leader while the daemon is down");
 
       const outcome = await spawnAuto(
-        { repo: "myrepo", here: true, title: "cli auto", prompt: "queued from a shell", auto: true },
+        { repo: "myrepo", here: true, title: "cli spawn", prompt: "queued from a shell" },
         built.fleet,
         (line) => {
           enqueued.push(line);
@@ -372,6 +828,65 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     }
   }, 60_000);
 
+  // The spec's "a plain `seanced spawn` lands as a task": the real CLI, as a subprocess, with the
+  // suite's config (key included) and a state dir of its own, so its audit lines are its alone.
+  test("a plain seanced spawn from a shell lands as a task, recorded as the CLI's", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "seance-e2e-cli-"));
+    const configDir = join(dir, "config");
+    const stateDir = join(dir, "state");
+    await mkdir(configDir, { recursive: true });
+    await mkdir(stateDir, { recursive: true });
+    await Bun.write(join(configDir, "config.json"), JSON.stringify(stack.config));
+    const app = startApp(stack);
+    let id: string | undefined;
+    let window: string | null = null;
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      await app.waitForApp(
+        (state) => state.relay.scheduler.kind === "ready" && fixtureOrigin(state) !== null,
+        "the suite's daemon verified as leader, with its repos listed",
+      );
+      const main = fileURLToPath(new URL("../daemon/src/main.ts", import.meta.url));
+      const proc = Bun.spawn([process.execPath, main, "spawn", "myrepo", "-p", "plain from a shell"], {
+        env: { ...process.env, SEANCE_CONFIG_DIR: configDir, SEANCE_STATE_DIR: stateDir },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [code, stdout, stderr] = await Promise.all([
+        proc.exited,
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ]);
+      expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
+      id = /^task (\S+): queued/u.exec(stdout)?.[1];
+      if (id === undefined) throw new Error(`no task id in: ${stdout}`);
+      // A verified leader is up, so the leaderless advice (which names --now) has no business here.
+      expect(stdout).not.toContain("--now");
+      expect(stdout).not.toContain("No scheduler is leading");
+      const taskId = id;
+      await pollUntil(
+        async () => (await stack.queue().get(taskId))?.body?.state === "running",
+        "the plain spawn's task to run",
+        20_000,
+      );
+      const running = (await stack.queue().get(taskId))?.body;
+      expect(running?.spec.client).toBe("cli");
+      window = running?.assignment?.window ?? null;
+      if (window === null) throw new Error("no window on the running task");
+      expect(await listWindows()).toContain(window);
+      const log = await Bun.file(join(stateDir, "seanced.log")).text();
+      expect(log).toContain("audit enqueue origin=cli client=cli");
+      expect(log).not.toContain("audit spawn");
+      expect(log).not.toContain("plain from a shell");
+    } finally {
+      if (id !== undefined) await app.client.cancel(id).catch(() => null);
+      if (window !== null) await killWindow(window);
+      app.stop();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
   // An app's create while the daemon leads is placed by `store-changed`, not by
   // a tick. The leader's own tick and the status beat (whose registry push also
   // ticks it) are pushed out for this daemon, so the nudge is the only thing
@@ -379,7 +894,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
   test("a task enqueued while a daemon leads is picked up on the store's nudge, not a tick", async () => {
     const id = crypto.randomUUID();
     await stack.restartDaemon({ quiet: true });
-    const app = startApp(stack, { auto: true });
+    const app = startApp(stack);
     let window: string | null = null;
     try {
       await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
@@ -419,7 +934,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
   // scheduler's.
   test("mark-done finishes a running task as manual and ends its session, audited", async () => {
     const id = crypto.randomUUID();
-    const app = startApp(stack, { auto: true });
+    const app = startApp(stack);
     const audit = spyOn(console, "log");
     let window: string | null = null;
     try {
@@ -473,7 +988,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
   // Holds live in the relay's store, so a pause outlasts the daemon that took it
   // and `queue` reports it back.
   test("pause and resume show up as holds in the queue", async () => {
-    const app = startApp(stack, { auto: true });
+    const app = startApp(stack);
     try {
       await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
       await stack.daemon.leader.settled();
@@ -500,7 +1015,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
   // queue is the relay's) and sends it nothing. When it goes, the real daemon
   // leads under a higher term and runs what was queued.
   test("a squatter is never nominated; a stolen listed seed reads as leader unverified, and nothing is sent to either", async () => {
-    const app = startApp(stack, { auto: true });
+    const app = startApp(stack);
     const watch = watchLeader(stack.relay);
     const squatterId = await newDeviceId();
     let squatter: Awaited<ReturnType<typeof connectDaemon>> | null = null;
@@ -613,7 +1128,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
   // thief apart: the relay minted a term the machine never heard, and the proof
   // it sealed for an older one, replayed, names the wrong term.
   test("a stolen seed registering the machine's own info blob, and replaying its last proof, reads as leader unverified", async () => {
-    const app = startApp(stack, { auto: true });
+    const app = startApp(stack);
     const watch = watchLeader(stack.relay);
     let thief: Awaited<ReturnType<typeof connectDaemon>> | null = null;
     let down = false;
