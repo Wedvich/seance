@@ -1,8 +1,9 @@
 import { importPsk, toBase64 } from "@seance/shared";
 import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import {
+  ATTACHMENT_LIMITS,
   CAPABILITIES,
-  type BatchStrategy,
+  accountRecord,
   QUEUE_MAX_TASKS,
   RelayClient,
   RequestFailure,
@@ -10,8 +11,11 @@ import {
   TASK_SPEC_LIMITS,
   withReportInstruction,
   type Decision,
+  type AttachmentRefusal,
+  type AttachmentUploaded,
   type DiscardReply,
   type DiscardRequest,
+  type ExclaveInfo,
   type Machine,
   type MetricsReply,
   type MetricsRequest,
@@ -22,6 +26,7 @@ import {
   type QueueReply,
   type QueueRequest,
   type RelayState,
+  type ResumeOutcome,
   type ResumeRequest,
   type RoutePreviewReply,
   type StoreRefusal,
@@ -38,7 +43,7 @@ import { deriveView } from "../src/view.ts";
 import { describeVerdict } from "../src/verdict-view.ts";
 import { PREVIEW_DEBOUNCE_MS, PREVIEW_RETRY_MS, QUEUE_POLL_MS, QUEUE_POLLS } from "../src/scheduler-store.ts";
 import { Store, UNDO_WINDOW_MS } from "../src/store.ts";
-import { fakeHistory, installBrowserGlobals } from "./stubs.ts";
+import { fakeHistory, installBrowserGlobals, setVisibility } from "./stubs.ts";
 
 installBrowserGlobals();
 
@@ -377,7 +382,7 @@ describe("layers and history", () => {
 
     store.openSettings();
     store.openSheet("machine");
-    store.selectMachine("m-1");
+    store.pickMachine("m-1");
     fake.settle(store);
 
     expect(store.getState().sheet).toBeNull();
@@ -411,6 +416,10 @@ class ScriptedClient extends RelayClient {
   onMarkDone: (taskId: string) => Promise<TaskReply | null> = async (id) => ({
     task: { ...QUEUED, id, state: "done", doneBy: "manual" },
   });
+  readonly runNows: string[] = [];
+  onRunNow: (taskId: string) => Promise<TaskReply | null> = async (id) => ({
+    task: { ...QUEUED, id, state: "reserved" },
+  });
   onPause: (request: PauseRequest) => Promise<PauseReply | null> = async () => ({
     holds: [{ until: "resume", at: 5 }],
   });
@@ -439,6 +448,16 @@ class ScriptedClient extends RelayClient {
 
   override reconnect(): void {}
 
+  /** The hidden time each tab resume reported. */
+  readonly shownAfter: number[] = [];
+  /** What a tab resume's probe finds: by default the socket answered. */
+  onShown: () => Promise<ResumeOutcome> = async () => "live";
+
+  override reconnectIfStale(hiddenMs: number): Promise<ResumeOutcome> {
+    this.shownAfter.push(hiddenMs);
+    return this.onShown();
+  }
+
   emit(next: Partial<RelayState>): void {
     this.relay = { ...this.relay, ...next };
     for (const listener of this.listeners) listener();
@@ -452,6 +471,19 @@ class ScriptedClient extends RelayClient {
   override createTask(task: Task): Promise<TaskCreated | StoreRefusal | null> {
     this.creates.push(task);
     return this.onCreate(task);
+  }
+
+  /** Every upload's plaintext, in order: a retry shows only the files that hadn't stored. */
+  readonly uploads: Uint8Array[] = [];
+  onUpload: (bytes: Uint8Array) => Promise<AttachmentUploaded | AttachmentRefusal> = async () => ({
+    ok: true,
+    id: crypto.randomUUID(),
+    hash: "h".repeat(43),
+  });
+
+  override uploadAttachment(bytes: Uint8Array<ArrayBuffer>): Promise<AttachmentUploaded | AttachmentRefusal> {
+    this.uploads.push(bytes);
+    return this.onUpload(bytes);
   }
 
   override queue(request: QueueRequest = {}): Promise<QueueReply | null> {
@@ -475,6 +507,11 @@ class ScriptedClient extends RelayClient {
 
   override markDone(taskId: string): Promise<TaskReply | null> {
     return this.onMarkDone(taskId);
+  }
+
+  override runNow(taskId: string): Promise<TaskReply | null> {
+    this.runNows.push(taskId);
+    return this.onRunNow(taskId);
   }
 
   override pause(request: PauseRequest): Promise<PauseReply | null> {
@@ -599,7 +636,7 @@ function firstCreate(client: ScriptedClient): Task {
 
 /** A queued verdict on screen and the same task as a row on the open Queue screen. */
 async function followedAndListed(client: ScriptedClient): Promise<{ store: Store; created: Task }> {
-  const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+  const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
   await store.spawn();
   const created = firstCreate(client);
   client.onQueue = async () => ({ tasks: [created], holds: [], at: 1 });
@@ -636,7 +673,7 @@ describe("auto's error paths", () => {
     const client = new ScriptedClient();
     client.onPreview = async () => ({ ok: false, code: "not_ready", message: "taking over" });
     const store = new Store(client);
-    store.selectAuto();
+    store.pickMachine(null);
     await until(() => timers.armed(PREVIEW_RETRY_MS) === 1, "the retry armed");
     expect(store.getState().preview).toMatchObject({ kind: "loading" });
 
@@ -651,19 +688,19 @@ describe("auto's error paths", () => {
     const late = Promise.withResolvers<RoutePreviewReply | null>();
     client.onPreview = () => late.promise;
     const store = new Store(client);
-    store.selectAuto();
-    store.selectMachine("dev-b");
+    store.pickMachine(null);
+    store.pickMachine("dev-b");
     late.resolve({ decision: DECISION });
     await drain();
     expect(store.getState().preview).toBeNull();
-    expect(store.getState().form.auto).toBe(false);
+    expect(store.getState().form.machine).toBe("dev-b");
   });
 
   test("a re-ask keeps the last decision on screen until its answer lands", async () => {
     const client = new ScriptedClient();
     client.onPreview = async () => ({ decision: DECISION });
     const store = new Store(client);
-    store.selectAuto();
+    store.pickMachine(null);
     await until(() => store.getState().preview?.kind === "ok", "the first preview");
 
     const late = Promise.withResolvers<RoutePreviewReply | null>();
@@ -677,7 +714,7 @@ describe("auto's error paths", () => {
 
   test("a presence or repo change asks the preview again once its burst settles; a status beat does not", async () => {
     const client = new ScriptedClient();
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true });
+    const store = new Store(client, { ...DEFAULT_FORM });
     const detach = store.attach();
     await until(() => store.getState().preview?.kind === "ok", "the first preview");
     expect(client.previews).toHaveLength(1);
@@ -699,7 +736,7 @@ describe("auto's error paths", () => {
     client.onCreate = async () => {
       throw new RequestFailure("timeout", "store-put timed out after 10000ms", "relay");
     };
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
     await store.spawn();
     const verdict = store.getState().verdict;
     expect(verdict).toMatchObject({ kind: "unqueued", mayHaveLanded: true, retry: { id: client.creates[0]?.id } });
@@ -716,6 +753,37 @@ describe("auto's error paths", () => {
     expect(store.getState().form.prompt).toBe("");
   });
 
+  // A dismissal's back is delivered later, so a retry that went back would close whichever verdict had landed by then.
+  test("a retry's verdict survives the history the failed one left", async () => {
+    const fake = fakeHistory();
+    try {
+      const client = new ScriptedClient();
+      client.onCreate = async () => {
+        throw new RequestFailure("timeout", "store-put timed out after 10000ms", "relay");
+      };
+      const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+      await store.spawn();
+      const failed = store.getState().verdict;
+      if (failed?.kind !== "unqueued") throw new Error("expected unqueued");
+      fake.settle(store);
+
+      store.retrySpawn(failed);
+      await until(() => client.creates.length === 2, "the retry put");
+      await until(() => store.getState().verdict?.kind === "unqueued", "the retried verdict shown");
+      fake.settle(store);
+
+      expect(store.getState().verdict).toMatchObject({ kind: "unqueued", mayHaveLanded: true });
+      // The retried verdict took over the failed one's entry: one layer, one back.
+      expect(fake.entries()).toHaveLength(2);
+      store.dismissLayer();
+      fake.settle(store);
+      expect(store.getState().verdict).toBeNull();
+      expect(fake.index()).toBe(0);
+    } finally {
+      fake.restore();
+    }
+  });
+
   test("a create that never left is not queued; one dropped after the send may be; both can be retried", async () => {
     for (const [reason, mayHaveLanded] of [
       ["disconnected", false],
@@ -725,7 +793,7 @@ describe("auto's error paths", () => {
       client.onCreate = async () => {
         throw new RequestFailure(reason, "the relay socket closed", "relay");
       };
-      const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+      const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
       // oxlint-disable-next-line no-await-in-loop -- one store each
       await store.spawn();
       expect(store.getState().verdict).toMatchObject({ kind: "unqueued", mayHaveLanded, retry: expect.anything() });
@@ -741,12 +809,12 @@ describe("auto's error paths", () => {
       client.onCreate = async () => {
         throw new RequestFailure(reason, message, "relay");
       };
-      const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+      const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
       // oxlint-disable-next-line no-await-in-loop -- one store each
       await store.spawn();
       const verdict = store.getState().verdict;
       if (verdict === null) throw new Error("no verdict");
-      const { body } = describeVerdict(verdict, "dev-a", [], 0, null);
+      const { body } = describeVerdict(verdict, [], {}, 0, null);
       expect(body.match(/may have/gu)).toHaveLength(1);
       expect(body).not.toContain("store-put");
       expect(body).toMatch(/^[A-Z].*\.$/u);
@@ -764,7 +832,7 @@ describe("auto's error paths", () => {
     ] as const) {
       const client = new ScriptedClient();
       client.onCreate = async () => ({ ok: false, code });
-      const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+      const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
       // oxlint-disable-next-line no-await-in-loop -- one store each
       await store.spawn();
       const verdict = store.getState().verdict;
@@ -783,7 +851,7 @@ describe("auto's error paths", () => {
       const listed = Array.from({ length: count }, (_, i) => ({ taskId: `j-${i}`, version: 1, reason: "unopenable" }));
       client.onQueue = async () => ({ tasks: [], holds: [], unreadable: listed, at: 1 });
       client.onCreate = async () => ({ ok: false, code: "store_full" });
-      const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+      const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
       // oxlint-disable-next-line no-await-in-loop -- one store each
       await store.refreshQueue();
       // oxlint-disable-next-line no-await-in-loop -- as above
@@ -799,14 +867,14 @@ describe("auto's error paths", () => {
   test("a store answer this build cannot read may have landed, and can be re-put", async () => {
     const client = new ScriptedClient();
     client.onCreate = async () => null;
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
     await store.spawn();
     expect(store.getState().verdict).toMatchObject({ kind: "unqueued", mayHaveLanded: true, retry: expect.anything() });
   });
 
   test("a created task becomes the queued verdict as the app's own copy, and the prompt clears", async () => {
     const client = new ScriptedClient();
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
     await store.spawn();
     const created = firstCreate(client);
     expect(created).toMatchObject({ state: "queued", spec: { repo: ORIGIN, prompt: "fix it" } });
@@ -817,7 +885,7 @@ describe("auto's error paths", () => {
 
   test("following stops once the task is running", async () => {
     const client = new ScriptedClient();
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
     await store.spawn();
     const created = firstCreate(client);
     expect(store.getState().verdict).toMatchObject({ kind: "queued", task: { state: "queued" } });
@@ -838,7 +906,7 @@ describe("auto's error paths", () => {
 
   test("following stops and says so when the leader refuses the read", async () => {
     const client = new ScriptedClient();
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
     await store.spawn();
     client.onQueue = async () => ({ ok: false, code: "invalid_request", message: "?" });
     timers.fire(QUEUE_POLL_MS);
@@ -872,7 +940,7 @@ describe("auto's error paths", () => {
     expect(followEnd(store)).toEqual({ kind: "unlisted" });
     const verdict = store.getState().verdict;
     if (verdict === null) throw new Error("no verdict");
-    const { body } = describeVerdict(verdict, "dev-a", [], 0, null);
+    const { body } = describeVerdict(verdict, [], {}, 0, null);
     expect(body).toContain("still in the queue");
     expect(body).not.toContain("stopped answering");
     detach();
@@ -893,7 +961,7 @@ describe("auto's error paths", () => {
     expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
     const verdict = store.getState().verdict;
     if (verdict === null) throw new Error("no verdict");
-    expect(describeVerdict(verdict, "dev-a", [], 0, null).body).toEndWith("no longer in the queue.");
+    expect(describeVerdict(verdict, [], {}, 0, null).body).toEndWith("no longer in the queue.");
     detach();
   });
 
@@ -920,7 +988,7 @@ describe("auto's error paths", () => {
 
   test("missed polls keep what was shown and ask again; out of polls, it says what it last knew may be stale", async () => {
     const client = new ScriptedClient();
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
     await store.spawn();
     const created = firstCreate(client);
     client.onQueue = async () => {
@@ -938,29 +1006,53 @@ describe("auto's error paths", () => {
     expect(store.getState().verdict).toEqual({ kind: "queued", task: created, follow: { kind: "unanswered" } });
   });
 
-  test("with no leader the task still queues, the follow waits without spending polls, and a leader's arrival places it", async () => {
+  test("with no leader the task still queues, the follow stops polling without spending a poll, and a leader's arrival reads it at once", async () => {
     const client = new ScriptedClient({ scheduler: { kind: "none" } });
     client.onQueue = async () => {
       throw new RequestFailure("no_leader", "no scheduler is leading");
     };
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
     await store.spawn();
     expect(store.getState().verdict).toMatchObject({ kind: "queued" });
     expect(client.creates).toHaveLength(1);
 
-    // More polls than the budget: none of them counted, so it never gives up.
-    const nextArmed = (): boolean => timers.armed(QUEUE_POLL_MS) === 1;
-    for (let poll = 0; poll < QUEUE_POLLS + 3; poll += 1) {
-      timers.fire(QUEUE_POLL_MS);
-      // oxlint-disable-next-line no-await-in-loop -- each poll follows the one before
-      await until(nextArmed, "the next poll armed");
-    }
+    timers.fire(QUEUE_POLL_MS);
+    await until(() => client.queueRequests.length === 1, "the first poll");
+    await drain();
+    // Nothing would hear another read until a leader leads, so none is armed.
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
     expect(followEnd(store)).toBeUndefined();
 
-    const placed: Task = { ...firstCreate(client), state: "running" };
+    const placed: Task = { ...firstCreate(client), state: "ready" };
     client.onQueue = async () => ({ tasks: [placed], at: 3 });
+    client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 1 } });
+    await until(() => queuedState(store) === "ready", "read once a leader leads");
+    // The waiting read spent nothing, nor did the arrival's: the chain re-arms on the whole budget.
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(1);
+    const rearmed = (): boolean => timers.armed(QUEUE_POLL_MS) === 1;
+    for (let poll = 1; poll < QUEUE_POLLS; poll += 1) {
+      timers.fire(QUEUE_POLL_MS);
+      // oxlint-disable-next-line no-await-in-loop -- each poll follows the one before
+      await until(rearmed, "the next poll armed");
+    }
     timers.fire(QUEUE_POLL_MS);
-    await until(() => queuedState(store) === "running", "placed");
+    await until(() => followEnd(store) !== undefined, "the budget spent");
+    detach();
+  });
+
+  test("a leader that verifies while the leaderless read is out keeps the follow polling", async () => {
+    const client = new ScriptedClient({ scheduler: { kind: "none" } });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.spawn();
+    client.onQueue = async () => {
+      client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 1 } });
+      throw new RequestFailure("no_leader", "no scheduler is leading");
+    };
+    timers.fire(QUEUE_POLL_MS);
+    await until(() => timers.armed(QUEUE_POLL_MS) === 1, "the next poll armed");
+    detach();
   });
 
   test("the preview still says there is no leader, though queueing needs none", async () => {
@@ -968,8 +1060,8 @@ describe("auto's error paths", () => {
     client.onPreview = async () => {
       throw new RequestFailure("no_leader", "no scheduler is leading");
     };
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true });
-    store.selectAuto();
+    const store = new Store(client, { ...DEFAULT_FORM });
+    store.pickMachine(null);
     await until(() => store.getState().preview?.kind === "failed", "the preview to fail");
     expect(store.getState().preview).toMatchObject({
       kind: "failed",
@@ -979,7 +1071,7 @@ describe("auto's error paths", () => {
 
   test("a queue-changed naming the followed task reads it without spending a poll; one naming another does not", async () => {
     const client = new ScriptedClient();
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
     const detach = store.attach();
     await store.spawn();
     const created = firstCreate(client);
@@ -999,9 +1091,31 @@ describe("auto's error paths", () => {
     detach();
   });
 
+  test("a nudge naming the followed task while the tab is hidden is read once it shows on a live socket", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.spawn();
+    const created = firstCreate(client);
+    await drain();
+    const asked = client.queueRequests.length;
+    const running: Task = { ...created, state: "running" };
+    client.onQueue = async () => ({ tasks: [running], at: 3 });
+    try {
+      setVisibility("hidden");
+      client.nudge({ at: 3, tasks: [created.id] });
+      await drain();
+      expect(client.queueRequests).toHaveLength(asked);
+    } finally {
+      setVisibility("visible");
+    }
+    await until(() => queuedState(store) === "running", "read on showing");
+    detach();
+  });
+
   test("a nudge with no ids reads the followed task too, and spends nothing when the read misses", async () => {
     const client = new ScriptedClient();
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
     const detach = store.attach();
     await store.spawn();
     client.onQueue = async () => {
@@ -1017,7 +1131,7 @@ describe("auto's error paths", () => {
 
   test("a slow poll answered after a newer read settled the verdict does not walk it back", async () => {
     const client = new ScriptedClient();
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
     const detach = store.attach();
     await store.spawn();
     const created = firstCreate(client);
@@ -1043,7 +1157,7 @@ describe("auto's error paths", () => {
 
   test("a poll answered after a newer unsettled read is dropped, and its follow carries on", async () => {
     const client = new ScriptedClient();
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
     const detach = store.attach();
     await store.spawn();
     const created = firstCreate(client);
@@ -1063,6 +1177,682 @@ describe("auto's error paths", () => {
     await drain();
     expect(queuedState(store)).toBe("ready");
     expect(timers.armed(QUEUE_POLL_MS)).toBe(1);
+    detach();
+  });
+
+  test("a leader the relay calls offline while the scheduler reads ready spends polls, so the follow ends", async () => {
+    const client = new ScriptedClient();
+    client.onQueue = async () => {
+      throw new RequestFailure("no_leader", "the relay has no leader to route to");
+    };
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.spawn();
+    for (let n = 0; n < QUEUE_POLLS; n += 1) {
+      timers.fire(QUEUE_POLL_MS);
+      // oxlint-disable-next-line no-await-in-loop -- one poll at a time
+      await drain();
+    }
+    expect(followEnd(store)).toBeDefined();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+    detach();
+  });
+
+  test("a last poll that finds the leader gone parks the follow rather than ending it", async () => {
+    const client = new ScriptedClient();
+    client.onQueue = async () => {
+      throw new RequestFailure("no_leader", "the relay has no leader to route to");
+    };
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.spawn();
+    const created = firstCreate(client);
+    for (let n = 1; n < QUEUE_POLLS; n += 1) {
+      timers.fire(QUEUE_POLL_MS);
+      // oxlint-disable-next-line no-await-in-loop -- one poll at a time
+      await drain();
+    }
+    // The leader is lost while the last poll is out: its leaderless answer is no longer the relay's `offline`.
+    client.onQueue = async () => {
+      client.emit({ scheduler: { kind: "none" } });
+      throw new RequestFailure("no_leader", "no scheduler is leading");
+    };
+    timers.fire(QUEUE_POLL_MS);
+    await drain();
+    expect(followEnd(store)).toBeUndefined();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+
+    client.onQueue = async () => ({ tasks: [{ ...created, state: "ready" }], at: 3 });
+    client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 1 } });
+    await until(() => queuedState(store) === "ready", "the parked last poll read on the leader's arrival");
+    detach();
+  });
+
+  test("a followed task nudged while hidden with no leader is not read on the leader's arrival once another is followed", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.spawn();
+    const created = firstCreate(client);
+    await drain();
+    client.emit({ scheduler: { kind: "none" } });
+    try {
+      setVisibility("hidden");
+      client.nudge({ at: 3, tasks: [created.id] });
+      await drain();
+    } finally {
+      setVisibility("visible");
+    }
+    await drain();
+
+    await store.spawn();
+    await drain();
+    const followReads = (): number => client.queueRequests.filter((r) => r.tasks !== undefined).length;
+    const asked = followReads();
+    client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 1 } });
+    await drain();
+    // The owed read belonged to the first task; the second's chain is on its own timer.
+    expect(followReads()).toBe(asked);
+    detach();
+  });
+
+  test("a leader arriving at a parked follow after a reopen reads the followed task once and re-arms the chain", async () => {
+    const client = new ScriptedClient({ scheduler: { kind: "none" } });
+    client.onQueue = async () => {
+      throw new RequestFailure("no_leader", "no scheduler is leading");
+    };
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.spawn();
+    const created = firstCreate(client);
+    timers.fire(QUEUE_POLL_MS);
+    await until(() => client.queueRequests.length === 1, "the leaderless poll");
+    await drain();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+
+    client.onQueue = async () => ({ tasks: [created], at: 3 });
+    client.emit({ status: "retrying" });
+    client.emit({ status: "open", scheduler: { kind: "ready", deviceId: "dev-a", term: 1 } });
+    await until(() => client.queueRequests.length === 2, "the arrival's read");
+    await drain();
+    expect(client.queueRequests).toHaveLength(2);
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(1);
+    detach();
+  });
+
+  test("a nudge for the followed task shown with no verified leader is read once one verifies", async () => {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.spawn();
+    const created = firstCreate(client);
+    await drain();
+    client.emit({ scheduler: { kind: "none" } });
+    const asked = client.queueRequests.length;
+    try {
+      setVisibility("hidden");
+      client.nudge({ at: 3, tasks: [created.id] });
+      await drain();
+    } finally {
+      setVisibility("visible");
+    }
+    await drain();
+    // Refused unsent would have recorded nothing: no read goes out while nobody can answer.
+    expect(client.queueRequests).toHaveLength(asked);
+
+    const running: Task = { ...created, state: "running" };
+    client.onQueue = async () => ({ tasks: [running], at: 4 });
+    client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 1 } });
+    await until(() => queuedState(store) === "running", "the nudged task read on the leader's arrival");
+    detach();
+  });
+});
+
+describe("start now", () => {
+  let timers: ReturnType<typeof captureTimers>;
+
+  beforeEach(() => {
+    timers = captureTimers();
+  });
+
+  afterEach(() => timers.restore());
+
+  /** A fleet whose verified leader advertises run-now. */
+  function capable(): ScriptedClient {
+    return new ScriptedClient({
+      machines: [autoMachine("dev-a", { capabilities: [CAPABILITIES.runNow] }), autoMachine("dev-b")],
+    });
+  }
+
+  const reserved = (task: Task): Task => ({
+    ...task,
+    state: "reserved",
+    reservation: { deviceId: "dev-a", exclave: "default", clone: "app", expiresAt: 9 },
+  });
+
+  /** One follow poll answered with `task`, run to the end of its chain. */
+  async function poll(client: ScriptedClient, task: Task): Promise<void> {
+    client.onQueue = async () => ({ tasks: [task], at: 2 });
+    const asked = client.queueRequests.length;
+    timers.fire(QUEUE_POLL_MS);
+    await until(() => client.queueRequests.length > asked, "the poll");
+    await drain();
+  }
+
+  test("queues as Queue does, then sends run-now once, on the first read that shows the task ready", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+    expect(created).toMatchObject({ state: "queued", spec: { repo: ORIGIN, prompt: "fix it" } });
+    expect(store.getState().verdict).toEqual({ kind: "queued", task: created });
+    // Not admitted yet: run-now would be refused not_waiting, so nothing goes with the create.
+    expect(client.runNows).toEqual([]);
+
+    await poll(client, { ...created, state: "queued" });
+    expect(client.runNows).toEqual([]);
+
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toEqual([created.id]);
+    await until(() => queuedState(store) === "reserved", "the reply shown");
+    expect(store.getState().startNowRefusal).toBeNull();
+
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toEqual([created.id]);
+  });
+
+  test("waits through blocked, and is never sent once a pass placed the task on its own", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+
+    await poll(client, { ...created, state: "blocked" });
+    await poll(client, reserved(created));
+    expect(queuedState(store)).toBe("reserved");
+    // Back to ready (a reservation that lapsed): the intent went with the placement.
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toEqual([]);
+  });
+
+  test("Queue never sends run-now, and a new enqueue drops a Start now still waiting", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const first = firstCreate(client);
+    store.setPrompt("and this");
+    await store.spawn();
+    const second = client.creates[1];
+    if (second === undefined) throw new Error("second create missing");
+
+    // The first task shows ready too: were its intent still held, something would read and send for it.
+    client.onQueue = async () => ({
+      tasks: [
+        { ...first, state: "ready" },
+        { ...second, state: "ready" },
+      ],
+      at: 2,
+    });
+    timers.fire(QUEUE_POLL_MS);
+    await drain();
+    expect(queuedState(store)).toBe("ready");
+    expect(client.runNows).toEqual([]);
+  });
+
+  test("a refusal says why on the queued verdict, and is gone once the task moves past waiting", async () => {
+    const client = capable();
+    client.onRunNow = async () => ({ ok: false, code: "unplaceable", message: "held" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.startNow();
+    const created = firstCreate(client);
+
+    client.onQueue = async () => ({ tasks: [{ ...created, state: "ready" }], at: 2 });
+    client.nudge({ at: 2, tasks: [created.id] });
+    await until(() => store.getState().startNowRefusal !== null, "the refusal");
+    const message = "Something besides the concurrency caps keeps it from every machine — see why it waits.";
+    expect(store.getState().startNowRefusal).toEqual({ taskId: created.id, message });
+    expect(queuedState(store)).toBe("ready");
+    const verdict = store.getState().verdict;
+    if (verdict === null) throw new Error("verdict missing");
+    const body = describeVerdict(verdict, [], {}, 1, null, store.getState().startNowRefusal).body;
+    expect(body).toEndWith(`Couldn't start it at once: ${message}`);
+    // Nothing queues the Queue screen's notice for it: the verdict is where it was asked.
+    expect(store.getState().queueNotice).toBeNull();
+
+    // A reservation that lapses back to ready must not bring the note back.
+    await poll(client, reserved(created));
+    expect(store.getState().startNowRefusal).toBeNull();
+    detach();
+  });
+
+  test("a run-now that throws shows the transport failure on the verdict", async () => {
+    const client = capable();
+    client.onRunNow = async () => {
+      throw new RequestFailure("dropped", "socket closed", "relay");
+    };
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+    await poll(client, { ...created, state: "ready" });
+    await until(() => store.getState().startNowRefusal !== null, "the refusal");
+    expect(store.getState().startNowRefusal?.message).toContain("Refresh to see whether it did.");
+  });
+
+  test("a create whose answer was lost keeps the Start now for its retry", async () => {
+    const client = capable();
+    client.onCreate = async () => {
+      throw new RequestFailure("timeout", "store-put timed out after 10000ms", "relay");
+    };
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const verdict = store.getState().verdict;
+    if (verdict?.kind !== "unqueued") throw new Error("expected unqueued");
+    expect(verdict.runNow).toBe(true);
+
+    client.onCreate = async () => ({ ok: true, landedEarlier: true });
+    await store.retryEnqueue(verdict);
+    await poll(client, { ...firstCreate(client), state: "ready" });
+    expect(client.runNows).toEqual([firstCreate(client).id]);
+  });
+
+  test("a verdict left before the task is ready still sends, and a refusal lands on the Queue notice", async () => {
+    const client = capable();
+    client.onRunNow = async () => ({ ok: false, code: "unplaceable", message: "held" });
+    const fake = fakeHistory();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+    store.startAnother();
+    fake.settle(store);
+    fake.restore();
+    expect(store.getState().verdict).toBeNull();
+
+    client.onQueue = async () => ({ tasks: [{ ...created, state: "ready" }], at: 2 });
+    timers.fire(QUEUE_POLL_MS);
+    await until(() => client.runNows.length > 0, "the run-now");
+    await until(() => store.getState().queueNotice !== null, "the notice");
+    expect(client.runNows).toEqual([created.id]);
+    expect(store.getState().queueNotice).toStartWith(`Couldn't start "fix it" at once:`);
+    expect(store.getState().queueNotice).toContain("see why it waits");
+    expect(store.getState().startNowRefusal).toBeNull();
+
+    // Opening the Queue screen reads it whole; that read must not take the note down before it is seen.
+    const notice = store.getState().queueNotice;
+    client.onQueue = async () => ({ tasks: [{ ...created, state: "ready" }], holds: [], at: 3 });
+    store.openQueue();
+    await until(() => store.getState().queueView?.kind === "ok", "the queue read");
+    expect(store.getState().queueNotice).toBe(notice);
+    await store.refreshQueue();
+    expect(store.getState().queueNotice).toBeNull();
+  });
+
+  test("an answer that comes after the verdict moved to another task shows nowhere", async () => {
+    const client = capable();
+    const slow = Promise.withResolvers<TaskReply | null>();
+    client.onRunNow = () => slow.promise;
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+    await poll(client, { ...created, state: "ready" });
+    await until(() => client.runNows.length > 0, "the run-now");
+
+    store.setPrompt("and this");
+    await store.spawn();
+    slow.resolve({ ok: false, code: "unplaceable", message: "held" });
+    await drain();
+    expect(store.getState().startNowRefusal).toBeNull();
+    expect(store.getState().queueNotice).toBeNull();
+  });
+
+  test("dispatching (a pass placing it) or finished (a cancel or end): no note, one read, and the follow goes on", async () => {
+    for (const code of ["dispatching", "finished"] as const) {
+      const client = capable();
+      const answer = Promise.withResolvers<TaskReply | null>();
+      client.onRunNow = () => answer.promise;
+      const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+      // oxlint-disable-next-line no-await-in-loop -- one store at a time
+      await store.startNow();
+      const created = firstCreate(client);
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await poll(client, { ...created, state: "ready" });
+      expect(client.runNows).toHaveLength(1);
+
+      const asked = client.queueRequests.length;
+      const armed = timers.armed(QUEUE_POLL_MS);
+      answer.resolve({ ok: false, code, message: "x" });
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await drain();
+      // Before any read could show it reserved: the answer alone says nothing to the person.
+      expect(store.getState().startNowRefusal).toBeNull();
+      expect(store.getState().queueNotice).toBeNull();
+      expect(client.queueRequests.length).toBe(asked + 1);
+      expect(timers.armed(QUEUE_POLL_MS)).toBe(armed);
+
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await poll(client, reserved(created));
+      expect(queuedState(store)).toBe("reserved");
+      expect(client.runNows).toHaveLength(1);
+    }
+  });
+
+  test("not_waiting keeps the intent reading: a later ready asks again, and never more than twice", async () => {
+    const client = capable();
+    client.onRunNow = async () => ({ ok: false, code: "not_waiting", message: "x" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toHaveLength(1);
+    await poll(client, { ...created, state: "queued" });
+    expect(client.runNows).toHaveLength(1);
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toHaveLength(2);
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toHaveLength(2);
+    expect(store.getState().startNowRefusal).toBeNull();
+    expect(store.getState().queueNotice).toBeNull();
+  });
+
+  test("a long stretch with no leader spends no reads, and the ready after it still sends", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.startNow();
+    const created = firstCreate(client);
+    client.emit({ scheduler: { kind: "none" } });
+    client.onQueue = async () => {
+      throw new RequestFailure("no_leader", "no scheduler is leading");
+    };
+    for (let n = 0; n < QUEUE_POLLS * 2; n += 1) {
+      timers.fire(QUEUE_POLL_MS);
+      // oxlint-disable-next-line no-await-in-loop -- one poll at a time
+      await drain();
+    }
+    client.onQueue = async () => ({ tasks: [{ ...created, state: "ready" }], at: 2 });
+    client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 1 } });
+    await until(() => client.runNows.length === 1, "the run-now");
+    expect(client.runNows).toEqual([created.id]);
+    detach();
+  });
+
+  test("reads that reach a leader spend the budget: once spent, the intent lapses unsent and silent", async () => {
+    const client = capable();
+    const fake = fakeHistory();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+    // Dismissed, so only the intent's own chain reads.
+    store.startAnother();
+    fake.settle(store);
+    fake.restore();
+    for (let n = 0; n < QUEUE_POLLS; n += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- one poll at a time
+      await poll(client, { ...created, state: "queued" });
+    }
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+    client.nudge({ at: 3, tasks: [created.id] });
+    await drain();
+    expect(client.runNows).toEqual([]);
+    expect(store.getState().queueNotice).toBeNull();
+  });
+
+  test("a second Start now while one is waiting replaces it", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const first = firstCreate(client);
+    store.setPrompt("and this");
+    await store.startNow();
+    const second = client.creates[1];
+    if (second === undefined) throw new Error("second create missing");
+
+    client.onQueue = async () => ({
+      tasks: [
+        { ...first, state: "ready" },
+        { ...second, state: "ready" },
+      ],
+      at: 2,
+    });
+    timers.fire(QUEUE_POLL_MS);
+    await until(() => client.runNows.length > 0, "the run-now");
+    await drain();
+    expect(client.runNows).toEqual([second.id]);
+  });
+
+  test("a run-now refused unsent for want of a leader is asked once more, then says so", async () => {
+    const client = capable();
+    client.onRunNow = async () => {
+      throw new RequestFailure("no_leader", "no scheduler is leading");
+    };
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toHaveLength(1);
+    expect(store.getState().startNowRefusal).toBeNull();
+
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toHaveLength(2);
+    expect(store.getState().startNowRefusal?.message).toBeDefined();
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toHaveLength(2);
+  });
+
+  test("a busy answer after the follow ran out still gets its one more ask", async () => {
+    const client = capable();
+    const busy = Promise.withResolvers<TaskReply | null>();
+    client.onRunNow = () => busy.promise;
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+    for (let n = 0; n < QUEUE_POLLS; n += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- one poll at a time
+      await poll(client, { ...created, state: "ready" });
+    }
+    expect(followEnd(store)).toBeDefined();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+
+    busy.resolve({ ok: false, code: "conflict", message: "x" });
+    await drain();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(1);
+    client.onRunNow = async (id) => ({ task: reserved({ ...created, id }) });
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toHaveLength(2);
+    expect(queuedState(store)).toBe("reserved");
+    expect(store.getState().startNowRefusal).toBeNull();
+  });
+
+  test("a ready sighting under an unverified leader holds the ask, not the intent", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.startNow();
+    const created = firstCreate(client);
+    client.emit({ scheduler: { kind: "unverified", deviceId: "dev-a", term: 2 } });
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toEqual([]);
+    expect(store.getState().startNowRefusal).toBeNull();
+
+    client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 2 } });
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toEqual([created.id]);
+    detach();
+  });
+
+  test("with no leader the Start now stops reading too, and asks on the first ready sighting once one leads", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.startNow();
+    const created = firstCreate(client);
+    client.emit({ scheduler: { kind: "none" } });
+    client.onQueue = async () => {
+      throw new RequestFailure("no_leader", "no scheduler is leading");
+    };
+    const asked = client.queueRequests.length;
+    // The follow's poll and the intent's read both come due, and both find nobody to ask.
+    timers.fire(QUEUE_POLL_MS);
+    await until(() => client.queueRequests.length === asked + 2, "both reads");
+    await drain();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+
+    client.onQueue = async () => ({ tasks: [{ ...created, state: "ready" }], at: 2 });
+    client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 3 } });
+    await until(() => client.runNows.length === 1, "the run-now once a leader leads");
+    expect(client.runNows).toEqual([created.id]);
+    detach();
+  });
+
+  test("a Start now whose last read finds the leader gone is parked, not forgotten, and asks once a leader leads", async () => {
+    const client = capable();
+    client.onQueue = async () => {
+      throw new RequestFailure("no_leader", "the relay has no leader to route to");
+    };
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.startNow();
+    const created = firstCreate(client);
+    for (let n = 1; n < QUEUE_POLLS; n += 1) {
+      timers.fire(QUEUE_POLL_MS);
+      // oxlint-disable-next-line no-await-in-loop -- one round at a time
+      await drain();
+    }
+    client.onQueue = async () => {
+      client.emit({ scheduler: { kind: "none" } });
+      throw new RequestFailure("no_leader", "no scheduler is leading");
+    };
+    timers.fire(QUEUE_POLL_MS);
+    await drain();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+
+    client.onQueue = async () => ({ tasks: [{ ...created, state: "ready" }], at: 2 });
+    client.emit({ scheduler: { kind: "ready", deviceId: "dev-a", term: 3 } });
+    await until(() => client.runNows.length === 1, "the run-now once a leader leads");
+    expect(client.runNows).toEqual([created.id]);
+    detach();
+  });
+
+  test("a follow that stops on a refused read leaves the run-now out to answer on the verdict", async () => {
+    const client = capable();
+    const answer = Promise.withResolvers<TaskReply | null>();
+    client.onRunNow = () => answer.promise;
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toHaveLength(1);
+
+    client.onQueue = async () => ({ ok: false, code: "not_leader", message: "x" });
+    timers.fire(QUEUE_POLL_MS);
+    await drain();
+    expect(followEnd(store)).toMatchObject({ kind: "refused" });
+
+    answer.resolve({ ok: false, code: "unplaceable", message: "held" });
+    await until(() => store.getState().startNowRefusal !== null, "the refusal");
+    expect(store.getState().startNowRefusal?.taskId).toBe(created.id);
+  });
+
+  test("detaching ends the intent: no timer stays armed, and a late answer arms none", async () => {
+    const client = capable();
+    const answer = Promise.withResolvers<TaskReply | null>();
+    client.onRunNow = () => answer.promise;
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.startNow();
+    const created = firstCreate(client);
+    await poll(client, { ...created, state: "ready" });
+    detach();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+
+    answer.resolve({ ok: false, code: "conflict", message: "x" });
+    await drain();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+    expect(store.getState().startNowRefusal).toBeNull();
+  });
+
+  test("a busy leader gets one more ask on the next ready sighting, then the note points at Start now", async () => {
+    const client = capable();
+    client.onRunNow = async () => ({ ok: false, code: "conflict", message: "x" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+    await poll(client, { ...created, state: "ready" });
+    await drain();
+    expect(client.runNows).toHaveLength(1);
+    expect(store.getState().startNowRefusal).toBeNull();
+
+    await poll(client, { ...created, state: "ready" });
+    await until(() => store.getState().startNowRefusal !== null, "the note");
+    expect(client.runNows).toHaveLength(2);
+    expect(store.getState().startNowRefusal?.message).toContain("Start now on the Queue screen");
+
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toHaveLength(2);
+  });
+
+  test("a leader that stopped advertising run-now is told so, and nothing is sent", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.startNow();
+    const created = firstCreate(client);
+    client.emit({ machines: [autoMachine("dev-a"), autoMachine("dev-b")] });
+    await poll(client, { ...created, state: "ready" });
+    expect(client.runNows).toEqual([]);
+    expect(store.getState().startNowRefusal?.message).toBe(
+      "This leader can't start tasks past the queue; it stays queued.",
+    );
+    detach();
+  });
+
+  test("a reply after the follow ran out restarts it, so the verdict goes on to running", async () => {
+    const client = capable();
+    const slow = Promise.withResolvers<TaskReply | null>();
+    client.onRunNow = () => slow.promise;
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    await store.startNow();
+    const created = firstCreate(client);
+    for (let n = 0; n < QUEUE_POLLS; n += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- one poll at a time
+      await poll(client, { ...created, state: "ready" });
+    }
+    expect(followEnd(store)).toBeDefined();
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(0);
+
+    slow.resolve({ task: reserved(created) });
+    await until(() => queuedState(store) === "reserved", "the reply");
+    expect(timers.armed(QUEUE_POLL_MS)).toBe(1);
+    await poll(client, { ...created, state: "running" });
+    expect(queuedState(store)).toBe("running");
+  });
+
+  test("a whole-queue read out before the run-now reply cannot walk the verdict back to ready", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    const detach = store.attach();
+    await store.startNow();
+    const created = firstCreate(client);
+    client.onQueue = async () => ({ tasks: [created], holds: [], at: 1 });
+    store.openQueue();
+    await until(() => store.getState().queueView?.kind === "ok", "the queue read");
+
+    const slowRun = Promise.withResolvers<TaskReply | null>();
+    client.onRunNow = () => slowRun.promise;
+    await poll(client, { ...created, state: "ready" });
+    await until(() => client.runNows.length > 0, "the run-now");
+
+    const slowRead = Promise.withResolvers<QueueReply | null>();
+    client.onQueue = () => slowRead.promise;
+    client.nudge({ at: 3, tasks: [created.id] });
+    await drain();
+    slowRun.resolve({ task: reserved(created) });
+    await until(() => queuedState(store) === "reserved", "the reply");
+
+    slowRead.resolve({ tasks: [{ ...created, state: "ready" }], holds: [], at: 2 });
+    await drain();
+    expect(queuedState(store)).toBe("reserved");
     detach();
   });
 });
@@ -1101,6 +1891,7 @@ describe("the queue screen", () => {
       tasks: [waiting, running],
       holds: [],
       unreadable: [],
+      idle: [],
       skew: expect.any(Number),
       at: 1,
     });
@@ -1205,6 +1996,7 @@ describe("the queue screen", () => {
       tasks: [done, running],
       holds: [{ until: "resume", at: 9 }],
       unreadable: [],
+      idle: [],
       skew: expect.any(Number),
       at: 2,
     });
@@ -1289,6 +2081,164 @@ describe("the queue screen", () => {
     expect(store.getState().queueNotice).toBeNull();
   });
 
+  test("run now asks the leader for that task and merges it as reserved; a refusal is the notice", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+
+    await store.runNow("w-1");
+    expect(client.runNows).toEqual(["w-1"]);
+    expect(store.getState().queueView).toMatchObject({ tasks: [{ id: "w-1", state: "reserved" }, { id: "r-1" }] });
+    expect(store.getState().taskAction).toBeNull();
+
+    client.onRunNow = async () => ({ ok: false, code: "unplaceable", message: "held" });
+    await store.runNow("w-1");
+    expect(store.getState().queueNotice).toBe(
+      "Something besides the concurrency caps keeps it from every machine — see why it waits.",
+    );
+  });
+
+  describe("continueTask", () => {
+    const at = { deviceId: "dev-a", exclave: "default", clone: "app" };
+    const failed: Task = {
+      id: "f-1",
+      spec: {
+        repo: ORIGIN,
+        mode: "worktree",
+        prompt: "fix it",
+        title: "fix-it",
+        model: "opus",
+        pin: { deviceId: "dev-b" },
+      },
+      state: "failed",
+      failure: { code: "session_failed", message: "the session ended with exit 137" },
+      assignment: { ...at, window: "fix-it" },
+      createdAt: 1,
+    };
+
+    async function withFailed(client: ScriptedClient): Promise<Store> {
+      client.onQueue = async () => ({ tasks: [failed], holds: [], at: 1 });
+      const store = new Store(client);
+      store.openQueue();
+      await until(() => store.getState().queueView?.kind === "ok", "the queue read");
+      return store;
+    }
+
+    const capable = (): ScriptedClient =>
+      new ScriptedClient({
+        machines: [
+          autoMachine("dev-a", { capabilities: [CAPABILITIES.continueTask, CAPABILITIES.continueSession] }),
+          autoMachine("dev-b", { capabilities: [CAPABILITIES.continueTask, CAPABILITIES.continueSession] }),
+        ],
+      });
+
+    test("writes a continue task aimed at the exact clone, as the PWA's, and lists it at once", async () => {
+      const client = capable();
+      const store = await withFailed(client);
+      await store.continueTask("f-1");
+
+      expect(client.creates).toHaveLength(1);
+      const [created] = client.creates;
+      expect(created?.spec).toEqual({
+        repo: ORIGIN,
+        mode: "continue",
+        title: "fix-it",
+        model: "opus",
+        continues: { task: "f-1", at },
+        client: "pwa",
+      });
+      expect(created?.state).toBe("queued");
+      expect(store.getState().queueNotice).toBeNull();
+      expect(store.getState().taskAction).toBeNull();
+      const view = store.getState().queueView;
+      expect(view?.kind === "ok" ? view.tasks.map((t) => t.id) : []).toEqual([String(created?.id), "f-1"]);
+    });
+
+    test("an answer that never came says it may have landed; a refusal says nothing was stored", async () => {
+      const client = capable();
+      const store = await withFailed(client);
+      client.onCreate = async () => null;
+      await store.continueTask("f-1");
+      expect(store.getState().queueNotice).toContain("Couldn't read the relay's answer");
+      expect(store.getState().queueNotice).toContain("It may have landed anyway.");
+
+      client.onCreate = async () => ({ ok: false, code: "store_full", message: "full" });
+      await store.continueTask("f-1");
+      expect(store.getState().queueNotice).not.toContain("may have landed");
+      expect(store.getState().queueNotice).toContain("full");
+      const view = store.getState().queueView;
+      expect(view?.kind === "ok" && view.tasks).toEqual([failed]);
+    });
+
+    test("writes nothing for a task the list no longer holds, or one the offer refuses", async () => {
+      const client = capable();
+      const store = await withFailed(client);
+      await store.continueTask("gone");
+      expect(store.getState().queueNotice).toBe("That task is no longer listed.");
+
+      // dev-b leads and can, but the machine it ran on (dev-a) cannot.
+      const detach = store.attach();
+      client.emit({
+        machines: [
+          autoMachine("dev-a"),
+          autoMachine("dev-b", { capabilities: [CAPABILITIES.continueTask, CAPABILITIES.continueSession] }),
+        ],
+        scheduler: { kind: "ready", deviceId: "dev-b", term: 1 },
+      });
+      await store.continueTask("f-1");
+      detach();
+      expect(store.getState().queueNotice).toContain("can't continue a session yet");
+      expect(client.creates).toEqual([]);
+    });
+
+    test("checks the leader at the tap, not only when the button was drawn", async () => {
+      const client = capable();
+      const store = await withFailed(client);
+      const detach = store.attach();
+      // The leader changed to one that cannot take a continue task (or went away) after the row was drawn.
+      client.emit({
+        machines: [
+          autoMachine("dev-a", { capabilities: [CAPABILITIES.continueTask, CAPABILITIES.continueSession] }),
+          autoMachine("dev-b"),
+        ],
+        scheduler: { kind: "ready", deviceId: "dev-b", term: 2 },
+      });
+      await store.continueTask("f-1");
+      expect(store.getState().queueNotice).toContain("No verified scheduler");
+      client.emit({ scheduler: { kind: "none" } });
+      await store.continueTask("f-1");
+      detach();
+      expect(store.getState().queueNotice).toContain("No verified scheduler");
+      expect(client.creates).toEqual([]);
+      expect(store.getState().taskAction).toBeNull();
+    });
+
+    test("writes nothing for a task something already continues", async () => {
+      const client = capable();
+      const continuation: Task = {
+        id: "c-1",
+        spec: { repo: ORIGIN, mode: "continue", continues: { task: "f-1", at } },
+        state: "needs-input",
+        createdAt: 2,
+      };
+      client.onQueue = async () => ({ tasks: [failed, continuation], holds: [], at: 1 });
+      const store = new Store(client);
+      store.openQueue();
+      await until(() => store.getState().queueView?.kind === "ok", "the queue read");
+      await store.continueTask("f-1");
+      expect(store.getState().queueNotice).toContain("already underway");
+      expect(client.creates).toEqual([]);
+    });
+
+    test("a second tap while the first continuation waits writes nothing and names the first", async () => {
+      const client = capable();
+      const store = await withFailed(client);
+      await store.continueTask("f-1");
+      await store.continueTask("f-1");
+      expect(client.creates).toHaveLength(1);
+      expect(store.getState().queueNotice).toContain(`Already continuing as task ${client.creates[0]?.id}`);
+    });
+  });
+
   test("pause and resume replace the holds with the leader's answer, and a refusal is the notice", async () => {
     const client = new ScriptedClient();
     const store = await loaded(client);
@@ -1321,7 +2271,7 @@ describe("the queue screen", () => {
     const client = new ScriptedClient();
     client.onPreview = async () => ({ decision: DECISION });
     const store = await loaded(client);
-    store.selectAuto();
+    store.pickMachine(null);
     await until(() => store.getState().preview?.kind === "ok", "the first preview");
     client.previews.length = 0;
 
@@ -1414,7 +2364,7 @@ describe("the queue screen", () => {
 
   test("a nudge naming the followed task asks the leader once: the queue read it set off updates the verdict too", async () => {
     const client = new ScriptedClient();
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
     const detach = store.attach();
     await store.spawn();
     const created = firstCreate(client);
@@ -1431,7 +2381,7 @@ describe("the queue screen", () => {
 
   test("a reconnect while a queued verdict waits reads that task once, spending no poll", async () => {
     const client = new ScriptedClient();
-    const store = new Store(client, { ...DEFAULT_FORM, auto: true, prompt: "fix it" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
     const detach = store.attach();
     await store.spawn();
     const created = firstCreate(client);
@@ -1465,6 +2415,7 @@ describe("the queue screen", () => {
       tasks: [moved, moved2],
       holds: [],
       unreadable: [],
+      idle: [],
       skew: expect.any(Number),
       at: 4,
     });
@@ -1524,21 +2475,76 @@ describe("the queue screen", () => {
     expect(store.getState().queueView?.kind).not.toBe("loading");
   });
 
-  test("a nudge while the tab is hidden reads nothing: showing it again re-dials, and the reopen reads", async () => {
+  test("a nudge while the tab is hidden reads nothing; showing it on a live socket reads the whole queue once", async () => {
     const client = new ScriptedClient();
     const store = await loaded(client);
     const detach = store.attach();
     await drain();
     const asked = client.queueRequests.length;
-    document.visibilityState = "hidden";
     try {
+      setVisibility("hidden");
       client.nudge({ at: 2, tasks: ["w-1"] });
       client.nudge({ at: 3 });
       await drain();
       expect(client.queueRequests).toHaveLength(asked);
     } finally {
-      document.visibilityState = "visible";
+      setVisibility("visible");
     }
+    await until(() => client.queueRequests.length === asked + 1, "the catch-up read");
+    expect(client.queueRequests.at(-1)).toEqual({});
+    expect(client.shownAfter).toHaveLength(1);
+    expect(client.shownAfter[0]).toBeLessThan(Infinity);
+
+    // Caught up: showing it again with nothing missed reads nothing more.
+    setVisibility("hidden");
+    setVisibility("visible");
+    await drain();
+    expect(client.queueRequests).toHaveLength(asked + 1);
+    detach();
+  });
+
+  test("a resume that re-dials leaves the catch-up to the reopen; a tab never seen hidden counts as hidden long", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+    const detach = store.attach();
+    await drain();
+    const asked = client.queueRequests.length;
+    setVisibility("visible");
+    await drain();
+    expect(client.shownAfter).toEqual([Infinity]);
+
+    client.onShown = async () => "redialed";
+    setVisibility("hidden");
+    client.nudge({ at: 2 });
+    setVisibility("visible");
+    await drain();
+    expect(client.queueRequests).toHaveLength(asked);
+    // The reopen reads it whole, as it does after any drop.
+    client.emit({ status: "retrying" });
+    client.emit({ status: "open" });
+    await until(() => client.queueRequests.length === asked + 1, "the reopen's read");
+    detach();
+  });
+
+  test("a tab hidden again before its resume's pong keeps what it missed for the next show", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+    const detach = store.attach();
+    await drain();
+    const asked = client.queueRequests.length;
+    const pong = Promise.withResolvers<ResumeOutcome>();
+    client.onShown = () => pong.promise;
+    setVisibility("hidden");
+    client.nudge({ at: 2 });
+    setVisibility("visible");
+    setVisibility("hidden");
+    pong.resolve("live");
+    await drain();
+    expect(client.queueRequests).toHaveLength(asked);
+
+    client.onShown = async () => "live";
+    setVisibility("visible");
+    await until(() => client.queueRequests.length === asked + 1, "the catch-up on the next show");
     detach();
   });
 
@@ -1638,6 +2644,108 @@ describe("the queue screen", () => {
   });
 });
 
+describe("pinning a task", () => {
+  const home = (id: string, accountId: string | null): ExclaveInfo => ({
+    id,
+    authOk: accountId !== null,
+    accountId,
+    email: `${id}@acme.dev`,
+    extraUsageEnabled: null,
+    skills: [],
+  });
+  const clone = (exclave: string): Machine["repos"] => [
+    { name: "app", path: "/r/app", defaultBranch: "main", origin: ORIGIN, exclave },
+  ];
+  /** dev-a leads and advertises the account pin; dev-b is signed in to another account. */
+  const pinning = (capabilities: string[] = [CAPABILITIES.pinAccount]): ScriptedClient =>
+    new ScriptedClient({
+      machines: [
+        autoMachine("dev-a", { capabilities, exclaves: [home("work", "acct-w")], repos: clone("work") }),
+        autoMachine("dev-b", { exclaves: [home("home", "acct-h")], repos: clone("home") }),
+      ],
+    });
+  const form = { ...DEFAULT_FORM, prompt: "fix it" };
+
+  test("a plain form writes no pin", async () => {
+    const client = pinning();
+    await new Store(client, form).spawn();
+    expect(firstCreate(client).spec).not.toHaveProperty("pin");
+  });
+
+  test("a machine pin and an account pin go into the spec as ids, and nothing else", async () => {
+    const client = pinning();
+    await new Store(client, { ...form, machine: "dev-b" }).spawn();
+    expect(firstCreate(client).spec.pin).toEqual({ deviceId: "dev-b" });
+
+    const both = pinning();
+    await new Store(both, { ...form, machine: "dev-a", account: "acct-w" }).spawn();
+    expect(firstCreate(both).spec.pin).toEqual({ deviceId: "dev-a", account: "acct-w" });
+  });
+
+  test("an account's name and email stay out of the spec: the pin carries the id", async () => {
+    const client = pinning();
+    Object.defineProperty(client, "accountsNamed", { value: true });
+    client.accountStoreKey = async () => "account:k-w";
+    client.getAccountRecord = async (recordKey) => ({ ok: true, key: recordKey, version: 0, entry: null });
+    client.putAccountAlias = async (accountId, name, version) => {
+      const record = accountRecord(accountId, name, version + 1);
+      if (record === null) throw new Error("bad record");
+      return { ok: true, key: "account:k-w", record };
+    };
+    const store = new Store(client, { ...form, account: "acct-w" });
+    expect(await store.renameAccount("acct-w", "Secret Name")).toBe(true);
+    // Both names are display state, so a leak into the spec would be a copy of what the form shows.
+    expect(store.getState().accounts.aliases).toEqual({ "acct-w": "Secret Name" });
+    expect(deriveView(store.getState(), Date.now()).accountTile.value).toBe("Secret Name");
+
+    await store.spawn();
+    const sealed = JSON.stringify(firstCreate(client).spec);
+    expect(sealed).toContain("acct-w");
+    expect(sealed).not.toContain("Secret Name");
+    expect(sealed).not.toContain("work@acme.dev");
+  });
+
+  test("an account pin the leader can't take is refused before anything is written", async () => {
+    const client = pinning([]);
+    const store = new Store(client, { ...form, account: "acct-w" });
+    await store.spawn();
+    expect(client.creates).toEqual([]);
+    expect(store.getState().verdict).toMatchObject({ kind: "unqueued", mayHaveLanded: false });
+    const { verdict } = store.getState();
+    if (verdict === null) throw new Error("no verdict");
+    expect(describeVerdict(verdict, [], {}, 0, null).body).toContain("update seanced");
+  });
+
+  test("an account no machine is signed in to is refused, and the form keeps its pin", async () => {
+    const client = pinning();
+    const store = new Store(client, { ...form, account: "acct-gone" });
+    await store.spawn();
+    expect(client.creates).toEqual([]);
+    expect(store.getState().verdict).toMatchObject({ kind: "unqueued", mayHaveLanded: false });
+    expect(store.getState().form.account).toBe("acct-gone");
+  });
+
+  test("a machine that leaves the registry resets the machine pick and keeps the account", () => {
+    const client = pinning();
+    const store = new Store(client, { ...form, machine: "dev-b", account: "acct-w" });
+    const detach = store.attach();
+    client.emit({ machines: client.relay.machines.filter((m) => m.deviceId !== "dev-b") });
+    expect(store.getState().form).toMatchObject({ machine: null, account: "acct-w" });
+    detach();
+  });
+
+  test("picking either side drops a repo the new scope doesn't hold, and never touches the other pick", () => {
+    const client = pinning();
+    const store = new Store(client, { ...form, repo: ORIGIN, machine: "dev-b" });
+    store.pickAccount("acct-w");
+    // acct-w is signed in on dev-a only, so dev-b's clone is out of scope for the pair.
+    expect(store.getState().form).toMatchObject({ repo: null, machine: "dev-b", account: "acct-w" });
+    store.pickAccount(null);
+    store.pickMachine(null);
+    expect(store.getState().form).toMatchObject({ machine: null, account: null });
+  });
+});
+
 describe("authoring a task from the auto form", () => {
   let timers: ReturnType<typeof captureTimers>;
   let fake: ReturnType<typeof fakeHistory>;
@@ -1657,16 +2765,13 @@ describe("authoring a task from the auto form", () => {
     new ScriptedClient({
       machines: [autoMachine("dev-a", { capabilities: [CAPABILITIES.reportedDone] }), autoMachine("dev-b")],
     });
-  const BATCH = { id: "b-1", strategy: { mode: "sequential" }, next: 1 } as const;
-  const form = { ...DEFAULT_FORM, auto: true, prompt: "fix it" };
+  const form = { ...DEFAULT_FORM, prompt: "fix it" };
 
-  test("deps, batch and Linear go into the spec, with no `until` unless it was changed, and then reset or advance", async () => {
+  test("deps go into the spec, with no `until` unless it was changed, and then reset", async () => {
     const client = new ScriptedClient();
     const store = new Store(client, {
       ...form,
       after: [{ task: "base", after: "merged" }],
-      batch: BATCH,
-      linearIssue: " ENG-7 ",
     });
     await store.spawn();
 
@@ -1674,17 +2779,10 @@ describe("authoring a task from the auto form", () => {
       client: "pwa",
       prompt: "fix it",
       deps: [{ task: "base", after: "merged" }],
-      batch: { id: "b-1", index: 1, strategy: { mode: "sequential" } },
-      linear: { issue: "ENG-7" },
     });
     expect(firstCreate(client).spec).not.toHaveProperty("until");
-    // What belongs to the task just stored is cleared; the batch stays open, one further on.
-    expect(store.getState().form).toMatchObject({
-      after: [],
-      until: "merged",
-      linearIssue: "",
-      batch: { ...BATCH, next: 2 },
-    });
+    // What belongs to the task just stored is cleared.
+    expect(store.getState().form).toMatchObject({ after: [], until: "merged" });
   });
 
   test("a plain form writes none of the authoring fields", async () => {
@@ -1692,22 +2790,6 @@ describe("authoring a task from the auto form", () => {
     await new Store(client, form).spawn();
     for (const field of ["deps", "batch", "until", "linear"])
       expect(firstCreate(client).spec).not.toHaveProperty(field);
-  });
-
-  test("a retry after an unreadable answer re-puts the same member and moves the counter once", async () => {
-    const client = new ScriptedClient();
-    client.onCreate = async () => null;
-    const store = new Store(client, { ...form, batch: { ...BATCH, next: 3 } });
-    await store.spawn();
-    const verdict = store.getState().verdict;
-    if (verdict?.kind !== "unqueued") throw new Error("expected unqueued");
-    expect(store.getState().form.batch?.next).toBe(3);
-
-    client.onCreate = async () => ({ ok: true, landedEarlier: true });
-    await store.retryEnqueue(verdict);
-    expect(client.creates).toHaveLength(2);
-    expect(client.creates[1]?.spec.batch?.index).toBe(3);
-    expect(store.getState().form.batch?.next).toBe(4);
   });
 
   test("settling on the done report appends the instruction, writes `until`, and resets to merged", async () => {
@@ -1751,14 +2833,6 @@ describe("authoring a task from the auto form", () => {
     expect(long.getState().form.prompt).toBe(prompt);
   });
 
-  test("a batch with no index left is refused", async () => {
-    const client = new ScriptedClient();
-    const store = new Store(client, { ...form, batch: { ...BATCH, next: TASK_SPEC_LIMITS.batchIndex + 1 } });
-    await store.spawn();
-    expect(client.creates).toHaveLength(0);
-    expect(store.getState().verdict).toMatchObject({ kind: "unqueued", message: expect.stringContaining("full") });
-  });
-
   test("an edge on a task replaces the one held, and sixteen is the most", () => {
     const store = new Store(new ScriptedClient(), form);
     store.addAfter("a", "opened");
@@ -1773,43 +2847,10 @@ describe("authoring a task from the auto form", () => {
     expect(store.getState().form.after.some((dep) => dep.task === "a")).toBe(false);
   });
 
-  test("re-picking the open batch's strategy keeps its id and counter; another strategy starts a new batch", () => {
-    const store = new Store(new ScriptedClient(), form);
-    const pick = (strategy: BatchStrategy): void => {
-      store.openSheet("batch");
-      store.startBatch(strategy);
-      fake.settle(store);
-    };
-    pick({ mode: "sequential" });
-    const first = store.getState().form.batch;
-    expect(first).toMatchObject({ strategy: { mode: "sequential" }, next: 1 });
-    expect(store.getState().sheet).toBeNull();
-
-    pick({ mode: "sequential" });
-    expect(store.getState().form.batch).toBe(first);
-
-    pick({ mode: "parallel", max: 2 });
-    const second = store.getState().form.batch;
-    expect(second?.id).not.toBe(first?.id);
-    expect(second).toMatchObject({ strategy: { mode: "parallel", max: 2 }, next: 1 });
-
-    store.openSheet("batch");
-    store.endBatch();
-    fake.settle(store);
-    expect(store.getState().form.batch).toBeNull();
-    expect(store.getState().sheet).toBeNull();
-  });
-
-  test("the Linear issue is clamped to what a spec takes", () => {
-    const store = new Store(new ScriptedClient(), form);
-    store.setLinearIssue("E".repeat(200));
-    expect(store.getState().form.linearIssue).toHaveLength(TASK_SPEC_LIMITS.linearIssue);
-  });
-
   test("opening the After sheet reads the queue; other sheets do not", async () => {
     const client = new ScriptedClient();
     const store = new Store(client, form);
-    store.openSheet("batch");
+    store.openSheet("effort");
     await drain();
     expect(client.queueRequests).toHaveLength(0);
     store.openSheet("after");
@@ -1827,7 +2868,7 @@ describe("authoring a task from the auto form", () => {
     fake.settle(store);
     expect(fake.index()).toBe(0);
     expect(store.getState()).toMatchObject({ queue: false, verdict: null, queueNotice: null });
-    expect(store.getState().form).toMatchObject({ auto: true, after: [{ task: "base", after: "opened" }] });
+    expect(store.getState().form).toMatchObject({ after: [{ task: "base", after: "opened" }] });
     expect(created.id).not.toBe("base");
   });
 
@@ -1837,7 +2878,6 @@ describe("authoring a task from the auto form", () => {
     wide.followUp("base");
     expect(fake.index()).toBe(0);
     expect(wide.getState().form).toMatchObject({
-      auto: true,
       prompt: "keep",
       after: [{ task: "base", after: "opened" }],
     });
@@ -1845,5 +2885,169 @@ describe("authoring a task from the auto form", () => {
     const away = new Store(new ScriptedClient({ status: "retrying" }), DEFAULT_FORM);
     away.followUp("base");
     expect(away.getState().form).toEqual(DEFAULT_FORM);
+  });
+
+  test("a follow-up resets both pickers to auto, and keeps the rest of the form", () => {
+    const store = new Store(new ScriptedClient(), {
+      ...DEFAULT_FORM,
+      prompt: "keep",
+      machine: "dev-b",
+      account: "acct-w",
+    });
+    store.followUp("base");
+    expect(store.getState().form).toMatchObject({
+      machine: null,
+      account: null,
+      prompt: "keep",
+      after: [{ task: "base", after: "opened" }],
+    });
+  });
+});
+
+describe("attachments", () => {
+  /** A fleet whose verified leader advertises attachments. */
+  function capable(): ScriptedClient {
+    return new ScriptedClient({
+      machines: [autoMachine("dev-a", { capabilities: [CAPABILITIES.attachments] }), autoMachine("dev-b")],
+    });
+  }
+
+  const file = (name: string, text: string, type = "text/plain"): File => new File([text], name, { type });
+
+  test("are offered only while the verified leader advertises them", () => {
+    expect(deriveView(new Store(capable()).getState(), 0).attachments.offered).toBe(true);
+    expect(deriveView(new Store(new ScriptedClient()).getState(), 0).attachments.offered).toBe(false);
+    const unverified = capable();
+    unverified.relay = { ...unverified.relay, scheduler: { kind: "unverified", deviceId: "dev-a", term: 1 } };
+    expect(deriveView(new Store(unverified).getState(), 0).attachments.offered).toBe(false);
+  });
+
+  test("upload in order, then the task is created with their manifest and they leave the form", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "look at these" });
+    store.addFiles([file("a.txt", "first"), file("b.png", "second", "image/png")]);
+    expect(deriveView(store.getState(), 0).attachments.summary).toBe("2 files · 11 B");
+
+    const labels: string[] = [];
+    store.subscribe(() => labels.push(deriveView(store.getState(), 0).button.label));
+    await store.spawn();
+
+    expect(client.uploads.map((bytes) => new TextDecoder().decode(bytes))).toEqual(["first", "second"]);
+    expect(labels).toContain("Uploading 1 of 2…");
+    expect(labels).toContain("Uploading 2 of 2…");
+    const created = firstCreate(client);
+    expect(created.spec.attachments?.map(({ name, type, size }) => ({ name, type, size }))).toEqual([
+      { name: "a.txt", type: "text/plain", size: 5 },
+      { name: "b.png", type: "image/png", size: 6 },
+    ]);
+    expect(store.getState().verdict?.kind).toBe("queued");
+    expect(store.getState().attachments).toEqual([]);
+    // The preview is told files ride along, as a flag: never the manifest.
+    expect(client.previews.at(-1)).toMatchObject({ attachments: true });
+  });
+
+  test("a refused upload creates no task and says why; the retry sends only the files that hadn't stored", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "go" });
+    store.addFiles([file("a.txt", "first"), file("b.txt", "second"), file("c.txt", "third")]);
+    client.onUpload = async (bytes) =>
+      new TextDecoder().decode(bytes) === "second"
+        ? { ok: false, code: "allowance_exhausted", window: "month", retryAfter: 7200 }
+        : { ok: true, id: crypto.randomUUID(), hash: "h".repeat(43) };
+
+    await store.spawn();
+    expect(client.creates).toEqual([]);
+    const verdict = store.getState().verdict;
+    expect(verdict).toMatchObject({ kind: "unqueued", mayHaveLanded: false });
+    expect(verdict?.kind === "unqueued" ? verdict.message : "").toContain(
+      "30-day allowance is spent. Try again in 2 hours",
+    );
+    expect(store.getState().spawning).toBe(false);
+
+    client.uploads.length = 0;
+    client.onUpload = async () => ({ ok: true, id: crypto.randomUUID(), hash: "h".repeat(43) });
+    store.dismissLayer();
+    await store.spawn();
+    expect(client.uploads.map((bytes) => new TextDecoder().decode(bytes))).toEqual(["second", "third"]);
+    expect(firstCreate(client).spec.attachments?.map((ref) => ref.name)).toEqual(["a.txt", "b.txt", "c.txt"]);
+  });
+
+  test("with files the prompt takes the lower bound, refused before anything uploads", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "x".repeat(ATTACHMENT_LIMITS.prompt + 1) });
+    store.addFiles([file("a.txt", "first")]);
+    await store.spawn();
+    expect(client.uploads).toEqual([]);
+    expect(client.creates).toEqual([]);
+    const verdict = store.getState().verdict;
+    expect(verdict?.kind === "unqueued" ? verdict.message : "").toContain(
+      `at most ${ATTACHMENT_LIMITS.prompt} beside attached files`,
+    );
+  });
+
+  test("files on the form block the button once the leader stops taking them, and nothing uploads", async () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "go" });
+    const detach = store.attach();
+    store.addFiles([file("a.txt", "first")]);
+    client.emit({ machines: [autoMachine("dev-a"), autoMachine("dev-b")] });
+    const view = deriveView(store.getState(), 0);
+    expect(view.button).toMatchObject({ label: "Can't attach files", enabled: false });
+    expect(view.formStatus).toContain("doesn't take attachments yet");
+    await store.spawn();
+    expect(client.uploads).toEqual([]);
+    expect(client.creates).toEqual([]);
+    // Still listed, so they can be removed; removing them frees the form.
+    store.removeFile(store.getState().attachments[0]?.key ?? "");
+    expect(deriveView(store.getState(), 0).button.enabled).toBe(true);
+    detach();
+  });
+
+  test("files picked while a re-dial's leader is unverified wait for it, then go", () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "go" });
+    const detach = store.attach();
+    const term = client.getState().scheduler;
+    client.emit({ scheduler: { kind: "unverified", deviceId: "dev-a", term: 2 } });
+    store.addFiles([file("a.txt", "first"), file("b.txt", "second")]);
+    const waiting = deriveView(store.getState(), 0);
+    expect(waiting.attachments.files.map((f) => f.name)).toEqual(["a.txt", "b.txt"]);
+    expect(waiting.button).toMatchObject({ label: "Checking leader…", enabled: false });
+    expect(waiting.formStatus).not.toContain("doesn't take attachments yet");
+    client.emit({ scheduler: term });
+    expect(deriveView(store.getState(), 0).button.enabled).toBe(true);
+    detach();
+  });
+
+  test("a share appends its text to the draft and its files meet the pick's limits, in one notice", () => {
+    const store = new Store(capable(), { ...DEFAULT_FORM, prompt: "draft" });
+    const big = new File([], "big.mov");
+    Object.defineProperty(big, "size", { value: ATTACHMENT_LIMITS.fileBytes + 1 });
+    store.receiveShare({
+      files: [file("a.txt", "first"), big],
+      refused: ["a task takes at most 10 files"],
+      problems: ["Not received from the share: c.png."],
+      text: "https://x.test",
+    });
+    const state = store.getState();
+    expect(state.form.prompt).toBe("draft\n\nhttps://x.test");
+    expect(state.attachments.map((f) => f.name)).toEqual(["a.txt"]);
+    expect(state.attachNotice).toBe(
+      "Not attached: a task takes at most 10 files; big.mov is 30 MB; a file can be at most 30 MB. Not received from the share: c.png.",
+    );
+  });
+
+  test("a share with no leader taking attachments keeps its files listed, with the reason shown", () => {
+    const client = capable();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "" });
+    const detach = store.attach();
+    client.emit({ machines: [autoMachine("dev-a"), autoMachine("dev-b")] });
+    store.receiveShare({ files: [file("rec.mp4", "video")], refused: [], problems: [], text: "" });
+    const view = deriveView(store.getState(), 0);
+    expect(view.attachments.files.map((f) => f.name)).toEqual(["rec.mp4"]);
+    expect(view.attachments.offered).toBe(false);
+    expect(view.button).toMatchObject({ label: "Can't attach files", enabled: false });
+    expect(store.getState().form.prompt).toBe("");
+    detach();
   });
 });

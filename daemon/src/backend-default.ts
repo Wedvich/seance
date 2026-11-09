@@ -28,10 +28,16 @@ export function createBackend(
 ): SessionBackend {
   let republish: ReturnType<typeof setInterval> | null = null;
   return {
-    spawn: (request, repos) =>
-      spawnSession(request, repos, { ...opts, tmuxSession: config.tmuxSession, machineTag: config.machineTag }),
+    spawn: (request, repos, continuation, attachments) =>
+      spawnSession(
+        request,
+        repos,
+        { ...opts, tmuxSession: config.tmuxSession, machineTag: config.machineTag },
+        continuation,
+        attachments,
+      ),
     sessions: (repos) => listClaudeSessions(repos),
-    despawn: (id, { force }) => despawnSession(id, { force }),
+    despawn: (id, request) => despawnSession(id, request),
     doctor: tmuxChecks,
     capture: (handle) => captureWindow(handle, { history: false }),
     start: async () => {

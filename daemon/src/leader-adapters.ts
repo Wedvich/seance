@@ -12,6 +12,7 @@ import {
 } from "@seance/scheduler";
 import {
   OP_TIMEOUT_MS,
+  parseInterrupted,
   parseTaskProgressList,
   quote,
   RequestFailure,
@@ -59,7 +60,7 @@ export function fencedStore(inner: QueueStore, term: number, live: () => boolean
 
 function sessionsOf(reply: SessionsResponse | ErrorResponse | NoAnswer): TaskSessionsReply {
   if ("ok" in reply) return reply;
-  const { sessions, ended, ledgerSince, progress, progressTrimmed } = reply;
+  const { sessions, ended, interrupted, ledgerSince, progress, progressTrimmed } = reply;
   // A proof that does not parse proves nothing: the task then fails rather than risk a twin.
   const proof = typeof ledgerSince === "number" && Number.isFinite(ledgerSince) ? { ledgerSince } : {};
   // A remote daemon's payload is untrusted until parsed. A list that does not
@@ -70,10 +71,13 @@ function sessionsOf(reply: SessionsResponse | ErrorResponse | NoAnswer): TaskSes
       ? progressTrimmed
       : undefined;
   const trimmedBy = parsed === null ? Math.max(trimmed ?? 0, 1) : trimmed;
+  // Only ids that are also in `ended`: a bad entry falls back to `done`, never to a re-dispatch.
+  const interruptedIds = parseInterrupted(interrupted, ended);
   return {
     ok: true,
     sessions,
     ...(ended === undefined ? {} : { ended }),
+    ...(interruptedIds === undefined ? {} : { interrupted: interruptedIds }),
     ...proof,
     ...(parsed === undefined || parsed === null ? {} : { progress: parsed }),
     ...(trimmedBy === undefined ? {} : { progressTrimmed: trimmedBy }),

@@ -5,7 +5,6 @@ import {
   type DepAfter,
   type TaskFailureCode,
 } from "@seance/shared";
-import { orderEdges } from "./batch.ts";
 import { FINISHED, type Task } from "./task.ts";
 
 /**
@@ -159,12 +158,10 @@ function cycles(tasks: readonly Task[]): ReadonlyMap<string, readonly string[]> 
   let next = 0;
 
   // A finished task's edges have released or failed its dependents, so they cannot be what a loop waits on.
-  // A sequential member also waits on the lower index before it (`batchCap`), so that wait is an edge.
-  const ordered = orderEdges(tasks);
   const edgesOf = (id: string): readonly string[] => {
     const task = byId.get(id);
     if (task === undefined || FINISHED.includes(task.state)) return [];
-    return [...(task.spec.deps ?? []).map((d) => d.task), ...(ordered.get(id) ?? [])];
+    return (task.spec.deps ?? []).map((d) => d.task);
   };
 
   const visit = (id: string): void => {

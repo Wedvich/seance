@@ -112,6 +112,18 @@ describe("fitStatus", () => {
     expect(crowded.ax).toEqual([1, 2]);
   });
 
+  test("the drain flag is never trimmed: routing reads it when quota and sess are gone", () => {
+    const drained = { ...status(3), drn: true as const };
+    const { quota: _quota, ...rest } = drained;
+    const fitted = fitStatus(drained, padded({ ...rest, tr: 3 }));
+    expect(fitted.quota).toBeUndefined();
+    expect(fitted.drn).toBe(true);
+    const crowded = fitStatus({ ...drained, sess: Array.from({ length: 600 }, () => 9) });
+    expect(crowded.sess).toBeUndefined();
+    expect(crowded.drn).toBe(true);
+    expect(statusBytes(crowded)).toBe(STATUS_PAYLOAD_BUDGET);
+  });
+
   test("an exclave list too long even for sess still says it was trimmed", () => {
     const huge = { ...status(1), sess: Array.from({ length: 600 }, () => 9) };
     const fitted = fitStatus(huge);

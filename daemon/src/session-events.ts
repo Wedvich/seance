@@ -5,6 +5,7 @@ import {
   isSessionState,
   isTaskId,
   quote,
+  SESSIONS_MAX_PROGRESS,
   type SessionEvent,
   type SessionState,
   type TaskProgress,
@@ -13,9 +14,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exclaveOf, type Exclave } from "./exclaves.ts";
-import { harvestExits, type HarvestPanes } from "./exit-status.ts";
-import { LaunchLedger, type LaunchSite, type NoteOutcome } from "./launch-ledger.ts";
+import { harvestExits, sampleOomPanes, type HarvestOom, type HarvestPanes } from "./exit-status.ts";
+import { LaunchLedger, pathOwners, type LaunchSite, type NoteOutcome } from "./launch-ledger.ts";
 import { log } from "./log.ts";
+import type { OomProbe } from "./oom-kill.ts";
 import { ancestorIn, peerPid, peerPidSupported, socketFd } from "./peer.ts";
 import { SESSION_EVENT_KIND, SESSION_EVENT_VERSION, type SessionEventReply } from "./session-event-frame.ts";
 import { FIELD_SEP, TASK_FIELD, tmux } from "./tmux.ts";
@@ -151,7 +153,15 @@ export const ENDED_MAX = 128;
  * is where a worktree-mode launch landed, noted before the launch counts as
  * over so a `sessions` waiting on `settled` sees it.
  */
-export type SettleLaunch = (launched: boolean, landed?: { readonly site?: LaunchSite }) => Promise<void>;
+export type SettleLaunch = (
+  launched: boolean,
+  landed?: { readonly site?: LaunchSite; readonly server?: number },
+  /**
+   * `unknown`: the backend crashed (threw something that is no refusal), so a window may exist untagged. With
+   * `launched: true`; the id is then marked `interrupted` rather than cleared, like a launch the process died in.
+   */
+  outcome?: { readonly unknown?: true },
+) => Promise<void>;
 
 /**
  * The `sessions` reply's `ended` and `ledgerSince` — the backstop for a
@@ -162,7 +172,13 @@ export type SettleLaunch = (launched: boolean, landed?: { readonly site?: Launch
  * memory. A task in either that no session in the reply carries is listed — so
  * a lost event, a session the mod never saw, a crash that fired no SessionEnd,
  * and a pane stuck before it registered all read as ran-and-ended, never as
- * never-started.
+ * never-started. A launch the process died in the middle of is listed too, and
+ * also named in `interrupted` (`LaunchLedger`): a leader that reads the field
+ * does not settle it `done`, and one that predates it still reads it as ran.
+ *
+ * It also holds task launches while the daemon is about to exit (`drain`): a
+ * launch begun then would be cut off, so it is refused unrecorded instead
+ * (`LaunchesClosed`).
  */
 /**
  * The launches of one task id in flight together. Only the first can find the
@@ -174,23 +190,66 @@ interface Launches {
   open: number;
   retractable: boolean;
   landed: boolean;
+  /** One of them crashed with no verdict (`SettleLaunch`'s `unknown`) and none was seen to land. */
+  crashed: boolean;
+  confirmed: boolean;
   /** Newest PR URL a session reported while one of them was in flight: the landed launch's note keeps it. */
   prUrl?: string;
 }
 
+/**
+ * A task launch arrived while the daemon is restarting. Nothing was recorded or
+ * run, so the spawn is answered with a transport code (`internal_error`): its
+ * leader leaves the task reserved and settles it from `sessions` at the TTL.
+ */
+export class LaunchesClosed extends Error {
+  constructor() {
+    super("this daemon is restarting, so no task launch was recorded or run — it will be settled from `sessions`");
+    this.name = "LaunchesClosed";
+  }
+}
+
 export class EndedTasks {
+  #closed = false;
+  /** Set by `drain(_, { final: true })`: the daemon is exiting, so `reopen` no longer undoes the close. */
+  #final = false;
+  /** Spawn handlers a launch was accepted for, until their reply is out. Only `drain` waits on these. */
+  readonly #holds = new Set<Promise<void>>();
+  /** Told on each close and reopen of the gate: a daemon's status carries it (`MachineStatus.drn`). */
+  readonly #gateListeners = new Set<(closed: boolean) => void>();
   readonly #ended = new Map<string, number>();
   readonly #ledger: LaunchLedger;
   readonly #inFlight = new Set<Promise<void>>();
   readonly #launches = new Map<string, Launches>();
   readonly #now: () => number;
   readonly #panes: HarvestPanes | undefined;
+  readonly #oom: HarvestOom | undefined;
 
-  /** `panes` is the tmux side of `harvestExits`; without it harvest does nothing. */
-  constructor(ledger: LaunchLedger = LaunchLedger.memory(), now: () => number = Date.now, panes?: HarvestPanes) {
+  /**
+   * `panes` is the tmux side of `harvestExits`; without it harvest does nothing.
+   * `oom` (Linux only) samples live task panes and judges a SIGKILL death.
+   */
+  constructor(
+    ledger: LaunchLedger = LaunchLedger.memory(),
+    now: () => number = Date.now,
+    panes?: HarvestPanes,
+    oom?: OomProbe,
+    oomTimeoutMs?: number,
+  ) {
     this.#ledger = ledger;
     this.#now = now;
     this.#panes = panes;
+    this.#oom =
+      oom === undefined
+        ? undefined
+        : {
+            probe: oom,
+            sampled: (taskId) => ledger.notes().find((note) => note.taskId === taskId)?.oom,
+            noteSamples: (entries) =>
+              ledger.noteBatch(entries.map(({ taskId, sample }) => ({ taskId, patch: { oom: sample } }))),
+            now,
+            ...(oomTimeoutMs === undefined ? {} : { timeoutMs: oomTimeoutMs }),
+          };
   }
 
   /**
@@ -202,9 +261,18 @@ export class EndedTasks {
    * the same id, in flight beside it, ran.
    */
   async launch(taskId: string): Promise<SettleLaunch> {
+    // Before any await, and never parked for later: a launch held outside `#inFlight` reads as never-landed in
+    // `sessions`, so one resumed after its reservation's TTL would start a twin of a task re-dispatched elsewhere.
+    if (this.#closed) throw new LaunchesClosed();
     const over = Promise.withResolvers<void>();
     this.#inFlight.add(over.promise);
-    const launches = this.#launches.get(taskId) ?? { open: 0, retractable: false, landed: false };
+    const launches = this.#launches.get(taskId) ?? {
+      open: 0,
+      retractable: false,
+      landed: false,
+      crashed: false,
+      confirmed: false,
+    };
     this.#launches.set(taskId, launches);
     launches.open += 1;
     // Retracted before the launch stops counting as in flight, so no `sessions` reply sees it half-done.
@@ -214,6 +282,10 @@ export class EndedTasks {
         if (launches.open > 0) return;
         this.#launches.delete(taskId);
         if (launches.retractable && !launches.landed) await this.#ledger.retract(taskId);
+        // A crash with no landed launch beside it may have left a window: interrupted, not ran-and-ended.
+        // On disk before `over` resolves, so a drain that returns has left nothing pending.
+        else if (launches.crashed && !launches.confirmed) await this.#ledger.markInterrupted(taskId);
+        else await this.#ledger.clearPending(taskId);
       } finally {
         this.#inFlight.delete(over.promise);
         over.resolve();
@@ -226,17 +298,119 @@ export class EndedTasks {
       await finish();
       throw err;
     }
-    return async (launched, landed) => {
+    return async (launched, landed, outcome) => {
       if (launched) launches.landed = true;
+      if (outcome?.unknown === true) launches.crashed = true;
+      if (launched && landed !== undefined) launches.confirmed = true;
+      let sample = false;
       try {
         const site = landed?.site;
         if (launched && landed !== undefined) {
-          await this.#ledger.startNote(taskId, site && { repo: site.repo, path: site.worktree }, launches.prUrl);
+          await this.#ledger.startNote(
+            taskId,
+            site && {
+              repo: site.repo,
+              path: site.worktree,
+              ...(site.session === undefined ? {} : { session: site.session }),
+            },
+            launches.prUrl,
+            landed?.server,
+          );
+          sample = true;
         }
       } finally {
         await finish();
       }
+      // A baseline from the start, not the next pass: a session dying before that would have none. After
+      // `finish`, and not awaited: its reads can stall, and neither the launch nor `sessions` waits on them.
+      if (sample && this.#panes !== undefined && this.#oom !== undefined) {
+        void sampleOomPanes(this.#panes, this.#oom);
+      }
     };
+  }
+
+  /**
+   * A spawn handler whose task launch was accepted: `drain` also waits for the returned release, which
+   * the handler calls once its reply is handed to the transport. Apart from `#inFlight` on purpose: that
+   * ends when the ledger write does, and `settled()` — what a `sessions` reply, and so the handler's own
+   * `sessionsAfter`, waits on — must not wait for the reply it is part of. Idempotent.
+   */
+  hold(): () => void {
+    const over = Promise.withResolvers<void>();
+    this.#holds.add(over.promise);
+    return () => {
+      this.#holds.delete(over.promise);
+      over.resolve();
+    };
+  }
+
+  /**
+   * Stops accepting task launches (`LaunchesClosed`) and resolves once those in flight are over and
+   * their spawn handlers' replies are out (`hold`), or `timeoutMs` has passed. True when they finished,
+   * false on the timeout. Idempotent. `final`: the daemon is exiting, so a later `reopen` (an update's
+   * release) cannot undo this close.
+   */
+  async drain(timeoutMs: number, opts?: { readonly final?: boolean }): Promise<boolean> {
+    this.#setClosed(true);
+    if (opts?.final === true) this.#final = true;
+    if (this.#inFlight.size + this.#holds.size > 0) {
+      log.info(
+        `holding task launches: waiting up to ${timeoutMs / 1000}s for ${this.#inFlight.size} launching, ${this.#holds.size} replying`,
+      );
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<false>((resolve) => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+    });
+    try {
+      const done = await Promise.race([this.#quiet().then(() => true as const), timeout]);
+      if (!done) {
+        log.warn(
+          `task launches still in flight after ${timeoutMs / 1000}s: ${this.#inFlight.size} launching, ${this.#holds.size} replying`,
+        );
+      }
+      return done;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Takes task launches again. Only launches that arrive later: a refused one was never parked. Not after a final drain. */
+  reopen(): void {
+    if (!this.#final) this.#setClosed(false);
+  }
+
+  /** True while task launches are refused (`LaunchesClosed`): what routing reads as draining. */
+  get draining(): boolean {
+    return this.#closed;
+  }
+
+  /**
+   * `listener` hears each change of the gate, never a repeat. Returns its unsubscribe: the gate is per
+   * process, and a config reload swaps the daemon that listens.
+   */
+  onGate(listener: (closed: boolean) => void): () => void {
+    this.#gateListeners.add(listener);
+    return () => {
+      this.#gateListeners.delete(listener);
+    };
+  }
+
+  #setClosed(closed: boolean): void {
+    if (this.#closed === closed) return;
+    this.#closed = closed;
+    for (const listener of this.#gateListeners) {
+      try {
+        listener(closed);
+      } catch (err) {
+        log.warn(`launch gate listener failed: ${String(err)}`);
+      }
+    }
+  }
+
+  async #quiet(): Promise<void> {
+    // oxlint-disable-next-line no-await-in-loop -- a launch or reply begun while waiting is waited for too
+    while (this.#inFlight.size > 0 || this.#holds.size > 0) await Promise.all([...this.#inFlight, ...this.#holds]);
   }
 
   /**
@@ -260,10 +434,51 @@ export class EndedTasks {
     return this.#ledger.progress();
   }
 
+  /**
+   * This daemon is about to close the task's pane (despawn, reap): noted first, so the pane going
+   * missing never reads as `vanished`. Best-effort; a failed note only risks a false `vanished` on a
+   * close the leader itself asked for, which settles the task `failed` it was already ending.
+   */
+  async closing(taskId: string): Promise<void> {
+    try {
+      await this.#ledger.note(taskId, { closedHere: true });
+    } catch (err) {
+      log.warn(`launch ledger: could not note that task ${taskId} is being closed (${String(err)})`);
+    }
+  }
+
+  /** Launches harvest may judge, minus any whose spawn is still in flight or registering. */
+  unaccounted(): readonly { readonly taskId: string; readonly recordedAt: number; readonly server: number }[] {
+    return this.#ledger.unaccounted().filter((launch) => !this.#launches.has(launch.taskId));
+  }
+
+  /** Notes `vanished` unless a launch is in flight or the ledger refuses it (`LaunchLedger.noteVanished`). */
+  vanished(taskId: string, recordedAt: number): Promise<boolean> {
+    if (this.#launches.has(taskId)) return Promise.resolve(false);
+    return this.#ledger.noteVanished(taskId, recordedAt);
+  }
+
   /** Each dead task pane's exit status into the ledger, then the pane closed (`exit-status.ts`). */
   async harvestExits(): Promise<void> {
     if (this.#panes === undefined) return;
-    await harvestExits({ ...this.#panes, note: (taskId, exit) => this.#ledger.note(taskId, { exit }) });
+    await harvestExits({
+      ...this.#panes,
+      note: async (taskId, exit, oomKill) => {
+        const noted = await this.#ledger.note(taskId, { exit, ...(oomKill === undefined ? {} : { oomKill }) });
+        await this.#ledger.clearInterrupted([taskId]);
+        return noted;
+      },
+      closing: (taskId) => this.closing(taskId),
+      launching: (taskId) => this.#launches.has(taskId),
+      unaccounted: () => this.unaccounted(),
+      vanished: (launch) => this.vanished(launch.taskId, launch.recordedAt),
+      ...(this.#oom === undefined ? {} : { oom: this.#oom }),
+    });
+  }
+
+  /** A live pane carries this task: no longer an interrupted launch. Best-effort, never rejects. */
+  sessionSeen(taskId: string): Promise<void> {
+    return this.#ledger.clearInterrupted([taskId]);
   }
 
   /** The one ledger of this file in this process, for the branch-state emitter. */
@@ -287,6 +502,51 @@ export class EndedTasks {
   }
 
   /**
+   * Where a continued task's session ran, from this ledger alone — the one authority on
+   * a worktree path and on the Claude session id it chose for the launch (DESIGN.md,
+   * Daemon, "Continuing a session"); a frame never names either. The newest note on a
+   * path owns it: a later launch there continued the same conversation (one shared id)
+   * and its work sits in the worktree, so only it may be continued. `refused` says why
+   * there is none, in words the task's failure carries.
+   */
+  continuation(taskId: string):
+    | {
+        readonly repo: string;
+        readonly path: string;
+        readonly session: string;
+        readonly exit?: number;
+        readonly vanished?: true;
+      }
+    | { readonly refused: string } {
+    if (this.#launches.has(taskId)) return { refused: "a launch of it is still in flight here" };
+    if (!this.#ledger.ids().includes(taskId)) {
+      return { refused: "this machine holds no launch of it (its launch ledger keeps a week, at most 128 launches)" };
+    }
+    const notes = this.#ledger.notes();
+    const note = notes.find((n) => n.taskId === taskId);
+    if (note?.path === undefined || note.repo === undefined) {
+      return { refused: "no worktree of it was noted here (a here-mode run, or it never landed)" };
+    }
+    const owner = pathOwners(notes).get(note.path);
+    if (owner !== undefined && owner.taskId !== taskId) {
+      return {
+        refused: `task ${owner.taskId} took over its worktree ${note.path} and its conversation after it; continue that task instead`,
+      };
+    }
+    // No `--continue` fallback: it is what misses a worktree spawn's conversation.
+    if (note.session === undefined) {
+      return { refused: "it was launched before this daemon noted session ids; resume it by hand" };
+    }
+    return {
+      repo: note.repo,
+      path: note.path,
+      session: note.session,
+      ...(note.exit === undefined ? {} : { exit: note.exit }),
+      ...(note.vanished === true && note.exit === undefined ? { vanished: true as const } : {}),
+    };
+  }
+
+  /**
    * Resolves once no launch is in flight. A reply listed mid-spawn would show
    * the task in neither `sessions` nor `ended` — the shape that proves a spawn
    * never landed — so the reply waits the few seconds a spawn takes instead.
@@ -299,12 +559,22 @@ export class EndedTasks {
   /**
    * `carried`: the task ids of the sessions the same reply lists. Every task
    * this daemon launched since `ledgerSince` is in exactly one of the two.
+   * `interrupted` is the part of `ended` a past process died launching; one a
+   * live session carries is accounted for, and its mark is cleared.
    */
-  report(carried: ReadonlySet<string>): { readonly ended: readonly string[]; readonly ledgerSince: number } {
+  report(carried: ReadonlySet<string>): {
+    readonly ended: readonly string[];
+    readonly ledgerSince: number;
+    readonly interrupted?: readonly string[];
+  } {
     this.#prune();
     const out = new Set<string>();
     for (const id of [...this.#ended.keys(), ...this.#ledger.ids()]) if (!carried.has(id)) out.add(id);
-    return { ended: [...out], ledgerSince: this.#ledger.since() };
+    const marked = this.#ledger.interrupted();
+    // Capped here too: `parseInterrupted` drops the whole list past `SESSIONS_MAX_PROGRESS`.
+    const interrupted = marked.filter((id) => !carried.has(id)).slice(0, SESSIONS_MAX_PROGRESS);
+    void this.#ledger.clearInterrupted(marked.filter((id) => carried.has(id)));
+    return { ended: [...out], ledgerSince: this.#ledger.since(), ...(interrupted.length === 0 ? {} : { interrupted }) };
   }
 
   #prune(): void {
@@ -469,6 +739,10 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
       if (frame.state === undefined || pane.taskId === null) return { ok: true };
       // A stopped ingest sends nothing, so a report must not be told it went.
       if (stopped) return frame.state === "done" ? { ok: false, code: "stopping" } : { ok: true };
+      // Ingest, not a new act: the id is the kernel-bound pane's own, never the frame's. Only `ended` and `done`
+      // prove the session ran and may leave no exit note (a clean exit closes the window); a live one is cleared
+      // by the `sessions` listing once it registers, which a bare `running` frame does not show.
+      if (frame.state === "ended" || frame.state === "done") void deps.ended.sessionSeen(pane.taskId);
       if (frame.state === "ended") deps.ended.ended(pane.taskId);
       // Before the reply, so `ok` tells the session its report is on disk — or says it is not.
       let reported: NoteOutcome | null = null;

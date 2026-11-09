@@ -151,18 +151,22 @@ Two verified LXC sharp edges (Debian 13 guest, systemd 257):
 
 Claude Code launches `seanced mcp` outside the daemon's unit, where no credential is
 delivered and (on systemd ≥ 256) direct unseal is refused — so it cannot hold the key.
-It does not need to. Every tool works, for every machine — except `auto`: `spawn_session`
-with `machine: "auto"` and `get_queue` talk to the scheduler, not to one machine, and the
-broker only carries requests to one machine. On this kind of box they answer "needs this
-machine's own key". The rest work like this:
+It does not need to. Every tool works, for every machine, and so does `seanced spawn`:
+`spawn_session`, `queue_batch`, `get_queue` and
+`cancel_task` talk to the scheduler through the same broker. A `seanced mcp` that started
+before the daemon was updated keeps answering "needs this machine's own key" for those
+until its Claude session restarts. The tools work like this:
 
-- **This machine**: ops aimed at the box the server runs on take the daemon's local op
-  socket, which needs no key — relay up or down.
+- **This machine**: listing and ending sessions on the box the server runs on take the daemon's
+  local op socket, which needs no key — relay up or down. A spawn is a queued task, so it goes
+  through the broker's scheduler enqueue like any other.
 - **Other machines, and the full `list_machines`**: the server asks the running daemon
   over that same socket, and the daemon makes the request as an app-role relay client
   with the key it already holds — the _fleet broker_. The key never leaves the daemon
-  and is never sent over the socket; what crosses it is "list the machines" or "this
-  op on this deviceId", for `sessions`, `spawn` and `despawn` only.
+  and is never sent over the socket; what crosses it is "list the machines", "this
+  op on this deviceId", for `sessions`, `spawn` and `despawn` only, or one of four
+  scheduler requests: enqueue this task spec, read the queue, cancel this task, list the
+  accounts. For an enqueue the daemon seals the task itself, with its own clock.
 
 Nothing to configure: the existing `seanced mcp install` registration is unchanged. The
 server tries its own PSK lookup first, on first remote use — on macOS, WSL, or Linux
@@ -188,15 +192,18 @@ shell, and probes the broker when that is the one:
 
 **What this hands out, said plainly.** Any process running as your user can now
 spawn and despawn on _every_ machine through the socket, including on this box where
-it cannot read the key. That is the point — a Claude session here is meant to drive
-the fleet — and it is behind Claude Code's per-tool approval, so do not allowlist
-`spawn_session` or `despawn_session`. It is confined to this kind of box: a daemon
+it cannot read the key, queue tasks for the scheduler, read the fleet queue (other
+clients' titles and prompt previews included) and the account names, and cancel any
+task. That is the point — a Claude session here is meant to drive the fleet — and it is
+behind Claude Code's per-tool approval, so do not allowlist `spawn_session`,
+`despawn_session`, `queue_batch` or `cancel_task`. It is confined to this kind of box: a daemon
 whose key came from anywhere but the systemd credential (keychain, DPAPI, a
 user-unsealed TPM blob, the config field) runs no broker at all, since there
 `seanced mcp` reads the key itself and a broker would only hand the same reach to
 anything that skips the key store. It is still less than the key: no way to read
-it, seal or open anything, address the `"machines"` group, or send any op but those
-three, and every brokered request is audited as `origin=local-broker` (the target
+it, seal or open anything, address the `"machines"` group, send any remote op but those
+three, overwrite or back-date a task, or write an account, and every brokered request is
+audited as `origin=local-broker` (the target
 records it as `origin=relay client="mcp"`). The TPM protects the key at rest; it never
 protected the running daemon from your own user, and this does not change that.
 

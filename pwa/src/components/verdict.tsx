@@ -1,7 +1,7 @@
 import type { JSX } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { Machine } from "@seance/shared";
-import type { Verdict } from "../state.ts";
+import type { StartNowRefusal, Verdict } from "../state.ts";
 import { describeVerdict, VERDICT_STAGES, type VerdictStage } from "../verdict-view.ts";
 
 /**
@@ -18,12 +18,15 @@ function StageTrack(props: { stage: VerdictStage }): JSX.Element {
   // cycle ends: cut mid-swell it would vanish at full size. The next bead's
   // ring starts at once; only the old one is let finish. Decided in render,
   // not an effect, so the ring is the same element across the step and its
-  // animation runs on rather than restarting.
+  // animation runs on rather than restarting. A ring that already came to rest
+  // (screen.css bounds the swells) has no cycle left to finish and goes at once.
   const previous = useRef(reached);
   const finishing = useRef<number | null>(null);
+  const rested = useRef(false);
   const [, rerender] = useState(0);
   if (previous.current !== reached) {
-    finishing.current = previous.current < 2 ? previous.current : null;
+    finishing.current = previous.current < 2 && !rested.current ? previous.current : null;
+    rested.current = false;
     previous.current = reached;
   }
   const finished = (): void => {
@@ -50,6 +53,13 @@ function StageTrack(props: { stage: VerdictStage }): JSX.Element {
                   className="stage-sonar"
                   onAnimationIteration={() => {
                     if (finishing.current === i) finished();
+                  }}
+                  onAnimationEnd={(event) => {
+                    if (event.animationName !== "stage-sonar") return;
+                    // The last swell ends with no iteration event after it. Rest is marked here, not when the
+                    // fade-in ends: a step during the fade-in would otherwise wait on an event that never comes.
+                    if (finishing.current === i) finished();
+                    else if (i === reached) rested.current = true;
                   }}
                 />
               )}
@@ -125,20 +135,29 @@ function SwapText(props: { as: "h2" | "p"; className: string; text: string }): J
 
 export function VerdictView(props: {
   verdict: Verdict;
-  machineName: string;
   machines: readonly Machine[];
+  /** Account aliases, for the queued verdict's pin line. */
+  aliases: Readonly<Record<string, string>>;
   now: number;
   /** The queued verdict's way to the Queue screen; absent where the queue is already on screen (wide). */
   onQueue?: () => void;
   /** `deriveAutoAvailability`'s note: set while no verified scheduler would read a queued task. */
   waitingNote?: string | null;
+  /** Why a Start now's `run-now` didn't place it; shown only on the verdict for that task. */
+  startNowRefusal?: StartNowRefusal | null;
   onRetry: () => void;
   onAnother: () => void;
-  onReuse: () => void;
   onBack: () => void;
 }): JSX.Element {
-  const { verdict, machineName, machines, now, onRetry, onAnother, onReuse, onBack } = props;
-  const content = describeVerdict(verdict, machineName, machines, now, props.waitingNote ?? null);
+  const { verdict, machines, aliases, now, onRetry, onAnother, onBack } = props;
+  const content = describeVerdict(
+    verdict,
+    machines,
+    aliases,
+    now,
+    props.waitingNote ?? null,
+    props.startNowRefusal ?? null,
+  );
   const onPrimary =
     content.primary.onClick === "retry" ? onRetry : content.primary.onClick === "back" ? onBack : onAnother;
 
@@ -161,11 +180,6 @@ export function VerdictView(props: {
         {verdict.kind === "queued" && props.onQueue !== undefined && (
           <button type="button" className="quiet" onClick={props.onQueue}>
             See the queue
-          </button>
-        )}
-        {verdict.kind === "ok" && verdict.prompt !== undefined && (
-          <button type="button" className="quiet" onClick={onReuse}>
-            Reuse this prompt
           </button>
         )}
         {content.showBack && (

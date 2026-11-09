@@ -2,17 +2,16 @@ import {
   DEFAULT_EFFORT,
   DEFAULT_MODEL,
   METRIC_NAMES,
-  type BatchStrategy,
   type MetricName,
   type MetricsSeries,
   type MetricsStep,
   type PauseHold,
   type Decision,
   type SessionEntry,
-  type SpawnErrorCode,
   type Task,
   type TaskDep,
   type TaskUntil,
+  type IdleTaskRef,
   type UnreadableTaskRef,
 } from "@seance/shared";
 
@@ -39,45 +38,22 @@ export const MODEL_LABELS: Record<Model, string> = {
   haiku: "Haiku",
 };
 
-export type SheetKind = "machine" | "repo" | "model" | "effort" | "after" | "batch";
+export type SheetKind = "machine" | "account" | "repo" | "model" | "effort" | "after";
 
-/** The repo sheet's rescan row: inline scanning/failure state instead of a fire-and-forget close. */
-export type RescanState = "idle" | "scanning" | "failed";
+/**
+ * The Machine sheet's rescan action: inline scanning/failure state on the row it
+ * was asked for, so only that row shows it.
+ */
+export type RescanState =
+  | { readonly kind: "idle" }
+  | { readonly kind: "scanning" | "failed"; readonly deviceId: string };
+
+/** One shared object, so `#patch`'s identity check sees an idle rescan as unchanged. */
+export const RESCAN_IDLE: RescanState = { kind: "idle" };
 
 export type Verdict =
-  | {
-      readonly kind: "ok";
-      readonly window: string;
-      readonly note?: string;
-      readonly prompt?: string;
-      /** Started, but never registered — the verdict says so instead of claiming it is running. */
-      readonly pending?: true;
-    }
-  | {
-      readonly kind: "failed";
-      readonly code: SpawnErrorCode;
-      readonly message: string;
-      readonly repo: string;
-      /**
-       * What a retry's rescan settled. "missing" is conclusive — the repo is gone,
-       * so the verdict stops offering retries. "unreachable" means the scan never
-       * got through, so nothing was tried and the retry still stands.
-       */
-      readonly rescan?: "missing" | "unreachable";
-    }
   /**
-   * `dropped` — the reply was lost, usually to a background/suspend mid-spawn, so
-   * a session may well be running. `undelivered` — the relay refused delivery, so
-   * nothing started. Never conflated: one is unknown, the other is a known no.
-   */
-  | {
-      readonly kind: "unknown";
-      readonly reason: "dropped" | "undelivered";
-      readonly machine: string;
-      readonly sessionCount: number | null;
-    }
-  /**
-   * An `auto` spawn the relay's store took. `task` is the newest copy the
+   * A spawn the relay's store took. `task` is the newest copy the
    * leader reported — refreshed from `queue` on `queue-changed` and a bounded
    * poll while the verdict is up — so the screen follows it from waiting to
    * placed, with its decision. Until a leader reads it, it is the app's own
@@ -87,13 +63,21 @@ export type Verdict =
   /**
    * The store refused the task, or its answer never came; `message` says which.
    * `retry` is the task to put again: the same id, so a retry cannot queue twice.
+   * `runNow`: it was a Start now, and a retry is one too.
    */
   | {
       readonly kind: "unqueued";
       readonly message: string;
       readonly mayHaveLanded: boolean;
       readonly retry?: Task;
+      readonly runNow?: true;
     };
+
+/** Why a Start now's `run-now` left its task where it was, as a sentence, for the queued verdict of `taskId`. */
+export interface StartNowRefusal {
+  readonly taskId: string;
+  readonly message: string;
+}
 
 /**
  * Why a queued verdict stopped following its task before it settled.
@@ -112,51 +96,20 @@ export type FollowEnd =
 
 /** What survives a reload; transient fields are deliberately absent. */
 export interface PersistedForm {
-  readonly machineId: string | null;
-  /**
-   * The machine picker's `auto`: the scheduler places the spawn. Beside
-   * `machineId` rather than a sentinel in it, so turning it off falls back to
-   * the machine picked last.
-   */
-  readonly auto: boolean;
-  /** The repo `auto` runs, by `RepoEntry.origin` — the cross-machine key, since no clone is chosen. */
-  readonly autoRepo: string | null;
-  /**
-   * Last repo picked per machine, by deviceId — the single source of truth for
-   * the repo selection, so switching machines restores what you last ran there
-   * instead of resetting to its first repo.
-   */
-  readonly repos: Readonly<Record<string, string>>;
+  /** The machine pick, by deviceId; null is `auto`: the scheduler chooses. Written to the task as `pin.deviceId`. */
+  readonly machine: string | null;
+  /** The account pick, by accountId; null is `auto`. Written as `pin.account`; the alias is display only. */
+  readonly account: string | null;
+  /** The repo to run, by `RepoEntry.origin` — the cross-machine key, since no clone is chosen. */
+  readonly repo: string | null;
   readonly prompt: string;
   readonly worktree: boolean;
   readonly model: Model;
   readonly effort: Effort;
-  /** Per task, `auto` only: the tasks this one waits on. Cleared once a task is queued. */
+  /** Per task: the tasks this one waits on. Cleared once a task is queued. */
   readonly after: readonly TaskDep[];
   /** Per task: what settles it. `reported` waits for its session's own done report. */
   readonly until: TaskUntil;
-  /** Per task: the Linear issue it is for; empty is none. */
-  readonly linearIssue: string;
-  /** Spans enqueues: the batch the next one joins, until it is ended. */
-  readonly batch: OpenBatch | null;
-}
-
-/**
- * A batch has no record of its own: each member carries the id and strategy, so
- * the form keeps them and numbers the next member. `next` moves only when a
- * member is stored, so a retry re-sends the same index.
- */
-export interface OpenBatch {
-  readonly id: string;
-  readonly strategy: BatchStrategy;
-  readonly next: number;
-}
-
-/** Enough to reconcile a spawn whose reply never arrived, across an app kill. */
-export interface PendingSpawn {
-  readonly machineId: string;
-  readonly repo: string;
-  readonly requestedAt: number;
 }
 
 export interface SessionsView {
@@ -212,6 +165,10 @@ export type QueueState =
       readonly holds: readonly PauseHold[];
       /** Records the leader cannot read: they hold store slots no prune frees, until a person discards them. */
       readonly unreadable: readonly UnreadableTaskRef[];
+      /** Running tasks the leader holds no slot for while they sit idle at their prompt (`QueueResponse.idle`). */
+      readonly idle: readonly IdleTaskRef[];
+      /** The leader's in-flight cap, the header's denominator; absent from an older leader. */
+      readonly globalMax?: number;
       /** The leader's clock when it answered, ms. */
       readonly at: number;
       /**
@@ -235,10 +192,10 @@ export interface AccountsState {
   readonly notice: string | null;
 }
 
-/** A cancel or mark-done on its way to the leader; the row shows it busy. */
+/** A task's action on its way to the leader (a continue: to the store); the row shows it busy. */
 export interface TaskAction {
   readonly taskId: string;
-  readonly op: "cancel" | "mark-done";
+  readonly op: "cancel" | "mark-done" | "run-now" | "continue";
 }
 
 export type HistoryResult =
@@ -262,18 +219,15 @@ export interface HistoryView {
  * fails the build instead of shipping an unselectable default.
  */
 export const DEFAULT_FORM: PersistedForm = {
-  machineId: null,
-  auto: false,
-  autoRepo: null,
-  repos: {},
+  machine: null,
+  account: null,
+  repo: null,
   prompt: "",
   worktree: true,
   model: DEFAULT_MODEL,
   effort: DEFAULT_EFFORT,
   after: [],
   until: "merged",
-  linearIssue: "",
-  batch: null,
 };
 
 export function isModel(value: unknown): value is Model {

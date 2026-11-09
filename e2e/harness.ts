@@ -25,7 +25,7 @@ import {
   type ClaudeStub,
   type GitFixture,
 } from "../daemon/test/fixtures.ts";
-import { DEFAULT_FORM, type PendingSpawn, type PersistedForm } from "../pwa/src/state.ts";
+import { DEFAULT_FORM, type PersistedForm } from "../pwa/src/state.ts";
 import { RelayClient, type RelayState } from "@seance/shared";
 import { Store } from "../pwa/src/store.ts";
 import type { AppState } from "../pwa/src/view.ts";
@@ -80,12 +80,18 @@ export interface ExclaveFixture {
   /** The cached reading's `fetchedAtMs` — its observed-at, which decides the newest observer. */
   readonly observedAtMs: number;
   readonly fiveHourPct: number;
+  /** Who it is signed in as: `E2E_ACCOUNT` unless a test needs a second account (an account pin). */
+  readonly account?: {
+    readonly organizationUuid: string;
+    readonly accountUuid: string;
+    readonly emailAddress?: string;
+  };
 }
 
 /**
  * A home of the daemon's own, so its exclaves are the fixture's and never the
  * developer's `~/.exclaves` and `~/.claude.json`. Each exclave is signed into
- * `E2E_ACCOUNT` with one cached quota reading, in the shape Claude Code leaves.
+ * its `account` (`E2E_ACCOUNT` by default) with one cached quota reading, in the shape Claude Code leaves.
  * An unlisted `default` is signed out.
  */
 async function makeHome(dir: string, exclaves: readonly ExclaveFixture[]): Promise<string> {
@@ -102,7 +108,7 @@ async function makeHome(dir: string, exclaves: readonly ExclaveFixture[]): Promi
       await writeFile(
         file,
         JSON.stringify({
-          oauthAccount: E2E_ACCOUNT,
+          oauthAccount: exclave.account ?? E2E_ACCOUNT,
           cachedUsageUtilization: {
             fetchedAtMs: exclave.observedAtMs,
             utilization: { five_hour: { utilization: exclave.fiveHourPct, resets_at: resetsAt } },
@@ -449,7 +455,6 @@ export interface AppHandle {
 export function startApp(
   stack: Stack,
   form: Partial<PersistedForm> = {},
-  pending: PendingSpawn | null = null,
   /**
    * `accounts`: with the PWA's account key, so it lists `account:` on open. Opt-in
    * because the relay's list bucket is shared by every app: a listing per app in
@@ -465,7 +470,7 @@ export function startApp(
     timeouts: { sessions: 4_000, rescan: 5_000, spawn: 15_000 },
     createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
   });
-  const store = new Store(client, { ...DEFAULT_FORM, ...form }, pending);
+  const store = new Store(client, { ...DEFAULT_FORM, ...form });
   const detach = store.attach();
   client.start();
 

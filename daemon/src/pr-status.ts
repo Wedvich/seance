@@ -100,23 +100,44 @@ function queryText(count: number): string {
   const reads = indices
     .map(
       (i) =>
-        `p${i}: repository(owner:$o${i},name:$r${i}){ defaultBranchRef{ name } pullRequest(number:$n${i}){ state isDraft merged baseRefName commits(last:1){ nodes{ commit{ statusCheckRollup{ state } } } } } }`,
+        `p${i}: repository(owner:$o${i},name:$r${i}){ defaultBranchRef{ name } pullRequest(number:$n${i}){ state isDraft merged baseRefName mergeCommit{ oid } commits(last:1){ nodes{ commit{ statusCheckRollup{ state } } } } } }`,
     )
     .join(" ");
   return `query(${vars}){ ${reads} }`;
 }
 
 /** Strings through `-f`: `-F` reads `@file` and coerces types, so only the regex-checked number goes through it. */
-function argvFor(gh: string, prs: readonly GithubPr[]): string[] {
-  const variables = prs.flatMap((pr, i) => [
+function prVariables(prs: readonly GithubPr[]): string[] {
+  return prs.flatMap((pr, i) => ["-f", `o${i}=${pr.owner}`, "-f", `r${i}=${pr.repo}`, "-F", `n${i}=${pr.number}`]);
+}
+
+/** A stacked merge to check: its alias index in the chunk, kept so `c<i>` answers for `p<i>`. */
+interface Landing {
+  readonly index: number;
+  readonly pr: GithubPr;
+  readonly oid: string;
+}
+
+function landedQueryText(landings: readonly Landing[]): string {
+  const vars = landings.map(({ index: i }) => `$o${i}:String!,$r${i}:String!,$h${i}:String!`).join(",");
+  const reads = landings
+    .map(
+      ({ index: i }) =>
+        `c${i}: repository(owner:$o${i},name:$r${i}){ defaultBranchRef{ compare(headRef:$h${i}){ status } } }`,
+    )
+    .join(" ");
+  return `query(${vars}){ ${reads} }`;
+}
+
+function landedVariables(landings: readonly Landing[]): string[] {
+  return landings.flatMap(({ index: i, pr, oid }) => [
     "-f",
     `o${i}=${pr.owner}`,
     "-f",
     `r${i}=${pr.repo}`,
-    "-F",
-    `n${i}=${pr.number}`,
+    "-f",
+    `h${i}=${oid}`,
   ]);
-  return [gh, "api", "--hostname", "github.com", "graphql", "-f", `query=${queryText(prs.length)}`, ...variables];
 }
 
 function checksOf(rollup: unknown): PrChecks | undefined {
@@ -159,13 +180,21 @@ function stateOf(pullRequest: Record<string, unknown>): PrState | null {
 /**
  * `MERGED` means merged into the PR's base, which for a stacked PR is its
  * parent's branch, not the default. Anything short of both names matching is
- * not on the default branch as far as can be told: settling on a guess would
- * release dependents on nothing.
+ * not on the default branch as far as this read can tell: settling on a guess
+ * would release dependents on nothing. `landedOnDefault` asks again for those.
  */
 function mergedIntoDefault(repository: Record<string, unknown>, pullRequest: Record<string, unknown>): boolean {
   const base = pullRequest["baseRefName"];
   const ref = repository["defaultBranchRef"];
   return typeof base === "string" && isRecord(ref) && ref["name"] === base;
+}
+
+const COMMIT_OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
+
+function mergeOidOf(pullRequest: Record<string, unknown>): string | null {
+  const commit = pullRequest["mergeCommit"];
+  const oid = isRecord(commit) ? commit["oid"] : undefined;
+  return typeof oid === "string" && COMMIT_OID.test(oid) ? oid : null;
 }
 
 /** A body with no `data` that is GitHub refusing the token: a revoked or expired one exits 1, not 4. */
@@ -186,17 +215,21 @@ function errorType(errors: unknown, index: number): string {
 
 type Chunk = { readonly kind: Failure } | { readonly kind: "ok"; readonly reads: readonly Read[] };
 
+type Answer =
+  | { readonly kind: Failure }
+  | { readonly kind: "ok"; readonly body: Record<string, unknown>; readonly data: Record<string, unknown> };
+
 /**
- * One `gh` run over `prs`. A PR the forge does not answer for (not found, no
+ * One `gh` GraphQL run. A PR the forge does not answer for (not found, no
  * access) makes `gh` exit 1 with the full JSON on stdout and `null` at its
  * alias, so a non-zero exit is not a failure by itself — only exit 4, a
  * timeout, or stdout that is no GraphQL answer is.
  */
-async function readChunk(deps: PrPollerDeps, prs: readonly GithubPr[]): Promise<Chunk> {
+async function ask(deps: PrPollerDeps, query: string, variables: readonly string[]): Promise<Answer> {
   const gh = deps.gh ?? process.env["SEANCE_GH_BIN"] ?? "gh";
   let result;
   try {
-    result = await exec(argvFor(gh, prs), {
+    result = await exec([gh, "api", "--hostname", "github.com", "graphql", "-f", `query=${query}`, ...variables], {
       timeoutMs: deps.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       killGroup: true,
       killAfterMs: 5_000,
@@ -217,8 +250,40 @@ async function readChunk(deps: PrPollerDeps, prs: readonly GithubPr[]): Promise<
   if (!isRecord(body)) return { kind: "failed" };
   const { data } = body;
   if (!isRecord(data)) return { kind: isBadCredentials(body) ? "unauthenticated" : "failed" };
+  return { kind: "ok", body, data };
+}
+
+/**
+ * The alias indices of `landings` whose merge commit the default branch
+ * contains (`BEHIND` or `IDENTICAL`: the commit is an ancestor of its tip, or
+ * is it). A stack merged in cascade lands on the default while each PR's
+ * `baseRefName` still names its parent's branch for good, so base names alone
+ * would hold such a task in `awaiting-merge` until it expires. Anything else —
+ * a failed run, an unanswered alias, `DIVERGED` — keeps the merge stacked.
+ */
+async function landedOnDefault(deps: PrPollerDeps, landings: readonly Landing[]): Promise<ReadonlySet<number>> {
+  const landed = new Set<number>();
+  if (landings.length === 0) return landed;
+  const answer = await ask(deps, landedQueryText(landings), landedVariables(landings));
+  if (answer.kind !== "ok") return landed;
+  for (const { index } of landings) {
+    const repository = answer.data[`c${index}`];
+    const ref = isRecord(repository) ? repository["defaultBranchRef"] : null;
+    const compare = isRecord(ref) ? ref["compare"] : null;
+    const status = isRecord(compare) ? compare["status"] : null;
+    if (status === "BEHIND" || status === "IDENTICAL") landed.add(index);
+  }
+  return landed;
+}
+
+/** One `gh` run over `prs`, and a second over its stacked merges (`landedOnDefault`) when there are any. */
+async function readChunk(deps: PrPollerDeps, prs: readonly GithubPr[]): Promise<Chunk> {
+  const answer = await ask(deps, queryText(prs.length), prVariables(prs));
+  if (answer.kind !== "ok") return answer;
+  const { body, data } = answer;
   const reads: Read[] = [];
-  prs.forEach((_, i) => {
+  const landings: Landing[] = [];
+  prs.forEach((pr, i) => {
     const repository = data[`p${i}`];
     const pullRequest = isRecord(repository) ? repository["pullRequest"] : null;
     if (!isRecord(repository) || !isRecord(pullRequest)) {
@@ -226,20 +291,30 @@ async function readChunk(deps: PrPollerDeps, prs: readonly GithubPr[]): Promise<
       return;
     }
     const state = stateOf(pullRequest);
+    if (state === null) {
+      reads.push({ kind: "none", error: null });
+      return;
+    }
     const checks = checksOf(rollupOf(pullRequest));
     const stacked = state === "merged" && !mergedIntoDefault(repository, pullRequest);
-    reads.push(
-      state === null
-        ? { kind: "none", error: null }
-        : {
-            kind: "status",
-            state,
-            ...(checks === undefined ? {} : { checks }),
-            ...(stacked ? { stacked: true } : {}),
-          },
-    );
+    const oid = stacked ? mergeOidOf(pullRequest) : null;
+    if (oid !== null) landings.push({ index: i, pr, oid });
+    reads.push({
+      kind: "status",
+      state,
+      ...(checks === undefined ? {} : { checks }),
+      ...(stacked ? { stacked: true } : {}),
+    });
   });
-  return { kind: "ok", reads };
+  const landed = await landedOnDefault(deps, landings);
+  return {
+    kind: "ok",
+    reads: reads.map((read, i) => {
+      if (read.kind !== "status" || !landed.has(i)) return read;
+      const { stacked: _stacked, ...rest } = read;
+      return rest;
+    }),
+  };
 }
 
 /**

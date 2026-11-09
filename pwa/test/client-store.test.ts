@@ -157,7 +157,7 @@ function batchSpec(index: number): Task["spec"] {
   return {
     repo: "git@github.com:m/seance.git",
     mode: "worktree",
-    batch: { id: crypto.randomUUID(), index, strategy: { mode: "sequential" } },
+    batch: { id: crypto.randomUUID(), index },
   };
 }
 

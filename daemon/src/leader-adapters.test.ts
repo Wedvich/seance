@@ -18,6 +18,9 @@ const relay: AppRelay = {
   createTask: unused,
   queue: unused,
   cancel: unused,
+  runNow: unused,
+  listAccounts: unused,
+  onStoreChanged: () => () => {},
 };
 
 function fleetOver(sessions: () => Promise<SessionsResponse>, sessionsTimeoutMs?: number) {
@@ -47,5 +50,20 @@ describe("this machine's sessions, from the leader", () => {
       "self",
     );
     expect(reply).toEqual({ ok: true, sessions: [], ledgerSince: 0 });
+  });
+
+  test("interrupted passes through when it is a subset of ended; an id outside ended is dropped", async () => {
+    // A remote's payload as it parses off the wire: not typed, so the bad shapes can be sent.
+    const answer = (interrupted: unknown, ended: unknown = ["a", "b"]): Promise<unknown> =>
+      fleetOver(
+        () => Promise.resolve(JSON.parse(JSON.stringify({ sessions: [], at: 1, ledgerSince: 0, ended, interrupted }))),
+        5_000,
+      ).sessions("self");
+    expect(await answer(["a"])).toMatchObject({ ended: ["a", "b"], interrupted: ["a"] });
+    expect(await answer(["a", "zzz", 7])).toMatchObject({ interrupted: ["a"] });
+    // Nothing usable left: the field is absent, as an older daemon's reply is read.
+    expect(await answer(["zzz"])).not.toHaveProperty("interrupted");
+    expect(await answer("a")).not.toHaveProperty("interrupted");
+    expect(await answer(["a"], "a")).not.toHaveProperty("interrupted");
   });
 });
