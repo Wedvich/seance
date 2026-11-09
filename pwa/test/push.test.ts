@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
   fromBase64Url,
+  parsePushSubscribeRequest,
   RequestFailure,
+  schedulerErrorText,
+  type PushDevice,
   type PushSettingsReading,
   type PushSubscribeReply,
   type PushSubscribeRequest,
@@ -9,10 +12,13 @@ import {
   type StoreRefusal,
 } from "@seance/shared";
 import {
+  deviceLabel,
+  deviceRows,
   disablePush,
   enablePush,
   inspectPush,
   PushTimeout,
+  removeDevice,
   resyncPush,
   watchResync,
   withTimeout,
@@ -23,12 +29,14 @@ import {
   type PushOffOutcome,
   type PushOutcome,
   type PushPermission,
+  type PushRemoveOutcome,
   type PushSubscriptionLike,
 } from "../src/push.ts";
 
 const PUBLIC_KEY = Buffer.alloc(65, 4).toString("base64url");
 const OTHER_KEY = Buffer.alloc(65, 5).toString("base64url");
 const ENDPOINT = "https://fcm.googleapis.com/fcm/send/abc";
+const SELF: PushDevice = { endpoint: ENDPOINT, vendor: "Chrome/Android", self: true };
 const KEYS = { p256dh: Buffer.alloc(65, 1).toString("base64url"), auth: Buffer.alloc(16, 2).toString("base64url") };
 
 interface Calls {
@@ -82,6 +90,7 @@ function harness(opts: {
   /** `push-unsubscribe` answers only once this settles. */
   unsubscribeGate?: Promise<void>;
   optedOut?: boolean;
+  userAgent?: string;
 }): { client: PushClient; env: PushEnv; calls: Calls } {
   const calls: Calls = {
     subscribed: [],
@@ -100,7 +109,8 @@ function harness(opts: {
           held = null;
         });
   let optedOut = opts.optedOut ?? false;
-  const settings = opts.settings === undefined ? { publicKey: PUBLIC_KEY, subscribed: false } : opts.settings;
+  const settings =
+    opts.settings === undefined ? { publicKey: PUBLIC_KEY, subscribed: false, devices: [] } : opts.settings;
   const reply = opts.reply === undefined ? { endpoint: ENDPOINT } : opts.reply;
   const client: PushClient = {
     pushSettings: (endpoint) => {
@@ -132,6 +142,7 @@ function harness(opts: {
   const env: PushEnv = {
     permission: () => opts.permission ?? "granted",
     optedOut: () => optedOut,
+    userAgent: () => opts.userAgent ?? "",
     setOptedOut: (off) => {
       calls.optedOut.push(off);
       optedOut = off;
@@ -187,7 +198,7 @@ function messageOrNote(outcome: Awaited<ReturnType<typeof settled>>): string {
 }
 
 /** The messages a failed outcome carries, for the cases that only differ in their line. */
-function messageOf(outcome: PushOutcome | PushOffOutcome | PushInspection | null): string {
+function messageOf(outcome: PushOutcome | PushOffOutcome | PushInspection | PushRemoveOutcome | null): string {
   return outcome?.kind === "failed" ? outcome.message : String(outcome?.kind);
 }
 
@@ -276,7 +287,7 @@ describe("enablePush", () => {
   test("a subscription under the current key that the record holds needs nothing more", async () => {
     const { client, env, calls } = harness({
       existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
-      settings: { publicKey: PUBLIC_KEY, subscribed: true },
+      settings: { publicKey: PUBLIC_KEY, subscribed: true, devices: [SELF] },
     });
     expect(await enablePush(client, env)).toEqual({ kind: "enabled" });
     expect(calls.settings).toEqual([ENDPOINT]);
@@ -322,20 +333,20 @@ describe("inspectPush", () => {
   test("is on only for a subscription held under the current key and by the record", async () => {
     const { client, env } = harness({
       existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
-      settings: { publicKey: PUBLIC_KEY, subscribed: true },
+      settings: { publicKey: PUBLIC_KEY, subscribed: true, devices: [SELF] },
     });
-    expect(await inspectPush(client, env)).toEqual({ kind: "on" });
+    expect(await inspectPush(client, env)).toEqual({ kind: "on", devices: [SELF] });
   });
 
   test("granted permission alone is not on: no subscription, one the record lost, or one under another key", async () => {
     const none = harness({ permission: "granted" });
     const lost = harness({
       existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
-      settings: { publicKey: PUBLIC_KEY, subscribed: false },
+      settings: { publicKey: PUBLIC_KEY, subscribed: false, devices: [] },
     });
     const rekeyed = harness({
       existing: { endpoint: ENDPOINT, key: OTHER_KEY },
-      settings: { publicKey: PUBLIC_KEY, subscribed: true },
+      settings: { publicKey: PUBLIC_KEY, subscribed: true, devices: [SELF] },
     });
     for (const { client, env } of [none, lost, rekeyed]) {
       // oxlint-disable-next-line no-await-in-loop -- one harness per case
@@ -347,7 +358,7 @@ describe("inspectPush", () => {
     const { client, env } = harness({
       permission: "default",
       existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
-      settings: { publicKey: PUBLIC_KEY, subscribed: true },
+      settings: { publicKey: PUBLIC_KEY, subscribed: true, devices: [SELF] },
     });
     expect(await inspectPush(client, env)).toMatchObject({ kind: "off" });
   });
@@ -390,7 +401,7 @@ describe("resyncPush", () => {
   test("puts a subscription the record lost back, without a prompt", async () => {
     const { client, env, calls } = harness({
       existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
-      settings: { publicKey: PUBLIC_KEY, subscribed: false },
+      settings: { publicKey: PUBLIC_KEY, subscribed: false, devices: [] },
     });
     expect(await resyncPush(client, env)).toEqual({ kind: "enabled" });
     expect(calls.sent).toEqual([{ endpoint: ENDPOINT, keys: KEYS }]);
@@ -406,7 +417,7 @@ describe("resyncPush", () => {
   test("a turn-off that lands while it prepares wins: nothing is subscribed", async () => {
     const { client, env, calls } = harness({
       existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
-      settings: { publicKey: PUBLIC_KEY, subscribed: false },
+      settings: { publicKey: PUBLIC_KEY, subscribed: false, devices: [] },
     });
     const slow: PushClient = {
       ...client,
@@ -678,7 +689,7 @@ describe("disablePush", () => {
   test("off, inspected and enabled again on one browser: it subscribes anew and the re-sync is back", async () => {
     const { client, env, calls } = harness({
       existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
-      settings: { publicKey: PUBLIC_KEY, subscribed: true },
+      settings: { publicKey: PUBLIC_KEY, subscribed: true, devices: [SELF] },
     });
     expect(await settled(disablePush(client, env))).toEqual({ kind: "disabled", note: null });
     const inspection = await inspectPush(client, env);
@@ -694,9 +705,9 @@ describe("disablePush", () => {
     const { client, env } = harness({
       optedOut: true,
       existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
-      settings: { publicKey: PUBLIC_KEY, subscribed: true },
+      settings: { publicKey: PUBLIC_KEY, subscribed: true, devices: [SELF] },
     });
-    expect(await inspectPush(client, env)).toEqual({ kind: "on" });
+    expect(await inspectPush(client, env)).toEqual({ kind: "on", devices: [SELF] });
     expect(env.optedOut()).toBe(false);
   });
 
@@ -842,5 +853,193 @@ describe("watchResync", () => {
     await settle();
     expect(watch.runs()).toBe(1);
     expect(watch.listeners()).toBe(0);
+  });
+});
+
+const CHROME_LINUX =
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
+
+describe("deviceLabel", () => {
+  test("names the browser and the system from a user agent, and the one it knows alone", () => {
+    const table: readonly (readonly [string, string | undefined])[] = [
+      [
+        "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/130.0.0.0 Mobile Safari/537.36",
+        "Chrome · Android",
+      ],
+      [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36",
+        "Chrome · Windows",
+      ],
+      [
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36",
+        "Chrome · macOS",
+      ],
+      [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0",
+        "Edge · Windows",
+      ],
+      ["Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0", "Firefox · Linux"],
+      ["Mozilla/5.0 (Android 14; Mobile; rv:132.0) Gecko/132.0 Firefox/132.0", "Firefox · Android"],
+      [
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/18.1 Safari/605.1.15",
+        "Safari · macOS",
+      ],
+      [
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+        "Safari · iOS",
+      ],
+      [
+        "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 SamsungBrowser/26.0 Chrome/122.0.0.0 Mobile Safari/537.36",
+        "Samsung Internet · Android",
+      ],
+      [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36 OPR/115.0.0.0",
+        "Opera · Windows",
+      ],
+      ["", undefined],
+      ["curl/8.0", undefined],
+    ];
+    for (const [agent, label] of table) {
+      expect(deviceLabel(agent)).toBe(label);
+      if (label === undefined) continue;
+      expect(label.length).toBeLessThanOrEqual(64);
+      expect(label).toBe(label.trim());
+      // What the leader's parser will accept, so a label is never the reason a subscribe is refused.
+      expect(parsePushSubscribeRequest({ endpoint: ENDPOINT, keys: KEYS, label })).not.toBeNull();
+    }
+  });
+});
+
+describe("the device label on the wire", () => {
+  test("Enable and the re-sync of an unheld browser send the label; no user agent sends none", async () => {
+    const enabled = harness({ userAgent: CHROME_LINUX });
+    expect(await enablePush(enabled.client, enabled.env)).toEqual({ kind: "enabled" });
+    expect(enabled.calls.sent).toEqual([{ endpoint: ENDPOINT, keys: KEYS, label: "Chrome · Linux" }]);
+
+    const resync = harness({
+      userAgent: CHROME_LINUX,
+      existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
+      settings: { publicKey: PUBLIC_KEY, subscribed: false, devices: [] },
+    });
+    expect(await resyncPush(resync.client, resync.env)).toEqual({ kind: "enabled" });
+    expect(resync.calls.sent).toEqual([{ endpoint: ENDPOINT, keys: KEYS, label: "Chrome · Linux" }]);
+  });
+
+  test("a held browser whose entry has no label sends one backfill, touching nothing in the browser", async () => {
+    const { client, env, calls } = harness({
+      userAgent: CHROME_LINUX,
+      existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
+      settings: { publicKey: PUBLIC_KEY, subscribed: true, devices: [SELF] },
+    });
+    expect(await resyncPush(client, env)).toEqual({ kind: "enabled" });
+    expect(calls.sent).toEqual([{ endpoint: ENDPOINT, keys: KEYS, label: "Chrome · Linux" }]);
+    expect(calls.subscribed).toEqual([]);
+    expect(calls.unsubscribed).toEqual([]);
+  });
+
+  test("a held browser whose entry has a label, or that has no label to send, sends nothing", async () => {
+    const labelled = harness({
+      userAgent: CHROME_LINUX,
+      existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
+      settings: { publicKey: PUBLIC_KEY, subscribed: true, devices: [{ ...SELF, label: "Chrome · Linux" }] },
+    });
+    await resyncPush(labelled.client, labelled.env);
+    expect(labelled.calls.sent).toEqual([]);
+    const unnamed = harness({
+      existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
+      settings: { publicKey: PUBLIC_KEY, subscribed: true, devices: [SELF] },
+    });
+    await resyncPush(unnamed.client, unnamed.env);
+    expect(unnamed.calls.sent).toEqual([]);
+  });
+
+  test("a failed backfill never drops the held subscription", async () => {
+    const { client, env, calls } = harness({
+      userAgent: CHROME_LINUX,
+      existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
+      settings: { publicKey: PUBLIC_KEY, subscribed: true, devices: [SELF] },
+      reply: { ok: false, code: "not_ready", message: "raw" },
+    });
+    expect(await resyncPush(client, env)).toMatchObject({ kind: "failed", retryable: true });
+    expect(calls.unsubscribed).toEqual([]);
+  });
+
+  test("inspectPush hands back the record's devices", async () => {
+    const devices: readonly PushDevice[] = [
+      SELF,
+      { endpoint: "https://web.push.apple.com/x", vendor: "Safari", self: false },
+    ];
+    const { client, env } = harness({
+      existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
+      settings: { publicKey: PUBLIC_KEY, subscribed: true, devices },
+    });
+    expect(await inspectPush(client, env)).toEqual({ kind: "on", devices });
+  });
+});
+
+describe("removeDevice", () => {
+  const OTHER = "https://web.push.apple.com/other";
+
+  test("asks the leader to drop that endpoint and reports it removed", async () => {
+    const { client, calls } = harness({});
+    expect(await removeDevice(client, OTHER)).toEqual({ kind: "removed" });
+    expect(calls.unsubscribeSent).toEqual([OTHER]);
+  });
+
+  test("a leader that predates the op is told apart, and not asked again", async () => {
+    const { client, calls } = harness({ unsubscribeReply: { ok: false, code: "invalid_request", message: "raw" } });
+    const out = await removeDevice(client, OTHER, { setTimer: instantTimer().setTimer });
+    expect(messageOf(out)).toContain("older version");
+    expect(out).toMatchObject({ retryable: false });
+    expect(calls.unsubscribeSent).toHaveLength(1);
+  });
+
+  test("a leader still starting is asked again after a backoff; four conflicts leave a retryable failure", async () => {
+    const notReady: PushUnsubscribeReply = { ok: false, code: "not_ready", message: "raw" };
+    const freed = harness({ unsubscribeReplies: [notReady, { endpoint: OTHER }] });
+    const clock = instantTimer();
+    expect(await removeDevice(freed.client, OTHER, { setTimer: clock.setTimer })).toEqual({ kind: "removed" });
+    expect(clock.waits).toEqual([1_000]);
+
+    const racing = harness({ unsubscribeReply: { ok: false, code: "conflict", message: "raw" } });
+    const out = await removeDevice(racing.client, OTHER, { setTimer: instantTimer().setTimer });
+    expect(out).toMatchObject({ kind: "failed", retryable: true });
+    expect(racing.calls.unsubscribeSent).toHaveLength(4);
+  });
+
+  test("an unknown refusal carries the shared text; an unreachable leader is retryable", async () => {
+    const odd = harness({ unsubscribeReply: { ok: false, code: "no_such_code", message: "raw" } });
+    expect(messageOf(await removeDevice(odd.client, OTHER))).toContain(schedulerErrorText("no_such_code"));
+    const down = harness({ unsubscribeReply: new RequestFailure("timeout", "no answer") });
+    const out = await removeDevice(down.client, OTHER);
+    expect(messageOf(out)).toContain("Couldn't reach the scheduler leader");
+    expect(out).toMatchObject({ retryable: true });
+    const other = harness({ unsubscribeReply: new Error("boom") });
+    expect(await removeDevice(other.client, OTHER)).toMatchObject({ kind: "failed", retryable: false });
+  });
+
+  test("a null reply, or an echo of another endpoint, is unreadable", async () => {
+    const none = harness({ unsubscribeReply: null });
+    expect(messageOf(await removeDevice(none.client, OTHER))).toContain("Couldn't read");
+    const echo = harness({ unsubscribeReply: { endpoint: ENDPOINT } });
+    expect(messageOf(await removeDevice(echo.client, OTHER))).toContain("Couldn't read");
+  });
+});
+
+describe("deviceRows", () => {
+  test("shows the label, or the vendor as added before labels, and carries no endpoint", () => {
+    const devices: readonly PushDevice[] = [
+      { endpoint: ENDPOINT, vendor: "Chrome/Android", label: "Chrome · Linux", addedAt: 1_760_000_000_000, self: true },
+      { endpoint: "https://web.push.apple.com/secret", vendor: "Safari", self: false },
+    ];
+    const rows = deviceRows(devices);
+    expect(rows).toEqual([
+      { title: "Chrome · Linux", addedAt: 1_760_000_000_000, self: true },
+      { title: "Safari · added before labels", self: false },
+    ]);
+    expect(Object.keys(rows[1] ?? {})).not.toContain("addedAt");
+    const json = JSON.stringify(rows);
+    expect(json).not.toContain("secret");
+    expect(json).not.toContain("googleapis");
   });
 });

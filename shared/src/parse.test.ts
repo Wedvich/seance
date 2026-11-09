@@ -14,6 +14,7 @@ import {
   parsePushUnsubscribeRequest,
   parseSettingsRecord,
   pushEndpoint,
+  pushServiceVendor,
   isStoreKey,
   isTaskId,
   isTerm,
@@ -63,6 +64,7 @@ import {
   DISK_ALERTS_MAX,
   LINEAR_KEY_MAX_LENGTH,
   PUSH_ENDPOINT_MAX_LENGTH,
+  PUSH_LABEL_MAX_LENGTH,
   PUSH_ALERT_MAX_BYTES,
   PUSH_MAX_SUBSCRIPTIONS,
   REPO_MAX_SKILLS,
@@ -1902,7 +1904,7 @@ describe("M4 shapes", () => {
       version: 4,
       vapid: { publicKey: b64url(65), privateKey: b64url(32) },
       linearKey: "k".repeat(LINEAR_KEY_MAX_LENGTH),
-      subscriptions: [subscription],
+      subscriptions: [{ ...subscription, label: "Firefox · Linux", addedAt: 1_760_000_000_000 }],
       diskAlerts: [{ deviceId: "dev-1", at: 1_760_000_000_000 }],
     };
     expect(parseSettingsRecord(settings)).toEqual(settings);
@@ -1941,6 +1943,71 @@ describe("M4 shapes", () => {
     }
   });
 
+  test("a bad label or date drops that field, never the subscription", () => {
+    const subscription: WebPushSubscription = {
+      endpoint: "https://fcm.googleapis.com/fcm/send/abc",
+      keys: { p256dh: b64url(65), auth: b64url(16) },
+    };
+    const other = { ...subscription, endpoint: `${subscription.endpoint}2`, label: "Chrome · Windows", addedAt: 5 };
+    const vapid = { publicKey: b64url(65), privateKey: b64url(32) };
+    const read = (entry: object) =>
+      parseSettingsRecord({ version: 1, vapid, subscriptions: [{ ...subscription, ...entry }, other] })?.subscriptions;
+    for (const label of ["", " Chrome", "x".repeat(PUSH_LABEL_MAX_LENGTH + 1), 7]) {
+      expect(read({ label, addedAt: 9 })).toEqual([{ ...subscription, addedAt: 9 }, other]);
+    }
+    for (const addedAt of [-1, 1.5, "1", Number.MAX_SAFE_INTEGER + 1]) {
+      expect(read({ label: "Safari · iOS", addedAt })).toEqual([{ ...subscription, label: "Safari · iOS" }, other]);
+    }
+    expect(read({})).toEqual([subscription, other]);
+  });
+
+  test("a push-subscribe label is kept when good and refuses the request when bad; addedAt is never taken", () => {
+    const subscription: WebPushSubscription = {
+      endpoint: "https://fcm.googleapis.com/fcm/send/abc",
+      keys: { p256dh: b64url(65), auth: b64url(16) },
+    };
+    expect(parsePushSubscribeRequest({ ...subscription, label: "Firefox · Linux" })).toEqual({
+      ...subscription,
+      label: "Firefox · Linux",
+    });
+    const plain = parsePushSubscribeRequest(subscription);
+    expect(plain).toEqual(subscription);
+    expect(Object.keys(plain ?? {})).not.toContain("label");
+    expect(parsePushSubscribeRequest({ ...subscription, addedAt: 5 })).toEqual(subscription);
+    expect(parsePushSubscribeRequest({ ...subscription, label: "x".repeat(PUSH_LABEL_MAX_LENGTH) })).not.toBeNull();
+    for (const label of [
+      "",
+      " Chrome",
+      "Chrome ",
+      "x".repeat(PUSH_LABEL_MAX_LENGTH + 1),
+      7,
+      null,
+      "a\u0001b",
+      "a\u0085b",
+      "a\ud800b",
+      "a\u202eb",
+      "a\u200bb",
+      "a\ufeffb",
+    ]) {
+      expect(parsePushSubscribeRequest({ ...subscription, label })).toBeNull();
+    }
+    // The record reads a bad label leniently: the subscription stays, the label goes.
+    const vapid = { publicKey: b64url(65), privateKey: b64url(32) };
+    for (const label of ["a\u0001b", "a\u0085b", "a\ud800b", "a\u202eb", "a\u200bb", "a\ufeffb"]) {
+      const read = parseSettingsRecord({ version: 1, vapid, subscriptions: [{ ...subscription, label }] });
+      expect(read?.subscriptions).toEqual([subscription]);
+    }
+  });
+
+  test("a push endpoint's vendor is its push service's browser family", () => {
+    expect(pushServiceVendor("https://fcm.googleapis.com/fcm/send/a")).toBe("Chrome/Android");
+    expect(pushServiceVendor("https://updates.push.services.mozilla.com/wpush/v2/a")).toBe("Firefox");
+    expect(pushServiceVendor("https://web.push.apple.com/QGh")).toBe("Safari");
+    expect(pushServiceVendor("https://wns2-par02p.notify.windows.com/w")).toBe("Edge");
+    expect(pushServiceVendor("https://notify.windows.com/w")).toBeNull();
+    expect(pushServiceVendor("https://example.com/x")).toBeNull();
+  });
+
   test("a subscription the parser no longer accepts is dropped, and the rest of the record reads", () => {
     const subscription: WebPushSubscription = {
       endpoint: "https://fcm.googleapis.com/fcm/send/abc",
@@ -1972,6 +2039,9 @@ describe("M4 shapes", () => {
       subscriptions: Array.from({ length: PUSH_MAX_SUBSCRIPTIONS }, (_, i) => ({
         endpoint: `https://fcm.googleapis.com/${"e".repeat(PUSH_ENDPOINT_MAX_LENGTH - 29)}${String(i).padStart(2, "0")}`,
         keys: { p256dh: b64url(65, true), auth: b64url(16, true) },
+        // The costliest character a label admits once JSON-encoded and UTF-8'd: three bytes.
+        label: "€".repeat(PUSH_LABEL_MAX_LENGTH),
+        addedAt: Number.MAX_SAFE_INTEGER,
       })),
       diskAlerts: Array.from({ length: DISK_ALERTS_MAX }, (_, i) => ({
         deviceId: `${"d".repeat(ROUTING_ID_MAX_LENGTH - 2)}${String(i).padStart(2, "0")}`,

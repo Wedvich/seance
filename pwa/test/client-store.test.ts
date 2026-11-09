@@ -648,6 +648,8 @@ describe("pushSettings", () => {
   const subscription = {
     endpoint: "https://fcm.googleapis.com/fcm/send/abc",
     keys: { p256dh: Buffer.alloc(65, 1).toString("base64url"), auth: Buffer.alloc(16, 2).toString("base64url") },
+    label: "Firefox · Linux",
+    addedAt: 7,
   };
   const body = {
     version: 3,
@@ -677,17 +679,24 @@ describe("pushSettings", () => {
     return client.pushSettings(endpoint);
   }
 
-  test("returns the public key and whether the endpoint is held, and nothing else of the record", async () => {
+  test("returns the public key, whether the endpoint is held and the entries as devices, and nothing else of the record", async () => {
+    const device = { endpoint: subscription.endpoint, vendor: "Chrome/Android", label: "Firefox · Linux", addedAt: 7 };
     const held = await ask(await settingsRecord(), subscription.endpoint);
-    expect(held).toEqual({ publicKey, subscribed: true });
+    expect(held).toEqual({ publicKey, subscribed: true, devices: [{ ...device, self: true }] });
     expect(await ask(await settingsRecord(), "https://fcm.googleapis.com/fcm/send/other")).toEqual({
       publicKey,
       subscribed: false,
+      devices: [{ ...device, self: false }],
     });
-    expect(await ask(await settingsRecord())).toEqual({ publicKey, subscribed: false });
+    expect(await ask(await settingsRecord())).toEqual({
+      publicKey,
+      subscribed: false,
+      devices: [{ ...device, self: false }],
+    });
     const text = JSON.stringify(held);
     expect(text).not.toContain(privateKey);
     expect(text).not.toContain("lin_api_secret");
+    expect(text).not.toContain(subscription.keys.auth);
   });
 
   test("is null for no record, a record that is not the settings one, or one it cannot trust", async () => {

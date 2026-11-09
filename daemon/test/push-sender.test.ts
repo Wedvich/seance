@@ -119,7 +119,9 @@ describe("a send", () => {
       const gone = stub();
       const live = stub();
       gone.respondWith(status);
-      const [a, b] = [await subscription("gone"), await subscription("live")];
+      const [a, live_] = [await subscription("gone"), await subscription("live")];
+      // The kept entry's label and date survive the prune.
+      const b = { ...live_, label: "Firefox · Linux", addedAt: 5 };
       const { sender, store, lines } = await rig([a, b], (id) => (id === "gone" ? gone : live));
       sender.send(alert);
       await pollUntil(() => store.record().version === 2, `the prune after a ${status}`);

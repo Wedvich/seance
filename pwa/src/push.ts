@@ -3,6 +3,7 @@ import {
   pushEndpoint,
   RequestFailure,
   schedulerErrorText,
+  type PushDevice,
   type PushSettingsReading,
   type PushSubscribeReply,
   type PushSubscribeRequest,
@@ -23,6 +24,9 @@ import {
  *
  * `disablePush` is the way back: it unsubscribes the browser and asks the leader to free the
  * endpoint's slot, and marks the browser turned off so `resyncPush` leaves it alone.
+ *
+ * Subscribing sends a `label` (`deviceLabel`, from the user agent) so the card can name this
+ * browser to the others; `removeDevice` is the card's Remove for another device's row.
  */
 
 /** What a subscription flow needs of the scheduler client: the key and the subscribe and unsubscribe ops. */
@@ -58,6 +62,8 @@ export interface PushEnv {
    */
   optedOut(): boolean;
   setOptedOut(off: boolean): void;
+  /** The browser's user agent, for the device label; a seam so tests need no DOM. */
+  userAgent(): string;
 }
 
 export type PushPermission = "default" | "denied" | "granted";
@@ -80,8 +86,8 @@ export type PushOffOutcome = { readonly kind: "disabled"; readonly note: Promise
 
 /** What the card learns before any click. */
 export type PushInspection =
-  | { readonly kind: "on" }
-  | { readonly kind: "off"; readonly prepared: PushPrepared }
+  | { readonly kind: "on"; readonly devices: readonly PushDevice[] }
+  | { readonly kind: "off"; readonly prepared: PushPrepared; readonly devices: readonly PushDevice[] }
   | PushFailure;
 
 /**
@@ -96,6 +102,12 @@ export interface PushPrepared {
   readonly reusable: boolean;
   /** The record already holds `existing`, under the current key: nothing is left to do. */
   readonly held: boolean;
+  /** This browser's device label, if its user agent names one. */
+  readonly label: string | undefined;
+  /** Held, but the record's entry has no label and this browser has one: one re-send backfills it. */
+  readonly labelMissing: boolean;
+  /** Every entry of the record, as the card lists them. */
+  readonly devices: readonly PushDevice[];
 }
 
 /** A service worker that never became ready: `navigator.serviceWorker.ready` has no failure of its own. */
@@ -134,13 +146,18 @@ const SLOT_KEPT_OLDER =
   "The scheduler leader is on an older version, so it keeps this browser's slot until the push service reports it gone.";
 const SLOT_UNREADABLE =
   "Couldn't read the scheduler leader's answer, so it may keep this browser's slot until the push service reports it gone. Update seanced and the app to matching versions.";
+const REMOVE_OLDER =
+  "The scheduler leader is on an older version, so it can't remove another device. That slot frees once the device's push service reports it gone.";
 const SLOT_KEPT =
   "Couldn't tell the scheduler leader, so it keeps this browser's slot until the push service reports it gone.";
 
 /** What a refusal code reads as here, and whether it can change; one without its own line falls back to the shared text. */
 const REFUSALS: Readonly<Record<string, { readonly text: string; readonly retryable: boolean }>> = {
   invalid_request: { text: LEADER_OLDER, retryable: false },
-  subscriptions_full: { text: "Too many browsers are subscribed already.", retryable: false },
+  subscriptions_full: {
+    text: "Too many browsers are subscribed already. Remove one you no longer use under Devices, then try again.",
+    retryable: false,
+  },
   not_ready: { text: "The scheduler leader is still starting. Try again in a moment.", retryable: true },
   conflict: { text: "Another change landed first. Try again.", retryable: true },
   settings_unavailable: {
@@ -185,31 +202,93 @@ async function prepare(client: PushClient, env: PushEnv): Promise<PushPrepared |
   if ("ok" in settings) return failure(STORE_DECLINED, true);
   const key = fromBase64Url(settings.publicKey);
   const reusable = existing !== null && sameBytes(existing.options.applicationServerKey, key);
-  return { manager, existing, key, reusable, held: reusable && settings.subscribed };
+  const label = deviceLabel(env.userAgent());
+  const held = reusable && settings.subscribed;
+  const labelMissing = held && label !== undefined && settings.devices.find((d) => d.self)?.label === undefined;
+  return { manager, existing, key, reusable, held, label, labelMissing, devices: settings.devices };
 }
 
-async function subscribeWith(client: PushClient, prepared: PushPrepared): Promise<PushOutcome> {
-  if (prepared.held) return { kind: "enabled" };
-  if (prepared.existing !== null && !prepared.reusable) await prepared.existing.unsubscribe();
-  const subscription = await prepared.manager.subscribe({ userVisibleOnly: true, applicationServerKey: prepared.key });
-  const json = subscription.toJSON();
+const BROWSERS: readonly (readonly [RegExp, string])[] = [
+  [/Edg\//u, "Edge"],
+  [/OPR\//u, "Opera"],
+  [/SamsungBrowser\//u, "Samsung Internet"],
+  [/Firefox\/|FxiOS\//u, "Firefox"],
+  [/Chrome\/|CriOS\//u, "Chrome"],
+  // An iOS Home Screen app's user agent has no `Safari/` token, hence the device fallback.
+  [/Safari\/|iPhone|iPad|iPod/u, "Safari"],
+];
+
+const SYSTEMS: readonly (readonly [RegExp, string])[] = [
+  [/iPhone|iPad|iPod/u, "iOS"],
+  [/Android/u, "Android"],
+  [/CrOS/u, "ChromeOS"],
+  [/Windows/u, "Windows"],
+  [/Macintosh/u, "macOS"],
+  [/Linux/u, "Linux"],
+];
+
+/**
+ * "Browser · OS" from a user agent, or whichever half it names, or undefined. Display-only,
+ * constant ASCII plus `·`, so it always passes the leader's label check. iPadOS reports
+ * `Macintosh` and reads "Safari · macOS"; accepted.
+ */
+export function deviceLabel(userAgent: string): string | undefined {
+  const browser = BROWSERS.find(([pattern]) => pattern.test(userAgent))?.[1];
+  const system = SYSTEMS.find(([pattern]) => pattern.test(userAgent))?.[1];
+  const parts = [browser, system].filter((part) => part !== undefined);
+  return parts.length === 0 ? undefined : parts.join(" · ");
+}
+
+/** A device as the card renders it: no endpoint, so nothing that renders a row can leak one. */
+export interface DeviceRow {
+  readonly title: string;
+  readonly addedAt?: number;
+  readonly self: boolean;
+}
+
+export function deviceRows(devices: readonly PushDevice[]): readonly DeviceRow[] {
+  return devices.map((device) => ({
+    title: device.label ?? `${device.vendor} · added before labels`,
+    ...(device.addedAt === undefined ? {} : { addedAt: device.addedAt }),
+    self: device.self,
+  }));
+}
+
+/** The subscription's endpoint and keys, checked as the leader will, then sent with the label. */
+async function sendSubscription(
+  client: PushClient,
+  json: ReturnType<PushSubscriptionLike["toJSON"]>,
+  label: string | undefined,
+): Promise<PushOutcome | "unusable"> {
   const { p256dh, auth } = json.keys ?? {};
   // The leader's parser refuses a host off its allowlist and says only `invalid_request`: check first,
   // with the same function, so the refusal reads as the browser's and not as an old leader's.
   const endpoint = pushEndpoint(json.endpoint);
-  if (endpoint === null) {
-    await subscription.unsubscribe();
-    return failure(UNSUPPORTED_SERVICE);
-  }
-  if (p256dh === undefined || auth === undefined) {
-    await subscription.unsubscribe();
-    return failure(NOT_SUBSCRIBED);
-  }
-
-  const reply = await client.pushSubscribe({ endpoint, keys: { p256dh, auth } });
+  if (endpoint === null || p256dh === undefined || auth === undefined) return "unusable";
+  const reply = await client.pushSubscribe({
+    endpoint,
+    keys: { p256dh, auth },
+    ...(label === undefined ? {} : { label }),
+  });
   if (reply === null) return failure(UNREADABLE);
   if ("ok" in reply) return refusal(reply.code);
   return { kind: "enabled" };
+}
+
+async function subscribeWith(client: PushClient, prepared: PushPrepared): Promise<PushOutcome> {
+  if (prepared.held && !prepared.labelMissing) return { kind: "enabled" };
+  if (prepared.held && prepared.existing !== null) {
+    // The backfill: re-send what is held with its label. Never unsubscribe it on a failed check; it is held already.
+    const sent = await sendSubscription(client, prepared.existing.toJSON(), prepared.label);
+    return sent === "unusable" ? { kind: "enabled" } : sent;
+  }
+  if (prepared.existing !== null && !prepared.reusable) await prepared.existing.unsubscribe();
+  const subscription = await prepared.manager.subscribe({ userVisibleOnly: true, applicationServerKey: prepared.key });
+  const json = subscription.toJSON();
+  const sent = await sendSubscription(client, json, prepared.label);
+  if (sent !== "unusable") return sent;
+  await subscription.unsubscribe();
+  return pushEndpoint(json.endpoint) === null ? failure(UNSUPPORTED_SERVICE) : failure(NOT_SUBSCRIBED);
 }
 
 async function guarded<T>(work: () => Promise<T>): Promise<T | PushFailure> {
@@ -232,9 +311,9 @@ export async function inspectPush(client: PushClient, env: PushEnv): Promise<Pus
     if (prepared.held && env.permission() === "granted") {
       // A browser proven on is not turned off: a stale flag (a turn-off that did not finish) must not keep the re-sync away.
       env.setOptedOut(false);
-      return { kind: "on" };
+      return { kind: "on", devices: prepared.devices };
     }
-    return { kind: "off", prepared };
+    return { kind: "off", prepared, devices: prepared.devices };
   } catch (err) {
     return failureOf(err);
   }
@@ -300,11 +379,55 @@ function realTimer(run: () => void, ms: number): () => void {
 const FREE_SLOT_ATTEMPTS = 4;
 const FREE_SLOT_BACKOFF_MS = 1_000;
 
+type UnsubscribeAnswer =
+  | { readonly kind: "removed" }
+  | { readonly kind: "older" }
+  | { readonly kind: "unreadable" }
+  | { readonly kind: "refused"; readonly code: string }
+  | { readonly kind: "aborted" }
+  | { readonly kind: "threw"; readonly err: unknown };
+
+/**
+ * Asks `push-unsubscribe` for `endpoint`. A refusal that may change (`not_ready`, `conflict`) is
+ * asked again after a doubling backoff, so the slot frees now rather than at the push service's
+ * next 404/410; a timeout is not, since the op may have landed. Stops once `signal` aborts.
+ * Never rejects.
+ */
+async function askUnsubscribe(
+  client: PushClient,
+  endpoint: string,
+  tuning: RetryTuning,
+  signal: AbortSignal | undefined,
+): Promise<UnsubscribeAnswer> {
+  const maxAttempts = tuning.maxAttempts ?? FREE_SLOT_ATTEMPTS;
+  const backoffMs = tuning.backoffMs ?? FREE_SLOT_BACKOFF_MS;
+  const setTimer = tuning.setTimer ?? realTimer;
+  try {
+    for (let attempt = 1; ; attempt += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- each retry follows the last answer
+      const reply = await client.pushUnsubscribe({ endpoint });
+      if (reply === null) return { kind: "unreadable" };
+      // An echo of another endpoint is not an answer about this one.
+      if (!("ok" in reply)) return reply.endpoint === endpoint ? { kind: "removed" } : { kind: "unreadable" };
+      // The endpoint passed `pushEndpoint` here, so `invalid_request` can only be a leader that predates the op.
+      if (reply.code === "invalid_request") return { kind: "older" };
+      if (REFUSALS[reply.code]?.retryable !== true || attempt >= maxAttempts) {
+        return { kind: "refused", code: reply.code };
+      }
+      // oxlint-disable-next-line no-await-in-loop -- the backoff between attempts
+      await new Promise<void>((resolve) => {
+        setTimer(resolve, backoffMs * 2 ** (attempt - 1));
+      });
+      if (signal?.aborted === true) return { kind: "aborted" };
+    }
+  } catch (err) {
+    return { kind: "threw", err };
+  }
+}
+
 /**
  * The leader's answer to `push-unsubscribe` as the card's note: null when it dropped the endpoint.
- * A refusal that may change (`not_ready`, `conflict`) is asked again after a doubling backoff, so
- * the slot frees now rather than at the push service's next 404/410; a timeout is not, since the
- * op may have landed. Stops once `signal` aborts (Enable ran, and a push service that reissued the
+ * Stops retrying once `signal` aborts (Enable ran, and a push service that reissued the
  * same endpoint would have the new subscription dropped); an in-memory signal rather than the
  * opt-out mark, which reads false throughout when storage is blocked. Never rejects.
  */
@@ -314,27 +437,45 @@ async function freeSlot(
   tuning: RetryTuning,
   signal: AbortSignal | undefined,
 ): Promise<string | null> {
-  const maxAttempts = tuning.maxAttempts ?? FREE_SLOT_ATTEMPTS;
-  const backoffMs = tuning.backoffMs ?? FREE_SLOT_BACKOFF_MS;
-  const setTimer = tuning.setTimer ?? realTimer;
-  try {
-    for (let attempt = 1; ; attempt += 1) {
-      // oxlint-disable-next-line no-await-in-loop -- each retry follows the last answer
-      const reply = await client.pushUnsubscribe({ endpoint });
-      if (reply === null) return SLOT_UNREADABLE;
-      // An echo of another endpoint is not an answer about this one.
-      if (!("ok" in reply)) return reply.endpoint === endpoint ? null : SLOT_UNREADABLE;
-      // The endpoint passed `pushEndpoint` here, so `invalid_request` can only be a leader that predates the op.
-      if (reply.code === "invalid_request") return SLOT_KEPT_OLDER;
-      if (REFUSALS[reply.code]?.retryable !== true || attempt >= maxAttempts) return SLOT_KEPT;
-      // oxlint-disable-next-line no-await-in-loop -- the backoff between attempts
-      await new Promise<void>((resolve) => {
-        setTimer(resolve, backoffMs * 2 ** (attempt - 1));
-      });
-      if (signal?.aborted === true) return SLOT_KEPT;
+  const answer = await askUnsubscribe(client, endpoint, tuning, signal);
+  if (answer.kind === "removed") return null;
+  if (answer.kind === "older") return SLOT_KEPT_OLDER;
+  if (answer.kind === "unreadable") return SLOT_UNREADABLE;
+  return SLOT_KEPT;
+}
+
+export type PushRemoveOutcome = { readonly kind: "removed" } | PushFailure;
+
+/**
+ * The card's Remove for another device's row: `push-unsubscribe` for that entry's endpoint,
+ * `not_ready` and `conflict` asked again as the turn-off does. No signal: the removal continues
+ * if the person leaves Settings. Never rejects, never logs.
+ */
+export async function removeDevice(
+  client: PushClient,
+  endpoint: string,
+  tuning: RetryTuning = {},
+): Promise<PushRemoveOutcome> {
+  const answer = await askUnsubscribe(client, endpoint, tuning, undefined);
+  switch (answer.kind) {
+    case "removed":
+      return { kind: "removed" };
+    case "older":
+      return failure(REMOVE_OLDER);
+    case "unreadable":
+      return failure(UNREADABLE);
+    case "refused": {
+      const known = REFUSALS[answer.code];
+      return known === undefined
+        ? failure(`Couldn't remove the device: ${schedulerErrorText(answer.code)}.`)
+        : failure(known.text, known.retryable);
     }
-  } catch {
-    return SLOT_KEPT;
+    case "threw":
+      return answer.err instanceof RequestFailure
+        ? failure(answer.err.target === "relay" ? RELAY_UNREACHABLE : LEADER_UNREACHABLE, true)
+        : failure("Couldn't remove the device.");
+    case "aborted":
+      return failure("Couldn't remove the device.");
   }
 }
 

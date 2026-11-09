@@ -1,13 +1,17 @@
 import type { JSX } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
+import { PUSH_MAX_SUBSCRIPTIONS, type PushDevice } from "@seance/shared";
 import {
+  deviceRows,
   disablePush,
   enablePush,
   inspectPush,
+  removeDevice,
   type PushClient,
   type PushOffOutcome,
   type PushOutcome,
   type PushPrepared,
+  type PushRemoveOutcome,
 } from "../push.ts";
 import { browserPushEnv, pushSupported } from "../push-browser.ts";
 import { readPref, setPref, THEME_PREFS, type ThemePref } from "../theme.ts";
@@ -18,6 +22,11 @@ import { CredentialFields, useCredentials } from "./setup.tsx";
 
 /** Matches the client's settle hold-back: a dial that hasn't resolved by then has failed. */
 const RECONNECT_HOLD_MS = 1_500;
+
+/** A Remove tap arms for this long; a second tap inside it confirms. */
+const ARM_MS = 4_000;
+
+const DATE = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
 
 const THEME_LABELS: Record<ThemePref, string> = {
   system: "System",
@@ -184,6 +193,21 @@ function NotificationsCard(props: { push: PushClient }): JSX.Element {
     turnOff.current?.abort();
     turnOff.current = null;
   };
+  // Null until an inspection succeeds: the list shows only when the record was read.
+  const [devices, setDevices] = useState<readonly PushDevice[] | null>(null);
+  const [armed, setArmed] = useState<number | null>(null);
+  const [removing, setRemoving] = useState<number | null>(null);
+  const [removeLine, setRemoveLine] = useState<string | null>(null);
+  // Indices may shift whenever the list is replaced, so an armed tap must not outlive it.
+  const replaceDevices = (next: readonly PushDevice[]): void => {
+    setArmed(null);
+    setDevices(next);
+  };
+  useEffect(() => {
+    if (armed === null) return;
+    const timer = setTimeout(() => setArmed(null), ARM_MS);
+    return () => clearTimeout(timer);
+  }, [armed]);
   const checking = view.kind === "checking";
   // "On" is what this browser really holds, so permission alone never shows it: the browser is asked.
   useEffect(() => {
@@ -192,8 +216,10 @@ function NotificationsCard(props: { push: PushClient }): JSX.Element {
     void inspectPush(push, browserPushEnv).then((result) => {
       if (!current) return;
       prepared.current = result.kind === "off" ? result.prepared : null;
-      if (result.kind === "off" || result.kind === "on") setView({ kind: result.kind });
-      else setView({ kind: "failed", message: result.message, retry: "inspect" });
+      if (result.kind === "off" || result.kind === "on") {
+        replaceDevices(result.devices);
+        setView({ kind: result.kind });
+      } else setView({ kind: "failed", message: result.message, retry: "inspect" });
     });
     return () => {
       current = false;
@@ -210,7 +236,14 @@ function NotificationsCard(props: { push: PushClient }): JSX.Element {
     // `enablePush` never rejects; the catch is for a throw it did not foresee, so the card cannot stick on "Setting up…".
     enablePush(push, browserPushEnv, ready)
       .catch((): PushOutcome => ({ kind: "failed", message: "Couldn't set up notifications.", retryable: false }))
-      .then((outcome) => setView(outcome.kind === "enabled" ? { kind: "on" } : outcomeView(outcome)));
+      .then((outcome) => {
+        setView(outcome.kind === "enabled" ? { kind: "on" } : outcomeView(outcome));
+        if (outcome.kind !== "enabled") return;
+        // So the new row appears; only the list is taken from it.
+        void inspectPush(push, browserPushEnv).then((result) => {
+          if (result.kind === "on" || result.kind === "off") replaceDevices(result.devices);
+        });
+      });
   };
   // Re-inspected after, so a later Enable has what it needs ready for the gesture. Not after the note: the
   // browser holds no subscription by then (or the op already answered), so the leader's answer changes nothing it reads.
@@ -234,6 +267,7 @@ function NotificationsCard(props: { push: PushClient }): JSX.Element {
         // The turn-off worked, so a failing read is still "off": Enable prepares after the prompt when it has nothing ready.
         void inspectPush(push, browserPushEnv).then((result) => {
           prepared.current = result.kind === "off" ? result.prepared : null;
+          if (result.kind === "on" || result.kind === "off") replaceDevices(result.devices);
           setView({ kind: result.kind === "on" ? "on" : "off" });
         });
       });
@@ -245,6 +279,31 @@ function NotificationsCard(props: { push: PushClient }): JSX.Element {
     if (view.retry === "inspect") setView({ kind: "checking" });
     else if (view.retry === "disable") disable();
     else enable();
+  };
+
+  // The endpoint is read only here, into a local: nothing rendered, keyed or logged carries it.
+  const remove = (index: number): void => {
+    if (removing !== null || devices === null) return;
+    if (armed !== index) {
+      setArmed(index);
+      return;
+    }
+    const device = devices[index];
+    if (device === undefined) return;
+    setArmed(null);
+    setRemoving(index);
+    setRemoveLine(null);
+    removeDevice(push, device.endpoint)
+      .catch((): PushRemoveOutcome => ({ kind: "failed", message: "Couldn't remove the device.", retryable: false }))
+      .then((outcome) => {
+        if (outcome.kind === "removed") setDevices((held) => held?.filter((_, i) => i !== index) ?? null);
+        else setRemoveLine(outcome.message);
+        return inspectPush(push, browserPushEnv);
+      })
+      .then((result) => {
+        if (result.kind === "on" || result.kind === "off") replaceDevices(result.devices);
+      })
+      .finally(() => setRemoving(null));
   };
 
   const busy = view.kind === "working" || view.kind === "stopping";
@@ -264,6 +323,39 @@ function NotificationsCard(props: { push: PushClient }): JSX.Element {
         <button type="button" className="push-button" disabled={busy} onClick={disable}>
           Turn off
         </button>
+      )}
+      {devices !== null && (
+        <div className="push-devices">
+          <span className="push-devices-title">
+            Devices ({devices.length} of {PUSH_MAX_SUBSCRIPTIONS})
+          </span>
+          {deviceRows(devices).map((row, index) => (
+            // The index, never the endpoint: nothing rendered may carry one.
+            // oxlint-disable-next-line react/no-array-index-key
+            <div key={index} className="push-device">
+              <span className="push-device-title">{row.title}</span>
+              {row.addedAt !== undefined && <span className="push-device-meta">Added {DATE.format(row.addedAt)}</span>}
+              {row.self && <span className="push-device-meta">This device</span>}
+              {!row.self && (
+                <button
+                  type="button"
+                  className="push-device-remove"
+                  disabled={removing !== null}
+                  onClick={() => remove(index)}
+                >
+                  {removing === index ? "Removing…" : armed === index ? "Tap again to remove" : "Remove"}
+                </button>
+              )}
+            </div>
+          ))}
+          {removeLine !== null && <p className="push-line">{removeLine}</p>}
+          {deviceRows(devices).some((row) => !row.self) && (
+            <p className="push-line">
+              Remove frees a device's slot until it opens Séance again. To keep a device you still use off, turn
+              notifications off on that device.
+            </p>
+          )}
+        </div>
       )}
     </div>
   );
