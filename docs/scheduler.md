@@ -874,6 +874,19 @@ of M4 has landed.
   alternatives.
   The `strategy` field left the wire 2026-10-27; the parser still drops a stored one.
 
+- **Removing another device's push subscription** — _Decided_ by the owner, 2026-10-26. Any PWA
+  frees another device's slot in `settings:main` (at most `PUSH_MAX_SUBSCRIPTIONS`) with the
+  existing `push-unsubscribe { endpoint }`: no new op, no opaque device id, no "remove all
+  others". The Notifications card lists every entry once its reading succeeded: the entry's
+  `label` (the browser's "Browser · OS", sent with `push-subscribe`, optional and display-only)
+  or, for one without, the push service's vendor and "added before labels"; `addedAt` (the
+  leader's clock) when known; "This device" for its own row, which has no Remove. Remove sits
+  behind a tap-again confirm, and no endpoint is ever rendered, logged or persisted. A device
+  still in use re-subscribes on its next load, since its re-sync cannot tell a removal from a 410
+  prune. Accepted over keeping a list of removed endpoints in the record. The card says so, and
+  Turn off on that device is what keeps it off. Follow-up, not built: the list on a browser whose
+  card never reads the record (`unsupported`, `denied`).
+
 ## Settled defaults (interview, 2026-10-15)
 
 Nothing below is open. An implementer who wants a different value changes this section in the
