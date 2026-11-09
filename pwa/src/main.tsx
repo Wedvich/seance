@@ -6,6 +6,7 @@ import { dropLegacyHidden, dropLegacyPending, readForm, readFormFiles, trackForm
 import { deriveAccountKey, FLEET_QUOTA_INTERVAL_MS, RelayClient } from "@seance/shared";
 import { loadPsk, loadPskBase, readBearer, readRelayUrl } from "./relay/keys.ts";
 import "./screen.css";
+import { watchPushResync } from "./push-browser.ts";
 import type { PersistedForm } from "./state.ts";
 import { deliverShare, shareMarker } from "./share-inbox.ts";
 import { Store } from "./store.ts";
@@ -80,7 +81,8 @@ if (key === null || token === null) {
   });
 
   client.start();
-  render(<App store={store} />, container);
+  watchPushResync(client);
+  render(<App store={store} push={client} />, container);
 
   // After the form's writer, so appended share text is saved. The form is up first: Cache Storage
   // can stall, and the files stay in the inbox for a later boot, never dropped.

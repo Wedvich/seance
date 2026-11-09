@@ -249,7 +249,7 @@ export interface QueueAudit {
   /** A `discard` that deleted the unreadable record at `task` and `version`. */
   readonly discarded: (id: string, taskId: string, version: number) => Promise<void>;
   readonly refused: (
-    op: "cancel" | "mark-done" | "run-now" | "pause" | "resume" | "discard",
+    op: "cancel" | "mark-done" | "run-now" | "pause" | "resume" | "discard" | "push-subscribe",
     id: string,
     code: string,
     /** What the request named: a `cancel`, `mark-done` or `run-now`'s task, a `pause` or `resume`'s account (absent: the whole queue). */
@@ -257,6 +257,8 @@ export interface QueueAudit {
   ) => Promise<void>;
   /** A `pause` or `resume` answered with the holds; `account` absent is the whole queue. */
   readonly held: (op: "pause" | "resume", id: string, account: string | undefined) => Promise<void>;
+  /** A `push-subscribe` that is now held (added, or already was). Names no endpoint, host or key: the endpoint is the subscription's secret. */
+  readonly subscribed: (id: string) => Promise<void>;
 }
 
 /**
@@ -280,6 +282,7 @@ export function queueAudit(sink: AuditSink): QueueAudit {
     discarded: (id, taskId, version) => emit(`op=discard id=${quote(id)} task=${quote(taskId)} version=${version} ok`),
     held: (op, id, account) =>
       emit(`op=${op} id=${quote(id)}${account === undefined ? "" : ` account=${quote(account)}`} ok`),
+    subscribed: (id) => emit(`op=push-subscribe id=${quote(id)} ok`),
     refused: (op, id, code, subject) =>
       emit(
         `op=${op} id=${quote(id)}${subject?.taskId === undefined ? "" : ` task=${quote(subject.taskId)}`}${subject?.account === undefined ? "" : ` account=${quote(subject.account)}`} refused code=${code}`,

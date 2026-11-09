@@ -17,12 +17,16 @@ import {
   RequestFailure,
   sealAccountRecord,
   sealFleetQuotaRecord,
+  sealAtRest,
+  SCHEDULER_ID,
   sealTaskRecord,
+  SETTINGS_KEY,
   taskKey,
   TASK_REQUEST_LIMITS,
   TASK_SPEC_LIMITS,
   toBase64,
   type FleetQuotaEntry,
+  type AtRestOp,
   type StoreRecord,
   type Task,
   type UnreadableRecord,
@@ -635,5 +639,80 @@ describe("fleet quota record", () => {
     double.answer = () => "silent";
     await client.refreshFleetQuota();
     expect(client.getState().fleetQuota).toEqual([ENTRY]);
+  });
+});
+
+describe("pushSettings", () => {
+  const publicKey = Buffer.alloc(65, 4).toString("base64url");
+  const privateKey = Buffer.alloc(32, 9).toString("base64url");
+  const subscription = {
+    endpoint: "https://fcm.googleapis.com/fcm/send/abc",
+    keys: { p256dh: Buffer.alloc(65, 1).toString("base64url"), auth: Buffer.alloc(16, 2).toString("base64url") },
+  };
+  const body = {
+    version: 3,
+    vapid: { publicKey, privateKey },
+    linearKey: "lin_api_secret",
+    subscriptions: [subscription],
+  };
+
+  async function settingsRecord(
+    overrides: { at?: string; to?: string; sealWith?: CryptoKey; op?: AtRestOp; payload?: unknown } = {},
+  ): Promise<StoreRecord> {
+    const env = await sealAtRest(
+      overrides.sealWith ?? key,
+      { to: overrides.to ?? SCHEDULER_ID, from: SCHEDULER_ID },
+      overrides.op ?? AT_REST_OPS.settings,
+      overrides.payload ?? body,
+    );
+    return { key: overrides.at ?? SETTINGS_KEY, version: 3, env };
+  }
+
+  async function ask(record: StoreRecord | null, endpoint?: string): Promise<unknown> {
+    const double = startDouble();
+    const client = await connect(double);
+    if (record !== null) double.records.set(SETTINGS_KEY, record);
+    // The key it was asked under is the one it is read for: a double that answers another key's record is no answer.
+    double.answer = (frame) => ({ t: "store-record", re: frame["id"], record });
+    return client.pushSettings(endpoint);
+  }
+
+  test("returns the public key and whether the endpoint is held, and nothing else of the record", async () => {
+    const held = await ask(await settingsRecord(), subscription.endpoint);
+    expect(held).toEqual({ publicKey, subscribed: true });
+    expect(await ask(await settingsRecord(), "https://fcm.googleapis.com/fcm/send/other")).toEqual({
+      publicKey,
+      subscribed: false,
+    });
+    expect(await ask(await settingsRecord())).toEqual({ publicKey, subscribed: false });
+    const text = JSON.stringify(held);
+    expect(text).not.toContain(privateKey);
+    expect(text).not.toContain("lin_api_secret");
+  });
+
+  test("is null for no record, a record that is not the settings one, or one it cannot trust", async () => {
+    const noVapid = { version: 3, subscriptions: [subscription] };
+    for (const record of [
+      null,
+      await settingsRecord({ at: "settings:other" }),
+      await settingsRecord({ to: APP_ID }),
+      await settingsRecord({ sealWith: otherKey }),
+      await settingsRecord({ op: AT_REST_OPS.pauseState }),
+      await settingsRecord({ payload: { ...body, version: 2 } }),
+      await settingsRecord({ payload: noVapid }),
+      await settingsRecord({ payload: { version: 3, vapid: { publicKey: "short", privateKey } } }),
+    ]) {
+      // oxlint-disable-next-line no-await-in-loop -- one double per case
+      expect(await ask(record)).toBeNull();
+    }
+  });
+
+  test("a refusal is its own answer, not an absent record, and nothing answering fails as a store request does", async () => {
+    const double = startDouble();
+    const client = await connect(double, 100);
+    double.answer = (frame) => ({ t: "store-refused", re: frame["id"], code: "rate_limited" });
+    expect(await client.pushSettings()).toEqual({ ok: false, code: "rate_limited" });
+    double.answer = () => "silent";
+    expect(await failure(client.pushSettings())).toBe("timeout");
   });
 });

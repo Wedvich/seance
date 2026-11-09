@@ -7,6 +7,7 @@ import {
   openAtRest,
   parseSettingsRecord,
   parseStoreReply,
+  PUSH_MAX_SUBSCRIPTIONS,
   SCHEDULER_ID,
   SETTINGS_KEY,
   STORE_TIMEOUT_MS,
@@ -415,6 +416,171 @@ describe("takeover: a leader stopped between spawn and verdict", () => {
   }, 60_000);
 });
 
+/**
+ * RFC 8291 Appendix A's user agent: a real P-256 point, so a send gets as far as the request,
+ * where `pushGuardFetch` refuses it. Keys that were not a point would fail earlier, at
+ * encryption, and prove nothing about the seam.
+ */
+const USER_AGENT_KEYS = {
+  p256dh: "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4",
+  auth: "BTBZMqHH6r4Tts7J_aSIgg",
+};
+
+describe("settings record: the leader's term creates it, and no later term replaces it", () => {
+  /** What an app's `store-get` of `settings:main` opens to, as any PSK holder reads it. */
+  const readSettings = async (): Promise<{ readonly version: number; readonly record: SettingsRecord } | null> => {
+    const app = await connectApp(stack.relay);
+    try {
+      const id = crypto.randomUUID();
+      app.send({ t: "store-get", id, key: SETTINGS_KEY });
+      const reply = parseStoreReply(await app.waitForRe<{ re: string }>(id, STORE_TIMEOUT_MS));
+      if (reply?.t !== "store-record") throw new Error(`store-get answered ${JSON.stringify(reply)}`);
+      if (reply.record === null) return null;
+      expect(reply.record.env.to).toBe(SCHEDULER_ID);
+      const opened = await openAtRest(stack.appKey, reply.record.env, AT_REST_OPS.settings);
+      const record = parseSettingsRecord(opened.payload);
+      if (record === null) throw new Error("the settings record does not parse");
+      return { version: reply.record.version, record };
+    } finally {
+      app.close();
+    }
+  };
+
+  /** The `expect` of each settings create or overwrite the daemon sent, in order. */
+  const settingsPuts = (): readonly number[] =>
+    (daemonStore?.mock.calls ?? []).flatMap(([frame]) =>
+      frame.t === "store-put" && frame.key === SETTINGS_KEY ? [frame.expect] : [],
+    );
+  /** Each settings read the daemon sent, as the promise of its answer. */
+  const settingsReads = (): readonly Promise<unknown>[] =>
+    (daemonStore?.mock.calls ?? []).flatMap(([frame], i) =>
+      frame.t === "store-get" && frame.key === SETTINGS_KEY
+        ? [Promise.resolve(daemonStore?.mock.results[i]?.value)]
+        : [],
+    );
+
+  test("the suite's first term created the record with a VAPID pair; a re-lead reads the same pair and moves nothing; nothing logs the key", async () => {
+    const lines: string[] = [];
+    const out = spyOn(console, "log").mockImplementation((...args) => void lines.push(args.join(" ")));
+    const err = spyOn(console, "error").mockImplementation((...args) => void lines.push(args.join(" ")));
+    try {
+      await stack.restartDaemon();
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      // Created beside takeover, not before it.
+      await pollUntil(async () => (await readSettings()) !== null, "the leader to create the settings record", 10_000);
+      const created = await readSettings();
+      // The relay was fresh and this daemon's first term is the only writer: its one create is the record's.
+      expect(settingsPuts()).toEqual([0]);
+      expect(created?.version).toBe(1);
+      expect(created?.record.version).toBe(1);
+      const publicKey = created?.record.vapid?.publicKey ?? "";
+      const privateKey = created?.record.vapid?.privateKey ?? "";
+      expect(publicKey).toHaveLength(87);
+
+      // A new term on the same relay: it reads the record, whose floor it already holds.
+      const term = stack.daemon.leader.term();
+      const readsBefore = settingsReads().length;
+      await stack.restartDaemon();
+      await pollUntil(
+        () => stack.daemon.leader.term() !== null && stack.daemon.leader.term() !== term,
+        "a later term",
+        10_000,
+      );
+      await stack.daemon.leader.settled();
+      // Positive first: the later term's read of the record has been answered, so the sleep below
+      // waits out a write that load would have made, not a load that never ran.
+      await pollUntil(() => settingsReads().length > readsBefore, "the later term to read the settings record", 10_000);
+      await Promise.allSettled(settingsReads());
+      // A sleep is right before a negative assertion: a write that never happened cannot be polled.
+      await Bun.sleep(300);
+      expect(settingsPuts()).toEqual([0]);
+      const again = await readSettings();
+      expect(again?.version).toBe(1);
+      expect(again?.record.vapid?.publicKey).toBe(publicKey);
+
+      expect(lines.some((line) => line.includes("settings unavailable"))).toBe(false);
+      expect(lines.some((line) => line.includes(publicKey) || line.includes(privateKey))).toBe(false);
+    } finally {
+      out.mockRestore();
+      err.mockRestore();
+    }
+  }, 30_000);
+
+  test("push-subscribe adds a browser's subscription to the record, is idempotent, refuses a host off the allowlist, and stops at the cap", async () => {
+    await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+    await stack.daemon.leader.settled();
+    const app = startApp(stack);
+    const keys = USER_AGENT_KEYS;
+    const sub = (id: string, host = "fcm.googleapis.com") => ({ endpoint: `https://${host}/fcm/send/${id}`, keys });
+    try {
+      await app.waitForApp((state) => state.relay.scheduler.kind === "ready", "the leader verified");
+      // Settings load beside takeover, so the first answers can be `not_ready`.
+      await pollUntil(
+        async () => {
+          const reply = await app.client.pushSubscribe(sub("first"));
+          return reply !== null && "endpoint" in reply;
+        },
+        "the leader to take a subscription",
+        10_000,
+      );
+      const held = await readSettings();
+      expect(held?.record.subscriptions).toEqual([sub("first")]);
+      const version = held?.version;
+
+      expect(await app.client.pushSubscribe(sub("first"))).toEqual({ endpoint: sub("first").endpoint });
+      expect((await readSettings())?.version).toBe(version);
+
+      expect(await app.client.pushSubscribe(sub("x", "example.com"))).toMatchObject({
+        ok: false,
+        code: "invalid_request",
+      });
+
+      for (let i = 1; i < PUSH_MAX_SUBSCRIPTIONS; i += 1) {
+        // oxlint-disable-next-line no-await-in-loop -- each lands on the version the last wrote
+        expect(await app.client.pushSubscribe(sub(`fill-${i}`))).toEqual({ endpoint: sub(`fill-${i}`).endpoint });
+      }
+      expect(await app.client.pushSubscribe(sub("over"))).toMatchObject({ ok: false, code: "subscriptions_full" });
+      expect((await readSettings())?.record.subscriptions).toHaveLength(PUSH_MAX_SUBSCRIPTIONS);
+    } finally {
+      app.stop();
+    }
+  }, 60_000);
+
+  test("an alert the leader raises is pushed at the seam, which refuses it: no real push service is contacted", async () => {
+    const app = startApp(stack);
+    const taskId = "e2e-push-stuck";
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await app.waitForApp((state) => state.relay.scheduler.kind === "ready", "the leader verified");
+      const keys = USER_AGENT_KEYS;
+      await pollUntil(
+        async () => {
+          const reply = await app.client.pushSubscribe({ endpoint: "https://fcm.googleapis.com/fcm/send/guard", keys });
+          // Full is fine: the record then holds the subscriptions an earlier test wrote.
+          return reply !== null && ("endpoint" in reply || reply.code === "subscriptions_full");
+        },
+        "the leader to answer the subscribe",
+        10_000,
+      );
+      // Escalates on the next term's first pass, and the term pushes beside its log line.
+      await stack.seedTask({
+        id: taskId,
+        spec: { repo: "github.com/acme/app", mode: "worktree" },
+        state: "needs-input",
+        createdAt: Date.now(),
+        needsInputSince: 1,
+      });
+      await stack.restartDaemon();
+      await pollUntil(() => stack.pushAttempts().length > 0, "the leader to try a push", 10_000);
+      expect(stack.pushAttempts().every((host) => host === "fcm.googleapis.com")).toBe(true);
+    } finally {
+      await app.client.cancel(taskId).catch(() => null);
+      app.stop();
+    }
+  }, 60_000);
+});
+
 describe("continue: an app's continue task ↔ leader ↔ the machine that ran the failed session", () => {
   // Only the machine's own launch ledger knows where the old session ran, so the ledger is
   // seeded with a task note instead of running a failing session first; everything after the
@@ -527,86 +693,4 @@ describe("continue: an app's continue task ↔ leader ↔ the machine that ran t
       app.stop();
     }
   }, 60_000);
-});
-
-describe("settings record: the leader's term creates it, and no later term replaces it", () => {
-  /** What an app's `store-get` of `settings:main` opens to, as any PSK holder reads it. */
-  const readSettings = async (): Promise<{ readonly version: number; readonly record: SettingsRecord } | null> => {
-    const app = await connectApp(stack.relay);
-    try {
-      const id = crypto.randomUUID();
-      app.send({ t: "store-get", id, key: SETTINGS_KEY });
-      const reply = parseStoreReply(await app.waitForRe<{ re: string }>(id, STORE_TIMEOUT_MS));
-      if (reply?.t !== "store-record") throw new Error(`store-get answered ${JSON.stringify(reply)}`);
-      if (reply.record === null) return null;
-      expect(reply.record.env.to).toBe(SCHEDULER_ID);
-      const opened = await openAtRest(stack.appKey, reply.record.env, AT_REST_OPS.settings);
-      const record = parseSettingsRecord(opened.payload);
-      if (record === null) throw new Error("the settings record does not parse");
-      return { version: reply.record.version, record };
-    } finally {
-      app.close();
-    }
-  };
-
-  /** The `expect` of each settings create or overwrite the daemon sent, in order. */
-  const settingsPuts = (): readonly number[] =>
-    (daemonStore?.mock.calls ?? []).flatMap(([frame]) =>
-      frame.t === "store-put" && frame.key === SETTINGS_KEY ? [frame.expect] : [],
-    );
-  /** Each settings read the daemon sent, as the promise of its answer. */
-  const settingsReads = (): readonly Promise<unknown>[] =>
-    (daemonStore?.mock.calls ?? []).flatMap(([frame], i) =>
-      frame.t === "store-get" && frame.key === SETTINGS_KEY
-        ? [Promise.resolve(daemonStore?.mock.results[i]?.value)]
-        : [],
-    );
-
-  test("the suite's first term created the record with a VAPID pair; a re-lead reads the same pair and moves nothing; nothing logs the key", async () => {
-    const lines: string[] = [];
-    const out = spyOn(console, "log").mockImplementation((...args) => void lines.push(args.join(" ")));
-    const err = spyOn(console, "error").mockImplementation((...args) => void lines.push(args.join(" ")));
-    try {
-      await stack.restartDaemon();
-      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
-      await stack.daemon.leader.settled();
-      // Created beside takeover, not before it.
-      await pollUntil(async () => (await readSettings()) !== null, "the leader to create the settings record", 10_000);
-      const created = await readSettings();
-      // The relay was fresh and this daemon's first term is the only writer: its one create is the record's.
-      expect(settingsPuts()).toEqual([0]);
-      expect(created?.version).toBe(1);
-      expect(created?.record.version).toBe(1);
-      const publicKey = created?.record.vapid?.publicKey ?? "";
-      const privateKey = created?.record.vapid?.privateKey ?? "";
-      expect(publicKey).toHaveLength(87);
-
-      // A new term on the same relay: it reads the record, whose floor it already holds.
-      const term = stack.daemon.leader.term();
-      const readsBefore = settingsReads().length;
-      await stack.restartDaemon();
-      await pollUntil(
-        () => stack.daemon.leader.term() !== null && stack.daemon.leader.term() !== term,
-        "a later term",
-        10_000,
-      );
-      await stack.daemon.leader.settled();
-      // Positive first: the later term's read of the record has been answered, so the sleep below
-      // waits out a write that load would have made, not a load that never ran.
-      await pollUntil(() => settingsReads().length > readsBefore, "the later term to read the settings record", 10_000);
-      await Promise.allSettled(settingsReads());
-      // A sleep is right before a negative assertion: a write that never happened cannot be polled.
-      await Bun.sleep(300);
-      expect(settingsPuts()).toEqual([0]);
-      const again = await readSettings();
-      expect(again?.version).toBe(1);
-      expect(again?.record.vapid?.publicKey).toBe(publicKey);
-
-      expect(lines.some((line) => line.includes("settings unavailable"))).toBe(false);
-      expect(lines.some((line) => line.includes(publicKey) || line.includes(privateKey))).toBe(false);
-    } finally {
-      out.mockRestore();
-      err.mockRestore();
-    }
-  }, 30_000);
 });

@@ -106,6 +106,7 @@ export async function withLeader(
   const replies = new AsyncQueue<Plain>("replies");
   const leader = createLeader({
     selfDeviceId: "self",
+    pushSubject: "https://relay.test",
     local: noLocalOps,
     store,
     ...(floor === undefined ? {} : { floor }),

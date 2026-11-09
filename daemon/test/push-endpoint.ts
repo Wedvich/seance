@@ -16,6 +16,8 @@ export interface PushEndpoint {
   readonly requests: () => readonly PushRequest[];
   /** The status later requests get: 201 by default, as a push service answers; 404 or 410 for a gone subscription, 429 for throttling. */
   readonly respondWith: (status: number) => void;
+  /** Later requests are answered 302 with this `Location`, which a sender that followed it would reach; null clears it. */
+  readonly redirectTo: (location: string | null) => void;
   /** Withholds answers until the returned release is called: a push service that takes seconds. */
   readonly hold: () => () => void;
   readonly waitForRequests: (count: number, timeoutMs?: number) => Promise<readonly PushRequest[]>;
@@ -32,6 +34,7 @@ export interface PushEndpoint {
 export function startPushEndpoint(): PushEndpoint {
   const received: PushRequest[] = [];
   let status = 201;
+  let location: string | null = null;
   // One gate while any hold is outstanding; it opens when the last release lands, so an earlier
   // release cannot free a request a later hold still withholds.
   let gate: { readonly promise: Promise<void>; readonly open: () => void } | null = null;
@@ -57,7 +60,9 @@ export function startPushEndpoint(): PushEndpoint {
       });
       // Read at arrival, so a status changed while this request is held does not reach it.
       const answer = status;
+      const redirect = location;
       if (gate !== null) await gate.promise;
+      if (redirect !== null) return new Response(null, { status: 302, headers: { location: redirect } });
       return new Response(null, { status: answer });
     },
   });
@@ -66,6 +71,9 @@ export function startPushEndpoint(): PushEndpoint {
     requests: () => [...received],
     respondWith: (next) => {
       status = next;
+    },
+    redirectTo: (next) => {
+      location = next;
     },
     hold: () => {
       if (gate === null) {
