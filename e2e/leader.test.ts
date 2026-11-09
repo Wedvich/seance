@@ -26,7 +26,7 @@ import { fixtureOrigin, q, startSuite, watchLeader, type Suite } from "./suite.t
 let suite: Suite | undefined;
 let base: string;
 let stack: Stack;
-/** Every store frame the in-process daemon sends, from before its first term: the settings record's history. */
+/** Every store frame the in-process daemon sends, from before its first term; a second daemon's are not here. */
 let daemonStore: Mock<DaemonRelayClient["store"]> | undefined;
 
 beforeAll(async () => {
@@ -459,7 +459,7 @@ describe("settings record: the leader's term creates it, and no later term repla
         : [],
     );
 
-  test("the suite's first term created the record with a VAPID pair; a re-lead reads the same pair and moves nothing; nothing logs the key", async () => {
+  test("a leader's term created the record once with a VAPID pair; a re-lead reads the same pair and moves nothing; nothing logs the key", async () => {
     const lines: string[] = [];
     const out = spyOn(console, "log").mockImplementation((...args) => void lines.push(args.join(" ")));
     const err = spyOn(console, "error").mockImplementation((...args) => void lines.push(args.join(" ")));
@@ -470,8 +470,8 @@ describe("settings record: the leader's term creates it, and no later term repla
       // Created beside takeover, not before it.
       await pollUntil(async () => (await readSettings()) !== null, "the leader to create the settings record", 10_000);
       const created = await readSettings();
-      // The relay was fresh and this daemon's first term is the only writer: its one create is the record's.
-      expect(settingsPuts()).toEqual([0]);
+      // Not necessarily this daemon's create: the leadership test stops it as soon as it leads, so LeaderBox's
+      // term (a subprocess, outside the spy) may load settings first. Version 1 is one create, no overwrite.
       expect(created?.version).toBe(1);
       expect(created?.record.version).toBe(1);
       const publicKey = created?.record.vapid?.publicKey ?? "";
@@ -481,6 +481,7 @@ describe("settings record: the leader's term creates it, and no later term repla
       // A new term on the same relay: it reads the record, whose floor it already holds.
       const term = stack.daemon.leader.term();
       const readsBefore = settingsReads().length;
+      const putsBefore = settingsPuts();
       await stack.restartDaemon();
       await pollUntil(
         () => stack.daemon.leader.term() !== null && stack.daemon.leader.term() !== term,
@@ -494,7 +495,7 @@ describe("settings record: the leader's term creates it, and no later term repla
       await Promise.allSettled(settingsReads());
       // A sleep is right before a negative assertion: a write that never happened cannot be polled.
       await Bun.sleep(300);
-      expect(settingsPuts()).toEqual([0]);
+      expect(settingsPuts()).toEqual(putsBefore);
       const again = await readSettings();
       expect(again?.version).toBe(1);
       expect(again?.record.vapid?.publicKey).toBe(publicKey);
