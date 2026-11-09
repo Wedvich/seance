@@ -1242,6 +1242,7 @@ describe("leader push", () => {
       expect(await subscribe(leader, replies, { ...rekeyed, label: "Chrome · Linux" })).toEqual({
         endpoint: old.endpoint,
       });
+      expect(settings.puts).toHaveLength(2);
       expect(settings.subscriptions()).toEqual([{ ...rekeyed, label: "Chrome · Linux" }]);
     } finally {
       leader.stop();

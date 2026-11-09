@@ -18,6 +18,7 @@ import {
   enablePush,
   inspectPush,
   PushTimeout,
+  readDevices,
   removeDevice,
   resyncPush,
   watchResync,
@@ -896,6 +897,14 @@ describe("deviceLabel", () => {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36 OPR/115.0.0.0",
         "Opera · Windows",
       ],
+      [
+        "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 Chrome/130.0.0.0 Mobile Safari/537.36 EdgA/130.0.0.0",
+        "Edge · Android",
+      ],
+      [
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 Version/18.1 EdgiOS/130.0.0.0 Mobile/15E148 Safari/605.1.15",
+        "Edge · iOS",
+      ],
       ["", undefined],
       ["curl/8.0", undefined],
     ];
@@ -964,6 +973,32 @@ describe("the device label on the wire", () => {
     expect(calls.unsubscribed).toEqual([]);
   });
 
+  test("Enable on a held browser whose backfill fails is still enabled, never a failure line", async () => {
+    const { client, env, calls } = harness({
+      userAgent: CHROME_LINUX,
+      existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
+      settings: { publicKey: PUBLIC_KEY, subscribed: true, devices: [SELF] },
+      reply: { ok: false, code: "not_ready", message: "raw" },
+    });
+    expect(await enablePush(client, env)).toEqual({ kind: "enabled" });
+    expect(calls.sent).toHaveLength(1);
+    expect(calls.unsubscribed).toEqual([]);
+  });
+
+  test("readDevices lists the record's devices without touching the opt-out mark; null when unreadable", async () => {
+    const devices: readonly PushDevice[] = [SELF];
+    const held = harness({
+      existing: { endpoint: ENDPOINT, key: PUBLIC_KEY },
+      settings: { publicKey: PUBLIC_KEY, subscribed: true, devices },
+    });
+    expect(await readDevices(held.client, held.env)).toEqual(devices);
+    expect(held.calls.optedOut).toEqual([]);
+    const down = harness({ settings: new Error("boom") });
+    expect(await readDevices(down.client, down.env)).toBeNull();
+    const none = harness({ settings: null });
+    expect(await readDevices(none.client, none.env)).toBeNull();
+  });
+
   test("inspectPush hands back the record's devices", async () => {
     const devices: readonly PushDevice[] = [
       SELF,
@@ -1005,6 +1040,15 @@ describe("removeDevice", () => {
     const out = await removeDevice(racing.client, OTHER, { setTimer: instantTimer().setTimer });
     expect(out).toMatchObject({ kind: "failed", retryable: true });
     expect(racing.calls.unsubscribeSent).toHaveLength(4);
+  });
+
+  test("a refusal that cannot change is not asked again", async () => {
+    const { client, calls } = harness({
+      unsubscribeReply: { ok: false, code: "settings_unavailable", message: "raw" },
+    });
+    const out = await removeDevice(client, OTHER, { setTimer: instantTimer().setTimer });
+    expect(out).toMatchObject({ kind: "failed" });
+    expect(calls.unsubscribeSent).toHaveLength(1);
   });
 
   test("an unknown refusal carries the shared text; an unreachable leader is retryable", async () => {

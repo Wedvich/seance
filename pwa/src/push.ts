@@ -209,7 +209,7 @@ async function prepare(client: PushClient, env: PushEnv): Promise<PushPrepared |
 }
 
 const BROWSERS: readonly (readonly [RegExp, string])[] = [
-  [/Edg\//u, "Edge"],
+  [/Edg(?:e|A|iOS)?\//u, "Edge"],
   [/OPR\//u, "Opera"],
   [/SamsungBrowser\//u, "Samsung Internet"],
   [/Firefox\/|FxiOS\//u, "Firefox"],
@@ -320,6 +320,19 @@ export async function inspectPush(client: PushClient, env: PushEnv): Promise<Pus
 }
 
 /**
+ * The record's device list alone, for the card's list refresh. Unlike `inspectPush` it never
+ * touches the opt-out mark, so it cannot undo a Turn off that is still in flight. Null on any failure.
+ */
+export async function readDevices(client: PushClient, env: PushEnv): Promise<readonly PushDevice[] | null> {
+  try {
+    const prepared = await prepare(client, env);
+    return "kind" in prepared ? null : prepared.devices;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The button's flow: ask for permission, then subscribe and hand the subscription to the
  * leader. Called from the click handler itself, and with `prepared` from `inspectPush` the
  * only awaits before `subscribe` are the permission prompt and, for a subscription under
@@ -343,7 +356,10 @@ export async function enablePush(
   env.setOptedOut(false);
   return guarded(async () => {
     const ready = prepared ?? (await prepare(client, env));
-    return "kind" in ready ? ready : subscribeWith(client, ready);
+    if ("kind" in ready) return ready;
+    const outcome = await subscribeWith(client, ready);
+    // A held browser is already on: its failed label backfill is cosmetic and must not read as a failed Enable.
+    return ready.held && outcome.kind === "failed" ? { kind: "enabled" } : outcome;
   });
 }
 

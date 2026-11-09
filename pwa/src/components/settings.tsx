@@ -6,6 +6,7 @@ import {
   disablePush,
   enablePush,
   inspectPush,
+  readDevices,
   removeDevice,
   type PushClient,
   type PushOffOutcome,
@@ -239,9 +240,9 @@ function NotificationsCard(props: { push: PushClient }): JSX.Element {
       .then((outcome) => {
         setView(outcome.kind === "enabled" ? { kind: "on" } : outcomeView(outcome));
         if (outcome.kind !== "enabled") return;
-        // So the new row appears; only the list is taken from it.
-        void inspectPush(push, browserPushEnv).then((result) => {
-          if (result.kind === "on" || result.kind === "off") replaceDevices(result.devices);
+        // So the new row appears. `readDevices`, not `inspectPush`: that one clears the opt-out mark, which a Turn off started meanwhile has just set.
+        void readDevices(push, browserPushEnv).then((list) => {
+          if (list !== null) replaceDevices(list);
         });
       });
   };
@@ -296,12 +297,16 @@ function NotificationsCard(props: { push: PushClient }): JSX.Element {
     removeDevice(push, device.endpoint)
       .catch((): PushRemoveOutcome => ({ kind: "failed", message: "Couldn't remove the device.", retryable: false }))
       .then((outcome) => {
-        if (outcome.kind === "removed") setDevices((held) => held?.filter((_, i) => i !== index) ?? null);
-        else setRemoveLine(outcome.message);
-        return inspectPush(push, browserPushEnv);
+        // By endpoint, not index: the list may have been replaced while this ran. Cleared with the row, so the
+        // device that slides into `index` does not read "Removing…" during the re-read.
+        if (outcome.kind === "removed") {
+          setDevices((held) => held?.filter((d) => d.endpoint !== device.endpoint) ?? null);
+          setRemoving(null);
+        } else setRemoveLine(outcome.message);
+        return readDevices(push, browserPushEnv);
       })
-      .then((result) => {
-        if (result.kind === "on" || result.kind === "off") replaceDevices(result.devices);
+      .then((list) => {
+        if (list !== null) replaceDevices(list);
       })
       .finally(() => setRemoving(null));
   };
