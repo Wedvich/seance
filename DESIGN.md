@@ -1607,7 +1607,8 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
 - `push-subscribe { endpoint, keys: { p256dh, auth }, label? }` (`PushSubscribeRequest`, a Web Push
   subscription; `label` is at most `PUSH_LABEL_MAX_LENGTH`, trimmed, non-empty and free of control,
   format and lone-surrogate characters, a bad one is `invalid_request`, and a leader that predates
-  it drops it) → `{ endpoint }` (the normalized form it stored), or `subscriptions_full`
+  it drops it; the record's `linearKey` is held to the same character rule, so no field can seal
+  past the store's cap on JSON escapes) → `{ endpoint }` (the normalized form it stored), or `subscriptions_full`
   past `PUSH_MAX_SUBSCRIPTIONS`; in `SCHEDULER_OPS` (10 s timeout). Refusals: `invalid_request`
   (a malformed request, or a leader older than the op, which answers it as it does any op it does
   not handle), `not_ready` (the term's settings read has not landed; retry), `settings_unavailable`

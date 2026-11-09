@@ -877,7 +877,9 @@ of M4 has landed.
 - **Removing another device's push subscription** — _Decided_ by the owner, 2026-10-26. Any PWA
   frees another device's slot in `settings:main` (at most `PUSH_MAX_SUBSCRIPTIONS`) with the
   existing `push-unsubscribe { endpoint }`: no new op, no opaque device id, no "remove all
-  others". The Notifications card lists every entry once its reading succeeded: the entry's
+  others". No opaque id: every PSK holder already reads every endpoint from `settings:main`, so an
+  id under a PSK-derived key would hide nothing. No "remove all others": it also kills live
+  devices, and the per-row Remove covers the lost-device case. The Notifications card lists every entry once its reading succeeded: the entry's
   `label` (the browser's "Browser · OS", sent with `push-subscribe`, optional and display-only)
   or, for one without, the push service's vendor and "added before labels"; `addedAt` (the
   leader's clock) when known; "This device" for its own row, which has no Remove. Remove sits
