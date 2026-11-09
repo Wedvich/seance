@@ -6,7 +6,6 @@ import type {
   SchedulerAvailability,
   Task,
   TaskReply,
-  TaskRequest,
 } from "@seance/shared";
 import {
   continuationSpec,
@@ -21,9 +20,10 @@ import {
   sentence,
   storeErrorText,
   TASK_PHASES,
+  taskRequest,
   type RelayClient,
 } from "@seance/shared";
-import type { FollowEnd, PersistedForm, PreviewState, QueueState, TaskAction } from "./state.ts";
+import type { FollowEnd, PreviewState, QueueState, TaskAction } from "./state.ts";
 import { taskTitle } from "./queue-view.ts";
 import type { AppState } from "./view.ts";
 import {
@@ -170,18 +170,6 @@ function holdsKey(holds: readonly PauseHold[]): string {
 
 /** A presence or repo change asks the preview again after this quiet, so a registry burst asks once. */
 export const PREVIEW_DEBOUNCE_MS = 500;
-
-/** The form as a `TaskRequest`; a preview leaves the prompt out, which routing never reads. */
-export function taskRequest(form: PersistedForm, origin: string, withPrompt: boolean): TaskRequest {
-  const prompt = form.prompt.trim();
-  return {
-    repo: origin,
-    mode: form.worktree ? "worktree" : "here",
-    model: form.model,
-    effort: form.effort,
-    ...(withPrompt && prompt !== "" ? { prompt } : {}),
-  };
-}
 
 export class SchedulerStore {
   readonly #client: RelayClient;

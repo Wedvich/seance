@@ -52,6 +52,15 @@ describe("registry cache", () => {
     expect(await readRegistry(store)).toEqual({ machines: [machine], at: 42 });
   });
 
+  test("keeps each repo's origin, which auto's repo list is keyed by", async () => {
+    const keyed: PickerMachine = {
+      ...machine,
+      repos: [{ name: "seance", path: "/repos/seance", defaultBranch: "main", origin: "github.com/me/seance" }],
+    };
+    await writeRegistry(store, [keyed], 42);
+    expect(await readRegistry(store)).toEqual({ machines: [keyed], at: 42 });
+  });
+
   test("stores a slept machine's last status beat as lastSeen, and no status", async () => {
     const slept: PickerMachine = { ...machine, connected: false, status: { at: 90, scan: 1_000 } };
     await writeRegistry(store, [slept], 1);

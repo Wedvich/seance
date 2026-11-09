@@ -3,7 +3,7 @@
   "name": "seance-raycast",
   "version": "0.0.0",
   "private": true,
-  "description": "Spawn a remote-controlled Claude Code session on any of your paired machines",
+  "description": "Spawn a remote-controlled Claude Code session on any of your paired machines, or queue one for the scheduler",
   "categories": [
     "Developer Tools"
   ],
@@ -34,7 +34,7 @@
       "name": "spawn",
       "title": "Spawn Session",
       "subtitle": "Séance",
-      "description": "Type a prompt and start a Claude Code session on a paired machine",
+      "description": "Type a prompt and start a Claude Code session on a paired machine, or queue it for the scheduler",
       "mode": "view"
     }
   ],
@@ -45,7 +45,7 @@
     {
       "name": "defaultMachine",
       "title": "Default machine",
-      "description": "Machine name to preselect on first run, or when the last-used one is gone from the registry. Blank picks the first connected machine.",
+      "description": "Machine name to preselect on first run, or when the last-used one is gone from the registry. \"auto\" preselects Auto (the scheduler picks). Blank picks the first connected machine.",
       "type": "textfield",
       "required": false,
       "default": ""

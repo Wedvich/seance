@@ -7,10 +7,12 @@ import {
   type SpawnClient,
   type SpawnRequest,
   type SpawnResponse,
+  type Task,
+  type TaskCreated,
 } from "@seance/shared";
 import type { Credentials } from "./credentials.ts";
 
-/** Stamped into every spawn this surface sends; the daemon audits it as `client="raycast"`. */
+/** Stamped into every spawn and task this surface sends; the daemon audits a spawn as `client="raycast"`, the leader a task's admit. */
 export const SPAWN_CLIENT: SpawnClient = "raycast";
 
 export interface RelayHandle {
@@ -20,14 +22,17 @@ export interface RelayHandle {
   readonly rescan: (deviceId: string) => Promise<RescanResponse>;
   /** Every `account:` record, as `RelayClient.listAccounts`: rejects before `open`. */
   readonly listAccounts: () => Promise<AccountListing | StoreRefusal | null>;
+  /** `auto`: a task into the relay's store, as `RelayClient.createTask`: rejects before `open`. */
+  readonly createTask: (task: Task) => Promise<TaskCreated | StoreRefusal | null>;
   readonly stop: () => void;
 }
 
 /**
  * A third app-role client, exactly as `seanced mcp` is: same `/app?t=<token>`
  * upgrade, same envelope crypto, same correlation. No relay or daemon change.
- * Beyond `spawn` and `rescan` it makes one read: the `account:` listing that
- * names accounts by their aliases (lib/accounts.ts).
+ * Beyond `spawn` and `rescan` it makes one read, the `account:` listing that
+ * names accounts by their aliases (lib/accounts.ts), and one write, `auto`'s
+ * task create (lib/queue.ts).
  *
  * No `createSocket` override: `RelayClient`'s default `new WebSocket(url)` is
  * enough once `installNodeGlobals()` has put one on the global object, which it
@@ -67,6 +72,7 @@ export function connect(credentials: Credentials, log: (line: string) => void = 
       return parsed;
     },
     listAccounts: () => client.listAccounts(),
+    createTask: (task) => client.createTask(task),
     stop: () => client.stop(),
   };
 }

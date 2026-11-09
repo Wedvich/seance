@@ -20,6 +20,12 @@ import {
  * it a sentence (`sentence`), and adds its own next step around it.
  */
 
+/** `host/path` → `path`: the host says nothing a person picks a repo by. A remote-less origin is its basename already. */
+export function originLabel(origin: string): string {
+  const slash = origin.indexOf("/");
+  return slash === -1 ? origin : origin.slice(slash + 1);
+}
+
 /** Every code worded, so a new one fails the build here rather than reading blank somewhere. */
 const SCHEDULER_ERROR_TEXT: Record<SchedulerErrorCode, string> = {
   not_leader: "the scheduler moved to another machine while this was on its way; try again",

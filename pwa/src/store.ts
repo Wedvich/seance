@@ -21,6 +21,7 @@ import {
   storeFullUnreadableText,
   TASK_REQUEST_LIMITS,
   TASK_SPEC_LIMITS,
+  taskRequest,
   withReportInstruction,
   type RelayClient,
 } from "@seance/shared";
@@ -44,7 +45,7 @@ import { AccountStore } from "./account-store.ts";
 import { admitFiles, manifestOf, notAttachedText, uploadRefusalText } from "./attachments.ts";
 import type { ReceivedShare } from "./share-inbox.ts";
 import { accountSeries } from "./chart.ts";
-import { SchedulerStore, STORE_UNREADABLE, taskRequest } from "./scheduler-store.ts";
+import { SchedulerStore, STORE_UNREADABLE } from "./scheduler-store.ts";
 import type { AppState } from "./view.ts";
 import {
   ATTACHMENTS_UNAVAILABLE,

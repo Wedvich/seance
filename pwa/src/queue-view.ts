@@ -5,6 +5,7 @@ import {
   TASK_SPEC_LIMITS,
   continueOffer,
   knownAccounts,
+  originLabel,
   waitingContinuation,
   type DepAfter,
   type KnownAccount,
@@ -30,7 +31,6 @@ import {
   deriveRunNowAvailability,
   failedBody,
   formatSeen,
-  originLabel,
   type AppState,
 } from "./view.ts";
 

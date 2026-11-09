@@ -79,7 +79,13 @@ export async function writeRegistry(store: Store, machines: readonly PickerMachi
       // Folded rather than storing `status`: the key and shape stay what older builds wrote and read.
       lastSeen: lastHeardAt(machine),
       scannedAt: machine.scannedAt,
-      repos: machine.repos.map((repo) => ({ name: repo.name, path: repo.path, defaultBranch: repo.defaultBranch })),
+      // `origin` keys `auto`'s repo list, which then renders before a socket opens too.
+      repos: machine.repos.map((repo) => ({
+        name: repo.name,
+        path: repo.path,
+        defaultBranch: repo.defaultBranch,
+        ...(repo.origin === undefined ? {} : { origin: repo.origin }),
+      })),
     })),
   };
   await store.setItem(REGISTRY_KEY, JSON.stringify(projection));

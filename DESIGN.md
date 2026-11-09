@@ -8206,8 +8206,8 @@ identical to `seanced mcp`: it dials `/app?t=<token>`, seals with the PSK as
 daemon changes; every channel property applies unchanged. What it adds is a
 latency budget — one hotkey to a running session.
 
-- **Scope is spawn, and only spawn.** Ops are `spawn` and `rescan`; there is no
-  `sessions` op and no session list. Monitoring stays the PWA's job, which is
+- **Scope is spawn, and only spawn.** Ops are `spawn` and `rescan` (plus `auto`'s
+  task create, below); there is no `sessions` op and no session list. A spawn is either direct or queued (2026-11-09, below). Monitoring stays the PWA's job, which is
   what keeps this surface a form rather than a second app. Rejected: a
   `Detail`/`List` view of running sessions (duplicates the PWA at a fraction of
   the fidelity, and the phone is where you actually watch a session).
@@ -8227,6 +8227,22 @@ latency budget — one hotkey to a running session.
   store key). A refused, lost or failed listing leaves the names on email or
   short id. The line reads the live registry only: the cached projection keeps
   no exclaves, so it appears once the socket's registry lands.
+- **`Auto` queues; a named machine spawns directly** (2026-11-09). The machine
+  picker's first entry is `Auto`: Start becomes Queue, the repo list becomes every
+  origin some machine reports (clones with none left out, as the PWA's), and the
+  submit is `RelayClient.createTask` of a task sealed with `client: "raycast"` —
+  the PWA's path, no leader needed, no daemon involved, so no audit line until
+  the leader's admit. It is not refused for asleep machines or a missing leader:
+  the store holds the task, and a Scheduler line (and the success toast) says
+  when it waits. The prompt is held to `TASK_REQUEST_LIMITS.prompt` before the
+  send, naming a direct spawn as the way past it. A create whose answer was lost
+  or that stored keeps its task (a refused retry does not drop it), and Queue
+  again with an unchanged form re-sends the same id, so it reads `landedEarlier`
+  rather than queuing twice (`raycast/src/lib/queue.ts`).
+  A named machine stays the direct `spawn` op, not a pin as on the PWA: this
+  surface's premise is one hotkey to a running session, and a pin waits on the
+  leader's pass and caps. No `pin.account`, `avoid`, deps, `until` or attachments —
+  each needs leader-capability gating this form would carry for little use.
 - **Reach is every paired machine, through the relay.** Rejected: local-only
   (talking to the daemon on this box directly). It would need no PSK and no
   socket, but "spawn on the machine I am sitting at" is the one case where a
@@ -8276,7 +8292,10 @@ latency budget — one hotkey to a running session.
 - **Defaults: last-used wins**, persisted after each successful spawn;
   preferences seed only the first run, or when the remembered machine is gone
   from the registry. The prompt always starts empty. Repos are remembered _per
-  machine_, so switching machines restores what you last ran there.
+  machine_, so switching machines restores what you last ran there; `auto` is a
+  key there like a deviceId, holding an origin, and the default-machine
+  preference may name it. The cached projection keeps each repo's `origin` so
+  `auto`'s list renders before the socket opens.
 - **Refuses rather than fires blind.** Offline machines stay selectable and are
   marked in the dropdown, but submitting names the reason it cannot go (asleep,
   no socket, empty registry, no repos) instead of disabling a button silently.
