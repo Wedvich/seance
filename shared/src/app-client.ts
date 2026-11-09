@@ -38,6 +38,7 @@ import {
   type PauseRequest,
   type PushSubscribeReply,
   type PushSubscribeRequest,
+  type PushSubscriptionEntry,
   type PushUnsubscribeReply,
   type PushUnsubscribeRequest,
   type QueueChanged,
@@ -81,6 +82,7 @@ import {
   parseRescanResponse,
   parseRoutePreviewReply,
   parseSettingsRecord,
+  pushServiceVendor,
   parseStoreChanged,
   parseStoreReply,
   parseTaskReply,
@@ -217,10 +219,31 @@ export interface StoreRefusal {
   readonly code: string;
 }
 
-/** What the page needs of the settings record to subscribe: the VAPID public key, and whether an endpoint is held. */
+/** One record entry as the Notifications card lists it. `endpoint` is the key Remove sends: memory only, never rendered, logged or persisted. */
+export interface PushDevice {
+  readonly endpoint: string;
+  readonly vendor: string;
+  readonly label?: string;
+  readonly addedAt?: number;
+  /** The entry is this browser's own subscription (the endpoint `pushSettings` was asked about). */
+  readonly self: boolean;
+}
+
+/** What the page needs of the settings record to subscribe: the VAPID public key, whether an endpoint is held, and every entry as a device. */
 export interface PushSettingsReading {
   readonly publicKey: string;
   readonly subscribed: boolean;
+  readonly devices: readonly PushDevice[];
+}
+
+function deviceOf(sub: PushSubscriptionEntry, endpoint: string | undefined): PushDevice {
+  return {
+    endpoint: sub.endpoint,
+    vendor: pushServiceVendor(sub.endpoint) ?? "Push service",
+    ...(sub.label === undefined ? {} : { label: sub.label }),
+    ...(sub.addedAt === undefined ? {} : { addedAt: sub.addedAt }),
+    self: endpoint !== undefined && sub.endpoint === endpoint,
+  };
 }
 
 export interface TaskListing {
@@ -1749,7 +1772,7 @@ export class RelayClient {
   /**
    * Asks the leader to add this browser's subscription to the settings record. A
    * leader that predates the op answers `invalid_request`, as it does any op it
-   * does not handle.
+   * does not handle. The optional `label` is dropped by a leader that predates it.
    */
   pushSubscribe(subscription: PushSubscribeRequest): Promise<PushSubscribeReply | null> {
     return this.#schedule(PUSH_SUBSCRIBE_OP, subscription, parsePushSubscribeReply);
@@ -1767,7 +1790,8 @@ export class RelayClient {
    * What the page needs of the settings record to subscribe: the VAPID public key
    * (a browser's `applicationServerKey`) and whether `endpoint` is already held.
    * The record is opened at rest here and dropped: it is never kept, and neither
-   * the private key nor the Linear key leaves this method. Null: no record, one
+   * the private key nor the Linear key leaves this method; each entry's endpoint,
+   * vendor, label and date go back as a device, never its keys. Null: no record, one
    * this build cannot open or read, or one without a key, so push is not set up. A
    * `StoreRefusal` is the relay declining the read, which says nothing about push
    * being set up, and a thrown `RequestFailure` is nothing answering at all.
@@ -1791,6 +1815,7 @@ export class RelayClient {
     return {
       publicKey: settings.vapid.publicKey,
       subscribed: endpoint !== undefined && settings.subscriptions?.some((sub) => sub.endpoint === endpoint) === true,
+      devices: (settings.subscriptions ?? []).map((sub) => deviceOf(sub, endpoint)),
     };
   }
 

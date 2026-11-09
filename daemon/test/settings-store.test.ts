@@ -121,6 +121,22 @@ describe("round trip", () => {
     });
   });
 
+  test("a subscription's label and date survive a put and a get", async () => {
+    await withRig(async ({ store }) => {
+      const vapid = await generateVapidKeys();
+      const subscriptions = [
+        {
+          endpoint: "https://fcm.googleapis.com/fcm/send/abc",
+          keys: { p256dh: Buffer.alloc(65, 1).toString("base64url"), auth: Buffer.alloc(16, 2).toString("base64url") },
+          label: "Firefox · Linux",
+          addedAt: 1_760_000_000_000,
+        },
+      ];
+      expect(await store.put(0, { vapid, subscriptions })).toEqual({ ok: true, version: 1 });
+      expect(await store.get()).toEqual({ version: 1, record: { version: 1, vapid, subscriptions } });
+    });
+  });
+
   test("a record the parser refuses is not sent", async () => {
     await withRig(async ({ relay, store }) => {
       const bad: Omit<SettingsRecord, "version"> = { vapid: { publicKey: "short", privateKey: "short" } };

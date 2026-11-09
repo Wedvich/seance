@@ -22,9 +22,11 @@ import {
   PR_STATES,
   PUSH_ALERT_MAX_BYTES,
   PUSH_ENDPOINT_MAX_LENGTH,
+  PUSH_LABEL_MAX_LENGTH,
   PUSH_MAX_SUBSCRIPTIONS,
   DISK_ALERTS_MAX,
   PUSH_SERVICE_HOSTS,
+  PUSH_SERVICE_VENDORS,
   REPO_MAX_SKILLS,
   SKILL_NAME_MAX_LENGTH,
   STATUS_MAX_AUTH_EXPIRED,
@@ -47,6 +49,7 @@ import {
   type PushAlert,
   type PushSubscribeReply,
   type PushSubscribeRequest,
+  type PushSubscriptionEntry,
   type PushUnsubscribeReply,
   type PushUnsubscribeRequest,
   type QuotaReading,
@@ -1291,10 +1294,38 @@ export function pushEndpoint(value: unknown): string | null {
   if (url.port !== "") return null;
   const host = url.hostname;
   if (host.split(".").some((label) => label === "")) return null;
-  const allowed = PUSH_SERVICE_HOSTS.some((entry) =>
+  return serviceHostOf(host) === undefined ? null : href;
+}
+
+/** The `PUSH_SERVICE_HOSTS` entry a host matches: a `*.` entry any non-empty subdomain, never the bare host. */
+function serviceHostOf(host: string): (typeof PUSH_SERVICE_HOSTS)[number] | undefined {
+  return PUSH_SERVICE_HOSTS.find((entry) =>
     entry.startsWith("*.") ? host.length > entry.length - 1 && host.endsWith(entry.slice(1)) : host === entry,
   );
-  return allowed ? href : null;
+}
+
+/** The browser family behind an allowed endpoint's push service, or null for an endpoint `pushEndpoint` refuses. */
+export function pushServiceVendor(endpoint: string): string | null {
+  const href = pushEndpoint(endpoint);
+  if (href === null) return null;
+  const entry = serviceHostOf(new URL(href).hostname);
+  return entry === undefined ? null : PUSH_SERVICE_VENDORS[entry];
+}
+
+/**
+ * No control (`Cc`), format (`Cf`: bidi, zero-width) or surrogate (`Cs`) character. `isName` alone
+ * admits characters JSON escapes to six bytes, so a few crafted fields could seal the settings
+ * record over the store's cap. `\p{Cs}` under `u` matches only a lone surrogate, and unlike
+ * `isWellFormed()` it runs in the browsers `shared/` also ships to.
+ */
+const UNPRINTABLE = /[\p{Cc}\p{Cf}\p{Cs}]/u;
+function isPrintableName(value: unknown, max: number): value is string {
+  return isName(value, max) && !UNPRINTABLE.test(value);
+}
+
+/** A subscription label: printable and trimmed. Shown on other devices, where a bidi or zero-width character could disguise a row. */
+function isPushLabel(value: unknown): value is string {
+  return isPrintableName(value, PUSH_LABEL_MAX_LENGTH) && value === value.trim();
 }
 
 /** An uncompressed P-256 point, and RFC 8291's auth secret. */
@@ -1309,13 +1340,30 @@ function parseWebPushSubscription(value: unknown): WebPushSubscription | null {
   return isBase64UrlBytes(auth, PUSH_AUTH_BYTES) ? { endpoint, keys: { p256dh, auth } } : null;
 }
 
+/** A record entry, leniently: a bad `label` or `addedAt` drops that field, never the subscription. */
+function parsePushSubscriptionEntry(value: unknown): PushSubscriptionEntry | null {
+  const sub = parseWebPushSubscription(value);
+  if (sub === null || !isRecord(value)) return null;
+  const { label, addedAt } = value;
+  return {
+    ...sub,
+    ...(isPushLabel(label) ? { label } : {}),
+    ...(isUint(addedAt) ? { addedAt } : {}),
+  };
+}
+
 /**
  * `push-subscribe`, at the leader: the subscription built field by field, its
  * endpoint held to the push-service allowlist (decided #10), so a forged one
- * cannot aim the leader at an arbitrary URL.
+ * cannot aim the leader at an arbitrary URL. The optional `label` is strict
+ * here, since the request is untrusted input: a bad one refuses the request.
  */
 export function parsePushSubscribeRequest(value: unknown): PushSubscribeRequest | null {
-  return parseWebPushSubscription(value);
+  const sub = parseWebPushSubscription(value);
+  if (sub === null || !isRecord(value)) return null;
+  const { label } = value;
+  if (label === undefined) return sub;
+  return isPushLabel(label) ? { ...sub, label } : null;
 }
 
 export function parsePushSubscribeReply(value: unknown): PushSubscribeReply | null {
@@ -1409,17 +1457,19 @@ function parseVapidKeys(value: unknown): VapidKeys | null {
  * (a host a later build no longer allows) is dropped and goes with the leader's next
  * write, rather than making the whole record — the VAPID key, the Linear key, every
  * other browser — unreadable. The cap and one-per-endpoint still refuse the record.
+ * `label` and `addedAt` are read more leniently still: a bad one drops that field,
+ * never the subscription.
  */
 export function parseSettingsRecord(value: unknown): SettingsRecord | null {
   if (!isRecord(value) || !isVersion(value["version"])) return null;
   const { vapid, linearKey, subscriptions, diskAlerts } = value;
   const keys = vapid === undefined ? undefined : parseVapidKeys(vapid);
   if (keys === null) return null;
-  if (linearKey !== undefined && !isName(linearKey, LINEAR_KEY_MAX_LENGTH)) return null;
-  let subscribed: readonly WebPushSubscription[] | undefined;
+  if (linearKey !== undefined && !isPrintableName(linearKey, LINEAR_KEY_MAX_LENGTH)) return null;
+  let subscribed: readonly PushSubscriptionEntry[] | undefined;
   if (subscriptions !== undefined) {
     if (!Array.isArray(subscriptions) || subscriptions.length > PUSH_MAX_SUBSCRIPTIONS) return null;
-    const parsed = subscriptions.flatMap((candidate) => parseWebPushSubscription(candidate) ?? []);
+    const parsed = subscriptions.flatMap((candidate) => parsePushSubscriptionEntry(candidate) ?? []);
     // One subscription per endpoint, as `parseFleetQuotaRecord` has one entry per account.
     if (new Set(parsed.map((sub) => sub.endpoint)).size !== parsed.length) return null;
     subscribed = parsed;

@@ -32,6 +32,7 @@ import {
   type PauseHold,
   type PauseResponse,
   type Plain,
+  type PushSubscriptionEntry,
   type PushSubscribeResponse,
   type PushUnsubscribeResponse,
   type QueueResponse,
@@ -365,16 +366,28 @@ async function answer(asked: Asked, op: SchedulerOp, payload: unknown): Promise<
       const result = await settings.update((record) => {
         const current = record.subscriptions ?? [];
         const same = current.find((sub) => sub.endpoint === request.endpoint);
-        // Already held as it is: no write, and no version bump for a browser that asks at every boot.
-        if (same?.keys.p256dh === request.keys.p256dh && same.keys.auth === request.keys.auth) return null;
-        // A browser can re-key one endpoint: the new keys replace the old.
-        const others = current.filter((sub) => sub.endpoint !== request.endpoint);
-        if (others.length >= PUSH_MAX_SUBSCRIPTIONS) {
+        const sameKeys =
+          same !== undefined && same.keys.p256dh === request.keys.p256dh && same.keys.auth === request.keys.auth;
+        // Held as it is: no write, so a browser that asks at every boot bumps no version — except once, to backfill a label.
+        if (sameKeys && (request.label === undefined || same.label !== undefined)) return null;
+        if (same === undefined && current.length >= PUSH_MAX_SUBSCRIPTIONS) {
           outcome.full = true;
           return null;
         }
+        const label = request.label ?? same?.label;
+        // The term's clock, never the client's; an entry held without one keeps none.
+        const addedAt = same === undefined ? asked.now : same.addedAt;
+        const entry: PushSubscriptionEntry = {
+          endpoint: request.endpoint,
+          keys: request.keys,
+          ...(label === undefined ? {} : { label }),
+          ...(addedAt === undefined ? {} : { addedAt }),
+        };
         const { version: _version, ...rest } = record;
-        return { ...rest, subscriptions: [...others, request] };
+        return {
+          ...rest,
+          subscriptions: same === undefined ? [...current, entry] : current.map((sub) => (sub === same ? entry : sub)),
+        };
       });
       if (result.ok && outcome.full) {
         await audit.refused("push-subscribe", id, "subscriptions_full");

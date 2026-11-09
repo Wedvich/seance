@@ -526,11 +526,38 @@ describe("settings record: the leader's term creates it, and no later term repla
         10_000,
       );
       const held = await readSettings();
-      expect(held?.record.subscriptions).toEqual([sub("first")]);
+      // The leader stamps `addedAt` from its own clock; the request never carries one.
+      expect(held?.record.subscriptions).toEqual([{ ...sub("first"), addedAt: expect.any(Number) }]);
       const version = held?.version;
 
       expect(await app.client.pushSubscribe(sub("first"))).toEqual({ endpoint: sub("first").endpoint });
       expect((await readSettings())?.version).toBe(version);
+
+      // A label the held entry lacks is backfilled in one write, and a second identical request writes nothing.
+      const labelled = { ...sub("first"), label: "Firefox · Linux" };
+      expect(await app.client.pushSubscribe(labelled)).toEqual({ endpoint: sub("first").endpoint });
+      const backfilled = await readSettings();
+      expect(backfilled?.record.subscriptions).toEqual([
+        { ...labelled, addedAt: held?.record.subscriptions?.[0]?.addedAt },
+      ]);
+      expect(backfilled?.version).toBe((version ?? 0) + 1);
+      expect(await app.client.pushSubscribe(labelled)).toEqual({ endpoint: sub("first").endpoint });
+      expect((await readSettings())?.version).toBe(backfilled?.version);
+
+      // The page's reading lists each entry as a device, and never the private key.
+      const reading = await app.client.pushSettings(sub("first").endpoint);
+      expect(reading).toMatchObject({
+        devices: [
+          {
+            endpoint: sub("first").endpoint,
+            vendor: "Chrome/Android",
+            label: "Firefox · Linux",
+            addedAt: expect.any(Number),
+            self: true,
+          },
+        ],
+      });
+      expect(JSON.stringify(reading)).not.toContain("privateKey");
 
       expect(await app.client.pushSubscribe(sub("x", "example.com"))).toMatchObject({
         ok: false,

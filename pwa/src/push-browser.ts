@@ -19,6 +19,7 @@ export const browserPushEnv: PushEnv = {
   manager: async () => (await withTimeout(navigator.serviceWorker.ready, SERVICE_WORKER_READY_MS)).pushManager,
   // Blocked storage (a private window) forgets a turn-off, and the next load's re-sync then subscribes again. Accepted:
   // the person sees "On" and can turn it off again, and nothing else on this page can outlive a load.
+  userAgent: () => navigator.userAgent,
   optedOut: () => {
     try {
       return localStorage.getItem(PUSH_OFF_KEY) !== null;

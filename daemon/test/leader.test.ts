@@ -38,6 +38,7 @@ import {
   type QueueResponse,
   type IdleTaskRef,
   type UnreadableTaskRef,
+  type PushSubscriptionEntry,
   type WebPushSubscription,
   type RegistryView,
   type SessionsResponse,
@@ -1118,7 +1119,7 @@ describe("leader push", () => {
   });
 
   /** A settings store in memory with the relay's version rule, starting from `held`. */
-  const heldSettings = async (subscriptions?: readonly WebPushSubscription[]) => {
+  const heldSettings = async (subscriptions?: readonly PushSubscriptionEntry[]) => {
     let held: SettingsRead = {
       version: 1,
       record: {
@@ -1160,6 +1161,7 @@ describe("leader push", () => {
     const settings = await heldSettings();
     const { leader, replies } = leaderOver(relay, new MemoryQueueStore(), undefined, undefined, settings.store);
     const fresh = sub("one");
+    const before = Date.now();
     const lines = await captureLog(async () => {
       try {
         leader.lead(1);
@@ -1167,10 +1169,13 @@ describe("leader push", () => {
         await pollUntil(() => leader.term() === 1, "the term");
         // Settings load beside takeover: a request before it is `not_ready`, so wait for the first answer that is not.
         await pollUntil(async () => {
-          const answer = await subscribe(leader, replies, fresh);
+          const answer = await subscribe(leader, replies, { ...fresh, label: "Firefox · Linux" });
           return !(isRecord(answer) && answer["code"] === "not_ready");
         }, "the settings to load");
-        expect(settings.subscriptions()).toEqual([fresh]);
+        expect(settings.subscriptions()).toEqual([{ ...fresh, label: "Firefox · Linux", addedAt: expect.any(Number) }]);
+        const addedAt = settings.subscriptions()?.[0]?.addedAt ?? 0;
+        expect(addedAt).toBeGreaterThanOrEqual(before);
+        expect(addedAt).toBeLessThanOrEqual(Date.now());
       } finally {
         leader.stop();
         relay.stop();
@@ -1179,7 +1184,11 @@ describe("leader push", () => {
     const audit = lines.filter((line) => line.includes("op=push-subscribe"));
     expect(audit).toHaveLength(1);
     expect(audit[0]).toMatch(/audit queue origin=relay op=push-subscribe id="?[\w-]+"? ok$/u);
-    expect(lines.some((line) => line.includes("fcm.googleapis.com") || line.includes(fresh.keys.auth))).toBe(false);
+    expect(
+      lines.some(
+        (line) => line.includes("fcm.googleapis.com") || line.includes(fresh.keys.auth) || line.includes("Firefox"),
+      ),
+    ).toBe(false);
   });
 
   test("the same subscription again answers its endpoint and writes nothing; new keys for it replace the old", async () => {
@@ -1195,13 +1204,75 @@ describe("leader push", () => {
         const answer = await subscribe(leader, replies, one);
         return isRecord(answer) && answer["endpoint"] === one.endpoint;
       }, "the first subscribe to land");
+      const first = settings.subscriptions()?.[0]?.addedAt;
       const puts = settings.puts.length;
       expect(await subscribe(leader, replies, one)).toEqual({ endpoint: one.endpoint });
       expect(settings.puts).toHaveLength(puts);
 
       const rekeyed = { ...one, keys: { ...one.keys, auth: Buffer.alloc(16, 3).toString("base64url") } };
       expect(await subscribe(leader, replies, rekeyed)).toEqual({ endpoint: one.endpoint });
-      expect(settings.subscriptions()).toEqual([rekeyed]);
+      expect(settings.subscriptions()).toEqual([{ ...rekeyed, addedAt: expect.any(Number) }]);
+      expect(settings.subscriptions()?.[0]?.addedAt).toBe(first);
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+
+  test("a label is stored, backfilled once onto an entry without one, and never changes the date", async () => {
+    const relay = startTestRelay(TOKEN);
+    const settings = await heldSettings([sub("old")]);
+    const { leader, replies } = leaderOver(relay, new MemoryQueueStore(), undefined, undefined, settings.store);
+    try {
+      leader.lead(1);
+      await leader.settled();
+      const old = sub("old");
+      await pollUntil(async () => {
+        const answer = await subscribe(leader, replies, { ...old, label: "Firefox · Linux" });
+        return isRecord(answer) && answer["endpoint"] === old.endpoint;
+      }, "the backfill to land");
+      expect(settings.puts).toHaveLength(1);
+      expect(settings.subscriptions()).toEqual([{ ...old, label: "Firefox · Linux" }]);
+      expect(await subscribe(leader, replies, { ...old, label: "Firefox · Linux" })).toEqual({
+        endpoint: old.endpoint,
+      });
+      expect(await subscribe(leader, replies, old)).toEqual({ endpoint: old.endpoint });
+      expect(settings.puts).toHaveLength(1);
+      const rekeyed = { ...old, keys: { ...old.keys, auth: Buffer.alloc(16, 3).toString("base64url") } };
+      expect(await subscribe(leader, replies, { ...rekeyed, label: "Chrome · Linux" })).toEqual({
+        endpoint: old.endpoint,
+      });
+      expect(settings.puts).toHaveLength(2);
+      expect(settings.subscriptions()).toEqual([{ ...rekeyed, label: "Chrome · Linux" }]);
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+
+  test("a re-key keeps the held date, and the held label unless the request names one", async () => {
+    const relay = startTestRelay(TOKEN);
+    const held = { ...sub("one"), label: "Safari · iOS", addedAt: 123 };
+    const settings = await heldSettings([held]);
+    const { leader, replies } = leaderOver(relay, new MemoryQueueStore(), undefined, undefined, settings.store);
+    try {
+      leader.lead(1);
+      await leader.settled();
+      const keys = { ...held.keys, auth: Buffer.alloc(16, 3).toString("base64url") };
+      await pollUntil(async () => {
+        const answer = await subscribe(leader, replies, { endpoint: held.endpoint, keys });
+        return isRecord(answer) && answer["endpoint"] === held.endpoint;
+      }, "the re-key to land");
+      expect(settings.subscriptions()).toEqual([{ ...held, keys }]);
+      const more = { ...held.keys, auth: Buffer.alloc(16, 4).toString("base64url") };
+      expect(
+        await subscribe(leader, replies, { endpoint: held.endpoint, keys: more, label: "Chrome · Linux" }),
+      ).toEqual({
+        endpoint: held.endpoint,
+      });
+      expect(settings.subscriptions()).toEqual([
+        { endpoint: held.endpoint, keys: more, label: "Chrome · Linux", addedAt: 123 },
+      ]);
     } finally {
       leader.stop();
       relay.stop();
@@ -1239,6 +1310,8 @@ describe("leader push", () => {
       for (const bad of [
         sub("x", "example.com"),
         { endpoint: sub("x").endpoint },
+        { ...sub("x"), label: "" },
+        { ...sub("x"), label: "x".repeat(65) },
         "https://fcm.googleapis.com/x",
         null,
       ]) {
@@ -1348,7 +1421,8 @@ describe("leader push", () => {
 
   test("push-unsubscribe removes a held endpoint, keeps the others, and audits the request id only", async () => {
     const relay = startTestRelay(TOKEN);
-    const settings = await heldSettings([sub("one"), sub("two"), sub("three")]);
+    const kept = { label: "Firefox · Linux", addedAt: 5 };
+    const settings = await heldSettings([sub("one"), sub("two"), { ...sub("three"), ...kept }]);
     const { leader, replies } = leaderOver(relay, new MemoryQueueStore(), undefined, undefined, settings.store);
     const lines = await captureLog(async () => {
       try {
@@ -1361,7 +1435,7 @@ describe("leader push", () => {
           return !(isRecord(answer) && answer["code"] === "not_ready");
         }, "the settings to load");
         expect(answer).toEqual({ endpoint: sub("two").endpoint });
-        expect(settings.subscriptions()).toEqual([sub("one"), sub("three")]);
+        expect(settings.subscriptions()).toEqual([sub("one"), { ...sub("three"), ...kept }]);
         expect(settings.puts).toHaveLength(1);
       } finally {
         leader.stop();

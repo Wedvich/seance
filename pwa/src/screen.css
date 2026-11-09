@@ -1549,6 +1549,48 @@
   opacity: 0.6;
 }
 
+.push-devices {
+  display: flex;
+  flex-direction: column;
+  align-self: stretch;
+  gap: 6px;
+}
+
+.push-devices-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--fg2);
+}
+
+.push-device {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.push-device-title {
+  overflow-wrap: anywhere;
+}
+
+.push-device-meta {
+  font-size: 13.5px;
+  color: var(--fg2);
+}
+
+.push-device-remove {
+  padding: 4px 10px;
+  border-radius: 10px;
+  font-weight: 600;
+  background: var(--sur2);
+  color: var(--fg);
+}
+
+.push-device-remove:disabled {
+  opacity: 0.6;
+}
+
 /* ---- theme segmented control ---- */
 
 .theme-card {

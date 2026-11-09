@@ -2421,6 +2421,12 @@ export interface WebPushSubscription {
   readonly keys: { readonly p256dh: string; readonly auth: string };
 }
 
+/** A settings-record entry: the subscription, its client-chosen `label` and the leader-stamped `addedAt` (ms, the term's clock). Both display-only and optional: an older leader's write drops them. */
+export interface PushSubscriptionEntry extends WebPushSubscription {
+  readonly label?: string;
+  readonly addedAt?: number;
+}
+
 /**
  * The push services a leader may send to (decided #10): an allowlist rather than
  * any public https host, so a forged subscription cannot aim the leader at an
@@ -2439,10 +2445,23 @@ export const PUSH_SERVICE_HOSTS = [
 /**
  * A push endpoint's length at most. Real ones run a few hundred characters;
  * the cap is what keeps the settings record under the store's cap: 16
- * subscriptions at it, with the VAPID pair and a `LINEAR_KEY_MAX_LENGTH` key at
- * their bounds, seal to ~26 KB of `STORE_MAX_CT_LENGTH` (40 KiB).
+ * subscriptions at it, each with a `PUSH_LABEL_MAX_LENGTH` label and an `addedAt`, the
+ * `DISK_ALERTS_MAX` disk alerts, the VAPID pair and a `LINEAR_KEY_MAX_LENGTH` key at
+ * their bounds, seal to ~40.1 KB of `STORE_MAX_CT_LENGTH` (40 KiB), measured by the
+ * bound test in parse.test.ts. Little headroom is left: grow nothing here unchecked.
  */
 export const PUSH_ENDPOINT_MAX_LENGTH = 1024;
+
+/** A subscription's client-chosen browser · OS label, at most this many UTF-16 units; display-only. */
+export const PUSH_LABEL_MAX_LENGTH = 64;
+
+/** What a person sees for an entry with no label: its push service's browser family. Keyed by host entry, so a new host without a vendor is a type error. */
+export const PUSH_SERVICE_VENDORS: Readonly<Record<(typeof PUSH_SERVICE_HOSTS)[number], string>> = {
+  "fcm.googleapis.com": "Chrome/Android",
+  "updates.push.services.mozilla.com": "Firefox",
+  "web.push.apple.com": "Safari",
+  "*.notify.windows.com": "Edge",
+};
 
 /** Subscriptions the settings record holds at most, one per endpoint: a person's browsers and devices. */
 export const PUSH_MAX_SUBSCRIPTIONS = 16;
@@ -2465,7 +2484,7 @@ export const LINEAR_KEY_MAX_LENGTH = 256;
 export interface SettingsRecord extends VersionBound {
   readonly vapid?: VapidKeys;
   readonly linearKey?: string;
-  readonly subscriptions?: readonly WebPushSubscription[];
+  readonly subscriptions?: readonly PushSubscriptionEntry[];
   /** Machines whose full disk was alerted and has not recovered yet (`daemon/src/disk-alerts.ts`). */
   readonly diskAlerts?: readonly DiskAlerted[];
 }
@@ -2735,10 +2754,14 @@ export interface RoutePreviewResponse {
  * to `PUSH_SERVICE_HOSTS`; refusals are `invalid_request` (also what a leader
  * that predates the op answers), `subscriptions_full`, `conflict`, `not_ready`,
  * `settings_unavailable` and `internal_error` (a write the store refused).
+ * `label` is optional; a bad one is `invalid_request`.
  */
 export const PUSH_SUBSCRIBE_OP = "push-subscribe";
 
-export type PushSubscribeRequest = WebPushSubscription;
+export interface PushSubscribeRequest extends WebPushSubscription {
+  /** Browser · OS, at most `PUSH_LABEL_MAX_LENGTH`, trimmed and non-empty; display-only. An older leader drops it. */
+  readonly label?: string;
+}
 
 /**
  * What a push carries (RFC 8291-encrypted to the browser, but minimal anyway): ids and
