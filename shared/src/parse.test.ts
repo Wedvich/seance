@@ -1984,16 +1984,16 @@ describe("M4 shapes", () => {
       null,
       "a\u0001b",
       "a\u0085b",
-      "a\ud800b",
-      "a\u202eb",
-      "a\u200bb",
-      "a\ufeffb",
+      "a\uD800b",
+      "a\u202Eb",
+      "a\u200Bb",
+      "a\uFEFFb",
     ]) {
       expect(parsePushSubscribeRequest({ ...subscription, label })).toBeNull();
     }
     // The record reads a bad label leniently: the subscription stays, the label goes.
     const vapid = { publicKey: b64url(65), privateKey: b64url(32) };
-    for (const label of ["a\u0001b", "a\u0085b", "a\ud800b", "a\u202eb", "a\u200bb", "a\ufeffb"]) {
+    for (const label of ["a\u0001b", "a\u0085b", "a\uD800b", "a\u202Eb", "a\u200Bb", "a\uFEFFb"]) {
       const read = parseSettingsRecord({ version: 1, vapid, subscriptions: [{ ...subscription, label }] });
       expect(read?.subscriptions).toEqual([subscription]);
     }
