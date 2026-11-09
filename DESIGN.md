@@ -532,7 +532,11 @@ Séance's noise is cover for a real intruder.
    an app request like the queue's, sealed under the PSK: a token holder without it cannot add a
    subscription, and a PSK holder can add or replace one (accepted, as #9 does for the rest of
    the record), but only one that `pushEndpoint` accepts, so a forged subscription can aim the
-   leader's sends only at a push service on the allowlist. What such a send carries is encrypted
+   leader's sends only at a push service on the allowlist. `push-unsubscribe` is sealed and
+   guarded the same way and removes only the one endpoint it names. That adds nothing a PSK
+   holder could not already do: every PSK holder reads every endpoint from `settings:main`
+   (above), so removing one hands over no new power, and an endpoint is no secret from them. Its audit line, like
+   push-subscribe's, carries no endpoint. What such a send carries is encrypted
    to the browser's own key and holds ids and state only; the push service sees its size and
    timing. The send never follows a redirect, and its answer is never read. A thief leader
    (above) can overwrite the record inside its term — the other leaders' floor stops only a
@@ -1215,7 +1219,8 @@ Who owns each frame in code — the place to change when a frame changes:
 | record `quota` (at rest)                                            | `sealFleetQuotaRecord` (`shared/src/fleet-quota.ts`), by each daemon's fleet quota writer (`daemon/src/fleet-quota.ts`) on its own socket                                                                                                                                                                                                                                          | `openFleetQuotaRecord` (`shared/src/fleet-quota.ts`) — `openAtRest`, sealed `to: "app"`, `parseFleetQuotaRecord`, sealed `version` the store's — by the app-client's `refreshFleetQuota` (the PWA and the leader's leg) and the writer; stored under `quota:fleet` (_Scheduler_, "Fleet quota record")                                 |
 | record `account` (at rest)                                          | `sealAccountRecord` (`shared/src/account-record.ts`) from the PWA's rename                                                                                                                                                                                                                                                                                                         | `openAccountRecord`, which opens at rest then `parseAccountRecord` and binds version and key; stored under `account:` (_Scheduler_, "The store")                                                                                                                                                                                       |
 | record `settings` (at rest)                                         | `sealAtRest` with op `settings`, by the leader's settings store (`createSettingsStore` in `daemon/src/settings-store.ts`), creating `settings:main` once at a term's start when none exists (Scheduler, "Settings record")                                                                                                                                                         | `openAtRest` with its op, then `parseSettingsRecord`, bound to its key and sealed version and held to the version floor, by the same store; an app's `store-get` opens it the same way once the PWA reads it (M4, Web Push); stored under `settings:main` (_Scheduler_, "The store")                                                   |
-| op `push-subscribe` (→`"scheduler"`)                                | `shared/src/app-client.ts` `pushSubscribe`, from `pwa/src/push.ts` (the Settings Notifications card, and a silent re-send after a page load when permission is already granted, retried while the leader starts)                                                                                                                                                                   | the term's `answer` in `daemon/src/leader-requests.ts`: `parsePushSubscribeRequest`, then one `update` of the settings record (_Scheduler_, "Web Push"); a leader that predates the op answers `invalid_request` as it does any op it does not handle                                                                                  |
+| op `push-subscribe` (→`"scheduler"`)                                | `shared/src/app-client.ts` `pushSubscribe`, from `pwa/src/push.ts` (the Settings Notifications card, and a silent re-send after a page load when permission is already granted and push not turned off, retried while the leader starts)                                                                                                                                           | the term's `answer` in `daemon/src/leader-requests.ts`: `parsePushSubscribeRequest`, then one `update` of the settings record (_Scheduler_, "Web Push"); a leader that predates the op answers `invalid_request` as it does any op it does not handle                                                                                  |
+| op `push-unsubscribe` (→`"scheduler"`)                              | `shared/src/app-client.ts` `pushUnsubscribe`, from `pwa/src/push.ts` `disablePush` (the Notifications card's Turn off, after the browser unsubscribed)                                                                                                                                                                                                                             | the term's `answer` in `daemon/src/leader-requests.ts`: `parsePushUnsubscribeRequest`, then one `update` of the settings record that drops the endpoint, none when it is not held (_Scheduler_, "Web Push"); a leader that predates the op answers `invalid_request`                                                                   |
 | HTTP `PUT /attachments/<id>`                                        | built: `RelayClient.uploadAttachment` (`shared/src/app-client.ts`) from the PWA's spawn form (`pwa/src/store.ts`), sealed by `sealAttachment`, with `Authorization: Bearer`                                                                                                                                                                                                        | built: `relay/src/attachments.ts`, after `Hub.reserveUpload` (`relay/src/allowance.ts`); into R2 through the `ATTACHMENTS` binding                                                                                                                                                                                                     |
 | HTTP `GET /attachments/<id>`                                        | built: `daemon/src/attachments.ts`, before the launch ledger's write-ahead record, at `attachmentUrl` of its own config's `relayUrl`                                                                                                                                                                                                                                               | built: `relay/src/attachments.ts`, streamed from R2                                                                                                                                                                                                                                                                                    |
 | field `attachments`                                                 | built: `TaskSpec` and `SpawnRequest`, from the PWA's `createTask` after every upload is `stored` (`pwa/src/store.ts`); the leader's `#dispatch` (`scheduler/src/scheduler.ts`)                                                                                                                                                                                                     | `parseAttachmentManifest` (`shared/src/parse.ts`), in `parseTaskSpec` and the daemon's `isSpawnRequest`; acted on in `handleSpawn` (`daemon/src/handlers.ts`)                                                                                                                                                                          |
@@ -1607,6 +1612,16 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   on a `PUSH_SERVICE_HOSTS` host (a `*.` entry is a subdomain, never the bare host), checked
   where the request is parsed (`pushEndpoint`), so a PSK holder cannot aim the leader's
   sends at an arbitrary URL. Subscriptions live in the `settings` record.
+- `push-unsubscribe { endpoint }` (`PushUnsubscribeRequest`) → `{ endpoint }`
+  (`PushUnsubscribeResponse`, the normalized form); in `SCHEDULER_OPS` (10 s timeout). Drops
+  that endpoint from the `settings` record, freeing its slot; one the record does not hold
+  answers the same and writes nothing, so asking twice, or for an endpoint a 404/410 already
+  pruned, is harmless. The endpoint is held to `pushEndpoint` like push-subscribe's
+  (`parsePushUnsubscribeRequest` builds a fresh `{ endpoint }` from it alone): the record holds
+  no endpoint that fails it, so nothing removable is refused. Refusals: `invalid_request` (a
+  malformed or over-long endpoint, or a leader older than the op), `not_ready`,
+  `settings_unavailable`, `conflict` and `internal_error`, as push-subscribe's. Audited
+  `op=push-unsubscribe id=<request id> ok`, or with its refusal's code, never the endpoint.
 - `queue-changed { at, tasks? }` runs the other way: the leader's term leg sends it `to: "app"`,
   fire-and-forget, when something an app would show changed (Scheduler, "The leader"). It is
   not a request and has no reply; an app re-reads `queue` on it.
@@ -2408,9 +2423,10 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     plumbing it shares with `queue-store.ts` is `daemon/src/store-frames.ts`, scheduler-free,
     so the adapter stays out of `LEADER_MODULES`: the term's end is thrown as the caller's
     `revoked`.
-  - **One app-facing op.** The leader generates the pair itself; `push-subscribe` (_Web Push_,
-    below) is the only settings op from an app, and the Linear key's write, parser and UI belong
-    to the Linear item, which round-trips through the record's `linearKey` untouched.
+  - **Two app-facing ops.** The leader generates the pair itself; `push-subscribe` and
+    `push-unsubscribe` (_Web Push_, below) are the only settings ops from an app, and the
+    Linear key's write, parser and UI belong to the Linear item, which round-trips through the
+    record's `linearKey` untouched.
   - **Accepted:** the one repair write (a record that parses but has no `vapid`) is rebuilt from
     the parsed record, so a field a newer build added and this build's parser drops is lost with
     it.
@@ -2438,6 +2454,24 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     already, and audits `op=push-subscribe id=<request id> ok` with no endpoint or host. A
     request is honoured only sealed `from: "app"` under the shared replay guard, like every
     scheduler op, so a bearer-token holder without the PSK cannot subscribe.
+  - **Unsubscribing** (added 2026-10-25). The card's Turn off unsubscribes the browser first —
+    that is what stops pushes to it, and it needs no leader — then sends `push-unsubscribe`
+    with the endpoint, which frees the slot: the leader removes it with one serialised
+    `update` of the settings holder (none for an endpoint it does not hold) and audits
+    `op=push-unsubscribe id=<request id> ok`. The op answers within its 10 s timeout at worst,
+    so ordering the local unsubscribe after it would keep a device pushed for that long on a
+    slow leader. A failed op, or a leader that predates it (`invalid_request`, after the same
+    `pushEndpoint` pre-check), leaves the browser off and the endpoint in the record until
+    the push service answers 404/410 for it, which the sender then prunes; the card says so. An
+    answer the app cannot read (or one echoing another endpoint) gets its own note, not the
+    "could not tell" one. The page marks the browser turned off (`seance:push-off`) before
+    anything can fail, so a re-sync in flight, which reads the mark again just before it
+    subscribes, cannot undo the turn-off; the mark is put back when the turn-off changed nothing
+    (service worker not ready, unsubscribe failed and the op too), and an inspection that finds
+    the browser on clears it. After a successful turn-off the card lands on off even if its
+    re-inspection fails (Enable then prepares after the prompt).
+    Rejected: the op first and the local unsubscribe only on success, which would leave a
+    person who asked for silence still pushed whenever the leader is down or old.
   - **Sending** (`createPushSender`). One send per subscription per alert, never awaited by the
     scheduler pass: push services can take seconds, and a hung one must not hold the queue.
     - The endpoint is checked again at send time against the allowlist (`pushEndpoint`). A host a
@@ -2494,9 +2528,9 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     raised then; one the record does not hold never landed, and the step raises it afresh. The watch runs on a registry
     change, on the tick timer and once the settings read lands; one log line,
     `scheduler: disk nearly full: device=<id>`.
-  - **Not built:** an unsubscribe op or a way to remove one from the PWA (a subscription leaves
-    the record only when a push service answers 404/410), and a recovery path for an unreadable
-    record (above).
+  - **Not built:** removing another browser's subscription from the PWA (a retired device's
+    slot still goes only when its push service answers 404/410), and a recovery path for an
+    unreadable record (above).
 - **A task on a machine that never answers again** becomes `lost` — after 15 minutes absent
   once running; while still reserved, at its TTL with its `sessions` check unanswered and its
   machine not connected, or 15 minutes past its TTL with every check failing on a machine that
@@ -6447,7 +6481,13 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   a leader is verified, so a subscription the record lost (pruned on a 410, or a record that
   started over) comes back; an answer that may change (`not_ready`, an unreachable relay or
   leader, no record yet) is tried again on the next ready transition and after a backoff, at
-  most five times. The service worker
+  most five times. When on, the card offers Turn off (`disablePush`): it unsubscribes the
+  browser, then sends `push-unsubscribe` (_Scheduler_, "Web Push", "Unsubscribing"), and when
+  the leader could not be told or predates the op it says the slot stays until the push
+  service reports the endpoint gone. Permission stays granted after a turn-off — no API takes
+  it back — so the page keeps `seance:push-off` in localStorage and the silent re-run skips a
+  browser that holds it; Enable clears it. Storage a private window blocks forgets the
+  turn-off, and the next load subscribes again (the card then reads "On"; accepted). The service worker
   (`pwa/public/push-sw.js`, joined to the generated worker by `importScripts`, so the precache and
   the `skipWaiting`/`clientsClaim` update path stay the plugin's) shows every push as a generic
   "Séance" notification, even one it cannot read, because Chrome shows its own otherwise and

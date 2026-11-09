@@ -1,6 +1,14 @@
 import type { JSX } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
-import { enablePush, inspectPush, type PushClient, type PushOutcome, type PushPrepared } from "../push.ts";
+import {
+  disablePush,
+  enablePush,
+  inspectPush,
+  type PushClient,
+  type PushOffOutcome,
+  type PushOutcome,
+  type PushPrepared,
+} from "../push.ts";
 import { browserPushEnv, pushSupported } from "../push-browser.ts";
 import { readPref, setPref, THEME_PREFS, type ThemePref } from "../theme.ts";
 import type { ConnectionState } from "../view.ts";
@@ -136,9 +144,9 @@ export function Settings(props: {
 }
 
 type PushView =
-  | { readonly kind: "unsupported" | "denied" | "on" | "off" | "checking" | "working" }
+  | { readonly kind: "unsupported" | "denied" | "on" | "off" | "checking" | "working" | "stopping" }
   /** `retry`: what the button does again. An inspection that failed is read again; a click that failed is run again. */
-  | { readonly kind: "failed"; readonly message: string; readonly retry: "inspect" | "enable" };
+  | { readonly kind: "failed"; readonly message: string; readonly retry: "inspect" | "enable" | "disable" };
 
 function initialPushView(): PushView {
   if (!pushSupported()) return { kind: "unsupported" };
@@ -153,6 +161,7 @@ const PUSH_LINES = {
   off: "Get a notification when an account is about to spill or a task waits for your input.",
   checking: "Checking…",
   working: "Setting up…",
+  stopping: "Turning off…",
 } as const;
 
 function NotificationsCard(props: { push: PushClient }): JSX.Element {
@@ -160,6 +169,8 @@ function NotificationsCard(props: { push: PushClient }): JSX.Element {
   const [view, setView] = useState<PushView>(initialPushView);
   // What `inspectPush` read ahead of the click: the key and the push manager, so the click subscribes at once.
   const prepared = useRef<PushPrepared | null>(null);
+  // What the last turn-off left behind: the leader still holding this browser's slot. Cleared by the next click or retry.
+  const [note, setNote] = useState<string | null>(null);
   const checking = view.kind === "checking";
   // "On" is what this browser really holds, so permission alone never shows it: the browser is asked.
   useEffect(() => {
@@ -180,29 +191,57 @@ function NotificationsCard(props: { push: PushClient }): JSX.Element {
   const enable = (): void => {
     const ready = prepared.current;
     prepared.current = null;
+    setNote(null);
     setView({ kind: "working" });
     // `enablePush` never rejects; the catch is for a throw it did not foresee, so the card cannot stick on "Setting up…".
     enablePush(push, browserPushEnv, ready)
       .catch((): PushOutcome => ({ kind: "failed", message: "Couldn't set up notifications.", retryable: false }))
       .then((outcome) => setView(outcome.kind === "enabled" ? { kind: "on" } : outcomeView(outcome)));
   };
+  // Re-inspected after, so a later Enable has what it needs ready for the gesture.
+  const disable = (): void => {
+    prepared.current = null;
+    setNote(null);
+    setView({ kind: "stopping" });
+    disablePush(push, browserPushEnv)
+      .catch((): PushOffOutcome => ({ kind: "failed", message: "Couldn't turn notifications off.", retryable: false }))
+      .then((outcome) => {
+        if (outcome.kind === "failed") {
+          setView({ kind: "failed", message: outcome.message, retry: "disable" });
+          return;
+        }
+        setNote(outcome.note);
+        // The turn-off worked, so a failing read is still "off": Enable prepares after the prompt when it has nothing ready.
+        void inspectPush(push, browserPushEnv).then((result) => {
+          prepared.current = result.kind === "off" ? result.prepared : null;
+          setView({ kind: result.kind === "on" ? "on" : "off" });
+        });
+      });
+  };
   const retry = (): void => {
-    if (view.kind === "failed" && view.retry === "inspect") {
-      setView({ kind: "checking" });
-      return;
-    }
-    enable();
+    if (view.kind !== "failed") return;
+    setNote(null);
+    if (view.retry === "inspect") setView({ kind: "checking" });
+    else if (view.retry === "disable") disable();
+    else enable();
   };
 
-  const busy = view.kind === "working";
-  const canEnable = view.kind === "off" || view.kind === "failed" || busy;
+  const busy = view.kind === "working" || view.kind === "stopping";
+  const canEnable = view.kind === "off" || view.kind === "failed" || view.kind === "working";
+  const canDisable = view.kind === "on" || view.kind === "stopping";
   return (
     <div className="push-card card">
       <span className="theme-title">Notifications</span>
       <p className="push-line">{view.kind === "failed" ? view.message : PUSH_LINES[view.kind]}</p>
+      {note !== null && <p className="push-line">{note}</p>}
       {canEnable && (
         <button type="button" className="push-button" disabled={busy} onClick={view.kind === "off" ? enable : retry}>
           {view.kind === "failed" ? "Try again" : "Enable notifications"}
+        </button>
+      )}
+      {canDisable && (
+        <button type="button" className="push-button" disabled={busy} onClick={disable}>
+          Turn off
         </button>
       )}
     </div>
