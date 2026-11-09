@@ -864,7 +864,8 @@ of M4 has landed.
   read the key go through the daemon's fleet broker (DESIGN.md "Fleet broker", "The scheduler
   actions").
 
-  Raycast `auto` attaches the same way as the CLI's.
+  Raycast `auto` attaches the same way as the keyed CLI's — **Done** (2026-11-09): an app-role
+  `createTask` with the key it already reads (DESIGN.md, Raycast extension).
 
 - **Batches are a group** — **Done** (owner, 2026-10-26). A batch is where a set of tasks came
   from, shown and acted on together, never a scheduling primitive: `sequential` and `parallel`

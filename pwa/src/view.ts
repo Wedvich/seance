@@ -4,6 +4,7 @@ import {
   endedBySignal,
   knownAccounts,
   lastHeardAt,
+  originLabel,
   sentence,
   taskFailureText,
   type TaskUntil,
@@ -360,12 +361,6 @@ function afterValue(after: PersistedForm["after"]): string {
   const [only] = after;
   if (only === undefined) return "None";
   return after.length === 1 ? `1 task · ${only.after}` : `${after.length} tasks`;
-}
-
-/** `host/path` → `path`: the host says nothing a person picks a repo by. A remote-less origin is its basename already. */
-export function originLabel(origin: string): string {
-  const slash = origin.indexOf("/");
-  return slash === -1 ? origin : origin.slice(slash + 1);
 }
 
 type Pins = Pick<PersistedForm, "machine" | "account">;

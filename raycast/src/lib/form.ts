@@ -1,5 +1,20 @@
-import { lastHeardAt, type MachineStatus, type RepoEntry } from "@seance/shared";
+import {
+  lastHeardAt,
+  originLabel,
+  TASK_REQUEST_LIMITS,
+  taskRequest,
+  type MachineStatus,
+  type RepoEntry,
+  type TaskRequest,
+} from "@seance/shared";
 import type { Effort, Model } from "./options.ts";
+
+/**
+ * The machine picker's `auto` entry: the scheduler places the task. Held in
+ * `machineId` (and as a `LastUsed.repos` key) beside deviceIds, which are
+ * base64url SHA-256 digests and so never spell it.
+ */
+export const AUTO = "auto";
 
 /**
  * The picker's view of a machine — `Machine` from the relay client minus the
@@ -47,7 +62,9 @@ export function sortedMachines(machines: readonly PickerMachine[]): readonly Pic
 /** Everything the form holds. The prompt always starts empty, so it is never persisted. */
 export interface FormValues {
   readonly prompt: string;
+  /** A deviceId, `AUTO`, or null when there is nothing to pick. */
   readonly machineId: string | null;
+  /** A clone name on a machine; on `AUTO`, an origin (`RepoEntry.origin`), the scheduler's repo key. */
   readonly repo: string | null;
   readonly model: Model;
   readonly effort: Effort;
@@ -57,7 +74,8 @@ export interface FormValues {
 /**
  * What survives between invocations, written after each successful spawn.
  * The repo is remembered *per machine*, so switching machines restores what
- * you last ran there instead of resetting to that machine's first repo.
+ * you last ran there instead of resetting to that machine's first repo. `AUTO`
+ * is a key like any deviceId, holding an origin.
  */
 export interface LastUsed {
   readonly machineId: string | null;
@@ -82,34 +100,59 @@ export interface Reconciliation {
 }
 
 /**
- * First connected machine, else first listed, extended with the preference: a remembered machine
- * that is gone from the registry falls back to the *named* default before
- * falling back to position.
+ * `AUTO` once picked, else first connected machine, else first listed, extended
+ * with the preference: a remembered machine that is gone from the registry
+ * falls back to the *named* default (a machine, or `auto`) before falling back
+ * to position.
  */
-function pickMachine(
+function pickTarget(
   machines: readonly PickerMachine[],
   preferredId: string | null,
   defaults: Defaults,
-): PickerMachine | null {
+): PickerMachine | typeof AUTO | null {
+  if (preferredId === AUTO) return AUTO;
   const remembered = machines.find((machine) => machine.deviceId === preferredId);
   if (remembered !== undefined) return remembered;
   if (defaults.machineName !== "") {
-    const named = machines.find((machine) => machine.name.toLowerCase() === defaults.machineName.toLowerCase());
+    const wanted = defaults.machineName.toLowerCase();
+    const named = machines.find((machine) => machine.name.toLowerCase() === wanted);
     if (named !== undefined) return named;
+    if (wanted === AUTO) return AUTO;
   }
   return machines.find((machine) => machine.connected) ?? machines[0] ?? null;
 }
 
+/** One entry of the repository dropdown. */
+export interface RepoChoice {
+  readonly value: string;
+  readonly title: string;
+  readonly keywords: readonly string[];
+}
+
 /**
- * First preference that resolves, else the machine's first repo — the cache or
- * the memory may name one that has gone.
+ * On `AUTO`, every origin some machine reports, once each, by label — as the
+ * PWA lists them with no pin (`scopedRepos`). A clone without an origin (a
+ * daemon too old to report one) is one the scheduler cannot route to, so it is
+ * left out. On a machine, its clones by name.
  */
-function pickRepo(machine: PickerMachine, preferred: readonly (string | null)[]): RepoEntry | null {
-  for (const name of preferred) {
-    const match = name === null ? undefined : machine.repos.find((repo) => repo.name === name);
+export function repoChoices(machineId: string | null, machines: readonly PickerMachine[]): readonly RepoChoice[] {
+  if (machineId !== AUTO) {
+    const machine = machines.find((candidate) => candidate.deviceId === machineId);
+    return (machine?.repos ?? []).map((repo) => ({ value: repo.name, title: repo.name, keywords: [repo.path] }));
+  }
+  const origins = new Set(machines.flatMap((machine) => machine.repos.flatMap((repo) => repo.origin ?? [])));
+  return sortedByName(
+    [...origins].map((origin) => ({ value: origin, title: originLabel(origin), name: originLabel(origin) })),
+  ).map(({ value, title }) => ({ value, title, keywords: [value] }));
+}
+
+/** First preference still offered, else the first choice — the cache or the memory may name one that has gone. */
+function pickRepo(choices: readonly RepoChoice[], preferred: readonly (string | null)[]): RepoChoice | null {
+  for (const value of preferred) {
+    const match = value === null ? undefined : choices.find((choice) => choice.value === value);
     if (match !== undefined) return match;
   }
-  return machine.repos[0] ?? null;
+  return choices[0] ?? null;
 }
 
 /**
@@ -126,36 +169,45 @@ export function reconcile(
     readonly defaults: Defaults;
   },
 ): Reconciliation {
-  const machine = pickMachine(machines, values.machineId, context.defaults);
-  if (machine === null) {
-    // Nothing to pick from. `submitBlocker` explains the emptiness; a note here
-    // would just duplicate it, and an empty registry is not a *change*.
-    return { values: { ...values, machineId: null, repo: null }, note: null };
+  const target = pickTarget(machines, values.machineId, context.defaults);
+  if (target === null || machines.length === 0) {
+    // Nothing to pick from. `checkSubmit` explains the emptiness; a note here
+    // would just duplicate it, and an empty registry is not a *change*. `auto` stays picked.
+    return { values: { ...values, machineId: target === AUTO ? AUTO : null, repo: null }, note: null };
   }
+  const targetId = target === AUTO ? AUTO : target.deviceId;
+  const where = target === AUTO ? "every machine" : target.name;
+  const shown = (value: string): string => (target === AUTO ? originLabel(value) : value);
 
-  // The per-machine memory: the current selection
-  // carries over only while the machine itself is unchanged — on a switch, the
-  // target machine's own remembered repo wins, never the previous machine's.
-  const remembered = context.lastUsed?.repos[machine.deviceId] ?? null;
-  const repo = pickRepo(machine, machine.deviceId === values.machineId ? [values.repo, remembered] : [remembered]);
-  const next: FormValues = { ...values, machineId: machine.deviceId, repo: repo?.name ?? null };
+  // The per-target memory: the current selection
+  // carries over only while the target itself is unchanged — on a switch, the
+  // target's own remembered repo wins, never the previous target's.
+  const remembered = context.lastUsed?.repos[targetId] ?? null;
+  const repo = pickRepo(
+    repoChoices(targetId, machines),
+    targetId === values.machineId ? [values.repo, remembered] : [remembered],
+  );
+  const next: FormValues = { ...values, machineId: targetId, repo: repo?.value ?? null };
 
-  if (machine.deviceId !== values.machineId) {
+  if (targetId !== values.machineId) {
     // Only worth a note if something was actually selected before, and only if
     // the cache can still name it — otherwise this is a first-run selection.
+    // Reaches `auto` only from a vanished machine, when the preference names it.
     const lost = context.cached.find((candidate) => candidate.deviceId === values.machineId);
     const note =
       values.machineId === null
         ? null
-        : `${lost?.name ?? "the last machine"} is no longer registered — switched to ${machine.name}`;
+        : `${lost?.name ?? "the last machine"} is no longer registered — switched to ${target === AUTO ? "Auto" : target.name}`;
     return { values: next, note };
   }
 
   if (repo === null) {
-    return { values: next, note: values.repo === null ? null : `${machine.name} has no repos to spawn in` };
+    const empty =
+      target === AUTO ? "No machine reports a repo the scheduler can route to" : `${where} has no repos to spawn in`;
+    return { values: next, note: values.repo === null ? null : empty };
   }
-  if (repo.name !== values.repo) {
-    const note = values.repo === null ? null : `${values.repo} is gone from ${machine.name} — picked ${repo.name}`;
+  if (repo.value !== values.repo) {
+    const note = values.repo === null ? null : `${shown(values.repo)} is gone from ${where} — picked ${repo.title}`;
     return { values: next, note };
   }
   return { values: next, note: null };
@@ -200,15 +252,18 @@ export function nextLastUsed(previous: LastUsed | null, values: FormValues): Las
  * than a bare `false`: refusing to submit without saying why is exactly the
  * failure mode this surface exists to avoid — the point is to not fire a spawn
  * into a void, and to say so. Returning the narrowed target too keeps the view
- * free of non-null assertions.
+ * free of non-null assertions. `spawn` goes straight to a machine; `queue` is a
+ * task in the relay's store for the scheduler to place.
  */
 export type Submission =
-  | { readonly ok: true; readonly machine: PickerMachine; readonly repo: string }
+  | { readonly ok: true; readonly kind: "spawn"; readonly machine: PickerMachine; readonly repo: string }
+  | { readonly ok: true; readonly kind: "queue"; readonly request: TaskRequest; readonly label: string }
   | { readonly ok: false; readonly reason: string };
 
 export function checkSubmit(values: FormValues, machines: readonly PickerMachine[], connected: boolean): Submission {
+  const auto = values.machineId === AUTO;
   const machine = machines.find((candidate) => candidate.deviceId === values.machineId);
-  if (machine === undefined) {
+  if (machines.length === 0 || (machine === undefined && !auto)) {
     if (machines.length > 0) return { ok: false, reason: "Pick a machine" };
     return {
       ok: false,
@@ -220,11 +275,33 @@ export function checkSubmit(values: FormValues, machines: readonly PickerMachine
   // The socket, not just the machine: a spawn is a request over a live app
   // socket, and the cached list can name a machine that looked online an hour ago.
   if (!connected) return { ok: false, reason: "Not connected to the relay" };
+  if (machine === undefined) return checkQueue(values);
   if (!machine.connected) return { ok: false, reason: `${machine.name} is asleep — nothing would receive the spawn` };
   if (values.repo === null) {
     return { ok: false, reason: `${machine.name} has no repos — check repoRoots in its config, then rescan` };
   }
-  return { ok: true, machine, repo: values.repo };
+  return { ok: true, kind: "spawn", machine, repo: values.repo };
+}
+
+/**
+ * No machine need be awake, nor a scheduler leading: the relay's store answers
+ * the create itself and the task waits there. The prompt is held to the
+ * scheduler's bound here, where it can be named, rather than refused by
+ * `createTask` as a bare `invalid_request`.
+ */
+function checkQueue(values: FormValues): Submission {
+  if (values.repo === null) {
+    return { ok: false, reason: "No machine reports a repo's origin — update seanced on them, then rescan" };
+  }
+  const request = taskRequest(values, values.repo, true);
+  const length = request.prompt?.length ?? 0;
+  if (length > TASK_REQUEST_LIMITS.prompt) {
+    return {
+      ok: false,
+      reason: `The prompt is ${length} characters; a queued task takes at most ${TASK_REQUEST_LIMITS.prompt}. Shorten it, or pick a machine to spawn on directly`,
+    };
+  }
+  return { ok: true, kind: "queue", request, label: originLabel(values.repo) };
 }
 
 /** Age of the freshest machine contact, for the cached-list banner. `now` is injected so it is testable. */

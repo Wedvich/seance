@@ -10,6 +10,7 @@ import {
   type Task,
   type TaskSpec,
   type TaskRecord,
+  type TaskRequest,
 } from "./types.ts";
 import { bindTaskRecord } from "./parse.ts";
 import { openAtRest, sealAtRest } from "./crypto.ts";
@@ -25,6 +26,26 @@ export function taskKey(taskId: string): string {
  */
 export function queuedTask(spec: TaskSpec, now: number, id: string = crypto.randomUUID()): Task {
   return { id, spec, state: "queued", createdAt: now };
+}
+
+/** The fields of a submit form a task request is built from — the PWA's and the Raycast extension's alike. */
+export interface TaskRequestForm {
+  readonly prompt: string;
+  readonly worktree: boolean;
+  readonly model: string;
+  readonly effort: string;
+}
+
+/** The form as a `TaskRequest` for `origin`: the prompt trimmed and left out when blank, or always (a routing preview never reads it). */
+export function taskRequest(form: TaskRequestForm, origin: string, withPrompt: boolean): TaskRequest {
+  const prompt = form.prompt.trim();
+  return {
+    repo: origin,
+    mode: form.worktree ? "worktree" : "here",
+    model: form.model,
+    effort: form.effort,
+    ...(withPrompt && prompt !== "" ? { prompt } : {}),
+  };
 }
 
 /** The seance MCP tool a `until: "reported"` task's session calls to settle itself (#21). */

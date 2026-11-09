@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import type { MachineStatus } from "@seance/shared";
 import {
+  AUTO,
   checkSubmit,
   formatAge,
   initialValues,
   nextLastUsed,
   reconcile,
+  repoChoices,
   sortedByName,
   sortedMachines,
   type Defaults,
@@ -223,7 +225,7 @@ describe("reconcile", () => {
 describe("checkSubmit", () => {
   test("resolves the target when everything lines up", () => {
     const result = checkSubmit(values({ machineId: "device-1", repo: "seance" }), [machine()], true);
-    expect(result).toEqual({ ok: true, machine: machine(), repo: "seance" });
+    expect(result).toEqual({ ok: true, kind: "spawn", machine: machine(), repo: "seance" });
   });
 
   test("refuses while the machine list is still empty and the relay is not open", () => {
@@ -361,5 +363,143 @@ describe("formatAge", () => {
 
   test("a future timestamp (clock skew) reads as moments ago", () => {
     expect(formatAge([machine({ lastSeen: now + 60_000 })], now)).toBe("moments ago");
+  });
+});
+
+describe("auto", () => {
+  const laptop = machine({
+    repos: [
+      { name: "seance", path: "/repos/seance", defaultBranch: "main", origin: "github.com/me/seance" },
+      { name: "legacy", path: "/repos/legacy", defaultBranch: null },
+    ],
+  });
+  const tower = machine({
+    deviceId: "device-2",
+    name: "tower",
+    connected: false,
+    repos: [
+      { name: "seance-2", path: "/w/seance", defaultBranch: "main", origin: "github.com/me/seance" },
+      { name: "api", path: "/w/api", defaultBranch: "main", origin: "github.com/me/api" },
+    ],
+  });
+  const fleet = [laptop, tower];
+  const context = (lastUsed: LastUsed | null = null) => ({ cached: fleet, lastUsed, defaults });
+
+  test("lists each origin once across the fleet, asleep machines included, and leaves out clones with none", () => {
+    expect(repoChoices(AUTO, fleet)).toEqual([
+      { value: "github.com/me/api", title: "me/api", keywords: ["github.com/me/api"] },
+      { value: "github.com/me/seance", title: "me/seance", keywords: ["github.com/me/seance"] },
+    ]);
+  });
+
+  test("is kept across a registry push, with its repo, silently", () => {
+    const current = values({ machineId: AUTO, repo: "github.com/me/seance" });
+    expect(reconcile(current, fleet, context())).toEqual({ values: current, note: null });
+  });
+
+  test("remembers its origin apart from each machine's clone", () => {
+    const remembered: LastUsed = {
+      machineId: AUTO,
+      repos: { [AUTO]: "github.com/me/seance", "device-1": "legacy" },
+      model: "opus",
+      effort: "medium",
+      worktree: true,
+    };
+    const opening = initialValues(fleet, remembered, defaults);
+    expect(opening.machineId).toBe(AUTO);
+    expect(opening.repo).toBe("github.com/me/seance");
+    expect(nextLastUsed(remembered, { ...opening, repo: "github.com/me/api" }).repos).toEqual({
+      [AUTO]: "github.com/me/api",
+      "device-1": "legacy",
+    });
+  });
+
+  test("the preference can name auto, and a machine named auto wins over it", () => {
+    expect(initialValues(fleet, null, { ...defaults, machineName: "Auto" }).machineId).toBe(AUTO);
+    const named = machine({ deviceId: "device-9", name: "auto" });
+    expect(initialValues([named], null, { ...defaults, machineName: "auto" }).machineId).toBe("device-9");
+  });
+
+  test("a vanished machine the preference replaces with auto says so, not that its clone is gone", () => {
+    const gone = machine({ deviceId: "device-gone", name: "old-box" });
+    const result = reconcile(values({ machineId: "device-gone", repo: "seance" }), fleet, {
+      cached: [gone],
+      lastUsed: null,
+      defaults: { ...defaults, machineName: "auto" },
+    });
+    expect(result.values.machineId).toBe(AUTO);
+    expect(result.note).toBe("old-box is no longer registered — switched to Auto");
+  });
+
+  test("an origin gone from every machine picks another and says so by its label", () => {
+    const result = reconcile(values({ machineId: AUTO, repo: "github.com/me/gone" }), fleet, context());
+    expect(result.values.repo).toBe("github.com/me/api");
+    expect(result.note).toBe("me/gone is gone from every machine — picked me/api");
+  });
+
+  test("a fleet reporting no origins leaves no repo, and says why once something was picked", () => {
+    const old = [machine({ repos: [{ name: "legacy", path: "/l", defaultBranch: null }] })];
+    const result = reconcile(values({ machineId: AUTO, repo: "github.com/me/seance" }), old, context());
+    expect(result.values).toMatchObject({ machineId: AUTO, repo: null });
+    expect(result.note).toBe("No machine reports a repo the scheduler can route to");
+  });
+
+  test("an empty registry keeps auto picked, without a note — the blocker explains it", () => {
+    const result = reconcile(values({ machineId: AUTO, repo: "github.com/me/seance" }), [], context());
+    expect(result).toEqual({ values: values({ machineId: AUTO, repo: null }), note: null });
+  });
+
+  test("queues with every machine asleep: the store holds the task, not a machine", () => {
+    const asleep = [machine({ ...laptop, connected: false }), tower];
+    const result = checkSubmit(
+      values({ machineId: AUTO, repo: "github.com/me/seance", prompt: "  fix it \n", model: "sonnet", effort: "high" }),
+      asleep,
+      true,
+    );
+    expect(result).toEqual({
+      ok: true,
+      kind: "queue",
+      request: { repo: "github.com/me/seance", mode: "worktree", model: "sonnet", effort: "high", prompt: "fix it" },
+      label: "me/seance",
+    });
+  });
+
+  test("a blank prompt is left out of the task, and the worktree box picks the mode", () => {
+    const result = checkSubmit(
+      values({ machineId: AUTO, repo: "github.com/me/api", prompt: "  ", worktree: false }),
+      fleet,
+      true,
+    );
+    expect(result).toMatchObject({ ok: true, request: { repo: "github.com/me/api", mode: "here" } });
+    expect(result.ok && result.kind === "queue" && "prompt" in result.request).toBe(false);
+  });
+
+  test("refuses without a socket, as a spawn does", () => {
+    const result = checkSubmit(values({ machineId: AUTO, repo: "github.com/me/api" }), fleet, false);
+    expect(result).toEqual({ ok: false, reason: "Not connected to the relay" });
+  });
+
+  test("refuses an empty registry rather than queuing a task nothing could run", () => {
+    expect(checkSubmit(values({ machineId: AUTO }), [], true)).toEqual({
+      ok: false,
+      reason: "No machines are registered with the relay",
+    });
+  });
+
+  test("refuses with no origin to queue, pointing at the daemons", () => {
+    expect(checkSubmit(values({ machineId: AUTO }), fleet, true)).toEqual({
+      ok: false,
+      reason: "No machine reports a repo's origin — update seanced on them, then rescan",
+    });
+  });
+
+  test("refuses a prompt past the scheduler's bound, naming the direct spawn as the way past it", () => {
+    const prompt = "x".repeat(8_193);
+    const result = checkSubmit(values({ machineId: AUTO, repo: "github.com/me/api", prompt }), fleet, true);
+    expect(result).toEqual({
+      ok: false,
+      reason:
+        "The prompt is 8193 characters; a queued task takes at most 8192. Shorten it, or pick a machine to spawn on directly",
+    });
   });
 });

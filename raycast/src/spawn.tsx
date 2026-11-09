@@ -14,7 +14,7 @@ import {
   showToast,
 } from "@raycast/api";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { RelayState, SpawnRequest, SpawnResponse } from "@seance/shared";
+import type { RelayState, SpawnRequest, SpawnResponse, TaskRequest } from "@seance/shared";
 import {
   accountLine,
   NO_ALIASES,
@@ -27,11 +27,13 @@ import { readLastUsed, readRegistry, writeLastUsed, writeRegistry, type Store } 
 import { loadKey } from "./lib/credentials.ts";
 import { failureText } from "./lib/errors.ts";
 import {
+  AUTO,
   checkSubmit,
   formatAge,
   initialValues,
   nextLastUsed,
   reconcile,
+  repoChoices,
   sortedMachines,
   type Defaults,
   type FormValues,
@@ -48,6 +50,7 @@ import {
   isEffort,
   isModel,
 } from "./lib/options.ts";
+import { enqueue, leaderWait, taskFor, type Unsettled } from "./lib/queue.ts";
 import { connect, type RelayHandle } from "./lib/relay.ts";
 import { installNodeGlobals } from "./lib/runtime.ts";
 
@@ -108,7 +111,9 @@ function statusLine(relay: RelayState | null, machines: readonly PickerMachine[]
 
 /**
  * Zero-friction spawn: hotkey, prompt, Start. Monitoring is the PWA's job, so
- * there is no session list here and no `sessions` op on the wire.
+ * there is no session list here and no `sessions` op on the wire. A named
+ * machine is a direct spawn, there at once; `Auto` queues a task for the
+ * scheduler to place, as the PWA does.
  *
  * Cache-first by design. The picker renders from the last registry projection
  * immediately — dialing the relay costs a TLS handshake plus a registry push,
@@ -137,6 +142,8 @@ export default function Command(): React.JSX.Element {
   /** The cached projection and the last-used memory feed reconciliation, but nothing renders them — refs, not state. */
   const cachedRef = useRef<readonly PickerMachine[]>([]);
   const lastUsedRef = useRef<LastUsed | null>(null);
+  /** The last `auto` create that may have landed: Queue again with the same form re-sends it, not a second task. */
+  const unsettledRef = useRef<Unsettled | null>(null);
 
   const absorb = useCallback(
     (pushed: readonly PickerMachine[], authoritative: boolean): void => {
@@ -235,19 +242,27 @@ export default function Command(): React.JSX.Element {
   }, [absorb, defaults]);
 
   const connected = relay?.status === "open";
+  const auto = values.machineId === AUTO;
+  // Shown only when a queued task would wait: which machine leads is no concern here.
+  const queueWait = auto && relay !== null ? leaderWait(relay.scheduler) : null;
   const selected = machines.find((machine) => machine.deviceId === values.machineId) ?? null;
   // From the live registry only: the cached projection keeps no exclaves.
   const accounts = accountLine(relay?.machines ?? [], values.machineId, aliases);
 
   const start = async (): Promise<void> => {
+    const refusal = auto ? "Can't queue a task" : "Can't start a session";
     const check = checkSubmit(values, machines, connected);
     if (!check.ok) {
-      await showToast(Toast.Style.Failure, "Can't start a session", check.reason);
+      await showToast(Toast.Style.Failure, refusal, check.reason);
       return;
     }
     const handle = handleRef.current;
     if (handle === null) {
-      await showToast(Toast.Style.Failure, "Can't start a session", "No relay connection");
+      await showToast(Toast.Style.Failure, refusal, "No relay connection");
+      return;
+    }
+    if (check.kind === "queue") {
+      await queue(handle, check.request, check.label);
       return;
     }
 
@@ -302,12 +317,50 @@ export default function Command(): React.JSX.Element {
     }
   };
 
+  const queue = async (handle: RelayHandle, request: TaskRequest, label: string): Promise<void> => {
+    const pending = taskFor(request, unsettledRef.current, Date.now());
+    setBusy("spawn");
+    const outcome = await enqueue(handle.createTask, pending.task);
+    setBusy(null);
+    if (outcome.kind === "refused") {
+      // This send stored nothing, but an earlier unsure one of the same form may have:
+      // the kept task stays kept, so the next try still re-sends its id.
+      // The form stays intact, as on a failed spawn.
+      await showToast(Toast.Style.Failure, "Not queued", outcome.message);
+      return;
+    }
+    // Kept after a store too: the window can stay open with the form intact (a leader-wait toast),
+    // and Queue again must read "already queued", not queue the work twice.
+    unsettledRef.current = pending;
+    if (outcome.kind === "unsure") {
+      await showToast(Toast.Style.Failure, "Not sure it queued", outcome.message);
+      return;
+    }
+    const title = outcome.landedEarlier ? `${label} was already queued` : `Queued ${label}`;
+    // As after a spawn: the task is stored, so bookkeeping failing must not read as "not queued".
+    const persisted = nextLastUsed(lastUsedRef.current, values);
+    lastUsedRef.current = persisted;
+    try {
+      await writeLastUsed(store, persisted);
+      const wait = leaderWait(handle.getState().scheduler);
+      if (wait !== null) {
+        // Worth reading, so a toast that stays rather than a HUD that vanishes.
+        await showToast(Toast.Style.Success, title, wait);
+        return;
+      }
+      await closeMainWindow();
+      await showHUD(title);
+    } catch {
+      void showToast(Toast.Style.Success, title);
+    }
+  };
+
   // Earns its keybinding precisely because cache-first makes a stale repo list
   // the likeliest way this form is wrong.
   const rescan = async (): Promise<void> => {
     const handle = handleRef.current;
     if (selected === null || handle === null || !connected) {
-      await showToast(Toast.Style.Failure, "Can't rescan", "No connected machine selected");
+      await showToast(Toast.Style.Failure, "Can't rescan", "Pick a connected machine to rescan");
       return;
     }
     setBusy("rescan");
@@ -348,7 +401,11 @@ export default function Command(): React.JSX.Element {
       navigationTitle="Spawn a Claude Code session"
       actions={
         <ActionPanel>
-          <Action.SubmitForm title="Start" icon={Icon.Play} onSubmit={() => void start()} />
+          <Action.SubmitForm
+            title={auto ? "Queue" : "Start"}
+            icon={auto ? Icon.Tray : Icon.Play}
+            onSubmit={() => void start()}
+          />
           <Action
             title="Rescan Repos"
             icon={Icon.ArrowClockwise}
@@ -367,43 +424,60 @@ export default function Command(): React.JSX.Element {
         onChange={(prompt) => setValues((current) => ({ ...current, prompt }))}
       />
       <Form.Description title="Relay" text={statusLine(relay, machines)} />
-      <Form.Dropdown
-        id="machine"
-        title="Machine"
-        value={values.machineId ?? ""}
-        onChange={(machineId) =>
-          setValues(
-            (current) =>
-              // repo: null — switching machines consults the target machine's
-              // own remembered repo, never the previous machine's selection.
-              reconcile({ ...current, machineId, repo: null }, machines, {
-                cached: cachedRef.current,
-                lastUsed: lastUsedRef.current,
-                defaults,
-              }).values,
-          )
-        }
-      >
-        {machines.map((machine) => (
+      {/* Neither picker renders before the cached form lands. Raycast's host
+          keeps a field by its id, and one first shown empty then filled resets
+          to its first item through onChange, discarding the remembered value
+          (seen live: Auto's remembered origin replaced by the top of the list). */}
+      {ready ? (
+        <Form.Dropdown
+          id="machine"
+          title="Machine"
+          value={values.machineId ?? ""}
+          onChange={(machineId) =>
+            setValues((current) =>
+              // Raycast also fires this on mount with the value it already
+              // shows; only a real switch may drop the repo.
+              machineId === current.machineId
+                ? current
+                : // repo: null — switching machines consults the target machine's
+                  // own remembered repo, never the previous machine's selection.
+                  reconcile({ ...current, machineId, repo: null }, machines, {
+                    cached: cachedRef.current,
+                    lastUsed: lastUsedRef.current,
+                    defaults,
+                  }).values,
+            )
+          }
+        >
           <Form.Dropdown.Item
-            key={machine.deviceId}
-            value={machine.deviceId}
-            title={machine.connected ? machine.name : `${machine.name} — asleep`}
-            icon={{ source: Icon.CircleFilled, tintColor: machine.connected ? Color.Green : Color.SecondaryText }}
+            value={AUTO}
+            title="Auto — the scheduler picks"
+            icon={{ source: Icon.CircleFilled, tintColor: Color.Blue }}
           />
-        ))}
-      </Form.Dropdown>
+          {machines.map((machine) => (
+            <Form.Dropdown.Item
+              key={machine.deviceId}
+              value={machine.deviceId}
+              title={machine.connected ? machine.name : `${machine.name} — asleep`}
+              icon={{ source: Icon.CircleFilled, tintColor: machine.connected ? Color.Green : Color.SecondaryText }}
+            />
+          ))}
+        </Form.Dropdown>
+      ) : null}
       {accounts === null ? null : <Form.Description title="Accounts" text={accounts} />}
-      <Form.Dropdown
-        id="repo"
-        title="Repository"
-        value={values.repo ?? ""}
-        onChange={(repo) => setValues((current) => ({ ...current, repo }))}
-      >
-        {(selected?.repos ?? []).map((repo) => (
-          <Form.Dropdown.Item key={repo.name} value={repo.name} title={repo.name} keywords={[repo.path]} />
-        ))}
-      </Form.Dropdown>
+      {queueWait === null ? null : <Form.Description title="Scheduler" text={queueWait} />}
+      {ready ? (
+        <Form.Dropdown
+          id="repo"
+          title="Repository"
+          value={values.repo ?? ""}
+          onChange={(repo) => setValues((current) => ({ ...current, repo }))}
+        >
+          {repoChoices(values.machineId, machines).map((repo) => (
+            <Form.Dropdown.Item key={repo.value} value={repo.value} title={repo.title} keywords={[...repo.keywords]} />
+          ))}
+        </Form.Dropdown>
+      ) : null}
       <Form.Dropdown
         id="model"
         title="Model"
