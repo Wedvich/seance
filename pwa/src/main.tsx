@@ -2,6 +2,7 @@ import { render } from "preact";
 import "./base.css";
 import { App } from "./app.tsx";
 import { Setup } from "./components/setup.tsx";
+import { watchDeepLinks } from "./deep-link-browser.ts";
 import { dropLegacyHidden, dropLegacyPending, readForm, readFormFiles, trackFormFiles, writeForm } from "./persist.ts";
 import { deriveAccountKey, FLEET_QUOTA_INTERVAL_MS, RelayClient } from "@seance/shared";
 import { loadPsk, loadPskBase, readBearer, readRelayUrl } from "./relay/keys.ts";
@@ -82,6 +83,7 @@ if (key === null || token === null) {
 
   client.start();
   watchPushResync(client);
+  watchDeepLinks(store);
   render(<App store={store} push={client} />, container);
 
   // After the form's writer, so appended share text is saved. The form is up first: Cache Storage

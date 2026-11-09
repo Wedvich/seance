@@ -17,6 +17,9 @@ import { RelaySettings } from "./relay-dot.tsx";
 /** A first tap on a cancel that ends a session arms it this long; no confirm dialog for a thing this quick to take back. */
 const ARM_MS = 4_000;
 
+/** How long a notification's row stays marked. */
+const MARK_MS = 3_000;
+
 /**
  * Reached from the spawn form's header: what the scheduler holds, by what each
  * task needs from the person, with a way to cancel, mark done, or hold the
@@ -29,6 +32,14 @@ export function QueueScreen(props: {
   notice: string | null;
   pausing: boolean;
   discarding: boolean;
+  /** A notification's task: scrolled to and marked once its row is listed. */
+  focusedTask: string | null;
+  /**
+   * The focus was acted on: the store forgets it. Only here, never on unmount: a callback that is a new
+   * closure each render would make an unmount effect run on every re-render and drop a focus whose row
+   * is not listed yet. The store drops it when the screen closes (`#closeTopLayer`).
+   */
+  onFocused: () => void;
   /** Absent in the desktop layout, where the screen is a column rather than a layer. */
   onDismiss?: () => void;
   onRefresh: () => void;
@@ -53,7 +64,7 @@ export function QueueScreen(props: {
   const list = useRef<HTMLDivElement>(null);
 
   // Not scrollIntoView: that scrolls every ancestor too, which shifts the page on a phone.
-  const reveal = (taskId: string): void => {
+  const reveal = useCallback((taskId: string): void => {
     const el = list.current;
     if (el === null) return;
     const card = el.querySelector<HTMLElement>(`[data-task="${CSS.escape(taskId)}"]`);
@@ -68,7 +79,31 @@ export function QueueScreen(props: {
     el.scrollTo({ top, behavior: still ? "auto" : "smooth" });
     // The scroll alone leaves keyboard and screen-reader focus on the button; preventScroll keeps the smooth scroll ours.
     card.focus({ preventScroll: true });
-  };
+  }, []);
+
+  // The row a notification named, marked while it fades; one view, never again on a re-render.
+  const [marked, setMarked] = useState<string | null>(null);
+  const { focusedTask, onFocused } = props;
+  const focusedIn =
+    focusedTask === null ? undefined : view.sections.find((s) => s.rows.some((r) => r.id === focusedTask))?.title;
+
+  useEffect(() => {
+    if (focusedTask === null || focusedIn === undefined) return;
+    // A card in the collapsed Asleep section is not rendered: open it, and reveal on the next pass.
+    if (focusedIn === ASLEEP_SECTION && !asleepOpen) {
+      setAsleepOpen(true);
+      return;
+    }
+    reveal(focusedTask);
+    setMarked(focusedTask);
+    onFocused();
+  }, [focusedTask, focusedIn, asleepOpen, onFocused, reveal]);
+
+  useEffect(() => {
+    if (marked === null) return;
+    const timer = setTimeout(() => setMarked(null), MARK_MS);
+    return () => clearTimeout(timer);
+  }, [marked]);
 
   useEffect(() => {
     if (armed === null) return;
@@ -190,6 +225,7 @@ export function QueueScreen(props: {
                   <QueueCard
                     key={row.id}
                     row={row}
+                    marked={marked === row.id}
                     available={view.available}
                     armed={armed}
                     onAct={act}
@@ -240,6 +276,8 @@ function QueueCard(props: {
   onFollowUp: (taskId: string) => void;
   /** Scrolls the queue to another task's card. */
   onReveal: (taskId: string) => void;
+  /** The task a notification opened: the card is marked while it fades. */
+  marked: boolean;
 }): JSX.Element {
   const { row, armed, onAct } = props;
   const { inline, continuing } = row;
@@ -278,7 +316,11 @@ function QueueCard(props: {
   );
 
   return (
-    <section className="fleet-card card" data-task={row.id} tabIndex={-1}>
+    <section
+      className={props.marked ? "fleet-card card fleet-card-marked" : "fleet-card card"}
+      data-task={row.id}
+      tabIndex={-1}
+    >
       <div className="fleet-card-head">
         {row.dot !== null && <span className={`dot dot-${row.dot}`} aria-hidden="true" />}
         <div className="fleet-card-title">

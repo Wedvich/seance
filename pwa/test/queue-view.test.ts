@@ -69,6 +69,7 @@ function state(
     queue: true,
     wide: false,
     queueView,
+    focusedTask: null,
     taskAction: null,
     queueNotice: null,
     startNowRefusal: null,

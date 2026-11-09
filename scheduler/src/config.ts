@@ -52,6 +52,11 @@ export interface SchedulerConfig {
   readonly minFreeMib: number;
   /** In-flight (`IN_FLIGHT`: reserved, running, needs-input) scheduler tasks across the fleet. */
   readonly globalMax: number;
+  /**
+   * A task in `needs-input` this long is alerted once (`inputAlert`): well above the seconds an
+   * auto-mode classifier call flickers it, well below the escalation.
+   */
+  readonly needsInputAlertMs: number;
   /** A task in `needs-input` this long is escalated once: re-alerted, never killed, its slot kept. */
   readonly needsInputEscalateMs: number;
   readonly reservationTtlMs: number;
@@ -162,6 +167,7 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   gatedModels: ["fable"],
   minFreeMib: MIN_FREE_MIB,
   globalMax: 8,
+  needsInputAlertMs: 2 * 60_000,
   needsInputEscalateMs: 30 * 60_000,
   // Outlives the leader's wait for a spawn reply (`OP_TIMEOUT_MS.spawn`): a daemon past its fetch deadline launches nothing.
   reservationTtlMs: 240_000,

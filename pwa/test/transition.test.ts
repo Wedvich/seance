@@ -41,6 +41,7 @@ function state(overrides: Partial<AppState> = {}): AppState {
     queue: false,
     wide: false,
     queueView: null,
+    focusedTask: null,
     taskAction: null,
     queueNotice: null,
     startNowRefusal: null,

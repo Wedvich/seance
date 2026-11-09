@@ -58,6 +58,7 @@ import {
   FLEET_QUOTA_MAX_ACCOUNTS,
   FLEET_QUOTA_MAX_WINDOWS,
   FLEET_QUOTA_WINDOW_MODEL_MAX_LENGTH,
+  DISK_ALERTS_MAX,
   LINEAR_KEY_MAX_LENGTH,
   PUSH_ENDPOINT_MAX_LENGTH,
   PUSH_ALERT_MAX_BYTES,
@@ -1171,6 +1172,8 @@ describe("store", () => {
     reservedAt: 1_760_000_000_000,
     needsInputSince: 1_760_000_000_000,
     escalated: true,
+    inputAlerted: true,
+    spillAlert: { accountId: "a".repeat(128), window: "ø".repeat(64), reset: 1_760_000_000_000, at: 1_760_000_000_000 },
     endedAt: 1_760_000_000_000,
     leftRunning: true,
   };
@@ -1193,15 +1196,36 @@ describe("store", () => {
     expect(await sealedLength(created)).toBeLessThanOrEqual(STORE_CREATE_MAX_CT_LENGTH);
   });
 
-  test("on top of that, all the leader adds at every bound fits a record with ten candidates beside it", async () => {
+  test("on top of that, all the leader adds at every bound fits a record with nine candidates beside it", async () => {
     const decided: Task = {
       ...written,
-      decision: { at: 1_760_000_000_000, chosen: target, candidates: Array.from({ length: 10 }, () => candidate) },
+      decision: { at: 1_760_000_000_000, chosen: target, candidates: Array.from({ length: 9 }, () => candidate) },
     };
     expect(parseTask(decided)).toEqual(decided);
     expect(await sealedLength(decided)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
     // …and a full prefix still lists in one frame, under the Workers WebSocket message limit.
     expect(MAX_TASKS * STORE_MAX_CT_LENGTH).toBeLessThan(32 * 1024 * 1024);
+  });
+
+  test("the alert stamps survive a parse, and a malformed one voids the task", () => {
+    const stamped: Task = {
+      ...created,
+      state: "needs-input",
+      inputAlerted: true,
+      spillAlert: { accountId: "org:acct", window: "7d", reset: 0, at: 1_760_000_000_000 },
+    };
+    expect(parseTask(stamped)).toEqual(stamped);
+    for (const bad of [
+      { ...stamped, inputAlerted: false },
+      { ...stamped, spillAlert: { accountId: "org:acct", window: "7d", reset: 0 } },
+      { ...stamped, spillAlert: { accountId: "org:acct", window: "7d", at: 1 } },
+      { ...stamped, spillAlert: { accountId: "", window: "7d", reset: 0, at: 1 } },
+      { ...stamped, spillAlert: { accountId: "org:acct", window: "7d", reset: -1, at: 1 } },
+      { ...stamped, spillAlert: { accountId: "org:acct", window: "7d", reset: 0, at: -1 } },
+      { ...stamped, spillAlert: "7d" },
+    ]) {
+      expect(parseTask(bad)).toBeNull();
+    }
   });
 
   describe("a full manifest", () => {
@@ -1850,6 +1874,7 @@ describe("M4 shapes", () => {
       vapid: { publicKey: b64url(65), privateKey: b64url(32) },
       linearKey: "k".repeat(LINEAR_KEY_MAX_LENGTH),
       subscriptions: [subscription],
+      diskAlerts: [{ deviceId: "dev-1", at: 1_760_000_000_000 }],
     };
     expect(parseSettingsRecord(settings)).toEqual(settings);
     expect(parseSettingsRecord({ version: 1 })).toEqual({ version: 1 });
@@ -1869,6 +1894,19 @@ describe("M4 shapes", () => {
       { ...settings, vapid: { publicKey: b64url(65), privateKey: b64url(32, true) } },
       { ...settings, subscriptions: [subscription, { ...subscription }] },
       { ...settings, version: 0 },
+      {
+        ...settings,
+        diskAlerts: [
+          { deviceId: "dev-1", at: 1 },
+          { deviceId: "dev-1", at: 2 },
+        ],
+      },
+      { ...settings, diskAlerts: [{ deviceId: "dev/1", at: 1 }] },
+      { ...settings, diskAlerts: [{ deviceId: "dev-1" }] },
+      {
+        ...settings,
+        diskAlerts: Array.from({ length: DISK_ALERTS_MAX + 1 }, (_, i) => ({ deviceId: `dev-${i}`, at: 1 })),
+      },
     ]) {
       expect(parseSettingsRecord(bad)).toBeNull();
     }
@@ -1905,6 +1943,10 @@ describe("M4 shapes", () => {
       subscriptions: Array.from({ length: PUSH_MAX_SUBSCRIPTIONS }, (_, i) => ({
         endpoint: `https://fcm.googleapis.com/${"e".repeat(PUSH_ENDPOINT_MAX_LENGTH - 29)}${String(i).padStart(2, "0")}`,
         keys: { p256dh: b64url(65, true), auth: b64url(16, true) },
+      })),
+      diskAlerts: Array.from({ length: DISK_ALERTS_MAX }, (_, i) => ({
+        deviceId: `${"d".repeat(ROUTING_ID_MAX_LENGTH - 2)}${String(i).padStart(2, "0")}`,
+        at: 1_760_000_000_000,
       })),
     };
     expect(parseSettingsRecord(full)).toEqual(full);

@@ -169,6 +169,7 @@ export class Store {
       queue: false,
       wide: false,
       queueView: null,
+      focusedTask: null,
       taskAction: null,
       queueNotice: null,
       startNowRefusal: null,
@@ -495,6 +496,7 @@ export class Store {
       form: { ...form, machine: null, account: null, after: [{ task: taskId, after: "opened" }] },
       queue: false,
       queueNotice: null,
+      focusedTask: null,
       verdict: null,
     });
     if (open > 0) history.go(-open);
@@ -533,6 +535,15 @@ export class Store {
     if (!this.#state.queue) this.#pushLayer();
     this.#patch({ queue: true });
     void this.refreshQueue();
+  }
+
+  /** Marks a task for the Queue screen to bring into view (a notification's link); `clearFocus` ends it. */
+  focusTask(taskId: string): void {
+    this.#patch({ focusedTask: taskId });
+  }
+
+  clearFocus(): void {
+    if (this.#state.focusedTask !== null) this.#patch({ focusedTask: null });
   }
 
   /** See `SchedulerStore.refreshPreview`. */
@@ -694,7 +705,8 @@ export class Store {
     }
     // Opened over a verdict, never under one, so it closes first.
     if (this.#state.queue) {
-      this.#patch({ queue: false, queueNotice: null });
+      // A notification's focus never listed (the task was pruned) must not scroll some later visit.
+      this.#patch({ queue: false, queueNotice: null, focusedTask: null });
       return;
     }
     if (this.#state.verdict !== null) this.#patch({ verdict: null });
