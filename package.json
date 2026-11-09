@@ -19,6 +19,7 @@
     "format:check": "oxfmt --check .",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
+    "perf": "bun e2e/perf.ts",
     "test": "bun scripts/test.ts",
     "typecheck": "tsc --noEmit && bun run --filter '*' typecheck"
   },
@@ -26,6 +27,7 @@
     "@types/bun": "^1.4.2",
     "oxfmt": "0.72.0",
     "oxlint": "1.87.0",
+    "playwright-core": "1.63.0",
     "typescript": "^7.0.2"
   },
   "packageManager": "bun@1.4.2"

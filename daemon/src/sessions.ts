@@ -152,6 +152,8 @@ export interface PaneInfo {
   readonly path: string;
   /** The `taskId` the pane was spawned with (`TASK_OPTION`); null for none. */
   readonly taskId: string | null;
+  /** Its process's pid while alive; null once dead, when tmux still reports the reaped one (`despawn.ts`). */
+  readonly pid: number | null;
 }
 
 /**
@@ -188,6 +190,7 @@ const PANE_INFO_FORMAT = [
   PANE_TITLED,
   `#{s/[${FIELD_SEP}]/-/:window_name}`,
   TASK_FIELD,
+  "#{pane_pid}",
   "#{pane_current_path}",
 ].join(FIELD_SEP);
 
@@ -196,15 +199,29 @@ export function parsePaneInfo(raw: string): readonly PaneInfo[] {
   const seen = new Set<string>();
   const panes: PaneInfo[] = [];
   for (const line of raw.split("\n")) {
-    const [paneId, windowId, command, ours, dead, deadTime, deadStatus, deadSignal, titled, windowName, task, ...rest] =
-      line.split(FIELD_SEP);
+    const [
+      paneId,
+      windowId,
+      command,
+      ours,
+      dead,
+      deadTime,
+      deadStatus,
+      deadSignal,
+      titled,
+      windowName,
+      task,
+      pid,
+      ...rest
+    ] = line.split(FIELD_SEP);
     if (paneId === undefined || windowId === undefined || command === undefined || dead === undefined) continue;
     if (
       deadTime === undefined ||
       deadStatus === undefined ||
       deadSignal === undefined ||
       windowName === undefined ||
-      task === undefined
+      task === undefined ||
+      pid === undefined
     )
       continue;
     if (rest.length === 0) continue;
@@ -224,13 +241,14 @@ export function parsePaneInfo(raw: string): readonly PaneInfo[] {
       command,
       path: rest.join(FIELD_SEP),
       taskId: taskIdFrom(task),
+      pid: dead !== "1" && /^[1-9]\d{0,9}$/u.test(pid) ? Number(pid) : null,
     });
   }
   return panes;
 }
 
 /** tmux prints the status only for a process that exited and the signal only for one it killed; one field is empty. */
-function exitStatus(raw: string, signal: string): number | null {
+export function exitStatus(raw: string, signal: string): number | null {
   if (/^\d{1,3}$/u.test(raw)) {
     const status = Number(raw);
     return status <= EXIT_STATUS_MAX ? status : null;

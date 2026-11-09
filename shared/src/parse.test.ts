@@ -38,14 +38,18 @@ import {
   parsePrStatus,
   parseTask,
   parseTaskRecord,
+  parseInterrupted,
   parseTaskProgressList,
   parseTaskRef,
   parseTaskReply,
   UPDATE_DETAIL_MAX,
+  parseRoutePreviewRequest,
   parseTaskRequest,
+  parseAttachmentManifest,
   parseTaskSpec,
 } from "./parse.ts";
 import { REPLAY_WINDOW_MS } from "./crypto.ts";
+import { taskRecordAtRest } from "./task-record.ts";
 import {
   ACCOUNT_ALIAS_MAX_LENGTH,
   BRANCH_MAX_LENGTH,
@@ -70,8 +74,12 @@ import {
   MAX_TASKS,
   OP_TIMEOUT_MS,
   QUEUE_MAX_TASKS,
+  ATTACHMENT_LIMITS,
+  ATTACHMENTS_DEP_SENTINEL,
+  PIN_SENTINEL,
   ROUTING_ID_MAX_LENGTH,
   SESSIONS_MAX_PROGRESS,
+  SIGKILL_STATUS,
   STORE_CREATE_MAX_CT_LENGTH,
   STORE_MAX_CT_LENGTH,
   STORE_PREFIXES,
@@ -80,6 +88,7 @@ import {
   TASK_FAILURE_LIMITS,
   TASK_REQUEST_LIMITS,
   TASK_SPEC_LIMITS,
+  type AttachmentRef,
   type BatchMembership,
   type BranchState,
   type Candidate,
@@ -109,7 +118,12 @@ const exclave = { id: "default", accountId: "org:acct", extraUsageEnabled: true,
 
 async function sealedLength(task: Task): Promise<number> {
   const key = await importPsk(toBase64(new Uint8Array(32)));
-  const plain = { id: crypto.randomUUID(), ts: Date.now(), op: "task", payload: { version: 1, task } } as const;
+  const plain = {
+    id: crypto.randomUUID(),
+    ts: Date.now(),
+    op: "task",
+    payload: taskRecordAtRest({ version: 1, task }),
+  } as const;
   return (await seal(key, { to: "scheduler", from: "app" }, plain)).ct.length;
 }
 
@@ -404,6 +418,18 @@ describe("metrics", () => {
   });
 });
 
+describe("parseRoutePreviewRequest", () => {
+  const minimal: TaskRequest = { repo: "github.com/acme/app", mode: "worktree" };
+
+  test("keeps the attachments flag only as true; a manifest or anything else is malformed", () => {
+    expect(parseRoutePreviewRequest(minimal)).toEqual(minimal);
+    expect(parseRoutePreviewRequest({ ...minimal, attachments: true })).toEqual({ ...minimal, attachments: true });
+    for (const attachments of [false, [attachment(0)], "yes", 1])
+      expect(parseRoutePreviewRequest({ ...minimal, attachments })).toBeNull();
+    expect(parseRoutePreviewRequest({ ...minimal, mode: "continue", attachments: true })).toBeNull();
+  });
+});
+
 describe("parseTaskRequest", () => {
   const minimal: TaskRequest = { repo: "github.com/acme/app", mode: "worktree" };
 
@@ -419,6 +445,8 @@ describe("parseTaskRequest", () => {
     for (const bad of [
       { ...minimal, repo: "" },
       { ...minimal, mode: "elsewhere" },
+      // A route preview has no target to continue at: only a stored spec carries the mode.
+      { ...minimal, mode: "continue" },
       { ...minimal, prompt: 1 },
       { ...minimal, plan: "yes" },
       { ...minimal, model: "" },
@@ -447,10 +475,11 @@ describe("parseTaskSpec", () => {
   const request: TaskRequest = { repo: "github.com/acme/app", mode: "worktree", prompt: "fix it" };
   const full: TaskSpec = {
     ...request,
-    pin: { exclave: "work" },
+    pin: { deviceId: "dev-a", account: "org-1:acct-1" },
+    avoid: ["dev-b", "dev-c"],
     lineage: { deviceId: "dev-a", exclave: "default" },
     base: { deviceId: "dev-b", exclave: "work" },
-    batch: { id: "batch-1", index: 2, strategy: { mode: "parallel", max: 3 } },
+    batch: { id: "batch-1", index: 2 },
     deps: [
       { task: "t-1", after: "opened" },
       { task: "t-2", after: "merged" },
@@ -462,21 +491,38 @@ describe("parseTaskSpec", () => {
   test("a whole spec round-trips, and fields it does not know stay behind", () => {
     expect(parseTaskSpec(full)).toEqual(full);
     expect(parseTaskSpec({ ...request, taskId: "x", deviceId: "y" })).toEqual(request);
-    for (const strategy of [{ mode: "sequential" }, { mode: "auto" }] as const) {
-      expect(parseTaskSpec({ ...request, batch: { id: "b", index: 0, strategy } })?.batch?.strategy).toEqual(strategy);
-    }
-    const last: BatchMembership = { id: "b", index: TASK_SPEC_LIMITS.batchIndex, strategy: { mode: "sequential" } };
+    const last: BatchMembership = { id: "b", index: TASK_SPEC_LIMITS.batchIndex };
     expect(parseTaskSpec({ ...full, batch: last })?.batch).toEqual(last);
+  });
+
+  test("a batch's stored strategy, whatever an older writer put there, is read and dropped", () => {
+    for (const strategy of [
+      { mode: "auto" },
+      { mode: "sequential" },
+      { mode: "parallel", max: 3 },
+      { mode: "parallel", max: 0 },
+      { mode: "round-robin" },
+      "sequential",
+      undefined,
+    ]) {
+      const batch = parseTaskSpec({ ...request, batch: { id: "b", index: 1, strategy } })?.batch;
+      expect(batch).toEqual({ id: "b", index: 1 });
+      expect(batch).not.toHaveProperty("strategy");
+    }
   });
 
   test("a malformed optional field nulls the spec — a task must not run without the pin or deps it was given", () => {
     for (const bad of [
-      { ...full, pin: { exclave: "" } },
+      { ...full, pin: { account: "" } },
+      { ...full, pin: { account: "a".repeat(TASK_SPEC_LIMITS.account + 1) } },
+      { ...full, pin: { deviceId: "has space" } },
+      { ...full, pin: "dev-a" },
+      { ...full, avoid: ["dev-b", "dev-b"] },
+      { ...full, avoid: ["has space"] },
+      { ...full, avoid: "dev-b" },
+      { ...full, avoid: Array.from({ length: TASK_SPEC_LIMITS.avoid + 1 }, (_, i) => `dev-${i}`) },
       { ...full, lineage: { deviceId: "dev-a" } },
       { ...full, batch: { ...full.batch, id: "has space" } },
-      { ...full, batch: { ...full.batch, strategy: { mode: "parallel", max: 0 } } },
-      { ...full, batch: { ...full.batch, strategy: { mode: "parallel", max: TASK_SPEC_LIMITS.parallel + 1 } } },
-      { ...full, batch: { ...full.batch, strategy: { mode: "round-robin" } } },
       { ...full, batch: { ...full.batch, index: TASK_SPEC_LIMITS.batchIndex + 1 } },
       { ...full, batch: { ...full.batch, index: -1 } },
       { ...full, deps: [{ task: "t-1", after: "pushed" }] },
@@ -493,9 +539,187 @@ describe("parseTaskSpec", () => {
     }
   });
 
+  describe("a continuation", () => {
+    const at = { deviceId: "dev-a", exclave: "default", clone: "app" };
+    const spec: TaskSpec = { ...request, mode: "continue", continues: { task: "t-old", at } };
+
+    test("round-trips: the mode and the field travel together", () => {
+      expect(parseTaskSpec(spec)).toEqual(spec);
+      expect(parseTaskSpec({ ...spec, continues: { task: "t-old", at, extra: 1 } })).toEqual(spec);
+    });
+
+    test("the field without the mode, or the mode without the field, is no spec", () => {
+      expect(parseTaskSpec({ ...spec, mode: "worktree" })).toBeNull();
+      expect(parseTaskSpec({ ...spec, mode: "here" })).toBeNull();
+      expect(parseTaskSpec({ ...request, mode: "continue" })).toBeNull();
+    });
+
+    test("a bad task id or target nulls the spec", () => {
+      for (const continues of [
+        { task: "has space", at },
+        { task: "", at },
+        { task: 7, at },
+        { task: "t-old" },
+        { task: "t-old", at: { ...at, exclave: "" } },
+        { task: "t-old", at: { ...at, clone: "c".repeat(TARGET_LIMITS.clone + 1) } },
+        { task: "t-old", at: { ...at, deviceId: "has space" } },
+        { task: "t-old", at: { deviceId: "dev-a", exclave: "default" } },
+        "t-old",
+        null,
+      ]) {
+        expect(parseTaskSpec({ ...spec, continues })).toBeNull();
+      }
+    });
+
+    test("a lineage beside it is still read as lineage", () => {
+      const lineage = { deviceId: "dev-b", exclave: "work" };
+      expect(parseTaskSpec({ ...spec, lineage })).toEqual({ ...spec, lineage });
+    });
+  });
+
+  test("an exclave in a pin is read by no one: a legacy exclave pin, or the sentinel, parses without it", () => {
+    expect(parseTaskSpec({ ...request, pin: { exclave: "work" } })).toEqual(request);
+    expect(parseTaskSpec({ ...request, pin: { deviceId: "dev-a", exclave: "work" } })?.pin).toEqual({
+      deviceId: "dev-a",
+    });
+    // Once refused as malformed; now there is nothing to refuse.
+    expect(parseTaskSpec({ ...request, pin: { exclave: "" } })).toEqual(request);
+    expect(parseTaskSpec({ ...full, pin: { ...full.pin, exclave: PIN_SENTINEL } })).toEqual(full);
+    expect(parseTaskSpec({ ...request, pin: {} })).toEqual(request);
+  });
+
+  test("an account and the avoid list are bounded, the limits themselves allowed", () => {
+    const account = "a".repeat(TASK_SPEC_LIMITS.account);
+    expect(parseTaskSpec({ ...request, pin: { account } })?.pin).toEqual({ account });
+    const avoid = Array.from({ length: TASK_SPEC_LIMITS.avoid }, (_, i) => `dev-${i}`);
+    expect(parseTaskSpec({ ...request, avoid })?.avoid).toEqual(avoid);
+    expect(parseTaskSpec({ ...request, avoid: [] })?.avoid).toEqual([]);
+  });
+
   test("deps are bounded, the limit itself allowed", () => {
     expect(parseTaskSpec({ ...request, deps: deps(TASK_SPEC_LIMITS.deps) })).not.toBeNull();
     expect(parseTaskSpec({ ...request, deps: deps(TASK_SPEC_LIMITS.deps + 1) })).toBeNull();
+  });
+
+  describe("attachments", () => {
+    const spec: TaskSpec = { ...request, attachments: [attachment(0), attachment(1)] };
+
+    test("round-trip beside every other field, and fields an entry does not know stay behind", () => {
+      expect(parseTaskSpec(spec)).toEqual(spec);
+      const both = { ...full, attachments: spec.attachments };
+      expect(parseTaskSpec(both)).toEqual(both);
+      const extra = { ...attachment(0), path: "/etc/passwd" };
+      expect(parseTaskSpec({ ...request, attachments: [extra] })?.attachments).toEqual([attachment(0)]);
+    });
+
+    test("a malformed manifest nulls the spec, never drops the field", () => {
+      expect(parseTaskSpec({ ...request, attachments: [{ ...attachment(0), hash: "short" }] })).toBeNull();
+      expect(parseTaskSpec({ ...request, attachments: [] })).toBeNull();
+      expect(parseTaskSpec({ ...request, attachments: "a.png" })).toBeNull();
+    });
+
+    test("never with a continuation", () => {
+      const at = { deviceId: "dev-a", exclave: "default", clone: "app" };
+      expect(parseTaskSpec({ ...spec, mode: "continue", continues: { task: "t-old", at } })).toBeNull();
+    });
+
+    test("take the lower prompt bound, the bound itself allowed", () => {
+      const prompt = (n: number): string => "p".repeat(n);
+      expect(parseTaskSpec({ ...spec, prompt: prompt(ATTACHMENT_LIMITS.prompt) })).not.toBeNull();
+      expect(parseTaskSpec({ ...spec, prompt: prompt(ATTACHMENT_LIMITS.prompt + 1) })).toBeNull();
+      expect(parseTaskSpec({ ...request, prompt: prompt(ATTACHMENT_LIMITS.prompt + 1) })).not.toBeNull();
+    });
+
+    test("the dep sentinel is dropped beside a manifest, before the deps bound; without one it nulls the spec", () => {
+      const sealed = { ...spec, deps: [...deps(TASK_SPEC_LIMITS.deps), ATTACHMENTS_DEP_SENTINEL] };
+      expect(parseTaskSpec(sealed)?.deps).toEqual(deps(TASK_SPEC_LIMITS.deps));
+      expect(parseTaskSpec({ ...spec, deps: [ATTACHMENTS_DEP_SENTINEL] })).toEqual(spec);
+      // A sentinel with no manifest is a record something stripped the files from.
+      expect(parseTaskSpec({ ...request, deps: [ATTACHMENTS_DEP_SENTINEL] })).toBeNull();
+      // Only the sentinel itself: any other malformed dep still nulls the spec.
+      expect(parseTaskSpec({ ...spec, deps: [{ task: "", after: "opened" }] })).toBeNull();
+      expect(parseTaskSpec({ ...spec, deps: [{ task: "", after: "merged", extra: 1 }] })).toEqual(spec);
+    });
+  });
+});
+
+function attachment(i: number, over: Partial<AttachmentRef> = {}): AttachmentRef {
+  return {
+    id: `0b6f0c9e-1a2b-4c3d-8e9f-${i.toString(16).padStart(12, "0")}`,
+    name: `screenshot ${i}.png`,
+    type: "image/png",
+    size: 1024,
+    hash: "A".repeat(43),
+    ...over,
+  };
+}
+
+describe("parseAttachmentManifest", () => {
+  const files = (n: number, over: Partial<AttachmentRef> = {}): readonly AttachmentRef[] =>
+    Array.from({ length: n }, (_, i) => attachment(i, over));
+
+  test("every bound itself is allowed", () => {
+    const largest = files(ATTACHMENT_LIMITS.files, { size: Math.floor(ATTACHMENT_LIMITS.totalBytes / 10) });
+    expect(parseAttachmentManifest(largest)).toEqual(largest);
+    const one = [
+      attachment(0, {
+        size: ATTACHMENT_LIMITS.fileBytes,
+        name: "ø".repeat(ATTACHMENT_LIMITS.name),
+        type: `application/${"x".repeat(ATTACHMENT_LIMITS.type - "application/".length)}`,
+        hash: "Az09_-".repeat(7) + "b",
+      }),
+    ];
+    expect(parseAttachmentManifest(one)).toEqual(one);
+    expect(parseAttachmentManifest([attachment(0, { size: 0, type: "application/vnd.ms-excel+xml" })])).not.toBeNull();
+  });
+
+  test("counts and sizes past their bounds are refused", () => {
+    expect(parseAttachmentManifest(files(ATTACHMENT_LIMITS.files + 1))).toBeNull();
+    expect(parseAttachmentManifest([])).toBeNull();
+    expect(parseAttachmentManifest([attachment(0, { size: ATTACHMENT_LIMITS.fileBytes + 1 })])).toBeNull();
+    // Each file under its own bound, the sum one byte over.
+    const size = Math.floor(ATTACHMENT_LIMITS.totalBytes / 4);
+    const over = [...files(3, { size: ATTACHMENT_LIMITS.fileBytes }), attachment(3, { size })];
+    expect(over.reduce((sum, ref) => sum + ref.size, 0)).toBeGreaterThan(ATTACHMENT_LIMITS.totalBytes);
+    expect(parseAttachmentManifest(over)).toBeNull();
+    const exact = [...files(3, { size: ATTACHMENT_LIMITS.fileBytes }), attachment(3, { size: 10 * 1024 * 1024 })];
+    expect(parseAttachmentManifest(exact)).not.toBeNull();
+  });
+
+  test("a malformed entry refuses the whole manifest", () => {
+    for (const bad of [
+      { id: "0B6F0C9E-1A2B-4C3D-8E9F-000000000000" },
+      { id: "0b6f0c9e-1a2b-3c3d-8e9f-000000000000" },
+      { id: "../../etc/passwd" },
+      { id: 7 },
+      { name: "" },
+      { name: "ø".repeat(ATTACHMENT_LIMITS.name + 1) },
+      { name: "two\nlines" },
+      { name: "tab\there" },
+      { name: "del\u007F" },
+      { name: "c1\u0085" },
+      { name: "sep " },
+      { type: "" },
+      { type: "Image/PNG" },
+      { type: "text/plain; charset=utf-8" },
+      { type: "image" },
+      { type: "image/png/x" },
+      { type: "/png" },
+      { type: `application/${"x".repeat(ATTACHMENT_LIMITS.type)}` },
+      { size: -1 },
+      { size: 1.5 },
+      { size: "1024" },
+      { hash: "A".repeat(42) },
+      { hash: `${"A".repeat(42)}=` },
+      { hash: `${"A".repeat(42)}+` },
+    ]) {
+      expect(parseAttachmentManifest([attachment(0), { ...attachment(1), ...bad }])).toBeNull();
+    }
+    expect(parseAttachmentManifest([attachment(0), null])).toBeNull();
+  });
+
+  test("ids are unique within a manifest", () => {
+    expect(parseAttachmentManifest([attachment(0), attachment(0, { name: "other.png" })])).toBeNull();
   });
 });
 
@@ -614,9 +838,10 @@ describe("tasks and their records", () => {
     const reason: Reason = { code: "cap_reached", inFlight: 2, max: 2, scope: "account" };
     const decision = (r: unknown) => ({ at: 1, chosen: null, candidates: [{ ...candidate, rejected: [r] }] });
     expect(parseDecision(decision(reason))?.candidates[0]?.rejected).toEqual([reason]);
-    const batch: Reason = { ...reason, scope: "batch" };
-    expect(parseDecision(decision(batch))?.candidates[0]?.rejected).toEqual([batch]);
-    expect(parseDecision(decision({ ...reason, scope: "machine" }))?.candidates[0]?.rejected).toEqual([]);
+    // An older leader's batch scope reads as unknown since batches stopped scheduling.
+    for (const scope of ["batch", "machine"]) {
+      expect(parseDecision(decision({ ...reason, scope }))?.candidates[0]?.rejected).toEqual([]);
+    }
     const legacy: Reason = { code: "cap_reached", inFlight: 8, max: 8 };
     expect(parseDecision(decision(legacy))?.candidates[0]?.rejected).toEqual([legacy]);
   });
@@ -631,14 +856,14 @@ describe("tasks and their records", () => {
     expect(parseDecision(decision({ ...over, creditsSpent: false }))?.candidates[0]?.rejected).toEqual([]);
   });
 
-  test("a batch order hold names the member it waits on; an index past the batch bound drops the reason", () => {
+  test("an older leader's batch order hold drops the reason, never the candidate or the decision", () => {
     const candidate = { deviceId: "d", machine: "mac", exclave: "default", rejected: [] };
-    const decision = (r: unknown) => ({ at: 1, chosen: null, candidates: [{ ...candidate, rejected: [r] }] });
-    const order: Reason = { code: "batch_order", index: 3 };
-    expect(parseDecision(decision(order))?.candidates[0]?.rejected).toEqual([order]);
-    for (const index of [TASK_SPEC_LIMITS.batchIndex + 1, -1, 1.5, "3", undefined]) {
-      expect(parseDecision(decision({ code: "batch_order", index }))?.candidates[0]?.rejected).toEqual([]);
-    }
+    const decision = {
+      at: 1,
+      chosen: null,
+      candidates: [{ ...candidate, rejected: [{ code: "batch_order", index: 3 }] }],
+    };
+    expect(parseDecision(decision)?.candidates).toEqual([{ ...candidate, rejected: [] }]);
   });
 
   test("a model not included names the gated model; an empty or oversized one drops the reason", () => {
@@ -649,6 +874,18 @@ describe("tasks and their records", () => {
     for (const model of ["", "x".repeat(TASK_REQUEST_LIMITS.model + 1), 7, undefined]) {
       expect(parseDecision(decision({ code: "model_not_included", model }))?.candidates[0]?.rejected).toEqual([]);
     }
+  });
+
+  test("a pin mismatch names the machine or the account; an exclave one, from an older leader, drops the reason", () => {
+    const candidate = { deviceId: "d", machine: "mac", exclave: "default", rejected: [] };
+    const decision = (r: unknown) => ({ at: 1, chosen: null, candidates: [{ ...candidate, rejected: [r] }] });
+    const reasons: readonly Reason[] = [
+      { code: "pin_mismatch", field: "deviceId" },
+      { code: "pin_mismatch", field: "account" },
+      { code: "avoided" },
+    ];
+    for (const reason of reasons) expect(parseDecision(decision(reason))?.candidates[0]?.rejected).toEqual([reason]);
+    expect(parseDecision(decision({ code: "pin_mismatch", field: "exclave" }))?.candidates[0]?.rejected).toEqual([]);
   });
 
   test("a pause reads with its scope and how it lifts; a malformed one drops the reason", () => {
@@ -741,6 +978,13 @@ describe("scheduler ops", () => {
     expect(parseQueueReply({ tasks: [], at: 5, holds: [{ until: "never", at: 1 }] })).toBeNull();
   });
 
+  test("queue carries the leader's cap; one that is not a positive integer is dropped, not the reply", () => {
+    expect(parseQueueReply({ tasks: [], at: 5, globalMax: 8 })).toEqual({ tasks: [], at: 5, globalMax: 8 });
+    for (const bad of [0, -1, 1.5, "8", null]) {
+      expect(parseQueueReply({ tasks: [], at: 5, globalMax: bad })).toEqual({ tasks: [], at: 5 });
+    }
+  });
+
   test("queue-changed is a stamp and which tasks changed; an unreadable list costs the list, not the nudge", () => {
     expect(parseQueueChanged({ at: 9, tasks: ["t-1"], extra: 1 })).toEqual({ at: 9, tasks: ["t-1"] });
     expect(parseQueueChanged({ at: 9 })).toEqual({ at: 9 });
@@ -757,6 +1001,20 @@ describe("scheduler ops", () => {
     expect(parseQueueRequest({ tasks: ["t:1"] })).toBeNull();
     expect(parseQueueRequest({ tasks: Array.from({ length: QUEUE_MAX_TASKS + 1 }, () => "t") })).toBeNull();
     expect(parseQueueRequest([])).toBeNull();
+  });
+
+  test("queue lists idle-released tasks, each one alone: a bad entry shows its task running, too many cost the reply", () => {
+    const idle = { taskId: "t-1", since: 4 };
+    expect(parseQueueReply({ tasks: [], at: 5, idle: [idle, { taskId: "t:2", since: 4 }, { taskId: "t-3" }] })).toEqual(
+      {
+        tasks: [],
+        at: 5,
+        idle: [idle],
+      },
+    );
+    expect(parseQueueReply({ tasks: [], at: 5, idle: [] })).toEqual({ tasks: [], at: 5 });
+    expect(parseQueueReply({ tasks: [], at: 5, idle: {} })).toBeNull();
+    expect(parseQueueReply({ tasks: [], at: 5, idle: Array.from({ length: MAX_TASKS + 1 }, () => idle) })).toBeNull();
   });
 
   test("queue lists unreadable records, each one alone: a bad entry costs its own discard, too many the reply", () => {
@@ -882,10 +1140,12 @@ describe("store", () => {
       effort: "e".repeat(TASK_REQUEST_LIMITS.effort),
       plan: true,
       skill: "s".repeat(SKILL_NAME_MAX_LENGTH),
-      pin: placement,
+      // The longest account id and every avoid slot at its longest id: the sentinel rides along too.
+      pin: { deviceId: device, account: "ø".repeat(TASK_SPEC_LIMITS.account) },
+      avoid: Array.from({ length: TASK_SPEC_LIMITS.avoid }, (_, i) => `${i}`.padEnd(ROUTING_ID_MAX_LENGTH, "A")),
       lineage: placement,
       base: placement,
-      batch: { id: crypto.randomUUID(), index: 15, strategy: { mode: "parallel", max: TASK_SPEC_LIMITS.parallel } },
+      batch: { id: crypto.randomUUID(), index: 15 },
       deps: Array.from({ length: TASK_SPEC_LIMITS.deps }, () => ({
         task: crypto.randomUUID(),
         after: "merged" as const,
@@ -936,10 +1196,10 @@ describe("store", () => {
     expect(await sealedLength(created)).toBeLessThanOrEqual(STORE_CREATE_MAX_CT_LENGTH);
   });
 
-  test("on top of that, all the leader adds at every bound fits a record with ten candidates beside it", async () => {
+  test("on top of that, all the leader adds at every bound fits a record with nine candidates beside it", async () => {
     const decided: Task = {
       ...written,
-      decision: { at: 1_760_000_000_000, chosen: target, candidates: Array.from({ length: 10 }, () => candidate) },
+      decision: { at: 1_760_000_000_000, chosen: target, candidates: Array.from({ length: 9 }, () => candidate) },
     };
     expect(parseTask(decided)).toEqual(decided);
     expect(await sealedLength(decided)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
@@ -966,6 +1226,44 @@ describe("store", () => {
     ]) {
       expect(parseTask(bad)).toBeNull();
     }
+  });
+
+  describe("a full manifest", () => {
+    // Every entry at its longest: a two-byte name, the longest type, a size as many digits as the largest.
+    const size = ATTACHMENT_LIMITS.totalBytes / ATTACHMENT_LIMITS.files;
+    expect(String(size).length).toBe(String(ATTACHMENT_LIMITS.fileBytes).length);
+    const manifest = Array.from({ length: ATTACHMENT_LIMITS.files }, (_, i) =>
+      attachment(i, {
+        name: "ø".repeat(ATTACHMENT_LIMITS.name),
+        type: `application/${"x".repeat(ATTACHMENT_LIMITS.type - "application/".length)}`,
+        size,
+      }),
+    );
+    const attached = (task: Task, prompt: number): Task => ({
+      ...task,
+      spec: { ...task.spec, prompt: "ø".repeat(prompt), attachments: manifest },
+    });
+
+    test("fits the create cap beside every other field at its bound, the dep sentinel included, at the lower prompt bound", async () => {
+      const task = attached(created, ATTACHMENT_LIMITS.prompt);
+      expect(parseTask(task)).toEqual(task);
+      expect(await sealedLength(task)).toBeLessThanOrEqual(STORE_CREATE_MAX_CT_LENGTH);
+      // Why the lower bound exists: at the general one the same create does not fit.
+      expect(await sealedLength(attached(created, TASK_REQUEST_LIMITS.prompt))).toBeGreaterThan(
+        STORE_CREATE_MAX_CT_LENGTH,
+      );
+    });
+
+    test("with all the leader adds at every bound and ten candidates, a record still carrying it fits", async () => {
+      // Unfinished: the write that finishes a task drops the manifest (`lean`), so no failure or end beside it.
+      const { failure: _failure, endedAt: _endedAt, leftRunning: _leftRunning, ...running } = written;
+      const decided: Task = {
+        ...attached({ ...running, state: "running" }, ATTACHMENT_LIMITS.prompt),
+        decision: { at: 1_760_000_000_000, chosen: target, candidates: Array.from({ length: 10 }, () => candidate) },
+      };
+      expect(parseTask(decided)).toEqual(decided);
+      expect(await sealedLength(decided)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
+    });
   });
 
   test("a decision's candidate basis sourced `session` still parses, for records an older leader wrote; `oauth` is refused", () => {
@@ -1095,6 +1393,33 @@ describe("what a leader writes into a task is bounded", () => {
     expect(parseTask({ ...task, state: "failed", failure: { code: "", message: "m" } })).toBeNull();
   });
 
+  test("a failure's exit status is kept in range and dropped outside it, never costing the failure or the task", () => {
+    const failed = (failure: object) => parseTask({ ...task, state: "failed", failure })?.failure;
+    const base = { code: "session_failed", message: "m" };
+    expect(failed({ ...base, exit: 137 })).toEqual({ ...base, exit: 137 });
+    expect(failed({ ...base, exit: EXIT_STATUS_MAX })).toEqual({ ...base, exit: EXIT_STATUS_MAX });
+    // An older leader's record: no field, read as before.
+    expect(failed(base)).toEqual(base);
+    for (const exit of [0, EXIT_STATUS_MAX + 1, 1.5, -1, "137", null]) expect(failed({ ...base, exit })).toEqual(base);
+    // Only a session_failed has one to word.
+    expect(failed({ code: "merge_expired", message: "m", exit: 137 })).toEqual({ code: "merge_expired", message: "m" });
+  });
+
+  test("a failure's OOM verdict is kept only beside a SIGKILL status, and a bad one costs only the field", () => {
+    const failed = (failure: object) => parseTask({ ...task, state: "failed", failure })?.failure;
+    const killed = { code: "session_failed", message: "m", exit: SIGKILL_STATUS };
+    expect(failed({ ...killed, oomKill: true })).toEqual({ ...killed, oomKill: true });
+    expect(failed({ ...killed, oomKill: false })).toEqual({ ...killed, oomKill: false });
+    for (const oomKill of ["true", 1, null]) expect(failed({ ...killed, oomKill })).toEqual(killed);
+    expect(failed({ ...killed, exit: 1, oomKill: true })).toEqual({ ...killed, exit: 1 });
+    // An out-of-range status is dropped, and the verdict with it.
+    expect(failed({ ...killed, exit: "137", oomKill: true })).toEqual({ code: "session_failed", message: "m" });
+    expect(failed({ code: "merge_expired", message: "m", exit: 137, oomKill: true })).toEqual({
+      code: "merge_expired",
+      message: "m",
+    });
+  });
+
   test("a decision lists at most DECISION_MAX_CANDIDATES, each with bounded reasons, and says when it was cut", () => {
     const candidate = { deviceId: "d-1", machine: "mac", exclave: "default", rejected: [{ code: "offline" }] };
     const decision = (n: number, extra: object = {}) => ({
@@ -1146,6 +1471,16 @@ describe("bindTaskRecord", () => {
     const ahead = { version: 1, task: { ...task, createdAt: now + REPLAY_WINDOW_MS + 1 } };
     expect(bindTaskRecord(ahead, { key, version: 1 }, now)).toBe("created_ahead");
   });
+
+  test("a task that continues itself is never kept, so it never dispatches; one that continues another is", () => {
+    const at = { deviceId: "dev-a", exclave: "default", clone: "app" };
+    const continuing = (of: string): TaskRecord => ({
+      version: 1,
+      task: { ...task, spec: { repo: "github.com/acme/app", mode: "continue", continues: { task: of, at } } },
+    });
+    expect(bindTaskRecord(continuing("t-1"), { key, version: 1 }, now)).toBe("malformed");
+    expect(bindTaskRecord(continuing("t-0"), { key, version: 1 }, now)).toEqual(continuing("t-0"));
+  });
 });
 
 describe("parseTaskProgressList", () => {
@@ -1173,12 +1508,32 @@ describe("parseTaskProgressList", () => {
     expect(parseTaskProgressList([reported])).toEqual([reported]);
   });
 
+  test("an OOM verdict rides only with a SIGKILL status, and a bad one costs the field, never the entry", () => {
+    const killed = { taskId: "t-5", exit: SIGKILL_STATUS, at: 5 };
+    expect(parseTaskProgressList([{ ...killed, oomKill: true }])).toEqual([{ ...killed, oomKill: true }]);
+    expect(parseTaskProgressList([{ ...killed, oomKill: false }])).toEqual([{ ...killed, oomKill: false }]);
+    for (const oomKill of ["yes", 1, null]) {
+      expect(parseTaskProgressList([entry, { ...killed, oomKill }])).toEqual([entry, killed]);
+    }
+    expect(parseTaskProgressList([{ ...killed, exit: 1, oomKill: true }])).toEqual([{ ...killed, exit: 1 }]);
+    expect(parseTaskProgressList([{ taskId: "t-5", oomKill: true, at: 5 }])).toEqual([{ taskId: "t-5", at: 5 }]);
+  });
+
+  test("vanished is kept when true, and an entry without it parses", () => {
+    expect(parseTaskProgressList([{ taskId: "t-6", vanished: true, at: 6 }])).toEqual([
+      { taskId: "t-6", vanished: true, at: 6 },
+    ]);
+    expect(parseTaskProgressList([{ taskId: "t-6", at: 6 }])).toEqual([{ taskId: "t-6", at: 6 }]);
+  });
+
   test("strict: one unreadable entry, or too many, nulls the list — a dropped one would read as no PR", () => {
     for (const bad of [
       { ...entry, prUrl: "http://github.com/acme/app/pull/7" },
       { ...entry, merged: false },
       { ...entry, reported: false },
       { ...entry, reported: "yes" },
+      { ...entry, vanished: false },
+      { ...entry, vanished: "yes" },
       { ...entry, pushed: "yes" },
       { ...entry, branch: "" },
       { ...entry, taskId: "t:1" },
@@ -1190,6 +1545,22 @@ describe("parseTaskProgressList", () => {
       expect(parseTaskProgressList([entry, bad])).toBeNull();
     }
     expect(parseTaskProgressList(Array.from({ length: SESSIONS_MAX_PROGRESS + 1 }, () => entry))).toBeNull();
+  });
+});
+
+describe("parseInterrupted", () => {
+  test("keeps only valid task ids that are in ended", () => {
+    expect(parseInterrupted(["t-1", "t-2", "t-3", 7, "bad id!", ""], ["t-1", "t-3", "t-9"])).toEqual(["t-1", "t-3"]);
+  });
+
+  test("is undefined for a non-array value or ended, a list over the cap, and an empty result", () => {
+    expect(parseInterrupted("t-1", ["t-1"])).toBeUndefined();
+    expect(parseInterrupted(["t-1"], undefined)).toBeUndefined();
+    expect(parseInterrupted(["t-1"], "t-1")).toBeUndefined();
+    const many = Array.from({ length: SESSIONS_MAX_PROGRESS + 1 }, (_, i) => `t-${i}`);
+    expect(parseInterrupted(many, many)).toBeUndefined();
+    expect(parseInterrupted([], ["t-1"])).toBeUndefined();
+    expect(parseInterrupted(["t-2"], ["t-1"])).toBeUndefined();
   });
 });
 
@@ -1318,6 +1689,13 @@ describe("M4 shapes", () => {
     expect(parsed?.sess).not.toBe(sess);
   });
 
+  test("a status says its launch gate is closed only as `drn: true`; an open gate or an old daemon says nothing", () => {
+    expect(parseMachineStatus({ at: 1, scan: 2, drn: true })).toEqual({ at: 1, scan: 2, drn: true });
+    expect(parseMachineStatus({ at: 1, scan: 2 })).not.toHaveProperty("drn");
+    for (const drn of [false, 1, "true", null]) expect(parseMachineStatus({ at: 1, scan: 2, drn })).toBeNull();
+    expect(parseDecision(decide({ code: "draining" }))?.candidates[0]?.rejected).toEqual([{ code: "draining" }]);
+  });
+
   test("a spec settles until merged or reported, absent read as merged; an edge may wait for done", () => {
     const request: TaskRequest = { repo: "github.com/acme/app", mode: "worktree" };
     const spec: TaskSpec = { ...request, until: "reported", deps: [{ task: "t-1", after: "done" }] };
@@ -1338,6 +1716,9 @@ describe("M4 shapes", () => {
       { code: "auth_expired" },
       { code: "base_unpushed" },
       { code: "skill_absent", skill: "ship" },
+      { code: "continue_elsewhere" },
+      { code: "continue_unsupported" },
+      { code: "attachments_unsupported" },
     ];
     for (const reason of reasons) expect(parseDecision(decide(reason))?.candidates[0]?.rejected).toEqual([reason]);
     for (const skill of [undefined, "", "a/b"]) {

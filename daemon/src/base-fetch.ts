@@ -99,7 +99,7 @@ function lastFetchedNote(branch: string, detail: string, at: number): string {
  */
 export async function freshenBase(
   repo: RepoEntry,
-  mode: SpawnMode,
+  mode: Exclude<SpawnMode, "continue">,
   terminal?: TerminalProbe,
 ): Promise<string | undefined> {
   try {

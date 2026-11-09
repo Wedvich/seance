@@ -1,4 +1,4 @@
-import { LAUNCH_LEDGER_MAX_AGE_MS, MIN_FREE_MIB } from "@seance/shared";
+import { LAUNCH_LEDGER_MAX_AGE_MS, MIN_FREE_MIB, STORE_TOMBSTONE_MS } from "@seance/shared";
 
 /** How long a quota window runs: the 5h session window, or any weekly (all-models or per-model). */
 export type WindowSpan = "5h" | "7d";
@@ -9,6 +9,8 @@ export interface SeatProfile {
   readonly capacity: number;
   /** `gatedModels` families this seat's quota covers; any other gated one is billed to credits. */
   readonly includes: readonly string[];
+  /** In-flight scheduler tasks per account on this seat, by the account of each task's placement. */
+  readonly accountMax: number;
 }
 
 /**
@@ -50,8 +52,6 @@ export interface SchedulerConfig {
   readonly minFreeMib: number;
   /** In-flight (`IN_FLIGHT`: reserved, running, needs-input) scheduler tasks across the fleet. */
   readonly globalMax: number;
-  /** The same count per account, by the account of each task's placement. */
-  readonly accountMax: number;
   /**
    * A task in `needs-input` this long is alerted once (`inputAlert`): well above the seconds an
    * auto-mode classifier call flickers it, well below the escalation.
@@ -66,6 +66,23 @@ export interface SchedulerConfig {
    * `lostExpiryMs` gives up on it.
    */
   readonly lostAfterMs: number;
+  /**
+   * An in-flight task whose machine has been absent this long stops counting
+   * toward `globalMax`, its seat's `accountMax` and projected usage, its state unchanged:
+   * nothing runs there while it sleeps. Short of `lostAfterMs`, which settles
+   * reservations and writes a record. A blip or reconnect frees nothing; a
+   * dark wake restarts the clock, so slots return only after the
+   * connected-read window (~2.5 min) plus this. Counted again once its machine is back.
+   */
+  readonly slotReleaseAfterMs: number;
+  /**
+   * A `running` task whose session has sat idle at its prompt this long (its
+   * own machine's `idle` event, nothing since) stops counting toward the
+   * caps and projected usage, as `slotReleaseAfterMs` does: nothing bills
+   * while it waits for a reply. Counted again on its next state, over a cap
+   * or not. `needs-input` keeps its slot: a dialog is mid-task.
+   */
+  readonly idleReleaseAfterMs: number;
   /**
    * A `lost` task whose machine went away (`absentSince`, else `createdAt`)
    * longer ago than this, and is disconnected now (a connected machine's
@@ -82,6 +99,22 @@ export interface SchedulerConfig {
    * task is never read back, so past it nothing waits on a signal that can still arrive.
    */
   readonly mergeExpiryMs: number;
+  /**
+   * A continuation (`TaskSpec.continues`) still `ready` this long past `createdAt` is
+   * `failed` `continue_expired`. Fixed, not per-machine: expiry runs in the leader and
+   * leadership moves. Must stay below the launch ledger's age, since past that the
+   * target daemon would refuse the continuation anyway, and failing earlier is never
+   * premature.
+   */
+  readonly continueExpiryMs: number;
+  /**
+   * A pinned task (`pin.deviceId` or `pin.account`, no `continues`) still `ready` this
+   * long past `createdAt` is `failed` `pin_expired`. Its target may be retired, re-keyed
+   * or signed out for good, and a `ready` task is never pruned; a machine back later
+   * would also start a prompt too stale to run unannounced. Fixed, as
+   * `continueExpiryMs` is.
+   */
+  readonly pinExpiryMs: number;
   /**
    * How often a pass also reads `sessions` from each connected machine holding
    * a running or `awaiting-merge` task: the backstop for an `ended` event that
@@ -123,24 +156,32 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   quotaLinePct: 90,
   resetGraceMs: 15 * 60_000,
   taskEstimatePct: { "5h": 5, "7d": 1 },
-  // Premium seats have 5× a standard seat's limits, and only they cover Fable from quota.
+  // Premium seats have 5× a standard seat's limits, and only they cover Fable from quota. `accountMax`:
+  // half the fleet's slots on a premium seat, since one account's sessions draw on its 5h window
+  // together; two on a standard one, where each task projects a quarter of that window.
   seats: {
-    team_tier_1: { capacity: 1, includes: ["fable"] },
-    team_standard: { capacity: 1 / 5, includes: [] },
+    team_tier_1: { capacity: 1, includes: ["fable"], accountMax: 4 },
+    team_standard: { capacity: 1 / 5, includes: [], accountMax: 2 },
   },
-  unknownSeat: { capacity: 1, includes: [] },
+  unknownSeat: { capacity: 1, includes: [], accountMax: 4 },
   gatedModels: ["fable"],
   minFreeMib: MIN_FREE_MIB,
   globalMax: 8,
-  // Half the fleet's slots: one account's sessions draw on its 5h window together.
-  accountMax: 4,
   needsInputAlertMs: 2 * 60_000,
   needsInputEscalateMs: 30 * 60_000,
-  reservationTtlMs: 120_000,
+  // Outlives the leader's wait for a spawn reply (`OP_TIMEOUT_MS.spawn`): a daemon past its fetch deadline launches nothing.
+  reservationTtlMs: 240_000,
   lostAfterMs: 15 * 60_000,
+  slotReleaseAfterMs: 2 * 60_000,
+  // docs/scheduler.md, Settled defaults 20.
+  idleReleaseAfterMs: 10 * 60_000,
   lostExpiryMs: 7 * 24 * 60 * 60_000,
   // Tied to the ledger: past its age no machine can report the merge (`mergeExpiryMs` doc).
   mergeExpiryMs: LAUNCH_LEDGER_MAX_AGE_MS,
+  // docs/scheduler.md, Settled defaults 19.
+  continueExpiryMs: 4 * 24 * 60 * 60_000,
+  // docs/scheduler.md, Settled defaults 21. The tombstone's life by choice, not by need.
+  pinExpiryMs: STORE_TOMBSTONE_MS,
   sweepIntervalMs: 120_000,
   endingTimeoutMs: 300_000,
   keepFinished: 50,

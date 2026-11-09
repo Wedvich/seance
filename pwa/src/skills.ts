@@ -1,4 +1,4 @@
-import type { Machine } from "@seance/shared";
+import { SKILL_TOKEN, SKILL_TOKEN_OPENER, trimSkillName, type Machine } from "@seance/shared";
 
 /**
  * The `/` picker's logic (DESIGN.md, PWA): the sorted union of skill names
@@ -37,21 +37,25 @@ export interface SkillToken {
 }
 
 /**
- * The token the picker completes: a `/` at the start or after whitespace, then
- * non-whitespace up to the caret, the caret at the token's end. So `… /sh|`
- * opens anywhere in the prompt, but a slash inside a word or URL (`and/or`,
- * `https://a/b`) never does, nor a second `/` (`/tmp/x`): skill names are dir
- * names, so that is a path. Null for a selection range (`caret` null).
+ * The token the picker completes, by the routing filter's rule
+ * (shared/src/skill-token.ts): a `/` at the start, after whitespace or after an
+ * opening wrapper, then no whitespace or second `/` up to the caret, the caret
+ * followed by whitespace or the end. So `… /sh|` and `` `/sh| `` open anywhere,
+ * but a slash inside a word or URL (`and/or`, `https://a/b`) never does, nor a
+ * path (`/tmp/x`). The token starts at the `/`, so a wrapper stays outside it.
+ * A caret before a closing wrapper (`` `/sh|` ``) does not open: no space fits
+ * there, so a pick would leave the token open under the caret. Null for a
+ * selection range (`caret` null).
  */
 export function skillToken(prompt: string, caret: number | null): SkillToken | null {
   if (caret === null || caret < 0 || caret > prompt.length) return null;
   if (/\S/u.test(prompt.charAt(caret))) return null;
-  let start = caret;
-  while (start > 0 && /\S/u.test(prompt.charAt(start - 1))) start -= 1;
-  if (prompt.charAt(start) !== "/") return null;
-  const query = prompt.slice(start + 1, caret);
-  if (query.includes("/")) return null;
-  return { start, end: caret, query };
+  let slash = caret;
+  while (slash > 0 && /[^\s/]/u.test(prompt.charAt(slash - 1))) slash -= 1;
+  slash -= 1;
+  if (slash < 0 || prompt.charAt(slash) !== "/") return null;
+  if (slash > 0 && !SKILL_TOKEN_OPENER.test(prompt.charAt(slash - 1))) return null;
+  return { start: slash, end: caret, query: prompt.slice(slash + 1, caret) };
 }
 
 /** Case-insensitive; names starting with the query first, then names containing it. */
@@ -92,8 +96,9 @@ export interface PromptSegment {
 }
 
 /**
- * The prompt cut into runs for the field's mirror: every `/name` token (at the
- * start or after whitespace) whose name the index knows is a `skill` run, as
+ * The prompt cut into runs for the field's mirror: every `/name` token (the
+ * routing rule, as `skillToken`) whose name the index knows is a `skill` run —
+ * the `/` and name only, a wrapper or trailing punctuation left plain — as
  * Claude Code highlights one — an unknown name still goes as typed, it just
  * isn't marked. Also cut at both ends of `anchor` so the view can measure exactly
  * the token being picked (a span running on to the prompt's end would report
@@ -107,11 +112,11 @@ export function promptSegments(
 ): readonly PromptSegment[] {
   const cuts = new Set<number>([0, prompt.length]);
   const marked = new Set<number>();
-  for (const match of prompt.matchAll(/(^|\s)\/(\S+)/gu)) {
-    if (!skills.includes(match[2] ?? "")) continue;
-    const start = match.index + (match[1] ?? "").length;
-    cuts.add(start).add(match.index + match[0].length);
-    marked.add(start);
+  for (const match of prompt.matchAll(SKILL_TOKEN)) {
+    const name = trimSkillName(match[1] ?? "");
+    if (!skills.includes(name)) continue;
+    cuts.add(match.index).add(match.index + 1 + name.length);
+    marked.add(match.index);
   }
   if (anchor !== null && anchor.start >= 0 && anchor.start < anchor.end && anchor.end <= prompt.length) {
     cuts.add(anchor.start).add(anchor.end);

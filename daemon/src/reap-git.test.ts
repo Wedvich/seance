@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseBranches, parseWorktreeList, transcriptDir } from "./reap-git.ts";
+import { parseBranches, parseWorktreeList, parseWorktreeLock, transcriptDir } from "./reap-git.ts";
 
 /** `git worktree list --porcelain -z`: NUL after every attribute, an empty one ending each record. */
 function porcelain(...records: readonly (readonly string[])[]): string {
@@ -43,17 +43,19 @@ describe("parseWorktreeList", () => {
 });
 
 describe("parseBranches", () => {
-  test("reads name, tip, and whether the upstream is gone", () => {
+  test("reads name, tip, whether an upstream is set, and whether it is gone", () => {
     const raw = [
-      "refs/heads/main\0aaa\0",
-      "refs/heads/feat/x\0bbb\0[gone]",
-      "refs/heads/ahead\0ccc\0[ahead 2]",
+      "refs/heads/main\0aaa\0\0refs/remotes/origin/main",
+      "refs/heads/feat/x\0bbb\0[gone]\0refs/remotes/origin/feat/x",
+      "refs/heads/ahead\0ccc\0[ahead 2]\0refs/remotes/origin/ahead",
+      "refs/heads/local\0ddd\0\0",
       "",
     ].join("\n");
     expect(parseBranches(raw)).toEqual([
-      { name: "main", sha: "aaa", upstreamGone: false },
-      { name: "feat/x", sha: "bbb", upstreamGone: true },
-      { name: "ahead", sha: "ccc", upstreamGone: false },
+      { name: "main", sha: "aaa", upstreamGone: false, hasUpstream: true },
+      { name: "feat/x", sha: "bbb", upstreamGone: true, hasUpstream: true },
+      { name: "ahead", sha: "ccc", upstreamGone: false, hasUpstream: true },
+      { name: "local", sha: "ddd", upstreamGone: false, hasUpstream: false },
     ]);
   });
 
@@ -74,5 +76,28 @@ describe("transcriptDir", () => {
       if (previous === undefined) delete process.env["CLAUDE_CONFIG_DIR"];
       else process.env["CLAUDE_CONFIG_DIR"] = previous;
     }
+  });
+});
+
+describe("parseWorktreeLock", () => {
+  const raw = porcelain(
+    ["worktree /r/main", "HEAD aaa", "branch refs/heads/main"],
+    ["worktree /r/a", "HEAD bbb", "branch refs/heads/a", "locked claude session fix (pid 4242 start 646904935)"],
+    ["worktree /r/b", "HEAD ccc", "detached", "locked"],
+    ["worktree /r/odd\nname", "HEAD ddd", "detached", "locked on a usb disk"],
+    ["worktree /r/short", "HEAD eee", "detached", "locked claude session fix (pid 4242)"],
+  );
+
+  test("gives the reason a worktree is locked with, an empty one when none was given, and null when unlocked", () => {
+    expect(parseWorktreeLock(raw, "/r/a")).toEqual({ reason: "claude session fix (pid 4242 start 646904935)" });
+    expect(parseWorktreeLock(raw, "/r/b")).toEqual({ reason: "" });
+    expect(parseWorktreeLock(raw, "/r/main")).toBeNull();
+    // The form Claude writes on Windows, with no start time.
+    expect(parseWorktreeLock(raw, "/r/short")).toEqual({ reason: "claude session fix (pid 4242)" });
+  });
+
+  test("reads the record of the path asked for, newline in it included, and none for an unlisted path", () => {
+    expect(parseWorktreeLock(raw, "/r/odd\nname")).toEqual({ reason: "on a usb disk" });
+    expect(parseWorktreeLock(raw, "/r/elsewhere")).toBeNull();
   });
 });

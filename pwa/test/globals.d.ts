@@ -11,6 +11,7 @@ declare var document: {
   visibilityState: "visible" | "hidden";
   addEventListener(type: string, listener: () => void): void;
   removeEventListener(type: string, listener: () => void): void;
+  dispatchEvent(event: Event): boolean;
 };
 
 declare var history: {
@@ -19,4 +20,9 @@ declare var history: {
   replaceState(data: unknown, unused: string): void;
   back(): void;
   go(delta: number): void;
+};
+
+/** Just enough of Cache Storage for share-handler.ts; share.test.ts installs a double. */
+declare var caches: {
+  open(name: string): Promise<{ put(request: string, response: Response): Promise<void> }>;
 };

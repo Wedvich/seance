@@ -152,6 +152,7 @@ interface InfoLine {
   readonly titled?: string;
   readonly name?: string;
   readonly task?: string;
+  readonly pid?: string;
   readonly path?: string;
 }
 
@@ -169,6 +170,7 @@ function infoLine(fields: InfoLine): string {
     fields.titled ?? "1",
     fields.name ?? "task",
     fields.task ?? "",
+    fields.pid ?? "4242",
     fields.path ?? "/Users/m/repos/seance",
   ].join("|");
 }
@@ -192,6 +194,7 @@ describe("parsePaneInfo", () => {
         command: "claude",
         path: "/Users/m/repos/seance",
         taskId: null,
+        pid: 4242,
       },
       {
         paneId: "%2",
@@ -205,8 +208,19 @@ describe("parsePaneInfo", () => {
         command: "claude",
         path: "/Users/m/repos/seance",
         taskId: null,
+        // A dead pane's pid is the reaped process's, maybe someone else's by now.
+        pid: null,
       },
     ]);
+  });
+
+  test("a live pane's pid only when tmux gives a number", () => {
+    const pid = (value: string): number | null | undefined =>
+      parsePaneInfo(infoLine({ pane: "%1", pid: value }))[0]?.pid;
+    expect(pid("1")).toBe(1);
+    expect(pid("")).toBeNull();
+    expect(pid("0")).toBeNull();
+    expect(pid("12a")).toBeNull();
   });
 
   test("an exit status only for a dead pane, and only one a process can exit with", () => {

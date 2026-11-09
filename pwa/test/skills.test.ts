@@ -84,7 +84,24 @@ describe("skillToken", () => {
     expect(queryAt("/ship /re")).toBe("re");
   });
 
+  test("after an opening wrapper, the wrapper outside the token", () => {
+    expect(skillToken("`/sh", 4)).toEqual({ start: 1, end: 4, query: "sh" });
+    expect(queryAt('say "/sh')).toBe("sh");
+    expect(queryAt("(/sh| x")).toBe("sh");
+    expect(queryAt("[/")).toBe("");
+    expect(queryAt("'/re")).toBe("re");
+    // Only the character before the `/` counts, as routing reads it.
+    expect(queryAt("x(/sh")).toBe("sh");
+  });
+
+  test("a caret before a closing wrapper does not open", () => {
+    expect(queryAt("`/sh|`")).toBeNull();
+    expect(queryAt("(/sh|)")).toBeNull();
+  });
+
   test("null for a slash inside a word or URL, or a path", () => {
+    expect(queryAt("`/tmp/x")).toBeNull();
+    expect(queryAt(")/sh")).toBeNull();
     expect(queryAt("see https://a/b")).toBeNull();
     expect(queryAt("and/or")).toBeNull();
     expect(queryAt("x/sh")).toBeNull();
@@ -149,6 +166,11 @@ describe("completeSkill", () => {
     expect(pick("a /re|\tb", "review")).toBe("a /review |\tb");
   });
 
+  test("keeps an opening wrapper in place", () => {
+    expect(pick("`/sh", "ship")).toBe("`/ship |");
+    expect(pick('run "/re| now', "review")).toBe('run "/review |now');
+  });
+
   test("the result has no token at its caret, so the picker closes", () => {
     const token = skillToken("do /sh", 6);
     if (token === null) throw new Error("no token");
@@ -177,7 +199,14 @@ describe("promptSegments", () => {
     expect(painted("a\t/ship")).toBe("a\t[/ship]");
   });
 
+  test("marks a wrapped known name, the wrapper and punctuation left plain", () => {
+    expect(painted("run `/ship` now")).toBe("run `[/ship]` now");
+    expect(painted("(/review).")).toBe("([/review]).");
+    expect(painted('"/ship, then x(/review"')).toBe('"[/ship], then x([/review]"');
+  });
+
   test("marks nothing for an unknown or partial name, or one inside a word or URL", () => {
+    expect(painted("/ship/x and /tmp/ship")).toBe("/ship/x and /tmp/ship");
     expect(painted("/shi")).toBe("/shi");
     expect(painted("/shipit now")).toBe("/shipit now");
     expect(painted("/")).toBe("/");

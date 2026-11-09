@@ -10,6 +10,7 @@ import {
 } from "@seance/shared";
 import { accountSeries, chartLines } from "../src/chart.ts";
 import { accountDisplayName, deriveMachines } from "../src/machines-view.ts";
+import { knownAccounts } from "@seance/shared";
 
 const NOW = 1_800_000_000_000;
 const S = NOW / 1000;
@@ -94,11 +95,18 @@ describe("deriveMachines", () => {
       NOW,
       NO_LEADER,
     );
-    expect(cards[0]?.meta).toStartWith("asleep · last seen");
+    expect(cards[0]?.meta).toBe("asleep · last seen 17m ago");
     expect(cards[0]?.gauges).toEqual([]);
     expect(cards[0]?.exclaves[0]?.sessions).toBeNull();
     expect(accounts[0]?.bars.map((bar) => bar.pct)).toEqual([7]);
     expect(accounts[0]?.observed).toEndWith("18m ago on mac, asleep");
+    // A socket the relay still listed when it slept: lastSeen is the register's, days old; the beat is the sleep.
+    const listed = deriveMachines(
+      [machine({ connected: false, lastSeen: NOW - 3 * 86_400_000, status })],
+      NOW,
+      NO_LEADER,
+    );
+    expect(listed.cards[0]?.meta).toBe("asleep · last seen 17m ago");
   });
 
   test("an account across machines takes the newest observation; unsigned exclaves group nowhere", () => {
@@ -147,7 +155,7 @@ describe("deriveMachines", () => {
     const { cards, accounts } = deriveMachines([first, old, named], NOW, NO_LEADER);
     expect(accounts.map((account) => account.detail)).toEqual(["me@example.com · on a, b, c", "acct acct-bbb · on a"]);
     expect(cards[2]?.exclaves[0]?.account).toBe("me@example.com");
-    expect(cards[0]?.exclaves[0]?.account).toBe("acct acct-aaa");
+    expect(cards[0]?.exclaves[0]?.account).toBe("me@example.com");
   });
 
   test("an alias leads the card, the exclave row and the display name; clearing falls back to email, then short id", () => {
@@ -166,22 +174,81 @@ describe("deriveMachines", () => {
       ["client", "client · on a"],
     ]);
     expect(cards[0]?.exclaves.map((row) => row.account)).toEqual(["personal", "client"]);
-    expect(accountDisplayName([named], ACCOUNT, aliases)).toBe("personal");
-    expect(accountDisplayName([named], "org-3:unseen-account", { "org-3:unseen-account": "ghost" })).toBe("ghost");
+    expect(accountDisplayName(knownAccounts([named]), ACCOUNT, aliases)).toBe("personal");
+    expect(
+      accountDisplayName(knownAccounts([named]), "org-3:unseen-account", { "org-3:unseen-account": "ghost" }),
+    ).toBe("ghost");
 
     const cleared = deriveMachines([named], NOW, NO_LEADER, {});
     expect(cleared.accounts.map((account) => [account.alias, account.detail])).toEqual([
       [null, "me@example.com · on a"],
       [null, "acct acct-bbb · on a"],
     ]);
-    expect(accountDisplayName([named], ACCOUNT)).toBe("me@example.com");
-    expect(accountDisplayName([named], "org-2:acct-bbbbbbbb-2222")).toBe("acct acct-bbb");
+    expect(accountDisplayName(knownAccounts([named]), ACCOUNT)).toBe("me@example.com");
+    expect(accountDisplayName(knownAccounts([named]), "org-2:acct-bbbbbbbb-2222")).toBe("acct acct-bbb");
+  });
+
+  test("one email on two orgs reads with each org on the card, the exclave row and a hold; an alias still leads", () => {
+    const personal = "1a2b3c4d-personal:acct-same";
+    const team = "9f8e7d6c-team:acct-same";
+    const both = machine({
+      deviceId: "a",
+      name: "a",
+      exclaves: [
+        { ...exclave("default", personal), email: "me@example.com" },
+        { ...exclave("work", team), email: "me@example.com" },
+      ],
+    });
+    const { cards, accounts } = deriveMachines([both], NOW, NO_LEADER);
+    expect(accounts.map((account) => account.detail)).toEqual([
+      "me@example.com (org 1a2b3c4d) · on a",
+      "me@example.com (org 9f8e7d6c) · on a",
+    ]);
+    expect(cards[0]?.exclaves.map((row) => row.account)).toEqual([
+      "me@example.com (org 1a2b3c4d)",
+      "me@example.com (org 9f8e7d6c)",
+    ]);
+    expect(accountDisplayName(knownAccounts([both]), team)).toBe("me@example.com (org 9f8e7d6c)");
+    expect(accountDisplayName(knownAccounts([both]), team, { [team]: "work" })).toBe("work");
+  });
+
+  test("one account has one label on every machine, whether or not that machine reports its email", () => {
+    const personal = "1a2b3c4d-personal:acct-same";
+    const team = "9f8e7d6c-team:acct-same";
+    const withEmail = machine({
+      deviceId: "a",
+      name: "a",
+      exclaves: [
+        { ...exclave("default", personal), email: "me@example.com" },
+        { ...exclave("work", team), email: "me@example.com" },
+      ],
+    });
+    const old = machine({ deviceId: "b", name: "b", exclaves: [exclave("default", personal)] });
+    const { cards } = deriveMachines([withEmail, old], NOW, NO_LEADER);
+    expect(cards[1]?.exclaves[0]?.account).toBe("me@example.com (org 1a2b3c4d)");
+    expect(cards[0]?.exclaves[0]?.account).toBe(cards[1]?.exclaves[0]?.account);
+
+    // A short-id twin: one account's emailless row must not collide with another account's short id.
+    const bare = machine({
+      deviceId: "c",
+      name: "c",
+      exclaves: [exclave("default", "org-x:acct-abcdefgh1"), exclave("work", "org-y:acct-abcdefgh2")],
+    });
+    const named = machine({
+      deviceId: "d",
+      name: "d",
+      exclaves: [{ ...exclave("default", "org-x:acct-abcdefgh1"), email: "x@example.com" }],
+    });
+    const labels = deriveMachines([bare, named], NOW, NO_LEADER).cards.map((card) =>
+      card.exclaves.map((row) => row.account),
+    );
+    expect(labels).toEqual([["x@example.com", "acct acct-abc"], ["x@example.com"]]);
   });
 
   test("an account id that names an inherited property is no alias", () => {
     const odd = machine({ exclaves: [exclave("default", "constructor")] });
     expect(deriveMachines([odd], NOW, NO_LEADER, {}).accounts[0]?.alias).toBeNull();
-    expect(accountDisplayName([odd], "toString", {})).toBe("acct toString");
+    expect(accountDisplayName(knownAccounts([odd]), "toString", {})).toBe("acct toString");
   });
 
   test("a window past its reset reads empty, however full the reading was", () => {

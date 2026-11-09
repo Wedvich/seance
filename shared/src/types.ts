@@ -479,7 +479,8 @@ export const STORE_MAX_CT_LENGTH = 40 * 1024;
  * `TASK_REQUEST_LIMITS.prompt` where each character costs two UTF-8 bytes;
  * three-byte text (CJK) fits about 5,800 characters, and the sealer's check
  * refuses more. The 12 KiB left holds all the leader adds at every bound plus a
- * decision of ten candidates (both measured in parse.test.ts).
+ * decision of nine candidates (both measured in parse.test.ts); past that the
+ * leader cuts the decision to its winner (`Decision.trimmed`).
  */
 export const STORE_CREATE_MAX_CT_LENGTH = 28 * 1024;
 
@@ -686,6 +687,7 @@ export const SCHEDULER_OPS = [
   "route-preview",
   "cancel",
   "mark-done",
+  "run-now",
   "pause",
   "resume",
   "discard",
@@ -697,20 +699,22 @@ export type SchedulerOp = (typeof SCHEDULER_OPS)[number];
 /**
  * App-side response deadlines. A backstop rather than the primary error path —
  * the daemon returns a structured error on its own — so spawn's ceiling clears
- * exec.ts's 60s command timeout plus spawn.ts's 3s pane-death check, and
+ * an attachment download (`ATTACHMENT_FETCH_DEADLINE_MS`) plus exec.ts's 60s
+ * command timeout and spawn.ts's 3s pane-death check, and
  * despawn's clears its ~5s graceful exit plus the kill and its escalation.
  * `cancel` may despawn on the task's machine first, so it clears `despawn`'s.
  */
 export const OP_TIMEOUT_MS = {
   sessions: 10_000,
   rescan: 15_000,
-  spawn: 90_000,
+  spawn: 210_000,
   despawn: 20_000,
   metrics: 15_000,
   queue: 10_000,
   "route-preview": 10_000,
   cancel: 25_000,
   "mark-done": 10_000,
+  "run-now": 10_000,
   pause: 10_000,
   resume: 10_000,
   discard: 10_000,
@@ -718,8 +722,9 @@ export const OP_TIMEOUT_MS = {
 } as const satisfies Record<RequestOp, number>;
 
 /**
- * Status cadence. The relay floors it per socket at STATUS_MIN_INTERVAL_MS, as
- * it rate-limits `register`; a sender below the floor is dropped, not closed.
+ * Status cadence, on wall-clock slots shared with app pings (`startSlotTimer`). The relay
+ * floors it per socket at STATUS_MIN_INTERVAL_MS, as it rate-limits `register`; a sender
+ * below the floor is dropped, not closed.
  */
 export const STATUS_INTERVAL_MS = 30_000;
 export const STATUS_MIN_INTERVAL_MS = 10_000;
@@ -756,7 +761,8 @@ export const REPLY_JSON_BUDGET = 44_000;
 
 /**
  * Heartbeat cadence, shared by both socket legs (daemon↔relay and app↔relay):
- * a bare "ping" every interval, "pong" expected within the deadline, a miss
+ * a bare "ping" every interval (on the app leg, a second into the status beats'
+ * wall-clock slot: `startSlotTimer`), "pong" expected within the deadline, a miss
  * closes/redials. The relay sweeps a daemon socket silent for
  * HEARTBEAT_MISSES_TO_SWEEP beats — derived from the interval there, so
  * slowing the beat can never silently outpace the sweep.
@@ -958,6 +964,27 @@ export interface MachineInfo {
  * leader acts on `TaskSpec.until` and `after: "done"` — what a client checks
  * of the verified leader before writing either, since an older leader strips
  * `until` on its first write and holds a `done` edge unreadable.
+ * `pinAccount`: as a leader, routes on `TaskSpec.pin.account` and
+ * `TaskSpec.avoid` — what a client checks of the verified leader before writing
+ * either. An older leader would rebuild the spec without both; the record's
+ * `PIN_SENTINEL` makes it unreadable to one instead (`TaskSpec.pin`).
+ * `continueTask`: as a daemon, spawns `mode: "continue"`; as a leader, routes and
+ * dispatches a continue task — what a client checks of the verified leader before
+ * writing one (an older leader refuses the mode, holding the record unreadable).
+ * `continueCancelled`: as a daemon, continues a task that was cancelled after it
+ * was placed. It refuses a continuation when a newer launch noted the same
+ * worktree, and words the seed from the old note's exit. Clients offer Continue
+ * on a cancelled task only on a machine advertising it.
+ * `continueSession`: as a daemon, gives each task spawn a Claude session id of its
+ * own choosing (`--session-id`), notes it, and continues by resuming that id
+ * (`--resume`) rather than with `--continue`, which misses a worktree spawn's
+ * conversation where Claude filed it under the clone. Clients offer Continue, and a
+ * leader routes a continuation, only to a machine advertising it.
+ * `runNow`: as a leader, answers `run-now` — what a client checks of the
+ * verified leader before offering it (an older one refuses the op as unknown).
+ * `attachments`: as a daemon, fetches and seeds `SpawnRequest.attachments`; as a
+ * leader, routes, dispatches and leans them — what the PWA checks of the verified
+ * leader before offering to attach. One build does both halves.
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -965,6 +992,12 @@ export const CAPABILITIES = {
   baseBranch: "baseBranch",
   exitStatus: "exitStatus",
   reportedDone: "reportedDone",
+  pinAccount: "pinAccount",
+  continueTask: "continueTask",
+  continueCancelled: "continueCancelled",
+  continueSession: "continueSession",
+  runNow: "runNow",
+  attachments: "attachments",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -1090,6 +1123,14 @@ export interface MachineStatus {
    * from older daemons, and when none has expired.
    */
   readonly ax?: readonly number[];
+  /**
+   * The daemon's task-launch gate is closed (`EndedTasks.drain`: a self-update's
+   * restart, or a shutdown), so a task launch sent now is refused `internal_error`
+   * and sits reserved until its TTL; routing filters the machine (`draining`).
+   * Never trimmed, like `ax`. Absent when the gate is open, and from older daemons;
+   * an older reader ignores it.
+   */
+  readonly drn?: true;
 }
 
 /**
@@ -1208,7 +1249,13 @@ export const METRIC_NAMES = {
 
 export type MetricName = (typeof METRIC_NAMES)[keyof typeof METRIC_NAMES];
 
-export type SpawnMode = "worktree" | "here";
+/**
+ * `continue` resumes a failed or cancelled task's session (`claude --resume <noted id>`) in the
+ * worktree this machine's launch ledger noted for `SpawnRequest.continues`. It comes only
+ * from the leader's dispatch of a continue task (DESIGN.md, Daemon, "Continuing a
+ * session"); no direct client sends it.
+ */
+export type SpawnMode = "worktree" | "here" | "continue";
 
 /**
  * Client names our own senders stamp into `SpawnRequest.client` — compile-time
@@ -1267,6 +1314,19 @@ export interface SpawnRequest {
    * none.
    */
   readonly baseBranch?: string;
+  /**
+   * The failed task whose worktree the session resumes. Required exactly when
+   * `mode` is `"continue"`. Bounded by `TASK_ID_PATTERN`; resolved against the
+   * receiving daemon's own launch ledger, never a path from the wire. An older
+   * daemon refuses the mode as malformed.
+   */
+  readonly continues?: string;
+  /**
+   * The task's files, copied from its spec by the leader's dispatch. The daemon
+   * fetches and verifies every one before launch, or refuses `attachment_unavailable`;
+   * sent only to a daemon advertising `CAPABILITIES.attachments`.
+   */
+  readonly attachments?: readonly AttachmentRef[];
 }
 
 /**
@@ -1292,6 +1352,23 @@ export const SPAWN_ERROR_CODES = [
   "no_default_branch",
   /** `baseBranch` names no branch on origin (M4, stacking). */
   "base_not_found",
+  /**
+   * A `mode: "continue"` spawn that cannot resume: not sealed by the scheduler, no
+   * task id of its own or naming itself, no ledger record of the continued task, its
+   * launch still in flight, no worktree noted (a `here` run), a different clone from
+   * the one `repo` resolved to, a path outside `<clone>/.claude/worktrees/` or not
+   * canonical, the worktree gone, a live session still in it, or a lock on it that is
+   * not a stale Claude one. Nothing launched. The refusals up to the path check come
+   * before the write-ahead launch record; the backend's (worktree gone again, live
+   * pane, lock) come after it, and the handler retracts the entry, so none stays.
+   */
+  "not_continuable",
+  /**
+   * An attachment would not fetch, verify or decrypt before its deadline, or the spawn
+   * carrying them was not the scheduler's. Nothing launched, nothing recorded: there is
+   * never a session without its files. The message names the file by index, never by name.
+   */
+  "attachment_unavailable",
   "launch_error",
   "claude_died",
   "timeout",
@@ -1383,6 +1460,17 @@ export interface SessionsResponse {
    */
   readonly ledgerSince?: number;
   /**
+   * The task ids in `ended` whose launch this daemon recorded but never saw
+   * finish, because the process exited mid-spawn (crash, kill, power cut, or a
+   * restart past the drain cap): the session may or may not have started.
+   * Always a subset of `ended` — the ids stay there, so a reader predating the
+   * field reads them as ran, never as never-landed. Sent only to the scheduler,
+   * at most `SESSIONS_MAX_PROGRESS` ids; absent from older daemons and when
+   * empty. A leader settles one `failed` `dispatch_unconfirmed` and never
+   * re-dispatches it.
+   */
+  readonly interrupted?: readonly string[];
+  /**
    * What this daemon last knew of each task's PR and branch, live or ended —
    * the sum of the `session-event`s and `branch-state`s it sent, which are
    * fire-and-forget and lost while no leader listens. A leader reads it on
@@ -1430,20 +1518,42 @@ export interface TaskProgress {
   readonly reported?: true;
   /**
    * The session's exit status once its pane died (tmux's `pane_dead_status`,
-   * 0–255), for `failed` from exit status (M4). Here rather than on `ended`,
+   * 0–255), for `failed` from exit status (M4). A signal death is `128 + signal`
+   * (`exitStatus` in `daemon/src/sessions.ts`). Here rather than on `ended`,
    * whose entries are bare ids an older leader reads as such, and on the ledger
    * entry that already survives restarts, so the sweep and a takeover read one
-   * value. Absent while the pane lives, for a status tmux did not give (a
-   * signal), after a clean exit (its window keeps only a failed pane, so a 0 is
-   * never seen), and from older daemons — a reader then settles as today.
+   * value. A task window keeps `remain-on-exit on`, so a clean exit's 0 is seen
+   * and noted too. Absent while the pane lives, for a signal death on a tmux that
+   * gives no `pane_dead_signal` (before 3.3), for a window closed from outside
+   * (`vanished`), and from older daemons — a reader then settles as today.
    */
   readonly exit?: number;
+  /**
+   * Its pane went from this machine's tmux with no exit status, and the daemon did
+   * not close it itself (closed by hand, or its server or machine stopped). Only
+   * where `exit` is absent. Ignored by a leader older than `session_closed`, which
+   * settles `done` as before.
+   */
+  readonly vanished?: true;
+  /**
+   * With `exit: SIGKILL_STATUS` only, on Linux with cgroup v2: whether the
+   * kernel counted an OOM kill (`memory.events` `oom_kill`) in the session's
+   * cgroup between the last time the daemon saw it alive and the pass that
+   * found it dead (`daemon/src/oom-kill.ts`). `true` says an OOM kill landed
+   * there then, not that this session was its victim — on a unit install every
+   * session shares the cgroup. `false` says no kernel OOM kill did. Absent:
+   * unknown (no sample, unreadable, macOS, an older daemon).
+   */
+  readonly oomKill?: boolean;
   /** When any of these last changed, ms (an unchanged state is not re-stamped). */
   readonly at: number;
 }
 
 /** Exit statuses `TaskProgress.exit` may hold: a process's, 0–255. */
 export const EXIT_STATUS_MAX = 255;
+
+/** A SIGKILL death as `TaskProgress.exit` holds it (`128 + 9`): the OOM killer's signal, and the only status `oomKill` rides with. */
+export const SIGKILL_STATUS = 137;
 
 /**
  * What a session is doing, as `session-event` reports it (docs/scheduler.md).
@@ -1606,25 +1716,13 @@ export interface Placement {
 }
 
 /**
- * How a batch's members share the fleet. `sequential`: one at a time, in
- * `index` order. `parallel`: at most `max` at once. `auto`: no batch-level
- * bound — deps and the global and per-account caps decide.
- */
-export type BatchStrategy =
-  | { readonly mode: "sequential" }
-  | { readonly mode: "parallel"; readonly max: number }
-  | { readonly mode: "auto" };
-
-/**
- * A task's place in a batch. Every member carries the strategy, since there is
- * no batch record — one client creates a batch's members together, so they
- * agree; where they do not, the earliest-created member's wins.
+ * A task's place in a batch: a group with no record of its own, so a batch is
+ * the tasks that name its id. It holds no order and no bound.
  */
 export interface BatchMembership {
   /** `TASK_ID_PATTERN`, minted by the client like a task id. */
   readonly id: string;
   readonly index: number;
-  readonly strategy: BatchStrategy;
 }
 
 /**
@@ -1686,11 +1784,114 @@ export interface LinearLink {
 export const TASK_SPEC_LIMITS = {
   client: 64,
   deps: 16,
-  parallel: 16,
   linearIssue: 64,
   placement: ROUTING_ID_MAX_LENGTH,
   batchIndex: MAX_TASKS,
+  /** `ExclaveInfo.accountId` is `org:account`, two UUIDs; past this it is no id. */
+  account: 128,
+  /**
+   * Machines a task may avoid: a few to steer around, not a fleet to list. Four
+   * keeps the record at every bound, the longest account pin included, under
+   * `STORE_MAX_CT_LENGTH` with nine candidates beside it, the alert stamps included
+   * (measured in parse.test.ts).
+   */
+  avoid: 4,
 } as const;
+
+/**
+ * Sealed into a task record's `pin.exclave` whenever its spec carries
+ * `pin.account` or `avoid` (`sealTaskRecord`). A leader older than `pinAccount`
+ * (#303) refuses an empty exclave, so it holds such a record unreadable — never
+ * strips the restriction by re-sealing what it parsed. Every leader since ignores
+ * `exclave` (exclave pins are gone), so this stops only those: a new gated field
+ * needs a sentinel of its own, as `ATTACHMENTS_DEP_SENTINEL` is.
+ */
+export const PIN_SENTINEL = "";
+
+/**
+ * Bounds on a task's attachments (DESIGN.md, "Attachments"). Sizes are plaintext.
+ * `name` and `prompt` are UTF-16 units: a manifest at its bounds fits the create
+ * cap only beside a prompt shorter than `TASK_REQUEST_LIMITS.prompt` (measured in
+ * parse.test.ts), so a spec carrying attachments takes `prompt` instead.
+ */
+export const ATTACHMENT_LIMITS = {
+  files: 10,
+  fileBytes: 30 * 1024 * 1024,
+  totalBytes: 100 * 1024 * 1024,
+  name: 100,
+  type: 127,
+  prompt: 6_144,
+} as const;
+
+/** A stored object's bytes past its plaintext: the IV and the GCM tag (`sealAttachment`). */
+export const ATTACHMENT_OVERHEAD_BYTES = 28;
+export const ATTACHMENT_MAX_OBJECT_BYTES = ATTACHMENT_LIMITS.fileBytes + ATTACHMENT_OVERHEAD_BYTES;
+/** A v4 UUID, lowercase, as `crypto.randomUUID()` mints it: the R2 key as it stands. */
+export const ATTACHMENT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+/** Unpadded base64url of a SHA-256 (`attachmentHash`). */
+export const ATTACHMENT_HASH_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
+export const ATTACHMENT_PATH = "/attachments/";
+/** Bound into an object's AAD, never an envelope's `op`: not an `AT_REST_OPS` member. */
+export const ATTACHMENT_OP = "attachment";
+/** All of a spawn's downloads together; the leader's spawn wait covers it plus the launch budget. */
+export const ATTACHMENT_FETCH_DEADLINE_MS = 120_000;
+/** The bucket's lifecycle rule: as long as admission's age limit, so a task still admissible finds its files. */
+export const ATTACHMENT_RETENTION_MS = STORE_TOMBSTONE_MS;
+/**
+ * The relay's upload allowance (the Hub). `windowHours` is summed over one more
+ * hour bucket than it names, so any trailing 30 days is covered. `windowBytes`
+ * keeps live storage under R2's 10 GB free tier, since objects expire at 30 days.
+ */
+export const ATTACHMENT_ALLOWANCE = {
+  windowHours: 720,
+  windowBytes: 9_500_000_000,
+  hourBytes: 1_000_000_000,
+  hourUploads: 300,
+} as const;
+
+/**
+ * Sealed into `spec.deps` whenever a spec carries `attachments` (`taskRecordAtRest`).
+ * Every older leader's dep parser refuses a `task` that is no task id, and a malformed
+ * dep nulls the spec, so such a leader holds the record unreadable rather than seal it
+ * back without the files. `PIN_SENTINEL` would not do: today's parser ignores `exclave`.
+ * This build's parser drops it before the deps bound applies.
+ */
+export const ATTACHMENTS_DEP_SENTINEL = { task: "", after: "merged" } as const;
+
+/** One file a task carries: uploaded sealed before the task was created. */
+export interface AttachmentRef {
+  /** `ATTACHMENT_ID_PATTERN`: minted by the PWA per file (`mintAttachmentId`). */
+  readonly id: string;
+  /** Display only, as prompt text is: the session's seed and the PWA, never a path. */
+  readonly name: string;
+  /** MIME, lowercase `type/subtype`, no parameters. */
+  readonly type: string;
+  /** Plaintext bytes. */
+  readonly size: number;
+  /** `attachmentHash` of the stored object: pins the entry to one exact ciphertext. */
+  readonly hash: string;
+}
+
+/**
+ * The relay's answers on `ATTACHMENT_PATH`, each a JSON body `{ code }` (the table
+ * in DESIGN.md, "The relay: R2 and the routes"). `allowance_exhausted` adds
+ * `window` and `retryAfter`.
+ */
+export const ATTACHMENT_HTTP_CODES = [
+  "stored",
+  "invalid_length",
+  "unauthorized",
+  "invalid_id",
+  "not_found",
+  "method_not_allowed",
+  "exists",
+  "length_required",
+  "too_large",
+  "allowance_exhausted",
+  "storage_error",
+] as const;
+
+export type AttachmentHttpCode = (typeof ATTACHMENT_HTTP_CODES)[number];
 
 /**
  * What settles a task (M4, #21). `merged`, the default: its merge, as today.
@@ -1703,8 +1904,19 @@ export type TaskUntil = (typeof TASK_UNTIL)[number];
 
 /** What was asked for, plus what the scheduler itself may add. Everything the spawn carries except where it lands. */
 export interface TaskSpec extends TaskRequest {
-  /** Restrict to a machine, an exclave name, or both; absent fields are free. */
-  readonly pin?: { readonly deviceId?: string; readonly exclave?: string };
+  /**
+   * Restrict to a machine, an account (`ExclaveInfo.accountId`), or both;
+   * absent fields are free. No exclave: an exclave id is machine-local — `abc`
+   * on two machines may be two accounts — so it pins nothing fleet-wide. A
+   * client writes `account` only to a leader advertising `CAPABILITIES.pinAccount`.
+   */
+  readonly pin?: { readonly deviceId?: string; readonly account?: string };
+  /**
+   * Machines (deviceIds) the task must not run on, at most
+   * `TASK_SPEC_LIMITS.avoid`. Avoiding every machine leaves it waiting, never
+   * expired (a pin to an absent machine fails `pin_expired`). Gated as `pin.account` is.
+   */
+  readonly avoid?: readonly string[];
   /** The session this one continues — its owner gets the sticky bonus. */
   readonly lineage?: Placement;
   /** Where the work this task builds on lives (M4's stacking fills it; unset today); drives `dependency_distance`. */
@@ -1722,6 +1934,21 @@ export interface TaskSpec extends TaskRequest {
   /** At most `TASK_SPEC_LIMITS.deps`; the leader holds the task `blocked` until every edge releases. */
   readonly deps?: readonly TaskDep[];
   readonly linear?: LinearLink;
+  /**
+   * The failed task this one resumes and where its worktree is: its id and its
+   * `assignment` as a `Target`, copied by the app at enqueue so the old record may
+   * be pruned. Present exactly when `mode === "continue"` (the parser requires
+   * both), which an older leader refuses, so it holds the record unreadable rather
+   * than strip this. Routing and display only: the daemon never reads a path from it.
+   */
+  readonly continues?: { readonly task: string; readonly at: Target };
+  /**
+   * The files the session gets (`parseAttachmentManifest`). Never with `mode:
+   * "continue"`, and the prompt is held to `ATTACHMENT_LIMITS.prompt` beside it. An
+   * older leader holds the record unreadable (`ATTACHMENTS_DEP_SENTINEL`); a client
+   * writes it only when the verified leader advertises `CAPABILITIES.attachments`.
+   */
+  readonly attachments?: readonly AttachmentRef[];
   /**
    * Which app-role client enqueued it, as `SpawnRequest.client` — audit trail
    * only (the leader's admit line), at most `TASK_SPEC_LIMITS.client`. Absent
@@ -1763,13 +1990,23 @@ export type Reason =
   | { readonly code: "offline" }
   /** Connected, but no status, or one `isStatusStale` calls stale: pressure is unknown. */
   | { readonly code: "status_stale" }
+  /** Its status carries `drn`: the daemon is restarting and refuses task launches meanwhile. */
+  | { readonly code: "draining" }
   | { readonly code: "task_id_unsupported" }
   /** A daemon predating exclaves: which account a spawn would bill is unknown. */
   | { readonly code: "exclaves_unknown" }
   | { readonly code: "disk_low"; readonly freeMib: number }
   | { readonly code: "pressure_unknown" }
-  | { readonly code: "pin_mismatch"; readonly field: "deviceId" | "exclave" }
+  | { readonly code: "pin_mismatch"; readonly field: "deviceId" | "account" }
+  /** The machine is in the task's `avoid` list. */
+  | { readonly code: "avoided" }
   | { readonly code: "repo_absent" }
+  /** A continue task's target is exactly one (machine, exclave, clone); this is another. */
+  | { readonly code: "continue_elsewhere" }
+  /** The target machine does not advertise both `CAPABILITIES.continueTask` and `continueSession`. */
+  | { readonly code: "continue_unsupported" }
+  /** The task carries attachments and the machine does not advertise `CAPABILITIES.attachments`. */
+  | { readonly code: "attachments_unsupported" }
   | { readonly code: "auth_missing" }
   /** M4, Auth health: the exclave is listed in its status's `ax`. */
   | { readonly code: "auth_expired" }
@@ -1799,21 +2036,15 @@ export type Reason =
   | { readonly code: "model_not_included"; readonly model: string }
   /**
    * `scope` absent is `global`, as M2's leaders sent it. M3's: `account`, the
-   * per-account cap; `batch`, the task's batch at its strategy's bound
-   * (`sequential` is a bound of 1).
+   * per-account cap. (Scope `batch` and the `batch_order` reason went with
+   * batch strategies; a reader drops either as a reason it does not know.)
    */
   | {
       readonly code: "cap_reached";
       readonly inFlight: number;
       readonly max: number;
-      readonly scope?: "global" | "account" | "batch";
+      readonly scope?: "global" | "account";
     }
-  /**
-   * A `sequential` batch member held for order: the member at `index`, the
-   * nearest lower one the scheduler holds, has not ended yet — running, or
-   * still `blocked` or unroutable itself.
-   */
-  | { readonly code: "batch_order"; readonly index: number }
   /**
    * A pause holds dispatch (`PauseHold`): the whole queue, or the candidate's
    * account. Set by the leader since M3 item 5.
@@ -1925,7 +2156,7 @@ export interface SpillStamp {
 
 export interface Task {
   readonly id: string;
-  /** What was asked for. Its `prompt` is dropped on the write that finishes the task (`forgetPrompt`). */
+  /** What was asked for. Its `prompt` and `attachments` are dropped on the write that finishes the task (`forgetPrompt`). */
   readonly spec: TaskSpec;
   readonly state: TaskState;
   readonly createdAt: number;
@@ -1936,9 +2167,19 @@ export interface Task {
   /**
    * A daemon's `SpawnErrorCode`, or a `TaskFailureCode`; a string, so a code
    * minted later still parses. Bounded by `TASK_FAILURE_LIMITS`: the message is
-   * often a daemon's, and it is stored.
+   * often a daemon's, and it is stored. `exit`, with `session_failed` only: the
+   * session's exit status (`TaskProgress.exit`, 1–`EXIT_STATUS_MAX`), so a reader
+   * words how it ended without parsing the message. Display-only; a reader drops
+   * one out of range and keeps the failure, and an older one ignores it.
+   * `oomKill`, with `exit: SIGKILL_STATUS` only: `TaskProgress.oomKill`, read
+   * the same way and dropped the same way.
    */
-  readonly failure?: { readonly code: string; readonly message: string };
+  readonly failure?: {
+    readonly code: string;
+    readonly message: string;
+    readonly exit?: number;
+    readonly oomKill?: boolean;
+  };
   /** With `lost`: when the scheduler first saw the task's machine absent, ms. */
   readonly absentSince?: number;
   /**
@@ -2244,7 +2485,8 @@ export interface DiskAlerted {
  * `Task.failure` codes the scheduler sets itself, beside a daemon's refusal.
  * `dispatch_unconfirmed`: its spawn's reply was lost and its machine, asked
  * later, could neither show the session nor prove it never started (an older
- * daemon, or a ledger pruned past the reservation). Terminal: re-dispatching
+ * daemon, or a ledger pruned past the reservation), or its machine reported the
+ * launch interrupted (it restarted or its spawn crashed mid-way). Terminal: re-dispatching
  * could start a twin. `dependency_failed`, `dependency_missing` and
  * `dependency_cycle`: an edge that can never release (`TaskDep`), set at
  * admission. `queue_expired`: `queued` past `STORE_TOMBSTONE_MS`, so it may be
@@ -2257,7 +2499,14 @@ export interface DiskAlerted {
  * with no merge. Its `after: "merged"` dependents fail with it.
  * `session_failed`: its session exited nonzero (`TaskProgress.exit`) with no
  * PR and no merge seen, so its dependents fail rather than start on a branch
- * with nothing on it.
+ * with nothing on it. `continue_expired`: a continuation (`TaskSpec.continues`)
+ * still `ready` past `SchedulerConfig.continueExpiryMs` since `createdAt`. Its
+ * machine never took it, so it never landed. `pin_expired`: a pinned task
+ * (`pin.deviceId` or `pin.account`, no `continues`) still `ready` past
+ * `SchedulerConfig.pinExpiryMs` since `createdAt`; it never ran.
+ * `session_closed`: its machine reported its window gone with no exit status
+ * and no close of its own (`TaskProgress.vanished`), with no PR and no merge
+ * seen. Its dependents fail as for `session_failed`.
  */
 export const TASK_FAILURE_CODES = [
   "dispatch_unconfirmed",
@@ -2268,6 +2517,9 @@ export const TASK_FAILURE_CODES = [
   "lost_expired",
   "merge_expired",
   "session_failed",
+  "continue_expired",
+  "pin_expired",
+  "session_closed",
 ] as const;
 
 export type TaskFailureCode = (typeof TASK_FAILURE_CODES)[number];
@@ -2296,16 +2548,20 @@ export const SCHEDULER_ERROR_CODES = [
   "not_leader",
   "not_ready",
   "invalid_request",
-  /** `cancel`, `mark-done`: the leader holds no task by that id. `discard`: no unreadable record by that id. */
+  /** `cancel`, `mark-done`, `run-now`: the leader holds no task by that id. `discard`: no unreadable record by that id. */
   "task_not_found",
-  /** `cancel`: the task is `reserved`, its spawn in flight — refused rather than raced; ask again. */
+  /** `cancel`, `mark-done`, `run-now`: the task is `reserved`, its spawn in flight — refused rather than raced; ask again. */
   "dispatching",
-  /** `cancel`, `mark-done`: the task is already `done`, `failed` or `cancelled`. */
+  /** `cancel`, `mark-done`, `run-now`: the task is already `done`, `failed` or `cancelled`. */
   "finished",
+  /** `run-now`: the task is not `ready` — waiting on admission or its deps, or already placed. */
+  "not_waiting",
+  /** `run-now`: something besides the concurrency caps (a pause, quota, a pin, …) keeps it from every machine. */
+  "unplaceable",
   /** `cancel`, `mark-done` of a running task: its machine answered the despawn with a refusal; the task is unchanged. */
   "despawn_failed",
   /**
-   * `cancel`, `mark-done`, `pause`, `resume`: the record changed under the
+   * `cancel`, `mark-done`, `run-now`, `pause`, `resume`: the record changed under the
    * request (a lost store race); ask again. `discard`: the unreadable record is
    * at another version than the one asked for — re-read the queue first.
    */
@@ -2364,6 +2620,25 @@ export interface QueueResponse {
    * and what `discard` takes. Absent from older leaders, and when there are none.
    */
   readonly unreadable?: readonly UnreadableTaskRef[];
+  /**
+   * Every `running` task the leader holds no slot for because its session has
+   * sat idle at its prompt past the grace (DESIGN.md, Scheduler, "Routing
+   * caps"), whatever `QueueRequest.tasks` asked for: the release is the
+   * leader's memory, on no record, so only this says it. Absent from older
+   * leaders, and when there are none.
+   */
+  readonly idle?: readonly IdleTaskRef[];
+  /**
+   * The leader's `globalMax`: the in-flight cap the header's "8/8 running" divides by. Not a
+   * ceiling on `running` — a task placed past the caps (`run-now`) overprovisions it. Absent from older leaders.
+   */
+  readonly globalMax?: number;
+}
+
+/** A task released for sitting idle at its prompt, and since when it has (leader's clock, ms). */
+export interface IdleTaskRef {
+  readonly taskId: string;
+  readonly since: number;
 }
 
 /** A `task:` record the leader holds as unreadable: its id, the relay's version, and why. */
@@ -2393,12 +2668,12 @@ export interface DiscardResponse {
   readonly taskId: string;
 }
 
-/** `op: "cancel"` and `op: "mark-done"`: the task, by id. */
+/** `op: "cancel"`, `op: "mark-done"` and `op: "run-now"`: the task, by id. */
 export interface TaskRef {
   readonly taskId: string;
 }
 
-/** `cancel` and `mark-done` → the task as it now stands. */
+/** `cancel`, `mark-done` and `run-now` → the task as it now stands. */
 export interface TaskResponse {
   readonly task: Task;
 }
@@ -2437,7 +2712,16 @@ export interface QueueChanged {
   readonly tasks?: readonly string[];
 }
 
-/** `op: "route-preview"` (a `TaskRequest`) → what routing would decide now, reserving nothing. */
+/**
+ * `op: "route-preview"`'s request: a `TaskRequest`, and `attachments` when the task
+ * will carry some — a flag, never the manifest, so the preview applies
+ * `attachments_unsupported`. An older leader ignores it.
+ */
+export interface RoutePreviewRequest extends TaskRequest {
+  readonly attachments?: true;
+}
+
+/** `op: "route-preview"` (a `RoutePreviewRequest`) → what routing would decide now, reserving nothing. */
 export interface RoutePreviewResponse {
   readonly decision: Decision;
 }

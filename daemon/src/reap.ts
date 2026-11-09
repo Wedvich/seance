@@ -2,10 +2,11 @@ import { link, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { RepoEntry } from "@seance/shared";
+import { pruneAttachments, type AttachmentPruneReason, type PrunedAttachments } from "./attachments.ts";
 import type { ReapAudit } from "./audit.ts";
 import { mapLimit } from "./concurrency.ts";
 import { answerKeepWorktree } from "./despawn.ts";
-import { owesExit } from "./exit-status.ts";
+import { harvestable } from "./exit-status.ts";
 import type { FsmonitorDaemon, FsmonitorSeams } from "./fsmonitor.ts";
 import { hardenedGit } from "./git-hardened.ts";
 import { canonical, inspectCheckout } from "./gitdir.ts";
@@ -26,6 +27,7 @@ import {
   readPruneLog,
   removeWorktree,
   resolveRemoteHead,
+  type BranchRecord,
   type BranchVerdict,
   type FetchOutcome,
   type Merged,
@@ -65,6 +67,12 @@ export interface ReapOptions {
   readonly audit: ReapAudit;
   /** The daemon's `harvestExits`: only the process owning the launch ledger can note a status, so the CLI passes none. */
   readonly harvest?: () => Promise<void>;
+  /**
+   * The daemon's `EndedTasks.closing`, awaited before reap closes a task pane: closed unnoted, the pane
+   * would read as `vanished` (`exit-status.ts`). Absent (the CLI's `seanced reap`), reap leaves every
+   * dead task pane alone, since only the daemon can note that it closed one.
+   */
+  readonly closing?: (taskId: string) => Promise<unknown>;
   readonly now?: number;
   /** Stops between repos — the daemon's stop() ends a scheduled run here. */
   readonly signal?: AbortSignal;
@@ -81,6 +89,13 @@ export interface ReapOptions {
    */
   readonly fsmonitor: FsmonitorSeams | null;
   readonly monitorIdleMs?: number;
+  /**
+   * Where fetched attachments live (`attachmentsRoot()`). Required for the same reason as
+   * `pruneLogPath`: a test that forgot it would prune the developer's own.
+   */
+  readonly attachments: string;
+  /** `ATTACHMENT_RETENTION_MS` unless a test shortens it. */
+  readonly attachmentRetentionMs?: number;
 }
 
 export interface RepoReport {
@@ -98,13 +113,41 @@ export interface RepoReport {
   readonly pruned: readonly string[];
   readonly dirty: readonly { readonly path: string; readonly changes: number }[];
   /** Upstream gone, commits on it nowhere upstream: unpushed work, kept. */
-  readonly keptBranches: readonly { readonly name: string; readonly ahead: number }[];
+  readonly keptBranches: readonly { readonly name: string; readonly ahead: number | null }[];
+  /** Linked worktrees on unpushed work — upstream gone, never pushed, or detached past the default branch. Kept. */
+  readonly keptWorktrees: readonly {
+    readonly path: string;
+    readonly branch: string | null;
+    readonly why: KeptWorktreeWhy;
+    readonly ahead: number | null;
+  }[];
   /** Worktrees whose pane is open in tmux — someone is in them. */
   readonly inUse: readonly string[];
   readonly locked: readonly string[];
   /** Merged and clean, but touched more recently than the age gate. */
   readonly young: number;
+  /** Unmerged worktrees on a branch whose upstream is still live: in-flight work, counted only. */
+  readonly active: number;
   readonly failed: readonly { readonly what: string; readonly detail: string }[];
+}
+
+export type KeptWorktreeWhy = "upstream-gone" | "never-pushed" | "detached";
+
+const KEPT_WORKTREE_TEXT: Readonly<Record<KeptWorktreeWhy, string>> = {
+  "upstream-gone": "upstream gone",
+  "never-pushed": "never pushed",
+  detached: "detached",
+};
+
+/** Why an unmerged worktree is listed, or null for one on a live upstream (counted `active`). */
+function keptWorktreeWhy(
+  branch: string | null,
+  verdict: BranchVerdict,
+  byName: ReadonlyMap<string, BranchRecord>,
+): KeptWorktreeWhy | null {
+  if (branch === null) return "detached";
+  if (verdict === "unmerged-gone") return "upstream-gone";
+  return byName.get(branch)?.hasUpstream === false ? "never-pushed" : null;
 }
 
 export interface PaneNote {
@@ -154,6 +197,8 @@ export interface ReapReport {
     readonly kept: KeptMonitors;
     readonly idleMs: number;
   };
+  /** Fetched attachments removed (or, dry, that would be). */
+  readonly attachments: readonly PrunedAttachments[];
 }
 
 export class ReapBusy extends Error {
@@ -233,6 +278,15 @@ export async function runReap(opts: ReapOptions): Promise<ReapReport> {
   const repos = [...reaped, ...refused];
   // After the repos, so a worktree this run removed whose daemon `stop` missed is swept too.
   const kept = monitors === null ? NO_KEPT_MONITORS : await sweepMonitors(monitors, opts, now);
+  // After the worktree pass too, so a worktree it removed reads gone.
+  const attachments = await pruneAttachments({
+    root: opts.attachments,
+    now,
+    dryRun: opts.dryRun,
+    audit: opts.audit,
+    panes: await listPanes(),
+    ...(opts.attachmentRetentionMs === undefined ? {} : { retentionMs: opts.attachmentRetentionMs }),
+  });
 
   if (!opts.dryRun) {
     const pruned = targets.filter((_, i) => reaped[i]?.fetch?.kind === "fetched");
@@ -246,6 +300,7 @@ export async function runReap(opts: ReapOptions): Promise<ReapReport> {
       branches: repos.reduce((sum, repo) => sum + repo.deletedBranches.length, 0),
       panes: panes.closedPanes.length,
       monitors: monitors?.stopped.length ?? 0,
+      attachments: attachments.length,
     });
   }
   return {
@@ -254,6 +309,7 @@ export async function runReap(opts: ReapOptions): Promise<ReapReport> {
     repos,
     ...panes,
     monitors: { stopped: monitors?.stopped ?? [], kept, idleMs: opts.monitorIdleMs ?? MONITOR_IDLE_MS },
+    attachments,
   };
 }
 
@@ -409,9 +465,18 @@ async function reapPanes(opts: ReapOptions, now: number): Promise<Pick<ReapRepor
     const state = await classifyPane(pane);
     if (state === "dead") {
       // No death time (an old tmux) can't be told from spawn's own pane: leave it. A task pane
-      // holding an exit status is the daemon's to note first (`harvestExits`), or the status is lost.
-      if (pane.deadAt === null || now - pane.deadAt < deadMinAge || owesExit(pane)) return { open: { ...note, state } };
+      // harvestable is the daemon's to note and close (`harvestExits`), or the status is lost. Any
+      // other task pane is closed only with `closing`, which says reap did it.
+      if (
+        pane.deadAt === null ||
+        now - pane.deadAt < deadMinAge ||
+        harvestable(pane) ||
+        (pane.taskId !== null && opts.closing === undefined)
+      ) {
+        return { open: { ...note, state } };
+      }
       if (!opts.dryRun) {
+        if (pane.taskId !== null) await opts.closing?.(pane.taskId);
         const killed = await tmux(["kill-pane", "-t", pane.paneId]);
         if (killed.exitCode !== 0) return { open: { ...note, state } };
         await opts.audit.closedPane(pane.paneId, pane.windowName, "dead");
@@ -457,6 +522,7 @@ type ListKey =
   | "pruned"
   | "dirty"
   | "keptBranches"
+  | "keptWorktrees"
   | "inUse"
   | "locked"
   | "failed";
@@ -475,6 +541,7 @@ function emptyLists(): RepoLists {
     pruned: [],
     dirty: [],
     keptBranches: [],
+    keptWorktrees: [],
     inUse: [],
     locked: [],
     failed: [],
@@ -482,7 +549,7 @@ function emptyLists(): RepoLists {
 }
 
 function emptyRepoReport(repo: string): RepoReport {
-  return { repo, ...emptyLists(), young: 0 };
+  return { repo, ...emptyLists(), young: 0, active: 0 };
 }
 
 interface Target {
@@ -564,6 +631,7 @@ async function reapRepo(
 
   const report = emptyLists();
   let young = 0;
+  let active = 0;
 
   const byName = new Map(branches.map((branch) => [branch.name, branch]));
   const verdicts = new Map<string, BranchVerdict>();
@@ -606,7 +674,20 @@ async function reapRepo(
     }
     // oxlint-disable-next-line no-await-in-loop
     const verdict = await verdictFor(worktree.head, worktree.branch);
-    if (!isMerged(verdict)) continue;
+    if (!isMerged(verdict)) {
+      // Checked-out branch is skipped by the branch pass, so this row is its only report; a detached tip is never
+      // patch-checked (verdict active), listed here because no branch holds its commits. A branch missing from
+      // `byName` claims nothing and stays counted.
+      const why = keptWorktreeWhy(worktree.branch, verdict, byName);
+      if (why === null) {
+        active += 1;
+        continue;
+      }
+      // oxlint-disable-next-line no-await-in-loop
+      const ahead = await commitsAhead(repo.path, worktree.head, base);
+      report.keptWorktrees.push({ path: worktree.path, branch: worktree.branch, why, ahead });
+      continue;
+    }
     // oxlint-disable-next-line no-await-in-loop
     const gitDir = await gitDirOf(worktree.path);
     if (gitDir === null) {
@@ -631,7 +712,6 @@ async function reapRepo(
       continue;
     }
     const idleDays = Math.floor((now - touched) / DAY_MS);
-    // oxlint-disable-next-line no-await-in-loop
     // oxlint-disable-next-line no-await-in-loop
     if (monitors !== null) await stopMonitor(monitors, worktree.path, real, opts);
     if (!opts.dryRun) {
@@ -661,7 +741,7 @@ async function reapRepo(
       what: "worktree list",
       detail: "git could not list worktrees again before deleting branches",
     });
-    return { repo: repo.name, ...(fetch === undefined ? {} : { fetch }), ...report, young };
+    return { repo: repo.name, ...(fetch === undefined ? {} : { fetch }), ...report, young, active };
   }
   const checkedOut = new Set(current.flatMap((worktree) => (worktree.branch === null ? [] : [worktree.branch])));
   for (const branch of branches) {
@@ -687,7 +767,7 @@ async function reapRepo(
     report.deletedBranches.push({ name: branch.name, sha: branch.sha, why: verdict });
   }
 
-  return { repo: repo.name, ...(fetch === undefined ? {} : { fetch }), ...report, young };
+  return { repo: repo.name, ...(fetch === undefined ? {} : { fetch }), ...report, young, active };
 }
 
 function tilde(path: string): string {
@@ -701,6 +781,12 @@ function row(label: string, rest: string): string {
 
 function megabytes(kb: number): string {
   return `${(kb / 1024).toFixed(1)} MB`;
+}
+
+function aheadText(ahead: number | null): string {
+  return ahead === null
+    ? "commits not on the default branch (count unavailable)"
+    : `${plural(ahead, "commit")} not on the default branch`;
 }
 
 function plural(count: number, noun: string, nouns = `${noun}s`): string {
@@ -735,9 +821,12 @@ export function formatReport(report: ReapReport): readonly string[] {
       rows.push(row("dirty worktree", `${tilde(dirty.path)}   ${plural(dirty.changes, "change")} — kept`));
     }
     for (const kept of repo.keptBranches) {
-      rows.push(
-        row("kept branch", `${kept.name}   upstream gone, ${plural(kept.ahead, "commit")} not on the default branch`),
-      );
+      rows.push(row("kept branch", `${kept.name}   upstream gone, ${aheadText(kept.ahead)}`));
+    }
+    for (const kept of repo.keptWorktrees) {
+      const text = KEPT_WORKTREE_TEXT[kept.why];
+      const why = kept.branch === null ? text : `${kept.branch}   ${text}`;
+      rows.push(row("kept worktree", `${tilde(kept.path)}   ${why}, ${aheadText(kept.ahead)}`));
     }
     for (const path of repo.inUse) rows.push(row("in use", `${tilde(path)}   a tmux pane is inside it`));
     for (const path of repo.locked) rows.push(row("locked worktree", tilde(path)));
@@ -774,6 +863,11 @@ export function formatReport(report: ReapReport): readonly string[] {
   if (keptTotal > 0) monitorRows.push(row("left running", `${plural(keptTotal, "daemon")}: ${keptParts.join(", ")}`));
   if (monitorRows.length > 0) lines.push("fsmonitor daemons", ...monitorRows);
 
+  const attachmentRows = report.attachments.map((entry) =>
+    row(removed, `${entry.task}   ${ATTACHMENT_LABELS[entry.reason]}`),
+  );
+  if (attachmentRows.length > 0) lines.push("attachments", ...attachmentRows);
+
   const sum = (pick: (repo: RepoReport) => number): number =>
     report.repos.reduce((total, repo) => total + pick(repo), 0);
   lines.push(
@@ -797,6 +891,11 @@ export function formatReport(report: ReapReport): readonly string[] {
             )})`,
           ]),
       `${sum((repo) => repo.dirty.length)} dirty`,
+      plural(
+        sum((repo) => repo.keptWorktrees.length),
+        "kept worktree",
+      ),
+      `${sum((repo) => repo.active)} active`,
       `${plural(report.openPanes.length, "session")} left open`,
       `${sum((repo) => repo.young)} younger than ${report.minAgeDays}d`,
     ].join(" · "),
@@ -809,6 +908,13 @@ const MONITOR_LABELS: Readonly<Record<MonitorReason, string>> = {
   gone: "its directory is gone",
   "no-repo": "no repo there any more",
   idle: "unused, no tmux pane inside",
+};
+
+const ATTACHMENT_LABELS: Readonly<Record<AttachmentPruneReason, string>> = {
+  "worktree-gone": "its worktree is gone",
+  aged: "past retention, no session using it",
+  staging: "an interrupted download",
+  "orphan-sidecar": "a note whose files are already gone",
 };
 
 const PANE_LABELS: Readonly<Record<PaneState, string>> = {
