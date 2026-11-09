@@ -8234,7 +8234,8 @@ latency budget — one hotkey to a running session.
   the PWA's path, no leader needed, no daemon involved, so no audit line until
   the leader's admit. It is not refused for asleep machines or a missing leader:
   the store holds the task, and a Scheduler line (and the success toast) says
-  when it waits. The prompt is held to `TASK_REQUEST_LIMITS.prompt` before the
+  when it waits — shown only then: the form never names the leader, which
+  this surface has no use for. The prompt is held to `TASK_REQUEST_LIMITS.prompt` before the
   send, naming a direct spawn as the way past it. A create whose answer was lost
   or that stored keeps its task (a refused retry does not drop it), and Queue
   again with an unchanged form re-sends the same id, so it reads `landedEarlier`

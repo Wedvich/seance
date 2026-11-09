@@ -50,7 +50,7 @@ import {
   isEffort,
   isModel,
 } from "./lib/options.ts";
-import { enqueue, leaderWait, schedulerLine, taskFor, type Unsettled } from "./lib/queue.ts";
+import { enqueue, leaderWait, taskFor, type Unsettled } from "./lib/queue.ts";
 import { connect, type RelayHandle } from "./lib/relay.ts";
 import { installNodeGlobals } from "./lib/runtime.ts";
 
@@ -243,6 +243,8 @@ export default function Command(): React.JSX.Element {
 
   const connected = relay?.status === "open";
   const auto = values.machineId === AUTO;
+  // Shown only when a queued task would wait: which machine leads is no concern here.
+  const queueWait = auto && relay !== null ? leaderWait(relay.scheduler) : null;
   const selected = machines.find((machine) => machine.deviceId === values.machineId) ?? null;
   // From the live registry only: the cached projection keeps no exclaves.
   const accounts = accountLine(relay?.machines ?? [], values.machineId, aliases);
@@ -454,9 +456,7 @@ export default function Command(): React.JSX.Element {
         ))}
       </Form.Dropdown>
       {accounts === null ? null : <Form.Description title="Accounts" text={accounts} />}
-      {auto && relay !== null ? (
-        <Form.Description title="Scheduler" text={schedulerLine(relay.scheduler, relay.machines)} />
-      ) : null}
+      {queueWait === null ? null : <Form.Description title="Scheduler" text={queueWait} />}
       <Form.Dropdown
         id="repo"
         title="Repository"

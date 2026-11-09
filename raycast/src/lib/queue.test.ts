@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { RequestFailure, type StoreRefusal, type Task, type TaskCreated, type TaskRequest } from "@seance/shared";
-import { enqueue, leaderWait, schedulerLine, taskFor } from "./queue.ts";
+import { enqueue, leaderWait, taskFor } from "./queue.ts";
 
 const request: TaskRequest = { repo: "github.com/me/seance", mode: "worktree", model: "opus", effort: "medium" };
 
@@ -75,17 +75,13 @@ describe("enqueue", () => {
   });
 });
 
-describe("scheduler lines", () => {
-  const machines = [{ deviceId: "d1", name: "tower" }] as const;
-
-  test("a verified leader is named, and no wait is said", () => {
-    const ready = { kind: "ready", deviceId: "d1", term: 3 } as const;
-    expect(leaderWait(ready)).toBeNull();
-    expect(schedulerLine(ready, machines)).toBe("Led by tower");
+describe("leader wait", () => {
+  test("a verified leader says nothing", () => {
+    expect(leaderWait({ kind: "ready", deviceId: "d1", term: 3 })).toBeNull();
   });
 
   test("no leader, or an unverified one, says the task waits rather than refusing it", () => {
     expect(leaderWait({ kind: "none" })).toContain("waits in the queue");
-    expect(schedulerLine({ kind: "unverified", deviceId: "d1", term: 3 }, machines)).toContain("waits until one shows");
+    expect(leaderWait({ kind: "unverified", deviceId: "d1", term: 3 })).toContain("waits until one shows");
   });
 });

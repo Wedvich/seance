@@ -3,7 +3,6 @@ import {
   RequestFailure,
   sentence,
   storeErrorText,
-  type Machine,
   type SchedulerAvailability,
   type StoreRefusal,
   type Task,
@@ -76,17 +75,10 @@ const WAITS = {
   unverified: "Leader unverified — the task waits until one shows it holds this key",
 } as const;
 
-/** Null: a verified leader will place it. */
+/**
+ * Null: a verified leader will place it, and the form says nothing — which
+ * machine leads is no concern on this surface, only whether the task would wait.
+ */
 export function leaderWait(scheduler: SchedulerAvailability): string | null {
   return scheduler.kind === "ready" ? null : WAITS[scheduler.kind];
-}
-
-/** Who will place the task, for the form's Scheduler line. */
-export function schedulerLine(
-  scheduler: SchedulerAvailability,
-  machines: readonly Pick<Machine, "deviceId" | "name">[],
-): string {
-  if (scheduler.kind !== "ready") return WAITS[scheduler.kind];
-  const leader = machines.find((machine) => machine.deviceId === scheduler.deviceId);
-  return `Led by ${leader?.name ?? "a machine not in the registry"}`;
 }
