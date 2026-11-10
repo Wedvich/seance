@@ -98,8 +98,14 @@ export interface PushPrepared {
   readonly manager: PushManagerLike;
   readonly existing: PushSubscriptionLike | null;
   readonly key: Uint8Array<ArrayBuffer>;
-  /** `existing` was made under `key`, so it can be reused. A subscription under another key can never be sent to with this one. */
+  /**
+   * `existing` was made under `key`, so it can be reused. A subscription under another key can never be sent to with this one.
+   * Firefox for Android reports no key at all (`applicationServerKey: null`); that one is taken as made under `key`,
+   * which holds while the leader never rotates its key (it makes one only for a record without one).
+   */
   readonly reusable: boolean;
+  /** The record holds `existing`'s endpoint, whatever its key: replacing it must free that slot. */
+  readonly recorded: boolean;
   /** The record already holds `existing`, under the current key: nothing is left to do. */
   readonly held: boolean;
   /** This browser's device label, if its user agent names one. */
@@ -177,8 +183,7 @@ function refusal(code: string): PushFailure {
     : failure(known.text, known.retryable);
 }
 
-function sameBytes(a: ArrayBuffer | null, b: Uint8Array): boolean {
-  if (a === null) return false;
+function sameBytes(a: ArrayBuffer, b: Uint8Array): boolean {
   const left = new Uint8Array(a);
   return left.length === b.length && left.every((byte, i) => byte === b[i]);
 }
@@ -201,11 +206,14 @@ async function prepare(client: PushClient, env: PushEnv): Promise<PushPrepared |
   if (settings === null) return failure(NO_SETTINGS, true);
   if ("ok" in settings) return failure(STORE_DECLINED, true);
   const key = fromBase64Url(settings.publicKey);
-  const reusable = existing !== null && sameBytes(existing.options.applicationServerKey, key);
+  const ownKey = existing?.options.applicationServerKey ?? null;
+  // Unchecked, a null key read as another key: every load replaced the subscription and leaked the old slot.
+  const reusable = existing !== null && (ownKey === null || sameBytes(ownKey, key));
   const label = deviceLabel(env.userAgent());
-  const held = reusable && settings.subscribed;
+  const recorded = existing !== null && settings.subscribed;
+  const held = reusable && recorded;
   const labelMissing = held && label !== undefined && settings.devices.find((d) => d.self)?.label === undefined;
-  return { manager, existing, key, reusable, held, label, labelMissing, devices: settings.devices };
+  return { manager, existing, key, reusable, recorded, held, label, labelMissing, devices: settings.devices };
 }
 
 const BROWSERS: readonly (readonly [RegExp, string])[] = [
@@ -282,8 +290,13 @@ async function subscribeWith(client: PushClient, prepared: PushPrepared): Promis
     const sent = await sendSubscription(client, prepared.existing.toJSON(), prepared.label);
     return sent === "unusable" ? { kind: "enabled" } : sent;
   }
-  if (prepared.existing !== null && !prepared.reusable) await prepared.existing.unsubscribe();
+  const replaced = prepared.existing !== null && !prepared.reusable ? prepared.existing : null;
+  if (replaced !== null) await replaced.unsubscribe();
   const subscription = await prepared.manager.subscribe({ userVisibleOnly: true, applicationServerKey: prepared.key });
+  // The record's slot for the replaced endpoint is dead now; free it before the send, so a full record still takes
+  // the new one. After `subscribe`, so iOS's gesture window is spent by then. Its answer changes nothing here.
+  const oldEndpoint = replaced === null || !prepared.recorded ? null : pushEndpoint(replaced.endpoint);
+  if (oldEndpoint !== null) await askUnsubscribe(client, oldEndpoint, {}, undefined);
   const json = subscription.toJSON();
   const sent = await sendSubscription(client, json, prepared.label);
   if (sent !== "unusable") return sent;
