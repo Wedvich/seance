@@ -2485,7 +2485,8 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     Séance, because its re-sync re-subscribes it and cannot tell a removal from a 410 prune. The
     owner accepted this on 2026-11-09 over a leader-side list of removed endpoints: the lost or
     wiped device the feature exists for never re-sends, and Turn off on the device is what keeps
-    one off. The card says so under the list.
+    one off. The card no longer says so under the list (the owner dropped the line on
+    2026-11-10).
   - **Unsubscribing** (added 2026-10-25). The card's Turn off unsubscribes the browser first —
     that is what stops pushes to it, and it needs no leader — then sends `push-unsubscribe`
     with the endpoint, which frees the slot: the leader removes it with one serialised
@@ -6520,7 +6521,12 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   entries as devices — the private key and the Linear key never leave the method; an absent record, a store refusal and
   nothing answering are three different answers, so the card can say "no leader has set up push",
   "the relay's store declined" and "couldn't reach the relay" apart), drops a subscription made
-  under another key, subscribes, and sends `push-subscribe`. The key, the service worker and
+  under another key, subscribes, and sends `push-subscribe`; when the record held the dropped one,
+  it first sends `push-unsubscribe` for it, so a replaced subscription never keeps a slot. A
+  subscription whose browser reports no key (Firefox for Android answers
+  `applicationServerKey: null`) is taken as made under the current key — the leader makes one
+  only for a record without one — rather than replaced on every load, which leaked a slot each
+  time and hid Turn off. The key, the service worker and
   this browser's own subscription are read when the card mounts, so the click does only
   `requestPermission` then `subscribe`, with nothing slow between them (iOS honours a
   subscription only close behind its gesture). The card says "On" only for a subscription this

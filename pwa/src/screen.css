@@ -1525,10 +1525,17 @@
 .push-card {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
   gap: 8px;
   padding: 14px 16px;
   border-radius: 14px;
+}
+
+/* Title and action on one row, as the theme card lays out its control. */
+.push-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .push-line {
@@ -1537,12 +1544,16 @@
   color: var(--fg2);
 }
 
+/* The segmented control's track and face, so the card's one action reads like the theme card's. */
 .push-button {
-  padding: 8px 14px;
-  border-radius: 10px;
-  font-weight: 600;
+  flex: none;
+  padding: 9px 14px;
+  border: 0;
+  border-radius: 11px;
   background: var(--sur2);
   color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .push-button:disabled {
@@ -1579,12 +1590,20 @@
   color: var(--fg2);
 }
 
+/* Quiet, as the machine sheet's remove: the list is for reading, not for clearing. */
 .push-device-remove {
-  padding: 4px 10px;
-  border-radius: 10px;
-  font-weight: 600;
-  background: var(--sur2);
-  color: var(--fg);
+  margin-left: auto;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg2);
+  font-size: 13.5px;
+}
+
+.push-button:enabled:active,
+.push-device-remove:enabled:active {
+  background: color-mix(in oklab, var(--sur2) 88%, var(--fg));
 }
 
 .push-device-remove:disabled {

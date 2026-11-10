@@ -163,12 +163,13 @@ function initialPushView(): PushView {
   return browserPushEnv.permission() === "denied" ? { kind: "denied" } : { kind: "checking" };
 }
 
+/** Null where the button says it all. */
 const PUSH_LINES = {
   unsupported:
     "This browser can't do push. On iOS, add Séance to the Home Screen first (Share, then Add to Home Screen), then open it from there.",
   denied: "Notifications are blocked for Séance. Allow them in the browser's site settings, then come back.",
-  on: "On for this browser: you'll hear about spill, and about a task that has waited for input.",
-  off: "Get a notification when an account is about to spill or a task waits for your input.",
+  on: null,
+  off: null,
   checking: "Checking…",
   working: "Setting up…",
   stopping: "Turning off…",
@@ -314,21 +315,24 @@ function NotificationsCard(props: { push: PushClient }): JSX.Element {
   const busy = view.kind === "working" || view.kind === "stopping";
   const canEnable = view.kind === "off" || view.kind === "failed" || view.kind === "working";
   const canDisable = view.kind === "on" || view.kind === "stopping";
+  const line = view.kind === "failed" ? view.message : PUSH_LINES[view.kind];
   return (
     <div className="push-card card">
-      <span className="theme-title">Notifications</span>
-      <p className="push-line">{view.kind === "failed" ? view.message : PUSH_LINES[view.kind]}</p>
+      <div className="push-head">
+        <span className="theme-title">Notifications</span>
+        {canEnable && (
+          <button type="button" className="push-button" disabled={busy} onClick={view.kind === "off" ? enable : retry}>
+            {view.kind === "failed" ? "Try again" : "Enable"}
+          </button>
+        )}
+        {canDisable && (
+          <button type="button" className="push-button" disabled={busy} onClick={disable}>
+            Turn off
+          </button>
+        )}
+      </div>
+      {line !== null && <p className="push-line">{line}</p>}
       {note !== null && <p className="push-line">{note}</p>}
-      {canEnable && (
-        <button type="button" className="push-button" disabled={busy} onClick={view.kind === "off" ? enable : retry}>
-          {view.kind === "failed" ? "Try again" : "Enable notifications"}
-        </button>
-      )}
-      {canDisable && (
-        <button type="button" className="push-button" disabled={busy} onClick={disable}>
-          Turn off
-        </button>
-      )}
       {devices !== null && (
         <div className="push-devices">
           <span className="push-devices-title">
@@ -354,12 +358,6 @@ function NotificationsCard(props: { push: PushClient }): JSX.Element {
             </div>
           ))}
           {removeLine !== null && <p className="push-line">{removeLine}</p>}
-          {deviceRows(devices).some((row) => !row.self) && (
-            <p className="push-line">
-              Remove frees a device's slot until it opens Séance again. To keep a device you still use off, turn
-              notifications off on that device.
-            </p>
-          )}
         </div>
       )}
     </div>

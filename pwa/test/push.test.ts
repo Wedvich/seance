@@ -54,14 +54,15 @@ interface Calls {
 
 function subscription(
   endpoint: string,
-  key: string,
+  /** Null: the browser reports no key, as Firefox for Android does. */
+  key: string | null,
   calls: Calls,
   local: boolean | Error = true,
   onGone: () => void = () => {},
 ): PushSubscriptionLike {
   return {
     endpoint,
-    options: { applicationServerKey: fromBase64Url(key).buffer },
+    options: { applicationServerKey: key === null ? null : fromBase64Url(key).buffer },
     // A browser's own JSON carries `expirationTime`, which the leader's parser would refuse.
     toJSON: () => ({ endpoint, keys: KEYS, expirationTime: null }),
     unsubscribe: () => {
@@ -76,7 +77,7 @@ function subscription(
 function harness(opts: {
   permission?: PushPermission;
   requested?: PushPermission | Error;
-  existing?: { endpoint: string; key: string };
+  existing?: { endpoint: string; key: string | null };
   made?: string;
   settings?: PushSettingsReading | StoreRefusal | null | Error;
   reply?: PushSubscribeReply | null | Error;
@@ -283,6 +284,38 @@ describe("enablePush", () => {
     expect(calls.unsubscribed).toEqual(["https://fcm.googleapis.com/fcm/send/old"]);
     expect(calls.subscribed).toHaveLength(1);
     expect(calls.sent).toHaveLength(1);
+    // The record never held it, so there is no slot to free.
+    expect(calls.unsubscribeSent).toEqual([]);
+  });
+
+  test("replacing a subscription the record held frees its slot before sending the new one", async () => {
+    const old = "https://fcm.googleapis.com/fcm/send/old";
+    const { client, env, calls } = harness({
+      existing: { endpoint: old, key: OTHER_KEY },
+      settings: { publicKey: PUBLIC_KEY, subscribed: true, devices: [{ ...SELF, endpoint: old }] },
+    });
+    expect(await enablePush(client, env)).toEqual({ kind: "enabled" });
+    expect(calls.unsubscribeSent).toEqual([old]);
+    expect(calls.order.slice(calls.order.indexOf("subscribe"))).toEqual(["subscribe", "send-unsubscribe", "send"]);
+  });
+
+  test("a slot the leader would not free still lets the new subscription through", async () => {
+    const old = "https://fcm.googleapis.com/fcm/send/old";
+    const replies: readonly (PushUnsubscribeReply | null | Error)[] = [
+      null,
+      { ok: false, code: "invalid_request", message: "raw" },
+      new Error("gone"),
+    ];
+    for (const unsubscribeReply of replies) {
+      const { client, env, calls } = harness({
+        existing: { endpoint: old, key: OTHER_KEY },
+        settings: { publicKey: PUBLIC_KEY, subscribed: true, devices: [] },
+        unsubscribeReply,
+      });
+      // oxlint-disable-next-line no-await-in-loop -- one harness per case
+      expect(await enablePush(client, env)).toEqual({ kind: "enabled" });
+      expect(calls.sent).toHaveLength(1);
+    }
   });
 
   test("a subscription under the current key that the record holds needs nothing more", async () => {
@@ -355,6 +388,14 @@ describe("inspectPush", () => {
     }
   });
 
+  test("a browser that reports no key (Firefox for Android) is on when the record holds it", async () => {
+    const { client, env } = harness({
+      existing: { endpoint: ENDPOINT, key: null },
+      settings: { publicKey: PUBLIC_KEY, subscribed: true, devices: [SELF] },
+    });
+    expect(await inspectPush(client, env)).toEqual({ kind: "on", devices: [SELF] });
+  });
+
   test("a held subscription without the permission is not on either", async () => {
     const { client, env } = harness({
       permission: "default",
@@ -407,6 +448,27 @@ describe("resyncPush", () => {
     expect(await resyncPush(client, env)).toEqual({ kind: "enabled" });
     expect(calls.sent).toEqual([{ endpoint: ENDPOINT, keys: KEYS }]);
     expect(calls.order).not.toContain("permission");
+  });
+
+  test("never replaces a subscription whose browser reports no key: each load would leak a slot", async () => {
+    const held = harness({
+      existing: { endpoint: ENDPOINT, key: null },
+      settings: { publicKey: PUBLIC_KEY, subscribed: true, devices: [SELF] },
+    });
+    const lost = harness({
+      existing: { endpoint: ENDPOINT, key: null },
+      settings: { publicKey: PUBLIC_KEY, subscribed: false, devices: [] },
+    });
+    expect(await resyncPush(held.client, held.env)).toEqual({ kind: "enabled" });
+    expect(await resyncPush(lost.client, lost.env)).toEqual({ kind: "enabled" });
+    // The lost one goes through `subscribe`, which hands back the same subscription; nothing is ever dropped.
+    for (const { calls } of [held, lost]) {
+      expect(calls.unsubscribed).toEqual([]);
+      expect(calls.unsubscribeSent).toEqual([]);
+    }
+    expect(held.calls.subscribed).toEqual([]);
+    expect(held.calls.sent).toEqual([]);
+    expect(lost.calls.sent).toEqual([{ endpoint: ENDPOINT, keys: KEYS }]);
   });
 
   test("leaves a browser the person turned off alone, though permission is still granted", async () => {
