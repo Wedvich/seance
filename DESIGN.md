@@ -5339,8 +5339,11 @@ of this section built.
   name).
 - **Usage refresh** (`daemon/src/usage-refresh.ts`, added 2026-10-20 for scheduler M4): the
   daemon keeps each signed-in exclave's `cachedUsageUtilization` fresh by having Claude Code
-  rewrite it: `claude --safe-mode --output-format json -p /usage` with `HOME` and, for a named
-  exclave, `CLAUDE_CONFIG_DIR` set. The daemon holds no token, calls no endpoint and never
+  rewrite it: `claude --safe-mode --no-session-persistence --output-format json -p /usage` with
+  `HOME` and, for a named exclave, `CLAUDE_CONFIG_DIR` set. Persistence is off because a refresh is
+  not a conversation: with it on, each run left a transcript under `projects/<home slug>/`, about
+  135 a day per exclave, swamping `/resume` and every transcript tool (2026-11-11). The cache write
+  does not depend on it, and nothing reads the session. The daemon holds no token, calls no endpoint and never
   refreshes a login; Claude Code does all three under its own rules, and the `cache` collector
   reads the result as before. A run is a whole Claude Code process (~350 MiB, 5–8 s) even when
   Claude Code answers from its cache, so it runs only for a reading older than `staleAfter`

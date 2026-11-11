@@ -7,7 +7,7 @@ import { cachedStampReader } from "./telemetry-collectors.ts";
 
 /**
  * The `/usage` refresh (DESIGN.md, Daemon, "Usage refresh"; docs/scheduler.md
- * M4): `claude --safe-mode --output-format json -p /usage` with an exclave's
+ * M4): `claude` with `USAGE_ARGS` (`-p /usage`) and an exclave's
  * config dir makes Claude Code rewrite its own `cachedUsageUtilization`, which
  * the `cache` collector already reads. The daemon holds no token, calls no
  * endpoint and never refreshes a login — Claude Code does all three under its
@@ -48,8 +48,18 @@ const OUTPUT_CAP_BYTES = 64 * 1024;
  * Fixed argv: nothing here comes from a frame, a request or a file. `--safe-mode`
  * always — smaller and faster, and no user hook, plugin or mod runs, so the
  * session-events mod never reports from a process that is not a session.
+ * `--no-session-persistence` always: without it each run leaves a transcript
+ * under `projects/<home slug>/`, ~135 a day per exclave, swamping `/resume`
+ * and every transcript tool. The cache write does not depend on it (2.1.322).
  */
-export const USAGE_ARGS = ["--safe-mode", "--output-format", "json", "-p", "/usage"] as const;
+export const USAGE_ARGS = [
+  "--safe-mode",
+  "--no-session-persistence",
+  "--output-format",
+  "json",
+  "-p",
+  "/usage",
+] as const;
 
 export interface UsageRefreshOpts {
   /** Floored at `DEBOUNCE_MS` too: config refuses less, but callers pass ms directly. */
