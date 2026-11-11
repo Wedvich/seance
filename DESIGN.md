@@ -4654,7 +4654,7 @@ of this section built.
   the normal reason to run it, and `launchctl bootout` returns before launchd has
   finished the teardown — bootstrapping into that window fails with EIO (5) and
   leaves the agent _unloaded_, a worse state than before the command. So a pass is
-  bootout → poll until the job is gone (5s cap) → bootstrap, and a failed pass
+  bootout → poll until the job is gone (capped at the plist's `ExitTimeOut` plus 5 s) → bootstrap, and a failed pass
   gets exactly one retry. Rejected: reporting the error and letting the user
   re-run (observed behavior was a half-installed machine with no daemon at all).
 - **CLI**: `seanced` (run in foreground; launchd/systemd supervises), `init`
@@ -6411,14 +6411,23 @@ relay state unnecessary).
   the process still alive, with an error line. The grace outlives the updater's `stop()` on purpose: the
   gate is per process and a config reload swaps the daemon under it, so cancelling the timer there would
   leave every task launch refused for good; at a real shutdown the final drain below makes it a no-op. The foreground daemon's SIGTERM/SIGINT takes the same
-  drain, capped at `SHUTDOWN_DRAIN_MS` (15 s: under launchd's default `ExitTimeOut` of 20 s, which the
-  plist leaves unset, and systemd's 90 s `TimeoutStopSec` with `KillMode=process`) and run before
+  drain, capped at `SHUTDOWN_DRAIN_MS` (15 s: under the plist's `ExitTimeOut` of 30 s,
+  `LAUNCHD_EXIT_TIMEOUT_S`, and systemd's 90 s `TimeoutStopSec` with `KillMode=process`) and run before
   `daemon.stop()`, so a finishing spawn's reply still reaches its leader; a second signal exits at once.
   That drain is **final**: an update's release (a thrown restart, the grace) cannot reopen the gate
   during a shutdown. `stopPower` or `stop` throwing still exits (`shutdown.ts`). `seanced install` on macOS waits
-  `SHUTDOWN_DRAIN_MS` plus 10 s for `bootout` to unload the job (`launchd.ts`), so it never
+  the `ExitTimeOut` plus 5 s for `bootout` to unload the job (`launchd.ts`), so it never
   bootstraps over a job still draining; systemd's 30 s relaunch wait in `signalRestart` already
   covers 15 s plus `RestartSec=5`.
+  The plist sets `ExitTimeOut` because launchd's own default is not the 20 s older man pages
+  give: `launchd.plist(5)` now says "system-defined", and on macOS 26 `launchctl print` shows
+  `exit timeout = 5` for every agent that sets none, so an unset plist SIGKILLed the daemon a
+  third of the way into its drain, before `stop()` closed the relay socket (`bootout` honours
+  the value: it returns at once and the job stays loaded until exit or the timeout). 30 s is
+  the drain plus 15 s for `stop()` and exit. A system shutdown or logout may still cut it short.
+  Like any plist change it lands only on `seanced install` ("Service definitions lag the
+  code", docs/platform-notes.md); `doctor` warns on a plist without it.
+  Rejected: sizing the drain to launchd's 5 s, which is shorter than a launch's tail.
   Spawns with no `taskId` are not held. The pre-update process does the restart, so the wave that ships
   this is unprotected: protection starts with the next one. A launch cut off anyway (a `kill -9`, a
   power cut, a drain past its cap) is covered by the ledger's `interrupted` ("Session events").

@@ -32,6 +32,17 @@ export function plistBunPath(plist: string): string | null {
 }
 
 /**
+ * Seconds launchd waits between SIGTERM and SIGKILL. Unset, it is "system-defined": 5 s on
+ * macOS 26 (`launchctl print` shows `exit timeout = 5` for every agent that sets none), which
+ * kills the daemon mid-drain, before `stop()` closes the relay socket. The 15 s past the drain
+ * covers `stop()` and exit with room to spare. A system shutdown or logout may still cut
+ * it short.
+ */
+export const LAUNCHD_EXIT_TIMEOUT_S = (SHUTDOWN_DRAIN_MS + 15_000) / 1000;
+
+const EXIT_TIMEOUT_ENTRY = `<key>ExitTimeOut</key><integer>${LAUNCHD_EXIT_TIMEOUT_S}</integer>`;
+
+/**
  * Runs the daemon from the git checkout via PATH's bun (never the realpath'd
  * keg, which a runtime upgrade deletes) — update = `git pull` + `seanced
  * restart`. PATH is captured at install time because launchd agents otherwise
@@ -50,6 +61,7 @@ export function plistContent(bunPath: string, mainPath: string, pathEnv: string)
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  ${EXIT_TIMEOUT_ENTRY}
   <key>StandardOutPath</key><string>${xmlEscape(logPath())}</string>
   <key>StandardErrorPath</key><string>${xmlEscape(logPath())}</string>
   <key>EnvironmentVariables</key>
@@ -74,10 +86,10 @@ export function assertMacos(action: string): void {
 /**
  * `bootout` SIGTERMs the daemon, which then drains task launches for up to `SHUTDOWN_DRAIN_MS` before it
  * exits; the job is unloaded only after, so the wait must outlast that, or `install` bootstraps over a
- * job still going down and leaves the agent unloaded. The margin covers launchd's 20 s `ExitTimeOut`, past which
- * it SIGKILLs.
+ * job still going down and leaves the agent unloaded. Sized from the `ExitTimeOut`, launchd's SIGKILL
+ * ceiling, so it outlasts even a daemon that overruns its drain.
  */
-const UNLOAD_WAIT_MS = SHUTDOWN_DRAIN_MS + 10_000;
+const UNLOAD_WAIT_MS = LAUNCHD_EXIT_TIMEOUT_S * 1000 + 5_000;
 
 /**
  * `bootout` returns before launchd has finished tearing the job down, and
@@ -154,7 +166,20 @@ export function selfRestart(): Promise<void> {
   process.exit(0);
 }
 
-/** Doctor's macOS service section: the agent, plus whether the plist's bun still resolves. */
+/**
+ * A plist written before `ExitTimeOut` was set (or with another value) leaves launchd's 5 s default,
+ * which SIGKILLs mid-drain. Only `seanced install` rewrites the plist, so nothing else notices.
+ * Null when the plist matches. Exported for tests.
+ */
+export function exitTimeoutCheck(plist: string): Check | null {
+  if (plist.includes(EXIT_TIMEOUT_ENTRY)) return null;
+  return {
+    level: "warn",
+    message: `plist lacks ExitTimeOut ${LAUNCHD_EXIT_TIMEOUT_S} s, so launchd kills the daemon mid-shutdown — \`seanced install\` rewrites it`,
+  };
+}
+
+/** Doctor's macOS service section: the agent, whether the plist's bun still resolves, and its ExitTimeOut. */
 export async function doctorServiceChecks(): Promise<readonly Check[]> {
   const loaded: Check = (await serviceLoaded())
     ? { level: "ok", message: "launchd agent loaded" }
@@ -162,6 +187,7 @@ export async function doctorServiceChecks(): Promise<readonly Check[]> {
   const plist = await Bun.file(servicePath())
     .text()
     .catch(() => null);
-  const drift = plist === null ? null : await recordedBunCheck(plistBunPath(plist));
-  return drift === null ? [loaded] : [loaded, drift];
+  if (plist === null) return [loaded];
+  const drift = await recordedBunCheck(plistBunPath(plist));
+  return [loaded, drift, exitTimeoutCheck(plist)].filter((check) => check !== null);
 }
