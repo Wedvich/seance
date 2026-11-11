@@ -10,10 +10,10 @@ import {
 
 /**
  * A session's own `done` report (#21), as `seanced mcp`'s `report_task_done`
- * tool sends it: the same `session-event` frame the mod's CLI sends, so the
- * daemon binds it by the sender's pid and a session settles only its own task.
- * The MCP server is a child of the session's `claude`, itself in the pane, so
- * the parent walk lands on that pane.
+ * tool sends it, and its hand-off (`hand_off_task`): the same `session-event`
+ * frame the mod's CLI sends, so the daemon binds it by the sender's pid and a
+ * session settles or closes only its own task. The MCP server is a child of the
+ * session's `claude`, itself in the pane, so the parent walk lands on that pane.
  *
  * Imports nothing that logs: this runs inside `seanced mcp`, whose stdout is the
  * JSON-RPC channel. That is why the reply codes live in `session-event-frame.ts`.
@@ -34,16 +34,42 @@ export interface ReportDoneOpts {
   readonly pane?: string;
 }
 
-const REFUSED = {
-  invalid: "this machine's daemon predates done reports; run `seanced update`",
+type Refusals = Record<(typeof SESSION_EVENT_REPLY_CODES)[number], string>;
+
+const COMMON = {
   unbound: "this session is not in a tmux pane this machine's daemon can see",
   unsupported: "this machine's daemon runs no session-event ingest",
+} as const;
+
+const REPORT_REFUSED = {
+  ...COMMON,
+  invalid: "this machine's daemon predates done reports; run `seanced update`",
   untasked: "this session runs no scheduler task, so there is nothing to report",
   unrecorded: "this machine's daemon holds no launch of this session's task, so nothing was reported",
   unwritten:
     "sent to the scheduler, but this machine's daemon could not save the report to disk, so a daemon restart could lose it",
   stopping: "this machine's daemon is stopping, so nothing was reported",
-} as const satisfies Record<(typeof SESSION_EVENT_REPLY_CODES)[number], string>;
+  // Only a hand-off is answered this; listed so every code has words.
+  prless: "this machine's daemon noted no pull request for this session's task",
+} as const satisfies Refusals;
+
+/** Every refusal leaves the PR with the session, and says so. */
+const KEEP_WATCHING = "; keep watching the PR yourself";
+
+const HANDOFF_REFUSED = {
+  unbound: COMMON.unbound + KEEP_WATCHING,
+  unsupported: COMMON.unsupported + KEEP_WATCHING,
+  invalid: "this machine's daemon predates hand-offs (run `seanced update`)" + KEEP_WATCHING,
+  untasked: "this session runs no scheduler task, so nothing would watch the PR" + KEEP_WATCHING,
+  unrecorded:
+    "this machine's daemon holds no launch of this session's task, so nothing would watch the PR" + KEEP_WATCHING,
+  // Never answered to a hand-off, which writes nothing; listed so every code has words.
+  unwritten: "this machine's daemon could not save the hand-off" + KEEP_WATCHING,
+  stopping: "this machine's daemon is stopping, so the hand-off was not taken" + KEEP_WATCHING,
+  prless:
+    "this machine's daemon noted no pull request for this session's task (it sees one only from `gh pr create` in this session), so its end would not wait for a merge" +
+    KEEP_WATCHING,
+} as const satisfies Refusals;
 
 function parseReply(raw: unknown): SessionEventReply | null {
   if (!isRecord(raw)) return null;
@@ -52,12 +78,17 @@ function parseReply(raw: unknown): SessionEventReply | null {
   return raw["ok"] === false && code !== undefined ? { ok: false, code } : null;
 }
 
-export async function reportDone(opts: ReportDoneOpts = {}): Promise<ReportDoneResult> {
+async function send(
+  fields: { readonly state: "done" } | { readonly handoff: true },
+  opts: ReportDoneOpts,
+  refused: Refusals,
+  sent: string,
+): Promise<ReportDoneResult> {
   const pane = opts.pane ?? process.env["TMUX_PANE"];
   const frame = {
     v: SESSION_EVENT_VERSION,
     kind: SESSION_EVENT_KIND,
-    state: "done",
+    ...fields,
     ...(pane === undefined || pane === "" ? {} : { pane }),
   };
   let raw: unknown;
@@ -65,7 +96,7 @@ export async function reportDone(opts: ReportDoneOpts = {}): Promise<ReportDoneR
     raw = await exchange(frame, {
       path: opts.path ?? socketPath(),
       timeoutMs: REPORT_TIMEOUT_MS,
-      timeoutText: "the daemon did not answer the report in time",
+      timeoutText: "the daemon did not answer in time",
     });
   } catch (err) {
     if (err instanceof LocalUnavailable) return { ok: false, text: "the local daemon is not running" };
@@ -73,6 +104,24 @@ export async function reportDone(opts: ReportDoneOpts = {}): Promise<ReportDoneR
   }
   const reply = parseReply(raw);
   if (reply === null) return { ok: false, text: "the daemon's answer was not a session-event reply" };
-  if (reply.ok) return { ok: true, text: "sent — settles the task if it was queued to settle on its report" };
-  return { ok: false, text: REFUSED[reply.code] };
+  if (reply.ok) return { ok: true, text: sent };
+  return { ok: false, text: refused[reply.code] };
+}
+
+export function reportDone(opts: ReportDoneOpts = {}): Promise<ReportDoneResult> {
+  return send(
+    { state: "done" },
+    opts,
+    REPORT_REFUSED,
+    "sent — settles the task if it was queued to settle on its report",
+  );
+}
+
+export function handOff(opts: ReportDoneOpts = {}): Promise<ReportDoneResult> {
+  return send(
+    { handoff: true },
+    opts,
+    HANDOFF_REFUSED,
+    "handed off — this session closes once this turn ends; the scheduler now watches the PR (awaiting merge), and its worktree is kept. End the turn now with your final summary.",
+  );
 }

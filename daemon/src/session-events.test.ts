@@ -833,3 +833,161 @@ describe("a session's done report (#21)", () => {
     }
   });
 });
+
+describe("a session's hand-off", () => {
+  const PR = "https://github.com/a/b/pull/1";
+
+  test("parses alone: a hand-off carries no state, and only `true` is one", () => {
+    expect(parseSessionEventFrame(frame({ handoff: true, pane: "%1", prUrl: PR }))).toEqual({
+      v: 1,
+      kind: "session-event",
+      handoff: true,
+      pane: "%1",
+    });
+    expect(parseSessionEventFrame(frame({ handoff: true, state: "idle" }))).toBeNull();
+    expect(parseSessionEventFrame(frame({ handoff: false }))).toBeNull();
+    expect(parseSessionEventFrame(frame({ handoff: true, pane: 7 }))).toBeNull();
+  });
+
+  test("a turn's end rides only on idle, and only as `true`", () => {
+    expect(parseSessionEventFrame(frame({ state: "idle", turnEnded: true }))).toEqual({
+      v: 1,
+      kind: "session-event",
+      state: "idle",
+      turnEnded: true,
+    });
+    expect(parseSessionEventFrame(frame({ state: "busy", turnEnded: true }))).toBeNull();
+    expect(parseSessionEventFrame(frame({ state: "idle", turnEnded: false }))).toBeNull();
+    expect(parseSessionEventFrame(frame({ handoff: true, turnEnded: true }))).toEqual({
+      v: 1,
+      kind: "session-event",
+      handoff: true,
+    });
+  });
+
+  function setup(opts: { readonly handOff?: boolean; readonly prWaitMs?: number } = {}) {
+    const ledger = LaunchLedger.memory();
+    const ended = new EndedTasks(ledger);
+    const panes: BoundPane[] = [
+      { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" },
+      { id: "%2", pid: 20, dead: false, taskId: null, path: "/home" },
+    ];
+    const forwarded: SessionEvent[] = [];
+    const closed: [string, string][] = [];
+    const events = createSessionEvents({
+      panes: () => Promise.resolve(panes),
+      exclaves: () => [],
+      forward: (event) => void forwarded.push(event),
+      ended,
+      coalesceMs: 0,
+      hostNamesPeers: () => false,
+      handoffPrWaitMs: opts.prWaitMs ?? 0,
+      ...(opts.handOff === false
+        ? {}
+        : {
+            handOff: (pane: string, taskId: string): Promise<void> => {
+              closed.push([pane, taskId]);
+              return Promise.resolve();
+            },
+          }),
+    });
+    const send = (pane: string, fields: object): Promise<unknown> => events.handle(frame({ pane, ...fields }), null);
+    return { ledger, ended, panes, forwarded, closed, events, send };
+  }
+
+  test("is refused, with nothing sent, from a task-less pane, an unrecorded task, or one with no PR noted", async () => {
+    const { ledger, ended, forwarded, events, send } = setup();
+    try {
+      expect(await send("%2", { handoff: true })).toEqual({ ok: false, code: "untasked" });
+      expect(await send("%1", { handoff: true })).toEqual({ ok: false, code: "unrecorded" });
+      await ledger.record("t1");
+      expect(await send("%1", { handoff: true })).toEqual({ ok: false, code: "prless" });
+      await ended.notePr("t1", PR);
+      expect(await send("%1", { handoff: true })).toEqual({ ok: true });
+      expect(forwarded).toEqual([]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("waits for a PR URL still on its way from the mod, and no longer than its limit", async () => {
+    const { ledger, ended, events, send } = setup({ prWaitMs: 2_000 });
+    try {
+      await ledger.record("t1");
+      const answer = send("%1", { handoff: true });
+      setTimeout(() => void ended.notePr("t1", PR), 150);
+      expect(await answer).toEqual({ ok: true });
+    } finally {
+      events.stop();
+    }
+    const late = setup({ prWaitMs: 200 });
+    try {
+      await late.ledger.record("t1");
+      const started = Date.now();
+      expect(await late.send("%1", { handoff: true })).toEqual({ ok: false, code: "prless" });
+      expect(Date.now() - started).toBeGreaterThanOrEqual(200);
+    } finally {
+      late.events.stop();
+    }
+  });
+
+  test("closes the pane at its turn's end, once, after that idle is forwarded", async () => {
+    const { ledger, ended, forwarded, closed, events, send } = setup();
+    try {
+      await ledger.record("t1");
+      await ended.notePr("t1", PR);
+      await send("%1", { handoff: true });
+      await send("%1", { state: "busy" });
+      await send("%1", { state: "needs-input" });
+      // A hooks-worker respawn mid-turn reads idle too: the final message is not written yet.
+      await send("%1", { state: "idle" });
+      expect(closed).toEqual([]);
+      await send("%1", { state: "idle", turnEnded: true });
+      expect(closed).toEqual([["%1", "t1"]]);
+      expect(forwarded.map((e) => e.state)).toEqual(["busy", "needs-input", "idle", "idle"]);
+      await send("%1", { state: "busy" });
+      await send("%1", { state: "idle", turnEnded: true });
+      expect(closed).toEqual([["%1", "t1"]]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("an end before the turn's, or the pane reused by another task, drops it", async () => {
+    const { ledger, ended, panes, closed, events, send } = setup();
+    try {
+      await ledger.record("t1");
+      await ended.notePr("t1", PR);
+      await send("%1", { handoff: true });
+      await send("%1", { state: "ended" });
+      await send("%1", { state: "idle", turnEnded: true });
+      expect(closed).toEqual([]);
+
+      await send("%1", { handoff: true });
+      panes[0] = { id: "%1", pid: 11, dead: false, taskId: "t2", path: "/home" };
+      await ledger.record("t2");
+      await send("%1", { state: "idle", turnEnded: true });
+      panes[0] = { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" };
+      await send("%1", { state: "idle", turnEnded: true });
+      expect(closed).toEqual([]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("a daemon with no hand-off act answers unsupported; a stopped ingest answers stopping", async () => {
+    const bare = setup({ handOff: false });
+    try {
+      await bare.ledger.record("t1");
+      await bare.ended.notePr("t1", PR);
+      expect(await bare.send("%1", { handoff: true })).toEqual({ ok: false, code: "unsupported" });
+    } finally {
+      bare.events.stop();
+    }
+    const { ledger, ended, events, send } = setup();
+    await ledger.record("t1");
+    await ended.notePr("t1", PR);
+    events.stop();
+    expect(await send("%1", { handoff: true })).toEqual({ ok: false, code: "stopping" });
+  });
+});

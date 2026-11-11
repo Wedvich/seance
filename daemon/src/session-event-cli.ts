@@ -30,6 +30,8 @@ export async function cmdSessionEvent(): Promise<void> {
     if (!isRecord(input)) return;
     // A done report is `report_task_done`'s alone: the mod's input is whatever its hook was fed, and a report settles a task.
     if (input["state"] === "done") return;
+    // So is a hand-off, `hand_off_task`'s: it closes the session.
+    if (input["handoff"] !== undefined) return;
     const pane = process.env["TMUX_PANE"];
     const remoteSession = process.env["CLAUDE_CODE_BRIDGE_SESSION_ID"];
     const frame = {

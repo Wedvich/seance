@@ -80,7 +80,7 @@ import {
 } from "./fleet.ts";
 import { recordedBunCheck, resolvedMain } from "./link.ts";
 import { localRequest, localSocketReachable, LocalUnavailable } from "./local-client.ts";
-import { reportDone } from "./report-done.ts";
+import { handOff, reportDone } from "./report-done.ts";
 import { readState } from "./state.ts";
 
 /**
@@ -187,6 +187,8 @@ interface ToolResult {
   readonly content: { readonly type: "text"; readonly text: string }[];
   readonly isError?: boolean;
 }
+
+const HAND_OFF_TOOL = "hand_off_task";
 
 const textResult = (text: string): ToolResult => ({ content: [{ type: "text", text }] });
 const errorResult = (text: string): ToolResult => ({ content: [{ type: "text", text }], isError: true });
@@ -763,6 +765,7 @@ export function buildMcpServer(
   local: LocalMachine | null = null,
   audit: AuditSink = cliSink,
   report: typeof reportDone = reportDone,
+  handOffTask: typeof handOff = handOff,
 ): McpServer {
   // 0.0.0 mirrors the package: the daemon versions by git sha, not semver.
   const server = new McpServer({ name: "seance", version: "0.0.0" });
@@ -1296,6 +1299,20 @@ export function buildMcpServer(
     },
     async () => {
       const result = await report();
+      return result.ok ? textResult(result.text) : errorResult(result.text);
+    },
+  );
+
+  server.registerTool(
+    HAND_OFF_TOOL,
+    {
+      title: "Hand this session's PR to the scheduler and close the session",
+      description:
+        "Close this session once the current turn ends, leaving its open pull request to the scheduler: the task then waits for the merge (awaiting merge) instead of this session watching CI. Call it only after the PR is open and whatever merges it is in place (auto-merge armed behind a required check, or a reviewer requested), as the last tool call of the run, then end the turn with your final summary. Refused, with the reason, outside a scheduler task or when this machine's daemon saw no `gh pr create` from this session; keep watching the PR yourself then. Not for a task told to call `report_task_done` when finished: report it instead, since after a hand-off no session is left to report and the task waits until it expires. The worktree is kept, so the task can be continued later.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    },
+    async () => {
+      const result = await handOffTask();
       return result.ok ? textResult(result.text) : errorResult(result.text);
     },
   );

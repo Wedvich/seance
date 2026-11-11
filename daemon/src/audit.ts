@@ -26,9 +26,10 @@ import { logPath } from "./paths.ts";
  * touching the relay — in practice a Claude session holding the MCP server, so
  * the `client` tag beside it is the rest of the answer. `leader` is this
  * daemon's own scheduler loop dispatching to this machine, which it reaches in
- * process rather than through the relay (`leader.ts`).
+ * process rather than through the relay (`leader.ts`). `handoff` is a session
+ * closing itself through `hand_off_task` (`handoff.ts`): despawn only.
  */
-export type SpawnOrigin = "relay" | "cli" | "local" | "leader";
+export type SpawnOrigin = "relay" | "cli" | "local" | "leader" | "handoff";
 
 export type AuditSink = (line: string) => void | Promise<void>;
 

@@ -769,7 +769,9 @@ nothing checked it. The last is the gap they leave.
   timer: a 3am cleanup must not read as someone at the desk. `harvest` is the daemon
   closing a dead task pane once its exit status is noted (Daemon, "Exit status"), on the
   same `closed-pane` line as reap's; it covers both triggers, a `sessions` read and the reap
-  timer, and the line does not say which. `leader` is the
+  timer, and the line does not say which. `handoff` is the daemon closing a session that handed
+  its PR to the scheduler (`hand_off_task`, Local op socket, "Session events"), on the despawn
+  lines: it is the session's own ask, never a peer's (`local`) or a person's (`cli`). `leader` is the
   daemon's scheduler loop dispatching to its own machine in process (_Scheduler_,
   "The leader") — distinct from `local`, which says a peer on the op socket asked,
   and from the `client=scheduler` other machines log under `relay`; the leader's
@@ -874,7 +876,10 @@ nothing checked it. The last is the gap they leave.
   socket. A new kind, or a new act for this one, is a threat-model change like the
   broker's. The second act, built (#21, "Session events"): a `done` report finishing the sender's own
   task, noted in the launch ledger and forwarded, and settled only by a leader and only
-  for an `until: "reported"` task.
+  for an `until: "reported"` task. The third (2026-11-11, "Session events", `handoff`): a hand-off
+  closing the sender's own pane at its turn's end (an `idle` with `turnEnded`), only for a task this machine's ledger holds a
+  launch and a PR URL of, through the graceful despawn, audited `origin=handoff`; no frame field
+  names the pane, the task or anything run.
 - **A PR status is read by the leader's own `gh`, never carried by a frame** (2026-10-23, Scheduler,
   "PR status"). `Scheduler.onPrStatus` is reachable from the leader's poller alone, never
   from `onEvent` or a request handler, and nothing on the wire carries a reading. It is bound
@@ -7601,8 +7606,9 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
   fleet broker below is the one deliberate exception, served only by a daemon
   whose key is service-delivered, and says so. The `session-event` kind below
   grants no op: it is ingest, and what it ingests is bound to the
-  sender's own pane. Its one act beyond ingest, a `done` report for the sender's own
-  task, writes a ledger note and forwards it ("Session events").
+  sender's own pane. Its acts beyond ingest are a `done` report for the sender's own
+  task, which writes a ledger note and forwards it, and a hand-off, which closes the
+  sender's own pane once it goes idle ("Session events").
 - **Connection per request; no correlation, no heartbeat, no backoff.** One
   `Plain` per line, one reply, close. This is deliberately not the relay
   protocol: there is no reordering to correlate against and no network to
@@ -7890,7 +7896,7 @@ local daemon, and the daemon forwards task sessions' states to the leader. This 
 a third frame kind on the op socket, and a widening of what the socket takes in.
 
 - **Its own frame kind, never a `Plain` or an `OpName`.** `{v, kind: "session-event",
-  state?, prUrl?, remoteSession?, pane?}`, routed on `kind` before the `Plain` check, as
+  state?, prUrl?, remoteSession?, pane?, turnEnded?}`, or `{v, kind, handoff: true, pane?}` alone (below), routed on `kind` before the `Plain` check, as
   broker frames are. A frame with `rateLimits` and no state, from a mod that predates
   2026-10-20 (below), is still taken as activity; its numbers go unread. It has no `op`, `id` or `ts`, so it cannot arrive from the relay
   and no op rides in as one. A daemon that predates it drops it as malformed. The mod
@@ -7917,7 +7923,9 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   Now: `session.start` is idle (not raised for `/clear` or a compaction, but also raised
   on an enable, a hooks-worker respawn or a reload, so a restart mid-turn reads idle until
   the next turn event; gating on a first start would take a `$.state` contract for a
-  report the next turn event corrects); the main loop's `turn.start` and `turn.complete`
+  report the next turn event corrects, and why only `turn.complete` marks an idle with
+  `turnEnded: true`, mod 0.3.0, the one thing a hand-off's close waits for, below); the main
+  loop's `turn.start` and `turn.complete`
   (`agentId` unset — a subagent's turns say nothing about whether the main loop is at
   its prompt) clear and set `atPrompt`. A `tool.check` whose verdict beneath the mod is
   `ask` with `approver: "person"` on a real call (a `$.tool.check` query has no
@@ -7965,8 +7973,8 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   leader). Its one other effect is a poke at the `/usage` refresh for the bound
   pane's exclave (Daemon, "Usage refresh"), which spawns only when that exclave's
   cached reading is stale, with a fixed argv and an env built from the scan — no
-  frame field reaches either. It never despawns or runs a command shaped by
-  a frame. Its own only subprocesses are fixed-argv reads: `tmux list-panes`, and on
+  frame field reaches either. It never runs a command shaped by a frame, and its one
+  despawn is a hand-off's (below): the bound pane's own, never one a frame names. Its own only subprocesses are fixed-argv reads: `tmux list-panes`, and on
   macOS, where the parent walk below cannot read a hop itself, `ps -Ao pid=,ppid=`.
   No frame field reaches any argv. The one indirect run is the `/usage` refresh above:
   poked, staleness-gated, fixed argv, built env. The one other act is the `done` report below:
@@ -7999,6 +8007,35 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   claim would turn a report into a despawn. A session stopped on a permission prompt, or in plan
   mode, cannot call the tool, so **Mark done** is the fallback; Linear Done (M4) is the other
   settle.
+- **`handoff`** (2026-11-11, threat-model change accepted by the owner). A session that has opened
+  its PR and put in place what merges it (auto-merge armed behind a required check, or a reviewer
+  asked) hands the PR to the scheduler and closes, rather than staying alive to watch CI. Measured
+  across one fleet over 30 days, sessions kept alive only to watch and merge made thousands of
+  sleep and poll calls, and their idle tails ran to hours. A task only reaches `awaiting-merge`
+  once its session ends, and until this nothing let a session end itself. `hand_off_task` (MCP) sends
+  `{handoff: true}` and nothing else: no state, so no path reads it as one, and `seanced
+  session-event` drops it unsent, as it does a `done`. For the bound pane's own task, the daemon
+  answers `untasked` for a pane with none, `unrecorded` for a task its ledger holds no launch of,
+  `prless` for one whose launch noted no PR URL (its end would settle `done` or `failed`, never
+  `awaiting-merge`), `stopping` once ingest stopped, and `unsupported` on a daemon wired without the
+  act (one whose session backend cannot despawn). Otherwise it marks the pane, in memory only, and answers `ok`. Nothing is forwarded: the
+  leader learns of the hand-off from the session's end, as it would from any exit. A PR URL still
+  on its way is waited for: the mod reports it from its own queue, which can hold one report in
+  flight for up to its 3 s timeout, so the daemon polls the ledger for up to
+  `HANDOFF_PR_WAIT_MS` (3 s, under the tool's 5 s wait for an answer) before answering `prless`. At
+  that pane's next idle carrying `turnEnded: true` (the end of the turn that called the tool, so its
+  last message is written; a plain idle, which a hooks-worker respawn mid-turn also sends, leaves the
+  mark standing), after the idle is queued to the leader (a coalesced one may give way to the `ended`, which carries the PR too), the daemon closes it through the graceful despawn (`/exit`, Keep on the
+  worktree prompt, the close noted first so harvest reads exit 0, never `vanished`), audited
+  `origin=handoff` (`daemon/src/handoff.ts`), after a re-read that the pane still carries the task
+  that handed off. An `ended` first, or the pane id reused for another task, drops the mark; so
+  does a daemon restart, which leaves the session running as it would have without the call. The
+  task then ends `awaiting-merge` (`ended`, Scheduler, "Done detection"), and its worktree and
+  branch stay, for a continuation and for reap's merged-only rules. Like `done`, it is bound by
+  the kernel's peer pid and needs `mcp__seance__hand_off_task` allowed in the exclave. A session
+  that lies about handing off can do no more than one that runs `/exit`. Watching the PR after
+  that, and alerting on a red required check or a conflict, is the leader's (docs/scheduler.md,
+  "PR hand-off").
 - **Every field is untrusted; the pane is the kernel's answer.** The 0700 run
   directory admits any process of this user, and every session is this user, so a
   frame could name any pane or task. The daemon asks the kernel who connected. Bun

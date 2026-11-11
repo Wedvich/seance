@@ -13,14 +13,16 @@ export const SESSION_EVENT_REPLY_CODES = [
   "unbound",
   /** This daemon runs no session-event ingest. */
   "unsupported",
-  /** A `done` report from a pane that carries no scheduler task: there is nothing to settle. */
+  /** A `done` report or hand-off from a pane that carries no scheduler task: there is nothing to settle. */
   "untasked",
-  /** A `done` report for a task this daemon holds no launch of: nothing recorded, nothing sent. */
+  /** A `done` report or hand-off for a task this daemon holds no launch of: nothing recorded, nothing sent. */
   "unrecorded",
   /** A `done` report sent but not saved: memory has it and the ledger write failed, so a restart could lose it. */
   "unwritten",
-  /** A `done` report refused because the daemon is stopping: nothing recorded, nothing sent. */
+  /** A `done` report or hand-off refused because the daemon is stopping: nothing recorded, nothing sent. */
   "stopping",
+  /** A hand-off from a task whose launch here noted no PR URL: there is no PR to hand over. */
+  "prless",
 ] as const;
 
 export type SessionEventReply =

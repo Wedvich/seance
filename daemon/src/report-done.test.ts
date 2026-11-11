@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { reportDone } from "./report-done.ts";
+import { handOff, reportDone } from "./report-done.ts";
 
 const dir = await mkdtemp(join(tmpdir(), "seance-report-"));
 afterAll(() => rm(dir, { recursive: true, force: true }));
@@ -73,5 +73,35 @@ describe("reportDone", () => {
       ok: false,
       text: "the local daemon is not running",
     });
+  });
+});
+
+describe("handOff", () => {
+  test("sends a stateless handoff frame carrying the pane, and tells the session to end its turn on ok", async () => {
+    const fake = daemon("handoff-ok.sock", JSON.stringify({ ok: true }));
+    try {
+      const result = await handOff({ path: fake.path, pane: "%7" });
+      expect(result.ok).toBe(true);
+      expect(result.text).toContain("End the turn now");
+      expect(fake.frames).toEqual([{ v: 1, kind: "session-event", handoff: true, pane: "%7" }]);
+    } finally {
+      fake.stop();
+    }
+  });
+
+  test("every refusal tells the session to keep watching the PR itself", async () => {
+    const codes = ["untasked", "unbound", "invalid", "unsupported", "unrecorded", "unwritten", "stopping", "prless"];
+    for (const code of codes) {
+      const fake = daemon(`handoff-${code}.sock`, JSON.stringify({ ok: false, code }));
+      try {
+        // oxlint-disable-next-line no-await-in-loop -- one daemon double per code
+        const result = await handOff({ path: fake.path, pane: "%1" });
+        expect(result.ok).toBe(false);
+        expect(result.text).toEndWith("keep watching the PR yourself");
+        expect(result.text.includes("seanced update")).toBe(code === "invalid");
+      } finally {
+        fake.stop();
+      }
+    }
   });
 });
