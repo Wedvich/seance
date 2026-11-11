@@ -14,7 +14,7 @@ import type { BoundPane } from "./session-events.ts";
  * continuation and for reap's merged-only rules.
  */
 export interface HandOffDeps {
-  readonly despawn: SessionBackend["despawn"];
+  readonly despawn: NonNullable<SessionBackend["despawn"]>;
   readonly panes: () => Promise<readonly BoundPane[]>;
   readonly closing: (taskId: string) => Promise<unknown>;
   readonly sink: AuditSink;
@@ -29,10 +29,6 @@ export function createHandOff(deps: HandOffDeps): (pane: string, taskId: string)
       const live = (await deps.panes()).find((p) => p.id === pane && !p.dead);
       if (live?.taskId !== taskId) {
         await audit.rejected("the pane no longer runs the task that handed off");
-        return;
-      }
-      if (deps.despawn === undefined) {
-        await audit.failed("internal_error");
         return;
       }
       await audit.ok(await deps.despawn(pane, { force: false, closing: deps.closing }));

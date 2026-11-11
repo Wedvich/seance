@@ -142,8 +142,24 @@ describe("reports", () => {
     expect(sent.map((s) => s.report)).toEqual([
       { state: "idle" },
       { state: "busy" },
-      { state: "idle" },
+      { state: "idle", turnEnded: true },
       { state: "ended" },
+    ]);
+  });
+
+  test("only the main loop's turn ending marks an idle: a respawn's start mid-turn does not", async ($, on) => {
+    const sent = record(on);
+    await $.turn.start({ ...turn, text: "hi" });
+    await settled(sent, 1);
+    // A hooks-worker respawn raises session.start while the turn runs on.
+    await $.session.start({ cwd: "/repo", surface: "terminal", isInteractive: true });
+    await settled(sent, 2);
+    await $.turn.complete(answered);
+    await settled(sent, 3);
+    expect(sent.map((s) => s.report)).toEqual([
+      { state: "busy" },
+      { state: "idle" },
+      { state: "idle", turnEnded: true },
     ]);
   });
 
@@ -302,7 +318,7 @@ describe("reports", () => {
     await call;
     // The turn already ended, so the dialog closing returns to idle, not busy.
     await settled(sent, 2);
-    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }, { state: "idle" }]);
+    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }, { state: "idle", turnEnded: true }]);
   });
 
   test("a call that rejects after an ask is forgotten, and its error passes up", async ($, on) => {
@@ -336,7 +352,7 @@ describe("reports", () => {
     dialog.release();
     await expect(call).rejects.toThrow();
     await settled(sent, 2);
-    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }, { state: "idle" }]);
+    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }, { state: "idle", turnEnded: true }]);
   });
 
   test("a person denying the call resumes", async ($, on) => {
@@ -394,7 +410,7 @@ describe("reports", () => {
     await settled(sent, 1);
     await $.turn.complete(answered);
     await settled(sent, 2);
-    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }, { state: "idle" }]);
+    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }, { state: "idle", turnEnded: true }]);
     stuck.release();
     await call;
   });
@@ -408,8 +424,8 @@ describe("reports", () => {
     await settled(sent, 3);
     expect(sent.map((s) => s.report)).toEqual([
       { state: "busy" },
-      { state: "idle" },
-      { state: "idle", prUrl: "https://github.com/acme/app/pull/12" },
+      { state: "idle", turnEnded: true },
+      { state: "idle", prUrl: "https://github.com/acme/app/pull/12", turnEnded: true },
     ]);
   });
 
@@ -463,7 +479,7 @@ describe("reports", () => {
     await settled(sent, 3);
     expect(sent.map((s) => s.report)).toEqual([
       { state: "busy" },
-      { state: "idle", prUrl: "https://github.com/acme/app/pull/12" },
+      { state: "idle", prUrl: "https://github.com/acme/app/pull/12", turnEnded: true },
     ]);
   });
 
@@ -536,6 +552,6 @@ describe("reports", () => {
     await $.turn.start({ ...turn, text: "hi" });
     await $.turn.complete(answered);
     await settled(sent, 2);
-    expect(sent.map((s) => s.report)).toEqual([{ state: "busy" }, { state: "idle" }]);
+    expect(sent.map((s) => s.report)).toEqual([{ state: "busy" }, { state: "idle", turnEnded: true }]);
   });
 });

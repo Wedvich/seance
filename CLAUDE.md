@@ -248,7 +248,7 @@ green:
   `hand_off_task` sends (`seanced session-event` drops one unsent), carries no state, and is taken
   only for the pane's own task when its launch ledger holds a launch and a PR URL of it (`untasked`,
   `unrecorded`, `prless` otherwise): the daemon marks the pane in memory and, at that pane's next
-  `idle`, closes it through the graceful despawn after re-reading that it still carries that task,
+  `idle` carrying `turnEnded` (its turn's end, never a respawn's idle), closes it through the graceful despawn after re-reading that it still carries that task,
   audited `origin=handoff` (`handoff.ts`), never a pane or task a frame names.
   The frame's one other carried claim is `remoteSession`, Remote Control's id for the session:
   display-only (the PWA's claude.ai link), kept only as `isRemoteSessionId` passes it, and

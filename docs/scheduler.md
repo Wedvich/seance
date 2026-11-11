@@ -923,6 +923,15 @@ of M4 has landed.
      the PR and its `after: "merged"` dependents, and the continuation ends `done` by `session`.
   5. **PWA**: Continue as the primary action on a blocked `awaiting-merge` card, and the chip names the
      reason.
+  - _Later:_ a hand-off whose close fails. The session was told `ok`, so it ended its turn and waits
+    at its prompt; the failure is audited (`origin=handoff`, the `DespawnFailure` code) but nothing
+    retries or tells anyone, and the task sits `running` until someone closes the window. Retry once
+    at the next end of turn, or surface it as a needs-input alert. Rare: the graceful despawn fails
+    only on a pane that will not take `/exit`.
+  - _Later:_ marks that never fire. A mark lives in memory until the pane's end of turn, `ended`,
+    or reuse by another task; a pane killed with no further event (tmux server gone, a window closed
+    by hand that the mod never reports) leaves its entry until the daemon restarts. Bounded by the
+    panes one daemon ever ran, a few bytes each, so not worth a sweep until something reads the map.
   - _Later:_ several PRs per task (`prUrls`, done once all merged, one alert per PR). Until then a
     task tracks only the last PR its session opened, so a multi-PR run keeps watching.
   - _Later:_ stacked PRs, once Stacking lands. A `reviewDecision` chip, with `CHANGES_REQUESTED` as a

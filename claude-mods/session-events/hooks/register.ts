@@ -44,6 +44,8 @@ type State = "busy" | "idle" | "needs-input" | "ended";
 interface Report {
   readonly state?: State;
   readonly prUrl?: string;
+  /** Only beside `idle`: the main loop's own turn.complete put it there, not a `session.start`. */
+  readonly turnEnded?: true;
 }
 
 /** Long enough for the daemon's parent walk, short enough to never pile up behind a wedged one. */
@@ -97,7 +99,13 @@ async function report($: EngineInterface, body: Report): Promise<void> {
 function merge(older: Report | null, newer: Report): Report {
   const state = newer.state ?? older?.state;
   const prUrl = newer.prUrl ?? older?.prUrl;
-  return { ...(state === undefined ? {} : { state }), ...(prUrl === undefined ? {} : { prUrl }) };
+  // Belongs to its state, so it goes wherever the state comes from.
+  const turnEnded = newer.state === undefined ? older?.turnEnded : newer.turnEnded;
+  return {
+    ...(state === undefined ? {} : { state }),
+    ...(prUrl === undefined ? {} : { prUrl }),
+    ...(turnEnded === true ? { turnEnded } : {}),
+  };
 }
 
 /**
@@ -116,7 +124,14 @@ interface Tracker {
   readonly outstanding: Map<string, string | undefined>;
   /** The main loop is at its prompt: its turn.complete came and no turn.start since. */
   atPrompt: boolean;
+  /**
+   * `atPrompt` came from the main loop's turn.complete. A `session.start` also sets `atPrompt`, on a
+   * hooks-worker respawn mid-turn too, so only this says the turn's last message is written: what a
+   * hand-off's close waits for (DESIGN.md, "Session events").
+   */
+  turnEnded: boolean;
   lastState: State | undefined;
+  lastTurnEnded: boolean;
   lastPrUrl: string | undefined;
   anonymous: number;
 }
@@ -127,7 +142,9 @@ function newTracker(): Tracker {
     pending: null,
     outstanding: new Map(),
     atPrompt: false,
+    turnEnded: false,
     lastState: undefined,
+    lastTurnEnded: false,
     lastPrUrl: undefined,
     anonymous: 0,
   };
@@ -177,9 +194,12 @@ function current(t: Tracker): State {
 /** Reports the current state; an unchanged one goes out only to carry a `prUrl`. */
 function sendCurrent($: EngineInterface, t: Tracker, prUrl?: string): void {
   const state = current(t);
-  if (state === t.lastState && prUrl === undefined) return;
+  // Part of the state: a respawn's idle followed by the turn's own end is a change.
+  const turnEnded = state === "idle" && t.turnEnded;
+  if (state === t.lastState && turnEnded === t.lastTurnEnded && prUrl === undefined) return;
   t.lastState = state;
-  send($, t, { state, ...(prUrl === undefined ? {} : { prUrl }) });
+  t.lastTurnEnded = turnEnded;
+  send($, t, { state, ...(prUrl === undefined ? {} : { prUrl }), ...(turnEnded ? { turnEnded } : {}) });
 }
 
 function dropMain(t: Tracker): void {
@@ -200,6 +220,7 @@ export const register: Register = (on) => {
   // too much machinery for a report the next turn event corrects.
   on("session.start", ($, e, next) => {
     t.atPrompt = true;
+    t.turnEnded = false;
     sendCurrent($, t);
     return next(e);
   }).catch(($, e, next) => next(e));
@@ -210,6 +231,7 @@ export const register: Register = (on) => {
       // background subagent's dialog may be open, which therefore stays.
       dropMain(t);
       t.atPrompt = false;
+      t.turnEnded = false;
       sendCurrent($, t);
     }
     return next(e);
@@ -218,6 +240,7 @@ export const register: Register = (on) => {
     if (e.agentId === undefined) {
       dropMain(t);
       t.atPrompt = true;
+      t.turnEnded = true;
       sendCurrent($, t);
     }
     return next(e);

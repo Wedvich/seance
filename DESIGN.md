@@ -877,7 +877,7 @@ nothing checked it. The last is the gap they leave.
   broker's. The second act, built (#21, "Session events"): a `done` report finishing the sender's own
   task, noted in the launch ledger and forwarded, and settled only by a leader and only
   for an `until: "reported"` task. The third (2026-11-11, "Session events", `handoff`): a hand-off
-  closing the sender's own pane at its next `idle`, only for a task this machine's ledger holds a
+  closing the sender's own pane at its turn's end (an `idle` with `turnEnded`), only for a task this machine's ledger holds a
   launch and a PR URL of, through the graceful despawn, audited `origin=handoff`; no frame field
   names the pane, the task or anything run.
 - **A PR status is read by the leader's own `gh`, never carried by a frame** (2026-10-23, Scheduler,
@@ -7896,7 +7896,7 @@ local daemon, and the daemon forwards task sessions' states to the leader. This 
 a third frame kind on the op socket, and a widening of what the socket takes in.
 
 - **Its own frame kind, never a `Plain` or an `OpName`.** `{v, kind: "session-event",
-  state?, prUrl?, remoteSession?, pane?}`, or `{v, kind, handoff: true, pane?}` alone (below), routed on `kind` before the `Plain` check, as
+  state?, prUrl?, remoteSession?, pane?, turnEnded?}`, or `{v, kind, handoff: true, pane?}` alone (below), routed on `kind` before the `Plain` check, as
   broker frames are. A frame with `rateLimits` and no state, from a mod that predates
   2026-10-20 (below), is still taken as activity; its numbers go unread. It has no `op`, `id` or `ts`, so it cannot arrive from the relay
   and no op rides in as one. A daemon that predates it drops it as malformed. The mod
@@ -7923,7 +7923,9 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   Now: `session.start` is idle (not raised for `/clear` or a compaction, but also raised
   on an enable, a hooks-worker respawn or a reload, so a restart mid-turn reads idle until
   the next turn event; gating on a first start would take a `$.state` contract for a
-  report the next turn event corrects); the main loop's `turn.start` and `turn.complete`
+  report the next turn event corrects, and why only `turn.complete` marks an idle with
+  `turnEnded: true`, mod 0.3.0, the one thing a hand-off's close waits for, below); the main
+  loop's `turn.start` and `turn.complete`
   (`agentId` unset — a subagent's turns say nothing about whether the main loop is at
   its prompt) clear and set `atPrompt`. A `tool.check` whose verdict beneath the mod is
   `ask` with `approver: "person"` on a real call (a `$.tool.check` query has no
@@ -8016,10 +8018,14 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   answers `untasked` for a pane with none, `unrecorded` for a task its ledger holds no launch of,
   `prless` for one whose launch noted no PR URL (its end would settle `done` or `failed`, never
   `awaiting-merge`), `stopping` once ingest stopped, and `unsupported` on a daemon wired without the
-  act. Otherwise it marks the pane, in memory only, and answers `ok`. Nothing is forwarded: the
-  leader learns of the hand-off from the session's end, as it would from any exit. At that pane's
-  next `idle` (the end of the turn that called the tool, so its last message is written), after the
-  idle is forwarded, the daemon closes it through the graceful despawn (`/exit`, Keep on the
+  act (one whose session backend cannot despawn). Otherwise it marks the pane, in memory only, and answers `ok`. Nothing is forwarded: the
+  leader learns of the hand-off from the session's end, as it would from any exit. A PR URL still
+  on its way is waited for: the mod reports it from its own queue, which can hold one report in
+  flight for up to its 3 s timeout, so the daemon polls the ledger for up to
+  `HANDOFF_PR_WAIT_MS` (3 s, under the tool's 5 s wait for an answer) before answering `prless`. At
+  that pane's next idle carrying `turnEnded: true` (the end of the turn that called the tool, so its
+  last message is written; a plain idle, which a hooks-worker respawn mid-turn also sends, leaves the
+  mark standing), after the idle is queued to the leader (a coalesced one may give way to the `ended`, which carries the PR too), the daemon closes it through the graceful despawn (`/exit`, Keep on the
   worktree prompt, the close noted first so harvest reads exit 0, never `vanished`), audited
   `origin=handoff` (`daemon/src/handoff.ts`), after a re-read that the pane still carries the task
   that handed off. An `ended` first, or the pane id reused for another task, drops the mark; so

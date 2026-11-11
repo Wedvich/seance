@@ -100,6 +100,7 @@ const sessionEvents: DaemonCapability = (ctx) => {
       log.warn(`local socket: peer binding failed its probe (${problem}) — every session event will be refused`);
     });
   }
+  const { despawn } = ctx.backend;
   const events = createSessionEvents({
     panes: listPanePids,
     exclaves: () => ctx.exclaveScan().exclaves,
@@ -114,12 +115,17 @@ const sessionEvents: DaemonCapability = (ctx) => {
       void ctx.client.sendToScheduler(event).catch((err: unknown) => log.warn(`session-event: ${String(err)}`));
     },
     ended: ctx.endedTasks,
-    handOff: createHandOff({
-      despawn: ctx.backend.despawn,
-      panes: listPanePids,
-      closing: (taskId) => ctx.endedTasks.closing(taskId),
-      sink: daemonSink,
-    }),
+    // Absent without a despawn: the session is then told `unsupported` up front, never `ok` for a close that cannot come.
+    ...(despawn === undefined
+      ? {}
+      : {
+          handOff: createHandOff({
+            despawn,
+            panes: listPanePids,
+            closing: (taskId) => ctx.endedTasks.closing(taskId),
+            sink: daemonSink,
+          }),
+        }),
     // Activity is when a reading matters; the refresh spawns only if it is stale.
     onActivity: (exclave) => ctx.usageRefresh?.poke(exclave),
   });

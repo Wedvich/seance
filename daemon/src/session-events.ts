@@ -61,8 +61,13 @@ export interface SessionEventFrame {
   readonly remoteSession?: string;
   /** `$TMUX_PANE` as the session saw it — consulted only on a host that can name no peer at all. */
   readonly pane?: string;
-  /** `hand_off_task`'s: close this session at its next `idle`, its PR left to the scheduler. Carries no state. */
+  /** `hand_off_task`'s: close this session at the end of its turn, its PR left to the scheduler. Carries no state. */
   readonly handoff?: true;
+  /**
+   * Only beside `idle`: the mod saw the main loop's turn complete, so its last message is written. A
+   * `session.start` (a hooks-worker respawn mid-turn too) reads idle without it. Only a hand-off reads it.
+   */
+  readonly turnEnded?: true;
 }
 
 /** Routed on `kind` ahead of the `Plain` check, as broker frames are. */
@@ -81,7 +86,7 @@ const MAX_FIELD = 64;
  */
 export function parseSessionEventFrame(raw: unknown): SessionEventFrame | null {
   if (!isRecord(raw) || raw["v"] !== SESSION_EVENT_VERSION || raw["kind"] !== SESSION_EVENT_KIND) return null;
-  const { state, prUrl, remoteSession, rateLimits, pane, handoff } = raw;
+  const { state, prUrl, remoteSession, rateLimits, pane, handoff, turnEnded } = raw;
   if (pane !== undefined && (typeof pane !== "string" || pane.length > MAX_FIELD)) return null;
   if (handoff !== undefined) {
     // Alone: a hand-off rides no state, so no ingest path can read one as the other.
@@ -96,6 +101,7 @@ export function parseSessionEventFrame(raw: unknown): SessionEventFrame | null {
   if (state !== undefined && !isSessionState(state)) return null;
   if (prUrl !== undefined && typeof prUrl !== "string") return null;
   if (remoteSession !== undefined && typeof remoteSession !== "string") return null;
+  if (turnEnded !== undefined && (turnEnded !== true || state !== "idle")) return null;
   if (state === undefined && rateLimits === undefined) return null;
   return {
     v: SESSION_EVENT_VERSION,
@@ -104,6 +110,7 @@ export function parseSessionEventFrame(raw: unknown): SessionEventFrame | null {
     ...(prUrl === undefined ? {} : { prUrl }),
     ...(remoteSession === undefined ? {} : { remoteSession }),
     ...(pane === undefined ? {} : { pane }),
+    ...(turnEnded === true ? { turnEnded } : {}),
   };
 }
 
@@ -657,6 +664,13 @@ export async function peerBindingProblem(): Promise<string | null> {
 /** At most one event per session per this window (docs/scheduler.md, "Daemon → scheduler"). */
 export const COALESCE_MS = 5_000;
 
+/**
+ * The mod's report of a PR can sit behind one in flight (its run times out at 3 s), so a hand-off made right
+ * after `gh pr create` waits this long for it. Under `hand_off_task`'s own 5 s wait for the answer.
+ */
+export const HANDOFF_PR_WAIT_MS = 3_000;
+const HANDOFF_PR_POLL_MS = 100;
+
 export interface SessionEventDeps {
   readonly panes: () => Promise<readonly BoundPane[]>;
   readonly exclaves: () => readonly Exclave[];
@@ -673,10 +687,12 @@ export interface SessionEventDeps {
   /** Whether this host can name a peer at all; `peerPidSupported` unless a test stands in for another host. */
   readonly hostNamesPeers?: () => boolean;
   /**
-   * Closes a pane whose session handed its task off, once that session goes idle. Absent, a hand-off is
+   * Closes a pane whose session handed its task off, once its turn ends. Absent, a hand-off is
    * answered `unsupported`. Not awaited by the ingest; it audits under its own origin (`handoff.ts`).
    */
   readonly handOff?: (pane: string, taskId: string) => Promise<void>;
+  /** How long a hand-off waits for a PR URL still on its way from the mod; `HANDOFF_PR_WAIT_MS` unless a test shortens it. */
+  readonly handoffPrWaitMs?: number;
 }
 
 export interface SessionEvents {
@@ -695,17 +711,29 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
   const now = deps.now ?? Date.now;
   const windowMs = deps.coalesceMs ?? COALESCE_MS;
   const outboxes = new Map<string, Outbox>();
-  /** Pane → the task it handed off. Bound like a `done` report; acted on at that pane's next `idle`. */
+  /** Pane → the task it handed off. Bound like a `done` report; acted on at that pane's next end of turn. */
   const handoffs = new Map<string, string>();
+  const prWaitMs = deps.handoffPrWaitMs ?? HANDOFF_PR_WAIT_MS;
   let stopped = false;
+  const isStopped = (): boolean => stopped;
 
-  const markHandoff = (pane: BoundPane): SessionEventReply => {
-    if (pane.taskId === null) return { ok: false, code: "untasked" };
+  const markHandoff = async (pane: BoundPane): Promise<SessionEventReply> => {
+    const taskId = pane.taskId;
+    if (taskId === null) return { ok: false, code: "untasked" };
     if (deps.handOff === undefined) return { ok: false, code: "unsupported" };
     if (stopped) return { ok: false, code: "stopping" };
-    const check = deps.ended.handoffCheck(pane.taskId);
+    let check = deps.ended.handoffCheck(taskId);
+    // The mod reports the PR from its own queue, so `gh pr create`'s URL may land just after the tool call.
+    const deadline = now() + prWaitMs;
+    while (check === "prless" && now() < deadline) {
+      // oxlint-disable-next-line no-await-in-loop -- polling the ledger for the report still in flight
+      await Bun.sleep(HANDOFF_PR_POLL_MS);
+      // `stop()` may run between polls.
+      if (isStopped()) return { ok: false, code: "stopping" };
+      check = deps.ended.handoffCheck(taskId);
+    }
     if (check !== "ok") return { ok: false, code: check };
-    handoffs.set(pane.id, pane.taskId);
+    handoffs.set(pane.id, taskId);
     return { ok: true };
   };
 
@@ -816,14 +844,15 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
           ...(remoteSession === null ? {} : { remoteSession }),
         });
       }
-      // After the enqueue, so the leader hears the idle before the end. Only the task the pane handed off: a
-      // pane id tmux reused for another task's window carries a different one.
+      // After the enqueue, so the idle is in the outbox before the close; a coalesced one may still give way to
+      // the `ended`, which carries the PR as well. Only the task the pane handed off: a pane id tmux reused for
+      // another task's window carries a different one. Only an idle the turn's own end raised: one from a
+      // hooks-worker respawn mid-turn would close the session before its final message.
       const handedOff = handoffs.get(pane.id);
-      if (handedOff !== undefined && (frame.state === "ended" || handedOff !== pane.taskId)) {
+      const turnEnd = frame.state === "idle" && frame.turnEnded === true;
+      if (handedOff !== undefined && (frame.state === "ended" || turnEnd || handedOff !== pane.taskId)) {
         handoffs.delete(pane.id);
-      } else if (handedOff !== undefined && frame.state === "idle" && deps.handOff !== undefined) {
-        handoffs.delete(pane.id);
-        void deps.handOff(pane.id, handedOff);
+        if (turnEnd && handedOff === pane.taskId) void deps.handOff?.(pane.id, handedOff);
       }
       // Forwarded either way: only the proof that survives a restart is missing.
       return reported === "unwritten" ? { ok: false, code: "unwritten" } : { ok: true };

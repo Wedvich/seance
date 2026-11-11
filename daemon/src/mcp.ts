@@ -188,7 +188,7 @@ interface ToolResult {
   readonly isError?: boolean;
 }
 
-export const HAND_OFF_TOOL = "hand_off_task";
+const HAND_OFF_TOOL = "hand_off_task";
 
 const textResult = (text: string): ToolResult => ({ content: [{ type: "text", text }] });
 const errorResult = (text: string): ToolResult => ({ content: [{ type: "text", text }], isError: true });
@@ -1308,7 +1308,7 @@ export function buildMcpServer(
     {
       title: "Hand this session's PR to the scheduler and close the session",
       description:
-        "Close this session once the current turn ends, leaving its open pull request to the scheduler: the task then waits for the merge (awaiting merge) instead of this session watching CI. Call it only after the PR is open and whatever merges it is in place (auto-merge armed behind a required check, or a reviewer requested), as the last tool call of the run, then end the turn with your final summary. Refused, with the reason, outside a scheduler task or when this machine's daemon saw no `gh pr create` from this session; keep watching the PR yourself then. The worktree is kept, so the task can be continued later.",
+        "Close this session once the current turn ends, leaving its open pull request to the scheduler: the task then waits for the merge (awaiting merge) instead of this session watching CI. Call it only after the PR is open and whatever merges it is in place (auto-merge armed behind a required check, or a reviewer requested), as the last tool call of the run, then end the turn with your final summary. Refused, with the reason, outside a scheduler task or when this machine's daemon saw no `gh pr create` from this session; keep watching the PR yourself then. Not for a task told to call `report_task_done` when finished: report it instead, since after a hand-off no session is left to report and the task waits until it expires. The worktree is kept, so the task can be continued later.",
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     },
     async () => {
