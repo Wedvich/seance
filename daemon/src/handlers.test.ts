@@ -112,6 +112,7 @@ describe("relay ops are audited", () => {
       { autonomy: 1 },
       { autonomy: "auto", plan: true },
       { autonomy: "checkpoint", plan: true },
+      { autonomy: "steer", plan: false },
     ]) {
       lines.length = 0;
       // oxlint-disable-next-line no-await-in-loop -- each case reads the lines the previous one cleared

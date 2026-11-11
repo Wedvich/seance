@@ -27,6 +27,7 @@ import {
   REPLY_JSON_BUDGET,
   SCHEDULER_CLIENT,
   SCHEDULER_ID,
+  withAutonomy,
 } from "@seance/shared";
 import {
   despawnAudit,
@@ -139,11 +140,12 @@ export function isSpawnRequest(payload: unknown): payload is SpawnRequest {
   for (const key of ["prompt", "title", "model", "effort", "client"]) {
     if (obj[key] !== undefined && typeof obj[key] !== "string") return false;
   }
-  if (obj["plan"] !== undefined && typeof obj["plan"] !== "boolean") return false;
+  const { plan, autonomy } = obj;
+  if (plan !== undefined && typeof plan !== "boolean") return false;
   // A closed set: the level reaches the window's environment, so only a literal of ours may.
-  if (obj["autonomy"] !== undefined && !isAutonomyLevel(obj["autonomy"])) return false;
-  // `plan: true` beside `checkpoint` or `auto` says two things at once; neither wins silently.
-  if (obj["plan"] === true && obj["autonomy"] !== undefined && obj["autonomy"] !== "steer") return false;
+  if (autonomy !== undefined && !isAutonomyLevel(autonomy)) return false;
+  // `plan` beside a level it contradicts says two things at once; neither wins silently.
+  if (withAutonomy({ autonomy, plan }) === null) return false;
   // Bounded, not just typed: it is written to the pane and echoed into every session list.
   if (obj["taskId"] !== undefined && !isTaskId(obj["taskId"])) return false;
   // Fail closed until stacking lands: a spawn that silently started from the default branch

@@ -1117,12 +1117,9 @@ export function buildMcpServer(
         // Retired, still parsed: zod drops unknown keys, which would turn a stale caller's order into a silent plain group.
         strategy: z.unknown().optional().describe("Retired: refused unless absent or auto"),
         max: z.unknown().optional().describe("Retired: refused"),
-        autonomy: z
-          .enum(AUTONOMY_LEVELS)
-          .optional()
-          .describe(
-            "The autonomy level of every task that gives neither its own autonomy nor plan, as spawn_session's autonomy",
-          ),
+        autonomy: AUTONOMY_FIELD.describe(
+          "The autonomy level of every task that gives no autonomy of its own and no plan it contradicts, as spawn_session's autonomy",
+        ),
         tasks: z
           .array(
             z.object({
@@ -1137,10 +1134,9 @@ export function buildMcpServer(
               model: z.string().optional(),
               effort: z.string().optional(),
               plan: z.boolean().optional().describe("Start in plan mode, as spawn_session's plan"),
-              autonomy: z
-                .enum(AUTONOMY_LEVELS)
-                .optional()
-                .describe("As spawn_session's autonomy; overrides the batch's autonomy for this task"),
+              autonomy: AUTONOMY_FIELD.describe(
+                "As spawn_session's autonomy; overrides the batch's autonomy for this task",
+              ),
               after: z
                 .array(
                   z.object({
@@ -1214,8 +1210,10 @@ export function buildMcpServer(
           repo: member.repo,
           ...requestFields({
             ...member,
-            // A member's own `plan` is its choice too: the batch's level never lands beside it as a contradiction.
-            autonomy: member.autonomy ?? (member.plan === undefined ? autonomy : undefined),
+            // A member's own `plan` is its choice too: the batch's level fills in only where it agrees with it,
+            // so a member's `plan: false` still takes the batch's `auto`, and never becomes a contradiction.
+            autonomy:
+              member.autonomy ?? (withAutonomy({ autonomy, plan: member.plan }) === null ? undefined : autonomy),
             prompt: reported.prompt,
           }),
           ...authoredFields(deps, member.until, member.linear),

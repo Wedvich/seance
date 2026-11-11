@@ -468,6 +468,7 @@ describe("parseTaskRequest", () => {
       // Two answers to one question: plan mode is `steer`, so neither may win silently.
       { ...minimal, autonomy: "auto", plan: true },
       { ...minimal, autonomy: "checkpoint", plan: true },
+      { ...minimal, autonomy: "steer", plan: false },
       { ...minimal, model: "" },
       { ...minimal, effort: null },
       null,

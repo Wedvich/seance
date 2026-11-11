@@ -1847,11 +1847,11 @@ describe("queue_batch", () => {
     expect(fake.requests).toEqual([]);
   });
 
-  test("the batch's autonomy fills only members that chose neither a level nor plan", async () => {
+  test("the batch's autonomy fills only members that chose no level and no plan it contradicts", async () => {
     const fake = leaderRelay([], reportingMachines());
     const { error } = await callTool(fake, "queue_batch", {
       autonomy: "auto",
-      tasks: [member(), member({ autonomy: "checkpoint" }), member({ plan: true })],
+      tasks: [member(), member({ autonomy: "checkpoint" }), member({ plan: true }), member({ plan: false })],
     });
     expect(error).toBe(false);
     expect(fake.creates.map((t) => [t.spec.autonomy, t.spec.plan])).toEqual([
@@ -1859,6 +1859,8 @@ describe("queue_batch", () => {
       ["checkpoint", undefined],
       // Its own plan is its choice: the batch's auto never lands beside it as a contradiction.
       [undefined, true],
+      // An agent filling every boolean with false still gets the batch's level.
+      ["auto", false],
     ]);
   });
 

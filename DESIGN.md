@@ -5114,11 +5114,12 @@ of this section built.
     applied by `parseRequestFields` and the MCP's request builder), so a leader or
     daemon older than the field still dispatches plan mode. One that drops `auto`
     runs the session at `checkpoint`, the safe direction, so the field needs no
-    sentinel. `plan: true` beside `checkpoint` or `auto` is refused, by the
-    parser, `isSpawnRequest` and the MCP's `specError`, never resolved.
+    sentinel. `plan: true` beside `checkpoint` or `auto`, and `plan: false` beside
+    `steer`, are refused, by the parser, `isSpawnRequest` and the MCP's `specError`,
+    never resolved.
   - **Where it is set.** Per task: `spawn_session`'s `autonomy`, `queue_batch`'s per
-    member, and the batch's own, which fills only members that give neither a level
-    nor `plan`. A continuation keeps its task's level (`continuationSpec`). The
+    member, and the batch's own, which fills only members that give no level and no
+    `plan` it contradicts (a member's `plan: false` still takes the batch's `auto`). A continuation keeps its task's level (`continuationSpec`). The
     audit line names it only when the request does. Not yet in the PWA, the CLI or
     Raycast; a fleet default in `settings:main` waits until per-task proves tedious.
 - **Task ids** (added 2026-10-16, scheduler M2). `SpawnRequest.taskId` is the

@@ -407,7 +407,9 @@ export function taskRequestError(request: TaskRequest, surface: EnqueueSurface =
     overBound("model", request.model, surface) ??
     overBound("effort", request.effort, surface) ??
     overBound("repo", request.repo, surface) ??
-    (withAutonomy(request) === null ? `plan: true contradicts autonomy: ${request.autonomy}; steer is plan mode` : null)
+    (withAutonomy(request) === null
+      ? `plan: ${request.plan} contradicts autonomy: ${request.autonomy}; steer is plan mode`
+      : null)
   );
 }
 

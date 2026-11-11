@@ -27,11 +27,13 @@ export function autonomyOf(request: Pick<SpawnRequest, "autonomy" | "plan">): Au
 
 /**
  * `plan` and `autonomy` as one consistent pair, or null for a contradiction (`plan: true` beside
- * a level other than `steer`). `steer` gains `plan: true`; anything else keeps what it had.
+ * a level other than `steer`, or `plan: false` beside `steer`). `steer` gains `plan: true`;
+ * anything else keeps what it had.
  */
 export function withAutonomy<T extends Pick<SpawnRequest, "autonomy" | "plan">>(request: T): T | null {
   const { autonomy, plan } = request;
   if (autonomy === undefined) return request;
-  if (autonomy === "steer") return plan === true ? request : { ...request, plan: true };
+  // `plan: false` beside `steer` too: resolved here, an older daemon handed the pair unnormalised would skip plan mode.
+  if (autonomy === "steer") return plan === undefined ? { ...request, plan: true } : plan ? request : null;
   return plan === true ? null : request;
 }
