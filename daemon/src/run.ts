@@ -41,7 +41,7 @@ import { RelayClient } from "./relay-client.ts";
 import { startCapabilities } from "./run-capabilities.ts";
 import { startStatusLoop } from "./run-collectors.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
-import { readSource } from "./selfsource.ts";
+import { checkoutRoot, readSource } from "./selfsource.ts";
 import { EndedTasks } from "./session-events.ts";
 import { LaunchLedger, launchLedgerPath } from "./launch-ledger.ts";
 import { VersionFloor, versionFloorPath } from "./version-floor.ts";
@@ -233,7 +233,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   // Read once per process: this is the code actually running, not whatever a
   // later `git pull` puts on disk. The previous run's sha decides the announce
   // below — captured before the stamp overwrites it.
-  const source = await readSource(opts.selfUpdate?.root);
+  const root = opts.selfUpdate?.root ?? checkoutRoot();
+  const source = await readSource(root);
   const previousSha = state.lastRunSha;
   if (source !== null && previousSha !== source.sha) {
     state = { ...state, lastRunSha: source.sha };
@@ -347,6 +348,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       connected,
       connectedSince: connected ? now() : null,
       sha: source?.sha ?? null,
+      root,
     }).catch((err: unknown) => log.warn(`could not write runtime.json: ${String(err)}`));
   };
 

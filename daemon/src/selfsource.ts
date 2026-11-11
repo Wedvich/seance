@@ -2,10 +2,12 @@
 // version identity gets its own reader instead of a RepoEntry.
 
 import { homedir } from "node:os";
+import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SourceInfo } from "@seance/shared";
 import { git } from "./exec.ts";
 import { tildify } from "./paths.ts";
+import type { Runtime } from "./state.ts";
 
 /** Checkout root — two levels above this file, same anchor as the service installers. */
 export function checkoutRoot(): string {
@@ -19,8 +21,23 @@ export function checkoutRoot(): string {
  */
 export function describeCheckout(source: SourceInfo, root: string = checkoutRoot(), home: string = homedir()): string {
   const branch = source.branch !== null ? ` on ${source.branch}` : " (detached)";
-  const trimmed = root.length > 1 ? root.replace(/[\\/]+$/u, "") : root;
-  return `${source.sha.slice(0, 12)}${branch} (${tildify(trimmed, home)})`;
+  return `${source.sha.slice(0, 12)}${branch} (${tildify(trimRoot(root), home)})`;
+}
+
+/** `checkoutRoot()` ends in a separator; display and comparison both want it without. */
+export function trimRoot(root: string): string {
+  return root.length > 1 ? root.replace(/\/+$/u, "") : root;
+}
+
+/**
+ * The checkout a live daemon runs from, as it recorded it in runtime.json.
+ * Null when no daemon is alive or it predates the field — callers then fall
+ * back to their own checkout, which is all they could say before.
+ */
+export function servingRoot(runtime: Runtime | null, alive: boolean): string | null {
+  if (runtime === null || !alive) return null;
+  const root: unknown = runtime.root;
+  return typeof root === "string" && isAbsolute(root) ? trimRoot(root) : null;
 }
 
 /**

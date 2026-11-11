@@ -91,5 +91,8 @@ export function expandTilde(p: string): string {
 
 /** Inverse of `expandTilde`, for display only. */
 export function tildify(path: string, home: string = homedir()): string {
-  return path === home || path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path;
+  // $HOME is taken verbatim, so `/home/m/` would otherwise match nothing.
+  const base = home.replace(/\/+$/u, "");
+  if (base === "") return path;
+  return path === base || path.startsWith(`${base}/`) ? `~${path.slice(base.length)}` : path;
 }

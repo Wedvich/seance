@@ -16,6 +16,7 @@ import {
 import { createBackend } from "../src/backend-default.ts";
 import type { Config } from "../src/config.ts";
 import { startDaemon } from "../src/run.ts";
+import { checkoutRoot } from "../src/selfsource.ts";
 import { readRuntime } from "../src/state.ts";
 import type { HostProbe } from "../src/telemetry.ts";
 import { makeGitFixture, pollUntil, usePrivateTmux, type GitFixture, type PrivateTmux } from "./fixtures.ts";
@@ -102,6 +103,8 @@ test("the injected probe and clock drive the register's scan stamp and the statu
 
     // runtime.json is written off the connect path, so it may land after the first frames.
     await pollUntil(async () => (await readRuntime())?.startedAt === NOW_MS, "runtime.json to carry the clock");
+    // …and the clone it runs from, which status and doctor read over their own.
+    expect((await readRuntime())?.root).toBe(checkoutRoot());
   } finally {
     daemon?.stop();
     relay.stop();

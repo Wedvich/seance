@@ -184,6 +184,11 @@ export interface Runtime {
   readonly connectedSince: number | null;
   /** Sha this process started on — not whatever a later `git pull` left on disk. */
   readonly sha?: string | null;
+  /**
+   * Checkout this process runs from. `status` and `doctor` read it because the
+   * CLI asking may be another clone; absent from a daemon older than the field.
+   */
+  readonly root?: string;
 }
 
 /**
