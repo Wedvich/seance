@@ -36,6 +36,10 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   M3 (the durable queue in the relay's store) are built and recorded in DESIGN.md; M4 records
   decisions ahead of code, and DESIGN.md takes over each part as it lands. Read it before
   scheduler work.
+- **docs/leaving.md** — spec, nothing built: the daemon's sealed `leaving` note (why it is going
+  away: update, restart, reboot, shutdown, sleep, unknown), how the relay keeps it, what clients
+  and the leader do with it, macOS sleep/DarkWake, and the shutdown drain on a dying box. Read it
+  before touching shutdown, presence or the systemd unit.
 
 Like DESIGN.md, the docs/ files are part of the record: a change that alters behavior they describe
 updates them in the same commit. They are not auto-discovered — this list is how sessions find them.
