@@ -140,7 +140,7 @@ What M1–M3 built is DESIGN.md's: _Daemon_ (exclaves, telemetry), Local op sock
 events"), and _Scheduler_ ("The leader", "The queue store", "Branch state"). M4 adds:
 
 - `daemon/src/usage-refresh.ts` (not `shared/src/quota.ts`, the fleet fold readers share): runs
-  `claude --safe-mode --output-format json -p /usage` for an exclave whose cached utilization is
+  `claude --safe-mode --no-session-persistence --output-format json -p /usage` for an exclave whose cached utilization is
   stale, so Claude Code refreshes its own cache and the existing `cache` collector reads the
   result. The daemon holds no token and calls no endpoint (M4 item "`/usage` refresh"). **Done**
   (DESIGN.md, _Daemon_, "Usage refresh").
@@ -686,11 +686,14 @@ of M4 has landed.
     knows it, so the PR is the handoff.
 - **`/usage` refresh** (decided 2026-10-20; replaces the OAuth quota poll, whose proposals #7 and
   #13 lapse with it; **Done** 2026-10-20 (PR #249), recorded in DESIGN.md, _Daemon_, "Usage refresh") — `daemon/src/usage-refresh.ts` runs
-  `claude --safe-mode --output-format json -p /usage` with the exclave's config dir, and Claude
+  `claude --safe-mode --no-session-persistence --output-format json -p /usage` with the exclave's config dir, and Claude
   Code refreshes `cachedUsageUtilization` in place. The daemon reads no token, calls no endpoint
   and never refreshes a login: Claude Code does all three under its own rules, so the
   rotating-refresh-token hazard that made the poll read-only is gone. Measured on 2.1.304:
-  - _Free._ `total_cost_usd: 0`, zero tokens, `num_turns: 0`, no transcript written.
+  - _Free._ `total_cost_usd: 0`, zero tokens, `num_turns: 0`. It does write a transcript, though (an earlier
+    note here said none): one per run under `projects/<home slug>/`, about 135 a day per exclave,
+    89–96% of every box's transcripts by 2026-11-11 and swamping `/resume` and every transcript
+    tool. Hence `--no-session-persistence` (2.1.322: the cache still moves, no file lands).
   - _Debounced by Claude Code._ `/usage` answers from the cache while `fetchedAtMs` is under 60s
     old and asks the endpoint only past that, so concurrent refreshes of one config dir reach the
     endpoint at most once a minute.
@@ -705,6 +708,8 @@ of M4 has landed.
     one of ours.
   - **`--safe-mode` always**: smaller, faster, and no user hook, plugin or mod runs — including
     session-events, which would otherwise report from a process that is not a session.
+  - **`--no-session-persistence` always**: a refresh is not a conversation, so it leaves no
+    transcript. The result is the cache file, never the session.
   - **One spawn at a time per daemon**, with a timeout and a kill: an LXC cannot carry ten
     400 MiB processes.
   - **Triggers**: a session event from the exclave (a session there has spent quota) and a
@@ -1085,7 +1090,8 @@ same PR, with the reason.
   unpadded, so the relay bounds prompt length — the same concession as live frames. At rest
   only while the task is unfinished (Settled defaults 16).
 - **`/usage` is Claude Code's behaviour, not a contract.** The 60s debounce, the cache shape,
-  the zero cost and the `--safe-mode` flag were read off 2.1.304 (2026-10-20); an update can move
+  the zero cost and the `--safe-mode` flag were read off 2.1.304 (2026-10-20), `--no-session-persistence`
+  leaving the cache write alone off 2.1.322 (2026-11-11); an update can move
   any of them. The cache file staying the result is what keeps a change visible: a refresh that
   stops moving `fetchedAtMs` logs, and the reading ages into the reset floor rather than lying.
   Its memory (~350 MiB a run) is the other cost, bounded by one spawn at a time and the

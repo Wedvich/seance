@@ -203,6 +203,8 @@ describe("the /usage refresh", () => {
     const user = userInfo().username;
     for (const run of first) {
       expect(run.argv).toEqual([...USAGE_ARGS]);
+      // Persisting would leave a transcript per run in the user's `projects/`.
+      expect(run.argv).toContain("--no-session-persistence");
       expect(run.cwd).toBe(await realpath(home)); // macOS: the stub reports /private/var for /var
     }
     const path = process.env["PATH"] ?? "";
