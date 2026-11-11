@@ -99,8 +99,9 @@ export function describeVerdict(
       headline: taskHeadline(task, machines, now),
       body: `${parts.join(" ")}${followText(verdict.follow)}`,
       detail: task.failure === undefined ? null : `${task.failure.code}\n${task.failure.message}`,
+      // The prompt was cleared when it queued, so "Start another" already lands on the form a back would.
       primary: { label: "Start another", onClick: "another" },
-      showBack: true,
+      showBack: false,
     };
   }
 
