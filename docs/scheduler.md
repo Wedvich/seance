@@ -895,6 +895,47 @@ of M4 has landed.
   Turn off on that device is what keeps it off. Follow-up, not built: the list on a browser whose
   card never reads the record (`unsupported`, `denied`).
 
+- **PR hand-off** — _Decided_ by the owner, 2026-11-11; step 1 built. A session that opened its PR
+  and armed what merges it hands the PR to the scheduler and exits, rather than staying alive to
+  watch CI and merge. A 30-day transcript sample across one fleet found that pattern in over half of
+  its sessions, at thousands of sleep and poll calls, with p90 lifetimes of 8 h and 20 h on two
+  machines. The scheduler already tracks the PR once the session ends (`awaiting-merge`, "PR status"
+  in DESIGN.md); what it lacks is noticing when the PR is stuck.
+  1. **A session can end itself** — **Done**: `hand_off_task`, DESIGN.md "Session events",
+     `handoff`. A workflow calls it last, only for one open PR that is not stacked, on a repo where a
+     required check gates auto-merge or a review is required.
+  2. **A wider PR read** (`daemon/src/pr-status.ts`). On the head commit: `oid`, each required check's
+     name and conclusion (`statusCheckRollup.contexts`, `isRequired(pullRequestNumber:)`, first 50,
+     only the failing names kept, at most 5 of 100 characters), plus `mergeStateStatus` and whether
+     auto-merge is armed. Today's rollup counts optional checks too, so it cannot be the trigger.
+  3. **A `pr-blocked` alert**, with reason `checks`, `conflict` (`DIRTY`) or `behind` (`BEHIND`, which
+     blocks only on a repo whose ruleset requires an up-to-date branch). Raised in `prChange` for an
+     `awaiting-merge` task with no continuation queued or running. Deduped on reason plus head oid,
+     persisted on the task as `spillAlert` is, so a fix that fails again alerts again. Pushed as a new
+     `PushAlert` kind with ids only, fixed wording in `push-sw.js`, and a click opening `/?task=<id>`. A
+     true one-tap Continue is out of reach: the service worker holds no PSK, and a URL that enqueues on
+     open would let any same-origin link start a session.
+  4. **Continue from `awaiting-merge`** while the PR is blocked. `continueOffer` allows it (DESIGN.md
+     "Not offered" changes: the ledger reason holds for `merge_expired`, not for a live
+     `awaiting-merge` inside its 7 days). The continuation's prompt is fixed text plus the PR URL, the
+     reason and the failing check names, never logs; the session reads those with `gh`. A new
+     `continuePreamble` wording covers a session that ended by handing off. The original task keeps
+     the PR and its `after: "merged"` dependents, and the continuation ends `done` by `session`.
+  5. **PWA**: Continue as the primary action on a blocked `awaiting-merge` card, and the chip names the
+     reason.
+  - _Later:_ several PRs per task (`prUrls`, done once all merged, one alert per PR). Until then a
+    task tracks only the last PR its session opened, so a multi-PR run keeps watching.
+  - _Later:_ stacked PRs, once Stacking lands. A `reviewDecision` chip, with `CHANGES_REQUESTED` as a
+    `pr-blocked` reason.
+  - _Deferred:_ the leader writing to GitHub (`gh pr update-branch`, re-running a flaky job). That is
+    its first write there, so a threat-model change. On a strict repo, prefer a ruleset change (drop
+    "require up to date", or a merge queue) to an alert on every `behind`.
+  - _Rejected for now:_ automatic continue on `pr-blocked`, which DESIGN.md "Continuing a session"
+    rejects in general. Revisit once the alerts show how often a tap does the obvious thing.
+  - _Measure:_ sleep and poll calls per session, p90 session lifetime, and merges without auto-merge,
+    against the 30-day baseline. Also `awaiting-merge` → merged time, `merge_expired` count,
+    `pr-blocked` by reason, Continue taps per alert, and continuations that end merged.
+
 ## Settled defaults (interview, 2026-10-15)
 
 Nothing below is open. An implementer who wants a different value changes this section in the

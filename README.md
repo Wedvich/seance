@@ -273,7 +273,11 @@ later and re-run it. A task that settles on its session's own done report
 (`until: "reported"`) needs it in the exclave the session runs in, since the session
 reports through this server's `report_task_done` tool, which must be allowed there
 (`mcp__seance__report_task_done` in that exclave's permissions): a call stopped at a
-permission prompt reports nothing, and the task then waits for **Mark done**.
+permission prompt reports nothing, and the task then waits for **Mark done**. The
+same goes for `hand_off_task` (`mcp__seance__hand_off_task`), which a session calls
+last, once its PR is open and set to merge: the session closes when that turn ends,
+and the task waits for the merge as **Awaiting merge** instead of the session
+watching CI.
 
 ### 7. Optional: spawn from Raycast (macOS)
 
@@ -486,7 +490,7 @@ versus the one on disk, which is how you spot a `git pull` that still needs a
 
 With `seanced mcp install` done (step 6), a local Claude Code can list machines,
 query running sessions, and spawn and end sessions on other machines through the relay:
-`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`, `start_task` (start a queued task now, past the concurrency cap — the app's Start now; `spawn_session`'s `start` does the same for a new one), `continue_task` (resume a failed or cancelled task's session in its worktree, as a new task), `queue_batch` (several tasks queued as one group, ordered only by the dependencies between them) and, for a session settling its own task, `report_task_done`. The server reads the daemon's own
+`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`, `start_task` (start a queued task now, past the concurrency cap — the app's Start now; `spawn_session`'s `start` does the same for a new one), `continue_task` (resume a failed or cancelled task's session in its worktree, as a new task), `queue_batch` (several tasks queued as one group, ordered only by the dependencies between them) and, for a session settling its own task, `report_task_done`, or handing its open PR to the scheduler and closing, `hand_off_task`. The server reads the daemon's own
 config and speaks to the relay exactly like the phone does.
 
 `spawn_session` always queues the task in the relay, as the app's **auto** does: it answers

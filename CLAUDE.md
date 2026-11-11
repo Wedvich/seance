@@ -131,7 +131,8 @@ green:
   requests the daemon forwards to other machines, or makes of the scheduler (enqueue, queue, cancel,
   run-now, account list), for a keyless `seanced mcp`, `seanced spawn` or `seanced start`, `schedule` for
   the daemon's reap timer, `harvest` for the daemon closing a dead task pane after noting its exit
-  status, `leader` for the scheduler loop dispatching to its own machine in
+  status, `handoff` for the daemon closing a session that handed its PR off (`hand_off_task`),
+  `leader` for the scheduler loop dispatching to its own machine in
   process and admitting a task, `mcp` for `seanced mcp`'s own `spawn_session`/`queue_batch`/`continue_task` enqueue lines, and `cli` for
   anything typed at this machine's shell, its `spawn` enqueue line included — a new
   surface adds an origin, never reuses one),
@@ -233,7 +234,7 @@ green:
   kind, `session-event` (`session-events.ts`, DESIGN.md "Session events"), is ingest-only and
   bound to the sender's pane by its kernel-reported peer pid, never by a field it sends — the
   frame's `pane` decides only on a host that names no peer at all (`peerPidSupported`), never for
-  one connection whose pid came back null. Its three acts past ingest are poking the bound
+  one connection whose pid came back null. Its four acts past ingest are poking the bound
   exclave's `/usage` refresh (`usage-refresh.ts`), which spawns only on a stale reading, with
   fixed argv and an env built from the scan — no frame field reaches either — and a `done`
   report, which only `report_task_done` sends (`seanced session-event` drops a `done` unsent):
@@ -243,7 +244,12 @@ green:
   only from the machine it was placed or reserved on — and clearing its own pane's task's
   `interrupted` mark in the launch ledger, only on an `ended` or `done` frame (proof the session ran;
   never when ingest is stopped), bound to the pane like the `done` report (including on a
-  host with no peer pid) and never to an id from the frame.
+  host with no peer pid) and never to an id from the frame — and a hand-off, which only
+  `hand_off_task` sends (`seanced session-event` drops one unsent), carries no state, and is taken
+  only for the pane's own task when its launch ledger holds a launch and a PR URL of it (`untasked`,
+  `unrecorded`, `prless` otherwise): the daemon marks the pane in memory and, at that pane's next
+  `idle`, closes it through the graceful despawn after re-reading that it still carries that task,
+  audited `origin=handoff` (`handoff.ts`), never a pane or task a frame names.
   The frame's one other carried claim is `remoteSession`, Remote Control's id for the session:
   display-only (the PWA's claude.ai link), kept only as `isRemoteSessionId` passes it, and
   never used to bind, route or move anything.

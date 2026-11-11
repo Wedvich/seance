@@ -7,6 +7,7 @@ import { brokerRelay, createBroker } from "./broker.ts";
 import { REAP_DEFAULTS, type Config, type ResolvedPsk } from "./config.ts";
 import type { ExclaveScan } from "./exclaves.ts";
 import { platformFsmonitor } from "./fsmonitor.ts";
+import { createHandOff } from "./handoff.ts";
 import { sourceOf, type Leader } from "./leader.ts";
 import type { LocalSocketOpts } from "./local-socket.ts";
 import { log } from "./log.ts";
@@ -113,6 +114,12 @@ const sessionEvents: DaemonCapability = (ctx) => {
       void ctx.client.sendToScheduler(event).catch((err: unknown) => log.warn(`session-event: ${String(err)}`));
     },
     ended: ctx.endedTasks,
+    handOff: createHandOff({
+      despawn: ctx.backend.despawn,
+      panes: listPanePids,
+      closing: (taskId) => ctx.endedTasks.closing(taskId),
+      sink: daemonSink,
+    }),
     // Activity is when a reading matters; the refresh spawns only if it is stale.
     onActivity: (exclave) => ctx.usageRefresh?.poke(exclave),
   });

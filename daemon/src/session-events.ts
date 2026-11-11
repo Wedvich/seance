@@ -28,7 +28,9 @@ import { FIELD_SEP, TASK_FIELD, tmux } from "./tmux.ts";
  * it runs in, through `seanced session-event`. Ingest-only — the handler stores
  * and forwards, and tells the bound pane's exclave it saw activity (the `/usage`
  * refresh's trigger, which decides alone whether anything runs); nothing here
- * spawns, despawns or runs a command shaped by the frame. Its own only
+ * spawns or runs a command shaped by the frame. The one despawn is a hand-off's
+ * (`hand_off_task`): the bound pane's own, at its next `idle`, never a pane the
+ * frame names. Its own only
  * subprocesses are fixed-argv reads: `tmux list-panes` and, on macOS where
  * `proc_pidinfo` will not answer a hop, `ps` for the parent walk. The one
  * indirect run is the `/usage` refresh the poke may start (staleness-gated,
@@ -59,6 +61,8 @@ export interface SessionEventFrame {
   readonly remoteSession?: string;
   /** `$TMUX_PANE` as the session saw it — consulted only on a host that can name no peer at all. */
   readonly pane?: string;
+  /** `hand_off_task`'s: close this session at its next `idle`, its PR left to the scheduler. Carries no state. */
+  readonly handoff?: true;
 }
 
 /** Routed on `kind` ahead of the `Plain` check, as broker frames are. */
@@ -77,11 +81,21 @@ const MAX_FIELD = 64;
  */
 export function parseSessionEventFrame(raw: unknown): SessionEventFrame | null {
   if (!isRecord(raw) || raw["v"] !== SESSION_EVENT_VERSION || raw["kind"] !== SESSION_EVENT_KIND) return null;
-  const { state, prUrl, remoteSession, rateLimits, pane } = raw;
+  const { state, prUrl, remoteSession, rateLimits, pane, handoff } = raw;
+  if (pane !== undefined && (typeof pane !== "string" || pane.length > MAX_FIELD)) return null;
+  if (handoff !== undefined) {
+    // Alone: a hand-off rides no state, so no ingest path can read one as the other.
+    if (handoff !== true || state !== undefined) return null;
+    return {
+      v: SESSION_EVENT_VERSION,
+      kind: SESSION_EVENT_KIND,
+      handoff: true,
+      ...(pane === undefined ? {} : { pane }),
+    };
+  }
   if (state !== undefined && !isSessionState(state)) return null;
   if (prUrl !== undefined && typeof prUrl !== "string") return null;
   if (remoteSession !== undefined && typeof remoteSession !== "string") return null;
-  if (pane !== undefined && (typeof pane !== "string" || pane.length > MAX_FIELD)) return null;
   if (state === undefined && rateLimits === undefined) return null;
   return {
     v: SESSION_EVENT_VERSION,
@@ -422,6 +436,16 @@ export class EndedTasks {
     return this.#ledger.apply(taskId, { reported: true });
   }
 
+  /**
+   * Whether a session of this task may hand its PR over: launched here, with a PR URL noted. Without
+   * one its end would settle `done` or `failed`, never `awaiting-merge`.
+   */
+  handoffCheck(taskId: string): "ok" | "unrecorded" | "prless" {
+    if (!this.#ledger.ids().includes(taskId)) return "unrecorded";
+    const prUrl = this.#launches.get(taskId)?.prUrl ?? this.#ledger.notes().find((n) => n.taskId === taskId)?.prUrl;
+    return prUrl === undefined ? "prless" : "ok";
+  }
+
   /** The newest `https:` PR URL a session reported, kept for `progress` across restarts. */
   async notePr(taskId: string, prUrl: string): Promise<void> {
     const launches = this.#launches.get(taskId);
@@ -648,6 +672,11 @@ export interface SessionEventDeps {
   readonly coalesceMs?: number;
   /** Whether this host can name a peer at all; `peerPidSupported` unless a test stands in for another host. */
   readonly hostNamesPeers?: () => boolean;
+  /**
+   * Closes a pane whose session handed its task off, once that session goes idle. Absent, a hand-off is
+   * answered `unsupported`. Not awaited by the ingest; it audits under its own origin (`handoff.ts`).
+   */
+  readonly handOff?: (pane: string, taskId: string) => Promise<void>;
 }
 
 export interface SessionEvents {
@@ -666,7 +695,19 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
   const now = deps.now ?? Date.now;
   const windowMs = deps.coalesceMs ?? COALESCE_MS;
   const outboxes = new Map<string, Outbox>();
+  /** Pane → the task it handed off. Bound like a `done` report; acted on at that pane's next `idle`. */
+  const handoffs = new Map<string, string>();
   let stopped = false;
+
+  const markHandoff = (pane: BoundPane): SessionEventReply => {
+    if (pane.taskId === null) return { ok: false, code: "untasked" };
+    if (deps.handOff === undefined) return { ok: false, code: "unsupported" };
+    if (stopped) return { ok: false, code: "stopping" };
+    const check = deps.ended.handoffCheck(pane.taskId);
+    if (check !== "ok") return { ok: false, code: check };
+    handoffs.set(pane.id, pane.taskId);
+    return { ok: true };
+  };
 
   const send = (box: Outbox, event: SessionEvent): void => {
     box.lastSentAt = now();
@@ -735,6 +776,7 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
       const at = now();
       const exclave = exclaveOf(pane.path, deps.exclaves());
       if (!stopped) deps.onActivity?.(exclave);
+      if (frame.handoff === true) return markHandoff(pane);
       if (frame.state === "done" && pane.taskId === null) return { ok: false, code: "untasked" };
       if (frame.state === undefined || pane.taskId === null) return { ok: true };
       // A stopped ingest sends nothing, so a report must not be told it went.
@@ -774,11 +816,21 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
           ...(remoteSession === null ? {} : { remoteSession }),
         });
       }
+      // After the enqueue, so the leader hears the idle before the end. Only the task the pane handed off: a
+      // pane id tmux reused for another task's window carries a different one.
+      const handedOff = handoffs.get(pane.id);
+      if (handedOff !== undefined && (frame.state === "ended" || handedOff !== pane.taskId)) {
+        handoffs.delete(pane.id);
+      } else if (handedOff !== undefined && frame.state === "idle" && deps.handOff !== undefined) {
+        handoffs.delete(pane.id);
+        void deps.handOff(pane.id, handedOff);
+      }
       // Forwarded either way: only the proof that survives a restart is missing.
       return reported === "unwritten" ? { ok: false, code: "unwritten" } : { ok: true };
     },
     stop: (): void => {
       stopped = true;
+      handoffs.clear();
       for (const box of outboxes.values()) if (box.timer !== null) clearTimeout(box.timer);
       outboxes.clear();
     },

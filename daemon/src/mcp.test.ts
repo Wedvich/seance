@@ -33,7 +33,7 @@ import { brokerFail, brokerOk } from "./broker-protocol.ts";
 import { resolveMachine, resolveOrigin, resolvePlacement, type PlacementInput } from "./auto.ts";
 import { brokerFleet, relayFleet, SCHEDULER_NEEDS_NEWER_DAEMON, selectFleet, type Fleet } from "./fleet.ts";
 import { LocalUnavailable } from "./local-client.ts";
-import type { reportDone } from "./report-done.ts";
+import type { handOff, reportDone } from "./report-done.ts";
 import {
   buildMcpServer,
   decisionText,
@@ -75,6 +75,7 @@ async function connectedClient(
   local: LocalMachine | null = null,
   audit: AuditSink = () => {},
   report?: typeof reportDone,
+  handOffTask?: typeof handOff,
 ): Promise<Client> {
   const fleet = relay instanceof LazyRelay ? relayFleet(relay) : relay;
   // Pinned, not auto: a fallback to the 2025 era would pass silently, and the
@@ -86,7 +87,7 @@ async function connectedClient(
     { versionNegotiation: { mode: { pin: "2026-07-28" } } },
   );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  serveStdio(() => buildMcpServer(fleet, local, audit, report), { transport: serverTransport });
+  serveStdio(() => buildMcpServer(fleet, local, audit, report, handOffTask), { transport: serverTransport });
   await client.connect(clientTransport);
   return client;
 }
@@ -2305,6 +2306,35 @@ describe("report_task_done", () => {
       error: true,
     });
     expect((await call({ ok: false, text: "the local daemon is not running" })).error).toBe(true);
+  });
+});
+
+describe("hand_off_task", () => {
+  test("is always offered, takes no input, and passes the sender's answer through as a result or an error", async () => {
+    const lazy = new LazyRelay({ create: () => fakeRelay([]) });
+    const answers = [
+      { ok: true, text: "handed off" },
+      { ok: false, text: "keep watching the PR yourself" },
+    ];
+    const client = await connectedClient(
+      lazy,
+      null,
+      () => {},
+      undefined,
+      () => Promise.resolve(answers.shift() ?? { ok: false, text: "unexpected" }),
+    );
+    try {
+      const { tools } = await client.listTools();
+      const tool = tools.find((t) => t.name === "hand_off_task");
+      expect(tool?.annotations?.readOnlyHint).toBe(false);
+      expect(tool?.description).toContain("as the last tool call of the run");
+      const ok = await client.callTool({ name: "hand_off_task", arguments: {} });
+      expect([toolText(ok), ok.isError === true]).toEqual(["handed off", false]);
+      const refused = await client.callTool({ name: "hand_off_task", arguments: {} });
+      expect([toolText(refused), refused.isError === true]).toEqual(["keep watching the PR yourself", true]);
+    } finally {
+      lazy.stop();
+    }
   });
 });
 
