@@ -1,4 +1,4 @@
-import { chmod, mkdir, stat } from "node:fs/promises";
+import { chmod, mkdir, realpath, stat } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import {
   DAEMON_PATH,
@@ -34,7 +34,7 @@ import { markClosed } from "./exit-status.ts";
 import { mcpFleetChecks } from "./fleet.ts";
 import { platformFsmonitor } from "./fsmonitor.ts";
 import { mcpChecks, runMcpServer } from "./mcp.ts";
-import { configDir, configPath, logPath, pruneLogPath, socketPath, statePath } from "./paths.ts";
+import { configDir, configPath, logPath, pruneLogPath, socketPath, statePath, tildify } from "./paths.ts";
 import { installExtension, raycastChecks, uninstallExtension } from "./raycast.ts";
 import { availablePskStore, pskStoreChecks, type PskStore } from "./psk-store.ts";
 import {
@@ -51,7 +51,7 @@ import {
 } from "./service.ts";
 import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts";
 import { scanRepos } from "./scan.ts";
-import { describeCheckout, readSource } from "./selfsource.ts";
+import { checkoutRoot, describeCheckout, readSource, servingRoot, trimRoot } from "./selfsource.ts";
 import { deregisterMachine } from "./deregister.ts";
 import { livePid, loadOrInitState, pidAlive, readRuntime, readState, saveState } from "./state.ts";
 
@@ -450,7 +450,10 @@ export async function cmdStatus(): Promise<void> {
   );
   // The running process's sha, not the checkout's: after a `git pull` without a
   // restart those differ, and only the first one answers "what is serving".
-  const disk = await readSource();
+  // The clone is the daemon's too, not this CLI's: with several on one machine,
+  // only that one says where an update has to land.
+  const root = servingRoot(runtime, alive) ?? checkoutRoot();
+  const disk = await readSource(root);
   if (alive && runtime.sha !== undefined && runtime.sha !== null) {
     const drifted = disk !== null && disk.sha !== runtime.sha;
     console.log(
@@ -458,7 +461,7 @@ export async function cmdStatus(): Promise<void> {
     );
   }
   if (disk !== null) {
-    console.log(`checkout:  ${describeCheckout(disk)}, committed ${new Date(disk.commitTs).toISOString()}`);
+    console.log(`checkout:  ${describeCheckout(disk, root)}, committed ${new Date(disk.commitTs).toISOString()}`);
   }
   if (state.lastUpdate !== undefined) {
     const { outcome, at, detail } = state.lastUpdate;
@@ -607,6 +610,13 @@ export async function cmdDoctor(): Promise<void> {
   const source = await readSource();
   if (source === null) warn("checkout version unreadable — not a git checkout? version reporting stays off");
   else ok(`checkout ${describeCheckout(source)}`);
+  const runtime = await readRuntime();
+  const serving = servingRoot(runtime, runtime !== null && pidAlive(runtime.pid));
+  // Realpath'd both sides: a symlinked path to this clone is still this clone.
+  const real = (path: string): Promise<string> => realpath(path).catch(() => path);
+  if (serving !== null && (await real(serving)) !== (await real(trimRoot(checkoutRoot())))) {
+    warn(`the running daemon runs from ${tildify(serving)}, not this checkout — update that clone`);
+  }
 
   render(await auditLogChecks(await auditLogPath()));
 

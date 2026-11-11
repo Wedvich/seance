@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exec } from "./exec.ts";
-import { checkoutRoot, describeCheckout, readSource } from "./selfsource.ts";
+import { checkoutRoot, describeCheckout, readSource, servingRoot } from "./selfsource.ts";
 
 const cleanups: string[] = [];
 afterAll(async () => {
@@ -81,7 +81,32 @@ describe("describeCheckout", () => {
     const source = await readSource();
     expect(source).not.toBeNull();
     if (source === null) return;
-    const root = checkoutRoot().replace(/\/+$/u, "");
-    expect(describeCheckout(source, undefined, "/nonexistent-home")).toEndWith(`(${root})`);
+    const shown = /\((\/.+)\)$/u.exec(describeCheckout(source, undefined, "/nonexistent-home"))?.[1];
+    // checkoutRoot() keeps the URL's trailing slash; the line drops it.
+    expect(`${shown}/`).toBe(checkoutRoot());
+  });
+
+  test("a $HOME with a trailing slash still shortens to ~", () => {
+    const source = { sha: SHA, commitTs: 0, branch: "main" };
+    expect(describeCheckout(source, "/home/m/repos/seance", "/home/m/")).toBe("ca651d97c793 on main (~/repos/seance)");
+  });
+});
+
+describe("servingRoot", () => {
+  const runtime = { pid: 1, startedAt: 0, connected: true, connectedSince: 0, sha: SHA };
+
+  test("a live daemon's recorded root wins, trailing slash dropped", () => {
+    expect(servingRoot({ ...runtime, root: "/Users/martin/repos/seance/" }, true)).toBe("/Users/martin/repos/seance");
+  });
+
+  test("nothing to say for a dead daemon, an older one with no root, or a root that isn't an absolute path", () => {
+    expect(servingRoot(null, true)).toBeNull();
+    expect(servingRoot({ ...runtime, root: "/Users/martin/repos/seance" }, false)).toBeNull();
+    expect(servingRoot(runtime, true)).toBeNull();
+    expect(servingRoot({ ...runtime, root: "repos/seance" }, true)).toBeNull();
+    // runtime.json is parsed, not validated field by field.
+    expect(
+      servingRoot(JSON.parse('{"pid":1,"startedAt":0,"connected":true,"connectedSince":0,"root":42}'), true),
+    ).toBeNull();
   });
 });
