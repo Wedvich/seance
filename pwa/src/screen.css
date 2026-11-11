@@ -34,7 +34,7 @@
 
 .header-title {
   margin: 0;
-  font-size: 18.5px;
+  font-size: 1.15625rem;
   font-weight: 600;
   letter-spacing: -0.01em;
 }
@@ -43,7 +43,7 @@
   margin: 2px 0 0;
   font-family: var(--mono);
   font-variant-ligatures: none;
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   color: var(--fg2);
 }
 
@@ -228,7 +228,7 @@
 .label {
   font-family: var(--mono);
   font-variant-ligatures: none;
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 600;
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -264,7 +264,7 @@
 .prompt-action {
   font-family: var(--mono);
   font-variant-ligatures: none;
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 600;
   letter-spacing: 0.08em;
   color: var(--fg2);
@@ -318,7 +318,7 @@
   resize: none;
   outline: none;
   font-family: var(--serif);
-  font-size: 20px;
+  font-size: 1.25rem;
   line-height: 1.35;
   white-space: pre-wrap;
   overflow-wrap: break-word;
@@ -402,7 +402,7 @@
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--sur2);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
 }
 
 .attach-name {
@@ -417,7 +417,7 @@
   flex: none;
   color: var(--fg2);
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 0.6875rem;
 }
 
 /* Small glyph, finger-sized target, as `.prompt-action` does. */
@@ -446,7 +446,7 @@
 
 .attach-notice {
   margin: 0;
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   color: var(--err);
 }
 
@@ -503,7 +503,7 @@
   min-width: 0;
   padding: 10px 18px;
   border-radius: 10px;
-  font-size: 15px;
+  font-size: 0.9375rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -528,7 +528,7 @@
 
 .compose-status {
   margin: -4px 0 0;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--fg2);
 }
 
@@ -549,7 +549,7 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
-  max-height: min(234px, 40dvh);
+  max-height: min(14.625rem, 40dvh);
   overflow-y: auto;
   overscroll-behavior: contain;
   margin: 0 -8px;
@@ -584,7 +584,7 @@
 .skill-name {
   font-family: var(--mono);
   font-variant-ligatures: none;
-  font-size: 15px;
+  font-size: 0.9375rem;
   font-weight: 400;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -598,7 +598,7 @@
 
 .skill-sub {
   margin-top: 2px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--fg2);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -641,14 +641,14 @@
 
 .banner-title {
   display: block;
-  font-size: 14.5px;
+  font-size: 0.90625rem;
   font-weight: 600;
 }
 
 .banner-body {
   display: block;
   margin: 3px 0 0;
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 1.5;
   color: var(--fg2);
 }
@@ -686,7 +686,7 @@
   display: flex;
   align-items: center;
   gap: 7px;
-  font-size: 16px;
+  font-size: 1rem;
   font-weight: 600;
   min-width: 0;
 }
@@ -694,7 +694,7 @@
 .tile-value-mono {
   font-family: var(--mono);
   font-variant-ligatures: none;
-  font-size: 15px;
+  font-size: 0.9375rem;
   font-weight: 500;
 }
 
@@ -706,7 +706,7 @@
 
 .ignored-note {
   margin: -4px 0 0;
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   color: var(--fg2);
 }
 
@@ -725,14 +725,14 @@
 
 .worktree-title {
   display: block;
-  font-size: 15.5px;
+  font-size: 0.96875rem;
   font-weight: 600;
 }
 
 .worktree-hint {
   display: block;
   margin: 2px 0 0;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--fg2);
 }
 
@@ -783,7 +783,7 @@
   border-radius: 12px;
   background: var(--acc);
   color: var(--acc-fg);
-  font-size: 17px;
+  font-size: 1.0625rem;
   font-weight: 600;
 }
 
@@ -915,7 +915,7 @@
   border-radius: 12px;
   background: transparent;
   color: var(--fg2);
-  font-size: 16px;
+  font-size: 1rem;
   text-align: center;
   text-decoration: none;
 }
@@ -1024,7 +1024,7 @@
 
 .sheet-title {
   margin: 0;
-  font-size: 16.5px;
+  font-size: 1.03125rem;
   font-weight: 600;
 }
 
@@ -1122,7 +1122,7 @@
 }
 
 .sheet-item-label {
-  font-size: 15.5px;
+  font-size: 0.96875rem;
   font-weight: 500;
   min-width: 0;
   overflow: hidden;
@@ -1138,7 +1138,7 @@
 .sheet-item-sub {
   display: block;
   margin: 2px 0 0;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--fg2);
 }
 
@@ -1151,7 +1151,7 @@
 .sheet-note {
   margin: 6px 0 0;
   padding: 0 13px;
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   color: var(--fg2);
 }
 
@@ -1228,7 +1228,7 @@
 .verdict-headline {
   margin: 0;
   font-family: var(--serif);
-  font-size: 32px;
+  font-size: 2rem;
   line-height: 1.15;
   font-weight: 400;
 }
@@ -1414,7 +1414,7 @@
 .stage-name {
   font-family: var(--mono);
   font-variant-ligatures: none;
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -1429,7 +1429,7 @@
 
 .verdict-body {
   margin: 0;
-  font-size: 16.5px;
+  font-size: 1.03125rem;
   line-height: 1.55;
   color: var(--fg2);
 }
@@ -1446,7 +1446,7 @@
   border-radius: 12px;
   font-family: var(--mono);
   font-variant-ligatures: none;
-  font-size: 14px;
+  font-size: 0.875rem;
   line-height: 1.5;
   color: var(--fg2);
   text-align: left;
@@ -1533,7 +1533,7 @@
   background: var(--bg);
   font-family: var(--mono);
   font-variant-ligatures: none;
-  font-size: 15px;
+  font-size: 0.9375rem;
   outline: none;
 }
 
@@ -1547,7 +1547,7 @@
 }
 
 .field-error {
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--err);
 }
 
@@ -1571,7 +1571,7 @@
 
 .push-line {
   margin: 0;
-  font-size: 13.5px;
+  font-size: 0.84375rem;
   color: var(--fg2);
 }
 
@@ -1583,7 +1583,7 @@
   border-radius: 11px;
   background: var(--sur2);
   color: var(--fg);
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 600;
 }
 
@@ -1599,7 +1599,7 @@
 }
 
 .push-devices-title {
-  font-size: 13.5px;
+  font-size: 0.84375rem;
   font-weight: 600;
   color: var(--fg2);
 }
@@ -1617,7 +1617,7 @@
 }
 
 .push-device-meta {
-  font-size: 13.5px;
+  font-size: 0.84375rem;
   color: var(--fg2);
 }
 
@@ -1629,7 +1629,7 @@
   border-radius: 8px;
   background: transparent;
   color: var(--fg2);
-  font-size: 13.5px;
+  font-size: 0.84375rem;
 }
 
 .push-button:enabled:active,
@@ -1653,7 +1653,7 @@
 }
 
 .theme-title {
-  font-size: 15.5px;
+  font-size: 0.96875rem;
   font-weight: 600;
 }
 
@@ -1693,7 +1693,7 @@
   border-radius: 8px;
   background: transparent;
   color: var(--fg2);
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 600;
   transition: color 0.18s ease;
 }
@@ -1759,7 +1759,7 @@
 
 /* Name and its toggle share one line box, so top-aligning them centres both on the same line. */
 .fleet-card-head {
-  --fleet-line: 20px;
+  --fleet-line: 1.25rem;
   display: flex;
   align-items: flex-start;
   gap: 10px;
@@ -1778,7 +1778,7 @@
 .fleet-name {
   margin: 0;
   line-height: var(--fleet-line);
-  font-size: 15.5px;
+  font-size: 0.96875rem;
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1789,7 +1789,7 @@
   margin: 2px 0 0;
   font-family: var(--mono);
   font-variant-ligatures: none;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--fg2);
 }
 
@@ -1804,7 +1804,7 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: var(--fleet-line);
   color: var(--fg2);
   background: transparent;
@@ -1821,14 +1821,14 @@
 }
 
 .disclosure-chevron {
-  font-size: 9px;
+  font-size: 0.5625rem;
   transition: transform 150ms ease;
 }
 
 .disclosure[aria-expanded="true"] > .disclosure-chevron,
 .fleet-note {
   margin: 0;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--fg2);
 }
 
@@ -1843,7 +1843,7 @@
   margin: -8px -4px;
   border: 0;
   background: transparent;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--fg2);
 }
 
@@ -1865,7 +1865,7 @@
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--bg);
-  font-size: 15px;
+  font-size: 0.9375rem;
   outline: none;
 }
 
@@ -1890,7 +1890,7 @@
   border-radius: 999px;
   /* The body face, not the mono one: Fira Code's glyphs sit high in their line box, so a
      mono pill reads top-heavy beside the name. */
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-weight: 600;
   line-height: 1.2;
   color: var(--auto);
@@ -1909,8 +1909,8 @@
  * rather than pushing its row out of line.
  */
 .fleet-card {
-  --fleet-label: 68px;
-  --fleet-num: 36px;
+  --fleet-label: 4.25rem;
+  --fleet-num: 2.25rem;
 }
 
 .bars {
@@ -1927,7 +1927,7 @@
   font-family: var(--mono);
   font-variant-ligatures: none;
   font-variant-numeric: tabular-nums;
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 /*
@@ -1943,7 +1943,7 @@
   grid-template-columns: var(--fleet-label) minmax(0, 1fr) minmax(var(--fleet-num), auto) minmax(13ch, auto);
   column-gap: 12px;
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .bar-resets {
@@ -2030,7 +2030,7 @@
   font-family: var(--mono);
   font-variant-ligatures: none;
   font-variant-numeric: tabular-nums;
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .exclave-id {
@@ -2090,7 +2090,7 @@
 
 .chart-status {
   margin: 0 12px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--fg2);
   text-align: center;
 }
@@ -2135,7 +2135,7 @@
   margin-top: -4px;
   font-family: var(--mono);
   font-variant-ligatures: none;
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--fg2);
 }
 
@@ -2146,10 +2146,10 @@
   margin: 0;
   padding: 0;
   list-style: none;
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   /* One row held open while empty, so loading doesn't drop the legend's height. */
-  line-height: 18px;
-  min-height: 18px;
+  line-height: 1.125rem;
+  min-height: 1.125rem;
   color: var(--fg2);
 }
 
@@ -2449,7 +2449,7 @@
 
 .decision-headline {
   margin: 0;
-  font-size: 15px;
+  font-size: 0.9375rem;
   font-weight: 600;
   color: var(--fg);
 }
@@ -2485,7 +2485,7 @@
 }
 
 .decision-where {
-  font-size: 14px;
+  font-size: 0.875rem;
   color: var(--fg);
   overflow-wrap: anywhere;
 }
@@ -2498,7 +2498,7 @@
 .decision-quota {
   font-family: var(--mono);
   font-variant-ligatures: none;
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   line-height: 1.45;
   color: var(--fg2);
   overflow-wrap: anywhere;
@@ -2508,7 +2508,7 @@
   min-height: 32px;
   display: flex;
   align-items: center;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--fg2);
   cursor: pointer;
 }
@@ -2519,7 +2519,7 @@
 
 .decision-omitted {
   padding-left: 12px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--fg2);
 }
 
@@ -2561,7 +2561,7 @@
 
 .fleet-card-body {
   margin: 0;
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 1.5;
   color: var(--fg2);
 }
@@ -2576,7 +2576,7 @@
 .queue-actions .quiet {
   width: auto;
   padding: 8px 12px;
-  font-size: 14px;
+  font-size: 0.875rem;
 }
 
 .queue-actions .quiet:disabled {
@@ -2677,7 +2677,7 @@
   padding: 8px 10px 7px;
   border-color: var(--line);
   border-radius: 8px;
-  font-size: 14px;
+  font-size: 0.875rem;
   color: var(--fg2);
   text-decoration: none;
   font-variant-numeric: tabular-nums;
@@ -2750,7 +2750,7 @@
   border-radius: 10px;
   background: var(--sur2);
   color: var(--fg);
-  font-size: 14px;
+  font-size: 0.875rem;
   flex: none;
 }
 
@@ -2829,7 +2829,7 @@
   border-radius: 10px;
   background: transparent;
   color: var(--fg);
-  font-size: 15px;
+  font-size: 0.9375rem;
   font-weight: 600;
   text-align: left;
   text-decoration: none;
@@ -2880,7 +2880,7 @@
 
 .menu-sub {
   color: var(--fg2);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   font-weight: 400;
 }
 
