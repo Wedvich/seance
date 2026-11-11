@@ -88,3 +88,8 @@ export function socketPath(): string {
 export function expandTilde(p: string): string {
   return p.replace(/^~(?=\/|$)/u, homedir());
 }
+
+/** Inverse of `expandTilde`, for display only. */
+export function tildify(path: string, home: string = homedir()): string {
+  return path === home || path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path;
+}

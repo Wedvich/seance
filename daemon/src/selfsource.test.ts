@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exec } from "./exec.ts";
-import { checkoutRoot, readSource } from "./selfsource.ts";
+import { checkoutRoot, describeCheckout, readSource } from "./selfsource.ts";
 
 const cleanups: string[] = [];
 afterAll(async () => {
@@ -55,5 +55,33 @@ describe("readSource", () => {
     // This repo is a checkout, so the default root must answer.
     const source = await readSource(checkoutRoot());
     expect(source?.sha).toMatch(/^[0-9a-f]{40}$/u);
+  });
+});
+
+const SHA = "ca651d97c793b0d1f2e3a4b5c6d7e8f901234567";
+
+describe("describeCheckout", () => {
+  test("names the clone it runs from, home-relative, so two clones on one box tell apart", () => {
+    const source = { sha: SHA, commitTs: 0, branch: "main" };
+    expect(describeCheckout(source, "/Users/martin/repos/seance/", "/Users/martin")).toBe(
+      "ca651d97c793 on main (~/repos/seance)",
+    );
+    expect(describeCheckout(source, "/Users/martin/pengefix2/seance", "/Users/martin")).toBe(
+      "ca651d97c793 on main (~/pengefix2/seance)",
+    );
+  });
+
+  test("a root outside home stays absolute; a home-prefixed sibling is not home", () => {
+    const source = { sha: SHA, commitTs: 0, branch: null };
+    expect(describeCheckout(source, "/opt/seance/", "/home/m")).toBe("ca651d97c793 (detached) (/opt/seance)");
+    expect(describeCheckout(source, "/home/max/seance", "/home/m")).toBe("ca651d97c793 (detached) (/home/max/seance)");
+  });
+
+  test("defaults to this checkout's own root, the one readSource reads", async () => {
+    const source = await readSource();
+    expect(source).not.toBeNull();
+    if (source === null) return;
+    const root = checkoutRoot().replace(/\/+$/u, "");
+    expect(describeCheckout(source, undefined, "/nonexistent-home")).toEndWith(`(${root})`);
   });
 });

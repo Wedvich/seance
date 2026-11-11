@@ -1,13 +1,26 @@
 // The daemon's own checkout is deliberately outside the scanned repo set, so
 // version identity gets its own reader instead of a RepoEntry.
 
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { SourceInfo } from "@seance/shared";
 import { git } from "./exec.ts";
+import { tildify } from "./paths.ts";
 
 /** Checkout root — two levels above this file, same anchor as the service installers. */
 export function checkoutRoot(): string {
   return fileURLToPath(new URL("../..", import.meta.url));
+}
+
+/**
+ * `<sha> on <branch> (<root>)` for doctor and status. The root is there because
+ * a machine can hold several seance clones, and sha and branch alone don't say
+ * which one the daemon runs from — the one an update has to land in.
+ */
+export function describeCheckout(source: SourceInfo, root: string = checkoutRoot(), home: string = homedir()): string {
+  const branch = source.branch !== null ? ` on ${source.branch}` : " (detached)";
+  const trimmed = root.length > 1 ? root.replace(/[\\/]+$/u, "") : root;
+  return `${source.sha.slice(0, 12)}${branch} (${tildify(trimmed, home)})`;
 }
 
 /**

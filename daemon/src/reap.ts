@@ -1,5 +1,4 @@
 import { link, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { RepoEntry } from "@seance/shared";
 import { pruneAttachments, type AttachmentPruneReason, type PrunedAttachments } from "./attachments.ts";
@@ -10,7 +9,7 @@ import { harvestable } from "./exit-status.ts";
 import type { FsmonitorDaemon, FsmonitorSeams } from "./fsmonitor.ts";
 import { hardenedGit } from "./git-hardened.ts";
 import { canonical, inspectCheckout } from "./gitdir.ts";
-import { runDir } from "./paths.ts";
+import { runDir, tildify } from "./paths.ts";
 import {
   classifyTip,
   commitsAhead,
@@ -770,11 +769,6 @@ async function reapRepo(
   return { repo: repo.name, ...(fetch === undefined ? {} : { fetch }), ...report, young, active };
 }
 
-function tilde(path: string): string {
-  const home = homedir();
-  return path === home || path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path;
-}
-
 function row(label: string, rest: string): string {
   return `  ${label.padEnd(18)} ${rest}`;
 }
@@ -810,15 +804,18 @@ export function formatReport(report: ReapReport): readonly string[] {
     for (const worktree of repo.removedWorktrees) {
       const branch = worktree.branch ?? "detached";
       rows.push(
-        row(`${removed} worktree`, `${tilde(worktree.path)}   ${branch} (${worktree.why}), idle ${worktree.idleDays}d`),
+        row(
+          `${removed} worktree`,
+          `${tildify(worktree.path)}   ${branch} (${worktree.why}), idle ${worktree.idleDays}d`,
+        ),
       );
     }
-    for (const path of repo.pruned) rows.push(row(`${pruned} worktree`, `${tilde(path)}   its directory is gone`));
+    for (const path of repo.pruned) rows.push(row(`${pruned} worktree`, `${tildify(path)}   its directory is gone`));
     for (const branch of repo.deletedBranches) {
       rows.push(row(`${deleted} branch`, `${branch.name}   ${branch.sha.slice(0, 12)}   ${branch.why}`));
     }
     for (const dirty of repo.dirty) {
-      rows.push(row("dirty worktree", `${tilde(dirty.path)}   ${plural(dirty.changes, "change")} — kept`));
+      rows.push(row("dirty worktree", `${tildify(dirty.path)}   ${plural(dirty.changes, "change")} — kept`));
     }
     for (const kept of repo.keptBranches) {
       rows.push(row("kept branch", `${kept.name}   upstream gone, ${aheadText(kept.ahead)}`));
@@ -826,10 +823,10 @@ export function formatReport(report: ReapReport): readonly string[] {
     for (const kept of repo.keptWorktrees) {
       const text = KEPT_WORKTREE_TEXT[kept.why];
       const why = kept.branch === null ? text : `${kept.branch}   ${text}`;
-      rows.push(row("kept worktree", `${tilde(kept.path)}   ${why}, ${aheadText(kept.ahead)}`));
+      rows.push(row("kept worktree", `${tildify(kept.path)}   ${why}, ${aheadText(kept.ahead)}`));
     }
-    for (const path of repo.inUse) rows.push(row("in use", `${tilde(path)}   a tmux pane is inside it`));
-    for (const path of repo.locked) rows.push(row("locked worktree", tilde(path)));
+    for (const path of repo.inUse) rows.push(row("in use", `${tildify(path)}   a tmux pane is inside it`));
+    for (const path of repo.locked) rows.push(row("locked worktree", tildify(path)));
     for (const failure of repo.failed) rows.push(row("failed", `${failure.what}: ${failure.detail}`));
     if (rows.length > 0) lines.push(repo.repo, ...rows);
   }
@@ -848,7 +845,7 @@ export function formatReport(report: ReapReport): readonly string[] {
   const monitorRows = stoppedMonitors.map((monitor) =>
     row(
       stopped,
-      `${tilde(monitor.path)}   ${monitor.pid === null ? "" : `pid ${monitor.pid}, `}${MONITOR_LABELS[monitor.why]}${
+      `${tildify(monitor.path)}   ${monitor.pid === null ? "" : `pid ${monitor.pid}, `}${MONITOR_LABELS[monitor.why]}${
         monitor.rssKb === null ? "" : `, ${megabytes(monitor.rssKb)}`
       }`,
     ),

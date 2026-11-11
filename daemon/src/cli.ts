@@ -51,7 +51,7 @@ import {
 } from "./service.ts";
 import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts";
 import { scanRepos } from "./scan.ts";
-import { readSource } from "./selfsource.ts";
+import { describeCheckout, readSource } from "./selfsource.ts";
 import { deregisterMachine } from "./deregister.ts";
 import { livePid, loadOrInitState, pidAlive, readRuntime, readState, saveState } from "./state.ts";
 
@@ -458,9 +458,7 @@ export async function cmdStatus(): Promise<void> {
     );
   }
   if (disk !== null) {
-    console.log(
-      `checkout:  ${disk.sha.slice(0, 12)}${disk.branch !== null ? ` on ${disk.branch}` : " (detached)"}, committed ${new Date(disk.commitTs).toISOString()}`,
-    );
+    console.log(`checkout:  ${describeCheckout(disk)}, committed ${new Date(disk.commitTs).toISOString()}`);
   }
   if (state.lastUpdate !== undefined) {
     const { outcome, at, detail } = state.lastUpdate;
@@ -608,7 +606,7 @@ export async function cmdDoctor(): Promise<void> {
   console.log("        to let this machine lead the scheduler, add its deviceId to the relay's SCHEDULER_LEADERS");
   const source = await readSource();
   if (source === null) warn("checkout version unreadable — not a git checkout? version reporting stays off");
-  else ok(`checkout ${source.sha.slice(0, 12)}${source.branch !== null ? ` on ${source.branch}` : " (detached)"}`);
+  else ok(`checkout ${describeCheckout(source)}`);
 
   render(await auditLogChecks(await auditLogPath()));
 
