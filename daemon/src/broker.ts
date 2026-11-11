@@ -137,6 +137,7 @@ function cleanSpawn(p: SpawnRequest): SpawnRequest {
     ...(p.model === undefined ? {} : { model: p.model }),
     ...(p.effort === undefined ? {} : { effort: p.effort }),
     ...(p.plan === undefined ? {} : { plan: p.plan }),
+    ...(p.autonomy === undefined ? {} : { autonomy: p.autonomy }),
     client: BROKER_CLIENT,
   };
 }

@@ -1,4 +1,5 @@
 export * from "./types.ts";
+export * from "./autonomy.ts";
 export * from "./parse.ts";
 export * from "./crypto.ts";
 export * from "./identity.ts";

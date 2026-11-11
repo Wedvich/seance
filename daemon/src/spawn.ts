@@ -1,7 +1,8 @@
 import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { DEFAULT_EFFORT, DEFAULT_MODEL, isTaskId, type RepoEntry, type SpawnRequest } from "@seance/shared";
+import { autonomyOf, DEFAULT_EFFORT, DEFAULT_MODEL, isTaskId, type RepoEntry, type SpawnRequest } from "@seance/shared";
+import { autonomyNote } from "./autonomy.ts";
 import { SpawnFailure, type Continuation, type SessionAttachments, type SpawnOutcome } from "./backend.ts";
 import { freshenBase } from "./base-fetch.ts";
 import { git } from "./exec.ts";
@@ -272,9 +273,9 @@ async function userDefaultsToBypass(home: string, exclave: string): Promise<bool
   }
 }
 
-/** Only a plan spawn reads settings, so every other command line stays byte-identical. */
+/** Only a plan (`steer`) spawn reads settings, so every other command line stays byte-identical. */
 async function planAllowsBypass(request: SpawnRequest, repo: RepoEntry, opts: SpawnOptions): Promise<boolean> {
-  return request.plan === true && (await userDefaultsToBypass(opts.home, repo.exclave ?? DEFAULT_EXCLAVE));
+  return autonomyOf(request) === "steer" && (await userDefaultsToBypass(opts.home, repo.exclave ?? DEFAULT_EXCLAVE));
 }
 
 async function buildInnerCommand(
@@ -285,15 +286,17 @@ async function buildInnerCommand(
   attachments?: SessionAttachments,
 ): Promise<InnerCommand> {
   const claude = process.env["SEANCE_CLAUDE_BIN"] ?? "claude";
+  const level = autonomyOf(request);
   const caffeinate = process.platform === "darwin" ? "caffeinate -is " : "";
   // `exec` keeps the pane's process-group-leader pid on claude itself — a
   // forked child under a compound command leaves pane_current_command as the
   // shell, hiding the window from session detection.
   //
-  // `--permission-mode` is omitted unless the caller asked for plan mode: passing one
-  // unconditionally would override whatever the machine's settings.json chose, so by
-  // default the session inherits the same mode an in-terminal `claude` gets on that box.
-  // `plan` is the one exception, and only ever a tightening the caller opted into.
+  // `--permission-mode` is omitted unless the caller asked for plan mode (`plan`, or the `steer`
+  // level): passing one unconditionally would override whatever the machine's settings.json
+  // chose, so by default the session inherits the same mode an in-terminal `claude` gets on that
+  // box. `plan` is the one exception, and only ever a tightening the caller opted into: no
+  // autonomy level loosens the mode (DESIGN.md, "Autonomy level").
   // Any mode flag drops bypass out of the shift+tab cycle unless it started there, so on a
   // machine whose own user settings default to bypass, plan adds `--allow-dangerously-skip-permissions`
   // to keep it reachable — nothing an unflagged spawn there doesn't already start in.
@@ -310,8 +313,8 @@ async function buildInnerCommand(
     `exec ${caffeinate}${claude} -n ${shq(session)} --remote-control ${addDirs}` +
     `--model ${shq(request.model ?? DEFAULT_MODEL)} --effort ${shq(request.effort ?? DEFAULT_EFFORT)}` +
     // literal value, so nothing wire-supplied reaches the command line — no shq() needed
-    `${request.plan === true ? " --permission-mode plan" : ""}` +
-    `${request.plan === true && allowBypass ? " --allow-dangerously-skip-permissions" : ""}` +
+    `${level === "steer" ? " --permission-mode plan" : ""}` +
+    `${level === "steer" && allowBypass ? " --allow-dangerously-skip-permissions" : ""}` +
     `${prepared.worktreeFlag.length > 0 ? ` --worktree ${shq(prepared.worktreeFlag[1] ?? "")}` : ""}` +
     // A daemon-made UUID, never a wire value (`continues` is a ledger key and never reaches the command line).
     // `--resume <id>`, not `--continue`: claude files a `--worktree` session under the project it started
@@ -329,9 +332,12 @@ async function buildInnerCommand(
 
   const seedDir = await mkdtemp(join(tmpdir(), "seance-seed-"));
   const seedFile = join(seedDir, "seed.txt");
+  // The level rides every seed, a resume's too: a continuation may come back after a compaction or
+  // days later, and the note is what restates it. A seedless spawn still has `SEANCE_AUTONOMY`.
+  const header = `${prepared.preamble}\n${autonomyNote(level)}`;
   const seed = resume
-    ? `${prepared.preamble}\n${prompt === undefined ? "" : `\nFrom the user: ${prompt}\n`}`
-    : `${prepared.preamble}\n${prompt === undefined ? "" : `\nTask: ${prompt}\n`}${listed}`;
+    ? `${header}${prompt === undefined ? "" : `\nFrom the user: ${prompt}\n`}`
+    : `${header}${prompt === undefined ? "" : `\nTask: ${prompt}\n`}${listed}`;
   await Bun.write(seedFile, seed);
   // Redirect, not an operand: an argv operand would be the expanded prompt in
   // every local process list for the session's whole life — the same text the
@@ -735,6 +741,9 @@ async function launchWindow(
   // tmux server's environment holds — a server started from inside a séance
   // session carries that session's tag.
   const tagEnv = ["-e", `SEANCE_MACHINE_TAG=${machineTagSlug(opts.machineTag)}`];
+  // Always passed, for the same reason as the tag: a server started inside a séance session
+  // would hand that session's level to every window. A literal of `AUTONOMY_LEVELS`, never a wire string.
+  const autonomyEnv = ["-e", `SEANCE_AUTONOMY=${autonomyOf(request)}`];
   const extraEnv = prepared.env.flatMap((pair) => ["-e", pair]);
   const target = await resolveTargetSession(opts.tmuxSession);
   let windowId: string;
@@ -755,6 +764,7 @@ async function launchWindow(
           "-n",
           windowName,
           ...tagEnv,
+          ...autonomyEnv,
           ...extraEnv,
           inner.command,
         ])

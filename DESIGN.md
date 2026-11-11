@@ -715,7 +715,11 @@ nothing checked it. The last is the gap they leave.
   wire-supplied may be concatenated into a command unquoted. `plan` is the one
   wire field exempt, and only because it is a boolean whose flag value is a
   literal: no wire-supplied text reaches the command line, so there is nothing
-  to quote. A future flag carrying wire _text_ is back under the rule. `taskId`
+  to quote. A future flag carrying wire _text_ is back under the rule. `autonomy`
+  never enters the shell string either: it is held to `AUTONOMY_LEVELS` by every
+  parser before a spawn sees it, and reaches the window as a tmux `-e` argv value
+  (`SEANCE_AUTONOMY`) and the seed file, where only `AUTONOMY_PREAMBLE`'s fixed text
+  goes. `taskId`
   never enters the shell string at all: it is an argv value to `tmux set-option`,
   and bounded to `TASK_ID_PATTERN` before it gets that far. A task spawn's `--session-id` value
   is a `crypto.randomUUID()` the daemon made; a continuation's `--resume` value is the one its
@@ -732,7 +736,7 @@ nothing checked it. The last is the gap they leave.
   ledger hands one back after a restart. Each read is bounded by a timeout, and nothing in the
   module logs, since it runs under no `seanced mcp`.
 - Every spawn is **logged at start and outcome** with repo, mode, title, model,
-  effort, plan mode when on, task id when present (and, on `task_running`, the
+  effort, plan mode when on, the autonomy level when named, task id when present (and, on `task_running`, the
   session it collided with), prompt length and prompt SHA-256 prefix — never the
   prompt text, which would make `seanced.log` a transcript of everything ever
   asked. With a stolen PSK this log is the only thing that says someone else
@@ -5069,11 +5073,54 @@ of this section built.
   at spawn time, uncached, and adds the literal flag when
   `permissions.defaultMode` is `bypassPermissions`. It grants a plan session
   nothing an unflagged spawn on that machine doesn't already start in; it comes
-  from the daemon's own read, never the wire (the only wire input is still the
-  `plan` boolean). User settings only: a repo's `.claude/settings.json` or
+  from the daemon's own read, never the wire (the only wire input is still
+  whether the spawn is in plan mode: `plan`, or the `steer` autonomy level). User settings only: a repo's `.claude/settings.json` or
   `settings.local.json` is whoever committed it, and must not unlock bypass.
   Missing, unreadable or misshapen settings leave the flag off and the spawn
   running; non-plan spawns read nothing and stay byte-identical.
+- **Autonomy level** (added 2026-11-11). `SpawnRequest.autonomy`, one of
+  `AUTONOMY_LEVELS` (`shared/src/autonomy.ts`), says how much the session decides
+  on its own: `steer` plans and waits for approval, `checkpoint` (the default)
+  never stops to ask whether to proceed but stops on a real choice, and `auto` also
+  makes reversible choices itself, recording each as "Decided: X, because Y" for
+  review. It exists because confirmations, not decisions, are most of what an owner
+  answers: a transcript count across the fleet (30 days, about 1,400 sessions) found
+  about 620 bare "yes / go / continue" turns. What a level means is told to the
+  session in its seed (`AUTONOMY_PREAMBLE`, `daemon/src/autonomy.ts`, after the
+  preamble and before the task, a resume's seed included), and the window carries
+  `SEANCE_AUTONOMY`, set on every spawn like `SEANCE_MACHINE_TAG` so a tmux server
+  started inside a session never hands its level on, and so the level outlives a
+  compaction for a skill or hook to read.
+  - **A prompt rule, never a permission grant.** No level loosens the machine's
+    permission mode: that is the bullet above's refusal, and a wire field that
+    widened what a session may run unprompted would be a threat-model change.
+    `steer` is plan mode (`--permission-mode plan`); `checkpoint` and `auto` pass no
+    mode, so tool prompts stay what the machine's `settings.json` makes them.
+    Permission modes govern tool calls; the confirmations this targets are prose
+    ("shall I proceed?"), which no mode touches.
+  - **Generic text.** The preamble names séance's own guardrails (production,
+    money figures, secrets, deleting, force-pushing, messaging people, protections,
+    a limit the user set) and defers the rest to "every guardrail your CLAUDE.md
+    files name". Séance knows no workspace, so it names none.
+  - **Every real choice goes through AskUserQuestion.** That is what session
+    events report as `needs-input`, so the 2-minute push fires, and what Remote
+    Control shows with its options, so the push's `/?task=<id>` link and the task
+    card's claude.ai link reach the question. The push itself carries no question:
+    the service worker holds no PSK and its text is fixed per kind (PWA, "Web
+    Push"), and answering from the PWA through the daemon into the pane would type
+    wire text into a session, which Remote Control already does without séance.
+  - **`plan` and `autonomy` are one setting.** `plan: true` alone is `steer`
+    (`autonomyOf`), and `steer` always travels with `plan: true` (`withAutonomy`,
+    applied by `parseRequestFields` and the MCP's request builder), so a leader or
+    daemon older than the field still dispatches plan mode. One that drops `auto`
+    runs the session at `checkpoint`, the safe direction, so the field needs no
+    sentinel. `plan: true` beside `checkpoint` or `auto` is refused, by the
+    parser, `isSpawnRequest` and the MCP's `specError`, never resolved.
+  - **Where it is set.** Per task: `spawn_session`'s `autonomy`, `queue_batch`'s per
+    member, and the batch's own, which fills only members that give neither a level
+    nor `plan`. A continuation keeps its task's level (`continuationSpec`). The
+    audit line names it only when the request does. Not yet in the PWA, the CLI or
+    Raycast; a fleet default in `settings:main` waits until per-task proves tedious.
 - **Task ids** (added 2026-10-16, scheduler M2). `SpawnRequest.taskId` is the
   scheduler's dispatch idempotency key: a spawn naming a task some live pane
   already carries is refused `task_running` with that pane's id, before the repo

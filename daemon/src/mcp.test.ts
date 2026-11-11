@@ -942,6 +942,25 @@ describe("spawn_session on auto", () => {
     expect(fake.requests).toEqual([]);
   });
 
+  test("an autonomy level is stored on the task; steer is sealed with plan for a leader that drops the level", async () => {
+    const auto = leaderRelay();
+    expect((await callAuto(auto, { autonomy: "auto" })).error).toBe(false);
+    expect(auto.creates[0]?.spec.autonomy).toBe("auto");
+    expect(auto.creates[0]?.spec).not.toHaveProperty("plan");
+
+    const steer = leaderRelay();
+    expect((await callAuto(steer, { autonomy: "steer" })).error).toBe(false);
+    expect(steer.creates[0]?.spec).toMatchObject({ autonomy: "steer", plan: true });
+  });
+
+  test("plan beside a level other than steer is refused before anything is stored", async () => {
+    const fake = leaderRelay();
+    const { text, error } = await callAuto(fake, { autonomy: "auto", plan: true });
+    expect(error).toBe(true);
+    expect(text).toContain("plan: true contradicts autonomy: auto");
+    expect(fake.creates).toEqual([]);
+  });
+
   test("a lost reply re-sends the same task, and a store that had it says so", async () => {
     const fake = leaderRelay();
     let tries = 0;
@@ -1826,6 +1845,21 @@ describe("queue_batch", () => {
     expect(text).toContain(`task 1 (schema): ${first?.id}`);
     expect(text).toContain(`task 3: ${third?.id}`);
     expect(fake.requests).toEqual([]);
+  });
+
+  test("the batch's autonomy fills only members that chose neither a level nor plan", async () => {
+    const fake = leaderRelay([], reportingMachines());
+    const { error } = await callTool(fake, "queue_batch", {
+      autonomy: "auto",
+      tasks: [member(), member({ autonomy: "checkpoint" }), member({ plan: true })],
+    });
+    expect(error).toBe(false);
+    expect(fake.creates.map((t) => [t.spec.autonomy, t.spec.plan])).toEqual([
+      ["auto", undefined],
+      ["checkpoint", undefined],
+      // Its own plan is its choice: the batch's auto never lands beside it as a contradiction.
+      [undefined, true],
+    ]);
   });
 
   test("a caller still sending an order or a limit is refused, not given a plain group; auto or none is fine", async () => {

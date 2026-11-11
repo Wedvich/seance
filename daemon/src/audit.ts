@@ -178,6 +178,7 @@ export function spawnAudit(origin: SpawnOrigin, sink: AuditSink): SpawnAudit {
       const clientNote = request.client === undefined ? "" : `client=${quote(request.client)} `;
       // Only when on, so every ordinary spawn's line stays byte-identical.
       const planNote = request.plan === true ? "plan=true " : "";
+      const autonomyNote = request.autonomy === undefined ? "" : `autonomy=${request.autonomy} `;
       const taskNote = request.taskId === undefined ? "" : `task=${quote(request.taskId)} `;
       const continuesNote = request.continues === undefined ? "" : `continues=${quote(request.continues)} `;
       // Counts only: names are treated as prompt text, and ids and hashes say nothing an operator needs.
@@ -190,6 +191,7 @@ export function spawnAudit(origin: SpawnOrigin, sink: AuditSink): SpawnAudit {
         `${clientNote}repo=${quote(request.repo)} mode=${request.mode} title=${quote(request.title ?? "")} ` +
           `model=${quote(request.model ?? DEFAULT_MODEL)} effort=${quote(request.effort ?? DEFAULT_EFFORT)} ` +
           planNote +
+          autonomyNote +
           taskNote +
           continuesNote +
           attachmentsNote +

@@ -137,7 +137,7 @@ export function continueOffer(task: Task, machines: readonly Machine[], tasks: r
 
 /**
  * The spec of the task that continues `task`. Carries what shapes the session
- * (model, effort, plan, title) and what settles it (`until`, `linear`), and
+ * (model, effort, plan, autonomy, title) and what settles it (`until`, `linear`), and
  * nothing that places or orders it: the target is exact, and the old task's
  * dependents stay failed. The caller stamps `client`.
  */
@@ -152,6 +152,7 @@ export function continuationSpec(task: Task, at: Target, prompt?: string): TaskS
     ...(spec.model === undefined ? {} : { model: spec.model }),
     ...(spec.effort === undefined ? {} : { effort: spec.effort }),
     ...(spec.plan === undefined ? {} : { plan: spec.plan }),
+    ...(spec.autonomy === undefined ? {} : { autonomy: spec.autonomy }),
     ...(spec.until === undefined ? {} : { until: spec.until }),
     ...(spec.linear === undefined ? {} : { linear: spec.linear }),
     continues: { task: task.id, at },

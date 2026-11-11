@@ -1,4 +1,5 @@
 import { REPLAY_WINDOW_MS } from "./crypto.ts";
+import { isAutonomyLevel, withAutonomy } from "./autonomy.ts";
 import {
   ACCOUNT_ALIAS_MAX_LENGTH,
   ATTACHMENT_HASH_PATTERN,
@@ -657,7 +658,7 @@ export function parseRoutePreviewRequest(value: unknown): RoutePreviewRequest | 
  */
 function parseRequestFields(value: unknown, modes: readonly SpawnMode[]): TaskRequest | null {
   if (!isRecord(value)) return null;
-  const { repo, mode, prompt, title, model, effort, plan, skill } = value;
+  const { repo, mode, prompt, title, model, effort, plan, autonomy, skill } = value;
   const limits = TASK_REQUEST_LIMITS;
   if (!isBoundedString(repo, limits.repo) || repo === "") return null;
   const admitted = modes.find((m) => m === mode);
@@ -668,8 +669,11 @@ function parseRequestFields(value: unknown, modes: readonly SpawnMode[]): TaskRe
   if (model !== undefined && (!isBoundedString(model, limits.model) || model === "")) return null;
   if (effort !== undefined && (!isBoundedString(effort, limits.effort) || effort === "")) return null;
   if (plan !== undefined && typeof plan !== "boolean") return null;
+  if (autonomy !== undefined && !isAutonomyLevel(autonomy)) return null;
   if (skill !== undefined && !isSkillName(skill)) return null;
-  return {
+  // Normalised, not just checked: `steer` gains `plan: true`, so an older leader that drops
+  // `autonomy` from the record still dispatches plan mode; `plan` beside another level is refused.
+  return withAutonomy({
     repo,
     mode: admitted,
     ...(prompt === undefined ? {} : { prompt }),
@@ -677,8 +681,9 @@ function parseRequestFields(value: unknown, modes: readonly SpawnMode[]): TaskRe
     ...(model === undefined ? {} : { model }),
     ...(effort === undefined ? {} : { effort }),
     ...(plan === undefined ? {} : { plan }),
+    ...(autonomy === undefined ? {} : { autonomy }),
     ...(skill === undefined ? {} : { skill }),
-  };
+  });
 }
 
 function isFiniteNumber(value: unknown): value is number {

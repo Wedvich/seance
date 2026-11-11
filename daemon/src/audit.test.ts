@@ -97,6 +97,16 @@ describe("spawn audit lines", () => {
     await audit.request({ repo: "myrepo", mode: "here", plan: false });
     expect(emitted()).not.toContain("plan=");
   });
+
+  test("a level is recorded when the request names one, and only then", async () => {
+    await audit.request({ repo: "myrepo", mode: "here", autonomy: "auto" });
+    expect(emitted()).toContain("autonomy=auto ");
+  });
+
+  test("a spawn naming no level carries no autonomy field, so ordinary lines stay byte-identical", async () => {
+    await audit.request({ repo: "myrepo", mode: "here" });
+    expect(emitted()).not.toContain("autonomy=");
+  });
 });
 
 describe("enqueue audit lines", () => {

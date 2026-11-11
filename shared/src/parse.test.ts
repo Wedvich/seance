@@ -445,6 +445,16 @@ describe("parseTaskRequest", () => {
     expect(parseTaskRequest({ ...minimal, taskId: "t1", deviceId: "d", pin: { deviceId: "d" } })).toEqual(minimal);
   });
 
+  test("autonomy is kept, and steer always carries plan, for a leader that drops the level", () => {
+    expect(parseTaskRequest({ ...minimal, autonomy: "auto" })).toEqual({ ...minimal, autonomy: "auto" });
+    expect(parseTaskRequest({ ...minimal, autonomy: "checkpoint", plan: false })).toEqual({
+      ...minimal,
+      autonomy: "checkpoint",
+      plan: false,
+    });
+    expect(parseTaskRequest({ ...minimal, autonomy: "steer" })).toEqual({ ...minimal, autonomy: "steer", plan: true });
+  });
+
   test("every field is typed, and the keys a spawn acts on are never empty", () => {
     for (const bad of [
       { ...minimal, repo: "" },
@@ -453,6 +463,11 @@ describe("parseTaskRequest", () => {
       { ...minimal, mode: "continue" },
       { ...minimal, prompt: 1 },
       { ...minimal, plan: "yes" },
+      { ...minimal, autonomy: "yolo" },
+      { ...minimal, autonomy: "" },
+      // Two answers to one question: plan mode is `steer`, so neither may win silently.
+      { ...minimal, autonomy: "auto", plan: true },
+      { ...minimal, autonomy: "checkpoint", plan: true },
       { ...minimal, model: "" },
       { ...minimal, effort: null },
       null,

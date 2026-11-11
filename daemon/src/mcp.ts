@@ -4,6 +4,9 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
 import {
   accountNameIn,
+  AUTONOMY_LEVELS,
+  withAutonomy,
+  type AutonomyLevel,
   continueOffer,
   DEP_AFTER,
   knownAccounts,
@@ -560,6 +563,13 @@ const LINEAR_FIELD = z
     "The Linear issue this task is for. Informational: the scheduler stores and shows it, and reads nothing from Linear",
   );
 
+const AUTONOMY_FIELD = z
+  .enum(AUTONOMY_LEVELS)
+  .optional()
+  .describe(
+    "How much the session decides on its own. steer: it plans and waits for approval before changing anything (plan mode, the same as plan: true). checkpoint, the default: it never stops to ask whether to proceed, only for real choices, which it asks with a recommendation. auto: it also makes reversible choices itself and records them as Decided lines for review, stopping only for guardrails (production, money, secrets, deleting, messaging people) and choices it has no recommendation for. Set auto when the user wants the work done unattended, steer when they want to approve a plan first; omit it otherwise",
+  );
+
 const UNTIL_FIELD = z
   .enum(TASK_UNTIL)
   .optional()
@@ -614,16 +624,20 @@ function requestFields(input: {
   readonly model?: string | undefined;
   readonly effort?: string | undefined;
   readonly plan?: boolean | undefined;
+  readonly autonomy?: AutonomyLevel | undefined;
 }): Omit<AutoSpec, "repo"> {
-  const { prompt, title, mode, model, effort, plan } = input;
-  return {
+  const { prompt, title, mode, model, effort, plan, autonomy } = input;
+  const fields = {
     mode,
     ...(prompt === undefined ? {} : { prompt }),
     ...(title === undefined ? {} : { title }),
     ...(model === undefined || model === "" ? {} : { model }),
     ...(effort === undefined || effort === "" ? {} : { effort }),
     ...(plan === undefined ? {} : { plan }),
+    ...(autonomy === undefined ? {} : { autonomy }),
   };
+  // `steer` is sealed with `plan: true`, for a leader that drops `autonomy`; a contradiction is left for `specError` to name.
+  return withAutonomy(fields) ?? fields;
 }
 
 /**
@@ -997,8 +1011,9 @@ export function buildMcpServer(
           .boolean()
           .optional()
           .describe(
-            "Start the session in plan mode: it researches and writes an implementation plan for approval instead of editing files. Set this when the request is to plan, design, investigate or scope work rather than carry it out. Omit it otherwise.",
+            "Start the session in plan mode: it researches and writes an implementation plan for approval instead of editing files. Set this when the request is to plan, design, investigate or scope work rather than carry it out. Omit it otherwise. The same as autonomy steer; give one or the other",
           ),
+        autonomy: AUTONOMY_FIELD,
         after: z
           .array(
             z.object({
@@ -1024,7 +1039,23 @@ export function buildMcpServer(
       }),
       annotations: { readOnlyHint: false },
     },
-    async ({ machine, repo, prompt, title, mode, model, effort, plan, after, until, linear, pin, avoid, start }) => {
+    async ({
+      machine,
+      repo,
+      prompt,
+      title,
+      mode,
+      model,
+      effort,
+      plan,
+      autonomy,
+      after,
+      until,
+      linear,
+      pin,
+      avoid,
+      start,
+    }) => {
       const machinePin = machine === undefined || isAutoRef(machine) ? undefined : machine;
       if (machinePin !== undefined && pin?.machine !== undefined) {
         return errorResult("spawn refused: give the machine once — machine or pin.machine, not both");
@@ -1041,7 +1072,7 @@ export function buildMcpServer(
       // scheduler's.
       const spec: AutoSpec = {
         repo,
-        ...requestFields({ prompt: reported.prompt, title, mode, model, effort, plan }),
+        ...requestFields({ prompt: reported.prompt, title, mode, model, effort, plan, autonomy }),
         ...authoredFields(
           (after ?? []).map(({ task, when }) => ({ task, after: when })),
           until,
@@ -1086,6 +1117,12 @@ export function buildMcpServer(
         // Retired, still parsed: zod drops unknown keys, which would turn a stale caller's order into a silent plain group.
         strategy: z.unknown().optional().describe("Retired: refused unless absent or auto"),
         max: z.unknown().optional().describe("Retired: refused"),
+        autonomy: z
+          .enum(AUTONOMY_LEVELS)
+          .optional()
+          .describe(
+            "The autonomy level of every task that gives neither its own autonomy nor plan, as spawn_session's autonomy",
+          ),
         tasks: z
           .array(
             z.object({
@@ -1100,6 +1137,10 @@ export function buildMcpServer(
               model: z.string().optional(),
               effort: z.string().optional(),
               plan: z.boolean().optional().describe("Start in plan mode, as spawn_session's plan"),
+              autonomy: z
+                .enum(AUTONOMY_LEVELS)
+                .optional()
+                .describe("As spawn_session's autonomy; overrides the batch's autonomy for this task"),
               after: z
                 .array(
                   z.object({
@@ -1122,7 +1163,7 @@ export function buildMcpServer(
       }),
       annotations: { readOnlyHint: false },
     },
-    async ({ strategy, max, tasks }) => {
+    async ({ strategy, max, autonomy, tasks }) => {
       if ((strategy !== undefined && strategy !== "auto") || max !== undefined) {
         return errorResult(
           "queue_batch refused: a batch no longer orders or limits its members, so strategy and max are retired. Give each member its after to order them; concurrency is the fleet's and accounts' caps",
@@ -1171,7 +1212,12 @@ export function buildMcpServer(
         if ("error" in placement) return errorResult(`queue_batch refused: task ${n}: ${placement.error}`);
         const spec: AutoSpec = {
           repo: member.repo,
-          ...requestFields({ ...member, prompt: reported.prompt }),
+          ...requestFields({
+            ...member,
+            // A member's own `plan` is its choice too: the batch's level never lands beside it as a contradiction.
+            autonomy: member.autonomy ?? (member.plan === undefined ? autonomy : undefined),
+            prompt: reported.prompt,
+          }),
           ...authoredFields(deps, member.until, member.linear),
           batch: { id: batchId, index: n },
         };

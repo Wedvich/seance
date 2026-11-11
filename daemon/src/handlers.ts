@@ -20,6 +20,7 @@ import type {
 import {
   isMetricsRequest,
   isRecord,
+  isAutonomyLevel,
   isTaskId,
   parseAttachmentManifest,
   quote,
@@ -139,6 +140,10 @@ export function isSpawnRequest(payload: unknown): payload is SpawnRequest {
     if (obj[key] !== undefined && typeof obj[key] !== "string") return false;
   }
   if (obj["plan"] !== undefined && typeof obj["plan"] !== "boolean") return false;
+  // A closed set: the level reaches the window's environment, so only a literal of ours may.
+  if (obj["autonomy"] !== undefined && !isAutonomyLevel(obj["autonomy"])) return false;
+  // `plan: true` beside `checkpoint` or `auto` says two things at once; neither wins silently.
+  if (obj["plan"] === true && obj["autonomy"] !== undefined && obj["autonomy"] !== "steer") return false;
   // Bounded, not just typed: it is written to the pane and echoed into every session list.
   if (obj["taskId"] !== undefined && !isTaskId(obj["taskId"])) return false;
   // Fail closed until stacking lands: a spawn that silently started from the default branch

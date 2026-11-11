@@ -74,7 +74,7 @@ async function stored(store: MemoryQueueStore, id: string): Promise<StoredTask |
 describe("dispatch", () => {
   test("a ready task is reserved, spawned with its taskId as the scheduler, and running on the chosen pane", async () => {
     const { store, fleet, scheduler } = setup();
-    const task = await enqueue(store, scheduler, spec({ title: "fix it", plan: true }));
+    const task = await enqueue(store, scheduler, spec({ title: "fix it", plan: true, autonomy: "steer" }));
     await pass(scheduler);
 
     expect(fleet.spawns).toEqual([
@@ -86,6 +86,7 @@ describe("dispatch", () => {
           prompt: "do it",
           title: "fix it",
           plan: true,
+          autonomy: "steer",
           client: SCHEDULER_CLIENT,
           taskId: task.id,
         },
