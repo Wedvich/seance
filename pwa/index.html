@@ -5,6 +5,10 @@
     <!-- viewport-fit=cover is load-bearing: without it env(safe-area-inset-*) resolves to 0
          and the pinned footer sits under the home indicator. -->
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <!-- Chrome Android ignores the OS font size unless opted in (Firefox applies it regardless).
+         It scales 1rem: text, and px boxes sized to fit text, are in rem (test/text-scale.test.ts),
+         and no absolute root font-size may override it. -->
+    <meta name="text-scale" content="scale" />
     <meta name="color-scheme" content="light dark" />
     <meta name="theme-color" content="#1c1a22" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
