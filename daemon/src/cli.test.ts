@@ -10,7 +10,8 @@ import {
   parseReapArgs,
   parseSpawnArgs,
 } from "./cli.ts";
-import { LAUNCHD_LABEL, plistBunPath, plistContent } from "./launchd.ts";
+import { SHUTDOWN_DRAIN_MS } from "./drain-limits.ts";
+import { exitTimeoutCheck, LAUNCHD_EXIT_TIMEOUT_S, LAUNCHD_LABEL, plistBunPath, plistContent } from "./launchd.ts";
 import { systemdRunning } from "./systemd.ts";
 
 describe("parseReapArgs", () => {
@@ -240,6 +241,23 @@ describe("plistContent", () => {
     expect(plist).toContain("<string>/repo/daemon/src/main.ts</string>");
     expect(plist).toContain("<key>KeepAlive</key><true/>");
     expect(plist).toContain("/opt/homebrew/bin:/usr/bin");
+  });
+
+  test("sets an ExitTimeOut that outlasts the shutdown drain, and doctor accepts it", () => {
+    const plist = plistContent("/opt/bun", "/repo/daemon/src/main.ts", "/bin");
+    expect(plist).toContain(`<key>ExitTimeOut</key><integer>${LAUNCHD_EXIT_TIMEOUT_S}</integer>`);
+    expect(LAUNCHD_EXIT_TIMEOUT_S * 1000).toBeGreaterThan(SHUTDOWN_DRAIN_MS);
+    expect(Number.isInteger(LAUNCHD_EXIT_TIMEOUT_S)).toBe(true);
+    expect(exitTimeoutCheck(plist)).toBeNull();
+  });
+
+  test("doctor warns on a plist from before ExitTimeOut, naming the fix", () => {
+    const old = plistContent("/opt/bun", "/m.ts", "/bin").replace(
+      /\s*<key>ExitTimeOut<\/key><integer>\d+<\/integer>/u,
+      "",
+    );
+    expect(old).not.toContain("ExitTimeOut");
+    expect(exitTimeoutCheck(old)).toMatchObject({ level: "warn", message: expect.stringContaining("seanced install") });
   });
 
   test("escapes XML-hostile characters in paths", () => {

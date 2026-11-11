@@ -8,8 +8,9 @@
 export const UPDATE_DRAIN_MS = 120_000;
 
 /**
- * How long SIGTERM/SIGINT waits for them: under launchd's default `ExitTimeOut`
- * of 20 s (the plist sets none), and far under systemd's `TimeoutStopSec` of
- * 90 s with `KillMode=process`. A launch cut off past it is `interrupted`.
+ * How long SIGTERM/SIGINT waits for them: under the plist's `ExitTimeOut`
+ * (`LAUNCHD_EXIT_TIMEOUT_S`, sized from this — launchd's own default is 5 s), and
+ * far under systemd's `TimeoutStopSec` of 90 s with `KillMode=process`. A launch
+ * cut off past it is `interrupted`.
  */
 export const SHUTDOWN_DRAIN_MS = 15_000;

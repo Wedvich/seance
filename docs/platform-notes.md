@@ -210,6 +210,11 @@ the drift, and `sudo --preserve-env=PATH "$(command -v seanced)" install --syste
 restarting the unit, since `enable --now` leaves an already-running one on its old
 definition.
 
+On macOS that includes the plist's `ExitTimeOut` (30 s, added 2026-11-11). A plist written
+earlier sets none, so launchd's 5 s default SIGKILLs the daemon partway through its
+15 s shutdown drain. `doctor` warns until `seanced install` rewrites it. That reloads the
+agent, so run it when no task launch is in flight.
+
 ## One-time catch-up for pre-2026-08-04 installs
 
 Before that date the daemon recorded bun by resolved path rather than by PATH name, so
