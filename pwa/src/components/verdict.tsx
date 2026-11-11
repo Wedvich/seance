@@ -163,30 +163,35 @@ export function VerdictView(props: {
 
   return (
     <div className="verdict" role="status" aria-live="polite">
-      {content.stage === null ? (
-        <div key="glyph" className={content.glyphClass} aria-hidden="true">
-          {content.glyph}
+      {/* Two halves meeting under the headline: what can grow below it grows down, never moving it (screen.css). */}
+      <div className="verdict-head">
+        {content.stage === null ? (
+          <div key="glyph" className={content.glyphClass} aria-hidden="true">
+            {content.glyph}
+          </div>
+        ) : (
+          <StageTrack key="track" stage={content.stage} />
+        )}
+        <SwapText as="h2" className="verdict-headline" text={content.headline} />
+      </div>
+      <div className="verdict-tail">
+        <SwapText as="p" className="verdict-body" text={content.body} />
+        {content.detail !== null && <pre className="verdict-detail card">{content.detail}</pre>}
+        <div className="verdict-actions">
+          <button type="button" className="primary" onClick={onPrimary}>
+            {content.primary.label}
+          </button>
+          {verdict.kind === "queued" && props.onQueue !== undefined && (
+            <button type="button" className="quiet" onClick={props.onQueue}>
+              See the queue
+            </button>
+          )}
+          {content.showBack && (
+            <button type="button" className="quiet" onClick={onBack}>
+              Back to the form
+            </button>
+          )}
         </div>
-      ) : (
-        <StageTrack key="track" stage={content.stage} />
-      )}
-      <SwapText as="h2" className="verdict-headline" text={content.headline} />
-      <SwapText as="p" className="verdict-body" text={content.body} />
-      {content.detail !== null && <pre className="verdict-detail card">{content.detail}</pre>}
-      <div className="verdict-actions">
-        <button type="button" className="primary" onClick={onPrimary}>
-          {content.primary.label}
-        </button>
-        {verdict.kind === "queued" && props.onQueue !== undefined && (
-          <button type="button" className="quiet" onClick={props.onQueue}>
-            See the queue
-          </button>
-        )}
-        {content.showBack && (
-          <button type="button" className="quiet" onClick={onBack}>
-            Back to the form
-          </button>
-        )}
       </div>
     </div>
   );

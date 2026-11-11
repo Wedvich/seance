@@ -1157,19 +1157,50 @@
 
 /* ---- verdict ---- */
 
-/* Top-anchored, not centred: a queued verdict grows as its task moves, and the
-   headline must stay put while what follows it fades in below. */
+/* Centred on a fixed line, not on its content: a queued verdict grows as its
+   task moves, and the headline must stay put while what follows it fades in
+   below. Head and tail split the free height evenly, the head sitting on the
+   line and the tail hanging from it, so growth below leaves the headline put
+   while the tail fits its half. A headline that wraps lifts the track instead. */
 .verdict {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 18px;
   padding: 56px 22px 28px;
   text-align: center;
+}
+
+/* Lifts the line by half its height: the tail (body, buttons) outweighs the
+   head (track, headline), so an even split leaves a queued verdict low. Free
+   space only: it shrinks away before the verdict has to scroll. */
+.verdict::after {
+  content: "";
+  flex: 0 1 56px;
+}
+
+.verdict-head,
+.verdict-tail {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+}
+
+.verdict-head {
+  justify-content: flex-end;
+}
+
+.verdict-tail {
+  margin-top: 18px;
+}
+
+/* The desk's verdict stays top-anchored, level with the columns beside it. */
+.desk .verdict-head,
+.desk .verdict-tail {
+  flex: none;
 }
 
 .verdict-glyph {

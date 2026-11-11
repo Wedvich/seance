@@ -59,6 +59,17 @@ describe("a queued verdict's stage track", () => {
     );
     expect(retry.primary.onClick).toBe("retry");
   });
+
+  test("each verdict offers one way back to the form: a separate back only beside a retry", () => {
+    for (const state of ["queued", "running", "done", "failed"] as const) {
+      const queued = verdictOf(task(state, { assignment: at }));
+      expect(queued.primary.onClick).toBe("another");
+      expect(queued.showBack).toBe(false);
+    }
+    const unqueued = { kind: "unqueued", message: "no answer.", mayHaveLanded: true } as const;
+    expect(describeVerdict(unqueued, [], {}, NOW, null).showBack).toBe(false);
+    expect(describeVerdict({ ...unqueued, retry: task("queued") }, [], {}, NOW, null).showBack).toBe(true);
+  });
 });
 
 describe("a queued verdict's body", () => {
