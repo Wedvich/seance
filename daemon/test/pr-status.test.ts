@@ -143,7 +143,8 @@ interface Seen {
   readonly status: PrStatus;
 }
 
-function start(tasks: readonly Task[], opts: PrPollerOpts = {}) {
+/** `rejects` names the tasks whose write the caller's `onStatus` refuses. */
+function start(tasks: readonly Task[], opts: PrPollerOpts = {}, rejects: ReadonlySet<string> = new Set()) {
   const logs = { info: [] as string[], warn: [] as string[] };
   const seen: Seen[] = [];
   const poller = startPrPoller({
@@ -154,6 +155,7 @@ function start(tasks: readonly Task[], opts: PrPollerOpts = {}) {
     ...opts,
     tasks: () => tasks,
     onStatus: (id, url, status) => {
+      if (rejects.has(id)) return Promise.reject(new Error("store refused"));
       seen.push({ id, url, status });
       return Promise.resolve();
     },
@@ -832,6 +834,36 @@ describe("the blocked-state read", () => {
     await pollUntil(() => seen.length >= 2, "the blocked reading", 5_000);
     stop();
     expect(seen[1]).toMatchObject({ id: "t1", status: { state: "open", head: HEAD } });
+  });
+
+  // Fifty-one targets are two merge chunks; the first holds the awaiting-merge task `t1`.
+  const twoChunks = async (): Promise<Task[]> => {
+    await gh.setReply(reply({ state: "OPEN", oid: HEAD }, ...Array.from({ length: 49 }, () => ({ state: "OPEN" }))), 0);
+    return [waiting(1), ...Array.from({ length: 50 }, (_, i) => pr(i + 2))];
+  };
+
+  test("(p) a later chunk that fails still lets an earlier chunk's open PRs be written, without blocked fields", async () => {
+    const tasks = await twoChunks();
+    await gh.setCallReply(2, "not json", 0);
+    const { seen, logs, stop } = start(tasks, { intervalMs: 60_000 });
+    await pollUntil(() => logs.warn.length > 0, "the failed poll");
+    stop();
+    expect(logs.warn[0]).toContain("PR status paused (failed)");
+    expect(seen).toHaveLength(50);
+    expect(seen.find((s) => s.id === "t1")).toEqual({ id: "t1", url: prUrl(1), status: { state: "open", at: 1234 } });
+    // The blocked run waits for a poll whose chunks all answered.
+    expect(await gh.argvs()).toHaveLength(2);
+  });
+
+  test("(q) a rejected write in a later chunk still lets an earlier chunk's open PRs be written", async () => {
+    const tasks = await twoChunks();
+    const { seen, logs, stop } = start(tasks, { intervalMs: 60_000 }, new Set(["t51"]));
+    await pollUntil(() => seen.some((s) => s.id === "t1"), "the open reading");
+    stop();
+    expect(seen.find((s) => s.id === "t1")?.status).toEqual({ state: "open", at: 1234 });
+    expect(await gh.argvs()).toHaveLength(2);
+    // The caller reports a rejected write; it says nothing of gh.
+    expect(logs.warn).toEqual([]);
   });
 
   test("(m) twelve awaiting-merge open PRs take one merge run and two blocked runs", async () => {

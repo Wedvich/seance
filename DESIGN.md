@@ -3886,7 +3886,10 @@ for the lot with its own `gh`.
   covered and nothing else: the poll does not fail, does not back off, and warns once per term (the
   poller's lifetime: "the blocked-state read did not answer"); an alias a run answers `null` (a
   PR the forge will not describe) drops its own PR's fields silently, with no warning. The chip
-  keeps its state and checks, and no alert is raised on a reading that lacks them. Owner, repo and number are variables as in the first query.
+  keeps its state and checks, and no alert is raised on a reading that lacks them. When a later
+  chunk fails, or a write is rejected, before those runs, the open PRs they were owed are still
+  written, as the base reading without wide fields, so a failing chunk never greys the chips of an
+  earlier one. Owner, repo and number are variables as in the first query.
   - **Fields.** `PrStatus` gains, all optional so an older reader ignores them and a reading
     without a wide read is today's: `head` (the commit oid, 40 or 64 hex), `required` (`pending`,
     `passing` or `failing` over the head's required contexts alone: an optional check failing

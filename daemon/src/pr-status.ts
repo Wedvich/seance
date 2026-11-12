@@ -623,15 +623,25 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
     return target.tasks.map((task) => deps.onStatus(task.id, task.prUrl, task.wide ? wide : base));
   };
 
-  /** The class the poll ended in, or null when there was nothing to poll. */
-  async function poll(): Promise<"ok" | Failure | null> {
-    const wanted = targets(deps.tasks(), unreadable, readThisTerm);
-    if (wanted.length === 0) return null;
+  /** The writes for one owed chunk's open PRs; without `fields` they carry the base reading only. */
+  const owed = (
+    { chunk, reads, wide, at }: Owing,
+    fields: ReadonlyMap<number, WideFields> | undefined,
+  ): Promise<void>[] =>
+    wide.flatMap(({ index }) => {
+      const target = chunk[index];
+      const read = reads[index];
+      return target === undefined || read === undefined ? [] : write(target, read, at, fields?.get(index));
+    });
+
+  /**
+   * The class the poll ended in, or null when there was nothing to poll. Open PRs owed a blocked-state read are
+   * pushed on `owing`: it runs once every chunk's merge reading is written, so a slow or stalled one delays only
+   * the chip fields it adds, never a merge (or the dependents it releases).
+   */
+  async function readAll(wanted: readonly Target[], owing: Owing[]): Promise<"ok" | Failure | null> {
     // A finished task's read is spent only once every chunk answered: its PRs may sit in several.
     const spent = new Set<string>();
-    // Open PRs owed a blocked-state read: it runs once every chunk's merge reading is written, so a slow
-    // or stalled one delays only the chip fields it adds, never a merge (or the dependents it releases).
-    const owing: Owing[] = [];
     for (let from = 0; from < wanted.length; from += CHUNK) {
       const chunk = wanted.slice(from, from + CHUNK);
       // oxlint-disable-next-line no-await-in-loop -- chunks run one after another, never overlapping
@@ -667,20 +677,32 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
       if (stopped) return null;
     }
     for (const id of spent) readThisTerm.add(id);
-    for (const { chunk, reads, wide, at } of owing) {
+    for (let next = owing[0]; next !== undefined; next = owing[0]) {
       // oxlint-disable-next-line no-await-in-loop -- as above
-      const fields = await readBlocked(deps, wide, blockedFailure);
+      const fields = await readBlocked(deps, next.wide, blockedFailure);
       if (stopped) return null;
-      const writes = wide.flatMap(({ index }) => {
-        const target = chunk[index];
-        const read = reads[index];
-        return target === undefined || read === undefined ? [] : write(target, read, at, fields.get(index));
-      });
+      // Off `owing` before its write: `poll`'s flush must not retry a rejected one, which could overwrite a
+      // sibling that landed with its fields.
+      owing.shift();
       // oxlint-disable-next-line no-await-in-loop -- as above
-      await Promise.all(writes);
+      await Promise.all(owed(next, fields));
       if (stopped) return null;
     }
     return "ok";
+  }
+
+  /** The class the poll ended in, or null when there was nothing to poll. */
+  async function poll(): Promise<"ok" | Failure | null> {
+    const wanted = targets(deps.tasks(), unreadable, readThisTerm);
+    if (wanted.length === 0) return null;
+    const owing: Owing[] = [];
+    try {
+      return await readAll(wanted, owing);
+    } finally {
+      // A later chunk's failure or a rejected write must not take an earlier chunk's open readings with it: they go
+      // out as the base reading, as before blocked state existed, and the blocked fields wait for the next poll.
+      if (!stopped) await Promise.allSettled(owing.flatMap((entry) => owed(entry, undefined)));
+    }
   }
 
   const schedule = (delay: number): void => {
