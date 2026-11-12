@@ -96,6 +96,7 @@ import {
   QUOTA_SOURCES,
   SCHEDULER_OPS,
   SESSION_STATES,
+  NEEDS_INPUT_REASONS,
   SPAWN_ERROR_CODES,
   TASK_ID_PATTERN,
   TASK_REQUEST_LIMITS,
@@ -129,6 +130,7 @@ import {
   type RescanResponse,
   type ScopedWindow,
   type SessionEvent,
+  type NeedsInputReason,
   type SessionState,
   type SpawnErrorCode,
   type SpawnMode,
@@ -572,6 +574,10 @@ export function isSessionState(value: unknown): value is SessionState {
   return SESSION_STATES.some((state) => state === value);
 }
 
+export function isNeedsInputReason(value: unknown): value is NeedsInputReason {
+  return NEEDS_INPUT_REASONS.some((reason) => reason === value);
+}
+
 /** A PR URL is kept only under this length; past it, it is no URL anyone typed. */
 export const PR_URL_MAX_LENGTH = 2048;
 
@@ -610,11 +616,13 @@ export function isRemoteSessionId(value: unknown): value is string {
  * bound the event to its pane — but a `prUrl` and a `remoteSession` are
  * re-checked all the same: they are the fields that reach an `href`. A bad
  * `remoteSession` is dropped rather than the event: a link is not worth losing
- * the state it rode with.
+ * the state it rode with. A `reason` is kept only when known and beside
+ * `needs-input`, and dropped otherwise, never the event: a newer daemon's
+ * reason costs this leader only the debounce it would have waited anyway.
  */
 export function parseSessionEvent(value: unknown): SessionEvent | null {
   if (!isRecord(value)) return null;
-  const { session, taskId, exclave, state, prUrl, remoteSession, at } = value;
+  const { session, taskId, exclave, state, prUrl, remoteSession, reason, at } = value;
   if (typeof session !== "string" || session === "" || session.length > ROUTING_ID_MAX_LENGTH) return null;
   if (!isTaskId(taskId) || typeof exclave !== "string" || exclave.length > ROUTING_ID_MAX_LENGTH) return null;
   if (!isSessionState(state) || typeof at !== "number" || !Number.isFinite(at)) return null;
@@ -628,6 +636,7 @@ export function parseSessionEvent(value: unknown): SessionEvent | null {
     at,
     ...(url === null ? {} : { prUrl: url }),
     ...(isRemoteSessionId(remoteSession) ? { remoteSession } : {}),
+    ...(state === "needs-input" && isNeedsInputReason(reason) ? { reason } : {}),
   };
 }
 
@@ -1421,7 +1430,7 @@ export function parsePushUnsubscribeReply(value: unknown): PushUnsubscribeReply 
 
 const PUSH_ALERT_KEYS = {
   spill: ["v", "kind", "at", "taskId", "window", "projectedPct", "spending"],
-  "needs-input": ["v", "kind", "at", "taskId", "since", "escalated"],
+  "needs-input": ["v", "kind", "at", "taskId", "since", "escalated", "question"],
   disk: ["v", "kind", "at", "deviceId", "diskPct", "freeMib"],
 } as const;
 
@@ -1443,10 +1452,11 @@ export function parsePushAlert(value: unknown): PushAlert | null {
     return { v: 1, kind, at, taskId, window, projectedPct, ...(spending === undefined ? {} : { spending }) };
   }
   if (kind === "needs-input") {
-    const { taskId, since, escalated } = value;
+    const { taskId, since, escalated, question } = value;
     if (!known(PUSH_ALERT_KEYS["needs-input"]) || !isTaskId(taskId)) return null;
     if (!isFiniteNumber(since) || typeof escalated !== "boolean") return null;
-    return { v: 1, kind, at, taskId, since, escalated };
+    if (question !== undefined && question !== true) return null;
+    return { v: 1, kind, at, taskId, since, escalated, ...(question === undefined ? {} : { question }) };
   }
   if (kind === "disk") {
     const { deviceId, diskPct, freeMib } = value;
