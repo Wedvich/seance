@@ -221,6 +221,30 @@ describe("the poller's read", () => {
     expect(argv.filter((arg) => arg.startsWith("n"))).toEqual(["n0=5"]);
   });
 
+  test("every PR a task reported is read, newest first, in the one run; one held by prUrl alone is read too", async () => {
+    await gh.setReply(reply({ state: "CLOSED" }, { state: "MERGED" }, { state: "OPEN" }), 0);
+    const several = pr(4, { id: "several", prs: [{ url: prUrl(3) }, { url: prUrl(4) }] });
+    const { seen } = start([several, pr(9, { id: "older" })]);
+    await pollUntil(() => seen.length >= 3, "three readings");
+    expect(seen.slice(0, 3)).toEqual([
+      { id: "several", url: prUrl(4), status: { state: "closed", at: 1234 } },
+      { id: "several", url: prUrl(3), status: { state: "merged", at: 1234 } },
+      { id: "older", url: prUrl(9), status: { state: "open", at: 1234 } },
+    ]);
+    const argv = await gh.argv();
+    expect(argv.filter((arg) => /^n\d=/u.test(arg))).toEqual(["n0=4", "n1=3", "n2=9"]);
+  });
+
+  test("a finished task's PRs are all read in its one read this term", async () => {
+    await gh.setReply(reply({ state: "CLOSED" }, { state: "OPEN" }), 0);
+    const { seen } = start([pr(2, { id: "done", state: "done", prs: [{ url: prUrl(1) }, { url: prUrl(2) }] })]);
+    await pollUntil(() => seen.length >= 2, "both readings");
+    // A non-event cannot be polled for: several intervals, and still the one run.
+    await Bun.sleep(200);
+    expect(await gh.calls()).toBe(1);
+    expect(seen.map((s) => s.url)).toEqual([prUrl(2), prUrl(1)]);
+  });
+
   test("GH_PROMPT_DISABLED=1 reaches the child", async () => {
     await gh.setReply(reply({ state: "OPEN" }), 0);
     const { seen, stop } = start([pr(3)]);
