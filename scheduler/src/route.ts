@@ -267,7 +267,7 @@ function accountInFlight(pass: Pick<Pass, "inFlight" | "accountAt">, accountId: 
   }).length;
 }
 
-function accountOfPlacement(machines: readonly Machine[], placement: Placement): string | null {
+export function accountOfPlacement(machines: readonly Machine[], placement: Placement): string | null {
   return (
     machines.find((m) => m.deviceId === placement.deviceId)?.exclaves?.find((x) => x.id === placement.exclave)
       ?.accountId ?? null

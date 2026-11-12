@@ -1228,10 +1228,18 @@ of M4 has landed.
        window is passed even while its exclave spills into credits, **but only when routing would place
        its successor now**. The guard routes the spec `successorSpec` would build (`succeeds.trigger:
        "quota"`, `succeeds.account` the old account, the predecessor's slot released) through `route`
-       itself and needs a chosen candidate, so a successor held by `quota_over_line` (a successor never
+       itself, with the prompt the real successor will carry (routing reads `/skill` tokens from it), and needs
+       a chosen candidate, so a successor held by `quota_over_line` (a successor never
        spills), `predecessor_account`, auth, a model seat, a skill, traits, the repo or a cap is not
        passed: it would strand `ready`, and the task alerts like any other level instead, once per window.
-       No routing rule is restated in a second place.
+       No routing rule is restated in a second place. _Decided: an auto task alerted for lack of room is
+       stamped `waiting` and its successor's placement is re-checked on every later tick of the window (one
+       route per such task), because the reasons routing says no are often transient (a stale status, a cap,
+       a pause) and credits would otherwise run to the reset, up to 7 days; it is passed once routing would
+       place it, with no second alert._ _Decided: at most one automatic pass is out per slot its successor
+       would take (the machine and the account routing chose), because judged one by one, several tasks
+       filling at once would all count the one free slot; the rest are judged on a later tick, when routing
+       counts the first successor. A simple bound, not a second copy of the caps._
      - **The dedupe** is `Task.quotaExhausted`, keyed on account id, window label and reset (within
        `resetGraceMs`; with no reset, one span of the window), written before the pass or the alert so a
        new leader repeats neither. It is dropped, never fatal, when malformed, and on finishing.
@@ -1244,21 +1252,25 @@ of M4 has landed.
        `detached_head`, `not_launched`, `push_rejected`, `pr_not_open`, `account_unknown`, `here`) alerts at
        once with reason `refused`, no retry. Every attempt is stamped before `pass` is called, so a
        takeover mid-pass never attempts twice. `succeeds.since` is the newest reading's time at the
-       attempt, or the first attempt's time on a retry, so a trigger that waited for a machine to qualify
-       or for room undercounts "time from limit to successor running".
+       attempt; the stamp keeps its `since` across the retry, so a retry counts from the first attempt's
+       reading. A trigger that waited for a machine to qualify or for room undercounts "time from limit to successor running".
      - **One push per event.** A task whose dispatch routing spilled onto this very full window already
        raised the spending spill alert; the window's `quota-exhausted` alert is then written to the stamp
        and logged (`outcome=spill_alerted`) but not pushed. _Decided: the spill alert stands, because it
        already says the window is full and spending, and a second push would only suggest undoing the
-       spill routing chose; passing it is one tap in the PWA._ A forecast spill alert does not count.
+       spill routing chose; passing it is one tap in the PWA._ A forecast spill alert does not count. With no reset on either side the spill alert covers one span of
+       the window, as a stamp does. A retry that gives up with no pass to run is not suppressed: it says the
+       automatic pass failed, which the spill alert did not.
      - **Not offered, not touched.** A `here` task is skipped entirely: it cannot be passed, and an alert
        offering a pass would be refused. A task whose machine is offline or cannot push for a successor
        (`passOffer`) is left alone and looked at each tick, so it acts once the machine qualifies.
        `needs_input`, `not_running` and `conflict` outcomes clear the stamp written ahead while the task is
        not finished and carries no `successor`, so it is looked at again once it is back in `running` (a
        `conflict` is a task that moved mid-push, a `needs-input` answered meanwhile among them);
-       `finished` and `not_found` leave it. A reading that gains a reset after a stamp written without
-       one is the same window (the span rule applies while either side has none).
+       `finished` and `not_found` leave it. A `conflict` after the successor's create (an orphan admission
+       fails `pass_abandoned`) keeps the stamp and alerts, so no second successor is made. A reading that
+       gains a reset after a stamp written without one is the same window unless that reset puts the
+       window's start after the stamp (the span rule applies while either side has none).
      - **Capability.** The daemon advertises `successorAuto`; nothing gates on it yet, it marks the
        leader's version in `status`. An older leader holds a `quota` successor unreadable
        (`parseSucceeds`), the intended gate.

@@ -1429,11 +1429,16 @@ describe("the automatic quota trigger", () => {
     later(s, RETRY_MS);
     await tick(s.scheduler);
     expect(s.scheduler.task("old")?.state).toBe("needs-input");
-    expect(stampOf(s)).toBeUndefined();
+    // The successor was created before the task moved: it is an orphan, so the window is not attempted again
+    // (a second successor), and the owner is told once that the task was not passed.
+    expect(stampOf(s)).toBeDefined();
+    expect(s.alerts.map((a) => a.kind)).toEqual(["quota-exhausted"]);
 
     await s.scheduler.onSession("old", "busy", { deviceId: "a", pane: "%1" });
     await tick(s.scheduler);
-    expect(s.scheduler.task("old")?.state).toBe("superseded");
+    expect(s.scheduler.task("old")?.state).toBe("running");
+    // The failed create, then the orphan's: no third.
+    expect(s.creates).toHaveLength(2);
   });
 
   test.each([
@@ -1582,6 +1587,65 @@ describe("the automatic quota trigger", () => {
       expect(stampOf(s)?.retry).toBeUndefined();
       await tick(s.scheduler);
       expect(s.alerts).toHaveLength(1);
+    });
+
+    test("a skill the prompt names and the other account lacks is no room: the successor carries the prompt", async () => {
+      const s = setup([
+        machine("a", { capabilities: CAPABLE, exclaves: [exclave("main", "org:a", { skills: ["ship"] })] }),
+        machine("b", { capabilities: CAPABLE }),
+      ]);
+      await running(s, true, { ...AUTO, prompt: "/ship PEN-123" });
+      exhaust(s);
+      await tick(s.scheduler);
+      expect(s.creates).toEqual([]);
+      expect(s.scheduler.task("old")?.state).toBe("running");
+      expect(s.alerts.map((a) => a.kind)).toEqual(["quota-exhausted"]);
+    });
+
+    test("an auto task alerted for lack of room is passed once routing has room, with no second alert", async () => {
+      const s = setup(twoMachines());
+      await running(s, true, AUTO);
+      exhaust(s);
+      exhaust(s, { h: 95 }, "b");
+      await tick(s.scheduler);
+      expect(s.alerts.map((a) => a.kind)).toEqual(["quota-exhausted"]);
+      expect(stampOf(s)?.waiting).toBe(true);
+
+      later(s, 60_000);
+      await tick(s.scheduler);
+      expect(s.scheduler.task("old")?.state).toBe("running");
+      expect(s.alerts).toHaveLength(1);
+
+      exhaust(s, { h: 10 }, "b");
+      later(s, 60_000);
+      await tick(s.scheduler);
+      expect(s.scheduler.task("old")?.state).toBe("superseded");
+      expect(s.creates).toHaveLength(1);
+      expect(s.alerts).toHaveLength(1);
+    });
+
+    test("two auto tasks filling at once are not passed into one slot while a pass is still pushing", async () => {
+      const s = setup(twoMachines());
+      await running(s, false, AUTO);
+      const second: Task = { id: "old2", spec: spec(AUTO), state: "queued", createdAt: NOW };
+      await s.store.put(second.id, 0, second);
+      await s.scheduler.refresh(second.id);
+      await tick(s.scheduler);
+      expect(s.scheduler.task("old2")?.state).toBe("running");
+      exhaust(s);
+      const gate = Promise.withResolvers<void>();
+      s.fleet.pushReply = async () => {
+        await gate.promise;
+        return { ok: true, remoteBranch: "feature/x", tip: TIP, pushed: true };
+      };
+      const ticking = s.scheduler.tick();
+      await until(() => s.fleet.pushes.length === 1);
+      await s.scheduler.tick();
+      expect(s.fleet.pushes).toHaveLength(1);
+      gate.resolve();
+      await ticking;
+      await s.scheduler.drain();
+      expect(s.creates.length).toBeGreaterThanOrEqual(1);
     });
   });
 

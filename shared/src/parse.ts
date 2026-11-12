@@ -1348,13 +1348,22 @@ export function parsePrAlertStamp(value: unknown): PrAlertStamp | null {
 
 /** The stamp of the last automatic quota pass or alert, built field by field; null when malformed. */
 export function parseQuotaExhaustedStamp(value: unknown): QuotaExhaustedStamp | null {
-  const keys = new Set(["accountId", "window", "reset", "at", "retry"]);
+  const keys = new Set(["accountId", "window", "reset", "at", "since", "retry", "waiting"]);
   if (!isRecord(value) || !Object.keys(value).every((key) => keys.has(key))) return null;
-  const { accountId, window, reset, at, retry } = value;
+  const { accountId, window, reset, at, since, retry, waiting } = value;
   if (!isAccountId(accountId) || !isName(window, WINDOW_LABEL_MAX_LENGTH)) return null;
   if (!isFiniteNumber(reset) || reset < 0 || !isFiniteNumber(at) || at < 0) return null;
-  if (retry !== undefined && retry !== true) return null;
-  return { accountId, window, reset, at, ...(retry === undefined ? {} : { retry }) };
+  if (since !== undefined && (!isFiniteNumber(since) || since < 0)) return null;
+  if ((retry !== undefined && retry !== true) || (waiting !== undefined && waiting !== true)) return null;
+  return {
+    accountId,
+    window,
+    reset,
+    at,
+    ...(since === undefined ? {} : { since }),
+    ...(retry === undefined ? {} : { retry }),
+    ...(waiting === undefined ? {} : { waiting }),
+  };
 }
 
 /** The leader's pointer to a task's newest landed continuation, built field by field; null when malformed. */

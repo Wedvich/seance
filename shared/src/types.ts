@@ -2549,15 +2549,19 @@ export interface SpillStamp {
 
 /**
  * The window an automatic quota pass or alert fired for (`Task.quotaExhausted`); `reset` is ms, 0 when
- * the reading gave none, `at` when the leader acted (ms, its clock). `retry`: one more attempt is owed,
- * an auto pass having been refused for a reason that can pass.
+ * the reading gave none, `at` when the leader acted (ms, its clock). `since`: the reading's time that
+ * the pass attempts count "time from limit to successor" from, kept across a retry. `retry`: one more
+ * attempt is owed, an auto pass having been refused for a reason that can pass. `waiting`: an auto task
+ * was alerted because routing would not place its successor; the leader looks again each tick.
  */
 export interface QuotaExhaustedStamp {
   readonly accountId: string;
   readonly window: string;
   readonly reset: number;
   readonly at: number;
+  readonly since?: number;
   readonly retry?: true;
+  readonly waiting?: true;
 }
 
 /**

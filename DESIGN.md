@@ -3380,8 +3380,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   warned of past the line alerts once more when a dispatch lands on it full. Until then every
   spill alerted as spending credits from 90% projected, which on a standard seat with one task
   in flight was a window reading 41%. A spend that starts mid-task, with no dispatch onto the
-  full window after it, gets no spending alert from this path (a non-auto task's full window raises
-  `quota-exhausted`, which is not pushed when the dispatch's own spending alert covered that window;
+  full window after it, gets no spending alert from this path (a full window of a task not passed
+  raises `quota-exhausted`, which is not pushed when the dispatch's own spending alert covered that window;
   _Successor_, "The automatic trigger"): the forecast was the warning. Not built: a
   leader watch pushing whenever an extra-usage account reads full, whatever spent it (manual
   sessions too) — it would need its own alert kind and de-dupe. A window is told apart by its
@@ -7454,13 +7454,18 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   when malformed, unlike `spillAlert`) before it passes or alerts, so a new leader repeats neither; it is
   dropped on finishing. An `auto` task is passed only when routing would place its successor now: the
   leader routes the spec `successorSpec` builds (`succeeds.trigger: "quota"`, the old account, the
-  predecessor's slot released) and needs a chosen candidate, so no filter is restated; otherwise it alerts,
-  as does every other level. A task whose machine fails `passOffer` is left for the next tick, a `here`
+  predecessor's slot released, the prompt `successorPrompt` will give it) and needs a chosen candidate, so no
+  filter is restated; otherwise it alerts, as does every other level, and an auto task so alerted is stamped
+  `waiting`: its successor's placement is re-checked every tick of the window and it is passed without a
+  second alert once routing would place it. At most one automatic pass is out per slot (machine, account)
+  its successor would take, the rest judged on a later tick. A task whose machine fails `passOffer` is left for the next tick, a `here`
   task is never touched, and neither gets an alert. A refusal that can pass (and a pass that throws) is
   retried once after `quotaPassRetryMs` (5 min), then alerts; a retry that comes due with no pass to run
   alerts too. A refusal waiting cannot clear alerts at once as reason `refused`; dirty and mismatched
   branches as `dirty` and `branch`. A `needs_input`, `not_running` or `conflict` outcome clears the stamp
-  while the task is unfinished with no `successor`, so it is looked at again. A task whose dispatch
+  while the task is unfinished with no `successor`, so it is looked at again; a `conflict` after the
+  successor's create keeps it and alerts, so no second successor is made. A stamp's `since` survives the
+  retry. A task whose dispatch
   routing spilled onto the very window that is full has already had the spending spill alert: the
   `quota-exhausted` one is stamped and logged, not pushed. A session's own pass the leader refuses
   raises `pass-refused` (once per task per term). The log carries `successor placed after=<ms>

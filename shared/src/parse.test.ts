@@ -1016,12 +1016,16 @@ describe("tasks and their records", () => {
     const stamp = { accountId: "org:a", window: "7d sonnet", reset: 0, at: 9 };
     const stamped: Task = { ...task, state: "running", quotaExhausted: stamp };
     expect(parseTask(stamped)).toEqual(stamped);
-    const retrying: Task = { ...stamped, quotaExhausted: { ...stamp, retry: true } };
+    const retrying: Task = { ...stamped, quotaExhausted: { ...stamp, since: 3, retry: true } };
     expect(parseTask(retrying)).toEqual(retrying);
+    const waiting: Task = { ...stamped, quotaExhausted: { ...stamp, waiting: true } };
+    expect(parseTask(waiting)).toEqual(waiting);
     const { quotaExhausted: _stamp, ...bare } = stamped;
     for (const bad of [
       { ...stamp, extra: 1 },
       { ...stamp, retry: false },
+      { ...stamp, waiting: false },
+      { ...stamp, since: -1 },
       { ...stamp, window: "" },
       { ...stamp, window: "w".repeat(65) },
       { ...stamp, accountId: "" },

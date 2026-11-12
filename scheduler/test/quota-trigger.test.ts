@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { DEFAULT_CONFIG, type Task } from "../src/index.ts";
-import { quotaDue, stampQuota } from "../src/quota-trigger.ts";
+import { quotaDue, spillAlerted, stampQuota } from "../src/quota-trigger.ts";
 import type { Exhaustion } from "../src/route.ts";
 import { NOW, spec } from "./fixtures.ts";
 
@@ -47,6 +47,14 @@ describe("quotaDue", () => {
     expect(quotaDue(stamped, { ...EX, reset: RESET + CONFIG.resetGraceMs }, NOW, CONFIG)).toBeNull();
   });
 
+  test("a reading whose reset puts the window's start after a reset-less stamp is a new window", () => {
+    const none = { ...EX, reset: 0 };
+    const stamped = stampQuota(running(), none, NOW, false) as Task;
+    const span = 5 * 3_600_000;
+    expect(quotaDue(stamped, { ...EX, reset: NOW + span - 60_000 }, NOW + 60_000, CONFIG)).toBeNull();
+    expect(quotaDue(stamped, { ...EX, reset: NOW + 2 * span }, NOW + 4.5 * 3_600_000, CONFIG)).toBe("act");
+  });
+
   test("with no reset the stamp holds for one span of the window", () => {
     const none = { ...EX, reset: 0 };
     const stamped = stampQuota(running(), none, NOW, false) as Task;
@@ -85,6 +93,24 @@ describe("quotaDue", () => {
   });
 });
 
+describe("spillAlerted", () => {
+  const spilled = (reset: number, at = NOW): Task =>
+    running({ spillAlert: { accountId: "org:a", window: "5h", reset, at, spending: true } });
+
+  test("matches the window by reset within the grace, and a forecast never counts", () => {
+    expect(spillAlerted(spilled(RESET), EX, NOW, CONFIG)).toBe(true);
+    expect(spillAlerted(spilled(RESET + 3_600_000), EX, NOW, CONFIG)).toBe(false);
+    const forecast = running({ spillAlert: { accountId: "org:a", window: "5h", reset: RESET, at: NOW } });
+    expect(spillAlerted(forecast, EX, NOW, CONFIG)).toBe(false);
+  });
+
+  test("with no reset on either side the alert holds for one span, not for ever", () => {
+    expect(spillAlerted(spilled(0), EX, NOW + 4 * 3_600_000, CONFIG)).toBe(true);
+    expect(spillAlerted(spilled(0), EX, NOW + 5 * 3_600_000, CONFIG)).toBe(false);
+    expect(spillAlerted(spilled(RESET), { ...EX, reset: 0 }, NOW + 5 * 3_600_000, CONFIG)).toBe(false);
+  });
+});
+
 describe("stampQuota", () => {
   test("stamps the window, with retry only when one is owed", () => {
     expect(stampQuota(running(), EX, NOW, false)?.quotaExhausted).toEqual({
@@ -92,8 +118,26 @@ describe("stampQuota", () => {
       window: "5h",
       reset: RESET,
       at: NOW,
+      since: EX.since,
     });
     expect(stampQuota(running(), EX, NOW, true)?.quotaExhausted).toMatchObject({ retry: true });
+  });
+
+  test("a retry keeps the first attempt's since, whatever later readings say", () => {
+    const first = stampQuota(running(), EX, NOW, true) as Task;
+    const later = { ...EX, since: NOW + 600_000 };
+    expect(stampQuota(first, later, NOW + 700_000, true)?.quotaExhausted?.since).toBe(EX.since);
+    expect(stampQuota(first, later, NOW + 700_000, false)?.quotaExhausted?.since).toBe(EX.since);
+    const plain = stampQuota(running(), EX, NOW, false) as Task;
+    expect(stampQuota(plain, later, NOW + 700_000, false)?.quotaExhausted?.since).toBe(later.since);
+  });
+
+  test("a waiting stamp is rechecked every tick, and a pass attempt's stamp is not waiting", () => {
+    const waiting = stampQuota(running(), EX, NOW, false, true) as Task;
+    expect(quotaDue(waiting, EX, NOW + 60_000, CONFIG)).toBe("recheck");
+    expect(quotaDue(waiting, { ...EX, reset: RESET + 86_400_000 }, NOW + 60_000, CONFIG)).toBe("act");
+    const attempted = stampQuota(waiting, EX, NOW + 60_000, false) as Task;
+    expect(quotaDue(attempted, EX, NOW + 120_000, CONFIG)).toBeNull();
   });
 
   test("declines a task that is no longer running, so a write that lost a race stamps nothing", () => {
