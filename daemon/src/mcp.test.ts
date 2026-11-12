@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, describe, expect, jest, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -3609,13 +3609,11 @@ describe("pass_to_successor", () => {
     assignment: { ...AT, window: "fix-it" },
   });
   const ACK = { taskId: "t-1", remoteBranch: "feature/x", tip: "a".repeat(40), pushed: true };
-  /** Short enough that a test of the window running out is quick. */
-  const FAST: PassPoll = { windowMs: 60, everyMs: 10 };
   /**
-   * For a confirmation that does land: the poll returns at the read that finds it, so a wide window costs
-   * nothing, where a 60 ms one is a latent flake — three reads 10 ms apart overran it on a busy macOS runner.
+   * Production's shape. The poll runs on a fake clock, so the window costs no wall time and a busy runner
+   * cannot overrun it: the read count is exact.
    */
-  const ROOMY: PassPoll = { windowMs: 10_000, everyMs: 10 };
+  const POLL: PassPoll = { windowMs: 30_000, everyMs: 1_000 };
 
   /** The leader (device-1), advertising `successorSelf` unless held back. */
   function leaderMachines(capable = true): Machine[] {
@@ -3634,7 +3632,6 @@ describe("pass_to_successor", () => {
       readonly queued?: (n: number) => readonly Task[];
       readonly machines?: readonly Machine[];
       readonly leading?: boolean;
-      readonly poll?: PassPoll;
     } = {},
   ): Promise<{
     text: string;
@@ -3663,16 +3660,41 @@ describe("pass_to_successor", () => {
         signals.push(passOpts?.signal);
         return Promise.resolve(opts.pass ?? { ok: true, text: "pushed", pass: ACK });
       },
-      opts.poll ?? FAST,
+      POLL,
     );
+    // Faked only once connected, so the handshake runs on real time; the call's own timers then fire only
+    // as the loop below moves the clock, one poll interval per step.
+    jest.useFakeTimers();
     try {
-      const result = await client.callTool({
-        name: "pass_to_successor",
-        arguments: { record: opts.record ?? "done: a; left: b" },
-      });
+      let settled = false;
+      const call = client
+        .callTool({ name: "pass_to_successor", arguments: { record: opts.record ?? "done: a; left: b" } })
+        .finally(() => {
+          settled = true;
+        });
+      // Past the window with a step to spare: a poll that outlives it fails here, not as a test timeout.
+      for (let step = 0; step <= POLL.windowMs / POLL.everyMs + 1; step += 1) {
+        // oxlint-disable-next-line no-await-in-loop -- each step waits for the call's chain to land
+        await settle();
+        if (settled) break;
+        jest.advanceTimersByTime(POLL.everyMs);
+      }
+      expect(settled).toBe(true);
+      const result = await call;
       return { text: toolText(result), error: result.isError === true, passed, queueReads: reads, signals };
     } finally {
+      jest.useRealTimers();
       lazy.stop();
+    }
+  }
+
+  /** Lets the call's promise chain land; no timer fires meanwhile, the clock being fake. */
+  async function settle(): Promise<void> {
+    for (let round = 0; round < 20; round += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- each round is one turn of the event loop
+      await new Promise((resolve) => {
+        setImmediate(resolve);
+      });
     }
   }
 
@@ -3756,7 +3778,6 @@ describe("pass_to_successor", () => {
   test("the confirmation is polled for, and found when it lands within the window", async () => {
     const result = await callSelf({
       queued: (n) => [n < 2 ? active : { ...active, successor: "t-2" }],
-      poll: ROOMY,
     });
     expect(result.text).toContain("recorded successor t-2");
     expect(result.queueReads).toBe(3);
@@ -3767,7 +3788,8 @@ describe("pass_to_successor", () => {
     expect(result.error).toBe(false);
     expect(result.text).toContain("the branch is pushed but no successor was recorded yet");
     expect(result.text).toContain("end your turn now");
-    expect(result.queueReads).toBeGreaterThan(1);
+    // One read at the start and one per interval through the window's last instant.
+    expect(result.queueReads).toBe(31);
   });
 
   test("an ok with no ack has nothing to confirm and says only that it was sent", async () => {
