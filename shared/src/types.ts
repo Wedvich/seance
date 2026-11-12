@@ -679,6 +679,7 @@ export type OpName =
   | "rescan"
   | "metrics"
   | "push-branch"
+  | "pass-close"
   | AtRestOp
   | EventOp
   | SchedulerOp;
@@ -721,6 +722,7 @@ export type SchedulerOp = (typeof SCHEDULER_OPS)[number];
  * a pass: the PR head read 15 s, `push-branch` 90 s, the create 10 s, the overwrite
  * with its retries about 30 s, then the `sessions` read 10 s and the despawn 20 s,
  * about 175 s. A client that gives up early retries safely (one pass per task at a time).
+ * `pass-close` answers at once (the daemon arms a close and never waits for it).
  */
 export const OP_TIMEOUT_MS = {
   sessions: 10_000,
@@ -740,6 +742,7 @@ export const OP_TIMEOUT_MS = {
   "push-unsubscribe": 10_000,
   pass: 180_000,
   "push-branch": 90_000,
+  "pass-close": 10_000,
 } as const satisfies Record<RequestOp, number>;
 
 /**
@@ -1047,9 +1050,11 @@ export interface MachineInfo {
  * `push-branch`; as a leader, answers `pass` and routes and admits a task carrying
  * `spec.succeeds`. What `pass_task`, the PWA and the CLI check of the verified leader,
  * and what a leader checks of the old task's machine before it asks for a push. The
- * session's own path needs a capability of its own (`successorSelf`, not built): a
- * leader advertising only this one would drop its `session-pass` event and time the
- * tool out on every attempt.
+ * session's own path has a capability of its own (`successorSelf`): a leader advertising
+ * only `successor` would drop a session's `session-pass` event and time the tool out on
+ * every attempt. `successorSelf`: as a daemon, ingests the `pass` frame of its local socket
+ * and answers `pass-close`; as a leader, ingests `session-pass`. What `pass_to_successor`
+ * checks of the verified leader.
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -1067,6 +1072,7 @@ export const CAPABILITIES = {
   authHealth: "authHealth",
   traits: "traits",
   successor: "successor",
+  successorSelf: "successorSelf",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -1598,6 +1604,28 @@ export type PushBranchResponse =
   | { readonly ok: true; readonly remoteBranch: string; readonly tip: string; readonly pushed: boolean }
   | { readonly ok: false; readonly code: PushBranchErrorCode; readonly message: string };
 
+/**
+ * `op: "pass-close"`, scheduler → the daemon holding a task, sealed `from: SCHEDULER_ID` (or the leader in
+ * process): the leader has written the commit point of a pass its session asked for, so the daemon may close
+ * that session at the end of its turn (DESIGN.md, "Session events", `pass`). The task names the pane through
+ * the daemon's own pane map, never a pane from the wire.
+ */
+export interface PassCloseRequest {
+  readonly taskId: string;
+}
+
+/**
+ * Answered at once, never after the close. `no_pane`: no live pane carries the task, so the session is
+ * already gone. `unsupported`: this daemon runs no ingest to arm.
+ */
+export const PASS_CLOSE_ERROR_CODES = ["no_pane", "unsupported", "invalid_request", ...TRANSPORT_ERROR_CODES] as const;
+
+export type PassCloseErrorCode = (typeof PASS_CLOSE_ERROR_CODES)[number];
+
+export type PassCloseResponse =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly code: PassCloseErrorCode; readonly message: string };
+
 export interface SessionsResponse {
   readonly sessions: readonly SessionEntry[];
   readonly at: number;
@@ -1777,6 +1805,28 @@ export interface SessionEvent {
    * session claimed it, kept only as `isToolName` passes it. Display-only.
    */
   readonly tool?: string;
+  /** Observed at by the daemon, ms. */
+  readonly at: number;
+}
+
+/**
+ * `op: "session-pass"`, daemon → scheduler, sealed to `SCHEDULER_ID`, fire-and-forget: a session asked to
+ * pass its own task to a successor and its daemon has already pushed the branch (DESIGN.md, "Session
+ * events", `pass`). Like `SessionEvent`, every field is the daemon's own (the task and pane from its pane
+ * map, `exclave` from the pane's path, `remoteBranch` and `tip` from its own push), except `record`: the
+ * session's claim, prompt text for the successor, at most `SUCCESSOR_RECORD_MAX` UTF-16 units, never
+ * logged and never used to bind, route or close anything.
+ */
+export interface SessionPass {
+  /** `SessionEntry.id` — the pane. */
+  readonly session: string;
+  readonly taskId: string;
+  readonly exclave: string;
+  /** The branch on `origin` the daemon pushed to; the leader compares it with the task's PR head. */
+  readonly remoteBranch: string;
+  /** The commit it holds. */
+  readonly tip: string;
+  readonly record?: string;
   /** Observed at by the daemon, ms. */
   readonly at: number;
 }

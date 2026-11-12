@@ -26,6 +26,7 @@ import {
   PR_MERGE_STATES,
   PR_STATES,
   PUSH_ALERT_MAX_BYTES,
+  PASS_CLOSE_ERROR_CODES,
   PUSH_BRANCH_ERROR_CODES,
   PUSH_ENDPOINT_MAX_LENGTH,
   PUSH_LABEL_MAX_LENGTH,
@@ -48,6 +49,7 @@ import {
   STORE_KEY_PATTERN,
   STORE_PREFIXES,
   SUCCESSOR_DEP_SENTINEL,
+  SUCCESSOR_RECORD_MAX,
   SUCCESSOR_TRIGGERS,
   TARGET_LIMITS,
   TASK_FAILURE_LIMITS,
@@ -60,6 +62,8 @@ import {
   type BatchMembership,
   type FleetQuotaEntry,
   type FleetQuotaRecord,
+  type PassCloseRequest,
+  type PassCloseResponse,
   type PassReply,
   type PushAlert,
   type PushBranchRequest,
@@ -70,6 +74,7 @@ import {
   type PushUnsubscribeReply,
   type PushUnsubscribeRequest,
   type QuotaReading,
+  type SessionPass,
   type SettingsRecord,
   type AuthAlerted,
   type DiskAlerted,
@@ -715,6 +720,27 @@ export function parseSessionEvent(value: unknown): SessionEvent | null {
     ...(state === "needs-input" && isNeedsInputReason(reason) ? { reason } : {}),
     ...(state === "needs-input" && reason === "permission" && isToolName(tool) ? { tool } : {}),
   };
+}
+
+/**
+ * The leader's check on a forwarded `session-pass`, as `parseSessionEvent` is: the sealer is a PSK holder
+ * that bound the task id and pane itself, so this is skew and bug hygiene, plus the two values the leader
+ * acts on, which are held as hard as a `push-branch` answer's: `remoteBranch` is compared to a PR head and
+ * named in a prompt (`isBranchName`), `tip` is named in it too (a commit id). A `record` over
+ * `SUCCESSOR_RECORD_MAX` UTF-16 units, or one that is empty or not a string, nulls the event: cutting
+ * it here would hide a daemon that did not enforce its own bound.
+ */
+export function parseSessionPass(value: unknown): SessionPass | null {
+  if (!isRecord(value)) return null;
+  const { session, taskId, exclave, remoteBranch, tip, record, at } = value;
+  if (typeof session !== "string" || session === "" || session.length > ROUTING_ID_MAX_LENGTH) return null;
+  if (!isTaskId(taskId) || typeof exclave !== "string" || exclave.length > ROUTING_ID_MAX_LENGTH) return null;
+  if (!isBranchName(remoteBranch) || typeof tip !== "string" || !COMMIT_OID.test(tip)) return null;
+  if (!isFiniteNumber(at)) return null;
+  if (record !== undefined && (typeof record !== "string" || record === "" || record.length > SUCCESSOR_RECORD_MAX)) {
+    return null;
+  }
+  return { session, taskId, exclave, remoteBranch, tip, at, ...(record === undefined ? {} : { record }) };
 }
 
 function isBoundedString(value: unknown, max: number): value is string {
@@ -1820,6 +1846,20 @@ export function parsePushBranchResponse(value: unknown): PushBranchResponse | nu
     return null;
   }
   return typeof pushed === "boolean" ? { ok: true, remoteBranch, tip, pushed } : null;
+}
+
+/** `pass-close`, at the daemon holding the task. */
+export function parsePassCloseRequest(value: unknown): PassCloseRequest | null {
+  return isRecord(value) && isTaskId(value["taskId"]) ? { taskId: value["taskId"] } : null;
+}
+
+/** A `pass-close` answer at the leader: only the fields it acts on, a code it does not know reading as a failure to arm. */
+export function parsePassCloseResponse(value: unknown): PassCloseResponse | null {
+  if (!isRecord(value)) return null;
+  if (value["ok"] === true) return { ok: true };
+  const code = PASS_CLOSE_ERROR_CODES.find((c) => c === value["code"]);
+  if (value["ok"] !== false || code === undefined || typeof value["message"] !== "string") return null;
+  return { ok: false, code, message: value["message"] };
 }
 
 /** `pause`, at the leader. `reset` without an account is malformed: it would be no account's reset. */

@@ -3,9 +3,12 @@ import type { Machine } from "./app-client.ts";
 import { importPsk, openAtRest, sealAtRest, toBase64 } from "./crypto.ts";
 import {
   bindTaskRecord,
+  parsePassCloseRequest,
+  parsePassCloseResponse,
   parsePassReply,
   parsePushBranchRequest,
   parsePushBranchResponse,
+  parseSessionPass,
   parseTask,
   parseTaskSpec,
 } from "./parse.ts";
@@ -20,6 +23,7 @@ import {
   STORE_CREATE_MAX_CT_LENGTH,
   SUCCESSOR_DEP_SENTINEL,
   SUCCESSOR_PROMPT_BYTES,
+  SUCCESSOR_RECORD_MAX,
   TASK_REQUEST_LIMITS,
   type Assignment,
   type Task,
@@ -424,5 +428,57 @@ describe("push-branch and pass on the wire", () => {
     expect(parsePassReply({ ok: false, code: "dirty_worktree", message: "m" })).toMatchObject({ ok: false });
     expect(parsePassReply({ task: old, successorId: "bad id!", successor: null })).toBeNull();
     expect(parsePassReply({ task: { id: "x" }, successorId: "t-new", successor: null })).toBeNull();
+  });
+});
+
+describe("the session's own pass on the wire", () => {
+  const pass = { session: "%3", taskId: "t-old", exclave: "default", remoteBranch: "feature/x", tip: TIP, at: NOW };
+
+  test("session-pass: the daemon's fields held hard, the record bounded and never cut", () => {
+    expect(parseSessionPass(pass)).toEqual(pass);
+    expect(parseSessionPass({ ...pass, record: "done: a; left: b" })).toEqual({ ...pass, record: "done: a; left: b" });
+    expect(parseSessionPass({ ...pass, record: "x".repeat(SUCCESSOR_RECORD_MAX) })?.record).toHaveLength(
+      SUCCESSOR_RECORD_MAX,
+    );
+    // The same bound the daemon holds the frame to, counted in UTF-16 units: an over-long one is refused whole.
+    for (const bad of [
+      { ...pass, record: "x".repeat(SUCCESSOR_RECORD_MAX + 1) },
+      { ...pass, record: "" },
+      { ...pass, record: 7 },
+      { ...pass, remoteBranch: "bad..name" },
+      { ...pass, remoteBranch: "-x" },
+      { ...pass, tip: "xyz" },
+      { ...pass, tip: TIP.toUpperCase() },
+      { ...pass, taskId: "../x" },
+      { ...pass, session: "" },
+      { ...pass, exclave: "e".repeat(300) },
+      { ...pass, at: "now" },
+      { ...pass, at: Number.NaN },
+      null,
+      "pass",
+    ]) {
+      expect(parseSessionPass(bad)).toBeNull();
+    }
+  });
+
+  test("pass-close: a task id and nothing else carried on", () => {
+    expect(parsePassCloseRequest({ taskId: "t-old" })).toEqual({ taskId: "t-old" });
+    expect(parsePassCloseRequest({ taskId: "t-old", pane: "%1" })).toEqual({ taskId: "t-old" });
+    for (const bad of [{}, { taskId: "../x" }, { taskId: 3 }, null, "t-old"]) {
+      expect(parsePassCloseRequest(bad)).toBeNull();
+    }
+    expect(parsePassCloseResponse({ ok: true })).toEqual({ ok: true });
+    expect(parsePassCloseResponse({ ok: false, code: "no_pane", message: "m" })).toEqual({
+      ok: false,
+      code: "no_pane",
+      message: "m",
+    });
+    for (const bad of [{ ok: false, code: "nope", message: "m" }, { ok: false, code: "no_pane" }, { ok: 1 }, null]) {
+      expect(parsePassCloseResponse(bad)).toBeNull();
+    }
+  });
+
+  test("a machine's capabilities name the two paths apart", () => {
+    expect(CAPABILITIES.successorSelf).not.toBe(CAPABILITIES.successor);
   });
 });
