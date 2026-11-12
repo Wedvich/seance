@@ -410,7 +410,7 @@ of M4 has landed.
 | 2     | Auth health — **Done**                                             | Web Push (built); spiked 2026-11-12                                    | M                        |
 | 2     | Traits: core — **Done** (#406)                                     | auth health's status lists (shape to copy)                             | M–L                      |
 | 2     | Traits: probes — **Done** (#409)                                   | traits core                                                            | M                        |
-| 2     | Traits: keep free (new)                                            | traits core                                                            | S                        |
+| 2     | Traits: keep free — **Done** (PR #<n>)                             | traits core                                                            | S                        |
 | 2     | Linear                                                             | settings; authoring surface                                            | L                        |
 | 2     | Successor (new) — spec 2026-11-12                                  | account records; fleet quota record; Web Push                          | M–L                      |
 | Later | LXC pressure view (was: Proxmox node view)                         | —                                                                      | S                        |
@@ -981,14 +981,15 @@ of M4 has landed.
     enqueue check is what keeps that rare.
   - _Decided, "keep me free":_ a trait may say `keepFree: true` — "prefer not to place tasks here
     that don't need this". Built as a score component, never a filter: a candidate exclave with a
-    `keepFree` trait the task does not require scores lower (`keepFree`, weight 4, beside
-    `machinePressure`), so the Mac fills last instead of never. `avoid` stays for "never here".
+    `keepFree` trait the task does not require scores worse (a `keepFree` component of 1, weight 4,
+    beside `machinePressure`: its total rises by 4, and a lower total wins), so the Mac fills last
+    instead of never. Binary: several kept-free traits still cost one. `avoid` stays for "never here".
     Advertised as `ExclaveInfo.keepFree` (names). An older leader ignores the extra component
     (`parseScore` ignores extra keys). Rejected: a filter (a busy fleet would then refuse work the
     Mac could take), and a per-task "prefer not" list (that is `avoid` again).
   - _PRs:_ (1) core — **built** (#406; DESIGN.md "Traits filter"); config, `ExclaveInfo.traits`, `TaskSpec.requires` with the sentinel, the
     filter and both reasons (`trait_unhealthy` parsed and worded, emitted by PR 2), MCP/CLI/PWA authoring, `get_queue`/PWA text, `CAPABILITIES.traits`;
-    (2) probes — **built** (#409; DESIGN.md "Trait probes"): `tf`/`tu` in status, `trait_unhealthy`; (3) `keepFree`. Each with its DESIGN.md
+    (2) probes — **built** (#409; DESIGN.md "Trait probes"): `tf`/`tu` in status, `trait_unhealthy`; (3) `keepFree` — **built** (PR #<n>; DESIGN.md "Traits filter", "Keep free"). Each with its DESIGN.md
     subsection and threat-model entry (probes run operator-configured commands: a new exec
     surface, audited under its own origin `probe`).
 - **Offline machines and the caps** (checked 2026-11-12; already decided, no change) — a task in
@@ -1014,8 +1015,24 @@ of M4 has landed.
     (`trait_absent`/`trait_unhealthy`), and one per client refusal of an unknown trait (logged by
     the client); tasks held, for how long, and by which trait.
   - `avoid`: the leader logs, per admitted task, whether it carries `avoid`, `requires` or a pin
-    (counts only, no ids or names); the share of tasks with `avoid` before traits ship and a
-    month after `keepFree` does says whether the workaround went away.
+    (counts only, no ids or names); the share of tasks with `avoid` before `keepFree` ships and a
+    month after it does says whether the workaround went away. The counts exist only from the traits-core
+    deploy (#406), so "before" is the window between that deploy and the `keepFree` deploy; there is no
+    pre-traits baseline (earlier admit lines carry no counts, and no earlier line records `avoid`). Owner,
+    monthly, on every machine that has led the scheduler; not a pass/fail gate:
+
+    ```sh
+    grep -h ' op=admit ' ~/.local/state/seance/seanced.log \
+    | awk '{ match($0, /task="[^"]*"/); id=substr($0,RSTART,RLENGTH); if (seen[id]++) next;
+             month=substr($1,1,7); total[month]++; if ($0 !~ / avoid=0 /) avoid[month]++ }
+           END { for (m in total) printf "%s admitted=%d with_avoid=%d share=%.0f%%\n", m, total[m], avoid[m], 100*avoid[m]/total[m] }' \
+    | sort
+    ```
+
+    To count across leaders, feed the logs of all of them into the `grep` (e.g. `ssh <box> cat
+    …/seanced.log`), so a task admitted under two leaders counts once. The "after" share is the month
+    starting a month after the `keepFree` deploy; a falling share means `avoid` was standing in for
+    "keep this machine free".
 
 - **Spawn defaults to the scheduler** — **Done** (owner, 2026-10-25; PRs #309, #310 and #311): every
   spawn is a task, a machine or an account is a pin on it, and a task's pin and `avoid` show on
@@ -1453,7 +1470,8 @@ same PR, with the reason.
    out-of-fleet use becomes routine.
 8. **Score weights and the rest of `SchedulerConfig`** (set with the library, 2026-10-16;
    `scheduler/src/config.ts` is the copy that runs): weights account 1, machine 4,
-   dependency 4, queue 1; sticky bonus 2; per-task estimate 5% of a 5h window and 1% of a
+   dependency 4, queue 1, keepFree 4 (a flat 0/1, added with traits, 2026-11-12: it costs what a
+   fully loaded machine does); sticky bonus 2; per-task estimate 5% of a 5h window and 1% of a
    weekly (all-models or per-model); global max 8 in-flight tasks; a reservation's TTL 240 s
    (`reservationTtlMs`; 120 s, twice the replay window, until attachments (DESIGN.md, 2026-10-28)
    put a download of up to 120 s before launch: it outlives the leader's 210 s wait for a spawn

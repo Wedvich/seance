@@ -212,8 +212,10 @@ Edit `~/.config/seance/config.json`:
   sets and a shell does not. Test the command as the installed service sees it, not only from your
   terminal: a CLI that keeps its login in the macOS keychain or a keyring (`az`, `gh`) can pass in a
   shell and fail in the service. Each probe is audited as `origin=probe` in the daemon log with a
-  word count, a short hash and the program's name, never the arguments. `keepFree` is refused until
-  it is built.
+  word count, a short hash and the program's name, never the arguments. A trait may also say
+  `"keepFree": true`: tasks that don't require it prefer other machines, and it still takes work
+  when nothing better is free (a score penalty, never a filter). Update the machine before setting
+  it: an older daemon refuses the key.
 
 Optional: `~/.exclaves` lists extra Claude Code accounts on the box, one name per line.
 Each name is a tree at `~/<name>` whose sessions use the config dir `~/.claude-<name>`;
