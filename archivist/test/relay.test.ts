@@ -136,6 +136,7 @@ describe("seance-archivist against the real relay", () => {
 
 /** Present in every prompt this suite writes; the archive's bytes must never hold it. */
 const PROMPT_MARKER = "PROMPT-MARKER-7f3a";
+const SLUG = "prompt-slug-9c1e-rotate-the-key";
 const ACCOUNT = "0f0e0d0c-0b0a-0908-0706-050403020100:00010203-0405-0607-0809-0a0b0c0d0e0f";
 const BUILD = "0123456789abcdef0123456789abcdef01234567";
 
@@ -243,7 +244,15 @@ describe("collection against the real relay", () => {
 
     // Before the archivist starts: a finished task with its prompt still on it, a queued one, and a record no key opens.
     expect(await writer.createTask(queued("arch-a"))).toEqual({ ok: true, landedEarlier: false });
-    await settle(ran("arch-a", { pr: { state: "open", at: Date.now() } }), 2);
+    // A title-less task's window and branch are slugged from its prompt; neither may reach the archive.
+    await settle(
+      ran("arch-a", {
+        pr: { state: "open", at: Date.now() },
+        assignment: { deviceId: leaderId, exclave: "default", clone: "seance", window: SLUG, pane: "%1" },
+        branch: `worktree-${SLUG}`,
+      }),
+      2,
+    );
     expect(await writer.createTask(queued("arch-b"))).toEqual({ ok: true, landedEarlier: false });
     const raw = await connectApp(relay);
     try {
@@ -277,6 +286,7 @@ describe("collection against the real relay", () => {
     expect(row).toMatchObject({ version: 2, state: "done", machine: "leader-box" });
     expect(row?.account).toBe(await accountStoreKey(accountKey, ACCOUNT));
     expect(row?.record).not.toContain(PROMPT_MARKER);
+    expect(row?.record).not.toContain(SLUG);
     // Neither the queued task nor the record nothing opens is archived; the unreadable one is still in the store.
     expect(taskAt("arch-b")).toBeUndefined();
     expect(taskAt("arch-junk")).toBeUndefined();
@@ -322,6 +332,7 @@ describe("collection against the real relay", () => {
       const bytes = await readFile(join(seatStateDir, name), "latin1");
       expect(bytes.includes(ACCOUNT)).toBe(false);
       expect(bytes.includes(PROMPT_MARKER)).toBe(false);
+      expect(bytes.includes(SLUG)).toBe(false);
     }
   });
 

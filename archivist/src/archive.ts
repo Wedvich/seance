@@ -10,7 +10,11 @@ import { forgetPrompt, TASK_PHASES, type Task } from "@seance/shared";
  * the task record's own.
  */
 
-/** What a fleet event records (A18). `gone`: a machine seen connected is not, or its entry left the registry. */
+/**
+ * What a fleet event records (A18). `gone`: a machine that was up is not, whether
+ * it disconnected or its entry left the registry. A machine already down when its
+ * entry leaves writes none: its row's `in_registry` and `updated_at` say when.
+ */
 export const FLEET_EVENT_KINDS = ["first_seen", "connected", "gone", "build_changed", "term_changed"] as const;
 export type FleetEventKind = (typeof FLEET_EVENT_KINDS)[number];
 
@@ -109,13 +113,36 @@ export interface TaskContext {
  * A task as the archive may hold it: `forgetPrompt` (prompt and attachment
  * manifest gone, A14), and the two fields that carry a raw account id
  * (`spec.pin.account`, `spillAlert`) dropped, since the archive names an
- * account only by its store key (A15).
+ * account only by its store key (A15). Also gone is everything the daemon or
+ * the router derives from prompt text, which the store prunes and the archive
+ * would keep for good: `assignment.window` and `branch` (a title-less task's
+ * slug is the prompt's first words), `failure.message` (a daemon's text, which
+ * may name the worktree) and `decision` (a `skill_absent` reason carries a
+ * `/skill` read off the prompt). `failure.code` and the placement stay.
  */
 export function archivedTask(task: Task): Task {
-  const { spillAlert: _spill, spec, ...rest } = forgetPrompt(task);
+  const {
+    spillAlert: _spill,
+    decision: _decision,
+    branch: _branch,
+    spec,
+    assignment,
+    failure,
+    ...rest
+  } = forgetPrompt(task);
   const { pin, ...specRest } = spec;
   const deviceId = pin?.deviceId;
-  return { ...rest, spec: { ...specRest, ...(deviceId === undefined ? {} : { pin: { deviceId } }) } };
+  return {
+    ...rest,
+    spec: { ...specRest, ...(deviceId === undefined ? {} : { pin: { deviceId } }) },
+    ...(assignment === undefined ? {} : { assignment: withoutWindow(assignment) }),
+    ...(failure === undefined ? {} : { failure: { ...failure, message: "" } }),
+  };
+}
+
+function withoutWindow(assignment: NonNullable<Task["assignment"]>): NonNullable<Task["assignment"]> {
+  const { window: _window, ...rest } = assignment;
+  return rest;
 }
 
 /** The row for a finished task (A16); null for any other, which the archive never keeps. */
@@ -171,6 +198,17 @@ export class Archive {
 
   private constructor(db: Database) {
     this.#db = db;
+    try {
+      this.#init(db);
+    } catch (err) {
+      db.close();
+      throw err;
+    }
+  }
+
+  #init(db: Database): void {
+    // A purge or a read-write shell on the same file is expected (A23): wait briefly for its lock, not fail at once.
+    db.exec("PRAGMA busy_timeout = 2000");
     db.exec("PRAGMA journal_mode = WAL");
     db.exec("PRAGMA synchronous = NORMAL");
     db.transaction(() => {
@@ -212,8 +250,10 @@ export class Archive {
 
   /**
    * Writes the row when the archive holds none or holds it at a lower store
-   * version (A16): a later PR reading lands, an older blob never wins. A name or
-   * account the caller could not resolve this time keeps the one already held.
+   * version (A16): a later PR reading lands, an older blob never wins. A name the
+   * caller could not resolve this time keeps the one already held, and the account
+   * is the first one resolved: a later reading never moves a task to the account
+   * its exclave holds by then.
    */
   upsertTask(row: TaskRow, now: number): boolean {
     const result = this.#db
@@ -224,7 +264,7 @@ export class Archive {
          ON CONFLICT (id) DO UPDATE SET
            version = excluded.version, state = excluded.state, repo = excluded.repo, title = excluded.title,
            created_at = excluded.created_at, device_id = excluded.device_id,
-           machine = coalesce(excluded.machine, tasks.machine), account = coalesce(excluded.account, tasks.account),
+           machine = coalesce(excluded.machine, tasks.machine), account = coalesce(tasks.account, excluded.account),
            pr_url = excluded.pr_url, pr_state = excluded.pr_state, done_by = excluded.done_by,
            failure = excluded.failure, record = excluded.record, archived_at = excluded.archived_at
          WHERE excluded.version > tasks.version`,

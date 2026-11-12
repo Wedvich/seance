@@ -106,6 +106,44 @@ describe("task rows", () => {
     expect(row).toMatchObject({ repo: "seance", title: "Do the thing", deviceId: "dev-a", prState: "open" });
   });
 
+  test("nothing the prompt names reaches the record: no window, branch, failure message or routing decision", () => {
+    const slug = "rotate-the-prod-stripe-key-in-kv-foo-and";
+    const text = JSON.stringify(
+      archivedTask(
+        task({
+          state: "failed",
+          spec: { repo: "seance", mode: "worktree", prompt: "PROMPT-TEXT rotate the prod stripe key" },
+          assignment: { deviceId: "dev-a", exclave: "default", clone: "seance", window: slug, pane: "%3" },
+          branch: `worktree-${slug}`,
+          failure: { code: "session_failed", message: `exited in /w/.claude/worktrees/${slug}`, exit: 1 },
+          decision: {
+            at: 1,
+            chosen: { deviceId: "dev-a", exclave: "default", clone: "seance" },
+            candidates: [
+              { deviceId: "dev-b", machine: "b", exclave: null, rejected: [{ code: "skill_absent", skill: slug }] },
+            ],
+          },
+        }),
+      ),
+    );
+    expect(text).not.toContain(slug);
+    expect(text).toContain("session_failed");
+    expect(text).toContain('"pane":"%3"');
+    expect(taskRow(task({ state: "failed", failure: { code: "x", message: "m" } }), 2, context)?.failure).toBe("x");
+  });
+
+  test("a task keeps the account first resolved; a later reading never moves it", () => {
+    const at = (version: number, account: string | null) => {
+      const row = taskRow(task(), version, { machine: "alpha", account });
+      if (row === null) throw new Error("finished task refused");
+      return row;
+    };
+    expect(archive.upsertTask(at(2, null), 10)).toBe(true);
+    expect(archive.upsertTask(at(3, "account:first"), 11)).toBe(true);
+    expect(archive.upsertTask(at(4, "account:later"), 12)).toBe(true);
+    expect(rows<{ account: string }>("SELECT account FROM tasks")).toEqual([{ account: "account:first" }]);
+  });
+
   test("upserts only at a higher store version, and a vanished record's row stays as it was", () => {
     const at = (version: number, over: Partial<Task> = {}) => {
       const row = taskRow(task(over), version, context);

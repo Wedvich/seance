@@ -252,7 +252,9 @@ green:
   reads back through the same rule, and the archivist's `archive.sqlite` (`archivist/src/archive.ts`)
   holds no prompt text, no attachment manifest and no raw account id: a task row is written only
   through `taskRow`, only for a finished task read through `listTasks`/`getTask`, after
-  `forgetPrompt` and with `pin.account` and `spillAlert` dropped, its account only as the
+  `forgetPrompt` and with `pin.account`, `spillAlert`, `assignment.window`, `branch`,
+  `failure.message` and `decision` dropped (the daemon slugs a title-less task's window and branch
+  from its prompt), its account only as the
   `account:` store key, and only over a row at a lower store version; an account row only from
   `openAccountRecord` or a key `accountStoreKey` made; and no statement there removes a row
   (`archivist/test/layering.test.ts`). Don't let changes drift from them.
