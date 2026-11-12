@@ -6,7 +6,8 @@ Séance spawns remote-controlled Claude Code sessions on dev machines via a blin
 monorepo: `daemon/` (seanced, per-machine), `relay/` (Cloudflare Worker + Durable Object), `pwa/`
 (Vite + Preact app), `raycast/` (a local-only Raycast extension — spawn only), `shared/` (wire types,
 envelope crypto + the app-role RelayClient), `scheduler/` (the scheduler as a pure library: routing,
-task state, reservations — no I/O, hosted only by the leader's modules — `LEADER_MODULES` in `scheduler/test/layering.test.ts`), `e2e/` (full-stack test suite, no shipped code).
+task state, reservations — no I/O, hosted only by the leader's modules — `LEADER_MODULES` in `scheduler/test/layering.test.ts`), `archivist/` (`seance-archivist`, the fleet's optional
+history service — docs/archivist.md; it imports daemon modules by path, never copies them), `e2e/` (full-stack test suite, no shipped code).
 `claude-mods/` is not a workspace: Claude Code function-hook plugins, installed by
 `seanced mod install` (DESIGN.md, "Claude Code mods").
 
@@ -339,6 +340,16 @@ green:
   the same version has all four, so the version alone answers nothing). `shared/` uses both as
   globals, so `raycast/src/lib/runtime.ts` installs them and the extension carries a `ws` dependency
   for it. Don't add injectable crypto/socket seams to `shared/` for this.
+- **The archivist holds the PSK and never acts** (DESIGN.md, Threat model item 2, and "Archivist").
+  Its key comes only from its unit's `$CREDENTIALS_DIRECTORY/seance-psk` (`CRED_NAME`, imported),
+  never a config field; it never runs as root; its state dir is its own, never the daemon's. It
+  registers only claiming `archivist`, with a blob `parseMachineInfo` refuses, answers no op, sends
+  no `status` and no store frame, and never enqueues. `archivist/test/layering.test.ts` walks its
+  whole import closure (type-only imports too) and its own source's calls: a module that spawns,
+  drives tmux, dispatches ops, brokers, leads or writes the queue or store, `daemon/src/config.ts`,
+  anything in `scheduler/`, or a client write method is refused. When a daemon module it needs sits
+  beside one it must not load, move the module (as `config-checks.ts` was), never copy it, and
+  never widen the forbidden list's exceptions.
 - The daemon never runs as root. `install --system` / `uninstall --system` are the only commands
   that require it (they write `/etc/systemd/system`), they refuse a target user that resolves to
   root, and they never invoke `sudo` themselves — the operator supplies the privilege. Under them

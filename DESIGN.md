@@ -298,6 +298,27 @@ Séance's noise is cover for a real intruder.
    inside an LXC guest whose seal path fully works — masked sysfs/ACPI
    firmware info — so the strict probe gates only _import_, and reads never
    consult it.
+   **The archivist, a PSK holder that never acts** (added 2026-11-12; "Archivist" below,
+   docs/archivist.md A8, A11, A12). The fleet's optional history service holds the PSK — and,
+   from its database onward, a plaintext history of tasks and metrics — on a box of its choosing,
+   so it is one more place the key rests. Its key is held only the way this item ends: delivered
+   by a systemd system unit (`LoadCredentialEncrypted=seance-psk:<blob>`, the name imported from
+   `daemon/src/credential.ts`, never restated), read from `$CREDENTIALS_DIRECTORY` and nowhere
+   else — no config field (a `psk` key in its config is refused at start, not ignored), no
+   keychain, DPAPI or direct unseal — so the plaintext is in that tmpfs and the process's memory
+   only. It never runs as root (uid or gid 0 is refused before it writes a file), and its state
+   dir is its own (`~/.local/state/seance-archivist`, 0700), never a daemon's. What a thief of
+   it gains is what a thief of any daemon's key gains — every envelope and record the fleet
+   seals — and nothing more: what it can _do_ is bounded by what it loads, not by what it holds
+   the key to. `archivist/test/layering.test.ts` walks its whole import closure, type-only
+   imports counted, and fails on any module that spawns, drives tmux, dispatches ops, brokers,
+   leads, or writes the queue or the store, and its own code may call no write method of either
+   client — it never enqueues, cancels, writes the store, replies to an op or sends a `status`.
+   That is what separates it from the standalone scheduler box rejected in docs/scheduler.md
+   (the PSK holder that acts on its own). Its seat on the relay is the `ARCHIVIST` id alone
+   (item 3 below), so a stolen bearer token plus a minted identity squats nothing. Letting it
+   request sessions, or giving it any act on the fleet, is a change to this entry with an audit
+   origin of its own, not a tweak.
 3. **Bearer token disclosure** (T1654 Log Enumeration). The `?t=` reasoning
    above holds for Cloudflare itself, but the token also reached Workers Trace
    Events and would reach any Logpush sink — enabling Logpush to a third party
@@ -10590,6 +10611,57 @@ are tmux-rename's, except where they say mods.
   once left session-events' tests unrun behind tmux-rename's — (the summary
   format matches bun's), and skips those shards, visibly, where `claude` isn't on
   PATH — which today includes CI.
+
+## Archivist (`archivist/`) — built 2026-11-12
+
+The fleet's optional history service (docs/archivist.md is the spec; each part lands here as it
+is built). Build order item 2 is the workspace and its two relay legs; it collects nothing yet
+and has no database. Its trust entry is the Threat model, item 2 ("The archivist, a PSK holder
+that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archivist's seat").
+
+- **A workspace of its own, reusing the daemon by import.** `archivist/`, command
+  `seance-archivist` with `run` and `status`. It imports the daemon's relay client, app-leg
+  factory, state, credential, paths, log and the relay-side config checks by relative path, as
+  `e2e/` does, and copies none. Where a module it needs sat beside one it must not load, the
+  module moved: `runnableProblems`, `bearerTokenWarnings` and `pskFingerprint` from `config.ts`
+  (which reaches the exclave scan and the broker's protocol) to `daemon/src/config-checks.ts`,
+  `CRED_NAME` from `tpmcreds.ts` (an exec path) to `credential.ts`, and `appRelayClient` now takes
+  the two fields it reads rather than the daemon's `Config`. Rejected: a copy of any of them (the
+  credential name or a check would drift), and moving them into `shared/` (bundled by the relay
+  and the PWA, and a change there deploys both).
+- **Its own config and state.** `~/.config/seance-archivist/config.json` holds `name`, `relayUrl`
+  and `bearerToken` only, checked by the daemon's own `runnableProblems`; a `psk` key is refused.
+  `~/.local/state/seance-archivist/` (0700, re-`chmod`ed at every start since `mkdir` honours the
+  umask and skips an existing dir) holds `state.json` — the identity seed, minted by the daemon's
+  `loadOrInitState`, never leaving the file — and `runtime.json` for `status`. Never the daemon's
+  `seance` dirs: on a shared box it is a different Unix user (docs/archivist.md, A27a), and even
+  as the same user it must not read or mint the daemon's identity.
+- **The key, from the unit only.** `readCredentialPsk` at `$CREDENTIALS_DIRECTORY/seance-psk`;
+  nothing found refuses start, naming the path and docs/psk.md. Root (uid or gid 0) is refused
+  first, before any file is read or written.
+- **The seat's leg.** The daemon's `RelayClient` on `/daemon` with `role: "archivist"`: the v2
+  register claims that role alone, never v1 (a roleless register would admit it as an ordinary
+  machine), and a `lead` frame is dropped unproven. A close with `CLOSE_ROLE_REFUSED` (4403) or
+  the reason `register role-refused` counts as a refusal, as `register unverified` does, so the
+  backoff keeps growing — a misconfigured archivist (its id not on `ARCHIVIST`) redials at the
+  ceiling, not the base interval — and unlike `unverified` it never flips the scheduler leg to
+  v1, since the relay read the v2 signature to refuse it. Its registry blob is sealed under op
+  `machine-info` from its own id, but carries `{archivist, name, platform}` — no `repos`, no
+  `scannedAt`, no exclaves — a shape `parseMachineInfo` refuses: a client that predates the
+  seat flag counts the entry `skewed` ("update", true of that client), never a `Machine` and
+  never `ignored` (which would send someone to rotate a correct key); one with the flag skips it.
+  Every op that reaches it is dropped with a warning and no reply. No `status`, no store frame.
+- **The read leg.** A second, app-role socket from `appRelayClient` with the PSK's key, as the
+  leader's own app leg reads (A7). Nothing reads through it yet (items 3 and 4). A 4401 on it is
+  permanent for that client, so the seat leg's accepted register — proof the token works now —
+  redials it.
+- **Held by a test, not a habit.** `archivist/test/layering.test.ts` walks the transitive import
+  closure from every file in `archivist/src`, counting type-only imports, and fails on any daemon
+  module that spawns, drives tmux, dispatches ops, brokers, leads or writes the queue or store,
+  on `daemon/src/config.ts`, `run.ts`, `cli.ts` and `mcp.ts`, on any path into `scheduler/`, and
+  on `@seance/scheduler` or `@seance/daemon`. A second scan forbids every write method either
+  client offers, and `execPath`, in the archivist's own source. Transitive because an allowed
+  module that later grows an edge to a forbidden one must fail here, not in review.
 
 ## Accepted trade-offs
 
