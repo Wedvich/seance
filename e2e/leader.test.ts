@@ -671,6 +671,7 @@ describe("pass: a session's own pass ↔ local daemon ↔ leader ↔ the daemon'
       audit.mock.calls.map((args) => args.join(" ")).filter((l) => l.includes("audit despawn origin=successor"));
     const app = startApp(stack);
     let window: string | undefined;
+    let successorId: string | undefined;
     try {
       await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
       await stack.daemon.leader.settled();
@@ -755,7 +756,7 @@ await Bun.write(${JSON.stringify(out)}, JSON.stringify(result));\n`,
         "the leader to commit the successor",
         10_000,
       );
-      const successorId = (await stack.queue().get(taskId))?.body?.successor ?? "";
+      successorId = (await stack.queue().get(taskId))?.body?.successor ?? "";
       const successor = (await stack.queue().get(successorId))?.body;
       expect(successor?.spec).toMatchObject({ succeeds: { task: taskId, trigger: "session" } });
       expect(successor?.spec.prompt).toContain(record);
@@ -778,6 +779,8 @@ await Bun.write(${JSON.stringify(out)}, JSON.stringify(result));\n`,
       );
     } finally {
       audit.mockRestore();
+      if (successorId !== undefined) await cancelTask(app.client, successorId);
+      await cancelTask(app.client, taskId);
       app.stop();
       if (window !== undefined) await killWindow(window);
     }
@@ -924,6 +927,8 @@ describe("pass: an app's pass ↔ leader ↔ the machine's push and close", () =
     } finally {
       audit.mockRestore();
       if (successorId !== undefined) await cancelTask(app.client, successorId);
+      // A failure before the pass leaves the original running; once passed it is finished, which returns at once.
+      await cancelTask(app.client, taskId);
       app.stop();
       if (window !== undefined) await killWindow(window);
     }
