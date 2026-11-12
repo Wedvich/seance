@@ -682,6 +682,7 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
       );
       await settle(true, outcome.server === undefined ? {} : { server: outcome.server });
       expect(outcome.registered).toBe(false);
+      if (outcome.handle === undefined) throw new Error("a timed-out spawn still names its window");
       const [pane = "", pid = ""] = (
         await tmuxOk(["display-message", "-p", "-t", outcome.handle, `#{pane_id}${FIELD_SEP}#{pane_pid}`])
       )
