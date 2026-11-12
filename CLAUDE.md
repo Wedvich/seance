@@ -140,7 +140,7 @@ green:
   (`exec.ts` strips `CREDENTIALS_DIRECTORY`, or the tmux server it boots hands the PSK's path to
   every session), and a registry entry whose `info` blob is not sealed `from` its own `deviceId`
   never becomes a `Machine` (verified app-side in `shared/src/app-client.ts` — the relay is blind,
-  so only the AAD-bound `from` says which machine an entry describes), every blob opened outside
+  so only the AAD-bound `from` says which machine an entry describes), and the daemon process never holds a Claude credential: auth health (`daemon/src/auth-health.ts`) reads each exclave's credential store only through a short-lived `bun -e` child running the one constant script, with the file handed over as a file descriptor (or, on macOS, `security -w` run by the child), a bare env and a timeout, and keeps only the child's `{lapsed, refreshExpiresAt}` after an exact-shape check — never the child's stdout or stderr in a log, and nothing on the wire but `ax`/`ae`/`au` indices, an expiry time and `CAPABILITIES.authHealth`, every blob opened outside
   the replay guard (`machine-info`, `status`, `lead-proof`, and the store's `task` and
   `pause-state` records) goes through `openAtRest` in
   `shared/src/crypto.ts`, which refuses one whose `op` isn't the slot's — shape alone does not say

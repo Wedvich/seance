@@ -407,7 +407,7 @@ of M4 has landed.
 | 1     | Asleep machines on the Queue screen (new) — **Done**               | —                                                                      | S                        |
 | 2     | Spawn defaults to the scheduler (**Done**)                         | account pins (PR #303); keyless `auto` for MCP (**Done**)              | M–L                      |
 | 2     | Stacking                                                           | authoring surface; #28                                                 | L                        |
-| 2     | Auth health                                                        | Web Push (built); spiked 2026-11-12                                    | M                        |
+| 2     | Auth health — **Done**                                             | Web Push (built); spiked 2026-11-12                                    | M                        |
 | 2     | Traits: core (new)                                                 | auth health's status lists (shape to copy)                             | M–L                      |
 | 2     | Traits: probes (new)                                               | traits core                                                            | M                        |
 | 2     | Traits: keep free (new)                                            | traits core                                                            | S                        |
@@ -839,7 +839,7 @@ of M4 has landed.
   the relay when each account is in use. DESIGN.md _Scheduler_, "Fleet quota record" records the
   writer as built (its register gate, bounds and the unreadable-record rule) and its readers.
   `status` shrinking to pressure, the other payoff, is not done.
-- **Auth health** (after the `/usage` refresh) — `authOk` says only that `.claude.json` names an
+- **Auth health** — **Done** (DESIGN.md "Auth health"; PR #<n>). `authOk` says only that `.claude.json` names an
   `oauthAccount`: a revoked or lapsed login still reads as signed in, and the `auth_missing`
   filter routes to an exclave that cannot start a session. Per exclave `ok | expiring | expired |
   unknown`, carried in `status`, not the register blob (a change there re-registers and drops the
