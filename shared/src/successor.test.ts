@@ -15,6 +15,7 @@ import { readsPrWhileWaiting, TASK_PHASES, wantsPrReading } from "./task-phase.t
 import {
   APP_ID,
   CAPABILITIES,
+  REQUIRES_DEP_SENTINEL,
   SCHEDULER_ID,
   STORE_CREATE_MAX_CT_LENGTH,
   SUCCESSOR_DEP_SENTINEL,
@@ -110,6 +111,7 @@ describe("successorSpec", () => {
         effort: "high",
         skill: "review",
         avoid: ["dev-z"],
+        requires: ["atlas"],
         until: "reported",
         linear: { issue: "PEN-1" },
         pin: { account: "org:x" },
@@ -129,6 +131,7 @@ describe("successorSpec", () => {
       effort: "high",
       skill: "review",
       avoid: ["dev-z"],
+      requires: ["atlas"],
       until: "reported",
       linear: { issue: "PEN-1" },
       succeeds: {
@@ -281,6 +284,29 @@ describe("a successor's record", () => {
     // Sealed past the one sealer: what an older leader would run beside the still-running predecessor.
     const env = await sealAtRest(key, { to: SCHEDULER_ID, from: APP_ID }, "task", { version: 1, task });
     expect(await openTaskRecord(key, { key: taskKey(task.id), version: 1, env }, NOW)).toBe("malformed");
+  });
+
+  test("a successor carrying requires seals both sentinels, and each is tied to its own field", async () => {
+    const task = successorTask({ requires: ["atlas"] });
+    const env = await sealTaskRecord(key, APP_ID, { version: 1, task });
+    const { payload } = await openAtRest(key, env, "task");
+    const deps = (payload as { task: { spec: { deps?: unknown[] } } }).task.spec.deps;
+    expect(deps).toEqual([REQUIRES_DEP_SENTINEL, SUCCESSOR_DEP_SENTINEL]);
+    expect(await openTaskRecord(key, { key: taskKey(task.id), version: 1, env }, NOW)).toEqual({ version: 1, task });
+
+    // Each sentinel beside only the other field is a record something stripped a gate from.
+    const { succeeds: _succeeds, ...required } = task.spec;
+    expect(parseTaskSpec({ ...required, deps: [SUCCESSOR_DEP_SENTINEL] })).toBeNull();
+    const { requires: _requires, ...succeeding } = task.spec;
+    expect(parseTaskSpec({ ...succeeding, deps: [REQUIRES_DEP_SENTINEL] })).toBeNull();
+    expect(parseTaskSpec({ ...task.spec, deps: [SUCCESSOR_DEP_SENTINEL, REQUIRES_DEP_SENTINEL] })).toEqual(task.spec);
+
+    // Sealed past the one sealer with only the requirement's gate: an older leader would run it beside its predecessor.
+    const partial = await sealAtRest(key, { to: SCHEDULER_ID, from: APP_ID }, "task", {
+      version: 1,
+      task: { ...task, spec: { ...task.spec, deps: [REQUIRES_DEP_SENTINEL] } },
+    });
+    expect(await openTaskRecord(key, { key: taskKey(task.id), version: 1, env: partial }, NOW)).toBe("malformed");
   });
 
   test("a successor at the largest prompt still seals under the create bound", async () => {

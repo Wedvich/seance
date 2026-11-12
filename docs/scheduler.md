@@ -1294,8 +1294,8 @@ of M4 has landed.
       the daemon deferring a `despawn` reply; the daemon closing on the `pass` frame alone (it would
       close a session whose pass the leader then refused).
     - **D7. The successor's spec** (`successorSpec`, `shared/src/successor.ts`) carries `repo`,
-      `mode: "worktree"`, `title`, `model`, `effort`, `until`, `linear`, `skill`, `avoid`, `autonomy`
-      and `plan`, the last two as `continuationSpec` carries them: `auto` and `checkpoint` stay, so an
+      `mode: "worktree"`, `title`, `model`, `effort`, `until`, `linear`, `skill`, `avoid`, `requires`,
+      `autonomy` and `plan`, the last two as `continuationSpec` carries them: `auto` and `checkpoint` stay, so an
       unattended failover does not stop at its first choice, and `steer` becomes
       `autonomy: "checkpoint"` with `plan` dropped, since the plan was approved. It drops `pin` (an
       account pin is the old account by definition), `deps`, `batch`, `lineage`, `base`, `continues`
@@ -1303,8 +1303,10 @@ of M4 has landed.
       `"session"` or `"manual"` until stage 3 adds `"quota"`. The task also carries the old
       `prUrl` and `prs`, so the PR chip and poller follow.
     - **D8. A forward-compat gate.** `SUCCESSOR_DEP_SENTINEL`, an empty-task-id dep, is appended by
-      the one task sealer whenever `succeeds` is present, as `ATTACHMENTS_DEP_SENTINEL` is, so an
-      older leader holds the record unreadable; a new leader's `openTaskRecord` holds a stored one
+      the one task sealer whenever `succeeds` is present, as `ATTACHMENTS_DEP_SENTINEL` and
+      `REQUIRES_DEP_SENTINEL` are, so an older leader holds the record unreadable; its `after` is
+      `done`, against `merged` and `opened`, so the parser ties each sentinel to its own field when a
+      successor also carries `requires` (a copy of the old task's, D7); a new leader's `openTaskRecord` holds a stored one
       carrying `succeeds` without it `malformed` (not `parseTask`, which also reads unsealed replies).
       _Rejected:_ a new `mode`: the spawn is a plain
       worktree spawn and no daemon needs to know about successors to run one.
@@ -1314,7 +1316,9 @@ of M4 has landed.
       for `trigger: "quota"`; a manual or session pass relies on the quota filter, and is also how a
       long session gives a fresh context to an account with headroom. A successor never spills into
       credits: in `judgeAccount` the spill branch becomes `quota_over_line`, so it holds `ready`
-      with reasons rather than spending money the owner did not choose to spend (Q3).
+      with reasons rather than spending money the owner did not choose to spend (Q3). The successor
+      carries the old task's `requires` (D7), so the traits filter applies as to any task: only
+      exclaves declaring them are candidates, and none ready holds it `ready` with `trait_absent`.
     - **D10. Dependents follow the chain.** Admission resolves a predecessor through
       `superseded → successor` links, at most `SUCCESSOR_CHAIN_MAX` (8) hops, before judging
       `released`; a chain too long or looping reads `blocked`. Pruning keeps every link a waiting

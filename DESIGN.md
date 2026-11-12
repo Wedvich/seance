@@ -1910,10 +1910,12 @@ an old peer's frames parse as before. Mixed versions:
     admission makes the old task's dependents wait (an unreadable predecessor blocks), where a
     failure code would fail them `dependency_failed`. An older PWA hides the card until reload.
   - `Task.successor` and `TaskSpec.succeeds`: a record carrying `succeeds` also carries
-    `SUCCESSOR_DEP_SENTINEL` (`{ task: "", after: "opened" }`), appended by the one task sealer as
+    `SUCCESSOR_DEP_SENTINEL` (`{ task: "", after: "done" }`), appended by the one task sealer as
     `ATTACHMENTS_DEP_SENTINEL` is, so an older leader's dep parser refuses it and holds the record
     unreadable instead of running it as a fresh task. The new parser drops the sentinel only beside
-    `succeeds`, and nulls the spec when either is alone. An older leader rewriting a running task
+    `succeeds`, and nulls the spec when either is alone. Its `after` is `done`, where the attachments
+    and requires sentinels are `merged` and `opened`: a successor carries `requires` too (below),
+    and sentinels with one value could not be told to belong to their own fields. An older leader rewriting a running task
     drops `successor` (`parseTask` rebuilds known fields only): leaders are an allowlist, updated
     together, and the orphan then fails `pass_abandoned` once the old task finishes.
   - `CAPABILITIES.successor` (2a) and `CAPABILITIES.successorSelf` (2b): unknown strings to an older
@@ -3056,7 +3058,9 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   spills: in `judgeAccount` the spill branch becomes `quota_over_line` for a task carrying
   `succeeds`, so it holds `ready` with reasons and never spends credits the owner did not choose to
   spend (accepted trade-off, below). Older readers drop `predecessor_account`, as any unknown
-  reason.
+  reason. The successor carries the old task's `requires` (`successorSpec`), so the traits filter
+  ("Traits filter") applies to it unchanged: a trait is a machine capability the work needs, not
+  a place the old task happened to run, and the old machine had it.
 - **Routing caps** (M2's global, M3 item 5's per account). Both count `IN_FLIGHT` — reserved, running
   and `needs-input`, which keeps its slot — and neither counts `lost` ("`lost`" below), nor a
   released task (asleep or idle, below).
@@ -6957,28 +6961,28 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
 - **Names.** One vocabulary, binding for every PR; no identifier of this feature contains the
   hand-off's names.
 
-  | Concept                                  | Name                                                       |
-  | ---------------------------------------- | ---------------------------------------------------------- |
-  | The act                                  | pass (a task to its successor)                             |
-  | Terminal state of the old task           | `superseded` (`TaskState`)                                 |
-  | Old task's link forward                  | `Task.successor` (the new task's id)                       |
-  | New task's link back                     | `TaskSpec.succeeds`                                        |
-  | App → leader scheduler op                | `pass` (payload: `TaskRef`)                                |
-  | Scheduler → daemon request op: push      | `push-branch` (payload: `{ taskId, expect? }`)             |
-  | Scheduler → daemon request op: arm close | `pass-close` (payload: `{ taskId }`)                       |
-  | Daemon → leader event op (self path)     | `session-pass`                                             |
-  | Local socket frame (self path)           | `pass: true` and `record` on the frame                     |
-  | The branch pushed to on `origin`         | the **remote branch** (`remoteBranch` on the wire)         |
-  | MCP tool, the session's own task         | `pass_to_successor`                                        |
-  | MCP tool, any task                       | `pass_task`                                                |
-  | CLI                                      | `seanced pass <task-id>`                                   |
-  | PWA button                               | "Pass to successor"                                        |
-  | Capability, outside path (2a)            | `CAPABILITIES.successor`                                   |
-  | Capability, session's own path (2b)      | `CAPABILITIES.successorSelf`                               |
-  | Audit origin (self path push and close)  | `successor`                                                |
-  | Forward-compat gate on the new record    | `SUCCESSOR_DEP_SENTINEL` (`{ task: "", after: "opened" }`) |
-  | Failure code of an orphaned successor    | `pass_abandoned`                                           |
-  | Route reason                             | `predecessor_account` (stage 3 only)                       |
+  | Concept                                  | Name                                                     |
+  | ---------------------------------------- | -------------------------------------------------------- |
+  | The act                                  | pass (a task to its successor)                           |
+  | Terminal state of the old task           | `superseded` (`TaskState`)                               |
+  | Old task's link forward                  | `Task.successor` (the new task's id)                     |
+  | New task's link back                     | `TaskSpec.succeeds`                                      |
+  | App → leader scheduler op                | `pass` (payload: `TaskRef`)                              |
+  | Scheduler → daemon request op: push      | `push-branch` (payload: `{ taskId, expect? }`)           |
+  | Scheduler → daemon request op: arm close | `pass-close` (payload: `{ taskId }`)                     |
+  | Daemon → leader event op (self path)     | `session-pass`                                           |
+  | Local socket frame (self path)           | `pass: true` and `record` on the frame                   |
+  | The branch pushed to on `origin`         | the **remote branch** (`remoteBranch` on the wire)       |
+  | MCP tool, the session's own task         | `pass_to_successor`                                      |
+  | MCP tool, any task                       | `pass_task`                                              |
+  | CLI                                      | `seanced pass <task-id>`                                 |
+  | PWA button                               | "Pass to successor"                                      |
+  | Capability, outside path (2a)            | `CAPABILITIES.successor`                                 |
+  | Capability, session's own path (2b)      | `CAPABILITIES.successorSelf`                             |
+  | Audit origin (self path push and close)  | `successor`                                              |
+  | Forward-compat gate on the new record    | `SUCCESSOR_DEP_SENTINEL` (`{ task: "", after: "done" }`) |
+  | Failure code of an orphaned successor    | `pass_abandoned`                                         |
+  | Route reason                             | `predecessor_account` (stage 3 only)                     |
 
 - **Decided by the owner, 2026-11-12.**
   - **O1: the record is the successor's prompt.** The session writes it through
@@ -7080,8 +7084,8 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   PR-carrying task `pr_unreadable`. The head is validated with `isBranchName` and never logged.
 - **The successor (D7, D8).** `successorSpec(task, account, trigger)` in `shared/src/successor.ts`
   beside `continuationSpec`: it carries `repo`, `mode: "worktree"`, `title`, `model`, `effort`,
-  `until`, `linear`, `skill`, `avoid`, `autonomy` and `plan`, the last two as `continuationSpec`
-  carries them: `auto` stays `auto` and `checkpoint` stays `checkpoint` (an unattended failover must
+  `until`, `linear`, `skill`, `avoid`, `requires`, `autonomy` and `plan`, the last two as
+  `continuationSpec` carries them: `auto` stays `auto` and `checkpoint` stays `checkpoint` (an unattended failover must
   not stop at its first choice), and `steer` becomes `autonomy: "checkpoint"` with `plan` dropped, the
   plan having been approved (`withAutonomy` refuses `plan: true` beside `checkpoint`); `client` is
   `"scheduler"`. It drops `pin` (an account pin is the old account by

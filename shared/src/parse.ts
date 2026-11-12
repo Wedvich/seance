@@ -848,7 +848,11 @@ export function parseTaskSpec(value: unknown): TaskSpec | null {
   const edges =
     deps === undefined
       ? undefined
-      : parseDeps(deps, { attached: files !== undefined, required: needs !== undefined, succeeding: follows !== undefined });
+      : parseDeps(deps, {
+          attached: files !== undefined,
+          required: needs !== undefined,
+          succeeding: follows !== undefined,
+        });
   const issue = linear === undefined ? undefined : parseLinear(linear);
   if (pinned === null || avoids === null || lineal === null || builds === null || member === null) return null;
   if (issue === null || resumes === null || files === null || needs === null || follows === null) return null;

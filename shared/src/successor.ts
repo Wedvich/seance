@@ -54,7 +54,8 @@ export function passOffer(task: Task, machines: readonly Machine[], leaderSucces
 
 /**
  * The spec of the task that carries `task`'s work on. Carries what shapes the session (repo, model,
- * effort, skill, autonomy, plan, title) and what settles it (`until`, `linear`, `avoid`), and
+ * effort, skill, autonomy, plan, title), what it needs of a machine (`requires`: the work depends on the
+ * capability, so the successor must land where the old task could) and what settles it (`until`, `linear`, `avoid`), and
  * nothing that places or orders it: no `pin` (an account pin is the old account by definition),
  * `deps` (already satisfied), `batch`, `lineage`, `base`, `continues` or `attachments`. The mode is
  * a plain worktree spawn, so no daemon needs to know about successors to run one. `succeeds` names
@@ -87,6 +88,7 @@ export function successorSpec(
         }),
     ...(spec.skill === undefined ? {} : { skill: spec.skill }),
     ...(spec.avoid === undefined ? {} : { avoid: spec.avoid }),
+    ...(spec.requires === undefined ? {} : { requires: spec.requires }),
     ...(spec.until === undefined ? {} : { until: spec.until }),
     ...(spec.linear === undefined ? {} : { linear: spec.linear }),
     succeeds: {

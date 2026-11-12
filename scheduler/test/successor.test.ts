@@ -189,6 +189,22 @@ describe("pass", () => {
     expect(s.scheduler.task(result.successorId)?.spec.succeeds?.trigger).toBe("session");
   });
 
+  test("the successor carries the old task's requires and is placed only where the trait is declared", async () => {
+    const s = setup([
+      machine("a", { capabilities: CAPABLE, exclaves: [exclave("main", "org:a", { traits: ["atlas"] })] }),
+      machine("b", { capabilities: CAPABLE, exclaves: [exclave("main", "org:b")] }),
+    ]);
+    const old = await running(s, false, { requires: ["atlas"] });
+    expect(old.assignment?.deviceId).toBe("a");
+    const result = ok(await s.scheduler.pass(old.id));
+    expect(s.scheduler.task(result.successorId)?.spec.requires).toEqual(["atlas"]);
+
+    await tick(s.scheduler);
+    expect(s.scheduler.task(result.successorId)).toMatchObject({ state: "running", assignment: { deviceId: "a" } });
+    const rejected = s.scheduler.lastDecision(result.successorId)?.candidates.find((c) => c.deviceId === "b")?.rejected;
+    expect(rejected).toEqual([{ code: "trait_absent", trait: "atlas" }]);
+  });
+
   describe("refused before anything is pushed", () => {
     const refusal = async (s: Setup, id = "old"): Promise<string> => {
       const result = await s.scheduler.pass(id);
