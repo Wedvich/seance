@@ -798,7 +798,7 @@ nothing checked it. The last is the gap they leave.
   formatter (`despawnAudit`), under the same origins. Reap destroys
   things — worktrees, branches, windows, fsmonitor daemons — and audits each one (`reapAudit`)
   under `cli` or under `schedule`, the fourth origin, which is the daemon's own
-  timer: a 3am cleanup must not read as someone at the desk. `successor` (designed 2026-11-12, not built) is the daemon pushing a task's branch on its session's own
+  timer: a 3am cleanup must not read as someone at the desk. `successor` (2026-11-12) is the daemon pushing a task's branch on its session's own
   `pass` frame and closing that session at its turn's end, once the scheduler confirmed the successor
   (`pass-close`), on the push and despawn lines: the session's own ask, as `handoff` is. A
   `push-branch` from the scheduler audits under `relay` (or `leader` in process), as every other
@@ -942,7 +942,7 @@ nothing checked it. The last is the gap they leave.
   closing the sender's own pane at its turn's end (an `idle` with `turnEnded`), only for a task this machine's ledger holds a
   launch and a PR URL of (for a continuation, the one that ledger noted on it at launch from the launch it
   continues, `continuedPr`: still the ledger's word, never a frame's), through the graceful despawn,
-  audited `origin=handoff`; no frame field names the pane, the task or anything run. The fourth (designed 2026-11-12, not built, "Session events", `pass`):
+  audited `origin=handoff`; no frame field names the pane, the task or anything run. The fourth (2026-11-12, "Session events", `pass`):
   a pass, pushing the sender's own task's branch, forwarding a bounded `record` once, and marking the pane
   for a close at its turn's end that only the scheduler's `pass-close` arms, audited `origin=successor`; no
   frame field names the pane, the task, a branch or anything run.
@@ -957,9 +957,9 @@ nothing checked it. The last is the gap they leave.
   `github.com`'s pull-request shape. The residual: a session can make the leader read any PR
   in any repo the operator's token can see, and the result lands only in a sealed record, so the worst
   case is a session settling its own task early by naming a merged PR. `gh`'s stderr is never logged.
-- **A pass** (the outside path built 2026-11-12, and `CLAUDE.md` carries those requirements; the
-  session's own path, its `pass` frame, `pass-close` and the `successor` origin, is not built and its
-  bullets below stay design; Scheduler, "Passing to a successor"):
+- **A pass** (built 2026-11-12, the outside path and the session's own, its `pass` frame,
+  `pass-close` and the `successor` origin; `CLAUDE.md` carries those requirements; Scheduler,
+  "Passing to a successor"):
   - The daemon's one write to a forge is `pushTaskBranch` (`daemon/src/push-branch.ts`): a `git push`
     through `networkGit`, never forced, of `<tip sha>:refs/heads/<r>` to `origin` only, `<tip>` that of `<b>`. `<b>` is the
     branch its own launch ledger's worktree has checked out; `<r>` is, in order: that branch's
@@ -1338,9 +1338,9 @@ Who owns each frame in code — the place to change when a frame changes:
 | ops `mark-done` / `run-now` / `pause` / `resume` / `discard`        | an app via `shared/src/app-client.ts`: `pwa/src/scheduler-store.ts` (the Queue screen; `run-now` also the Spawn screen's Start now); `run-now` also `daemon/src/auto.ts` (`startAuto`, `startQueuedAuto`: MCP's `start_task` and `spawn_session` `start`, `seanced start` and `spawn --start`)                                                                                     | `daemon/src/leader-requests.ts` `answer`, parsed by `parsePauseRequest` / `parseResumeRequest` / `parseDiscardRequest`, run by `Scheduler.pause` / `resume`, `Scheduler.markDone`, `Scheduler.runNow` and `Scheduler.discard`                                                                                                                                                                           |
 | op `pass` (→`"scheduler"`, built 2026-11-12)                        | an app via `shared/src/app-client.ts` `pass`: `pwa/src/scheduler-store.ts`, and `daemon/src/mcp.ts` (`pass_task`) and `daemon/src/cli.ts` (`seanced pass`), through the broker when keyless                                                                                                                                                                                        | `daemon/src/leader-requests.ts` → `Scheduler.pass` (Scheduler, "Passing to a successor")                                                                                                                                                                                                                                                                                                                |
 | op `push-branch` (scheduler→daemon, built 2026-11-12)               | the leader's `termFleet` in `daemon/src/leader-adapters.ts`, sealed `from: "scheduler"`, or in process through `createLocalOps(…, "leader")`                                                                                                                                                                                                                                       | `daemon/src/push-branch.ts` through `daemon/src/handlers.ts`                                                                                                                                                                                                                                                                                                                                            |
-| op `pass-close` (scheduler→daemon, designed 2026-11-12, not built)  | the leader's `termFleet`, once the commit point of a session-triggered pass is written                                                                                                                                                                                                                                                                                             | `daemon/src/session-events.ts` (`armPassClose`) through `daemon/src/handlers.ts`                                                                                                                                                                                                                                                                                                                        |
-| frame `pass` (local socket, designed 2026-11-12, not built)         | `daemon/src/report-done.ts` (`passToSuccessor`), from MCP's `pass_to_successor` only                                                                                                                                                                                                                                                                                               | `daemon/src/session-events.ts`                                                                                                                                                                                                                                                                                                                                                                          |
-| op `session-pass` (→`"scheduler"`, designed 2026-11-12, not built)  | `daemon/src/session-events.ts`, once per accepted `pass` frame                                                                                                                                                                                                                                                                                                                     | `daemon/src/leader.ts` `onEvent`                                                                                                                                                                                                                                                                                                                                                                        |
+| op `pass-close` (scheduler→daemon, built 2026-11-12)                | the leader's `termFleet`, once the commit point of a session-triggered pass is written                                                                                                                                                                                                                                                                                             | `daemon/src/session-events.ts` (`armPassClose`) through `daemon/src/handlers.ts`                                                                                                                                                                                                                                                                                                                        |
+| frame `pass` (local socket, built 2026-11-12)                       | `daemon/src/report-done.ts` (`passToSuccessor`), from MCP's `pass_to_successor` only                                                                                                                                                                                                                                                                                               | `daemon/src/session-events.ts`                                                                                                                                                                                                                                                                                                                                                                          |
+| op `session-pass` (→`"scheduler"`, built 2026-11-12)                | `daemon/src/session-events.ts`, once per accepted `pass` frame                                                                                                                                                                                                                                                                                                                     | `daemon/src/leader.ts` `onSessionPass`                                                                                                                                                                                                                                                                                                                                                                  |
 | op `queue-changed` (→`"app"`)                                       | `daemon/src/leader.ts` on the term's leg, as `from: "scheduler"`, coalesced to one per 500 ms                                                                                                                                                                                                                                                                                      | `shared/src/app-client.ts`, via `parseQueueChanged`: heard only by an app client (one with no term) and only `from: "scheduler"`, handed to `onQueueChanged` listeners — `pwa/src/scheduler-store.ts` re-reads on it                                                                                                                                                                                    |
 | op `branch-state` (→`"scheduler"`)                                  | `daemon/src/branch-state.ts` via `RelayClient.sendBranchState()`; on the leader's own machine `run-capabilities.ts` hands it in process to `leader.onBranchState` instead (Scheduler, "Branch state")                                                                                                                                                                              | `daemon/src/leader.ts` `onEvent`, via `parseBranchState`, into the one `onBranchState` sink, which feeds the library                                                                                                                                                                                                                                                                                    |
 | record `quota` (at rest)                                            | `sealFleetQuotaRecord` (`shared/src/fleet-quota.ts`), by each daemon's fleet quota writer (`daemon/src/fleet-quota.ts`) on its own socket                                                                                                                                                                                                                                          | `openFleetQuotaRecord` (`shared/src/fleet-quota.ts`) — `openAtRest`, sealed `to: "app"`, `parseFleetQuotaRecord`, sealed `version` the store's — by the app-client's `refreshFleetQuota` (the PWA and the leader's leg) and the writer; stored under `quota:fleet` (_Scheduler_, "Fleet quota record")                                                                                                  |
@@ -1781,11 +1781,11 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
 - `pass-close { taskId }` (`PassCloseRequest`) → `{ ok: true }` or `no_pane` / `unsupported` /
   a transport code (`PassCloseResponse`), scheduler → daemon, 10 s timeout. It answers at once and
   never waits for the close, so `despawn`'s reply semantics and its 20 s timeout are untouched
-  (designed 2026-11-12, not built; Local op socket, "Session events", `pass`).
+  (built 2026-11-12; Local op socket, "Session events", `pass`).
 - `session-pass { session, taskId, exclave, remoteBranch, tip, record?, at }` (`SessionPass`), an
   `EventOp` daemon → scheduler, fire-and-forget like `session-event`. Every field is the daemon's own
   except `record`, the session's claim: at most `SUCCESSOR_RECORD_MAX` (7 168) UTF-16 units, never
-  logged (designed 2026-11-12, not built).
+  logged (built 2026-11-12).
 - `pause { until, account? }` (`PauseRequest`) and `resume { account? }` (`ResumeRequest`) →
   `{ holds }` (`PauseResponse`), every hold in force after the change (M3 item 5; Scheduler,
   "Pause"). `queue` replies carry the same `holds`.
@@ -7137,15 +7137,16 @@ fields carry over), under the same gates.
 - **Moved out of Rejected:** `claude --resume <id>`. It was rejected because the daemon knew no Claude
   session id; `--session-id` on every task spawn gives it one of its own choosing (2026-10-27).
 
-### Passing to a successor — designed 2026-11-12; the outside path built 2026-11-12
+### Passing to a successor — designed 2026-11-12; the outside and the session's own path built 2026-11-12
 
 A task running on an account that runs out of usage can **pass** its work to a **successor**: a
 new task, free to land on another account, that starts from the old task's pushed branch and a
 written record. Continue (above) cannot do this, since it resumes the Claude conversation in the
 same worktree on the same machine and account. It is not the hand-off (`hand_off_task`, "Session
 events"), which ends a session whose work is finished and whose PR awaits merge; a pass moves work
-that is not finished. The outside path (stage 2a: the PWA, `seanced pass`, MCP `pass_task`) is built;
-the session's own path (2b) and the automatic trigger are not, and their entries below say so.
+that is not finished. The outside path (stage 2a: the PWA, `seanced pass`, MCP `pass_task`) and the
+session's own (stage 2b: MCP `pass_to_successor`) are built; the automatic trigger is not, and its
+entries below say so.
 docs/scheduler.md, "Successor", has the stages and is where each is marked done.
 
 - **Names.** One vocabulary, binding for every PR; no identifier of this feature contains the
@@ -7331,13 +7332,13 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   pane's next `idle` carrying `turnEnded` (the turn's own end, never a hooks-worker respawn's plain
   idle), reusing the hand-off's pane marking in `daemon/src/session-events.ts` and its graceful
   despawn, audited `origin=successor`, after a re-read that the pane still carries the task
-  (`createHandOff` is generalised to take the origin; the hand-off's behaviour and name stay).
+  (`createTurnEndClose` takes the origin; `createHandOff` and `createPassClose` are it for `handoff` and
+  `successor`, and the hand-off's behaviour and name stay).
   The close starts only once the leader confirms the commit point, because daemon → scheduler sends
   are fire-and-forget: that confirmation is `pass-close`, sent right after step 5 to the task's
   `assignment.deviceId` (in process on its own machine). The daemon keeps, per pane,
   `{ taskId, confirmed, turnEnded }`. The `pass` frame creates the entry unconfirmed; a `turnEnded`
-  idle sets `turnEnded`, and a later frame for that pane in any other state (`running`,
-  `needs-input`) clears it, so a turn begun after an unconfirmed pass (a person prompting the session
+  idle sets `turnEnded`, and a later `busy` or `needs-input` frame for that pane clears it, so a turn begun after an unconfirmed pass (a person prompting the session
   again) is never cut by a late `pass-close`; `pass-close` sets `confirmed` (creating the entry from the
   live pane carrying the task if none exists, as after a daemon restart: that entry has seen no turn
   end, so a session already idle is closed only by the backstop below); the daemon closes when both
@@ -8763,7 +8764,7 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   carried it, are the record, as `start_task`'s are. `get_queue` marks `passable`, `passedTo` and
   `succeeds`. Its description says it ends the task's session and pushes its branch, is refused on a
   dirty tree, and is not for the calling session's own task.
-- **`pass_to_successor { record }`** (designed 2026-11-12, not built; `record` is 1 to
+- **`pass_to_successor { record }`** (built 2026-11-12; `record` is 1 to
   `SUCCESSOR_RECORD_MAX` UTF-16 units, which the tool counts itself and refuses past before any push:
   the schema's `maxLength` counts code points). The session's own path, registered beside
   `hand_off_task`. Gated on the verified leader advertising `successorSelf` (without a fleet it
@@ -9420,7 +9421,7 @@ local daemon, and the daemon forwards task sessions' states to the leader. This 
 a third frame kind on the op socket, and a widening of what the socket takes in.
 
 - **Its own frame kind, never a `Plain` or an `OpName`.** `{v, kind: "session-event",
-  state?, prUrl?, remoteSession?, pane?, turnEnded?, reason?}`, or `{v, kind, handoff: true, pane?}` alone (below), or, designed 2026-11-12 and not built, `{v, kind, pass: true, record, pane?}` alone ("`pass`", below), routed on `kind` before the `Plain` check, as
+  state?, prUrl?, remoteSession?, pane?, turnEnded?, reason?}`, or `{v, kind, handoff: true, pane?}` alone (below), or `{v, kind, pass: true, record, pane?}` alone ("`pass`", below), routed on `kind` before the `Plain` check, as
   broker frames are. A frame with `rateLimits` and no state, from a mod that predates
   2026-10-20 (below), is still taken as activity; its numbers go unread. It has no `op`, `id` or `ts`, so it cannot arrive from the relay
   and no op rides in as one. A daemon that predates it drops it as malformed. The mod
@@ -9574,7 +9575,7 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   one, and it survives the continued launch's eviction. Watching the PR after
   that, and alerting on a red required check or a conflict, is the leader's (docs/scheduler.md,
   "PR hand-off").
-- **`pass`** (designed 2026-11-12, not built; the fifth act past ingest, a threat-model change; Scheduler,
+- **`pass`** (built 2026-11-12; the fifth act past ingest, a threat-model change; Scheduler,
   "Passing to a successor"). A session running out of usage commits its work and passes the task to
   a successor. `pass_to_successor` (MCP) sends `{pass: true, record}` and nothing else: no state, so no
   path reads it as one, and `seanced session-event` drops it unsent, as it does a `done` and a hand-off.
@@ -9586,16 +9587,20 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   (no upstream on `origin` while its ledger holds a PR URL for the task: the leader would refuse the
   PR's other branch after the push, so the daemon refuses before it, and the session is told to
   `git push -u origin HEAD:<pr branch>` or set the upstream and call again), `push_rejected`,
-  `push_failed`, `stopping` once ingest stopped, and `invalid` on a daemon that predates it. Otherwise
+  `push_failed`, `stopping` once ingest stopped, `unsent` (pushed, but this daemon could hand the
+  pass to neither the leader in process nor a relay connection; the mark is dropped), and `invalid` on a
+  daemon that predates it. Otherwise
   it pushes the ledger-noted worktree's branch through `pushTaskBranch` with no `expect` and `hasPr`
-  from its ledger (the daemon has no PR head; the leader checks it, D1 step 3), audits it under
+  from its ledger (the daemon has no PR head; the leader checks it, D1 step 3; a PR the session opened a moment ago and
+  the ledger has not yet noted is not waited for, as the hand-off waits: a pass without a PR is normal, and the
+  head comparison is the backstop), audits it under
   `origin=successor`, marks the pane
   in memory, sends one `session-pass` sealed to the scheduler (in process on the leader's machine),
   and answers `ok` with `pass { taskId, remoteBranch, tip, pushed }`. It never logs `record` or the
   remote branch. The mark is `{ taskId, confirmed, turnEnded }`. The daemon closes the session, through
   the graceful despawn (`/exit`, Keep on the worktree prompt, the close noted first so harvest reads
   exit 0), audited `origin=successor`, only when **both** hold: that pane's `idle` carrying
-  `turnEnded` has arrived since its last frame in any other state (a `running` or `needs-input` frame
+  `turnEnded` has arrived since its last frame in any other state (a `busy` or `needs-input` frame
   clears the flag, so a turn begun after an unconfirmed pass is never cut by a late `pass-close`), and a
   `pass-close` sealed `from` the scheduler (or the leader in process) naming that pane's task has set
   `confirmed`; whichever lands second closes, after a re-read that the pane still carries the task. An
@@ -9607,7 +9612,8 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   itself the proof that nobody is being asked, and the leader's view can lag its last answer by an
   event. Any other state or `from` does nothing but a log line naming the op and the machine. The hand-off keeps its behaviour: marked
   only by a `handoff` frame, closed only at its pane's `turnEnded` idle, audited `origin=handoff`;
-  `createHandOff` is generalised to take the origin, nothing else changes. A session that lies about
+  `createHandOff` and `createPassClose` share one close routine that takes the origin, nothing else
+  changes. A session that lies about
   passing can do no more than one that pushes its own branch and runs `/exit`; the leader's PR-head
   check bounds what it can claim, and the worst case of an unconfirmed pass is a pushed branch no
   successor follows. The session is told only "not
@@ -10247,7 +10253,7 @@ are tmux-rename's, except where they say mods.
   2026-11-12; Scheduler, "Passing to a successor"): it holds `ready` with `quota_over_line`
   and the owner sees it on the Queue screen. Holding costs a wait, spilling costs money the owner did
   not choose to spend. A forecast-only spill is a later option.
-- The self path pushes before the leader has checked the PR's head (designed 2026-11-12, not built):
+- The self path pushes before the leader has checked the PR's head (built 2026-11-12):
   a session with no upstream and a PR it never reported to the daemon (so `no_upstream` cannot fire)
   on another branch leaves a stray remote branch, which is harmless, before the leader refuses
   `branch_mismatch`. The outside path has no such window.
