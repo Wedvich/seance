@@ -476,6 +476,8 @@ export function usePrivateTmux(base: string, label: string): PrivateTmux {
   };
 }
 
+const EXPLAIN_BUDGET_MS = 5_000;
+
 /**
  * Replaces a fixed sleep before a *positive* assertion, which is a latent flake:
  * the sleep has to outlast the slowest machine, asserts nothing about what it
@@ -486,11 +488,25 @@ export async function pollUntil(
   ready: () => boolean | Promise<boolean>,
   label: string,
   timeoutMs = 5_000,
+  /**
+   * What the timeout's message should also say: the state that would name why it never happened (a
+   * task's route decision, a subprocess's log). A flake seen once in CI is diagnosed from this or not at all.
+   */
+  explain?: () => Promise<string>,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     if (await ready()) return;
-    if (Date.now() >= deadline) throw new Error(`timed out after ${timeoutMs}ms waiting for ${label}`);
+    if (Date.now() >= deadline) {
+      const message = `timed out after ${timeoutMs}ms waiting for ${label}`;
+      if (explain === undefined) throw new Error(message);
+      // Bounded: what it reads may be the very thing that stalled, and the timeout must still report.
+      const context = await Promise.race([
+        explain().catch((err: unknown) => `(explain failed: ${String(err)})`),
+        Bun.sleep(EXPLAIN_BUDGET_MS).then(() => `(explain gave no answer in ${EXPLAIN_BUDGET_MS}ms)`),
+      ]);
+      throw new Error(`${message}\n${context}`);
+    }
     await Bun.sleep(10);
   }
 }

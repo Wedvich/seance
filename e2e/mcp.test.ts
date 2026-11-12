@@ -73,10 +73,15 @@ describe("mcp ↔ relay ↔ daemon", () => {
       const spawned = await text("spawn_session", { machine: "TestMac", repo: "myrepo", prompt: "haunt the relay" });
       const id = /^task (\S+): queued/u.exec(spawned)?.[1];
       if (id === undefined) throw new Error(`no task id in: ${spawned}`);
+      // A stall here (one CI run, 2026-11-12) left only "admit" in the log: the decision says why it never placed.
       await pollUntil(
         async () => (await stack.queue().get(id))?.body?.state === "running",
         "the pinned task to run",
         20_000,
+        async () => {
+          const stored = (await stack.queue().get(id))?.body;
+          return `stored: ${JSON.stringify({ state: stored?.state, decision: stored?.decision })}\nget_queue: ${await text("get_queue", {})}`;
+        },
       );
       const running = (await stack.queue().get(id))?.body;
       expect(running?.spec.pin).toEqual({ deviceId: stack.deviceId });
@@ -100,7 +105,9 @@ describe("mcp ↔ relay ↔ daemon", () => {
       await client.close();
       lazy.stop();
     }
-  });
+    // Past its polls' own budgets, so a stall reports the poll's message (and its explanation), not the
+    // runner's bare timeout — which bun follows by running the next test beside this one's body.
+  }, 90_000);
 
   test("with the relay unreachable, the local sessions still answer over the local socket, and a spawn is refused rather than run directly", async () => {
     expect(stack.daemon.localSocket).not.toBeNull();
@@ -218,9 +225,11 @@ describe("keyless mcp ↔ local daemon's broker ↔ relay ↔ remote daemon", ()
         exclaves?: unknown[];
       }[];
       let listed: Listed = [];
+      let lastListing = "(no answer yet)";
       await pollUntil(
         async () => {
           const { text, error } = await call("list_machines");
+          lastListing = error ? `error: ${text}` : text;
           if (error || !text.startsWith("[")) return false;
           listed = JSON.parse(text) as Listed;
           return listed.some(
@@ -233,6 +242,9 @@ describe("keyless mcp ↔ local daemon's broker ↔ relay ↔ remote daemon", ()
         },
         "the remote machine in the brokered registry",
         20_000,
+        // A stall here (one CI run, 2026-11-12) showed only the broker's relay_unavailable; B's own log was never printed.
+        async () =>
+          `last list_machines: ${lastListing}\nRemoteBox log tail:\n${(await Bun.file(remoteLog).text()).slice(-4_000)}`,
       );
       // The whole fleet, not just this box — A as `local`, B beside it.
       expect(listed.find((entry) => entry.name === "TestMac")?.local).toBe(true);
