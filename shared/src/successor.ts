@@ -171,8 +171,12 @@ export function successorPreamble(input: Pick<SuccessorPromptInput, "task" | "re
     lines.push(
       "",
       "Do not call hand_off_task for the pull request above: an earlier session opened it, so it would be refused. " +
-        "Push, end your turn and leave it open; the scheduler watches it" +
-        (task.spec.until === "reported" ? "." : " and settles this task when it merges."),
+        "Keep the pull request open and carry it through yourself, as the task asks" +
+        // A merge settles nothing under `reported`: only the session's report does, so the line must not
+        // read as leave-and-go-idle. Otherwise the scheduler's watch settles the task on the merge.
+        (task.spec.until === "reported"
+          ? "; a merge alone does not settle this task, your report does."
+          : "; the scheduler settles this task when it merges."),
     );
   }
   if (task.spec.attachments !== undefined) {
