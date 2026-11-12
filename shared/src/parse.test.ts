@@ -8,6 +8,7 @@ import {
   isSkillName,
   parseAccountRecord,
   parseFleetQuotaRecord,
+  parseContinuedBy,
   parsePrAlertStamp,
   parsePushAlert,
   parsePushSubscribeReply,
@@ -920,6 +921,27 @@ describe("tasks and their records", () => {
     }
   });
 
+  test("a task's continuedBy survives a parse, and a malformed pointer is dropped while the task stays readable", () => {
+    const pointed: Task = { ...task, state: "awaiting-merge", continuedBy: { task: "c-1", createdAt: 9 } };
+    expect(parseTask(pointed)).toEqual(pointed);
+    const live: Task = { ...pointed, continuedBy: { task: "c-1", createdAt: 9, live: true } };
+    expect(parseTask(live)).toEqual(live);
+    const { continuedBy: _continuedBy, ...bare } = pointed;
+    for (const bad of [
+      { task: "a b", createdAt: 9 },
+      { task: "c-1", createdAt: "now" },
+      { task: "c-1", createdAt: Number.NaN },
+      { task: "c-1" },
+      { task: "c-1", createdAt: 9, live: false },
+      { task: "c-1", createdAt: 9, extra: 1 },
+      "c-1",
+      null,
+    ]) {
+      expect(parseTask({ ...pointed, continuedBy: bad })).toEqual(bare);
+      expect(parseContinuedBy(bad)).toBeNull();
+    }
+  });
+
   test("a progress field that is not exactly its shape nulls the task", () => {
     for (const bad of [
       { ...task, prUrl: "javascript:alert(1)" },
@@ -1426,6 +1448,7 @@ describe("store", () => {
         at: 1_760_000_000_000,
       },
       prAlert: { reason: "unarmed", head, at: 1_760_000_000_000 },
+      continuedBy: { task: "c".repeat(64), createdAt: 1_760_000_000_000, live: true },
       decision: { at: 1_760_000_000_000, chosen: target, candidates: Array.from({ length: 9 }, () => candidate) },
     };
     expect(parseTask(awaiting)).toEqual(awaiting);

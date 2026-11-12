@@ -331,6 +331,53 @@ describe("EndedTasks", () => {
     });
   });
 
+  test("the continued note's PR is carried for the continuation to inherit: its own report, else what it inherited", async () => {
+    const ledger = LaunchLedger.memory();
+    const ended = new EndedTasks(ledger);
+    const site = { repo: "/r", path: "/r/.claude/worktrees/x", session: SESSION };
+    await ledger.record("opened");
+    await ledger.note("opened", { ...site, prUrl: "https://github.com/a/b/pull/1" });
+    expect(ended.continuation("opened")).toMatchObject({ continuedPr: "https://github.com/a/b/pull/1" });
+    await ledger.record("inherited");
+    await ledger.note("inherited", {
+      ...site,
+      path: "/r/.claude/worktrees/y",
+      continuedPr: "https://github.com/a/b/pull/2",
+    });
+    expect(ended.continuation("inherited")).toMatchObject({ continuedPr: "https://github.com/a/b/pull/2" });
+    await ledger.record("both");
+    await ledger.note("both", {
+      ...site,
+      path: "/r/.claude/worktrees/z",
+      prUrl: "https://github.com/a/b/pull/3",
+      continuedPr: "https://github.com/a/b/pull/2",
+    });
+    expect(ended.continuation("both")).toMatchObject({ continuedPr: "https://github.com/a/b/pull/3" });
+    await ledger.record("bare");
+    await ledger.note("bare", { ...site, path: "/r/.claude/worktrees/w" });
+    expect(ended.continuation("bare")).not.toHaveProperty("continuedPr");
+  });
+
+  test("handingOff notes the hand-off and the close, and the continuation reports handedOff only for a clean end", async () => {
+    const ledger = LaunchLedger.memory();
+    const ended = new EndedTasks(ledger);
+    const site = { repo: "/r", path: "/r/.claude/worktrees/x", session: SESSION };
+    await ledger.record("h");
+    await ledger.note("h", site);
+    await ended.handingOff("h");
+    expect(ledger.notes().find((n) => n.taskId === "h")).toMatchObject({ closedHere: true, handedOff: true });
+    expect(ended.continuation("h")).toMatchObject({ handedOff: true });
+    await ledger.note("h", { exit: 0 });
+    expect(ended.continuation("h")).toMatchObject({ handedOff: true });
+    await ledger.note("h", { exit: 137 });
+    expect(ended.continuation("h")).not.toHaveProperty("handedOff");
+    // Reap and despawn keep `closing`: a close nobody handed off.
+    await ledger.record("r");
+    await ledger.note("r", { ...site, path: "/r/.claude/worktrees/y" });
+    await ended.closing("r");
+    expect(ended.continuation("r")).not.toHaveProperty("handedOff");
+  });
+
   test("a ledger that cannot record refuses the launch and holds nothing back", async () => {
     const dir = await mkdtemp(join(tmpdir(), "seance-ledger-"));
     try {
@@ -976,6 +1023,38 @@ describe("a session's hand-off", () => {
       await ended.notePr("t1", PR);
       expect(await send("%1", { handoff: true })).toEqual({ ok: true });
       expect(forwarded).toEqual([]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("a continuation hands off the PR its own note inherited, with nothing of the continued launch in the ledger", async () => {
+    const { ledger, events, closed, send } = setup();
+    try {
+      await ledger.record("t1");
+      await ledger.note("t1", {
+        repo: "/r",
+        path: "/r/.claude/worktrees/x",
+        session: SESSION,
+        continuedPr: PR,
+      });
+      expect(await send("%1", { handoff: true })).toEqual({ ok: true });
+      await send("%1", { state: "idle", turnEnded: true });
+      expect(closed).toEqual([["%1", "t1"]]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("a continuation with no PR of its own or inherited is prless, though another launch noted the same path and session", async () => {
+    const { ledger, events, send } = setup();
+    try {
+      const site = { repo: "/r", path: "/r/.claude/worktrees/x", session: SESSION };
+      await ledger.record("t0");
+      await ledger.note("t0", { ...site, prUrl: PR });
+      await ledger.record("t1");
+      await ledger.note("t1", site);
+      expect(await send("%1", { handoff: true })).toEqual({ ok: false, code: "prless" });
     } finally {
       events.stop();
     }

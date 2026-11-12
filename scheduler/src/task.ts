@@ -99,7 +99,17 @@ export function advance(task: Task, to: TaskState, fields: TaskFields = {}): Tas
   if (task.state === "lost" && to === "ready" && !isUnconfirmed(task)) {
     throw new Error(`task ${task.id}: a lost task that ran never returns to ready`);
   }
-  const { reservation, assignment, absentSince: _absent, reservedAt, pr, remoteSession, prAlert, ...rest } = task;
+  const {
+    reservation,
+    assignment,
+    absentSince: _absent,
+    reservedAt,
+    pr,
+    remoteSession,
+    prAlert,
+    continuedBy,
+    ...rest
+  } = task;
   const keepsReservedAt = to === "reserved" || (to === "lost" && task.state === "reserved");
   return {
     ...rest,
@@ -111,6 +121,8 @@ export function advance(task: Task, to: TaskState, fields: TaskFields = {}): Tas
     ...(pr !== undefined && (TASK_PHASES[to] !== "finished" || pr.state === "merged") ? { pr } : {}),
     // The dedupe stamp of an alert about a PR still waiting to merge: nothing is left to repeat once finished.
     ...(prAlert !== undefined && TASK_PHASES[to] !== "finished" ? { prAlert } : {}),
+    // Only an `awaiting-merge` task is offered from, and a finished record stays lean.
+    ...(continuedBy !== undefined && TASK_PHASES[to] !== "finished" ? { continuedBy } : {}),
     ...fields,
     state: to,
   };

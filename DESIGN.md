@@ -882,8 +882,9 @@ nothing checked it. The last is the gap they leave.
   task, noted in the launch ledger and forwarded, and settled only by a leader and only
   for an `until: "reported"` task. The third (2026-11-11, "Session events", `handoff`): a hand-off
   closing the sender's own pane at its turn's end (an `idle` with `turnEnded`), only for a task this machine's ledger holds a
-  launch and a PR URL of, through the graceful despawn, audited `origin=handoff`; no frame field
-  names the pane, the task or anything run.
+  launch and a PR URL of (for a continuation, the one that ledger noted on it at launch from the launch it
+  continues, `continuedPr`: still the ledger's word, never a frame's), through the graceful despawn,
+  audited `origin=handoff`; no frame field names the pane, the task or anything run.
 - **A PR status is read by the leader's own `gh`, never carried by a frame** (2026-10-23, Scheduler,
   "PR status"). `Scheduler.onPrStatus` is reachable from the leader's poller alone, never
   from `onEvent` or a request handler, and nothing on the wire carries a reading. It is bound
@@ -1690,6 +1691,18 @@ an old peer's frames parse as before. Mixed versions:
   parser drops each at its next write of the record, which costs one repeated alert, never a
   missed one. A malformed `prAlert` is dropped at parse and the task stays readable; a malformed
   `pr` reading is dropped as before.
+- `Task.continuedBy` and `CAPABILITIES.continueHandoff` (2026-11-12, Daemon, "Continuing a session"):
+  `continuedBy` is a leader-written pointer (`{ task, createdAt, live? }`) on an awaiting-merge task, to
+  its newest landed continuation. An older leader's parser drops it at its next write of the record,
+  which costs one wrong re-offer of Continue (the session it names is then the task's own, and the
+  daemon's path-owner rule refuses a second continuation of a worktree a later launch took), never a
+  lost task. A malformed pointer is dropped at parse and the task stays readable. A client offers
+  Continue on a blocked awaiting-merge task only to a verified leader advertising `continueHandoff`
+  (an older leader never writes the pointer), and only for a task whose machine advertises it (an older
+  daemon has neither the `handedOff` wording nor the `continuedPr` note, so a hand-off of the
+  continuation would answer `prless`); the leader's own routing filter is unchanged. An older daemon's
+  ledger parser skips the two new note fields and its next write drops them. No relay change and no
+  rollout order.
 - `Task.inputAlerted` and `Task.spillAlert` (the persisted alert stamps, acted on since the push
   alerts landed; Scheduler, "Needs input" and "Credits spill") and `SettingsRecord.diskAlerts`
   (Scheduler, "Web Push", "Disk alerts"): an older leader's parser drops each at its next write
@@ -2942,7 +2955,11 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   stays stuck on one head alerts once, and a new leader does not repeat it. No alert is raised
   while any continuation of the task, however deep its chain (`continuationUnderway`,
   `shared/src/continue-task.ts`), is waiting, dispatching or placed: its session is on the PR, and
-  the next poll alerts if it ends without fixing it. The alert is sent only once the write has
+  the next poll alerts if it ends without fixing it. A continuation that lands also clears the stamp
+  (`continuedChange`, `scheduler/src/continued.ts`, run by `#markContinued` once a pass): the stamp is
+  dropped in the write that moves `continuedBy` to a different task, so a fix that fails again on the
+  very head the first alert named still alerts once more, as its owner would expect, where the stamp
+  alone would hold it back. A pass that changes nothing in the chain writes nothing. The alert is sent only once the write has
   landed with the stamp it raised, so a lost or refused write costs a repeat after a leader change,
   never a missed alert. A malformed stamp is dropped at parse and the task stays readable (it never
   voids the record, which a stamp past its bound would otherwise do). The log line is
@@ -3281,7 +3298,9 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   `dependency_missing`. `pruneAt` narrows that race, it does not close it. It
   writes only when something is over the keep; never a task an unfinished one names in
   `deps`, whose dependent would otherwise fail `dependency_missing` on work that was
-  there. Equally old tasks go in id order, so two leaders prune the same ones. The deletes go
+  there, and never a link of a continuation chain (`continues`, followed to its root) whose root has not
+  finished (`unprunable`, `prune.ts`: the leader's `continuedBy` pointer is read off that chain, and an
+  awaiting-merge root is never pruned itself, so a link pruned from under it would strand the pointer). Equally old tasks go in id order, so two leaders prune the same ones. The deletes go
   out together, each its own CAS on its task's chain, so crossing `pruneAt` costs a round trip,
   not one per record; a delete whose reply was lost, or that met another write, is read back,
   so one that landed leaves no ghost taking a slot of every later prune (M3 review P2 and Q4,
@@ -3914,7 +3933,7 @@ for the lot with its own `gh`.
     task that ended. `samePrReading` compares two readings field by field (`failing` element-wise,
     `at` ignored), so an unchanged wide reading refreshes on the same 5-minute cadence as before.
   - **Record size.** A worst-case awaiting-merge record, with `failing` at its bounds in two-byte
-    characters, `prAlert` and nine candidates, stays within `STORE_MAX_CT_LENGTH` (`parse.test.ts`).
+    characters, `prAlert`, `continuedBy` and nine candidates, stays within `STORE_MAX_CT_LENGTH` (`parse.test.ts`).
     The older "every bound at once" fixture is not that record (an awaiting-merge task holds no
     failure, reservation or needs-input fields, which `advance` clears), and is left as it was.
 - **A stacked merge is asked about again.** A merged PR whose base is not the default branch
@@ -6090,7 +6109,8 @@ of this section built.
 ### Continuing a session (mode `"continue"`) — designed 2026-10-26, widened 2026-10-27
 
 A task that failed `session_failed` (an OOM SIGKILL, a crash) or `session_closed` (its window was
-closed from outside), or was cancelled after it was placed,
+closed from outside), or was cancelled after it was placed, or (2026-11-12, "Blocked PR" below) is
+awaiting its PR's merge with the PR blocked,
 leaves its worktree and its Claude conversation on disk. **Continue** queues a _new_ task that resumes that conversation
 (`claude --resume <id>`, the session id the daemon chose at the old launch) in the same worktree, on the same machine and clone. The PWA's failed or cancelled card
 carries the button, MCP has `continue_task { taskId, prompt? }` and the shell has `seanced
@@ -6182,10 +6202,13 @@ fields carry over), under the same gates.
     stale-resume thresholds, so that dialog itself stayed unexercised, as before.
 - **The seed is always written.** A continuation's stdin carries a fixed preamble (and `From the user:
   <prompt>` when one was given): "This session was resumed by séance in the same git worktree at
-  <path>, after the previous session …", in one of two wordings chosen by the old task's own ledger
-  note `exit` (`Continuation.exit`, from the ledger and never a frame): nonzero says it "ended
+  <path>, after the previous session …", in one of four wordings chosen by the old task's own ledger
+  note (`Continuation.exit` and `.handedOff`, from the ledger and never a frame): nonzero `exit` says it "ended
   unexpectedly (killed, crashed or out of memory) partway through", zero or none says it "was stopped
-  before it finished (cancelled from séance)", and no exit with the note's `vanished`
+  before it finished (cancelled from séance)", unless the note says `handedOff` (below) with an `exit`
+  of zero or none: it then "ended by handing its pull request off to séance (hand_off_task), which closed it
+  at the end of its turn. Nothing it started was interrupted: …" and nothing of the interrupted-work
+  warning follows, and no exit with the note's `vanished`
   (`Continuation.vanished`) says it "ended when its window was closed (closed by hand, or its tmux server
   or machine stopped) partway through" (`session_closed`; only when `exit === undefined`). All go on: "Its last tool call may not have finished, and
   processes it started in the background may still be running (only claude itself was killed, or was stopped, by the wording chosen):
@@ -6234,6 +6257,42 @@ fields carry over), under the same gates.
   `until` and `linear` carry over (under `until: "reported"` the resumed conversation already holds the
   report instruction). `deps`, `batch`, `skill`, `pin`, `avoid`, `lineage` and `base` do not: the target
   is exact, and the old task's dependents stay `dependency_failed`.
+- **Blocked PR** (2026-11-12, `CAPABILITIES.continueHandoff`; `blockedOffer`,
+  `shared/src/continue-task.ts`). An `awaiting-merge` task whose PR reads blocked (`taskPrBlock`, Scheduler,
+  "PR blocked") is offered Continue as well, and on the card it is the primary button where a failed task's
+  stays quiet: the alert asked for an act, and this is it. The continuation is the same spec as any
+  (`continuationSpec`), plus a fixed prompt (`blockedBrief`, `shared/src/pr-blocked.ts`): the PR's URL, one
+  sentence per reason (a required check failed, merge conflicts with its base branch, the branch behind
+  its base, or nothing armed to merge it: for that last one, arm auto-merge if the repo merges that way,
+  otherwise say so and leave it), the failing check names (already bounded and control-stripped at the
+  read) and an instruction to read the PR with `gh`, fix it in the worktree, push to the same branch, open
+  no new PR and call `hand_off_task` last; any note the person
+  typed follows it. The brief is fixed text built from the leader's reading, never a frame's
+  words. Offered only when: the task is `awaiting-merge`, has an assignment, ran in a worktree (not
+  `here`), is not `until: "reported"` (nothing waits on its merge, so no alert, so no button), and
+  `taskPrBlock` names a reason; the caller's leader advertises `continueHandoff` (`OfferContext.leaderHandoff`;
+  PWA `deriveContinueHandoffAvailability`, MCP and the daemon's auto path through `advertises` /
+  `leaderAdvertises`); the machine advertises `continueHandoff` beside the other two; and no continuation of it
+  is waiting or underway (`waitingContinuation`, `continuationUnderway`, and `continuedBy.live`). The failed
+  rules' ledger limits hold too: the session offered must be one the machine's launch ledger can still
+  hold, so the offer is refused once `LAUNCH_LEDGER_MAX_AGE_MS` has passed since the launch it resumes
+  (`continuedBy.createdAt`, else the task's own `createdAt`). A refusal says why in a sentence, as the others do.
+  - _Which session._ The task's own, unless the leader has pointed elsewhere: `Task.continuedBy`
+    `{ task, createdAt, live? }`, written by the leader (`continuedChange`, in `#markContinued`, once a pass), names
+    the newest continuation of the task that landed (`newestLanded`, which walks `continues` links and
+    takes the greater `createdAt`, a tie to the greater id, a cycle ending the walk). `live` is set while it runs.
+    The offer resumes `continuedBy.task` (`ContinueOffer.resumes`, `offeredSpec`): the conversation is the
+    one the chain's last launch holds, and a second Continue of the root would be refused by the daemon's
+    path-owner rule. Where the leader is older and writes no pointer, no offer is made at all (the gate above).
+    The pointer is dropped when the task finishes (`advance`), and a malformed one at parse.
+  - _The hand-off a continuation may make._ The session resumed to fix a PR must be able to hand it off
+    again, though it opens none: the new launch's ledger note carries `continuedPr` (`LaunchSite.continuedPr`,
+    `startNote`), copied by the daemon from the launch it continues, and `hand_off_task` accepts it
+    ("Session events", `handoff`). The continued launch's own `handedOff` note is what chooses the fourth
+    seed wording. Neither is progress: both stay out of `TaskProgress` and never move a note's `at`, like
+    `closedHere`.
+  - _Rollout._ A client offers it only to a leader and a machine advertising `continueHandoff` ("Forward
+    compatibility"); nothing else changes for a failed or cancelled task.
 - **Gates.** A client writes a continue spec only to a verified leader advertising `continueTask` (the
   PWA's `deriveContinueAvailability`, the MCP tool's and the CLI's `leaderAdvertises`, the broker before
   it forwards), and `continueOffer` needs the task's machine to be listed and advertising it as well,
@@ -6297,6 +6356,7 @@ fields carry over), under the same gates.
   conversation stranded; every terminal state that can still land a continuation now offers Continue itself.
 - **Not offered:** a task cancelled before it was placed (no session), a task cancelled after its session
   had finished (`endedAt`, from `awaiting-merge`: nothing to resume, like `done`), `done`, `here` runs, an
+  `awaiting-merge` task whose PR is not blocked, or is `until: "reported"` (Blocked PR, above), an
   automatic continue after an OOM kill (manual by decision), and failures other than `session_failed`
   and `session_closed` (both offered, from one `RESUMABLE_FAILURES` set): `lost_expired`, `merge_expired` and `dispatch_unconfirmed` all fire after the ledger's 7-day eviction
   clock or mean the ledger proved nothing, so the daemon would refuse. The relation is pinned by a test
@@ -7330,7 +7390,10 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   `continue_expired`) or is cancelled before placement, the button comes back. The tap re-checks the leader and the offer before
   writing, since either may have changed since the card was drawn, then writes the continuation spec with
   `client: "pwa"` through `createTask`, merged into the list as any enqueue is; a refused gate or offer or
-  a store answer becomes the screen's notice. The continuation's card
+  a store answer becomes the screen's notice. On an `awaiting-merge` card whose PR is blocked (2026-11-12,
+  "Continuing a session", "Blocked PR") the same button is the card's primary one (`QueueRow.inlinePrimary`),
+  the tap passes the offer the clock (skew-corrected) and `deriveContinueHandoffAvailability`, and the spec
+  is `offeredSpec`: the offer's session and brief, not the failed rules'. The continuation's card
   reads "Continues <old title>", falling back to "task <id prefix>". A `not_continuable` failure
   reads "The machine couldn't continue the earlier session: <the daemon's reason>. Nothing new was
   started." (the failure's message, rendered as text), or a generic line naming the possible causes when
@@ -7590,8 +7653,9 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   the same machine and clone, as a new task (the old one stays as it was). It reads the leader's queue for
   the task (an id it does not list is "not in the leader's list (pruned, or past the N most relevant)"),
   asks `continueOffer` (shared with the PWA) whether it can be continued, writes the spec
-  `continuationSpec` makes with `client: "mcp"`, and enqueues it through `enqueueAuto` under the `mcp`
-  origin, as `spawn_session` does. A continuation of it still waiting in the queue refuses it, naming
+  `offeredSpec` makes (`continuationSpec`, plus a blocked PR's session and brief) with `client: "mcp"`, and enqueues it through `enqueueAuto` under the `mcp`
+  origin, as `spawn_session` does. An `awaiting-merge` task whose PR is blocked is continued only when the
+  leader advertises `continueHandoff` (the refusal says so). A continuation of it still waiting in the queue refuses it, naming
   that task. Gated like `until: "reported"`: the verified leader must advertise
   `continueTask`, else the refusal says so ("ready" or "none" wording, as the account-pin gate). Keyless
   boxes broker it ("Fleet broker"). `get_queue` shows `continues` on a continuation and `continuable:
@@ -7843,7 +7907,7 @@ names the app's queue, not `get_queue`/`cancel_task`, which a shell cannot call.
   a direct spawn is not bound by it. MCP has no such escape.
 - _`seanced continue <task-id> [--prompt <text>]`_ (2026-10-26, Daemon, "Continuing a session"):
   `continueAuto` in `cli-auto.ts` does what MCP's `continue_task` does for a failed or cancelled task, the newest in a chain (leader gate, `queue()` lookup,
-  `continueOffer`, `continuationSpec` with `client: "cli"`, `enqueueAuto` under `origin=cli`) through
+  `continueOffer`, `offeredSpec` with `client: "cli"`, `enqueueAuto` under `origin=cli`) through
   `autoFleet`, so a keyless box brokers it. It never touches the local op socket's `spawn`: a continue
   spawn stays scheduler-only, and a continue from a terminal is a tracked task, not a hand-run `claude
   --resume` (invisible to the scheduler). It prints the new task id, or the refusal and exits non-zero.
@@ -8333,8 +8397,8 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   `{handoff: true}` and nothing else: no state, so no path reads it as one, and `seanced
   session-event` drops it unsent, as it does a `done`. For the bound pane's own task, the daemon
   answers `untasked` for a pane with none, `unrecorded` for a task its ledger holds no launch of,
-  `prless` for one whose launch noted no PR URL (its end would settle `done` or `failed`, never
-  `awaiting-merge`), `stopping` once ingest stopped, and `unsupported` on a daemon wired without the
+  `prless` for one whose launch noted no PR URL, its own or, for a continuation, the one it inherited
+  (`TaskNote.continuedPr`, below; its end would settle `done` or `failed`, never `awaiting-merge`), `stopping` once ingest stopped, and `unsupported` on a daemon wired without the
   act (one whose session backend cannot despawn). Otherwise it marks the pane, in memory only, and answers `ok`. Nothing is forwarded: the
   leader learns of the hand-off from the session's end, as it would from any exit. A PR URL still
   on its way is waited for: the mod reports it from its own queue, which can hold one report in
@@ -8345,12 +8409,19 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   mark standing), after the idle is queued to the leader (a coalesced one may give way to the `ended`, which carries the PR too), the daemon closes it through the graceful despawn (`/exit`, Keep on the
   worktree prompt, the close noted first so harvest reads exit 0, never `vanished`), audited
   `origin=handoff` (`daemon/src/handoff.ts`), after a re-read that the pane still carries the task
-  that handed off. An `ended` first, or the pane id reused for another task, drops the mark; so
+  that handed off. The close notes `handedOff` beside `closedHere` (`EndedTasks.handingOff`; reap and
+  despawn keep plain `closedHere`), so a continuation's seed can say so. An `ended` first, or the pane id reused for another task, drops the mark; so
   does a daemon restart, which leaves the session running as it would have without the call. The
   task then ends `awaiting-merge` (`ended`, Scheduler, "Done detection"), and its worktree and
   branch stay, for a continuation and for reap's merged-only rules. Like `done`, it is bound by
   the kernel's peer pid and needs `mcp__seance__hand_off_task` allowed in the exclave. A session
-  that lies about handing off can do no more than one that runs `/exit`. Watching the PR after
+  that lies about handing off can do no more than one that runs `/exit`. A continuation that carries the
+  PR on (2026-11-12, "Continuing a session") has no PR of its own to report: the mod reports one only
+  when it opens a PR, and a resumed session that fixes the old one never does. Its note carries
+  `continuedPr`, which the daemon copied at launch from the continued launch's own note (`prUrl`, else its
+  own `continuedPr`), under the same path-owner rule as the session id, never from a frame; the check
+  reads only the pane's own task's note, so another launch sharing the path or session cannot supply
+  one, and it survives the continued launch's eviction. Watching the PR after
   that, and alerting on a red required check or a conflict, is the leader's (docs/scheduler.md,
   "PR hand-off").
 - **Every field is untrusted; the pane is the kernel's answer.** The 0700 run

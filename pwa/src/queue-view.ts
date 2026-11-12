@@ -34,6 +34,7 @@ import { AUTONOMY_LABELS } from "./state.ts";
 import { taskTitle } from "./task-title.ts";
 import {
   deriveContinueAvailability,
+  deriveContinueHandoffAvailability,
   deriveReportedOffered,
   deriveRunNowAvailability,
   failedBody,
@@ -104,10 +105,13 @@ export interface QueueRow {
   /** Offered while the task can still be waited on; a finished one has nothing left to wait for. "Follow up" prefills the form's After. */
   readonly canFollowUp: boolean;
   /**
-   * A failed or cancelled session that can be picked up where it stopped: its machine is present and
-   * advertises it, the leader does too, and no continuation of it is already waiting, live or settled.
+   * A failed or cancelled session that can be picked up where it stopped, or an `awaiting-merge` task whose PR
+   * is blocked: its machine is present and advertises it, the leader does too, and no continuation of it is
+   * already waiting, live or settled.
    */
   readonly canContinue: boolean;
+  /** Continue is the card's primary action: a blocked PR is what the person was alerted to fix. */
+  readonly inlinePrimary: boolean;
   /** A waiting task's Start now menu item: always shown, greyed (`enabled`) by the split button's rules; null once it is no longer waiting. */
   readonly startNow: StartNowItem | null;
   /** `primaryAction` of the flags above: the card's one inline button. */
@@ -368,7 +372,9 @@ function rowOf(
   const idleSince = idle.get(task.id);
   const actionable = phase !== "dispatching" && phase !== "finished";
   const canFollowUp = phase !== "finished";
-  const canContinue = continueOffer(task, state.relay.machines, tasks).ok && deriveContinueAvailability(state.relay);
+  const context = { now: now + skew, leaderHandoff: deriveContinueHandoffAvailability(state.relay) };
+  const canContinue =
+    continueOffer(task, state.relay.machines, tasks, context).ok && deriveContinueAvailability(state.relay);
   const waiting = task.state === "queued" || task.state === "blocked" || task.state === "ready";
   const item = decisionStartNowItem(task.decision ?? null);
   const startNow = waiting ? { ...item, enabled: item.enabled && deriveRunNowAvailability(state.relay) } : null;
@@ -389,6 +395,7 @@ function rowOf(
     canContinue,
     startNow,
     inline: primaryAction({ canContinue }),
+    inlinePrimary: canContinue && taskPrBlock(task) !== null,
     deps: depsLine(task, titles),
     continues: continuesLine(task, titles),
     continuing: continuingOf(task, tasks),

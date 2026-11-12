@@ -60,3 +60,25 @@ export function prChipFields(pr: PrStatus): PrStatus {
     at: pr.at,
   };
 }
+
+const BLOCKED_SENTENCE: Record<PrBlockedReason, string> = {
+  checks: "a required check failed on its head commit",
+  conflict: "it has merge conflicts with its base branch",
+  behind: "its branch is behind its base branch, which this repo requires to be up to date",
+  unarmed:
+    "its required checks passed but nothing will merge it: no auto-merge is armed and no review is requested. If this repo merges with auto-merge, arm it (gh pr merge --auto with the repo's merge method); otherwise say so and leave it for the user",
+};
+
+/**
+ * What a continuation of a blocked `awaiting-merge` task opens with: fixed text, the PR URL (`https:`-checked
+ * at parse), the reason and the failing check names (bounded and cleaned by `PR_FAILING_LIMITS`), never logs;
+ * the session reads the rest with `gh`. It is in the record and the prompt, and the user's own note follows it.
+ */
+export function blockedBrief(task: Task, reason: PrBlockedReason): string {
+  const failing = task.pr?.failing;
+  return [
+    `Its pull request ${task.prUrl ?? "(unknown)"} is blocked: ${BLOCKED_SENTENCE[reason]}.`,
+    ...(failing === undefined || failing.length === 0 ? [] : [`Failing required checks: ${failing.join(", ")}.`]),
+    "Read the PR's state with gh (gh pr view, gh pr checks, gh run view --log-failed), fix what blocks it in this worktree, and push to the same branch; do not open a new pull request. Once it is pushed and whatever merges it is in place, call hand_off_task as your last tool call.",
+  ].join("\n");
+}

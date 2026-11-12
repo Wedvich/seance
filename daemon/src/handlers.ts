@@ -106,6 +106,8 @@ export interface TaskLaunches {
         readonly session: string;
         readonly exit?: number;
         readonly vanished?: true;
+        readonly handedOff?: true;
+        readonly continuedPr?: string;
       }
     | { readonly refused: string };
   /** The daemon is about to close this task's pane itself; never judged vanished. */
@@ -312,6 +314,8 @@ async function continuationSite(
     session: site.session,
     ...(site.exit === undefined ? {} : { exit: site.exit }),
     ...(site.vanished === true ? { vanished: true as const } : {}),
+    ...(site.handedOff === true ? { handedOff: true as const } : {}),
+    ...(site.continuedPr === undefined ? {} : { continuedPr: site.continuedPr }),
   };
 }
 
@@ -420,6 +424,7 @@ async function handleSpawn(
               repo: entry.path,
               worktree: outcome.path,
               ...(outcome.session === undefined ? {} : { session: outcome.session }),
+              ...(continuation?.continuedPr === undefined ? {} : { continuedPr: continuation.continuedPr }),
             },
           }),
       ...(outcome.server === undefined ? {} : { server: outcome.server }),

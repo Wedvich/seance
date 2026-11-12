@@ -1032,6 +1032,45 @@ describe("prune", () => {
     expect((await store.list()).map((s) => s.id)).toEqual([...failed.slice(2), ready.id]);
   });
 
+  test("a finished continuation in the chain of an awaiting-merge task is kept past the keep, and pruned once the root is finished", async () => {
+    const { store, scheduler } = setup(new FakeFleet([]));
+    const at = { deviceId: "a", exclave: "main", clone: "app" };
+    await store.put("t", 0, {
+      id: "t",
+      spec: spec(),
+      state: "awaiting-merge",
+      createdAt: NOW,
+      prUrl: "https://github.com/a/b/pull/1",
+    });
+    await store.put("c1", 0, {
+      id: "c1",
+      spec: spec({ mode: "continue", continues: { task: "t", at } }),
+      state: "done",
+      createdAt: NOW + 1,
+    });
+    await store.put("c2", 0, {
+      id: "c2",
+      spec: spec({ mode: "continue", continues: { task: "c1", at } }),
+      state: "done",
+      createdAt: NOW + 2,
+    });
+    await store.put("other", 0, { id: "other", spec: spec(), state: "cancelled", createdAt: NOW - 1 });
+    await scheduler.load();
+    await scheduler.prune(0);
+    expect((await store.list()).map((s) => s.id)).toEqual(["t", "c1", "c2"]);
+
+    const root = await store.get("t");
+    if (root?.body === undefined) throw new Error("no t");
+    await store.put("t", root.version, {
+      ...root.body,
+      state: "failed",
+      failure: { code: "merge_expired", message: "x" },
+    });
+    await scheduler.refresh("t");
+    await scheduler.prune(0);
+    expect(await store.list()).toEqual([]);
+  });
+
   test("a finished task an unfinished one names is kept past the keep: its dependent would fail on work that was there", async () => {
     const { store, scheduler } = setup(new FakeFleet([]));
     await store.put("named", 0, { id: "named", spec: spec(), state: "done", createdAt: NOW });

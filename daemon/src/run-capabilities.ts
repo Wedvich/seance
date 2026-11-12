@@ -122,7 +122,7 @@ const sessionEvents: DaemonCapability = (ctx) => {
           handOff: createHandOff({
             despawn,
             panes: listPanePids,
-            closing: (taskId) => ctx.endedTasks.closing(taskId),
+            closing: (taskId) => ctx.endedTasks.handingOff(taskId),
             sink: daemonSink,
           }),
         }),

@@ -984,6 +984,15 @@ export interface MachineInfo {
  * (`--resume`) rather than with `--continue`, which misses a worktree spawn's
  * conversation where Claude filed it under the clone. Clients offer Continue, and a
  * leader routes a continuation, only to a machine advertising it.
+ * `continueHandoff`: as a daemon, notes a hand-off in its launch ledger, words the
+ * seed of a continuation of a handed-off session, copies a continued launch's PR URL
+ * into the continuation's note (`continuedPr`) and accepts `hand_off_task` from a
+ * continuation on it; as a leader, records `Task.continuedBy` on an `awaiting-merge`
+ * task and keeps continuation chains past the prune. Clients offer Continue on an
+ * `awaiting-merge` task only when both the task's machine and the verified leader
+ * advertise it: an older daemon would word the seed "cancelled from séance" and
+ * refuse the continuation's hand-off, and an older leader never writes `continuedBy`,
+ * so a second Continue would resume a session a continuation already owns.
  * `runNow`: as a leader, answers `run-now` — what a client checks of the
  * verified leader before offering it (an older one refuses the op as unknown).
  * `attachments`: as a daemon, fetches and seeds `SpawnRequest.attachments`; as a
@@ -1000,6 +1009,7 @@ export const CAPABILITIES = {
   continueTask: "continueTask",
   continueCancelled: "continueCancelled",
   continueSession: "continueSession",
+  continueHandoff: "continueHandoff",
   runNow: "runNow",
   attachments: "attachments",
 } as const;
@@ -2162,6 +2172,19 @@ export interface Decision {
   readonly trimmed?: number;
 }
 
+/**
+ * The newest continuation of this `awaiting-merge` task's chain that landed (`tookOver`), written by the leader
+ * (`scheduler/src/continued.ts`): what a client's Continue resumes, since its `queue` list is bounded and may
+ * leave that continuation out. `createdAt` is that task's, which is no later than its launch, so it tells a client
+ * its machine's ledger may still hold it. `live` while it is dispatching or placed. Decides nothing on a daemon: its
+ * own launch ledger still binds the worktree and session. Dropped, never fatal; dropped on finishing.
+ */
+export interface ContinuedBy {
+  readonly task: string;
+  readonly createdAt: number;
+  readonly live?: true;
+}
+
 /** `Task.prAlert`: what a `pr-blocked` alert was raised for, and when (ms, the leader's clock). */
 export interface PrAlertStamp {
   readonly reason: PrBlockedReason;
@@ -2370,6 +2393,8 @@ export interface Task {
    * never fatal, when malformed (a lost one costs one repeated alert), and on finishing.
    */
   readonly prAlert?: PrAlertStamp;
+  /** The newest landed continuation of an `awaiting-merge` task's chain, the leader's pointer (`ContinuedBy`). */
+  readonly continuedBy?: ContinuedBy;
   /**
    * When it entered `awaiting-merge`, ms, the leader's clock — what merge expiry
    * (`SchedulerConfig.mergeExpiryMs`) ages from. Kept once it leaves. Absent on a

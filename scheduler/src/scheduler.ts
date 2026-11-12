@@ -27,7 +27,8 @@ import {
 } from "./alerts.ts";
 import { dispatchOrder } from "./batch.ts";
 import { DEFAULT_CONFIG, type SchedulerConfig } from "./config.ts";
-import { admission, named } from "./deps.ts";
+import { continuedChange } from "./continued.ts";
+import { admission } from "./deps.ts";
 import { branchChange, ended as settledEnd, prBound, prChange } from "./done.ts";
 import { endClock, expiry } from "./expiry.ts";
 import { PauseRecord, withHold, withoutHold, type PauseResult } from "./pause.ts";
@@ -43,7 +44,7 @@ import {
   type UnreadableTask,
 } from "./ports.ts";
 import { codeUnitOrder } from "./order.ts";
-import { prunable } from "./prune.ts";
+import { prunable, unprunable } from "./prune.ts";
 import { accountResetAt, route, type Decision } from "./route.ts";
 import {
   answerable,
@@ -426,7 +427,8 @@ export class Scheduler {
       prunable(this.tasks(), keep).map((task) =>
         this.#serial(task.id, async () => {
           const held = this.#held.get(task.id);
-          if (held === undefined || !FINISHED.includes(held.task.state) || named(this.tasks()).has(task.id)) return;
+          if (held === undefined || !FINISHED.includes(held.task.state) || unprunable(this.tasks()).has(task.id))
+            return;
           const write = await this.#store.delete(task.id, held.version);
           if (write.ok) {
             this.#held.delete(task.id);
@@ -930,6 +932,7 @@ export class Scheduler {
     await this.#markAbsent();
     this.#checkOut(this.#due());
     await this.#expire();
+    await this.#markContinued();
     await this.#alertInput();
     await this.#escalate();
     // A check ticks again once its answer is settled, so a predecessor it settled releases or fails its dependents then.
@@ -987,6 +990,19 @@ export class Scheduler {
     } catch (err) {
       this.#onError(err);
     }
+  }
+
+  /**
+   * An `awaiting-merge` task's `continuedBy` follows its chain (`continuedChange`): written here, before
+   * `#alertInput`, so a continuation that just landed has cleared its stamp by the next poll's reading.
+   */
+  async #markContinued(): Promise<void> {
+    const all = this.tasks();
+    await Promise.all(
+      all
+        .filter((t) => continuedChange(t, all) !== null)
+        .map((seen) => this.#update(seen.id, (current) => continuedChange(current, this.tasks()))),
+    );
   }
 
   /**

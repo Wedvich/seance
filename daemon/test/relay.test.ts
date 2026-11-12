@@ -713,6 +713,7 @@ describe("daemon ↔ relay integration", () => {
         "continueTask",
         "continueCancelled",
         "continueSession",
+        "continueHandoff",
         "runNow",
         "attachments",
       ]);

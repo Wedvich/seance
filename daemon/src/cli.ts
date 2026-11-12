@@ -318,7 +318,7 @@ export async function cmdStart(argv: readonly string[]): Promise<void> {
 }
 
 /**
- * Queues a task that resumes a failed or cancelled one's session (`cli-auto.ts`). Always a scheduler task,
+ * Queues a task that resumes a failed or cancelled one's (or a blocked awaiting-merge one's) session (`cli-auto.ts`). Always a scheduler task,
  * never the local op socket's `spawn`: a hand-run `claude --resume` is invisible to the scheduler.
  */
 export async function cmdContinue(argv: readonly string[]): Promise<void> {

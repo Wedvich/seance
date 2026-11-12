@@ -346,6 +346,7 @@ export class EndedTasks {
               repo: site.repo,
               path: site.worktree,
               ...(site.session === undefined ? {} : { session: site.session }),
+              ...(site.continuedPr === undefined ? {} : { continuedPr: site.continuedPr }),
             },
             launches.prUrl,
             landed?.server,
@@ -458,11 +459,16 @@ export class EndedTasks {
 
   /**
    * Whether a session of this task may hand its PR over: launched here, with a PR URL noted. Without
-   * one its end would settle `done` or `failed`, never `awaiting-merge`.
+   * one its end would settle `done` or `failed`, never `awaiting-merge`. A continuation resumes the
+   * conversation that opened the PR, so it may hand back the one its own note inherited at launch
+   * (`continuedPr`, copied from the launch it continued): only its own note, never another's by path or
+   * session, which broke once the continued launch was evicted and would let a fresh task in a reused
+   * worktree hand off a PR it never touched.
    */
   handoffCheck(taskId: string): "ok" | "unrecorded" | "prless" {
     if (!this.#ledger.ids().includes(taskId)) return "unrecorded";
-    const prUrl = this.#launches.get(taskId)?.prUrl ?? this.#ledger.notes().find((n) => n.taskId === taskId)?.prUrl;
+    const note = this.#ledger.notes().find((n) => n.taskId === taskId);
+    const prUrl = this.#launches.get(taskId)?.prUrl ?? note?.prUrl ?? note?.continuedPr;
     return prUrl === undefined ? "prless" : "ok";
   }
 
@@ -488,6 +494,18 @@ export class EndedTasks {
       await this.#ledger.note(taskId, { closedHere: true });
     } catch (err) {
       log.warn(`launch ledger: could not note that task ${taskId} is being closed (${String(err)})`);
+    }
+  }
+
+  /**
+   * This daemon is about to close the task's pane for its hand-off: `closing`, and noted as a hand-off too,
+   * so a continuation of it is worded as a handed-off session. Reap and despawn keep `closing`.
+   */
+  async handingOff(taskId: string): Promise<void> {
+    try {
+      await this.#ledger.note(taskId, { closedHere: true, handedOff: true });
+    } catch (err) {
+      log.warn(`launch ledger: could not note that task ${taskId} is being handed off (${String(err)})`);
     }
   }
 
@@ -560,6 +578,8 @@ export class EndedTasks {
         readonly session: string;
         readonly exit?: number;
         readonly vanished?: true;
+        readonly handedOff?: true;
+        readonly continuedPr?: string;
       }
     | { readonly refused: string } {
     if (this.#launches.has(taskId)) return { refused: "a launch of it is still in flight here" };
@@ -581,12 +601,16 @@ export class EndedTasks {
     if (note.session === undefined) {
       return { refused: "it was launched before this daemon noted session ids; resume it by hand" };
     }
+    // The PR this session had, for the continuation to inherit: its own report, else what it inherited.
+    const pr = note.prUrl ?? note.continuedPr;
     return {
       repo: note.repo,
       path: note.path,
       session: note.session,
       ...(note.exit === undefined ? {} : { exit: note.exit }),
       ...(note.vanished === true && note.exit === undefined ? { vanished: true as const } : {}),
+      ...(note.handedOff === true && (note.exit ?? 0) === 0 ? { handedOff: true as const } : {}),
+      ...(pr === undefined ? {} : { continuedPr: pr }),
     };
   }
 

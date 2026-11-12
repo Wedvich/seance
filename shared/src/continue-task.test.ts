@@ -1,8 +1,24 @@
 import { describe, expect, test } from "bun:test";
 import type { Machine } from "./app-client.ts";
-import { continuationSpec, continuationUnderway, continueOffer, waitingContinuation } from "./continue-task.ts";
+import {
+  continuationSpec,
+  continuationUnderway,
+  continueOffer,
+  newestLanded,
+  offeredSpec,
+  waitingContinuation,
+  type OfferContext,
+} from "./continue-task.ts";
+import { blockedBrief } from "./pr-blocked.ts";
 import { parseTaskSpec } from "./parse.ts";
-import { CAPABILITIES, type Assignment, type Task, type TaskSpec } from "./types.ts";
+import {
+  CAPABILITIES,
+  LAUNCH_LEDGER_MAX_AGE_MS,
+  type Assignment,
+  type Target,
+  type Task,
+  type TaskSpec,
+} from "./types.ts";
 
 const assignment: Assignment = { deviceId: "dev-a", exclave: "default", clone: "app", window: "w", pane: "%1" };
 
@@ -331,5 +347,153 @@ describe("continuationUnderway", () => {
     const a = link("t-a", "t-b", "done");
     const b = link("t-b", "t-a", "done");
     expect(continuationUnderway(a, [a, b])).toBe(false);
+  });
+});
+
+const continuationAt: Target = { deviceId: "dev-a", exclave: "default", clone: "app" };
+
+function continuationOf(id: string, state: Task["state"], continues = "t-old"): Task {
+  return {
+    id,
+    state,
+    createdAt: 2,
+    spec: { repo: "github.com/acme/app", mode: "continue", continues: { task: continues, at: continuationAt } },
+  };
+}
+
+describe("continueOffer, an awaiting-merge task whose PR is blocked", () => {
+  const caps = [CAPABILITIES.continueTask, CAPABILITIES.continueSession, CAPABILITIES.continueHandoff] as const;
+  const handoffable = [machine(caps)];
+  const stuck = (over: Partial<Task> = {}, spec: Partial<TaskSpec> = {}): Task =>
+    failed(
+      {
+        state: "awaiting-merge",
+        failure: undefined,
+        prUrl: "https://github.com/acme/app/pull/7",
+        pr: { state: "open", required: "failing", failing: ["test (ubuntu)", "lint"], merge: "blocked", at: 1 },
+        ...over,
+      },
+      spec,
+    );
+  const context = { now: 2, leaderHandoff: true } as const;
+  const target = { deviceId: "dev-a", exclave: "default", clone: "app" };
+
+  test("is offered, resuming the task itself, with the fixed brief naming the PR and the failing checks", () => {
+    const offer = continueOffer(stuck(), handoffable, [], context);
+    expect(offer).toMatchObject({ ok: true, at: target });
+    if (!offer.ok) return;
+    expect(offer).not.toHaveProperty("resumes");
+    expect(offer.brief).toContain("https://github.com/acme/app/pull/7");
+    expect(offer.brief).toContain("Failing required checks: test (ubuntu), lint.");
+    expect(offer.brief).toContain("hand_off_task");
+  });
+
+  test("each way it is not offered says why", () => {
+    const refusals: readonly (readonly [
+      string,
+      Task,
+      readonly Machine[],
+      readonly Task[],
+      OfferContext | undefined,
+    ])[] = [
+      ["the PR is not blocked", stuck({ pr: { state: "open", merge: "clean", at: 1 } }), handoffable, [], context],
+      ["until: reported", stuck({}, { until: "reported" }), handoffable, [], context],
+      ["no context", stuck(), handoffable, [], undefined],
+      ["the leader lacks it", stuck(), handoffable, [], { now: 2, leaderHandoff: false }],
+      ["the machine lacks continueHandoff", stuck(), able, [], context],
+      ["a continuation waits in the list", stuck(), handoffable, [continuationOf("t-c", "queued")], context],
+      [
+        "the pointer says live",
+        stuck({ continuedBy: { task: "t-c", createdAt: 2, live: true } }),
+        handoffable,
+        [],
+        context,
+      ],
+      ["here mode", stuck({}, { mode: "here" }), handoffable, [], context],
+      ["never placed", stuck({ assignment: undefined }), handoffable, [], context],
+    ];
+    for (const [name, task, machines, tasks, ctx] of refusals) {
+      const offer = continueOffer(task, machines, tasks, ctx);
+      expect(offer.ok, name).toBe(false);
+      expect(offer.ok ? "" : offer.reason.length, name).toBeGreaterThan(0);
+    }
+  });
+
+  test("the leader's pointer names the session to resume, with an empty list", () => {
+    const task = stuck({ continuedBy: { task: "t-c1", createdAt: 2 } });
+    const offer = continueOffer(task, handoffable, [], context);
+    expect(offer).toMatchObject({ ok: true, resumes: "t-c1", at: target });
+  });
+
+  test("a session older than the launch ledger keeps is refused, from the task and from the pointer; the bound itself is offered", () => {
+    const bound = LAUNCH_LEDGER_MAX_AGE_MS;
+    expect(continueOffer(stuck(), handoffable, [], { now: 1 + bound, leaderHandoff: true }).ok).toBe(true);
+    expect(continueOffer(stuck(), handoffable, [], { now: 2 + bound, leaderHandoff: true }).ok).toBe(false);
+    const pointed = stuck({ continuedBy: { task: "t-c1", createdAt: 100 } });
+    expect(continueOffer(pointed, handoffable, [], { now: 100 + bound, leaderHandoff: true }).ok).toBe(true);
+    const old = continueOffer(pointed, handoffable, [], { now: 101 + bound, leaderHandoff: true });
+    expect(old.ok).toBe(false);
+  });
+
+  test("failed and cancelled offers take no context and are unchanged", () => {
+    expect(continueOffer(failed(), able, [])).toEqual({ ok: true, at: target });
+    expect(continueOffer(failed(), able, [], context)).toEqual({ ok: true, at: target });
+  });
+
+  test("offeredSpec resumes the offer's session, from the tapped task's spec, with the brief ahead of the note", () => {
+    const task = stuck({ continuedBy: { task: "t-c1", createdAt: 2 } }, { model: "opus" });
+    const offer = continueOffer(task, handoffable, [], context);
+    if (!offer.ok) throw new Error(offer.reason);
+    const spec = offeredSpec(task, offer, "  mind the lockfile  ");
+    expect(spec.continues).toEqual({ task: "t-c1", at: target });
+    expect(spec.model).toBe("opus");
+    expect(spec.prompt).toBe(`${offer.brief}\n\nmind the lockfile`);
+    expect(offeredSpec(task, offer).prompt).toBe(offer.brief);
+    const plain = continueOffer(stuck(), handoffable, [], context);
+    if (!plain.ok) throw new Error(plain.reason);
+    expect(offeredSpec(stuck(), plain).continues).toEqual({ task: "t-old", at: target });
+  });
+});
+
+describe("blockedBrief", () => {
+  test("each reason's sentence, and no failing line without names", () => {
+    const task = failed({ state: "awaiting-merge", prUrl: "https://github.com/acme/app/pull/7" });
+    expect(blockedBrief(task, "conflict")).toContain("merge conflicts with its base branch");
+    expect(blockedBrief(task, "behind")).toContain("behind its base branch");
+    expect(blockedBrief(task, "unarmed")).toContain("gh pr merge --auto");
+    expect(blockedBrief(task, "checks")).not.toContain("Failing required checks");
+  });
+});
+
+describe("newestLanded", () => {
+  const origin = failed({ id: "t-0", state: "awaiting-merge", failure: undefined });
+  const link = (id: string, continues: string, state: Task["state"], over: Partial<Task> = {}): Task => ({
+    ...continuationOf(id, state, continues),
+    ...over,
+  });
+
+  test("walks a chain to its newest landed link", () => {
+    const chain = [origin, link("t-1", "t-0", "done"), link("t-2", "t-1", "running")];
+    expect(newestLanded(origin, chain)?.id).toBe("t-2");
+  });
+
+  test("a continuation still waiting, or one that never landed, is not it", () => {
+    expect(newestLanded(origin, [origin, link("t-1", "t-0", "queued")])).toBeUndefined();
+    const unlanded = link("t-1", "t-0", "failed", { failure: { code: "dispatch_unconfirmed", message: "x" } });
+    expect(newestLanded(origin, [origin, unlanded])).toBeUndefined();
+  });
+
+  test("of several landed at one link, the newest, a tie going to the greater id", () => {
+    const a = link("t-a", "t-0", "done", { createdAt: 5 });
+    const b = link("t-b", "t-0", "done", { createdAt: 9 });
+    const c = link("t-c", "t-0", "done", { createdAt: 9 });
+    expect(newestLanded(origin, [a, b, c])?.id).toBe("t-c");
+    expect(newestLanded(origin, [c, b, a])?.id).toBe("t-c");
+  });
+
+  test("a cycle ends the walk", () => {
+    const a = link("t-a", "t-b", "done");
+    const b = link("t-b", "t-a", "done");
+    expect(newestLanded(a, [a, b])).toBeDefined();
   });
 });

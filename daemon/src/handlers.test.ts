@@ -1013,6 +1013,8 @@ describe("a scheduler spawn that continues a failed task", () => {
     readonly repo?: string;
     readonly path?: string;
     readonly exit?: number;
+    readonly prUrl?: string;
+    readonly handedOff?: true;
     /** `null`: noted by a daemon predating session ids. */
     readonly session?: string | null;
   }
@@ -1030,6 +1032,8 @@ describe("a scheduler spawn that continues a failed task", () => {
         path: where.path ?? site,
         ...(session === null ? {} : { session }),
         ...(where.exit === undefined ? {} : { exit: where.exit }),
+        ...(where.prUrl === undefined ? {} : { prUrl: where.prUrl }),
+        ...(where.handedOff === undefined ? {} : { handedOff: true as const }),
       });
     const calls: { readonly request: SpawnRequest; readonly continuation: Continuation | undefined }[] = [];
     const backend: SessionBackend = {
@@ -1080,6 +1084,20 @@ describe("a scheduler spawn that continues a failed task", () => {
         continuation: { path: site, session: SESSION, exit: 137 },
       },
     ]);
+  });
+
+  test("the continued launch's PR and hand-off reach the backend and the new task's note, never from the request", async () => {
+    const pr = "https://github.com/a/b/pull/1";
+    const { ledger, calls, handlerCtx } = await rig({ prUrl: pr, handedOff: true });
+    const reply = await createHandler(handlerCtx)(
+      continuation({ continuedPr: "https://github.com/evil/x/pull/9", handedOff: false }),
+      SCHEDULER_ID,
+    );
+    expect(reply?.payload).toMatchObject({ ok: true });
+    expect(calls[0]?.continuation).toEqual({ path: site, session: SESSION, handedOff: true, continuedPr: pr });
+    expect(ledger.notes()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ taskId: NEW, path: site, continuedPr: pr })]),
+    );
   });
 
   test("the leader's own machine continues in process, under its own origin", async () => {

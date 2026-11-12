@@ -1031,7 +1031,7 @@ of M4 has landed.
   Turn off on that device is what keeps it off. Follow-up, not built: the list on a browser whose
   card never reads the record (`unsupported`, `denied`).
 
-- **PR hand-off** — _Decided_ by the owner, 2026-11-11; steps 1-3 built, and the chip half of 5. A session that opened its PR
+- **PR hand-off** — _Decided_ by the owner, 2026-11-11; steps 1-5 built. A session that opened its PR
   and armed what merges it hands the PR to the scheduler and exits, rather than staying alive to
   watch CI and merge. A 30-day transcript sample across one fleet found that pattern in over half of
   its sessions, at thousands of sleep and poll calls, with p90 lifetimes of 8 h and 20 h on two
@@ -1059,15 +1059,21 @@ of M4 has landed.
      only" for this kind), fixed wording per reason in `push-sw.js`, and a click opening `/?task=<id>`. A
      true one-tap Continue is out of reach: the service worker holds no PSK, and a URL that enqueues on
      open would let any same-origin link start a session.
-  4. **Continue from `awaiting-merge`** while the PR is blocked. `continueOffer` allows it (DESIGN.md
-     "Not offered" changes: the ledger reason holds for `merge_expired`, not for a live
-     `awaiting-merge` inside its 7 days). The continuation's prompt is fixed text plus the PR URL, the
-     reason and the failing check names, never logs; the session reads those with `gh`. A new
-     `continuePreamble` wording covers a session that ended by handing off. The original task keeps
-     the PR and its `after: "merged"` dependents, and the continuation ends `done` by `session`.
+  4. **Continue from `awaiting-merge`** while the PR is blocked — **Done** 2026-11-12 (DESIGN.md
+     "Continuing a session", "Blocked PR"). `continueOffer` allows it (the ledger reason holds for
+     `merge_expired`, not for a live `awaiting-merge` inside its 7 days), behind a new
+     `CAPABILITIES.continueHandoff` on the leader and the machine. The continuation's prompt is fixed
+     text plus the PR URL, the reason and the failing check names, never logs; the session reads those
+     with `gh`. A fourth `continuePreamble` wording covers a session that ended by handing off
+     (`TaskNote.handedOff`). The session resumed is the one the leader's `Task.continuedBy` pointer
+     names (the newest landed continuation), and it can hand the PR off again though it opened none:
+     its note carries `continuedPr`, copied by the daemon from the continued launch. The original task
+     keeps the PR and its `after: "merged"` dependents, and the continuation ends `done` by `session`.
+     A continuation that lands clears the alert stamp, so a fix that fails again on the same head
+     alerts again; the chain's finished links are kept from pruning while the root awaits its merge.
   5. **PWA**: Continue as the primary action on a blocked `awaiting-merge` card, and the chip names the
-     reason. The chip half is **Done** 2026-11-12 (a word beside the CI dot, and in its title; MCP's
-     `get_queue` carries `prBlocked` the same way).
+     reason — **Done** 2026-11-12 (the chip: a word beside the CI dot, and in its title; MCP's
+     `get_queue` carries `prBlocked` the same way; the button: `QueueRow.inlinePrimary`).
   - _Later:_ a hand-off whose close fails. The session was told `ok`, so it ended its turn and waits
     at its prompt; the failure is audited (`origin=handoff`, the `DespawnFailure` code) but nothing
     retries or tells anyone, and the task sits `running` until someone closes the window. Retry once
@@ -1079,6 +1085,9 @@ of M4 has landed.
     panes one daemon ever ran, a few bytes each, so not worth a sweep until something reads the map.
   - _Built 2026-11-12:_ several PRs per task (`Task.prs`, DESIGN.md "PR status", "Several PRs"):
     the task stands on its newest PR not read closed. _Later:_ one alert per PR.
+  - _Later:_ the old card's "Continuing as …" line looks one level down (`waitingContinuation`), so it
+    does not name a continuation of a continuation that is waiting; the button is withheld
+    all the same (`continuationUnderway` walks the whole chain), only the sentence is missing.
   - _Later:_ alert and Continue for `until: "reported"` tasks. They are excluded from the blocked-state
     read, the chip and the alert for now (they do not wait on the merge).
   - _Later:_ stacked PRs, once Stacking lands. A `reviewDecision` chip, with `CHANGES_REQUESTED` as a
