@@ -1024,13 +1024,15 @@ of M4 has landed.
     (counts only, no ids or names); the share of tasks with `avoid` before `keepFree` ships and a
     month after it does says whether the workaround went away. The counts exist only from the traits-core
     deploy (#406), so "before" is the window between that deploy and the `keepFree` deploy; there is no
-    pre-traits baseline (earlier admit lines carry no counts, and no earlier line records `avoid`). Owner,
+    pre-traits baseline (earlier admit lines carry no counts, and no earlier line records `avoid`; the command skips them, or the
+    months before the deploy would read 100%). Owner,
     monthly, on every machine that has led the scheduler; not a pass/fail gate:
 
     ```sh
     grep -h ' op=admit ' ~/.local/state/seance/seanced.log \
-    | awk '{ match($0, /task="[^"]*"/); id=substr($0,RSTART,RLENGTH); if (seen[id]++) next;
-             month=substr($1,1,7); total[month]++; if ($0 !~ / avoid=0 /) avoid[month]++ }
+    | awk '$0 !~ / avoid=[0-9]/ { next }  # admitted before #406: no counts, so neither numerator nor denominator
+           { match($0, /task="[^"]*"/); id=substr($0,RSTART,RLENGTH); if (seen[id]++) next;
+             month=substr($1,1,7); total[month]++; if ($0 ~ / avoid=[1-9]/) avoid[month]++ }
            END { for (m in total) printf "%s admitted=%d with_avoid=%d share=%.0f%%\n", m, total[m], avoid[m], 100*avoid[m]/total[m] }' \
     | sort
     ```
