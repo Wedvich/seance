@@ -68,7 +68,11 @@ export interface LaunchSite {
   readonly worktree: string;
   /** The Claude session id this daemon chose for the launch (`--session-id`), or a continuation resumed. */
   readonly session?: string;
-  /** The PR URL of the launch a continuation continued, from this ledger: noted on the new launch (`TaskNote.continuedPr`). */
+  /**
+   * The PR URL this launch inherited: a continuation's, from the launch it continued in this ledger, or a
+   * successor's, from its scheduler-sealed spawn (`SpawnRequest.inheritedPr`). Noted on the new launch
+   * (`TaskNote.continuedPr`).
+   */
   readonly continuedPr?: string;
 }
 
@@ -125,7 +129,8 @@ export interface TaskNote {
    * The PR URL of the launch this one continued (its `prUrl`, else its own `continuedPr`), copied from this
    * ledger when the continuation landed, so a hand-off checks only its own note and the chain inherits it link
    * by link. Internal, never in `TaskProgress`: as `prUrl` it would settle the continuation `awaiting-merge`
-   * on its predecessor's PR, and as progress the leader would read it.
+   * on its predecessor's PR, and as progress the leader would read it. A successor's launch notes here the PR
+   * it inherited from the scheduler's spawn (`SpawnRequest.inheritedPr`), under the same rules.
    */
   readonly continuedPr?: string;
   /**
@@ -656,7 +661,7 @@ export class LaunchLedger {
    * that no longer is this task's; carried over, they could settle it merged.
    * `prUrl` is one the new session reported while its spawn was still in
    * flight, which the mod sends once: it belongs to the new launch, and so does the PR URL a
-   * continuation inherits (`site.continuedPr`).
+   * continuation or a successor inherits (`site.continuedPr`).
    * Best-effort like `note`.
    */
   async startNote(

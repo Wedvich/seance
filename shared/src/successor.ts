@@ -142,7 +142,8 @@ function quoted(value: string): string {
  * pushed work and track it (nothing is lost, the worktree is fresh), never to check `<r>` out under its
  * own name (a local branch of that name may be checked out in an older worktree), to rebuild where the
  * work stands from git and each pull request, and to push back to `<r>` into the existing pull request.
- * With an inherited pull request it also says not to call `hand_off_task` for it.
+ * With an inherited pull request it says the successor may hand it off with `hand_off_task` (never under
+ * `until: "reported"`, which settles on the report).
  */
 export function successorPreamble(input: Pick<SuccessorPromptInput, "task" | "remoteBranch" | "tip">): string {
   const { task, remoteBranch, tip } = input;
@@ -166,17 +167,17 @@ export function successorPreamble(input: Pick<SuccessorPromptInput, "task" | "re
         : "Keep the existing pull request and never open a second one for the same work."),
   ];
   if (prs.length > 0) {
-    // The successor's launch notes no PR (only a session's own `gh pr create` output is noted), so the daemon
-    // answers `hand_off_task` `prless` for one it inherited. A PR-less task's successor opens its own, which is noted.
+    // The leader's dispatch carries the PR to the successor's daemon (`SpawnRequest.inheritedPr`), which then
+    // accepts `hand_off_task`; an older daemon answers `prless`, whose text says to keep watching it.
     lines.push(
       "",
-      "Do not call hand_off_task for the pull request above: an earlier session opened it, so it would be refused. " +
-        "Keep the pull request open and carry it through yourself, as the task asks" +
-        // A merge settles nothing under `reported`: only the session's report does, so the line must not
-        // read as leave-and-go-idle. Otherwise the scheduler's watch settles the task on the merge.
-        (task.spec.until === "reported"
-          ? "; a merge alone does not settle this task, your report does."
-          : "; the scheduler settles this task when it merges."),
+      task.spec.until === "reported"
+        ? // After a hand-off no session is left to report, and a merge alone settles nothing under `reported`.
+          "Do not call hand_off_task: this task settles only on your report, never on a merge alone. " +
+            "Keep the pull request open, carry it through yourself and report done."
+        : "Once the pull request is ready and what merges it is in place (auto-merge armed, or a reviewer asked), " +
+            "call hand_off_task last; the scheduler then settles this task when it merges. " +
+            "If that is refused, keep the pull request open and carry it through yourself.",
     );
   }
   if (task.spec.attachments !== undefined) {

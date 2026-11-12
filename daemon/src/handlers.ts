@@ -24,6 +24,7 @@ import {
   isMetricsRequest,
   isRecord,
   isAutonomyLevel,
+  httpsUrl,
   isTaskId,
   parseAttachmentManifest,
   parsePassCloseRequest,
@@ -185,6 +186,8 @@ export function isSpawnRequest(payload: unknown): payload is SpawnRequest {
     (parseAttachmentManifest(obj["attachments"]) === null || obj["mode"] === "continue")
   )
     return false;
+  // Only a worktree spawn (a successor's) inherits a PR this way; no correct leader sends it beside another mode.
+  if (obj["inheritedPr"] !== undefined && obj["mode"] !== "worktree") return false;
   // `continues` is the one field of a continuation and only of one. It is a ledger key: the
   // worktree comes from this machine's own record of that task, never from the request.
   if (obj["continues"] !== undefined && !isTaskId(obj["continues"])) return false;
@@ -283,6 +286,25 @@ function attachmentsRefusal(ctx: HandlerContext, request: SpawnRequest, schedule
     return attachmentUnavailable("attachments need the id of the task that carries them");
   if (ctx.attachments === undefined) return attachmentUnavailable("this daemon cannot fetch attachments");
   return null;
+}
+
+/**
+ * The PR a successor's spawn inherited, when the scheduler's own task spawn names it: sealed from the
+ * scheduler (or its own process), `client: SCHEDULER_CLIENT`, with a task id to note it under. From any
+ * other sender the claim is dropped, never refused: the spawn then runs as an older daemon runs it, and
+ * its session's hand-off answers `prless`. Never logs the URL.
+ */
+function inheritedPrOf(request: SpawnRequest, scheduler: boolean): string | undefined {
+  const { inheritedPr, taskId } = request;
+  if (inheritedPr === undefined) return undefined;
+  const fromScheduler = scheduler && request.client === SCHEDULER_CLIENT && taskId !== undefined;
+  // Held exact, as the ledger's reader holds `continuedPr`; a value this build reads otherwise is dropped, never refused.
+  if (fromScheduler && typeof inheritedPr === "string" && httpsUrl(inheritedPr) === inheritedPr) return inheritedPr;
+  log.warn(
+    `spawn: ignored an inherited pull request${fromScheduler ? " this daemon cannot read" : " not sealed by the scheduler"}` +
+      (taskId === undefined ? "" : ` (task ${quote(taskId)})`),
+  );
+  return undefined;
 }
 
 function notContinuable(message: string): SpawnRefusal {
@@ -385,6 +407,7 @@ async function handleSpawn(
     }
     continuation = site;
   }
+  const inherited = inheritedPrOf(payload, scheduler);
   // Before the write-ahead record: a refused or abandoned fetch then leaves no ledger entry, and
   // the leader's TTL check proves the task never landed. Past its deadline nothing launches.
   let attachments: SessionAttachments | undefined;
@@ -439,6 +462,7 @@ async function handleSpawn(
     }
     // Only a worktree has a branch of its own to watch; `here` runs in the clone itself.
     // A continuation watches the worktree it resumed, under its new task id.
+    const continuedPr = continuation?.continuedPr ?? inherited;
     const entry = payload.mode !== "here" ? repos.find((r) => r.name === payload.repo) : undefined;
     await settle?.(true, {
       ...(entry === undefined
@@ -448,7 +472,7 @@ async function handleSpawn(
               repo: entry.path,
               worktree: outcome.path,
               ...(outcome.session === undefined ? {} : { session: outcome.session }),
-              ...(continuation?.continuedPr === undefined ? {} : { continuedPr: continuation.continuedPr }),
+              ...(continuedPr === undefined ? {} : { continuedPr }),
             },
           }),
       ...(outcome.server === undefined ? {} : { server: outcome.server }),

@@ -1458,6 +1458,15 @@ export interface SpawnRequest {
    * sent only to a daemon advertising `CAPABILITIES.attachments`.
    */
   readonly attachments?: readonly AttachmentRef[];
+  /**
+   * The PR a successor inherited from the task it succeeds (`Task.prUrl` of a task carrying
+   * `TaskSpec.succeeds`), set only by the leader's dispatch. The daemon notes it in its launch
+   * ledger (`TaskNote.continuedPr`) so the session's `hand_off_task` is accepted, only on a worktree
+   * spawn sealed from the scheduler with `client: SCHEDULER_CLIENT` and a `taskId`; from any
+   * other sender it is ignored, as an older daemon ignores it. `https:` exactly as `httpsUrl` returns it,
+   * else it is ignored. Never logged.
+   */
+  readonly inheritedPr?: string;
 }
 
 /**

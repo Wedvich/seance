@@ -334,7 +334,7 @@ describe("successorPrompt", () => {
       },
     );
     // The fixed wording alone: less the 40-unit tip and the one-unit task id. The PR branch adds the
-    // hand-off line, so it is measured too, less the URL it substitutes.
+    // hand-off lines (they differ by `until`), so both are measured, less the URL they substitute.
     const bare = successorPreamble({ task: { ...attached, id: "t" }, remoteBranch: "b", tip: TIP });
     expect(bare.length - 40 - 2).toBeLessThanOrEqual(SUCCESSOR_PREAMBLE_MAX);
     for (const until of ["merged", "reported"] as const) {
@@ -360,22 +360,23 @@ describe("successorPrompt", () => {
     expect(prompt).not.toContain("was too long");
   });
 
-  test("an inherited pull request tells the successor not to call hand_off_task; a PR-less one does not", () => {
-    expect(successorPreamble({ task: running({ prUrl: PR }), remoteBranch: "b", tip: TIP })).toContain(
-      "Do not call hand_off_task for the pull request above",
-    );
+  test("an inherited pull request may be handed off, never under until: reported; a PR-less one names no hand-off", () => {
     const waits = successorPreamble({ task: running({ prUrl: PR }), remoteBranch: "b", tip: TIP });
-    expect(waits).toContain("the scheduler settles this task when it merges");
+    expect(waits).toContain("call hand_off_task last");
+    expect(waits).toContain("settles this task when it merges");
+    expect(waits).toContain("If that is refused, keep the pull request open");
+    expect(waits).not.toContain("Do not call");
     expect(waits).not.toContain("end your turn");
-    // Under `reported` a merge settles nothing: the line must not send the session idle before its report.
+    // Under `reported` a hand-off would leave no session to report, and a merge settles nothing.
     const reported = successorPreamble({
       task: running({ prUrl: PR }, { until: "reported" }),
       remoteBranch: "b",
       tip: TIP,
     });
-    expect(reported).toContain("a merge alone does not settle this task");
-    expect(reported).not.toContain("end your turn");
+    expect(reported).toContain("Do not call hand_off_task");
+    expect(reported).toContain("report done");
     expect(reported).not.toContain("settles this task when it merges");
+    expect(reported).not.toContain("end your turn");
     const bare = successorPreamble({ task: running(), remoteBranch: "b", tip: TIP });
     expect(bare).not.toContain("hand_off_task");
     expect(bare).toContain("Open a pull request once there is something to review.");
