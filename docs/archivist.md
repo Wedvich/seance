@@ -152,6 +152,45 @@ Each is the owner's, 2026-11-12, unless marked _derived_.
 - **A36. Health.** The Machines screen shows the archivist as its own card: online, last ingest,
   row counts, database size.
 
+**The PWA's surfaces.** Settled 2026-11-12 by the owner's review of the design canvas
+(https://claude.ai/artifact/B83Ftm67X654rGd4siUeBe, phone width, built from the PWA's own
+`tokens.css`/`screen.css` and the markup of `machines.tsx`/`queue.tsx`). Nothing here adds a new
+component or style.
+
+- **A36a. Where the card sits.** Last in the machine list, after every machine and before
+  Accounts; no heading of its own. It is a `fleet-card` like a machine's but carries no gauges,
+  no exclave rows, no ⋯ menu (nothing to chart or act on) and no Scheduler badge. Its meta line
+  reads `<platform> · last ingest <age>`, then the build line; both need the open detail on a
+  `machine-info` blob below, and drop what it does not say.
+- **A36b. Its rows.** Tasks, Samples, Events (row counts) and Database (size of
+  `archive.sqlite`), each with the oldest date it holds, laid out in the exclave table's columns so
+  the numbers share the right edge with every other card. One quiet line under them: "Keeps task,
+  chart and fleet history. Never runs sessions."
+- **A36c. Offline.** Grey dot, `offline · last seen <age>`, no rows (the status op needs it
+  online), and one line: what is hidden until it is back. Shown while the registry holds its
+  entry; a fleet whose registry never held an archivist shows no card.
+- **A36d. Range picker.** One segmented control, `6h · 24h · 30d · 90d · 1y`; the last two only
+  while the archivist is online (A35). If it leaves while one is showing, the chart falls back to
+  24h.
+- **A36e. No source marking.** A chart draws the same lines and legend whichever side answered;
+  the UI never says which ranges are a daemon's and which the archive's. The source shows only in
+  a failure, worded like today's daemon one: "No answer — the archivist may be offline."
+- **A36f. Account and asleep charts.** A merged account chart (A33) adds nothing to its card: the
+  detail line already names the machines. An asleep machine's card gains ⋯ › History while the
+  archivist is online; its lines stop at its last beat and the rest of the window stays empty.
+- **A36g. Older.** A collapsible section after Finished, with the Asleep section's toggle, closed
+  by default, no count (the archive is paged). It lists only tasks not already in Finished
+  (deduplicated by id). It disappears on the registry push that drops the archivist.
+- **A36h. Filters.** Inside Older, first a title search (the rename field's style), then the spawn
+  form's tile grid: Repo, Outcome, Machine, Account, Dates, each opening the existing bottom
+  sheet. They filter Older only, never the live sections. Dates is presets only: last 7, 30 and 90
+  days, last year, any time. Machine lists retired machines by last known name (A24).
+- **A36i. Archived cards.** No ⋯ menu and no Continue: the record has left the store, so nothing
+  can act on it. The PR chip is its last archived state, without the checks icon.
+- **A36j. Paging and states.** 20 a page, "Showing 20 of N" and a quiet "Load older" at the end;
+  loading is "Loading…" under the filters; no match is "No older tasks match." with "Clear search
+  and filters".
+
 ### 8. The silence alert
 
 - **A37.** The leader sends one push when the archivist's registry entry has been absent 24 h,
@@ -198,13 +237,14 @@ One stack of PRs, each based on the one before, merged together.
    first-start import, retention (A17, A19, A20, A22).
 5. `install --system`, update on the announce, and the docs: README setup, the move-the-seat
    runbook, schema and example queries (A26–A30).
-6. The archive status op and the Machines screen's health card (A31, A36).
+6. The archive status op and the Machines screen's health card (A31, A36–A36c).
 
 **Milestone 2 — read**
 
 7. The metrics and task query ops, in the archivist and `RelayClient` (A31, A33).
-8. PWA charts: 90-day and 1-year ranges, merged account charts, asleep machines (A32, A35).
-9. PWA task history: the older list, filters, title search (A34, A35).
+8. PWA charts: 90-day and 1-year ranges, merged account charts, asleep machines (A32, A35,
+   A36d–A36f).
+9. PWA task history: the older list, filters, title search (A34, A35, A36g–A36j).
 
 **Milestone 3 — alert**
 
