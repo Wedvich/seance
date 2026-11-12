@@ -186,8 +186,6 @@ export function isSpawnRequest(payload: unknown): payload is SpawnRequest {
     (parseAttachmentManifest(obj["attachments"]) === null || obj["mode"] === "continue")
   )
     return false;
-  // Only a worktree spawn (a successor's) inherits a PR this way; no correct leader sends it beside another mode.
-  if (obj["inheritedPr"] !== undefined && obj["mode"] !== "worktree") return false;
   // `continues` is the one field of a continuation and only of one. It is a ledger key: the
   // worktree comes from this machine's own record of that task, never from the request.
   if (obj["continues"] !== undefined && !isTaskId(obj["continues"])) return false;
@@ -289,20 +287,19 @@ function attachmentsRefusal(ctx: HandlerContext, request: SpawnRequest, schedule
 }
 
 /**
- * The PR a successor's spawn inherited, when the scheduler's own task spawn names it: sealed from the
- * scheduler (or its own process), `client: SCHEDULER_CLIENT`, with a task id to note it under. From any
- * other sender the claim is dropped, never refused: the spawn then runs as an older daemon runs it, and
- * its session's hand-off answers `prless`. Never logs the URL.
+ * The PR a successor's spawn inherited, when the scheduler's own task spawn names it: a worktree spawn
+ * sealed from the scheduler (or its own process), `client: SCHEDULER_CLIENT`, with a task id to note it
+ * under. Anything else, another sender or mode included, drops the claim, never refuses it: the spawn then
+ * runs as an older daemon runs it, and its session's hand-off answers `prless`. Never logs the URL.
  */
 function inheritedPrOf(request: SpawnRequest, scheduler: boolean): string | undefined {
   const { inheritedPr, taskId } = request;
   if (inheritedPr === undefined) return undefined;
-  const fromScheduler = scheduler && request.client === SCHEDULER_CLIENT && taskId !== undefined;
+  const taken = scheduler && request.client === SCHEDULER_CLIENT && taskId !== undefined && request.mode === "worktree";
   // Held exact, as the ledger's reader holds `continuedPr`; a value this build reads otherwise is dropped, never refused.
-  if (fromScheduler && typeof inheritedPr === "string" && httpsUrl(inheritedPr) === inheritedPr) return inheritedPr;
+  if (taken && typeof inheritedPr === "string" && httpsUrl(inheritedPr) === inheritedPr) return inheritedPr;
   log.warn(
-    `spawn: ignored an inherited pull request${fromScheduler ? " this daemon cannot read" : " not sealed by the scheduler"}` +
-      (taskId === undefined ? "" : ` (task ${quote(taskId)})`),
+    `spawn: ignored an inherited pull request this daemon does not take${taskId === undefined ? "" : ` (task ${quote(taskId)})`}`,
   );
   return undefined;
 }

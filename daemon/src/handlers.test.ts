@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1021,6 +1021,18 @@ describe("a successor's spawn and the PR it inherited", () => {
   const PR = "https://github.com/acme/app/pull/1";
   const SUCC = "succ";
 
+  // `log.warn` writes to stdout, not the audit sink: the drop's one line must name the task and never the claim.
+  let out: ReturnType<typeof spyOn<typeof console, "log">>;
+  beforeEach(() => {
+    out = spyOn(console, "log").mockImplementation(() => {});
+  });
+  afterEach(() => out.mockRestore());
+  const warned = (): string =>
+    out.mock.calls
+      .map((call) => String(call[0]))
+      .filter((line) => line.includes(" warn spawn: ignored an inherited pull request"))
+      .join("\n");
+
   const successor = (extra: Record<string, unknown> = {}): Plain =>
     request("spawn", {
       repo: "myrepo",
@@ -1098,6 +1110,9 @@ describe("a successor's spawn and the PR it inherited", () => {
       else expect(ledger.notes(), why).toEqual([]);
       expect(logged(), why).toContain("inheritedPr=true");
       expect(logged(), why).not.toContain(PR);
+      expect(warned(), why).not.toContain(PR);
+      if (hasTask) expect(warned(), why).toContain(`(task "${SUCC}")`);
+      else expect(warned(), why).not.toBe("");
     }
   });
 
@@ -1110,19 +1125,32 @@ describe("a successor's spawn and the PR it inherited", () => {
       expect(spawns()).toBe(1);
       expect(ledger.notes().filter((note) => note.continuedPr !== undefined)).toEqual([]);
       expect(tasks.handoffCheck(SUCC)).toBe("prless");
+      expect(warned(), String(inheritedPr)).toContain(`(task "${SUCC}")`);
+      expect(warned(), String(inheritedPr)).not.toContain("u:p");
+      expect(warned(), String(inheritedPr)).not.toContain("github.com");
     }
   });
 
-  test("beside another mode it is malformed, and nothing runs", async () => {
-    const cases: readonly Record<string, unknown>[] = [{ mode: "here" }, { mode: "continue", continues: "old-task" }];
-    for (const extra of cases) {
-      const { spawns, handlerCtx } = rig();
+  test("beside a mode other than worktree, from any sender, it is dropped like any claim the daemon does not take", async () => {
+    // A stray claim must not change what a plain `here` spawn did before the field existed.
+    const senders: readonly (readonly [string, (h: HandlerContext) => Promise<Plain | null>])[] = [
+      ["the scheduler", (h) => createHandler(h)(successor({ mode: "here" }), SCHEDULER_ID)],
+      ["an app", (h) => createHandler(h)(successor({ mode: "here" }), APP_ID)],
+      ["the local socket", (h) => createHandler(h, "local")(successor({ mode: "here" }), undefined)],
+    ];
+    for (const [why, send] of senders) {
+      const { ledger, spawns, handlerCtx } = rig();
       lines.length = 0;
       // oxlint-disable-next-line no-await-in-loop -- each case reads the lines the previous one cleared
-      const reply = await createHandler(handlerCtx)(successor(extra), SCHEDULER_ID);
-      expect(reply?.payload).toMatchObject({ ok: false, code: "internal_error" });
-      expect(logged()).toContain("audit spawn origin=relay rejected");
-      expect(spawns()).toBe(0);
+      const reply = await send(handlerCtx);
+      expect(reply?.payload, why).toMatchObject({ ok: true });
+      expect(spawns(), why).toBe(1);
+      expect(
+        ledger.notes().filter((note) => note.continuedPr !== undefined),
+        why,
+      ).toEqual([]);
+      expect(logged(), why).not.toContain("rejected");
+      expect(warned(), why).not.toContain(PR);
     }
   });
 });

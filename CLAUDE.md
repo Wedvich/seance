@@ -272,7 +272,7 @@ green:
   `client: "scheduler"`, noted `cancelled`), or, for a successor, the one that ledger noted on it at launch
   from the spawn's `inheritedPr` (`SpawnRequest`), taken only on a worktree spawn sealed `from` the scheduler
   with `client: "scheduler"` (or the leader's in-process dispatch) carrying a task id, held exact to
-  `httpsUrl`, ignored (never refused) from any other sender or when unreadable, kept out of `progress` and
+  `httpsUrl`, ignored (never refused) from any other sender, beside any other mode, or when unreadable, kept out of `progress` and
   never logged (the audit line says `inheritedPr=true`), and set by the leader only from the dispatched
   task's own `prUrl`, only for a task carrying `succeeds` and never under `until: "reported"`, never
   from a session-event frame — (`untasked`,
