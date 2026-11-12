@@ -956,7 +956,9 @@
   height: 24px;
   border-radius: 7px;
   background: #ffffff;
-  transition: transform 0.18s ease;
+  transition:
+    transform 0.18s ease,
+    background-color 0.18s ease;
 }
 
 .toggle-on .toggle-knob {
@@ -3102,7 +3104,9 @@
   height: 16px;
   border-radius: 5px;
   background: #ffffff;
-  transition: transform 0.18s ease;
+  transition:
+    transform 0.18s ease,
+    background-color 0.18s ease;
 }
 
 .menu-switch-on .menu-switch-knob {

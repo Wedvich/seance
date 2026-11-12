@@ -63,12 +63,12 @@ export function MachinesScreen(props: {
     onRename,
   } = props;
   const { renaming } = accounts;
-  const renamed = view.accounts.find((account) => account.accountId === renaming);
-  // An account no machine reports any more has nothing to rename; closing for good keeps the dialog from returning with it.
-  const gone = renaming !== null && renamed === undefined;
-  useEffect(() => {
-    if (gone) onCloseRename();
-  }, [gone, onCloseRename]);
+  // Kept while the account is briefly unreported (a sign-out in between), so a typed draft survives; Cancel or Save closes it.
+  const seen = useRef<AccountCard | undefined>(undefined);
+  const found = view.accounts.find((account) => account.accountId === renaming);
+  if (found !== undefined) seen.current = found;
+  const renamed =
+    renaming === null ? undefined : (found ?? (seen.current?.accountId === renaming ? seen.current : undefined));
   return (
     <>
       <header className="header">
@@ -124,6 +124,7 @@ export function MachinesScreen(props: {
           key={renamed.accountId}
           account={renamed}
           saving={accounts.saving === renamed.accountId}
+          blocked={accounts.saving !== null && accounts.saving !== renamed.accountId}
           notice={accounts.notice}
           onSave={(text) => void onRename(renamed.accountId, text)}
           onClose={onCloseRename}
@@ -287,13 +288,15 @@ function HistoryItem(props: { history: HistoryView | null; onShow: () => void; o
  */
 function RenameDialog(props: {
   account: AccountCard;
-  /** This account's rename is in flight; the store takes one at a time. */
+  /** This account's rename is in flight. */
   saving: boolean;
+  /** Another account's rename is: the store takes one at a time, so Save waits. */
+  blocked: boolean;
   notice: string | null;
   onSave: (text: string) => void;
   onClose: () => void;
 }): JSX.Element {
-  const { account, saving, notice, onSave, onClose } = props;
+  const { account, saving, blocked, notice, onSave, onClose } = props;
   const [draft, setDraft] = useState(account.alias ?? "");
   const input = useRef<HTMLInputElement>(null);
   const noticeId = useId();
@@ -310,7 +313,7 @@ function RenameDialog(props: {
         className="rename"
         onSubmit={(event) => {
           event.preventDefault();
-          if (!saving) onSave(draft);
+          if (!saving && !blocked) onSave(draft);
         }}
       >
         <p className="rename-account">
@@ -334,7 +337,11 @@ function RenameDialog(props: {
         />
         {notice === null ? (
           <p className="rename-hint">
-            <span>Shown as the card title. Leave it empty to go back to “{account.exclaves}”.</span>
+            <span>
+              {blocked
+                ? "Another account's name is still saving. Save is on hold until it lands."
+                : `Shown as the card title. Leave it empty to go back to “${account.exclaves}”.`}
+            </span>
             <span className="rename-count">
               {draft.length}/{ACCOUNT_ALIAS_MAX_LENGTH}
             </span>
@@ -348,7 +355,7 @@ function RenameDialog(props: {
           <button type="button" className="quiet" onClick={onClose}>
             Cancel
           </button>
-          <button type="submit" className="primary" disabled={saving}>
+          <button type="submit" className="primary" disabled={saving || blocked}>
             {saving ? "Saving…" : "Save"}
           </button>
         </div>

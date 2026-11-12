@@ -3903,9 +3903,10 @@ error.
 - **PWA.** "Rename" in the account card's ⋯ menu opens a dialog (a bottom sheet on a phone, centred
   on a desk; at most 64 characters, trimmed; empty clears) that stays open on a refusal with the
   reason under the field, closes when the name lands, and is a history layer like the sheets (back closes
-  it); it closes for good if its account leaves the registry, and a failure for another account never
-  shows in it; without the account key the item is `aria-disabled` (still reachable, not activatable) and its
-  sub-line says to re-enter the PSK. Two accounts under one alias are titled `<alias> (<exclaves>)`. An alias is the account card's title, and the exclave ids it replaces lead the meta line
+  it; the one close is idempotent, so a save landing after Cancel pops nothing more, and a layout change
+  closes it); it keeps its draft while its account is briefly unreported, Save waits while another
+  account's rename is saving, and a failure for another account never shows in it; without the account key the item is `aria-disabled` (still reachable, not activatable) and its
+  sub-line says to re-enter the PSK. Cards whose titles would repeat gain the exclave ids, then the machines, then the account id (`<alias> (<exclaves>)`). An alias is the account card's title, and the exclave ids it replaces lead the meta line
   (`<exclaves> · <email> · on <machines>`); an unnamed card is titled by its exclave ids. Names show
   on a machine card's exclave rows and the Queue screen's pause holds as alias, else email, else
   `acct` and the first eight characters of the account half.

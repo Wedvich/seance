@@ -255,6 +255,7 @@ export function MenuItem(props: {
         className={className}
         role="menuitem"
         href={disabled ? undefined : props.href}
+        tabIndex={disabled ? -1 : undefined}
         target={props.external === true ? "_blank" : undefined}
         rel={props.external === true ? "noopener noreferrer" : undefined}
         aria-disabled={disabled ? "true" : undefined}

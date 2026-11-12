@@ -252,6 +252,19 @@ describe("deriveMachines", () => {
     ]);
   });
 
+  test("same-named accounts on the same exclave id on different machines still read apart", () => {
+    const first = machine({ deviceId: "a", name: "a", exclaves: [exclave("default", ACCOUNT)] });
+    const second = machine({ deviceId: "b", name: "b", exclaves: [exclave("default", "org-2:acct-bbbbbbbb-2222")] });
+    const same = { [ACCOUNT]: "Martin", "org-2:acct-bbbbbbbb-2222": "Martin" };
+    expect(deriveMachines([first, second], NOW, NO_LEADER, same).accounts.map((account) => account.title)).toEqual([
+      "Martin (default on a)",
+      "Martin (default on b)",
+    ]);
+    const clash = { [ACCOUNT]: "default" };
+    const titles = deriveMachines([first, second], NOW, NO_LEADER, clash).accounts.map((account) => account.title);
+    expect(new Set(titles).size).toBe(2);
+  });
+
   test("one email on two orgs reads with each org on the card, the exclave row and a hold; an alias still leads", () => {
     const personal = "1a2b3c4d-personal:acct-same";
     const team = "9f8e7d6c-team:acct-same";

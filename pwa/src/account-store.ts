@@ -257,7 +257,7 @@ export class AccountStore {
 
   #latest(key: string, accountId: string, answered: boolean): Latest {
     if (!answered) return "unanswered";
-    if (!this.#accountByKey.has(key)) return "unreadable";
+    if (!this.#accountByKey.has(key)) return this.#versions.has(key) ? "unreadable" : "cleared";
     const alias = this.#heldAlias(accountId);
     return alias === null ? "cleared" : { named: alias };
   }

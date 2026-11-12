@@ -370,12 +370,25 @@ function deriveAccounts(
   }
 
   const newest = newestQuotaByAccount(machines, fleetQuota);
-  // An alias is per account and may repeat: the exclave ids then tell the cards, and their ⋯ labels, apart.
-  const uses = new Map<string, number>();
-  for (const group of groups.values()) {
+  // Titles tell the cards, and their ⋯ labels, apart: a repeated one gains the exclave ids, then the
+  // machines, and finally the account id, which no other account shares.
+  const tiers = (group: AccountGroup): string[] => {
     const alias = aliasOf(aliases, group.accountId);
-    if (alias !== undefined) uses.set(alias, (uses.get(alias) ?? 0) + 1);
-  }
+    const exclaves = [...group.exclaves].join(" · ");
+    const base = alias ?? exclaves;
+    const withExclaves = alias === undefined ? exclaves : `${alias} (${exclaves})`;
+    const onMachines = `${exclaves} on ${[...group.machines].join(", ")}`;
+    const withMachines = alias === undefined ? onMachines : `${alias} (${onMachines})`;
+    return [base, withExclaves, withMachines, `${base} (${group.accountId})`];
+  };
+  const candidates = new Map([...groups.values()].map((group) => [group.accountId, tiers(group)]));
+  const taken = (tier: number, title: string): number =>
+    [...candidates.values()].filter((titles) => titles[tier] === title).length;
+  const titleOf = (accountId: string): string => {
+    const titles = candidates.get(accountId) ?? [];
+    const tier = titles.findIndex((title, at) => taken(at, title) === 1);
+    return titles[tier === -1 ? titles.length - 1 : tier] ?? "";
+  };
   return [...groups.values()].map((group) => {
     const quota = newest.get(group.accountId);
     const observer = machines.find((machine) => machine.deviceId === quota?.deviceId);
@@ -386,7 +399,7 @@ function deriveAccounts(
     return {
       accountId: group.accountId,
       alias: alias ?? null,
-      title: alias === undefined ? exclaves : (uses.get(alias) ?? 0) > 1 ? `${alias} (${exclaves})` : alias,
+      title: titleOf(group.accountId),
       exclaves,
       plainName,
       detail: alias === undefined ? where : `${exclaves} · ${where}`,
