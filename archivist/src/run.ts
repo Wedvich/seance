@@ -7,6 +7,7 @@ import { CRED_NAME, credentialPskPath, readCredentialPsk } from "../../daemon/sr
 import { log } from "../../daemon/src/log.ts";
 import { RelayClient } from "../../daemon/src/relay-client.ts";
 import { identityOfState, writeRuntime } from "../../daemon/src/state.ts";
+import { isUpdateAvailable } from "../../daemon/src/update-notice.ts";
 import { Archive } from "./archive.ts";
 import { startCollector, type CollectTimings } from "./collect.ts";
 import { loadArchivistConfig } from "./config.ts";
@@ -20,9 +21,11 @@ import {
   metricsPathIn,
   runtimePathIn,
   statePathIn,
+  updateRequestPathIn,
 } from "./paths.ts";
 import { loadSeatState } from "./state.ts";
 import { rootRefusal } from "./unprivileged.ts";
+import { createUpdateRequester } from "./update-request.ts";
 
 export interface ArchivistOpts {
   readonly configPath?: string;
@@ -63,7 +66,8 @@ const STATE_DIR_MODE = 0o700;
  * only from the `ARCHIVIST` id — and an app-role socket for reading, as the
  * leader's own app leg reads. It advertises no repos and no exclaves, answers
  * no op, never enqueues and never writes the store; it writes only
- * `archive.sqlite` (`collect.ts`) and `metrics.sqlite` (`metrics-collect.ts`).
+ * `archive.sqlite` (`collect.ts`) and `metrics.sqlite` (`metrics-collect.ts`),
+ * plus the update request a fleet announce asks for (`update-request.ts`).
  * What it may import is held by
  * archivist/test/layering.test.ts.
  */
@@ -122,6 +126,11 @@ export async function startArchivist(opts: ArchivistOpts = {}): Promise<Archivis
     const appLeg = appRelayClient(config, { key, accountKey }, (line) => {
       if (!isStoreGetTraffic(line)) log.info(`app leg: ${line}`);
     });
+    const updates = createUpdateRequester({ path: updateRequestPathIn(stateDir) });
+    const requestUpdate = (written: Promise<void>): void => {
+      written.catch((err: unknown) => log.warn(`could not request an update check: ${String(err)}`));
+    };
+
     let appStatus: RelayStatus = appLeg.getState().status;
     const unsubscribe = appLeg.subscribe(() => {
       const { status, rejection } = appLeg.getState();
@@ -139,12 +148,19 @@ export async function startArchivist(opts: ArchivistOpts = {}): Promise<Archivis
       buildInfo: () =>
         sealArchivistInfo(key, identity.deviceId, { archivist: true, name: config.name, platform: process.platform }),
       // No op is the archivist's: an app that knows the flag never sends one, and an older one gets no answer.
+      // The one frame it takes is the fleet's update announce, a broadcast no one awaits (A26).
       handle: (plain: Plain, from: string): Promise<null> => {
+        if (plain.op === "update-available") {
+          if (isUpdateAvailable(plain.payload)) requestUpdate(updates.announce(plain.payload.sha));
+          else log.warn("dropped malformed update-available payload");
+          return Promise.resolve(null);
+        }
         log.warn(`dropped ${quote(plain.op)} from ${from}: the archivist answers no op`);
         return Promise.resolve(null);
       },
       onConnect: () => {
         updateRuntime(true);
+        requestUpdate(updates.registered());
         // A 401 on the app leg is permanent for that client; the /daemon upgrade succeeding says the token works now.
         // Fires once the register has left, not when it is accepted (there is no ack): a refused seat gets here too.
         if (appLeg.getState().status === "rejected") appLeg.reconnect();

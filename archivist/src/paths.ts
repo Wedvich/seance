@@ -16,6 +16,24 @@ export function archivistStateDir(): string {
   return xdgStateDir(NAME);
 }
 
+/**
+ * The same two for a named home, for `install --system`: as root, the XDG
+ * lookups above answer for root. A unit's `User=` gets that user's `HOME` and no
+ * XDG variables, so these are the paths the service resolves too.
+ */
+export function archivistConfigPathFor(home: string): string {
+  return join(home, ".config", NAME, "config.json");
+}
+
+export function archivistStateDirFor(home: string): string {
+  return join(home, ".local", "state", NAME);
+}
+
+/** What the running archivist writes to ask for an update check; the update unit's `.path` watches it. */
+export function updateRequestPathIn(stateDirectory: string): string {
+  return join(stateDirectory, "update-requested");
+}
+
 /** The per-state-dir files, taking the directory so tests and `status` can name one that isn't the default. */
 export function statePathIn(stateDirectory: string): string {
   return join(stateDirectory, "state.json");
