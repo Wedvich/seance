@@ -953,10 +953,12 @@ of M4 has landed.
     on every load and after every queued task, never remembered), the level as a chip on the Queue
     card off the default, and "Answer in Claude" (the claude.ai link) as the primary button on a
     `needs-input` card.
-  - _Not built:_ `seanced spawn --autonomy`, then Raycast.
-  - _Not built:_ a `question` reason on the session event, so an AskUserQuestion skips the 2-minute
-    `needs-input` debounce (which exists for auto mode's flicker; a question cannot flicker).
-    A frame change.
+  - **Done** (2026-11-12): one spelling per client. `seanced spawn --autonomy <level>` (queued or
+    `--now`; the no-op `--auto` is gone), an Autonomy dropdown in Raycast that starts at
+    `checkpoint` on every open, and MCP's `plan` input removed, with every tool's input strict so a
+    stale `plan` is refused by name instead of stripped. The wire `plan` stays for older readers.
+  - _Rejected:_ a shorter alert delay for a question. The 2-minute wait doesn't matter in practice,
+    and nothing else justifies a frame change.
   - _Not built,_ and only if a re-cut of the transcripts shows that confirmations survive the preamble: a mod that,
     at `checkpoint` or `auto`, answers a turn ending on a plain-text "shall I proceed?" with one
     nudge to proceed or ask it properly. First check that an engine hook can continue a turn.

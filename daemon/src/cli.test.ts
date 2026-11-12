@@ -91,20 +91,41 @@ describe("parseSpawnArgs", () => {
     expect(() => parseSpawnArgs(["seance", "--nope"])).toThrow("usage:");
     expect(() => parseSpawnArgs([])).toThrow("usage:");
     expect(() => parseSpawnArgs(["--here"])).toThrow("usage:");
-    expect(() => parseSpawnArgs(["--auto"])).toThrow("usage:");
   });
 
-  test("--auto is a no-op anywhere: the same args as without it", () => {
-    expect(parseSpawnArgs(["--auto", "seance", "--here", "-t", "My Task", "fix", "it"])).toEqual(
-      parseSpawnArgs(["seance", "--here", "-t", "My Task", "fix", "it"]),
-    );
-    expect(parseSpawnArgs(["seance", "-p", "do it", "--auto"])).toEqual({
+  test("--auto is gone: the generic usage error, like any unknown flag", () => {
+    expect(() => parseSpawnArgs(["--auto", "seance"])).toThrow(/^usage: seanced spawn/u);
+    expect(() => parseSpawnArgs(["seance", "-p", "do it", "--auto"])).toThrow(/^usage: seanced spawn/u);
+    // `-p` takes the next word as given, so a prompt that reads like a flag stays a prompt.
+    expect(parseSpawnArgs(["seance", "-p", "--auto"])).toEqual({ repo: "seance", here: false, prompt: "--auto" });
+  });
+
+  test("--autonomy takes one level, queued or beside --now", () => {
+    for (const level of ["steer", "checkpoint", "auto"] as const) {
+      expect(parseSpawnArgs(["--autonomy", level, "seance", "go"])).toEqual({
+        repo: "seance",
+        here: false,
+        prompt: "go",
+        autonomy: level,
+      });
+    }
+    expect(parseSpawnArgs(["--now", "seance", "--autonomy", "steer"])).toEqual({
       repo: "seance",
       here: false,
-      prompt: "do it",
+      now: true,
+      autonomy: "steer",
     });
-    // `-p` takes the next word as given, so a prompt that reads like the flag stays a prompt.
-    expect(parseSpawnArgs(["seance", "-p", "--auto"])).toEqual({ repo: "seance", here: false, prompt: "--auto" });
+    expect(parseSpawnArgs(["--machine", "here", "--autonomy", "auto", "seance"])).toMatchObject({
+      machine: "here",
+      autonomy: "auto",
+    });
+  });
+
+  test("--autonomy with another value, none, or twice is a usage error", () => {
+    expect(() => parseSpawnArgs(["--autonomy", "plan", "seance"])).toThrow("usage:");
+    expect(() => parseSpawnArgs(["--autonomy", "Steer", "seance"])).toThrow("usage:");
+    expect(() => parseSpawnArgs(["seance", "--autonomy"])).toThrow("usage:");
+    expect(() => parseSpawnArgs(["--autonomy", "auto", "--autonomy", "auto", "seance"])).toThrow("usage:");
   });
 
   test("--now parses to now: true beside --here, -t and -p", () => {
@@ -153,12 +174,10 @@ describe("parseSpawnArgs", () => {
     });
   });
 
-  test("--now refuses every pin flag and --auto", () => {
+  test("--now refuses every pin flag", () => {
     expect(() => parseSpawnArgs(["--now", "seance", "--machine", "x"])).toThrow("--now spawns on this machine now");
     expect(() => parseSpawnArgs(["--now", "seance", "--account", "a"])).toThrow("--now spawns on this machine now");
     expect(() => parseSpawnArgs(["--now", "seance", "--not", "here"])).toThrow("--now spawns on this machine now");
-    expect(() => parseSpawnArgs(["--now", "--auto", "seance"])).toThrow("--now and --auto contradict");
-    expect(() => parseSpawnArgs(["seance", "--auto", "--now"])).toThrow("--now and --auto contradict");
   });
 
   test("a placement flag without a value, or --machine / --account given twice, is a usage error", () => {

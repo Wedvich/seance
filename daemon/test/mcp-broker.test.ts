@@ -230,7 +230,7 @@ describe("the MCP tools, direct and brokered", () => {
         ["spawn_session", { machine: "auto", repo: "seance", prompt: "pinned", pin: { machine: "Linux Box" } }],
         ["spawn_session", { machine: "auto", repo: "seance", prompt: "pinned", pin: { account: "me@x.no" } }],
         ["spawn_session", { machine: "auto", repo: "seance", prompt: "avoiding", avoid: ["MacBook Pro"] }],
-        ["spawn_session", { machine: "Linux Box", repo: "seance", prompt: "named", plan: true }],
+        ["spawn_session", { machine: "Linux Box", repo: "seance", prompt: "named", autonomy: "steer" }],
         [
           "queue_batch",
           {
@@ -254,9 +254,12 @@ describe("the MCP tools, direct and brokered", () => {
         expect(masked(b)).toBe(masked(a));
         expect(a).not.toStartWith("ERROR");
       }
-      // Task and batch ids are minted per process; the spec is what must match.
-      const stored = (relay: FakeRelay | undefined): string[] =>
-        (relay?.creates ?? []).map((created) => masked(JSON.stringify({ ...created, createdAt: 0 })));
+      // Task and batch ids are minted per process; the spec is what must match. Compared as values: the
+      // broker's parser rebuilds the spec, so key order (e.g. `plan` beside `autonomy`) may differ.
+      const stored = (relay: FakeRelay | undefined): unknown[] =>
+        (relay?.creates ?? []).map((created): unknown =>
+          JSON.parse(masked(JSON.stringify({ ...created, createdAt: 0 }))),
+        );
       expect(stored(brokerRelays[0])).toEqual(stored(directRelays[0]));
       expect(stored(directRelays[0])).toHaveLength(7);
       expect(brokerRelays[0]?.requests.map((sent) => [sent.op, sent.payload])).toEqual(

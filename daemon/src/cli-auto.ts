@@ -1,3 +1,4 @@
+import { withAutonomy } from "@seance/shared";
 import { appRelayClient, importAppKeys, LazyRelay } from "./app-relay.ts";
 import { cliSink, type AuditSink } from "./audit.ts";
 import {
@@ -136,12 +137,15 @@ export async function spawnAuto(
   audit: AuditSink,
   opts: SpawnAutoOpts = {},
 ): Promise<AutoEnqueued> {
-  const spec: AutoSpec = {
+  const fields: AutoSpec = {
     repo: args.repo,
     mode: args.here ? "here" : "worktree",
     ...(args.title === undefined ? {} : { title: args.title }),
     ...(args.prompt === undefined ? {} : { prompt: args.prompt }),
+    ...(args.autonomy === undefined ? {} : { autonomy: args.autonomy }),
   };
+  // `steer` is sealed with `plan: true`, for a leader that drops `autonomy`. Never null: the CLI takes no `plan`.
+  const spec = withAutonomy(fields) ?? fields;
   // Refused before the relay is dialled: no round trip to learn the prompt is too long.
   const invalid = specError(spec, "cli");
   if (invalid !== null) return failed(`spawn refused: ${invalid}`);

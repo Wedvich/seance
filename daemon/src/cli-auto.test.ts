@@ -87,6 +87,56 @@ describe("spawnAuto", () => {
     expect(fake.requests).toEqual([]);
   });
 
+  test("--autonomy reaches the task; steer is sealed with plan for a leader that drops the level", async () => {
+    const auto = scheduledRelay();
+    expect((await run(auto, { autonomy: "auto" })).ok).toBe(true);
+    expect(auto.creates[0]?.spec).toMatchObject({ autonomy: "auto" });
+    expect(auto.creates[0]?.spec).not.toHaveProperty("plan");
+
+    const steer = scheduledRelay();
+    expect((await run(steer, { autonomy: "steer" })).ok).toBe(true);
+    expect(steer.creates[0]?.spec).toMatchObject({ autonomy: "steer", plan: true });
+  });
+
+  test("a keyless shell's --autonomy reaches the enqueue frame the daemon seals, steer with its plan", async () => {
+    const fleetMachines = [
+      machine({ repos: [{ name: "seance", path: "/repos/seance", defaultBranch: "main", origin: ORIGIN }] }),
+    ];
+    for (const [autonomy, extra] of [
+      ["steer", { plan: true }],
+      ["checkpoint", {}],
+      ["auto", {}],
+    ] as const) {
+      const frames: Record<string, unknown>[] = [];
+      // oxlint-disable-next-line no-await-in-loop -- one broker double per level, stopped before the next
+      const double = await startBrokerDouble((raw, id) => {
+        if (!isRecord(raw)) return brokerFail(id, "invalid_request", "not a frame");
+        frames.push(raw);
+        if (raw["action"] === "fleet") return brokerOk(id, { machines: fleetMachines, scheduler: LEADING });
+        if (raw["schedulerOp"] === "enqueue") return brokerOk(id, { ok: true, landedEarlier: false });
+        return brokerFail(id, "unsupported", "not in this double");
+      });
+      try {
+        // oxlint-disable-next-line no-await-in-loop -- as above
+        const built = await autoFleet(config({ psk: "" }), { stores: [], broker: { path: double.path } });
+        // oxlint-disable-next-line no-await-in-loop -- as above
+        const outcome = await spawnAuto(
+          { repo: "seance", here: false, prompt: "fix it", autonomy },
+          built.fleet,
+          () => {},
+          { keyless: built.keyless, self: async () => "device-self" },
+        );
+        expect(outcome.ok).toBe(true);
+        const sent = frames.find((frame) => frame["schedulerOp"] === "enqueue");
+        expect(sent).toMatchObject({ spec: { autonomy, client: "cli", ...extra } });
+        if (!("plan" in extra)) expect(sent?.["spec"]).not.toHaveProperty("plan");
+      } finally {
+        // oxlint-disable-next-line no-await-in-loop -- as above
+        await double.stop();
+      }
+    }
+  });
+
   test("with no leader the task still queues, and the answer says it waits for one", async () => {
     const fake = scheduledRelay({ kind: "none" });
     const { ok, text } = await run(fake);

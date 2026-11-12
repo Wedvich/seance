@@ -5082,17 +5082,15 @@ of this section built.
   rejects a _default_ mode flag, not a caller-chosen one: `SpawnRequest.plan`
   is an optional boolean that, when true, emits `--permission-mode plan` (plus
   the bypass allowance below) and nothing else changes. Absent or false, the
-  command string is byte-identical to what every client sent before, so the ambient default stands. It exists
-  for the MCP tool, where the calling model can read "plan the implementation
-  of X" out of a request and set it — a surface with no human picking flags is
-  exactly where the intent is legible and a picker is not. Deliberately binary:
+  command string is byte-identical to what every client sent before, so the ambient default stands. It began
+  as an MCP input, where the calling model can read "plan the implementation
+  of X" out of a request; since 2026-11-12 no client takes it as input, and each
+  sets it from the autonomy level ("Autonomy level", below). Deliberately binary:
   the other five modes either loosen what the machine chose (`bypassPermissions`,
   `acceptEdits`, `auto`, `dontAsk`) or are the ambient default already
   (`manual`), and a remote loosening the machine's own setting is the thing the
-  bullet above refuses. Plan only ever constrains. Not exposed in the PWA or
-  Raycast — a human at a picker can say "plan this" in the prompt — and
-  `seanced spawn` does not take it either; the field is on the wire, so adding
-  either later is a client change with no protocol change. Old daemons ignore
+  bullet above refuses. Plan only ever constrains. It is reached
+  from the PWA, Raycast, `seanced spawn` and MCP only as the `steer` level. Old daemons ignore
   it, exactly as they ignore `client`.
   **Bypass stays reachable** (added 2026-11-12). Any mode flag replaces the
   settings default, and claude offers bypass in the shift+tab cycle only when
@@ -5146,12 +5144,14 @@ of this section built.
     daemon older than the field still dispatches plan mode. One that drops `auto`
     runs the session at `checkpoint`, the safe direction, so the field needs no
     sentinel. `plan: true` beside `checkpoint` or `auto`, and `plan: false` beside
-    `steer`, are refused, by the parser, `isSpawnRequest` and the MCP's `specError`,
+    `steer`, are refused, by the parser, `isSpawnRequest` and `specError`,
     never resolved.
+  - **One spelling per client** (2026-11-12). `plan` stays on the wire for older readers, but no
+    client takes it as input: the MCP tools, `seanced spawn` and Raycast take only the level, and
+    each sets the wire `plan` itself through `withAutonomy`. MCP's strict input refuses a stale
+    `plan` by name ("MCP server", below) rather than stripping it into a `checkpoint` task.
   - **Where it is set.** Per task: `spawn_session`'s `autonomy`, `queue_batch`'s per
-    member, and the batch's own, which fills every member that gives no level and not
-    `plan: true` (a member's `plan: false` still takes the batch's `auto`, and beside its `steer` is
-    refused, as `spawn_session` refuses it). A continuation keeps its task's level
+    member, and the batch's own, which fills every member that gives no level. A continuation keeps its task's level
     (`continuationSpec`), except that a `steer` task continues at `checkpoint` out of plan mode:
     the conversation it resumes holds the plan the user approved, and a session that stopped
     mid-build would otherwise stall on a second approval. The
@@ -5159,8 +5159,16 @@ of this section built.
     (`AppState.autonomy`, outside the persisted form, so every load and every queued task
     starts back at `checkpoint` and a level picked once never rides along unseen), writes it
     only off the default and through `withAutonomy`, and shows it on the Queue card by
-    `autonomyOf`; a `needs-input` card with a session link carries "Answer in Claude". Not yet
-    in the CLI or Raycast; a fleet default in `settings:main` waits until per-task proves tedious.
+    `autonomyOf`; a `needs-input` card with a session link carries "Answer in Claude".
+    `seanced spawn --autonomy <level>` sets it, queued or `--now` (it shapes the session, not
+    its placement), given at most once. Raycast's Autonomy dropdown, beside model and effort,
+    starts at `checkpoint` on every open with no preference behind it, as the PWA's does (a
+    successful spawn or queue closes the window with `PopToRootType.Immediate`, so Raycast's
+    keep-state window cannot reopen the form at the level just used; a form merely dismissed
+    comes back as left, visibly), and
+    sends the level only off the default, to a queued task and a direct spawn alike
+    (`autonomyFields`, `raycast/src/lib/form.ts`). A fleet default in `settings:main` waits until
+    per-task proves tedious.
 - **Task ids** (added 2026-10-16, scheduler M2). `SpawnRequest.taskId` is the
   scheduler's dispatch idempotency key: a spawn naming a task some live pane
   already carries is refused `task_running` with that pane's id, before the repo
@@ -7368,7 +7376,7 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   whose `fleet` action carries the daemon's scheduler view (2026-10-25), so no mark means no
   verified leader, or that this machine's daemon could not say (older, or restarting); still a bare array, so the field is
   per entry rather than a wrapper), `get_sessions { machine }`,
-  `spawn_session { machine?, repo, prompt?, title?, mode?, model?, effort?, plan?, autonomy?, … }`
+  `spawn_session { machine?, repo, prompt?, title?, mode?, model?, effort?, autonomy?, … }`
   and `despawn_session { machine, id, force? }` (added 2026-10-09, see
   "Despawn"). `get_sessions` and `despawn_session` map 1:1 onto the `sessions`/`despawn` ops
   with the existing `OP_TIMEOUT_MS`; `spawn_session` is a scheduler enqueue and never sends a
@@ -7572,6 +7580,18 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   (caps out at the 2025-11-25 revision), hand-rolling the JSON-RPC loop
   (on-brand with the zero-dep ethos and only ~3 methods, but protocol drift
   would be owned here, for a protocol that is actively evolving).
+- **Every tool input is strict, at every level** (2026-11-12): `z.strictObject` for each tool's
+  input, nested objects (`pin`, `linear`, `after` items, `queue_batch` members) included, and a
+  strict empty object for the tools that take nothing, so `tools/list` says
+  `additionalProperties: false` on every object. Zod strips unknown keys by default, which made
+  a misspelled or retired field a silently different task: a stale `plan: true` queued at
+  `checkpoint` without plan mode. The SDK (2.0.0, checked through the real client/server pair)
+  validates inside its `tools/call` handler and returns a failed check as a tool result,
+  `isError: true` with `Input validation error: Invalid arguments for tool <name>: <path>:
+  Unrecognized key: "<key>"`, never a JSON-RPC error, so the calling agent reads which key to
+  correct and retries; no wrapping is needed (`mcp.test.ts` pins it). Retired fields whose
+  refusal says what replaced them (`queue_batch`'s `strategy` and `max`, `pin.exclave`) stay
+  listed as `unknown` fields, so the handler's own message wins over the generic one.
 - **Stdout is the protocol channel**, so the MCP path logs to stderr — the
   daemon's stdout logging convention would corrupt frames. The shared client
   takes a `log` sink option (default stdout) for exactly this consumer;
@@ -7673,15 +7693,18 @@ names the app's queue, not `get_queue`/`cancel_task`, which a shell cannot call.
 `--now` is the direct path: today's relay-free spawn, here, right away, audited
 `audit spawn origin=cli`, needing no relay, key, leader or daemon.
 
-- _Spelling:_ queued is the default and `--now` the flag that changes behaviour. `--auto` is
-  accepted and does nothing (the old spelling of the default), and is refused beside `--now`.
+- _Spelling:_ queued is the default and `--now` the flag that changes behaviour. `--auto`, the
+  old spelling of the default, was accepted as a no-op until 2026-11-12; it is now an unknown
+  flag like any other (the generic usage error), so `auto` is read only as an autonomy level.
 - _Flags:_ the ones a direct spawn has, which are `TaskRequest`'s `mode`, `title` and
-  `prompt`; the prompt is optional, as in MCP. Model, effort, plan and the
+  `prompt`; the prompt is optional, as in MCP. Model, effort and the
   authoring fields are not CLI flags at all, so v1 adds none. The placement flags came
   after (2026-10-25): `--machine`, `--account` and repeatable `--not`, resolved and gated
   exactly as MCP's `pin` and `avoid` ("`pin` and `avoid` on a spawn" above), with `here` for
   this box's own deviceId. Each takes a value; `--machine` and `--account` are given once.
-  `--now` runs on this machine and places nothing, so it refuses all three, and `--auto`.
+  `--now` runs on this machine and places nothing, so it refuses all three.
+  `--autonomy <steer|checkpoint|auto>` came last (2026-11-12, "Autonomy level"): the level that
+  sets plan mode for `steer`, queued or `--now`; there is no `--plan`.
 - _Key and relay:_ the queued form dials the relay as an app with this shell's
   own PSK (`loadPsk`, as `seanced mcp` resolves it); `LazyRelay`'s connect bound
   turns an unreachable relay into "not queued" rather than a hang. `--now` loads nothing

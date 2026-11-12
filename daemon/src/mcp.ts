@@ -136,7 +136,7 @@ export function isLocalRef(local: LocalMachine, ref: string): boolean {
 interface PinInput {
   readonly machine?: string | undefined;
   readonly account?: string | undefined;
-  /** Only to refuse it: the exclave pin is gone, and zod would otherwise strip the key without a word. */
+  /** Only to refuse it, naming what replaced the exclave pin. */
   readonly exclave?: unknown;
 }
 
@@ -546,6 +546,13 @@ function describeHold(hold: PauseHold, names: AccountNames): Record<string, unkn
   };
 }
 
+/**
+ * Every input object is strict, nested ones included: zod strips unknown keys by default, which turned
+ * a misspelled or retired field (a stale `plan: true`) into a silently different task. The SDK reports
+ * the refusal as a tool error naming the key (DESIGN.md, "MCP server"), so the caller can correct it.
+ */
+const NO_INPUT = z.strictObject({});
+
 const AFTER_WHEN = z
   .enum(DEP_AFTER)
   .default("opened")
@@ -554,7 +561,7 @@ const AFTER_WHEN = z
   );
 
 const LINEAR_FIELD = z
-  .object({
+  .strictObject({
     issue: z
       .string()
       .describe(`The Linear issue identifier, e.g. "ENG-123" (at most ${TASK_SPEC_LIMITS.linearIssue} characters)`),
@@ -569,7 +576,7 @@ const AUTONOMY_FIELD = z
   .enum(AUTONOMY_LEVELS)
   .optional()
   .describe(
-    "How much the session decides on its own. steer: it plans and waits for approval before changing anything (plan mode, the same as plan: true). checkpoint, the default: it never stops to ask whether to proceed, only for real choices, which it asks with a recommendation. auto: it also makes reversible choices itself and records them as Decided lines for review, stopping only for guardrails (production, money, secrets, deleting, messaging people) and choices it has no recommendation for. Set auto when the user wants the work done unattended, steer when they want to approve a plan first; omit it otherwise",
+    "How much the session decides on its own. steer: it starts in plan mode, plans and waits for approval before changing anything. Set it when the request is to plan, design, investigate or scope work rather than carry it out. checkpoint, the default: it never stops to ask whether to proceed, only for real choices, which it asks with a recommendation. auto: it also makes reversible choices itself and records them as Decided lines for review, stopping only for guardrails (production, money, secrets, deleting, messaging people) and choices it has no recommendation for. Set auto when the user wants the work done unattended, steer when they want to approve a plan first; omit it otherwise",
   );
 
 const UNTIL_FIELD = z
@@ -580,7 +587,7 @@ const UNTIL_FIELD = z
   );
 
 const PIN_FIELD = z
-  .object({
+  .strictObject({
     machine: z
       .string()
       .optional()
@@ -593,9 +600,9 @@ const PIN_FIELD = z
       .describe(
         "A Claude account: its alias (as the PWA names it), its email, or its accountId (organization:account) — list_machines lists each exclave's accountId, email and alias (not its `account` label, which is no value to pass). Only an account some machine reports signed in is taken; the task stores its accountId, never the alias or email",
       ),
+    // Retired, still listed: strict refuses it anyway, but `placementInput` says what replaced it.
+    exclave: z.unknown().optional().describe("Retired: refused"),
   })
-  // Loose so a stale `exclave` key reaches `placementInput` and is refused, not stripped.
-  .loose()
   .optional()
   .describe(
     "Restrict where the scheduler may place the task — to one machine, one account, or both; give at least one. An unknown machine, a name two machines share, an account no machine (or not the pinned one) reports signed in, or an alias or email two accounts share is refused, naming the choices. A pinned task waits in the queue for a slot where it is pinned rather than going elsewhere. Give its repo as the pinned machine (or the account's clones) list it, or by origin",
@@ -625,20 +632,18 @@ function requestFields(input: {
   readonly mode: "worktree" | "here";
   readonly model?: string | undefined;
   readonly effort?: string | undefined;
-  readonly plan?: boolean | undefined;
   readonly autonomy?: AutonomyLevel | undefined;
 }): Omit<AutoSpec, "repo"> {
-  const { prompt, title, mode, model, effort, plan, autonomy } = input;
+  const { prompt, title, mode, model, effort, autonomy } = input;
   const fields = {
     mode,
     ...(prompt === undefined ? {} : { prompt }),
     ...(title === undefined ? {} : { title }),
     ...(model === undefined || model === "" ? {} : { model }),
     ...(effort === undefined || effort === "" ? {} : { effort }),
-    ...(plan === undefined ? {} : { plan }),
     ...(autonomy === undefined ? {} : { autonomy }),
   };
-  // `steer` is sealed with `plan: true`, for a leader that drops `autonomy`; a contradiction is left for `specError` to name.
+  // `steer` is sealed with `plan: true`, for a leader that drops `autonomy`. Never null: the tools take no `plan`.
   return withAutonomy(fields) ?? fields;
 }
 
@@ -813,6 +818,7 @@ export function buildMcpServer(
       title: "List machines",
       description:
         "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any, plus `account`, the name every Séance client shows for it (its alias where one is set, else the email, else a short id; tagged where two accounts would read alike; no alias on a box whose daemon brokers for it, with no readable PSK) — a display name only, never a value for pin.account — and `alias` where one is set: a spawn's pin.account takes the `accountId`, the `email` or the `alias`, not `account`; a machine with the field absent or empty reports none, so the scheduler cannot place there until its daemon updates. Offline machines are listed with their last-seen time: `lastSeen` is when the machine was last heard from (its last register or status beat, whichever is later). `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that every spawn goes through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue, cancel_task and start_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
+      inputSchema: NO_INPUT,
       annotations: { readOnlyHint: true },
     },
     async () => {
@@ -850,7 +856,7 @@ export function buildMcpServer(
       title: "List running sessions",
       description:
         "List the Claude Code tmux sessions currently running on a machine. Naming this machine answers from the local daemon without touching the relay.",
-      inputSchema: z.object({ machine: z.string().describe("Machine name (or deviceId) from list_machines") }),
+      inputSchema: z.strictObject({ machine: z.string().describe("Machine name (or deviceId) from list_machines") }),
       annotations: { readOnlyHint: true },
     },
     async ({ machine }) => {
@@ -878,6 +884,7 @@ export function buildMcpServer(
     {
       title: "List the scheduler's queue",
       description: `List the scheduler's queue — the tasks spawn_session and queue_batch queued, and other clients' (the app, the CLI), and what holds dispatch (a paused queue, or an account named as a pin names it) — with each one's state, its pin (whichever of machine and account it pins: the machine by name where known, plus its deviceId; the account by its alias where one is set (none on a box whose daemon brokers for it), else the email a machine reports, else a short id, plus its accountId; an email or short id two accounts share, case aside, gains a tag telling them apart: the org's short id, or more of it where that still collides; pinned and held accounts no machine reports count as accounts too), the machines it avoids, its autonomy level where it is not the default checkpoint, where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). ${AUTO_LIMITS}`,
+      inputSchema: NO_INPUT,
       annotations: { readOnlyHint: true },
     },
     async () =>
@@ -911,7 +918,7 @@ export function buildMcpServer(
       title: "Cancel a scheduler task",
       description:
         "Cancel a scheduler task (one spawn_session or queue_batch queued, or another client's) by its id from get_queue. A task still waiting is taken out of the queue; one running is despawned on its machine first. A task whose machine stopped answering (lost) is cancelled as it stands, and its session may outlive the cancel there. A task mid-dispatch is refused; ask again in a moment.",
-      inputSchema: z.object({ taskId: z.string().describe("The task's id from get_queue") }),
+      inputSchema: z.strictObject({ taskId: z.string().describe("The task's id from get_queue") }),
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
     async ({ taskId }) =>
@@ -949,7 +956,7 @@ export function buildMcpServer(
       title: "Start a queued scheduler task now",
       description:
         "Start a task waiting in the scheduler's queue right away, past the fleet's concurrency cap — the app's Start now. Only the cap is lifted: a paused queue or account, the quota line, the disk floor, a pin or an avoid still hold it, and then it is refused unplaceable (get_queue's decision says why). The task must be ready — admitted, its dependencies released — so one still waiting on admission or its after is refused not_waiting; a task mid-dispatch is refused dispatching. Placed, it counts toward the cap like any task, so nothing new is placed until the count drains. Needs a scheduler leader whose daemon supports it. Answers with where it is starting.",
-      inputSchema: z.object({ taskId: z.string().describe("The waiting task's id from get_queue") }),
+      inputSchema: z.strictObject({ taskId: z.string().describe("The waiting task's id from get_queue") }),
       annotations: { readOnlyHint: false },
     },
     async ({ taskId }) =>
@@ -965,7 +972,7 @@ export function buildMcpServer(
     {
       title: "Continue a failed or cancelled scheduler task",
       description: `Resume a task whose session ended in failure, or that was cancelled after it started (get_queue marks one \`continuable\`): the same conversation, in the same worktree on the same machine, as a new task the scheduler dispatches there, at the task's own autonomy level (a steer task's at checkpoint, out of plan mode). Continue moves to the newest continuation that ran in a chain, and is withheld while one still waits in the queue (cancel that one to continue again); the old task stays as it was, and so do the tasks that wait on it. The new task waits in the queue like any other, and fails if the worktree is gone (reaped), a session is open in it, or a later task ran in the worktree, or the machine no longer holds the launch record (kept a week, at most 128 launches). \`prompt\` is an optional note the resumed session is told, within the ${TASK_REQUEST_LIMITS.prompt}-character prompt bound. Answers with the new task id; get_queue shows where it lands. ${AUTO_LIMITS}`,
-      inputSchema: z.object({
+      inputSchema: z.strictObject({
         taskId: z.string().describe("The failed or cancelled task's id from get_queue"),
         prompt: z.string().optional().describe("Optional: a note for the resumed session, from the user"),
       }),
@@ -990,7 +997,7 @@ export function buildMcpServer(
     {
       title: "Spawn a Claude Code session",
       description: `Queue a remote-controlled Claude Code session in a named repo for the scheduler, which picks the machine and account — under a pin, only what it leaves open. machine (or pin.machine) pins it to one machine, pin.account to one account, avoid keeps it off machines. Every scheduler limit still applies to a pinned task (the in-flight caps, the quota line, the disk floor): it waits for a slot where it is pinned rather than going elsewhere, and get_queue says why. Defaults to a fresh git worktree; mode "here" runs in the repo's main checkout instead. Answers with the task id once it is queued (with start, also whether it started), never with a session: get_queue shows where it lands, and get_sessions on that machine shows it running. Goes through this machine's daemon when this process cannot read the key, and caps the prompt at ${TASK_REQUEST_LIMITS.prompt} characters. ${AUTO_LIMITS}`,
-      inputSchema: z.object({
+      inputSchema: z.strictObject({
         machine: z
           .string()
           .optional()
@@ -1012,16 +1019,10 @@ export function buildMcpServer(
         mode: z.enum(["worktree", "here"]).default("worktree"),
         model: z.string().optional().describe('Model for the session, e.g. "opus"'),
         effort: z.string().optional().describe('Reasoning effort, e.g. "medium"'),
-        plan: z
-          .boolean()
-          .optional()
-          .describe(
-            "Start the session in plan mode: it researches and writes an implementation plan for approval instead of editing files. Set this when the request is to plan, design, investigate or scope work rather than carry it out. Omit it otherwise. The same as autonomy steer; give one or the other",
-          ),
         autonomy: AUTONOMY_FIELD,
         after: z
           .array(
-            z.object({
+            z.strictObject({
               task: z.string().describe("A task id from get_queue or an earlier queue_batch"),
               when: AFTER_WHEN,
             }),
@@ -1052,7 +1053,6 @@ export function buildMcpServer(
       mode,
       model,
       effort,
-      plan,
       autonomy,
       after,
       until,
@@ -1077,7 +1077,7 @@ export function buildMcpServer(
       // scheduler's.
       const spec: AutoSpec = {
         repo,
-        ...requestFields({ prompt: reported.prompt, title, mode, model, effort, plan, autonomy }),
+        ...requestFields({ prompt: reported.prompt, title, mode, model, effort, autonomy }),
         ...authoredFields(
           (after ?? []).map(({ task, when }) => ({ task, after: when })),
           until,
@@ -1118,16 +1118,16 @@ export function buildMcpServer(
     {
       title: "Queue a batch of tasks",
       description: `Queue several tasks for the scheduler at once, as one batch: a group that shows together in get_queue and the app, numbered in the order given. A batch sets no order and no limit of its own — members run as soon as their dependencies and the fleet's and accounts' concurrency caps allow, side by side unless told otherwise. To run members in order, give each its after: another member by its ref (an earlier one only), or an existing task by its id. Pin a member to a machine, an account or both with its pin, and keep it off machines with its avoid, as spawn_session's: an unknown or ambiguous machine or account refuses the whole batch, and a pinned member waits for a slot where it is pinned; each account a member is pinned to is named in the answer. Answers with the batch id and each member's task id, or names the member that failed and the ones that had already queued. The old strategy and max fields are retired. ${AUTO_LIMITS}`,
-      inputSchema: z.object({
-        // Retired, still parsed: zod drops unknown keys, which would turn a stale caller's order into a silent plain group.
+      inputSchema: z.strictObject({
+        // Retired, still listed: strict refuses them anyway, but the handler says what replaced them.
         strategy: z.unknown().optional().describe("Retired: refused unless absent or auto"),
         max: z.unknown().optional().describe("Retired: refused"),
         autonomy: AUTONOMY_FIELD.describe(
-          "The autonomy level of every task that gives no autonomy of its own and no plan it contradicts, as spawn_session's autonomy",
+          "The autonomy level of every task that gives no autonomy of its own, as spawn_session's autonomy",
         ),
         tasks: z
           .array(
-            z.object({
+            z.strictObject({
               ref: z
                 .string()
                 .optional()
@@ -1138,13 +1138,12 @@ export function buildMcpServer(
               mode: z.enum(["worktree", "here"]).default("worktree"),
               model: z.string().optional(),
               effort: z.string().optional(),
-              plan: z.boolean().optional().describe("Start in plan mode, as spawn_session's plan"),
               autonomy: AUTONOMY_FIELD.describe(
                 "As spawn_session's autonomy; overrides the batch's autonomy for this task",
               ),
               after: z
                 .array(
-                  z.object({
+                  z.strictObject({
                     task: z.string().optional().describe("An existing task's id from get_queue"),
                     ref: z.string().optional().describe("An earlier member's ref"),
                     when: AFTER_WHEN,
@@ -1215,9 +1214,7 @@ export function buildMcpServer(
           repo: member.repo,
           ...requestFields({
             ...member,
-            // A member's `plan: true` is its own level (steer); anything else takes the batch's, so a batch `steer`
-            // beside a member's `plan: false` is refused as a contradiction, as spawn_session refuses it, never dropped.
-            autonomy: member.autonomy ?? (member.plan === true ? undefined : autonomy),
+            autonomy: member.autonomy ?? autonomy,
             prompt: reported.prompt,
           }),
           ...authoredFields(deps, member.until, member.linear),
@@ -1295,7 +1292,7 @@ export function buildMcpServer(
       title: "End a Claude Code session",
       description:
         "End a running Claude Code session on a machine and close its window. Asks claude to /exit — a worktree session keeps its worktree — and kills it if it hasn't exited within about five seconds; force kills straight away. Take the id from get_sessions. Naming this machine goes straight to the local daemon.",
-      inputSchema: z.object({
+      inputSchema: z.strictObject({
         machine: z.string().describe("Machine name (or deviceId) from list_machines"),
         id: z.string().describe('The session\'s id from get_sessions, e.g. "%12"'),
         force: z.boolean().optional().describe("Kill without asking claude to exit first"),
@@ -1346,6 +1343,7 @@ export function buildMcpServer(
       title: "Report this session's scheduler task done",
       description:
         "Settle the scheduler task this session runs as done, releasing the tasks that wait on it. Call it only when the task's prompt asks you to, and only once the work is fully finished, a deploy you were watching included: it cannot be taken back. Outside a scheduler task it does nothing and says so. Goes to this machine's own daemon, which binds it to this session's tmux pane.",
+      inputSchema: NO_INPUT,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     },
     async () => {
@@ -1360,6 +1358,7 @@ export function buildMcpServer(
       title: "Hand this session's PR to the scheduler and close the session",
       description:
         "Close this session once the current turn ends, leaving its open pull request to the scheduler: the task then waits for the merge (awaiting merge) instead of this session watching CI. Call it only after the PR is open and whatever merges it is in place (auto-merge armed behind a required check, or a reviewer requested), as the last tool call of the run, then end the turn with your final summary. Refused, with the reason, outside a scheduler task or when this machine's daemon saw no `gh pr create` from this session; keep watching the PR yourself then. Not for a task told to call `report_task_done` when finished: report it instead, since after a hand-off no session is left to report and the task waits until it expires. The worktree is kept, so the task can be continued later.",
+      inputSchema: NO_INPUT,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     },
     async () => {

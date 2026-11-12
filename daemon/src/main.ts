@@ -25,6 +25,7 @@ usage: seanced [command]
   spawn       queue a session for the scheduler: seanced spawn <repo> [--here] [-t <title>] [[-p] <task>] (needs the relay, and a PSK this shell or its daemon holds)
               --machine <name|here> / --account <alias|email|id>: pin it; --not <machine|here>: keep it off (repeatable)
               --start: once the scheduler admits it, start it past the concurrency cap (as seanced start)
+              --autonomy <steer|checkpoint|auto>: how much the session decides on its own (default checkpoint; steer is plan mode)
               --now: spawn on this machine right away instead: no relay, key, leader or daemon needed; takes no pin flags or --start
   continue    resume a failed or cancelled task's session in its worktree, as a new queued task: seanced continue <task-id> [-p <note>] (needs the relay, and a PSK this shell or its daemon holds)
   start       start a queued task now, past the concurrency cap (the app's Start now): seanced start <task-id> (needs the relay, and a PSK this shell or its daemon holds)

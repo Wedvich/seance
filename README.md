@@ -291,7 +291,7 @@ Séance then appears in Raycast as **Spawn Session** — a form that reaches eve
 paired machine, one hotkey away. It reads this machine's `config.json` and the
 PSK from the login keychain, so there is no secret to enter and nothing to
 configure; Raycast's extension preferences hold only which machine, model and
-effort to preselect.
+effort to preselect. Its Autonomy field starts at Checkpoint every time.
 
 The install is a local one — the extension is deliberately never published to the
 Raycast Store — so nothing updates it on its own: **re-run it after a `git
@@ -426,6 +426,8 @@ seanced spawn --machine here seance -p "fix the flaky spawn test"
 #   pinned to this machine: it waits for a slot here rather than going elsewhere
 seanced spawn --account work --not here seance -p "rerun the slow suite"
 #   pinned to an account (alias, email or id) and kept off this machine
+seanced spawn --autonomy steer seance -p "plan the queue rewrite"
+#   starts in plan mode and waits for approval; auto decides reversible choices itself
 seanced spawn --now seance -t "flaky test" -p "fix the flaky spawn test"
 #   spawned 'flaky test' (~/repos/seance/.claude/worktrees/flaky-test)
 seanced spawn --now seance --here   # run in the checkout as it stands, no worktree
@@ -456,7 +458,9 @@ places it. It needs the relay: it reads the PSK itself, or on a box where only t
 (below) asks the running daemon to enqueue for it. The app's queue shows where it lands.
 `--now` is the direct path: it spawns on this machine right away, with no relay, key, leader or
 daemon, for a fleet nobody leads, a keyless box or debugging over SSH; it takes no pin flags.
-(`--auto`, the old spelling of the default, is still accepted and does nothing.)
+`--autonomy <steer|checkpoint|auto>` sets how much the session decides on its own, queued or
+`--now` (below, under MCP); `steer` is plan mode. `--auto`, the old no-op spelling of the
+default, is gone.
 
 Worktree mode, the default, puts the session in `.claude/worktrees/<slug>` on a
 `worktree-<slug>` branch. The daemon fetches `origin/<default>` first (5s at most),
@@ -516,7 +520,8 @@ also needs a scheduler leader on a build that routes on them. `autonomy` (`steer
 the default, or `auto`) says how much the session decides on its own: `steer` is plan mode and
 waits for approval, `auto` decides reversible choices itself and records them for review
 (DESIGN.md, "Autonomy level"); `queue_batch` takes one for the whole batch, and a continuation
-keeps its task's (a `steer` task's continues at `checkpoint`). The queue is the relay's, so a task waiting for capacity
+keeps its task's (a `steer` task's continues at `checkpoint`). There is no separate `plan` input:
+every tool refuses a key it does not know, naming it, rather than ignoring it. The queue is the relay's, so a task waiting for capacity
 survives leadership moving — every relay deploy and daemon self-update — and so does one
 queued while no scheduler leads: the next leader runs it.
 On a box where only the daemon can read the key (below), a spawn goes through the daemon.
