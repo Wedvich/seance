@@ -35,25 +35,42 @@ type SessionsAnswer = Extract<TaskSessionsReply, { readonly ok: true }>;
  * Who reported a session event: the machine that sealed it (the envelope's
  * AAD-bound `from`) and the pane its daemon bound the event to, plus the
  * session's own claim of its Remote Control id — display-only, written only
- * where the event moves the task — and its claim of why it waits, read only
- * where the event is the task's own machine's (`questionAlert`).
+ * where the event moves the task — and its claim of why it waits (`reason`,
+ * with the `tool` of a permission prompt): read by `questionAlert` and written
+ * onto the record as display-only wording, only where the event is the task's
+ * own machine's.
  */
 export interface SessionSource {
   readonly deviceId: string;
   readonly pane: string;
   readonly remoteSession?: string;
   readonly reason?: NeedsInputReason;
+  readonly tool?: string;
 }
 
 /** `event`'s source as sealed by `deviceId`. */
 export function sourceOf(deviceId: string, event: SessionEvent): SessionSource {
-  const { session: pane, remoteSession, reason } = event;
+  const { session: pane, remoteSession, reason, tool } = event;
   return {
     deviceId,
     pane,
     ...(remoteSession === undefined ? {} : { remoteSession }),
     ...(reason === undefined ? {} : { reason }),
+    ...(tool === undefined ? {} : { tool }),
   };
+}
+
+/** `task` with the wait `from` reports: only a needs-input task holds one, and a tool only beside `permission`. */
+function withWait(task: Task, from: SessionSource | undefined): Task {
+  const { inputReason: _reason, inputTool: _tool, ...rest } = task;
+  if (task.state !== "needs-input" || from?.reason === undefined) return rest;
+  const tool = from.reason === "permission" ? from.tool : undefined;
+  return { ...rest, inputReason: from.reason, ...(tool === undefined ? {} : { inputTool: tool }) };
+}
+
+function waitChanged(task: Task, from: SessionSource | undefined): boolean {
+  const next = withWait(task, from);
+  return next.inputReason !== task.inputReason || next.inputTool !== task.inputTool;
 }
 
 /**
@@ -176,7 +193,9 @@ function reported(task: Task, from: SessionSource | undefined, prUrl: string | u
  * A session event, with the PR URL it carried. A session that ended settles as
  * `ended` does (`awaiting-merge` with a PR, else `done`); one still live moves
  * between `running` and `needs-input`, and records a PR URL it does not hold yet
- * even when its state stands — `after: "opened"` and `awaiting-merge` read it. One that
+ * even when its state stands — `after: "opened"` and `awaiting-merge` read it. A
+ * needs-input event also writes its reason and tool (display-only), and a changed
+ * one is a write even when the state stands. One that
  * reports `done` settles as `reported` says.
  *
  * `awaitsExit`: the sender's daemon reports exit statuses (`CAPABILITIES.exitStatus`).
@@ -200,7 +219,8 @@ export function sessionChange(
     if (at === undefined || from === undefined || from.deviceId !== at.deviceId) return null;
     const fields = { assignment: assignmentOf(at, { id: from.pane }), ...pr };
     if (deferred) return advance(task, "running", fields);
-    return state === "ended" ? ended(task, undefined, fields) : advance(task, liveState(state), fields);
+    if (state === "ended") return ended(task, undefined, fields);
+    return withWait(advance(task, liveState(state), fields), from);
   }
   // A lost task's machine speaking for it is the proof `lost` waits for.
   if (!PLACED.includes(task.state)) return null;
@@ -216,8 +236,9 @@ export function sessionChange(
   if (deferred) return named || newRemote ? { ...task, ...fields } : null;
   if (state === "ended") return ended(task, undefined, fields);
   const to = liveState(state);
-  if (task.state !== to) return advance(task, to, fields);
-  return pr.prUrl === undefined && !newRemote ? null : { ...task, ...fields };
+  if (task.state !== to) return withWait(advance(task, to, fields), from);
+  const rewait = to === "needs-input" && waitChanged(task, from);
+  return pr.prUrl === undefined && !newRemote && !rewait ? null : withWait({ ...task, ...fields }, from);
 }
 
 /**

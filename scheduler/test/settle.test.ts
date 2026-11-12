@@ -159,6 +159,76 @@ describe("sessionChange remote session", () => {
   });
 });
 
+describe("sessionChange wait reason", () => {
+  const ask = { ...FROM_A, reason: "permission", tool: "Bash" } as const;
+
+  test("a needs-input event writes its reason and tool; a changed one is a write when the state stands", () => {
+    const waiting = sessionChange(task(), "needs-input", ask);
+    expect(waiting).toMatchObject({ state: "needs-input", inputReason: "permission", inputTool: "Bash" });
+    if (waiting === null) throw new Error("no write");
+    expect(sessionChange(waiting, "needs-input", ask)).toBeNull();
+    const asked = sessionChange(waiting, "needs-input", { ...FROM_A, reason: "question" });
+    expect(asked).toMatchObject({ inputReason: "question" });
+    expect(asked).not.toHaveProperty("inputTool");
+    const other = sessionChange(waiting, "needs-input", { ...FROM_A, reason: "permission", tool: "Edit" });
+    expect(other).toMatchObject({ inputReason: "permission", inputTool: "Edit" });
+    const bare = sessionChange(waiting, "needs-input", { ...FROM_A, reason: "permission" });
+    expect(bare).toMatchObject({ inputReason: "permission" });
+    expect(bare).not.toHaveProperty("inputTool");
+  });
+
+  test("an event with no reason removes both; leaving needs-input carries none", () => {
+    const waiting = task({ state: "needs-input", inputReason: "permission", inputTool: "Bash" });
+    const cleared = sessionChange(waiting, "needs-input", FROM_A);
+    expect(cleared).not.toHaveProperty("inputReason");
+    expect(cleared).not.toHaveProperty("inputTool");
+    expect(sessionChange(waiting, "busy", ask)).not.toHaveProperty("inputReason");
+  });
+
+  test("a reservation resolving straight to needs-input takes it; another machine's event writes nothing", () => {
+    const reserved = task({
+      state: "reserved",
+      assignment: undefined,
+      reservation: { deviceId: "a", exclave: "main", clone: "app", expiresAt: NOW + 1 },
+    });
+    expect(sessionChange(reserved, "needs-input", ask)).toMatchObject({ inputReason: "permission", inputTool: "Bash" });
+    expect(sessionChange(task(), "needs-input", { deviceId: "b", pane: "%1", reason: "permission" })).toBeNull();
+  });
+
+  test("a PR-only event on a standing needs-input strips a wait the event does not carry", () => {
+    const waiting = task({ state: "needs-input", inputReason: "permission", inputTool: "Bash" });
+    const prUrl = "https://github.com/acme/app/pull/7";
+    const written = sessionChange(waiting, "needs-input", FROM_A, prUrl);
+    expect(written).toMatchObject({ state: "needs-input", prUrl });
+    expect(written).not.toHaveProperty("inputReason");
+    expect(written).not.toHaveProperty("inputTool");
+  });
+
+  test("a lost task its machine speaks for takes the event's wait, or none when it is back to running", () => {
+    const lost = task({ state: "lost", needsInputSince: NOW, inputReason: "permission", inputTool: "Bash" });
+    expect(sessionChange(lost, "needs-input", { ...FROM_A, reason: "question" })).toMatchObject({
+      state: "needs-input",
+      inputReason: "question",
+    });
+    const running = sessionChange(lost, "busy", FROM_A);
+    expect(running?.state).toBe("running");
+    expect(running).not.toHaveProperty("inputReason");
+    expect(running).not.toHaveProperty("inputTool");
+  });
+
+  test("a lost task seen live again returns to needs-input keeping the wait it carried into lost", () => {
+    const lost = task({ state: "lost", needsInputSince: NOW, inputReason: "permission", inputTool: "Bash" });
+    const entry = { id: "%1", window: "w", repo: "app", path: "/p", taskId: "t" };
+    const reply: TaskSessionsReply = { ok: true, sessions: [entry], ledgerSince: NOW - 86_400_000 };
+    const at: Observed = { now: NOW + 1, connected: true, reservationTtlMs: 120_000, lostAfterMs: 900_000 };
+    expect(settle(lost, reply, at)).toMatchObject({
+      state: "needs-input",
+      inputReason: "permission",
+      inputTool: "Bash",
+    });
+  });
+});
+
 /** `settle` on a reply that names an id in `ended` and `interrupted`: a launch its machine died in the middle of. */
 describe("settle an interrupted launch", () => {
   const TTL = 120_000;

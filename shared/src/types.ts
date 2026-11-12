@@ -1584,19 +1584,28 @@ export type SessionState = (typeof SESSION_STATES)[number];
  * Why a session waits on a person, beside `needs-input` only. `question`: an
  * AskUserQuestion dialog is open, a real choice that cannot flicker the way auto
  * mode's classifier asks do, so the leader alerts it without the 2-minute
- * debounce (DESIGN.md, "Session events"). A reader that does not know a value
- * drops it and keeps the event: an unknown reason costs only the debounce.
+ * debounce and the PWA shows it at once (DESIGN.md, "Session events").
+ * `permission`: a permission prompt a person must answer, with the tool it is
+ * for in `tool`. Both display on the PWA. A reader that does not know a value
+ * drops it and keeps the event: an unknown reason costs only the wording.
  */
-export const NEEDS_INPUT_REASONS = ["question"] as const;
+export const NEEDS_INPUT_REASONS = ["question", "permission"] as const;
 
 export type NeedsInputReason = (typeof NEEDS_INPUT_REASONS)[number];
+
+/**
+ * Bounds `SessionEvent.tool` and `Task.inputTool`: display-only, `[A-Za-z0-9_-]`
+ * only (`isToolName`), so no command text can ride in a tool name.
+ */
+export const TOOL_NAME_MAX_LENGTH = 64;
 
 /**
  * `op: "session-event"`, daemon → scheduler, sealed to `SCHEDULER_ID`,
  * fire-and-forget. Every field is the daemon's own, never what the session
  * claimed: `session` and `taskId` from its pane map, `exclave` from the pane's
  * path, `prUrl` only once it parsed as `https:`, `remoteSession` only once it
- * matched `isRemoteSessionId`, `reason` only beside `needs-input` and known
+ * matched `isRemoteSessionId`, `reason` only beside `needs-input` and known,
+ * `tool` only beside `reason: "permission"` and once it matched `isToolName`
  * (DESIGN.md, "Session events").
  * Sent only for sessions that carry a task id.
  */
@@ -1614,8 +1623,13 @@ export interface SessionEvent {
    * connected. A claim, display-only — it names the session's claude.ai page.
    */
   readonly remoteSession?: string;
-  /** Only beside `needs-input`: the session's claim of why. It lifts the alert's debounce for that stay, nothing else. */
+  /** Only beside `needs-input`: the session's claim of why. `question` lifts the alert's debounce for that stay; `permission` is display-only. */
   readonly reason?: NeedsInputReason;
+  /**
+   * Only beside `reason: "permission"`: the tool the open permission prompt is for, as the
+   * session claimed it, kept only as `isToolName` passes it. Display-only.
+   */
+  readonly tool?: string;
   /** Observed at by the daemon, ms. */
   readonly at: number;
 }
@@ -2303,6 +2317,13 @@ export interface Task {
    * on the record so a new leader does not repeat it. Cleared with `escalated`.
    */
   readonly inputAlerted?: true;
+  /**
+   * Why the current needs-input stay waits (`SessionEvent.reason`/`tool`), from its own machine's
+   * latest event; cleared with `needsInputSince` (`inputClock`). Display-only: the PWA words it,
+   * no reader acts on it. An older reader drops both.
+   */
+  readonly inputReason?: NeedsInputReason;
+  readonly inputTool?: string;
   /**
    * The credit-spill alert this dispatch earned, stamped by the leader after its spawn is
    * confirmed: the account's window and the reset (ms, 0 when unknown) it was alerted under.

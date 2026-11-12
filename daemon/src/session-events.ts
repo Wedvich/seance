@@ -1,6 +1,7 @@
 import {
   httpsUrl,
   isNeedsInputReason,
+  isToolName,
   isRecord,
   isRemoteSessionId,
   isSessionState,
@@ -70,8 +71,10 @@ export interface SessionEventFrame {
    * `session.start` (a hooks-worker respawn mid-turn too) reads idle without it. Only a hand-off reads it.
    */
   readonly turnEnded?: true;
-  /** Only beside `needs-input`: an AskUserQuestion is open. Lifts the leader's alert debounce for the stay, nothing else. */
+  /** Only beside `needs-input`. `question` (an AskUserQuestion is open) lifts the leader's alert debounce for the stay; `permission` is display-only. */
   readonly reason?: NeedsInputReason;
+  /** Only beside `reason: "permission"`: the prompt's tool, kept only as `isToolName` passes it. Display-only. */
+  readonly tool?: string;
 }
 
 /** Routed on `kind` ahead of the `Plain` check, as broker frames are. */
@@ -88,11 +91,13 @@ const MAX_FIELD = 64;
  * exclave — the refresh's trigger — rather than malformed frames to warn about.
  * The numbers themselves are never read: the config dir's cache is the one source.
  * A `reason` is kept only when known and beside `needs-input`, and otherwise
- * dropped, never the frame: it is worth no more than the debounce it lifts.
+ * dropped, never the frame: it is worth no more than the debounce it lifts. A
+ * `tool` is kept only beside `permission` and as `isToolName` passes it; no
+ * line is logged for a dropped one.
  */
 export function parseSessionEventFrame(raw: unknown): SessionEventFrame | null {
   if (!isRecord(raw) || raw["v"] !== SESSION_EVENT_VERSION || raw["kind"] !== SESSION_EVENT_KIND) return null;
-  const { state, prUrl, remoteSession, rateLimits, pane, handoff, turnEnded, reason } = raw;
+  const { state, prUrl, remoteSession, rateLimits, pane, handoff, turnEnded, reason, tool } = raw;
   if (pane !== undefined && (typeof pane !== "string" || pane.length > MAX_FIELD)) return null;
   if (handoff !== undefined) {
     // Alone: a hand-off rides no state, so no ingest path can read one as the other.
@@ -118,6 +123,7 @@ export function parseSessionEventFrame(raw: unknown): SessionEventFrame | null {
     ...(pane === undefined ? {} : { pane }),
     ...(turnEnded === true ? { turnEnded } : {}),
     ...(state === "needs-input" && isNeedsInputReason(reason) ? { reason } : {}),
+    ...(state === "needs-input" && reason === "permission" && isToolName(tool) ? { tool } : {}),
   };
 }
 
@@ -850,6 +856,7 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
           ...(prUrl === null ? {} : { prUrl }),
           ...(remoteSession === null ? {} : { remoteSession }),
           ...(frame.reason === undefined ? {} : { reason: frame.reason }),
+          ...(frame.tool === undefined ? {} : { tool: frame.tool }),
         });
       }
       // After the enqueue, so the idle is in the outbox before the close; a coalesced one may still give way to

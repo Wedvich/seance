@@ -91,6 +91,7 @@ import {
   type StorePrefixRule,
   TARGET_LIMITS,
   TASK_FAILURE_LIMITS,
+  TOOL_NAME_MAX_LENGTH,
   TASK_PRS_MAX,
   TASK_PRS_MAX_LENGTH,
   TASK_REQUEST_LIMITS,
@@ -782,6 +783,29 @@ describe("tasks and their records", () => {
     }
   });
 
+  test("a wait reason and tool round-trip; a bad one is dropped, never the task", () => {
+    const stay = { ...task, state: "needs-input" } as const;
+    const waiting = { ...stay, inputReason: "permission", inputTool: "Bash" } as const;
+    expect(parseTask(waiting)).toEqual(waiting);
+    const question = { ...stay, inputReason: "question" } as const;
+    expect(parseTask(question)).toEqual(question);
+    expect(parseTask({ ...waiting, inputReason: "elicitation" })).toEqual(stay);
+    expect(parseTask({ ...waiting, inputReason: 3 })).toEqual(stay);
+    for (const inputTool of ["rm -rf /", "a/b", "", "t".repeat(65), 4]) {
+      expect(parseTask({ ...waiting, inputTool })).toEqual({ ...stay, inputReason: "permission" });
+    }
+    expect(parseTask({ ...question, inputTool: "Bash" })).toEqual(question);
+    expect(parseTask({ ...stay, inputTool: "Bash" })).toEqual(stay);
+  });
+
+  test("a wait reason is kept into `lost` and dropped on every other state", () => {
+    const fields = { inputReason: "permission", inputTool: "Bash" } as const;
+    expect(parseTask({ ...task, state: "lost", ...fields })).toEqual({ ...task, state: "lost", ...fields });
+    for (const state of ["running", "reserved", "failed", "done", "awaiting-merge"] as const) {
+      expect(parseTask({ ...task, state, ...fields })).toEqual({ ...task, state });
+    }
+  });
+
   test("a forge reading round-trips, with or without checks", () => {
     const at = 1_700_000_300_000;
     expect(parseTask({ ...task, pr: { state: "open", checks: "passing", at } })?.pr).toEqual({
@@ -1126,8 +1150,32 @@ describe("parseSessionEvent", () => {
   test("a question reason rides needs-input only; elsewhere, or unknown, it is dropped and the event kept", () => {
     expect(parseSessionEvent({ ...event, reason: "question" })).toEqual({ ...event, reason: "question" });
     expect(parseSessionEvent({ ...event, state: "busy", reason: "question" })).toEqual({ ...event, state: "busy" });
-    expect(parseSessionEvent({ ...event, reason: "permission" })).toEqual(event);
+    expect(parseSessionEvent({ ...event, reason: "elicitation" })).toEqual(event);
     expect(parseSessionEvent({ ...event, reason: true })).toEqual(event);
+  });
+
+  test("a permission reason carries its tool only when it is a tool name; a bad tool is dropped, reason and event kept", () => {
+    const permission = { ...event, reason: "permission" } as const;
+    expect(parseSessionEvent(permission)).toEqual(permission);
+    expect(parseSessionEvent({ ...permission, tool: "Bash" })).toEqual({ ...permission, tool: "Bash" });
+    expect(parseSessionEvent({ ...permission, tool: "mcp__github__create_issue" })).toEqual({
+      ...permission,
+      tool: "mcp__github__create_issue",
+    });
+    for (const tool of ["rm -rf /", "a/b", "a=b", 'a"b', "", "t".repeat(65), 7]) {
+      expect(parseSessionEvent({ ...permission, tool })).toEqual(permission);
+    }
+    expect(parseSessionEvent({ ...permission, tool: "t".repeat(64) })).toEqual({
+      ...permission,
+      tool: "t".repeat(64),
+    });
+    expect(TOOL_NAME_MAX_LENGTH).toBe(64);
+    expect(parseSessionEvent({ ...event, reason: "question", tool: "Bash" })).toEqual({ ...event, reason: "question" });
+    expect(parseSessionEvent({ ...event, tool: "Bash" })).toEqual(event);
+    expect(parseSessionEvent({ ...event, state: "busy", reason: "permission", tool: "Bash" })).toEqual({
+      ...event,
+      state: "busy",
+    });
   });
 });
 
@@ -1245,6 +1293,19 @@ describe("store", () => {
     expect(await sealedLength(decided)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
     // …and a full prefix still lists in one frame, under the Workers WebSocket message limit.
     expect(MAX_TASKS * STORE_MAX_CT_LENGTH).toBeLessThan(32 * 1024 * 1024);
+  });
+
+  test("a needs-input record carrying its wait at every bound, in place of the failure, fits beside nine candidates", async () => {
+    const { failure: _failure, ...unfailed } = written;
+    const waiting: Task = {
+      ...unfailed,
+      state: "needs-input",
+      inputReason: "permission",
+      inputTool: "t".repeat(TOOL_NAME_MAX_LENGTH),
+      decision: { at: 1_760_000_000_000, chosen: target, candidates: Array.from({ length: 9 }, () => candidate) },
+    };
+    expect(parseTask(waiting)).toEqual(waiting);
+    expect(await sealedLength(waiting)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
   });
 
   test("a PR list at its bound, its primary as prUrl, costs no more than a prUrl at its own: the same record fits", async () => {

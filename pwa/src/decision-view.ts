@@ -245,6 +245,30 @@ export function heldByCapsAlone(candidate: Candidate): boolean {
   return candidate.rejected.length > 0 && candidate.rejected.every((r) => r.code === "cap_reached");
 }
 
+/**
+ * Why a needs-input task waits, as the clause after "It": hedged for a permission, since the
+ * state also covers an approved call still running and the engine gives no settled-ask signal.
+ */
+function waitClause(task: Task): { readonly hedged: boolean; readonly text: string } {
+  if (task.inputReason === "question") return { hedged: false, text: "asking a question" };
+  if (task.inputReason !== "permission") return { hedged: false, text: "waiting for input" };
+  const text =
+    task.inputTool === undefined ? "waiting for permission" : `waiting for permission to use ${task.inputTool}`;
+  return { hedged: true, text };
+}
+
+/** The wait for a row's body, lower case: "may be waiting for permission to use Bash". */
+export function inputWait(task: Task): string {
+  const { hedged, text } = waitClause(task);
+  return hedged ? `may be ${text}` : text;
+}
+
+/** The headline's sentence: "It's asking a question", "It may be waiting for permission to use Bash". */
+function inputSentence(task: Task): string {
+  const { hedged, text } = waitClause(task);
+  return hedged ? `It may be ${text}` : `It's ${text}`;
+}
+
 /** What became of a queued task, in one line: the verdict's headline. */
 export function taskHeadline(task: Task, machines: readonly Machine[], now: number): string {
   const at = task.assignment ?? task.reservation;
@@ -265,7 +289,7 @@ export function taskHeadline(task: Task, machines: readonly Machine[], now: numb
     case "running":
       return `It's running${place}${slept}.`;
     case "needs-input":
-      return `It's waiting for input${place}${slept}.`;
+      return `${inputSentence(task)}${place}${slept}.`;
     case "lost":
       // The leader's `lost` is the sleep itself; "Lost" stays for a machine back or gone.
       if (asleep !== undefined) return `Asleep${place}${slept}.`;

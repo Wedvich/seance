@@ -1756,6 +1756,11 @@ an old peer's frames parse as before. Mixed versions:
   update`"; the daemon's own new reply codes are `untasked` (a pane with no scheduler task),
   `unrecorded` (a task the daemon's launch ledger holds no launch of), `unwritten` (sent, but the
   ledger write failed) and `stopping`.
+- `session-event` `reason: "permission"` and `tool`, `Task.inputReason`/`inputTool` (2026-11-12, no
+  capability, no sentinel): display-only. An older daemon's `parseSessionEventFrame`, an older
+  leader's `parseSessionEvent` and an older app's or leader's `parseTask` drop the unknown reason,
+  the key and the fields and keep the frame, event or task; an older leader re-writing a record
+  drops them, and the PWA then says "waiting for input". No rollout order.
 
 Repos are **pushed, not pulled**: they ride the encrypted register blob, so
 the PWA's repo picker renders from the machine registry alone and works for
@@ -2909,14 +2914,16 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   that is already past the 30-minute escalation gets only that alert, as the escalation: one
   push per stay at the first threshold crossed, a second only for a wait that outlives the
   escalation. **A question skips the debounce** (2026-11-12): a `needs-input` event whose
-  source carries `reason: "question"` (Session events, "The question reason") sets
+  source carries `reason: "question"` (Session events, "The wait reason") sets
   `inputAlerted` in the write that applies it, and once that write lands raises the first alert
   with `question: true`, so a real choice reaches the phone at once. It counts only where
   `sessionChange` accepts the machine, or for a needs-input stay its own machine re-reports
   (`questionAlert`). A stay already alerted, escalated or past the escalation mark (one push, as `inputAlert`) gets nothing more, and the 30-minute
   escalation is unchanged. No record field says it was a question: the stamp is the one every
   leader already reads, so an older leader taking over stays quiet for the stay and still
-  escalates it.
+  escalates it. `inputClock` also carries the stay's `inputReason`/`inputTool` (the wait reason,
+  Session events): written by the event through `sessionChange`, cleared with the clock, kept into
+  `lost`; display-only, nothing alerts or routes on them (`permission` lifts no debounce).
 - **Credits spill** (M3 item 5). A reservation on a candidate carrying `spill` is recorded in
   the decision the reservation writes — the PWA's verdict shows it on the chosen line, "may
   spill into credits (5h projected at 93%)", or "would spend credits (5h full)" for `spending`
@@ -5142,7 +5149,7 @@ of this section built.
     files name". Séance knows no workspace, so it names none.
   - **Every real choice goes through AskUserQuestion.** That is what session
     events report as `needs-input` with `reason: "question"`, so the push fires at
-    once rather than after the 2-minute debounce (Session events, "The question
+    once rather than after the 2-minute debounce (Session events, "The wait
     reason", 2026-11-12), and what Remote
     Control shows with its options, so the push's `/?task=<id>` link and the task
     card's claude.ai link reach the question. The push says only that it is one
@@ -7176,7 +7183,24 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   lists the store directly, since the leader's reply is where decisions, holds and the bounded,
   prompt-cut view come from. It re-reads on every `queue-changed` (the named tasks only, merged
   into what it holds), on a reconnect and on a leader change. A named task the reply leaves out
-  is dropped only if the store holds no record of it, the same rule as the verdict's. Tasks group by what each needs from
+  is dropped only if the store holds no record of it, the same rule as the verdict's. A needs-input stay younger than 30 s
+  (`NEEDS_INPUT_SCREEN_MS`, on the leader's clock via the reply's skew) shows as running (Running
+  section, running headline, no Answer link), so auto mode's per-call flicker never reaches Needs
+  you; once 30 s pass it moves there on its own, the store arming one timer for the crossing
+  because the app has no periodic render. Why 30 s: classifier asks settle in seconds and most
+  approved calls run under half a minute, while Claude Code auto-denies an unanswered prompt after
+  120 s (the incident behind this), so the push's 2-minute debounce would hide exactly the waits
+  that matter and 30 s leaves ~90 s to answer; an auto-mode call past 30 s still reaches Needs you,
+  worded as a maybe. Shown at once: a question (`inputReason`, cannot flicker), an alerted or
+  escalated stay, one with no `needsInputSince` (an older leader's), and one stamped more than 5 s
+  ahead of the leader's clock (another leader's, since a handover keeps the record: waiting out that
+  gap would hide a prompt Claude Code auto-denies in 120 s). The rule is `pwa/src/input-debounce.ts`,
+  shared by the Queue screen, the "After" sheet (same headline as the screen) and the store's
+  timer. The followed task's
+  verdict is not debounced: a person who opened it is looking on purpose, and it shows the record
+  with the same wording. Wording: "It's asking a question on …", "It may be waiting for permission
+  to use Bash on …", "It's waiting for input on …"; an escalated row's body "May be waiting for
+  permission to use Bash since …". Tasks group by what each needs from
   the owner: Needs you (escalated first, then `needs-input`, then `lost`), Running, Idle, Waiting,
   Asleep (collapsed; below), Awaiting merge, Finished, in the leader's order within each (`queue-view.ts`), except Waiting, oldest first (FIFO, as the scheduler routes ready tasks; batch grouping and blocked tasks are not reflected). Idle holds the
   `running` tasks the reply's `idle` lists (an entry for a task no longer running is ignored, so an
@@ -8146,8 +8170,11 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   the same id, so it enters once), until its `tool.call` settles or rejects. **One function
   names the state every report carries**: needs-input while any dialog is outstanding, else
   idle while `atPrompt`, else busy. A needs-input carries `reason: "question"` while any
-  outstanding dialog is an `AskUserQuestion` (mod 0.4.0), a permission ask beside it or not; the
-  reason is part of the state, so it opening or closing is a change. A report goes out whenever that changes (and only then,
+  outstanding dialog is an `AskUserQuestion`, a permission ask beside it or not; else
+  `reason: "permission"`, with `tool` only while exactly one permission dialog is outstanding (mod
+  0.5.0; with two open the older is usually an approved call still running and nothing says which
+  prompt is on screen, so none is named, and the one left is named when the other closes). The
+  reason and tool are part of the state, so a change in either is a report. A report goes out whenever that changes (and only then,
   bar a PR below), so two overlapping prompts report busy after the second, and a subagent's
   dialog closing after the main turn ended resumes to idle, not busy. A rejection resumes
   the same way when it empties the map. The main loop's own turn events drop its own entries
@@ -8328,6 +8355,29 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   is the one above: a same-uid process on the task's machine can make the title link to
   another claude.ai session the same account owns. Not covered: the spawn verdict (above,
   "Out of scope for v1"), and sessions with no task, whose events go nowhere.
+- **The wait reason** (the question reason, 2026-11-12; widened the same day with `permission`
+  and a tool name). Why a needs-input waits, for the PWA to say: `NEEDS_INPUT_REASONS` is
+  `question` and `permission`, and `tool` rides beside `permission` only. Closed kinds plus a
+  bounded name and never the command or the verdict's message: a command line may carry secrets,
+  and prompt text is never logged. `isToolName` (`[A-Za-z0-9_-]{1,64}`, the Claude API's own
+  tool-name alphabet, so every real name passes) holds it at ingest, at `parseSessionEvent` and
+  at `parseTask`; a bad one is dropped, never the frame, event or record. `parseTask` keeps them only
+  on a `needs-input` or `lost` task (where a wait lives; `inputClock` carries it into `lost`):
+  elsewhere a pair could only be a bug's, and the store bound need not fit one beside a `failure`. The event's reason and
+  tool are written onto `Task.inputReason`/`inputTool` through `sessionChange` (the task's own
+  machine only, like `remoteSession`; a changed one is a write even when the state stands) and
+  cleared by `inputClock`. Each changed reason or tool is one term-fenced store write plus the
+  `queue-changed` nudge, where a standing state was none before: parallel permission dialogs
+  opening and closing can flip it, bounded by the daemon's coalescing window, and accepted for a
+  field the person reads. Display-only: they bind, route, move and settle nothing and alert
+  nothing (`permission` lifts no debounce; `questionAlert` reads the event, not the record).
+  `seanced mcp`'s `get_queue` carries `inputReason` and never `inputTool`: a tool name is chosen
+  by whatever MCP server a repo brings, and `[A-Za-z0-9_-]{1,64}` admits words, so it would be a
+  session-chosen string in another agent's context. The `permission` state also covers an
+  _approved_ call still running, by a person or by auto mode's classifier (a 70 s auto-mode test
+  run read needs-input throughout), and the engine gives no settled-ask signal, so the PWA words
+  it "may be waiting for permission". Residual: a same-uid process can make its own task's row
+  name another tool. The rest of this bullet is the question reason as first written.
 - **The question reason** (added 2026-11-12, at the owner's request; reverses the earlier
   rejection in docs/scheduler.md, "Autonomy level"). The autonomy levels send every real choice
   through AskUserQuestion, and those are the waits a person should hear about first, but the

@@ -20,11 +20,13 @@ import { machineAsleep, needsAttention } from "./asleep.ts";
 import {
   avoidLine,
   decisionStartNowItem,
+  inputWait,
   pinLine,
   taskHeadline,
   waitingText,
   type StartNowItem,
 } from "./decision-view.ts";
+import { settlingInput } from "./input-debounce.ts";
 import { accountDisplayName, formatUntil } from "./machines-view.ts";
 import { AUTONOMY_LABELS } from "./state.ts";
 import { taskTitle } from "./task-title.ts";
@@ -215,7 +217,13 @@ function dotOf(task: Task): QueueDot | null {
 }
 
 /** `idleSince`, on this device's clock, is set only for a task the leader released idle. */
-function bodyOf(task: Task, machines: readonly Machine[], now: number, idleSince?: number): string | null {
+function bodyOf(
+  task: Task,
+  machines: readonly Machine[],
+  now: number,
+  skew: number,
+  idleSince?: number,
+): string | null {
   // The leader's `lost` is the sleep itself: waking settles it, and giving up is all the phone can do.
   if (task.state === "lost" && machineAsleep(task, machines)) {
     return "Settles when its machine wakes; cancel or mark done to give up on it";
@@ -232,9 +240,11 @@ function bodyOf(task: Task, machines: readonly Machine[], now: number, idleSince
     );
   }
   if (task.state === "needs-input" && task.escalated === true) {
+    const wait = inputWait(task);
+    const clause = `${wait.slice(0, 1).toUpperCase()}${wait.slice(1)}`;
     return task.needsInputSince === undefined
-      ? "Waiting for input"
-      : `Waiting for input since ${formatSeen(task.needsInputSince, now)}`;
+      ? clause
+      : `${clause} since ${formatSeen(task.needsInputSince - skew, now)}`;
   }
   if (idleSince !== undefined) return `Idle at its prompt since ${formatSeen(idleSince, now)} — its slot is free`;
   return null;
@@ -338,7 +348,7 @@ function rowOf(
     id: task.id,
     title: taskTitle(task),
     headline: taskHeadline(task, state.relay.machines, now),
-    body: bodyOf(task, state.relay.machines, now, idleSince === undefined ? undefined : idleSince - skew),
+    body: bodyOf(task, state.relay.machines, now, skew, idleSince === undefined ? undefined : idleSince - skew),
     dot: dotOf(task),
     age: formatSeen(task.createdAt, now),
     canCancel: actionable,
@@ -361,6 +371,13 @@ function rowOf(
     answer: task.state === "needs-input" ? session : null,
     autonomy: autonomy === DEFAULT_AUTONOMY ? null : AUTONOMY_LABELS[autonomy],
   };
+}
+
+/** A settling task is shown as running, whole: every reader downstream (section, headline, dot, Answer) sees one. */
+function asRunning(task: Task, leaderNow: number): Task {
+  if (!settlingInput(task, leaderNow)) return task;
+  const { needsInputSince: _since, inputReason: _reason, inputTool: _tool, ...rest } = task;
+  return { ...rest, state: "running" };
 }
 
 /** `idle`: the running tasks the leader released for sitting idle at their prompt, by id. */
@@ -421,9 +438,9 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
   const { text, available } = statusLine(state);
   const view = state.queueView;
   const ok = view?.kind === "ok" ? view : null;
-  const tasks = ok?.tasks ?? [];
-  const titles = new Map(tasks.map((task) => [task.id, taskTitle(task)]));
   const skew = ok?.skew ?? 0;
+  const tasks = (ok?.tasks ?? []).map((task) => asRunning(task, now + skew));
+  const titles = new Map(tasks.map((task) => [task.id, taskTitle(task)]));
   // Only while running: a task the reply's list outlived (settled by an action's own reply) is what it now is.
   const running = new Set(tasks.filter((t) => t.state === "running").map((t) => t.id));
   const idle = new Map((ok?.idle ?? []).filter((r) => running.has(r.taskId)).map((r) => [r.taskId, r.since]));
@@ -498,7 +515,9 @@ export interface AfterSheetView {
  */
 export function deriveAfterSheet(state: AppState, now: number): AfterSheetView {
   const view = state.queueView;
-  const tasks = view?.kind === "ok" ? view.tasks : [];
+  const tasks = (view?.kind === "ok" ? view.tasks : []).map((task) =>
+    asRunning(task, now + (view?.kind === "ok" ? view.skew : 0)),
+  );
   const held = new Map(state.form.after.map((dep) => [dep.task, dep.after]));
   const listed = tasks
     .filter((task) => task.state !== "failed" && task.state !== "cancelled")
