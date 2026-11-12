@@ -311,7 +311,8 @@ last, once its PR is open and set to merge: the session closes when that turn en
 and the task waits for the merge as **Awaiting merge** instead of the session
 watching CI. If that PR gets stuck (a required check fails, a conflict, the branch falls
 behind, or nothing is set to merge it), you are alerted and **Continue** resumes the
-session to fix it; the resumed session may hand the PR off again.
+session to fix it; the resumed session may hand the PR off again. So may a
+successor (below) for the PR it inherited, unless its task settles on its report.
 
 `pass_to_successor` (`mcp__seance__pass_to_successor`) is the same kind of call, for a
 session that is running out of usage: it commits, calls it last with a `record` of what is

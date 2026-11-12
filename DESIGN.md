@@ -944,7 +944,8 @@ nothing checked it. The last is the gap they leave.
   for an `until: "reported"` task. The third (2026-11-11, "Session events", `handoff`): a hand-off
   closing the sender's own pane at its turn's end (an `idle` with `turnEnded`), only for a task this machine's ledger holds a
   launch and a PR URL of (for a continuation, the one that ledger noted on it at launch from the launch it
-  continues, `continuedPr`: still the ledger's word, never a frame's), through the graceful despawn,
+  continues, `continuedPr`: still the ledger's word, never a session-event frame's; for a successor, the one
+  noted on it at launch from the scheduler-sealed spawn's `inheritedPr`, the same field), through the graceful despawn,
   audited `origin=handoff`; no frame field names the pane, the task or anything run. The fourth (2026-11-12, "Session events", `pass`):
   a pass, pushing the sender's own task's branch, forwarding a bounded `record` once, and marking the pane
   for a close at its turn's end that only the scheduler's `pass-close` arms, audited `origin=successor`; no
@@ -1354,6 +1355,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | HTTP `PUT /attachments/<id>`                                        | built: `RelayClient.uploadAttachment` (`shared/src/app-client.ts`) from the PWA's spawn form (`pwa/src/store.ts`), sealed by `sealAttachment`, with `Authorization: Bearer`                                                                                                                                                                                                        | built: `relay/src/attachments.ts`, after `Hub.reserveUpload` (`relay/src/allowance.ts`); into R2 through the `ATTACHMENTS` binding                                                                                                                                                                                                                                                                      |
 | HTTP `GET /attachments/<id>`                                        | built: `daemon/src/attachments.ts`, before the launch ledger's write-ahead record, at `attachmentUrl` of its own config's `relayUrl`                                                                                                                                                                                                                                               | built: `relay/src/attachments.ts`, streamed from R2                                                                                                                                                                                                                                                                                                                                                     |
 | field `attachments`                                                 | built: `TaskSpec` and `SpawnRequest`, from the PWA's `createTask` after every upload is `stored` (`pwa/src/store.ts`); the leader's `#dispatch` (`scheduler/src/scheduler.ts`)                                                                                                                                                                                                     | `parseAttachmentManifest` (`shared/src/parse.ts`), in `parseTaskSpec` and the daemon's `isSpawnRequest`; acted on in `handleSpawn` (`daemon/src/handlers.ts`)                                                                                                                                                                                                                                           |
+| field `inheritedPr`                                                 | built: `SpawnRequest`, by the leader's `#dispatch` (`scheduler/src/scheduler.ts`) for a task carrying `succeeds` and a `prUrl`, never under `until: "reported"`                                                                                                                                                                                                                    | built: `daemon/src/handlers.ts` `handleSpawn` (`inheritedPrOf`), only from a spawn sealed from the scheduler with `client: "scheduler"` and a task id, noted in the launch ledger's `continuedPr`                                                                                                                                                                                                       |
 
 `sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
 over the local op socket, arriving at the same `daemon/src/handlers.ts` routing.
@@ -2000,6 +2002,11 @@ an old peer's frames parse as before. Mixed versions:
     PR 2's parser refuses `"quota"`, so an early leader never misreads one: it holds a quota
     successor's record unreadable, the intended gate. The daemon advertises it from stage 3. The two new `PushAlert` kinds (`quota-exhausted`, `pass-refused`) are unknown to
     an older `parsePushAlert` and an older service worker, which show the fallback text.
+  - `SpawnRequest.inheritedPr` (2026-11-12): the successor record's `prUrl`, added by the leader's
+    `#dispatch` for a task carrying `succeeds`, never under `until: "reported"`. An older daemon's
+    `isSpawnRequest` has no closed key set and ignores it, so the successor's `hand_off_task` answers
+    `prless`, whose text says to keep watching the PR. No capability and no sentinel, and the record
+    shape is unchanged (see "Passing to a successor", the hand-off).
   - Reason `predecessor_account`: dropped by an older reader like any unknown reason, which keeps the
     candidate. Failure code `pass_abandoned` parses as any bounded name; an older PWA words it as a
     spawn refusal with the leader's message, the same residual as `continue_expired`.
@@ -3927,7 +3934,7 @@ reuses the record helpers.
   session's `done` report, a `cancel` or `mark-done` winning): no writer produces the record
   `parseTask` would null, which every reader would then hold unreadable and never prune. The
   created task also carries the old task's `prUrl` and `prs`, so the chip and the PR poller follow
-  the same PR; `parseTask` accepts progress fields in any state and `bindTaskRecord` requires only
+  the same PR, and its dispatch carries that `prUrl` as `SpawnRequest.inheritedPr`; `parseTask` accepts progress fields in any state and `bindTaskRecord` requires only
   `queued` at version 1. `SUCCESSOR_DEP_SENTINEL` is appended by the one sealer whenever `succeeds`
   is present (Wire protocol, "Passing to a successor"), and `openTaskRecord` holds a stored record that
   carries `succeeds` without it `malformed`: an older leader would run one beside its predecessor. That
@@ -7293,11 +7300,13 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
      (a release branch) is still adopted: the session could have pushed it itself. **No upstream, no
      `expect`**:
      pushes to `<b>` when the task has no PR; when the caller says it holds one (`hasPr`, the self
-     path, from the PR URL its ledger noted: it has no `expect`, and the leader would refuse another
+     path, from the PR URL its ledger noted, or the one it inherited at launch, a continuation's or a
+     successor's: it has no `expect`, and the leader would refuse another
      branch after the push) it is `no_upstream`, nothing pushed, and the session is told to run
      `git push -u origin HEAD:<pr branch>` or set the upstream and call again, which it can, being
      live. `expect` comes only from a scheduler-sealed request, never a session frame; `hasPr` is the
-     daemon's own ledger.
+     daemon's own ledger. A successor that inherited a PR whose worktree branch has no upstream is thus
+     `no_upstream` before any push, where it once pushed to `<b>` and met the leader's `branch_mismatch`.
   5. `<b>` or `<r>` equal to the repo's default branch (resolved from `refs/remotes/origin/HEAD` as
      branch-state's `repoBase` does; with none, `main` and `master`) is `default_branch`.
   6. Uncommitted or untracked changes are `dirty_worktree` (`pendingChanges`; unreadable is
@@ -7354,8 +7363,9 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   definition, and a machine pin would often have no other account; `repo_absent` covers a repo
   present on one machine only), `deps` (already satisfied), `batch` (not a new member), and `lineage`,
   `base`, `continues` and `attachments`. `succeeds` is described under "Task records". There is no new
-  `mode`: the spawn is a plain worktree spawn, so no daemon needs to know about successors to run one,
-  and the forward-compat gate is the sentinel alone. Passing the same task twice makes one successor
+  `mode`: the spawn is a plain worktree spawn, so no daemon needs to know about successors to run one
+  (the dispatch adds `inheritedPr`, which an older daemon ignores), and the forward-compat gate is the
+  sentinel alone. Passing the same task twice makes one successor
   (D15). The leader creates it through its app leg (`LeaderRelay extends AppRelay`, which has
   `createTask`), which binds through `bindTaskRecord`, seals the parsed copy and refuses `too_large`
   locally past `STORE_CREATE_MAX_CT_LENGTH`; one more `task:` record against the cap of 128 and the
@@ -7384,13 +7394,15 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   --set-upstream-to=origin/<r>`, and never `git switch <r>`, since a local branch of that name may
   be checked out in an older worktree; (3) rebuild state from `git log`, `git diff origin/HEAD...` and
   `gh pr view <url>` for each PR; (4) push with `git push origin HEAD:<r>`, keep the existing PR and
-  never open a second for the same work; and, when there is a PR, (5) not call `hand_off_task` for it (an
-  earlier session opened it and the successor's launch notes none, so the tool would answer `prless`): keep
-  the PR open and carry it through itself, as the task asks, since no hand-off closes the session after the
-  merge. Without `until` the scheduler's PR reading settles the task `done` (`merged`) when the PR merges, and
-  the pane is left running as for any merge settle (`leftRunning`); under `until: "reported"` the line says a
-  merge alone does not settle the task, which only the session's report does, so a successor
-  told to leave the PR and go idle would never settle. An `until: "reported"` task's report
+  never open a second for the same work; and, when there is a PR, (5) without `until: "reported"`, call `hand_off_task`
+  last once what merges the PR is in place (auto-merge armed, or a reviewer asked), and, if that is refused,
+  keep the PR open and carry it through itself. The hand-off is taken because the leader's dispatch carried
+  the PR as `inheritedPr` (the hand-off, below); the scheduler then settles the task `awaiting-merge` and
+  `done` when the PR merges. Under `until: "reported"` the line says not to call it: a hand-off leaves no
+  session to report, and a merge alone settles nothing, so the successor keeps the PR open, carries it
+  through itself and reports done. The fixed wording is held under `SUCCESSOR_PREAMBLE_MAX` for both
+  (1000 and 902 of 1 024 units before the URLs and ids it substitutes), so the `merged` line is not to
+  grow. An `until: "reported"` task's report
   instruction (`REPORT_DONE_INSTRUCTION`) is taken off the old prompt and added after everything, the record
   and the Linear key included, and is never cut, so the successor is still told how to report done. Chained passes on one clone are safe: each worktree keeps
   its own local branch tracking `origin/<r>` and nothing ever checks `<r>` out locally.
@@ -7531,7 +7543,12 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   says to restart `seanced`. New daemon, old leader, and a 2b daemon against a 2a leader (which
   advertises `successor` but not `successorSelf`, and would drop `session-pass`): the MCP tool's leader
   gate, on `successorSelf`, refuses before any push, and only that tool sends a `pass` frame
-  (`seanced session-event` drops one).
+  (`seanced session-event` drops one). The hand-off of an inherited PR: a new leader and an older daemon
+  placed the successor, so the field is ignored and its `hand_off_task` answers `prless` (the preamble
+  already says to carry the PR itself if refused); an older leader and a new daemon, no field arrives
+  and the old preamble says not to call the tool; a successor an older leader created and a new leader
+  dispatches gets the field (its record already holds `prUrl`) with the old prompt, which says not to
+  call it, harmless.
 - **Platform.** The push needs credentials the daemon's environment can use. Fetch already works
   through the same `networkGit`, so an HTTPS clone with a global helper (`gh auth git-credential`) pushes
   too. An SSH remote whose key lives only in a login session's agent fails under launchd or systemd.
@@ -7557,11 +7574,33 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   ending `done` by `merged` against `pass_abandoned`, `failed` and `cancelled`, over the ids an `audit pass …
   successor=<id>` line names: an orphan (a create that landed unseen, or one whose commit never landed) never
   ran, and its settle would count as a merge it did not carry).
-- **Later.** A successor's own `hand_off_task`: its launch notes no PR (only a session's own `gh pr create`
-  output is noted), so the tool answers `prless`, and the preamble tells it not to call it. Noting the
-  inherited PR from the scheduler-sealed spawn would be a carried claim, a threat-model change, so it waits
-  for a decision.
-- **Rejected.** Automatic continue of the old session (it cannot cross accounts); a new `mode` for the
+- **The successor's hand-off (built 2026-11-12).** A successor inherits its predecessor's PR, which its own
+  launch never reports, so `hand_off_task` answered `prless` and its preamble said not to call it.
+  - The leader side needed no change: `#runPass` creates the successor with the predecessor's `prUrl` and
+    `prs`, and `ended()` (`scheduler/src/done.ts`) settles any ended task whose record holds a PR
+    `awaiting-merge` before it reads the exit, a graceful close included. The PR poller and the merge
+    settle read the leader's own record, never the daemon's note.
+  - Only the daemon's permission was missing. `#dispatch` adds `inheritedPr: task.prUrl` for a task carrying
+    `succeeds` and a `prUrl`, never under `until: "reported"` (after a hand-off no session is left to
+    report, so the task would wait `awaiting-merge` until `merge_expired`; withholding it keeps `prless`).
+    It is read from the successor's own record at dispatch, so no record shape or sentinel is added, and a
+    pruned predecessor breaks nothing.
+  - `handleSpawn` notes it as the launch's existing `continuedPr` (`handoffCheck`, `hasPr` and
+    `continuation()` already read it; `notedPr` and `progress` already leave it out), only when the
+    spawn is sealed `from` the scheduler (or the leader in process) with `client: "scheduler"` and a task
+    id, and the value is `httpsUrl`-exact. From any other sender, or an unreadable value, it is dropped with
+    one warn naming the task, never refused: dropping leaves `prless`, as today, and a refusal would hold a
+    reserved successor and route it again to the same machine under a version gap. A `mode` other than
+    `worktree` is malformed (`isSpawnRequest`). The audit line says `inheritedPr=true`, never the URL.
+  - Threat model: the carried claim's only power is a session closing itself, which can do no more than
+    one that runs `/exit`; the `awaiting-merge` settle reads the leader's own record.
+- **Later.** None for this item.
+- **Rejected.** A capability gate or route filter for `inheritedPr` (the preamble is built at pass time,
+  before placement, so a capability cannot make its wording exact, and routing successors only to new
+  daemons would hold work off older machines for a convenience); refusing a non-scheduler `inheritedPr`
+  (a new spawn error code with words in the PWA and MCP, for a case no client produces, where dropping
+  it is the safe outcome); a separate ledger note field (the same concept as `continuedPr`, and one
+  that an older daemon still reads on rollback). Automatic continue of the old session (it cannot cross accounts); a new `mode` for the
   successor; the daemon-leg create; a failure code or `done` for the old task; stacking or `baseBranch`
   for the successor (no daemon implements `baseBranch` yet, so the successor resets its own branch
   to the pushed one); moving a task that waits on a person; attachments carried over (listed under
@@ -9652,7 +9691,7 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   `{handoff: true}` and nothing else: no state, so no path reads it as one, and `seanced
   session-event` drops it unsent, as it does a `done`. For the bound pane's own task, the daemon
   answers `untasked` for a pane with none, `unrecorded` for a task its ledger holds no launch of,
-  `prless` for one whose launch noted no PR URL, its own or, for a continuation, the one it inherited
+  `prless` for one whose launch noted no PR URL, its own or, for a continuation or a successor, the one it inherited
   (`TaskNote.continuedPr`, below; a launch with no PR would settle `done` or `failed`, never `awaiting-merge`), `stopping` once ingest stopped, and `unsupported` on a daemon wired without the
   act (one whose session backend cannot despawn). Otherwise it marks the pane, in memory only, and answers `ok`. Nothing is forwarded: the
   leader learns of the hand-off from the session's end, as it would from any exit. A PR URL still
@@ -9678,7 +9717,10 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   own `continuedPr`), from any launch but one the scheduler cancelled (noted `cancelled`, "Continuing a
   session"), under the same path-owner rule as the session id, never from a frame; the check
   reads only the pane's own task's note, so another launch sharing the path or session cannot supply
-  one, and it survives the continued launch's eviction. Watching the PR after
+  one, and it survives the continued launch's eviction. A successor (2026-11-12, "Passing to a successor")
+  inherits its predecessor's PR the same way: the same `continuedPr`, noted at launch by `handleSpawn` from
+  the spawn's `inheritedPr`, taken only from a spawn sealed from the scheduler with `client: "scheduler"` and
+  a task id, never from a session-event frame. Watching the PR after
   that, and alerting on a red required check or a conflict, is the leader's (docs/scheduler.md,
   "PR hand-off").
 - **`pass`** (built 2026-11-12; the fifth act past ingest, a threat-model change; Scheduler,
@@ -9872,7 +9914,7 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   window leaves at once. A burst after it folds into one trailing send, carrying the
   newest state and a PR URL seen earlier in the window. An `ended` with no PR of its own
   carries the one its pane's own launch noted in the ledger (`EndedTasks.notedPr`, the session's
-  own report, never a continuation's inherited `continuedPr`), for when the event that carried it
+  own report, never a continuation's or successor's inherited `continuedPr`), for when the event that carried it
   was lost and the mod's own `ended` carried none (its `lastPrUrl` is per hooks-worker process)
   (2026-11-12). The daemon seals the event
   to `"scheduler"` (`sendToScheduler`). With no leader the relay drops it. On the

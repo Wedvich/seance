@@ -1214,6 +1214,11 @@ of M4 has landed.
        successor's prompt. The daemon closes the session at the end of that turn, once the leader
        has confirmed the successor. It has its own capability, `successorSelf`, so a session never
        pushes against a 2a leader that would drop its event (D13).
+     - **A successor's own `hand_off_task` for the PR it inherited** — **Done** (2026-11-12): the
+       leader's dispatch carries the successor record's `prUrl` as `SpawnRequest.inheritedPr`
+       (never under `until: "reported"`), which the daemon notes as the launch's `continuedPr` only
+       when the spawn is sealed from the scheduler, so the tool is taken instead of answering
+       `prless`. The leader already settles an ended task whose record holds a PR `awaiting-merge`.
   3. **Automatic trigger** — **Done** (2026-11-12), as specced below. What the build decided:
      - **"Newest fresh reading"** is routing's own fold (`newestQuotaByAccount`, the fleet record
        included, so the trigger, the Machines screen and routing read one number), taken only while
@@ -1331,7 +1336,8 @@ of M4 has landed.
       `git reset --hard origin/<r>` (the worktree is fresh, nothing is lost) and
       `git branch --set-upstream-to=origin/<r>`; to rebuild state from `git log`,
       `git diff origin/HEAD...` and `gh pr view` for each PR; and to push with
-      `git push origin HEAD:<r>`, keep the existing PR and never open a second. It never says
+      `git push origin HEAD:<r>`, keep the existing PR and never open a second (and, without
+      `until: "reported"`, call `hand_off_task` last once what merges it is in place). It never says
       `git switch`: a local branch of that name may be checked out in an older worktree.
       _Rejected:_ a state file committed on the branch; switching the successor's worktree to `<r>`.
     - **O2. The daemon pushes, on a clean tree only.** The old task's daemon pushes the worktree's
@@ -1527,9 +1533,6 @@ of M4 has landed.
       confirmed" plus the leader's warn line) and a Queue-screen mark for a session pass the leader
       refused (the push alert, `pass-refused`, is built);
     - stacking, once it lands: a successor on a `baseBranch` instead of a reset to the remote branch;
-    - a successor's `hand_off_task`: its launch notes no PR (only the session's own `gh pr create`
-      output is noted), so the tool answers `prless`, and the preamble tells it not to call it. Noting
-      the inherited PR from the scheduler-sealed spawn is a carried claim, a threat-model change.
   - _Deferred:_ moving a `needs-input` task on any path (Q2); a forecast-only spill for a successor
     (Q3).
   - _Rejected for now:_ automatic continue of the old session: it cannot cross accounts.
