@@ -112,11 +112,10 @@ Each is the owner's, 2026-11-12, unless marked _derived_.
   `metrics-store.ts` does). Bun and `bun:sqlite`; no other database, no Node.
 - **A26.** It runs from the same git checkout layout as `seanced` and follows the fleet's update
   announce: an archivist that cannot parse a newer task record would archive nothing, silently.
-- **A27.** The first host is Thad itself, beside its `seanced`, not a container of its own (the
-  owner changed this on 2026-11-12, after the build tasks were queued: it supersedes any task
-  prompt that names a separate LXC). The archivist may share a box with a daemon; a box of its own
-  stays supported and is where A29 moves it. Séance ships the service's installer, never a
-  container.
+- **A27.** The archivist runs on any Linux box or container a daemon can run on (an unprivileged
+  LXC included), alone or beside a `seanced`. Where it is deployed is the operator's choice and
+  no part of this spec; this supersedes any task prompt that requires a container of its own.
+  Séance ships the service's installer, never a container.
 - **A27a.** On a shared box the archivist runs as a Unix user of its own, never the daemon's:
   sessions run as the daemon's user and must not be able to read or change `archive.sqlite`.
   `install --system` takes the target user, refuses root and refuses the user a `seanced` unit on
@@ -126,7 +125,7 @@ Each is the owner's, 2026-11-12, unless marked _derived_.
 - **A27b.** The archivist's PSK is its own sealed blob under its own unit, sealed by the operator
   as docs/psk.md describes for a daemon. Whether it may instead load the blob the box's `seanced`
   unit already uses is a build-time question (open details).
-- **A28.** Backups are the host's (Proxmox snapshots of the container it runs in). The service ships no
+- **A28.** Backups are the host's (snapshots of the box or container it runs in). The service ships no
   copies anywhere.
 - **A29.** Moving the seat is manual and documented: stop the service, copy `archive.sqlite`,
   seal the PSK on the new box (the blob is machine-bound), put the new id on `ARCHIVIST`.
@@ -216,8 +215,9 @@ component or style.
   queue already shows it (A16).
 - **A standby or failover seat** (A6), **a purge op on the wire** (A23), **service-run backups**
   (A28), **a provisioning script for a container** (A27).
-- **A container of its own from the start.** Thad already has the TPM, the checkout and Bun, and
-  A29 moves the seat later; the separation that matters on a shared box is the Unix user (A27a).
+- **Requiring a box of its own.** A box that already runs a daemon has the TPM, the checkout and
+  Bun, and A29 moves the seat later; the separation that matters on a shared box is the Unix user
+  (A27a).
 - **Names.** `ledger` (the launch ledger), `codex` (an existing tool), `familiar` (acts for its
   master). `archivist` says what it does, like `scheduler` and `relay`.
 
