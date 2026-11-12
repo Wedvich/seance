@@ -57,7 +57,7 @@ import {
 import { AttachmentUnavailable } from "./attachments.ts";
 import { canonical } from "./gitdir.ts";
 import { log } from "./log.ts";
-import { pushTaskBranch, type PushOptions } from "./push-branch.ts";
+import { PUSH_START_DEADLINE_MS, pushTaskBranch, type PushOptions } from "./push-branch.ts";
 import { LaunchesClosed, type SettleLaunch } from "./session-events.ts";
 
 export interface HandlerContext {
@@ -551,7 +551,10 @@ async function handlePushBranch(
   if (!scheduler) return { ok: false, code: "invalid_request", message: "only the scheduler pushes a task's branch" };
   const request = parsePushBranchRequest(payload);
   if (request === null) return { ok: false, code: "invalid_request", message: "malformed push-branch request" };
-  return pushForTask(ctx, audit, request.taskId, request.expect === undefined ? {} : { expect: request.expect });
+  return pushForTask(ctx, audit, request.taskId, {
+    ...(request.expect === undefined ? {} : { expect: request.expect }),
+    startDeadlineMs: PUSH_START_DEADLINE_MS,
+  });
 }
 
 /**

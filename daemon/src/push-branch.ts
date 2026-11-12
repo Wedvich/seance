@@ -14,11 +14,25 @@ export interface PushOptions {
   readonly expect?: string;
   /** The task has a PR, so a branch with no upstream and no `expect` is the session's to fix (`no_upstream`). */
   readonly hasPr?: boolean;
+  /**
+   * The push is refused `push_failed` (nothing pushed) when it would start later than this after the call began.
+   * Set only for the scheduler's `push-branch`, which the leader waits on for a fixed window; a session's own pass
+   * (`pass_to_successor`) has no such window, so it leaves this out.
+   */
+  readonly startDeadlineMs?: number;
+  /** A test seam for the clock `startDeadlineMs` is read against; `Date.now` when absent. */
+  readonly now?: () => number;
 }
 
 /** Past the 15 s default of the plumbing calls; under the leader's 90 s `push-branch` window with room to fetch. */
 const PUSH_TIMEOUT_MS = 45_000;
 const FETCH_TIMEOUT_MS = 15_000;
+/**
+ * A scheduler-sealed push is not started later than this after `pushTaskBranch` began: with `PUSH_TIMEOUT_MS` it keeps
+ * the push's landing inside the leader's 90 s `push-branch` window in the common case. Not a guarantee: the reply's
+ * transit and a slow `containedInOrigin` still add to it.
+ */
+export const PUSH_START_DEADLINE_MS = 30_000;
 const HEADS = "refs/heads/";
 const REMOTES = "refs/remotes/origin/";
 const ORIGIN_HEAD = "refs/remotes/origin/HEAD";
@@ -98,10 +112,13 @@ function isDefault(name: string, defaultBranch: string | null): boolean {
  * branch's own tip looks like. Never forced, never a hook or a signed push, never the default branch, never a
  * dirty tree. A tip origin already holds is pushed all the same (git answers `=`, `pushed: false`): a tracking
  * ref the last fetch left behind may not be what origin holds. A push refused as a non-fast-forward is
- * `push_rejected` unless origin's branch has moved on past the local tip (see `containedInOrigin`).
+ * `push_rejected` unless origin's branch has moved on past the local tip (see `containedInOrigin`). With
+ * `startDeadlineMs`, a push that would start later than that after this call began is `push_failed` with nothing pushed.
  */
 export async function pushTaskBranch(site: TaskSite, options: PushOptions = {}): Promise<PushBranchResponse> {
   const { path } = site;
+  const now = options.now ?? Date.now;
+  const started = now();
   const checkout = await inspectCheckout(path);
   if (checkout.kind !== "linked") return fail("not_launched");
   const here = await canonical(path);
@@ -149,6 +166,8 @@ export async function pushTaskBranch(site: TaskSite, options: PushOptions = {}):
 
   // A repo-local pushurl or pushInsteadOf would send the push somewhere other than the origin the PR head was read from.
   if ((await pushConfigRefusal(path)) !== null) return fail("push_failed");
+  // Past this the leader's window may close before the push lands; nothing has been pushed yet, so refusing is clean.
+  if (options.startDeadlineMs !== undefined && now() - started > options.startDeadlineMs) return fail("push_failed");
   const pushed = await networkGit(
     path,
     [
