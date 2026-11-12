@@ -2911,7 +2911,7 @@ describe("archive-tasks", () => {
       limit: 20,
       before: cursor,
       repo: "seance",
-      outcome: "failed",
+      outcome: "failed" as const,
       machine: "dev-1",
       account,
       since: 1,
@@ -2949,7 +2949,7 @@ describe("archive-tasks", () => {
   });
 
   test("a reply keeps the rows it can read and drops the rest; a bad cursor or total is unreadable", () => {
-    const task = { id: "t-1", spec: { repo: "seance", mode: "worktree" }, state: "done", createdAt: 1_000 };
+    const task = { id: "t-1", spec: { repo: "seance", mode: "worktree" }, state: "done", createdAt: 1_000 } as const;
     const row = { task, endedAt: 2_000, machine: "dev", account, alias: null };
     const reply = { ok: true, tasks: [row, { ...row, task: { ...task, state: "later" } }], total: 2, next: cursor };
     expect(parseArchiveTasksReply(reply)).toEqual({ ok: true, tasks: [row], total: 2, next: cursor });
