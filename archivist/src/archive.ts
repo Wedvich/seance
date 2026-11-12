@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { writeFile } from "node:fs/promises";
-import { forgetPrompt, TASK_PHASES, type Task } from "@seance/shared";
+import { forgetPrompt, TASK_PHASES, type ArchiveTableStatus, type Task } from "@seance/shared";
 
 /**
  * `archive.sqlite`: the fleet's long-term history (docs/archivist.md, A16, A18,
@@ -239,6 +239,22 @@ export class Archive {
 
   close(): void {
     this.#db.close();
+  }
+
+  /**
+   * Row counts and oldest times (ms) of the two tables the health card shows.
+   * Both are indexed on the column read (`tasks_created`, `events_at`), so the
+   * cost is a seek and a walk of the small tables, never a scan of a large one.
+   */
+  counts(): { readonly tasks: ArchiveTableStatus; readonly events: ArchiveTableStatus } {
+    const one = (sql: string): ArchiveTableStatus => {
+      const row = this.#db.query<{ rows: number; oldest: number | null }, []>(sql).get();
+      return { rows: row?.rows ?? 0, oldest: row?.oldest ?? null };
+    };
+    return {
+      tasks: one("SELECT count(*) AS rows, min(created_at) AS oldest FROM tasks"),
+      events: one("SELECT count(*) AS rows, min(at) AS oldest FROM events"),
+    };
   }
 
   /** The archived version of a task, or null when the archive holds none. */

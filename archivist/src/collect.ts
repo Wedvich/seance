@@ -14,6 +14,7 @@ import {
   type TaskRecord,
 } from "@seance/shared";
 import { taskRow, type Archive, type Fleet } from "./archive.ts";
+import type { IngestClock } from "./ingest-clock.ts";
 
 /**
  * The read slice of the shared app-role client the collector uses — reads and
@@ -56,6 +57,8 @@ export interface CollectorOpts {
   /** The seat's own id: never a machine (A9), whatever a registry says. */
   readonly selfId: string;
   readonly log: { readonly info: (line: string) => void; readonly warn: (line: string) => void };
+  /** Noted when data lands (a listing or a get answered, a fleet written), never on an attempt. */
+  readonly clock: IngestClock;
   readonly timings?: Partial<CollectTimings>;
 }
 
@@ -148,7 +151,7 @@ export function fleetOf(state: RelayState, selfId: string): Fleet {
  * leaves the store leaves its row as it was.
  */
 export function startCollector(opts: CollectorOpts): Collector {
-  const { source, archive, accountKey, selfId, log } = opts;
+  const { source, archive, accountKey, selfId, log, clock } = opts;
   const timings = { ...COLLECT_TIMINGS, ...opts.timings };
   let stopped = false;
   const accountKeys = new Map<string, Promise<string>>();
@@ -215,6 +218,7 @@ export function startCollector(opts: CollectorOpts): Collector {
         // oxlint-disable-next-line no-await-in-loop -- sequential: each may HMAC an account, and order is the listing's
         if (await archiveTask(record)) archived += 1;
       }
+      clock.note("store");
       if (archived > 0 || answer.unreadable.length > 0) {
         log.info(`tasks: archived ${archived}, skipped ${answer.unreadable.length} unreadable`);
       }
@@ -229,6 +233,7 @@ export function startCollector(opts: CollectorOpts): Collector {
       if (stopped) return true;
       const now = Date.now();
       for (const { key, record } of answer.accounts) archive.upsertAccount(key, record.alias, record.version, now);
+      clock.note("store");
       if (answer.unreadable.length > 0) log.info(`accounts: skipped ${answer.unreadable.length} unreadable`);
       return true;
     }),
@@ -243,6 +248,7 @@ export function startCollector(opts: CollectorOpts): Collector {
         // oxlint-disable-next-line no-await-in-loop -- one store-get at a time, by design
         const answer = await source.getTask(id);
         if (answer === null || !answer.ok) return refusal("task read", answer);
+        clock.note("store");
         const found = answer.task;
         // Null: gone from the store (pruned, or never there) — its row, if any, stays as it was.
         if (found === null) continue;
@@ -303,6 +309,7 @@ export function startCollector(opts: CollectorOpts): Collector {
       const answer = await source.getAccountRecord(key);
       if (answer === null || !answer.ok) return refusal("account read", answer);
       const { entry } = answer;
+      clock.note("store");
       if (entry === null || stopped) return true;
       if ("reason" in entry) {
         log.info(`accounts: skipped 1 unreadable (${entry.reason})`);
@@ -356,6 +363,7 @@ export function startCollector(opts: CollectorOpts): Collector {
       const events = archive.applyFleet(fleetOf(state, selfId), Date.now());
       lastMachines = state.machines;
       lastScheduler = state.scheduler;
+      clock.note("registry");
       if (events > 0) log.info(`fleet: ${events} event${events === 1 ? "" : "s"}`);
     } catch (err) {
       // A throw here would leave the shared client's listener loop and, on a registry push, kill the process.

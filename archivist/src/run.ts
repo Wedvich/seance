@@ -1,6 +1,15 @@
 import { chmod, mkdir } from "node:fs/promises";
 import { hostname } from "node:os";
-import { DAEMON_ROLES, importAccountKey, importPsk, quote, type Plain, type RelayStatus } from "@seance/shared";
+import {
+  DAEMON_ROLES,
+  importAccountKey,
+  importPsk,
+  parseSourceInfo,
+  quote,
+  type Plain,
+  type RelayStatus,
+  type SourceInfo,
+} from "@seance/shared";
 import { appRelayClient } from "../../daemon/src/app-relay.ts";
 import { bearerTokenWarnings, pskFingerprint, runnableProblems } from "../../daemon/src/config-checks.ts";
 import { CRED_NAME, credentialPskPath, readCredentialPsk } from "../../daemon/src/credential.ts";
@@ -11,6 +20,8 @@ import { isUpdateAvailable } from "../../daemon/src/update-notice.ts";
 import { Archive } from "./archive.ts";
 import { startCollector, type CollectTimings } from "./collect.ts";
 import { loadArchivistConfig } from "./config.ts";
+import { answerArchiveStatus, createStatusAnswer, startCountRefresher } from "./health.ts";
+import { createIngestClock } from "./ingest-clock.ts";
 import { sealArchivistInfo } from "./info.ts";
 import { MetricsArchive } from "./metrics-archive.ts";
 import { startMetricsCollector, type MetricsTimings } from "./metrics-collect.ts";
@@ -20,6 +31,7 @@ import {
   archivistStateDir,
   metricsPathIn,
   runtimePathIn,
+  servedSourcePathIn,
   statePathIn,
   updateRequestPathIn,
 } from "./paths.ts";
@@ -65,7 +77,8 @@ const STATE_DIR_MODE = 0o700;
  * holds the seat — a v2 register claiming `archivist`, which the relay accepts
  * only from the `ARCHIVIST` id — and an app-role socket for reading, as the
  * leader's own app leg reads. It advertises no repos and no exclaves, answers
- * no op, never enqueues and never writes the store; it writes only
+ * one op (`archive-status`, from the app only, counts and sizes and times),
+ * never enqueues and never writes the store; it writes only
  * `archive.sqlite` (`collect.ts`) and `metrics.sqlite` (`metrics-collect.ts`),
  * plus the update request a fleet announce asks for (`update-request.ts`).
  * What it may import is held by
@@ -112,6 +125,8 @@ export async function startArchivist(opts: ArchivistOpts = {}): Promise<Archivis
 
   async function startLegs(metrics: MetricsArchive): Promise<Archivist> {
     const startedAt = Date.now();
+    const clock = createIngestClock();
+    const source = await readServedSource(servedSourcePathIn(stateDir));
     let connectedSince: number | null = null;
     // Chained: the refusal loop flaps connected/disconnected back to back, and unordered renames could leave a stale value.
     let runtimeWrites: Promise<void> = Promise.resolve();
@@ -139,6 +154,15 @@ export async function startArchivist(opts: ArchivistOpts = {}): Promise<Archivis
       log.info(`app leg ${status}${rejection === null ? "" : ` (${rejection})`}`);
     });
 
+    const counts = startCountRefresher({ archive, metrics, log });
+    const answerStatus = createStatusAnswer({
+      counts: counts.snapshot,
+      clock,
+      onlineSince: () => connectedSince,
+      archivePath: archivePathIn(stateDir),
+      metricsPath: metricsPathIn(stateDir),
+    });
+
     const seat = new RelayClient({
       url: config.relayUrl,
       bearerToken: config.bearerToken,
@@ -146,16 +170,22 @@ export async function startArchivist(opts: ArchivistOpts = {}): Promise<Archivis
       key,
       role: DAEMON_ROLES.archivist,
       buildInfo: () =>
-        sealArchivistInfo(key, identity.deviceId, { archivist: true, name: config.name, platform: process.platform }),
-      // No op is the archivist's: an app that knows the flag never sends one, and an older one gets no answer.
-      // The one frame it takes is the fleet's update announce, a broadcast no one awaits (A26).
-      handle: (plain: Plain, from: string): Promise<null> => {
+        sealArchivistInfo(key, identity.deviceId, {
+          archivist: true,
+          name: config.name,
+          platform: process.platform,
+          ...(source === null ? {} : { source }),
+        }),
+      // One request op is the archivist's, `archive-status`, answered only to the app; a request for anything else
+      // gets no answer. The one other frame it takes is the fleet's update announce, a broadcast no one awaits (A26).
+      handle: (plain: Plain, from: string): Promise<Plain | null> => {
+        if (plain.op === "archive-status") return answerArchiveStatus(plain, from, answerStatus, log);
         if (plain.op === "update-available") {
           if (isUpdateAvailable(plain.payload)) requestUpdate(updates.announce(plain.payload.sha));
           else log.warn("dropped malformed update-available payload");
           return Promise.resolve(null);
         }
-        log.warn(`dropped ${quote(plain.op)} from ${from}: the archivist answers no op`);
+        log.warn(`dropped ${quote(plain.op)} from ${from}: the archivist answers only archive-status`);
         return Promise.resolve(null);
       },
       onConnect: () => {
@@ -176,6 +206,7 @@ export async function startArchivist(opts: ArchivistOpts = {}): Promise<Archivis
       accountKey,
       selfId: identity.deviceId,
       log,
+      clock,
       ...(opts.collect === undefined ? {} : { timings: opts.collect }),
     });
     const metricsCollector = startMetricsCollector({
@@ -184,6 +215,7 @@ export async function startArchivist(opts: ArchivistOpts = {}): Promise<Archivis
       accountKey,
       selfId: identity.deviceId,
       log,
+      clock,
       ...(opts.metrics === undefined ? {} : { timings: opts.metrics }),
     });
 
@@ -200,6 +232,7 @@ export async function startArchivist(opts: ArchivistOpts = {}): Promise<Archivis
       stop: (): void => {
         unsubscribe();
         collector.stop();
+        counts.stop();
         metricsCollector.stop();
         seat.stop();
         appLeg.stop();
@@ -208,5 +241,18 @@ export async function startArchivist(opts: ArchivistOpts = {}): Promise<Archivis
         metrics.close();
       },
     };
+  }
+}
+
+/**
+ * What the update unit recorded of the checkout this process runs: the run
+ * process never runs git, so it reads the file. Anything unreadable means no
+ * build line, never a refused start.
+ */
+async function readServedSource(path: string): Promise<SourceInfo | null> {
+  try {
+    return parseSourceInfo(await Bun.file(path).json());
+  } catch {
+    return null;
   }
 }

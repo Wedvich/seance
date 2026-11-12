@@ -9,6 +9,7 @@ import {
   importPsk,
   MACHINES_ID,
   open,
+  parseArchiveStatusReply,
   parseMachineInfo,
   REGISTER_REFUSALS,
   seal,
@@ -94,7 +95,7 @@ describe("seance-archivist run", () => {
     }
   });
 
-  test("answers no op, and sends no status and no store frame", async () => {
+  test("answers no other op than archive-status, and sends no status and no store frame", async () => {
     const relay = startTestRelay(TOKEN);
     const paths = await setup(relay.url);
     // Captured by hand rather than through `captureLog`: the drops are polled for while it runs.
@@ -103,7 +104,7 @@ describe("seance-archivist run", () => {
     console.log = (...args: unknown[]): void => {
       lines.push(args.map(String).join(" "));
     };
-    const drops = (): number => lines.filter((line) => line.includes("the archivist answers no op")).length;
+    const drops = (): number => lines.filter((line) => line.includes("the archivist answers only archive-status")).length;
     let archivist: Awaited<ReturnType<typeof startArchivist>> | undefined;
     try {
       archivist = await startArchivist({ ...paths, credentialPath });
@@ -130,6 +131,79 @@ describe("seance-archivist run", () => {
       console.log = realLog;
       archivist?.stop();
       relay.stop();
+    }
+  });
+
+  test("answers archive-status from the app, and drops one sealed from anyone else", async () => {
+    const relay = startTestRelay(TOKEN);
+    const paths = await setup(relay.url);
+    const lines: string[] = [];
+    const realLog = console.log;
+    console.log = (...args: unknown[]): void => {
+      lines.push(args.map(String).join(" "));
+    };
+    let archivist: Awaited<ReturnType<typeof startArchivist>> | undefined;
+    try {
+      archivist = await startArchivist({ ...paths, credentialPath });
+      const { deviceId } = archivist;
+      await relay.registers.next();
+      await pollUntil(
+        async () => (await readRuntime(join(paths.stateDir, "runtime.json")))?.connected === true,
+        "runtime.json to say connected",
+      );
+      const key = await importPsk(PSK);
+      const sealRequest = (from: string, id: string): ReturnType<typeof seal> =>
+        seal(key, { to: deviceId, from }, { id, ts: Date.now(), op: "archive-status", payload: {} });
+
+      // A sender that is not the app: dropped with a warn line, never answered.
+      relay.sendToDaemon(await sealRequest("some-daemon", "req-other"));
+      await pollUntil(() => lines.some((line) => line.includes("not sealed from the app")), "the drop line");
+      expect(relay.messages.size).toBe(0);
+
+      relay.sendToDaemon(await sealRequest(APP_ID, "req-app"));
+      await pollUntil(() => relay.messages.size === 1, "the reply");
+      const reply = await open(key, await relay.messages.next());
+      expect(reply.op).toBe("archive-status");
+      expect(reply.re).toBe("req-app");
+      const parsed = parseArchiveStatusReply(reply.payload);
+      if (parsed === null || !parsed.ok) throw new Error("not an ok reply");
+      expect(parsed.onlineSince).not.toBeNull();
+      expect(parsed.database.archiveBytes).toBeGreaterThan(0);
+      expect(parsed.database.metricsBytes).toBeGreaterThan(0);
+      expect(Object.keys(parsed.lastIngest).toSorted()).toEqual(["pull", "registry", "status", "store"]);
+    } finally {
+      console.log = realLog;
+      archivist?.stop();
+      relay.stop();
+    }
+  });
+
+  test("puts the build line the update unit recorded in the blob, and none when the file is unusable", async () => {
+    const source = { sha: "d".repeat(40), commitTs: 1_700_000_000_000, branch: "main" };
+    for (const [text, expected] of [
+      [JSON.stringify(source), { source }],
+      ["{ not json", {}],
+      [JSON.stringify({ sha: "short" }), {}],
+    ] as const) {
+      const relay = startTestRelay(TOKEN);
+      // oxlint-disable-next-line no-await-in-loop -- one archivist at a time
+      const paths = await setup(relay.url);
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await mkdir(paths.stateDir, { recursive: true });
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await writeFile(join(paths.stateDir, "served-source.json"), text);
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      const archivist = await startArchivist({ ...paths, credentialPath });
+      try {
+        // oxlint-disable-next-line no-await-in-loop -- as above
+        const frame = await relay.registers.next();
+        // oxlint-disable-next-line no-await-in-loop -- as above
+        const plain = await open(await importPsk(PSK), frame.info);
+        expect(plain.payload).toEqual({ archivist: true, name: "archive", platform: process.platform, ...expected });
+      } finally {
+        archivist.stop();
+        relay.stop();
+      }
     }
   });
 

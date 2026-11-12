@@ -12,6 +12,7 @@ import {
   type RelayState,
 } from "@seance/shared";
 import { M5_KEEP_S, quotaSamples, RAW_KEEP_S, type Sample } from "../../daemon/src/metrics-tiers.ts";
+import type { IngestClock } from "./ingest-clock.ts";
 import { OBSERVER_LABEL, type MetricsArchive } from "./metrics-archive.ts";
 
 /**
@@ -78,6 +79,8 @@ export interface MetricsCollectorOpts {
   /** The seat's own id: never a machine (A9). */
   readonly selfId: string;
   readonly log: { readonly info: (line: string) => void; readonly warn: (line: string) => void };
+  /** Noted when a live batch or a pulled page is written. */
+  readonly clock: IngestClock;
   readonly timings?: Partial<MetricsTimings>;
   /** Milliseconds; tests move it. */
   readonly now?: () => number;
@@ -134,7 +137,7 @@ export async function statusSamples(
  * an envelope is asked again one metric at a time, then in halves.
  */
 export function startMetricsCollector(opts: MetricsCollectorOpts): MetricsCollector {
-  const { source, archive, accountKey, selfId, log } = opts;
+  const { source, archive, accountKey, selfId, log, clock } = opts;
   const timings = { ...METRICS_TIMINGS, ...opts.timings };
   const now = opts.now ?? Date.now;
   const historyStartS = opts.historyStartS ?? METRICS_HISTORY_START_S;
@@ -176,7 +179,10 @@ export function startMetricsCollector(opts: MetricsCollectorOpts): MetricsCollec
         ),
       );
       // Checked after the await: a stop in between closes the database.
-      if (!stopped) archive.ingest(batches.flat(), nowS());
+      if (stopped) return;
+      const samples = batches.flat();
+      archive.ingest(samples, nowS());
+      if (samples.length > 0) clock.note("status");
     } catch (err) {
       if (!stopped) log.warn(`metrics: live write: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -269,6 +275,7 @@ export function startMetricsCollector(opts: MetricsCollectorOpts): MetricsCollec
       // One write a page, marks included: a page that half landed would leave its series' marks apart, and
       // the `lateS` cap would then skip what the lagging ones missed for good. Also one re-roll, not one a piece.
       archive.writePulled(machine.deviceId, step, page, nowS());
+      clock.note("pull");
       start = end + 1;
     }
     return true;

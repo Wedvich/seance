@@ -10,7 +10,7 @@ import { daemonSink } from "../../daemon/src/audit.ts";
 import { checkoutRoot, readSource, trimRoot } from "../../daemon/src/selfsource.ts";
 import { signalRestartUnit } from "../../daemon/src/systemd.ts";
 import { defaultUpdateEffects, updateNow, type ManualUpdate } from "../../daemon/src/update.ts";
-import { archivistStateDir, servedShaPathIn, updateLockPathIn, updateRequestPathIn } from "./paths.ts";
+import { archivistStateDir, servedShaPathIn, servedSourcePathIn, updateLockPathIn, updateRequestPathIn } from "./paths.ts";
 import { ARCHIVIST_UNIT, expectedArchivistUnits } from "./units.ts";
 import { rootRefusal } from "./unprivileged.ts";
 import { withUpdateLock } from "./update-lock.ts";
@@ -88,6 +88,10 @@ export async function updateArchivist(opts: { readonly requested: boolean }): Pr
     const sha = (await readSource(root))?.sha;
     if (sha !== undefined) await Bun.write(servedPath, `${sha}\n`, { mode: 0o600 });
   };
+  const recordSource = async (): Promise<void> => {
+    const source = await readSource(root);
+    if (source !== null) await Bun.write(servedSourcePathIn(stateDir), JSON.stringify(source), { mode: 0o600 });
+  };
   const readServed = async (): Promise<string | null> => {
     const text = (await readFile(servedPath, "utf8").catch(() => "")).trim();
     return SHA.test(text) ? text : null;
@@ -109,6 +113,8 @@ export async function updateArchivist(opts: { readonly requested: boolean }): Pr
         effects: {
           install: defaultUpdateEffects().install,
           restart: async () => {
+            // Before the signal: the restarted process reads it at start, so it must be there first.
+            await recordSource();
             await signalRestartUnit(ARCHIVIST_UNIT, RESTART_WORDING);
             await recordServed();
           },

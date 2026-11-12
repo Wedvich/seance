@@ -42,6 +42,11 @@ export function servedShaPathIn(stateDirectory: string): string {
   return join(stateDirectory, "served-sha");
 }
 
+/** The checkout's git identity (`SourceInfo` JSON) the update unit recorded beside it, for the info blob's build line. */
+export function servedSourcePathIn(stateDirectory: string): string {
+  return join(stateDirectory, "served-source.json");
+}
+
 /** Held while an `update` runs, so a hand one and the update unit's never overlap. */
 export function updateLockPathIn(stateDirectory: string): string {
   return join(stateDirectory, "update.lock");

@@ -2809,7 +2809,7 @@ describe("archive-status", () => {
     events: null,
     database: { archiveBytes: 100, metricsBytes: 200 },
     countedAt: 9,
-  };
+  } as const;
 
   test("a good reply parses, including a table still unread", () => {
     expect(parseArchiveStatusReply(good)).toEqual(good);
@@ -2842,7 +2842,7 @@ describe("archive-status", () => {
 
   test("the archivist's blob keeps the card when its source is bad, and refuses archivist: false", () => {
     const source = { sha: "a".repeat(40), commitTs: 1_700_000_000_000, branch: null };
-    const base = { archivist: true, name: "n", platform: "linux" };
+    const base = { archivist: true, name: "n", platform: "linux" } as const;
     expect(parseArchivistInfo(base)).toEqual(base);
     expect(parseArchivistInfo({ ...base, source })).toEqual({ ...base, source });
     expect(parseArchivistInfo({ ...base, source: { sha: "x" } })).toEqual(base);
