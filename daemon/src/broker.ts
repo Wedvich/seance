@@ -160,8 +160,8 @@ function cleanDespawn(p: DespawnRequest): DespawnRequest {
  * `mcp` or `cli` — the peer's unverifiable claim, since the daemon cannot tell
  * the two apart, kept in the record and audited as `claimed_client`. It may
  * continue a task (`mode: "continue"` with `continues`, paired by the parser). Never
- * `pwa`, `raycast` or `scheduler`. `cancel` and `run-now` take a task id alone (a leader
- * without `runNow` refuses that op as unknown, so it needs no gate here), `queue` and `accounts` no payload, and
+ * `pwa`, `raycast` or `scheduler`. `cancel`, `run-now` and `pass` take a task id alone (a leader
+ * without `runNow` or `successor` refuses that op as unknown, so it needs no gate here), `queue` and `accounts` no payload, and
  * whatever else the frame carries is never forwarded.
  */
 function parseSchedulerRequest(raw: Record<string, unknown>, id: string): Parsed {
@@ -172,7 +172,7 @@ function parseSchedulerRequest(raw: Record<string, unknown>, id: string): Parsed
   const head = { v: BROKER_VERSION, kind: "broker", id, action: "scheduler" } as const;
   if (schedulerOp === "queue" || schedulerOp === "accounts") return { request: { ...head, schedulerOp } };
   const { taskId } = raw;
-  if (schedulerOp === "cancel" || schedulerOp === "run-now") {
+  if (schedulerOp === "cancel" || schedulerOp === "run-now" || schedulerOp === "pass") {
     const ref = parseTaskRef({ taskId });
     if (ref === null) return { code: "invalid_request", message: "taskId is not a task id" };
     return { request: { ...head, schedulerOp, taskId: ref.taskId } };
@@ -331,8 +331,10 @@ export function createBroker(opts: BrokerOpts): Broker {
             ? await client.cancel(request.taskId)
             : request.schedulerOp === "run-now"
               ? await client.runNow(request.taskId)
-              : // Only a pin's resolution asks (labels never come through here), so the label hold does not apply.
-                await cacheOf(client).read();
+              : request.schedulerOp === "pass"
+                ? await client.pass(request.taskId)
+                : // Only a pin's resolution asks (labels never come through here), so the label hold does not apply.
+                  await cacheOf(client).read();
       await audit.ok(id);
       return brokerOk(id, data);
     } catch (err) {

@@ -12,6 +12,7 @@ import {
   type StoreRefusal,
   type Task,
   type TaskCreated,
+  type PassReply,
   type TaskReply,
 } from "@seance/shared";
 import type { AppRelay } from "../src/app-relay.ts";
@@ -138,6 +139,7 @@ export function fakeRelay(
     queue: () => schedule<QueueReply | null>("queue", {}),
     cancel: (taskId) => schedule<TaskReply | null>("cancel", { taskId }),
     runNow: (taskId) => schedule<TaskReply | null>("run-now", { taskId }),
+    pass: (taskId) => schedule<PassReply | null>("pass", { taskId }),
     accounts: [],
     accountLists: 0,
     listAccounts: async (): Promise<AccountListing | StoreRefusal | null> => {

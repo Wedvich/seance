@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   cmdInstall,
   parseContinueArgs,
+  parsePassArgs,
   parseStartArgs,
   parseDespawnArgs,
   parseInstallArgs,
@@ -321,5 +322,14 @@ describe("parseModArgs", () => {
     expect(() => parseModArgs([])).toThrow("usage:");
     expect(() => parseModArgs(["reinstall"])).toThrow(/unknown mod subcommand "reinstall"/u);
     expect(() => parseModArgs(["install", "--force"])).toThrow(/takes no arguments/u);
+  });
+});
+
+describe("parsePassArgs", () => {
+  test("takes exactly one task id", () => {
+    expect(parsePassArgs(["t-1"])).toEqual({ taskId: "t-1" });
+    for (const argv of [[], ["t-1", "t-2"], ["--force"]]) {
+      expect(() => parsePassArgs(argv)).toThrow("usage: seanced pass");
+    }
   });
 });

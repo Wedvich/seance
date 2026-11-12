@@ -6,6 +6,8 @@ import {
   failureReasonText,
   httpsUrl,
   isTaskId,
+  isTransportError,
+  passOffer,
   parseTaskSpec,
   queuedTask,
   RequestFailure,
@@ -692,6 +694,80 @@ export async function startAuto(lease: SchedulerLease, taskId: string, surface: 
   const answer = await sendRunNow(lease, taskId, surface);
   if (answer.kind === "answered") return answer.result;
   return failed(`${label} refused (not_waiting): ${schedulerErrorText("not_waiting")}`);
+}
+
+/** What a pass's reply leaves to check when it was lost: the branch may be pushed and the successor created anyway. */
+const PASS_CHECK: Readonly<Record<EnqueueSurface, string>> = {
+  mcp: "check get_queue",
+  cli: "check the app's queue",
+};
+
+/**
+ * `pass_task` / `seanced pass`: the Queue screen's "Pass to successor" — one `pass` for a running
+ * task, which pushes its branch, ends the session and queues the task that carries on (DESIGN.md
+ * "Passing to a successor"). The queue is read once first and the shared `passOffer` rule applied,
+ * so a task the leader would refuse is refused here with the same words. Sent once, never retried:
+ * a lost answer may follow a push and a created successor. Never logs; the leader's own `op=pass`
+ * audit line, and the broker's where it carried it, are the record.
+ */
+export async function passAuto(lease: SchedulerLease, taskId: string, surface: EnqueueSurface): Promise<AutoEnqueued> {
+  const label = surface === "mcp" ? "pass_task" : "pass";
+  const shown = JSON.stringify(taskId.slice(0, 64));
+  if (!isTaskId(taskId)) return failed(`${label} refused: ${shown} is not a task id`);
+  if (!leaderAdvertises(lease, CAPABILITIES.successor)) {
+    return failed(
+      `${label} refused: ${
+        lease.scheduler.availability().kind === "ready"
+          ? "the scheduler's leader cannot pass a task to a successor yet — its daemon needs `seanced update`"
+          : "no verified scheduler is leading, so nothing can be passed on now — try again once one leads"
+      }`,
+    );
+  }
+  let queue: Awaited<ReturnType<SchedulerLeg["queue"]>>;
+  try {
+    queue = await lease.scheduler.queue();
+  } catch (err) {
+    const why =
+      err instanceof RequestFailure ? failureReasonText(err) : err instanceof Error ? err.message : String(err);
+    return failed(`${label} failed: could not read the queue: ${why}`);
+  }
+  if (queue === null) {
+    return failed(`${label} failed: the scheduler's answer was unreadable (a seanced version mismatch?)`);
+  }
+  if ("ok" in queue) return failed(`${label} failed (${queue.code}): ${schedulerErrorText(queue.code)}`);
+  const task = queue.tasks.find((t) => t.id === taskId);
+  if (task === undefined) {
+    return failed(
+      `${label} refused: task ${taskId} is not in the leader's list (pruned, or past the ${QUEUE_MAX_TASKS} most relevant)`,
+    );
+  }
+  const offer = passOffer(task, lease.machines, true);
+  if (!offer.ok) return failed(`${label} refused: ${offer.reason}`);
+  const mayHave = `the pass may have landed anyway — ${PASS_CHECK[surface]}`;
+  let reply: Awaited<ReturnType<SchedulerLeg["pass"]>>;
+  try {
+    reply = await lease.scheduler.pass(taskId);
+  } catch (err) {
+    if (!(err instanceof RequestFailure)) {
+      const detail = err instanceof Error ? err.message : String(err);
+      return failed(`${label}: ${detail} — ${mayHave}`);
+    }
+    if (err.reason === "timeout" || err.reason === "dropped") {
+      return failed(`${label}: no answer from the scheduler (${err.message}) — ${mayHave}`);
+    }
+    return failed(`${label} failed: ${failureReasonText(err)}`);
+  }
+  if (reply === null) {
+    return failed(`${label}: the scheduler's answer was unreadable (a seanced version mismatch?) — ${mayHave}`);
+  }
+  if ("ok" in reply) {
+    const said = `${label} refused (${reply.code}): ${schedulerErrorText(reply.code)}`;
+    // A transport error judges the reply, not the request: the work may have been done.
+    return failed(isTransportError(reply.code) ? `${said} — ${mayHave}` : said);
+  }
+  return done(
+    `task ${taskId} passed to successor ${reply.successorId}; its branch is pushed and this session is ending`,
+  );
 }
 
 /** The reads between a `--start` spawn's create and its `run-now`, as the PWA's Start now waits for `ready`. */

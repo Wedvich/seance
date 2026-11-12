@@ -12,6 +12,7 @@ import {
   withAutonomy,
   type AutonomyLevel,
   continueOffer,
+  passOffer,
   type OfferContext,
   DEP_AFTER,
   knownAccounts,
@@ -66,6 +67,7 @@ import {
   resolveOrigin,
   resolvePlacement,
   specError,
+  passAuto,
   startAuto,
   startGateError,
   startQueuedAuto,
@@ -423,7 +425,7 @@ const AUTO_LIMITS =
 
 /** What `schedulerFailureText` and `olderDaemonText` name a scheduler call by. */
 type SchedulerCall = "get_queue" | "cancel_task";
-type SchedulerTool = "spawn_session" | "queue_batch" | "continue_task" | "start_task" | SchedulerCall;
+type SchedulerTool = "spawn_session" | "queue_batch" | "continue_task" | "start_task" | "pass_task" | SchedulerCall;
 
 /**
  * A keyless box's daemon brokers the scheduler (DESIGN.md "Fleet broker"), so a
@@ -728,6 +730,7 @@ function describeTask(
   offer: OfferContext,
   idle: ReadonlySet<string>,
   traits: ReadonlyMap<string, readonly string[]>,
+  leaderSuccessor: boolean,
 ): Record<string, unknown> {
   const placement = placementOf(task, machines);
   const pin = describePin(task, machines, names);
@@ -771,6 +774,10 @@ function describeTask(
     ...(spec.continues === undefined ? {} : { continues: spec.continues.task }),
     // The same offer the app's Continue button follows; `continue_task` still re-checks the leader.
     ...(continueOffer(task, machines, tasks, offer).ok ? { continuable: true } : {}),
+    ...(spec.succeeds === undefined ? {} : { succeeds: spec.succeeds.task }),
+    ...(task.successor === undefined ? {} : { passedTo: task.successor }),
+    // The same offer the app's menu follows; `pass_task` still re-checks the leader.
+    ...(passOffer(task, machines, leaderSuccessor).ok ? { passable: true } : {}),
     // Never `prBlocked` on the task: an `until: "reported"` task does not wait on its merge.
     ...(blocked === null ? {} : { prBlocked: blocked }),
   };
@@ -858,7 +865,7 @@ export function buildMcpServer(
     {
       title: "List machines",
       description:
-        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any, plus `account`, the name every Séance client shows for it (its alias where one is set, else the email, else a short id; tagged where two accounts would read alike; no alias on a box whose daemon brokers for it, with no readable PSK) — a display name only, never a value for pin.account — and `alias` where one is set: a spawn's pin.account takes the `accountId`, the `email` or the `alias`, not `account`; a machine with the field absent or empty reports none, so the scheduler cannot place there until its daemon updates. Each signed-in exclave's `auth` is `expired` (its login needs /login; the scheduler does not place there), `expiring` (within 3 days, with `loginExpiresAt`; still placed), `ok`, or `unknown` (not read, or the machine is asleep or its daemon older; still placed). Offline machines are listed with their last-seen time: `lastSeen` is when the machine was last heard from (its last register or status beat, whichever is later). `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that every spawn goes through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue, cancel_task and start_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
+        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any, plus `account`, the name every Séance client shows for it (its alias where one is set, else the email, else a short id; tagged where two accounts would read alike; no alias on a box whose daemon brokers for it, with no readable PSK) — a display name only, never a value for pin.account — and `alias` where one is set: a spawn's pin.account takes the `accountId`, the `email` or the `alias`, not `account`; a machine with the field absent or empty reports none, so the scheduler cannot place there until its daemon updates. Each signed-in exclave's `auth` is `expired` (its login needs /login; the scheduler does not place there), `expiring` (within 3 days, with `loginExpiresAt`; still placed), `ok`, or `unknown` (not read, or the machine is asleep or its daemon older; still placed). Offline machines are listed with their last-seen time: `lastSeen` is when the machine was last heard from (its last register or status beat, whichever is later). `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that every spawn goes through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue, cancel_task, start_task and pass_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
       inputSchema: NO_INPUT,
       annotations: { readOnlyHint: true },
     },
@@ -953,8 +960,9 @@ export function buildMcpServer(
         };
         const idle = new Set((reply.idle ?? []).map((ref) => ref.taskId));
         const traits = fleetTraits(lease.machines);
+        const leaderSuccessor = advertises(lease.machines, lease.scheduler.availability(), CAPABILITIES.successor);
         const tasks = reply.tasks.map((task) =>
-          describeTask(task, lease.machines, names, reply.tasks, offer, idle, traits),
+          describeTask(task, lease.machines, names, reply.tasks, offer, idle, traits, leaderSuccessor),
         );
         const holds = (reply.holds ?? []).map((hold) => describeHold(hold, names));
         return textResult(JSON.stringify({ at: new Date(reply.at).toISOString(), holds, tasks }, null, 2));
@@ -1012,6 +1020,23 @@ export function buildMcpServer(
       withFleet(async (lease) => {
         if (lease.scheduler === null) return errorResult(olderDaemonText("start_task"));
         const outcome = await startAuto({ machines: lease.machines, scheduler: lease.scheduler }, taskId, "mcp");
+        return outcome.ok ? textResult(outcome.text) : errorResult(outcome.text);
+      }),
+  );
+
+  server.registerTool(
+    "pass_task",
+    {
+      title: "Pass a running scheduler task to a successor",
+      description:
+        "Pass a running task to a successor — the app's Pass to successor. The scheduler has the task's machine push its branch to origin, ends its session and queues a new task that carries the work on in a fresh session, with a prompt that names the branch and the pull request; the old task settles as superseded once the successor exists, and anything waiting on it waits on the successor instead. For a task that is stuck, or whose account is out of quota, and whose work is committed: a task with uncommitted changes, one in place (mode here) or one on the repo's default branch is refused, and nothing is pushed. Only a running task: one waiting for the user (needs-input) or for a merge is refused. Needs a scheduler leader and a task machine whose daemon supports it (get_queue shows both). Sent once and never retried: if the answer is lost, check get_queue before passing again. Answers with the successor's task id.",
+      inputSchema: z.strictObject({ taskId: z.string().describe("The running task's id from get_queue") }),
+      annotations: { readOnlyHint: false },
+    },
+    async ({ taskId }) =>
+      withFleet(async (lease) => {
+        if (lease.scheduler === null) return errorResult(olderDaemonText("pass_task"));
+        const outcome = await passAuto({ machines: lease.machines, scheduler: lease.scheduler }, taskId, "mcp");
         return outcome.ok ? textResult(outcome.text) : errorResult(outcome.text);
       }),
   );
