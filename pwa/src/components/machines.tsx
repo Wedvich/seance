@@ -197,6 +197,9 @@ function MachineCardView(props: {
               {row.auth !== null && (
                 <span className={`exclave-auth exclave-auth-${row.auth.level}`}>{row.auth.text}</span>
               )}
+              {row.probes !== null && (
+                <span className={`exclave-auth exclave-auth-${row.probes.level}`}>{row.probes.text}</span>
+              )}
             </li>
           ))}
         </ul>

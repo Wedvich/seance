@@ -354,12 +354,12 @@ function batchLine(task: Task): string | null {
   return batch === undefined ? null : `Batch #${batch.index}`;
 }
 
-function placementLine(task: Task, state: AppState): string | null {
+function placementLine(task: Task, state: AppState, now: number): string | null {
   const { machines } = state.relay;
   const parts = [
     pinLine(task, machines, state.accounts.aliases),
     avoidLine(task, machines),
-    requiresLine(task, machines),
+    requiresLine(task, machines, now),
   ].filter((part): part is string => part !== null);
   return parts.length === 0 ? null : parts.join(". ");
 }
@@ -404,7 +404,7 @@ function rowOf(
     deps: depsLine(task, titles),
     continues: continuesLine(task, titles),
     continuing: continuingOf(task, tasks),
-    placement: placementLine(task, state),
+    placement: placementLine(task, state, now),
     batch: batchLine(task),
     busy: state.taskAction?.taskId === task.id,
     pr: prOf(task, now, skew),
