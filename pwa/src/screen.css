@@ -2702,10 +2702,15 @@
   text-decoration: none;
 }
 
-/* Inline in the mono meta line, after the age; back to the body face for `.fleet-badge`'s reason. */
+/* Inline in the mono meta line, after the age; back to the body face for `.fleet-badge`'s reason.
+   `.fleet-badge` is styled as a flex item, so here it needs its own box: an inline span's padding
+   and border overlap the line above when the pill wraps onto a line by itself. */
 .queue-autonomy {
+  display: inline-block;
   margin-left: 6px;
   font-family: var(--sans);
+  white-space: nowrap;
+  vertical-align: baseline;
 }
 
 /* The card's ⋯: every action it allows (menu.tsx). Pulled into the card's padding so the dots sit

@@ -31,6 +31,7 @@ import {
   type RelayClient,
 } from "@seance/shared";
 import {
+  AUTONOMY_LABELS,
   DEFAULT_FORM,
   DEFAULT_HISTORY_RANGE,
   HELD_MAX,
@@ -843,7 +844,7 @@ export class Store {
     const level = withAutonomy<Pick<TaskSpec, "autonomy" | "plan">>(autonomy === DEFAULT_AUTONOMY ? {} : { autonomy });
     // The form has no `plan` of its own, so the level can't contradict it; refused rather than dropped if it ever does.
     if (level === null) {
-      refusal(`The autonomy level ${autonomy} contradicts the task's plan setting.`);
+      refusal(`${AUTONOMY_LABELS[autonomy]} can't be sent with this task's plan mode.`);
       return;
     }
     const request = taskRequest(form, repo.origin, true);

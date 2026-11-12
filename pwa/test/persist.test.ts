@@ -146,6 +146,19 @@ describe("held tasks", () => {
     ]);
   });
 
+  // An `auto` task holds no `plan`, so dropping `autonomy` on read would silently send it at checkpoint.
+  test("keep a task's autonomy level, and steer's plan mode beside it", () => {
+    const leveled = (id: string, level: Pick<HeldTask["task"]["spec"], "autonomy" | "plan">): HeldTask => {
+      const entry = held(id);
+      return { ...entry, task: { ...entry.task, spec: { ...entry.task.spec, ...level } } };
+    };
+    writeHeld([leveled(TASK, { autonomy: "auto" }), leveled(OTHER, { autonomy: "steer", plan: true })]);
+    expect(readHeld().map((entry) => entry.task.spec)).toEqual([
+      expect.objectContaining({ autonomy: "auto" }),
+      expect.objectContaining({ autonomy: "steer", plan: true }),
+    ]);
+  });
+
   test("clear the key once none are left", () => {
     writeHeld([held(TASK)]);
     writeHeld([]);
