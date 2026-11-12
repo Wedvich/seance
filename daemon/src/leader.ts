@@ -196,10 +196,11 @@ export interface Leader {
   /**
    * A `session-pass` from this machine, in process, as `onSession` is; other machines' arrive through the
    * term's leg. `from` is the sealing daemon: only the task's own machine's is acted on (`Scheduler.pass`).
-   * Dropped outside a running term, as `onSession` is — the session's tool then finds no successor
-   * recorded and says so; nothing closes its session, since only a commit sends `pass-close`.
+   * Dropped outside a running term, as `onSession` is, but then logged and answered false: reconcile does not
+   * recover a pass, so the sender is told it was not taken and its session calls again. Nothing closes the
+   * session, since only a commit sends `pass-close`.
    */
-  readonly onSessionPass: (pass: SessionPass, from: string) => void;
+  readonly onSessionPass: (pass: SessionPass, from: string) => boolean;
   /**
    * The relay's nudge after an app-leg write to the store (`store-changed`;
    * `RelayClient`'s `onStoreChanged`): refreshes that one task, then ticks.
@@ -221,7 +222,7 @@ interface TermRun {
   readonly deliver: (env: Envelope) => void;
   readonly onSession: (taskId: string, state: SessionState, from?: SessionSource, prUrl?: string) => Promise<void>;
   readonly onBranchState: (state: BranchState, from: string) => void;
-  readonly onSessionPass: (pass: SessionPass, from: string) => void;
+  readonly onSessionPass: (pass: SessionPass, from: string) => boolean;
   readonly onStoreChanged: (key: string, version: number) => void;
   readonly end: () => void;
 }
@@ -358,8 +359,11 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     if (live && running) scheduler.onBranchState(state, from).catch(fail);
   };
   // The session's own pass: the record is prompt text and is never logged, nor is the branch it names.
-  const onSessionPass = (pass: SessionPass, from: string): void => {
-    if (!live || !running) return;
+  const onSessionPass = (pass: SessionPass, from: string): boolean => {
+    if (!live || !running) {
+      log.warn(`scheduler: session-pass task=${quote(pass.taskId)} from=${quote(from)} dropped — no running term`);
+      return false;
+    }
     scheduler
       .pass(pass.taskId, "session", {
         from,
@@ -367,14 +371,16 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
         ...(pass.record === undefined ? {} : { record: pass.record }),
       })
       .then((result) => {
-        log.info(
-          `scheduler: session-pass task=${quote(pass.taskId)} from=${quote(from)} outcome=${result.ok ? "ok" : result.code}`,
-        );
+        // A refusal is the one trace of why a session's pass stalled: the session is told only "not confirmed".
+        const line = `scheduler: session-pass task=${quote(pass.taskId)} from=${quote(from)} outcome=${result.ok ? "ok" : result.code}`;
+        if (result.ok) log.info(line);
+        else log.warn(line);
         // The successor waits for the old task's `superseded`, which a session's close writes later: nothing to place yet,
         // but its `blocked` record is new to the PWA's queue.
         if (result.ok) tick();
       })
       .catch(fail);
+    return true;
   };
   // Task ids a `store-changed` named while the term was still taking over, or
   // whose refresh failed: takeover's `load` replaces the held view, so a refresh
@@ -828,7 +834,7 @@ export function createLeader(options: LeaderOpts): Leader {
     },
     onSession: async (taskId, state, from, prUrl) => current?.onSession(taskId, state, from, prUrl),
     onBranchState: (state, from) => current?.onBranchState(state, from),
-    onSessionPass: (pass, from) => current?.onSessionPass(pass, from),
+    onSessionPass: (pass, from) => current?.onSessionPass(pass, from) ?? false,
     onStoreChanged: (key, version) => current?.onStoreChanged(key, version),
     term: () => current?.term ?? null,
     settled: async () => current?.settled,

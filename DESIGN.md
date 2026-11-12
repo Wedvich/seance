@@ -9598,7 +9598,9 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   `stopping_pushed` (the daemon began to stop while the push ran: the branch is on origin, nothing was
   sent, and the text says so; call again once it is back), `cancelled` (the caller was gone, below),
   `unsent` (pushed, but this daemon could hand the
-  pass to neither the leader in process nor a relay connection; the mark is dropped), and `invalid` on a
+  pass to neither the leader in process nor a relay connection; the mark is dropped; a leader whose term is still
+  taking over drops an in-process pass, which reconcile would not recover, so it is logged and counts as
+  neither), and `invalid` on a
   daemon that predates it. Otherwise
   it pushes the ledger-noted worktree's branch through `pushTaskBranch` with no `expect` and `hasPr`
   from its ledger (the daemon has no PR head; the leader checks it, D1 step 3; a PR the session opened a moment ago and
@@ -9639,7 +9641,12 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   passing can do no more than one that pushes its own branch and runs `/exit`; the leader's PR-head
   check bounds what it can claim, and the worst case of an unconfirmed pass is a pushed branch no
   successor follows. The session is told only "not
-  confirmed"; telling it why the leader refused is a docs/scheduler.md _Later_ item.
+  confirmed"; telling it why the leader refused is a docs/scheduler.md _Later_ item. The leader logs
+  each refusal at warn with the task and the sending machine (never the record or the branch), the one
+  trace of a stalled pass, since the task stays `running` and idle until someone sees it on the Queue
+  screen (an alert for it is that same _Later_ item). _Decided: a `pass-close` answered `no_pane` sets the
+  task's close deadline to now_ (the session is gone, so no turn's end will close it, and the 2-minute
+  grace only holds the successor blocked), and reconcile's re-ask is not awaited by the tick.
 - **Every field is untrusted; the pane is the kernel's answer.** The 0700 run
   directory admits any process of this user, and every session is this user, so a
   frame could name any pane or task. The daemon asks the kernel who connected. Bun

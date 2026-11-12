@@ -1215,6 +1215,12 @@ export class Scheduler {
     try {
       const reply = await passClose.call(this.#fleet, deviceId, { taskId });
       this.#log(`audit pass-close task=${quote(taskId)} outcome=${reply.ok ? "armed" : reply.code}`);
+      // No live pane carries the task: its session is already gone, so no turn's end is coming for the daemon to
+      // close at, and waiting out the grace only holds the successor blocked. The next tick's `#closePass` settles it.
+      if (!reply.ok && reply.code === "no_pane") {
+        const entry = this.#passing.get(taskId);
+        if (entry !== undefined) entry.deadline = this.#now();
+      }
     } catch (err) {
       this.#onError(err);
     }
@@ -1259,7 +1265,9 @@ export class Scheduler {
         this.#passing.set(task.id, { deadline: now });
       }
     }
-    await Promise.all(rearmed.map((t) => this.#armClose(t.assignment?.deviceId ?? "", t.id)));
+    // Not awaited: the entry's deadline is already set, so nothing here depends on the answer, and a daemon that is
+    // connected but slow must not hold the tick's admission and dispatch for its 10 s (`#armClose` never rejects).
+    for (const t of rearmed) void this.#armClose(t.assignment?.deviceId ?? "", t.id);
     const due: string[] = [];
     for (const [id, entry] of this.#passing) {
       const task = this.task(id);

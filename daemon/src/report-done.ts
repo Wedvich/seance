@@ -130,7 +130,7 @@ const PASS_REFUSED = {
   push_failed:
     "the push did not complete or could not be confirmed (network, credentials, repo configuration, or this machine's own log); try again, and tell the owner if it keeps failing",
   unsent:
-    "the branch is pushed, but this machine's daemon could not hand the pass to the scheduler (no relay connection); call again once it is back",
+    "the branch is pushed, but this machine's daemon could not hand the pass to the scheduler (no relay connection, or the scheduler here is still taking over); call again shortly",
   stopping_pushed:
     "the branch is pushed, but this machine's daemon is stopping and sent no pass; call again once it is back",
   // The caller is gone, so no one reads this; listed so every code has words.

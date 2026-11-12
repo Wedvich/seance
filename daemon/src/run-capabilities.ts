@@ -154,12 +154,10 @@ const sessionEvents: DaemonCapability = (ctx) => {
                 taskId,
                 options,
               ),
-            // In process when this machine leads, else sealed to the scheduler; false when neither could take it.
-            send: async (pass) => {
-              if (ctx.leader.term() !== null) {
-                ctx.leader.onSessionPass(pass, ctx.deviceId);
-                return true;
-              }
+            // In process when this machine leads, else sealed to the scheduler; false when neither could take it
+            // (a term still taking over drops it, and the session is told to call again).
+            send: (pass) => {
+              if (ctx.leader.term() !== null) return Promise.resolve(ctx.leader.onSessionPass(pass, ctx.deviceId));
               return ctx.client.sendSessionPass(pass);
             },
             close: createPassClose({

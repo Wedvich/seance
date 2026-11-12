@@ -891,6 +891,53 @@ describe("leader requests", () => {
     }
   });
 
+  test("a session's pass handed to a leader with no running term is logged and answered false, not taken", async () => {
+    const relay = startTestRelay(TOKEN);
+    const inner = new MemoryQueueStore();
+    const gate = Promise.withResolvers<void>();
+    const slow: QueueStore = {
+      list: async () => {
+        await gate.promise;
+        return inner.list();
+      },
+      get: (id) => inner.get(id),
+      put: (id, version, body) => inner.put(id, version, body),
+      delete: (id, version) => inner.delete(id, version),
+      getPause: () => inner.getPause(),
+      putPause: (version, holds) => inner.putPause(version, holds),
+    };
+    const pass = {
+      session: "%3",
+      taskId: "t-1",
+      exclave: "default",
+      remoteBranch: "feature/x",
+      tip: "a".repeat(40),
+      record: "SECRET-RECORD",
+      at: Date.now(),
+    };
+    const { leader } = leaderOver(relay, slow);
+    const lines = await captureLog(async () => {
+      try {
+        // Following: no term at all.
+        expect(leader.onSessionPass(pass, "a")).toBe(false);
+        leader.lead(1);
+        expect(await relay.appEvents.next()).toBe("open");
+        // Taking over: a term exists but is not running, and nothing recovers a pass dropped now.
+        expect(leader.term()).toBe(1);
+        expect(leader.onSessionPass(pass, "a")).toBe(false);
+        gate.resolve();
+        await leader.settled();
+        expect(leader.onSessionPass(pass, "a")).toBe(true);
+      } finally {
+        gate.resolve();
+        leader.stop();
+        relay.stop();
+      }
+    });
+    expect(lines.filter((l) => l.includes('session-pass task="t-1" from="a" dropped'))).toHaveLength(1);
+    for (const line of lines) expect(line).not.toContain("SECRET-RECORD");
+  });
+
   test("on a 3×3 fleet, twenty finished tasks still seal under the envelope bound, the oldest cut to their winner", async () => {
     const relay = startTestRelay(TOKEN);
     const store = new MemoryQueueStore();

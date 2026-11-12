@@ -1205,7 +1205,7 @@ of M4 has landed.
        successor's prompt. The daemon closes the session at the end of that turn, once the leader
        has confirmed the successor. It has its own capability, `successorSelf`, so a session never
        pushes against a 2a leader that would drop its event (D13).
-  3. **Automatic trigger** — spec only, below; built in a follow-up session now that 2b has merged.
+  3. **Automatic trigger** — spec only, below; built in a follow-up session once 2b has merged.
      - **Trigger.** The leader evaluates it every tick from what it already holds: `quotaOf`'s
        windows, `creditsSpent` and the spill notion (`Candidate.spill.spending`). An account is
        **exhausted** by its newest fresh reading (not `isStatusStale`) when (a) a window the task is
@@ -1321,8 +1321,14 @@ of M4 has landed.
       is a backstop: `#passing` is noted before the commit write, kept until the task leaves the pass
       states (a failed close retries each tick), and reconcile, which skips tasks in `#passing` or in
       flight, re-sends `pass-close` for a session-triggered or unreadable successor and closes any
-      other at once. Work committed after the push is not carried (the worktree is kept); the tool
-      tells the session to end its turn whatever it answers. _Rejected:_
+      other at once. A `pass-close` answered `no_pane` (the session is already gone, so no turn's end
+      is coming) sets the entry's deadline to now, and the re-ask is not awaited by the tick. Work
+      committed after the push is not carried (the worktree is kept); the tool
+      tells the session to end its turn whatever it answers, an unanswered call (a timeout past the
+      daemon's push window, or a lost connection) included, which it words as "may have gone through"
+      and never as a refusal. An interrupted call is fail-closed: the call's cancellation closes the
+      daemon connection and the daemon sends no pass for a caller that is gone. A pane carries one
+      close: a pass outranks a hand-off. _Rejected:_
       the leader closing at an `idle` event (`turnEnded` never reaches it, and a respawn's idle
       would close mid-turn); despawning at once on the self path (it interrupts the final message);
       the daemon deferring a `despawn` reply; the daemon closing on the `pass` frame alone (it would
@@ -1431,7 +1437,9 @@ of M4 has landed.
     - a `seanced doctor` line for push credentials: a remote whose SSH key lives only in a login
       session's agent fails under launchd or systemd as `push_failed` (ssh has no terminal to prompt on);
     - the self path telling the session why the leader refused after the push (today: "not
-      confirmed" plus the leader's log line);
+      confirmed" plus the leader's warn line), and an alert or a Queue-screen mark for a session pass
+      the leader refused, since the task stays `running` and idle until someone looks (a new alert kind
+      spans the wire type, the push sender, the service worker's fixed texts and the PWA);
     - stacking, once it lands: a successor on a `baseBranch` instead of a reset to the remote branch.
   - _Deferred:_ moving a `needs-input` task on any path (Q2); a forecast-only spill for a successor
     (Q3).

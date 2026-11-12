@@ -1006,20 +1006,68 @@ describe("the session's own pass", () => {
   });
 
   describe("the close the daemon was asked for", () => {
-    test("a daemon that answers no_pane or never answers leaves the pass committed, and the deadline closes it through the leader", async () => {
-      for (const reply of [() => ({ ok: false, code: "no_pane", message: "gone" }) as const, () => unreachable]) {
-        const s = setup([machine("a", { capabilities: SELF })]);
-        const old = await running(s, false);
-        s.fleet.passCloseReply = reply;
-        const result = ok(await s.scheduler.pass(old.id, "session", self()));
-        expect(result.task.state).toBe("running");
-        await tick(s.scheduler);
-        expect(s.fleet.despawns).toEqual([]);
-        s.clock.now += PASS_CLOSE_GRACE_MS + 1;
-        await tick(s.scheduler);
-        expect(s.fleet.despawns).toHaveLength(1);
-        expect(s.scheduler.task(old.id)?.state).toBe("superseded");
-      }
+    test("a daemon that never answers leaves the pass committed, and the deadline closes it through the leader", async () => {
+      const s = setup([machine("a", { capabilities: SELF })]);
+      const old = await running(s, false);
+      s.fleet.passCloseReply = () => unreachable;
+      const result = ok(await s.scheduler.pass(old.id, "session", self()));
+      expect(result.task.state).toBe("running");
+      await tick(s.scheduler);
+      expect(s.fleet.despawns).toEqual([]);
+      s.clock.now += PASS_CLOSE_GRACE_MS + 1;
+      await tick(s.scheduler);
+      expect(s.fleet.despawns).toHaveLength(1);
+      expect(s.scheduler.task(old.id)?.state).toBe("superseded");
+    });
+
+    test("no_pane means the session is already gone: the next tick settles it, with no grace to wait out", async () => {
+      const s = setup([machine("a", { capabilities: SELF })]);
+      const old = await running(s, false);
+      s.fleet.passCloseReply = () => ({ ok: false, code: "no_pane", message: "gone" });
+      const result = ok(await s.scheduler.pass(old.id, "session", self()));
+      expect(result.task.state).toBe("running");
+      await tick(s.scheduler);
+      expect(s.scheduler.task(old.id)).toMatchObject({ state: "superseded", successor: result.successorId });
+    });
+
+    test("a takeover's re-ask that finds no pane settles the task on a later tick, not after a fresh grace", async () => {
+      const s = setup([machine("a", { capabilities: SELF })]);
+      const old = await running(s, false);
+      ok(await s.scheduler.pass(old.id, "session", self()));
+      s.fleet.passCloseReply = () => ({ ok: false, code: "no_pane", message: "gone" });
+      const next = new Scheduler({
+        store: readerChecked(s.store, () => s.clock.now),
+        fleet: s.fleet,
+        now: () => s.clock.now,
+      });
+      await next.takeover();
+      // The re-ask is not awaited by the tick, so its answer lands for the one after.
+      await tick(next);
+      await tick(next);
+      expect(next.task(old.id)?.state).toBe("superseded");
+    });
+
+    test("a takeover's tick does not wait for a daemon slow to answer the re-armed close", async () => {
+      const s = setup([machine("a", { capabilities: SELF })]);
+      const old = await running(s, false);
+      ok(await s.scheduler.pass(old.id, "session", self()));
+      const release = Promise.withResolvers<void>();
+      let asked = 0;
+      s.fleet.passClose = async () => {
+        asked += 1;
+        await release.promise;
+        return { ok: true };
+      };
+      const next = new Scheduler({
+        store: readerChecked(s.store, () => s.clock.now),
+        fleet: s.fleet,
+        now: () => s.clock.now,
+      });
+      await next.takeover();
+      // Resolves while the re-ask is still outstanding.
+      await tick(next);
+      expect(asked).toBe(1);
+      release.resolve();
     });
 
     test("a takeover asks the daemon again for a session-triggered pass and waits a fresh grace", async () => {
