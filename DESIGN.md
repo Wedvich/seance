@@ -1690,7 +1690,9 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   which sends it for a task it just created once a read shows it `ready` (PWA, "Every PWA spawn
   is a task").
 - `pass { taskId }` (`TaskRef`) → `{ task, successorId, successor }` (`PassResponse`; `successor` is null when the
-  leader cannot read it, e.g. an already-passed answer after a prune) (built 2026-11-12;
+  leader cannot read it, e.g. an already-passed answer after a prune, or when the reply would pass
+  `REPLY_JSON_BUDGET`: a failed close leaves the old task with its prompt beside the successor's, and
+  the pass has committed by then, so the transport's `too_large` would read as a failure) (built 2026-11-12;
   Scheduler, "Passing to a successor"). In `SCHEDULER_OPS`, 180 s timeout (the worst path adds
   up to 15 s reading the PR, 90 s for `push-branch`, a create, an overwrite with retries, a
   `sessions` read and a 20 s despawn; a client that gives up early retries safely, D15). Refusals are
@@ -7110,7 +7112,7 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   code points). A successor carries no attachments, so the 6 144 attachment bound does not apply, and
   the fallback names that the old task had some and that they are not available. The preamble names
   the remote branch `<r>`, never the old local branch, and tells the successor to: (1) know it
-  continues task `<old id>`, which a session on another account began and pushed to `origin/<r>` at
+  continues task `<old id>`, which an earlier session began and pushed to `origin/<r>` at
   `<sha>`; (2) keep its fresh worktree and its own new branch, and run, in order, `git fetch origin
   <r>`, `git reset --hard origin/<r>` (nothing is lost, the worktree is fresh) and `git branch
   --set-upstream-to=origin/<r>`, and never `git switch <r>`, since a local branch of that name may

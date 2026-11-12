@@ -1219,8 +1219,8 @@ of M4 has landed.
       record's end, with a fixed closing line and a log line `pass record cut`; the preamble never.
       With no record (every outside pass, or a session that sends none) the leader composes the
       prompt: the preamble, the old prompt (cut to fit), the remote branch, the PR URLs and the
-      Linear key. The preamble tells the successor that it continues task `<old id>`, which a
-      session on another account began and pushed to `origin/<r>` at `<sha>`; that it is in a fresh
+      Linear key. The preamble tells the successor that it continues task `<old id>`, which an
+      earlier session began and pushed to `origin/<r>` at `<sha>`; that it is in a fresh
       worktree on its own new branch, which it keeps; to run `git fetch origin <r>`,
       `git reset --hard origin/<r>` (the worktree is fresh, nothing is lost) and
       `git branch --set-upstream-to=origin/<r>`; to rebuild state from `git log`,

@@ -137,7 +137,7 @@ export function successorPreamble(input: Pick<SuccessorPromptInput, "task" | "re
   const remote = quoted(`origin/${remoteBranch}`);
   const prs = taskPrs(task).map((pr) => pr.url);
   const lines = [
-    `You continue task ${task.id}, which a session on another account began. It pushed its work to the branch ${quoted(remoteBranch)} on origin at ${tip}.`,
+    `You continue task ${task.id}, which an earlier session began. It pushed its work to the branch ${quoted(remoteBranch)} on origin at ${tip}.`,
     "",
     "Keep your own fresh worktree and its own new branch. Do these first, in order:",
     `1. git fetch origin ${quoted(remoteBranch)}`,
