@@ -40,7 +40,16 @@ const desktop = machine({
 });
 
 function values(overrides: Partial<FormValues> = {}): FormValues {
-  return { prompt: "", machineId: null, repo: null, model: "opus", effort: "medium", worktree: true, ...overrides };
+  return {
+    prompt: "",
+    machineId: null,
+    repo: null,
+    model: "opus",
+    effort: "medium",
+    worktree: true,
+    autonomy: "checkpoint",
+    ...overrides,
+  };
 }
 
 describe("initialValues", () => {
@@ -225,7 +234,24 @@ describe("reconcile", () => {
 describe("checkSubmit", () => {
   test("resolves the target when everything lines up", () => {
     const result = checkSubmit(values({ machineId: "device-1", repo: "seance" }), [machine()], true);
-    expect(result).toEqual({ ok: true, kind: "spawn", machine: machine(), repo: "seance" });
+    expect(result).toEqual({
+      ok: true,
+      kind: "spawn",
+      machine: machine(),
+      request: { repo: "seance", mode: "worktree", model: "opus", effort: "medium" },
+    });
+  });
+
+  test("a direct spawn keeps the prompt as typed, and carries a level off the default, steer with plan mode", () => {
+    const at = (autonomy: FormValues["autonomy"]) =>
+      checkSubmit(values({ machineId: "device-1", repo: "seance", prompt: " go ", autonomy }), [machine()], true);
+    expect(at("steer")).toMatchObject({
+      kind: "spawn",
+      request: { prompt: " go ", autonomy: "steer", plan: true },
+    });
+    expect(at("auto")).toMatchObject({ kind: "spawn", request: { autonomy: "auto" } });
+    const plain = at("checkpoint");
+    expect(plain.ok && "autonomy" in plain.request).toBe(false);
   });
 
   test("refuses while the machine list is still empty and the relay is not open", () => {
@@ -462,6 +488,23 @@ describe("auto", () => {
       request: { repo: "github.com/me/seance", mode: "worktree", model: "sonnet", effort: "high", prompt: "fix it" },
       label: "me/seance",
     });
+  });
+
+  test("a queued task carries the level only off the default; steer is sealed with plan mode", () => {
+    const at = (autonomy: FormValues["autonomy"]) =>
+      checkSubmit(values({ machineId: AUTO, repo: "github.com/me/api", prompt: "go", autonomy }), fleet, true);
+    expect(at("steer")).toMatchObject({ kind: "queue", request: { autonomy: "steer", plan: true } });
+    const auto = at("auto");
+    expect(auto).toMatchObject({ kind: "queue", request: { autonomy: "auto" } });
+    expect(auto.ok && "plan" in auto.request).toBe(false);
+    const plain = at("checkpoint");
+    expect(plain.ok && ("autonomy" in plain.request || "plan" in plain.request)).toBe(false);
+  });
+
+  test("every open starts at checkpoint, whatever was used last", () => {
+    const remembered: LastUsed = { machineId: AUTO, repos: {}, model: "haiku", effort: "low", worktree: false };
+    expect(initialValues(fleet, remembered, defaults).autonomy).toBe("checkpoint");
+    expect(nextLastUsed(remembered, values({ autonomy: "auto" }))).not.toHaveProperty("autonomy");
   });
 
   test("a blank prompt is left out of the task, and the worktree box picks the mode", () => {

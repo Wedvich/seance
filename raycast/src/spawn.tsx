@@ -14,7 +14,13 @@ import {
   showToast,
 } from "@raycast/api";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { RelayState, SpawnRequest, SpawnResponse, TaskRequest } from "@seance/shared";
+import {
+  AUTONOMY_LEVELS,
+  isAutonomyLevel,
+  type RelayState,
+  type SpawnResponse,
+  type TaskRequest,
+} from "@seance/shared";
 import {
   accountLine,
   NO_ALIASES,
@@ -41,6 +47,7 @@ import {
   type PickerMachine,
 } from "./lib/form.ts";
 import {
+  AUTONOMY_LABELS,
   EFFORTS,
   EFFORT_LABELS,
   FALLBACK_EFFORT,
@@ -177,9 +184,13 @@ export default function Command(): React.JSX.Element {
       setMachines(list);
       lastUsedRef.current = remembered;
       // The autoFocus TextArea takes keystrokes from the first frame, before
-      // these reads resolve — anything already typed survives the opening values.
+      // these reads resolve — anything already typed or picked survives the opening values.
       setValues((current) => {
-        const opening = { ...initialValues(list, remembered, defaults), prompt: current.prompt };
+        const opening = {
+          ...initialValues(list, remembered, defaults),
+          prompt: current.prompt,
+          autonomy: current.autonomy,
+        };
         valuesRef.current = opening;
         return opening;
       });
@@ -266,20 +277,10 @@ export default function Command(): React.JSX.Element {
       return;
     }
 
-    const request: Omit<SpawnRequest, "client"> = {
-      repo: check.repo,
-      mode: values.worktree ? "worktree" : "here",
-      model: values.model,
-      effort: values.effort,
-      // An empty prompt is a deliberate mode (start an empty session), and the
-      // daemon distinguishes absent from empty — so it is omitted, not blanked.
-      ...(values.prompt.trim() === "" ? {} : { prompt: values.prompt }),
-    };
-
     setBusy("spawn");
     let reply: SpawnResponse;
     try {
-      reply = await handle.spawn(check.machine.deviceId, request);
+      reply = await handle.spawn(check.machine.deviceId, check.request);
     } catch (err) {
       await showToast(Toast.Style.Failure, "Spawn failed", failureText(err));
       return;
@@ -496,6 +497,19 @@ export default function Command(): React.JSX.Element {
       >
         {EFFORTS.map((effort) => (
           <Form.Dropdown.Item key={effort} value={effort} title={EFFORT_LABELS[effort]} />
+        ))}
+      </Form.Dropdown>
+      <Form.Dropdown
+        id="autonomy"
+        title="Autonomy"
+        info="How much the session decides on its own. Starts at Checkpoint every time; Steer is plan mode."
+        value={values.autonomy}
+        onChange={(autonomy) =>
+          setValues((current) => (isAutonomyLevel(autonomy) ? { ...current, autonomy } : current))
+        }
+      >
+        {AUTONOMY_LEVELS.map((level) => (
+          <Form.Dropdown.Item key={level} value={level} title={AUTONOMY_LABELS[level]} />
         ))}
       </Form.Dropdown>
       <Form.Checkbox

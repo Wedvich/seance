@@ -1,10 +1,14 @@
 import {
+  DEFAULT_AUTONOMY,
   lastHeardAt,
   originLabel,
   TASK_REQUEST_LIMITS,
   taskRequest,
+  withAutonomy,
+  type AutonomyLevel,
   type MachineStatus,
   type RepoEntry,
+  type SpawnRequest,
   type TaskRequest,
 } from "@seance/shared";
 import type { Effort, Model } from "./options.ts";
@@ -69,6 +73,8 @@ export interface FormValues {
   readonly model: Model;
   readonly effort: Effort;
   readonly worktree: boolean;
+  /** Never remembered or a preference: every open starts at `DEFAULT_AUTONOMY`, so a level picked once never rides along unseen. */
+  readonly autonomy: AutonomyLevel;
 }
 
 /**
@@ -230,6 +236,7 @@ export function initialValues(
     model: lastUsed?.model ?? defaults.model,
     effort: lastUsed?.effort ?? defaults.effort,
     worktree: lastUsed?.worktree ?? true,
+    autonomy: DEFAULT_AUTONOMY,
   };
   return reconcile(base, cached, { cached, lastUsed, defaults }).values;
 }
@@ -256,9 +263,41 @@ export function nextLastUsed(previous: LastUsed | null, values: FormValues): Las
  * task in the relay's store for the scheduler to place.
  */
 export type Submission =
-  | { readonly ok: true; readonly kind: "spawn"; readonly machine: PickerMachine; readonly repo: string }
+  | {
+      readonly ok: true;
+      readonly kind: "spawn";
+      readonly machine: PickerMachine;
+      readonly request: Omit<SpawnRequest, "client">;
+    }
   | { readonly ok: true; readonly kind: "queue"; readonly request: TaskRequest; readonly label: string }
   | { readonly ok: false; readonly reason: string };
+
+/**
+ * The level as request fields: none at the default, as the PWA writes it, and `steer` with
+ * `plan: true`, so a leader or daemon older than `autonomy` still starts the session in plan mode.
+ */
+export function autonomyFields(level: AutonomyLevel): Pick<SpawnRequest, "autonomy" | "plan"> {
+  if (level === DEFAULT_AUTONOMY) return {};
+  const fields = withAutonomy<Pick<SpawnRequest, "autonomy" | "plan">>({ autonomy: level });
+  // Unreachable: only a `plan` beside the level can contradict it, and the form has none.
+  if (fields === null) throw new Error(`autonomy ${level} contradicts no plan`);
+  return fields;
+}
+
+/**
+ * A direct spawn on `machine`. An empty prompt is a deliberate mode (start an empty session), and
+ * the daemon distinguishes absent from empty — so it is omitted, not blanked.
+ */
+function spawnRequest(values: FormValues, repo: string): Omit<SpawnRequest, "client"> {
+  return {
+    repo,
+    mode: values.worktree ? "worktree" : "here",
+    model: values.model,
+    effort: values.effort,
+    ...(values.prompt.trim() === "" ? {} : { prompt: values.prompt }),
+    ...autonomyFields(values.autonomy),
+  };
+}
 
 export function checkSubmit(values: FormValues, machines: readonly PickerMachine[], connected: boolean): Submission {
   const auto = values.machineId === AUTO;
@@ -280,7 +319,7 @@ export function checkSubmit(values: FormValues, machines: readonly PickerMachine
   if (values.repo === null) {
     return { ok: false, reason: `${machine.name} has no repos — check repoRoots in its config, then rescan` };
   }
-  return { ok: true, kind: "spawn", machine, repo: values.repo };
+  return { ok: true, kind: "spawn", machine, request: spawnRequest(values, values.repo) };
 }
 
 /**
@@ -293,7 +332,7 @@ function checkQueue(values: FormValues): Submission {
   if (values.repo === null) {
     return { ok: false, reason: "No machine reports a repo's origin — update seanced on them, then rescan" };
   }
-  const request = taskRequest(values, values.repo, true);
+  const request: TaskRequest = { ...taskRequest(values, values.repo, true), ...autonomyFields(values.autonomy) };
   const length = request.prompt?.length ?? 0;
   if (length > TASK_REQUEST_LIMITS.prompt) {
     return {

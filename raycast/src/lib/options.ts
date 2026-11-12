@@ -1,4 +1,4 @@
-import { DEFAULT_EFFORT, DEFAULT_MODEL } from "@seance/shared";
+import { DEFAULT_EFFORT, DEFAULT_MODEL, type AutonomyLevel } from "@seance/shared";
 
 /**
  * The offered models and efforts. Three copies of this list exist and cannot be
@@ -30,6 +30,13 @@ export const MODEL_LABELS: Record<Model, string> = {
   opus: "Opus",
   sonnet: "Sonnet",
   haiku: "Haiku",
+};
+
+/** The PWA's names for the levels, with the gist of each, since Raycast's dropdown has no room for a sheet's lines. */
+export const AUTONOMY_LABELS: Record<AutonomyLevel, string> = {
+  steer: "Steer — plan first, wait for approval",
+  checkpoint: "Checkpoint — stop only for real choices",
+  auto: "Auto — decide reversible choices, record them",
 };
 
 /**
