@@ -3874,7 +3874,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   creates past `maxTasks` (`MAX_TASKS`) as the relay does, tombstones counting toward
   nothing.
 - **A finished task keeps no prompt** (2026-10-18, owner), **nor attachment manifest** ("Attachments", 2026-10-28), **and only its decision's winner**
-  (M3 review P4, 2026-10-18). `lean` — `forgetPrompt` (`task.ts`) plus the cut to the winner
+  (M3 review P4, 2026-10-18). `lean` — `forgetPrompt` (`shared/src/task-phase.ts`) plus the cut to the winner
   `too_large` already made — runs in `#update`, the one write path, as for the clocks, so the
   write that moves a task to `done`, `failed` or `cancelled` carries `spec` without `prompt`
   and a winner-only decision, at no extra version, whatever built the record (`advance`,
