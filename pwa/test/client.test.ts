@@ -2403,15 +2403,12 @@ describe("uploadAttachment", () => {
     });
   });
 
-  test("a wrong token is unauthorized, and an unreachable relay says so", async () => {
-    const bytes = new Uint8Array(4);
-    expect(await startClient({ token: "wrong" }).client.uploadAttachment(bytes)).toEqual({
+  // An unreachable relay is shared/src/upload-attachment.test.ts's, on a held socket and a fake
+  // clock: a dial to a closed port here is refused on some hosts and held for minutes on others.
+  test("a wrong token is unauthorized", async () => {
+    expect(await startClient({ token: "wrong" }).client.uploadAttachment(new Uint8Array(4))).toEqual({
       ok: false,
       code: "unauthorized",
-    });
-    expect(await startClient({ url: "ws://127.0.0.1:1/app" }).client.uploadAttachment(bytes)).toEqual({
-      ok: false,
-      code: "unreachable",
     });
   });
 });
