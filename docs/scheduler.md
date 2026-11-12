@@ -1707,7 +1707,7 @@ same PR, with the reason.
     DESIGN.md "Expiry" has the record.
 
 22. **An automatic quota pass refused for a reason that can pass is retried once, 5 min later**
-    (`quotaPassRetryMs`, owner, 2026-11-12). The retry waits so it does not fire on the next 30 s tick
+    (`quotaPassRetryMs`, the stage 3 plan, 2026-11-12). The retry waits so it does not fire on the next 30 s tick
     into the same failure (a push that failed, a PR that could not be read); a SSH-agent or network
     blip passes in that time, a missing credential does not. One retry per window reset, then the
     leader alerts and stops: a task that cannot be passed needs a person. DESIGN.md "The automatic
