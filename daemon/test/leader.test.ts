@@ -266,6 +266,7 @@ function fleetDecision(machines: number, exclaves: number, seed: number): Decisi
                   machinePressure: f(2),
                   dependencyDistance: 0,
                   queuePressure: f(3),
+                  keepFree: 1,
                 },
                 sticky: 0,
                 total: f(4),

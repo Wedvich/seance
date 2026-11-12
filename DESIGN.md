@@ -2948,7 +2948,9 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   task's own model — "Seats" below), multiplied by the share of the window still to run; `machinePressure` is
   `max(cpu, mem)` as a fraction (disk never scores); `dependencyDistance` 0 / 0.25 /
   0.5 from `TaskSpec.base` (absent until M4's stacking fills it); `queuePressure` the
-  in-flight scheduler tasks on the machine. Stickiness subtracts a fixed bonus from the
+  in-flight scheduler tasks on the machine; `keepFree` (2026-11-12) is 1 when the exclave carries a
+  keepFree trait the task does not `require`, else 0 and omitted from the record, weighted 8 and
+  added to the total ("Traits filter", "Keep free"). Stickiness subtracts a fixed bonus from the
   `TaskSpec.lineage` owner's total, never overrides a filter. Projected usage is the
   effective reading plus a fixed estimate for this task and each in-flight one billed to
   the same account, per window span (`taskEstimatePct`: 5% of a 5h window, 1% of a weekly —
@@ -3026,8 +3028,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   (g) a clone without `refs/remotes/origin/HEAD` (no resolvable default branch) advertises no
   project skills.
 
-- **Traits filter** (2026-11-12, docs/scheduler.md M4 _Traits_, PRs 1 and 2 of 3: core and probes; keep-free
-  follows). A trait is an operator-declared name a machine's exclave carries ("atlas": the box that
+- **Traits filter** (2026-11-12, docs/scheduler.md M4 _Traits_, built in three PRs: core, probes, keep free). A trait is an operator-declared name a machine's exclave carries ("atlas": the box that
   can reach the internal registry). A task's `requires` (1 to 4 unique names, `isTraitName`) puts
   `trait_absent { trait }` on every candidate whose exclave lacks it, once per missing trait, in
   `requires` order (`traitFilter`, `scheduler/src/traits.ts`; a trait in `TASK_SPEC_LIMITS.requires`
@@ -3039,9 +3040,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   stack as they do for any rejected candidate, so a pinned-elsewhere candidate carries both.
   - **Declaring.** Only in the machine's own `config.json`: `"traits": {"<name>": {"exclaves"?: [...]}}`.
     `exclaves` narrows a trait to those exclave names (default: all of the box's). `probe` is built
-    (Daemon, "Trait probes"); `keepFree` is refused by name as "not built yet", so a config written for
-    the later PR fails loudly on an older daemon rather than being ignored. Strict parse: a bad name, a non-object value or an unknown
-    key fails the config load. `withTraits` (`daemon/src/traits.ts`) stamps the sorted names onto each
+    (Daemon, "Trait probes"); `keepFree` is a boolean, stored only when true (see "Keep free" below). Strict parse: a bad name, a non-object value or an unknown
+    key fails the config load, so a key a later build adds fails loudly on an older daemon rather than being ignored. `withTraits` (`daemon/src/traits.ts`) stamps the sorted names (and the `keepFree` subset) onto each
     `ExclaveInfo` in `buildInfo`; `CAPABILITIES.traits` is advertised by every daemon of this build.
   - **Holds, not rejections.** A trait no candidate carries holds the task like any unplaceable
     one; the leader logs `scheduler: task held by trait: task=<id> trait=<name> why=<absent|unhealthy>` once per trait per term (`onTraitHeld`; a new term
@@ -3079,6 +3079,45 @@ it through the store: an app's `store-put` create, read by the leader on `store-
     candidate bound moved from nine to eight (a nine-candidate worst-case record measured 41,096
     bytes against `STORE_MAX_CT_LENGTH`'s 40,960), and the leader's `too_large` retry still cuts the
     decision to its winner. A create at every bound is 27,176 bytes against 28,672.
+  - **Keep free** (PR 3 of 3). A trait marked `keepFree` asks the leader to prefer other machines for
+    tasks that don't need it: a score penalty, never a filter, so a busy fleet still places there. The
+    daemon advertises the sorted subset per exclave as `ExclaveInfo.keepFree` (`withTraits`, from local
+    config only; `parseExclaveInfo` keeps only names also in the parsed `traits` and reads an
+    unreadable list as none: a soft preference lost, never a task misplaced). `judge` sets
+    `components.keepFree` to 1 when the exclave carries a keepFree trait outside `task.spec.requires`
+    and adds `weights.keepFree` (8) × it to the total; the lower total still wins, so the penalty
+    _raises_ the machine's total (docs/scheduler.md's "scores lower" meant "is preferred"). Binary: three
+    kept-free traits are not three times as avoided, which would be a filter by another route. A task
+    requiring one kept-free trait still pays for another the exclave carries and the task does not
+    require. The component is omitted at 0, so every record without a penalty is byte-identical to
+    before; `parseScore` reads an optional `keepFree`, which an older reader drops with the rest of the
+    unknown keys, so records stay readable both ways. An unreadable one (not a finite number) is
+    dropped, not a reason to null the score: a deliberate departure from every other component, where
+    one bad candidate voids the decision and so the record, because `total` already carries the
+    penalty and a later build that changes the component's shape (a count, a list of names) must not
+    leave a leader of this build holding its records unreadable. Weight 8 is the global cap's worth
+    (`globalMax`): a kept-free idle machine loses to one carrying up to 7 in-flight scheduler tasks
+    (`queuePressure` is 1 each), and at 8 the cap refuses every candidate anyway; other load on the
+    competitor shifts that, and an exact tie goes to the lower deviceId. It is also two fully loaded machines' (`machinePressure` weighs 4),
+    and it beats a competitor's account pressure up to about 74% projected at the start of a window
+    (`(u/(1-u))²` is 8 at 0.74), a little more later in it, since that cost is scaled by the share of
+    the window still to run (80% at the halfway point). Weight 4 was considered and
+    rejected: another machine carrying four tasks is normal load, and the kept-free one would then
+    take work, so it would not replace `avoid`. Stickiness (−2) cannot outweigh it alone. Rollout: an
+    older leader ignores the advertisement and places as before; an older daemon refuses `keepFree` in
+    config, so update the machine before setting it. Mixed versions: if leadership moves to a daemon
+    built before this one, it rewrites a task's decision on its next write without
+    `components.keepFree` (its `parseScore` drops the key) while `total` keeps the penalty, so the PWA
+    loses "kept free" for that candidate and the components no longer sum to the total; nothing is
+    misplaced. Record size: a worst-case 8-candidate record with `keepFree: 1` on every candidate
+    measured 40,708 `ct` against `STORE_MAX_CT_LENGTH`'s 40,960 (40,568 without); the weight moves only `total`
+    (a total of ten or more adds a character per candidate: 40,716). Each penalised candidate adds about 18 bytes, so the
+    attachment record below, which measures 40,828 with ten unpenalised candidates (132 under), measures 41,004
+    with all ten penalised and overflows from about eight; the leader's `too_large` retry cuts such a
+    decision to its winner, and the cut candidates include the kept-free one the PWA would have
+    explained. Surfaces: the PWA's decision text says "kept free" for a penalised
+    candidate, and `list_machines` gives each exclave `keepFree: [names]`; `decisionText` shows totals
+    only. Measuring `avoid`'s share: docs/scheduler.md, "What to measure".
   - **Surfaces.** MCP: `requires` on `spawn_session` and each `queue_batch` member; `get_queue` gives each
     task with `requires` a `requires: [{ trait, machines, failing? }]` (`failing`: the machines whose probe
     fails on every exclave carrying the trait) and `list_machines` each exclave's
@@ -4517,7 +4556,7 @@ as follows, without reopening the decision.
   27,932 bytes, 740 under the cap (`requires` at its bound added 240). A name bound of 128 measured 28,436, too close to keep.
   Three-byte text fits less, as it already does for the prompt (the sealer's length check
   refuses it, `STORE_CREATE_MAX_CT_LENGTH`). With the leader's writes on top at every
-  bound and ten candidates, an unfinished record carrying the manifest seals to 40,828
+  bound and ten unpenalised candidates (see "Keep free"), an unfinished record carrying the manifest seals to 40,828
   bytes against `STORE_MAX_CT_LENGTH`'s 40,960 (task 2, `parse.test.ts`). A `failure` at
   its bound would push it over, but only a `failed` record carries one, and the write
   that finishes a task drops the manifest (`lean`, below); past the cap, the leader's
@@ -6210,8 +6249,8 @@ of this section built.
 - **Traits** (`daemon/src/traits.ts`, `config.ts`, 2026-11-12, scheduler M4 PR 1): `config.json`'s
   `traits` map declares what this box's exclaves carry (Scheduler, "Traits filter"). `parseTraits` is
   strict: names pass `isTraitName` (`TRAIT_LIMITS`), values are objects holding only `exclaves` (a
-  non-empty list of distinct exclave names; one matching no exclave never applies — config parse cannot see the scan, so `buildInfo` logs a warning naming the trait and the unknown ids once per exclave-set change, `unmatchedTraitExclaves`), at most
-  `TRAIT_LIMITS.perMachine` traits, and `keepFree` is refused by name as "not built yet" (`probe` parses: see "Trait probes"). `withTraits` stamps the sorted names onto each exclave in the
+  non-empty list of distinct exclave names; one matching no exclave never applies — config parse cannot see the scan, so `buildInfo` logs a warning naming the trait and the unknown ids once per exclave-set change, `unmatchedTraitExclaves`), `probe` (see "Trait probes") and `keepFree` (true or false; false is stored as absent), at most
+  `TRAIT_LIMITS.perMachine` traits. `withTraits` stamps the sorted names, and the sorted subset marked `keepFree` (absent when empty), onto each exclave in the
   register blob; the daemon advertises `CAPABILITIES.traits`. Nothing about a trait is read from the
   wire, the PWA or another machine, and nothing here calls `log.ts` from the MCP path.
 

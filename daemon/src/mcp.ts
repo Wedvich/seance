@@ -309,6 +309,7 @@ function describeMachine(
               ...(info.accountId === null ? {} : { accountId: info.accountId }),
               ...(info.email === undefined ? {} : { email: info.email }),
               ...(info.traits === undefined ? {} : { traits: info.traits }),
+              ...(info.keepFree === undefined ? {} : { keepFree: info.keepFree }),
               // A probe reading failing holds a task needing the trait off this exclave; unchecked still routes.
               ...(failing.length === 0 ? {} : { traitsFailing: failing }),
               ...(unchecked.length === 0 ? {} : { traitsUnchecked: unchecked }),

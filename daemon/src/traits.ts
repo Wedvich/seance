@@ -6,12 +6,15 @@ import type { TraitsConfig } from "./config.ts";
  * names whose `exclaves` is absent (every exclave) or lists its id, and none at all when no trait
  * applies. Kept out of the scan itself (`scanExclaves`, `exclaveInfoEqual`) so a rescan's "changed"
  * comparison never sees config; a config change restarts the daemon (`supervise.ts`) instead.
+ * `keepFree` is the sorted subset of those names marked so, absent when empty.
  */
 export function withTraits(info: readonly ExclaveInfo[], traits: TraitsConfig | undefined): readonly ExclaveInfo[] {
   if (traits === undefined) return info;
   return info.map((exclave) => {
     const names = exclaveTraitNames(exclave.id, traits);
-    return names.length === 0 ? exclave : { ...exclave, traits: names };
+    if (names.length === 0) return exclave;
+    const keepFree = names.filter((name) => traits[name]?.keepFree === true);
+    return { ...exclave, traits: names, ...(keepFree.length === 0 ? {} : { keepFree }) };
   });
 }
 

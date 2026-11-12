@@ -93,6 +93,28 @@ describe("describeDecision", () => {
     ]);
   });
 
+  test("a candidate carrying a keepFree penalty says so, and one without shows nothing of it", () => {
+    const kept: Candidate = {
+      ...scored("wsl", "WSL", 10.85),
+      score: {
+        components: {
+          accountPressure: 0.25,
+          machinePressure: 0.4,
+          dependencyDistance: 0,
+          queuePressure: 1,
+          keepFree: 1,
+        },
+        sticky: 0,
+        total: 10.85,
+      },
+    };
+    const summary = describeDecision({ ...decision, candidates: [scored("mac", "Mac", 1.5), kept] }, [], NOW, "did");
+    expect(summary.others[0]?.why).toBe(
+      "scored higher, score 10.85 (account 0.25 · load 40% · queue 1 · kept free) against 1.50",
+    );
+    expect(summary.chosen?.why).not.toContain("kept free");
+  });
+
   test("an exact tie says so, and how it was broken, rather than claiming the loser scored higher", () => {
     const tied: Decision = { ...decision, candidates: [scored("mac", "Mac", 1.5), scored("wsl", "WSL", 1.5)] };
     expect(describeDecision(tied, [], NOW, "would").others[0]?.why).toBe(

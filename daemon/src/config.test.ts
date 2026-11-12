@@ -223,8 +223,22 @@ describe("loadConfig", () => {
       }
     });
 
-    test("`keepFree` is refused as not built yet, never silently ignored", async () => {
-      await expect(load({ atlas: { keepFree: true } })).rejects.toThrow('"traits.atlas.keepFree" is not built yet');
+    test("`keepFree: true` loads beside `exclaves` and `probe`; `false` is stored as absent", async () => {
+      expect((await load({ atlas: { keepFree: true } })).traits).toEqual({ atlas: { keepFree: true } });
+      expect((await load({ atlas: { keepFree: false } })).traits).toEqual({ atlas: {} });
+      const probe = { argv: ["true"], everyMinutes: 30, timeoutSeconds: 10 };
+      expect((await load({ atlas: { exclaves: ["work"], keepFree: true, probe: { argv: ["true"] } } })).traits).toEqual(
+        {
+          atlas: { exclaves: ["work"], keepFree: true, probe },
+        },
+      );
+    });
+
+    test("a non-boolean `keepFree` fails the load, naming the key", async () => {
+      for (const keepFree of ["true", 1, 0, null, [], {}]) {
+        // oxlint-disable-next-line no-await-in-loop -- one config at a time
+        await expect(load({ atlas: { keepFree } })).rejects.toThrow('"traits.atlas.keepFree" must be true or false');
+      }
     });
 
     test("a probe loads with its defaults filled in, beside `exclaves` or alone", async () => {

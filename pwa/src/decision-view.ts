@@ -70,6 +70,7 @@ function scoreText(score: Score): string {
     `load ${Math.round(c.machinePressure * 100)}%`,
     `queue ${c.queuePressure}`,
   ];
+  if ((c.keepFree ?? 0) > 0) parts.push("kept free");
   if (c.dependencyDistance > 0) parts.push(`distance ${n(c.dependencyDistance)}`);
   if (score.sticky > 0) parts.push(`continuation −${n(score.sticky)}`);
   return `score ${n(score.total)} (${parts.join(" · ")})`;

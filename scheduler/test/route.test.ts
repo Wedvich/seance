@@ -1060,15 +1060,19 @@ describe("score", () => {
   });
 
   test("weights come from config, and the total is their weighted sum", () => {
+    const kept = exclave("main", "org:a", { traits: ["atlas", "gpu"], keepFree: ["atlas"] });
     const candidate = only(
-      decide([machine("a", { status: status({ cpu: 50, quota: [obs(0, { h: 45, d: 0 })] }) })], {
+      decide([machine("a", { status: status({ cpu: 50, quota: [obs(0, { h: 45, d: 0 })] }), exclaves: [kept] })], {
         tasks: [held("x", "a")],
-        config: { weights: { accountPressure: 2, machinePressure: 3, dependencyDistance: 5, queuePressure: 7 } },
+        config: {
+          weights: { accountPressure: 2, machinePressure: 3, dependencyDistance: 5, queuePressure: 7, keepFree: 11 },
+        },
+        task: task({ spec: spec({ requires: ["gpu"] }) }),
       }),
     );
     // A held task on the same account adds a second estimate: 45 + 10 = 55%.
     const account = (0.55 / 0.45) ** 2;
-    expect(candidate.score?.total).toBeCloseTo(2 * account + 3 * 0.5 + 7 * 1, 10);
+    expect(candidate.score?.total).toBeCloseTo(2 * account + 3 * 0.5 + 7 * 1 + 11 * 1, 10);
   });
 
   test("an exact tie goes to the lowest deviceId, then exclave", () => {
@@ -1100,6 +1104,88 @@ describe("stickiness", () => {
       task: task({ spec: spec({ lineage: { deviceId: "owner", exclave: "main" } }) }),
     });
     expect(decision.chosen?.deviceId).toBe("other");
+  });
+});
+
+describe("keepFree — a score penalty for placing here what does not need this machine's trait", () => {
+  const kept = (id: string, extra: Partial<ExclaveInfo> = {}, fields: Partial<Machine> = {}): Machine =>
+    machine(id, {
+      exclaves: [exclave("main", `org:${id}`, { traits: ["atlas", "gpu"], keepFree: ["atlas"], ...extra })],
+      ...fields,
+    });
+  const plain = (id: string, fields: Partial<Machine> = {}): Machine => machine(id, fields);
+  const requiring = (...requires: string[]): Task => task({ spec: spec({ requires }) });
+  const scoreOf = (decision: Decision, deviceId: string): Candidate["score"] =>
+    decision.candidates.find((c) => c.deviceId === deviceId)?.score;
+
+  test("a task not requiring the trait scores 8 higher with components.keepFree 1", () => {
+    const decision = decide([kept("a"), plain("a2", { exclaves: [exclave("main", "org:a")] })]);
+    const [penalised, free] = [scoreOf(decision, "a"), scoreOf(decision, "a2")];
+    expect(penalised?.components.keepFree).toBe(1);
+    expect(free?.components).not.toHaveProperty("keepFree");
+    expect((penalised?.total ?? 0) - (free?.total ?? 0)).toBeCloseTo(DEFAULT_CONFIG.weights.keepFree, 10);
+    expect(DEFAULT_CONFIG.weights.keepFree).toBe(8);
+  });
+
+  test("a task requiring the kept-free trait gets no penalty and no component", () => {
+    const score = scoreOf(decide([kept("a")], { task: requiring("atlas") }), "a");
+    expect(score?.components).not.toHaveProperty("keepFree");
+  });
+
+  test("requiring another trait the exclave carries does not lift it: the machine is still kept free for the first", () => {
+    const score = scoreOf(decide([kept("a")], { task: requiring("gpu") }), "a");
+    expect(score?.components.keepFree).toBe(1);
+  });
+
+  test("several kept-free traits still cost one penalty, and requiring all of them lifts it", () => {
+    const three = { traits: ["a1", "a2", "a3"], keepFree: ["a1", "a2", "a3"] };
+    const total = (task_: Task): number | undefined => scoreOf(decide([kept("a", three)], { task: task_ }), "a")?.total;
+    const none = total(requiring("a1", "a2", "a3"));
+    expect(total(task())).toBeCloseTo((none ?? 0) + 8, 10);
+    expect(total(requiring("a1"))).toBeCloseTo((none ?? 0) + 8, 10);
+    expect(scoreOf(decide([kept("a", three)], { task: requiring("a1") }), "a")?.components.keepFree).toBe(1);
+  });
+
+  test("the penalty is per exclave: only the exclave carrying the trait pays", () => {
+    const m = machine("a", {
+      exclaves: [
+        exclave("main", "org:a", { traits: ["atlas"], keepFree: ["atlas"] }),
+        exclave("alt", "org:b", { traits: ["atlas"] }),
+      ],
+      repos: [clone("app", "main"), clone("app2", "alt")],
+      status: status({ quota: [obs(0), obs(1)] }),
+    });
+    const decision = decide([m]);
+    const keepFree = (id: string): number | undefined =>
+      decision.candidates.find((c) => c.exclave === id)?.score?.components.keepFree;
+    expect([keepFree("main"), keepFree("alt")]).toEqual([1, undefined]);
+    expect(decision.chosen?.exclave).toBe("alt");
+  });
+
+  test("with two otherwise equal machines the other one wins, even when it sorts later", () => {
+    const decision = decide([kept("a"), plain("b")]);
+    expect(decision.chosen?.deviceId).toBe("b");
+  });
+
+  test("never a filter: the kept-free machine takes the task when it is the only candidate", () => {
+    expect(decide([kept("a")]).chosen?.deviceId).toBe("a");
+    expect(codes(only(decide([kept("a")])))).toEqual([]);
+  });
+
+  // The kept-free machine sorts first where it must lose and last where it must win, so the deviceId tie-break
+  // never explains the outcome.
+  test("fills last: an idle kept-free machine loses to a loaded one, and wins once the other costs more than the penalty", () => {
+    const idle = { status: status({ cpu: 0, mem: 0, quota: [obs(0)] }) };
+    const loaded = (id: string, fiveHourPct: number): Machine =>
+      plain(id, { status: status({ cpu: 100, quota: [obs(0, { h: fiveHourPct })] }) });
+    const running = (id: string): Task[] => [held("x", id), held("y", id), held("w", id)];
+    // 4 (saturated) + 3 in flight + a little account pressure < 8: still preferred over the idle machine.
+    const preferred = decide([kept("a", {}, idle), loaded("z", 10)], { tasks: running("z") });
+    expect(preferred.chosen?.deviceId).toBe("z");
+    // The same machine on a nearly spent account costs more than the penalty, so the kept-free one wins on score.
+    const spent = decide([loaded("a", 60), kept("z", {}, idle)], { tasks: running("a") });
+    expect(spent.chosen?.deviceId).toBe("z");
+    expect(scoreOf(spent, "z")?.total).toBeLessThan(scoreOf(spent, "a")?.total ?? 0);
   });
 });
 

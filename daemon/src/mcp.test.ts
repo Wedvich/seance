@@ -2072,6 +2072,29 @@ describe("traits in the tools' answers", () => {
   });
 });
 
+describe("keepFree in list_machines", () => {
+  test("an exclave advertising keepFree names them; one without shows no field", async () => {
+    // oxlint-disable no-map-spread -- a fixture, built once per test
+    const machines = traitMachines().map((m) =>
+      m.deviceId === "device-wsl"
+        ? { ...m, exclaves: (m.exclaves ?? []).map((e) => ({ ...e, keepFree: ["atlas"] })) }
+        : m,
+    );
+    // oxlint-enable no-map-spread
+    const fake = leaderRelay([], machines);
+    fake.setState({ scheduler: { kind: "ready", deviceId: "device-thad", term: 3 } });
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const listed: { name: string; exclaves: Record<string, unknown>[] }[] = JSON.parse(
+      toolText(await client.callTool({ name: "list_machines", arguments: {} })),
+    );
+    const byName = new Map(listed.map((m) => [m.name, m.exclaves.map((e) => e.keepFree)]));
+    expect(byName.get("WSL")).toEqual([["atlas"]]);
+    expect(byName.get("Thad")).toEqual([undefined, undefined]);
+    lazy.stop();
+  });
+});
+
 describe("trait probes", () => {
   /**
    * Thad's atlas and az probes fail on `default`, but az is healthy on `work`, which also carries it; WSL's

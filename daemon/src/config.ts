@@ -42,6 +42,8 @@ export type TraitsConfig = Readonly<Record<string, TraitScope>>;
 export interface TraitScope {
   readonly exclaves?: readonly string[];
   readonly probe?: TraitProbeConfig;
+  /** Ask the leader to prefer other machines for tasks that don't require this trait: a score penalty, never a filter. Stored only when true. */
+  readonly keepFree?: true;
 }
 
 /**
@@ -67,9 +69,6 @@ export const TRAIT_PROBE_LIMITS = {
   maxTimeoutSeconds: 30,
 } as const;
 
-/** Keys the spec defines for a trait that this build does not act on yet: refused, so no one believes `keepFree` shapes routing. */
-const UNBUILT_TRAIT_KEYS: ReadonlySet<string> = new Set(["keepFree"]);
-
 /**
  * Strict, as `parseAuthHealth` is: a trait dropped silently would route work away from (or, worse,
  * onto) a machine on the strength of a typo. Any mistake fails the load, naming where.
@@ -89,17 +88,23 @@ function parseTraits(raw: unknown, path: string): TraitsConfig | undefined {
     const scope = raw[name];
     if (!isRecord(scope)) throw new TypeError(`config at ${path}: "traits.${name}" must be an object`);
     for (const key of Object.keys(scope)) {
-      if (key === "exclaves" || key === "probe") continue;
+      if (key === "exclaves" || key === "probe" || key === "keepFree") continue;
       throw new TypeError(
-        UNBUILT_TRAIT_KEYS.has(key)
-          ? `config at ${path}: "traits.${name}.${key}" is not built yet in this seanced`
-          : `config at ${path}: unknown key "traits.${name}.${key}" (the keys are "exclaves" and "probe")`,
+        `config at ${path}: unknown key "traits.${name}.${key}" (the keys are "exclaves", "probe" and "keepFree")`,
       );
     }
     const probe = parseTraitProbe(scope["probe"], path, name);
+    const keepFreeRaw = scope["keepFree"];
+    if (keepFreeRaw !== undefined && typeof keepFreeRaw !== "boolean") {
+      throw new TypeError(`config at ${path}: "traits.${name}.keepFree" must be true or false`);
+    }
+    const extras = {
+      ...(probe === undefined ? {} : { probe }),
+      ...(keepFreeRaw === true ? { keepFree: true as const } : {}),
+    };
     const exclaves = scope["exclaves"];
     if (exclaves === undefined) {
-      traits[name] = probe === undefined ? {} : { probe };
+      traits[name] = extras;
       continue;
     }
     const valid =
@@ -112,7 +117,7 @@ function parseTraits(raw: unknown, path: string): TraitsConfig | undefined {
         `config at ${path}: "traits.${name}.exclaves" must be a non-empty array of distinct exclave names ("default" or one from ~/.exclaves)`,
       );
     }
-    traits[name] = { exclaves: [...exclaves], ...(probe === undefined ? {} : { probe }) };
+    traits[name] = { exclaves: [...exclaves], ...extras };
   }
   return traits;
 }

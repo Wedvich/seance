@@ -648,6 +648,86 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     }
   }, 90_000);
 
+  // M4's keepFree, end to end: the second daemon's config marks its trait keepFree, so its register carries
+  // `ExclaveInfo.keepFree`, and the real leader scores that machine's candidate 8 higher for a task that
+  // does not require the trait: the other machine wins, though the kept-free one is not filtered.
+  test("a task not requiring a keepFree trait lands on the other machine, and the kept-free candidate carries the penalty", async () => {
+    const second = await stack.startSecondDaemon({
+      name: "KeptFreeBox",
+      exclaves: [{ id: "default", observedAtMs: Date.now() - 10 * 60_000, fiveHourPct: 1 }],
+      traits: { atlas: { keepFree: true } },
+    });
+    const app = startApp(stack, {}, { accounts: true });
+    const lazy = new LazyRelay({
+      create: () =>
+        new RelayClient({
+          url: wsUrl(stack.relay, "/app"),
+          token: TOKEN,
+          key: stack.appKey,
+          accountKey: stack.accountKey,
+          createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
+        }),
+    });
+    const client = new Client(
+      { name: "e2e-keep-free", version: "0.0.0" },
+      { versionNegotiation: { mode: { pin: "2026-07-28" } } },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    serveStdio(() => buildMcpServer(relayFleet(lazy), null), { transport: serverTransport });
+    await client.connect(clientTransport);
+    const ids: string[] = [];
+    const windows: string[] = [];
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      await app.waitForApp(
+        (state) =>
+          state.relay.scheduler.kind === "ready" &&
+          state.relay.machines.some(
+            (m) =>
+              m.deviceId === second.deviceId &&
+              m.connected &&
+              m.repos.length > 0 &&
+              m.exclaves?.some((x) => x.keepFree?.includes("atlas") === true) === true &&
+              m.status !== undefined,
+          ),
+        "the second machine live, advertising atlas as keepFree",
+      );
+      const listing = await client.callTool({ name: "list_machines", arguments: {} });
+      expect(exclavesOf(listing, second.deviceId)).toContainEqual(expect.objectContaining({ keepFree: ["atlas"] }));
+      expect(exclavesOf(listing, stack.deviceId)).not.toContainEqual(
+        expect.objectContaining({ keepFree: expect.anything() }),
+      );
+
+      const result = await client.callTool({
+        name: "spawn_session",
+        arguments: { machine: "auto", repo: "myrepo", prompt: "keep free" },
+      });
+      const text = (result.content as { text: string }[]).map((entry) => entry.text).join("\n");
+      expect(result.isError).not.toBe(true);
+      const id = /^task (\S+):/u.exec(text)?.[1];
+      if (id === undefined) throw new Error(`no task id in: ${text}`);
+      ids.push(id);
+      await pollUntil(async () => (await stack.queue().get(id))?.body?.state === "running", "the task to run", 20_000);
+      const body = (await stack.queue().get(id))?.body;
+      const window = body?.assignment?.window;
+      if (window !== undefined) windows.push(window);
+      expect(body?.assignment?.deviceId).toBe(stack.deviceId);
+      const candidates = body?.decision?.candidates ?? [];
+      const penalised = candidates.find((c) => c.deviceId === second.deviceId)?.score;
+      expect(penalised?.components.keepFree).toBe(1);
+      const winner = candidates.find((c) => c.deviceId === stack.deviceId)?.score;
+      expect(winner?.components).not.toHaveProperty("keepFree");
+    } finally {
+      await Promise.all(ids.map((id) => app.client.cancel(id).catch(() => null)));
+      await Promise.all(windows.map((window) => killWindow(window).catch(() => {})));
+      await client.close();
+      lazy.stop();
+      app.stop();
+      await second.stop();
+    }
+  }, 90_000);
+
   // `seanced spawn` in a shell with no key: `autoFleet` finds none and takes the
   // broker. The alias is another client's write, resolved by the CLI from the broker's
   // accounts read, so the stored record carries the accountId and the CLI's client.
