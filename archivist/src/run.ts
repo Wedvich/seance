@@ -29,6 +29,15 @@ export interface ArchivistOpts {
   readonly collect?: Partial<CollectTimings>;
 }
 
+/**
+ * The shared client's wire log writes a send and a recv line per store-get; a
+ * burst of `queue-changed` is a burst of gets, and the collector says what it
+ * archived itself. Timeouts, refusals and drops still log.
+ */
+export function isStoreGetTraffic(line: string): boolean {
+  return /^wire send id=\S+ t=store-get$/u.test(line) || /^wire recv re=\S+ t=store-record pending=/u.test(line);
+}
+
 export interface Archivist {
   readonly deviceId: string;
   readonly stop: () => void;
@@ -72,79 +81,91 @@ export async function startArchivist(opts: ArchivistOpts = {}): Promise<Archivis
   const state = await loadSeatState(statePathIn(stateDir));
   const identity = await identityOfState(state);
   const [key, accountKey] = await Promise.all([importPsk(psk), importAccountKey(psk)]);
+  const fingerprint = await pskFingerprint(psk);
   const archive = await Archive.open(archivePathIn(stateDir));
+  try {
+    return await startLegs();
+  } catch (err) {
+    // A throw before the returned `stop` exists would leave the handle, and the file's locks, open.
+    archive.close();
+    throw err;
+  }
 
-  const startedAt = Date.now();
-  let connectedSince: number | null = null;
-  // Chained: the refusal loop flaps connected/disconnected back to back, and unordered renames could leave a stale value.
-  let runtimeWrites: Promise<void> = Promise.resolve();
-  const updateRuntime = (connected: boolean): void => {
-    connectedSince = connected ? (connectedSince ?? Date.now()) : null;
-    const runtime = { pid: process.pid, startedAt, connected, connectedSince };
-    runtimeWrites = runtimeWrites
-      .then(() => writeRuntime(runtime, runtimePathIn(stateDir)))
-      .catch((err: unknown) => log.warn(`could not write runtime: ${String(err)}`));
-  };
+  async function startLegs(): Promise<Archivist> {
+    const startedAt = Date.now();
+    let connectedSince: number | null = null;
+    // Chained: the refusal loop flaps connected/disconnected back to back, and unordered renames could leave a stale value.
+    let runtimeWrites: Promise<void> = Promise.resolve();
+    const updateRuntime = (connected: boolean): void => {
+      connectedSince = connected ? (connectedSince ?? Date.now()) : null;
+      const runtime = { pid: process.pid, startedAt, connected, connectedSince };
+      runtimeWrites = runtimeWrites
+        .then(() => writeRuntime(runtime, runtimePathIn(stateDir)))
+        .catch((err: unknown) => log.warn(`could not write runtime: ${String(err)}`));
+    };
 
-  const appLeg = appRelayClient(config, { key, accountKey }, (line) => log.info(`app leg: ${line}`));
-  let appStatus: RelayStatus = appLeg.getState().status;
-  const unsubscribe = appLeg.subscribe(() => {
-    const { status, rejection } = appLeg.getState();
-    if (status === appStatus) return;
-    appStatus = status;
-    log.info(`app leg ${status}${rejection === null ? "" : ` (${rejection})`}`);
-  });
+    const appLeg = appRelayClient(config, { key, accountKey }, (line) => {
+      if (!isStoreGetTraffic(line)) log.info(`app leg: ${line}`);
+    });
+    let appStatus: RelayStatus = appLeg.getState().status;
+    const unsubscribe = appLeg.subscribe(() => {
+      const { status, rejection } = appLeg.getState();
+      if (status === appStatus) return;
+      appStatus = status;
+      log.info(`app leg ${status}${rejection === null ? "" : ` (${rejection})`}`);
+    });
 
-  const seat = new RelayClient({
-    url: config.relayUrl,
-    bearerToken: config.bearerToken,
-    identity,
-    key,
-    role: DAEMON_ROLES.archivist,
-    buildInfo: () =>
-      sealArchivistInfo(key, identity.deviceId, { archivist: true, name: config.name, platform: process.platform }),
-    // No op is the archivist's: an app that knows the flag never sends one, and an older one gets no answer.
-    handle: (plain: Plain, from: string): Promise<null> => {
-      log.warn(`dropped ${quote(plain.op)} from ${from}: the archivist answers no op`);
-      return Promise.resolve(null);
-    },
-    onConnect: () => {
-      updateRuntime(true);
-      // A 401 on the app leg is permanent for that client; the /daemon upgrade succeeding says the token works now.
-      // Fires once the register has left, not when it is accepted (there is no ack): a refused seat gets here too.
-      if (appLeg.getState().status === "rejected") appLeg.reconnect();
-    },
-    onDisconnect: () => updateRuntime(false),
-    ...(opts.baseBackoffMs === undefined ? {} : { baseBackoffMs: opts.baseBackoffMs }),
-    ...(opts.maxBackoffMs === undefined ? {} : { maxBackoffMs: opts.maxBackoffMs }),
-  });
+    const seat = new RelayClient({
+      url: config.relayUrl,
+      bearerToken: config.bearerToken,
+      identity,
+      key,
+      role: DAEMON_ROLES.archivist,
+      buildInfo: () =>
+        sealArchivistInfo(key, identity.deviceId, { archivist: true, name: config.name, platform: process.platform }),
+      // No op is the archivist's: an app that knows the flag never sends one, and an older one gets no answer.
+      handle: (plain: Plain, from: string): Promise<null> => {
+        log.warn(`dropped ${quote(plain.op)} from ${from}: the archivist answers no op`);
+        return Promise.resolve(null);
+      },
+      onConnect: () => {
+        updateRuntime(true);
+        // A 401 on the app leg is permanent for that client; the /daemon upgrade succeeding says the token works now.
+        // Fires once the register has left, not when it is accepted (there is no ack): a refused seat gets here too.
+        if (appLeg.getState().status === "rejected") appLeg.reconnect();
+      },
+      onDisconnect: () => updateRuntime(false),
+      ...(opts.baseBackoffMs === undefined ? {} : { baseBackoffMs: opts.baseBackoffMs }),
+      ...(opts.maxBackoffMs === undefined ? {} : { maxBackoffMs: opts.maxBackoffMs }),
+    });
 
-  const collector = startCollector({
-    source: appLeg,
-    archive,
-    accountKey,
-    selfId: identity.deviceId,
-    log,
-    ...(opts.collect === undefined ? {} : { timings: opts.collect }),
-  });
+    const collector = startCollector({
+      source: appLeg,
+      archive,
+      accountKey,
+      selfId: identity.deviceId,
+      log,
+      ...(opts.collect === undefined ? {} : { timings: opts.collect }),
+    });
 
-  log.info(
-    `seance-archivist ${quote(config.name)} on ${hostname()}: deviceId ${identity.deviceId}, ` +
-      `psk ${await pskFingerprint(psk)} (credential), relay ${config.relayUrl}`,
-  );
-  seat.start();
-  appLeg.start();
-  updateRuntime(false);
+    log.info(
+      `seance-archivist ${quote(config.name)} on ${hostname()}: deviceId ${identity.deviceId}, ` +
+        `psk ${fingerprint} (credential), relay ${config.relayUrl}`,
+    );
+    seat.start();
+    appLeg.start();
+    updateRuntime(false);
 
-  return {
-    deviceId: identity.deviceId,
-    stop: (): void => {
-      unsubscribe();
-      collector.stop();
-      seat.stop();
-      appLeg.stop();
-      // After the collector: a reply landing past this point is dropped there, never written.
-      archive.close();
-    },
-  };
+    return {
+      deviceId: identity.deviceId,
+      stop: (): void => {
+        unsubscribe();
+        collector.stop();
+        seat.stop();
+        appLeg.stop();
+        // After the collector: a reply landing past this point is dropped there, never written.
+        archive.close();
+      },
+    };
+  }
 }

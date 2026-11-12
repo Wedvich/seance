@@ -17,7 +17,7 @@ import {
 import { readRuntime } from "../../daemon/src/state.ts";
 import { pollUntil } from "../../daemon/test/fixtures.ts";
 import { startTestRelay } from "../../daemon/test/harness.ts";
-import { startArchivist, type ArchivistOpts } from "../src/run.ts";
+import { isStoreGetTraffic, startArchivist, type ArchivistOpts } from "../src/run.ts";
 
 /**
  * The archivist against the daemon suite's relay double — controllable where the
@@ -207,5 +207,14 @@ describe("seance-archivist run", () => {
     await expect(startArchivist({ ...withPsk, credentialPath })).rejects.toThrow('holds a "psk"');
     expect(existsSync(paths.stateDir)).toBe(false);
     expect(existsSync(withPsk.stateDir)).toBe(false);
+  });
+
+  test("the app leg's log drops the per-get wire lines and keeps every failure", () => {
+    expect(isStoreGetTraffic('wire send id="abc-1" t=store-get')).toBe(true);
+    expect(isStoreGetTraffic('wire recv re="abc-1" t=store-record pending=yes')).toBe(true);
+    expect(isStoreGetTraffic('wire send id="abc-2" t=store-list')).toBe(false);
+    expect(isStoreGetTraffic('wire timeout id="abc-1" t=store-get after=10000ms')).toBe(false);
+    expect(isStoreGetTraffic('wire recv re="abc-1" t=store-refused pending=yes')).toBe(false);
+    expect(isStoreGetTraffic('wire dropped re="abc-1" reason=store-stale')).toBe(false);
   });
 });

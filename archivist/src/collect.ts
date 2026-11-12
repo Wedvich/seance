@@ -67,7 +67,7 @@ export interface Collector {
  * Runs `read` at most once per `gapMs`, coalescing kicks that land while one
  * runs or waits; a read that reports failure is tried again after `retryMs`.
  */
-class Paced {
+export class Paced {
   readonly #gapMs: number;
   readonly #retryMs: number;
   readonly #read: () => Promise<boolean>;
@@ -234,8 +234,7 @@ export function startCollector(opts: CollectorOpts): Collector {
     }),
   );
 
-  // Gets for named tasks run one at a time, after any before them: a burst of nudges is not a burst of reads.
-  let gets: Promise<void> = Promise.resolve();
+  let ready = false;
   const readNamed = async (ids: readonly string[]): Promise<void> => {
     const ok = await guarded("task read", async () => {
       let archived = 0;
@@ -260,20 +259,47 @@ export function startCollector(opts: CollectorOpts): Collector {
     // A failed get falls back to the paced listing, which covers the same records.
     if (!ok) tasks.kick();
   };
-  const getTasks = (ids: readonly string[]): void => {
-    gets = gets.then(() => readNamed(ids));
+  // Named ids wait in a set one worker drains, a batch at a time: a burst of nudges, or a slow relay, reads each
+  // task once per round, never once per nudge.
+  const named = new Set<string>();
+  let draining = false;
+  const drainNamed = async (): Promise<void> => {
+    if (draining) return;
+    draining = true;
+    try {
+      while (named.size > 0) {
+        if (stopped) return;
+        const ids = [...named];
+        named.clear();
+        // oxlint-disable-next-line no-await-in-loop -- one batch at a time, by design
+        await readNamed(ids);
+      }
+    } finally {
+      draining = false;
+    }
   };
 
   const onQueueChanged = (change: QueueChanged): void => {
     if (stopped) return;
-    if (change.tasks === undefined) tasks.kick();
-    else if (change.tasks.length > 0) getTasks(change.tasks);
+    if (change.tasks === undefined) {
+      tasks.kick();
+      return;
+    }
+    // Before the registry settles no machine resolves, so an account would be missed; the listing at ready covers these.
+    if (!ready) return;
+    for (const id of change.tasks) named.add(id);
+    void drainNamed();
   };
 
   const onStoreChanged = (key: string): void => {
     // Relay plaintext: only a hint to re-read through the record's own reader, which re-checks the key.
     if (stopped || !key.startsWith(STORE_PREFIXES.account.prefix)) return;
-    void guarded("account read", async () => {
+    changedAccounts.add(key);
+    void drainAccounts();
+  };
+
+  const readAccount = (key: string): Promise<boolean> =>
+    guarded("account read", async () => {
       const answer = await source.getAccountRecord(key);
       if (answer === null || !answer.ok) return refusal("account read", answer);
       const { entry } = answer;
@@ -285,9 +311,28 @@ export function startCollector(opts: CollectorOpts): Collector {
       archive.upsertAccount(answer.key, entry.alias, entry.version, Date.now());
       return true;
     });
+
+  // As the named tasks: coalesced per key, one get at a time. A failed one falls back to the paced listing.
+  const changedAccounts = new Set<string>();
+  let drainingAccounts = false;
+  const drainAccounts = async (): Promise<void> => {
+    if (drainingAccounts) return;
+    drainingAccounts = true;
+    try {
+      while (changedAccounts.size > 0) {
+        if (stopped) return;
+        const keys = [...changedAccounts];
+        changedAccounts.clear();
+        for (const key of keys) {
+          // oxlint-disable-next-line no-await-in-loop -- one store-get at a time, by design
+          if (!(await readAccount(key))) accounts.kick();
+        }
+      }
+    } finally {
+      drainingAccounts = false;
+    }
   };
 
-  let ready = false;
   let lastMachines: RelayState["machines"] | null = null;
   let lastScheduler: RelayState["scheduler"] | null = null;
   const onState = (): void => {
@@ -306,11 +351,22 @@ export function startCollector(opts: CollectorOpts): Collector {
       accounts.kick();
     }
     if (state.machines === lastMachines && state.scheduler === lastScheduler) return;
-    lastMachines = state.machines;
-    lastScheduler = state.scheduler;
-    const events = archive.applyFleet(fleetOf(state, selfId), Date.now());
-    if (events > 0) log.info(`fleet: ${events} event${events === 1 ? "" : "s"}`);
-    noteAccounts(state.machines).catch((err: unknown) => log.warn(`account note: ${String(err)}`));
+    // The baseline moves only once the write lands: a locked or full disk is tried again on the next change.
+    try {
+      const events = archive.applyFleet(fleetOf(state, selfId), Date.now());
+      lastMachines = state.machines;
+      lastScheduler = state.scheduler;
+      if (events > 0) log.info(`fleet: ${events} event${events === 1 ? "" : "s"}`);
+    } catch (err) {
+      // A throw here would leave the shared client's listener loop and, on a registry push, kill the process.
+      log.warn(`fleet write: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    noteAccounts(state.machines).catch((err: unknown) => {
+      if (stopped) return;
+      lastMachines = null;
+      log.warn(`account note: ${err instanceof Error ? err.message : String(err)}`);
+    });
   };
 
   /** Accounts signed in somewhere, kept by key so a removed one's rows still name a key (A24). */
@@ -324,8 +380,9 @@ export function startCollector(opts: CollectorOpts): Collector {
     const now = Date.now();
     for (const key of keys) {
       if (noted.has(key)) continue;
-      noted.add(key);
+      // After the write: a key that failed to land is tried again on the next registry change.
       archive.noteAccount(key, now);
+      noted.add(key);
     }
   };
 
