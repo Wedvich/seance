@@ -28,3 +28,7 @@ export function runtimePathIn(stateDirectory: string): string {
 export function archivePathIn(stateDirectory: string): string {
   return join(stateDirectory, "archive.sqlite");
 }
+
+export function metricsPathIn(stateDirectory: string): string {
+  return join(stateDirectory, "metrics.sqlite");
+}

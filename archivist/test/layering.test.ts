@@ -165,22 +165,36 @@ describe("archivist layering", () => {
     expect(offenders).toEqual([]);
   });
 
-  test("only archive.ts opens SQLite, and it holds no statement that removes or rewrites history", async () => {
+  test("only archive.ts and metrics-archive.ts open SQLite, and neither holds a statement that removes history", async () => {
     const sqliteUsers: string[] = [];
     for (const file of await archivistSources()) {
       // oxlint-disable-next-line no-await-in-loop -- a handful of small files
       if (specifiers(await readFile(join(ROOT, file), "utf8")).includes("bun:sqlite")) sqliteUsers.push(file);
     }
-    expect(sqliteUsers).toEqual(["archivist/src/archive.ts"]);
-    // Append-only (docs/archivist.md, A23): a purge is SQL on the box, never this code.
+    expect(sqliteUsers.toSorted()).toEqual(["archivist/src/archive.ts", "archivist/src/metrics-archive.ts"]);
+    // Append-only (docs/archivist.md, A23): a purge is SQL on the box, never this code. The metrics tiers'
+    // retention (A22) is the one prune, and it is the daemon's own module's, not a statement here.
     // Comments are stripped first: one saying "never delete" is not a statement.
-    const source = (await readFile(join(ROOT, "archivist/src/archive.ts"), "utf8")).replaceAll(
+    const sources = await Promise.all(
+      sqliteUsers.map(async (file) =>
+        (await readFile(join(ROOT, file), "utf8")).replaceAll(/\/\*[\s\S]*?\*\/|^\s*\/\/.*$/gmu, ""),
+      ),
+    );
+    for (const source of sources) expect(removing(source)).toBeNull();
+    // And an event is never rewritten, whatever else UPDATE touches.
+    expect(sources.join("\n").match(/\bUPDATE\s+events\b/giu)).toBeNull();
+  });
+
+  test("the archive's metrics prune only through the shared tiers' two horizon deletes", async () => {
+    const source = await readFile(join(ROOT, "archivist/src/metrics-archive.ts"), "utf8");
+    expect(specifiers(source)).toContain("../../daemon/src/metrics-tiers.ts");
+    const tiers = (await readFile(join(ROOT, "daemon/src/metrics-tiers.ts"), "utf8")).replaceAll(
       /\/\*[\s\S]*?\*\/|^\s*\/\/.*$/gmu,
       "",
     );
-    expect(removing(source)).toBeNull();
-    // And an event is never rewritten, whatever else UPDATE touches.
-    expect(source.match(/\bUPDATE\s+events\b/giu)).toBeNull();
+    // The two horizon prunes, and nothing else that removes a row.
+    expect(tiers.match(/\bDELETE\b[^"`]*/gu)).toEqual(["DELETE FROM raw WHERE ts < ?", "DELETE FROM m5 WHERE ts < ?"]);
+    expect(tiers.match(/\b(?:DROP|TRUNCATE)\b/gu)).toBeNull();
   });
 
   test("the walk catches a forbidden module behind an allowed one, a type-only import, and a package", async () => {
