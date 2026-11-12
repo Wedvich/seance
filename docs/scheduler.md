@@ -1154,7 +1154,8 @@ of M4 has landed.
     at `checkpoint` or `auto`, answers a turn ending on a plain-text "shall I proceed?" with one
     nudge to proceed or ask it properly. First check that an engine hook can continue a turn.
 
-- **Successor** — _Decided_ by the owner, 2026-11-12 (O1–O3 below); spec only, nothing built. A task
+- **Successor** — _Decided_ by the owner, 2026-11-12 (O1–O3 below); the outside path (2a) is built
+  (2026-11-12), the session's own (2b) and the automatic trigger are not. A task
   running on an account that runs out of usage passes its work to a **successor**: a new task, free
   to land on another account, that starts from the old task's pushed branch and a written record of
   where it stood. Quota failover is the reason: a task that is half done when its account's 5-hour
@@ -1164,12 +1165,12 @@ of M4 has landed.
   above), which ends a session whose work is finished and whose PR awaits merge. A pass moves work
   that is not finished. No identifier of this feature may contain the hand-off's names; the act is a
   **pass**, the new task the **successor**, the old one **`superseded`**. The record is DESIGN.md's
-  "Passing to a successor — designed 2026-11-12, not built".
+  "Passing to a successor".
   1. **Spec** — **Done** (this item and DESIGN.md), PR 1.
   2. **Manual path**, in two PRs. A person or the session itself passes a running task. The old
      machine's daemon pushes the clean branch, the leader creates the successor and links the two,
      and the old session is closed.
-     - **2a, from outside** — not built: the PWA's "Pass to successor" on a running card,
+     - **2a, from outside** — **Done** (2026-11-12): the PWA's "Pass to successor" on a running card,
        `seanced pass <task-id>` and MCP `pass_task { taskId }`. One scheduler op, `pass`, behind all
        three; the successor's prompt is the fallback one (below).
      - **2b, from the session** — not built: MCP `pass_to_successor { record }`. The session commits
