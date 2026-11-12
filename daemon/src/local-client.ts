@@ -23,9 +23,16 @@ const EMPTY = Buffer.alloc(0);
  * short circuit is unavailable" rather than "the request failed".
  */
 export class LocalUnavailable extends Error {
-  constructor(message: string) {
+  /**
+   * The socket file is there and nobody accepts on it: a daemon that exited without the clean
+   * stop that unlinks it — a self-update's restart, a crash — and that its service manager is
+   * about to relaunch, or never will. Only `exchange`'s restart grace reads it.
+   */
+  readonly refused: boolean;
+  constructor(message: string, refused = false) {
     super(message);
     this.name = "LocalUnavailable";
+    this.refused = refused;
   }
 }
 
@@ -76,14 +83,65 @@ function deferred(): Deferred {
 }
 
 /**
+ * How long a call that may be sent again waits for a restarting daemon to listen again: systemd's
+ * `RestartSec=5` plus a cold start, or launchd holding a job that ran under 10 s
+ * (`ThrottleInterval`) — a self-update shortly after a start — with room on a slow box.
+ */
+export const RESTART_GRACE_MS = 20_000;
+
+/** Between tries at a restarting daemon's socket. */
+const RESTART_POLL_MS = 250;
+
+export interface ExchangeOpts {
+  readonly path: string;
+  readonly timeoutMs: number;
+  readonly timeoutText: string;
+  /**
+   * For a frame whose repeat does nothing new — a read, an enqueue by its own task id — only:
+   * how long to keep re-sending it while the daemon restarts. A connection lost before its
+   * answer starts the clock, and so does a socket nobody accepts on (`LocalUnavailable.refused`);
+   * a socket that is not there at all is a daemon not running, said at once. Each try still has
+   * `timeoutMs`. Absent or 0, one try.
+   */
+  readonly restartGraceMs?: number;
+}
+
+/**
  * Writes one frame, reads one JSON-object line back, closes. Shared by the op
  * path below and the fleet broker client, which differ only in the frame they
  * send and how they check the answer.
  */
-export async function exchange(
-  frame: object,
-  opts: { readonly path: string; readonly timeoutMs: number; readonly timeoutText: string },
-): Promise<unknown> {
+export async function exchange(frame: object, opts: ExchangeOpts): Promise<unknown> {
+  const graceMs = opts.restartGraceMs ?? 0;
+  let until: number | null = null;
+  let lostLast = false;
+  let lostEver = false;
+  for (;;) {
+    try {
+      // oxlint-disable-next-line no-await-in-loop -- each try follows the one before
+      return await exchangeOnce(frame, opts);
+    } catch (err) {
+      if (graceMs <= 0 || !(err instanceof LocalUnavailable)) throw err;
+      const lost = err instanceof LocalConnectionLost;
+      // Once a restart is under way, a socket that is gone for a moment is part of it.
+      if (until === null && !lost && !err.refused) throw err;
+      // Taken and dropped twice running is a daemon refusing the frame (one older than it), not a restart:
+      // a restarting one is not listening in between.
+      if (lost && lostLast) throw err;
+      lostLast = lost;
+      lostEver ||= lost;
+      until ??= Date.now() + graceMs;
+      if (Date.now() + RESTART_POLL_MS > until) {
+        // A try that reached the daemon may have run: giving up on a later connect must not read as never sent.
+        throw lostEver && !lost ? new LocalConnectionLost(`${err.message}, after an earlier try was cut off`) : err;
+      }
+      // oxlint-disable-next-line no-await-in-loop -- the wait between tries
+      await Bun.sleep(RESTART_POLL_MS);
+    }
+  }
+}
+
+async function exchangeOnce(frame: object, opts: ExchangeOpts): Promise<unknown> {
   const { path, timeoutMs } = opts;
   const settled = deferred();
   let inbound = EMPTY;
@@ -149,9 +207,8 @@ export async function exchange(
   } catch (err) {
     // Remediation belongs to `localFailureText`, which carries it for every
     // `LocalUnavailable`, not just this one.
-    throw new LocalUnavailable(
-      `no daemon listening at ${path} (${(err as NodeJS.ErrnoException).code ?? String(err)})`,
-    );
+    const code = err instanceof Error && "code" in err && typeof err.code === "string" ? err.code : undefined;
+    throw new LocalUnavailable(`no daemon listening at ${path} (${code ?? String(err)})`, code === "ECONNREFUSED");
   }
 
   const timer = setTimeout(() => {
@@ -177,7 +234,7 @@ export async function exchange(
 export async function localRequest<T>(
   op: RequestOp,
   payload: unknown,
-  opts: { readonly path?: string; readonly timeoutMs?: number } = {},
+  opts: { readonly path?: string; readonly timeoutMs?: number; readonly restartGraceMs?: number } = {},
 ): Promise<T | ErrorResponse> {
   const request: Plain = { id: crypto.randomUUID(), ts: Date.now(), op, payload };
   const timeoutMs = opts.timeoutMs ?? OP_TIMEOUT_MS[op];
@@ -185,6 +242,8 @@ export async function localRequest<T>(
     path: opts.path ?? socketPath(),
     timeoutMs,
     timeoutText: `the daemon did not answer ${op} within ${timeoutMs}ms`,
+    // Only a read rides out a restart: a lost spawn or despawn may have run.
+    restartGraceMs: op === "sessions" ? (opts.restartGraceMs ?? RESTART_GRACE_MS) : 0,
   });
   // One connection per request, so this can only be our own reply — checked
   // anyway, because a mismatch means the two ends disagree about the protocol

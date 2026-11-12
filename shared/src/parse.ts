@@ -374,6 +374,9 @@ export function parseUpdateReport(value: unknown): UpdateReport | null {
   return { at, outcome: known, ...(detail === undefined ? {} : { detail: detail.slice(0, UPDATE_DETAIL_MAX) }) };
 }
 
+/** A daemon mints a UUID; the bound only keeps a skewed blob from carrying a large one around. */
+const MAX_INSTANCE_LENGTH = 64;
+
 /**
  * The decrypted register blob. Inside the PSK boundary, so this is skew
  * tolerance rather than defence: a daemon a version ahead or behind must cost
@@ -395,6 +398,7 @@ export function parseMachineInfo(value: unknown): MachineInfo | null {
   const capabilities = value["capabilities"];
   const source = parseSourceInfo(value["source"]);
   const lastUpdate = parseUpdateReport(value["lastUpdate"]);
+  const instance = value["instance"];
   return {
     name: value["name"],
     platform: value["platform"],
@@ -404,6 +408,7 @@ export function parseMachineInfo(value: unknown): MachineInfo | null {
     ...(isStringArray(capabilities) ? { capabilities } : {}),
     ...(source === null ? {} : { source }),
     ...(lastUpdate === null ? {} : { lastUpdate }),
+    ...(typeof instance === "string" && instance !== "" && instance.length <= MAX_INSTANCE_LENGTH ? { instance } : {}),
   };
 }
 

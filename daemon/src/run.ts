@@ -281,8 +281,10 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         });
   const candidates = new WeakMap<Envelope, Registered>();
   let lastSizeReport: string | null = null;
+  const instance = crypto.randomUUID();
   const buildInfo = async (): Promise<Envelope> => {
     const info: MachineInfo = {
+      instance,
       name: config.name,
       platform: process.platform,
       repos: state.repos,

@@ -919,7 +919,7 @@ export class SchedulerStore {
   }
 
   #actionFailure(err: unknown): string {
-    const failure = err instanceof RequestFailure ? err : new RequestFailure("dropped", String(err));
+    const failure = err instanceof RequestFailure ? err : new RequestFailure("dropped", String(err), "relay");
     const text = sentence(failureReasonText(failure));
     // The shared line for these two already says the request may have landed.
     return failure.reason === "timeout" || failure.reason === "dropped" ? `${text} ${REFRESH_HINT}` : text;

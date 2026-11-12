@@ -17,7 +17,7 @@ import {
   type BrokerOp,
   type BrokerRequest,
 } from "./broker-protocol.ts";
-import { exchange, LocalConnectionLost, LocalTimedOut, LocalUnavailable } from "./local-client.ts";
+import { exchange, LocalConnectionLost, LocalTimedOut, LocalUnavailable, RESTART_GRACE_MS } from "./local-client.ts";
 import { socketPath } from "./paths.ts";
 
 /**
@@ -76,10 +76,20 @@ export interface BrokerCallOpts {
   readonly path?: string;
   /** Defaults to the op's deadline (`brokerDeadlineMs`, `brokerSchedulerDeadlineMs`); tests shorten it. */
   readonly timeoutMs?: number;
+  /** How long a frame safe to send again waits out a daemon restart (`exchange`); defaults to `RESTART_GRACE_MS`. */
+  readonly restartGraceMs?: number;
 }
 
-/** Sends one broker frame and returns the reply's data, or throws a `BrokerError` / the `RequestFailure` the direct path would have. */
-async function call(frame: BrokerRequest, deadlineMs: number, opts: BrokerCallOpts): Promise<unknown> {
+/**
+ * Sends one broker frame and returns the reply's data, or throws a `BrokerError` / the `RequestFailure` the direct path would have.
+ * `resendable`: the frame does nothing new when sent twice, so a daemon restart under it is waited out rather than reported.
+ */
+async function call(
+  frame: BrokerRequest,
+  deadlineMs: number,
+  opts: BrokerCallOpts,
+  resendable: boolean,
+): Promise<unknown> {
   const timeoutMs = opts.timeoutMs ?? deadlineMs;
   let raw: unknown;
   try {
@@ -87,6 +97,7 @@ async function call(frame: BrokerRequest, deadlineMs: number, opts: BrokerCallOp
       path: opts.path ?? socketPath(),
       timeoutMs,
       timeoutText: `the daemon did not answer within ${timeoutMs}ms`,
+      restartGraceMs: resendable ? (opts.restartGraceMs ?? RESTART_GRACE_MS) : 0,
     });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
@@ -118,7 +129,7 @@ export async function brokerMachines(opts: BrokerCallOpts = {}): Promise<readonl
   const frame: BrokerRequest = { v: BROKER_VERSION, kind: "broker", id: crypto.randomUUID(), action: "machines" };
   let data: unknown;
   try {
-    data = await call(frame, brokerDeadlineMs(null), opts);
+    data = await call(frame, brokerDeadlineMs(null), opts, true);
   } catch (err) {
     if (err instanceof BrokerError && err.code === "daemon_closed") {
       throw new BrokerError(
@@ -147,7 +158,7 @@ export async function brokerFleetState(
   const frame: BrokerRequest = { v: BROKER_VERSION, kind: "broker", id: crypto.randomUUID(), action: "fleet" };
   let data: unknown;
   try {
-    data = await call(frame, brokerDeadlineMs(null), opts);
+    data = await call(frame, brokerDeadlineMs(null), opts, true);
   } catch (err) {
     // `fleet` changes nothing, so a daemon that predates it or hung up mid-restart is asked for `machines` instead.
     // Not `reply_too_large`: the fleet answer is the registry plus a few bytes, so `machines` would be too large as well.
@@ -169,10 +180,14 @@ export type SchedulerCall =
   | { readonly schedulerOp: "cancel" | "run-now"; readonly taskId: string }
   | { readonly schedulerOp: "queue" | "accounts" };
 
+/** Repeats that change nothing: reads, and an enqueue, whose second create of the same task id reads `landedEarlier`. */
+const RESENDABLE_SCHEDULER_OPS: ReadonlySet<SchedulerCall["schedulerOp"]> = new Set(["enqueue", "queue", "accounts"]);
+
 /**
  * One scheduler op, answered with the reply's raw data. Throws a `BrokerError`,
- * or the `RequestFailure` the direct path would have thrown. Never retried and
- * never falls back: a lost answer may follow a request already sent.
+ * or the `RequestFailure` the direct path would have thrown. Never falls back,
+ * and only a `RESENDABLE_SCHEDULER_OPS` frame is sent again across a daemon
+ * restart: a lost `cancel` or `run-now` may follow a request already sent.
  */
 export function brokerSchedulerCall(request: SchedulerCall, opts: BrokerCallOpts = {}): Promise<unknown> {
   const frame: BrokerRequest = {
@@ -182,10 +197,18 @@ export function brokerSchedulerCall(request: SchedulerCall, opts: BrokerCallOpts
     action: "scheduler",
     ...request,
   };
-  return call(frame, brokerSchedulerDeadlineMs(request.schedulerOp), opts);
+  return call(
+    frame,
+    brokerSchedulerDeadlineMs(request.schedulerOp),
+    opts,
+    RESENDABLE_SCHEDULER_OPS.has(request.schedulerOp),
+  );
 }
 
-/** One of the three allowlisted ops on one other machine, by exact deviceId. Never retried — not here, not by the caller. */
+/**
+ * One of the three allowlisted ops on one other machine, by exact deviceId. Only `sessions` is sent
+ * again, across a daemon restart; a spawn or despawn is never retried — not here, not by the caller.
+ */
 export async function brokerRequest<T>(
   deviceId: string,
   op: BrokerOp,
@@ -204,7 +227,7 @@ export async function brokerRequest<T>(
   try {
     // The reply's data is the target daemon's own response payload, typed by
     // the op exactly as the app-role client's `request<T>` types it.
-    return (await call(frame, brokerDeadlineMs(op), opts)) as T | ErrorResponse;
+    return (await call(frame, brokerDeadlineMs(op), opts, op === "sessions")) as T | ErrorResponse;
   } catch (err) {
     if (op !== "sessions" && err instanceof BrokerError && UNCERTAIN.has(err.code)) {
       throw new BrokerError(err.code, `${err.message}${MAY_HAVE_LANDED}`);

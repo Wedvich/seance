@@ -173,7 +173,10 @@ export class RelayClient {
     this.#ws?.close();
     this.#ws = null;
     for (const pending of [...this.#storePending.values()]) {
-      pending.settle({ ok: false, error: new RequestFailure("dropped", "the client stopped before the store reply") });
+      pending.settle({
+        ok: false,
+        error: new RequestFailure("dropped", "the client stopped before the store reply", "relay"),
+      });
     }
   }
 
@@ -347,7 +350,8 @@ export class RelayClient {
   /** The relay answers a store frame only on the socket that sent it, so a close after the send may have committed. */
   #failStorePending(socket: WebSocket, message: string): void {
     for (const pending of [...this.#storePending.values()]) {
-      if (pending.socket === socket) pending.settle({ ok: false, error: new RequestFailure("dropped", message) });
+      if (pending.socket === socket)
+        pending.settle({ ok: false, error: new RequestFailure("dropped", message, "relay") });
     }
   }
 

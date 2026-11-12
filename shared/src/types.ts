@@ -952,6 +952,12 @@ export interface MachineInfo {
    * daemon would drop. Sealed, unlike the relay-read `roles` of M2.
    */
   readonly capabilities?: readonly string[];
+  /**
+   * Random per daemon run (a supervisor reload is a new one), so a reader tells the
+   * process that took a request reconnecting (same) from a restarted one (new), which
+   * will never answer it. Never displayed; absent from an older daemon.
+   */
+  readonly instance?: string;
 }
 
 /**
