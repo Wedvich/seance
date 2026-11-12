@@ -19,6 +19,7 @@ import {
   type MachineStatus,
   type Plain,
   type QueueChanged,
+  type RegistryView,
   type SessionsResponse,
   type Task,
 } from "@seance/shared";
@@ -319,9 +320,7 @@ describe("registry", () => {
     let plain: Awaited<ReturnType<typeof startFakeDaemon>> | null = null;
     try {
       for (;;) {
-        const frame = await raw.waitFor<{ entries: { deviceId: string; connected: boolean; archivist?: true }[] }>(
-          "registry",
-        );
+        const frame = await raw.waitFor<{ t: "registry"; entries: readonly RegistryView[] }>("registry");
         const entry = frame.entries.find((candidate) => candidate.deviceId === seat);
         if (entry?.connected === true && entry.archivist === true) break;
       }

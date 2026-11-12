@@ -28,6 +28,8 @@ export interface Suite {
   readonly stack: Stack;
   /** A listed machine's seed, copied out without the PSK: the reader check's case once the allowlist holds. */
   readonly stolenSeedId: string;
+  /** The id on the relay's ARCHIVIST: nothing registers with it unless a test does. */
+  readonly archivistId: string;
   readonly dispose: () => Promise<void>;
 }
 
@@ -60,13 +62,15 @@ export async function startSuite(label: string): Promise<Suite> {
   };
   try {
     const stolenSeedId = await newDeviceId();
+    const archivistId = await newDeviceId();
     await Bun.sleep(SETTLE_MS);
     // Observed well before any second machine's reading, so that one is the newest.
     const stack = await startStack(base, [{ id: "default", observedAtMs: Date.now() - 10 * 60_000, fiveHourPct: 20 }], {
       secondLeaders: ["LeaderBox"],
       leaders: [stolenSeedId],
+      archivist: archivistId,
     });
-    return { base, stack, stolenSeedId, dispose: () => dispose(stack) };
+    return { base, stack, stolenSeedId, archivistId, dispose: () => dispose(stack) };
   } catch (error) {
     // No afterAll can reach a suite that never returned: tear down what did start.
     await dispose(undefined);
