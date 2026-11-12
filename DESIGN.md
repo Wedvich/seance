@@ -316,8 +316,10 @@ Séance's noise is cover for a real intruder.
    the key to. `archivist/test/layering.test.ts` walks the `run` process's whole import closure,
    type-only imports counted, and fails on any module that spawns, drives tmux, dispatches ops,
    brokers, leads, or writes the queue or the store, and its own code may call no write method of
-   either client — it never enqueues, cancels, writes the store, replies to an op or sends a
-   `status`. Even its own update is not run by the process that holds the key (added 2026-11-12,
+   either client — it never enqueues, cancels, writes the store, sends a request or a
+   `status`; it answers exactly one op, `archive-status`, only when sealed `from: "app"` to its
+   own device id and past the seat leg's replay guard, with counts, sizes and timestamps only
+   (added 2026-11-12, item 6). Even its own update is not run by the process that holds the key (added 2026-11-12,
    item 5): on the fleet's announce it writes one request file, and a separate unit, with the same
    user and no credential, runs git and `bun install`. `install`, `uninstall` and `update` load
    the daemon's exec path only through `import()` in their own command branches, never into
@@ -618,7 +620,7 @@ Séance's noise is cover for a real intruder.
    than the one on `ARCHIVIST` (`register role-refused`) and writes nothing, so it cannot take the
    seat or hide an entry of its own as one. A seed copied out of the seat's `state.json` registers
    as the seat, which today buys nothing: the relay answers no op for it and apps make no
-   `Machine` of it. Remedy as for a leader's seed: a new identity, its id on `ARCHIVIST`.
+   `Machine` of it (an app does ask the archivist itself one op, `archive-status`, below). Remedy as for a leader's seed: a new identity, its id on `ARCHIVIST`.
 4. **Relay compromise** (T1557 — the relay _is_ the AiTM position). Handled:
    AAD binding makes re-addressing fail closed. Residual is availability and
    traffic analysis, both accepted — the accepted kind is a relay that stops
@@ -1380,6 +1382,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | `status` (daemon→relay)                                             | `daemon/src/run-collectors.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register (`ax`/`ae`/`au` from `daemon/src/auth-health.ts` through the `auth` collector, `tf`/`tu` from `daemon/src/trait-probes.ts` through the `traits` collector)                                                                                                                     | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest on the socket attachment, kept in the entry on close/sweep until the next register                                                                                                                                                                                                                                                   |
 | `status` (relay→app)                                                | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`                                                                                                                                                                                                                                                                                               | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped                                                                                                                                                                                                                                                                                                  |
 | op `metrics`                                                        | `pwa/src/store.ts` and `archivist/src/metrics-collect.ts` via `shared/src/app-client.ts` `metrics()`, gated and parsed                                                                                                                                                                                                                                                             | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts` (tiers in `metrics-tiers.ts`); sized at the transport (`#sealReply`, `daemon/src/relay-client.ts`)                                                                                                                                                                                                                        |
+| op `archive-status`                                                 | `pwa/src/archivist-store.ts` via `shared/src/app-client.ts` `archiveStatus()`                                                                                                                                                                                                                                                                                                      | `archivist/src/health.ts` via the seat's `handle` in `archivist/src/run.ts` (sealed `from: "app"` only)                                                                                                                                                                                                                                                                                                 |
 | op `session-event` (→`"scheduler"`)                                 | `daemon/src/session-events.ts` via `sendToScheduler()` in `daemon/src/relay-client.ts`; on the leader's own machine, `Leader.onSession` in process                                                                                                                                                                                                                                 | `daemon/src/leader.ts`: opened by the term's leg (`onEvent` in `shared/src/app-client.ts`, under the daemon's one scheduler `ReplayGuard`), validated by `parseSessionEvent`, applied by `Scheduler.onSession`                                                                                                                                                                                          |
 | `store-list` / `store-get` / `store-put` / `store-delete`           | apps via `shared/src/app-client.ts` (list/get/create); the leader's daemon socket via `daemon/src/queue-store.ts` and `daemon/src/settings-store.ts`, with `term` on writes; the fleet broker's enqueue (`daemon/src/broker.ts`)                                                                                                                                                   | parsed and bounded in `relay/src/wire.ts`, rules in `relay/src/store.ts`, dispatched by `relay/src/hub.ts` `#onStoreFrame`                                                                                                                                                                                                                                                                              |
 | `store-listed` / `store-record` / `store-written` / `store-refused` | `relay/src/hub.ts` `#onStoreFrame`, answering from `relay/src/store.ts`                                                                                                                                                                                                                                                                                                            | `parseStoreReply` in `shared/src/parse.ts`; correlated on `re` by the app-client, which settles a reply it cannot read as `null` at once, and by the queue and settings stores                                                                                                                                                                                                                          |
@@ -8593,7 +8596,16 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   `shared/src/app-client.ts`, the rule `list_machines` uses too, so an unproven nominee is
   never drawn as leading. Each card shows its daemon's build (short sha, commit age, branch)
   and, when its last update attempt was a skip or failure, a note saying which and how long ago.
-- **Stored secrets show as a masked placeholder, and a blank field keeps them.**
+- **The archivist has a card, never a target** (2026-11-12). After the machine cards and before
+  Accounts, built only from the flagged registry entry whose `info` blob is sealed `from` its own
+  id and parses as `ArchivistInfo` (`RelayState.archivist`; an impostor's blob leaves it null).
+  Online it shows the platform, last ingest, the build line and Tasks, Samples, Events and
+  Database rows from the last `archive-status` reply held for that same device; offline, `offline ·
+  last seen`, no rows and a line on what is hidden. No menu, no spawn, no gauges. The counts are
+  read when the Machines screen is visible and the archivist connected, then every 60 s while it
+  stays so (`pwa/src/archivist-store.ts`), dropped when the seat moves or goes offline; a timeout
+  or error leaves the card without rows and does not mark it offline — the card follows the
+  registry.- **Stored secrets show as a masked placeholder, and a blank field keeps them.**
   The PSK cannot be read back at all and the bearer is not worth redisplaying,
   but two empty inputs read as "credentials lost" on a working install. So
   Settings is editable without being a re-entry chore, and only a field
@@ -10674,7 +10686,21 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   never `ignored` (which would send someone to rotate a correct key); one with the flag skips it.
   Every op that reaches it is dropped with a warning and no reply, except the fleet's
   `update-available` broadcast, which writes an update request and is answered by nothing
-  (item 5, below). No `status`, no store frame.
+  (item 5, below), and `archive-status` (item 6): answered only when sealed `from: "app"`
+  (anything else, or a frame carrying `re`, is dropped with a warning), parsed by
+  `parseArchiveStatusRequest`, through the leg's replay guard, with `{onlineSince, lastIngest,
+  tasks, samples, events, database, countedAt}` — counts, byte sizes and timestamps, never a row.
+  `lastIngest` is per source (`store`, `registry`, `status`, `pull`) and per process: null until
+  that source's first success since the archivist started. Row counts of the sample tiers
+  (`WITHOUT ROWID`, tens of millions of rows) are never taken in the request path: a background
+  pass at start and every 5 minutes counts them in bounded `ts` ranges, yielding a macrotask
+  between chunks so the heartbeat and collectors keep running, and the answer reads the last
+  published value (`countedAt`; null until the first pass ends, and a failed pass keeps the
+  previous value). Database size is the files' `stat` (plus `-wal`). The build line comes from
+  `served-source.json` (0600), which the credential-less update unit writes before it signals the
+  restart, since the run process has no git; it first appears one update after this lands, with
+  no fallback. There is no capability gate: an archivist that predates the op never answers, and
+  the app's 10 s timeout leaves a card without rows. No `status`, no store frame.
 - **The read leg.** A second, app-role socket from `appRelayClient` with the PSK's key and the
   account key derived from it, as the leader's own app leg reads (A7); `archivist/src/collect.ts`
   reads the store through it, and `archivist/src/metrics-collect.ts` the registry's `status`

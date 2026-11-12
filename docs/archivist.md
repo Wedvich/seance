@@ -6,7 +6,9 @@ built 2026-11-12, recorded in DESIGN.md, "Archivist", and its trust entry in the
 item 2; item 3 (tasks and fleet events in `archive.sqlite`) built 2026-11-12, recorded in
 DESIGN.md, "Archivist"; item 4 (metrics in `metrics.sqlite`) built 2026-11-12, recorded in
 DESIGN.md, "Archivist", "Metrics", and Daemon, "Telemetry"; item 5 (install, update and the
-docs) built 2026-11-12, recorded in DESIGN.md, "Archivist", with setup in the README's step 9.** Decided with the owner on 2026-11-12. Like docs/scheduler.md and
+docs) built 2026-11-12, recorded in DESIGN.md, "Archivist", with setup in the README's step 9; item 6
+(the status op and the health card) built 2026-11-12, recorded in DESIGN.md, "Archivist", Threat
+model item 2 and the PWA's Machines section.** Decided with the owner on 2026-11-12. Like docs/scheduler.md and
 docs/leaving.md, this file is the working record until the code lands; each part folds into
 DESIGN.md as it is built, and its text here goes.
 
@@ -172,7 +174,8 @@ Each is the owner's, 2026-11-12, unless marked _derived_.
 **The PWA's surfaces.** Settled 2026-11-12 by the owner's review of the design canvas
 (https://claude.ai/artifact/B83Ftm67X654rGd4siUeBe, phone width, built from the PWA's own
 `tokens.css`/`screen.css` and the markup of `machines.tsx`/`queue.tsx`). Nothing here adds a new
-component or style.
+component or style. (A36b, as built: one modifier class, `.exclave-sessions-wide`, widens the
+number column, since `18.4M` does not fit a session count's width.)
 
 - **A36a. Where the card sits.** Last in the machine list, after every machine and before
   Accounts; no heading of its own. It is a `fleet-card` like a machine's but carries no gauges,
@@ -255,7 +258,7 @@ One stack of PRs, each based on the one before, merged together.
    first-start import, retention (A17, A19, A20, A22). **Built 2026-11-12.**
 5. `install --system`, update on the announce, and the docs: README setup, the move-the-seat
    runbook, schema and example queries (A26–A30). **Built 2026-11-12.**
-6. The archive status op and the Machines screen's health card (A31, A36–A36c).
+6. The archive status op and the Machines screen's health card (A31, A36–A36c). **Built 2026-11-12.**
 
 **Milestone 2 — read**
 
@@ -276,8 +279,8 @@ One stack of PRs, each based on the one before, merged together.
   DESIGN.md, "Archivist") it is never a `Machine`
   row, so the PWA counts it as skewed and offers no forget button; the runbook says to
   forget it by id, with the daemon's `deregisterMachine` (a raw `forget` frame from an app
-  socket) run from the checkout (README, step 9). Item 6's health card and item 10's silence alert read the flag, so
-  they follow the seat, not the old entry.
+  socket) run from the checkout (README, step 9). Item 6's health card (settled: built from the flagged entry, DESIGN.md, "Archivist") and item 10's
+  silence alert read the flag, so they follow the seat, not the old entry.
 
 Settled at item 4 (DESIGN.md, "Archivist", "Metrics"): the shared rollup module is
 `daemon/src/metrics-tiers.ts`, imported by path (not `shared/`, which the relay and PWA bundle);
