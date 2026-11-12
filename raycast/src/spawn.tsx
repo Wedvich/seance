@@ -6,6 +6,7 @@ import {
   Form,
   Icon,
   LocalStorage,
+  PopToRootType,
   Toast,
   closeMainWindow,
   environment,
@@ -311,7 +312,9 @@ export default function Command(): React.JSX.Element {
         await showToast(Toast.Style.Success, `Started ${reply.window}`, reply.note);
         return;
       }
-      await closeMainWindow();
+      // Immediate, not the user's keep-state default: a form kept for a minute would reopen at
+      // the level the last task ran at, which a fresh open promises it never does.
+      await closeMainWindow({ popToRootType: PopToRootType.Immediate });
       await showHUD(`Started ${reply.window} on ${check.machine.name}`);
     } catch {
       void showToast(Toast.Style.Success, `Started ${reply.window} on ${check.machine.name}`);
@@ -349,7 +352,9 @@ export default function Command(): React.JSX.Element {
         await showToast(Toast.Style.Success, title, wait);
         return;
       }
-      await closeMainWindow();
+      // Immediate, not the user's keep-state default: a form kept for a minute would reopen at
+      // the level the last task ran at, which a fresh open promises it never does.
+      await closeMainWindow({ popToRootType: PopToRootType.Immediate });
       await showHUD(title);
     } catch {
       void showToast(Toast.Style.Success, title);
