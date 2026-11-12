@@ -54,6 +54,8 @@ const SHARDS: readonly Shard[] = [
   { name: "pwa", paths: ["pwa/"] },
   { name: "raycast", paths: ["raycast/"] },
   { name: "scheduler", paths: ["scheduler/"] },
+  // One process: its relay suite boots workerd once, and nothing else here does.
+  { name: "archivist", paths: ["archivist/"] },
   { name: "scripts", paths: ["scripts/"] },
   ...MOD_FOLDERS.map(modShard),
 ];
