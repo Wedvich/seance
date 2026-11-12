@@ -3,7 +3,7 @@ import { chmod, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exec } from "../src/exec.ts";
-import { pushTaskBranch } from "../src/push-branch.ts";
+import { PUSH_START_DEADLINE_MS, pushTaskBranch } from "../src/push-branch.ts";
 import { makeGitFixture, type GitFixture } from "./fixtures.ts";
 
 /**
@@ -44,6 +44,18 @@ async function originTip(branch: string): Promise<string | null> {
     cwd: fixture.barePath,
   });
   return result.exitCode === 0 ? result.stdout.trim() : null;
+}
+
+/** Every ref of origin, so a refusal can be shown to have left it as it was. */
+async function originRefs(): Promise<string> {
+  return git(fixture.barePath, "for-each-ref", "--format=%(refname) %(objectname)");
+}
+
+/** A bare repo that is not origin: where a redirected push would land. */
+async function elsewhere(): Promise<string> {
+  const path = join(base, `elsewhere-${(seq += 1)}.git`);
+  await git(base, "init", "--bare", "-q", "-b", "main", path);
+  return path;
 }
 
 function site(path: string): { readonly repo: string; readonly path: string } {
@@ -219,6 +231,50 @@ describe("a branch with an upstream", () => {
   });
 });
 
+describe("the push start deadline", () => {
+  /** A clock that reads `0` once, then `after`: the call's start, then the moment the push would begin. */
+  const clock = (after: number): (() => number) => {
+    let reads = 0;
+    return () => {
+      reads += 1;
+      return reads === 1 ? 0 : after;
+    };
+  };
+
+  test("a push that would start past it is push_failed with nothing pushed", async () => {
+    const path = await worktree("task/too-late");
+    await commit(path);
+    const before = await originRefs();
+    const reply = await pushTaskBranch(site(path), {
+      startDeadlineMs: PUSH_START_DEADLINE_MS,
+      now: clock(PUSH_START_DEADLINE_MS + 1),
+    });
+    expect(reply).toMatchObject({ ok: false, code: "push_failed" });
+    expect(await originTip("task/too-late")).toBeNull();
+    expect(await originRefs()).toBe(before);
+  });
+
+  test("one that starts exactly at it still goes", async () => {
+    const path = await worktree("task/on-time");
+    const tip = await commit(path);
+    const reply = await pushTaskBranch(site(path), {
+      startDeadlineMs: PUSH_START_DEADLINE_MS,
+      now: clock(PUSH_START_DEADLINE_MS),
+    });
+    expect(reply).toEqual({ ok: true, remoteBranch: "task/on-time", tip, pushed: true });
+    expect(await originTip("task/on-time")).toBe(tip);
+  });
+
+  test("with no deadline given (a session's own pass) a clock past it changes nothing", async () => {
+    const path = await worktree("task/no-deadline");
+    const tip = await commit(path);
+    const reply = await pushTaskBranch(site(path), { now: clock(PUSH_START_DEADLINE_MS * 10) });
+    expect(reply).toEqual({ ok: true, remoteBranch: "task/no-deadline", tip, pushed: true });
+    // The tip the reply names is the one origin holds.
+    expect(await originTip("task/no-deadline")).toBe(tip);
+  });
+});
+
 describe("what stops a push", () => {
   test("uncommitted and untracked files", async () => {
     const path = await worktree("task/dirty");
@@ -230,8 +286,12 @@ describe("what stops a push", () => {
 
   test("a detached HEAD", async () => {
     const path = await worktree("task/detached");
+    await commit(path);
     await git(path, "checkout", "-q", "--detach");
+    const before = await originRefs();
     expect(await pushTaskBranch(site(path))).toMatchObject({ ok: false, code: "detached_head" });
+    expect(await originTip("task/detached")).toBeNull();
+    expect(await originRefs()).toBe(before);
   });
 
   test("a branch origin holds other work on, which is never forced", async () => {
@@ -307,22 +367,47 @@ describe("what stops a push", () => {
   test("a repo-local pushurl, which would send it somewhere other than origin", async () => {
     const path = await worktree("task/pushurl");
     await commit(path);
-    await git(path, "config", "remote.origin.pushurl", join(base, "elsewhere.git"));
-    expect(await pushTaskBranch(site(path))).toMatchObject({ ok: false, code: "push_failed" });
-    expect(await originTip("task/pushurl")).toBeNull();
-    await git(path, "config", "--unset", "remote.origin.pushurl");
+    const other = await elsewhere();
+    await git(path, "config", "remote.origin.pushurl", other);
+    try {
+      expect(await pushTaskBranch(site(path))).toMatchObject({ ok: false, code: "push_failed" });
+      // Neither place holds it: without the refusal the push would have landed in `other`.
+      expect(await git(other, "for-each-ref")).toBe("");
+      expect(await originTip("task/pushurl")).toBeNull();
+    } finally {
+      await git(path, "config", "--unset", "remote.origin.pushurl");
+    }
+  });
+
+  test("a repo-local pushInsteadOf, which rewrites where origin's pushes go", async () => {
+    const path = await worktree("task/push-instead-of");
+    await commit(path);
+    const other = await elsewhere();
+    const key = `url.${other}.pushInsteadOf`;
+    await git(path, "config", key, fixture.barePath);
+    try {
+      expect(await pushTaskBranch(site(path))).toMatchObject({ ok: false, code: "push_failed" });
+      expect(await git(other, "for-each-ref")).toBe("");
+      expect(await originTip("task/push-instead-of")).toBeNull();
+    } finally {
+      await git(path, "config", "--unset", key);
+    }
   });
 
   test("a worktree the repo does not know", async () => {
+    const before = await originRefs();
     expect(await pushTaskBranch(site(join(base, "nowhere")))).toMatchObject({ ok: false, code: "not_launched" });
+    expect(await originRefs()).toBe(before);
   });
 
   test("a repo's own checkout is not a task's worktree, whatever path asks for it", async () => {
     await git(fixture.repoPath, "checkout", "-q", "-B", "task/in-the-clone", "origin/main");
     await commit(fixture.repoPath);
     try {
+      const before = await originRefs();
       expect(await pushTaskBranch(site(fixture.repoPath))).toMatchObject({ ok: false, code: "not_launched" });
       expect(await originTip("task/in-the-clone")).toBeNull();
+      expect(await originRefs()).toBe(before);
     } finally {
       await git(fixture.repoPath, "checkout", "-q", "main");
     }
@@ -416,5 +501,48 @@ describe("a branch the default merged after the last fetch", () => {
     } finally {
       await git(fixture.repoPath, "remote", "set-head", "origin", "main");
     }
+  });
+});
+
+describe("a repo whose default branch is not main", () => {
+  let own: GitFixture;
+  let outer: GitFixture;
+
+  beforeAll(async () => {
+    outer = fixture;
+    own = await makeGitFixture(join(base, "develop-default"));
+    fixture = own;
+    // origin's default becomes `develop`, and this clone learns it as a real `git clone` of such a repo would.
+    const developTree = await fixture.pushBranch("develop");
+    await git(fixture.barePath, "symbolic-ref", "HEAD", "refs/heads/develop");
+    await git(fixture.repoPath, "fetch", "-q", "origin");
+    await git(fixture.repoPath, "remote", "set-head", "origin", "develop");
+    // Free `main` from the clone's own checkout, so a worktree may take it.
+    await git(fixture.repoPath, "worktree", "remove", "--force", developTree);
+    await git(fixture.repoPath, "checkout", "-q", "develop");
+  });
+
+  afterAll(() => {
+    fixture = outer;
+  });
+
+  test("the resolved default is never pushed to", async () => {
+    const path = join(fixture.repoPath, ".claude", "worktrees", "on-develop");
+    await git(fixture.repoPath, "worktree", "add", "-q", "--detach", path, "origin/develop");
+    await git(path, "checkout", "-q", "-B", "develop-copy", "origin/develop");
+    await git(path, "branch", "--set-upstream-to=origin/develop");
+    await commit(path);
+    const before = await originRefs();
+    expect(await pushTaskBranch(site(path))).toMatchObject({ ok: false, code: "default_branch" });
+    expect(await originRefs()).toBe(before);
+  });
+
+  test("a branch named main is no longer protected by its name: only the resolved default is", async () => {
+    // DESIGN.md, "Passing to a successor": `main` and `master` are the fallback when no default resolves, not beside one.
+    const path = join(fixture.repoPath, ".claude", "worktrees", "named-main");
+    await git(fixture.repoPath, "worktree", "add", "-q", path, "main");
+    const tip = await commit(path);
+    expect(await pushTaskBranch(site(path))).toEqual({ ok: true, remoteBranch: "main", tip, pushed: true });
+    expect(await originTip("main")).toBe(tip);
   });
 });
