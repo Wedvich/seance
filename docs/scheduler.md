@@ -946,6 +946,19 @@ of M4 has landed.
     against the 30-day baseline. Also `awaiting-merge` → merged time, `merge_expired` count,
     `pr-blocked` by reason, Continue taps per alert, and continuations that end merged.
 
+- **Autonomy level** — **Wire, daemon and MCP done** (2026-11-11). A task says how much its session
+  decides on its own: `steer`, `checkpoint` (the default) or `auto`. The record is DESIGN.md's
+  "Autonomy level". Follow-ups, not built:
+  - The PWA: a three-way control on the form, the level on the Queue card, and "Answer in
+    Claude" (the claude.ai link) made prominent on a `needs-input` card.
+  - `seanced spawn --autonomy`, then Raycast.
+  - A `question` reason on the session event, so an AskUserQuestion skips the 2-minute
+    `needs-input` debounce (which exists for auto mode's flicker; a question cannot flicker).
+    A frame change.
+  - Only if a re-cut of the transcripts shows that confirmations survive the preamble: a mod that,
+    at `checkpoint` or `auto`, answers a turn ending on a plain-text "shall I proceed?" with one
+    nudge to proceed or ask it properly. First check that an engine hook can continue a turn.
+
 ## Settled defaults (interview, 2026-10-15)
 
 Nothing below is open. An implementer who wants a different value changes this section in the

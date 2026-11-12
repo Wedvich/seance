@@ -4,6 +4,11 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
 import {
   accountNameIn,
+  AUTONOMY_LEVELS,
+  autonomyOf,
+  DEFAULT_AUTONOMY,
+  withAutonomy,
+  type AutonomyLevel,
   continueOffer,
   DEP_AFTER,
   knownAccounts,
@@ -560,6 +565,13 @@ const LINEAR_FIELD = z
     "The Linear issue this task is for. Informational: the scheduler stores and shows it, and reads nothing from Linear",
   );
 
+const AUTONOMY_FIELD = z
+  .enum(AUTONOMY_LEVELS)
+  .optional()
+  .describe(
+    "How much the session decides on its own. steer: it plans and waits for approval before changing anything (plan mode, the same as plan: true). checkpoint, the default: it never stops to ask whether to proceed, only for real choices, which it asks with a recommendation. auto: it also makes reversible choices itself and records them as Decided lines for review, stopping only for guardrails (production, money, secrets, deleting, messaging people) and choices it has no recommendation for. Set auto when the user wants the work done unattended, steer when they want to approve a plan first; omit it otherwise",
+  );
+
 const UNTIL_FIELD = z
   .enum(TASK_UNTIL)
   .optional()
@@ -614,16 +626,20 @@ function requestFields(input: {
   readonly model?: string | undefined;
   readonly effort?: string | undefined;
   readonly plan?: boolean | undefined;
+  readonly autonomy?: AutonomyLevel | undefined;
 }): Omit<AutoSpec, "repo"> {
-  const { prompt, title, mode, model, effort, plan } = input;
-  return {
+  const { prompt, title, mode, model, effort, plan, autonomy } = input;
+  const fields = {
     mode,
     ...(prompt === undefined ? {} : { prompt }),
     ...(title === undefined ? {} : { title }),
     ...(model === undefined || model === "" ? {} : { model }),
     ...(effort === undefined || effort === "" ? {} : { effort }),
     ...(plan === undefined ? {} : { plan }),
+    ...(autonomy === undefined ? {} : { autonomy }),
   };
+  // `steer` is sealed with `plan: true`, for a leader that drops `autonomy`; a contradiction is left for `specError` to name.
+  return withAutonomy(fields) ?? fields;
 }
 
 /**
@@ -682,6 +698,7 @@ function describeTask(
   const placement = placementOf(task, machines);
   const pin = describePin(task, machines, names);
   const { spec } = task;
+  const level = autonomyOf(spec);
   return {
     id: task.id,
     state: task.state,
@@ -700,6 +717,8 @@ function describeTask(
     ...(task.escalated === true ? { escalated: true } : {}),
     ...(task.needsInputSince === undefined ? {} : { needsInputSince: new Date(task.needsInputSince).toISOString() }),
     ...(spec.until === "reported" ? { until: spec.until } : {}),
+    // Only off the default: most tasks run at checkpoint, and `plan: true` alone reads as steer.
+    ...(level === DEFAULT_AUTONOMY ? {} : { autonomy: level }),
     // A merge under `until: "reported"` settles nothing, so it is told apart from a finish here too.
     ...(task.merged === true ? { merged: true } : {}),
     ...(spec.batch === undefined ? {} : { batch: { id: spec.batch.id, index: spec.batch.index } }),
@@ -858,7 +877,7 @@ export function buildMcpServer(
     "get_queue",
     {
       title: "List the scheduler's queue",
-      description: `List the scheduler's queue — the tasks spawn_session and queue_batch queued, and other clients' (the app, the CLI), and what holds dispatch (a paused queue, or an account named as a pin names it) — with each one's state, its pin (whichever of machine and account it pins: the machine by name where known, plus its deviceId; the account by its alias where one is set (none on a box whose daemon brokers for it), else the email a machine reports, else a short id, plus its accountId; an email or short id two accounts share, case aside, gains a tag telling them apart: the org's short id, or more of it where that still collides; pinned and held accounts no machine reports count as accounts too), the machines it avoids, where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). ${AUTO_LIMITS}`,
+      description: `List the scheduler's queue — the tasks spawn_session and queue_batch queued, and other clients' (the app, the CLI), and what holds dispatch (a paused queue, or an account named as a pin names it) — with each one's state, its pin (whichever of machine and account it pins: the machine by name where known, plus its deviceId; the account by its alias where one is set (none on a box whose daemon brokers for it), else the email a machine reports, else a short id, plus its accountId; an email or short id two accounts share, case aside, gains a tag telling them apart: the org's short id, or more of it where that still collides; pinned and held accounts no machine reports count as accounts too), the machines it avoids, its autonomy level where it is not the default checkpoint, where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). ${AUTO_LIMITS}`,
       annotations: { readOnlyHint: true },
     },
     async () =>
@@ -945,7 +964,7 @@ export function buildMcpServer(
     "continue_task",
     {
       title: "Continue a failed or cancelled scheduler task",
-      description: `Resume a task whose session ended in failure, or that was cancelled after it started (get_queue marks one \`continuable\`): the same conversation, in the same worktree on the same machine, as a new task the scheduler dispatches there. Continue moves to the newest continuation that ran in a chain, and is withheld while one still waits in the queue (cancel that one to continue again); the old task stays as it was, and so do the tasks that wait on it. The new task waits in the queue like any other, and fails if the worktree is gone (reaped), a session is open in it, or a later task ran in the worktree, or the machine no longer holds the launch record (kept a week, at most 128 launches). \`prompt\` is an optional note the resumed session is told, within the ${TASK_REQUEST_LIMITS.prompt}-character prompt bound. Answers with the new task id; get_queue shows where it lands. ${AUTO_LIMITS}`,
+      description: `Resume a task whose session ended in failure, or that was cancelled after it started (get_queue marks one \`continuable\`): the same conversation, in the same worktree on the same machine, as a new task the scheduler dispatches there, at the task's own autonomy level (a steer task's at checkpoint, out of plan mode). Continue moves to the newest continuation that ran in a chain, and is withheld while one still waits in the queue (cancel that one to continue again); the old task stays as it was, and so do the tasks that wait on it. The new task waits in the queue like any other, and fails if the worktree is gone (reaped), a session is open in it, or a later task ran in the worktree, or the machine no longer holds the launch record (kept a week, at most 128 launches). \`prompt\` is an optional note the resumed session is told, within the ${TASK_REQUEST_LIMITS.prompt}-character prompt bound. Answers with the new task id; get_queue shows where it lands. ${AUTO_LIMITS}`,
       inputSchema: z.object({
         taskId: z.string().describe("The failed or cancelled task's id from get_queue"),
         prompt: z.string().optional().describe("Optional: a note for the resumed session, from the user"),
@@ -997,8 +1016,9 @@ export function buildMcpServer(
           .boolean()
           .optional()
           .describe(
-            "Start the session in plan mode: it researches and writes an implementation plan for approval instead of editing files. Set this when the request is to plan, design, investigate or scope work rather than carry it out. Omit it otherwise.",
+            "Start the session in plan mode: it researches and writes an implementation plan for approval instead of editing files. Set this when the request is to plan, design, investigate or scope work rather than carry it out. Omit it otherwise. The same as autonomy steer; give one or the other",
           ),
+        autonomy: AUTONOMY_FIELD,
         after: z
           .array(
             z.object({
@@ -1024,7 +1044,23 @@ export function buildMcpServer(
       }),
       annotations: { readOnlyHint: false },
     },
-    async ({ machine, repo, prompt, title, mode, model, effort, plan, after, until, linear, pin, avoid, start }) => {
+    async ({
+      machine,
+      repo,
+      prompt,
+      title,
+      mode,
+      model,
+      effort,
+      plan,
+      autonomy,
+      after,
+      until,
+      linear,
+      pin,
+      avoid,
+      start,
+    }) => {
       const machinePin = machine === undefined || isAutoRef(machine) ? undefined : machine;
       if (machinePin !== undefined && pin?.machine !== undefined) {
         return errorResult("spawn refused: give the machine once — machine or pin.machine, not both");
@@ -1041,7 +1077,7 @@ export function buildMcpServer(
       // scheduler's.
       const spec: AutoSpec = {
         repo,
-        ...requestFields({ prompt: reported.prompt, title, mode, model, effort, plan }),
+        ...requestFields({ prompt: reported.prompt, title, mode, model, effort, plan, autonomy }),
         ...authoredFields(
           (after ?? []).map(({ task, when }) => ({ task, after: when })),
           until,
@@ -1086,6 +1122,9 @@ export function buildMcpServer(
         // Retired, still parsed: zod drops unknown keys, which would turn a stale caller's order into a silent plain group.
         strategy: z.unknown().optional().describe("Retired: refused unless absent or auto"),
         max: z.unknown().optional().describe("Retired: refused"),
+        autonomy: AUTONOMY_FIELD.describe(
+          "The autonomy level of every task that gives no autonomy of its own and no plan it contradicts, as spawn_session's autonomy",
+        ),
         tasks: z
           .array(
             z.object({
@@ -1100,6 +1139,9 @@ export function buildMcpServer(
               model: z.string().optional(),
               effort: z.string().optional(),
               plan: z.boolean().optional().describe("Start in plan mode, as spawn_session's plan"),
+              autonomy: AUTONOMY_FIELD.describe(
+                "As spawn_session's autonomy; overrides the batch's autonomy for this task",
+              ),
               after: z
                 .array(
                   z.object({
@@ -1122,7 +1164,7 @@ export function buildMcpServer(
       }),
       annotations: { readOnlyHint: false },
     },
-    async ({ strategy, max, tasks }) => {
+    async ({ strategy, max, autonomy, tasks }) => {
       if ((strategy !== undefined && strategy !== "auto") || max !== undefined) {
         return errorResult(
           "queue_batch refused: a batch no longer orders or limits its members, so strategy and max are retired. Give each member its after to order them; concurrency is the fleet's and accounts' caps",
@@ -1171,7 +1213,13 @@ export function buildMcpServer(
         if ("error" in placement) return errorResult(`queue_batch refused: task ${n}: ${placement.error}`);
         const spec: AutoSpec = {
           repo: member.repo,
-          ...requestFields({ ...member, prompt: reported.prompt }),
+          ...requestFields({
+            ...member,
+            // A member's `plan: true` is its own level (steer); anything else takes the batch's, so a batch `steer`
+            // beside a member's `plan: false` is refused as a contradiction, as spawn_session refuses it, never dropped.
+            autonomy: member.autonomy ?? (member.plan === true ? undefined : autonomy),
+            prompt: reported.prompt,
+          }),
           ...authoredFields(deps, member.until, member.linear),
           batch: { id: batchId, index: n },
         };

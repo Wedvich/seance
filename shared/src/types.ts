@@ -1,3 +1,5 @@
+import type { AutonomyLevel } from "./autonomy.ts";
+
 export const PROTOCOL_VERSION = 1;
 
 /** Routing id the app uses on the wire; daemons address responses to it. */
@@ -1294,6 +1296,14 @@ export interface SpawnRequest {
    */
   readonly plan?: boolean;
   /**
+   * How much the session decides on its own (`AUTONOMY_LEVELS`, DESIGN.md "Autonomy level"):
+   * the seed's preamble and the window's `SEANCE_AUTONOMY`. `steer` always travels with
+   * `plan: true` (`withAutonomy`), so a daemon that ignores this field still starts in plan
+   * mode; one that ignores `auto` runs the session as `checkpoint`, the safe direction.
+   * Absent: `autonomyOf` reads `plan`.
+   */
+  readonly autonomy?: AutonomyLevel;
+  /**
    * Which app-role client formed the request — audit trail only, so
    * `origin=relay` stays separable into "my phone" vs "an agent on my
    * laptop". Our senders stamp a `SpawnClient`; the wire keeps `string` so a
@@ -1689,7 +1699,10 @@ export type TaskState = (typeof TASK_STATES)[number];
  * it lands, with `repo` naming the repo (`RepoEntry.origin`), never a
  * machine's clone of it. Bounded by `TASK_REQUEST_LIMITS`.
  */
-export interface TaskRequest extends Pick<SpawnRequest, "mode" | "prompt" | "title" | "model" | "effort" | "plan"> {
+export interface TaskRequest extends Pick<
+  SpawnRequest,
+  "mode" | "prompt" | "title" | "model" | "effort" | "plan" | "autonomy"
+> {
   readonly repo: string;
   /**
    * A skill the task needs (decided #19), by `isSkillName`: routing restricts

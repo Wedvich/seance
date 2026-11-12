@@ -139,6 +139,8 @@ export interface ClaudeStub {
   readonly argv: () => Promise<readonly string[]>;
   /** SEANCE_MACHINE_TAG as the launch saw it, null when unset. Read alongside `argv`, which it waits on. */
   readonly machineTag: () => Promise<string | null>;
+  /** SEANCE_AUTONOMY as the launch saw it, null when unset. Read like `machineTag`. */
+  readonly autonomy: () => Promise<string | null>;
   /** Polls for the record, then returns everything the launch was fed on stdin. */
   readonly stdin: () => Promise<string>;
 }
@@ -199,6 +201,7 @@ export async function makeClaudeStub(base: string): Promise<ClaudeStub> {
   const ok = join(dir, "claude");
   const argvFile = `${ok}.argv`;
   const tagFile = `${ok}.tag`;
+  const autonomyFile = `${ok}.autonomy`;
   const stdinFile = `${ok}.stdin`;
   // NUL separators: seed prompts carry newlines, so a line-based record would lie.
   // The tag is written first, so a complete argv record implies it landed.
@@ -208,8 +211,9 @@ export async function makeClaudeStub(base: string): Promise<ClaudeStub> {
     ok,
     head +
       [
-        `rm -f "${tagFile}"`,
+        `rm -f "${tagFile}" "${autonomyFile}"`,
         `if [ -n "\${SEANCE_MACHINE_TAG+x}" ]; then printf '%s' "$SEANCE_MACHINE_TAG" > "${tagFile}"; fi`,
+        `if [ -n "\${SEANCE_AUTONOMY+x}" ]; then printf '%s' "$SEANCE_AUTONOMY" > "${autonomyFile}"; fi`,
         `printf '%s\\0' "$@" > "${argvFile}"`,
         `if [ ! -t 0 ]; then cat > "${stdinFile}"; fi`,
         `exec -a claude "${versioned}" "${sleeper}" titled`,
@@ -262,6 +266,12 @@ export async function makeClaudeStub(base: string): Promise<ClaudeStub> {
       .text()
       .catch(() => null);
   };
+  const autonomy = async (): Promise<string | null> => {
+    await argv();
+    return Bun.file(autonomyFile)
+      .text()
+      .catch(() => null);
+  };
   // Non-empty, not merely present: `cat` creates the file before it has copied
   // anything, so existence alone can hand a test the empty prefix.
   const stdin = async (): Promise<string> => {
@@ -274,7 +284,7 @@ export async function makeClaudeStub(base: string): Promise<ClaudeStub> {
     }, `claude stub stdin at ${stdinFile}`);
     return text;
   };
-  return { ok, stuck, failing, exitPrompt, repl, deaf, argvFile, stdinFile, argv, machineTag, stdin };
+  return { ok, stuck, failing, exitPrompt, repl, deaf, argvFile, stdinFile, argv, machineTag, autonomy, stdin };
 }
 
 /** One test's view of the `gh` stub: its own files, so a call from another test's late child never lands in them. */

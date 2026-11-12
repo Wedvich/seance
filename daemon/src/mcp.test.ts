@@ -942,6 +942,25 @@ describe("spawn_session on auto", () => {
     expect(fake.requests).toEqual([]);
   });
 
+  test("an autonomy level is stored on the task; steer is sealed with plan for a leader that drops the level", async () => {
+    const auto = leaderRelay();
+    expect((await callAuto(auto, { autonomy: "auto" })).error).toBe(false);
+    expect(auto.creates[0]?.spec.autonomy).toBe("auto");
+    expect(auto.creates[0]?.spec).not.toHaveProperty("plan");
+
+    const steer = leaderRelay();
+    expect((await callAuto(steer, { autonomy: "steer" })).error).toBe(false);
+    expect(steer.creates[0]?.spec).toMatchObject({ autonomy: "steer", plan: true });
+  });
+
+  test("plan beside a level other than steer is refused before anything is stored", async () => {
+    const fake = leaderRelay();
+    const { text, error } = await callAuto(fake, { autonomy: "auto", plan: true });
+    expect(error).toBe(true);
+    expect(text).toContain("plan: true contradicts autonomy: auto");
+    expect(fake.creates).toEqual([]);
+  });
+
   test("a lost reply re-sends the same task, and a store that had it says so", async () => {
     const fake = leaderRelay();
     let tries = 0;
@@ -1828,6 +1847,34 @@ describe("queue_batch", () => {
     expect(fake.requests).toEqual([]);
   });
 
+  test("the batch's autonomy fills every member that chose no level and no plan mode", async () => {
+    const fake = leaderRelay([], reportingMachines());
+    const { error } = await callTool(fake, "queue_batch", {
+      autonomy: "auto",
+      tasks: [member(), member({ autonomy: "checkpoint" }), member({ plan: true }), member({ plan: false })],
+    });
+    expect(error).toBe(false);
+    expect(fake.creates.map((t) => [t.spec.autonomy, t.spec.plan])).toEqual([
+      ["auto", undefined],
+      ["checkpoint", undefined],
+      // Its own plan is its choice: the batch's auto never lands beside it as a contradiction.
+      [undefined, true],
+      // An agent filling every boolean with false still gets the batch's level.
+      ["auto", false],
+    ]);
+  });
+
+  test("a batch's steer beside a member's plan: false is refused, never dropped to checkpoint", async () => {
+    const fake = leaderRelay([], reportingMachines());
+    const { error, text } = await callTool(fake, "queue_batch", {
+      autonomy: "steer",
+      tasks: [member(), member({ plan: false })],
+    });
+    expect(error).toBe(true);
+    expect(text).toContain("contradicts autonomy: steer");
+    expect(fake.creates).toEqual([]);
+  });
+
   test("a caller still sending an order or a limit is refused, not given a plain group; auto or none is fine", async () => {
     for (const extra of [
       { strategy: "sequential" },
@@ -1976,6 +2023,34 @@ describe("get_queue", () => {
       ],
     });
     expect(fake.requests.map((r) => `${r.op}@${r.deviceId}`)).toEqual([`queue@${SCHEDULER_ID}`]);
+    lazy.stop();
+  });
+
+  test("names a task's autonomy level only off the default, and reads plan alone as steer", async () => {
+    const at = (id: string, fields: Pick<Task["spec"], "autonomy" | "plan">) =>
+      task({ id, state: "ready", spec: { repo: ORIGIN, mode: "worktree", ...fields } });
+    const fake = leaderRelay([
+      {
+        tasks: [
+          at("t-1", { autonomy: "auto" }),
+          at("t-2", { autonomy: "steer", plan: true }),
+          at("t-3", { plan: true }),
+          at("t-4", { autonomy: "checkpoint" }),
+          at("t-5", {}),
+        ],
+        at: 6_000,
+      },
+    ]);
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const { tasks } = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} })));
+    expect(tasks.map((t: { autonomy?: unknown }) => t.autonomy)).toEqual([
+      "auto",
+      "steer",
+      "steer",
+      undefined,
+      undefined,
+    ]);
     lazy.stop();
   });
 

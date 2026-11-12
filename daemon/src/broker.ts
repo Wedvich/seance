@@ -13,6 +13,7 @@ import {
   type FailureReason,
   type SpawnClient,
   type SpawnRequest,
+  withAutonomy,
 } from "@seance/shared";
 import { appRelayClient, importAppKeys, LazyRelay, type AppKeys, type AppRelay } from "./app-relay.ts";
 import { accountCaches } from "./account-cache.ts";
@@ -129,7 +130,7 @@ const BROKER_CLIENT: SpawnClient = "mcp";
  * in the payload — its `client` included — never reaches the wire.
  */
 function cleanSpawn(p: SpawnRequest): SpawnRequest {
-  return {
+  const clean: SpawnRequest = {
     repo: p.repo,
     mode: p.mode,
     ...(p.prompt === undefined ? {} : { prompt: p.prompt }),
@@ -137,8 +138,11 @@ function cleanSpawn(p: SpawnRequest): SpawnRequest {
     ...(p.model === undefined ? {} : { model: p.model }),
     ...(p.effort === undefined ? {} : { effort: p.effort }),
     ...(p.plan === undefined ? {} : { plan: p.plan }),
+    ...(p.autonomy === undefined ? {} : { autonomy: p.autonomy }),
     client: BROKER_CLIENT,
   };
+  // The target may predate `autonomy`: a bare `steer` must still reach it as plan mode. Never null past `isSpawnRequest`.
+  return withAutonomy(clean) ?? clean;
 }
 
 function cleanDespawn(p: DespawnRequest): DespawnRequest {

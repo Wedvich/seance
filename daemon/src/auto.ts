@@ -1,5 +1,6 @@
 import {
   CAPABILITIES,
+  withAutonomy,
   continuationSpec,
   continueOffer,
   failureReasonText,
@@ -405,7 +406,10 @@ export function taskRequestError(request: TaskRequest, surface: EnqueueSurface =
     overBound("title", request.title, surface) ??
     overBound("model", request.model, surface) ??
     overBound("effort", request.effort, surface) ??
-    overBound("repo", request.repo, surface)
+    overBound("repo", request.repo, surface) ??
+    (withAutonomy(request) === null
+      ? `plan: ${request.plan} contradicts autonomy: ${request.autonomy}; steer is plan mode`
+      : null)
   );
 }
 

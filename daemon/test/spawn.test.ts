@@ -3,7 +3,14 @@ import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { RepoEntry, SessionEntry, SpawnRequest } from "@seance/shared";
+import {
+  AUTONOMY_LEVELS,
+  type AutonomyLevel,
+  type RepoEntry,
+  type SessionEntry,
+  type SpawnRequest,
+} from "@seance/shared";
+import { AUTONOMY_PREAMBLE, autonomyNote } from "../src/autonomy.ts";
 import { SpawnFailure, type SpawnOutcome } from "../src/backend.ts";
 import { exec, git } from "../src/exec.ts";
 import { scanRepos } from "../src/scan.ts";
@@ -455,7 +462,7 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     const userSettings = join(home, ".claude", "settings.json");
     const repoSettingsDir = join(fixture.repoPath, ".claude");
     const argvOf = async (
-      request: { title: string; plan?: boolean },
+      request: { title: string; plan?: boolean; autonomy?: AutonomyLevel },
       entries: readonly RepoEntry[] = repos,
     ): Promise<readonly string[]> => {
       await rm(stub.argvFile, { force: true });
@@ -471,6 +478,9 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
       const allowed = await argvOf({ title: "Plan Bypass", plan: true });
       expect(allowed[allowed.indexOf("--permission-mode") + 1]).toBe("plan");
       expect(allowed).toContain(BYPASS);
+      // `steer` is plan mode by another name, so it keeps bypass reachable the same way.
+      expect(await argvOf({ title: "Steer Bypass", autonomy: "steer" })).toContain(BYPASS);
+      expect(await argvOf({ title: "Auto Bypass", autonomy: "auto" })).not.toContain(BYPASS);
 
       const ambient = await argvOf({ title: "Ambient Bypass" });
       expect(ambient).not.toContain(BYPASS);
@@ -504,6 +514,58 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
       await rm(userSettings, { force: true });
       await rm(join(home, ".claude-work", "settings.json"), { force: true });
       await rm(repoSettingsDir, { recursive: true, force: true });
+    }
+  });
+
+  test("each autonomy level reaches the window's env and the seed; only steer tightens the mode", async () => {
+    for (const level of AUTONOMY_LEVELS) {
+      await rm(stub.argvFile, { force: true });
+      await rm(stub.stdinFile, { force: true });
+      // oxlint-disable-next-line no-await-in-loop -- one window at a time, so each record is its own launch's
+      const outcome = await spawnSession(
+        { repo: "myrepo", mode: "here", title: `Level ${level}`, prompt: "do it", autonomy: level },
+        repos,
+        WAIT,
+      );
+      try {
+        const argv = await stub.argv();
+        if (level === "steer") expect(argv[argv.indexOf("--permission-mode") + 1]).toBe("plan");
+        else expect(argv).not.toContain("--permission-mode");
+        expect(await stub.autonomy()).toBe(level);
+        const seed = await stub.stdin();
+        expect(seed).toContain(AUTONOMY_PREAMBLE[level]);
+        // The level text sits between the preamble and the task, never after the user's words.
+        expect(seed.indexOf(AUTONOMY_PREAMBLE[level])).toBeLessThan(seed.indexOf("Task: do it"));
+      } finally {
+        await killWindow(outcome.window);
+      }
+    }
+  });
+
+  test("a spawn naming no level runs at checkpoint, and plan alone at steer", async () => {
+    await rm(stub.argvFile, { force: true });
+    await rm(stub.stdinFile, { force: true });
+    const ambient = await spawnSession({ repo: "myrepo", mode: "here", title: "No Level", prompt: "go" }, repos, WAIT);
+    try {
+      // Always set, never inherited: the tmux server may have been started from a session at another level.
+      expect(await stub.autonomy()).toBe("checkpoint");
+      expect(await stub.stdin()).toContain(AUTONOMY_PREAMBLE.checkpoint);
+    } finally {
+      await killWindow(ambient.window);
+    }
+
+    await rm(stub.argvFile, { force: true });
+    await rm(stub.stdinFile, { force: true });
+    const planned = await spawnSession(
+      { repo: "myrepo", mode: "here", title: "Plan Only", prompt: "go", plan: true },
+      repos,
+      WAIT,
+    );
+    try {
+      expect(await stub.autonomy()).toBe("steer");
+      expect(await stub.stdin()).toContain(AUTONOMY_PREAMBLE.steer);
+    } finally {
+      await killWindow(planned.window);
     }
   });
 
@@ -1004,7 +1066,7 @@ describe("spawnSession continuing a failed task's session", () => {
     }
   });
 
-  test("with no note the seed is the preamble alone — a resume is always seeded, so claude's stale-resume dialog never opens", async () => {
+  test("with no note the seed is the preamble and the level alone — a resume is always seeded, so claude's stale-resume dialog never opens", async () => {
     const wt = await makeWorktree();
     await rm(stub.stdinFile, { force: true });
     let outcome: SpawnOutcome | undefined;
@@ -1014,7 +1076,8 @@ describe("spawnSession continuing a failed task's session", () => {
       expect(seed).toStartWith("This session was resumed by séance");
       expect(seed).toContain("was stopped before it finished (cancelled from séance)");
       expect(seed).toContain("processes it started in the background may still be running");
-      expect(seed).toEndWith("carry on where it left off.\n");
+      // A resume restates the level: the session may come back after a compaction, or days later.
+      expect(seed).toEndWith(autonomyNote("checkpoint"));
       expect(seed).not.toContain("From the user");
     } finally {
       if (outcome !== undefined) await killWindow(outcome.window);

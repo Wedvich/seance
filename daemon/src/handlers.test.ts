@@ -104,6 +104,23 @@ describe("relay ops are audited", () => {
     expect(logged()).toContain("audit spawn origin=relay rejected");
   });
 
+  // The level reaches the window's environment, so anything outside the closed set must stop here.
+  test("an autonomy outside the levels, or contradicting plan, is rejected", async () => {
+    for (const fields of [
+      { autonomy: "yolo" },
+      { autonomy: "" },
+      { autonomy: 1 },
+      { autonomy: "auto", plan: true },
+      { autonomy: "checkpoint", plan: true },
+      { autonomy: "steer", plan: false },
+    ]) {
+      lines.length = 0;
+      // oxlint-disable-next-line no-await-in-loop -- each case reads the lines the previous one cleared
+      await createHandler(ctx)(spawnNope(fields));
+      expect(logged()).toContain("audit spawn origin=relay rejected");
+    }
+  });
+
   test("a taskId outside its bounds is rejected before the backend sees it", async () => {
     for (const taskId of ["", "a b", "x".repeat(65), "t;rm", 7]) {
       lines.length = 0;
