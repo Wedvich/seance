@@ -409,7 +409,7 @@ of M4 has landed.
 | 2     | Stacking                                                           | authoring surface; #28                                                 | L                        |
 | 2     | Auth health — **Done**                                             | Web Push (built); spiked 2026-11-12                                    | M                        |
 | 2     | Traits: core — **Done** (#406)                                     | auth health's status lists (shape to copy)                             | M–L                      |
-| 2     | Traits: probes — **Done** (PR #<n>)                                | traits core                                                            | M                        |
+| 2     | Traits: probes — **Done** (#409)                                   | traits core                                                            | M                        |
 | 2     | Traits: keep free (new)                                            | traits core                                                            | S                        |
 | 2     | Linear                                                             | settings; authoring surface                                            | L                        |
 | 2     | Successor (new) — spec 2026-11-12                                  | account records; fleet quota record; Web Push                          | M–L                      |
@@ -988,7 +988,7 @@ of M4 has landed.
     Mac could take), and a per-task "prefer not" list (that is `avoid` again).
   - _PRs:_ (1) core — **built** (#406; DESIGN.md "Traits filter"); config, `ExclaveInfo.traits`, `TaskSpec.requires` with the sentinel, the
     filter and both reasons (`trait_unhealthy` parsed and worded, emitted by PR 2), MCP/CLI/PWA authoring, `get_queue`/PWA text, `CAPABILITIES.traits`;
-    (2) probes — **built** (PR #<n>; DESIGN.md "Trait probes"): `tf`/`tu` in status, `trait_unhealthy`; (3) `keepFree`. Each with its DESIGN.md
+    (2) probes — **built** (#409; DESIGN.md "Trait probes"): `tf`/`tu` in status, `trait_unhealthy`; (3) `keepFree`. Each with its DESIGN.md
     subsection and threat-model entry (probes run operator-configured commands: a new exec
     surface, audited under its own origin `probe`).
 - **Offline machines and the caps** (checked 2026-11-12; already decided, no change) — a task in
