@@ -1072,6 +1072,35 @@ describe("spawn_session on auto", () => {
     expect(fake.creates).toEqual([]);
   });
 
+  test("through a daemon that predates traits, requires is refused as an old daemon, before any check on what the stripped registry declares", async () => {
+    const double = await startBrokerDouble((raw, id) =>
+      isRecord(raw) && raw["action"] === "fleet"
+        ? brokerOk(id, { machines: autoMachines(), scheduler: LEADING })
+        : brokerFail(id, "unsupported", "not in this double"),
+    );
+    try {
+      const fleet = selectFleet({
+        key: () => Promise.resolve(null),
+        direct: () => {
+          throw new Error("no key, so no direct path");
+        },
+        // device-1's registry entry advertises no `traits`: its daemon is older than this seanced.
+        broker: brokerFleet({ path: double.path }, () => Promise.resolve("device-1")),
+      });
+      const client = await connectedClient(fleet, fakeLocal());
+      const result = await client.callTool({
+        name: "spawn_session",
+        arguments: { machine: "auto", repo: "seance", requires: ["atlas"] },
+      });
+      expect(result.isError).toBe(true);
+      expect(toolText(result)).toContain("this machine's daemon is older than this seanced");
+      expect(toolText(result)).not.toContain("no machine declares");
+      expect(double.frames.every((frame) => isRecord(frame) && frame["action"] === "fleet")).toBe(true);
+    } finally {
+      await double.stop();
+    }
+  });
+
   test("an ambiguous repo is refused with the candidates, and nothing is stored", async () => {
     const machines = [
       ...autoMachines(),
@@ -1918,7 +1947,9 @@ describe("spawn_session requires", () => {
     expect(error).toBe(true);
     expect(text).toContain("no exclave this task can reach carries atlas and az together");
     // The two exclaves each carry one: named per exclave, not as "Thad" having both.
-    expect(text).toContain("atlas is on Thad/default, WSL (pinned elsewhere); az is on Thad/work, WSL (pinned elsewhere)");
+    expect(text).toContain(
+      "atlas is on Thad/default, WSL (pinned elsewhere); az is on Thad/work, WSL (pinned elsewhere)",
+    );
     expect(fake.creates).toEqual([]);
     expect(audited).toEqual([
       "audit enqueue origin=mcp client=mcp refused=unreachable_trait requires=2 missing=0 split=1",

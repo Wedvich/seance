@@ -3296,8 +3296,14 @@ describe("requiring traits", () => {
     expect(describeVerdict(verdict, [], {}, 0, null).body).toContain("no exclave this task can reach carries");
 
     const pinned = tracing();
-    await new Store(pinned, { ...form, machine: "dev-b", requires: ["atlas"] }).spawn();
+    const pinnedStore = new Store(pinned, { ...form, machine: "dev-b", requires: ["atlas"] });
+    await pinnedStore.spawn();
     expect(pinned.creates).toEqual([]);
+    const pinnedVerdict = pinnedStore.getState().verdict;
+    if (pinnedVerdict === null) throw new Error("no verdict");
+    // The reachability check fired, not the pin, repo or gate checks: it names the holder as pinned elsewhere.
+    expect(describeVerdict(pinnedVerdict, [], {}, 0, null).body).toContain("atlas is on");
+    expect(describeVerdict(pinnedVerdict, [], {}, 0, null).body).toContain("(pinned elsewhere)");
     // Pinned to the machine that has it, it places.
     const ok = tracing();
     await new Store(ok, { ...form, machine: "dev-a", requires: ["atlas"] }).spawn();
