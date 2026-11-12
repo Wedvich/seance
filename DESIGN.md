@@ -1497,7 +1497,7 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
   the scheduler alone: a request sealed `from: "scheduler"`, or the leader's
   in-process call (Local op socket, "Session events"; `progress`, Scheduler,
   "Branch state"). The one live pull — session state is inherently fresh-only.
-- `spawn { repo, prompt?, title?, mode: "worktree"|"here", model?, effort?, plan?, client?, taskId?, baseBranch? }`
+- `spawn { repo, prompt?, title?, mode: "worktree"|"here", model?, effort?, plan?, autonomy?, client?, taskId?, baseBranch? }`
   → `{ ok, window, path, sessions }` or `{ ok: false, code, message, id? }`. `id`
   rides only on `task_running`: the `SessionEntry.id` already running the
   request's `taskId` (Daemon, "Task ids"). Advertised as `"taskId"` in
@@ -1572,7 +1572,7 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   the holds are): what fills the store without ever running. `globalMax` is the leader's
   in-flight cap, the denominator of the Queue header's "8/8 running"; `run-now` places past it, so
   the numerator may exceed it ("9/8"). Absent from an older leader, whose header shows the bare count.
-- `route-preview { repo, mode, prompt?, title?, model?, effort?, plan?, skill? }` (`TaskRequest`: a
+- `route-preview { repo, mode, prompt?, title?, model?, effort?, plan?, autonomy?, skill? }` (`TaskRequest`: a
   spawn's fields minus the machine, `repo` the repo's `origin`) → `{ decision }`, reserving
   nothing.
 - **There is no `submit`** (removed in M3 item 6; M2's op took a `TaskRequest` and answered the
@@ -7275,7 +7275,7 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   whose `fleet` action carries the daemon's scheduler view (2026-10-25), so no mark means no
   verified leader, or that this machine's daemon could not say (older, or restarting); still a bare array, so the field is
   per entry rather than a wrapper), `get_sessions { machine }`,
-  `spawn_session { machine?, repo, prompt?, title?, mode?, model?, effort?, plan?, … }`
+  `spawn_session { machine?, repo, prompt?, title?, mode?, model?, effort?, plan?, autonomy?, … }`
   and `despawn_session { machine, id, force? }` (added 2026-10-09, see
   "Despawn"). `get_sessions` and `despawn_session` map 1:1 onto the `sessions`/`despawn` ops
   with the existing `OP_TIMEOUT_MS`; `spawn_session` is a scheduler enqueue and never sends a

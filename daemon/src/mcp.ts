@@ -698,6 +698,7 @@ function describeTask(
   const placement = placementOf(task, machines);
   const pin = describePin(task, machines, names);
   const { spec } = task;
+  const level = autonomyOf(spec);
   return {
     id: task.id,
     state: task.state,
@@ -717,7 +718,7 @@ function describeTask(
     ...(task.needsInputSince === undefined ? {} : { needsInputSince: new Date(task.needsInputSince).toISOString() }),
     ...(spec.until === "reported" ? { until: spec.until } : {}),
     // Only off the default: most tasks run at checkpoint, and `plan: true` alone reads as steer.
-    ...(autonomyOf(spec) === DEFAULT_AUTONOMY ? {} : { autonomy: autonomyOf(spec) }),
+    ...(level === DEFAULT_AUTONOMY ? {} : { autonomy: level }),
     // A merge under `until: "reported"` settles nothing, so it is told apart from a finish here too.
     ...(task.merged === true ? { merged: true } : {}),
     ...(spec.batch === undefined ? {} : { batch: { id: spec.batch.id, index: spec.batch.index } }),

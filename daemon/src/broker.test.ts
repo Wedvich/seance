@@ -189,6 +189,21 @@ describe("parseBrokerRequest refuses everything off the allowlist", () => {
     });
   });
 
+  test("a brokered steer travels with plan, for a target daemon that drops the level", () => {
+    const parsed = parseBrokerRequest(
+      request({ remoteOp: "spawn", payload: { repo: "seance", mode: "here", autonomy: "steer" } }),
+      SELF,
+    );
+    if (!("request" in parsed) || parsed.request.action !== "request") throw new Error("expected a request");
+    expect(parsed.request.payload).toEqual({
+      repo: "seance",
+      mode: "here",
+      autonomy: "steer",
+      plan: true,
+      client: "mcp",
+    });
+  });
+
   test("sessions carries no payload at all", () => {
     const parsed = parseBrokerRequest(request({ payload: { anything: 1 } }), SELF);
     if (!("request" in parsed) || parsed.request.action !== "request") throw new Error("expected a request");
