@@ -51,6 +51,34 @@ async function setup(refuse = 0, lose = 0, landed = true) {
   return { settings, puts, record: () => held };
 }
 
+/** `setup`'s store with the loss armed later: the next put loses its answer, committed when `landed`. */
+async function restoreSetup() {
+  let held: SettingsRecord = { version: 1, vapid: await generateVapidKeys(), subscriptions: [] };
+  let losing: boolean | null = null;
+  const store: SettingsStore = {
+    get: async () => ({ version: held.version, record: held }),
+    put: async (at, record): Promise<SettingsWrite> => {
+      if (held.version !== at) return { ok: false, code: "version_conflict" };
+      if (losing !== null) {
+        if (losing) held = { ...record, version: at + 1 };
+        losing = null;
+        return { ok: false, code: "indeterminate" };
+      }
+      held = { ...record, version: at + 1 };
+      return { ok: true, version: at + 1 };
+    },
+  };
+  const settings = createTermSettings({ store, term: 1, log: { warn: () => {} } });
+  await settings.load();
+  return {
+    settings,
+    record: () => held,
+    lose: (landed: boolean): void => {
+      losing = landed;
+    },
+  };
+}
+
 /** A machine with exclaves `default` and `work`, signed in, whose status carries `auth` beside a clean disk. */
 const authMachine = (deviceId: string, auth: { ax?: number[]; au?: number[] }): Machine => ({
   ...machine(deviceId, 10),
@@ -279,5 +307,39 @@ describe("createMachineAlertWatch", () => {
     expect(restored).toEqual([{ deviceId: "a", exclave: "default", state: "expired", at: NOW }]);
     expect(record().authAlerts).toBeUndefined();
     expect(raised).toHaveLength(1);
+  });
+
+  test("a clearing write whose answer was lost is still reported restored, once, whether or not it landed", async () => {
+    for (const landed of [true, false]) {
+      const { settings, record, lose } = await restoreSetup();
+      const fleet = { current: [authMachine("a", { ax: [0] })] };
+      const { watch, raised, restored, clock } = watchOver(settings, fleet);
+      watch.check(false);
+      // oxlint-disable-next-line no-await-in-loop -- one scenario after the other
+      await pollUntil(() => raised.length === 1, "the alert");
+
+      lose(landed);
+      fleet.current = [authMachine("a", {})];
+      clock.now += 1000;
+      watch.check(false);
+      // Negative: the answer was lost, so nothing is reported yet.
+      // oxlint-disable-next-line no-await-in-loop
+      await Bun.sleep(20);
+      expect(restored).toEqual([]);
+
+      clock.now += 1000;
+      watch.check(false);
+      // oxlint-disable-next-line no-await-in-loop
+      await pollUntil(() => restored.length === 1, `the restored entry (landed: ${landed})`);
+      expect(restored).toEqual([{ deviceId: "a", exclave: "default", state: "expired", at: NOW }]);
+      expect(record().authAlerts).toBeUndefined();
+
+      // Settled: a further check reports nothing more.
+      clock.now += 1000;
+      watch.check(false);
+      // oxlint-disable-next-line no-await-in-loop
+      await Bun.sleep(20);
+      expect(restored).toHaveLength(1);
+    }
   });
 });

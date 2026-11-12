@@ -39,12 +39,16 @@ export interface MachineAlertWatch {
  * a no-op, so the store answers a conflict if the first write did land, and the
  * record that conflict re-reads is what shows it. A pending alert is raised once
  * that record holds its entry at the alert's own `at`; one it does not hold
- * never landed, and the step raises it afresh.
+ * never landed, and the step raises it afresh. A login restored by such a write
+ * is kept the same way: once the record no longer holds its entry, the clear
+ * landed and the "restored" is reported then; while it still holds it, the step
+ * clears it again and reports it with that write.
  */
 export function createMachineAlertWatch(o: MachineAlertWatchOpts): MachineAlertWatch {
   let busy = false;
   let checkedAt = Number.NEGATIVE_INFINITY;
   let pending: readonly PushAlert[] = [];
+  let pendingRestored: readonly AuthAlerted[] = [];
   const holds = (record: SettingsRecord, alert: PushAlert): boolean => {
     if (alert.kind === "disk") {
       return (record.diskAlerts ?? []).some((e) => e.deviceId === alert.deviceId && e.at === alert.at);
@@ -55,6 +59,10 @@ export function createMachineAlertWatch(o: MachineAlertWatchOpts): MachineAlertW
         e.deviceId === alert.deviceId && e.exclave === alert.exclave && e.state === alert.state && e.at === alert.at,
     );
   };
+  const sameEntry = (a: AuthAlerted, b: AuthAlerted): boolean =>
+    a.deviceId === b.deviceId && a.exclave === b.exclave && a.state === b.state && a.at === b.at;
+  const heldIn = (record: SettingsRecord, entry: AuthAlerted): boolean =>
+    (record.authAlerts ?? []).some((e) => sameEntry(e, entry));
   return {
     check: (debounce) => {
       const settings = o.settings();
@@ -66,6 +74,7 @@ export function createMachineAlertWatch(o: MachineAlertWatchOpts): MachineAlertW
       if (held === null) return;
       if (
         pending.length === 0 &&
+        pendingRestored.length === 0 &&
         diskAlertStep(o.machines(), held.diskAlerts ?? [], at).next === null &&
         authAlertStep(o.machines(), held.authAlerts ?? [], at).next === null
       ) {
@@ -73,13 +82,17 @@ export function createMachineAlertWatch(o: MachineAlertWatchOpts): MachineAlertW
       }
       busy = true;
       const unsettled = pending;
+      const unsettledRestored = pendingRestored;
       let raised: readonly PushAlert[] = [];
       let restored: readonly AuthAlerted[] = [];
+      // Earlier lost writes' restores whose entry the record no longer holds: the clear landed.
+      let restoredEarlier: readonly AuthAlerted[] = [];
       // Earlier lost writes' alerts that the record the step last saw holds: they did land.
       let confirmed: readonly PushAlert[] = [];
       settings
         .update((record) => {
           confirmed = unsettled.filter((alert) => holds(record, alert));
+          restoredEarlier = unsettledRestored.filter((entry) => !heldIn(record, entry));
           const machines = o.machines();
           const disk = diskAlertStep(machines, record.diskAlerts ?? [], at);
           const auth = authAlertStep(machines, record.authAlerts ?? [], at);
@@ -88,7 +101,8 @@ export function createMachineAlertWatch(o: MachineAlertWatchOpts): MachineAlertW
           const { version: _version, ...body } = record;
           // Nothing to change, but an unsettled alert is still to be told from a lost write: write anyway.
           if (disk.next === null && auth.next === null) {
-            return unsettled.length > 0 && confirmed.length === 0 ? body : null;
+            const unsettledAny = unsettled.length + unsettledRestored.length > 0;
+            return unsettledAny && confirmed.length + restoredEarlier.length === 0 ? body : null;
           }
           const { diskAlerts: _disk, authAlerts: _auth, ...rest } = body;
           const diskNext = disk.next ?? record.diskAlerts ?? [];
@@ -104,7 +118,16 @@ export function createMachineAlertWatch(o: MachineAlertWatchOpts): MachineAlertW
             busy = false;
             const lost = !result.ok && result.code === "indeterminate";
             pending = lost ? [...unsettled.filter((alert) => !confirmed.includes(alert)), ...raised] : [];
+            pendingRestored = lost
+              ? [
+                  ...unsettledRestored.filter(
+                    (entry) => !restoredEarlier.includes(entry) && !restored.some((r) => sameEntry(r, entry)),
+                  ),
+                  ...restored,
+                ]
+              : [];
             for (const alert of confirmed) o.onAlert(alert);
+            for (const entry of restoredEarlier) o.onRestored?.(entry, at);
             if (!result.ok) return;
             for (const alert of raised) o.onAlert(alert);
             for (const entry of restored) o.onRestored?.(entry, at);
