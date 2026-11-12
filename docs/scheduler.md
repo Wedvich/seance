@@ -1217,34 +1217,57 @@ of M4 has landed.
   3. **Automatic trigger** — **Done** (2026-11-12), as specced below. What the build decided:
      - **"Newest fresh reading"** is routing's own fold (`newestQuotaByAccount`, the fleet record
        included, so the trigger, the Machines screen and routing read one number), taken only while
-       the machine that observed it is connected and its status is not `isStatusStale`. A reading only
-       the fleet record carries, or a sleeping machine's, never moves a task. A reading inside a fresh
+       the machine that observed the newest reading is connected and its status is not `isStatusStale`. A
+       reading whose observer is gone or asleep never moves a task; older windows merged into that reading
+       (`mergeQuota`) are not checked against their own observers. A reading inside a fresh
        status can itself be minutes old; _Settled defaults_ 7 (no age cap) stands.
      - **"Full"** is `fullWindow`'s rule at zero projected usage, so a projection can never count; a
        window inside `resetGraceMs` of its reset reads empty, as routing treats it. It holds whether
        or not the exclave is spilling into credits: an auto task is moved off credits too (the log
-       line carries `spending=1` for those, so the measure can tell). The trigger passes only when
-       another account could take the successor (an exclave on a connected machine, on another
-       account, with the repo, the traits and no avoided machine; headroom is not asked, the successor
-       waits on `quota_over_line`); otherwise it alerts like any other level, rather than strand the
-       successor `ready` under `predecessor_account`.
+       line carries `spending=1` for those, so the measure can tell). _Decided_ (owner): an auto task on a full
+       window is passed even while its exclave spills into credits, **but only when routing would place
+       its successor now**. The guard routes the spec `successorSpec` would build (`succeeds.trigger:
+       "quota"`, `succeeds.account` the old account, the predecessor's slot released) through `route`
+       itself and needs a chosen candidate, so a successor held by `quota_over_line` (a successor never
+       spills), `predecessor_account`, auth, a model seat, a skill, traits, the repo or a cap is not
+       passed: it would strand `ready`, and the task alerts like any other level instead, once per window.
+       No routing rule is restated in a second place.
      - **The dedupe** is `Task.quotaExhausted`, keyed on account id, window label and reset (within
        `resetGraceMs`; with no reset, one span of the window), written before the pass or the alert so a
        new leader repeats neither. It is dropped, never fatal, when malformed, and on finishing.
      - **"Retried once per reset"** is one retry after `quotaPassRetryMs` (5 min, _Settled defaults_ 22)
        within the same window, for a refusal that can pass (`push_failed`, `pr_unreadable`,
        `successor_unsupported`, ...). The retry's own refusal raises one reason-less `quota-exhausted`
-       alert, so an auto task never sits at 100% silently. Every attempt is stamped before `pass` is
-       called, so a takeover mid-pass never attempts twice.
+       alert, so an auto task never sits at 100% silently; a retry that comes due while no pass can run
+       (no successor placeable, the machine no longer offered) raises the same alert. A pass that throws
+       counts as a refusal that can pass. A refusal waiting cannot clear (`default_branch`,
+       `detached_head`, `not_launched`, `push_rejected`, `pr_not_open`, `account_unknown`, `here`) alerts at
+       once with reason `refused`, no retry. Every attempt is stamped before `pass` is called, so a
+       takeover mid-pass never attempts twice. `succeeds.since` is the newest reading's time at the
+       attempt, or the first attempt's time on a retry, so a trigger that waited for a machine to qualify
+       or for room undercounts "time from limit to successor running".
+     - **One push per event.** A task whose dispatch routing spilled onto this very full window already
+       raised the spending spill alert; the window's `quota-exhausted` alert is then written to the stamp
+       and logged (`outcome=spill_alerted`) but not pushed. _Decided: the spill alert stands, because it
+       already says the window is full and spending, and a second push would only suggest undoing the
+       spill routing chose; passing it is one tap in the PWA._ A forecast spill alert does not count.
      - **Not offered, not touched.** A `here` task is skipped entirely: it cannot be passed, and an alert
        offering a pass would be refused. A task whose machine is offline or cannot push for a successor
        (`passOffer`) is left alone and looked at each tick, so it acts once the machine qualifies.
-       `needs_input` and `not_running` refusals write nothing (a stamp written ahead is cleared), so the
-       task is looked at again once it is back in `running`; `conflict`, `finished` and `not_found` leave
-       the stamp.
+       `needs_input`, `not_running` and `conflict` outcomes clear the stamp written ahead while the task is
+       not finished and carries no `successor`, so it is looked at again once it is back in `running` (a
+       `conflict` is a task that moved mid-push, a `needs-input` answered meanwhile among them);
+       `finished` and `not_found` leave it. A reading that gains a reset after a stamp written without
+       one is the same window (the span rule applies while either side has none).
      - **Capability.** The daemon advertises `successorAuto`; nothing gates on it yet, it marks the
        leader's version in `status`. An older leader holds a `quota` successor unreadable
        (`parseSucceeds`), the intended gate.
+     - **Not decided from here.** Which session state Claude Code's hooks report at the usage limit
+       (`needs-input` would keep the trigger from ever seeing the task, `eligible` wants `running`) is not
+       established by any test; check it with the opportunistic dev check and record the answer here.
+     - **Audit.** The automatic pass has no `audit queue origin=...` line of its own: the scheduler's
+       `audit pass ... trigger=quota` (and `audit pass refused`) line is its record, and the push, spawn
+       and despawn it causes audit under their own origins. It is a leader-internal act, not a new surface.
      - **Session-pass refusals.** A session's own pass the leader refuses with a code other than `conflict`,
        `finished` or `not_found` raises a `pass-refused` alert, once per task per term (in memory: a new
        leader may alert once more).

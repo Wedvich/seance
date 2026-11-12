@@ -19,7 +19,7 @@ import {
   type Task,
   type TaskCreateResult,
 } from "../src/index.ts";
-import { exclave, FakeFleet, machine, NOW, obs, readerChecked, spec, status, unreachable } from "./fixtures.ts";
+import { clone, exclave, FakeFleet, machine, NOW, obs, readerChecked, spec, status, unreachable } from "./fixtures.ts";
 
 /**
  * Passing a running task to a successor (DESIGN.md, "Passing to a successor"), through the scheduler over
@@ -43,6 +43,7 @@ interface Setup {
   readonly heads: string[];
   readonly creates: Task[];
   readonly alerts: SchedulerAlert[];
+  readonly errors: unknown[];
   /** Another scheduler over the same store, fleet and clock: a new leader's term, once loaded. */
   another: () => Scheduler;
   prHead: PrHeadReading;
@@ -57,6 +58,7 @@ function setup(machines = [machine("a", { capabilities: CAPABLE })]): Setup {
   const heads: string[] = [];
   const creates: Task[] = [];
   const alerts: SchedulerAlert[] = [];
+  const errors: unknown[] = [];
   const state = { prHead: OPEN, create: (): TaskCreateResult => ({ ok: true }) } as Pick<Setup, "prHead" | "create">;
   const checked = readerChecked(store, () => clock.now);
   const make = (): Scheduler =>
@@ -66,6 +68,7 @@ function setup(machines = [machine("a", { capabilities: CAPABLE })]): Setup {
       now: () => clock.now,
       log: (line) => lines.push(line),
       onAlert: (alert) => alerts.push(alert),
+      onError: (err) => errors.push(err),
       prHead: async (url) => {
         heads.push(url);
         return state.prHead;
@@ -81,6 +84,7 @@ function setup(machines = [machine("a", { capabilities: CAPABLE })]): Setup {
   const scheduler = make();
   return {
     alerts,
+    errors,
     another: make,
     store,
     fleet,
@@ -1125,7 +1129,7 @@ describe("the session's own pass", () => {
 describe("the automatic quota trigger", () => {
   const AUTO = { autonomy: "auto" } as const;
   const RETRY_MS = 5 * 60_000;
-  const refused = (code: "dirty_worktree" | "branch_mismatch" | "internal_error") =>
+  const refused = (code: "dirty_worktree" | "branch_mismatch" | "internal_error" | "default_branch") =>
     ({ ok: false, code, message: "no" }) as const;
 
   /** `a`, where the task starts (ties go to the first id), and `b` on another account to carry on. */
@@ -1377,23 +1381,220 @@ describe("the automatic quota trigger", () => {
     expect(s.alerts).toEqual([]);
   });
 
-  test("a pass that loses a race leaves the window stamped: the task is not attempted again when it runs", async () => {
+  test("a pass that loses a race to a needs-input is looked at again once the task runs", async () => {
     const s = setup(twoMachines());
     await running(s, true, AUTO);
     exhaust(s);
+    let raced = false;
     s.fleet.pushReply = async () => {
-      await s.scheduler.onSession("old", "needs-input", { deviceId: "a", pane: "%1" });
+      if (!raced) {
+        raced = true;
+        await s.scheduler.onSession("old", "needs-input", { deviceId: "a", pane: "%1" });
+      }
       return { ok: true, remoteBranch: "feature/x", tip: TIP, pushed: true };
     };
     await tick(s.scheduler);
     expect(s.creates).toEqual([]);
     expect(s.scheduler.task("old")?.state).toBe("needs-input");
-    expect(stampOf(s)?.retry).toBeUndefined();
+    expect(stampOf(s)).toBeUndefined();
+    expect(s.alerts).toEqual([]);
 
     await s.scheduler.onSession("old", "busy", { deviceId: "a", pane: "%1" });
-    later(s, 3 * RETRY_MS);
     await tick(s.scheduler);
+    expect(s.fleet.pushes).toHaveLength(2);
+    expect(s.scheduler.task("old")?.state).toBe("superseded");
+  });
+
+  test("a retry that loses a race is looked at again too, and a pass that throws is a refusal that can pass", async () => {
+    const s = setup(twoMachines());
+    await running(s, true, AUTO);
+    exhaust(s);
+    s.create = () => {
+      throw new Error("store down");
+    };
+    await tick(s.scheduler);
+    expect(s.lines).toContain(`audit pass refused task="old" trigger=quota outcome=error`);
+    expect(s.errors).toHaveLength(1);
+    expect(stampOf(s)?.retry).toBe(true);
+    expect(s.alerts).toEqual([]);
+
+    let raced = false;
+    s.create = async () => {
+      if (!raced) {
+        raced = true;
+        await s.scheduler.onSession("old", "needs-input", { deviceId: "a", pane: "%1" });
+      }
+      return { ok: true };
+    };
+    later(s, RETRY_MS);
+    await tick(s.scheduler);
+    expect(s.scheduler.task("old")?.state).toBe("needs-input");
+    expect(stampOf(s)).toBeUndefined();
+
+    await s.scheduler.onSession("old", "busy", { deviceId: "a", pane: "%1" });
+    await tick(s.scheduler);
+    expect(s.scheduler.task("old")?.state).toBe("superseded");
+  });
+
+  test.each([
+    [
+      "default_branch",
+      (s: Setup): void => {
+        s.fleet.pushReply = () => refused("default_branch");
+      },
+    ],
+    [
+      "pr_not_open",
+      (s: Setup): void => {
+        s.prHead = { ...OPEN, state: "closed" };
+      },
+    ],
+  ] as const)(
+    "a refusal for %s cannot pass by waiting: alerted at once as refused, never retried",
+    async (_code, arrange) => {
+      const s = setup(twoMachines());
+      await running(s, true, AUTO);
+      exhaust(s);
+      arrange(s);
+      await tick(s.scheduler);
+      expect(s.alerts).toHaveLength(1);
+      expect(s.alerts[0]).toMatchObject({ kind: "quota-exhausted", taskId: "old", reason: "refused" });
+      later(s, 3 * RETRY_MS);
+      await tick(s.scheduler);
+      expect(s.alerts).toHaveLength(1);
+      expect(s.creates).toEqual([]);
+    },
+  );
+
+  test("a manual pass that arrives while an automatic one is out joins it", async () => {
+    const s = setup(twoMachines());
+    await running(s, true, AUTO);
+    exhaust(s);
+    const gate = Promise.withResolvers<void>();
+    s.fleet.pushReply = async () => {
+      await gate.promise;
+      return { ok: true, remoteBranch: "feature/x", tip: TIP, pushed: true };
+    };
+    const ticking = s.scheduler.tick();
+    await until(() => s.fleet.pushes.length === 1);
+    const manual = s.scheduler.pass("old");
+    gate.resolve();
+    ok(await manual);
+    await ticking;
+    await s.scheduler.drain();
     expect(s.fleet.pushes).toHaveLength(1);
+    expect(s.creates).toHaveLength(1);
+    expect(s.lines).toContain(`pass joined task="old"`);
+  });
+
+  describe("what routing would place", () => {
+    const spilling = (): ReturnType<typeof machine>[] => [
+      machine("a", { capabilities: CAPABLE, exclaves: [exclave("main", "org:a", { extraUsageEnabled: true })] }),
+      machine("b", { capabilities: CAPABLE }),
+    ];
+
+    test("an auto task spending credits is passed off them when the other account has room", async () => {
+      const s = setup(spilling());
+      await running(s, true, AUTO);
+      exhaust(s);
+      await tick(s.scheduler);
+      expect(s.scheduler.task("old")?.state).toBe("superseded");
+      expect(s.alerts).toEqual([]);
+    });
+
+    test("an auto task spilled onto a full account because the other is over the line keeps running, and is alerted once", async () => {
+      const s = setup(spilling());
+      exhaust(s);
+      exhaust(s, { h: 95 }, "b");
+      await running(s, true, AUTO);
+      expect(s.scheduler.task("old")).toMatchObject({ assignment: { deviceId: "a" } });
+      await tick(s.scheduler);
+      await tick(s.scheduler);
+      expect(s.creates).toEqual([]);
+      expect(s.scheduler.task("old")?.state).toBe("running");
+      // The spill alert of the dispatch is the one push: the window's full alert would be the same event.
+      expect(s.alerts.map((a) => a.kind)).toEqual(["spill"]);
+      expect(stampOf(s)).toMatchObject({ accountId: "org:a", window: "5h" });
+    });
+
+    test("a spilled checkpoint task gets the spill alert only, not a second push for the same event", async () => {
+      const s = setup(spilling());
+      exhaust(s);
+      exhaust(s, { h: 95 }, "b");
+      await running(s, true, { autonomy: "checkpoint" });
+      await tick(s.scheduler);
+      expect(s.alerts.map((a) => a.kind)).toEqual(["spill"]);
+    });
+
+    test("a successor routing could not place is not passed: the other account's seat lacks the model", async () => {
+      const s = setup([
+        machine("a", { capabilities: CAPABLE, exclaves: [exclave("main", "org:a", { seatTier: "team_tier_1" })] }),
+        machine("b", { capabilities: CAPABLE, exclaves: [exclave("main", "org:b", { seatTier: "team_standard" })] }),
+      ]);
+      await running(s, true, { ...AUTO, model: "fable" });
+      exhaust(s);
+      await tick(s.scheduler);
+      expect(s.creates).toEqual([]);
+      expect(s.alerts.map((a) => a.kind)).toEqual(["quota-exhausted"]);
+    });
+
+    test("a successor routing could not place is not passed: the other account's login is gone", async () => {
+      const s = setup(twoMachines());
+      await running(s, true, AUTO);
+      s.fleet.fleet = s.fleet.fleet.map((m) =>
+        m.deviceId === "b" ? { ...m, exclaves: [exclave("main", "org:b", { authOk: false })] } : m,
+      );
+      exhaust(s);
+      await tick(s.scheduler);
+      expect(s.creates).toEqual([]);
+      expect(s.alerts.map((a) => a.kind)).toEqual(["quota-exhausted"]);
+    });
+
+    test("another exclave on the same account is no room, and an offline other account is none either", async () => {
+      const s = setup([
+        machine("a", {
+          capabilities: CAPABLE,
+          exclaves: [exclave("main", "org:a"), exclave("alt", "org:a")],
+          repos: [clone("app", "main"), clone("app2", "alt")],
+          status: status({ quota: [obs(0), obs(1)] }),
+        }),
+        machine("b", { capabilities: CAPABLE, connected: false }),
+      ]);
+      await running(s, true, AUTO);
+      exhaust(s);
+      await tick(s.scheduler);
+      expect(s.creates).toEqual([]);
+      expect(s.alerts.map((a) => a.kind)).toEqual(["quota-exhausted"]);
+    });
+
+    test("a retry that comes due while the other account has gone is alerted, not dropped", async () => {
+      const s = setup(twoMachines());
+      await running(s, true, AUTO);
+      exhaust(s);
+      s.fleet.pushReply = () => refused("internal_error");
+      await tick(s.scheduler);
+      expect(stampOf(s)?.retry).toBe(true);
+
+      s.fleet.fleet = s.fleet.fleet.map((m) => (m.deviceId === "b" ? { ...m, connected: false } : m));
+      later(s, RETRY_MS);
+      await tick(s.scheduler);
+      expect(s.alerts.map((a) => a.kind)).toEqual(["quota-exhausted"]);
+      expect(stampOf(s)?.retry).toBeUndefined();
+      await tick(s.scheduler);
+      expect(s.alerts).toHaveLength(1);
+    });
+  });
+
+  test("a window whose reading gains a reset after the stamp is the same window", async () => {
+    const s = setup([machine("a", { capabilities: CAPABLE })]);
+    await running(s, true, AUTO);
+    exhaust(s);
+    await tick(s.scheduler);
+    expect(s.alerts).toHaveLength(1);
+    exhaust(s, { hr: NOW / 1000 + 3600 });
+    later(s, 30_000);
+    await tick(s.scheduler);
+    expect(s.alerts).toHaveLength(1);
   });
 
   describe("a session's own refused pass", () => {

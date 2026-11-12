@@ -1995,10 +1995,9 @@ an old peer's frames parse as before. Mixed versions:
     attempt: `pass_to_successor` gates on the verified leader advertising `successorSelf`. A new client
     offers the pass, and a new leader pushes, only against a machine or leader advertising the one it
     needs.
-    `CAPABILITIES.successorAuto` (stage 3) gates `trigger: "quota"` and `succeeds.since` the same way,
-    and PR 2's parser refuses `"quota"`, so an early leader never misreads one: it holds a quota
-    successor's record unreadable, the intended gate. The daemon advertises it from stage 3; nothing
-    gates on it yet. The two new `PushAlert` kinds (`quota-exhausted`, `pass-refused`) are unknown to
+    `CAPABILITIES.successorAuto` (stage 3) marks the leader's version in `status`; nothing gates on it.
+    PR 2's parser refuses `"quota"`, so an early leader never misreads one: it holds a quota
+    successor's record unreadable, the intended gate. The daemon advertises it from stage 3. The two new `PushAlert` kinds (`quota-exhausted`, `pass-refused`) are unknown to
     an older `parsePushAlert` and an older service worker, which show the fallback text.
   - Reason `predecessor_account`: dropped by an older reader like any unknown reason, which keeps the
     candidate. Failure code `pass_abandoned` parses as any bounded name; an older PWA words it as a
@@ -2666,7 +2665,9 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
 - **Alerts are a log line plus a push** (M3 item 5, M4 Web Push). The term's `Scheduler` takes
   `onAlert`, which `startTerm` logs as `warn scheduler: <message>` and hands to the push sender
   (_Web Push_, below): a dispatch that may spill into credits or already spends them, a wait for input (past 2 minutes, and again
-  past 30), an `awaiting-merge` task's PR that is stuck ("PR blocked") and, from the leader's own
+  past 30), an `awaiting-merge` task's PR that is stuck ("PR blocked"), a running task whose account ran
+  out of usage (`quota-exhausted`, _Successor_, "The automatic trigger"), a session's own pass the leader
+  refused (`pass-refused`) and, from the leader's own
   watch, a nearly full disk or an exclave whose login lapsed or is about to (_The library_,
   "Credits spill" and "Needs input"; _Disk alerts_ and _Auth alerts_, below). The line names task,
   account and device ids, never a prompt, title or URL; the push payload names a task or device id
@@ -3379,7 +3380,9 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   warned of past the line alerts once more when a dispatch lands on it full. Until then every
   spill alerted as spending credits from 90% projected, which on a standard seat with one task
   in flight was a window reading 41%. A spend that starts mid-task, with no dispatch onto the
-  full window after it, gets no spending alert: the forecast was the warning. Not built: a
+  full window after it, gets no spending alert from this path (a non-auto task's full window raises
+  `quota-exhausted`, which is not pushed when the dispatch's own spending alert covered that window;
+  _Successor_, "The automatic trigger"): the forecast was the warning. Not built: a
   leader watch pushing whenever an extra-usage account reads full, whatever spent it (manual
   sessions too) — it would need its own alert kind and de-dupe. A window is told apart by its
   reset, and two readings of one reset differ by seconds, so a later reset is a new window only
@@ -7440,30 +7443,34 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   does not offer a `superseded` task either, since only `failed` and `cancelled` qualify: its session
   was ended on purpose and its account is out. `seanced pass <task-id>` is origin `cli`, with no aliases.
   `shared/src/successor.ts` and the MCP tool code import no logging, since `seanced mcp` reaches them.
-- **The automatic trigger (stage 3, built 2026-11-12).** Mechanics as built: `exhaustion` (`scheduler/src/route.ts`)
+- **The automatic trigger (stage 3, built 2026-11-12).** As built: `exhaustion` (`scheduler/src/route.ts`)
   folds readings through routing's `newestQuotaByAccount` (the fleet record included) and counts one only
-  while the machine that observed it is connected with a status that is not stale; `fullWindow` at zero
-  projected usage decides "full", so a forecast never acts. `quotaDue` (`scheduler/src/quota-trigger.ts`)
-  selects a `running` task not `here`, not yet stamped for this account, window and reset. The leader
-  writes `Task.quotaExhausted` before it passes or alerts, so a new leader repeats neither; it is dropped
-  on finishing. An `auto` task is passed only when `successorHasRoom` (another account could host the
-  successor), else it alerts; a task whose machine fails `passOffer` is left for the next tick. A refusal
-  that can pass is retried once after `quotaPassRetryMs` (5 min), then alerts. A session's own pass the
-  leader refuses raises `pass-refused` (once per task per term). The log carries `successor placed
-  after=<ms> from=since|created`. The leader evaluates, each tick and from data it
-  already holds, whether an account is exhausted: by its newest fresh reading, a window the task is
-  judged on reads 100% and its credits are `spending` (or the exclave cannot spill), or its credits
-  are spent to the cap. A forecast never acts (an over-the-line projection, or a `spill` without
-  `spending`, may at most raise the existing spill alert). For a `running` task (not `needs-input`,
-  `lost` or `reserved`) on that account: an `auto` task is passed by the leader itself, `pass` with
-  `trigger: "quota"` and `succeeds.since` the reading's time, through the same in-flight guard, and its
-  successor avoids the old account (`predecessor_account`); every other level gets a `PushAlert`
-  kind `quota-exhausted { taskId, at, window }` with fixed wording in `push-sw.js`, its `window`
-  shown only as one of the known `5h` and `7d`, as a spill's is, and omitted otherwise, and a tap
-  opening `/?task=<id>`. Each is deduped per task per window reset, persisted on the task as `spillAlert` is.
-  `dirty_worktree` and `branch_mismatch` make the leader alert instead (reason `dirty` or `branch`);
-  any other refusal is logged and retried once per reset. The close is at once, since a session out of
-  usage cannot finish a turn. It needs `CAPABILITIES.successorAuto`.
+  while the machine that observed the newest reading is connected with a status that is not stale;
+  `fullWindow` at zero projected usage decides "full", so a forecast never acts, and a full window is
+  exhausted whether or not the exclave is spending credits (the owner chose that an auto task is
+  moved off credits too). `quotaDue` (`scheduler/src/quota-trigger.ts`) selects a `running` task not
+  `here`, not yet stamped for this account, window and reset (a stamp without a reset covers a reading
+  that gains one). The leader writes `Task.quotaExhausted` (`quotaExhausted`, parsed leniently: dropped
+  when malformed, unlike `spillAlert`) before it passes or alerts, so a new leader repeats neither; it is
+  dropped on finishing. An `auto` task is passed only when routing would place its successor now: the
+  leader routes the spec `successorSpec` builds (`succeeds.trigger: "quota"`, the old account, the
+  predecessor's slot released) and needs a chosen candidate, so no filter is restated; otherwise it alerts,
+  as does every other level. A task whose machine fails `passOffer` is left for the next tick, a `here`
+  task is never touched, and neither gets an alert. A refusal that can pass (and a pass that throws) is
+  retried once after `quotaPassRetryMs` (5 min), then alerts; a retry that comes due with no pass to run
+  alerts too. A refusal waiting cannot clear alerts at once as reason `refused`; dirty and mismatched
+  branches as `dirty` and `branch`. A `needs_input`, `not_running` or `conflict` outcome clears the stamp
+  while the task is unfinished with no `successor`, so it is looked at again. A task whose dispatch
+  routing spilled onto the very window that is full has already had the spending spill alert: the
+  `quota-exhausted` one is stamped and logged, not pushed. A session's own pass the leader refuses
+  raises `pass-refused` (once per task per term). The log carries `successor placed after=<ms>
+  from=since|created`. The close is at once, since a session out of usage cannot finish a turn. The
+  automatic pass has no `audit queue origin=` line of its own: its record is the scheduler's `audit pass
+  ... trigger=quota` line, and what it causes audits under its own origins.
+  A forecast (an over-the-line projection, or a `spill` without `spending`) never acts, and may at most
+  raise the existing spill alert. The alerts are `PushAlert` kind `quota-exhausted { taskId, at, window,
+  reason? }` with fixed wording in `push-sw.js`, its `window` shown only as one of the known `5h` and
+  `7d` and omitted otherwise, and a tap opening `/?task=<id>`.
 - **Mixed versions (each checked against the code path).** New PWA, MCP or CLI against an old leader:
   `passOffer` and the leader gate hide the button and refuse the call, and the broker refuses too
   (without the gate an old leader answers an unknown app op `invalid_request`, never a timeout). New

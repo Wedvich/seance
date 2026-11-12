@@ -56,8 +56,8 @@ import {
 } from "./ports.ts";
 import { codeUnitOrder } from "./order.ts";
 import { prunable, unprunable } from "./prune.ts";
-import { quotaDue, stampQuota } from "./quota-trigger.ts";
-import { accountResetAt, exhaustion, route, successorHasRoom, type Decision, type Exhaustion } from "./route.ts";
+import { quotaDue, spillAlerted, stampQuota } from "./quota-trigger.ts";
+import { accountResetAt, exhaustion, route, type Decision, type Exhaustion } from "./route.ts";
 import {
   answerable,
   asSeen,
@@ -593,7 +593,7 @@ export class Scheduler {
   }
 
   /** `task` routed over the current fleet and queue, as a pass would. */
-  #route(task: Task, now: number, uncapped = false, attachments = false): Decision {
+  #route(task: Task, now: number, uncapped = false, attachments = false, release: readonly string[] = []): Decision {
     return capped(
       route({
         task,
@@ -604,11 +604,30 @@ export class Scheduler {
         holds: this.#pause.holds,
         fleetQuota: this.#fleetQuota(),
         // Per route, not per pass: each reservation's await can land a `busy` or a reconnect that counts a task again.
-        released: this.#released(now),
+        released: release.length === 0 ? this.#released(now) : new Set([...this.#released(now), ...release]),
         uncapped,
         attachments,
       }),
     );
+  }
+
+  /**
+   * Whether routing would place `task`'s successor now: the spec `successorSpec` builds (`succeeds` naming
+   * the old account) routed through the same filters and judgement a queued task meets, with the
+   * predecessor's slot released, since it settles `superseded` once the pass commits. Asked of routing
+   * itself so no rule is restated: a successor held by `quota_over_line` (it never spills), auth, a model
+   * seat, a skill, traits or the repo would strand `ready`, and the task is alerted instead of passed.
+   */
+  #successorPlaceable(task: Task, accountId: string, now: number): boolean {
+    const { assignment } = task;
+    if (assignment === undefined) return false;
+    const successor: Task = {
+      id: `${task.id}.successor`,
+      spec: successorSpec({ ...task, assignment }, accountId, "quota"),
+      state: "ready",
+      createdAt: now,
+    };
+    return this.#route(successor, now, false, false, [task.id]).chosen !== null;
   }
 
   /**
@@ -1457,16 +1476,19 @@ export class Scheduler {
       if (this.#autoPasses.has(task.id)) continue;
       const ex = exhaustion(task, machines, now, config, fleetQuota);
       const due = quotaDue(task, ex, now, config);
-      if (ex === null || due === null || !passOffer(task, machines, true).ok) continue;
-      // An auto task with no other account to land on would strand its successor `ready`: it alerts like the rest.
-      if (autonomyOf(task.spec) === "auto" && successorHasRoom(task, machines, ex.accountId, now)) {
+      if (ex === null || due === null) continue;
+      const offered = passOffer(task, machines, true).ok;
+      // An auto task whose successor routing would not place now would strand it `ready`: it alerts like the rest.
+      if (offered && autonomyOf(task.spec) === "auto" && this.#successorPlaceable(task, ex.accountId, now)) {
         const run = this.#autoPass(task.id, ex, now, due === "retry")
           .catch(this.#onError)
           .finally(() => this.#autoPasses.delete(task.id));
         this.#autoPasses.set(task.id, run);
         continue;
       }
-      if (due === "act") alerted.push({ task, ex });
+      // A pass that cannot be offered is looked at again each tick, but a retry that comes due without a pass
+      // to run is the window's last word: it alerts, or the task would sit exhausted unannounced.
+      if (due === "retry" || offered) alerted.push({ task, ex });
     }
     await Promise.all(
       alerted.map(async ({ task, ex }) => {
@@ -1474,7 +1496,14 @@ export class Scheduler {
         const next = await this.#update(task.id, (c) =>
           quotaDue(c, ex, now, config) === null ? null : stampQuota(c, ex, now, false),
         );
-        if (next?.quotaExhausted?.at === now) this.#alertQuota(task.id, ex);
+        if (next?.quotaExhausted?.at !== now) return;
+        // The spill alert of a dispatch onto this very window already told the owner it is full and spending:
+        // a second push for the one event would only suggest undoing the spill routing chose.
+        if (spillAlerted(next, ex, config)) {
+          this.#log(`quota exhausted: task=${quote(task.id)} window=${quote(ex.window)} outcome=spill_alerted`);
+          return;
+        }
+        this.#alertQuota(task.id, ex);
       }),
     );
   }
@@ -1495,16 +1524,31 @@ export class Scheduler {
    * One automatic pass. Write-ahead: the window is stamped before `pass` is called, so a takeover mid-pass
    * never attempts again in the same window, and every outcome consumes the retry but the first refusal that
    * can pass, which re-stamps once with `retry`. Dirty and mismatched branches are a person's to fix: alerted
-   * with the reason. A `needs_input` or `not_running` refusal clears the stamp, so the task is looked at again
-   * once it is back in `running`; a lost race (`conflict`, `finished`, `not_found`) leaves it.
+   * with the reason, as is a refusal waiting cannot clear, at once. A `needs_input`, `not_running` or
+   * `conflict` outcome clears the stamp while the task is still running with no successor, so it is looked at
+   * again (a `conflict` is a task that moved mid-push: answered, and running again, it would otherwise sit
+   * exhausted unannounced for the rest of the window); `finished` and `not_found` leave it. A pass that
+   * throws (the create or the PR read rejecting) counts as a refusal that can pass.
    */
   async #autoPass(id: string, ex: Exhaustion, now: number, isRetry: boolean): Promise<void> {
     const config = this.#config;
+    // A retry's reading is newer than the limit: the first attempt's time is the nearer bound on when it ran out.
+    const first = isRetry ? this.task(id)?.quotaExhausted?.at : undefined;
+    const since = first === undefined ? ex.since : Math.min(ex.since, first);
     const written = await this.#update(id, (c) =>
       quotaDue(c, ex, now, config) === null ? null : stampQuota(c, ex, now, false),
     );
     if (written?.quotaExhausted?.at !== now) return;
-    const result = await this.pass(id, "quota", undefined, ex.since);
+    let result: PassResult | undefined;
+    try {
+      result = await this.pass(id, "quota", undefined, since);
+    } catch (err) {
+      this.#onError(err);
+    }
+    if (result === undefined) {
+      await this.#autoRefused(id, ex, now, isRetry, "error");
+      return;
+    }
     if (result.ok) {
       // The successor waits on the old task's `superseded`, which the pass has written: place it now, not in 30 s.
       await this.tick();
@@ -1513,28 +1557,45 @@ export class Scheduler {
     switch (result.code) {
       case "dirty_worktree":
         this.#alertQuota(id, ex, "dirty", result.code);
-        break;
+        return;
       case "branch_mismatch":
         this.#alertQuota(id, ex, "branch", result.code);
-        break;
+        return;
       case "needs_input":
       case "not_running":
+      case "conflict":
         await this.#update(id, (c) => {
-          if (c.quotaExhausted?.at !== now) return null;
+          if (c.quotaExhausted?.at !== now || FINISHED.includes(c.state) || c.successor !== undefined) return null;
           const { quotaExhausted: _stamp, ...rest } = c;
           return rest;
         });
-        break;
-      case "conflict":
+        return;
       case "finished":
       case "not_found":
-        break;
-      default:
+        return;
+      case "not_launched":
+      case "detached_head":
+      case "default_branch":
+      case "push_rejected":
+      case "pr_not_open":
+      case "account_unknown":
+      case "here":
         this.#log(`audit pass refused task=${quote(id)} trigger=quota outcome=${result.code}`);
-        if (isRetry) this.#alertQuota(id, ex, undefined, result.code);
-        else
-          await this.#update(id, (c) => (c.quotaExhausted?.at === now ? stampQuota(c, ex, this.#now(), true) : null));
+        this.#alertQuota(id, ex, "refused", result.code);
+        return;
+      default:
+        await this.#autoRefused(id, ex, now, isRetry, result.code);
     }
+  }
+
+  /** A refusal that may pass on a later try: re-stamped once with `retry`, alerted when that was the retry. */
+  async #autoRefused(id: string, ex: Exhaustion, now: number, isRetry: boolean, outcome: string): Promise<void> {
+    this.#log(`audit pass refused task=${quote(id)} trigger=quota outcome=${outcome}`);
+    if (isRetry) {
+      this.#alertQuota(id, ex, undefined, outcome);
+      return;
+    }
+    await this.#update(id, (c) => (c.quotaExhausted?.at === now ? stampQuota(c, ex, this.#now(), true) : null));
   }
 
   /** An alert is a side channel: a host that throws must not strand a reservation or end a pass. */

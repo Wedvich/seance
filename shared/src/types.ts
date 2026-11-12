@@ -3294,8 +3294,11 @@ export interface PushSubscribeRequest extends WebPushSubscription {
   readonly label?: string;
 }
 
-/** Why an automatic pass did not run: the old worktree is dirty, or its branch does not match its PR. */
-export const QUOTA_ALERT_REASONS = ["dirty", "branch"] as const;
+/**
+ * Why an automatic pass did not run: the old worktree is dirty, its branch does not match its PR, or the
+ * pass is refused for a reason that waiting does not clear (a default branch, a closed PR, ...).
+ */
+export const QUOTA_ALERT_REASONS = ["dirty", "branch", "refused"] as const;
 
 export type QuotaAlertReason = (typeof QUOTA_ALERT_REASONS)[number];
 

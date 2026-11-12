@@ -519,8 +519,9 @@ export interface Exhaustion {
  * Whether the account `task` runs on has run out: a window the task is judged on reads full
  * (`fullWindow` at zero projected usage, so a forecast never counts), whether or not the exclave
  * spills into credits. Decided from routing's own fold (`newestQuotaByAccount`, the fleet record
- * included), and only while the reading's newest status is a connected machine's and not stale: a
- * record's reading, or a sleeping machine's, never moves a task. Null when unknown, trimmed or fresh.
+ * included), and only while the machine that observed the newest reading is connected and not stale:
+ * a reading whose observer is gone or asleep never moves a task (older windows merged in by
+ * `mergeQuota` are not checked against their own observers). Null when unknown, trimmed or fresh.
  */
 export function exhaustion(
   task: Task,
@@ -553,28 +554,6 @@ export function exhaustion(
     since: Math.min(observation.at * 1000, now),
     spending: exclave.extraUsageEnabled === true && !creditsSpent(observation, now),
   };
-}
-
-/**
- * Whether a successor of `task` could be placed off `accountId`: a connected machine's exclave on
- * another account, with the task's repo, its required traits and no avoided machine. Headroom is not
- * asked: the successor waits for it. Without one, a pass would strand the successor `ready`.
- */
-export function successorHasRoom(task: Task, machines: readonly Machine[], accountId: string, now: number): boolean {
-  const { pin: _pin, ...spec } = task.spec;
-  const successor = { ...task, spec };
-  return machines.some(
-    (machine) =>
-      machine.connected &&
-      (machine.exclaves ?? []).some(
-        (exclave, index) =>
-          exclave.accountId !== null &&
-          exclave.accountId !== accountId &&
-          machine.repos.some((r) => r.exclave === exclave.id && r.origin === spec.repo) &&
-          placementFilter(successor, machine, exclave).length === 0 &&
-          traitFilter(successor, machine, exclave, index, now).length === 0,
-      ),
-  );
 }
 
 /** `seatTier` is daemon-reported, so only the table's own keys answer — never one off its prototype. */

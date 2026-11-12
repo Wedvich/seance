@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { CAPABILITIES, parseTask, type ExclaveInfo, type Machine } from "@seance/shared";
 import { DEFAULT_CONFIG, route, type Candidate, type Decision, type SchedulerConfig, type Task } from "../src/index.ts";
-import { accountResetAt, exhaustion, successorHasRoom } from "../src/route.ts";
+import { accountResetAt, exhaustion } from "../src/route.ts";
 import { traitsHolding } from "../src/traits.ts";
 import { accountMax, attachment, clone, exclave, machine, NOW, NOW_S, obs, spec, status } from "./fixtures.ts";
 
@@ -1605,26 +1605,5 @@ describe("exhaustion — the leader's reading of a running task's account", () =
   test("nothing for a task that was never placed, or whose exclave is unknown", () => {
     expect(read([on(obs(0, { h: 100 }))], task())).toBeNull();
     expect(read([on(obs(0, { h: 100 }))], running({ assignment: { ...target, exclave: "gone" } }))).toBeNull();
-  });
-});
-
-describe("successorHasRoom", () => {
-  const assignment = { deviceId: "a", exclave: "main", clone: "app" };
-  const old = task({ state: "running", assignment });
-
-  test("needs another account's exclave with the repo on a connected machine", () => {
-    expect(successorHasRoom(old, [machine("a")], "org:a", NOW)).toBe(false);
-    expect(successorHasRoom(old, [twoAccounts()], "org:a", NOW)).toBe(true);
-    expect(successorHasRoom(old, [machine("a"), machine("b", { connected: false })], "org:a", NOW)).toBe(false);
-    expect(successorHasRoom(old, [machine("a"), machine("b", { repos: [] })], "org:a", NOW)).toBe(false);
-  });
-
-  test("holds to the required traits and the avoided machines", () => {
-    const needs = task({ state: "running", assignment, spec: spec({ requires: ["atlas"] }) });
-    expect(successorHasRoom(needs, [machine("a"), machine("b")], "org:a", NOW)).toBe(false);
-    const carries = machine("b", { exclaves: [exclave("main", "org:b", { traits: ["atlas"] })] });
-    expect(successorHasRoom(needs, [machine("a"), carries], "org:a", NOW)).toBe(true);
-    const avoiding = task({ state: "running", assignment, spec: spec({ avoid: ["b"] }) });
-    expect(successorHasRoom(avoiding, [machine("a"), machine("b")], "org:a", NOW)).toBe(false);
   });
 });

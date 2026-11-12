@@ -40,6 +40,7 @@
     Object.assign(Object.create(null), {
       dirty: "A task ran out of usage, but its worktree has uncommitted changes. Tap to pass it on by hand.",
       branch: "A task ran out of usage, but its branch does not match its PR. Tap to pass it on by hand.",
+      refused: "A task ran out of usage, and it cannot be passed on automatically. Tap to see it.",
     }),
   );
 

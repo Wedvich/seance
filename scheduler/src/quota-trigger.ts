@@ -13,8 +13,9 @@ export type QuotaDue = "act" | "retry" | null;
 function covers(task: Task, ex: Exhaustion, now: number, config: SchedulerConfig): boolean {
   const stamp = task.quotaExhausted;
   if (stamp === undefined || stamp.accountId !== ex.accountId || stamp.window !== ex.window) return false;
-  if (ex.reset > 0) return Math.abs(stamp.reset - ex.reset) <= config.resetGraceMs;
-  // No reset to key on: the stamp holds for one span of the window, as a spill alert's does.
+  // A reading that gains a reset after a stamp written without one is the same window, not a new one.
+  if (ex.reset > 0 && stamp.reset > 0) return Math.abs(stamp.reset - ex.reset) <= config.resetGraceMs;
+  // No reset to key on (either side): the stamp holds for one span of the window, as a spill alert's does.
   return now - stamp.at < (ex.window.startsWith("7d") ? SPAN_MS["7d"] : SPAN_MS["5h"]);
 }
 
@@ -57,4 +58,15 @@ export function stampQuota(task: Task, ex: Exhaustion, now: number, retry: boole
       ...(retry ? { retry: true } : {}),
     },
   };
+}
+
+/**
+ * Whether the spending spill alert of a dispatch already told the owner this window is full: one
+ * push for the one event, since a `quota-exhausted` after it would only suggest undoing the spill routing
+ * chose. A forecast spill alert (no `spending`) does not count: the window was not full then.
+ */
+export function spillAlerted(task: Task, ex: Exhaustion, config: SchedulerConfig): boolean {
+  const spill = task.spillAlert;
+  if (spill?.spending !== true || spill.accountId !== ex.accountId || spill.window !== ex.window) return false;
+  return spill.reset === 0 || ex.reset === 0 || Math.abs(spill.reset - ex.reset) <= config.resetGraceMs;
 }
