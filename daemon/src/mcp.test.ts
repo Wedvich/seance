@@ -19,6 +19,7 @@ import {
   type Decision,
   type ExclaveInfo,
   type Machine,
+  type MachineStatus,
   type RequestOp,
   type Task,
   type TaskSpec,
@@ -2067,6 +2068,54 @@ describe("traits in the tools' answers", () => {
       { trait: "nosuch", machines: [] },
     ]);
     expect(tasks[1]).not.toHaveProperty("requires");
+    lazy.stop();
+  });
+});
+
+describe("trait probes", () => {
+  /** Thad's atlas probe fails on its one exclave carrying it; WSL's has not been read yet; az on Thad's `work` fails too. */
+  function probedMachines(): Machine[] {
+    const at = Math.floor(Date.now() / 1000);
+    const status: Record<string, MachineStatus> = {
+      "device-thad": { at, scan: 1, tf: [[0, 0]] },
+      "device-wsl": { at, scan: 1, tu: [[0, 0]] },
+    };
+    return traitMachines().map((m) =>
+      machine({ ...m, ...(status[m.deviceId] === undefined ? {} : { status: status[m.deviceId] }) }),
+    );
+  }
+
+  test("get_queue names the machines whose probe fails on every exclave carrying the trait, and list_machines each exclave's failing and unchecked ones", async () => {
+    const fake = leaderRelay(
+      [
+        {
+          tasks: [
+            task({ id: "t-1", state: "ready", spec: { repo: ORIGIN, mode: "worktree", requires: ["atlas", "az"] } }),
+          ],
+          at: 6_000,
+        },
+      ],
+      probedMachines(),
+    );
+    fake.setState({ scheduler: { kind: "ready", deviceId: "device-thad", term: 3 } });
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const { tasks } = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} })));
+    expect(tasks[0].requires).toEqual([
+      { trait: "atlas", machines: ["Thad", "WSL"], failing: ["Thad"] },
+      { trait: "az", machines: ["Thad", "WSL"] },
+    ]);
+    const listed: { name: string; exclaves: Record<string, unknown>[] }[] = JSON.parse(
+      toolText(await client.callTool({ name: "list_machines", arguments: {} })),
+    );
+    const byName = new Map(
+      listed.map((m) => [m.name, m.exclaves.map((e) => [e["id"], e["traitsFailing"], e["traitsUnchecked"]])]),
+    );
+    expect(byName.get("Thad")).toEqual([
+      ["default", ["atlas"], undefined],
+      ["work", undefined, undefined],
+    ]);
+    expect(byName.get("WSL")).toEqual([["default", undefined, ["atlas"]]]);
     lazy.stop();
   });
 });
