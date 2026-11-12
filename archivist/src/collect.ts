@@ -180,7 +180,8 @@ export function startCollector(opts: CollectorOpts): Collector {
     return accountId === undefined || accountId === null ? null : keyOf(accountId);
   };
 
-  const archiveTask = async ({ task, version }: TaskRecord): Promise<boolean> => {
+  /** `seenAt` is the pass's one clock reading, so a listing's backfill ties on end time and `created_at`, `id` order it. */
+  const archiveTask = async ({ task, version }: TaskRecord, seenAt: number): Promise<boolean> => {
     if (TASK_PHASES[task.state] !== "finished") return false;
     const held = archive.taskVersion(task.id);
     if (held !== null && held >= version) return false;
@@ -191,7 +192,7 @@ export function startCollector(opts: CollectorOpts): Collector {
     const row = taskRow(task, version, { machine, account });
     // Checked after the await: a stop in between closes the database.
     if (stopped || row === null) return false;
-    return archive.upsertTask(row, Date.now());
+    return archive.upsertTask(row, seenAt);
   };
 
   /** One read, its failure logged; false asks the pacer to retry. Never throws. */
@@ -214,9 +215,10 @@ export function startCollector(opts: CollectorOpts): Collector {
       const answer = await source.listTasks();
       if (answer === null || !answer.ok) return refusal("task listing", answer);
       let archived = 0;
+      const seenAt = Date.now();
       for (const record of answer.tasks) {
         // oxlint-disable-next-line no-await-in-loop -- sequential: each may HMAC an account, and order is the listing's
-        if (await archiveTask(record)) archived += 1;
+        if (await archiveTask(record, seenAt)) archived += 1;
       }
       clock.note("store");
       if (archived > 0 || answer.unreadable.length > 0) {
@@ -257,7 +259,7 @@ export function startCollector(opts: CollectorOpts): Collector {
           continue;
         }
         // oxlint-disable-next-line no-await-in-loop -- as above
-        if (await archiveTask(found)) archived += 1;
+        if (await archiveTask(found, Date.now())) archived += 1;
       }
       if (archived > 0) log.info(`tasks: archived ${archived}`);
       return true;

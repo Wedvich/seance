@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -182,6 +182,30 @@ describe("collector", () => {
       expect(fake.lists).toBe(1);
     } finally {
       collector.stop();
+    }
+  });
+
+  test("one listing stamps every task it archives with the same end time, so created and id order a backfill", async () => {
+    const fake = script();
+    let tick = 5_000;
+    const clockSpy = spyOn(Date, "now").mockImplementation(() => (tick += 7));
+    const listing = ["t-a", "t-b", "t-c"].map((id, i) => ({
+      task: { ...finished(id), createdAt: 10 + i },
+      version: 1,
+    }));
+    const source: ArchiveSource = {
+      ...fake.source,
+      listTasks: () => Promise.resolve({ ok: true, tasks: listing, unreadable: [] }),
+    };
+    const collector = await start(source);
+    try {
+      await pollUntil(() => archive.taskVersion("t-c") === 1, "the listing archived");
+      const { rows } = archive.queryTasks({}, 10);
+      expect(new Set(rows.map((row) => row.endedAt)).size).toBe(1);
+      expect(rows.map((row) => row.id)).toEqual(["t-c", "t-b", "t-a"]);
+    } finally {
+      collector.stop();
+      clockSpy.mockRestore();
     }
   });
 
