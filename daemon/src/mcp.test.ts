@@ -2073,15 +2073,37 @@ describe("traits in the tools' answers", () => {
 });
 
 describe("trait probes", () => {
-  /** Thad's atlas probe fails on its one exclave carrying it; WSL's has not been read yet; az on Thad's `work` fails too. */
+  /**
+   * Thad's atlas and az probes fail on `default`, but az is healthy on `work`, which also carries it; WSL's
+   * atlas has not been read yet.
+   */
   function probedMachines(): Machine[] {
     const at = Math.floor(Date.now() / 1000);
     const status: Record<string, MachineStatus> = {
-      "device-thad": { at, scan: 1, tf: [[0, 0]] },
+      "device-thad": {
+        at,
+        scan: 1,
+        tf: [
+          [0, 0],
+          [0, 1],
+        ],
+      },
       "device-wsl": { at, scan: 1, tu: [[0, 0]] },
     };
     return traitMachines().map((m) =>
-      machine({ ...m, ...(status[m.deviceId] === undefined ? {} : { status: status[m.deviceId] }) }),
+      machine({
+        ...m,
+        ...(m.deviceId === "device-thad"
+          ? {
+              // oxlint-disable-next-line no-map-spread -- a fixture, built once per test
+              exclaves: (m.exclaves ?? []).map((e) => ({
+                ...e,
+                traits: e.id === "default" ? ["atlas", "az"] : ["az"],
+              })),
+            }
+          : {}),
+        ...(status[m.deviceId] === undefined ? {} : { status: status[m.deviceId] }),
+      }),
     );
   }
 
@@ -2112,10 +2134,35 @@ describe("trait probes", () => {
       listed.map((m) => [m.name, m.exclaves.map((e) => [e["id"], e["traitsFailing"], e["traitsUnchecked"]])]),
     );
     expect(byName.get("Thad")).toEqual([
-      ["default", ["atlas"], undefined],
+      ["default", ["atlas", "az"], undefined],
       ["work", undefined, undefined],
     ]);
     expect(byName.get("WSL")).toEqual([["default", undefined, ["atlas"]]]);
+    lazy.stop();
+  });
+
+  test("list_machines lists no unchecked trait for an offline machine, a stale status or a trait without a probe", async () => {
+    const at = Math.floor(Date.now() / 1000);
+    const machines = traitMachines().map((m) => {
+      if (m.deviceId === "device-thad") return machine({ ...m, status: { at: at - 3600, scan: 1 } });
+      if (m.deviceId === "device-wsl")
+        return machine({ ...m, connected: false, status: { at, scan: 1, tu: [[0, 0]] } });
+      return machine({ ...m, status: { at, scan: 1 } });
+    });
+    const fake = leaderRelay([], machines);
+    fake.setState({ scheduler: { kind: "ready", deviceId: "device-thad", term: 3 } });
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const listed: { name: string; exclaves: Record<string, unknown>[] }[] = JSON.parse(
+      toolText(await client.callTool({ name: "list_machines", arguments: {} })),
+    );
+    for (const m of listed) {
+      for (const e of m.exclaves) {
+        expect(e).not.toHaveProperty("traitsUnchecked");
+        expect(e).not.toHaveProperty("traitsFailing");
+      }
+    }
+    expect(listed.map((m) => m.name).toSorted()).toEqual(["Mac", "Thad", "WSL"]);
     lazy.stop();
   });
 });

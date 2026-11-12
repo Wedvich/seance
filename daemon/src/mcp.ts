@@ -50,6 +50,7 @@ import {
   type TaskUntil,
   exclaveAuth,
   exclaveTraitHealth,
+  exclaveTraitUnchecked,
   lastHeardAt,
   sleepingMachine,
 } from "@seance/shared";
@@ -299,9 +300,10 @@ function describeMachine(
       : {
           exclaves: machine.exclaves.map((info, index) => {
             const auth = exclaveAuth(machine, index, now);
-            const health = (info.traits ?? []).map((trait) => [trait, exclaveTraitHealth(machine, index, trait, now)]);
-            const failing = health.flatMap(([trait, h]) => (h === "failing" ? [trait] : []));
-            const unchecked = health.flatMap(([trait, h]) => (h === "unknown" ? [trait] : []));
+            const traits = info.traits ?? [];
+            const failing = traits.filter((trait) => exclaveTraitHealth(machine, index, trait, now) === "failing");
+            // Only a probe the status lists as unread: a probe-less trait, or a machine offline or stale, has none to await.
+            const unchecked = traits.filter((trait) => exclaveTraitUnchecked(machine, index, trait, now));
             return {
               id: info.id,
               ...(info.accountId === null ? {} : { accountId: info.accountId }),

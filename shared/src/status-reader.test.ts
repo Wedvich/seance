@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   exclaveAuth,
   exclaveTraitHealth,
+  exclaveTraitUnchecked,
   isQuotaTrimmed,
   isStatusStale,
   lastHeardAt,
@@ -181,6 +182,16 @@ describe("exclaveTraitHealth", () => {
     expect(exclaveTraitHealth(machine({ tf: [[0, 0]] }, { connected: false }), 0, "atlas", NOW_MS)).toBe("unknown");
     expect(exclaveTraitHealth(machine({ tf: [[0, 0]] }), 0, "atlas", NOW_MS + STATUS_STALE_MS + 1000)).toBe("unknown");
     expect(exclaveTraitHealth({ connected: true, exclaves }, 0, "atlas", NOW_MS)).toBe("unknown");
+  });
+
+  test("unchecked only for a pair the live fresh status lists in tu", () => {
+    const m = machine({ tu: [[1, 0]] });
+    expect(exclaveTraitUnchecked(m, 1, "az", NOW_MS)).toBe(true);
+    expect(exclaveTraitUnchecked(m, 0, "az", NOW_MS)).toBe(false);
+    expect(exclaveTraitUnchecked(m, 2, "az", NOW_MS)).toBe(false);
+    expect(exclaveTraitUnchecked(machine({ tu: [[1, 0]] }, { connected: false }), 1, "az", NOW_MS)).toBe(false);
+    expect(exclaveTraitUnchecked(m, 1, "az", NOW_MS + STATUS_STALE_MS + 1000)).toBe(false);
+    expect(exclaveTraitUnchecked({ connected: true, exclaves }, 1, "az", NOW_MS)).toBe(false);
   });
 
   test("failing from tf, unknown from tu, healthy otherwise — by the trait's index in that exclave", () => {

@@ -88,9 +88,30 @@ export function exclaveTraitHealth(
   if (traitIndex === -1) return null;
   const status = liveStatus(machine);
   if (status === undefined || isStatusStale(status, nowMs)) return "unknown";
-  const at = (pairs: MachineStatus["tf"]): boolean => pairs?.some(([x, t]) => x === index && t === traitIndex) === true;
-  if (at(status.tf)) return "failing";
-  return at(status.tu) ? "unknown" : "healthy";
+  if (hasPair(status.tf, index, traitIndex)) return "failing";
+  return hasPair(status.tu, index, traitIndex) ? "unknown" : "healthy";
+}
+
+/**
+ * True only for a probe the daemon itself reports not yet read (a pair in the live fresh
+ * status's `tu`). Unlike `exclaveTraitHealth`'s `unknown`, a trait with no probe, or a
+ * machine whose status is absent or stale, is not a probe awaiting a reading.
+ */
+export function exclaveTraitUnchecked(
+  machine: Pick<Machine, "connected" | "status" | "exclaves">,
+  index: number,
+  trait: string,
+  nowMs: number,
+): boolean {
+  const traitIndex = machine.exclaves?.[index]?.traits?.indexOf(trait) ?? -1;
+  if (traitIndex === -1) return false;
+  const status = liveStatus(machine);
+  if (status === undefined || isStatusStale(status, nowMs)) return false;
+  return hasPair(status.tu, index, traitIndex);
+}
+
+function hasPair(pairs: MachineStatus["tf"], index: number, traitIndex: number): boolean {
+  return pairs?.some(([x, t]) => x === index && t === traitIndex) === true;
 }
 
 /**
