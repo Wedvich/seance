@@ -473,6 +473,15 @@ export class EndedTasks {
     return prUrl === undefined ? "prless" : "ok";
   }
 
+  /**
+   * The PR URL a session of this launch reported itself, for its `ended` event: the one event that carried
+   * it may never have reached the leader. Never `continuedPr`: as the event's PR it would settle a
+   * continuation `awaiting-merge` on a PR it never touched.
+   */
+  notedPr(taskId: string): string | undefined {
+    return this.#launches.get(taskId)?.prUrl ?? this.#ledger.notes().find((n) => n.taskId === taskId)?.prUrl;
+  }
+
   /** The newest `https:` PR URL a session reported, kept for `progress` across restarts. */
   async notePr(taskId: string, prUrl: string): Promise<void> {
     const launches = this.#launches.get(taskId);
@@ -870,6 +879,9 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
         log.warn(`local socket: session-event pane=${quote(pane.id)} carried a PR URL that is not https — dropped it`);
       }
       if (prUrl !== null) void deps.ended.notePr(pane.taskId, prUrl);
+      // An `ended` the leader cannot match to a PR waits for the exit, and settles `done` if the machine goes
+      // first: so it carries the PR this pane's own launch noted, in case the event that carried it was lost.
+      const sentPr = prUrl ?? (frame.state === "ended" ? (deps.ended.notedPr(pane.taskId) ?? null) : null);
       const remoteSession = isRemoteSessionId(frame.remoteSession) ? frame.remoteSession : null;
       if (frame.remoteSession !== undefined && remoteSession === null) {
         log.warn(
@@ -884,7 +896,7 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
           exclave,
           state: frame.state,
           at,
-          ...(prUrl === null ? {} : { prUrl }),
+          ...(sentPr === null ? {} : { prUrl: sentPr }),
           ...(remoteSession === null ? {} : { remoteSession }),
           ...(frame.reason === undefined ? {} : { reason: frame.reason }),
           ...(frame.tool === undefined ? {} : { tool: frame.tool }),

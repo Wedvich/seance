@@ -859,6 +859,70 @@ describe("the PR URL is kept for the scheduler's progress", () => {
   });
 });
 
+describe("an ended event carries the PR its own launch noted", () => {
+  const OLD = "https://github.com/a/b/pull/1";
+  const NEW = "https://github.com/a/b/pull/2";
+
+  function setup() {
+    const ledger = LaunchLedger.memory();
+    const ended = new EndedTasks(ledger);
+    const pane: BoundPane = { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" };
+    const forwarded: SessionEvent[] = [];
+    const events = createSessionEvents({
+      panes: () => Promise.resolve([pane]),
+      exclaves: () => [],
+      forward: (event) => void forwarded.push(event),
+      ended,
+      coalesceMs: 0,
+      hostNamesPeers: () => false,
+    });
+    const send = (fields: object): Promise<unknown> => events.handle(frame({ pane: "%1", ...fields }), null);
+    return { ledger, forwarded, events, send };
+  }
+
+  // The one event that carried the PR may be lost on its way to the leader (a relay hiccup, a failover); the
+  // leader would then defer the PR-less `ended` for the exit and, with the machine gone, settle it `done`.
+  test("a PR whose own event was lost rides the PR-less ended that follows", async () => {
+    const { ledger, forwarded, events, send } = setup();
+    try {
+      await ledger.record("t1");
+      await send({ state: "busy", prUrl: OLD });
+      forwarded.length = 0; // lost on the way
+      await send({ state: "ended" });
+      expect(forwarded).toEqual([expect.objectContaining({ taskId: "t1", state: "ended", prUrl: OLD })]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("the frame's own PR wins, and a live state carries only its own", async () => {
+    const { ledger, forwarded, events, send } = setup();
+    try {
+      await ledger.record("t1");
+      await send({ state: "busy", prUrl: OLD });
+      await send({ state: "idle" });
+      expect(forwarded.at(-1)?.prUrl).toBeUndefined();
+      await send({ state: "ended", prUrl: NEW });
+      expect(forwarded.at(-1)).toMatchObject({ state: "ended", prUrl: NEW });
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("a PR a continuation only inherited is not its own: its ended carries none", async () => {
+    const { ledger, forwarded, events, send } = setup();
+    try {
+      await ledger.record("t1");
+      await ledger.note("t1", { repo: "/r", path: "/r/.claude/worktrees/x", session: SESSION, continuedPr: OLD });
+      await send({ state: "ended" });
+      expect(forwarded).toEqual([expect.objectContaining({ state: "ended" })]);
+      expect(forwarded[0]?.prUrl).toBeUndefined();
+    } finally {
+      events.stop();
+    }
+  });
+});
+
 describe("a session's done report (#21)", () => {
   const tasked: BoundPane = { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" };
   const bare: BoundPane = { id: "%2", pid: 20, dead: false, taskId: null, path: "/home" };
