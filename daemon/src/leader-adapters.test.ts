@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { RequestFailure, type RelayState, type SessionsResponse } from "@seance/shared";
+import { RequestFailure, type RelayState, type SessionsResponse, type Task } from "@seance/shared";
 import type { AppRelay } from "./app-relay.ts";
 import type { LocalOps } from "./handlers.ts";
-import { termFleet } from "./leader-adapters.ts";
+import { successorCreate, termFleet } from "./leader-adapters.ts";
 
 const unused = (): Promise<never> => Promise.reject(new Error("unexpected relay call"));
 
@@ -217,5 +217,55 @@ describe("a pass-close from the leader", () => {
       expect(await fleet.passClose?.(device, request)).toMatchObject({ ok: false, code: "unreachable" });
     }
     expect(asked).toEqual([]);
+  });
+});
+
+describe("the leader's successor create", () => {
+  const task: Task = {
+    id: "t-new",
+    spec: { repo: "github.com/acme/app", mode: "worktree" },
+    state: "queued",
+    createdAt: 0,
+  };
+  const over = (createTask: AppRelay["createTask"], live = true) => {
+    const calls: Task[] = [];
+    const create = successorCreate(
+      {
+        createTask: (t) => {
+          calls.push(t);
+          return createTask(t);
+        },
+      },
+      () => live,
+    );
+    return { create, calls };
+  };
+
+  test("a term that is no longer live sends nothing and is not in doubt", async () => {
+    const { create, calls } = over(unused, false);
+    expect(await create(task)).toEqual({ ok: false, code: "unreachable" });
+    expect(calls).toEqual([]);
+  });
+
+  test("a create that landed, or had landed earlier, is created", async () => {
+    expect(await over(async () => ({ ok: true, landedEarlier: false })).create(task)).toEqual({ ok: true });
+    expect(await over(async () => ({ ok: true, landedEarlier: true })).create(task)).toEqual({ ok: true });
+  });
+
+  test("a refusal the relay answered is final, whatever its code", async () => {
+    const reply = await over(async () => ({ ok: false, code: "too_large" })).create(task);
+    expect(reply).toEqual({ ok: false, code: "too_large" });
+    expect(reply).not.toHaveProperty("unconfirmed");
+  });
+
+  test("a reply nothing could read, or a request that failed, may have landed", async () => {
+    const unconfirmed = { ok: false, code: "unreachable", unconfirmed: true } as const;
+    expect(await over(async () => null).create(task)).toEqual(unconfirmed);
+    expect(await over(() => Promise.reject(new RequestFailure("timeout", "no answer"))).create(task)).toEqual(
+      unconfirmed,
+    );
+    expect(await over(() => Promise.reject(new RequestFailure("disconnected", "gone"))).create(task)).toEqual(
+      unconfirmed,
+    );
   });
 });

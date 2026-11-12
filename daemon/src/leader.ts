@@ -31,7 +31,7 @@ import type { AppRelay } from "./app-relay.ts";
 import { admitAudit, daemonSink } from "./audit.ts";
 import type { LocalOps } from "./handlers.ts";
 import { createMachineAlertWatch } from "./machine-alerts.ts";
-import { fencedStore, termFleet } from "./leader-adapters.ts";
+import { fencedStore, successorCreate, termFleet } from "./leader-adapters.ts";
 import { requestHandler } from "./leader-requests.ts";
 import { log } from "./log.ts";
 import { readPrHead, startPrPoller, type PrPollerOpts } from "./pr-status.ts";
@@ -635,16 +635,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     onError: fail,
     // A pass's successor is created through the leader's own app leg (an `expect: 0` create the relay answers
     // itself), never a store write of the term: the relay's term fence does not cover creates.
-    create: async (task) => {
-      if (!isLive()) return { ok: false, code: "unreachable" };
-      try {
-        const reply = await relay.createTask(task);
-        if (reply === null) return { ok: false, code: "unreachable" };
-        return reply.ok ? { ok: true } : { ok: false, code: reply.code };
-      } catch {
-        return { ok: false, code: "unreachable" };
-      }
-    },
+    create: successorCreate(relay, isLive),
     prHead: (prUrl) => readPrHead(prUrl, opts.prStatus),
     log: (line) => log.info(line),
     onAlert: (alert) => {

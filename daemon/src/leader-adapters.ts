@@ -6,6 +6,7 @@ import {
   type NoAnswer,
   type QueueStore,
   type StoreWrite,
+  type TaskCreateResult,
   type TaskSessionsReply,
   type Undelivered,
   type Unreachable,
@@ -24,6 +25,7 @@ import {
   type FailureReason,
   type SessionsResponse,
   type SpawnResponse,
+  type Task,
 } from "@seance/shared";
 import type { AppRelay } from "./app-relay.ts";
 import type { LocalOps } from "./handlers.ts";
@@ -33,6 +35,27 @@ import type { LocalOps } from "./handlers.ts";
  * the term): the fence the term's store writes through — over the relay store
  * of `queue-store.ts` — and the `Fleet` over its leg.
  */
+
+/**
+ * The leader's successor create through its own app-role leg. A create that was sent and went unanswered
+ * (`null`, or a throw: `RequestFailure("disconnected")` is raised both before the frame left and after) is marked
+ * `unconfirmed`, since it may have landed; the scheduler re-sends it, which is idempotent.
+ */
+export function successorCreate(
+  relay: Pick<AppRelay, "createTask">,
+  live: () => boolean,
+): (task: Task) => Promise<TaskCreateResult> {
+  return async (task) => {
+    if (!live()) return { ok: false, code: "unreachable" };
+    try {
+      const reply = await relay.createTask(task);
+      if (reply === null) return { ok: false, code: "unreachable", unconfirmed: true };
+      return reply.ok ? { ok: true } : { ok: false, code: reply.code };
+    } catch {
+      return { ok: false, code: "unreachable", unconfirmed: true };
+    }
+  };
+}
 
 function unreachable(message: string): Unreachable {
   return { ok: false, code: UNREACHABLE, message };
