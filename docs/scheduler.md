@@ -1184,8 +1184,8 @@ of M4 has landed.
     at `checkpoint` or `auto`, answers a turn ending on a plain-text "shall I proceed?" with one
     nudge to proceed or ask it properly. First check that an engine hook can continue a turn.
 
-- **Successor** — _Decided_ by the owner, 2026-11-12 (O1–O3 below); the outside path (2a) is built
-  (2026-11-12), the session's own (2b) and the automatic trigger are not. A task
+- **Successor** — _Decided_ by the owner, 2026-11-12 (O1–O3 below); the outside path (2a) and the
+  session's own (2b) are built (2026-11-12), the automatic trigger is not. A task
   running on an account that runs out of usage passes its work to a **successor**: a new task, free
   to land on another account, that starts from the old task's pushed branch and a written record of
   where it stood. Quota failover is the reason: a task that is half done when its account's 5-hour
@@ -1203,7 +1203,7 @@ of M4 has landed.
      - **2a, from outside** — **Done** (2026-11-12): the PWA's "Pass to successor" on a running card,
        `seanced pass <task-id>` and MCP `pass_task { taskId }`. One scheduler op, `pass`, behind all
        three; the successor's prompt is the fallback one (below).
-     - **2b, from the session** — not built: MCP `pass_to_successor { record }`. The session commits
+     - **2b, from the session** — **Done** (2026-11-12): MCP `pass_to_successor { record }`. The session commits
        and calls it last; its daemon pushes at once and the session's `record` becomes the
        successor's prompt. The daemon closes the session at the end of that turn, once the leader
        has confirmed the successor. It has its own capability, `successorSelf`, so a session never
@@ -1318,14 +1318,20 @@ of M4 has landed.
       which leaves two sessions able to write one branch and holds a full account busy.
     - **D6. Closing.** An outside pass closes through the leader's `#endSession` at once, as
       `cancel` does. The self path is closed by the **daemon** at the pane's next `idle` carrying
-      `turnEnded` (a later frame in any other state clears the flag, so a turn begun after an
+      `turnEnded` (a later `busy` or `needs-input` frame clears the flag, so a turn begun after an
       unconfirmed pass is not cut), and only once the leader has confirmed the commit point with a new
       scheduler → daemon request, `pass-close`. The leader's 2-minute `PASS_CLOSE_GRACE_MS` deadline
       is a backstop: `#passing` is noted before the commit write, kept until the task leaves the pass
       states (a failed close retries each tick), and reconcile, which skips tasks in `#passing` or in
       flight, re-sends `pass-close` for a session-triggered or unreadable successor and closes any
-      other at once. Work committed after the push is not carried (the worktree is kept); the tool
-      tells the session to end its turn whatever it answers. _Rejected:_
+      other at once. A `pass-close` answered `no_pane` (the session is already gone, so no turn's end
+      is coming) sets the entry's deadline to now, and the re-ask is not awaited by the tick. Work
+      committed after the push is not carried (the worktree is kept); the tool
+      tells the session to end its turn whatever it answers, an unanswered call (a timeout past the
+      daemon's push window, or a lost connection) included, which it words as "may have gone through"
+      and never as a refusal. An interrupted call is fail-closed: the call's cancellation closes the
+      daemon connection and the daemon sends no pass for a caller that is gone. A pane carries one
+      close: a pass outranks a hand-off. _Rejected:_
       the leader closing at an `idle` event (`turnEnded` never reaches it, and a respawn's idle
       would close mid-turn); despawning at once on the self path (it interrupts the final message);
       the daemon deferring a `despawn` reply; the daemon closing on the `pass` frame alone (it would
@@ -1434,7 +1440,9 @@ of M4 has landed.
     - a `seanced doctor` line for push credentials: a remote whose SSH key lives only in a login
       session's agent fails under launchd or systemd as `push_failed` (ssh has no terminal to prompt on);
     - the self path telling the session why the leader refused after the push (today: "not
-      confirmed" plus the leader's log line);
+      confirmed" plus the leader's warn line), and an alert or a Queue-screen mark for a session pass
+      the leader refused, since the task stays `running` and idle until someone looks (a new alert kind
+      spans the wire type, the push sender, the service worker's fixed texts and the PWA);
     - stacking, once it lands: a successor on a `baseBranch` instead of a reset to the remote branch.
   - _Deferred:_ moving a `needs-input` task on any path (Q2); a forecast-only spill for a successor
     (Q3).

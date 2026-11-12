@@ -2,7 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SESSIONS_MAX_PROGRESS, type SessionEvent } from "@seance/shared";
+import {
+  SESSIONS_MAX_PROGRESS,
+  SUCCESSOR_RECORD_MAX,
+  type PushBranchResponse,
+  type SessionEvent,
+  type SessionPass,
+} from "@seance/shared";
 import { pollUntil } from "../test/fixtures.ts";
 import { LaunchLedger, LEDGER_MAX } from "./launch-ledger.ts";
 import { parseProcStatPpid, parsePsParents } from "./peer.ts";
@@ -1289,5 +1295,465 @@ describe("a session's hand-off", () => {
     await ended.notePr("t1", PR);
     events.stop();
     expect(await send("%1", { handoff: true })).toEqual({ ok: false, code: "stopping" });
+  });
+});
+
+describe("a session's own pass", () => {
+  const PR = "https://github.com/a/b/pull/1";
+  const TIP = "a".repeat(40);
+  const RECORD = "done: a; left: b";
+  const SITE = { repo: "/r", path: "/r/.claude/worktrees/x", session: SESSION };
+  const PUSHED: PushBranchResponse = { ok: true, remoteBranch: "feature/x", tip: TIP, pushed: true };
+
+  function setup(
+    opts: {
+      readonly pass?: boolean;
+      readonly push?: PushBranchResponse;
+      readonly sent?: boolean;
+      /** Runs inside the push, as a caller giving up or a throw would. */
+      readonly during?: () => void;
+    } = {},
+  ) {
+    const ledger = LaunchLedger.memory();
+    const ended = new EndedTasks(ledger);
+    const panes: BoundPane[] = [
+      { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" },
+      { id: "%2", pid: 20, dead: false, taskId: null, path: "/home" },
+    ];
+    const pushes: { taskId: string; hasPr: boolean }[] = [];
+    const passes: SessionPass[] = [];
+    const closed: [string, string][] = [];
+    const handedOff: [string, string][] = [];
+    const events = createSessionEvents({
+      panes: () => Promise.resolve(panes),
+      exclaves: () => [],
+      forward: () => {},
+      ended,
+      coalesceMs: 0,
+      hostNamesPeers: () => false,
+      handOff: (pane: string, taskId: string): Promise<void> => {
+        handedOff.push([pane, taskId]);
+        return Promise.resolve();
+      },
+      ...(opts.pass === false
+        ? {}
+        : {
+            pass: {
+              push: (taskId: string, options: { readonly hasPr: boolean }): Promise<PushBranchResponse> => {
+                pushes.push({ taskId, hasPr: options.hasPr });
+                opts.during?.();
+                return Promise.resolve(opts.push ?? PUSHED);
+              },
+              send: (pass: SessionPass): Promise<boolean> => {
+                passes.push(pass);
+                return Promise.resolve(opts.sent ?? true);
+              },
+              close: (pane: string, taskId: string): Promise<void> => {
+                closed.push([pane, taskId]);
+                return Promise.resolve();
+              },
+            },
+          }),
+    });
+    const send = (pane: string, fields: object, caller?: AbortSignal): Promise<unknown> =>
+      events.handle(frame({ pane, ...fields }), null, caller);
+    const launch = async (): Promise<void> => {
+      await ledger.record("t1");
+      await ledger.note("t1", SITE);
+    };
+    return { ledger, ended, panes, pushes, passes, closed, handedOff, events, send, launch };
+  }
+
+  test("parses alone, with a bounded record: a pass rides no state and never beside a hand-off", () => {
+    expect(parseSessionEventFrame(frame({ pass: true, record: RECORD, pane: "%1", prUrl: PR }))).toEqual({
+      v: 1,
+      kind: "session-event",
+      pass: true,
+      record: RECORD,
+      pane: "%1",
+    });
+    expect(parseSessionEventFrame(frame({ pass: true, record: "x".repeat(SUCCESSOR_RECORD_MAX) }))).not.toBeNull();
+    for (const bad of [
+      { pass: true },
+      { pass: true, record: "" },
+      { pass: true, record: 7 },
+      { pass: true, record: "x".repeat(SUCCESSOR_RECORD_MAX + 1) },
+      { pass: false, record: RECORD },
+      { pass: true, record: RECORD, state: "idle" },
+      { pass: true, record: RECORD, handoff: true },
+      { pass: true, record: RECORD, pane: 7 },
+    ]) {
+      expect(parseSessionEventFrame(frame(bad))).toBeNull();
+    }
+    // A record with no pass is no pass: ignored, the frame read as any other.
+    expect(parseSessionEventFrame(frame({ state: "busy", record: RECORD }))).toEqual({
+      v: 1,
+      kind: "session-event",
+      state: "busy",
+    });
+  });
+
+  test("pushes the task's branch, hands the pass to the scheduler once, and answers what was pushed", async () => {
+    const { launch, pushes, passes, send, events } = setup();
+    try {
+      await launch();
+      expect(await send("%1", { pass: true, record: RECORD })).toEqual({
+        ok: true,
+        pass: { taskId: "t1", remoteBranch: "feature/x", tip: TIP, pushed: true },
+      });
+      expect(pushes).toEqual([{ taskId: "t1", hasPr: false }]);
+      // Every field but the record is the daemon's own: the task comes from the bound pane, never the frame.
+      expect(passes).toEqual([
+        {
+          session: "%1",
+          taskId: "t1",
+          exclave: expect.any(String),
+          remoteBranch: "feature/x",
+          tip: TIP,
+          record: RECORD,
+          at: expect.any(Number),
+        },
+      ]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("tells the push whether the launch noted a PR, so a branch with no upstream is the session's to fix", async () => {
+    const { launch, ended, pushes, send, events } = setup({
+      push: { ok: false, code: "no_upstream", message: "m" },
+    });
+    try {
+      await launch();
+      await ended.notePr("t1", PR);
+      expect(await send("%1", { pass: true, record: RECORD })).toEqual({ ok: false, code: "no_upstream" });
+      expect(pushes).toEqual([{ taskId: "t1", hasPr: true }]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("a continuation's inherited PR counts as one for the push too", async () => {
+    const { launch, ledger, pushes, send, events } = setup({
+      push: { ok: false, code: "no_upstream", message: "m" },
+    });
+    try {
+      await launch();
+      await ledger.note("t1", { continuedPr: PR });
+      expect(await send("%1", { pass: true, record: RECORD })).toEqual({ ok: false, code: "no_upstream" });
+      expect(pushes).toEqual([{ taskId: "t1", hasPr: true }]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("is refused, with nothing pushed or sent, from a task-less pane, an unrecorded or in-place task", async () => {
+    const { ledger, passes, pushes, send, events } = setup();
+    try {
+      expect(await send("%2", { pass: true, record: RECORD })).toEqual({ ok: false, code: "untasked" });
+      expect(await send("%1", { pass: true, record: RECORD })).toEqual({ ok: false, code: "unrecorded" });
+      // Launched in place: a launch with no worktree noted.
+      await ledger.record("t1");
+      expect(await send("%1", { pass: true, record: RECORD })).toEqual({ ok: false, code: "here" });
+      expect(pushes).toEqual([]);
+      expect(passes).toEqual([]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("a daemon without the act answers unsupported, before anything is pushed", async () => {
+    const bare = setup({ pass: false });
+    try {
+      await bare.launch();
+      expect(await bare.send("%1", { pass: true, record: RECORD })).toEqual({ ok: false, code: "unsupported" });
+    } finally {
+      bare.events.stop();
+    }
+  });
+
+  test("answers a push refusal as the code the session can act on, and nothing is sent", async () => {
+    const cases: [PushBranchResponse, string][] = [
+      [{ ok: false, code: "dirty_worktree", message: "m" }, "dirty_worktree"],
+      [{ ok: false, code: "detached_head", message: "m" }, "detached_head"],
+      [{ ok: false, code: "default_branch", message: "m" }, "default_branch"],
+      [{ ok: false, code: "push_rejected", message: "m" }, "push_rejected"],
+      [{ ok: false, code: "not_launched", message: "m" }, "unrecorded"],
+      [{ ok: false, code: "internal_error", message: "m" }, "push_failed"],
+    ];
+    for (const [push, code] of cases) {
+      const { launch, passes, send, events } = setup({ push });
+      try {
+        // oxlint-disable-next-line no-await-in-loop -- one double per case
+        await launch();
+        // oxlint-disable-next-line no-await-in-loop -- one double per case
+        expect(await send("%1", { pass: true, record: RECORD })).toEqual({ ok: false, code });
+        expect(passes).toEqual([]);
+      } finally {
+        events.stop();
+      }
+    }
+  });
+
+  test("a pass the daemon could not hand on is told so, and leaves no mark: only a later pass-close makes one", async () => {
+    const { launch, closed, send, events } = setup({ sent: false });
+    try {
+      await launch();
+      expect(await send("%1", { pass: true, record: RECORD })).toEqual({ ok: false, code: "unsent" });
+      await send("%1", { state: "idle", turnEnded: true });
+      expect(closed).toEqual([]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("a stopped ingest answers stopping before the push, and says the branch is pushed after it", async () => {
+    const stopped = setup();
+    await stopped.launch();
+    stopped.events.stop();
+    expect(await stopped.send("%1", { pass: true, record: RECORD })).toEqual({ ok: false, code: "stopping" });
+    expect(stopped.pushes).toEqual([]);
+
+    const during = setup();
+    await during.launch();
+    const slow = createSessionEvents({
+      panes: () => Promise.resolve(during.panes),
+      exclaves: () => [],
+      forward: () => {},
+      ended: during.ended,
+      hostNamesPeers: () => false,
+      pass: {
+        push: (): Promise<PushBranchResponse> => {
+          slow.stop();
+          return Promise.resolve(PUSHED);
+        },
+        send: (): Promise<boolean> => Promise.reject(new Error("must not send")),
+        close: (): Promise<void> => Promise.resolve(),
+      },
+    });
+    expect(await slow.handle(frame({ pane: "%1", pass: true, record: RECORD }), null)).toEqual({
+      ok: false,
+      code: "stopping_pushed",
+    });
+    during.events.stop();
+  });
+
+  test("a push that throws is push_failed, never `invalid`, and sends and marks nothing", async () => {
+    const { launch, ledger, passes, closed, send, events } = setup();
+    try {
+      await launch();
+      const throwing = createSessionEvents({
+        panes: () => Promise.resolve([{ id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" }]),
+        exclaves: () => [],
+        forward: () => {},
+        ended: new EndedTasks(ledger),
+        hostNamesPeers: () => false,
+        pass: {
+          push: (): Promise<PushBranchResponse> => Promise.reject(new Error("audit log: EACCES")),
+          send: (pass: SessionPass): Promise<boolean> => {
+            passes.push(pass);
+            return Promise.resolve(true);
+          },
+          close: (): Promise<void> => Promise.resolve(),
+        },
+      });
+      expect(await throwing.handle(frame({ pane: "%1", pass: true, record: RECORD }), null)).toEqual({
+        ok: false,
+        code: "push_failed",
+      });
+      expect(passes).toEqual([]);
+      await send("%1", { state: "idle", turnEnded: true });
+      expect(closed).toEqual([]);
+      throwing.stop();
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("a caller that has gone is told nothing is sent, and no pass, mark or close follows (an interrupted call)", async () => {
+    const before = new AbortController();
+    before.abort();
+    const early = setup();
+    try {
+      await early.launch();
+      expect(await early.send("%1", { pass: true, record: RECORD }, before.signal)).toEqual({
+        ok: false,
+        code: "cancelled",
+      });
+      expect(early.pushes).toEqual([]);
+    } finally {
+      early.events.stop();
+    }
+
+    // Gone while the push ran: the branch is pushed (clean, never forced), but it is never passed.
+    const mid = new AbortController();
+    const late = setup({ during: () => mid.abort() });
+    try {
+      await late.launch();
+      expect(await late.send("%1", { pass: true, record: RECORD }, mid.signal)).toEqual({
+        ok: false,
+        code: "cancelled",
+      });
+      expect(late.pushes).toHaveLength(1);
+      expect(late.passes).toEqual([]);
+      // No mark: a later pass-close (which only a sent pass could provoke) finds none, and a turn end closes nothing.
+      await late.send("%1", { state: "idle", turnEnded: true });
+      await late.events.armPassClose("t1");
+      expect(late.closed).toEqual([]);
+    } finally {
+      late.events.stop();
+    }
+  });
+
+  test("one close per pane: a pass replaces a hand-off's mark, and a hand-off after a pass is refused", async () => {
+    const { launch, ended, closed, handedOff, send, events } = setup();
+    try {
+      await launch();
+      await ended.notePr("t1", PR);
+      await send("%1", { handoff: true });
+      await send("%1", { pass: true, record: RECORD });
+      await events.armPassClose("t1");
+      await send("%1", { state: "idle", turnEnded: true });
+      expect(closed).toEqual([["%1", "t1"]]);
+      expect(handedOff).toEqual([]);
+
+      await send("%1", { pass: true, record: RECORD });
+      expect(await send("%1", { handoff: true })).toEqual({ ok: false, code: "passed" });
+      await events.armPassClose("t1");
+      await send("%1", { state: "idle", turnEnded: true });
+      expect(closed).toHaveLength(2);
+      expect(handedOff).toEqual([]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  describe("the close at a turn's end", () => {
+    test("needs both the leader's pass-close and the turn's end, whichever lands second", async () => {
+      const { launch, closed, send, events } = setup();
+      try {
+        await launch();
+        await send("%1", { pass: true, record: RECORD });
+        // Turn ends first: nothing closes until the leader has written its commit point.
+        await send("%1", { state: "idle", turnEnded: true });
+        expect(closed).toEqual([]);
+        expect(await events.armPassClose("t1")).toEqual({ ok: true });
+        expect(closed).toEqual([["%1", "t1"]]);
+
+        // Confirmed first, then the turn ends.
+        await send("%1", { pass: true, record: RECORD });
+        expect(await events.armPassClose("t1")).toEqual({ ok: true });
+        expect(closed).toHaveLength(1);
+        await send("%1", { state: "idle", turnEnded: true });
+        expect(closed).toHaveLength(2);
+        // Once: a later turn end finds no entry.
+        await send("%1", { state: "idle", turnEnded: true });
+        expect(closed).toHaveLength(2);
+      } finally {
+        events.stop();
+      }
+    });
+
+    test("a plain idle, a hooks-worker respawn's, never closes a confirmed pass", async () => {
+      const { launch, closed, send, events } = setup();
+      try {
+        await launch();
+        await send("%1", { pass: true, record: RECORD });
+        await events.armPassClose("t1");
+        await send("%1", { state: "idle" });
+        await send("%1", { state: "idle" });
+        expect(closed).toEqual([]);
+      } finally {
+        events.stop();
+      }
+    });
+
+    test("a turn begun after an unconfirmed pass is never cut by a late pass-close", async () => {
+      const { launch, closed, send, events } = setup();
+      try {
+        await launch();
+        await send("%1", { pass: true, record: RECORD });
+        await send("%1", { state: "idle", turnEnded: true });
+        // A person prompts the session again before the leader's answer lands.
+        await send("%1", { state: "busy" });
+        await events.armPassClose("t1");
+        expect(closed).toEqual([]);
+        await send("%1", { state: "idle", turnEnded: true });
+        expect(closed).toEqual([["%1", "t1"]]);
+        // A question mid-turn clears it too.
+        await send("%1", { pass: true, record: RECORD });
+        await send("%1", { state: "idle", turnEnded: true });
+        await send("%1", { state: "needs-input" });
+        await events.armPassClose("t1");
+        expect(closed).toHaveLength(1);
+      } finally {
+        events.stop();
+      }
+    });
+
+    test("the pane reused by another task drops the entry", async () => {
+      const { launch, ledger, panes, closed, send, events } = setup();
+      try {
+        await launch();
+        await ledger.record("t2");
+        await send("%1", { pass: true, record: RECORD });
+        panes[0] = { id: "%1", pid: 10, dead: false, taskId: "t2", path: "/home" };
+        await send("%1", { state: "idle", turnEnded: true });
+        panes[0] = { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" };
+        // A pass-close for t1 now finds no entry of the pane's: it is made anew, and needs a later turn end.
+        await events.armPassClose("t1");
+        expect(closed).toEqual([]);
+      } finally {
+        events.stop();
+      }
+    });
+
+    test("a pass-close for a task no live pane carries is no_pane, and a stopped ingest arms nothing", async () => {
+      const { panes, events } = setup();
+      expect(await events.armPassClose("nobody")).toMatchObject({ ok: false, code: "no_pane" });
+      panes[0] = { id: "%1", pid: 10, dead: true, taskId: "t1", path: "/home" };
+      expect(await events.armPassClose("t1")).toMatchObject({ ok: false, code: "no_pane" });
+      panes[0] = { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" };
+      events.stop();
+      // Not no_pane: that tells the leader the session is gone, which a stopping daemon cannot say.
+      expect(await events.armPassClose("t1")).toMatchObject({ ok: false, code: "unsupported" });
+    });
+
+    test("after a daemon restart a pass-close makes the entry itself, and only a later turn end closes", async () => {
+      const { closed, send, events } = setup();
+      try {
+        expect(await events.armPassClose("t1")).toEqual({ ok: true });
+        expect(closed).toEqual([]);
+        await send("%1", { state: "busy" });
+        await send("%1", { state: "idle", turnEnded: true });
+        expect(closed).toEqual([["%1", "t1"]]);
+      } finally {
+        events.stop();
+      }
+    });
+
+    test("leaves the hand-off alone: its own mark, closed through its own seam", async () => {
+      const { launch, ended, closed, handedOff, send, events } = setup();
+      try {
+        await launch();
+        await ended.notePr("t1", PR);
+        await send("%1", { handoff: true });
+        await send("%1", { state: "idle", turnEnded: true });
+        expect(handedOff).toEqual([["%1", "t1"]]);
+        expect(closed).toEqual([]);
+      } finally {
+        events.stop();
+      }
+    });
+
+    test("stop clears the entries", async () => {
+      const { launch, closed, send, events } = setup();
+      await launch();
+      await send("%1", { pass: true, record: RECORD });
+      await events.armPassClose("t1");
+      events.stop();
+      await send("%1", { state: "idle", turnEnded: true });
+      expect(closed).toEqual([]);
+    });
   });
 });

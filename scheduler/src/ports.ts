@@ -4,6 +4,8 @@ import type {
   ErrorResponse,
   FleetQuotaEntry,
   Machine,
+  PassCloseRequest,
+  PassCloseResponse,
   PauseHold,
   PrState,
   PushBranchRequest,
@@ -200,4 +202,10 @@ export interface Fleet {
    * cannot, which a pass answers `successor_unsupported`.
    */
   pushBranch?(deviceId: string, request: PushBranchRequest): Promise<PushBranchResponse | ErrorResponse | NoAnswer>;
+  /**
+   * Tells the machine holding a task that its session's own pass reached its commit point
+   * (`pass-close`): the daemon closes the session at its turn's end. Absent where the host cannot, which
+   * the self path's pass refuses `successor_unsupported` before it creates anything.
+   */
+  passClose?(deviceId: string, request: PassCloseRequest): Promise<PassCloseResponse | ErrorResponse | NoAnswer>;
 }

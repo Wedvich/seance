@@ -66,6 +66,14 @@ export class LocalTimedOut extends LocalRequestFailed {
   }
 }
 
+/** The caller gave up (an interrupted tool call): the connection is closed unanswered, and the request may have run. */
+export class LocalAborted extends LocalRequestFailed {
+  constructor(message: string) {
+    super(message);
+    this.name = "LocalAborted";
+  }
+}
+
 interface Deferred {
   readonly promise: Promise<unknown>;
   readonly resolve: (reply: unknown) => void;
@@ -104,6 +112,8 @@ export interface ExchangeOpts {
    * `timeoutMs`. Absent or 0, one try.
    */
   readonly restartGraceMs?: number;
+  /** Closes the connection when it aborts, which the daemon reads as the caller having gone. */
+  readonly signal?: AbortSignal;
 }
 
 /**
@@ -142,7 +152,7 @@ export async function exchange(frame: object, opts: ExchangeOpts): Promise<unkno
 }
 
 async function exchangeOnce(frame: object, opts: ExchangeOpts): Promise<unknown> {
-  const { path, timeoutMs } = opts;
+  const { path, timeoutMs, signal } = opts;
   const settled = deferred();
   let inbound = EMPTY;
   let outbound = EMPTY;
@@ -214,6 +224,9 @@ async function exchangeOnce(frame: object, opts: ExchangeOpts): Promise<unknown>
   const timer = setTimeout(() => {
     finish(() => settled.reject(new LocalTimedOut(opts.timeoutText)));
   }, timeoutMs);
+  const onAbort = (): void => finish(() => settled.reject(new LocalAborted("the caller gave up")));
+  if (signal?.aborted === true) onAbort();
+  signal?.addEventListener("abort", onAbort, { once: true });
 
   try {
     outbound = Buffer.from(`${JSON.stringify(frame)}\n`, "utf8");
@@ -221,6 +234,7 @@ async function exchangeOnce(frame: object, opts: ExchangeOpts): Promise<unknown>
     return await settled.promise;
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
     socket.end();
   }
 }

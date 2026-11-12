@@ -313,6 +313,14 @@ watching CI. If that PR gets stuck (a required check fails, a conflict, the bran
 behind, or nothing is set to merge it), you are alerted and **Continue** resumes the
 session to fix it; the resumed session may hand the PR off again.
 
+`pass_to_successor` (`mcp__seance__pass_to_successor`) is the same kind of call, for a
+session that is running out of usage: it commits, calls it last with a `record` of what is
+done and left, and ends its turn. The daemon pushes the worktree's branch, the scheduler
+queues a successor whose prompt carries the record, and the session is closed at the end
+of its turn once the scheduler has recorded the pass. Allow it in the exclave the same way
+(a call stopped at a permission prompt pushes nothing), and keep `pass_task`, which passes
+another task and closes it at once, for tasks that are not the caller's own.
+
 ### 7. Optional: spawn from Raycast (macOS)
 
 On a Mac with [Raycast](https://raycast.com) installed:
@@ -542,7 +550,7 @@ versus the one on disk, which is how you spot a `git pull` that still needs a
 
 With `seanced mcp install` done (step 6), a local Claude Code can list machines,
 query running sessions, and spawn and end sessions on other machines through the relay:
-`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`, `start_task` (start a queued task now, past the concurrency cap — the app's Start now; `spawn_session`'s `start` does the same for a new one), `continue_task` (resume a failed or cancelled task's, or a blocked awaiting-merge task's, session in its worktree, as a new task), `pass_task` (push a running task's branch, end its session and queue a successor that picks it up — never for the calling session's own task), `queue_batch` (several tasks queued as one group, ordered only by the dependencies between them) and, for a session settling its own task, `report_task_done`, or handing its open PR to the scheduler and closing, `hand_off_task`. The server reads the daemon's own
+`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`, `start_task` (start a queued task now, past the concurrency cap — the app's Start now; `spawn_session`'s `start` does the same for a new one), `continue_task` (resume a failed or cancelled task's, or a blocked awaiting-merge task's, session in its worktree, as a new task), `pass_task` (push a running task's branch, end its session and queue a successor that picks it up — never for the calling session's own task, which passes itself with `pass_to_successor`), `queue_batch` (several tasks queued as one group, ordered only by the dependencies between them) and, for a session settling its own task, `report_task_done`, or handing its open PR to the scheduler and closing, `hand_off_task`, or passing its own task to a successor with its notes, `pass_to_successor`. The server reads the daemon's own
 config and speaks to the relay exactly like the phone does.
 
 `spawn_session` always queues the task in the relay, as the app's **auto** does: it answers

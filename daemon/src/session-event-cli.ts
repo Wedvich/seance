@@ -32,6 +32,8 @@ export async function cmdSessionEvent(): Promise<void> {
     if (input["state"] === "done") return;
     // So is a hand-off, `hand_off_task`'s: it closes the session.
     if (input["handoff"] !== undefined) return;
+    // And a pass, `pass_to_successor`'s: it pushes a branch and moves the task to a successor.
+    if (input["pass"] !== undefined) return;
     const pane = process.env["TMUX_PANE"];
     const remoteSession = process.env["CLAUDE_CODE_BRIDGE_SESSION_ID"];
     const frame = {

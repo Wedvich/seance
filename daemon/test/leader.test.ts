@@ -124,6 +124,7 @@ const noLocalOps: LocalOps = {
   spawn: () => Promise.reject(new Error("unexpected local spawn")),
   despawn: () => Promise.reject(new Error("unexpected local despawn")),
   pushBranch: () => Promise.reject(new Error("unexpected local push-branch")),
+  passClose: () => Promise.reject(new Error("unexpected local pass-close")),
 };
 
 /**
@@ -888,6 +889,53 @@ describe("leader requests", () => {
       leader.stop();
       relay.stop();
     }
+  });
+
+  test("a session's pass handed to a leader with no running term is logged and answered false, not taken", async () => {
+    const relay = startTestRelay(TOKEN);
+    const inner = new MemoryQueueStore();
+    const gate = Promise.withResolvers<void>();
+    const slow: QueueStore = {
+      list: async () => {
+        await gate.promise;
+        return inner.list();
+      },
+      get: (id) => inner.get(id),
+      put: (id, version, body) => inner.put(id, version, body),
+      delete: (id, version) => inner.delete(id, version),
+      getPause: () => inner.getPause(),
+      putPause: (version, holds) => inner.putPause(version, holds),
+    };
+    const pass = {
+      session: "%3",
+      taskId: "t-1",
+      exclave: "default",
+      remoteBranch: "feature/x",
+      tip: "a".repeat(40),
+      record: "SECRET-RECORD",
+      at: Date.now(),
+    };
+    const { leader } = leaderOver(relay, slow);
+    const lines = await captureLog(async () => {
+      try {
+        // Following: no term at all.
+        expect(leader.onSessionPass(pass, "a")).toBe(false);
+        leader.lead(1);
+        expect(await relay.appEvents.next()).toBe("open");
+        // Taking over: a term exists but is not running, and nothing recovers a pass dropped now.
+        expect(leader.term()).toBe(1);
+        expect(leader.onSessionPass(pass, "a")).toBe(false);
+        gate.resolve();
+        await leader.settled();
+        expect(leader.onSessionPass(pass, "a")).toBe(true);
+      } finally {
+        gate.resolve();
+        leader.stop();
+        relay.stop();
+      }
+    });
+    expect(lines.filter((l) => l.includes('session-pass task="t-1" from="a" dropped'))).toHaveLength(1);
+    for (const line of lines) expect(line).not.toContain("SECRET-RECORD");
   });
 
   test("on a 3×3 fleet, twenty finished tasks still seal under the envelope bound, the oldest cut to their winner", async () => {
@@ -2295,6 +2343,67 @@ describe("leader in the daemon", () => {
     expect(dropped).toHaveLength(3);
     expect(dropped.filter((line) => line.includes(`from="${APP_ID}"`))).toHaveLength(1);
     for (const line of dropped) expect(line).toContain("not a session event or branch state");
+  });
+
+  test("a session-pass reaches the leader's pass from the machine that sealed it; a malformed one and one from an app are dropped", async () => {
+    const relay = startTestRelay(TOKEN);
+    const seen: string[] = [];
+    const count = (needle: string): number => seen.filter((line) => line.includes(needle)).length;
+    const lines = await captureLog(async () => {
+      const capture = console.log;
+      console.log = (...args: unknown[]): void => {
+        seen.push(args.map(String).join(" "));
+        capture(...args);
+      };
+      const { daemon, deviceId } = await startLeaderDaemon(relay, new MemoryQueueStore());
+      try {
+        relay.lead(deviceId, 1);
+        await daemon.leader.settled();
+        const send = async (from: string, payload: unknown): Promise<void> => {
+          const env = await seal(
+            key,
+            { to: SCHEDULER_ID, from },
+            { id: crypto.randomUUID(), ts: Date.now(), op: "session-pass", payload },
+          );
+          relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env }));
+        };
+        const valid = {
+          session: "%3",
+          taskId: "t-gone",
+          exclave: "default",
+          remoteBranch: "feature/x",
+          tip: "a".repeat(40),
+          record: "SECRET-RECORD",
+          at: Date.now(),
+        };
+        await send("b", { ...valid, tip: "not a sha" });
+        await send(APP_ID, valid);
+        await send("b", { ...valid, record: 7 });
+        // The relay's lead nudge may land before the takeover has run, and a pass then is not acted on: ask until the leader answers.
+        await pollUntil(async () => {
+          await daemon.leader.settled();
+          await send("b", valid);
+          await Bun.sleep(20);
+          return count("scheduler: session-pass") >= 1;
+        }, "the leader to handle a valid pass");
+      } finally {
+        console.log = capture;
+        daemon.stop();
+        relay.stop();
+      }
+    });
+    const dropped = lines.filter((line) => line.includes('dropped op="session-pass"'));
+    expect(dropped).toHaveLength(3);
+    expect(dropped.filter((line) => line.includes(`from="${APP_ID}"`))).toHaveLength(1);
+    const handled = lines.filter((line) => line.includes("scheduler: session-pass"));
+    // A task the queue does not hold: the leader's own pass refused it, and said who sent it.
+    expect(handled.length).toBeGreaterThan(0);
+    for (const line of handled) expect(line).toContain('task="t-gone" from="b" outcome=not_found');
+    // The record is the successor's prompt: never in a log line, dropped or handled.
+    for (const line of lines) {
+      expect(line).not.toContain("SECRET-RECORD");
+      expect(line).not.toContain("feature/x");
+    }
   });
 
   test("with no term running, an app's scheduler request is answered not_leader from this machine", async () => {

@@ -196,6 +196,17 @@ export type PassResult =
 
 type PassFailure = Extract<PassResult, { readonly ok: false }>;
 
+/**
+ * What a session's own pass (`session-pass`) brings: the machine that sent it (the leader acts only for the
+ * task's own), the branch its daemon pushed and the commit it holds (so the push is not asked again), and
+ * what the session wrote for its successor, which is prompt text: never logged.
+ */
+export interface SessionPassInput {
+  readonly from: string;
+  readonly pushed: { readonly remoteBranch: string; readonly tip: string };
+  readonly record?: string;
+}
+
 /** What a settle by hand knew before its write: the task as it was, whether its session was live, and whether one was despawned. */
 interface ByHand {
   readonly task: Task;
@@ -1032,14 +1043,22 @@ export class Scheduler {
    * Refused, with nothing written beyond a pushed branch, before the successor exists; after the commit
    * a failed close still answers `ok` (the old task stays `running` with `successor` set, and `#closePasses`
    * retries it every pass). A `cancel` or `markDone` out for the task is `conflict` (`#stopping`).
+   *
+   * With `session` (the session's own pass, `session-pass`) the machine already pushed, so the push is skipped and
+   * its branch is compared with the PR's head instead; a `needs-input` task is accepted, since the session
+   * calling the tool is waiting on nobody; the record becomes the successor's prompt; and the close is the
+   * daemon's, at the session's turn end, armed by `pass-close` once the commit is written. Only the
+   * task's own machine may ask.
    */
-  pass(taskId: string, trigger: SuccessorTrigger = "manual"): Promise<PassResult> {
+  pass(taskId: string, trigger: SuccessorTrigger = "manual", session?: SessionPassInput): Promise<PassResult> {
     const joined = this.#passInFlight.get(taskId);
     if (joined !== undefined) {
       this.#log(`pass joined task=${quote(taskId)}`);
       return joined;
     }
-    const run = this.#runPass(taskId, trigger).finally(() => this.#passInFlight.delete(taskId));
+    const run = this.#runPass(taskId, session === undefined ? trigger : "session", session).finally(() =>
+      this.#passInFlight.delete(taskId),
+    );
     this.#passInFlight.set(taskId, run);
     return run;
   }
@@ -1048,27 +1067,37 @@ export class Scheduler {
     return { ok: true, task, successorId, successor: this.task(successorId) ?? created ?? null };
   }
 
-  async #runPass(taskId: string, trigger: SuccessorTrigger): Promise<PassResult> {
+  async #runPass(taskId: string, trigger: SuccessorTrigger, session?: SessionPassInput): Promise<PassResult> {
     const task = this.task(taskId);
     if (task === undefined) return { ok: false, code: "not_found" };
     if (task.successor !== undefined) return this.#passed(task, task.successor);
     if (FINISHED.includes(task.state)) return { ok: false, code: "finished" };
     if (task.state === "reserved") return { ok: false, code: "dispatching" };
-    if (task.state === "needs-input") return { ok: false, code: "needs_input" };
+    // The session's own pass is let through a `needs-input` task: its caller is waiting on nobody, and the
+    // leader's view can lag the answer by an event, which would silently drop a pass already pushed.
+    if (task.state === "needs-input" && session === undefined) return { ok: false, code: "needs_input" };
     const { assignment } = task;
-    if (task.state !== "running" || assignment === undefined) return { ok: false, code: "not_running" };
+    if ((task.state !== "running" && task.state !== "needs-input") || assignment === undefined) {
+      return { ok: false, code: "not_running" };
+    }
     if (task.spec.mode === "here") return { ok: false, code: "here" };
+    if (session !== undefined && session.from !== assignment.deviceId) {
+      // Nothing to answer: the frame is fire-and-forget, and another machine has no say over this task.
+      this.#log(`pass refused op=session-pass task=${quote(taskId)} from=${quote(session.from)} outcome=not_holder`);
+      return { ok: false, code: "conflict" };
+    }
     // A cancel or mark-done already out wins: its despawn would otherwise end a session this pass then supersedes.
     if (this.#stopping.has(taskId)) return { ok: false, code: "conflict" };
     const fleet = this.#fleet;
     const create = this.#create;
     // Before any push: an older host answers an unknown op `invalid_request`, which would read as a failure to push.
-    if (fleet.pushBranch === undefined || create === undefined) return { ok: false, code: "successor_unsupported" };
-    const machine = fleet.machines().find((m) => m.deviceId === assignment.deviceId);
-    if (machine === undefined || !machine.connected) return { ok: false, code: "offline" };
-    if (machine.capabilities?.includes(CAPABILITIES.successor) !== true) {
+    if (create === undefined || (session === undefined ? fleet.pushBranch : fleet.passClose) === undefined) {
       return { ok: false, code: "successor_unsupported" };
     }
+    const machine = fleet.machines().find((m) => m.deviceId === assignment.deviceId);
+    if (machine === undefined || !machine.connected) return { ok: false, code: "offline" };
+    const needed = session === undefined ? CAPABILITIES.successor : CAPABILITIES.successorSelf;
+    if (machine.capabilities?.includes(needed) !== true) return { ok: false, code: "successor_unsupported" };
     const account = machine.exclaves?.find((x) => x.id === assignment.exclave)?.accountId;
     if (account === undefined || account === null) return { ok: false, code: "account_unknown" };
 
@@ -1081,19 +1110,34 @@ export class Scheduler {
       if (reading.kind === "read") {
         if (reading.crossRepository) return { ok: false, code: "branch_mismatch" };
         if (reading.state === "merged" || reading.state === "closed") return { ok: false, code: "pr_not_open" };
+        // The session's push has happened: all that is left to say is that it went to another branch than the PR's.
+        if (session !== undefined && reading.head !== session.pushed.remoteBranch) {
+          return { ok: false, code: "branch_mismatch" };
+        }
         expect = reading.head;
       }
     }
 
-    const pushed = await fleet.pushBranch(assignment.deviceId, { taskId, ...(expect === undefined ? {} : { expect }) });
-    if (!pushed.ok) return passPushFailure(pushed.code);
+    let pushed: { readonly remoteBranch: string; readonly tip: string };
+    if (session !== undefined) {
+      pushed = session.pushed;
+    } else {
+      const pushBranch = fleet.pushBranch;
+      if (pushBranch === undefined) return { ok: false, code: "successor_unsupported" };
+      const reply = await pushBranch.call(fleet, assignment.deviceId, {
+        taskId,
+        ...(expect === undefined ? {} : { expect }),
+      });
+      if (!reply.ok) return passPushFailure(reply.code);
+      pushed = reply;
+    }
 
-    // The pushes and reads above took time: the task must still be the running one that was checked.
+    // The pushes and reads above took time: the task must still be the one that was checked.
     const current = this.task(taskId);
     const at = current?.assignment;
     if (
       current === undefined ||
-      current.state !== "running" ||
+      (current.state !== "running" && !(session !== undefined && current.state === "needs-input")) ||
       current.successor !== undefined ||
       at === undefined ||
       at.deviceId !== assignment.deviceId ||
@@ -1101,9 +1145,15 @@ export class Scheduler {
     ) {
       return { ok: false, code: "conflict" };
     }
-    const { prompt } = successorPrompt({ task: current, remoteBranch: pushed.remoteBranch, tip: pushed.tip });
+    const built = successorPrompt({
+      task: current,
+      remoteBranch: pushed.remoteBranch,
+      tip: pushed.tip,
+      ...(session?.record === undefined ? {} : { record: session.record }),
+    });
+    if (built.recordCut) this.#log(`pass record cut task=${quote(taskId)}`);
     const spec: TaskSpec = {
-      ...successorSpec({ ...current, assignment: at }, account, trigger, prompt),
+      ...successorSpec({ ...current, assignment: at }, account, trigger, built.prompt),
       client: SCHEDULER_CLIENT,
     };
     const successor: Task = {
@@ -1122,7 +1172,7 @@ export class Scheduler {
     let committed: Task | null = null;
     try {
       committed = await this.#update(taskId, (c) =>
-        c.state === "running" &&
+        (c.state === "running" || (session !== undefined && c.state === "needs-input")) &&
         c.successor === undefined &&
         c.assignment?.deviceId === assignment.deviceId &&
         !this.#stopping.has(taskId)
@@ -1142,6 +1192,12 @@ export class Scheduler {
     }
     this.#log(`audit pass task=${quote(taskId)} successor=${quote(successor.id)} trigger=${trigger}`);
 
+    if (session !== undefined) {
+      // The daemon closes at the turn's end, the gentler close; the deadline (`#closePasses`) backs anything
+      // that does not answer, and a session already gone settles through its `ended`.
+      await this.#armClose(assignment.deviceId, taskId);
+      return this.#passed(this.task(taskId) ?? committed, successor.id, successor);
+    }
     const closed = await this.#endSession(committed);
     if (!closed.ok) {
       const entry = this.#passing.get(taskId);
@@ -1150,6 +1206,24 @@ export class Scheduler {
     }
     await this.#settlePassed(taskId);
     return this.#passed(this.task(taskId) ?? committed, successor.id, successor);
+  }
+
+  /** `pass-close`: the daemon holding a session-passed task may close it at its turn's end. Best effort; the deadline backs it. */
+  async #armClose(deviceId: string, taskId: string): Promise<void> {
+    const passClose = this.#fleet.passClose;
+    if (passClose === undefined) return;
+    try {
+      const reply = await passClose.call(this.#fleet, deviceId, { taskId });
+      this.#log(`audit pass-close task=${quote(taskId)} outcome=${reply.ok ? "armed" : reply.code}`);
+      // No live pane carries the task: its session is already gone, so no turn's end is coming for the daemon to
+      // close at, and waiting out the grace only holds the successor blocked. The next tick's `#closePass` settles it.
+      if (!reply.ok && reply.code === "no_pane") {
+        const entry = this.#passing.get(taskId);
+        if (entry !== undefined) entry.deadline = this.#now();
+      }
+    } catch (err) {
+      this.#onError(err);
+    }
   }
 
   /**
@@ -1179,11 +1253,21 @@ export class Scheduler {
    */
   async #closePasses(): Promise<void> {
     const now = this.#now();
+    const rearmed: Task[] = [];
     for (const task of this.tasks()) {
-      if (passCarried(task) && !this.#passing.has(task.id) && !this.#passInFlight.has(task.id)) {
+      if (!passCarried(task) || this.#passing.has(task.id) || this.#passInFlight.has(task.id)) continue;
+      // A session's own pass is closed by its daemon at the turn's end, so reconcile asks again (idempotent)
+      // and waits a fresh grace; anything else is closed at once, as an outside pass is.
+      if (this.#asksItsDaemon(task)) {
+        this.#passing.set(task.id, { deadline: now + PASS_CLOSE_GRACE_MS });
+        rearmed.push(task);
+      } else {
         this.#passing.set(task.id, { deadline: now });
       }
     }
+    // Not awaited: the entry's deadline is already set, so nothing here depends on the answer, and a daemon that is
+    // connected but slow must not hold the tick's admission and dispatch for its 10 s (`#armClose` never rejects).
+    for (const t of rearmed) void this.#armClose(t.assignment?.deviceId ?? "", t.id);
     const due: string[] = [];
     for (const [id, entry] of this.#passing) {
       const task = this.task(id);
@@ -1191,6 +1275,19 @@ export class Scheduler {
       else if (entry.deadline <= now && !this.#passInFlight.has(id)) due.push(id);
     }
     await Promise.all(due.map((id) => this.#closePass(id)));
+  }
+
+  /** Whether a passed task's close is its daemon's to make: a session-triggered (or unreadable) successor, its machine 2b and connected. */
+  #asksItsDaemon(task: Task): boolean {
+    const deviceId = task.assignment?.deviceId;
+    if (deviceId === undefined || task.successor === undefined || this.#fleet.passClose === undefined) return false;
+    const trigger = this.task(task.successor)?.spec.succeeds?.trigger;
+    if (trigger !== undefined && trigger !== "session") return false;
+    return this.#fleet
+      .machines()
+      .some(
+        (m) => m.deviceId === deviceId && m.connected && m.capabilities?.includes(CAPABILITIES.successorSelf) === true,
+      );
   }
 
   async #closePass(id: string): Promise<void> {

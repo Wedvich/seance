@@ -25,7 +25,7 @@ const relay: AppRelay = {
 };
 
 function fleetOver(sessions: () => Promise<SessionsResponse>, sessionsTimeoutMs?: number) {
-  const local: LocalOps = { sessions, spawn: unused, despawn: unused, pushBranch: unused };
+  const local: LocalOps = { sessions, spawn: unused, despawn: unused, pushBranch: unused, passClose: unused };
   return termFleet({
     relay,
     selfDeviceId: "self",
@@ -89,7 +89,7 @@ describe("a push-branch from the leader", () => {
     const fleet = termFleet({
       relay: wire,
       selfDeviceId: "self",
-      local: { sessions: unused, spawn: unused, despawn: unused, pushBranch: opts.local ?? unused },
+      local: { sessions: unused, spawn: unused, despawn: unused, pushBranch: opts.local ?? unused, passClose: unused },
       live: () => opts.live ?? true,
       demote: () => {},
     });
@@ -141,6 +141,80 @@ describe("a push-branch from the leader", () => {
     for (const device of ["self", "other"]) {
       // oxlint-disable-next-line no-await-in-loop -- two machines, one answer each
       expect(await fleet.pushBranch?.(device, request)).toMatchObject({ ok: false, code: "unreachable" });
+    }
+    expect(asked).toEqual([]);
+  });
+});
+
+describe("a pass-close from the leader", () => {
+  const request = { taskId: "t-old" };
+
+  function closeFleet(opts: {
+    readonly local?: LocalOps["passClose"];
+    readonly remote?: () => Promise<unknown>;
+    readonly live?: boolean;
+  }) {
+    const asked: { op: string; payload: unknown }[] = [];
+    const wire: AppRelay = {
+      ...relay,
+      request: (<T>(_deviceId: string, op: string, payload: unknown) => {
+        asked.push({ op, payload });
+        return (opts.remote ?? unused)() as Promise<T>;
+      }) as AppRelay["request"],
+    };
+    const fleet = termFleet({
+      relay: wire,
+      selfDeviceId: "self",
+      local: { sessions: unused, spawn: unused, despawn: unused, pushBranch: unused, passClose: opts.local ?? unused },
+      live: () => opts.live ?? true,
+      demote: () => {},
+    });
+    return { fleet, asked };
+  }
+
+  test("this machine's own is answered in process, never over the relay", async () => {
+    const seen: unknown[] = [];
+    const { fleet, asked } = closeFleet({
+      local: (payload) => {
+        seen.push(payload);
+        return Promise.resolve({ ok: true });
+      },
+    });
+    expect(await fleet.passClose?.("self", request)).toEqual({ ok: true });
+    expect(seen).toEqual([request]);
+    expect(asked).toEqual([]);
+  });
+
+  test("another machine's goes over the relay as pass-close, and its answer is parsed before it is believed", async () => {
+    const good = closeFleet({ remote: () => Promise.resolve({ ok: true }) });
+    expect(await good.fleet.passClose?.("other", request)).toEqual({ ok: true });
+    expect(good.asked).toEqual([{ op: "pass-close", payload: request }]);
+    const refusal = { ok: false, code: "no_pane", message: "m" } as const;
+    expect(await closeFleet({ remote: () => Promise.resolve(refusal) }).fleet.passClose?.("other", request)).toEqual(
+      refusal,
+    );
+    for (const bad of [{ ok: false, code: "new_code", message: "m" }, { ok: false, code: "no_pane" }, "nope", null]) {
+      // oxlint-disable-next-line no-await-in-loop -- one malformed reply at a time
+      const reply = await closeFleet({ remote: () => Promise.resolve(bad) }).fleet.passClose?.("other", request);
+      expect(reply).toMatchObject({ ok: false, code: "internal_error" });
+    }
+  });
+
+  test("a machine that did not answer is unreachable, or undelivered when nothing can have run", async () => {
+    const failing = (reason: "timeout" | "offline") =>
+      closeFleet({ remote: () => Promise.reject(new RequestFailure(reason, "no")) }).fleet.passClose?.(
+        "other",
+        request,
+      );
+    expect(await failing("timeout")).toMatchObject({ ok: false, code: "unreachable" });
+    expect(await failing("offline")).toMatchObject({ ok: false, code: "undelivered" });
+  });
+
+  test("an ended term arms nothing, on this machine or another", async () => {
+    const { fleet, asked } = closeFleet({ live: false });
+    for (const device of ["self", "other"]) {
+      // oxlint-disable-next-line no-await-in-loop -- two machines, one answer each
+      expect(await fleet.passClose?.(device, request)).toMatchObject({ ok: false, code: "unreachable" });
     }
     expect(asked).toEqual([]);
   });

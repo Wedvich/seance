@@ -3,10 +3,10 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { APP_ID, SCHEDULER_ID, type Plain, type RepoEntry } from "@seance/shared";
-import type { AuditSink } from "../src/audit.ts";
+import { pushAudit, type AuditSink } from "../src/audit.ts";
 import type { SessionBackend } from "../src/backend.ts";
 import { exec } from "../src/exec.ts";
-import { createHandler, createLocalOps, type HandlerContext, type TaskLaunches } from "../src/handlers.ts";
+import { createHandler, createLocalOps, pushForTask, type HandlerContext, type TaskLaunches } from "../src/handlers.ts";
 import { makeGitFixture, type GitFixture } from "./fixtures.ts";
 
 /**
@@ -156,5 +156,23 @@ describe("push-branch", () => {
     expect(reply).toMatchObject({ ok: true, tip });
     expect(logged()).toContain('audit request origin=leader op="push-branch"');
     expect(logged()).toContain('audit push origin=leader task="t-local"');
+  });
+});
+
+describe("pushForTask", () => {
+  test("a session's own pass pushes the same worktree under origin=successor, and the audit names no branch", async () => {
+    const { tip } = await taskWorktree("t-self", "task/self-secret");
+    const reply = await pushForTask(ctx(), pushAudit("successor", collect), "t-self", { hasPr: false });
+    expect(reply).toEqual({ ok: true, remoteBranch: "task/self-secret", tip, pushed: true });
+    expect(logged()).toContain(
+      `audit push origin=successor task="t-self" repo="myrepo" outcome=pushed tip=${tip.slice(0, 7)}`,
+    );
+    expect(logged()).not.toContain("self-secret");
+  });
+
+  test("a task with no launch here is not_launched, audited under the same origin", async () => {
+    const reply = await pushForTask(ctx(), pushAudit("successor", collect), "t-none", {});
+    expect(reply).toMatchObject({ ok: false, code: "not_launched" });
+    expect(logged()).toContain('audit push origin=successor task="t-none" outcome=not_launched');
   });
 });

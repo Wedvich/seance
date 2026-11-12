@@ -28,6 +28,7 @@ import {
   schedulerErrorText,
   schedulerRefusal,
   schedulerRole,
+  SUCCESSOR_RECORD_MAX,
   taskFailureText,
   TASK_FAILURE_LIMITS,
   TASK_REQUEST_LIMITS,
@@ -99,7 +100,7 @@ import {
 } from "./fleet.ts";
 import { recordedBunCheck, resolvedMain } from "./link.ts";
 import { localRequest, localSocketReachable, LocalUnavailable } from "./local-client.ts";
-import { handOff, reportDone } from "./report-done.ts";
+import { handOff, passToSuccessor, reportDone } from "./report-done.ts";
 import { readState } from "./state.ts";
 
 /**
@@ -208,6 +209,22 @@ interface ToolResult {
 }
 
 const HAND_OFF_TOOL = "hand_off_task";
+const PASS_SELF_TOOL = "pass_to_successor";
+
+/**
+ * How long `pass_to_successor` looks for the leader's confirmation after its daemon pushed and reported:
+ * a commit point is written within seconds of a healthy leader's receipt, but the PR head read and the
+ * successor's create run first.
+ */
+export interface PassPoll {
+  readonly windowMs: number;
+  readonly everyMs: number;
+}
+const PASS_POLL: PassPoll = { windowMs: 30_000, everyMs: 1_000 };
+
+/** Said whatever the confirmation: the session is closed at its turn's end, or not at all, and nothing after the push is carried. */
+const END_THE_TURN =
+  "Do no further work and end your turn now with one line: if the pass stands, this session is closed when the turn ends, and anything committed after the push is not carried.";
 
 const textResult = (text: string): ToolResult => ({ content: [{ type: "text", text }] });
 const errorResult = (text: string): ToolResult => ({ content: [{ type: "text", text }], isError: true });
@@ -859,6 +876,8 @@ export function buildMcpServer(
   audit: AuditSink = cliSink,
   report: typeof reportDone = reportDone,
   handOffTask: typeof handOff = handOff,
+  passOwnTask: typeof passToSuccessor = passToSuccessor,
+  passPoll: PassPoll = PASS_POLL,
 ): McpServer {
   // 0.0.0 mirrors the package: the daemon versions by git sha, not semver.
   const server = new McpServer({ name: "seance", version: "0.0.0" });
@@ -1047,7 +1066,7 @@ export function buildMcpServer(
     {
       title: "Pass a running scheduler task to a successor",
       description:
-        "Pass a running task to a successor — the app's Pass to successor. The scheduler has the task's machine push its branch to origin, ends its session and queues a new task that carries the work on in a fresh session, with a prompt that names the branch and the pull request; the old task settles as superseded once the successor exists, and anything waiting on it waits on the successor instead. For a task that is stuck, or whose account is out of quota, and whose work is committed: a task with uncommitted changes, one in place (mode here) or one on the repo's default branch is refused, and nothing is pushed. Only a running task: one waiting for the user (needs-input) or for a merge is refused. Needs a scheduler leader and a task machine whose daemon supports it (get_queue shows both). Sent once and never retried: if the answer is lost, check get_queue before passing again. Not for the calling session's own task: it ends the session that is asking. Answers with the successor's task id.",
+        "Pass a running task to a successor — the app's Pass to successor. The scheduler has the task's machine push its branch to origin, ends its session and queues a new task that carries the work on in a fresh session, with a prompt that names the branch and the pull request; the old task settles as superseded once the successor exists, and anything waiting on it waits on the successor instead. For a task that is stuck, or whose account is out of quota, and whose work is committed: a task with uncommitted changes, one in place (mode here) or one on the repo's default branch is refused, and nothing is pushed. Only a running task: one waiting for the user (needs-input) or for a merge is refused. Needs a scheduler leader and a task machine whose daemon supports it (get_queue shows both). Sent once and never retried: if the answer is lost, check get_queue before passing again. To pass your own task use `pass_to_successor`; `pass_task` is for other tasks and closes the target session at once. Answers with the successor's task id.",
       inputSchema: z.strictObject({ taskId: z.string().describe("The running task's id from get_queue") }),
       annotations: { readOnlyHint: false },
     },
@@ -1486,7 +1505,88 @@ export function buildMcpServer(
     },
   );
 
+  server.registerTool(
+    PASS_SELF_TOOL,
+    {
+      title: "Pass this session's task to a successor session",
+      description: `Pass this scheduler task to a successor session when this one is running out of usage, or the owner asks. Commit everything first: the daemon pushes this worktree's branch to its upstream and refuses a dirty tree (nothing is pushed then). \`record\` is the whole of what the successor knows besides the branch and the PR it reads itself: what is done, what is left, decisions taken and why, how to verify; at most ${SUCCESSOR_RECORD_MAX} characters. Call it last and end the turn with one line: this session is closed when the turn ends, and nothing done after the push is carried. To pass your own task use this; \`pass_task\` is for other tasks and closes the target session at once. Not \`hand_off_task\`, which leaves a finished PR to the scheduler. Needs a scheduler leader that takes session passes; the call is refused before anything is pushed when there is none. If the task has a PR whose branch this worktree does not track, it is refused and tells you what to push first.`,
+      inputSchema: z.strictObject({
+        record: z.string().min(1).describe("What the successor needs: done, left, decisions, how to verify"),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false },
+    },
+    async ({ record }, ctx) => {
+      // UTF-16 units, as the daemon and the leader count: a schema `maxLength` counts code points, which lets an over-long record through.
+      if (record.length > SUCCESSOR_RECORD_MAX) {
+        return errorResult(
+          `${PASS_SELF_TOOL} refused: the record is ${record.length} characters, ${record.length - SUCCESSOR_RECORD_MAX} over the ${SUCCESSOR_RECORD_MAX} allowed; cut it and call again. Nothing was pushed.`,
+        );
+      }
+      return withFleet(async (lease) => {
+        if (lease.scheduler === null) {
+          return errorResult(
+            `${PASS_SELF_TOOL} refused: can't confirm the scheduler takes session passes (${SCHEDULER_NEEDS_NEWER_DAEMON}). Nothing was pushed.`,
+          );
+        }
+        // Before the push: a leader that predates the pass drops the report, and the branch would be pushed for nothing.
+        if (!advertises(lease.machines, lease.scheduler.availability(), CAPABILITIES.successorSelf)) {
+          return errorResult(
+            `${PASS_SELF_TOOL} refused: ${
+              lease.scheduler.availability().kind === "ready"
+                ? "the scheduler's leader cannot take a session's pass yet — its daemon needs `seanced update`"
+                : "no verified scheduler is leading, so it cannot be confirmed to take a pass — try again once one leads"
+            }. Nothing was pushed.`,
+          );
+        }
+        // The cancellation closes the daemon's connection, which is what keeps an interrupted call from passing later.
+        const result = await passOwnTask(record, { signal: ctx.mcpReq.signal });
+        // No answer is not a refusal: the daemon may have pushed and sent the pass, and closes this session at its turn's end.
+        if (result.unanswered === true) {
+          return textResult(
+            `${PASS_SELF_TOOL}: no answer from this machine's daemon (${result.text}), so the branch may be pushed and the pass may have gone through; check get_queue for a successor on your task before pushing or passing again. ${END_THE_TURN}`,
+          );
+        }
+        if (!result.ok) return errorResult(`${PASS_SELF_TOOL} refused: ${result.text}`);
+        const taskId = result.pass?.taskId;
+        if (taskId === undefined) return textResult(`${result.text}. ${END_THE_TURN}`);
+        const successor = await successorOf(lease.scheduler, taskId, passPoll);
+        if (successor !== null) {
+          return textResult(
+            `passed: the scheduler recorded successor ${successor} for task ${taskId}; its branch is pushed. ${END_THE_TURN}`,
+          );
+        }
+        return textResult(
+          `the branch is pushed but no successor was recorded yet; the leader may still confirm, or may have refused (for example the PR's head is another branch). ${END_THE_TURN}`,
+        );
+      });
+    },
+  );
+
   return server;
+}
+
+/**
+ * The successor the leader recorded on `taskId`, polled for up to the window; null when none appeared, the queue
+ * could not be read, or the leader answered with an error. Never throws: the push has happened, and the
+ * session is told what it knows.
+ */
+async function successorOf(scheduler: SchedulerLeg, taskId: string, poll: PassPoll): Promise<string | null> {
+  const until = Date.now() + poll.windowMs;
+  for (;;) {
+    try {
+      // oxlint-disable-next-line no-await-in-loop -- one read at a time, the leader's confirmation being what is waited for
+      const queue = await scheduler.queue();
+      if (queue !== null && !("ok" in queue)) {
+        const successor = queue.tasks.find((t) => t.id === taskId)?.successor;
+        if (successor !== undefined) return successor;
+      }
+    } catch {
+      return null;
+    }
+    if (Date.now() + poll.everyMs > until) return null;
+    // oxlint-disable-next-line no-await-in-loop -- see above
+    await Bun.sleep(poll.everyMs);
+  }
 }
 
 /**
