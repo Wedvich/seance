@@ -571,6 +571,7 @@ function autoMachine(deviceId: string, fields: Partial<Machine> = {}): Machine {
 const LEADING_RELAY: RelayState = {
   status: "open",
   rejection: null,
+  archivist: null,
   machines: [autoMachine("dev-a"), autoMachine("dev-b")],
   registrySize: 2,
   ignored: 0,

@@ -29,6 +29,8 @@ import {
   type ErrorResponse,
   type ExclaveInfo,
   type FleetQuotaEntry,
+  type ArchiveStatusReply,
+  type ArchivistInfo,
   type MachineInfo,
   type MachineStatus,
   type MetricsReply,
@@ -70,6 +72,8 @@ import {
   isRecord,
   isStoreKey,
   isTerm,
+  parseArchiveStatusReply,
+  parseArchivistInfo,
   parseDiscardReply,
   parseEnvelope,
   parseLeadProof,
@@ -519,12 +523,33 @@ export function schedulerRole(deviceId: string, scheduler: SchedulerAvailability
   return scheduler.kind === "ready" ? "leader" : "unverified";
 }
 
+/**
+ * The archivist's card, display only. `connected` is the registry entry's own:
+ * a request to the archivist that times out marks no one offline, since an
+ * older archivist that drops `archive-status` would otherwise read as down.
+ */
+export interface ArchivistEntry {
+  readonly deviceId: string;
+  readonly name: string;
+  readonly platform: string;
+  readonly connected: boolean;
+  /** As `Machine.lastSeen`. */
+  readonly lastSeen: number;
+  readonly source?: SourceInfo;
+}
+
 export interface RelayState {
   readonly status: RelayStatus;
   /** Set only for a permanent close; the client stops reconnecting. */
   readonly rejection: "unauthorized" | "bad-request" | null;
   /** Entries whose `info` decrypted; the list the app shows. */
   readonly machines: readonly Machine[];
+  /**
+   * The archivist's seat as the registry flags it, built only from a blob that
+   * opened, is sealed from the entry's own deviceId and parses as an
+   * `ArchivistInfo`. Never a `Machine`; null with no archivist or an unreadable blob.
+   */
+  readonly archivist: ArchivistEntry | null;
   /**
    * Entries the relay holds that may be machines, including any that did not
    * decrypt — never the archivist's seat, so a relay holding only that reads as empty.
@@ -614,6 +639,7 @@ const INITIAL_STATE: RelayState = {
   status: "connecting",
   rejection: null,
   machines: [],
+  archivist: null,
   registrySize: 0,
   ignored: 0,
   unbound: 0,
@@ -629,7 +655,13 @@ const INITIAL_STATE: RelayState = {
  * again once the target is back, inside the op's own deadline; any other op fails `dropped` then,
  * since it may have landed and only its caller can say whether to ask again.
  */
-const RESENDABLE_OPS: ReadonlySet<RequestOp> = new Set<RequestOp>(["sessions", "metrics", "queue", "route-preview"]);
+const RESENDABLE_OPS: ReadonlySet<RequestOp> = new Set<RequestOp>([
+  "sessions",
+  "metrics",
+  "archive-status",
+  "queue",
+  "route-preview",
+]);
 
 /**
  * How long a request whose target left the relay still waits for its answer. A reply sent just
@@ -844,7 +876,26 @@ function infoCacheKey(entry: RegistryView): string {
   return `${entry.info.iv.length}:${entry.info.iv}${entry.deviceId}`;
 }
 
-type InfoCacheHit = MachineInfo | "unopenable" | "skewed" | "unbound";
+/** The archivist's blob, kept apart from a `MachineInfo` so the union tells them apart without a cast. */
+interface ArchivistInfoHit {
+  readonly kind: "archivist";
+  readonly info: ArchivistInfo;
+}
+
+type InfoCacheHit = MachineInfo | ArchivistInfoHit | "unopenable" | "skewed" | "unbound";
+
+function sameArchivist(a: ArchivistEntry, b: ArchivistEntry): boolean {
+  return (
+    a.deviceId === b.deviceId &&
+    a.name === b.name &&
+    a.platform === b.platform &&
+    a.connected === b.connected &&
+    a.lastSeen === b.lastSeen &&
+    a.source?.sha === b.source?.sha &&
+    a.source?.commitTs === b.source?.commitTs &&
+    a.source?.branch === b.source?.branch
+  );
+}
 
 /** The last `lead-proof` opened, by iv: who sealed it and the term it names (null: it did not open or parse). */
 interface LeadProofHit {
@@ -1119,6 +1170,22 @@ export class RelayClient {
     }
     const parsed = parseMetricsReply(await this.request<unknown>(deviceId, "metrics", request));
     if (parsed === null) this.#wireLog("dropped", `from=${quote(deviceId)} reason=metrics-shape`);
+    return parsed;
+  }
+
+  /**
+   * The archivist's own counts (`archive-status`). Refused unsent while the
+   * registry shows no connected archivist, so no request is left to time out
+   * against a seat that is not there. An archivist that predates the op drops
+   * it unanswered and the request times out; the card then shows no rows.
+   */
+  async archiveStatus(): Promise<ArchiveStatusReply | null> {
+    const archivist = this.#state.archivist;
+    if (archivist === null || !archivist.connected) {
+      throw new RequestFailure("offline", "the archivist is offline");
+    }
+    const parsed = parseArchiveStatusReply(await this.request<unknown>(archivist.deviceId, "archive-status", {}));
+    if (parsed === null) this.#wireLog("dropped", `from=${quote(archivist.deviceId)} reason=archive-status-shape`);
     return parsed;
   }
 
@@ -1859,6 +1926,12 @@ export class RelayClient {
     try {
       const plain = await openAtRest(this.#key, env, "machine-info");
       const info = parseMachineInfo(plain.payload);
+      // The archivist's blob is deliberately no MachineInfo; whether it is the seat's is #rebuildMachines's call.
+      const archivist = info === null ? parseArchivistInfo(plain.payload) : null;
+      if (archivist !== null) {
+        this.#infoCache.set(cacheKey, { kind: "archivist", info: archivist });
+        return;
+      }
       // Logged where an unopenable blob is not: an entry sealed with a key this
       // app doesn't hold is an expected steady state — it is what `ignored`
       // counts — while a blob that opened and then failed the shape check is
@@ -1958,6 +2031,11 @@ export class RelayClient {
         continue;
       }
       if (info === undefined || info === "unopenable") continue;
+      // An archivist-shaped blob under an entry the relay did not flag is nothing this build can show.
+      if ("kind" in info) {
+        skewedHere += 1;
+        continue;
+      }
       const scan = this.#scans.get(entry.deviceId);
       // A register that carries the scan (or a later one) makes the override spent.
       if (scan !== undefined && scan.scannedAt <= info.scannedAt) this.#scans.delete(entry.deviceId);
@@ -2004,6 +2082,7 @@ export class RelayClient {
       } else machines.push(built);
     }
     this.#patch({
+      archivist: this.#archivistEntry(),
       scheduler: this.#schedulerAvailability(machines),
       // Every push re-derives the whole list, and the app connect behind every
       // resume re-sends a registry that is usually identical. Handing back the
@@ -2017,6 +2096,24 @@ export class RelayClient {
       skewed: skewedHere + this.#skippedEntries,
       ...extra,
     });
+  }
+
+  /** Same object back while nothing moved, so a push that changes nothing about it renders nothing. */
+  #archivistEntry(): ArchivistEntry | null {
+    const entry = this.#entries.find((candidate) => candidate.archivist === true);
+    const hit = entry === undefined ? undefined : this.#infoCache.get(infoCacheKey(entry));
+    if (entry === undefined || hit === undefined || typeof hit === "string" || !("kind" in hit)) return null;
+    const { name, platform, source } = hit.info;
+    const built: ArchivistEntry = {
+      deviceId: entry.deviceId,
+      name,
+      platform,
+      connected: entry.connected,
+      lastSeen: entry.lastSeen,
+      ...(source === undefined ? {} : { source }),
+    };
+    const prior = this.#state.archivist;
+    return prior !== null && sameArchivist(prior, built) ? prior : built;
   }
 
   /**

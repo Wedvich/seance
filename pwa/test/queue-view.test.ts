@@ -45,6 +45,7 @@ function state(
     relay: {
       status: "open",
       rejection: null,
+      archivist: null,
       machines,
       registrySize: machines.length,
       ignored: 0,

@@ -60,6 +60,7 @@ function stateOf(machines: readonly Machine[]): RelayState {
   return {
     status: "open",
     rejection: null,
+    archivist: null,
     machines,
     registrySize: machines.length,
     ignored: 0,

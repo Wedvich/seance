@@ -50,6 +50,7 @@ function relay(overrides: Partial<RelayState> = {}): RelayState {
   return {
     status: "open",
     rejection: null,
+    archivist: null,
     machines,
     registrySize: machines.length,
     ignored: 0,

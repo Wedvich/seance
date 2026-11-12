@@ -17,6 +17,7 @@ function state(overrides: Partial<AppState> = {}): AppState {
     relay: {
       status: "open",
       rejection: null,
+      archivist: null,
       machines: [],
       registrySize: 0,
       ignored: 0,
