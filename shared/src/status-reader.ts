@@ -1,6 +1,6 @@
 import type { Machine } from "./app-client.ts";
 import { REPLAY_WINDOW_MS } from "./crypto.ts";
-import { CAPABILITIES, STATUS_INTERVAL_MS, type MachineStatus, type QuotaObservation } from "./types.ts";
+import { CAPABILITIES, STATUS_INTERVAL_MS, type MachineStatus, type QuotaObservation, type Task } from "./types.ts";
 
 /**
  * The rules every reader of a `status` goes through, so the PWA and the
@@ -125,4 +125,20 @@ function isSaneObservation(q: QuotaObservation): boolean {
 
 function isPct(value: number | undefined): boolean {
   return value === undefined || value <= MAX_PCT;
+}
+
+/** States whose headline says the machine is asleep: a session may be alive there, waiting on the lid. */
+const SLEEP_AWARE: ReadonlySet<Task["state"]> = new Set(["reserved", "running", "needs-input", "lost"]);
+
+/**
+ * The task's machine when it is listed and not `connected` as this client sees
+ * it — the signal the Machines card's "asleep" reads, never the relay flag alone
+ * (DESIGN.md, "The Queue screen"). A derived view: the leader's state is unchanged.
+ */
+export function sleepingMachine(task: Task, machines: readonly Machine[]): Machine | undefined {
+  if (!SLEEP_AWARE.has(task.state)) return undefined;
+  const at = task.assignment ?? task.reservation;
+  if (at === undefined) return undefined;
+  const machine = machines.find((m) => m.deviceId === at.deviceId);
+  return machine?.connected === false ? machine : undefined;
 }
