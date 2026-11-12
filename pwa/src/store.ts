@@ -52,25 +52,16 @@ import {
   type Verdict,
 } from "./state.ts";
 import { AccountStore } from "./account-store.ts";
-import {
-  admitFiles,
-  manifestOf,
-  notAttachedText,
-  uploadFailureShort,
-  uploadRefusalText,
-  type PickedFile,
-  type UploadState,
-} from "./attachments.ts";
+import { admitFiles, manifestOf, notAttachedText } from "./attachments.ts";
 import type { ReceivedShare } from "./share-inbox.ts";
 import { accountSeries } from "./chart.ts";
 import { SchedulerStore, STORE_UNREADABLE } from "./scheduler-store.ts";
+import { UploadQueue } from "./upload-queue.ts";
 import { taskTitle } from "./task-title.ts";
 import type { AppState } from "./view.ts";
 import {
-  ATTACHMENTS_NOT_HELD,
-  ATTACHMENTS_UNAVAILABLE,
+  attachmentsRefusal,
   canHold,
-  attachmentsWithdrawn,
   deriveAttachmentsAvailability,
   deriveAutoAvailability,
   derivePinAccountAvailability,
@@ -184,17 +175,9 @@ export class Store {
   #leaderWasVerified = false;
   /** Held task ids sent on this socket; a retry takes its own back out. */
   #triedOnSocket = new Set<string>();
-  /** The abort handle of each upload in flight, by file key: removing the file cuts it off. */
-  readonly #uploadAborts = new Map<string, AbortController>();
-  /** Whether an upload is in flight. Checked and set synchronously, so a file added as one ends is never missed. */
-  #pumping = false;
-  /** Set by a refusal that every later file would meet too (allowance, key, no relay); cleared by a Queue press or a pick. */
-  /** Why the pump stopped; a reopened socket lifts `unreachable` only, the other two wait for a press or a pick. */
-  #pumpHalted: "allowance_exhausted" | "unauthorized" | "unreachable" | null = null;
-  /** A Queue press waiting for the uploads to go idle (`#awaitUploads`). */
-  #uploadIdleWaiters: (() => void)[] = [];
   readonly #queue: SchedulerStore;
   readonly #accounts: AccountStore;
+  readonly #uploads: UploadQueue;
 
   constructor(client: RelayClient, form: PersistedForm = DEFAULT_FORM, held: readonly HeldTask[] = []) {
     this.#client = client;
@@ -204,6 +187,11 @@ export class Store {
       (next) => this.#patch(next),
     );
     this.#accounts = new AccountStore(
+      client,
+      () => this.#state,
+      (next) => this.#patch(next),
+    );
+    this.#uploads = new UploadQueue(
       client,
       () => this.#state,
       (next) => this.#patch(next),
@@ -291,6 +279,7 @@ export class Store {
       this.#disarmUndo();
       this.#queue.dispose();
       this.#accounts.dispose();
+      this.#uploads.dispose();
     };
   }
 
@@ -298,13 +287,7 @@ export class Store {
   #patch(next: Partial<AppState>): void {
     const keys = Object.keys(next) as readonly (keyof AppState)[];
     if (keys.every((key) => Object.is(this.#state[key], next[key]))) return;
-    // The lock notice is true only while the press is out; a press that ended must not leave it up.
-    const unlocked = this.#state.spawning && next.spawning === false && next.attachNotice === undefined;
-    this.#state = {
-      ...this.#state,
-      ...next,
-      ...(unlocked && this.#state.attachNotice === LOCKED_NOTICE ? { attachNotice: null } : {}),
-    };
+    this.#state = { ...this.#state, ...next };
     for (const listener of this.#listeners) listener();
   }
 
@@ -317,13 +300,7 @@ export class Store {
     // Only an authoritative registry may prune — while it is unsettled an empty
     // `machines` means "no push yet", not "every machine vanished".
     this.#patch({ relay, ...(relay.registrySettled ? this.#pruneGone(relay.machines) : {}) });
-    // Files admitted while attaching wasn't offered (a share at boot, a pick in a re-dial) start once it is.
-    // An upload is its own HTTP request, so a dropped socket doesn't cut it (the create is re-checked after
-    // the wait). One going while a verified leader stops taking files is cut: its object may land, but no create follows.
-    if (attachmentsWithdrawn(relay)) for (const controller of this.#uploadAborts.values()) controller.abort();
-    // The network that failed an upload is likely back with the socket.
-    if (socketBack && this.#pumpHalted === "unreachable") this.#pumpHalted = null;
-    this.#pumpUploads();
+    this.#uploads.onRelay(socketBack);
     const decided = relay.status === "open" ? relay.registrySettled : !relay.settling;
     if (decided && this.#settleWaiters.length > 0) {
       const waiters = this.#settleWaiters;
@@ -472,20 +449,19 @@ export class Store {
     const sentences = [notAttachedText([...new Set([...refusedBefore, ...refused])]), ...problems].filter(
       (s) => s !== null,
     );
-    if (next.length > before.length) this.#pumpHalted = null;
     this.#patch({ attachments: next, attachNotice: sentences.length === 0 ? null : sentences.join(" ") });
     // route-preview filters on the flag; it changes only when the list empties or fills.
     if (before.length === 0 && next.length > 0) void this.refreshPreview();
-    this.#pumpUploads();
+    // A refused pick admits nothing, so it is no reason to try a halted upload again.
+    if (next.length > before.length) this.#uploads.onAdded();
   }
 
   /** Also mid-upload, which it aborts, and while Queue waits on uploads; never once the create is out. */
   removeFile(key: string): void {
     if (this.#state.spawning && !this.#state.awaitingUploads) return;
-    this.#uploadAborts.get(key)?.abort();
-    if (this.#pumpHalted === "unreachable") this.#pumpHalted = null;
     const next = this.#state.attachments.filter((f) => f.key !== key);
     this.#patch({ attachments: next, attachNotice: null });
+    this.#uploads.onRemoved(key);
     if (next.length === 0) void this.refreshPreview();
   }
 
@@ -952,7 +928,7 @@ export class Store {
     }
     const attaching = this.#state.attachments.length > 0;
     if (attaching && !deriveAttachmentsAvailability(relay)) {
-      return refused(`${holding ? ATTACHMENTS_NOT_HELD : ATTACHMENTS_UNAVAILABLE}.`);
+      return refused(`${attachmentsRefusal(relay)}.`);
     }
     const { autonomy } = this.#state;
     const level = withAutonomy<Pick<TaskSpec, "autonomy" | "plan">>(autonomy === DEFAULT_AUTONOMY ? {} : { autonomy });
@@ -1198,112 +1174,15 @@ export class Store {
   }
 
   /**
-   * Uploads waiting files one at a time, in list order, while attaching is offered:
-   * each holds its file and the sealed copy in memory, and the phone's uplink is the
-   * bottleneck, so parallel uploads would not finish the set sooner. Wakes the
-   * Queue press's waiters once nothing is left it can start.
-   */
-  #pumpUploads(): void {
-    if (this.#pumping) return;
-    const next =
-      deriveAttachmentsAvailability(this.#state.relay) && this.#pumpHalted === null
-        ? this.#state.attachments.find((f) => f.upload.kind === "waiting")
-        : undefined;
-    if (next === undefined) {
-      const waiters = this.#uploadIdleWaiters;
-      this.#uploadIdleWaiters = [];
-      for (const resolve of waiters) resolve();
-      return;
-    }
-    this.#pumping = true;
-    void this.#uploadOne(next).finally(() => {
-      this.#pumping = false;
-      this.#pumpUploads();
-    });
-  }
-
-  /** Seals and uploads one file, recording where it got; a removed file's outcome is dropped. Never rejects. */
-  async #uploadOne(picked: PickedFile): Promise<void> {
-    const { key } = picked;
-    const controller = new AbortController();
-    this.#uploadAborts.set(key, controller);
-    this.#setUpload(key, { kind: "uploading", percent: 0 });
-    try {
-      let bytes: Uint8Array<ArrayBuffer>;
-      try {
-        bytes = new Uint8Array(await picked.file.arrayBuffer());
-      } catch {
-        this.#setUpload(key, {
-          kind: "failed",
-          short: "couldn't read the file",
-          message:
-            "Couldn't read a file from this device. Remove the one marked failed and attach it again. Nothing was queued.",
-        });
-        return;
-      }
-      const reply = await this.#client.uploadAttachment(bytes, {
-        signal: controller.signal,
-        // Short of 100 until the relay answers `201`: the last byte sent is not a stored file.
-        onProgress: (sent, total) =>
-          this.#setUpload(key, {
-            kind: "uploading",
-            percent: total > 0 ? Math.min(99, Math.floor((sent / total) * 100)) : 0,
-          }),
-      });
-      if (reply.ok) this.#setUpload(key, { kind: "stored", id: reply.id, hash: reply.hash });
-      // A removed file's outcome is dropped by #setUpload; one still on the form goes back in line.
-      else if (reply.code === "aborted") this.#setUpload(key, { kind: "waiting" });
-      else {
-        if (reply.code === "allowance_exhausted" || reply.code === "unauthorized" || reply.code === "unreachable") {
-          this.#pumpHalted = reply.code;
-        }
-        this.#setUpload(key, {
-          kind: "failed",
-          short: uploadFailureShort(reply),
-          message: uploadRefusalText(reply),
-        });
-      }
-    } catch (err) {
-      this.#setUpload(key, {
-        kind: "failed",
-        short: "upload failed",
-        message: `Couldn't upload a file (${String(err)}). Nothing was queued.`,
-      });
-    } finally {
-      this.#uploadAborts.delete(key);
-    }
-  }
-
-  /** Patches one file's upload state; nothing for a file since removed, or a percent that didn't move. */
-  #setUpload(key: string, upload: UploadState): void {
-    const current = this.#state.attachments.find((f) => f.key === key);
-    if (current === undefined) return;
-    if (upload.kind === "uploading" && current.upload.kind === "uploading" && current.upload.percent === upload.percent)
-      return;
-    this.#patch({ attachments: this.#state.attachments.map((f) => (f.key === key ? { ...f, upload } : f)) });
-  }
-
-  /**
    * A Queue press with files: failed ones go again under fresh ids, and the press
-   * waits until nothing is uploading. Answers the manifest once every file still on
-   * the form is stored, or null when
-   * nothing is to be queued (also when every file was removed meanwhile), the verdict already saying why.
+   * waits until the uploads settle (`UploadQueue.settle`). Answers the manifest once
+   * every file still on the form is stored, or null when nothing is to be queued (also
+   * when every file was removed meanwhile), the verdict already saying why.
    */
   async #awaitUploads(): Promise<readonly AttachmentRef[] | null> {
-    this.#pumpHalted = null;
-    this.#patch({
-      spawning: true,
-      awaitingUploads: true,
-      verdict: null,
-      attachments: this.#state.attachments.map((f) =>
-        f.upload.kind === "failed" ? { ...f, upload: { kind: "waiting" } } : f,
-      ),
-    });
-    await new Promise<void>((resolve) => {
-      this.#uploadIdleWaiters.push(resolve);
-      this.#pumpUploads();
-    });
-    const files = this.#state.attachments;
+    this.#patch({ spawning: true, awaitingUploads: true, verdict: null });
+    await this.#uploads.settle();
+    const { attachments: files, relay } = this.#state;
     const manifest = manifestOf(files);
     // Still spawning on success: the create follows at once, and the button must not offer a second submit between.
     if (manifest !== null && manifest.length === 0) {
@@ -1316,16 +1195,16 @@ export class Store {
       return manifest;
     }
     const failed = files.map((f) => f.upload).find((upload) => upload.kind === "failed");
+    // Files still waiting: attaching stopped being offered mid-wait (a leader without it, or a re-dial that outlasted the wait).
+    const waiting = deriveAttachmentsAvailability(relay) ? "Not every file uploaded" : attachmentsRefusal(relay);
     this.#patch({ awaitingUploads: false, spawning: false });
-    this.#showVerdict({
-      kind: "unqueued",
-      // Files still waiting: attaching stopped being offered mid-wait (a re-dial, or a leader without it).
-      message:
+    this.#showVerdict(
+      unqueued(
         failed?.kind === "failed"
           ? failed.message
-          : "Not every file uploaded: the connection or the scheduler's leader changed. Nothing was queued; files already uploaded aren't sent again.",
-      mayHaveLanded: false,
-    });
+          : `${waiting}. Nothing was queued; files already uploaded aren't sent again.`,
+      ),
+    );
     return null;
   }
 
@@ -1375,11 +1254,21 @@ export class Store {
 
   async spawn(): Promise<void> {
     await this.#submit(false);
+    this.#dropLockNotice();
   }
 
   /** Queues the form as `spawn` does, then asks the leader to skip the queue for it (`run-now`). */
   async startNow(): Promise<void> {
     await this.#submit(true);
+    this.#dropLockNotice();
+  }
+
+  /**
+   * The lock notice is true only while a press is out; one that ended must not leave it up.
+   * Nothing while still spawning: a second press returns at once, the first one's lock standing.
+   */
+  #dropLockNotice(): void {
+    if (!this.#state.spawning && this.#state.attachNotice === LOCKED_NOTICE) this.#patch({ attachNotice: null });
   }
 
   /** Clears the prompt and returns to the form. */
@@ -1410,10 +1299,11 @@ export class Store {
     if (retry === undefined) return;
     // The leader may have changed since the first try: files go only to a verified leader that takes them.
     if (retry.spec.attachments !== undefined && !deriveAttachmentsAvailability(this.#state.relay)) {
-      this.#showVerdict({ ...verdict, message: `${ATTACHMENTS_UNAVAILABLE}.` });
+      this.#showVerdict({ ...verdict, message: `${attachmentsRefusal(this.#state.relay)}.` });
       return;
     }
     await this.#enqueue(retry, verdict.runNow === true);
+    this.#dropLockNotice();
   }
 
   reconnect(): void {

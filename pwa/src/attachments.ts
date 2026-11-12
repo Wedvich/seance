@@ -10,13 +10,15 @@ import {
  * Where a file's upload stands. `waiting` until its turn (or until attaching is
  * offered); `stored` is set by a `201` and kept for the compose session, so a retry
  * uploads only the rest; `failed` holds the chip's short reason and the verdict's
- * sentence, and goes back to `waiting` at the next Queue press.
+ * sentence, and goes back to `waiting` at the next Queue press. Its `code` is the
+ * refusal's, or `unread`/`threw` for a failure on this device: a reopened socket puts
+ * an `unreachable` one back in line by it.
  */
 export type UploadState =
   | { readonly kind: "waiting" }
   | { readonly kind: "uploading"; readonly percent: number }
   | { readonly kind: "stored"; readonly id: string; readonly hash: string }
-  | { readonly kind: "failed"; readonly short: string; readonly message: string };
+  | { readonly kind: "failed"; readonly code: string; readonly short: string; readonly message: string };
 
 /**
  * A file on the form (DESIGN.md, "Attachments", The PWA). `name` and `type` are

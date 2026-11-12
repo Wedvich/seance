@@ -1,5 +1,5 @@
 import { importPsk, toBase64 } from "@seance/shared";
-import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, jest, test } from "bun:test";
 import {
   ATTACHMENT_LIMITS,
   CAPABILITIES,
@@ -45,6 +45,7 @@ import { deriveView } from "../src/view.ts";
 import { describeVerdict } from "../src/verdict-view.ts";
 import { PREVIEW_DEBOUNCE_MS, PREVIEW_RETRY_MS, QUEUE_POLL_MS, QUEUE_POLLS } from "../src/scheduler-store.ts";
 import { Store, UNDO_WINDOW_MS } from "../src/store.ts";
+import { VERIFY_WAIT_MS } from "../src/upload-queue.ts";
 import { fakeHistory, installBrowserGlobals, setVisibility } from "./stubs.ts";
 
 installBrowserGlobals();
@@ -3564,6 +3565,113 @@ describe("attachments", () => {
     detach();
   });
 
+  test("a socket that drops between two files doesn't end the press: the next starts once it is back", async () => {
+    const client = capable();
+    const release = heldUploads(client);
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "go" });
+    const detach = store.attach();
+    store.addFiles([file("a.txt", "first"), file("b.txt", "second")]);
+    await settled(() => client.uploads.length === 1, "the first upload");
+    const spawned = store.spawn();
+    client.emit({ status: "retrying", registrySettled: false });
+    release(0);
+    await settled(() => statuses(store)[0] === "TXT · 5 B", "the first stored");
+    await drain();
+    // No upload starts while the leader can't be checked, and the press waits rather than giving up.
+    expect(client.uploads).toHaveLength(1);
+    expect(store.getState().spawning).toBe(true);
+    expect(deriveView(store.getState(), 0).button).toMatchObject({ label: "Reconnecting…", busy: true });
+    client.emit({ status: "open", registrySettled: true });
+    await settled(() => client.uploads.length === 2, "the second upload");
+    release(1);
+    await spawned;
+    expect(firstCreate(client).spec.attachments?.map((ref) => ref.name)).toEqual(["a.txt", "b.txt"]);
+    detach();
+  });
+
+  test("an upload that ends while the socket is down waits for it before the create", async () => {
+    const client = capable();
+    const release = heldUploads(client);
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "go" });
+    const detach = store.attach();
+    store.addFiles([file("a.txt", "first")]);
+    await settled(() => client.uploads.length === 1, "the upload");
+    const spawned = store.spawn();
+    client.emit({ status: "retrying", registrySettled: false });
+    release(0);
+    await settled(() => statuses(store)[0] === "TXT · 5 B", "stored");
+    await drain();
+    expect(client.creates).toEqual([]);
+    expect(store.getState().verdict).toBeNull();
+    client.emit({ status: "open", registrySettled: true });
+    await spawned;
+    expect(client.creates).toHaveLength(1);
+    detach();
+  });
+
+  test("a socket that stays down past the wait ends the press, saying files go only while connected", async () => {
+    const client = capable();
+    const release = heldUploads(client);
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "go" });
+    const detach = store.attach();
+    store.addFiles([file("a.txt", "first"), file("b.txt", "second")]);
+    await settled(() => client.uploads.length === 1, "the first upload");
+    const spawned = store.spawn();
+    client.emit({ status: "retrying", registrySettled: false });
+    // Fake before the first upload ends: the wait's timer is armed when it does.
+    jest.useFakeTimers();
+    try {
+      release(0);
+      await drain();
+      jest.advanceTimersByTime(VERIFY_WAIT_MS - 1);
+      await drain();
+      expect(store.getState().spawning).toBe(true);
+      jest.advanceTimersByTime(1);
+    } finally {
+      jest.useRealTimers();
+    }
+    await spawned;
+    expect(client.uploads).toHaveLength(1);
+    expect(client.creates).toEqual([]);
+    expect(store.getState().spawning).toBe(false);
+    const verdict = store.getState().verdict;
+    expect(verdict?.kind === "unqueued" ? verdict.message : "").toContain("Files go only while connected");
+    detach();
+  });
+
+  test("the file that failed as unreachable goes again when the socket reopens, without a Queue press", async () => {
+    const client = capable();
+    let reachable = false;
+    client.onUpload = async () => (reachable ? stored() : { ok: false, code: "unreachable" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "go" });
+    const detach = store.attach();
+    store.addFiles([file("a.txt", "first"), file("b.txt", "second")]);
+    await settled(() => statuses(store)[0] === "Failed: unreachable", "the first fails");
+    reachable = true;
+    client.emit({ status: "retrying", registrySettled: false });
+    client.emit({ status: "open", registrySettled: true });
+    await settled(() => statuses(store).every((s) => s.startsWith("TXT")), "both stored");
+    expect(client.uploads.map(decode)).toEqual(["first", "first", "second"]);
+    detach();
+  });
+
+  test("removing the failed file lets the rest go: no chip is left to say why they wait", async () => {
+    const client = capable();
+    client.onUpload = async (bytes) => (decode(bytes) === "first" ? { ok: false, code: "unauthorized" } : stored());
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "go" });
+    store.addFiles([file("a.txt", "first"), file("b.txt", "second"), file("c.txt", "third")]);
+    await settled(() => statuses(store)[0] === "Failed: token refused", "the first is refused");
+    await drain();
+    expect(client.uploads).toHaveLength(1);
+    // Another file goes first: the failed chip still stands, so the halt does too.
+    store.removeFile(store.getState().attachments[2]?.key ?? "");
+    await drain();
+    expect(client.uploads).toHaveLength(1);
+    store.removeFile(store.getState().attachments[0]?.key ?? "");
+    await settled(() => statuses(store)[0] === "TXT · 6 B", "the rest stored");
+    expect(client.uploads.map(decode)).toEqual(["first", "second"]);
+  });
+
   test("an upload cut because the leader stopped taking files starts again once one that takes them leads", async () => {
     const client = capable();
     const release = heldUploads(client);
@@ -3632,7 +3740,15 @@ describe("attachments", () => {
     again.emit(incapable);
     await retrying.retryEnqueue(verdict);
     expect(again.creates).toHaveLength(1);
-    expect(retrying.getState().verdict).toMatchObject({ kind: "unqueued", retry: verdict.retry });
+    const refusedRetry = retrying.getState().verdict;
+    expect(refusedRetry).toMatchObject({ kind: "unqueued", retry: verdict.retry });
+    expect(refusedRetry?.kind === "unqueued" ? refusedRetry.message : "").toContain("doesn't take attachments yet");
+    // A leader that is only unverified (a re-dial) is not told to update seanced.
+    again.emit({ scheduler: { kind: "unverified", deviceId: "dev-a", term: 2 } });
+    await retrying.retryEnqueue(verdict);
+    expect(again.creates).toHaveLength(1);
+    const unverified = retrying.getState().verdict;
+    expect(unverified?.kind === "unqueued" ? unverified.message : "").toContain("Couldn't confirm");
     detach();
   });
 

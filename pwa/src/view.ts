@@ -407,6 +407,10 @@ export const ATTACHMENTS_VERIFYING = "Checking that the scheduler's leader takes
 // Files upload only while a leader verified to take them leads, so a held task carries none.
 export const ATTACHMENTS_NOT_HELD = "Files go only while connected. Remove them to keep the task on this phone";
 
+/** A press or retry that outlasted the check: nothing says the leader lacks attachments, only that it isn't verified. */
+export const ATTACHMENTS_UNVERIFIED =
+  "Couldn't confirm that the scheduler's leader takes attachments. Try again once connected";
+
 export function leaderVerified(relay: RelayState): boolean {
   return relay.status === "open" && relay.scheduler.kind === "ready";
 }
@@ -415,9 +419,21 @@ export function leaderVerified(relay: RelayState): boolean {
  * Why files block the queue: a re-dial still settling is only checking; past it the task would be
  * held, and a held task carries none.
  */
-function attachmentsBlock(relay: RelayState): "unavailable" | "verifying" | "not_held" {
+export function attachmentsBlock(relay: RelayState): "unavailable" | "verifying" | "not_held" {
   if (leaderVerified(relay)) return "unavailable";
   return canHold(relay) && !relay.settling ? "not_held" : "verifying";
+}
+
+/** Why a task with files can't go now, as a verdict's opening; read only while attaching isn't offered. */
+export function attachmentsRefusal(relay: RelayState): string {
+  switch (attachmentsBlock(relay)) {
+    case "unavailable":
+      return ATTACHMENTS_UNAVAILABLE;
+    case "not_held":
+      return ATTACHMENTS_NOT_HELD;
+    case "verifying":
+      return ATTACHMENTS_UNVERIFIED;
+  }
 }
 
 function chipStatus(file: PickedFile, ext: string | null): string {
@@ -753,6 +769,10 @@ function deriveButton(
     return blocked(relay.skewed > 0 ? "Version mismatch" : "No machines listed");
   }
   if (state.awaitingUploads) {
+    // Nothing in flight and attaching not offered: the press is waiting out a dropped socket or a re-dial.
+    if (!state.attachments.some((f) => f.upload.kind === "uploading") && !deriveAttachmentsAvailability(relay)) {
+      return { label: relay.status === "open" ? "Checking leader…" : "Reconnecting…", enabled: false, busy: true };
+    }
     const total = state.attachments.length;
     const stored = state.attachments.filter((f) => f.upload.kind === "stored").length;
     return { label: `Uploading ${Math.min(stored + 1, total)}/${total}…`, enabled: false, busy: true };

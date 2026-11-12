@@ -4562,28 +4562,40 @@ with files queues as soon as its last upload ends, and a refusal shows before th
   after the wait), and a retry of an unqueued task carrying files re-checks too, so the
   CLAUDE.md rule that a task carrying files goes only to a verified leader advertising
   `attachments` holds however the wait ended.
-- **One at a time**, in list order (`#pumpUploads` in `pwa/src/store.ts`): each upload
+- **One at a time**, in list order (`UploadQueue` in `pwa/src/upload-queue.ts`, apart
+  from `Store` as `AccountStore` is: `Store` owns the list, the queue owns the pump, the
+  halt and the Queue press's wait): each upload
   holds the file and its sealed copy in memory, up to twice 30 MiB on a phone; the
   phone's uplink is the bottleneck, so parallel uploads would not finish the set sooner;
   and a refusal every later file would meet (`429` allowance, `401`, no answer) halts the
-  pump, leaving the rest waiting, so the next file doesn't spend allowance. A Queue press
-  or a new pick that admits a file lifts the halt (a refused pick doesn't); a halt on no
-  answer also lifts when the socket reopens or a file is removed. An upload with no
+  pump, leaving the rest waiting, so the next file doesn't spend allowance. The failed
+  chip is the only sign of a halt, so it stands only while one is listed: a Queue press,
+  a new pick that admits a file (a refused pick doesn't) or removing the last failed file
+  lifts it. A reopened socket lifts a halt on no answer and puts the files that failed
+  that way back in line, so they go again with the rest. An upload with no
   progress for a minute is cut off and fails as unreachable, so a dead connection can't
   hold a Queue press. The timer is wall-clock: a page suspended past a minute may cut a
   healthy upload on resume. Accepted: the file fails and a press sends it again.
 - **Per-file state** (`UploadState`, `pwa/src/attachments.ts`): waiting, uploading with a
   percent (held under 100 until the `201`), stored with id and hash, or failed with the
-  chip's short reason and the verdict's sentence. Failed files are not retried on their
-  own: a Queue press sends them again under fresh ids.
+  chip's short reason, the verdict's sentence and the refusal's code. A Queue press sends
+  failed files again under fresh ids; short of one, only a file that failed on no answer
+  is retried, when the socket reopens (above). There is no per-chip retry.
 - **Queue** runs its checks first (pin, prompt bound beside files, leader takes
   attachments), then waits until nothing is uploading; the button reads "Uploading N/M…".
+  A leader that can't be checked for now (a dropped socket, a re-dial, a proof not yet
+  in) does not end the wait: no upload starts, the button reads "Reconnecting…" or
+  "Checking leader…", and the press goes on when attaching is offered again, also when
+  every file had already stored, since the create needs the same leader. It gives up
+  after 10 s with nothing uploading (`VERIFY_WAIT_MS`), or at once when a verified leader
+  lacks `attachments`, and the verdict says which (`attachmentsRefusal`: update seanced,
+  files go only while connected, or the leader couldn't be confirmed).
   The form stays live during the wait, so once the uploads settle the checks run again
   and the task is built from the form as it then stands (prompt, pins, deps), not as it
   was at the press; one that no longer resolves a repo stops it with a verdict. It is
   created only when every file still listed is stored. A failed file stops it with its
-  refusal, which names no file (the chip marks which failed); files still waiting because attaching stopped
-  being offered mid-wait stop it too. Removing every file during the wait ends the press
+  refusal, which names no file (the chip marks which failed); files still waiting once
+  that wait gave up stop it too. Removing every file during the wait ends the press
   with a notice and no task. A second press during the wait does nothing.
 - **Remove** works at any time except while the create (or a settle wait, or a retry's
   create) is out: removing a file mid-upload aborts its request, and the next starts.
