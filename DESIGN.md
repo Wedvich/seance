@@ -1530,6 +1530,43 @@ requesting socket only.
   PWA still called it may-have-queued. Every surface words the pair through
   `failureReasonText`, and the leader's `Fleet` reads `disconnected` as never
   delivered (Scheduler, "The leader").
+- **A request whose target leaves the relay is settled then, not at its deadline**
+  (`#noteDepartures`, `#noteReturns`, `shared/src/app-client.ts`; 2026-11-12). The
+  relay cannot correlate a sealed reply, so a daemon that restarts after taking a
+  request used to leave the caller waiting out the op's whole deadline — 210 s for
+  a spawn — for an answer the new process never owed it. Each pending request
+  notes the route it went out on (a machine the client's registry showed
+  connected, or the scheduler leader's term) and, for a machine, the daemon run
+  that took it: `MachineInfo.instance`, a UUID each `runDaemon` mints and seals
+  into its register blob. The run is what tells a restart from a reconnect. The
+  same process redialling after a network change (its backoff caps at 60 s) still
+  owes the answer, and failing its spawn as "may have landed" would throw away a
+  real reply. A presence push cannot say which it is; the blob can.
+  - **A read** (`RESENDABLE_OPS`: `sessions`, `metrics`, `queue`, `route-preview`)
+    whose target is shown gone or offline, or whose term moved on, waits a
+    one-second grace (`STRANDED_GRACE_MS`), then waits for the target to come back
+    and goes again under its original id and deadline. A machine back under
+    another run strands it at once. The caller sees only a slower answer.
+  - **Anything else to a machine that names its run** waits for it. The same run
+    back clears the wait and the request keeps its deadline. Note that a reply the
+    daemon finished while disconnected is not queued (`wire unsent`), so the
+    deadline still decides then, as it did before. Another run back fails it
+    `dropped` at once — "the machine restarted before answering". Still away
+    after `STRANDED_AWAY_MS` (60 s) fails it the same way, worded "left the
+    relay". Comparing runs on every rebuild also catches a restart whose new
+    socket registered before the old one's close was seen, which no offline push
+    reports.
+  - **Anything else to an older daemon** (no `instance`) or to the leader gets the
+    one-second grace, which a push showing the machine back cancels, then fails
+    `dropped`. A leader's new socket is a new term even under the same device, so
+    a leader that only reconnected fails a scheduler op this way.
+
+  A failure here is the may-have-landed class with the target named (`target:
+  "machine"`): a spawn the old process launched before it died is as real as one
+  it answered. Re-sending a spawn was rejected for that reason. The daemon has no
+  request-id dedup, and the launch ledger already reports such a task for the
+  leader to reconcile. `wire stranded … why=left|restarted` is the log line.
+
 - **`iv` is also the cross-tier debug join key**, for the same reason it carries
   `undeliverable`: it is the only per-message identifier a blind relay can name.
   All three tiers emit `wire <event> iv=… ` lines through one `quote()` in
@@ -8924,6 +8961,21 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
   Local ops need no key. It also narrows the threat-model addendum above: for
   local work the MCP process never holds the PSK, and on a credential-delivered
   box it never holds it at all.
+- **A call safe to repeat rides out a daemon restart** (`exchange`'s `restartGraceMs`,
+  `daemon/src/local-client.ts`; 2026-11-12). A restart closes the socket under an in-flight call,
+  and the path is gone (`stop(true)` unlinks it) or refusing (a self-update's `process.exit`, a
+  crash) until the service manager brings the daemon back: systemd's `RestartSec=5`, or launchd's
+  10 s `ThrottleInterval` for a job that ran under 10 s. A read — `sessions` here, and the broker's
+  `machines`, `fleet`, `request` of `sessions`, `queue` and `accounts` — and a brokered `enqueue`
+  (a second create of the same task id reads `landedEarlier`) are sent again, same frame, every
+  250 ms for up to `RESTART_GRACE_MS` (20 s) from the loss. A socket path that is not there at all
+  on the first try is a daemon not running, said at once: the grace starts only on a lost
+  connection or a refusing socket. A connection taken and dropped twice in a row is a daemon
+  refusing the frame — one older than the broker — not a restart, and is reported as before. A grace
+  spent after a try was cut off fails as that lost call (`LocalConnectionLost`), never as a daemon not
+  running: the cut-off try may have run.
+  `spawn`, `despawn`, `cancel`, `run-now` and the session-event frames are sent once: a lost one may
+  have run.
 - **The listener never fails the daemon.** An unbindable socket — a run directory
   owned by someone else, a path past the ~104-byte `sun_path` limit — logs and is
   skipped, matching `ensureAuditLog`'s posture: a degraded local surface is not a
@@ -9021,7 +9073,8 @@ app-role relay client with the key it imported at start.
   codes, and a `RequestFailure` crosses with its reason so the MCP side renders it
   exactly as the direct path does — a relay timeout still reads "may have landed
   anyway". Losing the daemon mid-request, or its deadline passing, on a spawn or
-  despawn says the same; nothing is retried, on either path. Two stop codes keep
+  despawn says the same, and neither is retried on either path. A frame safe to repeat — the reads
+  and `enqueue` — rides out a daemon restart instead ("Local op socket", "A call safe to repeat"). Two stop codes keep
   the certainty apart: `shutting_down` is a refusal before anything was sent, so
   the request certainly did not happen; `stopped_in_flight` means it was already
   out and reads as possibly landed. The latter is best effort — the local socket

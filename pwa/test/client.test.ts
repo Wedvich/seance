@@ -33,7 +33,7 @@ import {
 } from "../../relay/test/harness.ts";
 import type { ServerWebSocket } from "bun";
 import { pollUntil } from "./poll.ts";
-import { RelayClient, RequestFailure, type RelayState } from "@seance/shared";
+import { failureReasonText, RelayClient, RequestFailure, type RelayState } from "@seance/shared";
 import { startFakeDaemon } from "./daemon.ts";
 import { DEFAULT_FORM, RESCAN_IDLE, type PersistedForm } from "../src/state.ts";
 import { Store } from "../src/store.ts";
@@ -106,6 +106,8 @@ function startClient(
     readonly url?: string;
     /** A scheduler leader's leg; only the scheduler suite builds one. */
     readonly scheduler?: { readonly term: number };
+    readonly strandedGraceMs?: number;
+    readonly strandedAwayMs?: number;
   } = {},
 ): {
   client: RelayClient;
@@ -125,6 +127,8 @@ function startClient(
     ...(opts.pongTimeoutMs === undefined ? {} : { pongTimeoutMs: opts.pongTimeoutMs }),
     ...(opts.log === undefined ? {} : { log: opts.log }),
     ...(opts.scheduler === undefined ? {} : { scheduler: opts.scheduler }),
+    ...(opts.strandedGraceMs === undefined ? {} : { strandedGraceMs: opts.strandedGraceMs }),
+    ...(opts.strandedAwayMs === undefined ? {} : { strandedAwayMs: opts.strandedAwayMs }),
   });
   const waitFor = (predicate: (state: RelayState) => boolean, label: string): Promise<RelayState> =>
     new Promise((resolve, reject) => {
@@ -862,6 +866,286 @@ describe("requests", () => {
       await expect(sent).rejects.toMatchObject({ reason: "dropped" });
     } finally {
       daemon.close();
+    }
+  });
+});
+
+// A daemon that restarts mid-request never answers it: its new process does not know the request.
+// The relay's offline push says so, so nothing waits out the op's deadline (210 s for a spawn).
+describe("a target leaving mid-request", () => {
+  type Msg = { t: "msg"; env: Envelope };
+
+  /**
+   * A raw daemon socket, so the test sees each request arrive and answers it, or doesn't, itself.
+   * `instance` is the daemon run its blob names; without one it reads as an older daemon.
+   */
+  const machine = async (deviceId: string, instance?: string): Promise<Awaited<ReturnType<typeof connectDaemon>>> => {
+    const socket = await connectDaemon(relay);
+    const info: Plain = {
+      id: crypto.randomUUID(),
+      ts: Date.now(),
+      op: "machine-info",
+      payload: { ...machineInfo("Restarting"), ...(instance === undefined ? {} : { instance }) },
+    };
+    socket.send(await register(deviceId, { info: await seal(key, { to: APP_ID, from: deviceId }, info) }));
+    return socket;
+  };
+
+  test("a spawn fails `dropped` when its machine leaves the relay, long before its deadline", async () => {
+    const deviceId = await newDeviceId();
+    const { client, waitFor } = startClient({ strandedGraceMs: 50 });
+    const daemon = await machine(deviceId);
+    try {
+      await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && m.connected), "machine online");
+      const started = Date.now();
+      const spawn = client.request(deviceId, "spawn", { repo: "seance", mode: "worktree" });
+      await daemon.waitFor<Msg>("msg");
+      daemon.close();
+      const failure: unknown = await spawn.then(
+        () => null,
+        (err: unknown) => err,
+      );
+      if (!(failure instanceof RequestFailure)) throw new Error(`expected a RequestFailure, got ${String(failure)}`);
+      expect(failure).toMatchObject({ reason: "dropped", target: "machine" });
+      expect(failureReasonText(failure)).toBe(
+        "the machine left the relay before answering spawn — the request may have landed anyway",
+      );
+      expect(Date.now() - started).toBeLessThan(10_000);
+    } finally {
+      daemon.close();
+      await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && !m.connected), "registry sees it gone");
+      client.forget(deviceId);
+      await waitFor((s) => !s.machines.some((m) => m.deviceId === deviceId), "entry is gone");
+      client.stop();
+    }
+  });
+
+  /** Settles to the error a request failed with, or null once it resolved. */
+  const outcome = (request: Promise<unknown>): Promise<unknown> =>
+    request.then(
+      () => null,
+      (err: unknown) => err,
+    );
+
+  /** Forgets the entry so the next test has room under the relay's registry cap. */
+  const forget = async (
+    deviceId: string,
+    { client, waitFor }: ReturnType<typeof startClient>,
+    sockets: readonly { readonly close: () => void }[],
+  ): Promise<void> => {
+    for (const socket of sockets) socket.close();
+    await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && !m.connected), "registry sees it gone");
+    client.forget(deviceId);
+    await waitFor((s) => !s.machines.some((m) => m.deviceId === deviceId), "entry is gone");
+    client.stop();
+  };
+
+  test("a spawn whose daemon run reconnects keeps waiting, and takes that run's answer", async () => {
+    const deviceId = await newDeviceId();
+    const started = startClient({ strandedGraceMs: 50, strandedAwayMs: 10_000 });
+    const { client, waitFor } = started;
+    const before = await machine(deviceId, "run-a");
+    let after: Awaited<ReturnType<typeof machine>> | null = null;
+    try {
+      await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && m.connected), "machine online");
+      let settled = false;
+      const spawn = client.request(deviceId, "spawn", { repo: "seance", mode: "worktree" });
+      void spawn.then(
+        () => (settled = true),
+        () => (settled = true),
+      );
+      const { env } = await before.waitFor<Msg>("msg");
+      before.close();
+      await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && !m.connected), "machine offline");
+      after = await machine(deviceId, "run-a");
+      await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && m.connected), "machine back");
+      // Well past the 50ms grace: a run that names itself is not failed for leaving.
+      await Bun.sleep(300);
+      expect(settled).toBe(false);
+      const request = await open(key, env);
+      const reply: Plain = {
+        id: crypto.randomUUID(),
+        ts: Date.now(),
+        op: "spawn",
+        re: request.id,
+        payload: { ok: true },
+      };
+      after.send({ t: "msg", env: await seal(key, { to: APP_ID, from: deviceId }, reply) });
+      expect(await spawn).toEqual({ ok: true });
+    } finally {
+      await forget(deviceId, started, [before, ...(after === null ? [] : [after])]);
+    }
+  });
+
+  test("a spawn fails at once when its machine comes back as another daemon run", async () => {
+    const deviceId = await newDeviceId();
+    const started = startClient({ strandedGraceMs: 50, strandedAwayMs: 60_000 });
+    const { client, waitFor } = started;
+    const before = await machine(deviceId, "run-a");
+    let after: Awaited<ReturnType<typeof machine>> | null = null;
+    try {
+      await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && m.connected), "machine online");
+      const spawn = outcome(client.request(deviceId, "spawn", { repo: "seance", mode: "worktree" }));
+      await before.waitFor<Msg>("msg");
+      before.close();
+      after = await machine(deviceId, "run-b");
+      const failure = await spawn;
+      if (!(failure instanceof RequestFailure)) throw new Error(`expected a RequestFailure, got ${String(failure)}`);
+      expect(failureReasonText(failure)).toBe(
+        "the machine restarted before answering spawn — the request may have landed anyway",
+      );
+    } finally {
+      await forget(deviceId, started, [before, ...(after === null ? [] : [after])]);
+    }
+  });
+
+  test("a restart whose new socket registers before the old one closes still fails the spawn", async () => {
+    const deviceId = await newDeviceId();
+    const started = startClient({ strandedGraceMs: 50, strandedAwayMs: 60_000 });
+    const { client, waitFor } = started;
+    const before = await machine(deviceId, "run-a");
+    let after: Awaited<ReturnType<typeof machine>> | null = null;
+    try {
+      await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && m.connected), "machine online");
+      const spawn = outcome(client.request(deviceId, "spawn", { repo: "seance", mode: "worktree" }));
+      await before.waitFor<Msg>("msg");
+      after = await machine(deviceId, "run-b");
+      expect(await spawn).toMatchObject({ reason: "dropped", target: "machine" });
+    } finally {
+      await forget(deviceId, started, [before, ...(after === null ? [] : [after])]);
+    }
+  });
+
+  test("a spawn whose daemon run stays away fails once the away window is spent", async () => {
+    const deviceId = await newDeviceId();
+    const started = startClient({ strandedGraceMs: 50, strandedAwayMs: 300 });
+    const { client, waitFor } = started;
+    const daemon = await machine(deviceId, "run-a");
+    try {
+      await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && m.connected), "machine online");
+      const spawn = outcome(client.request(deviceId, "spawn", { repo: "seance", mode: "worktree" }));
+      await daemon.waitFor<Msg>("msg");
+      daemon.close();
+      const failure = await spawn;
+      if (!(failure instanceof RequestFailure)) throw new Error(`expected a RequestFailure, got ${String(failure)}`);
+      expect(failureReasonText(failure)).toBe(
+        "the machine left the relay before answering spawn — the request may have landed anyway",
+      );
+    } finally {
+      await forget(deviceId, started, [daemon]);
+    }
+  });
+
+  test("a sessions request is sent again once its machine is back, and answered there", async () => {
+    const deviceId = await newDeviceId();
+    const lines: string[] = [];
+    const { client, waitFor } = startClient({ strandedGraceMs: 50, log: (line) => lines.push(line) });
+    const before = await machine(deviceId);
+    const sessions: SessionsResponse = { sessions: [], at: 42 };
+    let after: Awaited<ReturnType<typeof startFakeDaemon>> | null = null;
+    try {
+      await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && m.connected), "machine online");
+      const reply = client.request<SessionsResponse>(deviceId, "sessions", {});
+      const first = await before.waitFor<Msg>("msg");
+      before.close();
+      await pollUntil(() => lines.some((line) => line.startsWith("wire stranded ")), "the request stranded");
+      after = await startFakeDaemon(relay, key, deviceId, machineInfo("Restarting"), { sessions: () => sessions });
+      expect(await reply).toEqual(sessions);
+      // The same request, sealed afresh: one id, two IVs.
+      const sends = lines.filter((line) => line.startsWith("wire send ") && line.includes('op="sessions"'));
+      expect(sends).toHaveLength(2);
+      expect(sends[1]).not.toContain(first.env.iv);
+      expect(new Set(sends.map((line) => /id="([^"]+)"/u.exec(line)?.[1])).size).toBe(1);
+    } finally {
+      before.close();
+      after?.close();
+      await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && !m.connected), "registry sees it gone");
+      client.forget(deviceId);
+      await waitFor((s) => !s.machines.some((m) => m.deviceId === deviceId), "entry is gone");
+      client.stop();
+    }
+  });
+
+  test("a sessions request resent to a machine's new run is not resent again by the next push", async () => {
+    const deviceId = await newDeviceId();
+    const otherId = await newDeviceId();
+    const lines: string[] = [];
+    const started = startClient({ strandedGraceMs: 50, log: (line) => lines.push(line) });
+    const { client, waitFor } = started;
+    const before = await machine(deviceId, "run-a");
+    let after: Awaited<ReturnType<typeof machine>> | null = null;
+    let other: Awaited<ReturnType<typeof machine>> | null = null;
+    try {
+      await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && m.connected), "machine online");
+      const reply = client.request<SessionsResponse>(deviceId, "sessions", {});
+      await before.waitFor<Msg>("msg");
+      before.close();
+      await pollUntil(() => lines.some((line) => line.startsWith("wire stranded ")), "the request stranded");
+      after = await machine(deviceId, "run-b");
+      const { env } = await after.waitFor<Msg>("msg");
+      // Any later push: one from an unrelated machine connecting.
+      other = await machine(otherId);
+      await waitFor((s) => s.machines.some((m) => m.deviceId === otherId && m.connected), "other machine online");
+      // Logged in the same turn as the push's rebuild, so the wait above already covers it.
+      expect(lines.filter((line) => line.startsWith("wire stranded "))).toHaveLength(1);
+      const request = await open(key, env);
+      const sessions: SessionsResponse = { sessions: [], at: 9 };
+      const answer: Plain = {
+        id: crypto.randomUUID(),
+        ts: Date.now(),
+        op: "sessions",
+        re: request.id,
+        payload: sessions,
+      };
+      after.send({ t: "msg", env: await seal(key, { to: APP_ID, from: deviceId }, answer) });
+      expect(await reply).toEqual(sessions);
+    } finally {
+      other?.close();
+      if (other !== null) {
+        await waitFor((s) => s.machines.some((m) => m.deviceId === otherId && !m.connected), "other gone");
+        client.forget(otherId);
+      }
+      await forget(deviceId, started, [before, ...(after === null ? [] : [after])]);
+    }
+  });
+
+  test("a scheduler cancel fails `dropped` once the leader's term moves on, without waiting out its deadline", async () => {
+    const leaderId = listed.legLeader;
+    const info = await seal(
+      key,
+      { to: APP_ID, from: leaderId },
+      { id: leaderId, ts: Date.now(), op: "machine-info", payload: machineInfo(leaderId) },
+    );
+    const lead = async (): Promise<{ socket: Awaited<ReturnType<typeof connectDaemon>>; term: number }> => {
+      const socket = await connectDaemon(relay);
+      socket.send(await register(leaderId, { roles: [DAEMON_ROLES.scheduler], info }));
+      const { term } = await socket.waitFor<{ t: "lead"; term: number }>("lead");
+      const proof = await seal(
+        key,
+        { to: APP_ID, from: leaderId },
+        { id: crypto.randomUUID(), ts: Date.now(), op: "lead-proof", payload: { term } },
+      );
+      socket.send({ t: "lead-proof", term, env: proof });
+      return { socket, term };
+    };
+    const first = await lead();
+    let second: Awaited<ReturnType<typeof lead>> | null = null;
+    const { client, waitFor } = startClient({ strandedGraceMs: 50 });
+    try {
+      await waitFor((s) => s.scheduler.kind === "ready" && s.scheduler.term === first.term, "the leader verified");
+      const cancel = client.cancel("t");
+      await first.socket.waitFor<Msg>("msg");
+      // The restarted daemon's socket registers before the old one is seen to close: a new term all the same.
+      second = await lead();
+      expect(second.term).toBeGreaterThan(first.term);
+      await expect(cancel).rejects.toMatchObject({ reason: "dropped", target: "machine" });
+    } finally {
+      first.socket.close();
+      second?.socket.close();
+      await waitFor((s) => s.machines.every((m) => m.deviceId !== leaderId || !m.connected), "the leader gone");
+      client.forget(leaderId);
+      await waitFor((s) => s.machines.every((m) => m.deviceId !== leaderId), "the leader forgotten");
+      client.stop();
     }
   });
 });
