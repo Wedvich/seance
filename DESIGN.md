@@ -5126,6 +5126,23 @@ Where the build adds to or departs from the wording above:
   package's raw TS cannot. Since 2026-11-12 `img-src` also allows `blob:`, for the chips'
   previews.
 
+### The PWA: chip preview (2026-11-12)
+
+- **A cut name shows whole on hover**: the chip's name gets a `title` only when it is
+  ellipsised, measured at pointer enter (`scrollWidth > clientWidth`), so a name that
+  fits has no tooltip repeating it.
+- **An image chip opens at full size**: a click anywhere on the chip but its ×, or
+  Enter on its thumbnail (a button, the keyboard's way in). The preview is a native
+  modal `<dialog>` over the whole viewport, showing the `File` still held on the form
+  through its own object URL: nothing is fetched and nothing uploaded is read back.
+  Escape, Android's back, the ✕ and a click anywhere but the picture close it. It is
+  local component state, not a history layer. An image the browser can't decode (the
+  glyph fallback) and every other file type open nothing.
+- **Never opened as a document** (rejected: "open the local file"): a page has no way
+  to hand a `File` to the device's own viewer, and the nearest thing, navigating a tab
+  to the object URL, would run a picked SVG or HTML file in the app's origin, beside the
+  bearer token and the key store. An `<img>` runs nothing.
+
 ### The PWA: upload at pick (2026-11-12)
 
 Uploads start when a file lands on the form rather than at the Queue press, so a task

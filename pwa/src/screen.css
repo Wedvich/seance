@@ -441,6 +441,17 @@
   object-fit: cover;
 }
 
+/* The thumbnail as the preview's button: the UA's button box off, the chip's look kept. */
+.attach-thumb-open {
+  padding: 0;
+  border: 0;
+  cursor: zoom-in;
+}
+
+.attach-chip-open {
+  cursor: zoom-in;
+}
+
 .attach-thumb-ext {
   max-width: 36px;
   overflow: hidden;
@@ -537,6 +548,72 @@
   margin: 0;
   font-size: 0.78125rem;
   color: var(--err);
+}
+
+/* ---- attachment preview ---- */
+
+/* The whole viewport, so a click beside the picture lands on the dialog and closes it. */
+.attach-preview {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  max-height: none;
+  margin: 0;
+  padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
+  border: 0;
+  background: transparent;
+  color: #fff;
+  cursor: zoom-out;
+}
+
+/* `display: flex` above would otherwise show a closed dialog. */
+.attach-preview:not([open]) {
+  display: none;
+}
+
+.attach-preview::backdrop {
+  background: rgba(0, 0, 0, 0.85);
+}
+
+.attach-preview-head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.attach-preview-name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 0.875rem;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Its own tint: the sheet's surface colour is the theme's, and this sits on black in both. */
+.attach-preview .sheet-close {
+  background: rgba(255, 255, 255, 0.16);
+  color: inherit;
+}
+
+/* Never upscaled past its own pixels; its own backdrop so a transparent PNG reads. */
+.attach-preview-image {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-width: 100%;
+  margin: auto;
+  border-radius: 8px;
+  background: var(--sur3);
+  object-fit: contain;
+  cursor: default;
 }
 
 /* ---- composer bar ---- */
