@@ -136,7 +136,8 @@ export function archivedTask(task: Task): Task {
     failure,
     ...rest
   } = forgetPrompt(task);
-  const { pin, ...specRest } = spec;
+  // Dropped again whatever the phase: `forgetPrompt` leaves an unfinished record's spec whole, and a stored row's JSON is not held to its `state` column.
+  const { pin, prompt: _prompt, attachments: _attachments, ...specRest } = spec;
   const deviceId = pin?.deviceId;
   return {
     ...rest,
