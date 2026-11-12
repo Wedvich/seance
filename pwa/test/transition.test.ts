@@ -53,7 +53,7 @@ function state(overrides: Partial<AppState> = {}): AppState {
     attachments: [],
     attachNotice: null,
     heldDropped: [],
-    upload: null,
+    awaitingUploads: false,
     ...overrides,
   };
 }

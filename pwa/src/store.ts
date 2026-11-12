@@ -52,15 +52,15 @@ import {
   type Verdict,
 } from "./state.ts";
 import { AccountStore } from "./account-store.ts";
-import { admitFiles, manifestOf, notAttachedText, uploadRefusalText } from "./attachments.ts";
+import { admitFiles, manifestOf, notAttachedText } from "./attachments.ts";
 import type { ReceivedShare } from "./share-inbox.ts";
 import { accountSeries } from "./chart.ts";
 import { SchedulerStore, STORE_UNREADABLE } from "./scheduler-store.ts";
+import { UploadQueue } from "./upload-queue.ts";
 import { taskTitle } from "./task-title.ts";
 import type { AppState } from "./view.ts";
 import {
-  ATTACHMENTS_NOT_HELD,
-  ATTACHMENTS_UNAVAILABLE,
+  attachmentsRefusal,
   canHold,
   deriveAttachmentsAvailability,
   deriveAutoAvailability,
@@ -130,6 +130,10 @@ const REPORTED_UNAVAILABLE = "The scheduler's leader doesn't take tasks that set
 /** How long a cleared prompt stays recoverable. Undo instead of a confirm dialog. */
 export const UNDO_WINDOW_MS = 6000;
 
+const unqueued = (message: string): Verdict => ({ kind: "unqueued", message, mayHaveLanded: false });
+
+const LOCKED_NOTICE = "Files can't be added once Queue is pressed.";
+
 export class Store {
   readonly #client: RelayClient;
   readonly #listeners = new Set<() => void>();
@@ -173,6 +177,7 @@ export class Store {
   #triedOnSocket = new Set<string>();
   readonly #queue: SchedulerStore;
   readonly #accounts: AccountStore;
+  readonly #uploads: UploadQueue;
 
   constructor(client: RelayClient, form: PersistedForm = DEFAULT_FORM, held: readonly HeldTask[] = []) {
     this.#client = client;
@@ -182,6 +187,11 @@ export class Store {
       (next) => this.#patch(next),
     );
     this.#accounts = new AccountStore(
+      client,
+      () => this.#state,
+      (next) => this.#patch(next),
+    );
+    this.#uploads = new UploadQueue(
       client,
       () => this.#state,
       (next) => this.#patch(next),
@@ -214,7 +224,7 @@ export class Store {
       attachments: [],
       attachNotice: null,
       heldDropped: [],
-      upload: null,
+      awaitingUploads: false,
     };
   }
 
@@ -269,6 +279,7 @@ export class Store {
       this.#disarmUndo();
       this.#queue.dispose();
       this.#accounts.dispose();
+      this.#uploads.dispose();
     };
   }
 
@@ -282,12 +293,14 @@ export class Store {
 
   #onRelay(): void {
     const relay = this.#client.getState();
+    const socketBack = relay.status === "open" && this.#state.relay.status !== "open";
     // Pruned in the same patch as the registry that justifies it: patched apart,
     // subscribers get one render where the machine is gone but the selection
     // still names it.
     // Only an authoritative registry may prune — while it is unsettled an empty
     // `machines` means "no push yet", not "every machine vanished".
     this.#patch({ relay, ...(relay.registrySettled ? this.#pruneGone(relay.machines) : {}) });
+    this.#uploads.onRelay(socketBack);
     const decided = relay.status === "open" ? relay.registrySettled : !relay.settling;
     if (decided && this.#settleWaiters.length > 0) {
       const waiters = this.#settleWaiters;
@@ -404,11 +417,16 @@ export class Store {
   }
 
   /**
-   * Adds picked, pasted or dropped files as far as the limits allow, and says
-   * why the rest were left out. Ignored mid-submit: the list is what is being sent.
+   * Adds picked, pasted or dropped files as far as the limits allow, says why the
+   * rest were left out, and starts uploading them. Ignored once Queue is pressed:
+   * the list is what is being sent.
    */
   addFiles(files: readonly File[]): void {
-    if (files.length === 0 || this.#state.spawning) return;
+    if (files.length === 0) return;
+    if (this.#state.spawning) {
+      this.#patch({ attachNotice: LOCKED_NOTICE });
+      return;
+    }
     this.#admit(files, [], []);
   }
 
@@ -434,12 +452,16 @@ export class Store {
     this.#patch({ attachments: next, attachNotice: sentences.length === 0 ? null : sentences.join(" ") });
     // route-preview filters on the flag; it changes only when the list empties or fills.
     if (before.length === 0 && next.length > 0) void this.refreshPreview();
+    // A refused pick admits nothing, so it is no reason to try a halted upload again.
+    if (next.length > before.length) this.#uploads.onAdded();
   }
 
+  /** Also mid-upload, which it aborts, and while Queue waits on uploads; never once the create is out. */
   removeFile(key: string): void {
-    if (this.#state.spawning) return;
+    if (this.#state.spawning && !this.#state.awaitingUploads) return;
     const next = this.#state.attachments.filter((f) => f.key !== key);
     this.#patch({ attachments: next, attachNotice: null });
+    this.#uploads.onRemoved(key);
     if (next.length === 0) void this.refreshPreview();
   }
 
@@ -819,7 +841,7 @@ export class Store {
    * a `run-now` sent whenever the app next reconnects would skip the caps at a moment nobody chose.
    */
   async #submit(runNow: boolean): Promise<void> {
-    const { relay, form } = this.#state;
+    const { relay } = this.#state;
     const holding = canHold(relay);
     if ((!holding && !deriveAutoAvailability(relay).available) || this.#state.spawning) return;
     // A resume's re-dial reconnects within a second or two (both settle windows are 1.5 s), so a tap
@@ -834,17 +856,63 @@ export class Store {
       await this.#submit(runNow);
       return;
     }
+    const first = this.#prepare();
+    if (first.kind !== "ready") {
+      if (first.kind === "refused") this.#showVerdict(unqueued(first.message));
+      return;
+    }
+    let prepared = first;
+    let attachments: readonly AttachmentRef[] | undefined;
+    if (first.attaching) {
+      const waited = await this.#awaitUploads();
+      if (waited === null) return;
+      // The wait can be long and the form stays live: whatever changed in it (prompt, pins, deps) or in the
+      // relay (leader, socket) is what the task is built from, under the same checks as at the press.
+      const again = this.#prepare();
+      if (again.kind !== "ready" || !again.attaching) {
+        this.#patch({ spawning: false });
+        // A silent stop is possible here that wasn't at the press (the repo left scope during the wait).
+        this.#showVerdict(
+          unqueued(
+            again.kind === "refused"
+              ? again.message
+              : "The form changed while the files uploaded and no repo is in scope now. Nothing was queued.",
+          ),
+        );
+        return;
+      }
+      prepared = again;
+      attachments = waited;
+    }
+    const task = queuedTask(prepared.spec(attachments), Date.now());
+    if (prepared.holding) this.#hold(task);
+    else await this.#enqueue(task, runNow);
+  }
+
+  /**
+   * The checks a Queue press makes, and the spec they allow, from the form and relay as they stand now:
+   * run at the press and again once uploads settle. `silent` is a stop with no verdict (no repo in scope).
+   */
+  #prepare():
+    | { readonly kind: "refused"; readonly message: string }
+    | { readonly kind: "silent" }
+    | {
+        readonly kind: "ready";
+        readonly holding: boolean;
+        readonly attaching: boolean;
+        readonly spec: (attachments: readonly AttachmentRef[] | undefined) => TaskSpec;
+      } {
+    const { relay, form } = this.#state;
+    const holding = canHold(relay);
+    if (!holding && !deriveAutoAvailability(relay).available) return { kind: "silent" };
+    const refused = (message: string) => ({ kind: "refused", message }) as const;
     // The leader bounds what it reads; past the bound it would skip the task, and the store's refusal blames versions.
-    const refusal = (message: string): void => this.#showVerdict({ kind: "unqueued", message, mayHaveLanded: false });
     // The button blocks these too; a form that changed since it rendered is stopped here. Before the repo
     // check: a pin nothing satisfies leaves no repo in scope, and that silence would hide the reason.
     const problem = derivePinProblem(relay, form, this.#state.accounts.aliases);
-    if (problem !== null) {
-      refusal(`${problem.text}.`);
-      return;
-    }
+    if (problem !== null) return refused(`${problem.text}.`);
     const repo = resolveRepo(scopedRepos(relay.machines, form), form);
-    if (repo === null) return;
+    if (repo === null) return { kind: "silent" };
     const reported = form.until === "reported";
     // An older leader would drop `until` and hold a `done` edge unreadable, so neither is written to one.
     // A held task is checked when it is sent: no relay, no leader to ask.
@@ -853,25 +921,19 @@ export class Store {
       (reported || form.after.some((dep) => dep.after === "done")) &&
       !deriveReportedAvailability(relay)
     ) {
-      refusal(`${REPORTED_UNAVAILABLE} Update seanced on its machine, or pick another setting.`);
-      return;
+      return refused(`${REPORTED_UNAVAILABLE} Update seanced on its machine, or pick another setting.`);
     }
     if (reported && form.prompt.trim() === "") {
-      refusal("A task that settles on its done report needs a prompt: the session is told in it to report.");
-      return;
+      return refused("A task that settles on its done report needs a prompt: the session is told in it to report.");
     }
     const attaching = this.#state.attachments.length > 0;
     if (attaching && !deriveAttachmentsAvailability(relay)) {
-      refusal(`${holding ? ATTACHMENTS_NOT_HELD : ATTACHMENTS_UNAVAILABLE}.`);
-      return;
+      return refused(`${attachmentsRefusal(relay)}.`);
     }
     const { autonomy } = this.#state;
     const level = withAutonomy<Pick<TaskSpec, "autonomy" | "plan">>(autonomy === DEFAULT_AUTONOMY ? {} : { autonomy });
     // The form has no `plan` of its own, so the level can't contradict it; refused rather than dropped if it ever does.
-    if (level === null) {
-      refusal(`${AUTONOMY_LABELS[autonomy]} can't be sent with this task's plan mode.`);
-      return;
-    }
+    if (level === null) return refused(`${AUTONOMY_LABELS[autonomy]} can't be sent with this task's plan mode.`);
     const request = taskRequest(form, repo.origin, true);
     // Appended here so the length below is the one the leader reads; it never rewrites a prompt.
     const prompt = reported && request.prompt !== undefined ? withReportInstruction(request.prompt) : request.prompt;
@@ -881,32 +943,31 @@ export class Store {
     if (length > bound) {
       const instruction = reported ? " (with the instruction to report, which is added)" : "";
       const files = attaching ? " beside attached files" : "";
-      refusal(
+      return refused(
         `The prompt is ${length} characters${instruction}; the scheduler takes at most ${bound}${files}. Shorten it, or use \`seanced spawn --now\` on the machine.`,
       );
-      return;
     }
-    const attachments = attaching ? await this.#upload() : undefined;
-    if (attachments === null) return;
     // Only ids: an alias or email is display text and never goes in a record.
     const pin = {
       ...(form.machine === null ? {} : { deviceId: form.machine }),
       ...(form.account === null ? {} : { account: form.account }),
     };
-    const spec: TaskSpec = {
-      ...request,
-      // Only off the default: a `checkpoint` task's record stays what it was before levels existed.
-      ...level,
-      ...(prompt === undefined ? {} : { prompt }),
-      ...(form.machine === null && form.account === null ? {} : { pin }),
-      client: "pwa" satisfies SpawnClient,
-      ...(form.after.length === 0 ? {} : { deps: form.after }),
-      ...(reported ? { until: form.until } : {}),
-      ...(attachments === undefined ? {} : { attachments }),
+    return {
+      kind: "ready",
+      holding,
+      attaching,
+      spec: (attachments) => ({
+        ...request,
+        // Only off the default: a `checkpoint` task's record stays what it was before levels existed.
+        ...level,
+        ...(prompt === undefined ? {} : { prompt }),
+        ...(form.machine === null && form.account === null ? {} : { pin }),
+        client: "pwa" satisfies SpawnClient,
+        ...(form.after.length === 0 ? {} : { deps: form.after }),
+        ...(reported ? { until: form.until } : {}),
+        ...(attachments === undefined ? {} : { attachments }),
+      }),
     };
-    const task = queuedTask(spec, Date.now());
-    if (holding) this.#hold(task);
-    else await this.#enqueue(task, runNow);
   }
 
   /** Keeps `task` on this phone, clearing the form as a stored one does; it is sent when a registry next settles. */
@@ -941,7 +1002,7 @@ export class Store {
       },
       autonomy: DEFAULT_AUTONOMY,
       promptUndo: null,
-      attachments: this.#state.attachments.filter((f) => f.stored === null || !sent.has(f.stored.id)),
+      attachments: this.#state.attachments.filter((f) => f.upload.kind !== "stored" || !sent.has(f.upload.id)),
       attachNotice: null,
     });
   }
@@ -1113,49 +1174,37 @@ export class Store {
   }
 
   /**
-   * Seals and uploads every file not yet stored, in order, then answers the
-   * manifest. The first refusal stops the run and shows why; what was stored
-   * stays stored for the next try, which mints fresh ids for the rest only.
-   * Null: nothing is to be queued, and the verdict already says why.
+   * A Queue press with files: failed ones go again under fresh ids, and the press
+   * waits until the uploads settle (`UploadQueue.settle`). Answers the manifest once
+   * every file still on the form is stored, or null when nothing is to be queued (also
+   * when every file was removed meanwhile), the verdict already saying why.
    */
-  async #upload(): Promise<readonly AttachmentRef[] | null> {
-    const pending = this.#state.attachments.filter((f) => f.stored === null);
-    this.#patch({ spawning: true, verdict: null, upload: { done: 0, total: pending.length } });
-    let failure: string | null = null;
-    for (const [done, picked] of pending.entries()) {
-      this.#patch({ upload: { done, total: pending.length } });
-      let bytes: Uint8Array<ArrayBuffer>;
-      try {
-        // oxlint-disable-next-line no-await-in-loop -- one file in memory at a time, in order
-        bytes = new Uint8Array(await picked.file.arrayBuffer());
-      } catch {
-        failure = `Couldn't read ${picked.name} from this device. Remove it and attach it again. Nothing was queued.`;
-        break;
-      }
-      // oxlint-disable-next-line no-await-in-loop -- as above
-      const reply = await this.#client.uploadAttachment(bytes);
-      if (!reply.ok) {
-        failure = uploadRefusalText(picked.name, reply);
-        break;
-      }
-      const stored = { id: reply.id, hash: reply.hash };
-      // By key: the list can't change mid-run (add and remove wait), but the identity is what's kept.
-      this.#patch({
-        attachments: this.#state.attachments.map((f) => (f.key === picked.key ? { ...f, stored } : f)),
-      });
-    }
-    const manifest = manifestOf(this.#state.attachments);
+  async #awaitUploads(): Promise<readonly AttachmentRef[] | null> {
+    this.#patch({ spawning: true, awaitingUploads: true, verdict: null });
+    await this.#uploads.settle();
+    const { attachments: files, relay } = this.#state;
+    const manifest = manifestOf(files);
     // Still spawning on success: the create follows at once, and the button must not offer a second submit between.
-    if (failure === null && manifest !== null) {
-      this.#patch({ upload: null });
+    if (manifest !== null && manifest.length === 0) {
+      // Every file was removed during the wait: the press asked for a task with files, so it ends here.
+      this.#patch({ awaitingUploads: false, spawning: false, attachNotice: "No files left. Nothing was queued." });
+      return null;
+    }
+    if (manifest !== null) {
+      this.#patch({ awaitingUploads: false });
       return manifest;
     }
-    this.#patch({ upload: null, spawning: false });
-    this.#showVerdict({
-      kind: "unqueued",
-      message: failure ?? "Not every file uploaded. Nothing was queued.",
-      mayHaveLanded: false,
-    });
+    const failed = files.map((f) => f.upload).find((upload) => upload.kind === "failed");
+    // Files still waiting: attaching stopped being offered mid-wait (a leader without it, or a re-dial that outlasted the wait).
+    const waiting = deriveAttachmentsAvailability(relay) ? "Not every file uploaded" : attachmentsRefusal(relay);
+    this.#patch({ awaitingUploads: false, spawning: false });
+    this.#showVerdict(
+      unqueued(
+        failed?.kind === "failed"
+          ? failed.message
+          : `${waiting}. Nothing was queued; files already uploaded aren't sent again.`,
+      ),
+    );
     return null;
   }
 
@@ -1205,11 +1254,21 @@ export class Store {
 
   async spawn(): Promise<void> {
     await this.#submit(false);
+    this.#dropLockNotice();
   }
 
   /** Queues the form as `spawn` does, then asks the leader to skip the queue for it (`run-now`). */
   async startNow(): Promise<void> {
     await this.#submit(true);
+    this.#dropLockNotice();
+  }
+
+  /**
+   * The lock notice is true only while a press is out; one that ended must not leave it up.
+   * Nothing while still spawning: a second press returns at once, the first one's lock standing.
+   */
+  #dropLockNotice(): void {
+    if (!this.#state.spawning && this.#state.attachNotice === LOCKED_NOTICE) this.#patch({ attachNotice: null });
   }
 
   /** Clears the prompt and returns to the form. */
@@ -1236,7 +1295,15 @@ export class Store {
 
   /** Puts an unqueued verdict's task again; nothing to put leaves the form as the retry found it. */
   async retryEnqueue(verdict: Extract<Verdict, { kind: "unqueued" }>): Promise<void> {
-    if (verdict.retry !== undefined) await this.#enqueue(verdict.retry, verdict.runNow === true);
+    const { retry } = verdict;
+    if (retry === undefined) return;
+    // The leader may have changed since the first try: files go only to a verified leader that takes them.
+    if (retry.spec.attachments !== undefined && !deriveAttachmentsAvailability(this.#state.relay)) {
+      this.#showVerdict({ ...verdict, message: `${attachmentsRefusal(this.#state.relay)}.` });
+      return;
+    }
+    await this.#enqueue(retry, verdict.runNow === true);
+    this.#dropLockNotice();
   }
 
   reconnect(): void {

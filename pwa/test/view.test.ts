@@ -92,7 +92,7 @@ function state(overrides: Partial<AppState> = {}, form: Partial<PersistedForm> =
     attachments: [],
     attachNotice: null,
     heldDropped: [],
-    upload: null,
+    awaitingUploads: false,
     ...overrides,
   };
 }

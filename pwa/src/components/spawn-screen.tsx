@@ -116,9 +116,54 @@ function carriesFiles(event: DragEvent): boolean {
 }
 
 /**
- * The prompt card's files, above the text: chips with remove. Still listed after
- * attaching stops being offered (the leader changed under them), so they can be
- * removed.
+ * A local preview of an image file, or the file glyph with its extension. The object
+ * URL lives exactly as long as the chip: made in an effect, revoked on cleanup, so a
+ * remove, a queued task or leaving the screen frees it. An image the browser can't
+ * decode (HEIC on Chrome) falls back to the glyph.
+ */
+function AttachmentThumb(props: { image: Blob | null; ext: string | null }): JSX.Element {
+  const { image, ext } = props;
+  const [url, setUrl] = useState<string | null>(null);
+  const [broken, setBroken] = useState(false);
+  useEffect(() => {
+    if (image === null) return;
+    const made = URL.createObjectURL(image);
+    setUrl(made);
+    setBroken(false);
+    return () => URL.revokeObjectURL(made);
+  }, [image]);
+  if (image !== null && url !== null && !broken) {
+    return (
+      <span className="attach-thumb" aria-hidden="true">
+        <img src={url} alt="" decoding="async" onError={() => setBroken(true)} />
+      </span>
+    );
+  }
+  return (
+    <span className="attach-thumb attach-thumb-file" aria-hidden="true">
+      <svg
+        viewBox="0 0 24 24"
+        width="18"
+        height="18"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.8"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      >
+        <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+        <path d="M14 3v5h5" />
+      </svg>
+      {ext !== null && <span className="attach-thumb-ext">{ext}</span>}
+    </span>
+  );
+}
+
+/**
+ * The prompt card's files, above the text: two-row chips with a thumbnail, the name
+ * and remove on the first row, size and upload state on the second. Still listed
+ * after attaching stops being offered (the leader changed under them), so they can
+ * be removed.
  */
 function AttachmentChips(props: { view: AttachmentsView; onRemove: (key: string) => void }): JSX.Element | null {
   const { view, onRemove } = props;
@@ -128,18 +173,35 @@ function AttachmentChips(props: { view: AttachmentsView; onRemove: (key: string)
       {view.files.length > 0 && (
         <ul className="attach-list" aria-label={view.summary ?? undefined}>
           {view.files.map((file) => (
-            <li key={file.key} className="attach-chip">
-              <span className="attach-name">{file.name}</span>
-              <span className="attach-size">{file.size}</span>
-              <button
-                type="button"
-                className="attach-remove"
-                aria-label={`Remove ${file.name}`}
-                disabled={view.locked}
-                onClick={() => onRemove(file.key)}
-              >
-                ×
-              </button>
+            <li key={file.key} className={file.failed ? "attach-chip attach-chip-failed" : "attach-chip"}>
+              <AttachmentThumb image={file.image} ext={file.ext} />
+              <span className="attach-text">
+                <span className="attach-row">
+                  <span className="attach-name">{file.name}</span>
+                  <button
+                    type="button"
+                    className="attach-remove"
+                    aria-label={`Remove ${file.name}`}
+                    disabled={view.removeLocked}
+                    onClick={() => onRemove(file.key)}
+                  >
+                    ×
+                  </button>
+                </span>
+                <span className="attach-status">{file.status}</span>
+              </span>
+              {file.percent !== null && (
+                <span
+                  className="attach-progress"
+                  role="progressbar"
+                  aria-label={`Uploading ${file.name}`}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={file.percent}
+                >
+                  <span className="attach-progress-fill" style={{ width: `${file.percent}%` }} />
+                </span>
+              )}
             </li>
           ))}
         </ul>
@@ -972,7 +1034,7 @@ export function SpawnScreen(props: {
             <SkillPicker id={SKILL_LIST_ID} query={query} items={matches} active={active} onPick={pickSkill} />
           )}
           <div className="compose-bar">
-            <AttachButton offered={attachOffered} locked={view.attachments.locked} onAdd={actions.addFiles} />
+            <AttachButton offered={attachOffered} locked={view.attachments.addLocked} onAdd={actions.addFiles} />
             <QueueButton
               view={view}
               preview={view.previewShown ? preview : null}
