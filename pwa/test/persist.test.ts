@@ -28,11 +28,12 @@ const {
   readFormFiles,
   readHeld,
   trackFormFiles,
+  trackHeld,
   writeForm,
   writeFormFiles,
   writeHeld,
 } = await import("../src/persist.ts");
-const { DEFAULT_FORM, HELD_MAX } = await import("../src/state.ts");
+const { DEFAULT_FORM, HELD_MAX, HELD_MAX_AGE_MS } = await import("../src/state.ts");
 
 beforeEach(() => store.clear());
 
@@ -125,12 +126,13 @@ describe("form persistence", () => {
 
 describe("held tasks", () => {
   const OTHER = "7b0e4c1d-2f3a-4b5c-9d6e-1a2b3c4d5e6f";
+  const CREATED = Date.now();
   const held = (id: string, failure: string | null = null): HeldTask => ({
     task: {
       id,
       spec: { repo: "github.com/acme/app", mode: "worktree", prompt: "port it" },
       state: "queued",
-      createdAt: 5,
+      createdAt: CREATED,
     },
     failure,
     sending: true,
@@ -189,9 +191,80 @@ describe("held tasks", () => {
     expect(readHeld()).toHaveLength(HELD_MAX);
   });
 
+  test("drop one held past the age limit", () => {
+    const { task } = held(OTHER);
+    const now = Date.now();
+    store.set("seance:held", JSON.stringify([held(TASK), { task: { ...task, createdAt: now - HELD_MAX_AGE_MS - 1 } }]));
+    expect(readHeld(now).map((entry) => entry.task.id)).toEqual([TASK]);
+  });
+
   test("survive corrupt JSON", () => {
     store.set("seance:held", "[{");
     expect(readHeld()).toEqual([]);
+  });
+});
+
+describe("tracking held tasks across tabs", () => {
+  function tracked(initial: readonly HeldTask[] = []) {
+    let state = { held: initial };
+    const listeners = new Set<() => void>();
+    const adopted: (readonly HeldTask[])[] = [];
+    let fire: (key: string | null) => void = () => {};
+    const source = {
+      subscribe: (listener: () => void) => listeners.add(listener),
+      getState: () => state,
+      adoptHeld: (held: readonly HeldTask[]) => {
+        adopted.push(held);
+        set(held);
+      },
+    };
+    const set = (held: readonly HeldTask[]): void => {
+      state = { held };
+      for (const listener of listeners) listener();
+    };
+    trackHeld(source, (handler) => {
+      fire = handler;
+    });
+    return { set, adopted, fire: (key: string | null) => fire(key) };
+  }
+  const entry = (id: string): HeldTask => ({
+    task: {
+      id,
+      spec: { repo: "github.com/acme/app", mode: "worktree", prompt: "p" },
+      state: "queued",
+      createdAt: Date.now(),
+    },
+    failure: null,
+    sending: false,
+  });
+
+  test("writes this tab's changes, and adopts another tab's without writing them back", () => {
+    const t = tracked();
+    t.set([entry(TASK)]);
+    expect(readHeld().map((e) => e.task.id)).toEqual([TASK]);
+
+    // Another tab's write: storage changes under this one, then the event names the key.
+    const other = "7b0e4c1d-2f3a-4b5c-9d6e-1a2b3c4d5e6f";
+    const written = JSON.stringify([
+      { task: entry(TASK).task, failure: null },
+      { task: entry(other).task, failure: null },
+    ]);
+    store.set("seance:held", written);
+    t.fire("seance:held");
+    expect(t.adopted.map((list) => list.map((e) => e.task.id))).toEqual([[TASK, other]]);
+    expect(store.get("seance:held")).toBe(written);
+
+    // Another key, or this key's own echo, adopts nothing new.
+    t.fire("seance:form");
+    expect(t.adopted).toHaveLength(1);
+  });
+
+  test("adopts an empty list when another tab clears storage", () => {
+    const t = tracked();
+    t.set([entry(TASK)]);
+    store.clear();
+    t.fire(null);
+    expect(t.adopted).toEqual([[]]);
   });
 });
 

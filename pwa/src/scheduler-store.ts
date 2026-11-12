@@ -24,7 +24,7 @@ import {
   type RelayClient,
 } from "@seance/shared";
 import type { FollowEnd, PreviewState, QueueState, TaskAction } from "./state.ts";
-import { taskTitle } from "./queue-view.ts";
+import { taskTitle } from "./task-title.ts";
 import type { AppState } from "./view.ts";
 import {
   deriveAutoAvailability,

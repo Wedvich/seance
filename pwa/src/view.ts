@@ -9,7 +9,7 @@ import {
   taskFailureText,
   type TaskUntil,
 } from "@seance/shared";
-import type { Capability, KnownAccount, Machine, RelayState } from "@seance/shared";
+import type { Capability, KnownAccount, Machine, RelayState, Task } from "@seance/shared";
 import {
   EFFORT_LABELS,
   HELD_MAX,
@@ -29,6 +29,7 @@ import {
 } from "./state.ts";
 import { needsAttention } from "./asleep.ts";
 import { formatBytes, type PickedFile } from "./attachments.ts";
+import { taskTitle } from "./task-title.ts";
 
 /**
  * Everything the screen renders, derived in one pure pass. Components stay dumb
@@ -369,7 +370,7 @@ export const ATTACHMENTS_VERIFYING = "Checking that the scheduler's leader takes
 // Files upload at the queue and only to a leader verified to take them, so a held task carries none.
 export const ATTACHMENTS_NOT_HELD = "Files go only while connected. Remove them to keep the task on this phone";
 
-function leaderVerified(relay: RelayState): boolean {
+export function leaderVerified(relay: RelayState): boolean {
   return relay.status === "open" && relay.scheduler.kind === "ready";
 }
 
@@ -720,14 +721,31 @@ function deriveIgnoredNote(relay: RelayState): string | null {
   return notes.length === 0 ? null : notes.join(" · ");
 }
 
-function heldRow(entry: HeldTask): HeldRow {
+/**
+ * Whether a held task asks something of the leader that only a verified one can answer (a done
+ * report, an account pin): it waits for one rather than failing on a leader that is only asleep or
+ * not yet verified.
+ */
+export function heldNeedsLeader(task: Task): boolean {
+  const { spec } = task;
+  return (
+    spec.until === "reported" ||
+    spec.deps?.some((dep) => dep.after === "done") === true ||
+    spec.pin?.account !== undefined
+  );
+}
+
+function heldRow(entry: HeldTask, relay: RelayState): HeldRow {
   const { task, failure, sending } = entry;
-  const line = task.spec.prompt?.trim().split("\n", 1)[0] ?? "";
+  const waiting =
+    relay.status === "open" && heldNeedsLeader(task) && !leaderVerified(relay)
+      ? "Waiting for the scheduler's leader"
+      : "Waiting for the relay";
   return {
     taskId: task.id,
-    title: line === "" ? "No prompt" : line,
+    title: taskTitle(task),
     repo: originLabel(task.spec.repo),
-    status: sending ? "Sending…" : (failure ?? "Waiting for the relay"),
+    status: sending ? "Sending…" : (failure ?? waiting),
     failed: failure !== null,
     sending,
   };
@@ -782,7 +800,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
     },
     afterTile: { label: "AFTER", value: afterValue(form.after), mono: false, dot: null },
     reportedAvailable: deriveReportedOffered(relay),
-    held: state.held.map(heldRow),
+    held: state.held.map((entry) => heldRow(entry, relay)),
     worktreeHint: form.worktree ? "Branches off the default branch on origin" : "Runs in the repo as it stands",
     formStatus: deriveFormStatus(state, machine, problem),
     button: deriveButton(state, machine, repo, problem),

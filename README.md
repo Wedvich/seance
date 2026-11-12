@@ -361,7 +361,8 @@ Lost the relay? Queue still works once the app has connected since it opened: th
 reads **Queue when connected**, and the task waits on the phone, listed above the tiles,
 until the app reconnects (with the app open — nothing sends it in the background). One the
 relay or the scheduler's leader then refuses stays there with the reason, to retry or
-discard.
+discard. Holding is for a dropped connection, not a long time offline: a task still held a
+day after you queued it is dropped unsent.
 
 A machine you have retired keeps its place in the picker with a stale last-seen —
 the relay never expires an entry. The bin on an offline row deletes it there, so it

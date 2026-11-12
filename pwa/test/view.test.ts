@@ -168,6 +168,8 @@ describe("banner and button", () => {
     const held = [
       { task, failure: null, sending: false },
       { task: { ...task, id: "t-2", spec: { ...task.spec, prompt: "" } }, failure: "Refused.", sending: false },
+      // Named as the Queue screen names it: the first line with text, not a blank one.
+      { task: { ...task, id: "t-3", spec: { ...task.spec, prompt: "\n  then this" } }, failure: null, sending: false },
     ];
     const view = deriveView(state({ relay: relay({ status: "retrying" }), held }), NOW);
     expect(view.held).toEqual([
@@ -179,7 +181,15 @@ describe("banner and button", () => {
         failed: false,
         sending: false,
       },
-      { taskId: "t-2", title: "No prompt", repo: "acme/app", status: "Refused.", failed: true, sending: false },
+      { taskId: "t-2", title: "acme/app", repo: "acme/app", status: "Refused.", failed: true, sending: false },
+      {
+        taskId: "t-3",
+        title: "then this",
+        repo: "acme/app",
+        status: "Waiting for the relay",
+        failed: false,
+        sending: false,
+      },
     ]);
   });
 

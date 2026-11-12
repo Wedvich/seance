@@ -37,7 +37,7 @@ import {
   type TaskRequest,
 } from "@seance/shared";
 import { openDeepLink } from "../src/deep-link.ts";
-import { DEFAULT_FORM, HELD_MAX, type HeldTask } from "../src/state.ts";
+import { DEFAULT_FORM, HELD_MAX, HELD_MAX_AGE_MS, type HeldTask } from "../src/state.ts";
 import { deriveQueue } from "../src/queue-view.ts";
 import { deriveView } from "../src/view.ts";
 import { describeVerdict } from "../src/verdict-view.ts";
@@ -797,6 +797,65 @@ describe("holding a task while the relay is down", () => {
     expect(client.creates[0]?.spec.until).toBe("reported");
   });
 
+  // An asleep or not-yet-verified leader says nothing about what it takes: failing then would need a manual retry.
+  test("one needing the leader waits, unfailed, for a verified one, and others go past it", async () => {
+    const client = new ScriptedClient(DOWN);
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it", until: "reported" });
+    store.attach();
+    await store.spawn();
+    store.setPrompt("plain");
+    store.setUntil("merged");
+    await store.spawn();
+    const [reported, plain] = [heldTask(store, 0), heldTask(store, 1)];
+
+    const leader = client.getState().scheduler;
+    client.emit({
+      status: "open",
+      registrySettled: true,
+      scheduler: { kind: "none" },
+      machines: [autoMachine("dev-a", { capabilities: [CAPABILITIES.reportedDone] }), autoMachine("dev-b")],
+    });
+    await until(() => client.creates.length === 1, "the plain task sent");
+    await drain();
+    expect(client.creates).toEqual([plain]);
+    expect(store.getState().held).toEqual([{ task: reported, failure: null, sending: false }]);
+    expect(deriveView(store.getState(), 0).held[0]?.status).toBe("Waiting for the scheduler's leader");
+
+    client.emit({ scheduler: leader });
+    await until(() => store.getState().held.length === 0, "the send once a leader is verified");
+    expect(client.creates).toEqual([plain, reported]);
+  });
+
+  // Holding rides out a dropped connection; a task left far longer is no longer what anyone wants.
+  test("one held past the age limit is dropped unsent", async () => {
+    const client = new ScriptedClient(DOWN);
+    const stale = { ...QUEUED, id: "t-stale", state: "queued" as const, createdAt: Date.now() - HELD_MAX_AGE_MS - 1 };
+    const store = attached(client, [{ task: stale, failure: null, sending: false }]);
+    await store.spawn();
+    const fresh = heldTask(store, 1);
+
+    client.emit({ status: "open", registrySettled: true });
+    await until(() => store.getState().held.length === 0, "the held list emptied");
+    expect(client.creates).toEqual([fresh]);
+  });
+
+  test("a list another tab wrote replaces this one's, keeping a send that is out", async () => {
+    const client = new ScriptedClient(DOWN);
+    const store = attached(client);
+    await store.spawn();
+    const mine = heldTask(store);
+    client.onCreate = () => new Promise(() => {});
+    client.emit({ status: "open", registrySettled: true });
+    await until(() => store.getState().held[0]?.sending === true, "the send out");
+
+    const theirs = { ...QUEUED, id: "t-theirs", state: "queued" as const, createdAt: Date.now() };
+    store.adoptHeld([{ task: theirs, failure: null, sending: false }]);
+    expect(store.getState().held).toEqual([
+      { task: theirs, failure: null, sending: false },
+      { task: mine, failure: null, sending: true },
+    ]);
+  });
+
   // A run-now sent whenever the app next reconnects would skip the caps at a moment nobody chose.
   test("Start now with the relay down is a plain queue", async () => {
     const client = new ScriptedClient(DOWN);
@@ -834,7 +893,7 @@ describe("holding a task while the relay is down", () => {
   test("past the cap another is refused; discard frees a slot, but never takes back one being sent", async () => {
     const client = new ScriptedClient(DOWN);
     const held = Array.from({ length: HELD_MAX }, (_, i) => ({
-      task: { ...QUEUED, id: `t-held-${i}`, state: "queued" as const },
+      task: { ...QUEUED, id: `t-held-${i}`, state: "queued" as const, createdAt: Date.now() },
       failure: null,
       sending: false,
     }));
@@ -2921,7 +2980,7 @@ describe("pinning a task", () => {
 
     client.emit({ status: "open", registrySettled: true });
     await until(() => store.getState().held[0]?.failure !== null, "the send-time check");
-    expect(store.getState().held[0]?.failure).toContain("can't pin an account");
+    expect(store.getState().held[0]?.failure).toContain("doesn't take account pins");
     expect(client.creates).toEqual([]);
   });
 
