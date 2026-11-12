@@ -1884,6 +1884,12 @@ export class Scheduler {
       ...(spec.autonomy === undefined ? {} : { autonomy: spec.autonomy }),
       ...(spec.continues === undefined ? {} : { continues: spec.continues.task }),
       ...(spec.attachments === undefined ? {} : { attachments: spec.attachments }),
+      // A successor holds its predecessor's PR (`#runPass`); its daemon notes it so the session may hand it off.
+      // Never under `until: "reported"`: a hand-off leaves no session to report, so the task would sit
+      // awaiting-merge until `merge_expired`; withholding it keeps the daemon's `prless` refusal.
+      ...(spec.succeeds === undefined || task.prUrl === undefined || spec.until === "reported"
+        ? {}
+        : { inheritedPr: task.prUrl }),
       client: SCHEDULER_CLIENT,
       taskId: task.id,
     });

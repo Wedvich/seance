@@ -13,6 +13,7 @@ import {
   STORE_TIMEOUT_MS,
   type SessionEntry,
   type SettingsRecord,
+  type SpawnResponse,
 } from "@seance/shared";
 import { exec } from "../daemon/src/exec.ts";
 import { localSocketReachable } from "../daemon/src/local-client.ts";
@@ -929,6 +930,256 @@ describe("pass: an app's pass ↔ leader ↔ the machine's push and close", () =
       if (successorId !== undefined) await cancelTask(app.client, successorId);
       // A failure before the pass leaves the original running; once passed it is finished, which returns at once.
       await cancelTask(app.client, taskId);
+      app.stop();
+      if (window !== undefined) await killWindow(window);
+    }
+  }, 60_000);
+});
+
+describe("hand-off: a successor's inherited PR ↔ the leader's dispatch ↔ the daemon's hand-off", () => {
+  // The wiring no unit test joins: the leader's dispatch carrying the successor record's PR as
+  // `SpawnRequest.inheritedPr`, the daemon's launch note, the pane-bound hand-off frame, the close
+  // at the turn's end, and the leader settling the ended task `awaiting-merge`. Only the session is a
+  // stand-in: a script in the spawned pane that calls the tool's own function.
+  // A GitHub-shaped URL is safe: the suite points `SEANCE_GH_BIN` at a missing binary, so no poller reads it.
+  const PR = "https://github.com/acme/app/pull/1";
+  const tool = join(import.meta.dir, "..", "daemon", "src", "report-done.ts");
+  const main = join(import.meta.dir, "..", "daemon", "src", "main.ts");
+
+  /** The launch ledger's notes as `launched.json` holds them (`realWorktree` reads the same key). */
+  async function launched(): Promise<readonly { readonly taskId: string; readonly continuedPr?: string }[]> {
+    const ledger = JSON.parse(await Bun.file(join(process.env["SEANCE_STATE_DIR"] ?? "", "launched.json")).text()) as {
+      readonly progress: readonly { readonly taskId: string; readonly continuedPr?: string }[];
+    };
+    return ledger.progress;
+  }
+
+  const paneOf = async (taskId: string): Promise<string> => {
+    const panes = await tmuxOk(["list-panes", "-a", "-F", "#{pane_id} #{@seance-task}"]);
+    const pane = panes
+      .split("\n")
+      .map((line) => line.split(" "))
+      .find(([, task]) => task === taskId)?.[0];
+    if (pane === undefined) throw new Error(`no pane carries ${taskId}: ${panes}`);
+    return pane;
+  };
+
+  /**
+   * Takes over the task's pane with a script that calls `handOff` and writes its answer to `out`. With
+   * `steps`, it then waits for `go` and sends an idle turn end, waits for `go2` and sends `ended`.
+   */
+  async function handOffFrom(
+    taskId: string,
+    name: string,
+    steps: boolean,
+  ): Promise<{ out: string; go: string; go2: string }> {
+    const out = join(base, `${name}.json`);
+    const go = join(base, `${name}.go`);
+    const go2 = join(base, `${name}.go2`);
+    const script = join(base, `${name}.ts`);
+    const idle = join(base, `${name}-idle.json`);
+    const ended = join(base, `${name}-ended.json`);
+    for (const file of [out, go, go2]) await rm(file, { force: true });
+    await Bun.write(idle, JSON.stringify({ state: "idle", turnEnded: true }));
+    await Bun.write(ended, JSON.stringify({ state: "ended" }));
+    const stateDir = process.env["SEANCE_STATE_DIR"] ?? "";
+    const socket = join(stateDir, "run", "seanced.sock");
+    await Bun.write(
+      script,
+      // The running state can precede the daemon's launch landing in its ledger; the tool then answers "call again".
+      `import { handOff } from ${JSON.stringify(tool)};
+let result = await handOff({ path: ${JSON.stringify(socket)} });
+for (let i = 0; i < 40 && !result.ok && result.text.includes("holds no launch"); i++) {
+  await Bun.sleep(250);
+  result = await handOff({ path: ${JSON.stringify(socket)} });
+}
+await Bun.write(${JSON.stringify(out)}, JSON.stringify(result));\n`,
+    );
+    const event = (input: string): string =>
+      `SEANCE_STATE_DIR=${q(stateDir)} ${q(process.execPath)} ${q(main)} session-event < ${q(input)}`;
+    const wait = (file: string): string => `while [ ! -e ${q(file)} ]; do sleep 0.05; done`;
+    const rest = steps ? `; ${wait(go)}; ${event(idle)}; ${wait(go2)}; ${event(ended)}` : "";
+    await tmuxOk([
+      "respawn-pane",
+      "-k",
+      "-t",
+      await paneOf(taskId),
+      "sh",
+      "-c",
+      `${q(process.execPath)} ${q(script)}${rest}; exec sleep 600`,
+    ]);
+    return { out, go, go2 };
+  }
+
+  const answer = async (out: string): Promise<unknown> => {
+    await pollUntil(
+      async () => (await Bun.file(out).exists()) && (await Bun.file(out).text()) !== "",
+      "the hand-off's answer",
+      30_000,
+    );
+    return JSON.parse(await Bun.file(out).text());
+  };
+
+  test("a successor's hand-off is taken for the PR it inherited, and the task waits awaiting-merge; a PR-less successor's is prless", async () => {
+    const P1 = "e2e-handoff-pred";
+    const P2 = "e2e-handoff-pred-bare";
+    const S1 = "e2e-handoff-succ";
+    const S2 = "e2e-handoff-succ-bare";
+    const audit = spyOn(console, "log");
+    const closes = (): string[] =>
+      audit.mock.calls.map((args) => args.join(" ")).filter((l) => l.includes("audit despawn origin=handoff"));
+    let app: ReturnType<typeof startApp> | undefined;
+    const windows: string[] = [];
+    try {
+      // Superseded predecessors naming their successors, as the leader leaves them after a pass.
+      await stack.seedTask({
+        id: P1,
+        spec: { repo: "github.com/acme/app", mode: "worktree" },
+        state: "superseded",
+        successor: S1,
+        prUrl: PR,
+        createdAt: Date.now(),
+      });
+      await stack.seedTask({
+        id: P2,
+        spec: { repo: "github.com/acme/app", mode: "worktree" },
+        state: "superseded",
+        successor: S2,
+        createdAt: Date.now(),
+      });
+      await stack.restartDaemon();
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      app = startApp(stack);
+      const ready = await app.waitForApp(
+        (state) =>
+          state.relay.scheduler.kind === "ready" &&
+          state.relay.machines.some(
+            (m) =>
+              m.deviceId === stack.deviceId &&
+              m.connected &&
+              m.repos.length > 0 &&
+              m.capabilities?.includes(CAPABILITIES.successor) === true,
+          ),
+        "the leader verified and the machine advertising successor",
+      );
+      const origin = fixtureOrigin(ready);
+      const clone = ready.relay.machines
+        .find((m) => m.deviceId === stack.deviceId)
+        ?.repos.find((r) => r.origin === origin)?.name;
+      if (origin === null || clone === undefined) throw new Error("the fixture machine lists no repo origin");
+      const successor = (id: string, predecessor: string, prUrl?: string) => ({
+        id,
+        spec: {
+          repo: origin,
+          mode: "worktree" as const,
+          succeeds: {
+            task: predecessor,
+            account: "org:e2e",
+            at: { deviceId: stack.deviceId, exclave: "default", clone },
+            trigger: "manual" as const,
+          },
+        },
+        ...(prUrl === undefined ? {} : { prUrl }),
+        state: "queued" as const,
+        createdAt: Date.now(),
+      });
+      expect(await app.client.createTask(successor(S1, P1, PR))).toEqual({ ok: true, landedEarlier: false });
+      expect(await app.client.createTask(successor(S2, P2))).toEqual({ ok: true, landedEarlier: false });
+      // The verdict's window is written from the spawn's reply, which the daemon sends only after its ledger
+      // note; a bare `running` can come from a hook event before the note lands.
+      const spawned = async (id: string): Promise<void> => {
+        await pollUntil(
+          async () => (await stack.queue().get(id))?.body?.assignment?.window !== undefined,
+          `${id} to be spawned`,
+          30_000,
+        );
+        windows.push((await stack.queue().get(id))?.body?.assignment?.window ?? "");
+      };
+      await spawned(S1);
+      await spawned(S2);
+      const notes = await launched();
+      expect(notes.find((n) => n.taskId === S1)?.continuedPr).toBe(PR);
+      expect(notes.find((n) => n.taskId === S2)?.continuedPr).toBeUndefined();
+
+      const inherited = await handOffFrom(S1, "handoff-succ", true);
+      expect(await answer(inherited.out)).toMatchObject({ ok: true });
+      // The close waits for the turn's end: none is decided yet, before any idle event. The stand-in pane is no
+      // registered session, so the graceful despawn answers `session_not_found` after the close was decided, and
+      // what is under test is the decision.
+      expect(closes()).toEqual([]);
+      const pane = await paneOf(S1);
+      await Bun.write(inherited.go, "");
+      await pollUntil(
+        () => closes().some((l) => l.includes(`target="${pane}"`)),
+        "the daemon to decide the close at the turn's end",
+        20_000,
+      );
+      await Bun.write(inherited.go2, "");
+      // The ended event's own settle (`ended()` settles any ended task whose record holds a PR), kept for the
+      // whole flow: it does not show the hand-off took effect, the answer and the close decision above do.
+      await pollUntil(
+        async () => (await stack.queue().get(S1))?.body?.state === "awaiting-merge",
+        "the leader to settle the ended successor awaiting-merge",
+        20_000,
+      );
+      expect((await stack.queue().get(S1))?.body).toMatchObject({ prUrl: PR });
+
+      // No PR on the record, none noted: the same call is refused, after the daemon's wait for a PR still on its way.
+      const bare = await handOffFrom(S2, "handoff-succ-bare", false);
+      const refused = await answer(bare.out);
+      expect(refused).toMatchObject({ ok: false });
+      expect(JSON.stringify(refused)).toContain("noted no pull request");
+    } finally {
+      audit.mockRestore();
+      if (app !== undefined) {
+        await cancelTask(app.client, S1);
+        await cancelTask(app.client, S2);
+        app.stop();
+      }
+      for (const window of windows) await killWindow(window);
+    }
+  }, 90_000);
+
+  test("an app-sealed spawn carrying inheritedPr runs, but notes no PR, so its hand-off is prless", async () => {
+    const taskId = "e2e-forged-pr";
+    const audit = spyOn(console, "log");
+    const app = startApp(stack);
+    let window: string | undefined;
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      const ready = await app.waitForApp(
+        (state) =>
+          state.relay.scheduler.kind === "ready" &&
+          state.relay.machines.some((m) => m.deviceId === stack.deviceId && m.connected && m.repos.length > 0),
+        "the leader verified and the machine's repos listed",
+      );
+      const repo = ready.relay.machines.find((m) => m.deviceId === stack.deviceId)?.repos[0]?.name;
+      if (repo === undefined) throw new Error("the fixture machine lists no repo");
+      const reply = await app.client.request<SpawnResponse>(stack.deviceId, "spawn", {
+        repo,
+        mode: "worktree",
+        taskId,
+        client: "scheduler",
+        inheritedPr: PR,
+      });
+      if (reply === null || !("ok" in reply) || !reply.ok)
+        throw new Error(`the spawn was refused: ${JSON.stringify(reply)}`);
+      window = reply.window;
+      const lines = audit.mock.calls
+        .map((args) => args.join(" "))
+        .filter((l) => l.includes("audit spawn origin=relay"));
+      expect(lines.some((l) => l.includes("inheritedPr=true"))).toBe(true);
+      // Every line the daemon wrote, the drop's warn included, never only the audit ones.
+      expect(audit.mock.calls.some((args) => args.join(" ").includes(PR))).toBe(false);
+      expect((await launched()).find((n) => n.taskId === taskId)).not.toHaveProperty("continuedPr");
+
+      const sent = await handOffFrom(taskId, "handoff-forged", false);
+      const refused = await answer(sent.out);
+      expect(refused).toMatchObject({ ok: false });
+      expect(JSON.stringify(refused)).toContain("noted no pull request");
+    } finally {
+      audit.mockRestore();
       app.stop();
       if (window !== undefined) await killWindow(window);
     }

@@ -269,8 +269,13 @@ green:
   only for the pane's own task when its launch ledger holds a launch and a PR URL of it — one its
   session reported, or, for a continuation, the one that ledger noted on it at launch from the launch
   it continues (`continuedPr`, from any launch but one the scheduler cancelled: a despawn sealed from the scheduler naming
-  `client: "scheduler"`, noted `cancelled`), never
-  from a frame — (`untasked`,
+  `client: "scheduler"`, noted `cancelled`), or, for a successor, the one that ledger noted on it at launch
+  from the spawn's `inheritedPr` (`SpawnRequest`), taken only on a worktree spawn sealed `from` the scheduler
+  with `client: "scheduler"` (or the leader's in-process dispatch) carrying a task id, held exact to
+  `httpsUrl`, ignored (never refused) from any other sender, beside any other mode, or when unreadable, kept out of `progress` and
+  never logged (the audit line says `inheritedPr=true`), and set by the leader only from the dispatched
+  task's own `prUrl`, only for a task carrying `succeeds` and never under `until: "reported"`, never
+  from a session-event frame — (`untasked`,
   `unrecorded`, `prless` otherwise): the daemon marks the pane in memory and, at that pane's next
   `idle` carrying `turnEnded` (its turn's end, never a respawn's idle), closes it through the graceful despawn after re-reading that it still carries that task,
   audited `origin=handoff` (`handoff.ts`), never a pane or task a frame names, and a pass, which only

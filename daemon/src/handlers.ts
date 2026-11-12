@@ -24,6 +24,7 @@ import {
   isMetricsRequest,
   isRecord,
   isAutonomyLevel,
+  httpsUrl,
   isTaskId,
   parseAttachmentManifest,
   parsePassCloseRequest,
@@ -285,6 +286,24 @@ function attachmentsRefusal(ctx: HandlerContext, request: SpawnRequest, schedule
   return null;
 }
 
+/**
+ * The PR a successor's spawn inherited, when the scheduler's own task spawn names it: a worktree spawn
+ * sealed from the scheduler (or its own process), `client: SCHEDULER_CLIENT`, with a task id to note it
+ * under. Anything else, another sender or mode included, drops the claim, never refuses it: the spawn then
+ * runs as an older daemon runs it, and its session's hand-off answers `prless`. Never logs the URL.
+ */
+function inheritedPrOf(request: SpawnRequest, scheduler: boolean): string | undefined {
+  const { inheritedPr, taskId } = request;
+  if (inheritedPr === undefined) return undefined;
+  const taken = scheduler && request.client === SCHEDULER_CLIENT && taskId !== undefined && request.mode === "worktree";
+  // Held exact, as the ledger's reader holds `continuedPr`; a value this build reads otherwise is dropped, never refused.
+  if (taken && typeof inheritedPr === "string" && httpsUrl(inheritedPr) === inheritedPr) return inheritedPr;
+  log.warn(
+    `spawn: ignored an inherited pull request this daemon does not take${taskId === undefined ? "" : ` (task ${quote(taskId)})`}`,
+  );
+  return undefined;
+}
+
 function notContinuable(message: string): SpawnRefusal {
   return { ok: false, code: "not_continuable", message };
 }
@@ -385,6 +404,7 @@ async function handleSpawn(
     }
     continuation = site;
   }
+  const inherited = inheritedPrOf(payload, scheduler);
   // Before the write-ahead record: a refused or abandoned fetch then leaves no ledger entry, and
   // the leader's TTL check proves the task never landed. Past its deadline nothing launches.
   let attachments: SessionAttachments | undefined;
@@ -439,6 +459,7 @@ async function handleSpawn(
     }
     // Only a worktree has a branch of its own to watch; `here` runs in the clone itself.
     // A continuation watches the worktree it resumed, under its new task id.
+    const continuedPr = continuation?.continuedPr ?? inherited;
     const entry = payload.mode !== "here" ? repos.find((r) => r.name === payload.repo) : undefined;
     await settle?.(true, {
       ...(entry === undefined
@@ -448,7 +469,7 @@ async function handleSpawn(
               repo: entry.path,
               worktree: outcome.path,
               ...(outcome.session === undefined ? {} : { session: outcome.session }),
-              ...(continuation?.continuedPr === undefined ? {} : { continuedPr: continuation.continuedPr }),
+              ...(continuedPr === undefined ? {} : { continuedPr }),
             },
           }),
       ...(outcome.server === undefined ? {} : { server: outcome.server }),

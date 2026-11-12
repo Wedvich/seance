@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1014,6 +1014,144 @@ describe("metrics answers from the store, within one envelope", () => {
   test("a daemon without a store answers with a code instead of leaving the chart to time out", async () => {
     const reply = await metricsReply(null, { from: NOW, to: NOW, step: 30 });
     expect(reply).toMatchObject({ ok: false, code: "internal_error" });
+  });
+});
+
+describe("a successor's spawn and the PR it inherited", () => {
+  const PR = "https://github.com/acme/app/pull/1";
+  const SUCC = "succ";
+
+  // `log.warn` writes to stdout, not the audit sink: the drop's one line must name the task and never the claim.
+  let out: ReturnType<typeof spyOn<typeof console, "log">>;
+  beforeEach(() => {
+    out = spyOn(console, "log").mockImplementation(() => {});
+  });
+  afterEach(() => out.mockRestore());
+  const warned = (): string =>
+    out.mock.calls
+      .map((call) => String(call[0]))
+      .filter((line) => line.includes(" warn spawn: ignored an inherited pull request"))
+      .join("\n");
+
+  const successor = (extra: Record<string, unknown> = {}): Plain =>
+    request("spawn", {
+      repo: "myrepo",
+      mode: "worktree",
+      taskId: SUCC,
+      client: SCHEDULER_CLIENT,
+      inheritedPr: PR,
+      ...extra,
+    });
+
+  function rig() {
+    const ledger = LaunchLedger.memory();
+    const tasks = new EndedTasks(ledger);
+    let spawned = 0;
+    const backend: SessionBackend = {
+      spawn: () => {
+        spawned += 1;
+        return Promise.resolve({ window: "s", path: "/r/.claude/worktrees/s", registered: true, handle: "@1" });
+      },
+      sessions: () => Promise.resolve([]),
+      doctor: () => Promise.resolve([]),
+    };
+    const handlerCtx: HandlerContext = { ...ctx, backend, getRepos: () => REPOS, tasks };
+    return { ledger, tasks, spawns: () => spawned, handlerCtx };
+  }
+
+  test("sealed from the scheduler, over the relay or in process, the PR is noted so the session's hand-off is taken, and never logged", async () => {
+    const relay = rig();
+    const relayReply = await createHandler(relay.handlerCtx)(successor(), SCHEDULER_ID);
+    const local = rig();
+    const localReply = await createLocalOps(local.handlerCtx, "leader").spawn({
+      repo: "myrepo",
+      mode: "worktree",
+      taskId: SUCC,
+      client: SCHEDULER_CLIENT,
+      inheritedPr: PR,
+    });
+    for (const [reply, { ledger, tasks, spawns }] of [
+      [relayReply?.payload, relay],
+      [localReply, local],
+    ] as const) {
+      expect(reply).toMatchObject({ ok: true });
+      expect(spawns()).toBe(1);
+      expect(ledger.notes()).toEqual(
+        expect.arrayContaining([expect.objectContaining({ taskId: SUCC, continuedPr: PR })]),
+      );
+      // Internal: as `prUrl` it would reach the leader as the session's own report, and the note alone makes no entry.
+      expect(ledger.progress().find((entry) => entry.taskId === SUCC)).toBeUndefined();
+      expect(tasks.handoffCheck(SUCC)).toBe("ok");
+    }
+    expect(logged()).toContain("inheritedPr=true");
+    expect(logged()).not.toContain(PR);
+  });
+
+  test("from any other sender the spawn runs but notes no PR, so the hand-off stays prless", async () => {
+    const cases: readonly (readonly [string, (h: HandlerContext) => Promise<Plain | null>, boolean])[] = [
+      ["an app", (h) => createHandler(h)(successor(), APP_ID), true],
+      ["no sender", (h) => createHandler(h)(successor(), undefined), true],
+      ["the local socket", (h) => createHandler(h, "local")(successor(), undefined), true],
+      ["another client", (h) => createHandler(h)(successor({ client: "mcp" }), SCHEDULER_ID), true],
+      ["no task id", (h) => createHandler(h)(successor({ taskId: undefined }), SCHEDULER_ID), false],
+    ];
+    for (const [why, send, hasTask] of cases) {
+      const { ledger, tasks, spawns, handlerCtx } = rig();
+      lines.length = 0;
+      // oxlint-disable-next-line no-await-in-loop -- each case reads the lines the previous one cleared
+      const reply = await send(handlerCtx);
+      expect(reply?.payload, why).toMatchObject({ ok: true });
+      expect(spawns(), why).toBe(1);
+      expect(
+        ledger.notes().filter((note) => note.continuedPr !== undefined),
+        why,
+      ).toEqual([]);
+      if (hasTask) expect(tasks.handoffCheck(SUCC), why).toBe("prless");
+      else expect(ledger.notes(), why).toEqual([]);
+      expect(logged(), why).toContain("inheritedPr=true");
+      expect(logged(), why).not.toContain(PR);
+      expect(warned(), why).not.toContain(PR);
+      if (hasTask) expect(warned(), why).toContain(`(task "${SUCC}")`);
+      else expect(warned(), why).not.toBe("");
+    }
+  });
+
+  test("a value this daemon does not read is dropped, never refused", async () => {
+    for (const inheritedPr of ["http://github.com/a/b/pull/1", "https://u:p@github.com/a/b/pull/1", 7]) {
+      const { ledger, tasks, spawns, handlerCtx } = rig();
+      // oxlint-disable-next-line no-await-in-loop -- each case has its own rig
+      const reply = await createHandler(handlerCtx)(successor({ inheritedPr }), SCHEDULER_ID);
+      expect(reply?.payload, String(inheritedPr)).toMatchObject({ ok: true });
+      expect(spawns()).toBe(1);
+      expect(ledger.notes().filter((note) => note.continuedPr !== undefined)).toEqual([]);
+      expect(tasks.handoffCheck(SUCC)).toBe("prless");
+      expect(warned(), String(inheritedPr)).toContain(`(task "${SUCC}")`);
+      expect(warned(), String(inheritedPr)).not.toContain("u:p");
+      expect(warned(), String(inheritedPr)).not.toContain("github.com");
+    }
+  });
+
+  test("beside a mode other than worktree, from any sender, it is dropped like any claim the daemon does not take", async () => {
+    // A stray claim must not change what a plain `here` spawn did before the field existed.
+    const senders: readonly (readonly [string, (h: HandlerContext) => Promise<Plain | null>])[] = [
+      ["the scheduler", (h) => createHandler(h)(successor({ mode: "here" }), SCHEDULER_ID)],
+      ["an app", (h) => createHandler(h)(successor({ mode: "here" }), APP_ID)],
+      ["the local socket", (h) => createHandler(h, "local")(successor({ mode: "here" }), undefined)],
+    ];
+    for (const [why, send] of senders) {
+      const { ledger, spawns, handlerCtx } = rig();
+      lines.length = 0;
+      // oxlint-disable-next-line no-await-in-loop -- each case reads the lines the previous one cleared
+      const reply = await send(handlerCtx);
+      expect(reply?.payload, why).toMatchObject({ ok: true });
+      expect(spawns(), why).toBe(1);
+      expect(
+        ledger.notes().filter((note) => note.continuedPr !== undefined),
+        why,
+      ).toEqual([]);
+      expect(logged(), why).not.toContain("rejected");
+      expect(warned(), why).not.toContain(PR);
+    }
   });
 });
 

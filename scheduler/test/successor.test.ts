@@ -169,6 +169,37 @@ describe("pass", () => {
     expect(s.lines.some((l) => l.startsWith(`successor placed task="${result.successorId}" after=`))).toBe(true);
   });
 
+  test("the successor's dispatch carries the PR it inherited; a PR-less one, one under until: reported and a task that is no successor carry none", async () => {
+    const withPr = setup();
+    const old = await running(withPr);
+    const result = ok(await withPr.scheduler.pass(old.id));
+    await tick(withPr.scheduler);
+    expect(withPr.fleet.spawns.at(-1)?.request).toMatchObject({ taskId: result.successorId, inheritedPr: PR });
+
+    const bare = setup();
+    const bareOld = await running(bare, false);
+    const bareResult = ok(await bare.scheduler.pass(bareOld.id));
+    await tick(bare.scheduler);
+    expect(bare.fleet.spawns.at(-1)?.request.taskId).toBe(bareResult.successorId);
+    expect(bare.fleet.spawns.at(-1)?.request).not.toHaveProperty("inheritedPr");
+
+    // A hand-off leaves no session to report, so a task settling on its report never gets the PR to hand off.
+    const reported = setup();
+    const reportedOld = await running(reported, true, { until: "reported" });
+    const reportedResult = ok(await reported.scheduler.pass(reportedOld.id));
+    await tick(reported.scheduler);
+    expect(reported.fleet.spawns.at(-1)?.request.taskId).toBe(reportedResult.successorId);
+    expect(reported.fleet.spawns.at(-1)?.request).not.toHaveProperty("inheritedPr");
+
+    // Only `succeeds` makes the PR inherited: an app may create any task carrying a `prUrl`.
+    const plain = setup();
+    await plain.store.put("plain", 0, { id: "plain", spec: spec(), state: "queued", createdAt: NOW, prUrl: PR });
+    await plain.scheduler.refresh("plain");
+    await tick(plain.scheduler);
+    expect(plain.fleet.spawns.at(-1)?.request.taskId).toBe("plain");
+    expect(plain.fleet.spawns.at(-1)?.request).not.toHaveProperty("inheritedPr");
+  });
+
   test("a successor whose first event is needs-input is counted as placed too", async () => {
     const s = setup();
     const old = await running(s, false);

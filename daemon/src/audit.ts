@@ -185,6 +185,8 @@ export function spawnAudit(origin: SpawnOrigin, sink: AuditSink): SpawnAudit {
       const autonomyNote = request.autonomy === undefined ? "" : `autonomy=${request.autonomy} `;
       const taskNote = request.taskId === undefined ? "" : `task=${quote(request.taskId)} `;
       const continuesNote = request.continues === undefined ? "" : `continues=${quote(request.continues)} `;
+      // Presence only: the URL names a private repo, and the log is plaintext at rest.
+      const inheritedNote = request.inheritedPr === undefined ? "" : "inheritedPr=true ";
       // Counts only: names are treated as prompt text, and ids and hashes say nothing an operator needs.
       const files = request.attachments;
       const attachmentsNote =
@@ -198,6 +200,7 @@ export function spawnAudit(origin: SpawnOrigin, sink: AuditSink): SpawnAudit {
           autonomyNote +
           taskNote +
           continuesNote +
+          inheritedNote +
           attachmentsNote +
           promptNote,
       );

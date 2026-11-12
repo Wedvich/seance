@@ -100,7 +100,7 @@ const HANDOFF_REFUSED = {
   unwritten: "this machine's daemon could not save the hand-off" + KEEP_WATCHING,
   stopping: "this machine's daemon is stopping, so the hand-off was not taken" + KEEP_WATCHING,
   prless:
-    "this machine's daemon noted no pull request for this session's task (it sees one only from `gh pr create` in this session), so its end would not wait for a merge" +
+    "this machine's daemon noted no pull request for this session's task (it sees one only from `gh pr create` in this session, in the session it continues, or as the pull request a successor inherited), so its end would not wait for a merge" +
     KEEP_WATCHING,
   passed: "this session already passed its task to a successor, so there is nothing left to hand off",
 } as const satisfies Refusals;

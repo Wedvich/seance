@@ -490,7 +490,9 @@ export class EndedTasks {
    * one its end would settle `done` or `failed`, never `awaiting-merge`. A continuation resumes the
    * conversation that opened the PR, so it may hand back the one its own note inherited at launch
    * (`continuedPr`, copied from the launch it continued, and only from one that ended handed off or by
-   * itself, `continuation`): only its own note, never another's by path or
+   * itself, `continuation`), and a successor the one it inherited from the task it succeeds (the same
+   * `continuedPr`, noted at launch from the scheduler-sealed spawn, `handlers.ts` `inheritedPr` handling, never
+   * from a frame): only its own note, never another's by path or
    * session, which broke once the continued launch was evicted and would let a fresh task in a reused
    * worktree hand off a PR it never touched.
    */
@@ -516,7 +518,7 @@ export class EndedTasks {
     return { code: note?.path === undefined || note.repo === undefined ? "here" : "unrecorded" };
   }
 
-  /** Whether this launch noted a PR (`handoffCheck`'s lookup), for a pass: a branch with no upstream then has to be the PR's. */
+  /** Whether this launch noted a PR (`handoffCheck`'s lookup, a continuation's or successor's inherited one included), for a pass: a branch with no upstream then has to be the PR's. */
   hasPr(taskId: string): boolean {
     const note = this.#ledger.notes().find((n) => n.taskId === taskId);
     return (this.#launches.get(taskId)?.prUrl ?? note?.prUrl ?? note?.continuedPr) !== undefined;
@@ -524,8 +526,8 @@ export class EndedTasks {
 
   /**
    * The PR URL a session of this launch reported itself, for its `ended` event: the one event that carried
-   * it may never have reached the leader. Never `continuedPr`: as the event's PR it would settle a
-   * continuation `awaiting-merge` on a PR it never touched.
+   * it may never have reached the leader. Never `continuedPr` (a continuation's or successor's inherited PR): as the
+   * event's PR it would settle a continuation `awaiting-merge` on a PR it never touched.
    */
   notedPr(taskId: string): string | undefined {
     return this.#launches.get(taskId)?.prUrl ?? this.#ledger.notes().find((n) => n.taskId === taskId)?.prUrl;
