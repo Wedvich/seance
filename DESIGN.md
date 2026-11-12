@@ -899,6 +899,16 @@ nothing checked it. The last is the gap they leave.
   `parsePin` refuses it, so one taking over holds the record unreadable instead of placing it
   unrestricted. The parser never nulls a spec over `pin.exclave` (Scheduler, "Rollout: a gate
   and a sentinel").
+- **A task record carrying `requires` always carries `REQUIRES_DEP_SENTINEL`, and a machine's traits
+  are its own.** Every such record is sealed through the one task sealer (`taskRecordAtRest`), which
+  appends `{ task: "", after: "opened" }` to its deps; an older parser refuses the dep and holds the
+  record unreadable instead of placing the task on a machine without the trait. The current parser
+  drops the sentinel only beside `requires` and nulls the spec over one without it (Scheduler, "Traits
+  filter"). A client writes `requires` only to a verified leader advertising `CAPABILITIES.traits`. A
+  machine's traits come only from its own `config.json`, ride its register blob as
+  `ExclaveInfo.traits`, and are believed only as that machine's own entry (`from` bound, as every
+  `info` blob); no frame, app or other machine sets one. An audit line carries the count of
+  names (`requires=<n>`), never a name.
 - **A session event is bound by the daemon, never by the event.** On the local
   socket's `session-event` frame, the pane is the one the kernel-reported peer pid
   runs under; the frame's own `pane` decides only on a host that can name no peer
@@ -1872,6 +1882,12 @@ an old peer's frames parse as before. Mixed versions:
   a reason this app can't read".
 - Reasons `skill_absent { skill }`, `auth_expired` and `base_unpushed`: an older app or
   leader drops an unknown reason from a decision and keeps the candidate.
+- `TaskSpec.requires` (1 to `TASK_SPEC_LIMITS.requires` = 4 unique trait names), `ExclaveInfo.traits`
+  (sorted names an exclave declares, lenient: a bad list costs the field), `CAPABILITIES.traits` and
+  the reasons `trait_absent { trait }` and `trait_unhealthy { trait }` (parsed and worded, emitted by
+  nothing yet; the probes PR sends it). An older leader refuses a record carrying `requires`
+  (`REQUIRES_DEP_SENTINEL`, "Traits filter"), an older daemon advertises no traits so never
+  receives one, an older app drops the reasons from a decision and keeps the candidate.
 - `session-event` `done`: ingested since 2026-10-23 (Local op socket, "Session events"). A daemon
   that predates it refuses the frame `invalid`, which `report_task_done` words as "run `seanced
   update`"; the daemon's own new reply codes are `untasked` (a pane with no scheduler task),
@@ -2510,7 +2526,7 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   An enqueue is no request — an app's create is a store write the relay answers — so the
   leader's record of one is its admission, the first write after the version-1 create:
   `audit queue origin=leader op=admit task=<task> client=<client> createdAt=<ms>
-  state=ready|blocked|failed`, `client` the record's own `TaskSpec.client` (the PWA's `pwa`,
+  state=ready|blocked|failed avoid=<n> requires=<n> pin=<0|1>` (counts only, never a name, 2026-11-12), `client` the record's own `TaskSpec.client` (the PWA's `pwa`,
   MCP's `mcp`; absent from older clients), never the prompt (added 2026-10-18, M3 review S5).
 
 - **`queue-changed` tells apps to re-read** (M3 item 6). Every write the term makes to a
@@ -2845,7 +2861,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   `RepoEntry.origin`, never the machine-local name), `auth_missing`, `quota_unknown`,
   `quota_over_line`, `model_not_included` (the task's model is a gated one its seat bills
   to credits — "Seats" below), `cap_reached` (global, or `scope: "account"`, "Routing caps" below; the
-  `scope: "batch"` and `batch_order` an older leader sent went with batch strategies, "Batches"), `paused` ("Pause"), `skill_absent` (naming the skill; "Skills filter" below).
+  `scope: "batch"` and `batch_order` an older leader sent went with batch strategies, "Batches"), `paused` ("Pause"), `skill_absent` (naming the skill; "Skills filter" below), `trait_absent` (naming the trait; "Traits filter" below; `trait_unhealthy` is parsed and worded but nothing emits it until the probes PR).
   `auth_expired` (an exclave whose login `exclaveAuth` reads expired: its index in `ax`, or an `ae` time already
   past, on a daemon advertising `authHealth`; `expiring` and `unknown` still route, and `auth_missing`
   stands in for it on a signed-out exclave; Daemon, "Auth health"). M4's `base_unpushed` is read and
@@ -2946,6 +2962,69 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   (f) a symlinked skill dir, or a symlinked `SKILL.md`, in the tree is not advertised;
   (g) a clone without `refs/remotes/origin/HEAD` (no resolvable default branch) advertises no
   project skills.
+
+- **Traits filter** (2026-11-12, docs/scheduler.md M4 _Traits_, PR 1 of 3: core; probes and keep-free
+  follow). A trait is an operator-declared name a machine's exclave carries ("atlas": the box that
+  can reach the internal registry). A task's `requires` (1 to 4 unique names, `isTraitName`) puts
+  `trait_absent { trait }` on every candidate whose exclave lacks it, once per missing trait, in
+  `requires` order (`traitFilter`, `scheduler/src/traits.ts`; a trait in `TASK_SPEC_LIMITS.requires`
+  worst case is one reason per trait, which the record-size fixtures carry). The exclave is the unit:
+  every trait must sit on one exclave, not spread across a machine's. A candidate with no exclave
+  (`exclave: null`, an older daemon) lacks every trait and is `trait_absent`; `traitsHolding` ignores such
+  candidates when deciding which traits hold a task. Mixed with the other filters the reasons
+  stack as they do for any rejected candidate, so a pinned-elsewhere candidate carries both.
+  - **Declaring.** Only in the machine's own `config.json`: `"traits": {"<name>": {"exclaves"?: [...]}}`.
+    `exclaves` narrows a trait to those exclave names (default: all of the box's). `probe` and `keepFree`
+    are refused by name as "not built yet", so a config written for the later PRs fails loudly on an
+    older daemon rather than being ignored. Strict parse: a bad name, a non-object value or an unknown
+    key fails the config load. `withTraits` (`daemon/src/traits.ts`) stamps the sorted names onto each
+    `ExclaveInfo` in `buildInfo`; `CAPABILITIES.traits` is advertised by every daemon of this build.
+  - **Holds, not rejections.** A trait no candidate carries holds the task like any unplaceable
+    one; the leader logs `held on trait <name>` once per trait per term (`onTraitHeld`; a new term
+    logs it again, the memo being per term, which is accepted). `trait_unhealthy` is reserved for
+    probes (PR 2).
+  - **Submit-time checks, one per client.** Each client writes `requires` only to a verified leader
+    advertising `CAPABILITIES.traits`; otherwise it refuses, naming `seanced update` (or that no
+    verified leader leads). Then, in this order, it refuses a name no machine declares ("no
+    machine declares the trait nosuch — known: atlas"; a typo must not wait forever, `unknownTraitsText`)
+    and a spec no reachable exclave could ever satisfy: the traits that no single exclave carries
+    together, after the device pin, the account pin and `avoid` have cut the candidates
+    (`unreachableTraitsText`: "no exclave this task can reach carries atlas and gpu together — atlas is
+    on Mac; gpu is on WSL (avoided)"). A task without `requires` skips both. A continuation inherits its
+    task's `requires` through the capability gate only, with no name check: the traits it carries were
+    already accepted once and may since have been undeclared, which then waits like any held task.
+    The PWA has no avoid list, so its reachability check cuts by the machine and account pins only; a
+    held task (queued while the leader was unreachable) is checked when it is sent, not when held.
+  - **Rollout, a sentinel.** `taskRecordAtRest` appends `REQUIRES_DEP_SENTINEL`, `{ task: "", after:
+    "opened" }`, to the deps of a record carrying `requires`. A leader older than this build refuses a
+    dep whose `task` fails `isTaskId`, so it holds the record unreadable and the task is never placed
+    on a machine without the trait. `parseTaskSpec` drops it before the deps bound, only beside
+    `requires`; a sentinel without `requires` nulls the spec, and `requires` without the sentinel
+    parses (`parseTaskSpec` also reads specs that never pass the sealer: a brokered enqueue, the CLI's
+    check, `queue` and `cancel` replies, the PWA's cache): the attachments rule. Rejected: a new record
+    version (every reader would need a migration), and a `pin`-style field (nothing an older leader
+    refuses).
+  - **Record size.** `requires` at its bound adds 4 names to every write of the record; with it the
+    candidate bound moved from nine to eight (a nine-candidate worst-case record measured 41,096
+    bytes against `STORE_MAX_CT_LENGTH`'s 40,960), and the leader's `too_large` retry still cuts the
+    decision to its winner. A create at every bound is 27,176 bytes against 28,672.
+  - **Surfaces.** MCP: `requires` on `spawn_session` and each `queue_batch` member; `get_queue` gives each
+    task with `requires` a `requires: [{ trait, machines }]` and `list_machines` each exclave's
+    `traits`. CLI: repeatable `seanced spawn --requires <name>`, refused with `--now` ("--requires needs
+    the scheduler: --now spawns directly and skips routing"). PWA: a REQUIRES tile and sheet on the form,
+    listing the traits the fleet declares with the machines that hold each, and a "Needs atlas (on
+    MacBook)" line on the Queue screen and verdict, which leave `trait_absent` clauses out of the waiting
+    text as they do pin mismatches. Not in Raycast. Route preview carries `requires` (no change: the
+    request is the spec).
+  - **Mixed versions.** An old PWA or CLI hides or cannot write a `requires` task, as with `attachments`
+    (an old app drops the unreadable record from its list). An old keyless peer talking to a new broker
+    is covered by the broker; the reverse, a new `seanced` over an old broker, is checked client-side:
+    the peer reads its own daemon's registry entry and, absent `CAPABILITIES.traits`, refuses with "this
+    machine's daemon is older than this seanced: restart or update it (seanced update)", ahead of the
+    unknown-trait check, so the answer is not "no machine declares" for a fleet the old broker never
+    saw. Audit: the admit line gains counts (`avoid=<n> requires=<n> pin=<0|1>`), a refusal writes
+    `audit enqueue origin=<surface> client=<surface> refused=<unknown_trait|unreachable_trait>
+    requires=<n> unknown=<n>|missing=<n>`; never a name.
 
 - **Continue routing** (2026-10-26, Daemon, "Continuing a session"). A task with
   `spec.continues` has exactly one acceptable candidate, the `(deviceId, exclave, clone)` in
@@ -4173,7 +4252,7 @@ for the lot with its own `gh`.
     task that ended. `samePrReading` compares two readings field by field (`failing` element-wise,
     `at` ignored), so an unchanged wide reading refreshes on the same 5-minute cadence as before.
   - **Record size.** A worst-case awaiting-merge record, with `failing` at its bounds in two-byte
-    characters, `prAlert`, `continuedBy` and nine candidates, stays within `STORE_MAX_CT_LENGTH` (`parse.test.ts`).
+    characters, `prAlert`, `continuedBy` and eight candidates, stays within `STORE_MAX_CT_LENGTH` (`parse.test.ts`).
     The older "every bound at once" fixture is not that record (an awaiting-merge task holds no
     failure, reservation or needs-input fields, which `advance` clears), and is left as it was.
 - **A stacked merge is asked about again.** A merged PR whose base is not the default branch
@@ -4353,10 +4432,10 @@ as follows, without reopening the decision.
   units, against `TASK_REQUEST_LIMITS.prompt`'s 8,192), and names are bounded at 100
   units. Measured 2026-10-28 with ten entries, each name 100 two-byte characters and each
   type 127 bytes, the dep sentinel below included, beside every other field at its bound:
-  27,692 bytes, 980 under the cap. A name bound of 128 measured 28,436, too close to keep.
+  27,932 bytes, 740 under the cap (`requires` at its bound added 240). A name bound of 128 measured 28,436, too close to keep.
   Three-byte text fits less, as it already does for the prompt (the sealer's length check
   refuses it, `STORE_CREATE_MAX_CT_LENGTH`). With the leader's writes on top at every
-  bound and ten candidates, an unfinished record carrying the manifest seals to 40,108
+  bound and ten candidates, an unfinished record carrying the manifest seals to 40,828
   bytes against `STORE_MAX_CT_LENGTH`'s 40,960 (task 2, `parse.test.ts`). A `failure` at
   its bound would push it over, but only a `failed` record carries one, and the write
   that finishes a task drops the manifest (`lean`, below); past the cap, the leader's
@@ -6046,6 +6125,14 @@ of this section built.
     `claude setup-token` token (`CLAUDE_CODE_OAUTH_TOKEN`) stores nothing and reads `unknown`, and a
     session that dies on auth mid-run, which no hook reports. On only through `RunOpts.authHealth`, which
     `main.ts` always passes, like `usageRefresh`.
+- **Traits** (`daemon/src/traits.ts`, `config.ts`, 2026-11-12, scheduler M4 PR 1): `config.json`'s
+  `traits` map declares what this box's exclaves carry (Scheduler, "Traits filter"). `parseTraits` is
+  strict: names pass `isTraitName` (`TRAIT_LIMITS`), values are objects holding only `exclaves` (a
+  non-empty list of distinct exclave names; one matching no exclave never applies), at most
+  `TRAIT_LIMITS.perMachine` traits, and `probe` and `keepFree` are refused by name as "not built yet". `withTraits` stamps the sorted names onto each exclave in the
+  register blob; the daemon advertises `CAPABILITIES.traits`. Nothing about a trait is read from the
+  wire, the PWA or another machine, and nothing here calls `log.ts` from the MCP path.
+
 - **Session detection**: list all tmux panes across all sessions, dedup by
   window id (grouped sessions repeat windows), count a window as a session by
   one predicate, `isRegistered` in `sessions.ts`, which the spawn path shares.
@@ -8450,9 +8537,9 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   (its `machine` field, or `pin.machine`), each `queue_batch` member (`pin.machine`) and `seanced spawn`
   (`--machine`, `--account`, repeatable `--not`) take a pin to a machine, an account or both, and a list of
   machines to avoid, stored as `TaskSpec.pin { deviceId?, account? }` and `TaskSpec.avoid` (at most
-  `TASK_SPEC_LIMITS.avoid`, 4: with a 128-character account and nine candidates a record at that
+  `TASK_SPEC_LIMITS.avoid`, 4: with a 128-character account, `requires` at its bound of 4 and eight candidates a record at that
   bound still seals under `STORE_MAX_CT_LENGTH`, the push alert stamps included; ten fitted until
-  those landed, and past nine the leader trims the decision to its winner). The leader routes on them in `placementFilter`
+  those landed, nine until `requires` did, and past eight the leader trims the decision to its winner). The leader routes on them in `placementFilter`
   (`scheduler/src/route.ts`): a candidate off the pinned machine or account is `pin_mismatch`
   (`field`), one on an avoided machine `avoided`, so a restricted task waits for a slot it may take
   and never goes elsewhere — a task avoiding every machine waits too. An `accountId` that is null
@@ -8667,6 +8754,8 @@ names the app's queue, not `get_queue`/`cancel_task`, which a shell cannot call.
   exactly as MCP's `pin` and `avoid` ("`pin` and `avoid` on a spawn" above), with `here` for
   this box's own deviceId. Each takes a value; `--machine` and `--account` are given once.
   `--now` runs on this machine and places nothing, so it refuses all three.
+  `--requires <trait>` (repeatable, at most 4; 2026-11-12, "Traits filter") is gated and checked like
+  MCP's `requires` and refused with `--now`.
   `--autonomy <steer|checkpoint|auto>` came last (2026-11-12, "Autonomy level"): the level that
   sets plan mode for `steer`, queued or `--now`; there is no `--plan`.
 - _Key and relay:_ the queued form dials the relay as an app with this shell's
@@ -8985,7 +9074,8 @@ app-role relay client with the key it imported at start.
   unless paired, by `parseTaskSpec`), so a keyless `seanced mcp` `continue_task` and `seanced continue`
   work on a credential-delivered box. Before forwarding one the broker checks the verified leader
   advertises `continueTask` and refuses plainly otherwise, mirroring the client gate; everything else
-  stays: the daemon seals from the parsed spec at `expect: 0` with its own `createdAt`, lineage and base
+  stays: a spec carrying `requires` is refused `invalid_request` unless the verified leader advertises
+  `CAPABILITIES.traits`, the same gate beside `continueTask`; the daemon seals from the parsed spec at `expect: 0` with its own `createdAt`, lineage and base
   are still refused, and a non-continue enqueue is unchanged. The `request` action's remote `spawn`
   takes no widening: its `mode` must be `worktree` or `here`, else `invalid_request` (a continue
   spawn is the scheduler's, and `cleanSpawn` drops `continues`). What the keyless process gains is queueing
@@ -9837,6 +9927,10 @@ are tmux-rename's, except where they say mods.
   PATH — which today includes CI.
 
 ## Accepted trade-offs
+
+- A task with `requires` is invisible to an app or CLI older than traits (its leader-side record is
+  refused by an older leader, and an older app drops what it cannot read), as with `attachments`;
+  and the leader's "held on trait" line repeats after a leader change, its memo being per term.
 
 - `/spawn` and the daemon duplicate git/tmux logic — drift risk, owned, and on
   its way out: `seanced spawn --now` audits like the relay path, so the slash

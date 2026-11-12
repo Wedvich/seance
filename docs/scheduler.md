@@ -174,7 +174,7 @@ they now live:
 
 - Filters (the per-account cap and `skill_absent` are DESIGN.md "Routing caps" and "Skills
   filter"; the per-batch bound M3 built went 2026-10-26, "Batches"): stacked base unpushed and not on this exclave (M4,
-  _Stacking_); auth expired (M4, _Auth health_); trait absent or unhealthy (M4, _Traits_).
+  _Stacking_); auth expired (M4, _Auth health_); trait absent (built, DESIGN.md "Traits filter") or unhealthy (M4, _Traits_, probes).
 - Score: `dependencyDistance` gets an input once M4's stacking fills `TaskSpec.base`. The LXC
   pressure view (M4) reaches `machinePressure` folded into the LXC daemon's own `status`, so the
   library reads it as any other pressure.
@@ -408,7 +408,7 @@ of M4 has landed.
 | 2     | Spawn defaults to the scheduler (**Done**)                         | account pins (PR #303); keyless `auto` for MCP (**Done**)              | M–L                      |
 | 2     | Stacking                                                           | authoring surface; #28                                                 | L                        |
 | 2     | Auth health — **Done**                                             | Web Push (built); spiked 2026-11-12                                    | M                        |
-| 2     | Traits: core (new)                                                 | auth health's status lists (shape to copy)                             | M–L                      |
+| 2     | Traits: core — **Done** (PR #<n>)                                  | auth health's status lists (shape to copy)                             | M–L                      |
 | 2     | Traits: probes (new)                                               | traits core                                                            | M                        |
 | 2     | Traits: keep free (new)                                            | traits core                                                            | S                        |
 | 2     | Linear                                                             | settings; authoring surface                                            | L                        |
@@ -932,11 +932,14 @@ of M4 has landed.
     a per-probe cadence below 5 minutes.
   - _Decided, where a task says what it requires:_ one spelling per client, as #390 did for
     autonomy: `requires` (a list of names) on `spawn_session` and each `queue_batch` member;
-    `--requires <name>` (repeatable) on `seanced auto`; a REQUIRES field on the PWA form offering
+    `--requires <name>` (repeatable) on `seanced spawn`; a REQUIRES field on the PWA form offering
     the traits the fleet advertises. `TaskSpec.requires`, at most 4 names. Not on `--now`
     (the direct spawn bypasses routing) — refused there with a message. Not in Raycast for v1. A
     continuation inherits its task's `requires`; a route preview carries it. A client refuses a
-    name no machine advertises at enqueue, listing the known ones, so a typo never waits forever.
+    name no machine advertises at enqueue, listing the known ones, so a typo never waits forever,
+    and refuses a spec no exclave it can reach could satisfy (the traits split across exclaves, or
+    held only by machines the device pin, the account pin or `avoid` rules out), naming where each
+    trait is: one waiting forever would be the same typo by another route. Built in PR 1.
   - _Decided, what an older peer does:_ an older **leader** must refuse the task rather than place
     it anywhere. Every task record carrying `requires` is sealed through the one task sealer
     (`taskRecordAtRest`), which appends `REQUIRES_DEP_SENTINEL` (`{ task: "", after: "opened" }`)
@@ -965,8 +968,8 @@ of M4 has landed.
     Advertised as `ExclaveInfo.keepFree` (names). An older leader ignores the extra component
     (`parseScore` ignores extra keys). Rejected: a filter (a busy fleet would then refuse work the
     Mac could take), and a per-task "prefer not" list (that is `avoid` again).
-  - _PRs:_ (1) core — config, `ExclaveInfo.traits`, `TaskSpec.requires` with the sentinel, the
-    filter and both reasons, MCP/CLI/PWA authoring, `get_queue`/PWA text, `CAPABILITIES.traits`;
+  - _PRs:_ (1) core — **built** (PR #<n>; DESIGN.md "Traits filter"); config, `ExclaveInfo.traits`, `TaskSpec.requires` with the sentinel, the
+    filter and both reasons (`trait_unhealthy` parsed and worded, emitted by PR 2), MCP/CLI/PWA authoring, `get_queue`/PWA text, `CAPABILITIES.traits`;
     (2) probes — `tf` in status, `trait_unhealthy`; (3) `keepFree`. Each with its DESIGN.md
     subsection and threat-model entry (probes run operator-configured commands: a new exec
     surface, audited under its own origin `probe`).
