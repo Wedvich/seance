@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -32,10 +32,12 @@ import { deriveQueue } from "../pwa/src/queue-view.ts";
 import { describeVerdict } from "../pwa/src/verdict-view.ts";
 import { deriveView, type AppState } from "../pwa/src/view.ts";
 import {
+  cancelTask,
   killWindow,
   listWindows,
   ownMachine,
   startApp,
+  takeLeakedTasks,
   TOKEN,
   wsUrl,
   type SecondDaemon,
@@ -50,6 +52,11 @@ let stolenSeedId: string;
 beforeAll(async () => {
   suite = await startSuite("e2e-auto");
   ({ stack, stolenSeedId } = suite);
+});
+
+// A task a test leaves running holds a slot under its account's cap (4) for every later test.
+afterEach(() => {
+  expect(takeLeakedTasks()).toEqual([]);
 });
 
 afterAll(async () => {
@@ -84,6 +91,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     const second = await stack.startSecondDaemon({ name: "AutoBox" });
     const app = startApp(stack, { prompt: "route me" });
     let window: string | null = null;
+    let taskId: string | null = null;
     try {
       await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
       await stack.daemon.leader.settled();
@@ -126,6 +134,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       );
       if (queued.verdict?.kind !== "queued") throw new Error("no queued verdict");
       const { task } = queued.verdict;
+      taskId = task.id;
       const decision = task.decision;
       expect(decision?.chosen?.deviceId).toBe(stack.deviceId);
       expect(task.assignment?.deviceId).toBe(decision?.chosen?.deviceId);
@@ -143,7 +152,8 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       await pollUntil(() => nudges.some((n) => n.tasks?.includes(task.id)), "a queue-changed naming the task");
       stopNudges();
     } finally {
-      if (window !== null) await killWindow(window);
+      if (taskId !== null) await cancelTask(app.client, taskId);
+      if (window !== null) await killWindow(window).catch(() => {});
       app.stop();
       await second.stop();
     }
@@ -177,6 +187,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     // The suite's daemon audits to its stdout, which in-process is console.log.
     const audit = spyOn(console, "log");
     let window: string | null = null;
+    let taskId: string | undefined;
     try {
       await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
       await stack.daemon.leader.settled();
@@ -185,8 +196,9 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       expect(spawned.error).toBe(false);
       // The spawn is an enqueue: it answers queued, and the leader places it afterwards.
       expect(spawned.text).toMatch(/^task (\S+): queued/u);
-      const id = /^task (\S+):/u.exec(spawned.text)?.[1];
-      if (id === undefined) throw new Error(`no task id in: ${spawned.text}`);
+      taskId = /^task (\S+):/u.exec(spawned.text)?.[1];
+      if (taskId === undefined) throw new Error(`no task id in: ${spawned.text}`);
+      const id = taskId;
 
       type Queue = {
         tasks: { id: string; state: string; placement?: { machine: string; window?: string } }[];
@@ -220,7 +232,11 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       expect(lines.some((line) => line.includes("route me by mcp"))).toBe(false);
     } finally {
       audit.mockRestore();
-      if (window !== null) await killWindow(window);
+      if (taskId !== undefined) {
+        await cancelTask(await lazy.acquire(), taskId);
+        lazy.release();
+      }
+      if (window !== null) await killWindow(window).catch(() => {});
       await client.close();
       lazy.stop();
     }
@@ -432,7 +448,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
         code: "avoided",
       });
     } finally {
-      await Promise.all(ids.map((id) => app.client.cancel(id).catch(() => null)));
+      await Promise.all(ids.map((id) => cancelTask(app.client, id)));
       await Promise.all(windows.map((window) => killWindow(window).catch(() => {})));
       raw.close();
       built.fleet.stop();
@@ -555,7 +571,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       const controlWindow = controlBody?.assignment?.window;
       if (controlWindow !== undefined) windows.push(controlWindow);
     } finally {
-      await Promise.all(ids.map((id) => app.client.cancel(id).catch(() => null)));
+      await Promise.all(ids.map((id) => cancelTask(app.client, id)));
       await Promise.all(windows.map((window) => killWindow(window).catch(() => {})));
       raw.close();
       await client.close();
@@ -640,7 +656,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       expect(held?.requires?.[0]?.failing).toEqual(["TraitBox2"]);
       expect((await stack.queue().get(id))?.body?.assignment).toBeUndefined();
     } finally {
-      await Promise.all(ids.map((id) => app.client.cancel(id).catch(() => null)));
+      await Promise.all(ids.map((id) => cancelTask(app.client, id)));
       await client.close();
       lazy.stop();
       app.stop();
@@ -719,7 +735,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       const winner = candidates.find((c) => c.deviceId === stack.deviceId)?.score;
       expect(winner?.components).not.toHaveProperty("keepFree");
     } finally {
-      await Promise.all(ids.map((id) => app.client.cancel(id).catch(() => null)));
+      await Promise.all(ids.map((id) => cancelTask(app.client, id)));
       await Promise.all(windows.map((window) => killWindow(window).catch(() => {})));
       await client.close();
       lazy.stop();
@@ -795,7 +811,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
         expect.stringMatching(/^audit enqueue origin=cli client=cli task="[^"]+" createdAt=\d+ queued$/u),
       ]);
     } finally {
-      if (id !== undefined) await app.client.cancel(id).catch(() => null);
+      if (id !== undefined) await cancelTask(app.client, id);
       if (window !== null) await killWindow(window).catch(() => {});
       built.fleet.stop();
       app.stop();
@@ -826,7 +842,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       expect(stored?.assignment?.deviceId).toBe(stack.deviceId);
       window = stored?.assignment?.window ?? null;
     } finally {
-      if (taskId !== null) await app.client.cancel(taskId).catch(() => null);
+      if (taskId !== null) await cancelTask(app.client, taskId);
       if (window !== null) await killWindow(window).catch(() => {});
       app.stop();
     }
@@ -878,7 +894,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
         "Pinned to PickBox",
       );
     } finally {
-      if (taskId !== null) await app.client.cancel(taskId).catch(() => null);
+      if (taskId !== null) await cancelTask(app.client, taskId);
       if (window !== null) await killWindow(window).catch(() => {});
       app.stop();
       await second.stop();
@@ -939,7 +955,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       expect(row?.body).toContain("Waiting: FullBox");
       expect(row?.body).not.toContain("pinned machine");
     } finally {
-      if (taskId !== null) await app.client.cancel(taskId).catch(() => null);
+      if (taskId !== null) await cancelTask(app.client, taskId);
       app.stop();
       await full.stop();
     }
@@ -1042,7 +1058,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       window = (await stack.queue().get(id))?.body?.assignment?.window ?? null;
     } finally {
       if (down) await stack.restartDaemon();
-      await app.client.cancel(id).catch(() => null);
+      await cancelTask(app.client, id);
       if (window !== null) await killWindow(window);
       app.stop();
     }
@@ -1108,7 +1124,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
     } finally {
       audit.mockRestore();
       if (down) await stack.restartDaemon();
-      if (id !== undefined) await app.client.cancel(id).catch(() => null);
+      if (id !== undefined) await cancelTask(app.client, id);
       if (window !== null) await killWindow(window);
       built.fleet.stop();
       app.stop();
@@ -1167,7 +1183,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       expect(log).not.toContain("audit spawn");
       expect(log).not.toContain("plain from a shell");
     } finally {
-      if (id !== undefined) await app.client.cancel(id).catch(() => null);
+      if (id !== undefined) await cancelTask(app.client, id);
       if (window !== null) await killWindow(window);
       app.stop();
       await rm(dir, { recursive: true, force: true });
@@ -1208,7 +1224,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       );
       window = (await stack.queue().get(id))?.body?.assignment?.window ?? null;
     } finally {
-      await app.client.cancel(id).catch(() => null);
+      await cancelTask(app.client, id);
       if (window !== null) await killWindow(window);
       app.stop();
       await stack.restartDaemon();
@@ -1391,19 +1407,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       stolen?.close();
       if (down) await stack.restartDaemon();
       // The real leader runs what the squatter-era app queued; cancel ends that session too.
-      if (queuedId !== null) {
-        const id = queuedId;
-        // `dispatching` (spawn in flight) and a leader still taking over are asked again, never ignored: a task spawning after the test is a leak.
-        // A cleanup that gives up must not skip the teardown below, nor mask the test's own failure.
-        await pollUntil(
-          async () => {
-            const reply = await app.client.cancel(id).catch(() => null);
-            return reply !== null && ("task" in reply || reply.code === "finished" || reply.code === "task_not_found");
-          },
-          "the leftover task to be cancelled or finished",
-          20_000,
-        ).catch((err: unknown) => console.error(`leftover task ${id} not cleaned up: ${String(err)}`));
-      }
+      if (queuedId !== null) await cancelTask(app.client, queuedId);
       app.stop();
       watch.close();
     }

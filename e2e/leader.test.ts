@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, spyOn, test, type Mock } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test, type Mock } from "bun:test";
 import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import {
@@ -19,7 +19,16 @@ import { localSocketReachable } from "../daemon/src/local-client.ts";
 import { RelayClient as DaemonRelayClient } from "../daemon/src/relay-client.ts";
 import { tmux, tmuxOk } from "../daemon/src/tmux.ts";
 import { pollUntil } from "../daemon/test/fixtures.ts";
-import { killWindow, listRegisteredWindows, listWindows, startApp, type SecondDaemon, type Stack } from "./harness.ts";
+import {
+  cancelTask,
+  killWindow,
+  listRegisteredWindows,
+  listWindows,
+  startApp,
+  takeLeakedTasks,
+  type SecondDaemon,
+  type Stack,
+} from "./harness.ts";
 import { connectApp } from "../relay/test/harness.ts";
 import { fixtureOrigin, q, startSuite, watchLeader, type Suite } from "./suite.ts";
 
@@ -33,6 +42,11 @@ beforeAll(async () => {
   daemonStore = spyOn(DaemonRelayClient.prototype, "store");
   suite = await startSuite("e2e-leader");
   ({ base, stack } = suite);
+});
+
+// A task a test leaves running holds a slot under its account's cap (4) for every later test.
+afterEach(() => {
+  expect(takeLeakedTasks()).toEqual([]);
 });
 
 afterAll(async () => {
@@ -261,7 +275,7 @@ describe("session report: MCP's report path ↔ local daemon ↔ relay ↔ leade
         10_000,
       );
     } finally {
-      await app.client.cancel(nudge).catch(() => null);
+      await cancelTask(app.client, nudge);
       app.stop();
       if (window !== undefined) await killWindow(window);
     }
@@ -407,7 +421,7 @@ describe("takeover: a leader stopped between spawn and verdict", () => {
       if (down) await stack.restartDaemon();
       // Frees a stub still waiting if the test failed before releasing it.
       await Bun.write(go, "");
-      await app.client.cancel(id).catch(() => null);
+      await cancelTask(app.client, id);
       if (second !== null) await tmux(["kill-session", "-t", second.tmuxSession]).catch(() => undefined);
       await second?.stop();
       app.stop();
@@ -614,7 +628,7 @@ describe("settings record: the leader's term creates it, and no later term repla
       await pollUntil(() => stack.pushAttempts().length > 0, "the leader to try a push", 10_000);
       expect(stack.pushAttempts().every((host) => host === "fcm.googleapis.com")).toBe(true);
     } finally {
-      await app.client.cancel(taskId).catch(() => null);
+      await cancelTask(app.client, taskId);
       app.stop();
     }
   }, 60_000);
@@ -863,7 +877,7 @@ describe("continue: an app's continue task ↔ leader ↔ the machine that ran t
         assignment: { deviceId: b, clone: basename(stack.fixture.repoPath) },
       });
     } finally {
-      await app.client.cancel(id).catch(() => null);
+      await cancelTask(app.client, id);
       if (second !== null) await tmux(["kill-session", "-t", second.tmuxSession]).catch(() => undefined);
       await second?.stop();
       app.stop();
