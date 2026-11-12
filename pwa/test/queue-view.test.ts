@@ -1342,8 +1342,11 @@ describe("the Start now menu item", () => {
   });
 
   test("shown but disabled, saying why, before the task is ready: the leader would refuse it", () => {
-    expect(item(task("w", { state: "blocked" }))).toEqual({ sub: "Waits on the tasks it depends on", enabled: false });
-    expect(item(task("w", { state: "queued" }))).toEqual({ sub: "Not admitted by the scheduler yet", enabled: false });
+    expect(item(task("w", { state: "blocked" }))).toEqual({
+      sub: "Waiting on the tasks it depends on",
+      enabled: false,
+    });
+    expect(item(task("w", { state: "queued" }))).toEqual({ sub: "Waiting for the scheduler", enabled: false });
     // Not even a decision that would let it past the caps lifts it: run-now refuses a task that isn't ready.
     expect(item({ ...rejecting(capped), state: "blocked" })?.enabled).toBe(false);
   });

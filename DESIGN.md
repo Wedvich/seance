@@ -8566,9 +8566,11 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   queued verdict when that shows the task, clearing once the task is seen past waiting;
   otherwise on the Queue screen's notice, naming the task (`taskTitle`, its row label), and kept
   through reads until one asked with the screen open lands, so opening the screen shows it. That
-  notice floats as a toast above the screen's footer, so it shows however far the list is scrolled,
-  until its × or ten seconds unheld close it; the screen's holds and unreadable line stay in the list,
-  since each is a standing state with its own button. The
+  notice shows as a toast docked between the list and the footer, so it shows however far the list is
+  scrolled and never covers the last card. It has no timer — it can be an instruction ("Refresh to see
+  whether it did.") and a phone has no hover to hold one — and closes on its ×, on the next action, or
+  on a read that lands, as before. The screen's holds and unreadable line stay in the list, since each
+  is a standing state with its own button. The
   intent is in memory: a reload leaves the task queued, as a takeover between the route and the
   write would. Rejected: sending `run-now` with the create
   (refused before admission) and a wire flag on the record (above, "Run now lifts both caps").
@@ -8729,7 +8731,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   Every waiting card (`queued`, `blocked`, `ready`) also has **Start now** in its ⋯ menu, always shown (`QueueRow.startNow`),
   worded and greyed by the Spawn screen's rules (`decisionStartNowItem` over the task's latest decision: greyed only when
   the decision has no winner and no candidate held by the caps alone, or the leader lacks `runNow`). A `queued` or `blocked` one is
-  greyed too, its line saying why ("Not admitted by the scheduler yet", "Waits on the tasks it depends on"): `run-now` takes only
+  greyed too, its line saying why ("Waiting for the scheduler", "Waiting on the tasks it depends on"): `run-now` takes only
   `ready` and refuses anything earlier `not_waiting`, so offering it there was a tap certain to fail (2026-11-12). A card shown
   `blocked` after its dependencies cleared waits for the next read (a `queue-changed` nudge, or Refresh) to enable it.
 - **Continue on the Queue screen** (2026-10-26, widened 2026-10-27, Daemon, "Continuing a session"). A failed

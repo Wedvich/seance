@@ -247,8 +247,8 @@ function dotOf(task: Task): QueueDot | null {
  * greys until then rather than offering a tap that is always refused. Shown still: it says why.
  */
 function startNowFor(task: Task): StartNowItem {
-  if (task.state === "blocked") return { sub: "Waits on the tasks it depends on", enabled: false };
-  if (task.state === "queued") return { sub: "Not admitted by the scheduler yet", enabled: false };
+  if (task.state === "blocked") return { sub: "Waiting on the tasks it depends on", enabled: false };
+  if (task.state === "queued") return { sub: "Waiting for the scheduler", enabled: false };
   return decisionStartNowItem(task.decision ?? null);
 }
 

@@ -828,16 +828,10 @@
 
 /* ---- toast (toast.tsx) ---- */
 
-/* Anchors the toast: it floats just above the footer, over the list's foot. */
-.queue-footer {
-  position: relative;
-}
-
+/* In flow above the footer: the list shrinks to end above it, so no card sits out of reach under it. */
 .toast {
-  position: absolute;
-  left: var(--gutter);
-  right: var(--gutter);
-  bottom: calc(100% + var(--gap));
+  flex: none;
+  margin: 0 var(--gutter) var(--gap);
   display: flex;
   align-items: flex-start;
   gap: 11px;
@@ -877,6 +871,7 @@
   flex: none;
   display: grid;
   place-items: center;
+  position: relative;
   width: 32px;
   height: 32px;
   margin: -6px 0;
@@ -884,6 +879,20 @@
   border-radius: 8px;
   background: transparent;
   color: var(--fg2);
+  cursor: pointer;
+}
+
+/* A finger-sized target around the small glyph, kept inside the toast's own box. */
+.toast-close::before {
+  content: "";
+  position: absolute;
+  inset: -6px;
+}
+
+@media (hover: hover) {
+  .toast-close:hover {
+    color: var(--fg);
+  }
 }
 
 .toast-close:active {
