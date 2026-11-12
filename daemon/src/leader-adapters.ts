@@ -11,8 +11,10 @@ import {
   type Unreachable,
 } from "@seance/scheduler";
 import {
+  isRecord,
   OP_TIMEOUT_MS,
   parseInterrupted,
+  parsePushBranchResponse,
   parseTaskProgressList,
   quote,
   RequestFailure,
@@ -56,6 +58,10 @@ export function fencedStore(inner: QueueStore, term: number, live: () => boolean
     getPause: () => inner.getPause(),
     putPause: (expect, holds) => fence(() => inner.putPause(expect, holds)),
   };
+}
+
+function isNoAnswer(reply: unknown): reply is NoAnswer {
+  return isRecord(reply) && (reply["code"] === UNREACHABLE || reply["code"] === UNDELIVERED);
 }
 
 function sessionsOf(reply: SessionsResponse | ErrorResponse | NoAnswer): TaskSessionsReply {
@@ -133,7 +139,11 @@ const NEVER_DELIVERED: ReadonlySet<FailureReason> = new Set(["offline", "unknown
  * has said it is someone else's.
  */
 export function termFleet(o: TermFleetOpts): Fleet {
-  const remote = async <T>(deviceId: string, op: "spawn" | "sessions" | "despawn", payload: unknown) => {
+  const remote = async <T>(
+    deviceId: string,
+    op: "spawn" | "sessions" | "despawn" | "push-branch",
+    payload: unknown,
+  ) => {
     try {
       return await o.relay.request<T>(deviceId, op, payload);
     } catch (err) {
@@ -143,6 +153,7 @@ export function termFleet(o: TermFleetOpts): Fleet {
     }
   };
   const ended = unreachable("the scheduler term has ended");
+  const malformedPush: ErrorResponse = { ok: false, code: "internal_error", message: "malformed push-branch reply" };
   return {
     machines: () => o.relay.getState().machines,
     fleetQuota: () => o.relay.getState().fleetQuota,
@@ -160,6 +171,15 @@ export function termFleet(o: TermFleetOpts): Fleet {
       if (!o.live()) return ended;
       if (deviceId === o.selfDeviceId) return o.local.despawn(request);
       return remote<DespawnResponse>(deviceId, "despawn", request);
+    },
+    pushBranch: async (deviceId, request) => {
+      if (!o.live()) return ended;
+      if (deviceId === o.selfDeviceId) return o.local.pushBranch(request);
+      const reply: unknown = await remote<unknown>(deviceId, "push-branch", request);
+      // The host's own no-answer passes through; anything else is a remote daemon's payload, trusted only once
+      // parsed: `remoteBranch` is named in a prompt and compared to a PR head.
+      if (isNoAnswer(reply)) return reply;
+      return parsePushBranchResponse(reply) ?? malformedPush;
     },
   };
 }

@@ -119,6 +119,7 @@ const noLocalOps: LocalOps = {
   sessions: () => Promise.reject(new Error("unexpected local sessions")),
   spawn: () => Promise.reject(new Error("unexpected local spawn")),
   despawn: () => Promise.reject(new Error("unexpected local despawn")),
+  pushBranch: () => Promise.reject(new Error("unexpected local push-branch")),
 };
 
 /**
@@ -2546,6 +2547,66 @@ describe("fleet quota record", () => {
       leader.lead(1);
       await leader.settled();
       expect(legs[0]?.getState().fleetQuota).toEqual([]);
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+});
+
+describe("pass", () => {
+  test("is refused with a code the app can act on, audited with its request id and the task, and changes no task", async () => {
+    const relay = startTestRelay(TOKEN);
+    const store = new MemoryQueueStore();
+    await store.put("w1", 0, task("w1", { state: "queued" }));
+    await store.put("d1", 0, task("d1", { state: "done", doneBy: "manual" }));
+    const { leader, replies } = leaderOver(relay, store);
+    const ids: Record<string, string> = {};
+    const ask = async (name: string, payload: unknown): Promise<unknown> => {
+      const request = await appRequest("pass", payload);
+      ids[name] = (await open(key, request)).id;
+      leader.deliver(request);
+      return (await replies.next()).response.payload;
+    };
+    const lines = await captureLog(async () => {
+      try {
+        leader.lead(1);
+        await leader.settled();
+        expect(await ask("nobody", { taskId: "nobody" })).toMatchObject({ ok: false, code: "task_not_found" });
+        expect(await ask("waiting", { taskId: "w1" })).toMatchObject({ ok: false, code: "not_running" });
+        expect(await ask("done", { taskId: "d1" })).toMatchObject({ ok: false, code: "finished" });
+        expect(await ask("malformed", { id: "w1" })).toMatchObject({ ok: false, code: "invalid_request" });
+        expect(await ask("bad", { taskId: 1 })).toMatchObject({ ok: false, code: "invalid_request" });
+      } finally {
+        leader.stop();
+        relay.stop();
+      }
+    });
+    const audits = lines.filter((line) => line.includes("audit queue"));
+    expect(audits).toContainEqual(
+      expect.stringContaining(`op=pass id="${ids["nobody"]}" task="nobody" refused code=not_found`),
+    );
+    expect(audits).toContainEqual(
+      expect.stringContaining(`op=pass id="${ids["waiting"]}" task="w1" refused code=not_running`),
+    );
+    expect(audits).toContainEqual(
+      expect.stringContaining(`op=pass id="${ids["done"]}" task="d1" refused code=finished`),
+    );
+    expect((await store.list()).map((entry) => entry.body?.state).toSorted()).toEqual(["done", "ready"]);
+  });
+
+  test("sealed by a daemon is an event, never a request", async () => {
+    const relay = startTestRelay(TOKEN);
+    const store = new MemoryQueueStore();
+    await store.put("w1", 0, task("w1", { state: "queued" }));
+    const { leader, replies } = leaderOver(relay, store);
+    try {
+      leader.lead(1);
+      await leader.settled();
+      leader.deliver(await appRequest("pass", { taskId: "w1" }, "remote"));
+      // A non-event cannot be polled for.
+      await Bun.sleep(100);
+      expect(replies.size).toBe(0);
     } finally {
       leader.stop();
       relay.stop();

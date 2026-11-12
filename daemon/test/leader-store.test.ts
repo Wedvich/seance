@@ -78,6 +78,7 @@ const noLocalOps: LocalOps = {
   sessions: () => Promise.reject(new Error("unexpected local sessions")),
   spawn: () => Promise.reject(new Error("unexpected local spawn")),
   despawn: () => Promise.reject(new Error("unexpected local despawn")),
+  pushBranch: () => Promise.reject(new Error("unexpected local push-branch")),
 };
 
 /**

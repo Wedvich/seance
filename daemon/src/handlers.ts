@@ -8,6 +8,8 @@ import type {
   MetricsRequest,
   MetricsSeries,
   Plain,
+  PushBranchErrorCode,
+  PushBranchResponse,
   RepoEntry,
   RescanResponse,
   SessionEntry,
@@ -23,6 +25,7 @@ import {
   isAutonomyLevel,
   isTaskId,
   parseAttachmentManifest,
+  parsePushBranchRequest,
   quote,
   REPLY_JSON_BUDGET,
   SCHEDULER_CLIENT,
@@ -31,9 +34,11 @@ import {
 } from "@seance/shared";
 import {
   despawnAudit,
+  pushAudit,
   spawnAudit,
   type AuditSink,
   type DespawnAudit,
+  type PushAudit,
   type SpawnAudit,
   type SpawnOrigin,
 } from "./audit.ts";
@@ -49,6 +54,7 @@ import {
 import { AttachmentUnavailable } from "./attachments.ts";
 import { canonical } from "./gitdir.ts";
 import { log } from "./log.ts";
+import { pushTaskBranch } from "./push-branch.ts";
 import { LaunchesClosed, type SettleLaunch } from "./session-events.ts";
 
 export interface HandlerContext {
@@ -94,6 +100,13 @@ export interface TaskLaunches {
   readonly launch: (taskId: string) => Promise<SettleLaunch>;
   /** The ledger holds the task as launched here, and no launch of it is in flight. */
   readonly launched: (taskId: string) => boolean;
+  /**
+   * Where the ledger noted `taskId`'s worktree, for `push-branch`; `refused` says why there is none.
+   * Never from the wire: the request names a task, this machine says where it ran.
+   */
+  readonly worktree: (
+    taskId: string,
+  ) => { readonly repo: string; readonly path: string } | { readonly refused: string };
   /**
    * Where the ledger noted `taskId`'s worktree and the session id it ran under, for a
    * continuation; `refused` says why there is none. Never from the wire: the request names a
@@ -516,6 +529,43 @@ async function handleDespawn(
 }
 
 /**
+ * `push-branch` (DESIGN.md, "Passing to a successor"): the scheduler asking the machine that ran a task to push its
+ * worktree branch. Only the scheduler's seal, and only for a task this machine's own launch ledger noted a worktree
+ * of, in a clone it still scans and under that clone's `.claude/worktrees/` — so a request names a task, never a
+ * path, a repo or a remote. Replies and audit lines carry codes and a short tip, never a branch or a URL.
+ */
+async function handlePushBranch(
+  ctx: HandlerContext,
+  audit: PushAudit,
+  payload: unknown,
+  scheduler: boolean,
+): Promise<PushBranchResponse> {
+  if (!scheduler) return { ok: false, code: "invalid_request", message: "only the scheduler pushes a task's branch" };
+  const request = parsePushBranchRequest(payload);
+  if (request === null) return { ok: false, code: "invalid_request", message: "malformed push-branch request" };
+  const refuse = async (code: PushBranchErrorCode, message: string): Promise<PushBranchResponse> => {
+    await audit.refused(request.taskId, code);
+    return { ok: false, code, message };
+  };
+  const site = ctx.tasks?.worktree(request.taskId);
+  if (site === undefined || "refused" in site)
+    return refuse("not_launched", "the task has no worktree on this machine");
+  const entry = ctx.getRepos().find((r) => r.path === site.repo);
+  if (entry === undefined) return refuse("not_launched", "the task's repo is no longer scanned here");
+  const real = await canonical(site.path);
+  if (real !== site.path || !real.startsWith(join(entry.path, ".claude", "worktrees") + sep)) {
+    return refuse("not_launched", "the task's worktree is not under its repo's worktrees");
+  }
+  const reply = await pushTaskBranch(
+    { repo: entry.name, path: real },
+    request.expect === undefined ? {} : { expect: request.expect },
+  );
+  if (reply.ok) await audit.done(request.taskId, entry.name, reply.pushed ? "pushed" : "unchanged", reply.tip);
+  else await audit.done(request.taskId, entry.name, reply.code, undefined);
+  return reply;
+}
+
+/**
  * One decimal: the units are whole percent, MiB and KiB/s, and a rollup's
  * average otherwise serializes to seventeen digits — a third of the reply.
  */
@@ -629,11 +679,12 @@ export function fitProgress(
   };
 }
 
-/** The three ops the scheduler dispatches, typed, for a caller inside this process. */
+/** The ops the scheduler dispatches, typed, for a caller inside this process. */
 export interface LocalOps {
   readonly sessions: () => Promise<SessionsResponse | ErrorResponse>;
   readonly spawn: (payload: unknown) => Promise<SpawnResponse | ErrorResponse>;
   readonly despawn: (payload: unknown) => Promise<DespawnResponse | ErrorResponse>;
+  readonly pushBranch: (payload: unknown) => Promise<PushBranchResponse | ErrorResponse>;
 }
 
 /**
@@ -644,6 +695,7 @@ export interface LocalOps {
 export function createLocalOps(ctx: HandlerContext, origin: SpawnOrigin): LocalOps {
   const audit = spawnAudit(origin, ctx.auditSink);
   const despawnTrail = despawnAudit(origin, ctx.auditSink);
+  const pushTrail = pushAudit(origin, ctx.auditSink);
   // No `Plain` id to join on: a spawn's request line carries its task id, which the
   // spawn lines after it and the scheduler's task both name; the rest get a fresh one.
   const run = async <T>(op: string, id: string, body: () => Promise<T>): Promise<T | ErrorResponse> => {
@@ -662,6 +714,8 @@ export function createLocalOps(ctx: HandlerContext, origin: SpawnOrigin): LocalO
       );
     },
     despawn: (payload) => run("despawn", crypto.randomUUID(), () => handleDespawn(ctx, despawnTrail, payload, true)),
+    pushBranch: (payload) =>
+      run("push-branch", crypto.randomUUID(), () => handlePushBranch(ctx, pushTrail, payload, true)),
   };
 }
 
@@ -689,6 +743,7 @@ export function createHandler(
 ): (plain: Plain, from?: string, replied?: Promise<unknown>) => Promise<Plain | null> {
   const audit = spawnAudit(origin, ctx.auditSink);
   const despawnTrail = despawnAudit(origin, ctx.auditSink);
+  const pushTrail = pushAudit(origin, ctx.auditSink);
   return async (plain: Plain, from?: string, replied?: Promise<unknown>): Promise<Plain | null> => {
     await auditRequest(ctx, origin, plain.op, plain.id);
 
@@ -709,6 +764,8 @@ export function createHandler(
           return { payload: await handleSpawn(ctx, audit, plain.payload, from === SCHEDULER_ID, replied) };
         case "despawn":
           return { payload: await handleDespawn(ctx, despawnTrail, plain.payload, from === SCHEDULER_ID) };
+        case "push-branch":
+          return { payload: await handlePushBranch(ctx, pushTrail, plain.payload, from === SCHEDULER_ID) };
         case "metrics":
           return { payload: handleMetrics(ctx, plain.payload) };
         case "rescan": {

@@ -244,15 +244,48 @@ export function despawnAudit(origin: SpawnOrigin, sink: AuditSink): DespawnAudit
   };
 }
 
+/**
+ * A `push-branch`: which task's worktree, in which repo, and what came of it — a code, `pushed` or `unchanged`
+ * (origin already held the tip) — with the first seven characters of the tip. Never the branch, its remote name or a
+ * URL: they are the user's own text (DESIGN.md, "Passing to a successor").
+ */
+export interface PushAudit {
+  readonly refused: (taskId: string, outcome: string) => Promise<void>;
+  readonly done: (taskId: string, repo: string, outcome: string, tip: string | undefined) => Promise<void>;
+}
+
+export function pushAudit(origin: SpawnOrigin, sink: AuditSink): PushAudit {
+  return {
+    refused: async (taskId, outcome) => {
+      await sink(`audit push origin=${origin} task=${quote(taskId)} outcome=${outcome}`);
+    },
+    done: async (taskId, repo, outcome, tip) => {
+      const tipNote = tip === undefined ? "" : ` tip=${tip.slice(0, 7)}`;
+      await sink(`audit push origin=${origin} task=${quote(taskId)} repo=${quote(repo)} outcome=${outcome}${tipNote}`);
+    },
+  };
+}
+
 export interface QueueAudit {
   readonly markedDone: (id: string, task: { readonly id: string }) => Promise<void>;
   /** A `run-now` that reserved the task past the concurrency caps. */
   readonly ranNow: (id: string, task: { readonly id: string }) => Promise<void>;
   readonly cancelled: (id: string, task: { readonly id: string; readonly leftRunning?: boolean }) => Promise<void>;
+  /** A `pass` that created `successor` for `task`. The branch and the PR stay out: they are the user's own text. */
+  readonly passed: (id: string, task: { readonly id: string }, successorId: string) => Promise<void>;
   /** A `discard` that deleted the unreadable record at `task` and `version`. */
   readonly discarded: (id: string, taskId: string, version: number) => Promise<void>;
   readonly refused: (
-    op: "cancel" | "mark-done" | "run-now" | "pause" | "resume" | "discard" | "push-subscribe" | "push-unsubscribe",
+    op:
+      | "cancel"
+      | "mark-done"
+      | "run-now"
+      | "pass"
+      | "pause"
+      | "resume"
+      | "discard"
+      | "push-subscribe"
+      | "push-unsubscribe",
     id: string,
     code: string,
     /** What the request named: a `cancel`, `mark-done` or `run-now`'s task, a `pause` or `resume`'s account (absent: the whole queue). */
@@ -286,6 +319,8 @@ export function queueAudit(sink: AuditSink): QueueAudit {
       emit(
         `op=cancel id=${quote(id)} task=${quote(task.id)} ok${task.leftRunning === true ? " leftRunning=true" : ""}`,
       ),
+    passed: (id, task, successorId) =>
+      emit(`op=pass id=${quote(id)} task=${quote(task.id)} successor=${quote(successorId)} trigger=manual ok`),
     discarded: (id, taskId, version) => emit(`op=discard id=${quote(id)} task=${quote(taskId)} version=${version} ok`),
     held: (op, id, account) =>
       emit(`op=${op} id=${quote(id)}${account === undefined ? "" : ` account=${quote(account)}`} ok`),

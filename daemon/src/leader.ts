@@ -32,7 +32,7 @@ import { createMachineAlertWatch } from "./machine-alerts.ts";
 import { fencedStore, termFleet } from "./leader-adapters.ts";
 import { requestHandler } from "./leader-requests.ts";
 import { log } from "./log.ts";
-import { startPrPoller, type PrPollerOpts } from "./pr-status.ts";
+import { readPrHead, startPrPoller, type PrPollerOpts } from "./pr-status.ts";
 import { createPushSender, type PushSender } from "./push-sender.ts";
 import { createQueueStore, flooredStore, type StoreLeg } from "./queue-store.ts";
 import type { Fetch } from "./seams.ts";
@@ -566,6 +566,20 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     }),
     now,
     onError: fail,
+    // A pass's successor is created through the leader's own app leg (an `expect: 0` create the relay answers
+    // itself), never a store write of the term: the relay's term fence does not cover creates.
+    create: async (task) => {
+      if (!isLive()) return { ok: false, code: "unreachable" };
+      try {
+        const reply = await relay.createTask(task);
+        if (reply === null) return { ok: false, code: "unreachable" };
+        return reply.ok ? { ok: true } : { ok: false, code: reply.code };
+      } catch {
+        return { ok: false, code: "unreachable" };
+      }
+    },
+    prHead: (prUrl) => readPrHead(prUrl, opts.prStatus),
+    log: (line) => log.info(line),
     onAlert: (alert) => {
       log.warn(`scheduler: ${alert.message}`);
       if (pushSender === null) return;

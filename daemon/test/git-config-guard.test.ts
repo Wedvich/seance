@@ -359,7 +359,7 @@ describe("every network call takes one environment", () => {
       if (name !== "git-hardened.ts" && text.includes("GCM_INTERACTIVE")) offenders.push(`${name}: GCM_INTERACTIVE`);
     }
     expect(offenders).toEqual([]);
-    // reap's fetch and set-head, the base fetch, self-update's set-head and fetch.
-    expect(sites).toBe(5);
+    // reap's fetch and set-head, the base fetch, self-update's set-head and fetch, a pass's push and its no-upstream fetch.
+    expect(sites).toBe(7);
   });
 });
