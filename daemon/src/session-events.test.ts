@@ -1305,7 +1305,15 @@ describe("a session's own pass", () => {
   const SITE = { repo: "/r", path: "/r/.claude/worktrees/x", session: SESSION };
   const PUSHED: PushBranchResponse = { ok: true, remoteBranch: "feature/x", tip: TIP, pushed: true };
 
-  function setup(opts: { readonly pass?: boolean; readonly push?: PushBranchResponse; readonly sent?: boolean } = {}) {
+  function setup(
+    opts: {
+      readonly pass?: boolean;
+      readonly push?: PushBranchResponse;
+      readonly sent?: boolean;
+      /** Runs inside the push, as a caller giving up or a throw would. */
+      readonly during?: () => void;
+    } = {},
+  ) {
     const ledger = LaunchLedger.memory();
     const ended = new EndedTasks(ledger);
     const panes: BoundPane[] = [
@@ -1333,6 +1341,7 @@ describe("a session's own pass", () => {
             pass: {
               push: (taskId: string, options: { readonly hasPr: boolean }): Promise<PushBranchResponse> => {
                 pushes.push({ taskId, hasPr: options.hasPr });
+                opts.during?.();
                 return Promise.resolve(opts.push ?? PUSHED);
               },
               send: (pass: SessionPass): Promise<boolean> => {
@@ -1346,7 +1355,8 @@ describe("a session's own pass", () => {
             },
           }),
     });
-    const send = (pane: string, fields: object): Promise<unknown> => events.handle(frame({ pane, ...fields }), null);
+    const send = (pane: string, fields: object, caller?: AbortSignal): Promise<unknown> =>
+      events.handle(frame({ pane, ...fields }), null, caller);
     const launch = async (): Promise<void> => {
       await ledger.record("t1");
       await ledger.note("t1", SITE);
@@ -1483,7 +1493,7 @@ describe("a session's own pass", () => {
     }
   });
 
-  test("a stopped ingest answers stopping, before and after the push", async () => {
+  test("a stopped ingest answers stopping before the push, and says the branch is pushed after it", async () => {
     const stopped = setup();
     await stopped.launch();
     stopped.events.stop();
@@ -1509,9 +1519,99 @@ describe("a session's own pass", () => {
     });
     expect(await slow.handle(frame({ pane: "%1", pass: true, record: RECORD }), null)).toEqual({
       ok: false,
-      code: "stopping",
+      code: "stopping_pushed",
     });
     during.events.stop();
+  });
+
+  test("a push that throws is push_failed, never `invalid`, and sends and marks nothing", async () => {
+    const { launch, ledger, passes, closed, send, events } = setup();
+    try {
+      await launch();
+      const throwing = createSessionEvents({
+        panes: () => Promise.resolve([{ id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" }]),
+        exclaves: () => [],
+        forward: () => {},
+        ended: new EndedTasks(ledger),
+        hostNamesPeers: () => false,
+        pass: {
+          push: (): Promise<PushBranchResponse> => Promise.reject(new Error("audit log: EACCES")),
+          send: (pass: SessionPass): Promise<boolean> => {
+            passes.push(pass);
+            return Promise.resolve(true);
+          },
+          close: (): Promise<void> => Promise.resolve(),
+        },
+      });
+      expect(await throwing.handle(frame({ pane: "%1", pass: true, record: RECORD }), null)).toEqual({
+        ok: false,
+        code: "push_failed",
+      });
+      expect(passes).toEqual([]);
+      await send("%1", { state: "idle", turnEnded: true });
+      expect(closed).toEqual([]);
+      throwing.stop();
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("a caller that has gone is told nothing is sent, and no pass, mark or close follows (an interrupted call)", async () => {
+    const before = new AbortController();
+    before.abort();
+    const early = setup();
+    try {
+      await early.launch();
+      expect(await early.send("%1", { pass: true, record: RECORD }, before.signal)).toEqual({
+        ok: false,
+        code: "cancelled",
+      });
+      expect(early.pushes).toEqual([]);
+    } finally {
+      early.events.stop();
+    }
+
+    // Gone while the push ran: the branch is pushed (clean, never forced), but it is never passed.
+    const mid = new AbortController();
+    const late = setup({ during: () => mid.abort() });
+    try {
+      await late.launch();
+      expect(await late.send("%1", { pass: true, record: RECORD }, mid.signal)).toEqual({
+        ok: false,
+        code: "cancelled",
+      });
+      expect(late.pushes).toHaveLength(1);
+      expect(late.passes).toEqual([]);
+      // No mark: a later pass-close (which only a sent pass could provoke) finds none, and a turn end closes nothing.
+      await late.send("%1", { state: "idle", turnEnded: true });
+      await late.events.armPassClose("t1");
+      expect(late.closed).toEqual([]);
+    } finally {
+      late.events.stop();
+    }
+  });
+
+  test("one close per pane: a pass replaces a hand-off's mark, and a hand-off after a pass is refused", async () => {
+    const { launch, ended, closed, handedOff, send, events } = setup();
+    try {
+      await launch();
+      await ended.notePr("t1", PR);
+      await send("%1", { handoff: true });
+      await send("%1", { pass: true, record: RECORD });
+      await events.armPassClose("t1");
+      await send("%1", { state: "idle", turnEnded: true });
+      expect(closed).toEqual([["%1", "t1"]]);
+      expect(handedOff).toEqual([]);
+
+      await send("%1", { pass: true, record: RECORD });
+      expect(await send("%1", { handoff: true })).toEqual({ ok: false, code: "passed" });
+      await events.armPassClose("t1");
+      await send("%1", { state: "idle", turnEnded: true });
+      expect(closed).toHaveLength(2);
+      expect(handedOff).toEqual([]);
+    } finally {
+      events.stop();
+    }
   });
 
   describe("the close at a turn's end", () => {
@@ -1601,7 +1701,8 @@ describe("a session's own pass", () => {
       expect(await events.armPassClose("t1")).toMatchObject({ ok: false, code: "no_pane" });
       panes[0] = { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" };
       events.stop();
-      expect(await events.armPassClose("t1")).toMatchObject({ ok: false, code: "no_pane" });
+      // Not no_pane: that tells the leader the session is gone, which a stopping daemon cannot say.
+      expect(await events.armPassClose("t1")).toMatchObject({ ok: false, code: "unsupported" });
     });
 
     test("after a daemon restart a pass-close makes the entry itself, and only a later turn end closes", async () => {

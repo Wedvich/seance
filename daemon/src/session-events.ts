@@ -820,8 +820,11 @@ export interface SessionEventDeps {
 }
 
 export interface SessionEvents {
-  /** `peer`: the kernel's pid for the connecting process, or null where the host cannot say. */
-  readonly handle: (raw: unknown, peer: number | null) => Promise<SessionEventReply>;
+  /**
+   * `peer`: the kernel's pid for the connecting process, or null where the host cannot say. `caller` aborts when
+   * the connection goes away before the reply: a pass whose caller is gone is never sent (an interrupted tool call).
+   */
+  readonly handle: (raw: unknown, peer: number | null, caller?: AbortSignal) => Promise<SessionEventReply>;
   /**
    * The leader's `pass-close`: its commit point for a session's pass is written, so the pane carrying
    * `taskId` may be closed at its turn's end. Answers at once and never waits for the close.
@@ -868,23 +871,42 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
       check = deps.ended.handoffCheck(taskId);
     }
     if (check !== "ok") return { ok: false, code: check };
+    // A pass is irreversible once the leader acts on it, so it outranks a hand-off: one close per pane, never two despawns.
+    if (passes.get(pane.id)?.taskId === taskId) return { ok: false, code: "passed" };
     handoffs.set(pane.id, taskId);
     return { ok: true };
   };
 
-  const markPass = async (pane: BoundPane, exclave: string, record: string): Promise<SessionEventReply> => {
+  const markPass = async (
+    pane: BoundPane,
+    exclave: string,
+    record: string,
+    caller: AbortSignal | undefined,
+  ): Promise<SessionEventReply> => {
     const taskId = pane.taskId;
     if (taskId === null) return { ok: false, code: "untasked" };
     const host = deps.pass;
     if (host === undefined) return { ok: false, code: "unsupported" };
     if (stopped) return { ok: false, code: "stopping" };
+    // Fail closed: a caller that has gone (the person interrupted the tool call, or it timed out) is told
+    // nothing and must leave no mark behind, which would close the session at some later turn's end.
+    const callerGone = (): boolean => caller?.aborted === true;
+    if (callerGone()) return { ok: false, code: "cancelled" };
     const site = deps.ended.passSite(taskId);
     if ("code" in site) return { ok: false, code: site.code };
     // No `expect`: the daemon holds no PR head, and the leader refuses a branch that is not the PR's.
-    const pushed = await host.push(taskId, { hasPr: deps.ended.hasPr(taskId) });
+    let pushed: PushBranchResponse;
+    try {
+      pushed = await host.push(taskId, { hasPr: deps.ended.hasPr(taskId) });
+    } catch (err) {
+      // An audit write or a repo read that threw: the push may have happened, but nothing was passed. Never the record or branch.
+      log.error(`local socket: a session's pass could not push (${String(err)})`);
+      return { ok: false, code: "push_failed" };
+    }
     if (!pushed.ok) return { ok: false, code: passRefusal(pushed.code) };
-    // The push may have outlasted `stop()`: nothing is sent then, and the session is told.
-    if (stopped) return { ok: false, code: "stopping" };
+    // The push may have outlasted `stop()` or the caller: nothing is sent then, and the pushed branch is said to be there.
+    if (stopped) return { ok: false, code: "stopping_pushed" };
+    if (callerGone()) return { ok: false, code: "cancelled" };
     const prior = passes.get(pane.id);
     // Before the report: the leader's `pass-close` may land as soon as it is sent.
     passes.set(pane.id, {
@@ -892,6 +914,8 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
       confirmed: prior?.taskId === taskId && prior.confirmed,
       turnEnded: false,
     });
+    // One close per pane: a hand-off mark left on it would send a second despawn at the same turn's end.
+    if (handoffs.get(pane.id) === taskId) handoffs.delete(pane.id);
     const sent = await host
       .send({
         session: pane.id,
@@ -912,7 +936,8 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
   };
 
   const armPassClose = async (taskId: string): Promise<PassCloseResponse> => {
-    if (stopped) return { ok: false, code: "no_pane", message: "this daemon is stopping" };
+    // Not `no_pane`, which tells the leader the session is gone and lets it close at once: a stopping daemon arms nothing.
+    if (stopped) return { ok: false, code: "unsupported", message: "this daemon is stopping" };
     const pane = (await deps.panes()).find((p) => !p.dead && p.taskId === taskId);
     if (pane === undefined) return { ok: false, code: "no_pane", message: "no live pane carries the task" };
     // After a restart the entry is gone: the pane carrying the task is the proof, and it has seen no turn end.
@@ -981,7 +1006,7 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
   };
 
   return {
-    handle: async (raw, peer): Promise<SessionEventReply> => {
+    handle: async (raw, peer, caller): Promise<SessionEventReply> => {
       const frame = parseSessionEventFrame(raw);
       if (frame === null) {
         log.warn("local socket: dropped a malformed session-event frame");
@@ -997,7 +1022,7 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
       const exclave = exclaveOf(pane.path, deps.exclaves());
       if (!stopped) deps.onActivity?.(exclave);
       if (frame.handoff === true) return markHandoff(pane);
-      if (frame.pass === true && frame.record !== undefined) return markPass(pane, exclave, frame.record);
+      if (frame.pass === true && frame.record !== undefined) return markPass(pane, exclave, frame.record, caller);
       if (frame.state === "done" && pane.taskId === null) return { ok: false, code: "untasked" };
       if (frame.state === undefined || pane.taskId === null) return { ok: true };
       // A stopped ingest sends nothing, so a report must not be told it went.

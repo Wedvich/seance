@@ -46,7 +46,7 @@ export function createTurnEndClose(
         await audit.failed(err.code).catch(() => {});
         return;
       }
-      log.error(`${origin} despawn crashed: ${String(err)}`);
+      log.error(`${origin === "handoff" ? "hand-off" : "pass"} despawn crashed: ${String(err)}`);
       await audit.failed("internal_error").catch(() => {});
     }
   };

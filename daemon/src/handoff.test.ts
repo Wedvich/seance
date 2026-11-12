@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { DespawnFailure, type DespawnResult } from "./backend.ts";
 import { createHandOff, createPassClose } from "./handoff.ts";
 import type { BoundPane } from "./session-events.ts";
@@ -95,5 +95,29 @@ describe("createPassClose", () => {
     );
     await close("%1", "t1");
     expect(lines.at(-1)).toBe("audit despawn origin=successor failed code=session_not_found");
+  });
+});
+
+describe("a despawn that crashes", () => {
+  test("is logged under each act's own words, the hand-off's unchanged, and audited internal_error", async () => {
+    const crash = (): Promise<DespawnResult> => Promise.reject(new Error("boom"));
+    const stderr = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const lines: string[] = [];
+      const deps = {
+        despawn: crash,
+        panes: () => Promise.resolve([pane("t1")]),
+        closing: () => Promise.resolve(),
+        sink: (line: string) => void lines.push(line),
+      };
+      await createHandOff(deps)("%1", "t1");
+      await createPassClose(deps)("%1", "t1");
+      const logged = stderr.mock.calls.map((call) => String(call[0]));
+      expect(logged[0]).toContain(" error hand-off despawn crashed: Error: boom");
+      expect(logged[1]).toContain(" error pass despawn crashed: Error: boom");
+      expect(lines.filter((l) => l.endsWith("failed code=internal_error"))).toHaveLength(2);
+    } finally {
+      stderr.mockRestore();
+    }
   });
 });

@@ -1515,7 +1515,7 @@ export function buildMcpServer(
       }),
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
-    async ({ record }) => {
+    async ({ record }, ctx) => {
       // UTF-16 units, as the daemon and the leader count: a schema `maxLength` counts code points, which lets an over-long record through.
       if (record.length > SUCCESSOR_RECORD_MAX) {
         return errorResult(
@@ -1538,7 +1538,14 @@ export function buildMcpServer(
             }. Nothing was pushed.`,
           );
         }
-        const result = await passOwnTask(record);
+        // The cancellation closes the daemon's connection, which is what keeps an interrupted call from passing later.
+        const result = await passOwnTask(record, { signal: ctx.mcpReq.signal });
+        // No answer is not a refusal: the daemon may have pushed and sent the pass, and closes this session at its turn's end.
+        if (result.unanswered === true) {
+          return textResult(
+            `${PASS_SELF_TOOL}: no answer from this machine's daemon (${result.text}), so the branch may be pushed and the pass may have gone through; check get_queue for a successor on your task before pushing or passing again. ${END_THE_TURN}`,
+          );
+        }
         if (!result.ok) return errorResult(`${PASS_SELF_TOOL} refused: ${result.text}`);
         const taskId = result.pass?.taskId;
         if (taskId === undefined) return textResult(`${result.text}. ${END_THE_TURN}`);

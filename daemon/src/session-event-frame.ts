@@ -35,6 +35,12 @@ export const SESSION_EVENT_REPLY_CODES = [
   "push_failed",
   /** Pushed, but this daemon could not hand the pass to the scheduler (no relay connection and no leader here). */
   "unsent",
+  /** A pass whose push finished as this daemon began to stop: the branch is on origin, nothing was sent. */
+  "stopping_pushed",
+  /** A pass whose caller was gone (the tool call was interrupted or timed out) before it was sent: nothing was sent, and no close is armed. */
+  "cancelled",
+  /** A hand-off for a task whose session already passed it: a pass outranks it, and one close per pane is all there is. */
+  "passed",
 ] as const;
 
 /** What a pass reports back: the branch and commit now on `origin`, and whether the push changed anything. */

@@ -89,6 +89,17 @@ describe("handOff", () => {
     }
   });
 
+  test("a hand-off after a pass is refused as such: there is no PR left to watch", async () => {
+    const fake = daemon("handoff-passed.sock", JSON.stringify({ ok: false, code: "passed" }));
+    try {
+      const result = await handOff({ path: fake.path, pane: "%1" });
+      expect(result.ok).toBe(false);
+      expect(result.text).toContain("already passed its task to a successor");
+    } finally {
+      fake.stop();
+    }
+  });
+
   test("every refusal tells the session to keep watching the PR itself", async () => {
     const codes = ["untasked", "unbound", "invalid", "unsupported", "unrecorded", "unwritten", "stopping", "prless"];
     for (const code of codes) {
@@ -146,13 +157,16 @@ describe("passToSuccessor", () => {
       unrecorded: "holds no launch of this session's task",
       stopping: "daemon is stopping",
       here: "runs in place",
-      dirty_worktree: "commit or stash your changes first",
+      dirty_worktree: "commit your changes first, or discard what should not be carried (a stash is never pushed",
       detached_head: "on no branch",
       default_branch: "default branch",
       no_upstream: "git push -u origin HEAD:<pr branch>",
       push_rejected: "nothing was forced",
       push_failed: "did not complete",
       unsent: "the branch is pushed, but",
+      stopping_pushed: "the branch is pushed, but this machine's daemon is stopping and sent no pass",
+      cancelled: "cancelled before the pass was sent",
+      passed: "already passed its task",
     } as const;
     for (const [code, text] of Object.entries(wording)) {
       const fake = daemon(`pass-${code}.sock`, JSON.stringify({ ok: false, code }));
@@ -165,6 +179,48 @@ describe("passToSuccessor", () => {
       } finally {
         fake.stop();
       }
+    }
+  });
+
+  test("no answer is not a refusal: a lost connection or a cancelled call says the pass may have gone through", async () => {
+    const path = join(dir, "silent.sock");
+    const seen: string[] = [];
+    const server = Bun.listen<undefined>({
+      unix: path,
+      socket: {
+        data: (sock, chunk) => {
+          seen.push(chunk.toString("utf8"));
+          sock.end();
+        },
+      },
+    });
+    try {
+      const lost = await passToSuccessor("r", { path, pane: "%1" });
+      expect(lost.ok).toBe(false);
+      expect(lost.unanswered).toBe(true);
+      expect(seen).toHaveLength(1);
+    } finally {
+      server.stop(true);
+    }
+
+    // A cancelled call closes the connection unanswered, which is what tells the daemon the caller is gone.
+    const held = join(dir, "held.sock");
+    let closedByCaller: () => void = () => {};
+    const closed = new Promise<void>((resolve) => {
+      closedByCaller = resolve;
+    });
+    const slow = Bun.listen<undefined>({ unix: held, socket: { data: () => {}, close: () => closedByCaller() } });
+    try {
+      const controller = new AbortController();
+      const pending = passToSuccessor("r", { path: held, pane: "%1", signal: controller.signal });
+      setTimeout(() => controller.abort(), 20);
+      const result = await pending;
+      expect(result.unanswered).toBe(true);
+      await closed;
+      // Already aborted: no request is left standing at all.
+      expect((await passToSuccessor("r", { path: held, pane: "%1", signal: controller.signal })).unanswered).toBe(true);
+    } finally {
+      slow.stop(true);
     }
   });
 

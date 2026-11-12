@@ -7165,7 +7165,7 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   | Local socket frame (self path)           | `pass: true` and `record` on the frame                   |
   | The branch pushed to on `origin`         | the **remote branch** (`remoteBranch` on the wire)       |
   | MCP tool, the session's own task         | `pass_to_successor`                                      |
-  | MCP tool, any task                       | `pass_task`                                              |
+  | MCP tool, another task                   | `pass_task`                                              |
   | CLI                                      | `seanced pass <task-id>`                                 |
   | PWA button                               | "Pass to successor"                                      |
   | Capability, outside path (2a)            | `CAPABILITIES.successor`                                 |
@@ -8774,8 +8774,14 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   confirmed; unconfirmed says the branch is pushed, the leader may still confirm or may have refused (for
   example the PR's head is another branch), and that the session must do no further work and end its
   turn either way: the session is closed at the turn's end only if the leader confirms, and a commit
-  made after the push is not carried. Refusals have a text per code (`dirty_worktree`: commit or stash
-  first, nothing was pushed; `no_upstream`: the task has a PR, so push to its branch with `git push -u
+  made after the push is not carried. The tool waits for its daemon `OP_TIMEOUT_MS["push-branch"]` plus
+  30 s (120 s, past a push and the fetch after a rejected one), and an unanswered call (a timeout or a lost
+  connection) is never worded as a refusal: it may have pushed and sent the pass, so the text says so, tells
+  the session to check `get_queue` before pushing or passing again, and to end its turn. The call's
+  cancellation signal (an interrupt) closes its daemon connection, and the daemon sends no pass for a
+  caller that is gone (below). Refusals have a text per code (`dirty_worktree`: commit the changes first or
+  discard what must not be carried, because a stash is never pushed and a successor never sees it, nothing
+  was pushed; `no_upstream`: the task has a PR, so push to its branch with `git push -u
   origin HEAD:<pr branch>` and call again; `invalid`: this machine's daemon predates passing, restart
   `seanced`). The description tells
   the session: commit everything first, `record` is the whole of what the successor knows (what is
@@ -9587,7 +9593,11 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   (no upstream on `origin` while its ledger holds a PR URL for the task: the leader would refuse the
   PR's other branch after the push, so the daemon refuses before it, and the session is told to
   `git push -u origin HEAD:<pr branch>` or set the upstream and call again), `push_rejected`,
-  `push_failed`, `stopping` once ingest stopped, `unsent` (pushed, but this daemon could hand the
+  `push_failed` (also when the push path itself threw, an audit write or a repo read, which the session
+  would otherwise be told is a daemon that predates passing), `stopping` once ingest stopped before the push,
+  `stopping_pushed` (the daemon began to stop while the push ran: the branch is on origin, nothing was
+  sent, and the text says so; call again once it is back), `cancelled` (the caller was gone, below),
+  `unsent` (pushed, but this daemon could hand the
   pass to neither the leader in process nor a relay connection; the mark is dropped), and `invalid` on a
   daemon that predates it. Otherwise
   it pushes the ledger-noted worktree's branch through `pushTaskBranch` with no `expect` and `hasPr`
@@ -9612,8 +9622,20 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   itself the proof that nobody is being asked, and the leader's view can lag its last answer by an
   event. Any other state or `from` does nothing but a log line naming the op and the machine. The hand-off keeps its behaviour: marked
   only by a `handoff` frame, closed only at its pane's `turnEnded` idle, audited `origin=handoff`;
-  `createHandOff` and `createPassClose` share one close routine that takes the origin, nothing else
-  changes. A session that lies about
+  `createHandOff` and `createPassClose` share one close routine that takes the origin, and its crash
+  log line keeps each act's own text (`hand-off despawn crashed`, `pass despawn crashed`), nothing else
+  changes. _Decided: one close per pane, a pass outranks a hand-off_, because a pass is irreversible once
+  the leader acts on it and two graceful despawns of one pane interleave their keystrokes (`/exit` and
+  the worktree prompt's answer, with no per-pane lock): a pass drops the pane's hand-off mark, and a
+  hand-off on a pane carrying a pass mark is refused `passed` ("this session already passed its task").
+  _Decided: fail closed on an interrupted call_, because a pass confirmed after the person stopped the
+  tool would close the session mid-use at a later turn's end, or by the backstop, and queue a successor
+  the person did not want. The local socket hands the ingest an `AbortSignal` that aborts when the
+  connection closes; `pass_to_successor` gives the exchange the MCP request's own cancellation signal, so
+  an interrupt (or a timeout) closes the connection; the daemon checks the signal before the push and
+  again after it and then answers `cancelled`, creating no mark and sending no pass. A branch already
+  pushed stays pushed (a clean tree, never forced). A call past the second check has sent; a pass the
+  caller abandoned after that is the unavoidable window. A session that lies about
   passing can do no more than one that pushes its own branch and runs `/exit`; the leader's PR-head
   check bounds what it can claim, and the worst case of an unconfirmed pass is a pushed branch no
   successor follows. The session is told only "not

@@ -3521,8 +3521,15 @@ describe("pass_to_successor", () => {
       readonly machines?: readonly Machine[];
       readonly leading?: boolean;
     } = {},
-  ): Promise<{ text: string; error: boolean; passed: string[]; queueReads: number }> {
+  ): Promise<{
+    text: string;
+    error: boolean;
+    passed: string[];
+    queueReads: number;
+    signals: (AbortSignal | undefined)[];
+  }> {
     let reads = 0;
+    const signals: (AbortSignal | undefined)[] = [];
     const fake = fakeRelay(opts.machines ?? leaderMachines(), (op) => {
       if (op === "queue") return { tasks: opts.queued?.(reads++) ?? [active], at: 6_000 };
       return new Error(`unexpected ${op}`);
@@ -3536,8 +3543,9 @@ describe("pass_to_successor", () => {
       () => {},
       undefined,
       undefined,
-      (record) => {
+      (record, passOpts) => {
         passed.push(record);
+        signals.push(passOpts?.signal);
         return Promise.resolve(opts.pass ?? { ok: true, text: "pushed", pass: ACK });
       },
       FAST,
@@ -3547,7 +3555,7 @@ describe("pass_to_successor", () => {
         name: "pass_to_successor",
         arguments: { record: opts.record ?? "done: a; left: b" },
       });
-      return { text: toolText(result), error: result.isError === true, passed, queueReads: reads };
+      return { text: toolText(result), error: result.isError === true, passed, queueReads: reads, signals };
     } finally {
       lazy.stop();
     }
@@ -3595,13 +3603,31 @@ describe("pass_to_successor", () => {
 
   test("a refusal from the daemon is the tool's error, in the daemon's words", async () => {
     const result = await callSelf({
-      pass: { ok: false, text: "commit or stash your changes first; nothing was pushed" },
+      pass: { ok: false, text: "commit your changes first; nothing was pushed" },
     });
     expect(result).toMatchObject({
       error: true,
-      text: "pass_to_successor refused: commit or stash your changes first; nothing was pushed",
+      text: "pass_to_successor refused: commit your changes first; nothing was pushed",
       queueReads: 0,
     });
+  });
+
+  test("the daemon is asked with the call's cancellation, so an interrupted call is never passed later", async () => {
+    const result = await callSelf({ queued: () => [{ ...active, successor: "t-2" }] });
+    expect(result.signals).toHaveLength(1);
+    expect(result.signals[0]).toBeInstanceOf(AbortSignal);
+  });
+
+  test("no answer from the daemon is never worded as a refusal: the pass may have gone through", async () => {
+    const result = await callSelf({
+      pass: { ok: false, text: "the daemon did not answer in time", unanswered: true },
+    });
+    expect(result.error).toBe(false);
+    expect(result.text).not.toContain("refused");
+    expect(result.text).toContain("may be pushed and the pass may have gone through");
+    expect(result.text).toContain("check get_queue");
+    expect(result.text).toContain("end your turn now");
+    expect(result.queueReads).toBe(0);
   });
 
   test("a successor the leader recorded is named, and the session told to end its turn", async () => {

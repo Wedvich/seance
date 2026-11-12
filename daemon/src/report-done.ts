@@ -1,5 +1,5 @@
-import { isBranchName, isRecord, isTaskId } from "@seance/shared";
-import { exchange, LocalUnavailable } from "./local-client.ts";
+import { isBranchName, isRecord, isTaskId, OP_TIMEOUT_MS } from "@seance/shared";
+import { exchange, LocalAborted, LocalConnectionLost, LocalTimedOut, LocalUnavailable } from "./local-client.ts";
 import { socketPath } from "./paths.ts";
 import {
   SESSION_EVENT_KIND,
@@ -23,14 +23,23 @@ import {
 /** The ingest does a pane lookup, a parent walk and a ledger write before it answers. */
 const REPORT_TIMEOUT_MS = 5_000;
 
-/** A pass pushes the branch before it answers: under the leader's own 90 s `push-branch` window, with room for a slow network. */
-const PASS_TIMEOUT_MS = 60_000;
+/**
+ * A pass pushes the branch before it answers, so it outlasts the leader's own `push-branch` window (a push and
+ * the fetch that follows a rejected one, with the git reads around them) by the time the daemon needs to hand the
+ * report on. A timeout past this is still worded as "may have gone through", never as a refusal.
+ */
+const PASS_TIMEOUT_MS = OP_TIMEOUT_MS["push-branch"] + 30_000;
 
 export interface ReportDoneResult {
   readonly ok: boolean;
   readonly text: string;
   /** A pass's answer: what the daemon pushed. */
   readonly pass?: PassAck;
+  /**
+   * No answer came (a timeout, or the connection lost): the request may have run. Set only on a pass, whose push
+   * and report may have gone through; the caller must not word it as a refusal.
+   */
+  readonly unanswered?: true;
 }
 
 export interface ReportDoneOpts {
@@ -38,12 +47,16 @@ export interface ReportDoneOpts {
   readonly path?: string;
   /** `$TMUX_PANE`, consulted by the daemon only on a host that cannot name a peer. */
   readonly pane?: string;
+  /** A pass only: aborts when the tool call is cancelled, which closes the connection, and the daemon sends no pass then. */
+  readonly signal?: AbortSignal;
 }
 
 type ReplyCode = (typeof SESSION_EVENT_REPLY_CODES)[number];
 
 /** The codes only a pass is answered: a `done` report or a hand-off never meets one. */
 type PassOnlyCode =
+  | "stopping_pushed"
+  | "cancelled"
   | "here"
   | "dirty_worktree"
   | "detached_head"
@@ -68,8 +81,9 @@ const REPORT_REFUSED = {
   unwritten:
     "sent to the scheduler, but this machine's daemon could not save the report to disk, so a daemon restart could lose it",
   stopping: "this machine's daemon is stopping, so nothing was reported",
-  // Only a hand-off is answered this; listed so every code has words.
+  // Only a hand-off is answered these; listed so every code has words.
   prless: "this machine's daemon noted no pull request for this session's task",
+  passed: "this session already passed its task to a successor",
 } as const satisfies Refusals;
 
 /** Every refusal leaves the PR with the session, and says so. */
@@ -88,6 +102,7 @@ const HANDOFF_REFUSED = {
   prless:
     "this machine's daemon noted no pull request for this session's task (it sees one only from `gh pr create` in this session), so its end would not wait for a merge" +
     KEEP_WATCHING,
+  passed: "this session already passed its task to a successor, so there is nothing left to hand off",
 } as const satisfies Refusals;
 
 const PASS_REFUSED = {
@@ -100,8 +115,11 @@ const PASS_REFUSED = {
   unwritten: "this machine's daemon could not save the pass",
   stopping: "this machine's daemon is stopping, so nothing was pushed or passed",
   prless: "this machine's daemon noted no pull request for this session's task",
+  // Only a hand-off is answered this; listed so every code has words.
+  passed: "this session already passed its task",
   here: "this task runs in place and has no branch of its own to pass; nothing was pushed",
-  dirty_worktree: "commit or stash your changes first; nothing was pushed",
+  dirty_worktree:
+    "commit your changes first, or discard what should not be carried (a stash is never pushed, so a successor would not have it); nothing was pushed",
   detached_head: "this worktree is on no branch; check one out with your commits, then call again; nothing was pushed",
   default_branch:
     "this worktree is on the repo's default branch, which a pass never pushes; move your commits to a task branch, then call again; nothing was pushed",
@@ -110,9 +128,13 @@ const PASS_REFUSED = {
   push_rejected:
     "origin rejected the push (not a fast-forward, or a protected branch); fetch and reconcile it yourself, then call again; nothing was forced",
   push_failed:
-    "the push did not complete (network, credentials or repo configuration); try again, and tell the owner if it keeps failing",
+    "the push did not complete or could not be confirmed (network, credentials, repo configuration, or this machine's own log); try again, and tell the owner if it keeps failing",
   unsent:
     "the branch is pushed, but this machine's daemon could not hand the pass to the scheduler (no relay connection); call again once it is back",
+  stopping_pushed:
+    "the branch is pushed, but this machine's daemon is stopping and sent no pass; call again once it is back",
+  // The caller is gone, so no one reads this; listed so every code has words.
+  cancelled: "the call was cancelled before the pass was sent; the branch may be pushed",
 } as const satisfies Record<ReplyCode, string>;
 
 function parseAck(raw: unknown): PassAck | undefined {
@@ -154,8 +176,13 @@ async function send(
       path: opts.path ?? socketPath(),
       timeoutMs,
       timeoutText: "the daemon did not answer in time",
+      ...(opts.signal === undefined ? {} : { signal: opts.signal }),
     });
   } catch (err) {
+    // No answer says nothing about whether the request ran: a pass may have pushed and been sent.
+    if (err instanceof LocalTimedOut || err instanceof LocalConnectionLost || err instanceof LocalAborted) {
+      return { ok: false, text: err.message, unanswered: true };
+    }
     if (err instanceof LocalUnavailable) return { ok: false, text: "the local daemon is not running" };
     return { ok: false, text: err instanceof Error ? err.message : String(err) };
   }
