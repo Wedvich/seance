@@ -83,7 +83,8 @@ describe("push-sw.js", () => {
     const alerts: readonly PushAlert[] = [
       { v: 1, kind: "needs-input", at: 5, taskId: TASK, since: 1, escalated: false },
       { v: 1, kind: "needs-input", at: 5, taskId: TASK, since: 1, escalated: true },
-      { v: 1, kind: "spill", at: 5, taskId: TASK, window: "7d", projectedPct: 104.6 },
+      { v: 1, kind: "spill", at: 5, taskId: TASK, window: "7d", projectedPct: 94.6 },
+      { v: 1, kind: "spill", at: 5, taskId: TASK, window: "5h", projectedPct: 104.6, spending: true },
       { v: 1, kind: "disk", at: 5, deviceId: "dev-1", diskPct: 93 },
     ];
     const worker = boot();
@@ -110,7 +111,16 @@ describe("push-sw.js", () => {
       {
         title: "Séance",
         options: {
-          body: "A task is spending credits (7d at 105%).",
+          body: "A task may spill into credits (7d projected at 95%).",
+          tag: `spill:${TASK}`,
+          renotify: true,
+          data: { url: `/?task=${TASK}` },
+        },
+      },
+      {
+        title: "Séance",
+        options: {
+          body: "A task is spending credits (5h full).",
           tag: `spill:${TASK}`,
           renotify: true,
           data: { url: `/?task=${TASK}` },
@@ -130,24 +140,38 @@ describe("push-sw.js", () => {
 
   test("nothing a payload carries beyond its ids and numbers reaches the text, and only a known window label is shown", async () => {
     const worker = boot();
-    const spill = (window: unknown): string =>
-      JSON.stringify({ v: 1, kind: "spill", at: 1, taskId: TASK, window, projectedPct: 104, title: "secret" });
+    const spill = (window: unknown, spending?: true): string =>
+      JSON.stringify({
+        v: 1,
+        kind: "spill",
+        at: 1,
+        taskId: TASK,
+        window,
+        projectedPct: 104,
+        spending,
+        title: "secret",
+      });
     // The scheduler's labels: both windows, and a per-model weekly named by a daemon-reported display name.
-    for (const window of ["5h", "7d", "7d Fable", "x".repeat(500), "7days", "5h <b>x</b>", "", 7, null])
-      await worker.push(spill(window));
+    const windows = ["5h", "7d", "7d Fable", "x".repeat(500), "7days", "5h <b>x</b>", "", 7, null];
+    for (const window of windows) await worker.push(spill(window));
+    for (const window of windows) await worker.push(spill(window, true));
     expect(worker.shown.map((n) => n.options.body)).toEqual([
-      "A task is spending credits (5h at 104%).",
-      "A task is spending credits (7d at 104%).",
-      "A task is spending credits (7d at 104%).",
-      "A task is spending credits (104%).",
-      "A task is spending credits (104%).",
-      "A task is spending credits (104%).",
-      "A task is spending credits (104%).",
-      "A task is spending credits (104%).",
-      "A task is spending credits (104%).",
+      "A task may spill into credits (5h projected at 104%).",
+      "A task may spill into credits (7d projected at 104%).",
+      "A task may spill into credits (7d projected at 104%).",
+      ...Array.from({ length: 6 }, () => "A task may spill into credits (projected at 104%)."),
+      "A task is spending credits (5h full).",
+      "A task is spending credits (7d full).",
+      "A task is spending credits (7d full).",
+      ...Array.from({ length: 6 }, () => "A task is spending credits."),
     ]);
     await worker.push(JSON.stringify({ v: 1, kind: "spill", at: 1, taskId: TASK, window: "5h", projectedPct: "high" }));
-    expect(worker.shown.at(-1)?.options.body).toBe("A task is spending credits (5h).");
+    expect(worker.shown.at(-1)?.options.body).toBe("A task may spill into credits (5h).");
+    // Only `true` says spending: anything else reads as the forecast, the weaker claim.
+    await worker.push(
+      JSON.stringify({ v: 1, kind: "spill", at: 1, taskId: TASK, window: "5h", projectedPct: 93, spending: "yes" }),
+    );
+    expect(worker.shown.at(-1)?.options.body).toBe("A task may spill into credits (5h projected at 93%).");
     expect(JSON.stringify(worker.shown)).not.toContain("secret");
   });
 

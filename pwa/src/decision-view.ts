@@ -92,14 +92,17 @@ function quotaText(
   return `quota: ${quota.source} · ${at} on ${observer?.connected === false ? `${named}, asleep` : named}`;
 }
 
-/** A placed task already spent them: "would" is wrong for a record read after the fact. */
+/**
+ * A placed task already spends them: "would" is wrong for a record read after the fact. A spill
+ * past the line alone is a forecast in either tense — credits bill only once the window is full.
+ */
 function spillText(candidate: Candidate, tense: "would" | "did"): string | null {
   const { spill } = candidate;
   if (spill === undefined) return null;
-  const pct = Math.round(spill.projectedPct);
-  return tense === "would"
-    ? `would spend credits (${spill.window} at ${pct}%)`
-    : `spending credits (${spill.window} projected at ${pct}%)`;
+  if (spill.spending !== true) {
+    return `may spill into credits (${spill.window} projected at ${Math.round(spill.projectedPct)}%)`;
+  }
+  return tense === "would" ? `would spend credits (${spill.window} full)` : `spending credits (${spill.window} full)`;
 }
 
 function line(

@@ -182,8 +182,9 @@ they now live:
   deltas per task.
 
 **Credits spill:** detected, logged, pushed and shown in the PWA (DESIGN.md "Credits spill", "Web
-Push"). An account whose credits are spent to the monthly cap is never spilled into (DESIGN.md,
-Routing).
+Push") at two levels: a forecast once projected usage crosses the line, and spending once a window
+already reads full (2026-11-11). An account whose credits are spent to the monthly cap is never
+spilled into (DESIGN.md, Routing).
 
 **Done detection, ahead.** The forge is built: the leader reads each GitHub PR with its own `gh` and settles a merge (DESIGN.md, "PR status"). Linear Done (M4, if linked, polled). A session that ends with no PR
 and a nonzero exit is `failed` since M4's _`failed` from exit status_, which fails its

@@ -973,9 +973,10 @@ function parseCandidate(value: unknown): Candidate | null {
   let spilled: Candidate["spill"];
   if (spill !== undefined) {
     if (!isRecord(spill)) return null;
-    const { window, projectedPct } = spill;
+    const { window, projectedPct, spending } = spill;
     if (!isBoundedString(window, WINDOW_LABEL_MAX_LENGTH) || !isFiniteNumber(projectedPct)) return null;
-    spilled = { window, projectedPct };
+    if (spending !== undefined && spending !== true) return null;
+    spilled = { window, projectedPct, ...(spending === undefined ? {} : { spending }) };
   }
   return {
     deviceId,
@@ -1067,10 +1068,11 @@ function parseProgressFields(value: Record<string, unknown>): Partial<Task> | nu
  */
 export function parseSpillStamp(value: unknown): SpillStamp | null {
   if (!isRecord(value)) return null;
-  const { accountId, window, reset, at } = value;
+  const { accountId, window, reset, at, spending } = value;
   if (!isAccountId(accountId) || !isName(window, WINDOW_LABEL_MAX_LENGTH)) return null;
   if (!isFiniteNumber(reset) || reset < 0 || !isFiniteNumber(at) || at < 0) return null;
-  return { accountId, window, reset, at };
+  if (spending !== undefined && spending !== true) return null;
+  return { accountId, window, reset, at, ...(spending === undefined ? {} : { spending }) };
 }
 
 /** A forge reading, or null when any field is malformed. A fresh object, so nothing unvalidated rides along. */
@@ -1389,7 +1391,7 @@ export function parsePushUnsubscribeReply(value: unknown): PushUnsubscribeReply 
 }
 
 const PUSH_ALERT_KEYS = {
-  spill: ["v", "kind", "at", "taskId", "window", "projectedPct"],
+  spill: ["v", "kind", "at", "taskId", "window", "projectedPct", "spending"],
   "needs-input": ["v", "kind", "at", "taskId", "since", "escalated"],
   disk: ["v", "kind", "at", "deviceId", "diskPct", "freeMib"],
 } as const;
@@ -1405,10 +1407,11 @@ export function parsePushAlert(value: unknown): PushAlert | null {
   const { kind, at } = value;
   const known = (keys: readonly string[]): boolean => Object.keys(value).every((key) => keys.includes(key));
   if (kind === "spill") {
-    const { taskId, window, projectedPct } = value;
+    const { taskId, window, projectedPct, spending } = value;
     if (!known(PUSH_ALERT_KEYS.spill) || !isTaskId(taskId)) return null;
     if (!isName(window, WINDOW_LABEL_MAX_LENGTH) || !isFiniteNumber(projectedPct)) return null;
-    return { v: 1, kind, at, taskId, window, projectedPct };
+    if (spending !== undefined && spending !== true) return null;
+    return { v: 1, kind, at, taskId, window, projectedPct, ...(spending === undefined ? {} : { spending }) };
   }
   if (kind === "needs-input") {
     const { taskId, since, escalated } = value;

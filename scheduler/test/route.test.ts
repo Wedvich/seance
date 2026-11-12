@@ -630,6 +630,24 @@ describe("filter", () => {
       expect(candidate.score).toBeDefined();
     });
 
+    test("a spill is spending only on a window already full; past the line alone is a forecast", () => {
+      const spill = (reading: Parameters<typeof obs>[1]): Candidate["spill"] =>
+        only(
+          decide([
+            machine("a", {
+              exclaves: [exclave("main", "org:a", { extraUsageEnabled: true })],
+              status: status({ quota: [obs(0, reading)] }),
+            }),
+          ]),
+        ).spill;
+      expect(spill({ h: 95 })).toEqual({ window: "5h", projectedPct: 100 });
+      expect(spill({ h: 100 })).toEqual({ window: "5h", projectedPct: 105, spending: true });
+      // The full window is the one named, even under another that projects higher.
+      expect(spill({ h: 99, d: 100 })).toEqual({ window: "7d", projectedPct: 101, spending: true });
+      // A full window resetting within the grace reads as empty, as it does for the line.
+      expect(spill({ h: 100, hr: NOW_S + 14 * 60, d: 95 })).toEqual({ window: "7d", projectedPct: 96 });
+    });
+
     // Spending credits that are already at the cap would launch a task that can't run.
     test("extra usage on but credits spent: filtered, never spilled; credits unreported still spill", () => {
       const over = (credits: { c?: number; cu?: number; cl?: number; at?: number }): ReturnType<typeof only> =>

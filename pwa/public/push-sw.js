@@ -49,10 +49,18 @@
     }
     if (alert.kind === "spill") {
       const window = windowShown(alert.window);
+      if (alert.spending === true) {
+        return {
+          body: window === "" ? "A task is spending credits." : `A task is spending credits (${window} full).`,
+          tag: `spill:${alert.taskId}`,
+          url,
+        };
+      }
+      // Past the line alone is a forecast: credits bill only once the window is full.
       const pct = Number.isFinite(alert.projectedPct) ? Math.round(alert.projectedPct) : null;
-      const where = pct === null ? window : window === "" ? `${pct}%` : `${window} at ${pct}%`;
+      const where = pct === null ? window : `${window === "" ? "" : `${window} `}projected at ${pct}%`;
       return {
-        body: where === "" ? "A task is spending credits." : `A task is spending credits (${where}).`,
+        body: where === "" ? "A task may spill into credits." : `A task may spill into credits (${where}).`,
         tag: `spill:${alert.taskId}`,
         url,
       };

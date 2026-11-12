@@ -4,9 +4,10 @@ import type { Task } from "./task.ts";
 
 /**
  * What the library tells its host as it happens, beside what the record shows:
- * a dispatch spending credits, and a task left waiting for input. The leader
- * logs each line and pushes the same alerts. `message` is a line for a log —
- * ids only, never a prompt or title.
+ * a dispatch past the quota line on an account that may spill into credits (or,
+ * `spending`, one already spending them), and a task left waiting for input.
+ * The leader logs each line and pushes the same alerts. `message` is a line for
+ * a log — ids only, never a prompt or title.
  */
 export type SchedulerAlert =
   | {
@@ -15,6 +16,8 @@ export type SchedulerAlert =
       readonly accountId: string;
       readonly window: string;
       readonly projectedPct: number;
+      /** `Candidate.spill`'s: the window already reads full. Absent, the spill is a forecast. */
+      readonly spending?: true;
       readonly message: string;
     }
   | {
@@ -76,17 +79,19 @@ export function escalation(task: Task, now: number, afterMs: number): Task | nul
 }
 
 /**
- * A confirmed spawn on a candidate that `spill`s spends credits: alerted once
- * per account per quota window, not per task — the record's decision carries
- * the spill for each task. The window is told apart by its reset; two
- * readings of one window differ by seconds, so a reset only counts as a new
- * window when it is later by more than `resetGraceMs` (or the alerted one has
- * passed), and a reading with no reset never does.
+ * A confirmed spawn on a candidate that `spill`s: alerted once per account per
+ * quota window per level — the forecast (past the line) and `spending` (the
+ * window already full) apart, so a window warned of alerts again once it fills
+ * — not per task: the record's decision carries the spill for each task. The
+ * window is told apart by its reset; two readings of one window differ by
+ * seconds, so a reset only counts as a new window when it is later by more
+ * than `resetGraceMs` (or the alerted one has passed), and a reading with no
+ * reset never does.
  */
 export class SpillAlerts {
   readonly #resetGraceMs: number;
   /**
-   * `account window` -> the window a spill was last alerted for: its reset (ms), 0
+   * `alertKey` -> the window a spill was last alerted for: its reset (ms), 0
    * when that reading carried none, and when it alerted. Seeded at takeover from
    * the stamps dispatches left on their records (`seed`), so a new leader does not
    * alert an ongoing window once more.
@@ -106,7 +111,7 @@ export class SpillAlerts {
    */
   seed(stamp: SpillStamp, now: number): void {
     if (this.#stale(stamp.window, stamp.reset, stamp.at, now)) return;
-    const key = `${stamp.accountId} ${stamp.window}`;
+    const key = alertKey(stamp.accountId, stamp.window, stamp.spending === true);
     const held = this.#alerted.get(key);
     if (held === undefined || stamp.reset > held.reset || (stamp.reset === held.reset && stamp.at > held.at)) {
       this.#alerted.set(key, { reset: stamp.reset, at: stamp.at });
@@ -146,7 +151,8 @@ export class SpillAlerts {
       .find((m) => m.deviceId === chosen.deviceId)
       ?.exclaves?.find((x) => x.id === chosen.exclave)?.accountId;
     if (accountId === undefined || accountId === null) return null;
-    const key = `${accountId} ${spill.window}`;
+    const spending = spill.spending === true;
+    const key = alertKey(accountId, spill.window, spending);
     const resetS = windowResetOf(accountId, machines, spill.window, fleetQuota);
     const reset = resetS === undefined ? undefined : resetS * 1000;
     const held = this.#alerted.get(key);
@@ -165,6 +171,8 @@ export class SpillAlerts {
     }
     this.#alerted.set(key, { reset: reset ?? 0, at: now });
     const pct = Math.round(spill.projectedPct);
+    const what = spending ? "spending credits" : "may spill into credits";
+    const level = spending ? { spending } : {};
     return {
       alert: {
         kind: "spill",
@@ -172,9 +180,15 @@ export class SpillAlerts {
         accountId,
         window: spill.window,
         projectedPct: spill.projectedPct,
-        message: `spending credits: task=${quote(taskId)} account=${quote(accountId)} window=${quote(spill.window)} projected=${pct}%`,
+        ...level,
+        message: `${what}: task=${quote(taskId)} account=${quote(accountId)} window=${quote(spill.window)} projected=${pct}%`,
       },
-      stamp: { accountId, window: spill.window, reset: reset ?? 0, at: now },
+      stamp: { accountId, window: spill.window, reset: reset ?? 0, at: now, ...level },
     };
   }
+}
+
+/** The level leads: a label can hold a space (`7d Fable`), so a trailing word could read as part of it. */
+function alertKey(accountId: string, window: string, spending: boolean): string {
+  return `${spending ? "spending" : "forecast"} ${accountId} ${window}`;
 }
