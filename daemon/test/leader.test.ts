@@ -197,6 +197,7 @@ async function routableEntry(
   deviceId: string,
   observed = true,
   reading: Partial<MachineStatus> = {},
+  capabilities: readonly string[] = [],
 ): Promise<RegistryView> {
   const info: MachineInfo = {
     name: deviceId,
@@ -212,7 +213,7 @@ async function routableEntry(
     ],
     scannedAt: 1,
     exclaves: [{ id: "default", accountId: `org:${deviceId}`, extraUsageEnabled: false, authOk: true, skills: [] }],
-    capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId],
+    capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId, ...capabilities],
   };
   const nowS = Math.floor(Date.now() / 1000);
   const status: MachineStatus = {
@@ -1775,7 +1776,12 @@ describe("leader disk alerts", () => {
         return { ok: true, version: at + 1 };
       },
     };
-    return { store, gets: () => gets, diskAlerts: () => held?.record?.diskAlerts };
+    return {
+      store,
+      gets: () => gets,
+      diskAlerts: () => held?.record?.diskAlerts,
+      authAlerts: () => held?.record?.authAlerts,
+    };
   };
 
   test("a nearly full disk is pushed once and recorded; a later term repeats nothing, and recovery re-arms it", async () => {
@@ -1814,6 +1820,43 @@ describe("leader disk alerts", () => {
       }
     });
     expect(lines.filter((line) => line.includes("disk nearly full: device="))).toHaveLength(2);
+  });
+  test("a lapsed login is pushed once and recorded; a later term repeats nothing, and recovery logs restored", async () => {
+    const relay = startTestRelay(TOKEN);
+    const push = startPushEndpoint();
+    const settings = await heldSettings();
+    const entry = async (reading: Partial<MachineStatus>) =>
+      routableEntry("b", true, reading, [CAPABILITIES.authHealth]);
+    relay.setRegistry([await entry({ ax: [0] })]);
+    const { leader } = leaderOver(relay, new MemoryQueueStore(), 40, undefined, settings.store, (input, init) =>
+      fetch(push.endpoint(new URL(String(input)).pathname.split("/").at(-1) ?? ""), init),
+    );
+    const lines = await captureLog(async () => {
+      try {
+        leader.lead(1);
+        await leader.settled();
+        await push.waitForRequests(1);
+        await pollUntil(() => settings.authAlerts()?.length === 1, "the alerted exclave on the record");
+        expect(settings.authAlerts()).toMatchObject([{ deviceId: "b", exclave: "default", state: "expired" }]);
+
+        // A new term reads the record, so the same lapse is not news.
+        leader.lead(2);
+        await pollUntil(() => leader.term() === 2, "the second term");
+        await leader.settled();
+        await pollUntil(() => settings.gets() >= 2, "the second term's settings load");
+        await Bun.sleep(300);
+        expect(push.requests()).toHaveLength(1);
+
+        relay.setRegistry([await entry({})]);
+        await pollUntil(() => (settings.authAlerts() ?? []).length === 0, "the recovery");
+      } finally {
+        leader.stop();
+        relay.stop();
+        await push.stop();
+      }
+    });
+    expect(lines.filter((line) => line.includes("scheduler: login expired: device="))).toHaveLength(1);
+    expect(lines.filter((line) => line.includes("scheduler: login restored: device="))).toHaveLength(1);
   });
 });
 

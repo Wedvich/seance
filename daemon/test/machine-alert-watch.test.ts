@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { Machine, PushAlert, SettingsRecord } from "@seance/shared";
-import { createDiskWatch } from "../src/disk-alerts.ts";
+import { CAPABILITIES, type AuthAlerted, type Machine, type PushAlert, type SettingsRecord } from "@seance/shared";
+import { createMachineAlertWatch } from "../src/machine-alerts.ts";
 import { pollUntil } from "./fixtures.ts";
 import { createTermSettings, type TermSettings } from "../src/settings.ts";
 import type { SettingsStore, SettingsWrite } from "../src/settings-store.ts";
@@ -51,24 +51,40 @@ async function setup(refuse = 0, lose = 0, landed = true) {
   return { settings, puts, record: () => held };
 }
 
+/** A machine with exclaves `default` and `work`, signed in, whose status carries `auth` beside a clean disk. */
+const authMachine = (deviceId: string, auth: { ax?: number[]; au?: number[] }): Machine => ({
+  ...machine(deviceId, 10),
+  capabilities: [CAPABILITIES.authHealth],
+  exclaves: ["default", "work"].map((id) => ({
+    id,
+    accountId: `org:${id}`,
+    extraUsageEnabled: null,
+    authOk: true,
+    skills: [],
+  })),
+  status: { at: NOW / 1000 - 10, scan: NOW, disk: 10, ...auth },
+});
+
 function watchOver(settings: TermSettings, machines: { current: readonly Machine[] }, ready = () => true) {
   const raised: PushAlert[] = [];
+  const restored: AuthAlerted[] = [];
   const clock = { now: NOW };
-  const watch = createDiskWatch({
+  const watch = createMachineAlertWatch({
     settings: () => settings,
     ready,
     machines: () => machines.current,
     onAlert: (alert) => raised.push(alert),
+    onRestored: (entry) => restored.push(entry),
     onError: (err) => {
       throw err;
     },
     now: () => clock.now,
     minGapMs: 30_000,
   });
-  return { watch, raised, clock };
+  return { watch, raised, restored, clock };
 }
 
-describe("createDiskWatch", () => {
+describe("createMachineAlertWatch", () => {
   test("a crossing writes the list first and raises the alert once it landed; a steady reading writes nothing more", async () => {
     const { settings, puts, record } = await setup();
     const fleet = { current: [machine("a", 95)] };
@@ -186,5 +202,82 @@ describe("createDiskWatch", () => {
     await Bun.sleep(20);
     expect(raised).toEqual([]);
     expect(puts).toEqual([]);
+  });
+
+  test("a login alert is raised only after its write landed, and the list carries it", async () => {
+    const { settings, puts, record } = await setup();
+    const fleet = { current: [authMachine("a", { ax: [1] })] };
+    const { watch, raised } = watchOver(settings, fleet);
+    watch.check(false);
+    await pollUntil(() => raised.length === 1, "the login alert");
+    expect(raised).toEqual([{ v: 1, kind: "auth", at: NOW, deviceId: "a", exclave: "work", state: "expired" }]);
+    expect(record().authAlerts).toEqual([{ deviceId: "a", exclave: "work", state: "expired", at: NOW }]);
+    expect(puts).toHaveLength(1);
+    // The disk list stays absent when empty.
+    expect(record().diskAlerts).toBeUndefined();
+
+    watch.check(false);
+    await Bun.sleep(20);
+    expect(raised).toHaveLength(1);
+    expect(puts).toHaveLength(1);
+  });
+
+  test("a lost login-alert write that landed is raised once by the next check; one that did not is re-raised afresh", async () => {
+    const landed = await setup(0, 1, true);
+    const fleet = { current: [authMachine("a", { ax: [0] })] };
+    const first = watchOver(landed.settings, fleet);
+    first.watch.check(false);
+    await pollUntil(() => landed.puts.length === 1, "the write whose answer was lost");
+    await Bun.sleep(20);
+    expect(first.raised).toEqual([]);
+    first.clock.now += 1000;
+    first.watch.check(false);
+    await pollUntil(() => first.raised.length === 1, "the alert, once the record shows it landed");
+    expect(first.raised).toMatchObject([{ kind: "auth", exclave: "default", at: NOW }]);
+
+    const lost = await setup(0, 1, false);
+    const second = watchOver(lost.settings, fleet);
+    second.watch.check(false);
+    await Bun.sleep(20);
+    expect(second.raised).toEqual([]);
+    second.clock.now += 1000;
+    second.watch.check(false);
+    await pollUntil(() => second.raised.length === 1, "the alert of the write that did land");
+    expect(second.raised).toMatchObject([{ kind: "auth", exclave: "default", at: NOW + 1000 }]);
+  });
+
+  test("disk and login changes in one check make one write", async () => {
+    const { settings, puts, record } = await setup();
+    const full = { ...authMachine("a", { ax: [0] }), status: { at: NOW / 1000 - 10, scan: NOW, disk: 95, ax: [0] } };
+    const { watch, raised } = watchOver(settings, { current: [full] });
+    watch.check(false);
+    await pollUntil(() => raised.length === 2, "both alerts");
+    expect(puts).toHaveLength(1);
+    expect(raised.map((a) => a.kind).toSorted()).toEqual(["auth", "disk"]);
+    expect(record().diskAlerts).toEqual([{ deviceId: "a", at: NOW }]);
+    expect(record().authAlerts).toHaveLength(1);
+  });
+
+  test("a recovery clears the entry and reports it restored once the write landed; an unread status clears nothing", async () => {
+    const { settings, record } = await setup();
+    const fleet = { current: [authMachine("a", { ax: [0] })] };
+    const { watch, raised, restored, clock } = watchOver(settings, fleet);
+    watch.check(false);
+    await pollUntil(() => raised.length === 1, "the alert");
+
+    fleet.current = [authMachine("a", { au: [0, 1] })];
+    clock.now += 1000;
+    watch.check(false);
+    await Bun.sleep(20);
+    expect(restored).toEqual([]);
+    expect(record().authAlerts).toHaveLength(1);
+
+    fleet.current = [authMachine("a", {})];
+    clock.now += 1000;
+    watch.check(false);
+    await pollUntil(() => restored.length === 1, "the restored entry");
+    expect(restored).toEqual([{ deviceId: "a", exclave: "default", state: "expired", at: NOW }]);
+    expect(record().authAlerts).toBeUndefined();
+    expect(raised).toHaveLength(1);
   });
 });
