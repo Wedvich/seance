@@ -691,12 +691,20 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
       process.kill(Number(pid), "SIGTERM");
       await pollUntil(async () => (await paneInfo(pane))?.dead === true, `pane ${pane} dead`);
 
-      await tasks.harvestExits();
-      expect(tasks.progress()).toEqual([expect.objectContaining({ taskId: "task-untitled", exit: 143 })]);
-      // Harvest leaves an untitled pane; reap closes it, noting its close first.
+      // `pane_dead` does not say the pane-died hook has run: wait for the status it records.
+      const option = "@seance-exit-task-untitled";
+      await pollUntil(
+        async () => (await tmux(["show-options", "-g", "-v", option])).exitCode === 0,
+        `${option} recorded`,
+      );
+      // Reap closes an untitled dead pane (harvest leaves it), noting its close first; here the pane is
+      // gone before harvest has run at all, so only the hook's record can explain its exit.
       await tasks.closing("task-untitled");
       await tmuxOk(["kill-pane", "-t", pane]);
-      await tasks.harvestExits();
+      await pollUntil(async () => {
+        await tasks.harvestExits();
+        return tasks.progress().some((p) => p.exit !== undefined);
+      }, "harvest noted the recorded exit");
       const [entry] = tasks.progress();
       expect(entry).toMatchObject({ taskId: "task-untitled", exit: 143 });
       expect(entry?.vanished).toBeUndefined();
