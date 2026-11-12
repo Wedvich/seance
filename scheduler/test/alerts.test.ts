@@ -485,7 +485,10 @@ describe("needs-input question alert", () => {
     const entry = await stored(store, id);
     // Out of band, so the leader's held version is stale and its first write conflicts.
     await store.put(id, entry.version, { ...entry.body, inputAlerted: true });
-    await scheduler.onSession(id, "needs-input", { ...from, reason: "question" });
+    // A PR URL beside it, so the retry still writes: what is left to keep the alert back is the retry's own verdict.
+    const prUrl = "https://github.com/o/r/pull/1";
+    await scheduler.onSession(id, "needs-input", { ...from, reason: "question" }, prUrl);
+    expect((await stored(store, id)).body).toMatchObject({ prUrl, inputAlerted: true });
     expect(alerts).toEqual([]);
   });
 

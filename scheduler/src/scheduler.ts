@@ -594,10 +594,9 @@ export class Scheduler {
     const written = await this.#update(taskId, (task) => {
       defers = waitsForExit(task, state, from, prUrl, awaitsExit);
       const moved = this.#yieldToCancel(task, sessionChange(task, state, from, prUrl, awaitsExit));
-      // Reset on every run: a version conflict applies the change again to what the store holds.
-      asked = false;
       if (state !== "needs-input" || from?.reason !== "question") return moved;
       const alerted = questionAlert(task, moved, from.deviceId, this.#now(), this.#config.needsInputEscalateMs);
+      // Set on every run that gets here: a version conflict applies the change again to what the store holds.
       asked = alerted !== null;
       return alerted ?? moved;
     });
