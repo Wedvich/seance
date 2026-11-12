@@ -274,7 +274,7 @@ describe("account aliases in the store", () => {
     await b.renameAccount(ACCOUNT, "from-b");
 
     await a.renameAccount(ACCOUNT, "from-a");
-    expect(a.getState().accounts.notice).toStartWith("Renamed elsewhere");
+    expect(a.getState().accounts.notice).toBe("Renamed elsewhere to “from-b” — save again to replace it");
     expect(a.getState().accounts.aliases).toEqual({ [ACCOUNT]: "from-b" });
     expect(a.getState().accounts.saving).toBeNull();
 
@@ -282,6 +282,21 @@ describe("account aliases in the store", () => {
     expect(a.getState().accounts.notice).toBeNull();
     expect(a.getState().accounts.aliases).toEqual({ [ACCOUNT]: "from-a" });
     expect(double.records.get(await accountStoreKey(accountKey, ACCOUNT))?.version).toBe(2);
+  });
+
+  test("a rename that lost to a clear says the name was cleared", async () => {
+    const double = startDouble();
+    await planted(double, ACCOUNT, "work");
+    const a = await openStore(double);
+    const b = await openStore(double);
+    await pollUntil(() => a.getState().accounts.aliases[ACCOUNT] === "work", "a's listing to land");
+    await pollUntil(() => b.getState().accounts.aliases[ACCOUNT] === "work", "b's listing to land");
+    double.muted = true;
+    await b.renameAccount(ACCOUNT, "  ");
+
+    await a.renameAccount(ACCOUNT, "home");
+    expect(a.getState().accounts.notice).toBe("Renamed elsewhere and cleared — save again to replace it");
+    expect(a.getState().accounts.aliases).toEqual({});
   });
 
   test("a version-1 blob put back reads unreadable: the alias is gone, and the next rename overwrites at the relay's version", async () => {

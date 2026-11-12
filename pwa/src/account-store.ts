@@ -15,7 +15,6 @@ import type { AppState } from "./view.ts";
 export const LIST_RETRY_MS = 8_000;
 
 const TOO_LONG = "Names are at most 64 characters";
-const CONFLICT = "Renamed elsewhere — showing the latest name; rename again to replace it";
 
 function refusalText(code: string): string {
   switch (code) {
@@ -26,6 +25,12 @@ function refusalText(code: string): string {
     default:
       return `Rename refused (${code})`;
   }
+}
+
+function conflictText(latest: string | null | undefined): string {
+  if (latest === undefined) return "Renamed elsewhere — save again to replace it";
+  if (latest === null) return "Renamed elsewhere and cleared — save again to replace it";
+  return `Renamed elsewhere to “${latest}” — save again to replace it`;
 }
 
 /**
@@ -232,8 +237,9 @@ export class AccountStore {
         this.#take(key, written.record.version, written.record);
         landed = true;
       } else if (written.code === "version_conflict") {
-        await this.#refresh(key);
-        this.#set({ notice: CONFLICT });
+        // The form covers the card, so the notice itself names what landed; undefined: the re-read got no answer.
+        const reread = await this.#refresh(key);
+        this.#set({ notice: conflictText(reread ? this.#heldAlias(accountId) : undefined) });
       } else {
         this.#set({ notice: refusalText(written.code) });
       }
