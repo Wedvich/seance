@@ -165,7 +165,10 @@ Each is the owner's, 2026-11-12, unless marked _derived_.
   days (new 90-day and 1-year ranges), and for a machine that is asleep.
 - **A33. Merging an account.** Series are stored per observer, unmerged. An account's value in a
   bucket is the newest observation in it from any machine, computed at query time, as the fleet
-  quota record already takes the newest reading per account.
+  quota record already takes the newest reading per account. As built, each observer's bucket is
+  first valued as a machine's own chart values it (stored, or the hourly average at 6 h and 1 d),
+  then merged: newest row, the larger at the same instant. A coarse bucket is therefore a
+  per-observer average, not the last reading, so one account reads alike at 1 h and at 1 d.
 - **A34. Task history.** The Queue screen's finished list continues into the archive ("older"),
   with filters for repo, outcome, machine, account and date range, and a substring search on the
   title.

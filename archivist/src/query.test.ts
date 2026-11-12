@@ -76,6 +76,11 @@ describe("archive-tasks", () => {
     archive.upsertTask(stripped, 200);
     // As if a build before A14's stripping, or a hand edit, had stored the record whole.
     archive.upsertTask({ ...stripped, id: "t-old", record: JSON.stringify(task({ id: "t-old" })) }, 100);
+    // A record whose JSON disagrees with its `state` column, so `forgetPrompt` alone would keep its prompt.
+    archive.upsertTask(
+      { ...stripped, id: "t-odd", record: JSON.stringify(task({ id: "t-odd", state: "running" })) },
+      50,
+    );
 
     const reply = await answerArchiveTasks(
       plain("archive-tasks", {}),
@@ -90,7 +95,7 @@ describe("archive-tasks", () => {
     expect(text).not.toContain(RAW_ACCOUNT);
     const parsed = parseArchiveTasksReply(reply?.payload);
     if (parsed === null || !parsed.ok) throw new Error("not an ok page");
-    expect(parsed.tasks.map((entry) => entry.task.id)).toEqual(["t-new", "t-old"]);
+    expect(parsed.tasks.map((entry) => entry.task.id)).toEqual(["t-new", "t-old", "t-odd"]);
     for (const { task: archived } of parsed.tasks) {
       expect(archived.spec.prompt).toBeUndefined();
       expect(archived.spec.attachments).toBeUndefined();
@@ -208,6 +213,29 @@ describe("the app-only gate", () => {
     );
     expect(good).toMatchObject({ op: "archive-metrics", re: "req-1" });
     expect(parseMetricsReply(good?.payload)).toEqual({ series: [] });
+  });
+
+  test("a year at one day over many series is refused too_large with a message, not left to the transport", async () => {
+    const archive = MetricsArchive.memory();
+    const now = Math.floor(Date.now() / 1000);
+    const day = now - (now % 86_400);
+    const points = Array.from({ length: 366 }, (_, i): [number, number] => [
+      day - i * 86_400,
+      (i + 1) / 7,
+    ]).toReversed();
+    archive.writePulled(
+      "dev-a",
+      3600,
+      Array.from({ length: 8 }, (_, i) => ({ metric: `m${i}`, labels: { machine: "dev-a" }, points })),
+      now,
+    );
+    const answer = createMetricsAnswer(archive);
+    const request = { from: day - 365 * 86_400, to: day, step: 86_400, machine: "dev-a" } as const;
+    expect(answer(request)).toMatchObject({ ok: false, code: "too_large" });
+    // The same range for one name fits.
+    const one = answer({ ...request, names: ["m0"] });
+    expect("series" in one && one.series).toHaveLength(1);
+    archive.close();
   });
 
   test("a throwing archive is internal_error naming only the op", async () => {

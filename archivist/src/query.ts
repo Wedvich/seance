@@ -9,6 +9,7 @@ import {
   type ArchiveTasksCursor,
   type ArchiveTasksRequest,
   type ArchiveTasksResponse,
+  type MetricsReply,
   type MetricsResponse,
   type Plain,
 } from "@seance/shared";
@@ -96,8 +97,17 @@ export function createTasksAnswer(
 
 export function createMetricsAnswer(
   metrics: Pick<MetricsArchive, "queryArchive">,
-): (query: ArchiveMetricsRequest) => MetricsResponse {
-  return (query) => ({ series: metrics.queryArchive(query) });
+): (query: ArchiveMetricsRequest) => MetricsReply {
+  return (query) => {
+    const reply: MetricsResponse = { series: metrics.queryArchive(query) };
+    // Refused here, not left to the transport's bare `too_large`: a year at 1 d over many series is the case, and the message says how to ask.
+    if (jsonBytes(reply) <= REPLY_JSON_BUDGET - PAGE_FRAME_BYTES) return reply;
+    return {
+      ok: false,
+      code: "too_large",
+      message: "reply too large: ask fewer names, or a shorter range or coarser step",
+    };
+  };
 }
 
 export function answerArchiveTasks(

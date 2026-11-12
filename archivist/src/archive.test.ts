@@ -114,6 +114,12 @@ describe("task rows", () => {
     expect(row).toMatchObject({ repo: "seance", title: "Do the thing", deviceId: "dev-a", prState: "open" });
   });
 
+  test("a record not in a finished state still loses its prompt and attachment manifest", () => {
+    const { spec } = archivedTask(task({ state: "running" }));
+    expect(spec.prompt).toBeUndefined();
+    expect(spec.attachments).toBeUndefined();
+  });
+
   test("nothing the prompt names reaches the record: no window, branch, failure message or routing decision", () => {
     const slug = "rotate-the-prod-stripe-key-in-kv-foo-and";
     const text = JSON.stringify(
@@ -375,6 +381,19 @@ describe("queryTasks", () => {
     ]);
   });
 
+  /** Every page of `limit` rows, followed by cursor, as the app would walk it. */
+  function walk(limit: number): string[][] {
+    const pages: string[][] = [];
+    let before: ArchiveTasksRequest["before"];
+    for (;;) {
+      const { rows: page } = archive.queryTasks({ ...(before === undefined ? {} : { before }) }, limit);
+      const last = page.at(-1);
+      if (last === undefined) return pages;
+      pages.push(page.map((row) => row.id));
+      before = { endedAt: last.endedAt, createdAt: last.createdAt, id: last.id };
+    }
+  }
+
   test("a keyset page continues exactly where the last ended, and total ignores the cursor", () => {
     for (const [i, at] of [100, 200, 200, 300, 400].entries()) put(`t-${i}`, at);
     const first = archive.queryTasks({}, 2);
@@ -387,6 +406,18 @@ describe("queryTasks", () => {
     );
     expect(second.total).toBe(5);
     expect([...first.rows, ...second.rows].map((row) => row.id)).toEqual(["t-4", "t-3", "t-2", "t-1", "t-0"]);
+  });
+
+  test("a page boundary inside a tie on end time, or on end time and created, loses and repeats nothing", () => {
+    for (const [i, at] of [100, 200, 200, 300, 400].entries()) put(`t-${i}`, at);
+    // limit 3 cuts between the two 200s.
+    expect(walk(3)).toEqual([
+      ["t-4", "t-3", "t-2"],
+      ["t-1", "t-0"],
+    ]);
+    // Equal end and created: only the id decides, and a boundary lands between each.
+    for (const id of ["u-1", "u-2", "u-3"]) put(id, 500, { createdAt: 50 });
+    expect(walk(1).flat()).toEqual(["u-3", "u-2", "u-1", "t-4", "t-3", "t-2", "t-1", "t-0"]);
   });
 
   test("each filter narrows, and they combine", () => {

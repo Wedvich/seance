@@ -267,12 +267,15 @@ describe("queryArchive", () => {
     archive.writePulled("dev-b", 3600, [quota("dev-b", "work", KEY, [[day, 35]])], NOW);
     expect(archive.queryArchive({ from: day, to: day, step: 3600, account: KEY })[0]?.points).toEqual([[day, 35]]);
 
-    // At a day, the newest hourly row in it, whichever machine read it.
+    // At a day each observer's hourly rows average, as its own machine chart reads (35 and 20), then the larger wins.
     archive.writePulled("dev-a", 3600, [quota("dev-a", "default", KEY, [[day + 3600, 40]])], NOW);
     archive.writePulled("dev-b", 3600, [quota("dev-b", "work", KEY, [[day + 3 * 3600, 5]])], NOW);
     expect(archive.queryArchive({ from: day, to: day + 23 * 3600, step: 86_400, account: KEY })).toEqual([
-      { metric: "quota_5h_pct", labels: { account: KEY }, points: [[day, 5]] },
+      { metric: "quota_5h_pct", labels: { account: KEY }, points: [[day, 35]] },
     ]);
+    expect(archive.queryArchive({ from: day, to: day + 23 * 3600, step: 86_400, machine: "dev-a" })[0]?.points).toEqual(
+      [[day, 35]],
+    );
     archive.close();
   });
 

@@ -1453,11 +1453,12 @@ export type ArchiveMetricsStep = (typeof ARCHIVE_METRICS_STEPS)[number];
  * (retired machines included). `account` is the `account:<hex>` store key,
  * never a raw id: every series labelled with it from any observer, merged per
  * bucket at query time. Same point cap per series as `metrics`. The reply is
- * a `MetricsReply`.
+ * a `MetricsReply`: past one envelope (a year at 1 d with many series) it is
+ * `too_large`, and the ask is fewer `names` or a shorter range.
  */
 export type ArchiveMetricsRequest = Omit<MetricsRequest, "step"> & { readonly step: ArchiveMetricsStep } & (
-    | { readonly machine: string }
-    | { readonly account: string }
+    | { readonly machine: string; readonly account?: never }
+    | { readonly account: string; readonly machine?: never }
   );
 
 /** The finished states the archive keeps (A16), each an `outcome` filter. */
@@ -1480,7 +1481,8 @@ export interface ArchiveTasksCursor {
  * `op: "archive-tasks"` — one page of archived tasks, newest first by
  * `ArchivedTask.endedAt`, then `createdAt`, then id. Every filter is optional
  * and they combine. `since`/`until` bound `endedAt` (ms; `until` exclusive).
- * `title` is a case-insensitive substring of the task's title; a task with no
+ * `title` is a substring of the task's title, case-insensitive for ASCII
+ * letters only (SQLite's `LIKE`): "øl" does not find "Øl-oppsett". A task with no
  * title never matches, since its shown title comes from the prompt the archive
  * never holds.
  */

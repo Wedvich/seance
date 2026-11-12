@@ -10721,17 +10721,26 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
     1 d (`ARCHIVE_METRICS_STEPS`), under the same `METRICS_MAX_POINTS` cap, so a year is
     reachable at 1 d. The reply is a `MetricsReply`. A machine gets its own observed series as
     stored at the step's tier, and at 6 h or 1 d the average of its hourly rows per bucket. An
-    account gets every series labelled with it, from any observer and exclave, merged at query
-    time (A33): per bucket the newest observation wins, and rows at the same instant (every row
-    of a rolled tier sits at its bucket's start) take the larger value, since within a window
-    usage only rises; the merged series drop `machine` and `exclave`. Series are picked by label
-    in the `series` table first, so a tier is read only for those ids, bound as one JSON array.
+    account gets every series labelled with it, from any observer and exclave, each valued as a
+    machine's own series is (so a chart reads alike at every step: the same account at 1 h and
+    1 d no longer disagrees by taking a different statistic), merged at query time (A33): per
+    bucket the newest row wins, and rows at the same instant (every row of a rolled or averaged
+    tier sits at its bucket's start) take the larger value, since within a window usage only
+    rises; the merged series drop `machine` and `exclave`. Series are picked by label in the
+    `series` table first, bound as one JSON array; the tier is then read by `ts` range (its key
+    is `(ts, series)`, so every series in the range is scanned, then filtered to those ids,
+    synchronously) — a `(series, ts)` index would be a shared-schema migration, left until a
+    fleet's size makes it matter. A reply past `REPLY_JSON_BUDGET` is refused `too_large` by the
+    archivist itself, with a message: a year at 1 d with more than a handful of series is the
+    case, and the app asks per `names` or a shorter range.
   - `archive-tasks` is a page, newest first by end time, filtered by `repo`, `outcome` (`done`,
     `failed`, `cancelled`), `machine`, `account`, `since`/`until` and a `title` substring
-    (`LIKE` with `%`, `_` and `\` escaped); every filter is a bound parameter. The archive has no
+    (`LIKE` with `%`, `_` and `\` escaped, so case-insensitive for ASCII only: "øl" does not
+    find "Øl-oppsett"); every filter is a bound parameter. The archive has no
     finish time, so end time is `first_archived_at`, the first time the archivist saw the task
-    finished; ties go to `created_at`, then id, all descending, and `before` is a keyset cursor
-    on those three. `limit` is 1–50 (`ARCHIVE_TASKS_PAGE` 20 by default), and a page is also
+    finished (one clock reading per listing pass, so a first start's backfill, whose true finish
+    times are unknown, ties and falls to `created_at` then id); ties go to `created_at`, then
+    id, all descending, and `before` is a keyset cursor on those three. `limit` is 1–50 (`ARCHIVE_TASKS_PAGE` 20 by default), and a page is also
     filled only to `REPLY_JSON_BUDGET`, keeping at least one row; `next` points past the last row
     it consumed whenever one is left, so a page cut by size loses nothing, and `total` counts
     every match. Each row carries the task record, its end time, the machine's last-known name

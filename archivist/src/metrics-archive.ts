@@ -221,18 +221,21 @@ export class MetricsArchive {
 
   /**
    * `archive-metrics` (A31–A33); bounds on the range are the parser's. The
-   * series are picked from the `series` table by label first, so a tier is
-   * read only for those ids. A machine gets its own observed series as stored,
+   * series are picked from the `series` table by label first and bound as one
+   * JSON array; the tier is then read by `ts` range (its key is `(ts, series)`,
+   * so every series in the range is scanned) and filtered to those ids. A machine gets its own observed series as stored,
    * at the step's tier, or for 6 h and 1 d the average of its hourly rows per
    * bucket (each tier is the average of the one below). An account gets every
-   * series labelled with it, from any observer and exclave, merged per bucket:
-   * the newest observation in it wins, and rows at the same instant (always so
-   * on a rolled tier, every row at its bucket's start) take the larger value,
-   * since within a window usage only rises; `machine` and `exclave` are dropped.
+   * series labelled with it, from any observer and exclave, each valued as a
+   * machine's own series is (stored, or the hourly average at 6 h and 1 d),
+   * merged per bucket: the newest row wins, and rows at the same instant
+   * (always so on a rolled tier or an averaged one, every row at its bucket's
+   * start) take the larger value, since within a window usage only rises;
+   * `machine` and `exclave` are dropped. So a chart reads alike at every step.
    */
   queryArchive(request: ArchiveMetricsRequest): readonly MetricsSeries[] {
     const target: Readonly<Record<string, string>> =
-      "machine" in request ? { [OBSERVER_LABEL]: request.machine } : { account: request.account };
+      request.machine === undefined ? { account: request.account } : { [OBSERVER_LABEL]: request.machine };
     const names = request.names === undefined ? null : new Set(request.names);
     const picked: PickedSeries[] = [];
     for (const row of this.#allSeries.all()) {
@@ -249,24 +252,30 @@ export class MetricsArchive {
     const inRange = `ts >= ?1 AND ts <= ?2 AND series IN (SELECT value FROM json_each(?3))`;
     const bucketOf = `(ts / CAST(?4 AS INTEGER)) * CAST(?4 AS INTEGER)`;
     const byId = new Map(picked.map((series) => [series.id, series]));
-    if ("account" in request) {
-      // SQLite's bare column beside max(): `value` is the row holding each series' newest `ts` in the bucket.
-      const rows = this.#db
+    // Past the stored tiers a bucket is the average of the hourly rows in it, for a machine and an account alike.
+    const averaged = (): readonly (TierRow & { readonly bucket: number })[] =>
+      this.#db
         .query<TierRow & { readonly bucket: number }, [number, number, string, number]>(
-          `SELECT series, ${bucketOf} AS bucket, max(ts) AS ts, value FROM ${tier}
-           WHERE ${inRange} GROUP BY series, bucket`,
+          `SELECT series, ${bucketOf} AS bucket, ${bucketOf} AS ts, avg(value) AS value FROM ${tier}
+           WHERE ${inRange} GROUP BY series, bucket ORDER BY series, bucket`,
         )
         .all(request.from, request.to, ids, request.step);
+    if (request.account !== undefined) {
+      // SQLite's bare column beside max(): `value` is the row holding each series' newest `ts` in the bucket.
+      const rows =
+        native === undefined
+          ? averaged()
+          : this.#db
+              .query<TierRow & { readonly bucket: number }, [number, number, string, number]>(
+                `SELECT series, ${bucketOf} AS bucket, max(ts) AS ts, value FROM ${tier}
+                 WHERE ${inRange} GROUP BY series, bucket`,
+              )
+              .all(request.from, request.to, ids, request.step);
       return mergeAccount(rows, byId);
     }
     const rows =
       native === undefined
-        ? this.#db
-            .query<TierRow, [number, number, string, number]>(
-              `SELECT series, ${bucketOf} AS ts, avg(value) AS value FROM ${tier}
-               WHERE ${inRange} GROUP BY series, ts / CAST(?4 AS INTEGER) ORDER BY series, ts`,
-            )
-            .all(request.from, request.to, ids, request.step)
+        ? averaged()
         : this.#db
             .query<TierRow, [number, number, string]>(
               `SELECT series, ts, value FROM ${tier} WHERE ${inRange} ORDER BY series, ts`,
