@@ -338,7 +338,7 @@ interface XhrLike {
   abort(): void;
   readonly status: number;
   readonly responseText: string;
-  addEventListener(type: "load" | "error" | "timeout" | "abort", listener: () => void): void;
+  addEventListener(type: "load" | "error" | "abort", listener: () => void): void;
   readonly upload: {
     addEventListener(type: "progress", listener: (event: XhrProgress) => void): void;
   };
@@ -398,7 +398,6 @@ function putByXhr(
     };
     xhr.addEventListener("load", () => settle({ status: xhr.status, body: parseJson(xhr.responseText) }));
     xhr.addEventListener("error", () => settle("unreachable"));
-    xhr.addEventListener("timeout", () => settle("unreachable"));
     xhr.addEventListener("abort", () => settle(stalled ? "unreachable" : "aborted"));
     // A listener on `upload` forces a preflight; the Authorization header forces one anyway.
     if (onProgress !== undefined) {
