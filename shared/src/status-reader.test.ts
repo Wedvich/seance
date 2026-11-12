@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  exclaveAuth,
   isQuotaTrimmed,
   isStatusStale,
   lastHeardAt,
@@ -7,7 +8,7 @@ import {
   STATUS_CLOCK_SKEW_MS,
   STATUS_STALE_MS,
 } from "./status-reader.ts";
-import type { MachineStatus, QuotaObservation } from "./types.ts";
+import { CAPABILITIES, type MachineStatus, type QuotaObservation } from "./types.ts";
 
 const NOW_MS = 1_760_000_000_000;
 const NOW_S = NOW_MS / 1000;
@@ -116,5 +117,42 @@ describe("lastHeardAt", () => {
 
   test("a status older than a later register's lastSeen never wins", () => {
     expect(lastHeardAt({ lastSeen: NOW_MS - 5_000, status: { ...status, at: NOW_S - 600 } })).toBe(NOW_MS - 5_000);
+  });
+});
+
+describe("exclaveAuth", () => {
+  const caps = [CAPABILITIES.authHealth];
+  const machine = (
+    over: Partial<MachineStatus>,
+    extra: { connected?: boolean; capabilities?: readonly string[] } = {},
+  ) => ({
+    connected: extra.connected ?? true,
+    capabilities: "capabilities" in extra ? extra.capabilities : caps,
+    status: { ...status, ...over },
+  });
+
+  test("ok when the daemon advertises authHealth and lists the exclave nowhere", () => {
+    expect(exclaveAuth(machine({}), 0, NOW_MS)).toEqual({ state: "ok" });
+  });
+
+  test("unknown for a disconnected machine, a stale status, a daemon without the capability and an au index", () => {
+    expect(exclaveAuth(machine({ ax: [0] }, { connected: false }), 0, NOW_MS)).toEqual({ state: "unknown" });
+    expect(exclaveAuth(machine({ ax: [0] }), 0, NOW_MS + STATUS_STALE_MS + 1000)).toEqual({ state: "unknown" });
+    expect(exclaveAuth(machine({ ax: [0] }, { capabilities: [] }), 0, NOW_MS)).toEqual({ state: "unknown" });
+    expect(exclaveAuth(machine({ ax: [0] }, { capabilities: undefined }), 0, NOW_MS)).toEqual({ state: "unknown" });
+    expect(exclaveAuth({ connected: true, capabilities: caps }, 0, NOW_MS)).toEqual({ state: "unknown" });
+    expect(exclaveAuth(machine({ au: [1] }), 1, NOW_MS)).toEqual({ state: "unknown" });
+  });
+
+  test("expired from ax, and from an ae time already past", () => {
+    expect(exclaveAuth(machine({ ax: [1] }), 1, NOW_MS)).toEqual({ state: "expired" });
+    expect(exclaveAuth(machine({ ae: [[1, NOW_S - 1]] }), 1, NOW_MS)).toEqual({ state: "expired" });
+    expect(exclaveAuth(machine({ ae: [[1, NOW_S]] }), 1, NOW_MS)).toEqual({ state: "expired" });
+  });
+
+  test("expiring carries its expiry in milliseconds, for its own index only", () => {
+    const m = machine({ ae: [[1, NOW_S + 3600]] });
+    expect(exclaveAuth(m, 1, NOW_MS)).toEqual({ state: "expiring", expiresAt: NOW_MS + 3_600_000 });
+    expect(exclaveAuth(m, 0, NOW_MS)).toEqual({ state: "ok" });
   });
 });
