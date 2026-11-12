@@ -549,14 +549,26 @@ of M4 has landed.
   No capability: an older leader reads it as `done`, as before. DESIGN.md, _Daemon_, "Window closed from
   outside", records the tmux behaviour verified, why no global hook, and the residuals.
 
-  _Open gaps (follow-up, not yet planned):_
+  _Gaps found 2026-10-22, closed (follow-up, 2026-11-12):_
   - The deadline and disconnect settles call `ended(task, undefined)`, so a PR the daemon noted
-    in the ledger (`progress.prUrl`) but the leader never recorded settles `done` by `session`,
-    not `awaiting-merge`, and releases `after: "merged"` dependents early. Same blindness the
-    event path had before; narrower now. Fix direction: settle from the machine's last
-    `progress` entry where one was read.
-  - A spawn that times out before claude registers and then dies untitled gets no status
-    (harvest takes only titled panes; reap closes it), so its task settles `done` as before.
+    in the ledger (`progress.prUrl`) but the leader never recorded settled `done` by `session`,
+    not `awaiting-merge`, and released `after: "merged"` dependents early. The recorded fix
+    direction, settling from the machine's last `progress` entry read, proved unnecessary: every
+    read that answers for a live session already absorbs its `progress.prUrl` into the record
+    (`settlePlaced` → `progressed`), so no read the leader keeps could hold a PR it lacks. The hole
+    was the daemon's: a PR rode only the one forwarded event that carried it, and when that one was
+    lost (a relay hiccup, a failover) the PR-less `ended` was deferred for the exit and the machine
+    went before any read. _As built:_ the daemon's `ended` now carries the PR its pane's own launch
+    noted (`EndedTasks.notedPr`; the session's own report, never a continuation's `continuedPr`), so
+    the leader settles `awaiting-merge` on the event, never deferring. No wire or leader change: an
+    older leader already settles an `ended` carrying a PR that way, a PR it holds is no write, and a
+    task that fell back to an older of several PRs keeps it (`reportedPr`). An older daemon's machine
+    keeps the gap until it updates.
+  - A spawn that times out before claude registers and then dies untitled got no status (harvest
+    takes only titled panes; reap closes it). Found already closed: the `pane-died` hook of
+    2026-10-27 is set by `armTask`, which runs after a timed-out registration too, so the death is
+    recorded server-side and harvest notes it from there; reap's close (`closing` first) keeps it.
+    A test pins it (`daemon/test/spawn.test.ts`).
 
 - **Continue a failed task (new, 2026-10-26; widened 2026-10-27).** A task that failed `session_failed` (an OOM
   kill) leaves its worktree and its conversation on disk, and the only remedy was a new task from
