@@ -453,6 +453,17 @@ describe("continueOffer, an awaiting-merge task whose PR is blocked", () => {
     if (!plain.ok) throw new Error(plain.reason);
     expect(offeredSpec(stuck(), plain).continues).toEqual({ task: "t-old", at: target });
   });
+
+  test("offeredSpec names an untitled task's continuation by its PR, not by the brief, and keeps a title it has", () => {
+    const untitled = stuck();
+    const offer = continueOffer(untitled, handoffable, [], context);
+    if (!offer.ok) throw new Error(offer.reason);
+    expect(offeredSpec(untitled, offer).title).toBe("Unblock PR #7");
+    const titled = stuck({}, { title: "Add export" });
+    const again = continueOffer(titled, handoffable, [], context);
+    if (!again.ok) throw new Error(again.reason);
+    expect(offeredSpec(titled, again).title).toBe("Add export");
+  });
 });
 
 describe("blockedBrief", () => {
@@ -462,6 +473,14 @@ describe("blockedBrief", () => {
     expect(blockedBrief(task, "behind")).toContain("behind its base branch");
     expect(blockedBrief(task, "unarmed")).toContain("gh pr merge --auto");
     expect(blockedBrief(task, "checks")).not.toContain("Failing required checks");
+    // Séance's words reach the session after "From the user:", so the brief says whose they are, and every reason ends in a hand-off.
+    for (const reason of ["checks", "conflict", "behind", "unarmed"] as const) {
+      expect(blockedBrief(task, reason)).toContain("not written by the user");
+      expect(blockedBrief(task, reason)).toContain(
+        "call hand_off_task as your last tool call, whatever the PR's state",
+      );
+    }
+    expect(blockedBrief(task, "unarmed")).not.toContain("leave it");
   });
 });
 

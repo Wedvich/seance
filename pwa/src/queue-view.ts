@@ -342,7 +342,9 @@ function continuesLine(task: Task, titles: ReadonlyMap<string, string>): string 
 }
 
 function continuingOf(task: Task, tasks: readonly Task[]): QueueRow["continuing"] {
-  const waiting = waitingContinuation(task, tasks);
+  // A task whose continuation landed (`continuedBy`) is continued by whatever waits on that link, not on itself.
+  const link = task.continuedBy === undefined ? undefined : tasks.find((other) => other.id === task.continuedBy?.task);
+  const waiting = waitingContinuation(link ?? task, tasks);
   return waiting === undefined ? null : { id: waiting.id, text: `Continuing as ${taskTitle(waiting)} · waiting` };
 }
 

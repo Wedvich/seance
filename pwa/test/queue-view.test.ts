@@ -1026,6 +1026,26 @@ describe("continuing an awaiting-merge task whose PR is blocked", () => {
     expect(rowOf(reported, HANDOFF)).toMatchObject({ canContinue: false, inlinePrimary: false });
   });
 
+  test("the blocked task's card names a continuation waiting on its newest landed link", () => {
+    const landed = task("c1", {
+      state: "running",
+      assignment: placedAt,
+      spec: { repo: ORIGIN, mode: "continue", continues: { task: "w", at: placedAt } },
+    });
+    const waiting = task("c2", {
+      state: "queued",
+      spec: { repo: ORIGIN, mode: "continue", title: "Unblock PR #7", continues: { task: "c1", at: placedAt } },
+    });
+    const pointed = { ...blocked, continuedBy: { task: "c1", createdAt: NOW } };
+    const row = deriveQueue(
+      state(ok([pointed, landed, waiting]), {}, { machines: [machine({ capabilities: HANDOFF })] }),
+      NOW,
+    )
+      .sections.flatMap((section) => section.rows)
+      .find((r) => r.id === "w");
+    expect(row?.continuing).toEqual({ id: "c2", text: "Continuing as Unblock PR #7 · waiting" });
+  });
+
   test("a failed task's Continue stays the quiet one", () => {
     const failed = task("f", {
       state: "failed",

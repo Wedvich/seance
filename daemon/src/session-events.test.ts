@@ -336,13 +336,14 @@ describe("EndedTasks", () => {
     const ended = new EndedTasks(ledger);
     const site = { repo: "/r", path: "/r/.claude/worktrees/x", session: SESSION };
     await ledger.record("opened");
-    await ledger.note("opened", { ...site, prUrl: "https://github.com/a/b/pull/1" });
+    await ledger.note("opened", { ...site, prUrl: "https://github.com/a/b/pull/1", exit: 0 });
     expect(ended.continuation("opened")).toMatchObject({ continuedPr: "https://github.com/a/b/pull/1" });
     await ledger.record("inherited");
     await ledger.note("inherited", {
       ...site,
       path: "/r/.claude/worktrees/y",
       continuedPr: "https://github.com/a/b/pull/2",
+      exit: 0,
     });
     expect(ended.continuation("inherited")).toMatchObject({ continuedPr: "https://github.com/a/b/pull/2" });
     await ledger.record("both");
@@ -351,11 +352,48 @@ describe("EndedTasks", () => {
       path: "/r/.claude/worktrees/z",
       prUrl: "https://github.com/a/b/pull/3",
       continuedPr: "https://github.com/a/b/pull/2",
+      exit: 0,
     });
     expect(ended.continuation("both")).toMatchObject({ continuedPr: "https://github.com/a/b/pull/3" });
     await ledger.record("bare");
-    await ledger.note("bare", { ...site, path: "/r/.claude/worktrees/w" });
+    await ledger.note("bare", { ...site, path: "/r/.claude/worktrees/w", exit: 0 });
     expect(ended.continuation("bare")).not.toHaveProperty("continuedPr");
+  });
+
+  test("a PR is inherited only from a launch that ended handed off or by itself with status 0, never a cancelled or failed one", async () => {
+    const ledger = LaunchLedger.memory();
+    const ended = new EndedTasks(ledger);
+    const pr = "https://github.com/a/b/pull/1";
+    const noted = async (id: string, note: object): Promise<void> => {
+      await ledger.record(id);
+      await ledger.note(id, {
+        repo: "/r",
+        path: `/r/.claude/worktrees/${id}`,
+        session: SESSION,
+        prUrl: pr,
+        ...note,
+      });
+    };
+    await noted("handed", {});
+    await ended.handingOff("handed");
+    expect(ended.continuation("handed")).toMatchObject({ continuedPr: pr });
+    await noted("exited", { exit: 0 });
+    expect(ended.continuation("exited")).toMatchObject({ continuedPr: pr });
+    // A cancel: this daemon closed the pane, nothing handed off.
+    await noted("cancelled", {});
+    await ended.closing("cancelled");
+    expect(ended.continuation("cancelled")).not.toHaveProperty("continuedPr");
+    await noted("cancelled-zero", { exit: 0 });
+    await ended.closing("cancelled-zero");
+    expect(ended.continuation("cancelled-zero")).not.toHaveProperty("continuedPr");
+    await noted("failed", { exit: 1 });
+    expect(ended.continuation("failed")).not.toHaveProperty("continuedPr");
+    await noted("handed-killed", {});
+    await ended.handingOff("handed-killed");
+    await ledger.note("handed-killed", { exit: 137 });
+    expect(ended.continuation("handed-killed")).not.toHaveProperty("continuedPr");
+    await noted("running", {});
+    expect(ended.continuation("running")).not.toHaveProperty("continuedPr");
   });
 
   test("handingOff notes the hand-off and the close, and the continuation reports handedOff only for a clean end", async () => {

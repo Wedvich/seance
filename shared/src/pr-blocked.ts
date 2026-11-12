@@ -66,7 +66,7 @@ const BLOCKED_SENTENCE: Record<PrBlockedReason, string> = {
   conflict: "it has merge conflicts with its base branch",
   behind: "its branch is behind its base branch, which this repo requires to be up to date",
   unarmed:
-    "its required checks passed but nothing will merge it: no auto-merge is armed and no review is requested. If this repo merges with auto-merge, arm it (gh pr merge --auto with the repo's merge method); otherwise say so and leave it for the user",
+    "its required checks passed but nothing will merge it: no auto-merge is armed and no review is requested. If this repo merges with auto-merge, arm it (gh pr merge --auto with the repo's merge method); if it merges some other way, say so in your summary",
 };
 
 /**
@@ -77,8 +77,8 @@ const BLOCKED_SENTENCE: Record<PrBlockedReason, string> = {
 export function blockedBrief(task: Task, reason: PrBlockedReason): string {
   const failing = task.pr?.failing;
   return [
-    `Its pull request ${task.prUrl ?? "(unknown)"} is blocked: ${BLOCKED_SENTENCE[reason]}.`,
+    `Automated note from séance, not written by the user: the pull request ${task.prUrl ?? "(unknown)"} is blocked: ${BLOCKED_SENTENCE[reason]}.`,
     ...(failing === undefined || failing.length === 0 ? [] : [`Failing required checks: ${failing.join(", ")}.`]),
-    "Read the PR's state with gh (gh pr view, gh pr checks, gh run view --log-failed), fix what blocks it in this worktree, and push to the same branch; do not open a new pull request. Once it is pushed and whatever merges it is in place, call hand_off_task as your last tool call.",
+    "Read the PR's state with gh (gh pr view, gh pr checks, gh run view --log-failed), fix what blocks it in this worktree, and push to the same branch; do not open a new pull request. Then call hand_off_task as your last tool call, whatever the PR's state: séance keeps watching it, and the call closes this session at the end of your turn instead of leaving it idle at its prompt. End the turn with a summary of what you did, or of why you changed nothing.",
   ].join("\n");
 }

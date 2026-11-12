@@ -6264,16 +6264,20 @@ fields carry over), under the same gates.
   (`continuationSpec`), plus a fixed prompt (`blockedBrief`, `shared/src/pr-blocked.ts`): the PR's URL, one
   sentence per reason (a required check failed, merge conflicts with its base branch, the branch behind
   its base, or nothing armed to merge it: for that last one, arm auto-merge if the repo merges that way,
-  otherwise say so and leave it), the failing check names (already bounded and control-stripped at the
+  otherwise say so in the summary), the failing check names (already bounded and control-stripped at the
   read) and an instruction to read the PR with `gh`, fix it in the worktree, push to the same branch, open
-  no new PR and call `hand_off_task` last; any note the person
-  typed follows it. The brief is fixed text built from the leader's reading, never a frame's
-  words. Offered only when: the task is `awaiting-merge`, has an assignment, ran in a worktree (not
+  no new PR and call `hand_off_task` last on every reason, so the session always ends rather than idling at
+  its prompt (an idle continuation reads `running`, which holds back every later alert and offer); any note
+  the person typed follows it. The brief opens "Automated note from séance, not written by the user": the
+  daemon's seed prints a continuation's prompt after "From the user:", and the words are the leader's. It is
+  fixed text built from the leader's reading, never a frame's words. An untitled task's continuation is
+  titled `Unblock PR #<n>` (`offeredSpec`), else its card and window would be named by the brief's first line. Offered only when: the task is `awaiting-merge`, has an assignment, ran in a worktree (not
   `here`), is not `until: "reported"` (nothing waits on its merge, so no alert, so no button), and
   `taskPrBlock` names a reason; the caller's leader advertises `continueHandoff` (`OfferContext.leaderHandoff`;
   PWA `deriveContinueHandoffAvailability`, MCP and the daemon's auto path through `advertises` /
   `leaderAdvertises`); the machine advertises `continueHandoff` beside the other two; and no continuation of it
-  is waiting or underway (`waitingContinuation`, `continuationUnderway`, and `continuedBy.live`). The failed
+  is underway (`continuationUnderway`, which walks the whole chain, and `continuedBy.live`; `blockedOffer` does
+  no `waitingContinuation` walk of its own). The failed
   rules' ledger limits hold too: the session offered must be one the machine's launch ledger can still
   hold, so the offer is refused once `LAUNCH_LEDGER_MAX_AGE_MS` has passed since the launch it resumes
   (`continuedBy.createdAt`, else the task's own `createdAt`). A refusal says why in a sentence, as the others do.
@@ -6287,7 +6291,14 @@ fields carry over), under the same gates.
     The pointer is dropped when the task finishes (`advance`), and a malformed one at parse.
   - _The hand-off a continuation may make._ The session resumed to fix a PR must be able to hand it off
     again, though it opens none: the new launch's ledger note carries `continuedPr` (`LaunchSite.continuedPr`,
-    `startNote`), copied by the daemon from the launch it continues, and `hand_off_task` accepts it
+    `startNote`), copied by the daemon from the launch it continues, and `hand_off_task` accepts it. Copied
+    only from a launch that ended handed off or by itself with status 0 (`EndedTasks.continuation`): a
+    cancelled one (closed by the daemon, nothing handed off) or a failed one leaves its PR to no scheduler
+    watch, so its continuation answers `prless` and keeps watching the PR itself, as before. A continuation's
+    hand-off ends it `done` (it carries no PR of its own): the task it continued stays `awaiting-merge` and
+    keeps the PR, the alerts and the `after: "merged"` dependents. Residual, accepted: a task handed off and
+    then cancelled keeps its `handedOff` note, so its continuation may hand off and close with nothing
+    watching the PR; the daemon cannot see the task's state
     ("Session events", `handoff`). The continued launch's own `handedOff` note is what chooses the fourth
     seed wording. Neither is progress: both stay out of `TaskProgress` and never move a note's `at`, like
     `closedHere`.
@@ -8412,14 +8423,16 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   that handed off. The close notes `handedOff` beside `closedHere` (`EndedTasks.handingOff`; reap and
   despawn keep plain `closedHere`), so a continuation's seed can say so. An `ended` first, or the pane id reused for another task, drops the mark; so
   does a daemon restart, which leaves the session running as it would have without the call. The
-  task then ends `awaiting-merge` (`ended`, Scheduler, "Done detection"), and its worktree and
+  task then ends `awaiting-merge` (`ended`, Scheduler, "Done detection"; a continuation, which carries
+  no PR of its own, ends `done`, and the task it continued keeps waiting), and its worktree and
   branch stay, for a continuation and for reap's merged-only rules. Like `done`, it is bound by
   the kernel's peer pid and needs `mcp__seance__hand_off_task` allowed in the exclave. A session
   that lies about handing off can do no more than one that runs `/exit`. A continuation that carries the
   PR on (2026-11-12, "Continuing a session") has no PR of its own to report: the mod reports one only
   when it opens a PR, and a resumed session that fixes the old one never does. Its note carries
   `continuedPr`, which the daemon copied at launch from the continued launch's own note (`prUrl`, else its
-  own `continuedPr`), under the same path-owner rule as the session id, never from a frame; the check
+  own `continuedPr`), only when that launch ended handed off or by itself with status 0, never a cancelled or
+  failed one, under the same path-owner rule as the session id, never from a frame; the check
   reads only the pane's own task's note, so another launch sharing the path or session cannot supply
   one, and it survives the continued launch's eviction. Watching the PR after
   that, and alerting on a red required check or a conflict, is the leader's (docs/scheduler.md,

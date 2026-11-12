@@ -1067,7 +1067,8 @@ of M4 has landed.
      with `gh`. A fourth `continuePreamble` wording covers a session that ended by handing off
      (`TaskNote.handedOff`). The session resumed is the one the leader's `Task.continuedBy` pointer
      names (the newest landed continuation), and it can hand the PR off again though it opened none:
-     its note carries `continuedPr`, copied by the daemon from the continued launch. The original task
+     its note carries `continuedPr`, copied by the daemon from the continued launch (only one that ended
+     handed off or by itself with status 0, never a cancelled or failed one). The original task
      keeps the PR and its `after: "merged"` dependents, and the continuation ends `done` by `session`.
      A continuation that lands clears the alert stamp, so a fix that fails again on the same head
      alerts again; the chain's finished links are kept from pruning while the root awaits its merge.
@@ -1085,9 +1086,9 @@ of M4 has landed.
     panes one daemon ever ran, a few bytes each, so not worth a sweep until something reads the map.
   - _Built 2026-11-12:_ several PRs per task (`Task.prs`, DESIGN.md "PR status", "Several PRs"):
     the task stands on its newest PR not read closed. _Later:_ one alert per PR.
-  - _Later:_ the old card's "Continuing as …" line looks one level down (`waitingContinuation`), so it
-    does not name a continuation of a continuation that is waiting; the button is withheld
-    all the same (`continuationUnderway` walks the whole chain), only the sentence is missing.
+  - _Built 2026-11-12:_ a blocked task's "Continuing as …" line names a continuation waiting on its newest
+    landed link (`continuingOf` looks from `Task.continuedBy`, not the task). A failed or cancelled task
+    has no pointer and its line still looks one level down: its button moves to the taker, so none is lost.
   - _Later:_ alert and Continue for `until: "reported"` tasks. They are excluded from the blocked-state
     read, the chip and the alert for now (they do not wait on the merge).
   - _Later:_ stacked PRs, once Stacking lands. A `reviewDecision` chip, with `CHANGES_REQUESTED` as a

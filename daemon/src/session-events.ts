@@ -461,7 +461,8 @@ export class EndedTasks {
    * Whether a session of this task may hand its PR over: launched here, with a PR URL noted. Without
    * one its end would settle `done` or `failed`, never `awaiting-merge`. A continuation resumes the
    * conversation that opened the PR, so it may hand back the one its own note inherited at launch
-   * (`continuedPr`, copied from the launch it continued): only its own note, never another's by path or
+   * (`continuedPr`, copied from the launch it continued, and only from one that ended handed off or by
+   * itself, `continuation`): only its own note, never another's by path or
    * session, which broke once the continued launch was evicted and would let a fresh task in a reused
    * worktree hand off a PR it never touched.
    */
@@ -601,15 +602,20 @@ export class EndedTasks {
     if (note.session === undefined) {
       return { refused: "it was launched before this daemon noted session ids; resume it by hand" };
     }
-    // The PR this session had, for the continuation to inherit: its own report, else what it inherited.
-    const pr = note.prUrl ?? note.continuedPr;
+    // The PR this session had, for the continuation to inherit: its own report, else what it inherited. Only
+    // from a launch that ended by its hand-off or by itself with status 0: a cancelled one (closed here, no
+    // hand-off) or a failed one leaves its PR to no scheduler watch, and a continuation of it must keep watching
+    // the PR itself (`hand_off_task` answers `prless`) rather than close and leave it unwatched.
+    const handedOff = note.handedOff === true && (note.exit ?? 0) === 0;
+    const pr =
+      handedOff || (note.closedHere !== true && note.exit === 0) ? (note.prUrl ?? note.continuedPr) : undefined;
     return {
       repo: note.repo,
       path: note.path,
       session: note.session,
       ...(note.exit === undefined ? {} : { exit: note.exit }),
       ...(note.vanished === true && note.exit === undefined ? { vanished: true as const } : {}),
-      ...(note.handedOff === true && (note.exit ?? 0) === 0 ? { handedOff: true as const } : {}),
+      ...(handedOff ? { handedOff: true as const } : {}),
       ...(pr === undefined ? {} : { continuedPr: pr }),
     };
   }

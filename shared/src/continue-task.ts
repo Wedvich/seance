@@ -326,5 +326,13 @@ export function continuationSpec(task: Task, at: Target, prompt?: string, contin
  */
 export function offeredSpec(task: Task, offer: Extract<ContinueOffer, { ok: true }>, prompt?: string): TaskSpec {
   const joined = [offer.brief, prompt?.trim()].filter((part) => part !== undefined && part !== "").join("\n\n");
-  return continuationSpec(task, offer.at, joined, offer.resumes ?? task.id);
+  const spec = continuationSpec(task, offer.at, joined, offer.resumes ?? task.id);
+  // An untitled task would otherwise be named by its prompt's first line, the brief's: on its card and as its window.
+  return offer.brief === undefined || spec.title !== undefined ? spec : { ...spec, title: blockedTitle(task) };
+}
+
+/** `Unblock PR #7`: the number is the last path segment of the PR URL, kept only when it is digits. */
+function blockedTitle(task: Task): string {
+  const number = task.prUrl?.split("/").at(-1);
+  return number !== undefined && /^[0-9]+$/u.test(number) ? `Unblock PR #${number}` : "Unblock PR";
 }

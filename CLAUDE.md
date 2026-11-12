@@ -248,7 +248,8 @@ green:
   `hand_off_task` sends (`seanced session-event` drops one unsent), carries no state, and is taken
   only for the pane's own task when its launch ledger holds a launch and a PR URL of it — one its
   session reported, or, for a continuation, the one that ledger noted on it at launch from the launch
-  it continues (`continuedPr`), never from a frame — (`untasked`,
+  it continues (`continuedPr`, only from one that ended handed off or by itself with status 0), never
+  from a frame — (`untasked`,
   `unrecorded`, `prless` otherwise): the daemon marks the pane in memory and, at that pane's next
   `idle` carrying `turnEnded` (its turn's end, never a respawn's idle), closes it through the graceful despawn after re-reading that it still carries that task,
   audited `origin=handoff` (`handoff.ts`), never a pane or task a frame names.
