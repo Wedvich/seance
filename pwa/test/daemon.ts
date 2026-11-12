@@ -23,7 +23,8 @@ export async function startFakeDaemon(
   deviceId: string,
   info: MachineInfo,
   handlers: Handlers = {},
-  opts: { readonly infoTs?: number } = {},
+  /** `roles`: signed into the register (v2), as a daemon claiming a role sends them. */
+  opts: { readonly infoTs?: number; readonly roles?: readonly string[] } = {},
 ): Promise<FakeDaemon> {
   const client = await connectDaemon(relay);
 
@@ -33,7 +34,8 @@ export async function startFakeDaemon(
     op: "machine-info",
     payload: info,
   };
-  client.send(await register(deviceId, { info: await seal(key, { to: APP_ID, from: deviceId }, infoPlain) }));
+  const sealed = await seal(key, { to: APP_ID, from: deviceId }, infoPlain);
+  client.send(await register(deviceId, { info: sealed, ...(opts.roles === undefined ? {} : { roles: opts.roles }) }));
 
   // A holder rather than a bare `let`: the loop condition is flipped by the
   // stop/close closures below, which static analysis cannot see through.

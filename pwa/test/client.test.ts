@@ -56,13 +56,17 @@ let otherKey: CryptoKey;
  * SCHEDULER_LEADERS can list them, as an operator lists real machines.
  */
 let listed: { readonly legLeader: string; readonly stolenSeed: string; readonly autoLeader: string };
+/** On the relay's ARCHIVIST, minted before boot for the same reason. */
+let seat: string;
 
 beforeAll(async () => {
   const [legLeader, stolenSeed, autoLeader] = await Promise.all([newDeviceId(), newDeviceId(), newDeviceId()]);
   listed = { legLeader, stolenSeed, autoLeader };
+  seat = await newDeviceId();
   // Only the attachment suite uploads; a low count bound lets it reach the allowance's 429 in a few puts.
   relay = await startRelay(TOKEN, {
     leaders: [legLeader, stolenSeed, autoLeader],
+    archivist: seat,
     uploadAllowance: { hourUploads: ATTACHMENT_HOUR_UPLOADS },
   });
   key = await importPsk(PSK);
@@ -297,6 +301,56 @@ describe("registry", () => {
       await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId), "stale info still decrypts");
     } finally {
       daemon.close();
+      client.stop();
+    }
+  });
+
+  // The seat's blob opens under this key and names repos, so only the relay's
+  // flag keeps it out of `machines` — the list every spawn target comes from.
+  // Its absence is asserted only once this client has listed a machine that
+  // registered after it, so the push it read held the seat; the same blob,
+  // registered again without the role, then lists — proving it was the skip.
+  test("the archivist's seat never becomes a machine, nor counts as ignored or registered", async () => {
+    const plainId = await newDeviceId();
+    const raw = await connectApp(relay);
+    const { client, waitFor } = startClient();
+    const info = machineInfo("Archive Box");
+    let archivist = await startFakeDaemon(relay, key, seat, info, {}, { roles: [DAEMON_ROLES.archivist] });
+    let plain: Awaited<ReturnType<typeof startFakeDaemon>> | null = null;
+    try {
+      for (;;) {
+        const frame = await raw.waitFor<{ entries: { deviceId: string; connected: boolean; archivist?: true }[] }>(
+          "registry",
+        );
+        const entry = frame.entries.find((candidate) => candidate.deviceId === seat);
+        if (entry?.connected === true && entry.archivist === true) break;
+      }
+      const before = await waitFor((s) => s.registrySettled, "the first push");
+      plain = await startFakeDaemon(relay, key, plainId, machineInfo("Plain Box"));
+      const after = await waitFor(
+        (s) => s.machines.some((m) => m.deviceId === plainId && m.connected),
+        "the machine registered after the seat",
+      );
+      expect(after.machines.some((m) => m.deviceId === seat)).toBe(false);
+      expect(after.ignored).toBe(before.ignored);
+      expect(after.registrySize).toBe(before.registrySize + 1);
+
+      archivist.close();
+      archivist = await startFakeDaemon(relay, key, seat, info);
+      const roleless = await waitFor(
+        (s) => s.machines.some((m) => m.deviceId === seat && m.connected),
+        "the same blob, registered without the role",
+      );
+      expect(roleless.machines.find((m) => m.deviceId === seat)?.repos.map((r) => r.name)).toEqual([
+        "seance",
+        "pengefix",
+      ]);
+      expect(roleless.registrySize).toBe(after.registrySize + 1);
+      expect(roleless.ignored).toBe(before.ignored);
+    } finally {
+      archivist.close();
+      plain?.close();
+      raw.close();
       client.stop();
     }
   });
