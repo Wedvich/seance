@@ -1267,6 +1267,9 @@ describe("store", () => {
       prs: [{ url: url(5) }, { url: url(6), closed: true }],
     };
     expect(parseTask(listed)).toEqual(listed);
+    // A lone PR read closed keeps its flag.
+    const lone: Task = { ...listed, prs: [{ url: url(5), closed: true }] };
+    expect(parseTask(lone)).toEqual(lone);
     const { prs: _prs, ...bare } = listed;
     const long = (n: number): string => `https://${"x".repeat(TASK_PRS_MAX_LENGTH / 2)}.example/${n}`;
     for (const prs of [

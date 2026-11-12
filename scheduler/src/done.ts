@@ -52,10 +52,18 @@ function capped(prs: readonly TaskPr[]): readonly TaskPr[] {
   return kept;
 }
 
-/** A task's PR fields for `prs`: its primary as `prUrl`, and the list itself only when it says more than that. */
+/**
+ * A task's PR fields for `prs`: its primary as `prUrl`, and the list itself only when it says more
+ * than that — two or more, or a closed flag. An unwritten list is an explicit `undefined`, so
+ * every `{ ...task, ...fields }` merge drops a stale one instead of keeping it beside a new
+ * `prUrl`. A lone URL past `TASK_PRS_MAX_LENGTH` is no list either: the parser would refuse it.
+ */
 function prFields(prs: readonly TaskPr[]): Pick<Task, "prUrl" | "prs"> {
   const prUrl = primaryPr(prs);
-  return { ...(prUrl === undefined ? {} : { prUrl }), ...(prs.length > 1 ? { prs } : {}) };
+  const listed =
+    (prs.length > 1 || prs.some((pr) => pr.closed === true)) &&
+    prs.reduce((sum, pr) => sum + pr.url.length, 0) <= TASK_PRS_MAX_LENGTH;
+  return { ...(prUrl === undefined ? {} : { prUrl }), prs: listed ? prs : undefined };
 }
 
 /**
@@ -231,9 +239,12 @@ export function prChange(task: Task, prUrl: string, status: PrStatus): Task | nu
   const closed = status.state === "closed";
   const flipped = (prs[at]?.closed === true) !== closed;
   const listed = flipped ? prs.with(at, closed ? { url: prUrl, closed } : { url: prUrl }) : prs;
-  // A one-PR list is not written (`prFields`), so its flag is no change.
-  const relisted = flipped && listed.length > 1 ? prFields(listed) : {};
-  if (primaryPr(listed) !== task.prUrl) return { ...task, ...prFields(listed) };
+  const relisted = flipped ? prFields(listed) : {};
+  if (primaryPr(listed) !== task.prUrl) {
+    const moved = { ...task, ...prFields(listed) };
+    // The PR read is the new primary: its reading is the primary's, applied to the moved task.
+    return primaryPr(listed) === prUrl ? prChange(prBound(task, moved), prUrl, status) : moved;
+  }
   if (prUrl !== task.prUrl) return flipped ? { ...task, ...relisted } : null;
   const pr: PrStatus = {
     state: status.state,
@@ -262,12 +273,13 @@ export function prChange(task: Task, prUrl: string, status: PrStatus): Task | nu
 }
 
 /**
- * `after` without `pr` when it moved `prUrl` off `before`'s: a reading speaks
+ * `after` without `pr` when it moved `prUrl` off `before`'s and carried `before`'s reading: a reading speaks
  * only for the URL it was taken for, and `prUrl` changes in several paths
  * (`absorb`, a resumed `progress` entry), so this holds at the write boundary.
  */
 export function prBound(before: Task, after: Task): Task {
-  if (after.prUrl === before.prUrl || after.pr === undefined) return after;
+  // A `pr` the write itself set is for the `prUrl` it moved to (`prChange`): only a carried one is stale.
+  if (after.prUrl === before.prUrl || after.pr === undefined || after.pr !== before.pr) return after;
   const { pr: _pr, ...rest } = after;
   return rest;
 }

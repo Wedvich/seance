@@ -2248,7 +2248,7 @@ export interface Task {
   /**
    * Every PR URL its session reported, oldest first, `prUrl` among them (`taskPrs` normalises a
    * record without it), bounded by `TASK_PRS_MAX` and `TASK_PRS_MAX_LENGTH`. Written only with two
-   * or more: one says nothing `prUrl` does not. A session that folds a newer PR back into an older
+   * or more, or with a `closed` flag: one unflagged says nothing `prUrl` does not. A session that folds a newer PR back into an older
    * one and closes it leaves the task on the older (DESIGN.md, "PR status"). Dropped, never fatal,
    * when malformed, and by an older leader's parser, so the task then stands on `prUrl`.
    */

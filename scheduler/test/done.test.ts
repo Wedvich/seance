@@ -1194,6 +1194,49 @@ describe("a task that opened several PRs", () => {
     });
   });
 
+  test("a lone PR read closed keeps its flag, so a second one reported later settles on its own reading without flip-flopping", async () => {
+    const { scheduler, put, store } = setup();
+    await put("t", { assignment: ON_A, prUrl: pull(6) });
+    await scheduler.load();
+    await scheduler.onPrStatus("t", pull(6), reading("closed"));
+    expect(scheduler.task("t")).toMatchObject({ prUrl: pull(6), prs: [{ url: pull(6), closed: true }] });
+    await scheduler.onSession("t", "busy", FROM_A, pull(7));
+    expect(scheduler.task("t")).toMatchObject({
+      prUrl: pull(7),
+      prs: [{ url: pull(6), closed: true }, { url: pull(7) }],
+    });
+    await scheduler.onPrStatus("t", pull(7), reading("closed"));
+    expect(scheduler.task("t")).toMatchObject({ prUrl: pull(7), pr: { state: "closed" } });
+    const settled = await version(store, "t");
+    await scheduler.onPrStatus("t", pull(6), reading("closed"));
+    expect(await version(store, "t")).toBe(settled);
+  });
+
+  test("a reopen of the only flagged PR drops its list; a reading that makes its PR primary is applied", async () => {
+    const { scheduler, put } = setup();
+    await put("t", { assignment: ON_A, prUrl: pull(6), prs: [{ url: pull(6), closed: true }] });
+    await scheduler.load();
+    await scheduler.onPrStatus("t", pull(6), reading("open"));
+    expect(scheduler.task("t")?.prs).toBeUndefined();
+    expect(scheduler.task("t")).toMatchObject({ prUrl: pull(6), pr: { state: "open" } });
+
+    await put("u", { assignment: ON_A, prUrl: pull(5), prs: [{ url: pull(5) }, { url: pull(6), closed: true }] });
+    await scheduler.load();
+    await scheduler.onPrStatus("u", pull(6), reading("merged"));
+    expect(scheduler.task("u")).toMatchObject({ prUrl: pull(6), state: "done", pr: { state: "merged" } });
+  });
+
+  test("a reported URL too long to share a list leaves no stale list beside it, in memory or stored", async () => {
+    const { scheduler, put, store } = setup();
+    await put("t", { assignment: ON_A, prUrl: pull(2), prs: [{ url: pull(1) }, { url: pull(2) }] });
+    await scheduler.load();
+    const longer = `https://github.com/acme/${"r".repeat(TASK_PRS_MAX_LENGTH)}/pull/4`;
+    await scheduler.onSession("t", "busy", FROM_A, longer);
+    expect(scheduler.task("t")?.prUrl).toBe(longer);
+    expect(scheduler.task("t")?.prs).toBeUndefined();
+    expect(JSON.stringify(await store.get("t"))).not.toContain(pull(1));
+  });
+
   test("a record from an older leader, prUrl alone, gains its list on the next new PR", () => {
     const task: Task = { id: "t", spec: spec(), state: "running", createdAt: NOW, prUrl: pull(5) };
     expect(reportedPr(task, pull(5))).toEqual({});

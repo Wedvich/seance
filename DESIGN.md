@@ -3186,7 +3186,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   compare two leaders' clocks. A session that opens several PRs is settled by its primary, the
   newest not read closed (PR status, "Several PRs"), so one that folds a newer PR back into an
   older and closes it settles on the older's merge. Known gaps: a PR reported while no leader
-  listened is read back only as the newest (`TaskProgress` carries one `prUrl`); a task marked done by hand is not polled; the forge's
+  listened is read back only as the newest (`TaskProgress` carries one `prUrl`); a task marked done by hand is read once a term, not every poll (PR status, "A finished task is read once"); the forge's
   "open" does not release `after: "opened"`, which still reads the recorded `prUrl`; and
   `absorb` keeps `prUrl` across a branch switch, so a session that opens PR 1, switches
   branch for more work and has PR 1 merge before a new `gh pr create` settles the task on PR 1
@@ -3898,12 +3898,17 @@ for the lot with its own `gh`.
   dropped first. `prUrl` stays, as the primary (`primaryPr`): the newest not read closed, else the
   newest. Every reader that read `prUrl` — `after: "opened"`, `awaiting-merge`, the PWA's chip, an
   older leader — still does, and `taskPrs` gives a record with `prUrl` alone (an older leader's,
-  which drops `prs` on its next write) as a list of one; `prs` is written only with two or more.
+  which drops `prs` on its next write) as a list of one; `prs` is written only with two or more or
+  with a `closed` flag, so a lone PR read closed keeps it for a second one reported later.
   A reported URL (session event, `progress` entry) is matched against every PR the task holds,
   never only `prUrl`: the daemon keeps reporting its newest after the task fell back, and that
   must not move it back. The poller reads every PR of a wanted task, newest first, so a fallback's
   own reading lands in the same poll. A malformed `prs` is dropped at parse, never fatal. No
   sentinel for older leaders: one that drops `prs` leaves the task on `prUrl`, today's behaviour.
+  Accepted gap: that loss is permanent, not only while the older leader leads. Its write drops the
+  list and the flags, and its daemon-reported newest PR can move `prUrl` back to a closed one; a
+  newer leader that takes over rebuilds the list from `prUrl` alone, so a rollback or a mixed
+  fleet forgets earlier PRs and the task can fail `merge_expired` as before.
   The length bound keeps a record at every bound within `STORE_MAX_CT_LENGTH`: a list at its bound
   beside its primary costs no more than a `prUrl` at `PR_URL_MAX_LENGTH` alone (parse.test.ts).
   Accepted gap: the launch ledger's `TaskProgress` carries only the newest `prUrl`, so a PR reported
@@ -3912,7 +3917,9 @@ for the lot with its own `gh`.
 - **`prBound`.** A reading speaks only for the URL it was taken for, and `prUrl` changes on
   several paths (`absorb` on a session event, a resumed `progress` entry, a fallback in
   `prChange`), so `#update` drops
-  `pr` from any write that moved `prUrl` rather than each path remembering to.
+  `pr` from any write that moved `prUrl` and carried the old reading, rather than each path remembering to;
+  a reading the write itself set (a fallback's own, in `prChange`) is for the new `prUrl` and stays.
+  A write that drops the list (`prFields`) sets `prs` to `undefined`, so no merge keeps a stale one.
 - **Rejected.** A poller in each daemon: the machine a session ran on may hold no GitHub token,
   cannot see a hub's sub-repo PRs, and would send one `branch-state`-like frame per daemon for a
   fact only one reader needs. Webhooks: the relay is blind and holds no secrets worth a
