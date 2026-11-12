@@ -12,6 +12,7 @@ import {
   continueOffer,
   DEP_AFTER,
   knownAccounts,
+  taskPrBlock,
   type KnownAccount,
   failureReasonText,
   isTransportError,
@@ -704,6 +705,7 @@ function describeTask(
   const pin = describePin(task, machines, names);
   const { spec } = task;
   const level = autonomyOf(spec);
+  const blocked = taskPrBlock(task);
   return {
     id: task.id,
     state: task.state,
@@ -734,6 +736,8 @@ function describeTask(
     ...(spec.continues === undefined ? {} : { continues: spec.continues.task }),
     // The same offer the app's Continue button follows; `continue_task` still re-checks the leader.
     ...(continueOffer(task, machines, tasks).ok ? { continuable: true } : {}),
+    // Never `prBlocked` on the task: an `until: "reported"` task does not wait on its merge.
+    ...(blocked === null ? {} : { prBlocked: blocked }),
   };
 }
 
@@ -885,7 +889,7 @@ export function buildMcpServer(
     "get_queue",
     {
       title: "List the scheduler's queue",
-      description: `List the scheduler's queue — the tasks spawn_session and queue_batch queued, and other clients' (the app, the CLI), and what holds dispatch (a paused queue, or an account named as a pin names it) — with each one's state, its pin (whichever of machine and account it pins: the machine by name where known, plus its deviceId; the account by its alias where one is set (none on a box whose daemon brokers for it), else the email a machine reports, else a short id, plus its accountId; an email or short id two accounts share, case aside, gains a tag telling them apart: the org's short id, or more of it where that still collides; pinned and held accounts no machine reports count as accounts too), the machines it avoids, its autonomy level where it is not the default checkpoint, where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). ${AUTO_LIMITS}`,
+      description: `List the scheduler's queue — the tasks spawn_session and queue_batch queued, and other clients' (the app, the CLI), and what holds dispatch (a paused queue, or an account named as a pin names it) — with each one's state, its pin (whichever of machine and account it pins: the machine by name where known, plus its deviceId; the account by its alias where one is set (none on a box whose daemon brokers for it), else the email a machine reports, else a short id, plus its accountId; an email or short id two accounts share, case aside, gains a tag telling them apart: the org's short id, or more of it where that still collides; pinned and held accounts no machine reports count as accounts too), the machines it avoids, its autonomy level where it is not the default checkpoint, where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); an awaiting-merge task whose open PR is stuck carries \`prBlocked\` — \`checks\` (a required check failed), \`conflict\`, \`behind\` (its branch is behind its base) or \`unarmed\` (its required checks passed but nothing will merge it: no auto-merge, no review requested); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). ${AUTO_LIMITS}`,
       inputSchema: NO_INPUT,
       annotations: { readOnlyHint: true },
     },

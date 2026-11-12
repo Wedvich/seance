@@ -7,11 +7,13 @@ import {
   TASK_SPEC_LIMITS,
   continueOffer,
   knownAccounts,
+  taskPrBlock,
   waitingContinuation,
   type DepAfter,
   type KnownAccount,
   type Machine,
   type PauseHold,
+  type PrBlockedReason,
   type PrChecks,
   type PrState,
   type Task,
@@ -133,6 +135,11 @@ export interface QueueRow {
     readonly state: PrState | null;
     readonly checks: PrChecks | null;
     readonly stale: boolean;
+    /**
+     * Why its PR is stuck, in words, when the task waits on the merge and the leader's reading names a
+     * reason (`taskPrBlock`: an `until: "reported"` task does not wait on it); null otherwise.
+     */
+    readonly blocked: string | null;
     /** The chip's `title`: the PR, what the leader read of it, and how long ago. */
     readonly description: string;
     /** The chip's accessible name: what following it does, then the same reading. */
@@ -250,6 +257,13 @@ function bodyOf(
   return null;
 }
 
+const PR_BLOCKED_LABEL: Record<PrBlockedReason, string> = {
+  checks: "check failing",
+  conflict: "conflict",
+  behind: "behind",
+  unarmed: "not set to merge",
+};
+
 /** GitHub's `/pull/<n>`, GitLab's `/-/merge_requests/<n>`. */
 const PR_NUMBER = /\/(?:pull|merge_requests)\/(\d+)(?:\/|$)/u;
 
@@ -267,15 +281,31 @@ function prOf(task: Task, now: number, skew: number): QueueRow["pr"] {
   const { pr } = task;
   const base = { url: task.prUrl, label };
   if (pr === undefined) {
-    return { ...base, state: null, checks: null, stale: false, description: name, accessibleName: `Open ${noun}` };
+    return {
+      ...base,
+      state: null,
+      checks: null,
+      stale: false,
+      blocked: null,
+      description: name,
+      accessibleName: `Open ${noun}`,
+    };
   }
   const leaderNow = now + skew;
   const checks = pr.state === "merged" ? null : (pr.checks ?? null);
-  const reading = [pr.state, ...(checks === null ? [] : [`checks ${checks}`]), `read ${formatSeen(pr.at, leaderNow)}`];
+  const reason = taskPrBlock(task);
+  const blocked = reason === null ? null : PR_BLOCKED_LABEL[reason];
+  const reading = [
+    pr.state,
+    ...(checks === null ? [] : [`checks ${checks}`]),
+    ...(blocked === null ? [] : [blocked]),
+    `read ${formatSeen(pr.at, leaderNow)}`,
+  ];
   return {
     ...base,
     state: pr.state,
     checks,
+    blocked,
     // A merge does not un-merge, so it keeps its colour however old the reading.
     stale: pr.state !== "merged" && leaderNow - pr.at > PR_STATUS_STALE_MS,
     description: [name, ...reading].join(" · "),

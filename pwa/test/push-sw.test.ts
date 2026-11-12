@@ -148,6 +148,32 @@ describe("push-sw.js", () => {
     ]);
   });
 
+  test("a pr-blocked alert shows fixed text per reason, and an unknown reason falls back to the general line", async () => {
+    const worker = boot();
+    const body = (reason: unknown): string =>
+      JSON.stringify({ v: 1, kind: "pr-blocked", at: 1, taskId: TASK, reason, head: "never shown" });
+    for (const reason of ["checks", "conflict", "behind", "unarmed", "<b>x</b>", "__proto__", "constructor", 7]) {
+      await worker.push(body(reason));
+    }
+    expect(worker.shown.map((note) => note.options.body)).toEqual([
+      "A task's pull request has a failing required check.",
+      "A task's pull request has merge conflicts.",
+      "A task's pull request is behind its base branch.",
+      "A task's pull request is ready, but nothing will merge it.",
+      "A task's pull request is blocked.",
+      "A task's pull request is blocked.",
+      "A task's pull request is blocked.",
+      "A task's pull request is blocked.",
+    ]);
+    for (const note of worker.shown) {
+      expect(note.options).toMatchObject({
+        tag: `pr-blocked:${TASK}`,
+        renotify: true,
+        data: { url: `/?task=${TASK}` },
+      });
+    }
+  });
+
   test("nothing a payload carries beyond its ids and numbers reaches the text, and only a known window label is shown", async () => {
     const worker = boot();
     const spill = (window: unknown, spending?: true): string =>

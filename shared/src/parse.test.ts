@@ -8,6 +8,7 @@ import {
   isSkillName,
   parseAccountRecord,
   parseFleetQuotaRecord,
+  parsePrAlertStamp,
   parsePushAlert,
   parsePushSubscribeReply,
   parsePushSubscribeRequest,
@@ -66,6 +67,7 @@ import {
   LINEAR_KEY_MAX_LENGTH,
   PUSH_ENDPOINT_MAX_LENGTH,
   PUSH_LABEL_MAX_LENGTH,
+  PR_FAILING_LIMITS,
   PUSH_ALERT_MAX_BYTES,
   PUSH_MAX_SUBSCRIPTIONS,
   REPO_MAX_SKILLS,
@@ -104,6 +106,7 @@ import {
   type MachineStatus,
   type MetricsSeries,
   type PauseHold,
+  type PrStatus,
   type QuotaObservation,
   type QuotaReading,
   type SettingsRecord,
@@ -855,6 +858,68 @@ describe("tasks and their records", () => {
     expect(parsePrStatus({ state: "merged", stacked: true, at: 5 })).toEqual({ state: "merged", stacked: true, at: 5 });
   });
 
+  test("parsePrStatus round-trips the blocked-state fields, and one malformed value nulls the reading", () => {
+    const head = "0123456789abcdef0123456789abcdef01234567";
+    const wide: PrStatus = {
+      state: "open",
+      checks: "failing",
+      head,
+      required: "failing",
+      failing: ["test (ubuntu-latest)", "test (macos-latest)"],
+      merge: "has_hooks",
+      armed: true,
+      reviewRequested: true,
+      at: 5,
+    };
+    expect(parsePrStatus(wide)).toEqual(wide);
+    expect(parsePrStatus({ ...wide, head: "0".repeat(64) })).toEqual({ ...wide, head: "0".repeat(64) });
+    expect(parsePrStatus({ state: "open", required: "passing", merge: "clean", at: 5 })).toEqual({
+      state: "open",
+      required: "passing",
+      merge: "clean",
+      at: 5,
+    });
+    for (const bad of [
+      { ...wide, head: "0123" },
+      { ...wide, head: head.toUpperCase() },
+      { ...wide, required: "red" },
+      { ...wide, failing: ["a", "b", "c", "d", "e", "f"] },
+      { ...wide, failing: ["x".repeat(PR_FAILING_LIMITS.length + 1)] },
+      { ...wide, failing: ["bad\u0007name"] },
+      { ...wide, failing: [""] },
+      { ...wide, failing: [] },
+      { ...wide, failing: "a" },
+      { ...wide, required: "passing" },
+      { ...wide, merge: "DIRTY" },
+      { ...wide, armed: false },
+      { ...wide, reviewRequested: false },
+    ]) {
+      expect(parsePrStatus(bad)).toBeNull();
+    }
+    const { required: _required, ...noRequired } = wide;
+    expect(parsePrStatus(noRequired)).toBeNull();
+  });
+
+  test("a task's prAlert survives a parse, and a malformed stamp is dropped while the task stays readable", () => {
+    const head = "0123456789abcdef0123456789abcdef01234567";
+    const stamped: Task = { ...task, state: "awaiting-merge", prAlert: { reason: "unarmed", head, at: 9 } };
+    expect(parseTask(stamped)).toEqual(stamped);
+    const { prAlert: _prAlert, ...bare } = stamped;
+    for (const bad of [
+      { reason: "slow", head, at: 9 },
+      { reason: "checks", head: "abc", at: 9 },
+      { reason: "checks", head, at: "now" },
+      { reason: "checks", head },
+      { reason: "checks", head, at: 9, extra: 1 },
+      "checks",
+      null,
+    ]) {
+      const parsed = parseTask({ ...stamped, prAlert: bad });
+      expect(parsed).toEqual(bare);
+      expect(parsePrAlertStamp(bad)).toBeNull();
+    }
+  });
+
   test("a progress field that is not exactly its shape nulls the task", () => {
     for (const bad of [
       { ...task, prUrl: "javascript:alert(1)" },
@@ -1324,6 +1389,47 @@ describe("store", () => {
     };
     expect(parseTask(decided)).toEqual(decided);
     expect(await sealedLength(decided)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
+  });
+
+  test("an awaiting-merge task, its blocked-state reading and alert stamp at every bound, fits beside nine candidates", async () => {
+    // What `advance` and `inputClock` keep for this state: no failure, reservation or needs-input clock beside a reading.
+    const {
+      failure: _failure,
+      reservation: _reservation,
+      absentSince: _absent,
+      reservedAt: _reserved,
+      ...kept
+    } = written;
+    const { needsInputSince: _since, escalated: _escalated, inputAlerted: _alerted, ...waiting } = kept;
+    const each = TASK_PRS_MAX_LENGTH / TASK_PRS_MAX;
+    const prs = Array.from({ length: TASK_PRS_MAX }, (_, i) => ({
+      url: `https://${`${i}`.padEnd(each - 17, "g")}.example/`,
+      closed: true as const,
+    }));
+    const head = "f".repeat(64);
+    const awaiting: Task = {
+      ...waiting,
+      state: "awaiting-merge",
+      prUrl: prs.at(-1)?.url ?? "",
+      prs,
+      pr: {
+        state: "open",
+        checks: "failing",
+        head,
+        required: "failing",
+        failing: Array.from({ length: PR_FAILING_LIMITS.names }, (_, i) =>
+          `${i}`.padEnd(PR_FAILING_LIMITS.length, "ø"),
+        ),
+        merge: "has_hooks",
+        armed: true,
+        reviewRequested: true,
+        at: 1_760_000_000_000,
+      },
+      prAlert: { reason: "unarmed", head, at: 1_760_000_000_000 },
+      decision: { at: 1_760_000_000_000, chosen: target, candidates: Array.from({ length: 9 }, () => candidate) },
+    };
+    expect(parseTask(awaiting)).toEqual(awaiting);
+    expect(await sealedLength(awaiting)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
   });
 
   test("a task's PR list survives a parse; a malformed one is dropped and the task stands on prUrl", () => {
@@ -2220,6 +2326,22 @@ describe("parsePushAlert", () => {
     const question = { ...input, escalated: false, question: true } as const;
     for (const alert of [spill, spending, input, question, disk, bare]) {
       expect(parsePushAlert(alert)).toEqual(alert);
+    }
+  });
+
+  test("accepts a pr-blocked alert and refuses an unknown reason, a key it does not name and a bad id", () => {
+    const blocked = { v: 1, kind: "pr-blocked", at: 5, taskId: "t-1", reason: "unarmed" } as const;
+    for (const reason of ["checks", "conflict", "behind", "unarmed"] as const) {
+      expect(parsePushAlert({ ...blocked, reason })).toEqual({ ...blocked, reason });
+    }
+    for (const bad of [
+      { ...blocked, reason: "slow" },
+      { ...blocked, reason: undefined },
+      { ...blocked, head: "0".repeat(40) },
+      { ...blocked, prUrl: "https://github.com/a/b/pull/1" },
+      { ...blocked, taskId: "../x" },
+    ]) {
+      expect(parsePushAlert(bad)).toBeNull();
     }
   });
 

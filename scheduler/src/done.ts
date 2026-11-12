@@ -2,6 +2,8 @@ import {
   isPrReadable,
   primaryPr,
   PR_STATUS_REFRESH_MS,
+  prChipFields,
+  samePrReading,
   SIGKILL_STATUS,
   TASK_PRS_MAX,
   TASK_PRS_MAX_LENGTH,
@@ -246,19 +248,15 @@ export function prChange(task: Task, prUrl: string, status: PrStatus): Task | nu
     return primaryPr(listed) === prUrl ? prChange(prBound(task, moved), prUrl, status) : moved;
   }
   if (prUrl !== task.prUrl) return flipped ? { ...task, ...relisted } : null;
-  const pr: PrStatus = {
-    state: status.state,
-    ...(status.checks === undefined ? {} : { checks: status.checks }),
-    ...(status.stacked === undefined ? {} : { stacked: status.stacked }),
-    at: status.at,
-  };
+  // The whole reading: the alert and the chip read its head, required checks and merge state.
+  const pr: PrStatus = status;
   // A finished task's one reading is for its chip alone: nothing is left for a merge to settle.
-  if (!isPrReadable(task.state)) return { ...task, ...relisted, pr };
+  if (!isPrReadable(task.state)) return { ...task, ...relisted, pr: prChipFields(pr) };
   const landed = status.state === "merged" && status.stacked !== true;
   const settles = landed && !settlesOnReport(task);
   const marks = landed && settlesOnReport(task) && task.merged !== true;
-  const same =
-    task.pr?.state === status.state && task.pr?.checks === status.checks && task.pr?.stacked === status.stacked;
+  // Every field, not three: a new head with the same state must be written, or the alert's dedupe stalls.
+  const same = samePrReading(task.pr, status);
   const fresh = task.pr !== undefined && status.at >= task.pr.at && status.at - task.pr.at < PR_STATUS_REFRESH_MS;
   // A merged chip never greys (`PR_STATUS_STALE_MS`), so an unchanged one needs no refresh write.
   const relists = Object.keys(relisted).length > 0;

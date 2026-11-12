@@ -19,7 +19,10 @@ import {
   MAX_PAUSE_HOLDS,
   MAX_TASKS,
   PAUSE_UNTIL,
+  PR_BLOCKED_REASONS,
   PR_CHECKS,
+  PR_FAILING_LIMITS,
+  PR_MERGE_STATES,
   PR_STATES,
   PUSH_ALERT_MAX_BYTES,
   PUSH_ENDPOINT_MAX_LENGTH,
@@ -72,6 +75,7 @@ import {
   type PauseRecord,
   type PauseReply,
   type PauseRequest,
+  type PrAlertStamp,
   type PrStatus,
   type Placement,
   type QueueChanged,
@@ -1120,21 +1124,64 @@ function parseTaskPrs(value: unknown, prUrl: string): readonly TaskPr[] | null {
   return prs.reduce((sum, pr) => sum + pr.url.length, 0) > TASK_PRS_MAX_LENGTH ? null : prs;
 }
 
+const COMMIT_OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
+
+/** The failing required names: 1..`PR_FAILING_LIMITS.names` non-empty names, none over `.length` or with a control character. */
+function parseFailing(value: unknown): readonly string[] | null {
+  if (!Array.isArray(value) || value.length === 0 || value.length > PR_FAILING_LIMITS.names) return null;
+  const names: string[] = [];
+  for (const name of value) {
+    if (!isName(name, PR_FAILING_LIMITS.length) || [...name].some(isControl)) return null;
+    names.push(name);
+  }
+  return names;
+}
+
 /** A forge reading, or null when any field is malformed. A fresh object, so nothing unvalidated rides along. */
 export function parsePrStatus(value: unknown): PrStatus | null {
   if (!isRecord(value)) return null;
-  const { state, checks, stacked, at } = value;
+  const { state, checks, stacked, at, head, required, failing, merge, armed, reviewRequested } = value;
   const known = PR_STATES.find((s) => s === state);
   if (known === undefined || !isFiniteNumber(at)) return null;
   const rollup = checks === undefined ? undefined : PR_CHECKS.find((c) => c === checks);
   if (checks !== undefined && rollup === undefined) return null;
   if (stacked !== undefined && stacked !== true) return null;
+  if (head !== undefined && (typeof head !== "string" || !COMMIT_OID.test(head))) return null;
+  const requiredRollup = required === undefined ? undefined : PR_CHECKS.find((c) => c === required);
+  if (required !== undefined && requiredRollup === undefined) return null;
+  const names = failing === undefined ? undefined : parseFailing(failing);
+  if (names === null || (names !== undefined && requiredRollup !== "failing")) return null;
+  const mergeState = merge === undefined ? undefined : PR_MERGE_STATES.find((m) => m === merge);
+  if (merge !== undefined && mergeState === undefined) return null;
+  if ((armed !== undefined && armed !== true) || (reviewRequested !== undefined && reviewRequested !== true)) {
+    return null;
+  }
   return {
     state: known,
     ...(rollup === undefined ? {} : { checks: rollup }),
     ...(stacked === undefined ? {} : { stacked }),
+    ...(head === undefined ? {} : { head }),
+    ...(requiredRollup === undefined ? {} : { required: requiredRollup }),
+    ...(names === undefined ? {} : { failing: names }),
+    ...(mergeState === undefined ? {} : { merge: mergeState }),
+    ...(armed === undefined ? {} : { armed }),
+    ...(reviewRequested === undefined ? {} : { reviewRequested }),
     at,
   };
+}
+
+/**
+ * The stamp of the last `pr-blocked` alert, built field by field; null when malformed. Exported so
+ * the writer stamps only what this reads back.
+ */
+export function parsePrAlertStamp(value: unknown): PrAlertStamp | null {
+  if (!isRecord(value) || !Object.keys(value).every((key) => key === "reason" || key === "head" || key === "at")) {
+    return null;
+  }
+  const { reason, head, at } = value;
+  const known = PR_BLOCKED_REASONS.find((r) => r === reason);
+  if (known === undefined || typeof head !== "string" || !COMMIT_OID.test(head) || !isFiniteNumber(at)) return null;
+  return { reason: known, head, at };
 }
 
 /**
@@ -1189,6 +1236,8 @@ export function parseTask(value: unknown): Task | null {
   // Dropped, never fatal, like `pr`: without it the task stands on `prUrl`, as under an older leader.
   const prs =
     value["prs"] === undefined || progress.prUrl === undefined ? null : parseTaskPrs(value["prs"], progress.prUrl);
+  // Apart from `progress`, like `pr`: a lost stamp costs one repeated alert, a fatal parse would hide the task.
+  const prAlert = value["prAlert"] === undefined ? null : parsePrAlertStamp(value["prAlert"]);
   const { remoteSession, inputReason, inputTool } = value;
   const waiting = known === "needs-input" || known === "lost";
   return {
@@ -1206,6 +1255,7 @@ export function parseTask(value: unknown): Task | null {
     ...progress,
     ...(pr === null ? {} : { pr }),
     ...(prs === null ? {} : { prs }),
+    ...(prAlert === null ? {} : { prAlert }),
     // Dropped, never fatal, like `pr`: a link is display-only.
     ...(isRemoteSessionId(remoteSession) ? { remoteSession } : {}),
     // Dropped, never fatal, like `remoteSession`: display-only. Only on the states a wait lives in
@@ -1449,6 +1499,7 @@ const PUSH_ALERT_KEYS = {
   spill: ["v", "kind", "at", "taskId", "window", "projectedPct", "spending"],
   "needs-input": ["v", "kind", "at", "taskId", "since", "escalated", "question"],
   disk: ["v", "kind", "at", "deviceId", "diskPct", "freeMib"],
+  "pr-blocked": ["v", "kind", "at", "taskId", "reason"],
 } as const;
 
 /**
@@ -1489,6 +1540,12 @@ export function parsePushAlert(value: unknown): PushAlert | null {
       ...(diskPct === undefined ? {} : { diskPct }),
       ...(freeMib === undefined ? {} : { freeMib }),
     };
+  }
+  if (kind === "pr-blocked") {
+    const { taskId, reason } = value;
+    const blockedReason = PR_BLOCKED_REASONS.find((r) => r === reason);
+    if (!known(PUSH_ALERT_KEYS["pr-blocked"]) || !isTaskId(taskId) || blockedReason === undefined) return null;
+    return { v: 1, kind, at, taskId, reason: blockedReason };
   }
   return null;
 }

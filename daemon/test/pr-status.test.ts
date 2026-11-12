@@ -53,7 +53,38 @@ type Fake = {
   readonly mergeOid?: string;
   /** The default branch compared to `mergeOid`: answered at `c<i>` when set. */
   readonly landed?: string | null;
+  /** Any of these answers the blocked-state read at `b<i>`; `blocked: null` answers it with a null alias. */
+  readonly oid?: string;
+  readonly contexts?: readonly unknown[];
+  readonly mergeStateStatus?: string;
+  readonly autoMerge?: boolean;
+  readonly inMergeQueue?: boolean;
+  readonly reviewRequests?: number;
+  readonly blocked?: null;
 } | null;
+
+const HEAD = "0123456789abcdef0123456789abcdef01234567";
+
+/** A required (or not) CheckRun as the blocked read returns it. */
+function run(name: string, conclusion: string | null, required = true, status = "COMPLETED"): unknown {
+  return { __typename: "CheckRun", name, status, conclusion, isRequired: required };
+}
+
+function statusContext(context: string, state: string, required = true): unknown {
+  return { __typename: "StatusContext", context, state, isRequired: required };
+}
+
+function wideOf(fake: Exclude<Fake, null>): boolean {
+  return (
+    fake.oid !== undefined ||
+    fake.contexts !== undefined ||
+    fake.mergeStateStatus !== undefined ||
+    fake.autoMerge !== undefined ||
+    fake.inMergeQueue !== undefined ||
+    fake.reviewRequests !== undefined ||
+    fake.blocked === null
+  );
+}
 
 /** gh's GraphQL answer: alias `p<i>` per PR, `null` for one the forge gives nothing for. */
 function reply(...prs: readonly Fake[]): string {
@@ -79,6 +110,29 @@ function reply(...prs: readonly Fake[]): string {
     if (fake?.landed !== undefined) {
       data[`c${i}`] = fake.landed === null ? null : { defaultBranchRef: { compare: { status: fake.landed } } };
     }
+    if (fake !== null && wideOf(fake)) {
+      data[`b${i}`] =
+        fake.blocked === null
+          ? null
+          : {
+              pullRequest: {
+                mergeStateStatus: fake.mergeStateStatus ?? "CLEAN",
+                isInMergeQueue: fake.inMergeQueue ?? false,
+                autoMergeRequest: fake.autoMerge === true ? { enabledAt: "2026-11-12T00:00:00Z" } : null,
+                reviewRequests: { totalCount: fake.reviewRequests ?? 0 },
+                commits: {
+                  nodes: [
+                    {
+                      commit: {
+                        oid: fake.oid ?? HEAD,
+                        statusCheckRollup: fake.contexts === undefined ? null : { contexts: { nodes: fake.contexts } },
+                      },
+                    },
+                  ],
+                },
+              },
+            };
+    }
   });
   return JSON.stringify({ data });
 }
@@ -89,7 +143,8 @@ interface Seen {
   readonly status: PrStatus;
 }
 
-function start(tasks: readonly Task[], opts: PrPollerOpts = {}) {
+/** `rejects` names the tasks whose write the caller's `onStatus` refuses. */
+function start(tasks: readonly Task[], opts: PrPollerOpts = {}, rejects: ReadonlySet<string> = new Set()) {
   const logs = { info: [] as string[], warn: [] as string[] };
   const seen: Seen[] = [];
   const poller = startPrPoller({
@@ -100,6 +155,7 @@ function start(tasks: readonly Task[], opts: PrPollerOpts = {}) {
     ...opts,
     tasks: () => tasks,
     onStatus: (id, url, status) => {
+      if (rejects.has(id)) return Promise.reject(new Error("store refused"));
       seen.push({ id, url, status });
       return Promise.resolve();
     },
@@ -553,5 +609,277 @@ describe("when gh does not answer", () => {
     const { logs } = start([pr(4)]);
     await pollUntil(() => logs.warn.length === 1, "the warning");
     expect(logs.warn[0]).toContain("failed");
+  });
+});
+
+describe("the blocked-state read", () => {
+  const waiting = (n: number, fields: Partial<Task> = {}): Task => pr(n, { state: "awaiting-merge", ...fields });
+  const read = async (
+    fake: Omit<Exclude<Fake, null>, "state">,
+    task: Task = waiting(1),
+  ): Promise<PrStatus | undefined> => {
+    await gh.setReply(reply({ state: "OPEN", ...fake }), 0);
+    const { seen, stop } = start([task], { intervalMs: 60_000 });
+    await pollUntil(() => seen.length > 0, "a reading");
+    stop();
+    return seen[0]?.status;
+  };
+
+  test("(a) required CheckRuns roll up to failing and name only the required failing ones", async () => {
+    const status = await read({
+      oid: HEAD,
+      contexts: [
+        run("test (ubuntu-latest)", "FAILURE"),
+        run("test (macos-latest)", "SUCCESS"),
+        run("deploy-preview", "FAILURE", false),
+      ],
+    });
+    expect(status).toEqual({
+      state: "open",
+      head: HEAD,
+      required: "failing",
+      failing: ["test (ubuntu-latest)"],
+      merge: "clean",
+      at: 1234,
+    });
+  });
+
+  test("(b) a required StatusContext in ERROR fails; FAILURE too", async () => {
+    const status = await read({
+      contexts: [statusContext("ci/legacy", "ERROR"), statusContext("ci/other", "SUCCESS")],
+    });
+    expect(status?.required).toBe("failing");
+    expect(status?.failing).toEqual(["ci/legacy"]);
+  });
+
+  test("(c) in progress and STALE read as pending; SKIPPED and NEUTRAL as passing", async () => {
+    expect((await read({ contexts: [run("a", null, true, "IN_PROGRESS"), run("b", "SUCCESS")] }))?.required).toBe(
+      "pending",
+    );
+    gh = await stub.fresh();
+    expect((await read({ contexts: [run("a", "STALE"), run("b", "SUCCESS")] }))?.required).toBe("pending");
+    gh = await stub.fresh();
+    expect((await read({ contexts: [run("a", "SKIPPED"), run("b", "NEUTRAL")] }))?.required).toBe("passing");
+    gh = await stub.fresh();
+    expect((await read({ contexts: [statusContext("a", "PENDING"), statusContext("b", "SUCCESS")] }))?.required).toBe(
+      "pending",
+    );
+  });
+
+  test("(d) no required context gives no `required` and no `failing`", async () => {
+    const status = await read({ contexts: [run("a", "FAILURE", false)] });
+    expect(status).toEqual({ state: "open", head: HEAD, merge: "clean", at: 1234 });
+    gh = await stub.fresh();
+    expect(await read({ oid: HEAD })).toEqual({ state: "open", head: HEAD, merge: "clean", at: 1234 });
+  });
+
+  test("(e) names: seven keep five, a long one is cut, control characters go, a blank one is dropped, and a repeat counts once", async () => {
+    const status = await read({
+      contexts: [
+        ...Array.from({ length: 7 }, (_, i) => run(`check ${i}`, "FAILURE")),
+        run("x".repeat(300), "FAILURE"),
+        run("bad\u0007na\u001Bme\u0085", "FAILURE"),
+        run("   ", "FAILURE"),
+        run("check 0", "FAILURE"),
+      ],
+    });
+    expect(status?.failing).toEqual(["check 0", "check 1", "check 2", "check 3", "check 4"]);
+    gh = await stub.fresh();
+    const cut = await read({
+      contexts: [run("x".repeat(300), "FAILURE"), run("bad\u0007na\u001Bme\u0085", "FAILURE"), run("   ", "FAILURE")],
+    });
+    expect(cut?.failing).toEqual(["x".repeat(100), "badname"]);
+  });
+
+  test("(e) a name cut inside an astral character drops the whole character, never half of it", async () => {
+    const status = await read({ contexts: [run(`${"x".repeat(99)}\u{1F680}tail`, "FAILURE")] });
+    expect(status?.failing).toEqual(["x".repeat(99)]);
+  });
+
+  test("(f) mergeStateStatus is lowercased; a value this build does not know is left out", async () => {
+    expect((await read({ mergeStateStatus: "DIRTY" }))?.merge).toBe("dirty");
+    gh = await stub.fresh();
+    expect((await read({ mergeStateStatus: "HAS_HOOKS" }))?.merge).toBe("has_hooks");
+    gh = await stub.fresh();
+    expect(await read({ mergeStateStatus: "DRAFT" })).not.toHaveProperty("merge");
+  });
+
+  test("(g) an armed auto-merge, or a place in the merge queue, is `armed`", async () => {
+    expect((await read({ autoMerge: true }))?.armed).toBe(true);
+    gh = await stub.fresh();
+    expect((await read({ inMergeQueue: true }))?.armed).toBe(true);
+    gh = await stub.fresh();
+    expect(await read({ autoMerge: false })).not.toHaveProperty("armed");
+  });
+
+  test("(h) a requested review is `reviewRequested`", async () => {
+    expect((await read({ reviewRequests: 2 }))?.reviewRequested).toBe(true);
+    gh = await stub.fresh();
+    expect(await read({ reviewRequests: 0 })).not.toHaveProperty("reviewRequested");
+  });
+
+  test("(i) a merged or draft PR carries none of it and takes one run only", async () => {
+    await gh.setReply(reply({ state: "MERGED", oid: HEAD }, { state: "OPEN", isDraft: true, oid: HEAD }), 0);
+    const { seen, stop } = start([waiting(1), waiting(2)], { intervalMs: 60_000 });
+    await pollUntil(() => seen.length >= 2, "both readings");
+    stop();
+    expect(seen.map((s) => s.status)).toEqual([
+      { state: "merged", at: 1234 },
+      { state: "draft", at: 1234 },
+    ]);
+    expect(await gh.argvs()).toHaveLength(1);
+  });
+
+  test("(j) a running task and an until-reported awaiting-merge task get none, and make no blocked run; a task sharing the PR with a running one gets them", async () => {
+    await gh.setReply(reply({ state: "OPEN", oid: HEAD, mergeStateStatus: "DIRTY" }, { state: "OPEN", oid: HEAD }), 0);
+    const first = start(
+      [
+        pr(1, { id: "running" }),
+        pr(2, { id: "reported", state: "awaiting-merge", spec: { repo: "r", mode: "worktree", until: "reported" } }),
+      ],
+      { intervalMs: 60_000 },
+    );
+    await pollUntil(() => first.seen.length >= 2, "both readings");
+    first.stop();
+    expect(first.seen.map((s) => s.status)).toEqual([
+      { state: "open", at: 1234 },
+      { state: "open", at: 1234 },
+    ]);
+    expect(await gh.argvs()).toHaveLength(1);
+
+    gh = await stub.fresh();
+    await gh.setReply(reply({ state: "OPEN", oid: HEAD, mergeStateStatus: "DIRTY" }), 0);
+    const shared = start([pr(1, { id: "running" }), waiting(1, { id: "waiting" })], { intervalMs: 60_000 });
+    await pollUntil(() => shared.seen.length >= 2, "both readings");
+    shared.stop();
+    expect(shared.seen.find((s) => s.id === "running")?.status).toEqual({ state: "open", at: 1234 });
+    expect(shared.seen.find((s) => s.id === "waiting")?.status).toMatchObject({ head: HEAD, merge: "dirty" });
+  });
+
+  test("(j) only the primary PR of a task is read for its blocked state", async () => {
+    await gh.setReply(reply({ state: "OPEN", oid: HEAD }, { state: "OPEN", oid: HEAD }), 0);
+    const { seen, stop } = start([waiting(2, { prs: [{ url: prUrl(1) }, { url: prUrl(2) }] })], {
+      intervalMs: 60_000,
+    });
+    await pollUntil(() => seen.length >= 2, "both readings");
+    stop();
+    expect(seen.find((s) => s.url === prUrl(2))?.status).toMatchObject({ head: HEAD });
+    expect(seen.find((s) => s.url === prUrl(1))?.status).toEqual({ state: "open", at: 1234 });
+  });
+
+  test("(k) the merge query is untouched, and the blocked one is a second run whose values are variables", async () => {
+    await gh.setReply(reply({ state: "OPEN", oid: HEAD }), 0);
+    const { seen, stop } = start([waiting(4242)], { intervalMs: 60_000 });
+    await pollUntil(() => seen.length > 0, "a reading");
+    stop();
+    const [first, second] = (await gh.argvs()).map((argv) => argv.slice(4));
+    const queryOf = (argv: readonly string[] | undefined): string =>
+      argv?.find((arg) => arg.startsWith("query=")) ?? "";
+    expect(queryOf(first)).not.toContain("isRequired");
+    expect(queryOf(first)).not.toContain("b0:");
+    expect(queryOf(second)).toContain("isRequired(pullRequestNumber:$n0)");
+    expect(queryOf(second)).toContain("b0:");
+    for (const argv of [first, second]) {
+      expect(argv).toContain("o0=octo-org");
+      expect(argv).toContain("n0=4242");
+      expect(argv?.[(argv?.indexOf("n0=4242") ?? 0) - 1]).toBe("-F");
+      for (const value of ["octo-org", "widgets", "4242"]) expect(queryOf(argv)).not.toContain(value);
+    }
+  });
+
+  test("(l) a null blocked alias with its error still delivers the merge reading, warns nothing, and does not back off", async () => {
+    const body = JSON.parse(reply({ state: "OPEN", blocked: null }, { state: "MERGED" }));
+    body.errors = [{ type: "TIMEOUT", path: ["b0"], message: "slow" }];
+    await gh.setReply(JSON.stringify(body), 1);
+    const { seen, logs } = start([waiting(1), waiting(2)]);
+    // Several polls at the plain interval: a backoff would double it each time.
+    await pollUntil(() => seen.filter((s) => s.id === "t1").length >= 4, "four polls");
+    expect(seen.find((s) => s.id === "t1")).toEqual({ id: "t1", url: prUrl(1), status: { state: "open", at: 1234 } });
+    expect(seen.find((s) => s.id === "t2")).toEqual({ id: "t2", url: prUrl(2), status: { state: "merged", at: 1234 } });
+    expect(logs.warn).toEqual([]);
+    expect(logs.info).toEqual([]);
+  });
+
+  const blockedRunFails = async (stdout: string, code: number): Promise<void> => {
+    await gh.setReply(reply({ state: "OPEN", oid: HEAD }, { state: "MERGED" }), 0);
+    await gh.setBlockedReply(stdout, code);
+    const { seen, logs } = start([waiting(1), waiting(2)]);
+    await pollUntil(() => seen.filter((s) => s.id === "t1").length >= 3, "three polls");
+    // The merge is written ahead of the open PR, whose blocked read it does not wait on.
+    expect(seen.slice(0, 2).map((s) => [s.id, s.status])).toEqual([
+      ["t2", { state: "merged", at: 1234 }],
+      ["t1", { state: "open", at: 1234 }],
+    ]);
+    expect(seen.every((s) => s.status.head === undefined)).toBe(true);
+    // A poll that ended in a failure class would warn `PR status paused` and back the next one off.
+    expect(logs.warn).toHaveLength(1);
+    expect(logs.warn[0]).toContain("blocked-state read");
+    expect(logs.info).toEqual([]);
+  };
+
+  test("(n) a blocked run that prints garbage still delivers the merge reading, warns once however many polls, and is no failure of the poll", async () => {
+    await blockedRunFails("not json", 0);
+  });
+
+  test("(n) a blocked run GitHub refuses (exit 1, errors and no data) does the same", async () => {
+    await blockedRunFails(JSON.stringify({ errors: [{ type: "TIMEOUT", message: "slow" }] }), 1);
+  });
+
+  test("(o) a slow blocked read holds back only its own fields: a merge is written before it answers", async () => {
+    await gh.setReply(reply({ state: "OPEN", oid: HEAD }, { state: "MERGED" }), 0);
+    await gh.setBlockedReply(reply({ state: "OPEN", oid: HEAD }), 0, 1);
+    const { seen, stop } = start([waiting(1), waiting(2)], { intervalMs: 60_000 });
+    await pollUntil(() => seen.length > 0, "the first reading");
+    expect(seen.map((s) => s.id)).toEqual(["t2"]);
+    await pollUntil(() => seen.length >= 2, "the blocked reading", 5_000);
+    stop();
+    expect(seen[1]).toMatchObject({ id: "t1", status: { state: "open", head: HEAD } });
+  });
+
+  // Fifty-one targets are two merge chunks; the first holds the awaiting-merge task `t1`.
+  const twoChunks = async (): Promise<Task[]> => {
+    await gh.setReply(reply({ state: "OPEN", oid: HEAD }, ...Array.from({ length: 49 }, () => ({ state: "OPEN" }))), 0);
+    return [waiting(1), ...Array.from({ length: 50 }, (_, i) => pr(i + 2))];
+  };
+
+  test("(p) a later chunk that fails still lets an earlier chunk's open PRs be written, without blocked fields", async () => {
+    const tasks = await twoChunks();
+    await gh.setCallReply(2, "not json", 0);
+    const { seen, logs, stop } = start(tasks, { intervalMs: 60_000 });
+    await pollUntil(() => logs.warn.length > 0, "the failed poll");
+    stop();
+    expect(logs.warn[0]).toContain("PR status paused (failed)");
+    expect(seen).toHaveLength(50);
+    expect(seen.find((s) => s.id === "t1")).toEqual({ id: "t1", url: prUrl(1), status: { state: "open", at: 1234 } });
+    // The blocked run waits for a poll whose chunks all answered.
+    expect(await gh.argvs()).toHaveLength(2);
+  });
+
+  test("(q) a rejected write in a later chunk still lets an earlier chunk's open PRs be written", async () => {
+    const tasks = await twoChunks();
+    const { seen, logs, stop } = start(tasks, { intervalMs: 60_000 }, new Set(["t51"]));
+    await pollUntil(() => seen.some((s) => s.id === "t1"), "the open reading");
+    stop();
+    expect(seen.find((s) => s.id === "t1")?.status).toEqual({ state: "open", at: 1234 });
+    expect(await gh.argvs()).toHaveLength(2);
+    // The caller reports a rejected write; it says nothing of gh.
+    expect(logs.warn).toEqual([]);
+  });
+
+  test("(m) twelve awaiting-merge open PRs take one merge run and two blocked runs", async () => {
+    await gh.setReply(reply(...Array.from({ length: 12 }, () => ({ state: "OPEN", oid: HEAD }))), 0);
+    const tasks = Array.from({ length: 12 }, (_, i) => waiting(i + 1));
+    const { seen, stop } = start(tasks, { intervalMs: 60_000 });
+    await pollUntil(() => seen.length >= 12, "twelve readings");
+    stop();
+    const runs = await gh.argvs();
+    expect(runs).toHaveLength(3);
+    // Each run keeps the chunk's own indices, so `b<i>` answers for `p<i>`.
+    expect(runs[1]).toContain("n0=1");
+    expect(runs[1]).toContain("n9=10");
+    expect(runs[1]).not.toContain("n10=11");
+    expect(runs[2]).toContain("n10=11");
+    expect(runs[2]).toContain("n11=12");
+    expect(seen.every((s) => s.status.head === HEAD)).toBe(true);
   });
 });

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { PrStatus } from "@seance/shared";
 import {
   DEFAULT_CONFIG,
   MemoryQueueStore,
@@ -8,7 +9,7 @@ import {
   type StoredTask,
   type Task,
 } from "../src/index.ts";
-import { escalation, inputAlert, inputClock } from "../src/alerts.ts";
+import { escalation, inputAlert, inputClock, prBlockedAlert } from "../src/alerts.ts";
 import { advance } from "../src/task.ts";
 import {
   accountMax,
@@ -813,5 +814,144 @@ describe("credits spill", () => {
     await pass(scheduler, fleet, clock.now);
     expect(fleet.spawns).toHaveLength(1);
     expect(alerts).toEqual([]);
+  });
+});
+
+describe("pr-blocked", () => {
+  const PR = "https://github.com/acme/app/pull/7";
+  const H1 = "1".repeat(40);
+  const H2 = "2".repeat(40);
+  const conflict = (head = H1, at = NOW + 1_000): PrStatus => ({ state: "open", merge: "dirty", head, at });
+  const awaiting = (fields: Partial<Task> = {}): Task => ({
+    id: "t",
+    spec: spec(),
+    state: "awaiting-merge",
+    createdAt: NOW,
+    prUrl: PR,
+    endedAt: NOW,
+    pr: conflict(),
+    ...fields,
+  });
+
+  describe("prBlockedAlert", () => {
+    test("stamps an awaiting-merge task whose reading names a reason, with that reason and head", () => {
+      expect(prBlockedAlert(awaiting(), false, NOW)?.prAlert).toEqual({ reason: "conflict", head: H1, at: NOW });
+    });
+
+    test("is due only for awaiting-merge, never under until: reported, never while continuing, never without a head", () => {
+      expect(prBlockedAlert(awaiting({ state: "running" }), false, NOW)).toBeNull();
+      expect(prBlockedAlert(awaiting({ spec: spec({ until: "reported" }) }), false, NOW)).toBeNull();
+      expect(prBlockedAlert(awaiting(), true, NOW)).toBeNull();
+      expect(prBlockedAlert(awaiting({ pr: { state: "open", merge: "dirty", at: NOW } }), false, NOW)).toBeNull();
+      expect(
+        prBlockedAlert(awaiting({ pr: { state: "open", merge: "clean", head: H1, at: NOW } }), false, NOW),
+      ).toBeNull();
+    });
+
+    test("is not due for the same reason and head, and is again for a new head or a new reason at the same head", () => {
+      const stamped = awaiting({ prAlert: { reason: "conflict", head: H1, at: NOW } });
+      expect(prBlockedAlert(stamped, false, NOW + 1)).toBeNull();
+      expect(prBlockedAlert({ ...stamped, pr: conflict(H2) }, false, NOW + 1)?.prAlert).toEqual({
+        reason: "conflict",
+        head: H2,
+        at: NOW + 1,
+      });
+      const failing: PrStatus = { state: "open", required: "failing", failing: ["x"], head: H1, at: NOW };
+      expect(prBlockedAlert({ ...stamped, pr: failing }, false, NOW + 1)?.prAlert?.reason).toBe("checks");
+    });
+  });
+
+  describe("through onPrStatus", () => {
+    const ON_A = { deviceId: "a", exclave: "main", clone: "app", pane: "%1" } as const;
+    const seed = async (store: MemoryQueueStore, fields: Partial<Task> = {}): Promise<void> => {
+      const { pr: _pr, ...bare } = awaiting();
+      const write = await store.put("t", 0, { ...bare, assignment: ON_A, ...fields });
+      if (!write.ok) throw new Error(`seed: ${write.code}`);
+    };
+
+    test("(a) alerts once, and the stamp is on the stored record", async () => {
+      const { alerts, scheduler, store } = setup();
+      await seed(store);
+      await scheduler.load();
+      await scheduler.onPrStatus("t", PR, conflict());
+      expect(alerts).toEqual([
+        {
+          kind: "pr-blocked",
+          taskId: "t",
+          reason: "conflict",
+          head: H1,
+          message: 'pr blocked: task="t" reason=conflict',
+        },
+      ]);
+      expect((await stored(store, "t")).body.prAlert).toEqual({ reason: "conflict", head: H1, at: NOW });
+    });
+
+    test("(b) an identical reading again alerts nothing, a new head does, and a task under until: reported never does", async () => {
+      const { alerts, scheduler, store } = setup();
+      await seed(store);
+      await scheduler.load();
+      await scheduler.onPrStatus("t", PR, conflict());
+      await scheduler.onPrStatus("t", PR, conflict(H1, NOW + 2_000));
+      expect(alerts).toHaveLength(1);
+      await scheduler.onPrStatus("t", PR, conflict(H2, NOW + 3_000));
+      expect(alerts).toHaveLength(2);
+      expect(alerts[1]).toMatchObject({ kind: "pr-blocked", head: H2 });
+
+      const reported = setup();
+      await seed(reported.store, { spec: spec({ until: "reported" }) });
+      await reported.scheduler.load();
+      await reported.scheduler.onPrStatus("t", PR, conflict());
+      expect(reported.alerts).toEqual([]);
+      expect((await stored(reported.store, "t")).body).not.toHaveProperty("prAlert");
+    });
+
+    test("(c) a continuation still in the queue holds the alert, and the next reading alerts once it has ended", async () => {
+      const { alerts, scheduler, store } = setup();
+      await seed(store);
+      const continuation: Task = {
+        id: "c",
+        state: "queued",
+        createdAt: NOW,
+        spec: spec({
+          mode: "continue",
+          continues: { task: "t", at: { deviceId: "a", exclave: "main", clone: "app" } },
+        }),
+      };
+      expect((await store.put("c", 0, continuation)).ok).toBe(true);
+      await scheduler.load();
+      await scheduler.onPrStatus("t", PR, conflict());
+      expect(alerts).toEqual([]);
+      expect((await stored(store, "t")).body).not.toHaveProperty("prAlert");
+
+      expect((await store.put("c", 1, { ...continuation, state: "done", doneBy: "session" })).ok).toBe(true);
+      await scheduler.refresh("c");
+      await scheduler.onPrStatus("t", PR, conflict(H1, NOW + 2_000));
+      expect(alerts).toHaveLength(1);
+    });
+
+    test("(d) a new leader reading the stamped record does not alert again", async () => {
+      const { alerts, make, scheduler, store } = setup();
+      await seed(store);
+      await scheduler.load();
+      await scheduler.onPrStatus("t", PR, conflict());
+      expect(alerts).toHaveLength(1);
+      const next = make();
+      await next.takeover();
+      await next.onPrStatus("t", PR, conflict(H1, NOW + 2_000));
+      await next.onPrStatus("t", PR, conflict(H1, NOW + 3_000));
+      expect(alerts).toHaveLength(1);
+    });
+
+    test("(e) a write that conflicts and retries still alerts exactly once", async () => {
+      const { alerts, scheduler, store } = setup();
+      await seed(store);
+      await scheduler.load();
+      // Another writer moves the record on: the leader's held version is stale, so its first put conflicts.
+      const entry = await stored(store, "t");
+      expect((await store.put("t", entry.version, entry.body)).ok).toBe(true);
+      await scheduler.onPrStatus("t", PR, conflict());
+      expect(alerts).toHaveLength(1);
+      expect((await stored(store, "t")).body.prAlert).toEqual({ reason: "conflict", head: H1, at: NOW });
+    });
   });
 });

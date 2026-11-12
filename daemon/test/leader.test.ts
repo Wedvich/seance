@@ -41,6 +41,7 @@ import {
   type PushSubscriptionEntry,
   type WebPushSubscription,
   type RegistryView,
+  parsePushAlert,
   type SessionsResponse,
 } from "@seance/shared";
 import { IDLE_MS } from "../src/app-relay.ts";
@@ -1639,6 +1640,76 @@ describe("leader push", () => {
       relay.stop();
       await push.stop();
     }
+  });
+
+  test("a pr-blocked scheduler alert is pushed as ids and its reason only: no head, URL or message", () => {
+    const alert = {
+      kind: "pr-blocked",
+      taskId: "t-1",
+      reason: "checks",
+      head: "0".repeat(40),
+      message: 'pr blocked: task="t-1" reason=checks',
+    } as const;
+    const push = alertToPush(alert, 77);
+    expect(push).toEqual({ v: 1, kind: "pr-blocked", at: 77, taskId: "t-1", reason: "checks" });
+    expect(Object.keys(push).toSorted()).toEqual(["at", "kind", "reason", "taskId", "v"]);
+    expect(parsePushAlert(JSON.parse(JSON.stringify(push)))).toEqual(push);
+  });
+
+  test("a blocked PR read by the poller is alerted once, logged by ids and reason, and pushed", async () => {
+    const relay = startTestRelay(TOKEN);
+    relay.schedulerTerm = 1;
+    const push = startPushEndpoint();
+    const settings = await heldSettings([sub("live")]);
+    const store = new MemoryQueueStore();
+    const url = "https://github.com/acme/app/pull/7";
+    await store.put("pr1", 0, task("pr1", { state: "awaiting-merge", prUrl: url, endedAt: Date.now() }));
+    const gh = await ghStub.fresh();
+    // One body answers both runs: the merge read's `p0` and the blocked-state read's `b0`.
+    await gh.setReply(
+      JSON.stringify({
+        data: {
+          p0: {
+            defaultBranchRef: { name: "main" },
+            pullRequest: { state: "OPEN", isDraft: false, merged: false, baseRefName: "main", commits: { nodes: [] } },
+          },
+          b0: {
+            pullRequest: {
+              mergeStateStatus: "DIRTY",
+              isInMergeQueue: false,
+              autoMergeRequest: null,
+              reviewRequests: { totalCount: 0 },
+              commits: { nodes: [{ commit: { oid: "a".repeat(40), statusCheckRollup: null } }] },
+            },
+          },
+        },
+      }),
+      0,
+    );
+    const { leader } = leaderOver(
+      relay,
+      store,
+      undefined,
+      { gh: ghStub.path, intervalMs: 50 },
+      settings.store,
+      (input, init) => fetch(push.endpoint(new URL(String(input)).pathname.split("/").at(-1) ?? ""), init),
+    );
+    const lines = await captureLog(async () => {
+      try {
+        leader.lead(1);
+        await push.waitForRequests(1);
+        await pollUntil(async () => (await store.get("pr1"))?.body?.prAlert?.reason === "conflict", "the stamp");
+        // The same reading each poll: a non-event cannot be polled for, so several intervals, and still one push.
+        await Bun.sleep(300);
+        expect(push.requests()).toHaveLength(1);
+      } finally {
+        leader.stop();
+        relay.stop();
+        await push.stop();
+      }
+    });
+    expect(lines.filter((line) => line.includes("pr blocked: task="))).toHaveLength(1);
+    expect(lines.join("\n")).not.toContain(url);
   });
 
   test("an alert is pushed to every subscription, beside its log line, and a pruned endpoint leaves the record", async () => {

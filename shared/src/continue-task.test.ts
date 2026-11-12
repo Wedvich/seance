@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Machine } from "./app-client.ts";
-import { continuationSpec, continueOffer, waitingContinuation } from "./continue-task.ts";
+import { continuationSpec, continuationUnderway, continueOffer, waitingContinuation } from "./continue-task.ts";
 import { parseTaskSpec } from "./parse.ts";
 import { CAPABILITIES, type Assignment, type Task, type TaskSpec } from "./types.ts";
 
@@ -291,5 +291,45 @@ describe("continuationSpec", () => {
     expect(continuationSpec(failed(), at)).not.toHaveProperty("prompt");
     expect(continuationSpec(failed(), at, "  \n ")).not.toHaveProperty("prompt");
     expect(continuationSpec(failed(), at, "  retry the build  ").prompt).toBe("retry the build");
+  });
+});
+
+describe("continuationUnderway", () => {
+  const link = (id: string, continues: string, state: Task["state"]): Task => ({
+    id,
+    state,
+    createdAt: 2,
+    spec: {
+      repo: "github.com/acme/app",
+      mode: "worktree",
+      continues: { task: continues, at: { deviceId: "dev-a", exclave: "default", clone: "app" } },
+    },
+  });
+  const origin = failed({ id: "t-0", state: "awaiting-merge" });
+
+  test("no continuation, or only finished ones, is not underway", () => {
+    expect(continuationUnderway(origin, [origin])).toBe(false);
+    expect(continuationUnderway(origin, [origin, link("t-1", "t-0", "done")])).toBe(false);
+    expect(continuationUnderway(origin, [origin, link("t-1", "t-0", "failed"), link("t-2", "t-9", "queued")])).toBe(
+      false,
+    );
+  });
+
+  test("a waiting, dispatching or placed continuation is", () => {
+    for (const state of ["queued", "blocked", "ready", "reserved", "running", "needs-input", "lost"] as const) {
+      expect(continuationUnderway(origin, [origin, link("t-1", "t-0", state)])).toBe(true);
+    }
+  });
+
+  test("the walk follows a chain, where a later continuation continues the previous one", () => {
+    const chain = [origin, link("t-1", "t-0", "done"), link("t-2", "t-1", "running")];
+    expect(continuationUnderway(origin, chain)).toBe(true);
+    expect(continuationUnderway(origin, chain.toReversed())).toBe(true);
+  });
+
+  test("a cycle ends the walk", () => {
+    const a = link("t-a", "t-b", "done");
+    const b = link("t-b", "t-a", "done");
+    expect(continuationUnderway(a, [a, b])).toBe(false);
   });
 });

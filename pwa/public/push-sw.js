@@ -23,6 +23,19 @@
   const FALLBACK = { body: "Something needs your attention.", tag: "seance", url: null };
 
   /**
+   * What a blocked PR says per reason: fixed text, looked up by a closed key. A null prototype, so a
+   * `reason` of `__proto__` or `constructor` from a payload this worker cannot authenticate finds nothing.
+   */
+  const PR_BLOCKED_TEXT = Object.freeze(
+    Object.assign(Object.create(null), {
+      checks: "A task's pull request has a failing required check.",
+      conflict: "A task's pull request has merge conflicts.",
+      behind: "A task's pull request is behind its base branch.",
+      unarmed: "A task's pull request is ready, but nothing will merge it.",
+    }),
+  );
+
+  /**
    * The quota windows the scheduler labels a spill with (`windowsOf`, scheduler/src/route.ts): `5h`, `7d`,
    * and a per-model weekly `7d <model>`. Only these are shown, as the fixed `5h` or `7d`: a label is the
    * payload's, and the text stays this file's. Anything else is left out of the text.
@@ -67,6 +80,10 @@
         tag: `spill:${alert.taskId}`,
         url,
       };
+    }
+    if (alert.kind === "pr-blocked") {
+      const body = PR_BLOCKED_TEXT[alert.reason] ?? "A task's pull request is blocked.";
+      return { body, tag: `pr-blocked:${alert.taskId}`, url };
     }
     return null;
   }
