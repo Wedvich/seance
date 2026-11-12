@@ -1597,7 +1597,7 @@ export type NeedsInputReason = (typeof NEEDS_INPUT_REASONS)[number];
  * Bounds `SessionEvent.tool` and `Task.inputTool`: display-only, `[A-Za-z0-9_-]`
  * only (`isToolName`), so no command text can ride in a tool name.
  */
-export const TOOL_NAME_MAX_LENGTH = 128;
+export const TOOL_NAME_MAX_LENGTH = 64;
 
 /**
  * `op: "session-event"`, daemon → scheduler, sealed to `SCHEDULER_ID`,

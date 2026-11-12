@@ -8355,15 +8355,17 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   and a tool name). Why a needs-input waits, for the PWA to say: `NEEDS_INPUT_REASONS` is
   `question` and `permission`, and `tool` rides beside `permission` only. Closed kinds plus a
   bounded name and never the command or the verdict's message: a command line may carry secrets,
-  and prompt text is never logged. `isToolName` (`[A-Za-z0-9_-]{1,128}`, the Claude API's own
+  and prompt text is never logged. `isToolName` (`[A-Za-z0-9_-]{1,64}`, the Claude API's own
   tool-name alphabet, so every real name passes) holds it at ingest, at `parseSessionEvent` and
-  at `parseTask`; a bad one is dropped, never the frame, event or record. The event's reason and
+  at `parseTask`; a bad one is dropped, never the frame, event or record. `parseTask` keeps them only
+  on a `needs-input` or `lost` task, so a stale pair an older leader left on a later state goes,
+  and the store bound need not fit one beside a `failure`. The event's reason and
   tool are written onto `Task.inputReason`/`inputTool` through `sessionChange` (the task's own
   machine only, like `remoteSession`; a changed one is a write even when the state stands) and
   cleared by `inputClock`. Display-only: they bind, route, move and settle nothing and alert
   nothing (`permission` lifts no debounce; `questionAlert` reads the event, not the record).
   `seanced mcp`'s `get_queue` carries `inputReason` and never `inputTool`: a tool name is chosen
-  by whatever MCP server a repo brings, and `[A-Za-z0-9_-]{1,128}` admits words, so it would be a
+  by whatever MCP server a repo brings, and `[A-Za-z0-9_-]{1,64}` admits words, so it would be a
   session-chosen string in another agent's context. The `permission` state also covers an
   _approved_ call still running, by a person or by auto mode's classifier (a 70 s auto-mode test
   run read needs-input throughout), and the engine gives no settled-ask signal, so the PWA words

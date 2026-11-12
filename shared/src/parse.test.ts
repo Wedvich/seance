@@ -784,17 +784,26 @@ describe("tasks and their records", () => {
   });
 
   test("a wait reason and tool round-trip; a bad one is dropped, never the task", () => {
-    const waiting = { ...task, inputReason: "permission", inputTool: "Bash" } as const;
+    const stay = { ...task, state: "needs-input" } as const;
+    const waiting = { ...stay, inputReason: "permission", inputTool: "Bash" } as const;
     expect(parseTask(waiting)).toEqual(waiting);
-    const question = { ...task, inputReason: "question" } as const;
+    const question = { ...stay, inputReason: "question" } as const;
     expect(parseTask(question)).toEqual(question);
-    expect(parseTask({ ...waiting, inputReason: "elicitation" })).toEqual(task);
-    expect(parseTask({ ...waiting, inputReason: 3 })).toEqual(task);
-    for (const inputTool of ["rm -rf /", "a/b", "", "t".repeat(129), 4]) {
-      expect(parseTask({ ...waiting, inputTool })).toEqual({ ...task, inputReason: "permission" });
+    expect(parseTask({ ...waiting, inputReason: "elicitation" })).toEqual(stay);
+    expect(parseTask({ ...waiting, inputReason: 3 })).toEqual(stay);
+    for (const inputTool of ["rm -rf /", "a/b", "", "t".repeat(65), 4]) {
+      expect(parseTask({ ...waiting, inputTool })).toEqual({ ...stay, inputReason: "permission" });
     }
     expect(parseTask({ ...question, inputTool: "Bash" })).toEqual(question);
-    expect(parseTask({ ...task, inputTool: "Bash" })).toEqual(task);
+    expect(parseTask({ ...stay, inputTool: "Bash" })).toEqual(stay);
+  });
+
+  test("a wait reason is kept into `lost` and dropped on every other state", () => {
+    const fields = { inputReason: "permission", inputTool: "Bash" } as const;
+    expect(parseTask({ ...task, state: "lost", ...fields })).toEqual({ ...task, state: "lost", ...fields });
+    for (const state of ["running", "reserved", "failed", "done", "awaiting-merge"] as const) {
+      expect(parseTask({ ...task, state, ...fields })).toEqual({ ...task, state });
+    }
   });
 
   test("a forge reading round-trips, with or without checks", () => {
@@ -1153,14 +1162,14 @@ describe("parseSessionEvent", () => {
       ...permission,
       tool: "mcp__github__create_issue",
     });
-    for (const tool of ["rm -rf /", "a/b", "a=b", 'a"b', "", "t".repeat(129), 7]) {
+    for (const tool of ["rm -rf /", "a/b", "a=b", 'a"b', "", "t".repeat(65), 7]) {
       expect(parseSessionEvent({ ...permission, tool })).toEqual(permission);
     }
-    expect(parseSessionEvent({ ...permission, tool: "t".repeat(128) })).toEqual({
+    expect(parseSessionEvent({ ...permission, tool: "t".repeat(64) })).toEqual({
       ...permission,
-      tool: "t".repeat(128),
+      tool: "t".repeat(64),
     });
-    expect(TOOL_NAME_MAX_LENGTH).toBe(128);
+    expect(TOOL_NAME_MAX_LENGTH).toBe(64);
     expect(parseSessionEvent({ ...event, reason: "question", tool: "Bash" })).toEqual({ ...event, reason: "question" });
     expect(parseSessionEvent({ ...event, tool: "Bash" })).toEqual(event);
     expect(parseSessionEvent({ ...event, state: "busy", reason: "permission", tool: "Bash" })).toEqual({
@@ -1284,6 +1293,19 @@ describe("store", () => {
     expect(await sealedLength(decided)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
     // …and a full prefix still lists in one frame, under the Workers WebSocket message limit.
     expect(MAX_TASKS * STORE_MAX_CT_LENGTH).toBeLessThan(32 * 1024 * 1024);
+  });
+
+  test("a needs-input record carrying its wait at every bound, in place of the failure, fits beside nine candidates", async () => {
+    const { failure: _failure, ...unfailed } = written;
+    const waiting: Task = {
+      ...unfailed,
+      state: "needs-input",
+      inputReason: "permission",
+      inputTool: "t".repeat(TOOL_NAME_MAX_LENGTH),
+      decision: { at: 1_760_000_000_000, chosen: target, candidates: Array.from({ length: 9 }, () => candidate) },
+    };
+    expect(parseTask(waiting)).toEqual(waiting);
+    expect(await sealedLength(waiting)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
   });
 
   test("a PR list at its bound, its primary as prUrl, costs no more than a prUrl at its own: the same record fits", async () => {

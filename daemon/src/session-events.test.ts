@@ -906,7 +906,7 @@ describe("a session's hand-off", () => {
     const permission = { ...base, reason: "permission" } as const;
     expect(parseSessionEventFrame(frame({ ...permission, tool: "Bash" }))).toEqual({ ...permission, tool: "Bash" });
     expect(parseSessionEventFrame(frame(permission))).toEqual(permission);
-    for (const tool of ["rm -rf /", "a/b", "", "t".repeat(129), 4]) {
+    for (const tool of ["rm -rf /", "a/b", "", "t".repeat(65), 4]) {
       expect(parseSessionEventFrame(frame({ ...permission, tool }))).toEqual(permission);
     }
     expect(parseSessionEventFrame(frame({ ...base, reason: "question", tool: "Bash" }))).toEqual({

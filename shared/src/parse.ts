@@ -610,7 +610,7 @@ export function isRemoteSessionId(value: unknown): value is string {
   return typeof value === "string" && REMOTE_SESSION_ID.test(value);
 }
 
-const TOOL_NAME = /^[A-Za-z0-9_-]{1,128}$/u;
+const TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/u;
 
 /** A tool name as Claude Code mints one; nothing that could carry a command line passes. */
 export function isToolName(value: unknown): value is string {
@@ -1189,6 +1189,7 @@ export function parseTask(value: unknown): Task | null {
   const prs =
     value["prs"] === undefined || progress.prUrl === undefined ? null : parseTaskPrs(value["prs"], progress.prUrl);
   const { remoteSession, inputReason, inputTool } = value;
+  const waiting = known === "needs-input" || known === "lost";
   return {
     id,
     state: known,
@@ -1206,9 +1207,11 @@ export function parseTask(value: unknown): Task | null {
     ...(prs === null ? {} : { prs }),
     // Dropped, never fatal, like `pr`: a link is display-only.
     ...(isRemoteSessionId(remoteSession) ? { remoteSession } : {}),
-    // Dropped, never fatal, like `remoteSession`: display-only.
-    ...(isNeedsInputReason(inputReason) ? { inputReason } : {}),
-    ...(inputReason === "permission" && isToolName(inputTool) ? { inputTool } : {}),
+    // Dropped, never fatal, like `remoteSession`: display-only. Only on the states a wait lives in
+    // (`inputClock` keeps it into `lost`): a stale one an older leader left elsewhere goes, and the
+    // store bound need not fit it beside a `failure`.
+    ...(waiting && isNeedsInputReason(inputReason) ? { inputReason } : {}),
+    ...(waiting && inputReason === "permission" && isToolName(inputTool) ? { inputTool } : {}),
   };
 }
 
