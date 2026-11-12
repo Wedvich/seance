@@ -888,6 +888,24 @@ describe("pass", () => {
     }
   });
 
+  test("a task already passed is answered with its successor, and no pass is sent", async () => {
+    const fake = fakeRelay(machines(), (op) =>
+      op === "queue"
+        ? { tasks: [{ ...running, state: "superseded", successor: "t-2" }], at: 6_000 }
+        : new Error(`unexpected ${op}`),
+    );
+    fake.setState({ scheduler: LEADING });
+    const lazy = new LazyRelay({ create: () => fake });
+    try {
+      const outcome = await passTaskAuto({ taskId: "t-1" }, relayFleet(lazy));
+      expect(outcome.ok).toBe(true);
+      expect(outcome.text).toContain("already passed to successor t-2");
+      expect(fake.requests.map((r) => r.op)).toEqual(["queue"]);
+    } finally {
+      lazy.stop();
+    }
+  });
+
   test("a malformed id and a task the shared rule refuses send no pass", async () => {
     const waiting: Task = { ...running, state: "needs-input" };
     const fake = fakeRelay(machines(), (op) =>

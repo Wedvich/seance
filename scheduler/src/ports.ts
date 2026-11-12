@@ -178,8 +178,14 @@ export type PrHeadReading =
   | { readonly kind: "skipped" }
   | { readonly kind: "unreadable" };
 
-/** A successor's create through the leader's app-role leg: it landed (or had already), or why not. */
-export type TaskCreateResult = { readonly ok: true } | { readonly ok: false; readonly code: string };
+/**
+ * A successor's create through the leader's app-role leg: it landed (or had already), or why not.
+ * `unconfirmed`: the create was sent and nothing answered, so it may have landed; re-sending the same task
+ * is safe (`createTask` reads a conflict on its fresh id as landed).
+ */
+export type TaskCreateResult =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly code: string; readonly unconfirmed?: true };
 
 export interface Fleet {
   /**

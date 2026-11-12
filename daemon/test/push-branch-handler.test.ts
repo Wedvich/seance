@@ -122,6 +122,21 @@ describe("push-branch", () => {
     expect(logged()).not.toContain("audit push");
   });
 
+  test("a malformed scheduler request is audited with no task", async () => {
+    await taskWorktree("t-bad-audit", "task/bad-audit");
+    for (const payload of [
+      {},
+      { taskId: "t-bad-audit", extra: 1, expect: 3 },
+      { taskId: "t-bad-audit", expect: "-x" },
+    ]) {
+      // oxlint-disable-next-line no-await-in-loop -- each case is its own reply and its own line
+      const reply = await createHandler(ctx())(request(payload), SCHEDULER_ID);
+      expect(reply?.payload).toMatchObject({ ok: false, code: "invalid_request" });
+      expect(logged()).toContain("audit push origin=relay task=- outcome=invalid_request");
+      lines.length = 0;
+    }
+  });
+
   test("a task this machine holds no launch of is not_launched, audited", async () => {
     const reply = await createHandler(ctx())(request({ taskId: "t-none" }), SCHEDULER_ID);
     expect(reply?.payload).toMatchObject({ ok: false, code: "not_launched" });

@@ -1268,7 +1268,8 @@ of M4 has landed.
        not finished and carries no `successor`, so it is looked at again once it is back in `running` (a
        `conflict` is a task that moved mid-push, a `needs-input` answered meanwhile among them);
        `finished` and `not_found` leave it. A `conflict` after the successor's create (an orphan admission
-       fails `pass_abandoned`) keeps the stamp and alerts, so no second successor is made. A reading that
+       fails `pass_abandoned`) keeps the stamp and alerts, so no second successor is made; a `pass_failed` after a
+       create that landed unseen is retried under the same successor id, so none is made then either. A reading that
        gains a reset after a stamp written without one is the same window unless that reset puts the
        window's start after the stamp (the span rule applies while either side has none).
      - **Capability.** The daemon advertises `successorAuto`; nothing gates on it yet, it marks the
@@ -1447,8 +1448,11 @@ of M4 has landed.
       `finished`, `dispatching`, `not_running`, `needs_input`, `here`, `offline`,
       `successor_unsupported`, `account_unknown`, `pr_unreadable`, `pr_not_open`, `branch_mismatch`,
       `dirty_worktree`, `detached_head`, `default_branch`, `push_rejected`, `push_failed`,
-      `not_launched`, `pass_failed`, `conflict` and `unrecorded`; a `push-branch` that gets no answer is
-      `push_failed`. A refusal is the request audit line's outcome, as for `cancel`. A task that
+      `not_launched`, `pass_failed` (the successor's create was refused, or went unanswered and was not
+      seen; the task's next pass, the quota retry included, creates under the same id, so a successor that
+      landed unseen is found and named, not duplicated), `conflict` and `internal_error` (the library's `unrecorded`, as for `cancel`); a `push-branch`
+      that gets no answer is `push_failed`, and a push is not started past 30 s after the daemon began it
+      (`push_failed`, nothing pushed). A refusal is the request audit line's outcome, as for `cancel`. A task that
       already carries `successor` is not refused: it answers `ok` with it. A `needs-input` task is
       refused on the outside paths in v1 (Q2): the person can answer or cancel first, and widening is
       cheap later. The self path accepts it: a session calling a tool is waiting on nobody, and the
@@ -1483,7 +1487,8 @@ of M4 has landed.
       started to fetch a deleted branch; under `until: "reported"` a merge is only recorded. A
       closed, unmerged PR is recorded and moves nothing, and the successor still places. This takes
       `prChange`'s `isPrReadable` early return letting a waiting successor through, beside the wider
-      `wantsPrReading`. This is the one exception to "`done` from `queued`, `blocked` or `ready` is `mark-done`'s alone".
+      `wantsPrReading`. This and admission's settle of a successor whose predecessor merged (`judgeSuccessor`) are the two
+      exceptions to "`done` from `queued`, `blocked` or `ready` is `mark-done`'s alone".
     - **Q4. The pin is dropped** (D7): `repo_absent` already covers a repo present on one machine
       only. **Q5.** `PASS_CLOSE_GRACE_MS` is 120 000. **Q6.** `SUCCESSOR_RECORD_MAX` stays 7 168 (what a session may
       send; a record that does not fit beside the preamble is cut at its end, O1), and the
@@ -1521,7 +1526,10 @@ of M4 has landed.
     - the self path telling the session why the leader refused after the push (today: "not
       confirmed" plus the leader's warn line) and a Queue-screen mark for a session pass the leader
       refused (the push alert, `pass-refused`, is built);
-    - stacking, once it lands: a successor on a `baseBranch` instead of a reset to the remote branch.
+    - stacking, once it lands: a successor on a `baseBranch` instead of a reset to the remote branch;
+    - a successor's `hand_off_task`: its launch notes no PR (only the session's own `gh pr create`
+      output is noted), so the tool answers `prless`, and the preamble tells it not to call it. Noting
+      the inherited PR from the scheduler-sealed spawn is a carried claim, a threat-model change.
   - _Deferred:_ moving a `needs-input` task on any path (Q2); a forecast-only spill for a successor
     (Q3).
   - _Rejected for now:_ automatic continue of the old session: it cannot cross accounts.
@@ -1530,13 +1538,15 @@ of M4 has landed.
       lines, counted by week and `trigger` (`manual`, `session`, `quota`), and `audit pass refused …
       trigger=quota outcome=<code>` for the automatic ones that did not go through.
     - **Time from limit to successor running**: stage 3 stamps `succeeds.since` (the reading's
-      time); the leader logs `successor placed after=<ms> from=since|created` at the successor's
-      confirmed spawn, counted from `since` for a quota pass, or from the successor's `createdAt` for a
-      manual or session pass, which has no limit time, so for those it is the pass to the start. Read as
-      a median and p90 by trigger.
-    - **Successors that end merged**: the leader logs `successor settled state=<s> doneBy=<d>` when
+      time); the leader logs `successor placed task=<id> after=<ms> from=since|created` each time the
+      successor moves from `reserved` to `running` or `needs-input`, counted from `since` for a quota
+      pass, or from the successor's `createdAt` for a manual or session pass, which has no limit time,
+      so for those it is the pass to the start. Read as a median and p90 by trigger.
+    - **Successors that end merged**: the leader logs `successor settled task=<id> state=<s>[ doneBy=<d>][ failure=<code>]` when
       a task carrying `succeeds` finishes; read as the share of settled successors with
-      `state=done doneBy=merged`, against `pass_abandoned`, `failed` and `cancelled`.
+      `state=done doneBy=merged`, against `pass_abandoned`, `failed` and `cancelled`, over the ids an `audit pass …
+      successor=<id>` line names only: an orphan (a create that landed unseen, or one whose commit never landed)
+      never ran, and its settle would count as a merge it did not carry.
     - Also: refusals by code (the request audit line's outcome), and successors that wait past an hour on
       `quota_over_line`, which says whether never spilling costs more than it saves.
 

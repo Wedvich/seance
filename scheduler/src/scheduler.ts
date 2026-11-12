@@ -132,7 +132,7 @@ export interface SchedulerOptions {
   readonly prHead?: (prUrl: string) => Promise<PrHeadReading>;
   /**
    * One line per audited or measured event (`audit pass`, `pass joined`, `successor settled`,
-   * `successor placed`): never a branch name, a PR head or a record.
+   * `successor placed`, `pass create unconfirmed`): never a branch name, a PR head or a record.
    */
   readonly log?: (line: string) => void;
 }
@@ -168,8 +168,11 @@ export type RunNowResult =
 /**
  * `pass`: the old task and its successor, or why not. `ok` also answers a task that already carries
  * `successor` (a repeat pass, or a retry after a timeout), with that successor. `unrecorded`: the
- * term ended before the commit was written. The codes are `SCHEDULER_ERROR_CODES`' (`not_found` is
- * `task_not_found` on the wire).
+ * term ended before the commit was written. `pass_failed` may follow a create that landed unseen: the
+ * create is re-sent once and then read back, and a successor it left behind waits `blocked`; the task's next
+ * pass (the quota retry included) creates under that same id, so it is found landed and named, never a second. A
+ * new term forgets the id: the orphan then ends with the task (`done` (`merged`) if it merges, `pass_abandoned`
+ * otherwise). The codes are `SCHEDULER_ERROR_CODES`' (`not_found` is `task_not_found` on the wire).
  */
 export type PassResult =
   | ({ readonly ok: true } & PassResponse)
@@ -320,6 +323,13 @@ export class Scheduler {
   readonly #stopping = new Map<string, number>();
   /** Task id → its pass, still out (`pass`): a second pass of the task waits for it and answers its result. */
   readonly #passInFlight = new Map<string, Promise<PassResult>>();
+  /**
+   * Task id → the id of a successor whose create nothing confirmed or refused (unanswered twice and not seen on
+   * read-back, or thrown): it may have landed. The next pass of the task creates under that id, which the relay
+   * reads as landed if it did, so a retry never leaves a second successor beside an orphan. Memory only: a new term's
+   * pass makes a fresh id, and the orphan ends with its task (`pass_abandoned`, or `done` if it merges).
+   */
+  readonly #unsureSuccessors = new Map<string, string>();
   /** Task id → its automatic quota pass (`#autoPass`), detached from the tick that began it: `drain` waits for it. */
   readonly #autoPasses = new Map<string, Promise<void>>();
   /** What each detached automatic pass's successor is about to take (`#slotKeys`), until the pass is over. */
@@ -1149,8 +1159,14 @@ export class Scheduler {
   ): Promise<PassResult> {
     const task = this.task(taskId);
     if (task === undefined) return { ok: false, code: "not_found" };
-    if (task.successor !== undefined) return this.#passed(task, task.successor);
-    if (FINISHED.includes(task.state)) return { ok: false, code: "finished" };
+    if (task.successor !== undefined) {
+      this.#unsureSuccessors.delete(taskId);
+      return this.#passed(task, task.successor);
+    }
+    if (FINISHED.includes(task.state)) {
+      this.#unsureSuccessors.delete(taskId);
+      return { ok: false, code: "finished" };
+    }
     if (task.state === "reserved") return { ok: false, code: "dispatching" };
     // The session's own pass is let through a `needs-input` task: its caller is waiting on nobody, and the
     // leader's view can lag the answer by an event, which would silently drop a pass already pushed.
@@ -1214,10 +1230,12 @@ export class Scheduler {
     // The pushes and reads above took time: the task must still be the one that was checked.
     const current = this.task(taskId);
     const at = current?.assignment;
+    // Another pass named a successor meanwhile (a refresh pulled another term's write into this view): the task
+    // is passed, which is what was asked, and D15 answers it `ok` with that one. Nothing of ours is created yet.
+    if (current?.successor !== undefined) return this.#passed(current, current.successor);
     if (
       current === undefined ||
       (current.state !== "running" && !(session !== undefined && current.state === "needs-input")) ||
-      current.successor !== undefined ||
       at === undefined ||
       at.deviceId !== assignment.deviceId ||
       this.#stopping.has(taskId)
@@ -1235,16 +1253,14 @@ export class Scheduler {
       ...successorSpec({ ...current, assignment: at }, account, trigger, built.prompt, since),
       client: SCHEDULER_CLIENT,
     };
+    const unsure = this.#unsureSuccessors.get(taskId);
     const successor: Task = {
       ...queuedTask(spec, this.#now()),
+      ...(unsure === undefined ? {} : { id: unsure }),
       ...(current.prUrl === undefined ? {} : { prUrl: current.prUrl }),
       ...(current.prs === undefined ? {} : { prs: current.prs }),
     };
-    const made = await create(successor);
-    if (!made.ok) return { ok: false, code: "pass_failed" };
-    // Held now, not at the store's nudge: admission keeps it `blocked` from this pass on. A failed read is not a
-    // failed pass: it exists, the commit below names it, and a retry would only leave this one an orphan.
-    await this.refresh(successor.id).catch(this.#onError);
+    if (!(await this.#createSuccessor(create, successor, taskId))) return { ok: false, code: "pass_failed" };
 
     // Entered before the commit: no pass may see a task carrying `successor` that no entry covers.
     this.#passing.set(taskId, { deadline: this.#now() + PASS_CLOSE_GRACE_MS });
@@ -1267,6 +1283,12 @@ export class Scheduler {
     }
     if (committed === null) {
       this.#passing.delete(taskId);
+      // The commit declined because another pass named a successor first (the create's refresh pulled it in):
+      // answered as the check after the push answers it, `ok` with that one. Ours is an orphan that ends with the task.
+      const other = this.task(taskId);
+      if (other?.successor !== undefined && other.successor !== successor.id) {
+        return this.#passed(other, other.successor);
+      }
       return { ok: false, code: "conflict" };
     }
     this.#log(`audit pass task=${quote(taskId)} successor=${quote(successor.id)} trigger=${trigger}`);
@@ -1285,6 +1307,50 @@ export class Scheduler {
     }
     await this.#settlePassed(taskId);
     return this.#passed(this.task(taskId) ?? committed, successor.id, successor);
+  }
+
+  /**
+   * The successor's create, and whether it exists afterwards. A refused create is final. One nothing answered
+   * may have landed, so the identical task (same id) is sent once more, which `createTask` reads as landed if the
+   * first did; if that is unanswered too, the key is read back, and only a record seen there counts. A read-back
+   * is one snapshot, so a create still in flight can land after it: that successor then waits `blocked`. Its id
+   * stays in `#unsureSuccessors` while the outcome is unknown (also when the create throws), so the task's next
+   * pass creates under it and finds it landed, instead of leaving a second successor, which the automatic quota
+   * retry would otherwise make. Recorded in DESIGN.md.
+   */
+  async #createSuccessor(
+    create: (task: Task) => Promise<TaskCreateResult>,
+    successor: Task,
+    taskId: string,
+  ): Promise<boolean> {
+    this.#unsureSuccessors.set(taskId, successor.id);
+    let made = await create(successor);
+    const doubted = !made.ok && made.unconfirmed === true;
+    if (!made.ok && !doubted) {
+      this.#unsureSuccessors.delete(taskId);
+      return false;
+    }
+    if (doubted) {
+      this.#log(`pass create unconfirmed task=${quote(taskId)} successor=${quote(successor.id)}`);
+      made = await create(successor);
+    }
+    if (!made.ok) {
+      try {
+        await this.refresh(successor.id);
+      } catch (err) {
+        // Not `.catch(this.#onError)`: a plain error there may end the term, and this one only means "unknown".
+        if (err instanceof StoreRevoked) this.#onError(err);
+        return false;
+      }
+      const seen = this.task(successor.id) !== undefined;
+      if (seen) this.#unsureSuccessors.delete(taskId);
+      return seen;
+    }
+    this.#unsureSuccessors.delete(taskId);
+    // Held now, not at the store's nudge: admission keeps it `blocked` from this pass on. A failed read is not a
+    // failed pass: it exists, the commit names it, and a retry would only leave this one an orphan.
+    await this.refresh(successor.id).catch(this.#onError);
+    return true;
   }
 
   /** `pass-close`: the daemon holding a session-passed task may close it at its turn's end. Best effort; the deadline backs it. */

@@ -10,6 +10,7 @@ import {
   type SuccessorTrigger,
 } from "@seance/shared";
 import {
+  DEFAULT_CONFIG,
   MemoryQueueStore,
   Scheduler,
   StoreRevoked,
@@ -28,6 +29,8 @@ import { clone, exclave, FakeFleet, machine, NOW, obs, readerChecked, spec, stat
 
 const PR = "https://github.com/acme/app/pull/7";
 const CAPABLE = [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.successor];
+// An exit status makes an `ended` wait for the exit (`#ending`), which a machine without it never does.
+const WITH_EXIT = [...CAPABLE, CAPABILITIES.exitStatus];
 const SELF = [...CAPABLE, CAPABILITIES.successorSelf];
 const TIP = "b".repeat(40);
 const PUSHED = { remoteBranch: "feature/x", tip: TIP };
@@ -47,7 +50,7 @@ interface Setup {
   /** Another scheduler over the same store, fleet and clock: a new leader's term, once loaded. */
   another: () => Scheduler;
   prHead: PrHeadReading;
-  create: () => Promise<TaskCreateResult> | TaskCreateResult;
+  create: (task: Task) => Promise<TaskCreateResult> | TaskCreateResult;
 }
 
 function setup(machines = [machine("a", { capabilities: CAPABLE })]): Setup {
@@ -75,10 +78,11 @@ function setup(machines = [machine("a", { capabilities: CAPABLE })]): Setup {
       },
       create: async (task) => {
         creates.push(task);
-        const made = await state.create();
+        const made = await state.create(task);
         if (!made.ok) return made;
         const write = await checked.put(task.id, 0, task);
-        return write.ok ? { ok: true } : { ok: false, code: write.code };
+        // As the real `createTask` reads a conflict on a fresh id: the same create already landed.
+        return write.ok || write.code === "version_conflict" ? { ok: true } : { ok: false, code: write.code };
       },
     });
   const scheduler = make();
@@ -346,6 +350,117 @@ describe("pass", () => {
     expect(await s.scheduler.pass(old.id)).toEqual({ ok: false, code: "pass_failed" });
     expect(s.fleet.despawns).toEqual([]);
     expect(s.scheduler.task(old.id)?.successor).toBeUndefined();
+    // The relay answered: a refusal is final, and the same task is not sent again.
+    expect(s.creates).toHaveLength(1);
+  });
+
+  describe("a create whose reply was lost", () => {
+    const unconfirmed: TaskCreateResult = { ok: false, code: "unreachable", unconfirmed: true };
+
+    /** A create that lands on its first call, whatever the answer; `answers` says what each call reports. */
+    function landing(s: Setup, answers: readonly TaskCreateResult[]): void {
+      let calls = 0;
+      s.create = async (task) => {
+        const answer = answers[Math.min(calls, answers.length - 1)] ?? unconfirmed;
+        if (calls === 0) await s.store.put(task.id, 0, task);
+        calls += 1;
+        return answer;
+      };
+    }
+
+    test("one that landed is re-sent identically, read as landed, and the pass goes on", async () => {
+      const s = setup();
+      const old = await running(s, false);
+      landing(s, [unconfirmed, { ok: true }]);
+      const result = ok(await s.scheduler.pass(old.id));
+      expect(s.creates).toHaveLength(2);
+      expect(s.creates[1]).toEqual(s.creates[0]!);
+      expect(s.scheduler.task(old.id)).toMatchObject({ state: "superseded", successor: s.creates[0]?.id });
+      expect(result.successorId).toBe(s.creates[0]?.id ?? "");
+    });
+
+    test("a re-send nothing answered either is read back, and a record seen there counts", async () => {
+      const s = setup();
+      const old = await running(s, false);
+      landing(s, [unconfirmed]);
+      const result = ok(await s.scheduler.pass(old.id));
+      expect(s.creates).toHaveLength(2);
+      expect(result.task).toMatchObject({ state: "superseded", successor: s.creates[0]?.id });
+      expect(s.lines).toContain(`pass create unconfirmed task="${old.id}" successor="${s.creates[0]?.id}"`);
+    });
+
+    test("and no record seen there is pass_failed, with nothing despawned or named", async () => {
+      const s = setup();
+      const old = await running(s, false);
+      s.create = () => unconfirmed;
+      expect(await s.scheduler.pass(old.id)).toEqual({ ok: false, code: "pass_failed" });
+      expect(s.creates).toHaveLength(2);
+      expect(s.fleet.despawns).toEqual([]);
+      expect(s.scheduler.task(old.id)?.successor).toBeUndefined();
+    });
+
+    test("a read-back that throws is pass_failed too, and never throws out of the pass", async () => {
+      const s = setup();
+      const old = await running(s, false);
+      landing(s, [unconfirmed]);
+      const read = s.store.get.bind(s.store);
+      const readBack: string[] = [];
+      s.store.get = async (id) => {
+        if (id === old.id) return read(id);
+        readBack.push(id);
+        throw new Error("transient");
+      };
+      expect(await s.scheduler.pass(old.id)).toEqual({ ok: false, code: "pass_failed" });
+      // The create was re-sent, then read back (and the read threw): not a pass_failed taken at the first doubt.
+      expect(s.creates).toHaveLength(2);
+      expect(readBack).toEqual(s.creates.slice(0, 1).map((task) => task.id));
+      expect(s.scheduler.task(old.id)?.successor).toBeUndefined();
+    });
+
+    test("a retry after a read-back that saw nothing creates under the same id, so the orphan is found and named", async () => {
+      const s = setup();
+      const old = await running(s, false);
+      landing(s, [unconfirmed]);
+      const read = s.store.get.bind(s.store);
+      // The create is in flight: it lands only after the read-back has seen nothing.
+      let seen = false;
+      s.store.get = async (id) => {
+        if (id === old.id || seen) return read(id);
+        seen = true;
+        return null;
+      };
+      expect(await s.scheduler.pass(old.id)).toEqual({ ok: false, code: "pass_failed" });
+      s.create = () => ({ ok: true });
+      const result = ok(await s.scheduler.pass(old.id));
+      const landed = s.creates[0]?.id ?? "";
+      expect(result.successorId).toBe(landed);
+      expect(s.creates.map((task) => task.id)).toEqual([landed, landed, landed]);
+      expect(s.scheduler.task(old.id)).toMatchObject({ state: "superseded", successor: landed });
+    });
+
+    test("a create that threw is retried under the same id too", async () => {
+      const s = setup();
+      const old = await running(s, false);
+      s.create = () => {
+        throw new Error("store down");
+      };
+      await expect(s.scheduler.pass(old.id)).rejects.toThrow("store down");
+      s.create = () => ({ ok: true });
+      const result = ok(await s.scheduler.pass(old.id));
+      expect(s.creates).toHaveLength(2);
+      expect(s.creates[1]?.id).toBe(s.creates[0]?.id ?? "");
+      expect(result.successorId).toBe(s.creates[0]?.id ?? "");
+    });
+
+    test("a refused create is final: the retry is a new successor", async () => {
+      const s = setup();
+      const old = await running(s, false);
+      s.create = () => ({ ok: false, code: "store_full" });
+      expect(await s.scheduler.pass(old.id)).toEqual({ ok: false, code: "pass_failed" });
+      s.create = () => ({ ok: true });
+      ok(await s.scheduler.pass(old.id));
+      expect(s.creates[1]?.id).not.toBe(s.creates[0]?.id);
+    });
   });
 
   test("a successor that cannot be read back at once is still named, and a retry creates no second", async () => {
@@ -377,6 +492,89 @@ describe("pass", () => {
     };
     expect(await s.scheduler.pass(old.id)).toEqual({ ok: false, code: "conflict" });
     expect(s.creates).toEqual([]);
+  });
+
+  test("a successor another pass named under the push answers ok with that one, creating nothing", async () => {
+    const s = setup();
+    const old = await running(s, false);
+    const answer = s.fleet.pushReply;
+    s.fleet.pushReply = async (request) => {
+      const held = s.scheduler.task(old.id);
+      const entry = await s.store.get(old.id);
+      if (held === undefined || entry === null || !("body" in entry)) throw new Error("the task is not held");
+      await s.store.put(old.id, entry.version, { ...held, successor: "other" });
+      await s.scheduler.refresh(old.id);
+      return answer(request);
+    };
+    const result = ok(await s.scheduler.pass(old.id));
+    expect(result.successorId).toBe("other");
+    expect(s.creates).toEqual([]);
+  });
+
+  test("a successor another pass named during the create answers ok with that one, ours left to end with the task", async () => {
+    const s = setup();
+    const old = await running(s, false);
+    s.create = async () => {
+      const held = s.scheduler.task(old.id);
+      const entry = await s.store.get(old.id);
+      if (held === undefined || entry === null || !("body" in entry)) throw new Error("the task is not held");
+      await s.store.put(old.id, entry.version, { ...held, successor: "other" });
+      await s.scheduler.refresh(old.id);
+      return { ok: true };
+    };
+    const result = ok(await s.scheduler.pass(old.id));
+    expect(result.successorId).toBe("other");
+    expect(s.scheduler.task(old.id)?.successor).toBe("other");
+  });
+
+  test("a task that needs a person during the create is a conflict, and the successor it left fails once the task ends", async () => {
+    const s = setup();
+    const old = await running(s, false);
+    s.create = async () => {
+      await s.scheduler.onSession(old.id, "needs-input", { deviceId: "a", pane: "%1" });
+      return { ok: true };
+    };
+    expect(await s.scheduler.pass(old.id)).toEqual({ ok: false, code: "conflict" });
+    expect(s.scheduler.task(old.id)?.successor).toBeUndefined();
+    expect(s.fleet.despawns).toEqual([]);
+    const orphan = s.creates[0]?.id ?? "";
+    await s.scheduler.cancel(old.id);
+    await tick(s.scheduler);
+    expect(s.scheduler.task(orphan)).toMatchObject({ state: "failed", failure: { code: "pass_abandoned" } });
+  });
+
+  test("a task that moved machine under the push is a conflict, and nothing is created", async () => {
+    const s = setup([machine("a", { capabilities: CAPABLE }), machine("b", { capabilities: CAPABLE })]);
+    const old = await running(s, false);
+    const answer = s.fleet.pushReply;
+    s.fleet.pushReply = async (request) => {
+      const entry = await s.store.get(old.id);
+      const held = s.scheduler.task(old.id);
+      if (held?.assignment === undefined || entry === null || !("body" in entry))
+        throw new Error("the task is not held");
+      await s.store.put(old.id, entry.version, { ...held, assignment: { ...held.assignment, deviceId: "b" } });
+      await s.scheduler.refresh(old.id);
+      return answer(request);
+    };
+    expect(await s.scheduler.pass(old.id)).toEqual({ ok: false, code: "conflict" });
+    expect(s.creates).toEqual([]);
+  });
+
+  describe("an already-passed task is answered from its record", () => {
+    for (const state of ["needs-input", "lost"] as const) {
+      test(`${state} answers ok with its successor, pushing and creating nothing`, async () => {
+        const s = setup();
+        const old = await running(s, false);
+        const held = s.scheduler.task(old.id);
+        const entry = await s.store.get(old.id);
+        if (held === undefined || entry === null || !("body" in entry)) throw new Error("the task is not held");
+        await s.store.put(old.id, entry.version, { ...held, state, successor: "t-next" });
+        await s.scheduler.refresh(old.id);
+        expect(ok(await s.scheduler.pass(old.id)).successorId).toBe("t-next");
+        expect(s.fleet.pushes).toEqual([]);
+        expect(s.creates).toEqual([]);
+      });
+    }
   });
 
   describe("one pass per task at a time", () => {
@@ -440,6 +638,55 @@ describe("pass", () => {
       await next.takeover();
       await tick(next);
       expect(next.task(old.id)).toMatchObject({ state: "superseded", successor: result.successorId });
+    });
+
+    describe("a session that ends by another way than the close settles superseded, with its successor kept", () => {
+      /** The pass committed, its despawn failed, and every close the leader retries fails too: only a settle path can end it. */
+      async function stuck(s: Setup): Promise<{ readonly oldId: string; readonly successorId: string }> {
+        const old = await running(s, false);
+        s.fleet.despawnReply = () => FAILED_DESPAWN;
+        const result = ok(await s.scheduler.pass(old.id));
+        expect(result.task).toMatchObject({ state: "running", successor: result.successorId });
+        return { oldId: old.id, successorId: result.successorId };
+      }
+
+      test("the sweep: the machine lists no session for it", async () => {
+        const s = setup();
+        const { oldId, successorId } = await stuck(s);
+        s.fleet.sessionsReply = () => ({ ok: true, sessions: [] });
+        s.clock.now += DEFAULT_CONFIG.sweepIntervalMs;
+        await tick(s.scheduler);
+        expect(s.scheduler.task(oldId)).toMatchObject({ state: "superseded", successor: successorId });
+      });
+
+      test("the ending timeout: its end waited on the exit past the deadline", async () => {
+        const s = setup([machine("a", { capabilities: WITH_EXIT })]);
+        const { oldId, successorId } = await stuck(s);
+        const listed = { id: "%1", window: "w", repo: "app", path: "/wt/old", taskId: oldId } as const;
+        s.fleet.sessionsReply = () => ({ ok: true, sessions: [listed] });
+        await s.scheduler.onSession(oldId, "ended", { deviceId: "a", pane: "%1" });
+        await s.scheduler.drain();
+        expect(s.scheduler.task(oldId)?.state).toBe("running");
+        s.clock.now += DEFAULT_CONFIG.endingTimeoutMs;
+        // One read begun after the deadline still lists it, then the deadline alone settles.
+        await tick(s.scheduler);
+        await tick(s.scheduler);
+        expect(s.scheduler.task(oldId)).toMatchObject({ state: "superseded", successor: successorId });
+      });
+
+      test("the machine's absence while its end waits on the exit", async () => {
+        const s = setup([machine("a", { capabilities: WITH_EXIT })]);
+        const { oldId, successorId } = await stuck(s);
+        const listed = { id: "%1", window: "w", repo: "app", path: "/wt/old", taskId: oldId } as const;
+        s.fleet.sessionsReply = () => ({ ok: true, sessions: [listed] });
+        await s.scheduler.onSession(oldId, "ended", { deviceId: "a", pane: "%1" });
+        await s.scheduler.drain();
+        s.fleet.fleet = [machine("a", { capabilities: WITH_EXIT, connected: false })];
+        await tick(s.scheduler);
+        s.clock.now += DEFAULT_CONFIG.lostAfterMs;
+        await tick(s.scheduler);
+        expect(s.scheduler.task(oldId)).toMatchObject({ state: "superseded", successor: successorId });
+      });
     });
 
     test("PASS_CLOSE_GRACE_MS is the leader's wait before its own close, which the outside path never uses", () => {
@@ -736,9 +983,13 @@ describe("pass", () => {
 });
 
 describe("admission of a successor", () => {
-  async function waiting(s: Setup, pred: Partial<Task>): Promise<Task> {
-    const predecessor: Task = { id: "pred", spec: spec(), state: "running", createdAt: NOW, ...pred };
-    await s.store.put("pred", 0, predecessor);
+  async function waiting(s: Setup, pred: Partial<Task> | "unreadable"): Promise<Task> {
+    if (pred === "unreadable") {
+      s.store.plant("pred", "unopenable");
+    } else {
+      const predecessor: Task = { id: "pred", spec: spec(), state: "running", createdAt: NOW, ...pred };
+      await s.store.put("pred", 0, predecessor);
+    }
     const successor: Task = {
       id: "succ",
       spec: spec({
@@ -787,6 +1038,30 @@ describe("admission of a successor", () => {
     lone.clock.now += DEP_MISSING_GRACE_MS + 1;
     await tick(lone.scheduler);
     expect(lone.scheduler.task("succ")).toMatchObject({ state: "failed", failure: { code: "pass_abandoned" } });
+  });
+
+  test("an unreadable predecessor keeps it blocked, past the grace too", async () => {
+    const s = setup();
+    await waiting(s, "unreadable");
+    await tick(s.scheduler);
+    s.clock.now += DEP_MISSING_GRACE_MS + 1;
+    await tick(s.scheduler);
+    expect(s.scheduler.task("succ")?.state).toBe("blocked");
+    expect(s.fleet.spawns).toEqual([]);
+  });
+
+  test("a running predecessor that already names it keeps it blocked until the close settles", async () => {
+    const s = setup();
+    // The leader's own close of it (reconcile) must not land, or the predecessor settles and releases the successor.
+    s.fleet.despawnReply = () => FAILED_DESPAWN;
+    await waiting(s, {
+      state: "running",
+      successor: "succ",
+      assignment: { deviceId: "a", exclave: "main", clone: "app", pane: "%1" },
+    });
+    await tick(s.scheduler);
+    expect(s.scheduler.task("succ")?.state).toBe("blocked");
+    expect(s.fleet.spawns).toEqual([]);
   });
 
   test("is released by a predecessor superseded to it, and refused by one superseded to another task", async () => {
@@ -1378,6 +1653,33 @@ describe("the automatic quota trigger", () => {
     later(s, RETRY_MS);
     await tick(s.scheduler);
     expect(s.scheduler.task("old")?.state).toBe("superseded");
+    expect(s.alerts).toEqual([]);
+  });
+
+  test("a create that landed unseen is not made twice by the retry: the same successor is found and named", async () => {
+    const s = setup(twoMachines());
+    await running(s, true, AUTO);
+    exhaust(s);
+    // Nothing answers either send and the read-back sees nothing, but the first create lands afterwards.
+    s.create = async (task) => {
+      if (s.creates.length === 1) await s.store.put(task.id, 0, task);
+      return { ok: false, code: "unreachable", unconfirmed: true };
+    };
+    const read = s.store.get.bind(s.store);
+    let blind = true;
+    s.store.get = async (id) => (id !== "old" && blind ? null : read(id));
+    await tick(s.scheduler);
+    expect(s.lines).toContain(`audit pass refused task="old" trigger=quota outcome=pass_failed`);
+    expect(stampOf(s)?.retry).toBe(true);
+    expect(s.alerts).toEqual([]);
+
+    blind = false;
+    s.create = () => ({ ok: true });
+    later(s, RETRY_MS);
+    await tick(s.scheduler);
+    const landed = s.creates[0]?.id ?? "";
+    expect(s.creates.every((task) => task.id === landed)).toBe(true);
+    expect(s.scheduler.task("old")).toMatchObject({ state: "superseded", successor: landed });
     expect(s.alerts).toEqual([]);
   });
 

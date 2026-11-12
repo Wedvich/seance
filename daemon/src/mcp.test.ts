@@ -3078,6 +3078,18 @@ describe("pass_task", () => {
     ]);
   });
 
+  test("a task already passed is answered with its successor, and nothing is sent", async () => {
+    for (const state of ["running", "needs-input", "lost", "superseded"] as const) {
+      // oxlint-disable-next-line no-await-in-loop -- one relay per case
+      const { text, error, fake } = await callPass(() => new Error("must not be asked"), {
+        tasks: [{ ...passing, state, successor: "t-2" }],
+      });
+      expect({ state, error }).toEqual({ state, error: false });
+      expect(text).toContain("already passed to successor t-2");
+      expect(fake.requests.map((r) => r.op)).toEqual(["queue"]);
+    }
+  });
+
   test("a task the shared rule refuses, or a leader or box that cannot, sends no pass", async () => {
     const cases = [
       [
@@ -3088,7 +3100,6 @@ describe("pass_task", () => {
       ["a box that predates it", { machines: passingMachines({ box: false }) }, "can't push for a successor yet"],
       ["a task waiting on a person", { tasks: [{ ...passing, state: "needs-input" }] }, "waiting for you"],
       ["a task that is not running", { tasks: [{ ...passing, state: "ready" }] }, "only a running task"],
-      ["a task already passed", { tasks: [{ ...passing, successor: "t-2" }] }, "already been passed"],
       ["a task not in the list", { tasks: [] }, "is not in the leader's list"],
     ] as const;
     for (const [name, opts, said] of cases) {
@@ -3111,7 +3122,7 @@ describe("pass_task", () => {
     const lost = await callPass(() => new RequestFailure("timeout", "no reply within 180000ms"));
     expect(lost).toMatchObject({
       error: true,
-      text: expect.stringContaining("the pass may have landed anyway — check get_queue"),
+      text: expect.stringContaining("the pass may have landed anyway — check get_queue, or pass it again"),
     });
     const big = await callPass(() => ({ ok: false, code: "too_large", message: "x" }));
     expect(big.text).toContain("the pass may have landed anyway");

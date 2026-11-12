@@ -13,7 +13,13 @@ import {
   parseTaskSpec,
 } from "./parse.ts";
 import { passOffer, successorPreamble, successorPrompt, successorSpec } from "./successor.ts";
-import { openTaskRecord, sealTaskRecord, taskKey } from "./task-record.ts";
+import {
+  openTaskRecord,
+  REPORT_DONE_INSTRUCTION,
+  sealTaskRecord,
+  taskKey,
+  withReportInstruction,
+} from "./task-record.ts";
 import { readsPrWhileWaiting, TASK_PHASES, wantsPrReading } from "./task-phase.ts";
 import {
   APP_ID,
@@ -22,8 +28,11 @@ import {
   SCHEDULER_ID,
   STORE_CREATE_MAX_CT_LENGTH,
   SUCCESSOR_DEP_SENTINEL,
+  SUCCESSOR_PREAMBLE_MAX,
   SUCCESSOR_PROMPT_BYTES,
   SUCCESSOR_RECORD_MAX,
+  TASK_PRS_MAX,
+  TASK_PRS_MAX_LENGTH,
   TASK_REQUEST_LIMITS,
   type Assignment,
   type Task,
@@ -97,6 +106,26 @@ describe("passOffer", () => {
     expect(offer(running({ successor: "t-new" }))).toMatchObject({ ok: false });
   });
 
+  test("a finished task is worded as finished, and a reserved one as still starting", () => {
+    for (const state of ["done", "failed", "cancelled"] as const) {
+      expect(offer(running({ state }))).toEqual({ ok: false, reason: "it has already finished" });
+    }
+    expect(offer(running({ state: "reserved" }))).toEqual({
+      ok: false,
+      reason: "it is still being started on a machine; try again in a moment",
+    });
+    // A superseded task carries its successor, which answers first.
+    expect(offer(running({ state: "superseded", successor: "t-new" }))).toEqual({
+      ok: false,
+      reason: "it has already been passed to a successor",
+    });
+    // The rest of the not-running states keep the old words.
+    expect(offer(running({ state: "ready" }))).toEqual({
+      ok: false,
+      reason: "only a running task can be passed to a successor",
+    });
+  });
+
   test("not under a leader or on a machine that cannot, or that is gone or away", () => {
     expect(offer(running(), [machine()], false)).toMatchObject({ ok: false });
     expect(offer(running(), [machine({ capabilities: [] })])).toMatchObject({ ok: false });
@@ -167,6 +196,8 @@ describe("successorSpec", () => {
 });
 
 describe("successorPrompt", () => {
+  const fits = (prompt: string): boolean =>
+    prompt.length <= TASK_REQUEST_LIMITS.prompt && new TextEncoder().encode(prompt).length <= SUCCESSOR_PROMPT_BYTES;
   const input = (task: Task, record?: string) => ({
     task,
     remoteBranch: "feature/x",
@@ -237,6 +268,117 @@ describe("successorPrompt", () => {
     expect(new TextEncoder().encode(huge.prompt).length).toBeLessThanOrEqual(SUCCESSOR_PROMPT_BYTES);
     expect(huge.prompt).not.toContain("The original task prompt");
     expect(huge.prompt.startsWith(successorPreamble(input(task)))).toBe(true);
+  });
+
+  describe("the report instruction", () => {
+    const reported = (prompt: string, over: Partial<TaskSpec> = {}): Task =>
+      running({}, { prompt: withReportInstruction(prompt), until: "reported", ...over });
+    const endsWithOnce = (prompt: string): boolean =>
+      prompt.endsWith(`\n\n${REPORT_DONE_INSTRUCTION}`) && prompt.split(REPORT_DONE_INSTRUCTION).length === 2;
+
+    test("comes last and once when the old prompt fits whole", () => {
+      const { prompt } = successorPrompt({ ...input(reported("fix it", { linear: { issue: "PEN-7" } })) });
+      expect(endsWithOnce(prompt)).toBe(true);
+      expect(prompt).toContain("fix it\n\nLinear issue: PEN-7");
+    });
+
+    test("survives the old prompt's cut", () => {
+      const { prompt, recordCut } = successorPrompt(input(reported("x".repeat(TASK_REQUEST_LIMITS.prompt))));
+      expect(recordCut).toBe(false);
+      expect(prompt).toContain("The rest of the original prompt was cut to fit.");
+      expect(endsWithOnce(prompt)).toBe(true);
+      expect(fits(prompt)).toBe(true);
+    });
+
+    test("survives the record's cut", () => {
+      const task = reported("y".repeat(5_000), { linear: { issue: "PEN-7" } });
+      const { prompt, recordCut } = successorPrompt(input(task, "r".repeat(TASK_REQUEST_LIMITS.prompt)));
+      expect(recordCut).toBe(true);
+      expect(endsWithOnce(prompt)).toBe(true);
+      expect(fits(prompt)).toBe(true);
+    });
+
+    test("is added when the old prompt lacks it, and a prompt that merely names the tool is left whole", () => {
+      const bare = running({}, { prompt: "call report_task_done when done", until: "reported" });
+      const { prompt } = successorPrompt(input(bare));
+      expect(prompt).toContain("call report_task_done when done");
+      expect(endsWithOnce(prompt)).toBe(true);
+    });
+
+    test("a task without until gets none", () => {
+      const { prompt } = successorPrompt(input(running({}, { prompt: "fix it" })));
+      expect(prompt).not.toContain(REPORT_DONE_INSTRUCTION);
+    });
+
+    test("an old prompt that was only the instruction leaves no empty original-prompt section", () => {
+      const task = running({}, { prompt: withReportInstruction(""), until: "reported" });
+      const { prompt } = successorPrompt(input(task));
+      expect(prompt).not.toContain("The original task prompt");
+      expect(endsWithOnce(prompt)).toBe(true);
+    });
+  });
+
+  test("the preamble's fixed wording fits its bound", () => {
+    const attached = running(
+      {},
+      {
+        attachments: [
+          {
+            id: "0b6f0c9e-1a2b-4c3d-8e9f-001122334455",
+            name: "a.png",
+            type: "image/png",
+            size: 1,
+            hash: "A".repeat(43),
+          },
+        ],
+      },
+    );
+    // The fixed wording alone: less the 40-unit tip and the one-unit task id. The PR branch adds the
+    // hand-off line, so it is measured too, less the URL it substitutes.
+    const bare = successorPreamble({ task: { ...attached, id: "t" }, remoteBranch: "b", tip: TIP });
+    expect(bare.length - 40 - 2).toBeLessThanOrEqual(SUCCESSOR_PREAMBLE_MAX);
+    for (const until of ["merged", "reported"] as const) {
+      const withPr = { ...attached, id: "t", prUrl: PR, spec: { ...attached.spec, until } };
+      const preamble = successorPreamble({ task: withPr, remoteBranch: "b", tip: TIP });
+      expect(preamble).toContain("hand_off_task");
+      expect(preamble.length - 40 - 2 - PR.length).toBeLessThanOrEqual(SUCCESSOR_PREAMBLE_MAX);
+    }
+  });
+
+  test("the fixed part at its largest still fits, with no record and no old prompt", () => {
+    const each = TASK_PRS_MAX_LENGTH / TASK_PRS_MAX;
+    const prs = Array.from({ length: TASK_PRS_MAX }, (_, i) => ({ url: `https://${"x".repeat(each - 9 - 1)}${i}` }));
+    const { prompt: _prompt, ...noPrompt } = running().spec;
+    const task: Task = {
+      ...running({ prs, prUrl: prs[0]?.url }),
+      spec: { ...noPrompt, until: "reported", linear: { issue: "PEN-1234" } },
+    };
+    const { prompt, recordCut } = successorPrompt({ task, remoteBranch: "b".repeat(250), tip: TIP });
+    expect(recordCut).toBe(false);
+    expect(fits(prompt)).toBe(true);
+    expect(prompt.endsWith(REPORT_DONE_INSTRUCTION)).toBe(true);
+    expect(prompt).not.toContain("was too long");
+  });
+
+  test("an inherited pull request tells the successor not to call hand_off_task; a PR-less one does not", () => {
+    expect(successorPreamble({ task: running({ prUrl: PR }), remoteBranch: "b", tip: TIP })).toContain(
+      "Do not call hand_off_task for the pull request above",
+    );
+    const waits = successorPreamble({ task: running({ prUrl: PR }), remoteBranch: "b", tip: TIP });
+    expect(waits).toContain("the scheduler settles this task when it merges");
+    expect(waits).not.toContain("end your turn");
+    // Under `reported` a merge settles nothing: the line must not send the session idle before its report.
+    const reported = successorPreamble({
+      task: running({ prUrl: PR }, { until: "reported" }),
+      remoteBranch: "b",
+      tip: TIP,
+    });
+    expect(reported).toContain("a merge alone does not settle this task");
+    expect(reported).not.toContain("end your turn");
+    expect(reported).not.toContain("settles this task when it merges");
+    const bare = successorPreamble({ task: running(), remoteBranch: "b", tip: TIP });
+    expect(bare).not.toContain("hand_off_task");
+    expect(bare).toContain("Open a pull request once there is something to review.");
   });
 
   test("a cut never splits a surrogate pair", () => {
