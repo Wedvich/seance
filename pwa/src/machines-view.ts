@@ -86,10 +86,15 @@ function aliasOf(aliases: AccountAliases, accountId: string): string | undefined
 
 export interface AccountCard {
   readonly accountId: string;
-  /** The name set for this account from any client, if one is; `detail` leads with it. */
+  /** The name set for this account from any client, if one is; it becomes `title`. */
   readonly alias: string | null;
-  /** The exclave ids that sign in as this account, anywhere in the fleet. */
+  /** The alias, else `exclaves`. */
   readonly title: string;
+  /** The exclave ids that sign in as this account, anywhere in the fleet. */
+  readonly exclaves: string;
+  /** What it reads as without its alias: email, else short id, with any twin tag. */
+  readonly plainName: string;
+  /** Named, `exclaves` leads it, since the title no longer says them. */
   readonly detail: string;
   readonly bars: readonly QuotaBar[];
   readonly observed: string;
@@ -369,11 +374,16 @@ function deriveAccounts(
     const quota = newest.get(group.accountId);
     const observer = machines.find((machine) => machine.deviceId === quota?.deviceId);
     const alias = aliasOf(aliases, group.accountId);
+    const exclaves = [...group.exclaves].join(" · ");
+    const plainName = accountNameIn(known, group.accountId);
+    const where = `${plainName} · on ${[...group.machines].join(", ")}`;
     return {
       accountId: group.accountId,
       alias: alias ?? null,
-      title: [...group.exclaves].join(" · "),
-      detail: `${accountNameIn(known, group.accountId, alias)} · on ${[...group.machines].join(", ")}`,
+      title: alias ?? exclaves,
+      exclaves,
+      plainName,
+      detail: alias === undefined ? where : `${exclaves} · ${where}`,
       bars: quota === undefined ? [] : quotaBars(quota.observation, now),
       observed: observedLine(quota, observer, now),
       historyFrom: historyHost(group, observer),
