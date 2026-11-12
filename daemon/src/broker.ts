@@ -337,7 +337,10 @@ export function createBroker(opts: BrokerOpts): Broker {
         // With none, the client's own refusal (`no_leader`, `leader_unverified`) is the plainer answer.
         const { machines, scheduler } = client.getState();
         const pass = request.schedulerOp === "pass";
-        if (scheduler.kind === "ready" && !advertises(machines, scheduler, pass ? CAPABILITIES.successor : CAPABILITIES.amend)) {
+        if (
+          scheduler.kind === "ready" &&
+          !advertises(machines, scheduler, pass ? CAPABILITIES.successor : CAPABILITIES.amend)
+        ) {
           return await fail(
             id,
             "invalid_request",
@@ -357,7 +360,7 @@ export function createBroker(opts: BrokerOpts): Broker {
                 : request.schedulerOp === "amend"
                   ? await sendAmend(client, request.amend)
                   : // Only a pin's resolution asks (labels never come through here), so the label hold does not apply.
-                  await cacheOf(client).read();
+                    await cacheOf(client).read();
       await audit.ok(id);
       return brokerOk(id, data);
     } catch (err) {
