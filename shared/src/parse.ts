@@ -1167,7 +1167,8 @@ export function parseTask(value: unknown): Task | null {
   // Apart from `progress`: a display cache must not make a task unreadable when a later build adds a state.
   const pr = value["pr"] === undefined ? null : parsePrStatus(value["pr"]);
   // Dropped, never fatal, like `pr`: without it the task stands on `prUrl`, as under an older leader.
-  const prs = value["prs"] === undefined || progress.prUrl === undefined ? null : parseTaskPrs(value["prs"], progress.prUrl);
+  const prs =
+    value["prs"] === undefined || progress.prUrl === undefined ? null : parseTaskPrs(value["prs"], progress.prUrl);
   const { remoteSession } = value;
   return {
     id,
