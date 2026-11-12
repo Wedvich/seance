@@ -1304,7 +1304,9 @@ of M4 has landed.
       `prUrl` and `prs`, so the PR chip and poller follow.
     - **D8. A forward-compat gate.** `SUCCESSOR_DEP_SENTINEL`, an empty-task-id dep, is appended by
       the one task sealer whenever `succeeds` is present, as `ATTACHMENTS_DEP_SENTINEL` is, so an
-      older leader holds the record unreadable. _Rejected:_ a new `mode`: the spawn is a plain
+      older leader holds the record unreadable; a new leader's `openTaskRecord` holds a stored one
+      carrying `succeeds` without it `malformed` (not `parseTask`, which also reads unsealed replies).
+      _Rejected:_ a new `mode`: the spawn is a plain
       worktree spawn and no daemon needs to know about successors to run one.
     - **D9. Placement.** Any clone is a candidate, the old one included: the successor never checks
       out the remote branch under its own name, so no local branch is shared across worktrees.

@@ -3784,7 +3784,10 @@ reuses the record helpers.
   created task also carries the old task's `prUrl` and `prs`, so the chip and the PR poller follow
   the same PR; `parseTask` accepts progress fields in any state and `bindTaskRecord` requires only
   `queued` at version 1. `SUCCESSOR_DEP_SENTINEL` is appended by the one sealer whenever `succeeds`
-  is present (Wire protocol, "Passing to a successor"). A successor create carries a full prompt
+  is present (Wire protocol, "Passing to a successor"), and `openTaskRecord` holds a stored record that
+  carries `succeeds` without it `malformed`: an older leader would run one beside its predecessor. That
+  check is on the store's read path only, not in `parseTask`, which also reads the leader's replies
+  and the in-memory bind before sealing (both carry `succeeds` unsealed). A successor create carries a full prompt
   plus these fields and must fit `STORE_CREATE_MAX_CT_LENGTH`; a sealed-size test with every field
   at its bound proves it, with a three-byte-character prompt held to `SUCCESSOR_PROMPT_BYTES` as well
   as a two-byte one at 8 192 units, and if it ever fails the fallback is to carry `prUrl` only, never

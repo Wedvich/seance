@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Machine } from "./app-client.ts";
-import { importPsk, openAtRest, toBase64 } from "./crypto.ts";
+import { importPsk, openAtRest, sealAtRest, toBase64 } from "./crypto.ts";
 import {
   bindTaskRecord,
   parsePassReply,
@@ -15,6 +15,7 @@ import { readsPrWhileWaiting, TASK_PHASES, wantsPrReading } from "./task-phase.t
 import {
   APP_ID,
   CAPABILITIES,
+  SCHEDULER_ID,
   STORE_CREATE_MAX_CT_LENGTH,
   SUCCESSOR_DEP_SENTINEL,
   SUCCESSOR_PROMPT_BYTES,
@@ -273,6 +274,13 @@ describe("a successor's record", () => {
     const deps = (payload as { task: { spec: { deps?: unknown[] } } }).task.spec.deps;
     expect(deps).toEqual([SUCCESSOR_DEP_SENTINEL]);
     expect(await openTaskRecord(key, { key: taskKey(task.id), version: 1, env }, NOW)).toEqual({ version: 1, task });
+  });
+
+  test("a stored record carrying succeeds without the sentinel is held unreadable", async () => {
+    const task = successorTask();
+    // Sealed past the one sealer: what an older leader would run beside the still-running predecessor.
+    const env = await sealAtRest(key, { to: SCHEDULER_ID, from: APP_ID }, "task", { version: 1, task });
+    expect(await openTaskRecord(key, { key: taskKey(task.id), version: 1, env }, NOW)).toBe("malformed");
   });
 
   test("a successor at the largest prompt still seals under the create bound", async () => {

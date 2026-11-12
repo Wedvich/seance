@@ -14,7 +14,7 @@ import {
   type TaskRecord,
   type TaskRequest,
 } from "./types.ts";
-import { bindTaskRecord } from "./parse.ts";
+import { bindTaskRecord, isRecord } from "./parse.ts";
 import { openAtRest, sealAtRest } from "./crypto.ts";
 
 /** The store key a task lives at: the prefix, then its id as it stands (`STORE_KEY_PATTERN`). */
@@ -121,7 +121,28 @@ export async function openTaskRecord(
   } catch {
     return "unopenable";
   }
+  if (succeedsWithoutGate(payload)) return "malformed";
   return bindTaskRecord(payload, stored, now);
+}
+
+/**
+ * A stored record carrying `succeeds` without `SUCCESSOR_DEP_SENTINEL` was written past the one sealer
+ * (`taskRecordAtRest`): an older leader would read it as a task with no deps and run it beside its still-running
+ * predecessor, so it is held unreadable here. Only on the store's read path: `parseTask` also reads a leader's
+ * replies, which carry `succeeds` unsealed.
+ */
+function succeedsWithoutGate(payload: unknown): boolean {
+  const task = isRecord(payload) ? payload["task"] : undefined;
+  const spec = isRecord(task) ? task["spec"] : undefined;
+  if (!isRecord(spec) || spec["succeeds"] === undefined) return false;
+  const deps = spec["deps"];
+  return !(
+    Array.isArray(deps) &&
+    deps.some(
+      (dep) =>
+        isRecord(dep) && dep["task"] === SUCCESSOR_DEP_SENTINEL.task && dep["after"] === SUCCESSOR_DEP_SENTINEL.after,
+    )
+  );
 }
 
 /** A stored task this build could not keep: skipped and reported with its reason, never fatal, never deleted. */
