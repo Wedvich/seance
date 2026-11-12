@@ -127,6 +127,12 @@ function outcomeOf(state: Settled): ProbeOutcomeAudit {
   return { state: "healthy" };
 }
 
+/** The probe in flight; its pid is set only while its group leader is unreaped. */
+interface Run {
+  readonly key: string;
+  pid: number | null;
+}
+
 export function createTraitProbes(deps: TraitProbesDeps): TraitProbes {
   const now = deps.now ?? Date.now;
   const sink = deps.audit ?? daemonSink;
@@ -137,7 +143,7 @@ export function createTraitProbes(deps: TraitProbesDeps): TraitProbes {
   let draining: Promise<void> | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
   let stopped = false;
-  let running: { readonly key: string; pid: number | null } | null = null;
+  let running: Run | null = null;
   let changed = false;
   let overflowLogged = 0;
 
@@ -178,7 +184,7 @@ export function createTraitProbes(deps: TraitProbesDeps): TraitProbes {
       ? {}
       : { CLAUDE_CONFIG_DIR: unit.exclave.id === DEFAULT_EXCLAVE ? undefined : unit.exclave.configDir };
 
-  const runProbe = async (unit: Unit): Promise<Settled> => {
+  const runProbe = async (unit: Unit, run: Run): Promise<Settled> => {
     const [program = "", ...rest] = unit.probe.argv;
     const env = envOf(unit);
     // Resolved at each run and never kept: a path recorded now dangles when a package manager retires it.
@@ -198,19 +204,22 @@ export function createTraitProbes(deps: TraitProbesDeps): TraitProbes {
       env,
       killGroup: true,
       killAfterMs: KILL_AFTER_MS,
+      // A probe repeats on a cadence: a descendant it leaves behind would pile up every five minutes while it fails.
+      sweepGroup: true,
       timeoutMs,
       discardStdout: true,
       discardStderr: true,
+      // This run's own record, never `running`: an abandoned child's exit can land during a later run.
       onSpawn: (pid) => {
-        if (running !== null) running.pid = pid;
+        run.pid = pid;
       },
       onExit: () => {
-        if (running !== null) running.pid = null;
+        run.pid = null;
       },
     }).catch(() => "spawn" as const);
     const result = await Promise.race([ran, abandoned]).finally(() => {
       clearTimeout(deadline);
-      if (running !== null) running.pid = null;
+      run.pid = null;
     });
     if (result === "spawn") return { kind: "unknown", why: "spawn" };
     if (result === "abandoned" || result.timedOut) return { kind: "unknown", why: "timeout" };
@@ -223,10 +232,11 @@ export function createTraitProbes(deps: TraitProbesDeps): TraitProbes {
     const entry = entries.get(key);
     if (unit === undefined || entry === undefined) return;
     entry.startedAt = now();
-    running = { key, pid: null };
+    const run: Run = { key, pid: null };
+    running = run;
     let state: Settled;
     try {
-      state = await runProbe(unit);
+      state = await runProbe(unit, run);
     } finally {
       running = null;
     }

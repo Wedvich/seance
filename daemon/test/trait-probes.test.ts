@@ -116,6 +116,24 @@ describe("what a run reads", () => {
     expect(Date.now() - began).toBeLessThan(5_000);
   });
 
+  test("a descendant a probe leaves behind is killed with its group when the probe exits on its own", async () => {
+    const pidFile = join(base, "orphan.pid");
+    await rm(pidFile, { force: true });
+    const p = make({ forks: probe(["sh", "-c", `sleep 300 & echo $! > "${pidFile}"; exit 0`]) });
+    await runOnce(p);
+    expect(p.view().get("forks")).toEqual({ kind: "healthy" });
+    const orphan = Math.trunc(Number(await readFile(pidFile, "utf8")));
+    expect(orphan).toBeGreaterThan(0);
+    await pollUntil(() => {
+      try {
+        process.kill(orphan, 0);
+        return false;
+      } catch {
+        return true;
+      }
+    }, "the left-behind descendant to be gone");
+  });
+
   test("a flood of output cannot stall a probe: its stdio is ignored", async () => {
     const p = make({ loud: probe(["sh", "-c", "head -c 4000000 /dev/zero; head -c 4000000 /dev/zero >&2"]) });
     await runOnce(p);

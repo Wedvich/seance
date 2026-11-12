@@ -91,6 +91,14 @@ export async function exec(
      * and traps TERM is the price.
      */
     readonly killAfterMs?: number;
+    /**
+     * With `killGroup`: SIGKILL the group once, the moment the leader's exit is observed, to sweep
+     * descendants it left behind (a probe's CLI forking a helper). The one signal sent after the
+     * reap, so it takes the reused-id risk `killAfterMs` avoids: the id is reserved while any member
+     * lives, which is exactly when there is something to sweep, and the window is the gap between
+     * the reap and this callback. Opt-in, for a caller that repeats the run and would pile orphans up.
+     */
+    readonly sweepGroup?: boolean;
     /** Receives the child's pid as soon as it exists, so a caller can kill its group on shutdown. */
     readonly onSpawn?: (pid: number) => void;
     /** Called once the child has been reaped, whatever its pipes are still doing: the pid is no longer the caller's to signal. */
@@ -116,6 +124,13 @@ export async function exec(
   let timer: ReturnType<typeof setTimeout> | undefined;
   void proc.exited.then(() => {
     exited = true;
+    if (opts.sweepGroup === true && opts.killGroup === true) {
+      try {
+        process.kill(-proc.pid, "SIGKILL");
+      } catch {
+        // no member left
+      }
+    }
     if (strict) {
       clearTimeout(timer);
       clearTimeout(killTimer);
