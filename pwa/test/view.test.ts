@@ -91,6 +91,7 @@ function state(overrides: Partial<AppState> = {}, form: Partial<PersistedForm> =
     accounts: { aliases: {}, nameable: true, saving: null, notice: null },
     attachments: [],
     attachNotice: null,
+    heldDropped: [],
     upload: null,
     ...overrides,
   };

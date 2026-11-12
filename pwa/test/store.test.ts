@@ -892,16 +892,34 @@ describe("holding a task while the relay is down", () => {
   });
 
   // Holding rides out a dropped connection; a task left far longer is no longer what anyone wants.
-  test("one held past the age limit is dropped unsent", async () => {
+  test("one held past the age limit, failed or waiting, is dropped unsent and named until dismissed", async () => {
     const client = new ScriptedClient(DOWN);
-    const stale = { ...QUEUED, id: "t-stale", state: "queued" as const, createdAt: Date.now() - HELD_MAX_AGE_MS - 1 };
-    const store = attached(client, [{ task: stale, failure: null, sending: false }]);
-    await store.spawn();
-    const fresh = heldTask(store, 1);
+    const old = Date.now() - HELD_MAX_AGE_MS - 1;
+    const stale = { ...QUEUED, id: "t-stale", state: "queued" as const, createdAt: old };
+    const failed = {
+      ...QUEUED,
+      id: "t-failed",
+      state: "queued" as const,
+      createdAt: old,
+      spec: { ...QUEUED.spec, prompt: "the refused one" },
+    };
+    const store = attached(client, [
+      { task: stale, failure: null, sending: false },
+      { task: failed, failure: "Refused.", sending: false },
+    ]);
+    expect(store.getState().held).toEqual([]);
+    expect(deriveView(store.getState(), 0).heldDropped).toBe(
+      "Dropped 2 tasks held over a day: fix it, the refused one",
+    );
 
+    await store.spawn();
+    const fresh = heldTask(store);
     client.emit({ status: "open", registrySettled: true });
     await until(() => store.getState().held.length === 0, "the held list emptied");
     expect(client.creates).toEqual([fresh]);
+
+    store.dismissHeldDropped();
+    expect(deriveView(store.getState(), 0).heldDropped).toBeNull();
   });
 
   test("a list another tab wrote replaces this one's, keeping a send that is out", async () => {
@@ -915,10 +933,78 @@ describe("holding a task while the relay is down", () => {
 
     const theirs = { ...QUEUED, id: "t-theirs", state: "queued" as const, createdAt: Date.now() };
     store.adoptHeld([{ task: theirs, failure: null, sending: false }]);
+    // Oldest first, wherever each came from: `mine` was held before `theirs` was made.
     expect(store.getState().held).toEqual([
-      { task: theirs, failure: null, sending: false },
       { task: mine, failure: null, sending: true },
+      { task: theirs, failure: null, sending: false },
     ]);
+  });
+
+  // This tab can't tell a discard from another tab's send or an age-out, so it claims none of them.
+  test("its held verdict closes once the task leaves without landing here, whatever took it", async () => {
+    const fake = fakeHistory();
+    try {
+      const client = new ScriptedClient(DOWN);
+      const store = attached(client);
+      await store.spawn();
+      expect(store.getState().verdict?.kind).toBe("held");
+      store.discardHeld(heldTask(store).id);
+      fake.settle(store);
+      expect(store.getState().verdict).toBeNull();
+
+      store.setPrompt("again");
+      await store.spawn();
+      expect(store.getState().verdict?.kind).toBe("held");
+      store.adoptHeld([]);
+      fake.settle(store);
+      expect(store.getState().verdict).toBeNull();
+      expect(fake.index()).toBe(0);
+    } finally {
+      fake.restore();
+    }
+  });
+
+  // Holding would say "not connected" a moment before sending anyway.
+  test("a tap while a re-dial settles waits as Queuing…, then queues if it reconnected", async () => {
+    const client = new ScriptedClient({ status: "connecting", settling: true, registrySettled: false });
+    const store = attached(client);
+    const tap = store.spawn();
+    await drain();
+    expect(store.getState().held).toEqual([]);
+    expect(deriveView(store.getState(), 0).button).toMatchObject({ label: "Queuing…", busy: true });
+
+    client.emit({ status: "open", settling: false, registrySettled: false });
+    await drain();
+    expect(client.creates).toEqual([]);
+    client.emit({ registrySettled: true });
+    await tap;
+    expect(client.creates.map((task) => task.spec.prompt)).toEqual(["fix it"]);
+    expect(store.getState().held).toEqual([]);
+    expect(store.getState().verdict?.kind).toBe("queued");
+  });
+
+  test("a tap while a re-dial settles is held once the settle window ends without a socket", async () => {
+    const client = new ScriptedClient({ status: "connecting", settling: true, registrySettled: false });
+    const store = attached(client);
+    const tap = store.spawn();
+    await drain();
+    client.emit({ status: "retrying", settling: false });
+    await tap;
+    expect(client.creates).toEqual([]);
+    expect(store.getState().held).toHaveLength(1);
+    expect(store.getState().verdict?.kind).toBe("held");
+  });
+
+  test("an unchanged list from another tab notifies nothing", async () => {
+    const client = new ScriptedClient(DOWN);
+    const store = attached(client);
+    await store.spawn();
+    const before = store.getState().held;
+    let notified = 0;
+    store.subscribe(() => notified++);
+    store.adoptHeld(before.map((entry) => ({ ...entry })));
+    expect(store.getState().held).toBe(before);
+    expect(notified).toBe(0);
   });
 
   // The writer may have held it on a dead socket of its own; this tab's socket is up and sends it.

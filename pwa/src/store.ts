@@ -35,6 +35,7 @@ import {
   DEFAULT_FORM,
   DEFAULT_HISTORY_RANGE,
   HELD_MAX,
+  heldOrder,
   heldStale,
   RANGE_SPANS,
   RESCAN_IDLE,
@@ -55,6 +56,7 @@ import { admitFiles, manifestOf, notAttachedText, uploadRefusalText } from "./at
 import type { ReceivedShare } from "./share-inbox.ts";
 import { accountSeries } from "./chart.ts";
 import { SchedulerStore, STORE_UNREADABLE } from "./scheduler-store.ts";
+import { taskTitle } from "./task-title.ts";
 import type { AppState } from "./view.ts";
 import {
   ATTACHMENTS_NOT_HELD,
@@ -163,6 +165,8 @@ export class Store {
    */
   #sentOnSettle = false;
   #sendingHeld = false;
+  /** Taps made while a re-dial settles, each waiting to learn whether it reconnected (`#submit`). */
+  #settleWaiters: (() => void)[] = [];
   /** Whether the leader was verified at the last relay change: held tasks needing one go when it is. */
   #leaderWasVerified = false;
   /** Held task ids sent on this socket; a retry takes its own back out. */
@@ -209,6 +213,7 @@ export class Store {
       accounts: { aliases: {}, nameable: client.accountsNamed, saving: null, notice: null },
       attachments: [],
       attachNotice: null,
+      heldDropped: [],
       upload: null,
     };
   }
@@ -222,6 +227,8 @@ export class Store {
 
   /** Wires up relay and lifecycle listeners; returns a disposer. */
   attach(): () => void {
+    // Here, not in the constructor: the persistence wiring subscribes in between, so the drop reaches storage.
+    this.#dropStaleHeld();
     const unsubscribe = this.#client.subscribe(() => this.#onRelay());
     let hiddenAt: number | null = null;
     let attached = true;
@@ -281,6 +288,12 @@ export class Store {
     // Only an authoritative registry may prune — while it is unsettled an empty
     // `machines` means "no push yet", not "every machine vanished".
     this.#patch({ relay, ...(relay.registrySettled ? this.#pruneGone(relay.machines) : {}) });
+    const decided = relay.status === "open" ? relay.registrySettled : !relay.settling;
+    if (decided && this.#settleWaiters.length > 0) {
+      const waiters = this.#settleWaiters;
+      this.#settleWaiters = [];
+      for (const resolve of waiters) resolve();
+    }
     if (relay.status !== "open") {
       // Forgotten rather than kept: the re-dial's registry names the same
       // machines, so leaving the map in place means nothing ever counts as
@@ -809,6 +822,18 @@ export class Store {
     const { relay, form } = this.#state;
     const holding = canHold(relay);
     if ((!holding && !deriveAutoAvailability(relay).available) || this.#state.spawning) return;
+    // A resume's re-dial reconnects within a second or two (both settle windows are 1.5 s), so a tap
+    // in it waits as "Queuing…" for the outcome rather than holding: holding would announce "not
+    // connected" a moment before sending anyway.
+    if (holding && relay.settling) {
+      this.#patch({ spawning: true });
+      await new Promise<void>((resolve) => {
+        this.#settleWaiters.push(resolve);
+      });
+      this.#patch({ spawning: false });
+      await this.#submit(runNow);
+      return;
+    }
     // The leader bounds what it reads; past the bound it would skip the task, and the store's refusal blames versions.
     const refusal = (message: string): void => this.#showVerdict({ kind: "unqueued", message, mayHaveLanded: false });
     // The button blocks these too; a form that changed since it rendered is stopped here. Before the repo
@@ -992,10 +1017,32 @@ export class Store {
     else this.#heldLanded(task);
   }
 
+  /** Drops held tasks past the age limit, failed or waiting, and names them in `heldDropped`. */
   #dropStaleHeld(): void {
     const now = Date.now();
-    const held = this.#state.held.filter((entry) => entry.sending || !heldStale(entry.task, now));
-    if (held.length !== this.#state.held.length) this.#patch({ held });
+    const stale = this.#state.held.filter((entry) => !entry.sending && heldStale(entry.task, now));
+    if (stale.length === 0) return;
+    const gone = new Set(stale.map((entry) => entry.task.id));
+    this.#setHeld(
+      this.#state.held.filter((entry) => !gone.has(entry.task.id)),
+      [...this.#state.heldDropped, ...stale.map((entry) => taskTitle(entry.task))],
+    );
+  }
+
+  dismissHeldDropped(): void {
+    if (this.#state.heldDropped.length > 0) this.#patch({ heldDropped: [] });
+  }
+
+  /**
+   * Sets the held list when tasks may have left it without landing here (discarded, dropped, or gone
+   * from another tab's write). A held verdict for one that left is closed: this tab can't tell which
+   * of those it was, so it claims nothing. Closed only as the top layer, the only place it opens.
+   */
+  #setHeld(held: readonly HeldTask[], heldDropped: readonly string[] = this.#state.heldDropped): void {
+    this.#patch({ held, heldDropped });
+    const { verdict } = this.#state;
+    if (verdict?.kind !== "held" || held.some((entry) => entry.task.id === verdict.task.id)) return;
+    if (this.#openLayers() === 1) this.dismissLayer();
   }
 
   /**
@@ -1005,13 +1052,20 @@ export class Store {
    * this tab's own reconnect. A task both send answers `landedEarlier` the second time.
    */
   adoptHeld(incoming: readonly HeldTask[]): void {
-    const sending = new Set(this.#state.held.filter((entry) => entry.sending).map((entry) => entry.task.id));
+    const current = this.#state.held;
+    const sending = new Set(current.filter((entry) => entry.sending).map((entry) => entry.task.id));
     const ids = new Set(incoming.map((entry) => entry.task.id));
     const held = [
       ...incoming.map((entry) => (sending.has(entry.task.id) ? { ...entry, sending: true } : entry)),
-      ...this.#state.held.filter((entry) => entry.sending && !ids.has(entry.task.id)),
-    ];
-    this.#patch({ held });
+      ...current.filter((entry) => entry.sending && !ids.has(entry.task.id)),
+    ].toSorted(heldOrder);
+    const same =
+      held.length === current.length &&
+      held.every((entry, i) => {
+        const was = current[i];
+        return was !== undefined && was.task.id === entry.task.id && was.failure === entry.failure;
+      });
+    if (!same) this.#setHeld(held);
     void this.#sendHeld();
   }
 
@@ -1055,7 +1109,7 @@ export class Store {
   /** Never one being sent: its create is already out, and dropping it here would not stop it landing. */
   discardHeld(taskId: string): void {
     const held = this.#state.held.filter((entry) => entry.task.id !== taskId || entry.sending);
-    this.#patch({ held: held.length === this.#state.held.length ? this.#state.held : held });
+    if (held.length !== this.#state.held.length) this.#setHeld(held);
   }
 
   /**

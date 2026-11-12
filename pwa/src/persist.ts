@@ -1,5 +1,5 @@
 import { DEP_AFTER, isTaskId, parseTask, TASK_SPEC_LIMITS, TASK_UNTIL, type TaskDep } from "@seance/shared";
-import { DEFAULT_FORM, HELD_MAX, heldStale, isEffort, isModel, type HeldTask, type PersistedForm } from "./state.ts";
+import { DEFAULT_FORM, HELD_MAX, heldOrder, isEffort, isModel, type HeldTask, type PersistedForm } from "./state.ts";
 
 /**
  * The form survives a reload because iOS kills backgrounded PWAs freely and the
@@ -14,7 +14,9 @@ import { DEFAULT_FORM, HELD_MAX, heldStale, isEffort, isModel, type HeldTask, ty
 
 const FORM_KEY = "seance:form";
 const PENDING_KEY = "seance:pending";
-const HELD_KEY = "seance:held";
+/** One key per held task, `seance:held:<id>`. */
+const HELD_PREFIX = "seance:held:";
+const LEGACY_HELD_KEY = "seance:held";
 /** Only cleared now — machines are forgotten at the relay, not hidden per browser. */
 const HIDDEN_KEY = "seance:hidden";
 
@@ -81,36 +83,59 @@ export function writeForm(form: PersistedForm): void {
   writeJson(FORM_KEY, form);
 }
 
-/** Stricter than the form: a held task is sent as it stands, so one this build can't parse is dropped, not sent. */
-export function readHeld(now: number = Date.now()): readonly HeldTask[] {
-  const raw = readJson(HELD_KEY);
-  if (!Array.isArray(raw)) return [];
-  const held: HeldTask[] = [];
-  const ids = new Set<string>();
-  for (const entry of raw) {
-    if (held.length === HELD_MAX) break;
-    if (typeof entry !== "object" || entry === null) continue;
-    const task = parseTask(Reflect.get(entry, "task"));
-    // Never one with files: those go only to a leader verified to take them, which holding never sees.
-    if (task === null || task.state !== "queued" || task.spec.attachments !== undefined || ids.has(task.id)) continue;
-    if (heldStale(task, now)) continue;
-    const failure: unknown = Reflect.get(entry, "failure");
-    ids.add(task.id);
-    held.push({ task, failure: typeof failure === "string" ? failure : null, sending: false });
+function heldKeys(): string[] {
+  try {
+    const keys: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key?.startsWith(HELD_PREFIX) === true) keys.push(key);
+    }
+    return keys;
+  } catch {
+    return [];
   }
-  return held;
-}
-
-/** Written on every change, never debounced: a held task lost to a kill is a task that never runs. */
-export function writeHeld(held: readonly HeldTask[]): void {
-  writeJson(HELD_KEY, held.length === 0 ? null : held.map(({ task, failure }) => ({ task, failure })));
 }
 
 /**
- * Keeps `seance:held` and this tab's held list in step both ways. Each tab holds its own list in
- * memory, so without the `storage` event (fired in every other same-origin tab on a write) one tab's
- * write would replace another's held tasks, and a kill of the second would lose them. A list adopted
- * from storage is not written back. Two tabs writing within the same instant can still drop one.
+ * Stricter than the form: a held task is sent as it stands, so one this build can't parse is dropped,
+ * not sent. Oldest first. Stale ones are read like any other: the store drops them and says so.
+ */
+export function readHeld(): readonly HeldTask[] {
+  const held: HeldTask[] = [];
+  for (const key of heldKeys()) {
+    const entry = readJson(key);
+    if (typeof entry !== "object" || entry === null) continue;
+    const task = parseTask(Reflect.get(entry, "task"));
+    // Never one with files: those go only to a leader verified to take them, which holding never sees.
+    if (task === null || task.state !== "queued" || task.spec.attachments !== undefined) continue;
+    if (key !== `${HELD_PREFIX}${task.id}`) continue;
+    const failure: unknown = Reflect.get(entry, "failure");
+    held.push({ task, failure: typeof failure === "string" ? failure : null, sending: false });
+  }
+  return held.toSorted(heldOrder).slice(0, HELD_MAX);
+}
+
+/**
+ * Writes only what changed between two lists, one key per task, so a tab never rewrites a task
+ * another tab holds and `sending` (never persisted) costs no write. Never debounced: a held task lost
+ * to a kill is a task that never runs.
+ */
+export function writeHeld(before: readonly HeldTask[], after: readonly HeldTask[]): void {
+  const previous = new Map(before.map((entry) => [entry.task.id, entry]));
+  for (const { task, failure } of after) {
+    const was = previous.get(task.id);
+    previous.delete(task.id);
+    if (was !== undefined && was.task === task && was.failure === failure) continue;
+    writeJson(`${HELD_PREFIX}${task.id}`, { task, failure });
+  }
+  for (const id of previous.keys()) writeJson(`${HELD_PREFIX}${id}`, null);
+}
+
+/**
+ * Keeps the `seance:held:<id>` keys and this tab's held list in step both ways. Each tab writes only
+ * the tasks it changed, and adopts what other tabs wrote from the `storage` event (fired in every
+ * other same-origin tab on a write), so no tab's write can replace another's tasks. An adopted list
+ * is not written back.
  */
 export function trackHeld(
   source: {
@@ -125,12 +150,12 @@ export function trackHeld(
   source.subscribe(() => {
     const { held } = source.getState();
     if (held === written) return;
+    if (!adopting) writeHeld(written, held);
     written = held;
-    if (!adopting) writeHeld(held);
   });
   onStorage((key) => {
     // A null key is another tab's `localStorage.clear()`.
-    if (key !== HELD_KEY && key !== null) return;
+    if (key !== null && !key.startsWith(HELD_PREFIX)) return;
     adopting = true;
     try {
       source.adoptHeld(readHeld());
@@ -138,6 +163,11 @@ export function trackHeld(
       adopting = false;
     }
   });
+}
+
+/** The single-list key an earlier build wrote; cleared like `dropLegacyHidden`, since nothing held under it is kept. */
+export function dropLegacyHeld(): void {
+  writeJson(LEGACY_HELD_KEY, null);
 }
 
 /** No spawn is sent directly any more, so a pending record has nothing left to reconcile; cleared like `dropLegacyHidden`. */

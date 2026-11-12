@@ -80,6 +80,7 @@ function state(
     accounts: { aliases: {}, nameable: true, saving: null, notice: null },
     attachments: [],
     attachNotice: null,
+    heldDropped: [],
     upload: null,
     ...overrides,
   };

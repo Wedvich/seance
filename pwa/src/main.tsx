@@ -6,6 +6,7 @@ import { Setup } from "./components/setup.tsx";
 import { watchDeepLinks } from "./deep-link-browser.ts";
 import { markKeys, markScript, recordLaunch } from "./launch.ts";
 import {
+  dropLegacyHeld,
   dropLegacyHidden,
   dropLegacyPending,
   readForm,
@@ -66,6 +67,7 @@ if (key === null || token === null) {
   if (marker !== null) history.replaceState(history.state, "", "/");
   dropLegacyHidden();
   dropLegacyPending();
+  dropLegacyHeld();
   // No base on an install saved before account records: it works, without aliases, until the PSK is re-entered.
   // A derivation that throws degrades the same way: naming is an extra, and must not take the app down.
   const accountKey = base === null ? null : await deriveAccountKey(base).catch(() => null);
