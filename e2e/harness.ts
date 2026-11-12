@@ -449,6 +449,51 @@ function waitOn<T>(
   });
 }
 
+/**
+ * A test's teardown cancel, settled for good. The leader refuses a task it still holds `reserved` with
+ * `dispatching`, whose advice is to ask again: its spawn is out, or the store already shows the `running`
+ * write the leader has not yet taken the ack of. A cancel swallowed there leaves the task running, holding a
+ * slot under its account's cap (4) through every later test, and killing its window frees it only at the
+ * leader's 120s sweep. So this asks again on `dispatching`, `conflict` and a leader the app cannot reach yet
+ * (a teardown that just restarted the daemon). It never throws, so the teardown after it still runs and the
+ * test's own failure stays the one reported: a task it could not cancel is noted for `takeLeakedTasks`,
+ * which each suite's `afterEach` asserts empty. Asked every 100ms, not `pollUntil`'s 10ms: each refusal is
+ * an audit line, and a spawn takes ~500ms.
+ */
+export async function cancelTask(
+  client: Pick<RelayClient, "cancel">,
+  taskId: string,
+  timeoutMs = 20_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let last = "nothing yet";
+  for (;;) {
+    let settled = false;
+    try {
+      // oxlint-disable-next-line no-await-in-loop -- each ask follows the refusal before it
+      const reply = await client.cancel(taskId);
+      last = JSON.stringify(reply);
+      if (reply !== null) {
+        if (!("ok" in reply) || reply.code === "finished" || reply.code === "task_not_found") return;
+        if (reply.code !== "dispatching" && reply.code !== "conflict") settled = true;
+      }
+    } catch (err) {
+      last = `threw ${String(err)}`;
+    }
+    if (settled || Date.now() >= deadline) break;
+    // oxlint-disable-next-line no-await-in-loop -- as above
+    await Bun.sleep(100);
+  }
+  leaked.push(`${taskId}: last cancel reply ${last}`);
+}
+
+const leaked: string[] = [];
+
+/** The tasks `cancelTask` could not cancel since the last call, emptied by reading. */
+export function takeLeakedTasks(): readonly string[] {
+  return leaked.splice(0);
+}
+
 export interface AppHandle {
   readonly client: RelayClient;
   readonly store: Store;
