@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { CRED_NAME } from "./credential.ts";
 import { exec, execFailure } from "./exec.ts";
 import { pskBlobPathIn, stateDir } from "./paths.ts";
 import { isWsl } from "./wsl.ts";
@@ -9,13 +10,6 @@ import { isWsl } from "./wsl.ts";
 export function tpmPskPath(): string {
   return pskBlobPathIn(stateDir());
 }
-
-/**
- * Name embedded in the credential at encrypt time; decrypt must present the
- * same one, and a unit loading the blob must use it as the credential id
- * (credential.ts reads $CREDENTIALS_DIRECTORY under this name).
- */
-export const CRED_NAME = "seance-psk";
 
 // No PCR binding (--tpm2-pcrs=): a PCR-bound blob dies on the next firmware
 // update, and the threat model here is at-rest exfiltration, not a tampered

@@ -19,7 +19,8 @@ import {
   targetUserName,
   whichIn,
 } from "./target-user.ts";
-import { blobLoadable, CRED_NAME } from "./tpmcreds.ts";
+import { CRED_NAME } from "./credential.ts";
+import { blobLoadable } from "./tpmcreds.ts";
 import type { Check } from "./check.ts";
 import { NO_SERVICE_MANAGER, type InstallResult } from "./service-types.ts";
 import { isWsl, schtasksExe } from "./wsl.ts";

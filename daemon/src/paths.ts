@@ -3,16 +3,22 @@ import { join } from "node:path";
 
 // SEANCE_* overrides exist for tests; XDG vars keep macOS and WSL identical.
 
+/** `name` under the XDG config home: the daemon's `seance`, the archivist's `seance-archivist`. */
+export function xdgConfigDir(name: string): string {
+  return join(process.env["XDG_CONFIG_HOME"] ?? join(homedir(), ".config"), name);
+}
+
+/** `name` under the XDG state home, as `xdgConfigDir`. */
+export function xdgStateDir(name: string): string {
+  return join(process.env["XDG_STATE_HOME"] ?? defaultStateHome(homedir()), name);
+}
+
 export function configDir(): string {
-  return (
-    process.env["SEANCE_CONFIG_DIR"] ?? join(process.env["XDG_CONFIG_HOME"] ?? join(homedir(), ".config"), "seance")
-  );
+  return process.env["SEANCE_CONFIG_DIR"] ?? xdgConfigDir("seance");
 }
 
 export function stateDir(): string {
-  return (
-    process.env["SEANCE_STATE_DIR"] ?? join(process.env["XDG_STATE_HOME"] ?? defaultStateHome(homedir()), "seance")
-  );
+  return process.env["SEANCE_STATE_DIR"] ?? xdgStateDir("seance");
 }
 
 /**

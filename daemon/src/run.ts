@@ -14,15 +14,8 @@ import { daemonSink, ensureAuditLog, reapAudit } from "./audit.ts";
 import { tmuxHarvestPanes } from "./exit-status.ts";
 import { createBackend } from "./backend-default.ts";
 import type { SessionBackend } from "./backend.ts";
-import {
-  loadConfig,
-  loadPsk,
-  pskFingerprint,
-  QUOTA_DEFAULTS,
-  runnableProblems,
-  type Config,
-  type ResolvedPsk,
-} from "./config.ts";
+import { loadConfig, loadPsk, QUOTA_DEFAULTS, type Config, type ResolvedPsk } from "./config.ts";
+import { pskFingerprint, runnableProblems } from "./config-checks.ts";
 import { exclaveInfoEqual, scanExclaves, tagExclaves, type ExclaveScan } from "./exclaves.ts";
 import { appRelayClient } from "./app-relay.ts";
 import type { BranchStateDeps } from "./branch-state.ts";

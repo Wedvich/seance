@@ -1,5 +1,4 @@
 import { join } from "node:path";
-import { CRED_NAME } from "./tpmcreds.ts";
 
 /**
  * PSK delivered by the service manager instead of unsealed by this process:
@@ -12,6 +11,14 @@ import { CRED_NAME } from "./tpmcreds.ts";
  * The credential id must equal the `--name=` sealed into the blob
  * (CRED_NAME), or systemd refuses to load it.
  */
+
+/**
+ * Name embedded in the credential at encrypt time; decrypt must present the
+ * same one, and a unit loading the blob must use it as the credential id.
+ * Here rather than in `tpmcreds.ts`, so a reader of the delivered key (the
+ * archivist) imports no exec path.
+ */
+export const CRED_NAME = "seance-psk";
 
 /** Where the manager put this service's PSK, or null when no credentials were delivered. */
 export function credentialPskPath(): string | null {
