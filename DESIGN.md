@@ -6643,9 +6643,13 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   on reconnect** (2026-10-29). Held only once this document has seen a registry
   (`canHold`): the repo and pins resolve against the machines the socket left in
   memory, and a cold launch with no relay has nothing to pick from, so its button
-  still waits. The task is whole at the tap, its id minted and `createdAt` stamped
-  then, and kept in `seance:held` (at most `HELD_MAX`, written on every change, never
-  debounced). It goes out once per socket, when that socket's registry settles,
+  still waits. A tap while a resume's re-dial is still settling waits as "Queuing…"
+  for its outcome instead (both settle windows are 1.5 s): it queues if the socket
+  opened, and is held only if the window ended without one, since holding would say
+  "not connected" a moment before sending anyway. The task is whole at the tap, its
+  id minted and `createdAt` stamped then, and kept under its own key,
+  `seance:held:<id>` (at most `HELD_MAX`, written on every change, never debounced,
+  and only for the tasks that changed). It goes out once per socket, when that socket's registry settles,
   oldest first and one create at a time. A send whose
   answer never came stays held and goes again on the next socket: the id is the key,
   so the resend answers `landedEarlier` if the first landed. A refusal fails it in
@@ -6656,13 +6660,19 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   verified leader that doesn't advertise `reportedDone` fails a task settling on its
   done report or with a `done` edge, and one without `pinAccount` an account pin.
   Holding rides out a dropped connection, not days offline: a task held past
-  `HELD_MAX_AGE_MS` (24 h) is dropped unsent, by `readHeld` and before each send,
-  since whatever it was for has likely moved on, and past the leader's admission age
-  it would be refused anyway. Each open tab keeps its held list in memory, so
-  `trackHeld` adopts another tab's write to `seance:held` from the `storage` event,
-  and a tab killed after holding loses nothing the others hold; a tab whose relay is
-  up sends what it adopts (a task both send answers `landedEarlier` the second time).
-  Two writes in the same instant can still drop one. A Start now held this way is a plain queue,
+  `HELD_MAX_AGE_MS` (24 h), failed or waiting, is dropped unsent when the store
+  attaches and before each send, since whatever it was for has likely moved on, and
+  past the leader's admission age it would be refused anyway. The held card names
+  what was dropped until dismissed, so a prompt is never lost unsaid. A key per task
+  is what makes several tabs safe: each tab writes only the tasks it changed, so no
+  write replaces another tab's, and `trackHeld` adopts the others' writes from the
+  `storage` event; a tab whose relay is up sends what it adopts (a task both send
+  answers `landedEarlier` the second time). A held verdict closes once its task leaves
+  the list without landing in this tab (discarded, dropped for age, or gone in another
+  tab's write): the tab can't tell which, so it claims none. The single-list
+  `seance:held` key of the first build is cleared, not migrated: it lived for hours, and a held task
+  outlives only a dropped connection. Rejected: one list rewritten whole and merged on adopt (last
+  writer wins, so two tabs holding at once lost a task). A Start now held this way is a plain queue,
   since a `run-now` fired whenever the app next reconnects would skip the caps at a
   moment nobody chose. A task with files is never held: files upload at the tap and
   go only to a leader verified to advertise `attachments`, which a dropped socket

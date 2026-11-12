@@ -82,6 +82,7 @@ export interface SpawnActions {
   readonly removeFile: (key: string) => void;
   readonly retryHeld: (taskId: string) => void;
   readonly discardHeld: (taskId: string) => void;
+  readonly dismissHeldDropped: () => void;
 }
 
 /**
@@ -151,12 +152,26 @@ function AttachmentChips(props: { view: AttachmentsView; onRemove: (key: string)
 /** Tasks queued with the relay unreachable, waiting on this phone; a refused one offers a retry. */
 function HeldList(props: {
   rows: ViewModel["held"];
+  dropped: string | null;
   onRetry: (taskId: string) => void;
   onDiscard: (taskId: string) => void;
+  onDismissDropped: () => void;
 }): JSX.Element {
   return (
     <section className="held card" aria-label="Held on this phone">
       <p className="label">HELD ON THIS PHONE</p>
+      {props.dropped !== null && (
+        <div className="held-row" role="status">
+          <span className="held-text">
+            <span className="held-status held-status-err">{props.dropped}</span>
+          </span>
+          <span className="held-actions">
+            <button type="button" className="held-action" onClick={props.onDismissDropped}>
+              Dismiss
+            </button>
+          </span>
+        </div>
+      )}
       <ul className="held-list">
         {props.rows.map((row) => (
           <li key={row.taskId} className="held-row">
@@ -995,8 +1010,14 @@ export function SpawnScreen(props: {
             </div>
           ))}
 
-        {view.held.length > 0 && (
-          <HeldList rows={view.held} onRetry={actions.retryHeld} onDiscard={actions.discardHeld} />
+        {(view.held.length > 0 || view.heldDropped !== null) && (
+          <HeldList
+            rows={view.held}
+            dropped={view.heldDropped}
+            onRetry={actions.retryHeld}
+            onDiscard={actions.discardHeld}
+            onDismissDropped={actions.dismissHeldDropped}
+          />
         )}
 
         <div className="grid">

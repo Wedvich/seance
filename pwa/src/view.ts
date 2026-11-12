@@ -158,6 +158,8 @@ export interface ViewModel {
   readonly reportedAvailable: boolean;
   /** Tasks kept on this phone until the relay takes them, oldest first. */
   readonly held: readonly HeldRow[];
+  /** Held tasks dropped for age, as one line naming them; null when none or dismissed. */
+  readonly heldDropped: string | null;
   readonly worktreeHint: string;
   /** The line under the prompt card; null when there is nothing to say. */
   readonly formStatus: string | null;
@@ -210,6 +212,8 @@ export interface AppState {
   readonly verdict: Verdict | null;
   /** Tasks queued while the relay was unreachable, oldest first; persisted (`writeHeld`). */
   readonly held: readonly HeldTask[];
+  /** Titles of held tasks dropped past `HELD_MAX_AGE_MS`, until dismissed: a prompt is never lost unsaid. */
+  readonly heldDropped: readonly string[];
   /** The form's `route-preview`; null while either picker is pinned. */
   readonly preview: PreviewState | null;
   /** By deviceId; "unknown" once a fetch failed or timed out. */
@@ -744,6 +748,12 @@ export function settlesOnReport(task: Task): boolean {
   return spec.until === "reported" || spec.deps?.some((dep) => dep.after === "done") === true;
 }
 
+function heldDroppedText(titles: readonly string[]): string | null {
+  if (titles.length === 0) return null;
+  const count = titles.length === 1 ? "1 task" : `${titles.length} tasks`;
+  return `Dropped ${count} held over a day: ${titles.join(", ")}`;
+}
+
 function heldRow(entry: HeldTask, relay: RelayState): HeldRow {
   const { task, failure, sending } = entry;
   const waiting =
@@ -811,6 +821,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
     afterTile: { label: "AFTER", value: afterValue(form.after), mono: false, dot: null },
     reportedAvailable: deriveReportedOffered(relay),
     held: state.held.map((entry) => heldRow(entry, relay)),
+    heldDropped: heldDroppedText(state.heldDropped),
     worktreeHint: form.worktree ? "Branches off the default branch on origin" : "Runs in the repo as it stands",
     formStatus: deriveFormStatus(state, machine, problem),
     button: deriveButton(state, machine, repo, problem),

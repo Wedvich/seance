@@ -113,6 +113,11 @@ export const HELD_MAX = 10;
  */
 export const HELD_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
+/** Oldest first, the order held tasks are listed and sent in; ties broken by id so every tab agrees. */
+export function heldOrder(a: HeldTask, b: HeldTask): number {
+  return a.task.createdAt - b.task.createdAt || (a.task.id < b.task.id ? -1 : 1);
+}
+
 export function heldStale(task: Task, now: number): boolean {
   return now - task.createdAt > HELD_MAX_AGE_MS;
 }

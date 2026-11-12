@@ -266,6 +266,7 @@ function useSpawnActions(store: Store): SpawnActions {
       removeFile: (key) => store.removeFile(key),
       retryHeld: (taskId) => store.retryHeld(taskId),
       discardHeld: (taskId) => store.discardHeld(taskId),
+      dismissHeldDropped: () => store.dismissHeldDropped(),
     }),
     [store],
   );

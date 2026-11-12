@@ -17,10 +17,15 @@ Object.defineProperty(globalThis, "localStorage", {
     setItem: (key: string, value: string) => void store.set(key, value),
     removeItem: (key: string) => void store.delete(key),
     clear: () => store.clear(),
+    key: (index: number) => [...store.keys()][index] ?? null,
+    get length() {
+      return store.size;
+    },
   },
 });
 
 const {
+  dropLegacyHeld,
   dropLegacyHidden,
   dropLegacyPending,
   FORM_FILES_FRESH_MS,
@@ -126,62 +131,52 @@ describe("form persistence", () => {
 
 describe("held tasks", () => {
   const OTHER = "7b0e4c1d-2f3a-4b5c-9d6e-1a2b3c4d5e6f";
-  const CREATED = Date.now();
-  const held = (id: string, failure: string | null = null): HeldTask => ({
+  const held = (id: string, failure: string | null = null, createdAt = 5): HeldTask => ({
     task: {
       id,
       spec: { repo: "github.com/acme/app", mode: "worktree", prompt: "port it" },
       state: "queued",
-      createdAt: CREATED,
+      createdAt,
     },
     failure,
     sending: true,
   });
+  const key = (id: string): string => `seance:held:${id}`;
 
-  test("round-trip with their failures, never as sending", () => {
-    writeHeld([held(TASK), held(OTHER, "Refused.")]);
+  test("round-trip one key per task, oldest first, with failures and never as sending", () => {
+    writeHeld([], [held(OTHER, "Refused.", 7), held(TASK, null, 6)]);
+    expect([...store.keys()].toSorted()).toEqual([key(TASK), key(OTHER)].toSorted());
     expect(readHeld()).toEqual([
-      { ...held(TASK), sending: false },
-      { ...held(OTHER, "Refused."), sending: false },
+      { ...held(TASK, null, 6), sending: false },
+      { ...held(OTHER, "Refused.", 7), sending: false },
     ]);
   });
 
-  // An `auto` task holds no `plan`, so dropping `autonomy` on read would silently send it at checkpoint.
-  test("keep a task's autonomy level, and steer's plan mode beside it", () => {
-    const leveled = (id: string, level: Pick<HeldTask["task"]["spec"], "autonomy" | "plan">): HeldTask => {
-      const entry = held(id);
-      return { ...entry, task: { ...entry.task, spec: { ...entry.task.spec, ...level } } };
-    };
-    writeHeld([leveled(TASK, { autonomy: "auto" }), leveled(OTHER, { autonomy: "steer", plan: true })]);
-    expect(readHeld().map((entry) => entry.task.spec)).toEqual([
-      expect.objectContaining({ autonomy: "auto" }),
-      expect.objectContaining({ autonomy: "steer", plan: true }),
-    ]);
-  });
+  test("write only what changed: a sending flip writes nothing, a removal clears its key", () => {
+    const first = held(TASK);
+    const second = held(OTHER);
+    writeHeld([], [first, second]);
+    store.set(key(OTHER), "written by another tab");
+    writeHeld([first, second], [{ ...first, sending: false }, second]);
+    expect(store.get(key(OTHER))).toBe("written by another tab");
 
-  test("clear the key once none are left", () => {
-    writeHeld([held(TASK)]);
-    writeHeld([]);
-    expect(store.get("seance:held")).toBeUndefined();
+    writeHeld([first, second], [second]);
+    expect(store.has(key(TASK))).toBe(false);
   });
 
   // Sent as it stands, so anything this build can't parse is dropped rather than sent.
-  test("drop entries that don't parse, aren't queued, or repeat an id", () => {
-    store.set(
-      "seance:held",
-      JSON.stringify([
-        held(TASK),
-        { task: { ...held(OTHER).task, state: "running" } },
-        { task: { id: "not a task" } },
-        held(TASK, "dup"),
-        "junk",
-      ]),
-    );
+  test("skip entries that don't parse, aren't queued, or sit under another task's key", () => {
+    writeHeld([], [held(TASK)]);
+    const { task } = held(OTHER);
+    store.set(key(OTHER), JSON.stringify({ task: { ...task, state: "running" } }));
+    store.set(key("x"), JSON.stringify({ task: { id: "not a task" } }));
+    store.set(key("7b0e4c1d-2f3a-4b5c-9d6e-000000000000"), JSON.stringify({ task }));
+    store.set(key("junk"), "[{");
     expect(readHeld().map((entry) => entry.task.id)).toEqual([TASK]);
   });
 
   // Files go only to a leader verified to take them, which holding never checks.
-  test("drop one carrying files, though it parses", () => {
+  test("skip one carrying files, though it parses", () => {
     const ref = {
       id: "0b6f0c9e-1a2b-4c3d-8e9f-000000000000",
       name: "a.png",
@@ -190,29 +185,32 @@ describe("held tasks", () => {
       hash: "A".repeat(43),
     };
     const { task } = held(OTHER);
-    store.set(
-      "seance:held",
-      JSON.stringify([held(TASK), { task: { ...task, spec: { ...task.spec, attachments: [ref] } } }]),
-    );
-    expect(parseTask({ ...task, spec: { ...task.spec, attachments: [ref] } })).not.toBeNull();
+    const withFiles = { ...task, spec: { ...task.spec, attachments: [ref] } };
+    writeHeld([], [held(TASK)]);
+    store.set(key(OTHER), JSON.stringify({ task: withFiles }));
+    expect(parseTask(withFiles)).not.toBeNull();
     expect(readHeld().map((entry) => entry.task.id)).toEqual([TASK]);
   });
 
   test("stop at the cap", () => {
     const ids = Array.from({ length: HELD_MAX + 2 }, (_, i) => `${TASK.slice(0, -2)}${String(i).padStart(2, "0")}`);
-    store.set("seance:held", JSON.stringify(ids.map((id) => held(id))));
+    writeHeld(
+      [],
+      ids.map((id) => held(id)),
+    );
     expect(readHeld()).toHaveLength(HELD_MAX);
   });
 
-  test("drop one held past the age limit", () => {
-    const { task } = held(OTHER);
-    const now = Date.now();
-    store.set("seance:held", JSON.stringify([held(TASK), { task: { ...task, createdAt: now - HELD_MAX_AGE_MS - 1 } }]));
-    expect(readHeld(now).map((entry) => entry.task.id)).toEqual([TASK]);
+  // The store drops these, and says so: a read that skipped them would lose them unsaid.
+  test("read one past the age limit like any other", () => {
+    writeHeld([], [held(TASK, null, Date.now() - HELD_MAX_AGE_MS - 1)]);
+    expect(readHeld().map((entry) => entry.task.id)).toEqual([TASK]);
   });
 
-  test("survive corrupt JSON", () => {
-    store.set("seance:held", "[{");
+  test("clear an earlier build's single-list key", () => {
+    store.set("seance:held", JSON.stringify([{ task: held(TASK).task, failure: null }]));
+    dropLegacyHeld();
+    expect(store.has("seance:held")).toBe(false);
     expect(readHeld()).toEqual([]);
   });
 });
@@ -223,6 +221,10 @@ describe("tracking held tasks across tabs", () => {
     const listeners = new Set<() => void>();
     const adopted: (readonly HeldTask[])[] = [];
     let fire: (key: string | null) => void = () => {};
+    const set = (held: readonly HeldTask[]): void => {
+      state = { held };
+      for (const listener of listeners) listener();
+    };
     const source = {
       subscribe: (listener: () => void) => listeners.add(listener),
       getState: () => state,
@@ -231,25 +233,17 @@ describe("tracking held tasks across tabs", () => {
         set(held);
       },
     };
-    const set = (held: readonly HeldTask[]): void => {
-      state = { held };
-      for (const listener of listeners) listener();
-    };
     trackHeld(source, (handler) => {
       fire = handler;
     });
     return { set, adopted, fire: (key: string | null) => fire(key) };
   }
   const entry = (id: string): HeldTask => ({
-    task: {
-      id,
-      spec: { repo: "github.com/acme/app", mode: "worktree", prompt: "p" },
-      state: "queued",
-      createdAt: Date.now(),
-    },
+    task: { id, spec: { repo: "github.com/acme/app", mode: "worktree", prompt: "p" }, state: "queued", createdAt: 1 },
     failure: null,
     sending: false,
   });
+  const OTHER = "7b0e4c1d-2f3a-4b5c-9d6e-1a2b3c4d5e6f";
 
   test("writes this tab's changes, and adopts another tab's without writing them back", () => {
     const t = tracked();
@@ -257,19 +251,23 @@ describe("tracking held tasks across tabs", () => {
     expect(readHeld().map((e) => e.task.id)).toEqual([TASK]);
 
     // Another tab's write: storage changes under this one, then the event names the key.
-    const other = "7b0e4c1d-2f3a-4b5c-9d6e-1a2b3c4d5e6f";
-    const written = JSON.stringify([
-      { task: entry(TASK).task, failure: null },
-      { task: entry(other).task, failure: null },
-    ]);
-    store.set("seance:held", written);
-    t.fire("seance:held");
-    expect(t.adopted.map((list) => list.map((e) => e.task.id))).toEqual([[TASK, other]]);
-    expect(store.get("seance:held")).toBe(written);
+    const theirs = JSON.stringify({ task: entry(OTHER).task, failure: null });
+    store.set(`seance:held:${OTHER}`, theirs);
+    t.fire(`seance:held:${OTHER}`);
+    expect(t.adopted.map((list) => list.map((e) => e.task.id))).toEqual([[TASK, OTHER]]);
+    expect(store.get(`seance:held:${OTHER}`)).toBe(theirs);
 
-    // Another key adopts nothing.
     t.fire("seance:form");
     expect(t.adopted).toHaveLength(1);
+  });
+
+  // The race a single list had: each tab writing its whole list over the other's.
+  test("two tabs holding at once both keep their tasks", () => {
+    const a = tracked();
+    const b = tracked();
+    a.set([entry(TASK)]);
+    b.set([entry(OTHER)]);
+    expect(readHeld().map((e) => e.task.id)).toEqual([TASK, OTHER]);
   });
 
   test("adopts an empty list when another tab clears storage", () => {
