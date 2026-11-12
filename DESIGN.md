@@ -1355,7 +1355,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | HTTP `PUT /attachments/<id>`                                        | built: `RelayClient.uploadAttachment` (`shared/src/app-client.ts`) from the PWA's spawn form (`pwa/src/store.ts`), sealed by `sealAttachment`, with `Authorization: Bearer`                                                                                                                                                                                                        | built: `relay/src/attachments.ts`, after `Hub.reserveUpload` (`relay/src/allowance.ts`); into R2 through the `ATTACHMENTS` binding                                                                                                                                                                                                                                                                      |
 | HTTP `GET /attachments/<id>`                                        | built: `daemon/src/attachments.ts`, before the launch ledger's write-ahead record, at `attachmentUrl` of its own config's `relayUrl`                                                                                                                                                                                                                                               | built: `relay/src/attachments.ts`, streamed from R2                                                                                                                                                                                                                                                                                                                                                     |
 | field `attachments`                                                 | built: `TaskSpec` and `SpawnRequest`, from the PWA's `createTask` after every upload is `stored` (`pwa/src/store.ts`); the leader's `#dispatch` (`scheduler/src/scheduler.ts`)                                                                                                                                                                                                     | `parseAttachmentManifest` (`shared/src/parse.ts`), in `parseTaskSpec` and the daemon's `isSpawnRequest`; acted on in `handleSpawn` (`daemon/src/handlers.ts`)                                                                                                                                                                                                                                           |
-| field `inheritedPr`                                                 | built: `SpawnRequest`, by the leader's `#dispatch` (`scheduler/src/scheduler.ts`) for a task carrying `succeeds` and a `prUrl`, never under `until: "reported"`                                                                                                                                                                                                                    | built: `daemon/src/handlers.ts` `handleSpawn` (`inheritedPrOf`), only from a spawn sealed from the scheduler with `client: "scheduler"` and a task id, noted in the launch ledger's `continuedPr`                                                                                                                                                                                                       |
+| field `inheritedPr`                                                 | built: `SpawnRequest`, by the leader's `#dispatch` (`scheduler/src/scheduler.ts`) for a task carrying `succeeds` and a `prUrl`, never under `until: "reported"`                                                                                                                                                                                                                    | built: `daemon/src/handlers.ts` `handleSpawn` (`inheritedPrOf`), only on a worktree spawn sealed from the scheduler (or the leader in process) with `client: "scheduler"` and a task id, noted in the launch ledger's `continuedPr`                                                                                                                                                                     |
 
 `sessions`, `spawn` and `despawn` have a second, relay-free sender: `daemon/src/local-client.ts`
 over the local op socket, arriving at the same `daemon/src/handlers.ts` routing.
@@ -7305,8 +7305,9 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
      branch after the push) it is `no_upstream`, nothing pushed, and the session is told to run
      `git push -u origin HEAD:<pr branch>` or set the upstream and call again, which it can, being
      live. `expect` comes only from a scheduler-sealed request, never a session frame; `hasPr` is the
-     daemon's own ledger. A successor that inherited a PR whose worktree branch has no upstream is thus
-     `no_upstream` before any push, where it once pushed to `<b>` and met the leader's `branch_mismatch`.
+     daemon's own ledger. A successor that inherited a PR (never under `until: "reported"`, whose dispatch
+     withholds it) whose worktree branch has no upstream is thus `no_upstream` before any push, where it
+     once pushed to `<b>` and met the leader's `branch_mismatch`.
   5. `<b>` or `<r>` equal to the repo's default branch (resolved from `refs/remotes/origin/HEAD` as
      branch-state's `repoBase` does; with none, `main` and `master`) is `default_branch`.
   6. Uncommitted or untracked changes are `dirty_worktree` (`pendingChanges`; unreadable is
@@ -7591,7 +7592,9 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
     id, and the value is `httpsUrl`-exact. From any other sender, or an unreadable value, it is dropped with
     one warn naming the task, never refused: dropping leaves `prless`, as today, and a refusal would hold a
     reserved successor and route it again to the same machine under a version gap. A `mode` other than
-    `worktree` is malformed (`isSpawnRequest`). The audit line says `inheritedPr=true`, never the URL.
+    `worktree` drops it the same way, from any sender (`isSpawnRequest` holds no rule on the field, so a
+    stray claim beside `here` leaves a plain spawn as it was). The audit line says `inheritedPr=true`,
+    never the URL; the warn names the task only.
   - Threat model: the carried claim's only power is a session closing itself, which can do no more than
     one that runs `/exit`; the `awaiting-merge` settle reads the leader's own record.
 - **Later.** None for this item.
@@ -9719,7 +9722,7 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   reads only the pane's own task's note, so another launch sharing the path or session cannot supply
   one, and it survives the continued launch's eviction. A successor (2026-11-12, "Passing to a successor")
   inherits its predecessor's PR the same way: the same `continuedPr`, noted at launch by `handleSpawn` from
-  the spawn's `inheritedPr`, taken only from a spawn sealed from the scheduler with `client: "scheduler"` and
+  the spawn's `inheritedPr`, taken only from a worktree spawn sealed from the scheduler with `client: "scheduler"` and
   a task id, never from a session-event frame. Watching the PR after
   that, and alerting on a red required check or a conflict, is the leader's (docs/scheduler.md,
   "PR hand-off").

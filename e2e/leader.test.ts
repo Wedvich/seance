@@ -1104,8 +1104,9 @@ await Bun.write(${JSON.stringify(out)}, JSON.stringify(result));\n`,
 
       const inherited = await handOffFrom(S1, "handoff-succ", true);
       expect(await answer(inherited.out)).toMatchObject({ ok: true });
-      // The close waits for the turn's end. The stand-in pane is no registered session, so the graceful despawn
-      // answers `session_not_found` after the close was decided, and what is under test is the decision.
+      // The close waits for the turn's end: none is decided yet, before any idle event. The stand-in pane is no
+      // registered session, so the graceful despawn answers `session_not_found` after the close was decided, and
+      // what is under test is the decision.
       expect(closes()).toEqual([]);
       const pane = await paneOf(S1);
       await Bun.write(inherited.go, "");
@@ -1115,6 +1116,8 @@ await Bun.write(${JSON.stringify(out)}, JSON.stringify(result));\n`,
         20_000,
       );
       await Bun.write(inherited.go2, "");
+      // The ended event's own settle (`ended()` settles any ended task whose record holds a PR), kept for the
+      // whole flow: it does not show the hand-off took effect, the answer and the close decision above do.
       await pollUntil(
         async () => (await stack.queue().get(S1))?.body?.state === "awaiting-merge",
         "the leader to settle the ended successor awaiting-merge",
@@ -1167,7 +1170,8 @@ await Bun.write(${JSON.stringify(out)}, JSON.stringify(result));\n`,
         .map((args) => args.join(" "))
         .filter((l) => l.includes("audit spawn origin=relay"));
       expect(lines.some((l) => l.includes("inheritedPr=true"))).toBe(true);
-      expect(lines.some((l) => l.includes(PR))).toBe(false);
+      // Every line the daemon wrote, the drop's warn included, never only the audit ones.
+      expect(audit.mock.calls.some((args) => args.join(" ").includes(PR))).toBe(false);
       expect((await launched()).find((n) => n.taskId === taskId)).not.toHaveProperty("continuedPr");
 
       const sent = await handOffFrom(taskId, "handoff-forged", false);
