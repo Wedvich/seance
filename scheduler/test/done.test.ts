@@ -1433,3 +1433,31 @@ describe("a finishing transition and the task's PR reading", () => {
     expect(ended(base({ pr: open }), undefined)).toMatchObject({ state: "awaiting-merge", pr: open });
   });
 });
+
+/** A pass whose close has not landed (`Task.successor`): every settle path goes through `ended`, which keeps the work's end in the successor. */
+describe("ended: a task carrying a successor", () => {
+  const passed = (fields: Partial<Task> = {}): Task => ({
+    id: "t",
+    spec: spec(),
+    state: "running",
+    createdAt: NOW,
+    assignment: ON_A,
+    successor: "s",
+    ...fields,
+  });
+
+  test("settles superseded with the successor kept, with or without a PR or a clean exit", () => {
+    expect(ended(passed(), undefined)).toMatchObject({ state: "superseded", successor: "s" });
+    expect(ended(passed({ prUrl: PR }), undefined)).toMatchObject({ state: "superseded", successor: "s" });
+    expect(ended(passed(), { exit: 0 })).toMatchObject({ state: "superseded", successor: "s" });
+  });
+
+  test("a merged branch with work on it still settles done, and the report wins too", () => {
+    const merged = { branch: "b", pushed: true, merged: true } as const;
+    expect(ended(passed(), merged)).toMatchObject({ state: "done", doneBy: "merged" });
+    expect(ended(passed({ spec: spec({ until: "reported" }) }), { reported: true })).toMatchObject({
+      state: "done",
+      doneBy: "reported",
+    });
+  });
+});
