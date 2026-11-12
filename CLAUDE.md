@@ -74,6 +74,12 @@ green:
   setup — `makeClaudeStub` shows both and carries the measurements. Setup means `beforeAll`: a stub
   written in `beforeEach` is a new file every test (`raycast-cli.test.ts` passes per-test paths in
   by env instead).
+- A shell stub that a test stops with SIGINT traps it before writing anything the test waits on,
+  and idles as `sleep 1 >/dev/null 2>&1 & wait $!` in a loop, never a foreground `sleep`. macOS
+  `/bin/sh` is bash 3.2: a SIGINT landing while it waits on a foreground child is ignored outright
+  when untrapped, and lost now and then when trapped (after the child is reaped, before the handler
+  is restored), so the stub runs on to its SIGKILL. The redirect keeps the outliving `sleep` off
+  pipes the caller drains to EOF. `raycast-cli.test.ts`'s `ray` stubs are the example.
 - A private tmux server still loads the developer's own `~/.tmux.conf` — product code boots it, and
   only `-f` skips the file — so local runs get its default-shell, hooks and `automatic-rename-format`
   while CI gets none. Don't assert on what a config can set: name a test window at creation (`-n`,
