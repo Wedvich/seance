@@ -1061,14 +1061,14 @@ function parseScore(value: unknown): Score | null {
   const { sticky, total } = value;
   const numbers = [accountPressure, machinePressure, dependencyDistance, queuePressure, sticky, total];
   if (!numbers.every(isFiniteNumber)) return null;
-  if (keepFree !== undefined && !isFiniteNumber(keepFree)) return null;
   return {
     components: {
       accountPressure: Number(accountPressure),
       machinePressure: Number(machinePressure),
       dependencyDistance: Number(dependencyDistance),
       queuePressure: Number(queuePressure),
-      ...(keepFree === undefined ? {} : { keepFree: Number(keepFree) }),
+      // Display-only, and `total` already carries its effect: an unreadable one is dropped, never the score.
+      ...(isFiniteNumber(keepFree) ? { keepFree: Number(keepFree) } : {}),
     },
     sticky: Number(sticky),
     total: Number(total),

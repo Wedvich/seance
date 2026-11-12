@@ -1070,7 +1070,7 @@ describe("tasks and their records", () => {
     expect(parseDecision(decision(legacy))?.candidates[0]?.rejected).toEqual([legacy]);
   });
 
-  test("a score's keepFree component round-trips, is optional (an older leader omits it) and voids the decision when not finite", () => {
+  test("a score's keepFree component round-trips, is optional (an older leader omits it) and is dropped, not the score, when not finite", () => {
     const components = { accountPressure: 0.1, machinePressure: 0.2, dependencyDistance: 0, queuePressure: 0 };
     const decision = (score: unknown) => ({
       at: 1,
@@ -1083,9 +1083,16 @@ describe("tasks and their records", () => {
     const read = parseDecision(decision(plain))?.candidates[0]?.score;
     expect(read).toEqual(plain);
     expect(read?.components).not.toHaveProperty("keepFree");
-    for (const keepFree of [Number.NaN, Infinity, "1", null]) {
-      expect(parseDecision(decision({ ...kept, components: { ...components, keepFree } }))).toBeNull();
+    // Lenient on purpose, unlike the other components: `total` carries the penalty, and a later build's
+    // reshaped component must not leave this build holding the record unreadable.
+    for (const keepFree of [Number.NaN, Infinity, "1", null, [1], { value: 1 }]) {
+      const dropped = parseDecision(decision({ ...kept, components: { ...components, keepFree } }))?.candidates[0]
+        ?.score;
+      expect(dropped).toEqual({ components, sticky: 0, total: 4.3 });
+      expect(dropped?.components).not.toHaveProperty("keepFree");
     }
+    // The other components stay strict: one bad one still voids the decision.
+    expect(parseDecision(decision({ ...kept, components: { ...components, queuePressure: "1" } }))).toBeNull();
   });
 
   test("an over-the-line reason may say its credits are spent; any other value drops the reason", () => {

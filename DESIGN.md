@@ -3090,8 +3090,12 @@ it through the store: an app's `store-put` create, read by the leader on `store-
     kept-free traits are not three times as avoided, which would be a filter by another route. A task
     requiring one kept-free trait still pays for another the exclave carries and the task does not
     require. The component is omitted at 0, so every record without a penalty is byte-identical to
-    before; `parseScore` reads an optional finite `keepFree` (an invalid one nulls the score), which an older reader drops with the rest of the
-    unknown keys, so records stay readable both ways. Weight 8 is the global cap's worth
+    before; `parseScore` reads an optional `keepFree`, which an older reader drops with the rest of the
+    unknown keys, so records stay readable both ways. An unreadable one (not a finite number) is
+    dropped, not a reason to null the score: a deliberate departure from every other component, where
+    one bad candidate voids the decision and so the record, because `total` already carries the
+    penalty and a later build that changes the component's shape (a count, a list of names) must not
+    leave a leader of this build holding its records unreadable. Weight 8 is the global cap's worth
     (`globalMax`): a kept-free idle machine loses to one carrying up to 7 in-flight scheduler tasks
     (`queuePressure` is 1 each), and at 8 the cap refuses every candidate anyway; other load on the
     competitor shifts that, and an exact tie goes to the lower deviceId. It is also two fully loaded machines' (`machinePressure` weighs 4),
