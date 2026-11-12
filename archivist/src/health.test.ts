@@ -95,6 +95,32 @@ describe("count refresher", () => {
       refresher.stop();
     }
   });
+  test("a sample count that fails midway leaves the earlier samples under their own countedAt", async () => {
+    let clock = 100;
+    let failSamples = false;
+    const refresher = startCountRefresher({
+      archive: { counts: () => ({ tasks: { rows: clock, oldest: 1 }, events: none }) },
+      metrics: {
+        countSamples: () => (failSamples ? Promise.reject(new Error("busy")) : Promise.resolve({ rows: 7, oldest: 1 })),
+      },
+      log: { warn: () => {} },
+      intervalMs: 3_600_000,
+      now: () => clock,
+    });
+    try {
+      await pollUntil(
+        () => refresher.snapshot()?.samples !== null && refresher.snapshot()?.samples !== undefined,
+        "the first pass",
+      );
+      failSamples = true;
+      clock = 200;
+      await refresher.refresh();
+      expect(refresher.snapshot()?.samples).toEqual({ rows: 7, oldest: 1 });
+      expect(refresher.snapshot()?.countedAt).toBe(100);
+    } finally {
+      refresher.stop();
+    }
+  });
 });
 
 describe("status answer", () => {

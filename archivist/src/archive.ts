@@ -243,8 +243,9 @@ export class Archive {
 
   /**
    * Row counts and oldest times (ms) of the two tables the health card shows.
-   * Both are indexed on the column read (`tasks_created`, `events_at`), so the
-   * cost is a seek and a walk of the small tables, never a scan of a large one.
+   * `min` is an index seek, but `count(*)` walks a whole index, synchronously. Fine
+   * while `tasks` and `events` stay small; `events` has no retention, so if it grows
+   * large count it in chunks over `at` as `MetricsArchive.countSamples` does.
    */
   counts(): { readonly tasks: ArchiveTableStatus; readonly events: ArchiveTableStatus } {
     const one = (sql: string): ArchiveTableStatus => {

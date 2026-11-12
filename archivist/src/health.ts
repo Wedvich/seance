@@ -55,7 +55,8 @@ export function startCountRefresher(deps: RefresherDeps): CountRefresher {
   const pass = async (): Promise<void> => {
     try {
       const { tasks, events } = archive.counts();
-      latest = { tasks, events, samples: latest?.samples ?? null, countedAt: now() };
+      // Early publish keeps the older samples, so it keeps their time too: countedAt dates every count in the reply.
+      latest = { tasks, events, samples: latest?.samples ?? null, countedAt: latest?.countedAt ?? now() };
       const samples = await metrics.countSamples();
       if (stopped) return;
       latest = { tasks, events, samples, countedAt: now() };
