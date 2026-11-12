@@ -4255,7 +4255,8 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   judged by its recorded tip alone, and the remote ref counts only if it holds that tip or
   descends from it. Nor does the owner trust the local ref blindly: with a tip recorded, the local
   ref is used only if it equals it, descends from it, or is that same ref rewritten: its reflog
-  (`git reflog show refs/heads/<b>`) holds the recorded tip. Otherwise something else made a branch of
+  (`git rev-list --walk-reflogs refs/heads/<b>`, plumbing: `reflog show` is `git log -g`, which runs a
+  repo-local `gpg.program` under `log.showSignature`) holds the recorded tip. Otherwise something else made a branch of
   that name once the task's own was removed (a spawn with no task id on the freed path), and
   reading it would overwrite the recorded tip and read that spawn's merge as the task's; the
   recorded tip is judged instead. The reflog tells the two apart because deleting a branch deletes
@@ -4264,7 +4265,8 @@ with `progress`, the same facts as a sum, for a leader that missed the sends.
   its pre-rebase tip, which origin never held, so it never read `pushed` and its `after: "opened"`
   dependents never released). With reflogs off (`core.logAllRefUpdates=false`) or a failed read, a
   rewritten branch falls back to its last recorded tip as before: its new work is not reported
-  pushed or merged; a missed `merged` costs a manual mark-done. A detached head, or no branch at
+  pushed or merged; a missed `merged` costs a manual mark-done, a false one settles a task `done`
+  with its PR open. A detached head, or no branch at
   all, is skipped.
 - **`pushed` is the remote ref, never an upstream.** `claude --worktree` branches `--no-track`,
   so `%(upstream:track)` says nothing for them. `pushed` is true when

@@ -99,10 +99,11 @@ async function isAncestor(cwd: string, ancestor: string, of: string): Promise<bo
  * Whether `refs/heads/<branch>` itself once held `tip`: a rebase or reset moved the task's own ref, whose reflog
  * keeps the old value. Deleting a branch deletes its reflog, so a branch made under the name afterwards (the
  * stranger `checkTask` guards against) never passes. False on any read failure, or with reflogs off: the recorded
- * tip is then judged, as before.
+ * tip is then judged, as before. Plumbing `rev-list`, never `reflog show`: that is `git log -g`, which honours a
+ * repo-local `log.showSignature` and runs a session-written `gpg.program` on a signed entry.
  */
 async function rewritten(repoPath: string, branch: string, tip: string): Promise<boolean> {
-  const result = await hardenedGit(repoPath, ["reflog", "show", "--format=%H", `${HEADS}${branch}`, "--"]);
+  const result = await hardenedGit(repoPath, ["rev-list", "--walk-reflogs", `${HEADS}${branch}`, "--"]);
   return result.exitCode === 0 && result.stdout.split("\n").includes(tip);
 }
 
