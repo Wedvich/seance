@@ -871,6 +871,12 @@ export interface ExclaveInfo {
    * (the fail-closed direction for placement).
    */
   readonly traits?: readonly string[];
+  /**
+   * The subset of `traits` the machine asks to keep free: a score penalty for tasks
+   * that don't require them, never a filter. Declared like `traits` (own `config.json`
+   * only), absent when none, and an older reader drops it.
+   */
+  readonly keepFree?: readonly string[];
 }
 
 export interface SessionEntry {
@@ -2203,6 +2209,8 @@ export interface ScoreComponents {
   readonly machinePressure: number;
   readonly dependencyDistance: number;
   readonly queuePressure: number;
+  /** 1 when the exclave carries a keepFree trait the task does not require; absent otherwise (and from an older leader). */
+  readonly keepFree?: number;
 }
 
 export interface Score {

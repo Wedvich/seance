@@ -331,6 +331,7 @@ export function parseExclaveInfo(value: unknown): ExclaveInfo | null {
   const skills = value["skills"];
   if (!isStringArray(skills)) return null;
   const traits = parseExclaveTraits(value["traits"]);
+  const keepFree = parseExclaveKeepFree(value["keepFree"], traits);
   return {
     id: value["id"],
     accountId,
@@ -340,6 +341,7 @@ export function parseExclaveInfo(value: unknown): ExclaveInfo | null {
     authOk: value["authOk"],
     skills,
     ...(traits === undefined ? {} : { traits }),
+    ...(keepFree === undefined ? {} : { keepFree }),
   };
 }
 
@@ -352,6 +354,17 @@ export function parseExclaveInfo(value: unknown): ExclaveInfo | null {
 function parseExclaveTraits(value: unknown): readonly string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const names = [...new Set(value.filter(isTraitName))].slice(0, TRAIT_LIMITS.perMachine);
+  return names.length === 0 ? undefined : names;
+}
+
+/**
+ * Lenient like `parseExclaveTraits`: a list this build cannot read is read as none (the
+ * kept-free machine then scores as any other: a soft preference lost, never a task misplaced).
+ * Only names also in the parsed `traits` survive, since a keepFree name without the trait means nothing.
+ */
+function parseExclaveKeepFree(value: unknown, traits: readonly string[] | undefined): readonly string[] | undefined {
+  if (!Array.isArray(value) || traits === undefined) return undefined;
+  const names = [...new Set(value.filter((name) => isTraitName(name) && traits.includes(name)))];
   return names.length === 0 ? undefined : names;
 }
 
@@ -1044,15 +1057,18 @@ function parseReason(value: unknown): Reason | null {
 function parseScore(value: unknown): Score | null {
   if (!isRecord(value) || !isRecord(value["components"])) return null;
   const { accountPressure, machinePressure, dependencyDistance, queuePressure } = value["components"];
+  const { keepFree } = value["components"];
   const { sticky, total } = value;
   const numbers = [accountPressure, machinePressure, dependencyDistance, queuePressure, sticky, total];
   if (!numbers.every(isFiniteNumber)) return null;
+  if (keepFree !== undefined && !isFiniteNumber(keepFree)) return null;
   return {
     components: {
       accountPressure: Number(accountPressure),
       machinePressure: Number(machinePressure),
       dependencyDistance: Number(dependencyDistance),
       queuePressure: Number(queuePressure),
+      ...(keepFree === undefined ? {} : { keepFree: Number(keepFree) }),
     },
     sticky: Number(sticky),
     total: Number(total),
