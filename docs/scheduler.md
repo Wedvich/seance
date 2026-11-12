@@ -1268,7 +1268,8 @@ of M4 has landed.
       `superseded`, the states `parseTask` accepts it on, so a task a winner finishes drops it, and
       no write produces a record every reader would hold unreadable. A cancel or mark-done wins over
       the despawn's own `ended`: `#yieldToCancel` holds a `superseded` settle as it holds a `failed`
-      one, and `markDone` of a task carrying `successor` counts in `#cancelling` for its call, so
+      one, and `markDone` of a task carrying `successor`, or whose pass is in flight (it may commit
+      while the despawn runs), counts in `#cancelling` for its call, so
       neither answers `superseded` or lets the successor run after the person said stop.
     - **D5. The successor waits for its predecessor.** It is released only when the predecessor is
       `superseded` naming it; `blocked` while the predecessor is unfinished, unreadable, or missing

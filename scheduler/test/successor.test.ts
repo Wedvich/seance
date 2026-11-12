@@ -146,6 +146,25 @@ describe("pass", () => {
     expect(s.lines.some((l) => l.startsWith(`successor placed task="${result.successorId}" after=`))).toBe(true);
   });
 
+  test("a successor whose first event is needs-input is counted as placed too", async () => {
+    const s = setup();
+    const old = await running(s, false);
+    const result = ok(await s.scheduler.pass(old.id));
+    const gate = Promise.withResolvers<void>();
+    s.fleet.scripts.set("a", async (request) => {
+      await gate.promise;
+      return s.fleet.start("a", request);
+    });
+    const ticking = tick(s.scheduler);
+    await Bun.sleep(5);
+    expect(s.scheduler.task(result.successorId)?.state).toBe("reserved");
+    await s.scheduler.onSession(result.successorId, "needs-input", { deviceId: "a", pane: "%9" });
+    gate.resolve();
+    await ticking;
+    expect(s.scheduler.task(result.successorId)?.state).toBe("needs-input");
+    expect(s.lines.some((l) => l.startsWith(`successor placed task="${result.successorId}" after=`))).toBe(true);
+  });
+
   test("a task without a PR passes with no head to compare, and nothing is read", async () => {
     const s = setup();
     const old = await running(s, false);
@@ -294,6 +313,26 @@ describe("pass", () => {
     expect(s.scheduler.task(old.id)?.successor).toBeUndefined();
   });
 
+  test("a successor that cannot be read back at once is still named, and a retry creates no second", async () => {
+    const s = setup();
+    const old = await running(s, false);
+    // The store fails one read of the successor, right after its create.
+    const read = s.store.get.bind(s.store);
+    let failures = 1;
+    s.store.get = async (id) => {
+      if (id !== old.id && failures > 0) {
+        failures -= 1;
+        throw new Error("transient");
+      }
+      return read(id);
+    };
+    const first = ok(await s.scheduler.pass(old.id));
+    expect(failures).toBe(0);
+    expect(s.scheduler.task(old.id)).toMatchObject({ state: "superseded", successor: first.successorId });
+    expect(ok(await s.scheduler.pass(old.id)).successorId).toBe(first.successorId);
+    expect(s.creates).toHaveLength(1);
+  });
+
   test("the task changing under the push is a conflict, and nothing is created", async () => {
     const s = setup();
     const old = await running(s, false);
@@ -414,6 +453,42 @@ describe("pass", () => {
       expect(s.scheduler.task(old.id)?.state).toBe("cancelled");
       await tick(s.scheduler);
       expect(s.scheduler.task(result.successorId)?.state).toBe("failed");
+    });
+
+    test("mark-done while the pass is still pushing wins over the commit that lands under its despawn", async () => {
+      const s = setup();
+      const old = await running(s, false);
+      const pushGate = Promise.withResolvers<void>();
+      const despawnGate = Promise.withResolvers<void>();
+      const answer = s.fleet.pushReply;
+      s.fleet.pushReply = async (request) => {
+        await pushGate.promise;
+        return answer(request);
+      };
+      const base = s.fleet.despawn.bind(s.fleet);
+      let despawns = 0;
+      s.fleet.despawn = async (deviceId, request) => {
+        despawns += 1;
+        // The first despawn is mark-done's: it stays out while the pass commits.
+        if (despawns === 1) await despawnGate.promise;
+        return base(deviceId, request);
+      };
+      const passing = s.scheduler.pass(old.id);
+      await Bun.sleep(5);
+      const marking = s.scheduler.markDone(old.id);
+      await Bun.sleep(5);
+      pushGate.resolve();
+      const passed = ok(await passing);
+      despawnGate.resolve();
+      const marked = await marking;
+      expect(marked).toMatchObject({ ok: true, task: { state: "done", doneBy: "manual" } });
+      expect(s.scheduler.task(old.id)).toMatchObject({ state: "done", doneBy: "manual" });
+      expect(s.scheduler.task(old.id)?.successor).toBeUndefined();
+      await tick(s.scheduler);
+      expect(s.scheduler.task(passed.successorId)).toMatchObject({
+        state: "failed",
+        failure: { code: "pass_abandoned" },
+      });
     });
 
     test("mark-done after the commit ends the task done, and the successor fails", async () => {

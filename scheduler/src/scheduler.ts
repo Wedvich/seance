@@ -302,7 +302,7 @@ export class Scheduler {
    * Memory only: reconcile (`#closePasses`) re-enters every such task after a takeover.
    */
   readonly #passing = new Map<string, { deadline: number }>();
-  /** Tasks whose dependency chain was reported unreadable, so it is logged once. */
+  /** Tasks whose dependency chain was reported unreadable, so it is logged once per stall. */
   readonly #stalled = new Set<string>();
   /**
    * `#ending` notes made by a hold (`#yieldToCancel`), not by a session's own
@@ -967,8 +967,11 @@ export class Scheduler {
       const leftRunning = !live && current.state === "lost";
       return advance(current, "done", { doneBy: "manual", ...(leftRunning ? { leftRunning: true } : {}) });
     };
-    // A passed task's despawn ends its session as a cancel's does, and would settle it `superseded` first.
-    if (this.task(taskId)?.successor === undefined) return this.#byHand(taskId, decide);
+    // A passed task's despawn ends its session as a cancel's does, and would settle it `superseded` first; so
+    // would one whose pass is in flight, which may commit while this despawn runs.
+    if (this.task(taskId)?.successor === undefined && !this.#passInFlight.has(taskId)) {
+      return this.#byHand(taskId, decide);
+    }
     return this.#counting(taskId, () => this.#byHand(taskId, decide));
   }
 
@@ -1084,8 +1087,9 @@ export class Scheduler {
     };
     const made = await create(successor);
     if (!made.ok) return { ok: false, code: "pass_failed" };
-    // Held now, not at the store's nudge: admission keeps it `blocked` from this pass on.
-    await this.refresh(successor.id);
+    // Held now, not at the store's nudge: admission keeps it `blocked` from this pass on. A failed read is not a
+    // failed pass: it exists, the commit below names it, and a retry would only leave this one an orphan.
+    await this.refresh(successor.id).catch(this.#onError);
 
     // Entered before the commit: no pass may see a task carrying `successor` that no entry covers.
     this.#passing.set(taskId, { deadline: this.#now() + PASS_CLOSE_GRACE_MS });
@@ -1398,11 +1402,15 @@ export class Scheduler {
    * re-checks that its task is still waiting where it was.
    */
   async #admit(): Promise<void> {
+    const stalled = new Set<string>();
     const moves = admission(this.tasks(), new Set(this.#unreadable.keys()), this.#now(), (id) => {
+      stalled.add(id);
       if (this.#stalled.has(id)) return;
       this.#stalled.add(id);
       this.#log(`dependency chain unreadable task=${quote(id)}`);
     });
+    // Only a chain still unreadable stays noted: a pruned task leaves it, and a later stall is logged again.
+    for (const id of this.#stalled) if (!stalled.has(id)) this.#stalled.delete(id);
     await Promise.all(
       [...moves].map(([id, move]) =>
         this.#update(id, (current) => {
@@ -1728,7 +1736,8 @@ export class Scheduler {
    */
   #noteSuccessor(before: Task, after: Task): void {
     if (after.spec.succeeds === undefined) return;
-    if (before.state === "reserved" && after.state === "running") {
+    // A successor may land straight in `needs-input`: its first event is that one.
+    if (before.state === "reserved" && (after.state === "running" || after.state === "needs-input")) {
       this.#log(`successor placed task=${quote(after.id)} after=${Math.max(0, this.#now() - after.createdAt)}`);
       return;
     }

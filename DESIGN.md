@@ -3413,7 +3413,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   today, with `successor` dropped (`advance`), and fail a still-unfinished successor `pass_abandoned`
   (a merge settles it `done` instead, "Admission of a successor"). A cancel or mark-done wins over
   the despawn's own `ended` too: `#yieldToCancel` holds a `superseded` settle as it holds a `failed`
-  one, and `markDone` of a task carrying `successor` counts in `#cancelling` for its call as `cancel`
+  one, and `markDone` of a task carrying `successor`, or whose pass is in flight (`#passInFlight`: the pass
+  may commit while the despawn runs), counts in `#cancelling` for its call as `cancel`
   does, so neither answers `superseded` nor lets the successor run on after the person said stop.
   `successor` is written only by the leader
   (`appWrite: false`), and a `superseded` task without it is malformed. Rejected: `failed` with a
@@ -6995,7 +6996,9 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   (5) the **commit point**: the leader notes the pass in `#passing` ("Closing"), then overwrites the
   old task with `successor: <new id>`; (6) close the old session;
   (7) settle the old task `superseded`. Failure before step 4 changes nothing but a pushed branch,
-  which is harmless; step 4 failing answers `pass_failed` with nothing else written; step 5
+  which is harmless; step 4 failing answers `pass_failed` with nothing else written; a failed read-back of
+  the created successor (the leader's `refresh`) is reported and the pass goes on to step 5, so a retry
+  never leaves a second successor beside an orphan; step 5
   failing (a conflict after retries, `StoreRevoked`) leaves a successor its predecessor never names,
   which admission holds `blocked` and fails `pass_abandoned` once the predecessor finishes any other
   way, with no close armed; step 6 failing answers `ok` with the old task still `running` and
