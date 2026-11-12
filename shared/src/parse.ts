@@ -41,6 +41,8 @@ import {
   STORE_PREFIXES,
   TARGET_LIMITS,
   TASK_FAILURE_LIMITS,
+  TASK_PRS_MAX,
+  TASK_PRS_MAX_LENGTH,
   TASK_SPEC_LIMITS,
   type AccountRecord,
   type AttachmentRef,
@@ -57,6 +59,7 @@ import {
   type SettingsRecord,
   type DiskAlerted,
   type SpillStamp,
+  type TaskPr,
   type VapidKeys,
   type WebPushSubscription,
   type BranchState,
@@ -1080,6 +1083,23 @@ export function parseSpillStamp(value: unknown): SpillStamp | null {
   return { accountId, window, reset, at, ...(spending === undefined ? {} : { spending }) };
 }
 
+function parseTaskPr(value: unknown): TaskPr | null {
+  if (!isRecord(value)) return null;
+  const { url, closed } = value;
+  const href = httpsUrl(url);
+  if (href === null || (closed !== undefined && closed !== true)) return null;
+  return { url: href, ...(closed === undefined ? {} : { closed }) };
+}
+
+/** `Task.prs`, or null when malformed: past its bounds, a URL twice, or no `prUrl` among them to be primary. */
+function parseTaskPrs(value: unknown, prUrl: string): readonly TaskPr[] | null {
+  const prs = parseList(value, parseTaskPr);
+  if (prs === null || prs.length === 0 || prs.length > TASK_PRS_MAX) return null;
+  const urls = new Set(prs.map((pr) => pr.url));
+  if (urls.size !== prs.length || !urls.has(prUrl)) return null;
+  return prs.reduce((sum, pr) => sum + pr.url.length, 0) > TASK_PRS_MAX_LENGTH ? null : prs;
+}
+
 /** A forge reading, or null when any field is malformed. A fresh object, so nothing unvalidated rides along. */
 export function parsePrStatus(value: unknown): PrStatus | null {
   if (!isRecord(value)) return null;
@@ -1146,6 +1166,8 @@ export function parseTask(value: unknown): Task | null {
   if (progress === null) return null;
   // Apart from `progress`: a display cache must not make a task unreadable when a later build adds a state.
   const pr = value["pr"] === undefined ? null : parsePrStatus(value["pr"]);
+  // Dropped, never fatal, like `pr`: without it the task stands on `prUrl`, as under an older leader.
+  const prs = value["prs"] === undefined || progress.prUrl === undefined ? null : parseTaskPrs(value["prs"], progress.prUrl);
   const { remoteSession } = value;
   return {
     id,
@@ -1161,6 +1183,7 @@ export function parseTask(value: unknown): Task | null {
     ...(leftRunning === undefined ? {} : { leftRunning }),
     ...progress,
     ...(pr === null ? {} : { pr }),
+    ...(prs === null ? {} : { prs }),
     // Dropped, never fatal, like `pr`: a link is display-only.
     ...(isRemoteSessionId(remoteSession) ? { remoteSession } : {}),
   };

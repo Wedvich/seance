@@ -2178,6 +2178,27 @@ export interface SpillStamp {
   readonly spending?: true;
 }
 
+/**
+ * One PR a task's session reported (`Task.prs`). `closed`: the leader's poller last read it
+ * closed, so it is not the task's primary while a later or earlier one is not; a reopen clears it.
+ */
+export interface TaskPr {
+  readonly url: string;
+  readonly closed?: true;
+}
+
+/** `Task.prs` keeps at most this many PRs, oldest dropped first, never the primary. */
+export const TASK_PRS_MAX = 8;
+
+/**
+ * …and at most this many URL characters across them, the primary's included, dropped the same
+ * way (a primary longer alone leaves no list). Small enough that a list at its bound, beside its
+ * primary as `prUrl`, seals no larger than a `prUrl` at `PR_URL_MAX_LENGTH` with none: a record
+ * at every bound has no room to spare (`STORE_MAX_CT_LENGTH`, measured in parse.test.ts). A
+ * GitHub PR URL is ~60 characters, so the count is what binds in practice.
+ */
+export const TASK_PRS_MAX_LENGTH = 768;
+
 export interface Task {
   readonly id: string;
   /** What was asked for. Its `prompt` and `attachments` are dropped on the write that finishes the task (`forgetPrompt`). */
@@ -2218,8 +2239,20 @@ export interface Task {
    * despawned there — whatever session it had may still be running.
    */
   readonly leftRunning?: true;
-  /** The newest `https:` PR URL its session reported — what `after: "opened"` and `awaiting-merge` read. */
+  /**
+   * Its primary PR: the newest `https:` PR URL its session reported that the leader has not read
+   * closed, else the newest (`primaryPr`) — what `after: "opened"`, `awaiting-merge` and the PWA's
+   * chip read. An older leader's record holds this alone, as the newest.
+   */
   readonly prUrl?: string;
+  /**
+   * Every PR URL its session reported, oldest first, `prUrl` among them (`taskPrs` normalises a
+   * record without it), bounded by `TASK_PRS_MAX` and `TASK_PRS_MAX_LENGTH`. Written only with two
+   * or more: one says nothing `prUrl` does not. A session that folds a newer PR back into an older
+   * one and closes it leaves the task on the older (DESIGN.md, "PR status"). Dropped, never fatal,
+   * when malformed, and by an older leader's parser, so the task then stands on `prUrl`.
+   */
+  readonly prs?: readonly TaskPr[];
   /**
    * Remote Control's id for its session (`SessionEvent.remoteSession`), the
    * newest its machine reported: what the PWA links to claude.ai by. Display-only,

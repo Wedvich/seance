@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { importPsk, seal, toBase64 } from "./crypto.ts";
 import {
   bindTaskRecord,
+  PR_URL_MAX_LENGTH,
   isBranchName,
   isMetricsRequest,
   isSkillName,
@@ -90,6 +91,8 @@ import {
   type StorePrefixRule,
   TARGET_LIMITS,
   TASK_FAILURE_LIMITS,
+  TASK_PRS_MAX,
+  TASK_PRS_MAX_LENGTH,
   TASK_REQUEST_LIMITS,
   TASK_SPEC_LIMITS,
   type AttachmentRef,
@@ -1235,6 +1238,54 @@ describe("store", () => {
     expect(await sealedLength(decided)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
     // …and a full prefix still lists in one frame, under the Workers WebSocket message limit.
     expect(MAX_TASKS * STORE_MAX_CT_LENGTH).toBeLessThan(32 * 1024 * 1024);
+  });
+
+  test("a PR list at its bound, its primary as prUrl, costs no more than a prUrl at its own: the same record fits", async () => {
+    const each = TASK_PRS_MAX_LENGTH / TASK_PRS_MAX;
+    const prs = Array.from({ length: TASK_PRS_MAX }, (_, i) => ({
+      url: `https://${`${i}`.padEnd(each - 17, "g")}.example/`,
+      closed: true as const,
+    }));
+    expect(prs.reduce((sum, pr) => sum + pr.url.length, 0)).toBe(TASK_PRS_MAX_LENGTH);
+    expect(2 * TASK_PRS_MAX_LENGTH).toBeLessThan(PR_URL_MAX_LENGTH);
+    const decided: Task = {
+      ...written,
+      prUrl: prs.at(-1)?.url ?? "",
+      prs,
+      decision: { at: 1_760_000_000_000, chosen: target, candidates: Array.from({ length: 9 }, () => candidate) },
+    };
+    expect(parseTask(decided)).toEqual(decided);
+    expect(await sealedLength(decided)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
+  });
+
+  test("a task's PR list survives a parse; a malformed one is dropped and the task stands on prUrl", () => {
+    const url = (n: number): string => `https://github.com/acme/app/pull/${n}`;
+    const listed: Task = {
+      ...created,
+      state: "awaiting-merge",
+      prUrl: url(5),
+      prs: [{ url: url(5) }, { url: url(6), closed: true }],
+    };
+    expect(parseTask(listed)).toEqual(listed);
+    const { prs: _prs, ...bare } = listed;
+    const long = (n: number): string => `https://${"x".repeat(TASK_PRS_MAX_LENGTH / 2)}.example/${n}`;
+    for (const prs of [
+      [{ url: url(5) }, { url: url(6), closed: false }],
+      [{ url: url(5) }, { url: "http://github.com/acme/app/pull/6" }],
+      [{ url: url(5) }, { url: url(5) }],
+      [{ url: url(6) }],
+      [],
+      Array.from({ length: TASK_PRS_MAX + 1 }, (_, i) => ({ url: url(i === 0 ? 5 : 100 + i) })),
+      [{ url: url(5) }, { url: long(1) }, { url: long(2) }],
+      { url: url(5) },
+      [url(5)],
+    ]) {
+      expect(parseTask({ ...listed, prs })).toEqual(bare);
+    }
+    // Without a primary there is no list to keep.
+    const { prUrl: _prUrl, ...unprimaried } = listed;
+    const { prs: _gone, ...neither } = unprimaried;
+    expect(parseTask(unprimaried)).toEqual(neither);
   });
 
   test("the alert stamps survive a parse, and a malformed one voids the task", () => {
