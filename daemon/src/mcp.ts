@@ -6,6 +6,7 @@ import {
   accountNameIn,
   CAPABILITIES,
   fleetTraits,
+  traitHealthByMachine,
   AUTONOMY_LEVELS,
   autonomyOf,
   DEFAULT_AUTONOMY,
@@ -48,6 +49,8 @@ import {
   type TaskDep,
   type TaskUntil,
   exclaveAuth,
+  exclaveTraitHealth,
+  exclaveTraitUnchecked,
   lastHeardAt,
   sleepingMachine,
 } from "@seance/shared";
@@ -297,11 +300,18 @@ function describeMachine(
       : {
           exclaves: machine.exclaves.map((info, index) => {
             const auth = exclaveAuth(machine, index, now);
+            const traits = info.traits ?? [];
+            const failing = traits.filter((trait) => exclaveTraitHealth(machine, index, trait, now) === "failing");
+            // Only a probe the status lists as unread: a probe-less trait, or a machine offline or stale, has none to await.
+            const unchecked = traits.filter((trait) => exclaveTraitUnchecked(machine, index, trait, now));
             return {
               id: info.id,
               ...(info.accountId === null ? {} : { accountId: info.accountId }),
               ...(info.email === undefined ? {} : { email: info.email }),
               ...(info.traits === undefined ? {} : { traits: info.traits }),
+              // A probe reading failing holds a task needing the trait off this exclave; unchecked still routes.
+              ...(failing.length === 0 ? {} : { traitsFailing: failing }),
+              ...(unchecked.length === 0 ? {} : { traitsUnchecked: unchecked }),
               ...(info.accountId === null ? {} : describeName(names, info.accountId)),
               // A signed-out exclave has no login to read: the scheduler already filters it as `auth_missing`.
               ...(info.accountId === null ? {} : { auth: auth.state }),
@@ -638,7 +648,7 @@ const REQUIRES_FIELD = z
   .max(TASK_SPEC_LIMITS.requires)
   .optional()
   .describe(
-    `Traits the machine must declare (list_machines shows each exclave's \`traits\`): the task is placed only on an exclave carrying every one, at most ${TASK_SPEC_LIMITS.requires}. A trait no machine declares is refused, naming the ones that exist; so is a combination no exclave the task may reach carries. A trait on a machine that is offline makes the task wait for it`,
+    `Traits the machine must declare (list_machines shows each exclave's \`traits\`): the task is placed only on an exclave carrying every one, at most ${TASK_SPEC_LIMITS.requires}. A trait no machine declares is refused, naming the ones that exist; so is a combination no exclave the task may reach carries. A trait on a machine that is offline makes the task wait for it. A trait whose probe is failing on every exclave that carries it holds the task there too (list_machines shows traitsFailing; get_queue names the machines under requires[].failing)`,
   );
 
 const REPORTED_GATE =
@@ -728,6 +738,7 @@ function describeTask(
   offer: OfferContext,
   idle: ReadonlySet<string>,
   traits: ReadonlyMap<string, readonly string[]>,
+  now: number,
 ): Record<string, unknown> {
   const placement = placementOf(task, machines);
   const pin = describePin(task, machines, names);
@@ -745,10 +756,16 @@ function describeTask(
     ...(placement === null ? {} : { placement }),
     ...(pin === null ? {} : { pin }),
     ...(spec.avoid === undefined ? {} : { avoid: spec.avoid.map((id) => describeDevice(task, machines, id)) }),
-    // Where each trait is declared, so a task held for one reads with the machines that could end the wait.
+    // Where each trait is declared, so a task held for one reads with the machines that could end the wait,
+    // and which of them have a failing probe on every exclave that carries it ("MacBook's probe is failing").
     ...(spec.requires === undefined
       ? {}
-      : { requires: spec.requires.map((trait) => ({ trait, machines: traits.get(trait) ?? [] })) }),
+      : {
+          requires: spec.requires.map((trait) => {
+            const { failing } = traitHealthByMachine(machines, trait, now);
+            return { trait, machines: traits.get(trait) ?? [], ...(failing.length === 0 ? {} : { failing }) };
+          }),
+        }),
     ...(task.decision === undefined ? {} : { decision: decisionText(task.decision) }),
     ...(task.failure === undefined ? {} : { failure: `${task.failure.code}: ${failureMessage(task, task.failure)}` }),
     // A `manual` mark reads apart from a finish: a person settled it, nothing observed it end.
@@ -954,7 +971,7 @@ export function buildMcpServer(
         const idle = new Set((reply.idle ?? []).map((ref) => ref.taskId));
         const traits = fleetTraits(lease.machines);
         const tasks = reply.tasks.map((task) =>
-          describeTask(task, lease.machines, names, reply.tasks, offer, idle, traits),
+          describeTask(task, lease.machines, names, reply.tasks, offer, idle, traits, Date.now()),
         );
         const holds = (reply.holds ?? []).map((hold) => describeHold(hold, names));
         return textResult(JSON.stringify({ at: new Date(reply.at).toISOString(), holds, tasks }, null, 2));

@@ -268,6 +268,8 @@ export function createAuthHealth(deps: AuthHealthDeps): AuthHealth {
   let draining: Promise<void> | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
   let checking = false;
+  /** The exclave whose read is running: no longer in `queued`, and not yet in `entries` on a first read. */
+  let inFlight: string | null = null;
   let stopped = false;
   let running: number | null = null;
   let changed = false;
@@ -410,16 +412,21 @@ export function createAuthHealth(deps: AuthHealthDeps): AuthHealth {
     const entry = entries.get(id);
     // Floored, not skipped: a poke inside the floor stays set and the next check re-queues it.
     if (entry?.readAt !== undefined && entry.readAt !== null && now() - entry.readAt < minRereadMs) return;
-    const marker = await markerOf(exclave);
-    const reading = await readOnce(exclave);
-    if (stopped) return;
-    const next: Entry = entry ?? { reading: null, marker: null, readAt: null, poked: false, logged: null };
-    next.reading = reading;
-    next.marker = marker;
-    next.readAt = now();
-    next.poked = false;
-    entries.set(id, next);
-    noteChange(id, next);
+    inFlight = id;
+    try {
+      const marker = await markerOf(exclave);
+      const reading = await readOnce(exclave);
+      if (stopped) return;
+      const next: Entry = entry ?? { reading: null, marker: null, readAt: null, poked: false, logged: null };
+      next.reading = reading;
+      next.marker = marker;
+      next.readAt = now();
+      next.poked = false;
+      entries.set(id, next);
+      noteChange(id, next);
+    } finally {
+      inFlight = null;
+    }
   };
 
   const drain = (): void => {
@@ -467,6 +474,8 @@ export function createAuthHealth(deps: AuthHealthDeps): AuthHealth {
       for (const exclave of present) {
         const entry = entries.get(exclave.id);
         if (entry !== undefined) noteChange(exclave.id, entry);
+        // A check landing mid-read would find no entry (or the old one) and read the exclave twice over.
+        if (inFlight === exclave.id) continue;
         // oxlint-disable-next-line no-await-in-loop -- a stat each
         if (await isDue(exclave, entry)) enqueue(exclave.id);
       }

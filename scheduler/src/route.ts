@@ -185,7 +185,7 @@ function judge(
   if (clone === undefined) rejected.push({ code: "repo_absent" });
   const missing = lacking(clone);
   if (missing !== undefined) rejected.push({ code: "skill_absent", skill: missing });
-  rejected.push(...traitFilter(task, exclave));
+  rejected.push(...traitFilter(task, machine, exclave, index, pass.now));
   // One code per exclave: signed out says everything an expired login would. Only `expired` filters —
   // `expiring` and `unknown` (an older daemon, an unreadable store) still route.
   if (!exclave.authOk || exclave.accountId === null) rejected.push({ code: "auth_missing" });

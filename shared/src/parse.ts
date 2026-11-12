@@ -37,6 +37,7 @@ import {
   REQUIRES_DEP_SENTINEL,
   SKILL_NAME_MAX_LENGTH,
   STATUS_MAX_AUTH_EXPIRED,
+  STATUS_MAX_TRAIT_PAIRS,
   TASK_UNTIL,
   QUEUE_MAX_TASKS,
   ROUTING_ID_MAX_LENGTH,
@@ -478,7 +479,7 @@ function parseQuotaObservation(value: unknown): QuotaObservation | null {
   return reading === null ? null : { x: value["x"], ...reading };
 }
 
-function parseExpiring(value: unknown): readonly [number, number] | null {
+function parseUintPair(value: unknown): readonly [number, number] | null {
   if (!Array.isArray(value) || value.length !== 2) return null;
   const [index, at] = value;
   return isUint(index) && isUint(at) ? [index, at] : null;
@@ -502,12 +503,17 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
   const { tr } = value;
   if (!isOptionalUint(tr)) return null;
   const ax = value["ax"] === undefined ? undefined : parseUintList(value["ax"]);
-  const ae = value["ae"] === undefined ? undefined : parseList(value["ae"], parseExpiring);
+  const ae = value["ae"] === undefined ? undefined : parseList(value["ae"], parseUintPair);
   const au = value["au"] === undefined ? undefined : parseUintList(value["au"]);
   if (ax === null || ae === null || au === null) return null;
   // Disjoint and bounded together: one exclave is in at most one list.
   const authIndices = [...(ax ?? []), ...(ae ?? []).map(([index]) => index), ...(au ?? [])];
   if (authIndices.length > STATUS_MAX_AUTH_EXPIRED || new Set(authIndices).size !== authIndices.length) return null;
+  const tf = value["tf"] === undefined ? undefined : parseList(value["tf"], parseUintPair);
+  const tu = value["tu"] === undefined ? undefined : parseList(value["tu"], parseUintPair);
+  if (tf === null || tu === null) return null;
+  const traitPairs = [...(tf ?? []), ...(tu ?? [])].map(([x, t]) => `${x}:${t}`);
+  if (traitPairs.length > STATUS_MAX_TRAIT_PAIRS || new Set(traitPairs).size !== traitPairs.length) return null;
   const { drn } = value;
   if (drn !== undefined && drn !== true) return null;
   return {
@@ -525,6 +531,8 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
     ...(ax === undefined ? {} : { ax }),
     ...(ae === undefined ? {} : { ae }),
     ...(au === undefined ? {} : { au }),
+    ...(tf === undefined ? {} : { tf }),
+    ...(tu === undefined ? {} : { tu }),
     ...(drn === undefined ? {} : { drn }),
   };
 }

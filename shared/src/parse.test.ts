@@ -75,6 +75,7 @@ import {
   REPO_MAX_SKILLS,
   SKILL_NAME_MAX_LENGTH,
   STATUS_MAX_AUTH_EXPIRED,
+  STATUS_MAX_TRAIT_PAIRS,
   DECISION_MAX_CANDIDATES,
   MAX_PAUSE_HOLDS,
   METRICS_MAX_FILTER_LENGTH,
@@ -2081,6 +2082,50 @@ describe("M4 shapes", () => {
     }
     const given = [[1, 5]];
     expect(parseMachineStatus({ at: 1, scan: 2, ae: given })?.ae).not.toBe(given);
+  });
+
+  test("a status carries failing and unknown trait probes: disjoint, bounded together, absent stays absent", () => {
+    const status = {
+      at: 1,
+      scan: 2,
+      tf: [[0, 1]],
+      tu: [
+        [0, 0],
+        [2, 3],
+      ],
+    } as const;
+    expect(parseMachineStatus(status)).toEqual(status);
+    expect(parseMachineStatus({ at: 1, scan: 2 })).not.toHaveProperty("tf");
+    expect(parseMachineStatus({ at: 1, scan: 2 })).not.toHaveProperty("tu");
+    const full = Array.from({ length: STATUS_MAX_TRAIT_PAIRS }, (_, i) => [i, 0]);
+    expect(parseMachineStatus({ at: 1, scan: 2, tf: full })?.tf).toHaveLength(full.length);
+    expect(parseMachineStatus({ at: 1, scan: 2, tf: full.slice(0, 9), tu: full.slice(9) })?.tu).toHaveLength(7);
+    for (const bad of [
+      { tf: [[1]] },
+      { tf: [[1, 2, 3]] },
+      { tf: [[-1, 0]] },
+      { tf: [[0, 1.5]] },
+      { tu: [[0, -1]] },
+      { tf: [0, 1] },
+      { tu: "x" },
+      {
+        tf: [
+          [0, 1],
+          [0, 1],
+        ],
+      },
+      {
+        tu: [
+          [0, 1],
+          [0, 1],
+        ],
+      },
+      { tf: [[0, 1]], tu: [[0, 1]] },
+      { tf: [...full, [99, 0]] },
+      { tf: full.slice(0, 9), tu: [...full.slice(9), [99, 0]] },
+    ]) {
+      expect(parseMachineStatus({ at: 1, scan: 2, ...bad })).toBeNull();
+    }
   });
 
   test("a status says its launch gate is closed only as `drn: true`; an open gate or an old daemon says nothing", () => {

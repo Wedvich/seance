@@ -99,6 +99,42 @@ describe("deriveMachines", () => {
     });
   });
 
+  describe("exclave trait probes", () => {
+    const probed = (status: Partial<MachineStatus>, connected = true): Machine =>
+      machine({
+        connected,
+        exclaves: [
+          { ...exclave("default", ACCOUNT), traits: ["atlas", "az"] },
+          { ...exclave("work", "org-2:acct-bbbbbbbb-2222"), traits: ["az"] },
+          exclave("plain", ACCOUNT),
+        ],
+        status: { at: S - 10, scan: 1, ...status },
+      });
+    const rows = (m: Machine) => deriveMachines([m], NOW, NO_LEADER).cards[0]?.exclaves.map((row) => row.probes);
+
+    test("a failing probe names its traits per exclave, singular or plural; unchecked and healthy say nothing", () => {
+      expect(
+        rows(
+          probed({
+            tf: [
+              [0, 0],
+              [0, 1],
+              [1, 0],
+            ],
+            tu: [],
+          }),
+        ),
+      ).toEqual([{ text: "atlas, az probes failing", level: "err" }, { text: "az probe failing", level: "err" }, null]);
+      expect(rows(probed({ tu: [[0, 0]] }))).toEqual([null, null, null]);
+      expect(rows(probed({}))).toEqual([null, null, null]);
+    });
+
+    test("an asleep machine and a stale status say nothing: the reading is not current", () => {
+      expect(rows(probed({ tf: [[0, 0]] }, false))).toEqual([null, null, null]);
+      expect(rows({ ...probed({}), status: { at: S - 3600, scan: 1, tf: [[0, 0]] } })).toEqual([null, null, null]);
+    });
+  });
+
   // The scheduler's floor is free space, not percent: a small LXC root can be out of routing at 80%.
   test("disk reads red under the scheduler's free-space floor whatever its percent, and is absent with no reading", () => {
     const gauges = (status: MachineStatus): [string, string][] =>

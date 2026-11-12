@@ -18,6 +18,7 @@ import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts
 import type { RelayClient } from "./relay-client.ts";
 import { createSessionEvents, listPanePids, peerBindingProblem, type EndedTasks } from "./session-events.ts";
 import type { Fetch } from "./seams.ts";
+import type { TraitProbes } from "./trait-probes.ts";
 import type { UsageRefresh } from "./usage-refresh.ts";
 
 const RESCAN_INTERVAL_MS = 3_600_000;
@@ -42,6 +43,8 @@ export interface WiringCtx {
   readonly exclaveScan: () => ExclaveScan;
   /** Null unless `RunOpts.authHealth` enabled it; its own capability runs its timer, and the refresh reads and pokes it. */
   readonly authHealth: AuthHealth | null;
+  /** Null unless `config.traits` declares a probe; its own capability runs its cadence. */
+  readonly traitProbes: TraitProbes | null;
   /** Null unless `RunOpts.usageRefresh` enabled it; session events poke it, its own capability runs its timer. */
   readonly usageRefresh: UsageRefresh | null;
   readonly rescan: () => Promise<unknown>;
@@ -143,6 +146,14 @@ const authHealth: DaemonCapability = (ctx) => {
   return { stop: (): void => void health.stop() };
 };
 
+/** Trait probes' cadence: every unit runs once at start, then when due. Its `stop` kills a probe in flight and waits for the lane. */
+const traitProbes: DaemonCapability = (ctx) => {
+  const probes = ctx.traitProbes;
+  if (probes === null) return { stop: (): void => {} };
+  probes.start();
+  return { stop: (): void => void probes.stop() };
+};
+
 /** The refresh's own timer, for exclaves no session is active in. */
 const usageRefresh: DaemonCapability = (ctx) => {
   const refresh = ctx.usageRefresh;
@@ -235,6 +246,7 @@ export const DAEMON_CAPABILITIES: readonly DaemonCapability[] = [
   fleetBroker,
   sessionEvents,
   authHealth,
+  traitProbes,
   usageRefresh,
   branchStates,
   rescanSchedule,

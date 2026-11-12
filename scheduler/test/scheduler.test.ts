@@ -2344,14 +2344,14 @@ describe("traits", () => {
   function traitSetup(machines: Machine[]) {
     const store = new MemoryQueueStore();
     const clock = { now: NOW };
-    const held: [string, string][] = [];
+    const held: [string, string, string][] = [];
     const fleet = new FakeFleet(machines);
     const scheduler = new Scheduler({
       store: readerChecked(store, () => clock.now),
       fleet,
       config: DEFAULT_CONFIG,
       now: () => clock.now,
-      onTraitHeld: (id, trait) => held.push([id, trait]),
+      onTraitHeld: (id, trait, why) => held.push([id, trait, why]),
     });
     return { store, fleet, scheduler, held };
   }
@@ -2363,8 +2363,8 @@ describe("traits", () => {
     await pass(scheduler);
     await pass(scheduler);
     expect(held).toEqual([
-      [task.id, "atlas"],
-      [task.id, "az"],
+      [task.id, "atlas", "absent"],
+      [task.id, "az", "absent"],
     ]);
     await scheduler.load();
     await pass(scheduler);
@@ -2376,12 +2376,27 @@ describe("traits", () => {
     const plain = await enqueue(store, scheduler, spec());
     const needy = await enqueue(store, scheduler, spec({ requires: ["atlas"] }));
     await pass(scheduler);
-    expect(held).toEqual([[needy.id, "atlas"]]);
+    expect(held).toEqual([[needy.id, "atlas", "absent"]]);
     expect(scheduler.task(plain.id)?.state).toBe("running");
     expect(scheduler.task(needy.id)?.state).toBe("ready");
     fleet.fleet = [holder(["atlas"])];
     await pass(scheduler);
     expect(scheduler.task(needy.id)?.state).toBe("running");
+    expect(held).toHaveLength(1);
+  });
+
+  test("a trait held by a failing probe says unhealthy, once, and does not tell again when it turns absent", async () => {
+    const failing = machine("a", {
+      exclaves: [exclave("main", "org:a", { traits: ["atlas"] })],
+      status: status({ quota: [obs(0)], tf: [[0, 0]] }),
+    });
+    const { store, fleet, scheduler, held } = traitSetup([failing]);
+    const task = await enqueue(store, scheduler, spec({ requires: ["atlas"] }));
+    await pass(scheduler);
+    await pass(scheduler);
+    expect(held).toEqual([[task.id, "atlas", "unhealthy"]]);
+    fleet.fleet = [holder([])];
+    await pass(scheduler);
     expect(held).toHaveLength(1);
   });
 

@@ -73,7 +73,7 @@ export function describeVerdict(
     const { task } = verdict;
     const settled = isSettled(task.state);
     const pin = pinLine(task, machines, aliases);
-    const requires = requiresLine(task, machines);
+    const requires = requiresLine(task, machines, now);
     const waiting = waitingText(task);
     const parts = [
       queuedBody(task),

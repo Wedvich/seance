@@ -1103,6 +1103,53 @@ describe("stickiness", () => {
   });
 });
 
+describe("trait_unhealthy — a carried trait whose probe reads failing", () => {
+  const carrying = (fields: Partial<Machine> = {}): Machine =>
+    machine("a", {
+      exclaves: [exclave("main", "org:a", { traits: ["atlas", "az"] }), exclave("alt", "org:b", { traits: ["az"] })],
+      repos: [clone("app", "main"), clone("app2", "alt")],
+      status: status({ quota: [obs(0), obs(1)], tf: [[0, 1]] }),
+      ...fields,
+    });
+  const requiring = (...requires: string[]): Task => task({ spec: spec({ requires }) });
+
+  test("a failing probe rejects only the exclave it is on, trait_unhealthy alone", () => {
+    const decision = decide([carrying()], { task: requiring("az") });
+    expect(byExclave(decision, "main")?.rejected).toEqual([{ code: "trait_unhealthy", trait: "az" }]);
+    expect(byExclave(decision, "alt")?.rejected).toEqual([]);
+    expect(decision.chosen).toEqual({ deviceId: "a", exclave: "alt", clone: "app2" });
+  });
+
+  test("a trait the exclave lacks is trait_absent, never trait_unhealthy: absent wins; both in requires order", () => {
+    const decision = decide([carrying()], { task: requiring("atlas", "az") });
+    expect(byExclave(decision, "main")?.rejected).toEqual([{ code: "trait_unhealthy", trait: "az" }]);
+    expect(byExclave(decision, "alt")?.rejected).toEqual([{ code: "trait_absent", trait: "atlas" }]);
+    const both = decide([carrying()], { task: requiring("gpu", "az") });
+    expect(byExclave(both, "main")?.rejected).toEqual([
+      { code: "trait_absent", trait: "gpu" },
+      { code: "trait_unhealthy", trait: "az" },
+    ]);
+  });
+
+  test("an unknown probe (tu), a stale status and a disconnected machine route: none is a failing reading", () => {
+    const unknown = decide([carrying({ status: status({ quota: [obs(0), obs(1)], tu: [[0, 1]] }) })], {
+      task: requiring("az"),
+    });
+    expect(byExclave(unknown, "main")?.rejected).toEqual([]);
+    const stale = decide([carrying({ status: status({ quota: [obs(0), obs(1)], tf: [[0, 1]], at: NOW_S - 3600 }) })], {
+      task: requiring("az"),
+    });
+    expect(stale.candidates.flatMap(codes)).not.toContain("trait_unhealthy");
+    const gone = decide([carrying({ connected: false })], { task: requiring("az") });
+    expect(gone.candidates.flatMap(codes)).not.toContain("trait_unhealthy");
+  });
+
+  test("a task that does not require the failing trait is not held by it", () => {
+    const decision = decide([carrying()], { task: requiring("atlas") });
+    expect(decision.chosen).toEqual({ deviceId: "a", exclave: "main", clone: "app" });
+  });
+});
+
 describe("trait_absent — a required trait is an exclave's own, and every one is needed", () => {
   const atlas = (): Machine =>
     machine("a", {
@@ -1204,8 +1251,10 @@ describe("trait_absent — a required trait is an exclave's own, and every one i
   });
 
   describe("traitsHolding", () => {
-    const hold = (machines: readonly Machine[], requires: string[]): readonly string[] =>
+    const holds = (machines: readonly Machine[], requires: string[]): ReturnType<typeof traitsHolding> =>
       traitsHolding(decide(machines, { task: task({ spec: spec({ requires }) }) }), requires);
+    const hold = (machines: readonly Machine[], requires: string[]): readonly string[] =>
+      holds(machines, requires).map((h) => h.trait);
     const asleep = (id: string, traits?: string[]): Machine =>
       machine(id, {
         connected: false,
@@ -1238,6 +1287,16 @@ describe("trait_absent — a required trait is an exclave's own, and every one i
 
     test("a task without requires holds nothing", () => {
       expect(traitsHolding(decide([plain()]), [])).toEqual([]);
+    });
+
+    test("why: absent when no machine carries it, unhealthy when the only holder's probe fails", () => {
+      expect(holds([plain()], ["atlas"])).toEqual([{ trait: "atlas", why: "absent" }]);
+      const failing = machine("a", {
+        exclaves: [exclave("main", "org:a", { traits: ["atlas"] })],
+        status: status({ quota: [obs(0)], tf: [[0, 0]] }),
+      });
+      expect(holds([failing], ["atlas"])).toEqual([{ trait: "atlas", why: "unhealthy" }]);
+      expect(holds([plain(), failing], ["atlas"])).toEqual([{ trait: "atlas", why: "unhealthy" }]);
     });
   });
 });

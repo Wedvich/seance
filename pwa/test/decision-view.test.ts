@@ -539,12 +539,43 @@ describe("waitingText and pinLine", () => {
       ...waiting([]),
       spec: { repo: "github.com/acme/app", mode: "worktree", requires },
     });
-    expect(requiresLine(waiting([]), machines)).toBeNull();
-    expect(requiresLine(needing(["gpu"]), machines)).toBe("Needs gpu (on WSL)");
-    expect(requiresLine(needing(["atlas"]), machines)).toBe("Needs atlas (on Box, Mac, Pi, +2 more)");
-    expect(requiresLine(needing(["gpu", "nosuch"]), machines)).toBe(
+    expect(requiresLine(waiting([]), machines, NOW)).toBeNull();
+    expect(requiresLine(needing(["gpu"]), machines, NOW)).toBe("Needs gpu (on WSL)");
+    expect(requiresLine(needing(["atlas"]), machines, NOW)).toBe("Needs atlas (on Box, Mac, Pi, +2 more)");
+    expect(requiresLine(needing(["gpu", "nosuch"]), machines, NOW)).toBe(
       "Needs gpu (on WSL) · Needs nosuch — no machine has it",
     );
+  });
+
+  test("requiresLine names a machine whose probe fails apart from the healthy ones, and the machines when several", () => {
+    const probed = (deviceId: string, name: string, failing: boolean): Machine => ({
+      ...machine(deviceId, name),
+      exclaves: [
+        { id: "default", accountId: "org:a", extraUsageEnabled: null, authOk: true, skills: [], traits: ["atlas"] },
+      ],
+      status: { at: NOW_S - 10, scan: 1, ...(failing ? { tf: [[0, 0]] } : {}) },
+    });
+    const needing: Task = {
+      ...waiting([]),
+      spec: { repo: "github.com/acme/app", mode: "worktree", requires: ["atlas"] },
+    };
+    const line = (...machines: Machine[]) => requiresLine(needing, machines, NOW);
+    expect(line(probed("a", "Mac", false), probed("b", "Thad", false))).toBe("Needs atlas (on Mac, Thad)");
+    expect(line(probed("a", "Mac", true))).toBe("Needs atlas (Mac's probe is failing)");
+    expect(line(probed("a", "Mac", true), probed("b", "Thad", false))).toBe(
+      "Needs atlas (on Thad; Mac's probe is failing)",
+    );
+    expect(line(probed("a", "Mac", true), probed("b", "Thad", true))).toBe("Needs atlas (probe failing on Mac, Thad)");
+    // A stale status is no reading: the line falls back to the plain list.
+    const stale: Machine = { ...probed("a", "Mac", false), status: { at: NOW_S - 3600, scan: 1, tf: [[0, 0]] } };
+    expect(line(stale)).toBe("Needs atlas (on Mac)");
+  });
+
+  test("a place whose probe fails is left out of waitingText whole, as an absent trait is", () => {
+    const unhealthy: Reason = { code: "trait_unhealthy", trait: "atlas" };
+    const task = waiting([rejected("a", "Probed", [unhealthy, over]), rejected("c", "Carries", [over])]);
+    expect(waitingText(task)).toBe(`Carries · work: ${reasonText(over)}`);
+    expect(waitingText(waiting([rejected("a", "Probed", [unhealthy])]))).toBeNull();
   });
 
   test("pinLine words the machine and account from display labels, and is null without a pin", () => {

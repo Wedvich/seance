@@ -193,6 +193,32 @@ describe("config reload failure paths", () => {
     await awaitRestart(testRelay, connectionsBefore);
   });
 
+  test("a swap, and a rollback, arm the trait probes `via: reload`; the first start does not", async () => {
+    const testRelay = startTestRelay(TOKEN);
+    relay = testRelay;
+    const path = await configFile();
+    await writeConfig(path, "Healthy", testRelay.url);
+
+    const seen: (string | undefined)[] = [];
+    const start = async (opts: RunOpts): Promise<DaemonHandle> => {
+      seen.push(opts.traitProbes?.via);
+      if (opts.config?.name === "Rejected") throw new Error("injected startDaemon failure");
+      return startDaemon(opts);
+    };
+    await startSupervised(path, { startDaemon: start });
+    await registerAs(testRelay, "Healthy");
+    expect(seen).toEqual([undefined]);
+
+    await writeConfig(path, "Renamed", testRelay.url);
+    await reload();
+    await registerAs(testRelay, "Renamed");
+    expect(seen).toEqual([undefined, "reload"]);
+
+    await writeConfig(path, "Rejected", testRelay.url);
+    await reload();
+    expect(seen).toEqual([undefined, "reload", "reload", "reload"]);
+  });
+
   test("a reload that throws leaves the supervisor able to reload again", async () => {
     const testRelay = startTestRelay(TOKEN);
     relay = testRelay;

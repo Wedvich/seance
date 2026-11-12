@@ -1177,6 +1177,20 @@ export interface MachineStatus {
    */
   readonly au?: readonly number[];
   /**
+   * Trait probes reading failing (M4, Traits), each `[exclave index, trait index into that
+   * exclave's `ExclaveInfo.traits`]` — the registered blob's, so a reader range-checks both
+   * against the info it holds. Routing rejects the exclave for a task requiring that trait
+   * (`trait_unhealthy`). Disjoint from `tu`, at most `STATUS_MAX_TRAIT_PAIRS` across both,
+   * `tf` first, and never trimmed. A reader refuses more, or a pair repeated within or across
+   * the two. Absent from older daemons (which ignore it), and when none is failing.
+   */
+  readonly tf?: readonly (readonly [number, number])[];
+  /**
+   * Trait probes not yet known, as `tf`'s pairs: not run yet, or the last run timed out or
+   * could not start. Still placed; says nothing. Disjoint from `tf`, never trimmed.
+   */
+  readonly tu?: readonly (readonly [number, number])[];
+  /**
    * The daemon's task-launch gate is closed (`EndedTasks.drain`: a self-update's
    * restart, or a shutdown), so a task launch sent now is refused `internal_error`
    * and sits reserved until its TTL; routing filters the machine (`draining`).
@@ -1195,6 +1209,9 @@ export interface MachineStatus {
  * code for nothing.
  */
 export const STATUS_MAX_AUTH_EXPIRED = 16;
+
+/** `MachineStatus.tf` and `tu` pairs at most, combined; `tf` first. */
+export const STATUS_MAX_TRAIT_PAIRS = 16;
 
 /**
  * A refresh token's remaining life at which an exclave reads `expiring`: Claude
@@ -2139,8 +2156,8 @@ export type Reason =
   /** M4, Traits: the task requires `trait` and this exclave's `ExclaveInfo.traits` lacks it. One reason per missing trait. */
   | { readonly code: "trait_absent"; readonly trait: string }
   /**
-   * M4, Traits: the exclave declares `trait` but its probe is failing. Emitted only by
-   * the probes PR; parsed and worded now so a reader of this build does not drop it.
+   * M4, Traits: the exclave declares `trait` and its probe reads failing (its pair is in the
+   * status's `tf`). An unknown probe (`tu`, or a stale status) is not this reason.
    */
   | { readonly code: "trait_unhealthy"; readonly trait: string }
   /**

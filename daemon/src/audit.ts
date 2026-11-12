@@ -1,7 +1,8 @@
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { access, appendFile, chmod, mkdir, open, stat } from "node:fs/promises";
 import { userInfo } from "node:os";
-import { dirname } from "node:path";
+import { basename, dirname } from "node:path";
 import {
   DEFAULT_EFFORT,
   DEFAULT_MODEL,
@@ -536,5 +537,65 @@ export function updateAudit(origin: UpdateOrigin, sink: AuditSink): UpdateAudit 
     checking: (sha: string): Promise<void> => emit(`checking head=${sha.slice(0, 12)}`),
     outcome: (outcome: UpdateOutcome, detail?: string): Promise<void> =>
       emit(`outcome=${outcome}${detail === undefined ? "" : ` detail=${quote(detail)}`}`),
+  };
+}
+
+/**
+ * What ran a trait probe: only ever the daemon itself, on its own cadence, from the argv its own
+ * `config.json` names (`trait-probes.ts`). Not a spawn, but an exec surface, and a new surface
+ * adds an origin, never reuses one.
+ */
+export type ProbeOrigin = "probe";
+
+/** Why this daemon is arming: a process start, or a config reload swapping the daemon in place. */
+export type ProbeVia = "start" | "reload";
+
+/** The unit a line is about. A trait name and an exclave id both passed their name rules, so they are written bare. */
+export interface ProbeUnitAudit {
+  readonly trait: string;
+  readonly exclave?: string;
+  readonly everyMinutes: number;
+  readonly timeoutSeconds: number;
+  readonly argv: readonly string[];
+}
+
+export type ProbeOutcomeAudit =
+  | { readonly state: "healthy" }
+  | { readonly state: "failing"; readonly exit: number }
+  | { readonly state: "unknown"; readonly why: string };
+
+export interface ProbeAudit {
+  readonly armed: (unit: ProbeUnitAudit, via: ProbeVia) => Promise<void>;
+  readonly result: (unit: ProbeUnitAudit, outcome: ProbeOutcomeAudit) => Promise<void>;
+}
+
+/**
+ * The argv is never written: a word count, a SHA-256 prefix that says "the command changed", and the
+ * program's basename (the one word an operator needs to tell two probes apart) stand for it. A token
+ * pasted into an argv word must not reach the log, and neither may anything the probe printed (its
+ * stdio is ignored, never read).
+ */
+export function probeAudit(sink: AuditSink): ProbeAudit {
+  const emit = async (rest: string): Promise<void> => {
+    await sink(`audit probe origin=probe ${rest}`);
+  };
+  const who = (unit: ProbeUnitAudit): string =>
+    `trait=${unit.trait}${unit.exclave === undefined ? "" : ` exclave=${unit.exclave}`}`;
+  return {
+    armed: (unit, via) =>
+      emit(
+        `op=armed ${who(unit)} every=${unit.everyMinutes}m timeout=${unit.timeoutSeconds}s argv=${unit.argv.length} ` +
+          `argvSha=${createHash("sha256").update(unit.argv.join("\0")).digest("hex").slice(0, 12)} ` +
+          `argv0=${quote(basename(unit.argv[0] ?? ""))} via=${via}`,
+      ),
+    result: (unit, outcome) => {
+      const detail =
+        outcome.state === "failing"
+          ? ` exit=${outcome.exit}`
+          : outcome.state === "unknown"
+            ? ` why=${outcome.why}`
+            : "";
+      return emit(`op=result ${who(unit)} state=${outcome.state}${detail}`);
+    },
   };
 }
