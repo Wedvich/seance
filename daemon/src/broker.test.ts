@@ -224,6 +224,10 @@ describe("parseBrokerRequest on scheduler frames", () => {
       schedulerOp: "run-now",
       taskId: TASK_ID,
     });
+    expect(parsedRequest(frame({ schedulerOp: "pass", taskId: TASK_ID }))).toMatchObject({
+      schedulerOp: "pass",
+      taskId: TASK_ID,
+    });
     expect(parsedRequest(enqueue())).toMatchObject({ schedulerOp: "enqueue", taskId: TASK_ID });
   });
 
@@ -236,6 +240,8 @@ describe("parseBrokerRequest on scheduler frames", () => {
     ["a cancel without a task id", frame({ schedulerOp: "cancel" }), "invalid_request"],
     ["a cancel of an id that is not one", frame({ schedulerOp: "cancel", taskId: "../x" }), "invalid_request"],
     ["a run-now of an id that is not one", frame({ schedulerOp: "run-now", taskId: "../x" }), "invalid_request"],
+    ["a pass of an id that is not one", frame({ schedulerOp: "pass", taskId: "../x" }), "invalid_request"],
+    ["a pass with no task id", frame({ schedulerOp: "pass" }), "invalid_request"],
     ["an enqueue with a bad task id", enqueue({}, { taskId: "not an id" }), "invalid_request"],
     ["an enqueue with no spec", frame({ schedulerOp: "enqueue", taskId: TASK_ID }), "invalid_request"],
     ["an unparseable spec", enqueue({ mode: "sideways" }), "invalid_request"],
@@ -512,19 +518,23 @@ describe("the broker's scheduler actions", () => {
     const queue = { at: 1, tasks: [] };
     const { broker, fakes, lines } = rig((op) => (op === "queue" ? queue : { task: { id: TASK_ID } }), {
       scheduler: LEADING,
+      capabilities: [CAPABILITIES.successor],
     });
     expect(await broker.handle(frame({ schedulerOp: "queue" }))).toMatchObject({ ok: true, data: queue });
     await broker.handle(frame({ id: "c1", schedulerOp: "cancel", taskId: TASK_ID }));
     await broker.handle(frame({ id: "r1", schedulerOp: "run-now", taskId: TASK_ID, extra: "dropped" }));
+    await broker.handle(frame({ id: "p1", schedulerOp: "pass", taskId: TASK_ID, extra: "dropped" }));
     // Rebuilt from the id alone: nothing else the peer sent reaches the leader.
     expect(fakes[0]?.requests.map((sent) => [sent.op, sent.payload])).toEqual([
       ["queue", {}],
       ["cancel", { taskId: TASK_ID }],
       ["run-now", { taskId: TASK_ID }],
+      ["pass", { taskId: TASK_ID }],
     ]);
     expect(lines).toContain(`audit broker origin=local-broker action=scheduler op="cancel" task="${TASK_ID}" id="c1"`);
     expect(lines).toContain('audit broker origin=local-broker ok id="c1"');
     expect(lines).toContain(`audit broker origin=local-broker action=scheduler op="run-now" task="${TASK_ID}" id="r1"`);
+    expect(lines).toContain(`audit broker origin=local-broker action=scheduler op="pass" task="${TASK_ID}" id="p1"`);
     broker.stop();
 
     const none = rig();
@@ -532,12 +542,22 @@ describe("the broker's scheduler actions", () => {
       frame({ schedulerOp: "queue" }),
       frame({ schedulerOp: "cancel", taskId: TASK_ID }),
       frame({ schedulerOp: "run-now", taskId: TASK_ID }),
+      frame({ schedulerOp: "pass", taskId: TASK_ID }),
     ]) {
       // oxlint-disable-next-line no-await-in-loop -- sequential: each is its own broker reply
       expect(failed(await none.broker.handle(raw))).toMatchObject({ code: "request_failed", reason: "no_leader" });
     }
     expect(none.fakes[0]?.requests).toEqual([]);
     none.broker.stop();
+  });
+
+  test("a pass to a verified leader that does not advertise it is refused with the reason, nothing sent", async () => {
+    const { broker, fakes } = rig(undefined, { scheduler: LEADING });
+    const reply = failed(await broker.handle(frame({ schedulerOp: "pass", taskId: TASK_ID })));
+    expect(reply).toMatchObject({ code: "invalid_request" });
+    expect(reply.message).toContain("cannot pass a task to a successor");
+    expect(fakes[0]?.requests).toEqual([]);
+    broker.stop();
   });
 
   test("an unverified leader is refused as leader_unverified, nothing sent", async () => {

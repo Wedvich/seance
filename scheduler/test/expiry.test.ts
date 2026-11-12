@@ -61,6 +61,27 @@ describe("a lost task", () => {
     expect(fleet.despawns).toEqual([]);
   });
 
+  test("one that was passed to a successor settles superseded, marked left running, and releases the successor", async () => {
+    const { clock, scheduler, put } = setup();
+    await put("t", { ...lost(NOW - LOST_MS - 1), successor: "s" });
+    await put("s", {
+      spec: spec({
+        succeeds: {
+          task: "t",
+          account: "org:a",
+          at: { deviceId: "a", exclave: "main", clone: "app" },
+          trigger: "manual",
+        },
+      }),
+    });
+    await scheduler.load();
+    await pass(scheduler);
+    expect(scheduler.task("t")).toMatchObject({ state: "superseded", successor: "s", leftRunning: true });
+    expect(clock.now).toBe(NOW);
+    // Admission runs after expiry in the same pass: the successor is blocked no longer.
+    expect(scheduler.task("s")?.state).toBe("ready");
+  });
+
   test("ages from createdAt when its record has no absentSince", async () => {
     const { scheduler, put } = setup();
     await put("t", { state: "lost", assignment: ON_A, createdAt: NOW - LOST_MS - 1 });

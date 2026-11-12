@@ -15,7 +15,7 @@ import {
 import { attachmentsRoot } from "./attachments.ts";
 import { auditLogChecks, cliSink, despawnAudit, reapAudit, spawnAudit } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
-import { cmdContinueAuto, cmdSpawnAuto, cmdStartAuto } from "./cli-auto.ts";
+import { cmdContinueAuto, cmdPassAuto, cmdSpawnAuto, cmdStartAuto } from "./cli-auto.ts";
 import { installMods, modChecks, uninstallMods } from "./claude-mod.ts";
 import { DespawnFailure, SpawnFailure } from "./backend.ts";
 import {
@@ -331,6 +331,24 @@ export function parseStartArgs(argv: readonly string[]): StartCliArgs {
 /** Starts a queued task now, past the concurrency cap (`cli-auto.ts`) — the app's Start now. */
 export async function cmdStart(argv: readonly string[]): Promise<void> {
   return cmdStartAuto(parseStartArgs(argv));
+}
+
+export interface PassCliArgs {
+  readonly taskId: string;
+}
+
+const PASS_USAGE = "usage: seanced pass <task-id>";
+
+/** Exported for tests. */
+export function parsePassArgs(argv: readonly string[]): PassCliArgs {
+  const [taskId] = argv;
+  if (taskId === undefined || argv.length !== 1 || taskId.startsWith("-")) throw new Error(PASS_USAGE);
+  return { taskId };
+}
+
+/** Passes a running task to a successor: pushes its branch, ends its session, queues the task that carries on (`cli-auto.ts`). */
+export async function cmdPass(argv: readonly string[]): Promise<void> {
+  return cmdPassAuto(parsePassArgs(argv));
 }
 
 /**

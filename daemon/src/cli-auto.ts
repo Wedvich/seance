@@ -4,6 +4,7 @@ import { cliSink, traitRefusalAudit, type AuditSink } from "./audit.ts";
 import {
   continueAuto,
   enqueueAuto,
+  passAuto,
   pinAccountGateError,
   placementInputError,
   placementNeedsPinAccount,
@@ -21,7 +22,7 @@ import {
   type PlacementInput,
   type PlacementNames,
 } from "./auto.ts";
-import type { ContinueCliArgs, SpawnCliArgs, StartCliArgs } from "./cli.ts";
+import type { ContinueCliArgs, PassCliArgs, SpawnCliArgs, StartCliArgs } from "./cli.ts";
 import { BrokerError, type BrokerCallOpts } from "./broker-client.ts";
 import { loadConfig, loadPsk, type Config } from "./config.ts";
 import {
@@ -253,6 +254,43 @@ export async function startTaskAuto(
   } finally {
     lease.release();
   }
+}
+
+/** `seanced pass`: MCP's `pass_task` (`passAuto`) from this shell, through its key or the daemon's broker. */
+export async function passTaskAuto(
+  args: PassCliArgs,
+  fleet: Fleet,
+  opts: { readonly keyless?: boolean } = {},
+): Promise<AutoEnqueued> {
+  let lease: FleetLease;
+  try {
+    lease = await fleet.open();
+  } catch (err) {
+    const why = err instanceof BrokerError ? brokerFailureText(err) : err instanceof Error ? err.message : String(err);
+    return failed(
+      opts.keyless === true
+        ? `pass: not sent — this shell could not read the PSK, so the daemon's broker was the only way to the scheduler, and it failed: ${why}`
+        : `pass: not sent — ${why}`,
+    );
+  }
+  try {
+    if (lease.scheduler === null) return failed(`pass unavailable: ${SCHEDULER_NEEDS_NEWER_DAEMON}`);
+    return await passAuto({ machines: lease.machines, scheduler: lease.scheduler }, args.taskId, "cli");
+  } finally {
+    lease.release();
+  }
+}
+
+export async function cmdPassAuto(args: PassCliArgs): Promise<void> {
+  const config = await loadConfig();
+  const built = await autoFleet(config);
+  const outcome = await passTaskAuto(args, built.fleet, { keyless: built.keyless }).finally(() => built.fleet.stop());
+  if (!outcome.ok) {
+    console.error(outcome.text);
+    process.exit(1);
+  }
+  console.log(outcome.text);
+  process.exit(0);
 }
 
 export async function cmdStartAuto(args: StartCliArgs): Promise<void> {

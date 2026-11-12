@@ -150,6 +150,16 @@ PATH, and the key as delivered. `sudo --preserve-env=PATH "$(command -v seanced)
 leaving the sealed blob (a TPM blob can't be recreated from a backup) and the `seanced`
 name on PATH, which belongs to a user whose PATH root can't see.
 
+### Pushing a task's branch (passing to a successor)
+
+`seanced pass` and the app's **Pass to successor** make the task's machine run `git push` of its
+branch to `origin`. That push uses the operator's own git credentials (their git config and
+credential helper or ssh agent, non-interactive: `GIT_TERMINAL_PROMPT=0`), the same ones the daemon
+already uses to fetch; séance holds no extra credential. On a Linux service the unit must be able to
+reach them (an ssh agent or a helper that works without a login session), or the pass is refused
+`push_failed` and nothing ends. The push refuses a repo-local `remote.*.pushurl` and
+`url.*.pushinsteadof`, as the fetch path does.
+
 ## WSL
 
 `systemd=true` under `[boot]` in `/etc/wsl.conf` is a prerequisite, not a tweak:

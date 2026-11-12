@@ -325,6 +325,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         CAPABILITIES.runNow,
         CAPABILITIES.attachments,
         CAPABILITIES.traits,
+        CAPABILITIES.successor,
         ...(authHealth === null ? [] : [CAPABILITIES.authHealth]),
       ],
     };

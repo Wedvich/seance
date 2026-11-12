@@ -3020,6 +3020,137 @@ describe("start_task", () => {
   });
 });
 
+describe("pass_task", () => {
+  const AT = { deviceId: "device-2", exclave: "work", clone: "seance" };
+  const passing = task({
+    id: "t-1",
+    state: "running",
+    spec: { repo: ORIGIN, mode: "worktree", prompt: "fix it" },
+    assignment: { ...AT, window: "fix-it" },
+  });
+
+  /** The leader (device-1) and the task's box (device-2), each advertising `successor` unless held back. */
+  function passingMachines(opts: { readonly leader?: boolean; readonly box?: boolean } = {}): Machine[] {
+    const [leader, box] = autoMachines();
+    return [
+      machine({ ...leader, ...(opts.leader === false ? {} : { capabilities: [CAPABILITIES.successor] }) }),
+      machine({ ...box, ...(opts.box === false ? {} : { capabilities: [CAPABILITIES.successor] }) }),
+    ];
+  }
+
+  async function callPass(
+    answer: () => unknown,
+    opts: { readonly machines?: readonly Machine[]; readonly tasks?: readonly Task[] } = {},
+  ): Promise<{ text: string; error: boolean; fake: FakeRelay }> {
+    const fake = fakeRelay(opts.machines ?? passingMachines(), (op) => {
+      if (op === "queue") return { tasks: opts.tasks ?? [passing], at: 6_000 };
+      if (op === "pass") return answer();
+      return new Error(`unexpected ${op}`);
+    });
+    fake.setState({ scheduler: LEADING });
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    try {
+      const result = await client.callTool({ name: "pass_task", arguments: { taskId: "t-1" } });
+      return { text: toolText(result), error: result.isError === true, fake };
+    } finally {
+      lazy.stop();
+    }
+  }
+
+  test("sends pass once for a running task and names the successor", async () => {
+    const { text, error, fake } = await callPass(() => ({
+      task: { ...passing, state: "superseded", successor: "t-2" },
+      successorId: "t-2",
+      successor: null,
+    }));
+    expect(error).toBe(false);
+    expect(text).toContain("task t-1 passed to successor t-2");
+    expect(fake.requests).toEqual([
+      { deviceId: SCHEDULER_ID, op: "queue", payload: {} },
+      { deviceId: SCHEDULER_ID, op: "pass", payload: { taskId: "t-1" } },
+    ]);
+  });
+
+  test("a task the shared rule refuses, or a leader or box that cannot, sends no pass", async () => {
+    const cases = [
+      [
+        "a leader that predates it",
+        { machines: passingMachines({ leader: false }) },
+        "its daemon needs `seanced update`",
+      ],
+      ["a box that predates it", { machines: passingMachines({ box: false }) }, "can't push for a successor yet"],
+      ["a task waiting on a person", { tasks: [{ ...passing, state: "needs-input" }] }, "waiting for you"],
+      ["a task that is not running", { tasks: [{ ...passing, state: "ready" }] }, "only a running task"],
+      ["a task already passed", { tasks: [{ ...passing, successor: "t-2" }] }, "already been passed"],
+      ["a task not in the list", { tasks: [] }, "is not in the leader's list"],
+    ] as const;
+    for (const [name, opts, said] of cases) {
+      // oxlint-disable-next-line no-await-in-loop -- one relay per case
+      const result = await callPass(() => new Error("must not be asked"), opts);
+      expect({ name, error: result.error, text: result.text }).toEqual({
+        name,
+        error: true,
+        text: expect.stringContaining(said),
+      });
+      expect(result.fake.requests.map((r) => r.op)).not.toContain("pass");
+    }
+  });
+
+  test("refusals are worded, and a lost or crashed answer may have landed", async () => {
+    const dirty = await callPass(() => ({ ok: false, code: "dirty_worktree", message: "x" }));
+    expect(dirty.error).toBe(true);
+    expect(dirty.text).toContain("pass_task refused (dirty_worktree)");
+    expect(dirty.text).not.toContain("may have landed");
+    const lost = await callPass(() => new RequestFailure("timeout", "no reply within 180000ms"));
+    expect(lost).toMatchObject({
+      error: true,
+      text: expect.stringContaining("the pass may have landed anyway — check get_queue"),
+    });
+    const big = await callPass(() => ({ ok: false, code: "too_large", message: "x" }));
+    expect(big.text).toContain("the pass may have landed anyway");
+  });
+
+  test("get_queue marks a task that can be passed, one that was, and the one that carries on", async () => {
+    const fake = leaderRelay(
+      [
+        {
+          tasks: [
+            passing,
+            { ...passing, id: "t-0", state: "superseded", successor: "t-3" },
+            {
+              id: "t-3",
+              state: "blocked",
+              createdAt: 4_000,
+              spec: {
+                repo: ORIGIN,
+                mode: "worktree",
+                succeeds: { task: "t-0", account: "acct", at: AT, trigger: "manual" },
+              },
+            },
+          ],
+          at: 6_000,
+        },
+      ],
+      passingMachines(),
+    );
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    try {
+      const listed = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} }))) as {
+        tasks: Record<string, unknown>[];
+      };
+      const by = (id: string) => listed.tasks.find((t) => t["id"] === id);
+      expect(by("t-1")).toMatchObject({ passable: true });
+      expect(by("t-0")).toMatchObject({ passedTo: "t-3" });
+      expect(by("t-0")).not.toHaveProperty("passable");
+      expect(by("t-3")).toMatchObject({ succeeds: "t-0" });
+    } finally {
+      lazy.stop();
+    }
+  });
+});
+
 describe("continue_task", () => {
   const AT = { deviceId: "device-2", exclave: "work", clone: "seance" };
   const failedTask = task({

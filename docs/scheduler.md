@@ -1181,7 +1181,8 @@ of M4 has landed.
     at `checkpoint` or `auto`, answers a turn ending on a plain-text "shall I proceed?" with one
     nudge to proceed or ask it properly. First check that an engine hook can continue a turn.
 
-- **Successor** — _Decided_ by the owner, 2026-11-12 (O1–O3 below); spec only, nothing built. A task
+- **Successor** — _Decided_ by the owner, 2026-11-12 (O1–O3 below); the outside path (2a) is built
+  (2026-11-12), the session's own (2b) and the automatic trigger are not. A task
   running on an account that runs out of usage passes its work to a **successor**: a new task, free
   to land on another account, that starts from the old task's pushed branch and a written record of
   where it stood. Quota failover is the reason: a task that is half done when its account's 5-hour
@@ -1191,12 +1192,12 @@ of M4 has landed.
   above), which ends a session whose work is finished and whose PR awaits merge. A pass moves work
   that is not finished. No identifier of this feature may contain the hand-off's names; the act is a
   **pass**, the new task the **successor**, the old one **`superseded`**. The record is DESIGN.md's
-  "Passing to a successor — designed 2026-11-12, not built".
+  "Passing to a successor".
   1. **Spec** — **Done** (this item and DESIGN.md), PR 1.
   2. **Manual path**, in two PRs. A person or the session itself passes a running task. The old
      machine's daemon pushes the clean branch, the leader creates the successor and links the two,
      and the old session is closed.
-     - **2a, from outside** — not built: the PWA's "Pass to successor" on a running card,
+     - **2a, from outside** — **Done** (2026-11-12): the PWA's "Pass to successor" on a running card,
        `seanced pass <task-id>` and MCP `pass_task { taskId }`. One scheduler op, `pass`, behind all
        three; the successor's prompt is the fallback one (below).
      - **2b, from the session** — not built: MCP `pass_to_successor { record }`. The session commits
@@ -1245,8 +1246,8 @@ of M4 has landed.
       record's end, with a fixed closing line and a log line `pass record cut`; the preamble never.
       With no record (every outside pass, or a session that sends none) the leader composes the
       prompt: the preamble, the old prompt (cut to fit), the remote branch, the PR URLs and the
-      Linear key. The preamble tells the successor that it continues task `<old id>`, which a
-      session on another account began and pushed to `origin/<r>` at `<sha>`; that it is in a fresh
+      Linear key. The preamble tells the successor that it continues task `<old id>`, which an
+      earlier session began and pushed to `origin/<r>` at `<sha>`; that it is in a fresh
       worktree on its own new branch, which it keeps; to run `git fetch origin <r>`,
       `git reset --hard origin/<r>` (the worktree is fresh, nothing is lost) and
       `git branch --set-upstream-to=origin/<r>`; to rebuild state from `git log`,
@@ -1256,12 +1257,17 @@ of M4 has landed.
       _Rejected:_ a state file committed on the branch; switching the successor's worktree to `<r>`.
     - **O2. The daemon pushes, on a clean tree only.** The old task's daemon pushes the worktree's
       local branch `<b>` to its **remote branch** `<r>` on `origin`: argv only, never forced, only
-      `refs/heads/<b>:refs/heads/<r>`. `<r>` is the branch's configured upstream when
+      `<b>`'s tip sha to `refs/heads/<r>`. `<r>` is the branch's configured upstream when
       `branch.<b>.remote` is exactly `origin` (daemon worktrees sit on `worktree-<name>` while
       sessions push `HEAD:martin/…`, so `<b>` alone would leave a stray branch beside the PR's),
       else, for a branch with no upstream (an upstream on another remote counts as none): the PR head
-      the leader read, when origin's tip of it is an ancestor of the local tip (else `branch_mismatch`,
-      nothing pushed), or, with no PR head, `<b>` (Q7 below). A dirty tree refuses `dirty_worktree`; the
+      the leader read, when origin's tip of it is an ancestor of the local tip and of no default
+      branch's tip, the default fetched with it (else `branch_mismatch`, nothing pushed; the default
+      branch itself is `default_branch`, and a fetch that fails for a reason other than a missing
+      branch, or a clone with no `origin/HEAD`, is `push_failed`), or, with no PR head, `<b>` (Q7 below).
+      A push refused as a non-fast-forward is `push_rejected`, unless origin's branch moved on past a
+      tip already in it (a GitHub "Update branch"): then the pass goes on with origin's tip, nothing
+      pushed. A dirty tree refuses `dirty_worktree`; the
       daemon makes no WIP commits. This is the daemon's first write to GitHub, so a threat-model
       change (D12). _Rejected:_ daemon WIP commits; never pushing; always pushing to `<b>`.
     - **O3. The automatic trigger is specced now and built later** (stage 3).
@@ -1292,8 +1298,13 @@ of M4 has landed.
       `superseded`, the states `parseTask` accepts it on, so a task a winner finishes drops it, and
       no write produces a record every reader would hold unreadable. A cancel or mark-done wins over
       the despawn's own `ended`: `#yieldToCancel` holds a `superseded` settle as it holds a `failed`
-      one, and `markDone` of a task carrying `successor` counts in `#cancelling` for its call, so
-      neither answers `superseded` or lets the successor run after the person said stop.
+      one, and `markDone` of a task carrying `successor`, or whose pass is in flight (it may commit
+      while the despawn runs), counts in `#cancelling` for its call, so
+      neither answers `superseded` or lets the successor run after the person said stop. The other
+      order wins too: a pass refuses `conflict` while a `cancel` or `mark-done` is out (`#stopping`), at
+      its start, after the push and inside the commit write. A stop whose despawn fails writes
+      nothing: a pass it raced stands and is closed at its grace; a mark-done asked again before
+      then wins.
     - **D5. The successor waits for its predecessor.** It is released only when the predecessor is
       `superseded` naming it; `blocked` while the predecessor is unfinished, unreadable, or missing
       inside `DEP_MISSING_GRACE_MS`; `done` by `merged` when the predecessor was merged (the same answer
@@ -1317,8 +1328,8 @@ of M4 has landed.
       the daemon deferring a `despawn` reply; the daemon closing on the `pass` frame alone (it would
       close a session whose pass the leader then refused).
     - **D7. The successor's spec** (`successorSpec`, `shared/src/successor.ts`) carries `repo`,
-      `mode: "worktree"`, `title`, `model`, `effort`, `until`, `linear`, `skill`, `avoid`, `autonomy`
-      and `plan`, the last two as `continuationSpec` carries them: `auto` and `checkpoint` stay, so an
+      `mode: "worktree"`, `title`, `model`, `effort`, `until`, `linear`, `skill`, `avoid`, `requires`,
+      `autonomy` and `plan`, the last two as `continuationSpec` carries them: `auto` and `checkpoint` stay, so an
       unattended failover does not stop at its first choice, and `steer` becomes
       `autonomy: "checkpoint"` with `plan` dropped, since the plan was approved. It drops `pin` (an
       account pin is the old account by definition), `deps`, `batch`, `lineage`, `base`, `continues`
@@ -1326,8 +1337,12 @@ of M4 has landed.
       `"session"` or `"manual"` until stage 3 adds `"quota"`. The task also carries the old
       `prUrl` and `prs`, so the PR chip and poller follow.
     - **D8. A forward-compat gate.** `SUCCESSOR_DEP_SENTINEL`, an empty-task-id dep, is appended by
-      the one task sealer whenever `succeeds` is present, as `ATTACHMENTS_DEP_SENTINEL` is, so an
-      older leader holds the record unreadable. _Rejected:_ a new `mode`: the spawn is a plain
+      the one task sealer whenever `succeeds` is present, as `ATTACHMENTS_DEP_SENTINEL` and
+      `REQUIRES_DEP_SENTINEL` are, so an older leader holds the record unreadable; its `after` is
+      `done`, against `merged` and `opened`, so the parser ties each sentinel to its own field when a
+      successor also carries `requires` (a copy of the old task's, D7); a new leader's `openTaskRecord` holds a stored one
+      carrying `succeeds` without it `malformed` (not `parseTask`, which also reads unsealed replies).
+      _Rejected:_ a new `mode`: the spawn is a plain
       worktree spawn and no daemon needs to know about successors to run one.
     - **D9. Placement.** Any clone is a candidate, the old one included: the successor never checks
       out the remote branch under its own name, so no local branch is shared across worktrees.
@@ -1335,7 +1350,9 @@ of M4 has landed.
       for `trigger: "quota"`; a manual or session pass relies on the quota filter, and is also how a
       long session gives a fresh context to an account with headroom. A successor never spills into
       credits: in `judgeAccount` the spill branch becomes `quota_over_line`, so it holds `ready`
-      with reasons rather than spending money the owner did not choose to spend (Q3).
+      with reasons rather than spending money the owner did not choose to spend (Q3). The successor
+      carries the old task's `requires` (D7), so the traits filter applies as to any task: only
+      exclaves declaring them are candidates, and none ready holds it `ready` with `trait_absent`.
     - **D10. Dependents follow the chain.** Admission resolves a predecessor through
       `superseded → successor` links, at most `SUCCESSOR_CHAIN_MAX` (8) hops, before judging
       `released`; a chain too long or looping reads `blocked`. Pruning keeps every link a waiting
@@ -1389,10 +1406,13 @@ of M4 has landed.
       needs a daemon-side spawn change this item avoids.
     - **Q7. No upstream, PR open on another branch.** A rate-limited session cannot set its own
       upstream, so refusing would strand the case the feature exists for. When the branch has no
-      upstream on `origin` and the scheduler-sealed `push-branch` carries `expect` (the PR head the
-      leader read), the daemon validates it with the same ref-format rule, fetches it, and pushes
-      `refs/heads/<b>:refs/heads/<expect>` only if that remote tip is an ancestor of the local tip:
-      the PR head is this worktree's own line of work. Otherwise `branch_mismatch`, nothing pushed.
+      upstream on `origin` (an upstream on another remote counts as none) and the scheduler-sealed
+      `push-branch` carries `expect` (the PR head the leader read), the daemon validates it with the
+      same ref-format rule, fetches it with the default branch, and pushes `<tip sha>:refs/heads/<expect>`
+      only if that remote tip is an ancestor of the local tip and not already in the default branch:
+      the PR head is this worktree's own line of work. A head that is the default branch is
+      `default_branch`; otherwise `branch_mismatch`, nothing pushed (a fetch that fails for any other
+      reason than a missing branch is `push_failed`).
       A branch with no upstream and no PR pushes to `<b>`. An upstream that is set always wins and
       is never overridden by `expect`. The value comes only from a request the scheduler sealed,
       never a session frame. The self path has no `expect` (the daemon has no PR head), but its

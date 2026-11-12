@@ -26,6 +26,7 @@ import {
   PR_MERGE_STATES,
   PR_STATES,
   PUSH_ALERT_MAX_BYTES,
+  PUSH_BRANCH_ERROR_CODES,
   PUSH_ENDPOINT_MAX_LENGTH,
   PUSH_LABEL_MAX_LENGTH,
   PUSH_MAX_SUBSCRIPTIONS,
@@ -46,6 +47,8 @@ import {
   SIGKILL_STATUS,
   STORE_KEY_PATTERN,
   STORE_PREFIXES,
+  SUCCESSOR_DEP_SENTINEL,
+  SUCCESSOR_TRIGGERS,
   TARGET_LIMITS,
   TASK_FAILURE_LIMITS,
   TASK_PRS_MAX,
@@ -57,7 +60,10 @@ import {
   type BatchMembership,
   type FleetQuotaEntry,
   type FleetQuotaRecord,
+  type PassReply,
   type PushAlert,
+  type PushBranchRequest,
+  type PushBranchResponse,
   type PushSubscribeReply,
   type PushSubscribeRequest,
   type PushSubscriptionEntry,
@@ -860,14 +866,26 @@ export function parseTaskSpec(value: unknown): TaskSpec | null {
   const avoids = avoid === undefined ? undefined : parseAvoid(avoid);
   const lineal = lineage === undefined ? undefined : parsePlacement(lineage);
   const resumes = continues === undefined ? undefined : parseContinues(continues);
+  const follows = value["succeeds"] === undefined ? undefined : parseSucceeds(value["succeeds"]);
   const builds = base === undefined ? undefined : parsePlacement(base);
   const member = batch === undefined ? undefined : parseBatch(batch);
   const files = value["attachments"] === undefined ? undefined : parseAttachmentManifest(value["attachments"]);
   const needs = value["requires"] === undefined ? undefined : parseRequires(value["requires"]);
-  const edges = deps === undefined ? undefined : parseDeps(deps, files !== undefined, needs !== undefined);
+  const edges =
+    deps === undefined
+      ? undefined
+      : parseDeps(deps, {
+          attached: files !== undefined,
+          required: needs !== undefined,
+          succeeding: follows !== undefined,
+        });
   const issue = linear === undefined ? undefined : parseLinear(linear);
   if (pinned === null || avoids === null || lineal === null || builds === null || member === null) return null;
-  if (issue === null || resumes === null || files === null || needs === null) return null;
+  if (issue === null || resumes === null || files === null || needs === null || follows === null) return null;
+  // A successor is a plain worktree spawn that resets its own branch: a resumed session or files would contradict that.
+  if (follows !== undefined && (request.mode !== "worktree" || resumes !== undefined || files !== undefined)) {
+    return null;
+  }
   if (files !== undefined && (request.mode === "continue" || (request.prompt?.length ?? 0) > ATTACHMENT_LIMITS.prompt))
     return null;
   // The mode is what an older leader refuses, so the field never travels without it.
@@ -890,25 +908,37 @@ export function parseTaskSpec(value: unknown): TaskSpec | null {
     ...(resumes === undefined ? {} : { continues: resumes }),
     ...(files === undefined ? {} : { attachments: files }),
     ...(needs === undefined ? {} : { requires: needs }),
+    ...(follows === undefined ? {} : { succeeds: follows }),
   };
 }
 
 /**
- * Each sentinel (`ATTACHMENTS_DEP_SENTINEL`, `REQUIRES_DEP_SENTINEL`) is dropped before
- * the bound applies, and only beside its field: one without it is a record something
- * stripped the field from — or a sentinel with nothing it guards — and fails `isTaskId`,
- * nulling the spec. A requirement stripped is the reverse, `requires` without its
+ * Each sentinel (`ATTACHMENTS_DEP_SENTINEL`, `REQUIRES_DEP_SENTINEL`, `SUCCESSOR_DEP_SENTINEL`) is
+ * dropped before the bound applies, and only beside its field: one without it is a record
+ * something stripped the field from — or a sentinel with nothing it guards — and fails
+ * `isTaskId`, nulling the spec. A requirement stripped is the reverse, `requires` without its
  * sentinel, and reads fine: no leader older than this one wrote it. Deps that were
  * sentinels alone read as none, as the spec was before sealing.
  */
-function parseDeps(value: unknown, attached: boolean, required: boolean): readonly TaskDep[] | null | undefined {
+type DepGuards = { readonly attached: boolean; readonly required: boolean; readonly succeeding: boolean };
+
+function parseDeps(value: unknown, guards: DepGuards): readonly TaskDep[] | null | undefined {
   if (!Array.isArray(value)) return null;
   const real = value.filter(
-    (dep) => !((attached && isAttachmentsSentinel(dep)) || (required && isRequiresSentinel(dep))),
+    (dep) =>
+      !(guards.attached && isAttachmentsSentinel(dep)) &&
+      !(guards.required && isRequiresSentinel(dep)) &&
+      !(guards.succeeding && isSuccessorSentinel(dep)),
   );
   if (real.length === 0 && value.length > 0) return undefined;
   const edges = parseList(real, parseDep);
   return edges === null || edges.length > TASK_SPEC_LIMITS.deps ? null : edges;
+}
+
+function isSuccessorSentinel(value: unknown): boolean {
+  return (
+    isRecord(value) && value["task"] === SUCCESSOR_DEP_SENTINEL.task && value["after"] === SUCCESSOR_DEP_SENTINEL.after
+  );
 }
 
 function isAttachmentsSentinel(value: unknown): boolean {
@@ -956,6 +986,16 @@ function parseAttachmentRef(value: unknown): AttachmentRef | null {
   return { id, name, type, size, hash };
 }
 
+/** `account` is an exclave's `accountId` as the leader read it: held to the same bound as a pin's. */
+function parseSucceeds(value: unknown): TaskSpec["succeeds"] | null {
+  if (!isRecord(value)) return null;
+  const { task, account } = value;
+  const at = parseTarget(value["at"]);
+  const trigger = SUCCESSOR_TRIGGERS.find((t) => t === value["trigger"]);
+  if (!isTaskId(task) || !isAccountId(account) || at === null || trigger === undefined) return null;
+  return { task, account, at, trigger };
+}
+
 function parseContinues(value: unknown): TaskSpec["continues"] | null {
   if (!isRecord(value)) return null;
   const { task } = value;
@@ -1001,6 +1041,7 @@ function parseReason(value: unknown): Reason | null {
     case "pressure_unknown":
     case "repo_absent":
     case "continue_elsewhere":
+    case "predecessor_account":
     case "continue_unsupported":
     case "attachments_unsupported":
     case "auth_missing":
@@ -1304,10 +1345,16 @@ export function parseTask(value: unknown): Task | null {
     absentSince,
     reservedAt,
     leftRunning,
+    successor,
   } = value;
   if (!isTaskId(id) || !isFiniteNumber(createdAt)) return null;
   const known = TASK_STATES.find((s) => s === state);
   if (known === undefined) return null;
+  // Held to the states a pass lives in, so no writer produces a record every reader would hold unreadable:
+  // `advance` drops it elsewhere. A `superseded` task without it names nothing for its dependents to follow.
+  const passing = known === "running" || known === "needs-input" || known === "lost";
+  if (successor !== undefined && (!isTaskId(successor) || !(passing || known === "superseded"))) return null;
+  if (known === "superseded" && successor === undefined) return null;
   const parsedSpec = parseTaskSpec(spec);
   if (parsedSpec === null) return null;
   const placed = assignment === undefined ? undefined : parseAssignment(assignment);
@@ -1354,6 +1401,7 @@ export function parseTask(value: unknown): Task | null {
     ...(absentSince === undefined ? {} : { absentSince }),
     ...(reservedAt === undefined ? {} : { reservedAt }),
     ...(leftRunning === undefined ? {} : { leftRunning }),
+    ...(successor === undefined ? {} : { successor }),
     ...progress,
     ...(pr === null ? {} : { pr }),
     ...(prs === null ? {} : { prs }),
@@ -1404,6 +1452,8 @@ export function bindTaskRecord(
   if (record.task.createdAt > now + REPLAY_WINDOW_MS) return "created_ahead";
   // A task that continues itself has no earlier launch to resume; the daemon would only refuse it, so it never dispatches.
   if (record.task.spec.continues?.task === record.task.id) return "malformed";
+  // Likewise a successor of itself: it would wait on its own `superseded` for ever.
+  if (record.task.spec.succeeds?.task === record.task.id) return "malformed";
   return record;
 }
 
@@ -1745,6 +1795,33 @@ export function parseTaskRef(value: unknown): TaskRef | null {
   return isRecord(value) && isTaskId(value["taskId"]) ? { taskId: value["taskId"] } : null;
 }
 
+/**
+ * `push-branch`, at the daemon holding the task. `expect`, when given, is a branch name the daemon
+ * will hand to git, so it is held to `isBranchName` here, once, for every route in.
+ */
+export function parsePushBranchRequest(value: unknown): PushBranchRequest | null {
+  if (!isRecord(value) || !isTaskId(value["taskId"])) return null;
+  const { expect } = value;
+  if (expect === undefined) return { taskId: value["taskId"] };
+  return isBranchName(expect) ? { taskId: value["taskId"], expect } : null;
+}
+
+/** A `push-branch` answer at the leader: `remoteBranch` is validated before it is compared or named in a prompt. */
+export function parsePushBranchResponse(value: unknown): PushBranchResponse | null {
+  if (!isRecord(value)) return null;
+  if (value["ok"] === false) {
+    const code = PUSH_BRANCH_ERROR_CODES.find((c) => c === value["code"]);
+    return code === undefined || typeof value["message"] !== "string"
+      ? null
+      : { ok: false, code, message: value["message"] };
+  }
+  const { remoteBranch, tip, pushed } = value;
+  if (value["ok"] !== true || !isBranchName(remoteBranch) || typeof tip !== "string" || !COMMIT_OID.test(tip)) {
+    return null;
+  }
+  return typeof pushed === "boolean" ? { ok: true, remoteBranch, tip, pushed } : null;
+}
+
 /** `pause`, at the leader. `reset` without an account is malformed: it would be no account's reset. */
 export function parsePauseRequest(value: unknown): PauseRequest | null {
   if (!isRecord(value)) return null;
@@ -1833,6 +1910,16 @@ export function parseTaskReply(value: unknown): TaskReply | null {
   if (isRecord(value) && value["ok"] === false) return parseSchedulerError(value);
   const task = isRecord(value) ? parseTask(value["task"]) : null;
   return task === null ? null : { task };
+}
+
+/** `pass` replies. The successor is display-only, so one this build cannot read costs the field, not the reply. */
+export function parsePassReply(value: unknown): PassReply | null {
+  if (isRecord(value) && value["ok"] === false) return parseSchedulerError(value);
+  if (!isRecord(value) || !isTaskId(value["successorId"])) return null;
+  const task = parseTask(value["task"]);
+  if (task === null) return null;
+  const successor = value["successor"] === null ? null : parseTask(value["successor"]);
+  return { task, successorId: value["successorId"], successor };
 }
 
 /** `pause` and `resume` replies. */

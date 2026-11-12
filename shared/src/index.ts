@@ -19,3 +19,4 @@ export * from "./continue-task.ts";
 export * from "./pr-blocked.ts";
 export * from "./slot-timer.ts";
 export * from "./traits.ts";
+export * from "./successor.ts";

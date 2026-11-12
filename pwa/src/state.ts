@@ -245,10 +245,10 @@ export interface AccountsState {
   readonly notice: string | null;
 }
 
-/** A task's action on its way to the leader (a continue: to the store); the row shows it busy. */
+/** A task's action on its way to the leader (a continue: to the store; a pass: the leader, which pushes first and answers last); the row shows it busy. */
 export interface TaskAction {
   readonly taskId: string;
-  readonly op: "cancel" | "mark-done" | "run-now" | "continue";
+  readonly op: "cancel" | "mark-done" | "run-now" | "continue" | "pass";
 }
 
 export type HistoryResult =

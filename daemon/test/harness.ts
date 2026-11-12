@@ -306,8 +306,29 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
         leader === null || relay.schedulerTerm === null ? null : { deviceId: leader, term: relay.schedulerTerm },
     } satisfies RelayToAppFrame);
 
+  /** An app's create: `expect: 0`, refused over a held key or a tombstone; the record lands at version 1. */
+  const createRecord = (
+    key: string,
+    env: Envelope,
+  ): { readonly ok: true; readonly version: number } | { readonly ok: false; readonly code: string } => {
+    if (!isStoreKey(key)) return { ok: false, code: "invalid_request" };
+    if (tombstones.has(key) || records.has(key)) return { ok: false, code: "version_conflict" };
+    records.set(key, { version: 1, env });
+    return { ok: true, version: 1 };
+  };
+
   const onAppMessage = (ws: Bun.ServerWebSocket<Role>, text: string): void => {
     const frame = JSON.parse(text) as AppFrame;
+    if (frame.t === "store-put") {
+      if (relay.holdStoreReplies) return;
+      // The app leg creates only; an overwrite is the term's, which the leader's own leg never claims.
+      const made = frame.expect === 0 ? createRecord(frame.key, frame.env) : { ok: false as const, code: "forbidden" };
+      const reply: StoreReplyFrame = made.ok
+        ? { t: "store-written", re: frame.id, version: made.version }
+        : refused(frame.id, made.code);
+      ws.send(JSON.stringify(reply));
+      return;
+    }
     if (frame.t === "store-get") {
       if (relay.holdStoreReplies) return;
       const held = isStoreKey(frame.key) ? records.get(frame.key) : undefined;
@@ -491,13 +512,11 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
       records.set(key, { version, env });
     },
     appWrite: (key, env) => {
-      if (!isStoreKey(key)) return { ok: false, code: "invalid_request" };
-      if (tombstones.has(key) || records.has(key)) return { ok: false, code: "version_conflict" };
-      records.set(key, { version: 1, env });
-      if (leader !== null) {
+      const made = createRecord(key, env);
+      if (made.ok && leader !== null) {
         daemons.get(leader)?.send(JSON.stringify({ t: "store-changed", key, version: 1 }));
       }
-      return { ok: true, version: 1 };
+      return made;
     },
     dropDaemon: (deviceId): void => {
       daemons.get(deviceId)?.close(1000, "dropped by the test relay");
