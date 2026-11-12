@@ -5045,9 +5045,9 @@ of this section built.
   will sit on permission prompts until answered from the phone.
 - **`plan` is the one opt-in exception** (added 2026-08-29). The bullet above
   rejects a _default_ mode flag, not a caller-chosen one: `SpawnRequest.plan`
-  is an optional boolean that, when true, emits `--permission-mode plan` and
-  nothing else changes. Absent or false, the command string is byte-identical
-  to what every client sent before, so the ambient default stands. It exists
+  is an optional boolean that, when true, emits `--permission-mode plan` (plus
+  the bypass allowance below) and nothing else changes. Absent or false, the
+  command string is byte-identical to what every client sent before, so the ambient default stands. It exists
   for the MCP tool, where the calling model can read "plan the implementation
   of X" out of a request and set it — a surface with no human picking flags is
   exactly where the intent is legible and a picker is not. Deliberately binary:
@@ -5059,6 +5059,21 @@ of this section built.
   `seanced spawn` does not take it either; the field is on the wire, so adding
   either later is a client change with no protocol change. Old daemons ignore
   it, exactly as they ignore `client`.
+  **Bypass stays reachable** (added 2026-11-12). Any mode flag replaces the
+  settings default, and claude offers bypass in the shift+tab cycle only when
+  the session starts in it or gets `--allow-dangerously-skip-permissions` — no
+  settings key grants it (`disableBypassPermissionsMode` only removes it). So on
+  a machine defaulting to bypass, a plan session could leave plan only for
+  `auto`. A plan spawn now reads the target exclave's user `settings.json`
+  (`exclaveSettingsFile`: `~/.claude` for `default`, `~/.claude-<id>` otherwise)
+  at spawn time, uncached, and adds the literal flag when
+  `permissions.defaultMode` is `bypassPermissions`. It grants a plan session
+  nothing an unflagged spawn on that machine doesn't already start in; it comes
+  from the daemon's own read, never the wire (the only wire input is still the
+  `plan` boolean). User settings only: a repo's `.claude/settings.json` or
+  `settings.local.json` is whoever committed it, and must not unlock bypass.
+  Missing, unreadable or misshapen settings leave the flag off and the spawn
+  running; non-plan spawns read nothing and stay byte-identical.
 - **Task ids** (added 2026-10-16, scheduler M2). `SpawnRequest.taskId` is the
   scheduler's dispatch idempotency key: a spawn naming a task some live pane
   already carries is refused `task_running` with that pane's id, before the repo
@@ -5945,7 +5960,7 @@ fields carry over), under the same gates.
   continues itself is not read at all (`bindTaskRecord` calls it malformed), so it never reaches a
   daemon. `not_continuable` fails the new task with the daemon's message; the old task stays `failed`.
 - **The argv.** As a worktree spawn, minus `--worktree` and the fetch: tmux `-c <path>`, `claude -n
-  <name> --remote-control --model … --effort …[ --permission-mode plan] --resume <session> -- < seed`.
+  <name> --remote-control --model … --effort …[ --permission-mode plan[ --allow-dangerously-skip-permissions]] --resume <session> -- < seed`.
   `<session>` is the id the old launch's note holds (above), through `shq()` though it is a UUID the
   daemon made; the name is the path's basename through `shq()`, and `continues` never enters the shell
   string. No `--fork-session`: the conversation keeps its id, so a continuation of the continuation

@@ -1288,7 +1288,9 @@ export interface SpawnRequest {
    * flag off entirely, so the session inherits the machine's own settings.json default —
    * the standing behaviour for every other caller. Boolean, not free text: the flag's value
    * is a literal, so unlike `title`/`model`/`effort` nothing wire-supplied reaches the
-   * command line. Optional: older clients don't send it, older daemons ignore it.
+   * command line. Optional: older clients don't send it, older daemons ignore it. The daemon
+   * adds `--allow-dangerously-skip-permissions` beside it when its own user settings default
+   * to `bypassPermissions`, so plan never hides bypass there (DESIGN.md, the `plan` bullet).
    */
   readonly plan?: boolean;
   /**

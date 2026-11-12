@@ -47,6 +47,11 @@ function exclaveConfigDir(home: string, id: string): string {
   return id === DEFAULT_EXCLAVE ? join(home, ".claude") : join(home, `.claude-${id}`);
 }
 
+/** The exclave's user `settings.json` — the machine owner's own, unlike a repo's `.claude/settings.json`. */
+export function exclaveSettingsFile(home: string, id: string): string {
+  return join(exclaveConfigDir(home, id), "settings.json");
+}
+
 /** The `.claude.json` an exclave's sessions read — `Exclave.configFile`, from the id alone. */
 export function exclaveConfigFile(home: string, id: string): string {
   return id === DEFAULT_EXCLAVE ? join(home, ".claude.json") : join(exclaveConfigDir(home, id), ".claude.json");
