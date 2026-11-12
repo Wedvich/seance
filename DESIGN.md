@@ -4479,8 +4479,8 @@ Where the build adds to or departs from the wording above:
   `verifiedLeaderAdvertises(relay, CAPABILITIES.attachments)`) is true. Files come from a
   file picker (`<input type="file" multiple>`) and from paste into the prompt, and since
   2026-11-02 from Android's share sheet (Share target, below).
-- **Before any upload** it checks the limits and says which one was hit. While files are
-  attached, the prompt counts against `ATTACHMENT_LIMITS.prompt`. `type` is `File.type`
+- **Before any upload** it checks the file limits and says which one was hit. While files are
+  attached, the prompt counts against `ATTACHMENT_LIMITS.prompt` (checked at the Queue press). `type` is `File.type`
   lowercased with any parameters stripped, or `application/octet-stream` when empty or
   outside the pattern. A name past 100 units is cut in the stem, keeping the extension.
 - **Upload**: for each file in order:
@@ -4488,12 +4488,14 @@ Where the build adds to or departs from the wording above:
   2. `sealAttachment`, then `attachmentHash`.
   3. `PUT` the object with `Content-Type: application/octet-stream`.
 
-  It shows "uploading 2 of 5". It keeps the id and hash of every `201` for the compose
-  session and re-uploads only the rest under fresh ids on a retry. Any non-`201` stops the
-  run and creates no task. `429` shows the allowance message with `retryAfter`. Once every
-  file is `stored`, it creates the task (`createTask`) with `attachments` in the spec.
-  Objects of a run that never became a task stay until the lifecycle rule expires them,
-  counted against the allowance.
+  Since 2026-11-12 each file uploads as soon as it is on the form (see "Upload at pick"
+  below); before, the run started at the Queue press. It keeps the id and hash of every
+  `201` for the compose session and re-uploads only the rest under fresh ids on a retry.
+  A non-`201` marks that file failed and creates no task. `429` shows the allowance message
+  with `retryAfter`. Once every file is `stored`, it creates the task (`createTask`) with
+  `attachments` in the spec. Objects that never became part of a task (a file removed
+  after it stored, a form abandoned) stay until the lifecycle rule expires them, counted
+  against the allowance.
 
 - **CSP**: `connect-src` gains the relay's `https:` origin (`http:` in dev) beside its
   `wss:` one (`securityHeaders` in `pwa/vite.config.ts`). Browsers' scheme upgrade from
@@ -4513,21 +4515,27 @@ Where the build adds to or departs from the wording above:
   every other relay call. A retry is a new call, so a fresh id.
 - **Drop** on the prompt card joins the picker and paste (desktop). Paste takes the
   clipboard's files; it suppresses the text paste only when there is no text.
-- **Progress is per file** ("Uploading 2 of 5…" on the Queue button). `fetch` reports no
-  upload progress, and the shared client also runs under Bun and Raycast, where
-  `XMLHttpRequest` does not exist.
+- **Progress is per file and per byte** (since 2026-11-12). `uploadAttachment(bytes, {
+  onProgress, signal })` sends the `PUT` over `XMLHttpRequest` where one exists (a browser),
+  for its `upload` progress events over the sealed object's bytes; under Bun and Raycast,
+  which have none, it keeps `fetch` and reports no progress. Same headers on both paths;
+  the relay's preflight already allows them. A `signal` that fires answers the local code
+  `aborted`. Before, progress was "Uploading 2 of 5…" on the Queue button alone, because
+  `fetch` reports no upload progress.
 - **Limits at pick time** (`admitFiles`, `pwa/src/attachments.ts`): a file over 30 MiB is
   skipped and the next tried; once 10 files are on the form nothing after is added; a
   file that would pass 100 MiB in all is skipped. One line under the list names each
-  left out and why. The prompt bound is checked at submit, before any upload.
+  left out and why. The prompt bound is checked at submit, before the create (since
+  2026-11-12 files have usually uploaded by then; before, it came ahead of any upload).
 - **Names**: control characters (the parser's forbidden set, now exported from
   `shared/src/parse.ts` with the type pattern) become `_`, an empty name is `file`, and a
   name past 100 units is cut in the stem, keeping an extension of up to 16 units, never
   splitting a surrogate pair.
 - **Files are not persisted**: a `File` can't be, so a reload drops them, unlike the
   prompt. They leave the form when a task carrying them is stored, matched by id.
-- **A refused upload** shows the unqueued verdict without **Try again**: back on the
-  form, Queue again uploads only the files not yet stored.
+- **A refused upload** marks its chip failed with a short reason ("Failed: limit
+  reached"). A Queue press with a failed file shows the unqueued verdict without **Try
+  again**: back on the form, Queue again re-uploads only the failed files.
 - **Not offered, files listed**: if the leader stops advertising `attachments` with files
   on the form, they stay listed (removable), the button reads "Can't attach files" and the
   status line under the prompt says why. `route-preview` carries `attachments: true` while files are listed.
@@ -4535,7 +4543,46 @@ Where the build adds to or departs from the wording above:
   on the form's chips.
 - **CSP**: `pwa/vite.config.ts` derives the `https:` origin with `attachmentUrl`, imported
   by relative path: the config is bundled and loads under node, where the workspace
-  package's raw TS cannot.
+  package's raw TS cannot. Since 2026-11-12 `img-src` also allows `blob:`, for the chips'
+  previews.
+
+### The PWA: upload at pick (2026-11-12)
+
+Uploads start when a file lands on the form rather than at the Queue press, so a task
+with files queues as soon as its last upload ends, and a refusal shows before the press.
+
+- **When**: a file admitted by pick, paste, drop or share starts at once while attaching
+  is offered (`deriveAttachmentsAvailability`). One admitted while it isn't (a share at
+  boot, a pick during a re-dial) waits and starts when the relay state next offers it.
+  Nothing goes while not offered, so the CLAUDE.md rule that files go only to a verified
+  leader advertising `attachments` holds for the upload as for the create.
+- **One at a time**, in list order (`#pumpUploads` in `pwa/src/store.ts`): each upload
+  holds the file and its sealed copy in memory, up to twice 30 MiB on a phone; the
+  phone's uplink is the bottleneck, so parallel uploads would not finish the set sooner;
+  and a `429` stops the next file spending allowance.
+- **Per-file state** (`UploadState`, `pwa/src/attachments.ts`): waiting, uploading with a
+  percent (held under 100 until the `201`), stored with id and hash, or failed with the
+  chip's short reason and the verdict's sentence. Failed files are not retried on their
+  own: a Queue press sends them again under fresh ids.
+- **Queue** runs its checks first (pin, prompt bound beside files, leader takes
+  attachments), then waits until nothing is uploading; the button reads "Uploading N of
+  M…". It creates the task only when every file still listed is stored. A failed file
+  stops it with that file's refusal; files still waiting because attaching stopped being
+  offered mid-wait stop it too.
+- **Remove** works at any time except while the create (or a settle wait, or a retry's
+  create) is out: removing a file mid-upload aborts its request, and the next starts.
+  While Queue waits on uploads, a file can still be removed and the task carries the
+  rest. Adding is locked from the Queue press on, as before.
+- **Chips**: two rows beside a 40px thumbnail: the name and × on the first, size and
+  state on the second ("PNG · 14 KB", "14 KB · 45%", "14 KB · waiting", "Failed: limit
+  reached"), with a bar along the bottom while uploading. An `image/*` file previews
+  through an object URL the chip makes in an effect and revokes on cleanup, so remove,
+  a stored task or leaving the screen frees it. An image the browser can't decode (HEIC
+  on Chrome) falls back to the file glyph with its extension.
+- **Cost**: allowance is spent at pick time. A file removed after it stored, or a form
+  abandoned, leaves an object no task names until the lifecycle rule expires it (30
+  days), counted against the allowance. Accepted: deleting needs a principal the relay
+  doesn't have (Rejected alternatives, "Deleting at task end").
 
 ### Share target (`pwa/src/share*.ts`) — built 2026-11-02
 
