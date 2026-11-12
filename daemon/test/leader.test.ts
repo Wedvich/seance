@@ -734,8 +734,8 @@ describe("leader requests", () => {
       }
     });
     expect(lines.filter((line) => line.includes("scheduler: task held by trait:"))).toEqual([
-      expect.stringContaining("scheduler: task held by trait: task=needy trait=atlas"),
-      expect.stringContaining("scheduler: task held by trait: task=needy trait=gpu"),
+      expect.stringContaining("scheduler: task held by trait: task=needy trait=atlas why=absent"),
+      expect.stringContaining("scheduler: task held by trait: task=needy trait=gpu why=absent"),
     ]);
     const admit = lines.find((line) => line.includes("op=admit"));
     expect(admit).toContain("avoid=2 requires=2 pin=1");
