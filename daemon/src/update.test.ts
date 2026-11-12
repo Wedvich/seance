@@ -7,7 +7,7 @@ import { exec } from "./exec.ts";
 import { pollUntil } from "../test/fixtures.ts";
 import { LaunchLedger } from "./launch-ledger.ts";
 import { EndedTasks, LaunchesClosed } from "./session-events.ts";
-import { createUpdater, type UpdateEffects, type Updater, type UpdaterOpts } from "./update.ts";
+import { createUpdater, updateNow, type UpdateEffects, type Updater, type UpdaterOpts } from "./update.ts";
 
 const cleanups: string[] = [];
 afterAll(async () => {
@@ -389,5 +389,124 @@ describe("self-update pipeline", () => {
 
     expect(h.reports).toEqual([]);
     expect(h.calls.install).toBe(0);
+  });
+});
+
+describe("seanced update", () => {
+  function manual(
+    restartError?: Error,
+    installFails = false,
+  ): {
+    readonly lines: string[];
+    readonly calls: { install: number; restart: number };
+    readonly effects: UpdateEffects;
+  } {
+    const lines: string[] = [];
+    const calls = { install: 0, restart: 0 };
+    return {
+      lines,
+      calls,
+      effects: {
+        install: async () => {
+          calls.install += 1;
+          return installFails ? { ok: false, detail: "lockfile mismatch" } : { ok: true };
+        },
+        restart: async () => {
+          calls.restart += 1;
+          if (restartError !== undefined) throw restartError;
+        },
+      },
+    };
+  }
+
+  test("fast-forwards, installs and restarts, audited under origin=cli", async () => {
+    const { upstream, checkout } = await makePair();
+    const target = await publish(upstream);
+    const m = manual();
+
+    const result = await updateNow({
+      root: checkout,
+      servingSha: null,
+      effects: m.effects,
+      sink: (line) => {
+        m.lines.push(line);
+      },
+    });
+
+    expect(result).toMatchObject({ outcome: "ok", restarted: true });
+    expect(await runGit(checkout, ["rev-parse", "HEAD"])).toBe(target);
+    expect(m.calls).toEqual({ install: 1, restart: 1 });
+    expect(m.lines.some((l) => l.startsWith("audit update origin=cli outcome=ok"))).toBe(true);
+  });
+
+  test("a current checkout restarts only a daemon still serving an older sha", async () => {
+    const { checkout } = await makePair();
+    const head = await runGit(checkout, ["rev-parse", "HEAD"]);
+    const sink = (): void => {};
+
+    const onHead = manual();
+    const same = await updateNow({ root: checkout, servingSha: head, effects: onHead.effects, sink });
+    expect(same).toMatchObject({ outcome: "current", restarted: false });
+    expect(onHead.calls.restart).toBe(0);
+
+    const none = manual();
+    expect(await updateNow({ root: checkout, servingSha: null, effects: none.effects, sink })).toMatchObject({
+      restarted: false,
+    });
+
+    const stale = manual();
+    const result = await updateNow({ root: checkout, servingSha: "0".repeat(40), effects: stale.effects, sink });
+    expect(result).toMatchObject({ outcome: "current", restarted: true });
+    // Installed first: HEAD may be where an earlier install failed.
+    expect(stale.calls).toEqual({ install: 1, restart: 1 });
+  });
+
+  test("a stale daemon is not restarted onto a checkout whose install fails", async () => {
+    const { checkout } = await makePair();
+    const lines: string[] = [];
+    const m = manual(undefined, true);
+
+    const result = await updateNow({
+      root: checkout,
+      servingSha: "0".repeat(40),
+      effects: m.effects,
+      sink: (line) => {
+        lines.push(line);
+      },
+    });
+
+    expect(result).toEqual({ outcome: "install_failed", detail: "lockfile mismatch", restarted: false });
+    expect(m.calls).toEqual({ install: 1, restart: 0 });
+    expect(lines.some((l) => l.includes("origin=cli outcome=install_failed"))).toBe(true);
+  });
+
+  test("a refusal never restarts, even a stale daemon", async () => {
+    const { upstream, checkout } = await makePair();
+    await publish(upstream);
+    await appendFile(join(checkout, "f.txt"), "local edit\n");
+    const m = manual();
+
+    const result = await updateNow({ root: checkout, servingSha: "0".repeat(40), effects: m.effects, sink: () => {} });
+
+    expect(result).toMatchObject({ outcome: "skipped_dirty", restarted: false });
+    expect(m.calls).toEqual({ install: 0, restart: 0 });
+  });
+
+  test("a failed restart is the outcome, and audited", async () => {
+    const { upstream, checkout } = await makePair();
+    await publish(upstream);
+    const m = manual(new Error("kickstart denied"));
+
+    const result = await updateNow({
+      root: checkout,
+      servingSha: null,
+      effects: m.effects,
+      sink: (line) => {
+        m.lines.push(line);
+      },
+    });
+
+    expect(result).toEqual({ outcome: "restart_failed", detail: "kickstart denied", restarted: false });
+    expect(m.lines.some((l) => l.includes("origin=cli outcome=restart_failed"))).toBe(true);
   });
 });

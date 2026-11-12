@@ -18,6 +18,8 @@ usage: seanced [command]
   link        put seanced on PATH — a symlink to this file, so it tracks git pull: seanced link [dir]
   unlink      remove the PATH symlink (only ones pointing at this checkout)
   restart     restart the service (after git pull)
+  update      what a fleet update announce does, by hand: fast-forward the daemon's own checkout, bun install, restart
+              (refuses a dirty, re-branched or diverged checkout; restarts a daemon still on an older sha even when current)
   doctor      preflight checks: config, binaries, roots, relay, service
   status      service / socket / scan status
   scan        discover repos now; caches for the next start unless a daemon is running
@@ -96,6 +98,9 @@ async function runCommand(command: string, rest: readonly string[]): Promise<voi
       break;
     case "restart":
       await cli.cmdRestart();
+      break;
+    case "update":
+      await cli.cmdUpdate(rest);
       break;
     case "doctor":
       await cli.cmdDoctor();

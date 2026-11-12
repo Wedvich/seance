@@ -55,6 +55,7 @@ import {
 } from "./service.ts";
 import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts";
 import { scanRepos } from "./scan.ts";
+import { defaultUpdateEffects, updateNow } from "./update.ts";
 import { checkoutRoot, describeCheckout, readSource, servingRoot, trimRoot } from "./selfsource.ts";
 import { deregisterMachine } from "./deregister.ts";
 import { livePid, loadOrInitState, pidAlive, readRuntime, readState, saveState } from "./state.ts";
@@ -798,6 +799,41 @@ export async function cmdUnlink(): Promise<void> {
 export async function cmdRestart(): Promise<void> {
   await restartService();
   console.log("restarted");
+}
+
+/**
+ * What an announce does, from a shell: fast-forward the clone the live daemon serves from (this
+ * one when none runs), install, restart. The same refusals hold — a dirty, re-branched or diverged
+ * checkout is left alone — and the restart is `seanced restart`'s, not the self-update's exit.
+ */
+export async function cmdUpdate(argv: readonly string[]): Promise<void> {
+  if (argv.length > 0) throw new Error("usage: seanced update");
+  const runtime = await readRuntime();
+  const alive = runtime !== null && pidAlive(runtime.pid);
+  const root = servingRoot(runtime, alive) ?? trimRoot(checkoutRoot());
+  const servingSha = alive && typeof runtime?.sha === "string" ? runtime.sha : null;
+  console.log(`updating ${tildify(root)}`);
+  const result = await updateNow({
+    root,
+    sink: cliSink,
+    servingSha,
+    effects: { ...defaultUpdateEffects(), restart: restartService },
+  });
+  const detail = result.detail === undefined ? "" : ` — ${result.detail}`;
+  if (result.outcome === "ok") {
+    console.log(`updated${detail}; restarted`);
+    return;
+  }
+  if (result.outcome === "current") {
+    console.log(
+      result.restarted
+        ? `already current; restarted the daemon onto ${tildify(root)}'s HEAD`
+        : "already current — nothing to do",
+    );
+    return;
+  }
+  console.error(`update ${result.outcome}${detail}`);
+  process.exit(1);
 }
 
 export async function cmdSessions(): Promise<void> {
