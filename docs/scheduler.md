@@ -940,7 +940,7 @@ of M4 has landed.
     the first draft, and a keyring-backed CLI fails in one, so a probe would say failing for a trait a
     session reaches), stdio ignored and never logged, one probe at a time per daemon, every
     `everyMinutes` (at least 5, at most 1440, default 30; a failing or unknown one reruns at the
-    5-minute floor) and killed after `timeoutSeconds` (1–30, default 10). Exit 0 is healthy, any other exit is
+    5-minute floor) and killed after `timeoutSeconds` (1–30, default 10), and its process group killed when it exits on its own, so it leaves nothing running. Exit 0 is healthy, any other exit is
     failing, a timeout or spawn error is unknown. Failing is carried in `status` as
     `tf: [[exclaveIndex, traitIndex], …]` (at most 16, never trimmed, like `ax`); unknown routes,
     as for auth. Every probe runs once at daemon start, and a trait not yet probed is carried as

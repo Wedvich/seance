@@ -204,7 +204,10 @@ Edit `~/.config/seance/config.json`:
   `everyMinutes` (5 to 1440), one probe at a time, with the environment a session gets. Exit 0 is
   healthy, any other exit is failing: a task requiring the trait is not placed on that exclave and
   waits, and `get_queue` and the app say so; a failing probe is retried every 5 minutes. A probe that
-  times out or cannot start reads as unknown, which still routes. Prefer an absolute path for
+  times out or cannot start reads as unknown, which still routes. When the probe exits, the daemon
+  kills whatever it left running in its process group, so a probe must not start an agent or any
+  background process it expects to outlive it: wait for it in the probe, or the process is killed
+  with the probe's exit. Prefer an absolute path for
   `argv[0]`: a bare name resolves through the daemon's own `PATH`, which a launchd or systemd service
   sets and a shell does not. Test the command as the installed service sees it, not only from your
   terminal: a CLI that keeps its login in the macOS keychain or a keyring (`az`, `gh`) can pass in a

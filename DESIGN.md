@@ -917,9 +917,11 @@ nothing checked it. The last is the gap they leave.
   as an argv array, never a shell string, with the environment a session gets (the daemon's, less
   `CREDENTIALS_DIRECTORY`, which `exec` always strips) plus `CLAUDE_CONFIG_DIR` for an exclave-scoped
   trait. Its stdio is ignored, so nothing it prints is read or logged, one probe runs at a time in the
-  whole process, and a run past its timeout is killed by process group. It audits under its own
-  origin, `probe`, with a word count, a 12-hex hash of the argv and the program's basename, never an
-  argv word or any output (`daemon/src/trait-probes.ts`). What leaves the box is `tf`/`tu` index pairs
+  whole process, and a run past its timeout is killed by process group, as is a run that exits on its
+  own (below, "Outcomes"). It audits under its own origin, `probe`, with a word count, a 12-hex hash
+  of the argv and `argv[0]`'s basename, never another argv word or any output
+  (`daemon/src/trait-probes.ts`). The basename is the one argv text that reaches a line, so it is
+  verbatim for a bare program name: a secret does not belong in `argv[0]`. What leaves the box is `tf`/`tu` index pairs
   in the `status`, nothing else. This is not a boundary against a same-uid session: such a session can
   already write `config.json` and run anything the daemon can, so the invariant is what the daemon
   does with a probe, not who may declare one. It was chosen over a bare environment because a probe has
@@ -6223,7 +6225,8 @@ of this section built.
   - **Units.** One per trait, machine-wide, or one per listed exclave present in the scan for a trait
     with `exclaves` (`trait` and `trait/exclaveId` keys). An exclave-scoped unit runs with
     `CLAUDE_CONFIG_DIR` set to that exclave's config dir (unset for `default`), so a CLI that reads
-    Claude's own settings judges that exclave. An exclave that appears after boot arms at first sight.
+    Claude's own settings judges that exclave. An exclave that appears after boot arms on the next
+    `check`, within 60 s of the scan that found it; until then its pairs read `pending`, so `tu`.
   - **One at a time.** A module-level promise chain, `lane`, serialises every run in the process, even
     across the instances a config reload makes: a probe may spawn a heavyweight CLI, and a box of
     several must not run them together.
@@ -6231,8 +6234,10 @@ of this section built.
     again when the last run's start is `everyMinutes` old, or 5 minutes (`PROBE_FLOOR_MS`) while it is
     failing or unknown: a transient failure must not hold work for `everyMinutes` (30 by default),
     and the floor stops a failing probe from being hammered. A `check` timer (60 s) finds the due
-    units; each run is deferred to the lane. `everyMinutes` is capped at 1440 because a reading older
-    than a day is a guess, and a hung `tu` would otherwise hide for a week.
+    units; each run is deferred to the lane. `everyMinutes` is capped at 1440 because a healthy reading
+    older than a day is a guess, and so that a typo (milliseconds for minutes) is refused at load rather
+    than silently parking a probe for weeks. The cap does not bound an unknown or failing reading,
+    which always reruns at the floor.
   - **Outcomes.** Exit 0 is healthy; any other exit is `failing`; a timeout, a spawn failure and a
     program that does not resolve (`not_found`) are `unknown` (the daemon cannot say), which still
     routes, as unread auth does. The program is resolved on each run: a bare name through
@@ -6242,6 +6247,15 @@ of this section built.
     ignored at the file descriptor, never piped, so a flood costs no memory) and a hard deadline of the
     timeout plus 2 s past which the run is abandoned, so a probe that ignores SIGKILL cannot hold the
     lane. `stop()` kills the running group with SIGKILL, only while its pid is unreaped.
+    _Decided: a probe that exits on its own also has its group SIGKILLed_ (`exec`'s `sweepGroup`, the
+    moment the leader's exit is observed), _because a probe repeats every 5 minutes while it fails, and
+    a CLI that forks a helper or a backgrounded `cmd &` would leave one more orphan on each run._ It is
+    the one signal `exec` sends after the reap, so it takes the risk `killAfterMs` avoids (a group id
+    reused in the gap between the reap and the callback; the id stays reserved while any member lives,
+    which is when there is something to sweep). The consequence: a probe cannot leave anything running
+    on purpose. One that starts an agent, a daemon or any background process has it killed as soon as
+    the probe's own process exits, so it must wait for the work it starts, or `setsid` it out of the group
+    (which the daemon then no longer tracks: such a process is the operator's to bound).
   - **Reporting.** `statusLists` turns the states into `tf`/`tu` through `exclaveTraitNames`, the same
     function `withTraits` stamps the register blob with, so a pair's trait index is the position in the
     list the leader reads. A change of any state fires `onChange` once per quiet drain, which asks the
