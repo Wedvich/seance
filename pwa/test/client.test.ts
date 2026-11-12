@@ -318,11 +318,13 @@ describe("registry", () => {
     const info = machineInfo("Archive Box");
     let archivist = await startFakeDaemon(relay, key, seat, info, {}, { roles: [DAEMON_ROLES.archivist] });
     let plain: Awaited<ReturnType<typeof startFakeDaemon>> | null = null;
+    const seatId = seat;
+    const isLiveSeat = (entry: RegistryView): boolean =>
+      entry.deviceId === seatId && entry.connected && entry.archivist === true;
     try {
       for (;;) {
         const frame = await raw.waitFor<{ t: "registry"; entries: readonly RegistryView[] }>("registry");
-        const entry = frame.entries.find((candidate) => candidate.deviceId === seat);
-        if (entry?.connected === true && entry.archivist === true) break;
+        if (frame.entries.some(isLiveSeat)) break;
       }
       const before = await waitFor((s) => s.registrySettled, "the first push");
       plain = await startFakeDaemon(relay, key, plainId, machineInfo("Plain Box"));

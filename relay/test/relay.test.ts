@@ -1654,7 +1654,11 @@ describe("archivist seat", () => {
     await seated.dispose();
   });
 
-  async function seen(app: Client, deviceId: string, matches: (entry: RegistryView) => boolean): Promise<RegistryFrame> {
+  async function seen(
+    app: Client,
+    deviceId: string,
+    matches: (entry: RegistryView) => boolean,
+  ): Promise<RegistryFrame> {
     for (;;) {
       const frame = await app.waitFor<RegistryFrame>("registry");
       const entry = frame.entries.find((candidate) => candidate.deviceId === deviceId);

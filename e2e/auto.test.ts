@@ -1537,7 +1537,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
         : [];
     };
     const sockets: Awaited<ReturnType<typeof connectDaemon>>[] = [];
-    const join = async (deviceId: string, roles?: readonly string[]): Promise<void> => {
+    const registerBox = async (deviceId: string, roles?: readonly string[]): Promise<void> => {
       const own = ownMachine(app.store.getState(), stack.deviceId);
       if (own === null) throw new Error("the suite's daemon is not listed");
       const info: MachineInfo = {
@@ -1557,13 +1557,13 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
         (state) => (ownMachine(state, stack.deviceId)?.repos.length ?? 0) > 0,
         "the suite's daemon listing its clone",
       );
-      await join(archivistId, [DAEMON_ROLES.archivist]);
+      await registerBox(archivistId, [DAEMON_ROLES.archivist]);
       await pollUntil(
         () => watch.connected(archivistId) && watch.entry(archivistId)?.archivist === true,
         "the seat registered and flagged",
       );
 
-      await join(plainId);
+      await registerBox(plainId);
       const seen = await app.waitForApp(
         (state) => ownMachine(state, plainId)?.connected === true,
         "the machine registered after the seat",
@@ -1578,7 +1578,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
 
       sockets.shift()?.close();
       await pollUntil(() => !watch.connected(archivistId), "the seat gone");
-      await join(archivistId);
+      await registerBox(archivistId);
       await app.waitForApp(
         (state) => ownMachine(state, archivistId)?.connected === true,
         "the same blob, registered without the role",
