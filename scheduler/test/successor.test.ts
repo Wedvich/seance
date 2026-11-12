@@ -386,7 +386,7 @@ describe("pass", () => {
       const result = ok(await s.scheduler.pass(old.id));
       expect(s.creates).toHaveLength(2);
       expect(result.task).toMatchObject({ state: "superseded", successor: s.creates[0]?.id });
-      expect(s.lines).toContain(`pass create unconfirmed task="${s.creates[0]?.id}"`);
+      expect(s.lines).toContain(`pass create unconfirmed task="${old.id}" successor="${s.creates[0]?.id}"`);
     });
 
     test("and no record seen there is pass_failed, with nothing despawned or named", async () => {
@@ -404,11 +404,16 @@ describe("pass", () => {
       const old = await running(s, false);
       landing(s, [unconfirmed]);
       const read = s.store.get.bind(s.store);
+      const readBack: string[] = [];
       s.store.get = async (id) => {
-        if (id !== old.id) throw new Error("transient");
-        return read(id);
+        if (id === old.id) return read(id);
+        readBack.push(id);
+        throw new Error("transient");
       };
       expect(await s.scheduler.pass(old.id)).toEqual({ ok: false, code: "pass_failed" });
+      // The create was re-sent, then read back (and the read threw): not a pass_failed taken at the first doubt.
+      expect(s.creates).toHaveLength(2);
+      expect(readBack).toEqual(s.creates.slice(0, 1).map((task) => task.id));
       expect(s.scheduler.task(old.id)?.successor).toBeUndefined();
     });
 

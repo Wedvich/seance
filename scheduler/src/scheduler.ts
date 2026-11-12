@@ -132,7 +132,7 @@ export interface SchedulerOptions {
   readonly prHead?: (prUrl: string) => Promise<PrHeadReading>;
   /**
    * One line per audited or measured event (`audit pass`, `pass joined`, `successor settled`,
-   * `successor placed`): never a branch name, a PR head or a record.
+   * `successor placed`, `pass create unconfirmed`): never a branch name, a PR head or a record.
    */
   readonly log?: (line: string) => void;
 }
@@ -169,8 +169,8 @@ export type RunNowResult =
  * `pass`: the old task and its successor, or why not. `ok` also answers a task that already carries
  * `successor` (a repeat pass, or a retry after a timeout), with that successor. `unrecorded`: the
  * term ended before the commit was written. `pass_failed` may follow a create that landed unseen: the
- * create is re-sent once and then read back, and a successor it left behind waits `blocked` and fails
- * `pass_abandoned` once the task ends. The codes are `SCHEDULER_ERROR_CODES`' (`not_found` is
+ * create is re-sent once and then read back, and a successor it left behind waits `blocked` and ends with the
+ * task: `done` (`merged`) when the task merges, `pass_abandoned` otherwise. The codes are `SCHEDULER_ERROR_CODES`' (`not_found` is
  * `task_not_found` on the wire).
  */
 export type PassResult =
@@ -1244,7 +1244,7 @@ export class Scheduler {
       ...(current.prUrl === undefined ? {} : { prUrl: current.prUrl }),
       ...(current.prs === undefined ? {} : { prs: current.prs }),
     };
-    if (!(await this.#createSuccessor(create, successor))) return { ok: false, code: "pass_failed" };
+    if (!(await this.#createSuccessor(create, successor, taskId))) return { ok: false, code: "pass_failed" };
 
     // Entered before the commit: no pass may see a task carrying `successor` that no entry covers.
     this.#passing.set(taskId, { deadline: this.#now() + PASS_CLOSE_GRACE_MS });
@@ -1292,14 +1292,19 @@ export class Scheduler {
    * may have landed, so the identical task (same id) is sent once more, which `createTask` reads as landed if the
    * first did; if that is unanswered too, the key is read back, and only a record seen there counts. A read-back
    * is one snapshot, so a create still in flight can land after it: that successor then waits `blocked` and
-   * fails `pass_abandoned` once the task ends, and a retry makes a new id. Accepted, and recorded in DESIGN.md.
+   * ends with the task (`done` if it merges, `pass_abandoned` otherwise), and a retry makes a new id. Accepted, and
+   * recorded in DESIGN.md.
    */
-  async #createSuccessor(create: (task: Task) => Promise<TaskCreateResult>, successor: Task): Promise<boolean> {
+  async #createSuccessor(
+    create: (task: Task) => Promise<TaskCreateResult>,
+    successor: Task,
+    taskId: string,
+  ): Promise<boolean> {
     let made = await create(successor);
     const doubted = !made.ok && made.unconfirmed === true;
     if (!made.ok && !doubted) return false;
     if (doubted) {
-      this.#log(`pass create unconfirmed task=${quote(successor.id)}`);
+      this.#log(`pass create unconfirmed task=${quote(taskId)} successor=${quote(successor.id)}`);
       made = await create(successor);
     }
     if (!made.ok) {

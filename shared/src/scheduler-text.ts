@@ -63,7 +63,7 @@ const SCHEDULER_ERROR_TEXT: Record<SchedulerErrorCode, string> = {
     "the push failed, timed out or was refused by the repo's config, or the machine did not answer; passing again pushes nothing new if it did land",
   not_launched: "the task's machine holds no worktree launch of it, so it has no branch to push",
   pass_failed:
-    "the successor could not be created, or its create went unanswered; one created anyway fails on its own once this task ends, and passing again is safe",
+    "the successor could not be created, or its create went unanswered; one created anyway ends on its own with this task (done if the task merges, failed otherwise), and passing again is safe",
 };
 
 /** A refusal's line; a code this build does not know is named rather than guessed at. */
