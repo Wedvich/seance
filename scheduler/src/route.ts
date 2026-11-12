@@ -217,11 +217,16 @@ function judge(
   if (rejected.length > 0 || status === undefined || account === null) return base;
 
   const placement = { deviceId: machine.deviceId, exclave: exclave.id };
+  // A penalty, never a filter: a kept-free exclave still takes the task when nothing cheaper can. Binary, so
+  // three kept-free traits are not three times as avoided; omitted at 0 so a record without one is unchanged.
+  const required = task.spec.requires ?? [];
+  const keepFree = (exclave.keepFree ?? []).some((trait) => !required.includes(trait)) ? 1 : 0;
   const components: ScoreComponents = {
     accountPressure: account.pressure,
     machinePressure: Math.max(status.cpu ?? 0, status.mem ?? 0) / 100,
     dependencyDistance: distance(task.spec.base, placement),
     queuePressure: inFlight.filter((t) => (t.assignment ?? t.reservation)?.deviceId === machine.deviceId).length,
+    ...(keepFree === 0 ? {} : { keepFree }),
   };
   const sticky = samePlacement(task.spec.lineage, placement) ? config.stickyBonus : 0;
   const { weights } = config;
@@ -229,7 +234,8 @@ function judge(
     weights.accountPressure * components.accountPressure +
     weights.machinePressure * components.machinePressure +
     weights.dependencyDistance * components.dependencyDistance +
-    weights.queuePressure * components.queuePressure -
+    weights.queuePressure * components.queuePressure +
+    weights.keepFree * keepFree -
     sticky;
   return { ...base, score: { components, sticky, total } };
 }
