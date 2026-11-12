@@ -8,6 +8,7 @@ import {
   CAPABILITIES,
   isRecord,
   QUEUE_MAX_TASKS,
+  SUCCESSOR_RECORD_MAX,
   RequestFailure,
   SCHEDULER_ID,
   TASK_FAILURE_LIMITS,
@@ -34,7 +35,7 @@ import { brokerFail, brokerOk } from "./broker-protocol.ts";
 import { resolveMachine, resolveOrigin, resolvePlacement, type PlacementInput } from "./auto.ts";
 import { brokerFleet, relayFleet, SCHEDULER_NEEDS_NEWER_DAEMON, selectFleet, type Fleet } from "./fleet.ts";
 import { LocalUnavailable } from "./local-client.ts";
-import type { handOff, reportDone } from "./report-done.ts";
+import type { handOff, passToSuccessor, reportDone } from "./report-done.ts";
 import {
   buildMcpServer,
   decisionText,
@@ -44,6 +45,7 @@ import {
   mcpScriptPath,
   ACCOUNT_LABEL_DEADLINE_MS,
   type LocalMachine,
+  type PassPoll,
 } from "./mcp.ts";
 
 interface FakeLocal extends LocalMachine {
@@ -77,6 +79,8 @@ async function connectedClient(
   audit: AuditSink = () => {},
   report?: typeof reportDone,
   handOffTask?: typeof handOff,
+  passOwnTask?: typeof passToSuccessor,
+  passPoll?: PassPoll,
 ): Promise<Client> {
   const fleet = relay instanceof LazyRelay ? relayFleet(relay) : relay;
   // Pinned, not auto: a fallback to the 2025 era would pass silently, and the
@@ -88,7 +92,9 @@ async function connectedClient(
     { versionNegotiation: { mode: { pin: "2026-07-28" } } },
   );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  serveStdio(() => buildMcpServer(fleet, local, audit, report, handOffTask), { transport: serverTransport });
+  serveStdio(() => buildMcpServer(fleet, local, audit, report, handOffTask, passOwnTask, passPoll), {
+    transport: serverTransport,
+  });
   await client.connect(clientTransport);
   return client;
 }
@@ -3483,5 +3489,147 @@ describe("continue_task", () => {
       ).not.toHaveProperty("continuable");
       lazy.stop();
     }
+  });
+});
+
+describe("pass_to_successor", () => {
+  const AT = { deviceId: "device-2", exclave: "work", clone: "seance" };
+  const active = task({
+    id: "t-1",
+    state: "running",
+    spec: { repo: ORIGIN, mode: "worktree", prompt: "fix it" },
+    assignment: { ...AT, window: "fix-it" },
+  });
+  const ACK = { taskId: "t-1", remoteBranch: "feature/x", tip: "a".repeat(40), pushed: true };
+  const FAST: PassPoll = { windowMs: 60, everyMs: 10 };
+
+  /** The leader (device-1), advertising `successorSelf` unless held back. */
+  function leaderMachines(capable = true): Machine[] {
+    const [leader, box] = autoMachines();
+    return [
+      machine({ ...leader, ...(capable ? { capabilities: [CAPABILITIES.successorSelf] } : {}) }),
+      machine({ ...box }),
+    ];
+  }
+
+  async function callSelf(
+    opts: {
+      readonly record?: string;
+      readonly pass?: Awaited<ReturnType<typeof passToSuccessor>>;
+      /** The queue read number n answers with this task list. */
+      readonly queued?: (n: number) => readonly Task[];
+      readonly machines?: readonly Machine[];
+      readonly leading?: boolean;
+    } = {},
+  ): Promise<{ text: string; error: boolean; passed: string[]; queueReads: number }> {
+    let reads = 0;
+    const fake = fakeRelay(opts.machines ?? leaderMachines(), (op) => {
+      if (op === "queue") return { tasks: opts.queued?.(reads++) ?? [active], at: 6_000 };
+      return new Error(`unexpected ${op}`);
+    });
+    if (opts.leading !== false) fake.setState({ scheduler: LEADING });
+    const passed: string[] = [];
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(
+      lazy,
+      null,
+      () => {},
+      undefined,
+      undefined,
+      (record) => {
+        passed.push(record);
+        return Promise.resolve(opts.pass ?? { ok: true, text: "pushed", pass: ACK });
+      },
+      FAST,
+    );
+    try {
+      const result = await client.callTool({
+        name: "pass_to_successor",
+        arguments: { record: opts.record ?? "done: a; left: b" },
+      });
+      return { text: toolText(result), error: result.isError === true, passed, queueReads: reads };
+    } finally {
+      lazy.stop();
+    }
+  }
+
+  test("is always offered, takes a record, and both pass tools point at the right one for their case", async () => {
+    const lazy = new LazyRelay({ create: () => fakeRelay([]) });
+    const client = await connectedClient(lazy);
+    try {
+      const { tools } = await client.listTools();
+      const own = tools.find((t) => t.name === "pass_to_successor");
+      const other = tools.find((t) => t.name === "pass_task");
+      expect(own?.annotations?.readOnlyHint).toBe(false);
+      expect(own?.description).toContain("`pass_task` is for other tasks");
+      expect(other?.description).toContain("To pass your own task use `pass_to_successor`");
+      expect(own?.inputSchema).toMatchObject({ required: ["record"] });
+    } finally {
+      lazy.stop();
+    }
+  });
+
+  test("a record over the bound is refused before the daemon is asked, so nothing is pushed", async () => {
+    const result = await callSelf({ record: "x".repeat(SUCCESSOR_RECORD_MAX + 1) });
+    expect(result.error).toBe(true);
+    expect(result.text).toContain("1 over the 7168 allowed");
+    expect(result.text).toContain("Nothing was pushed");
+    expect(result.passed).toEqual([]);
+    expect(result.queueReads).toBe(0);
+    // The bound itself is allowed.
+    expect(
+      (await callSelf({ record: "x".repeat(SUCCESSOR_RECORD_MAX), queued: () => [{ ...active, successor: "t-2" }] }))
+        .error,
+    ).toBe(false);
+  });
+
+  test("a leader that predates it, or none leading, refuses before the daemon pushes anything", async () => {
+    const old = await callSelf({ machines: leaderMachines(false) });
+    expect([old.error, old.passed]).toEqual([true, []]);
+    expect(old.text).toContain("needs `seanced update`");
+    expect(old.text).toContain("Nothing was pushed");
+    const none = await callSelf({ leading: false });
+    expect([none.error, none.passed]).toEqual([true, []]);
+    expect(none.text).toContain("no verified scheduler is leading");
+  });
+
+  test("a refusal from the daemon is the tool's error, in the daemon's words", async () => {
+    const result = await callSelf({
+      pass: { ok: false, text: "commit or stash your changes first; nothing was pushed" },
+    });
+    expect(result).toMatchObject({
+      error: true,
+      text: "pass_to_successor refused: commit or stash your changes first; nothing was pushed",
+      queueReads: 0,
+    });
+  });
+
+  test("a successor the leader recorded is named, and the session told to end its turn", async () => {
+    const result = await callSelf({ queued: () => [{ ...active, state: "superseded", successor: "t-2" }] });
+    expect(result.error).toBe(false);
+    expect(result.text).toContain("passed: the scheduler recorded successor t-2 for task t-1");
+    expect(result.text).toContain("end your turn now");
+    expect(result.passed).toEqual(["done: a; left: b"]);
+  });
+
+  test("the confirmation is polled for, and found when it lands within the window", async () => {
+    const result = await callSelf({ queued: (n) => [n < 2 ? active : { ...active, successor: "t-2" }] });
+    expect(result.text).toContain("recorded successor t-2");
+    expect(result.queueReads).toBe(3);
+  });
+
+  test("no successor within the window is told as such, not as a failure, and still ends the turn", async () => {
+    const result = await callSelf({ queued: () => [active] });
+    expect(result.error).toBe(false);
+    expect(result.text).toContain("the branch is pushed but no successor was recorded yet");
+    expect(result.text).toContain("end your turn now");
+    expect(result.queueReads).toBeGreaterThan(1);
+  });
+
+  test("an ok with no ack has nothing to confirm and says only that it was sent", async () => {
+    const result = await callSelf({ pass: { ok: true, text: "pushed, and the pass was sent to the scheduler" } });
+    expect(result.error).toBe(false);
+    expect(result.text).toContain("pushed, and the pass was sent to the scheduler.");
+    expect(result.queueReads).toBe(0);
   });
 });
