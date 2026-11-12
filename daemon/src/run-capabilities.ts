@@ -5,6 +5,7 @@ import type { SessionBackend } from "./backend.ts";
 import { createBranchStates, type BranchStateDeps } from "./branch-state.ts";
 import { brokerRelay, createBroker } from "./broker.ts";
 import { REAP_DEFAULTS, type Config, type ResolvedPsk } from "./config.ts";
+import type { AuthHealth } from "./auth-health.ts";
 import type { ExclaveScan } from "./exclaves.ts";
 import { platformFsmonitor } from "./fsmonitor.ts";
 import { createHandOff } from "./handoff.ts";
@@ -39,6 +40,8 @@ export interface WiringCtx {
   readonly endedTasks: EndedTasks;
   readonly repos: () => readonly RepoEntry[];
   readonly exclaveScan: () => ExclaveScan;
+  /** Null unless `RunOpts.authHealth` enabled it; its own capability runs its timer, and the refresh reads and pokes it. */
+  readonly authHealth: AuthHealth | null;
   /** Null unless `RunOpts.usageRefresh` enabled it; session events poke it, its own capability runs its timer. */
   readonly usageRefresh: UsageRefresh | null;
   readonly rescan: () => Promise<unknown>;
@@ -132,6 +135,14 @@ const sessionEvents: DaemonCapability = (ctx) => {
   return { stop: events.stop, local: { sessionEvents: events.handle } };
 };
 
+/** Auth health's timer: the first walk runs at once, then every minute. Its `stop` waits for a read in flight. */
+const authHealth: DaemonCapability = (ctx) => {
+  const health = ctx.authHealth;
+  if (health === null) return { stop: (): void => {} };
+  health.start();
+  return { stop: (): void => void health.stop() };
+};
+
 /** The refresh's own timer, for exclaves no session is active in. */
 const usageRefresh: DaemonCapability = (ctx) => {
   const refresh = ctx.usageRefresh;
@@ -223,6 +234,7 @@ const reapSchedule: DaemonCapability = (ctx) => {
 export const DAEMON_CAPABILITIES: readonly DaemonCapability[] = [
   fleetBroker,
   sessionEvents,
+  authHealth,
   usageRefresh,
   branchStates,
   rescanSchedule,

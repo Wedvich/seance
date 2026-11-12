@@ -38,6 +38,7 @@ import { MetricsStore } from "./metrics-store.ts";
 import { procOomProbe } from "./oom-kill.ts";
 import type { PrPollerOpts } from "./pr-status.ts";
 import { RelayClient } from "./relay-client.ts";
+import { createAuthHealth, type AuthHealthDeps } from "./auth-health.ts";
 import { startCapabilities } from "./run-capabilities.ts";
 import { startStatusLoop } from "./run-collectors.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
@@ -100,6 +101,13 @@ export interface RunOpts {
    * passes `{}`.
    */
   readonly usageRefresh?: UsageRefreshOpts;
+  /**
+   * Enables auth health (`auth-health.ts`): each signed-in exclave's login state, read from its
+   * credential store by a short-lived child, in the `status` and the `authHealth` capability. Off
+   * unless supplied, as `usageRefresh` is — tests run against a real home and must not spawn a
+   * child by surprise; main.ts passes `{}`. `keychain` defaults to the config's `authHealth.keychain`.
+   */
+  readonly authHealth?: Partial<Omit<AuthHealthDeps, "scan" | "home">>;
   /**
    * Tests seed one store across terms and shorten the tick; absent, the leader
    * runs on the relay store.
@@ -259,6 +267,16 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   // (DESIGN.md, Presence & identity). Committed only once the frame has left —
   // keyed by the blob, so two overlapping registers each commit their own.
   let registered: Registered = { scan: 0, exclaves: exclaveScan };
+  // Read per startDaemon, so a config reload's new daemon takes a changed `authHealth.keychain`.
+  const authHealth =
+    opts.authHealth === undefined
+      ? null
+      : createAuthHealth({
+          keychain: config.authHealth?.keychain === true,
+          ...opts.authHealth,
+          scan: () => exclaveScan,
+          home,
+        });
   const candidates = new WeakMap<Envelope, Registered>();
   let lastSizeReport: string | null = null;
   const buildInfo = async (): Promise<Envelope> => {
@@ -282,6 +300,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         CAPABILITIES.continueHandoff,
         CAPABILITIES.runNow,
         CAPABILITIES.attachments,
+        ...(authHealth === null ? [] : [CAPABILITIES.authHealth]),
       ],
     };
     const candidate: Registered = { scan: info.scannedAt, exclaves: exclaveScan };
@@ -314,6 +333,13 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     // A sign-in or a new line in `.exclaves` re-registers like a new clone does:
     // the blob is the only place apps learn either from.
     const changed = !repoSetsEqual(scanned, state.repos) || !exclaveInfoEqual(exclaves.info, exclaveScan.info);
+    // A changed exclave (a sign-in, a new line) may hold a changed login: re-read it.
+    exclaves.exclaves.forEach((exclave, x) => {
+      const before = exclaveScan.info[x];
+      if (before === undefined || JSON.stringify(before) !== JSON.stringify(exclaves.info[x])) {
+        authHealth?.poke(exclave.id);
+      }
+    });
     exclaveScan = exclaves;
     // Same blob list, fresh paths: a moved exclave root is counted where it now
     // is without a register, since every index still means the same exclave.
@@ -411,6 +437,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       now,
       httpFetch,
       draining: () => endedTasks.draining,
+      auth: () => authHealth?.view() ?? new Map(),
       ...(opts.probe === undefined ? {} : { probe: opts.probe }),
     },
     {
@@ -573,6 +600,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     endedTasks,
     repos: () => state.repos,
     exclaveScan: () => exclaveScan,
+    authHealth,
     usageRefresh:
       opts.usageRefresh === undefined
         ? null
@@ -582,6 +610,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
             ...opts.usageRefresh,
             scan: () => exclaveScan,
             home,
+            expired: (id) => authHealth?.expired(id) ?? false,
+            onRan: (id) => authHealth?.poke(id),
           }),
     rescan,
     lastReapAt: () => state.lastReapAt,

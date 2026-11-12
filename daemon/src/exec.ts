@@ -59,6 +59,14 @@ export async function exec(
     readonly cwd?: string;
     readonly timeoutMs?: number;
     readonly stdin?: string;
+    /**
+     * An open file descriptor the child reads as its stdin, so a file's bytes go from the kernel
+     * to the child without passing through this process (auth health: the credential store).
+     * The caller owns the fd and may close it once exec has spawned the child. Exclusive with `stdin`.
+     */
+    readonly stdinFd?: number;
+    /** The child's stderr is ignored, never read: it may quote its input. `stderr` is then `""`. */
+    readonly discardStderr?: boolean;
     readonly env?: Readonly<Record<string, string | undefined>>;
     /** The child gets `env` alone, never the daemon's environment (`childEnv`'s `bare`). */
     readonly bareEnv?: boolean;
@@ -89,12 +97,14 @@ export async function exec(
     readonly maxOutputBytes?: number;
   } = {},
 ): Promise<ExecResult> {
+  if (opts.stdin !== undefined && opts.stdinFd !== undefined) throw new Error("exec: stdin and stdinFd are exclusive");
+  const discardStderr = opts.discardStderr === true;
   const proc = Bun.spawn([...argv], {
     cwd: opts.cwd,
     env: childEnv(opts.env, opts.bareEnv === true),
-    stdin: opts.stdin === undefined ? "ignore" : "pipe",
+    stdin: opts.stdinFd ?? (opts.stdin === undefined ? "ignore" : "pipe"),
     stdout: "pipe",
-    stderr: "pipe",
+    stderr: discardStderr ? "ignore" : "pipe",
     detached: opts.killGroup === true,
   });
   const strict = opts.killGroup === true && opts.killAfterMs !== undefined;
@@ -162,7 +172,7 @@ export async function exec(
   }
   const [stdout, stderr, exitCode] = await Promise.all([
     readText(proc.stdout, opts.maxOutputBytes),
-    readText(proc.stderr, opts.maxOutputBytes),
+    proc.stderr === undefined ? "" : readText(proc.stderr, opts.maxOutputBytes),
     proc.exited,
   ]);
   clearTimeout(timer);

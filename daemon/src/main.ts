@@ -59,7 +59,7 @@ async function runForeground(): Promise<void> {
   // Self-update only under the supervisor that can actually relaunch us.
   const supervised = startedBySupervisor();
   if (!supervised) log.info("not started by a service manager — self-update is off for this run");
-  const daemon = await startSupervisor({ usageRefresh: {}, ...(supervised ? { selfUpdate: {} } : {}) });
+  const daemon = await startSupervisor({ authHealth: {}, usageRefresh: {}, ...(supervised ? { selfUpdate: {} } : {}) });
   const stopPower = startPowerLoop();
   const shutdown = createShutdown({
     info: (message) => log.info(message),

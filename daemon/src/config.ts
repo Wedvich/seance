@@ -1,6 +1,6 @@
 import { watch } from "node:fs";
 import { dirname } from "node:path";
-import { fromBase64 } from "@seance/shared";
+import { fromBase64, isRecord } from "@seance/shared";
 import { fingerprint } from "./hash.ts";
 import { log } from "./log.ts";
 import { configPath, expandTilde } from "./paths.ts";
@@ -26,6 +26,29 @@ export interface Config {
   readonly reap?: ReapConfig;
   /** The `/usage` refresh's settings; absent means the defaults. */
   readonly quota?: QuotaConfig;
+  /** Auth health's settings (`auth-health.ts`); absent means the defaults. */
+  readonly authHealth?: AuthHealthConfig;
+}
+
+export interface AuthHealthConfig {
+  /**
+   * Read the macOS keychain for each exclave's login. Off by default until the item naming and a
+   * no-prompt `security -w` read are checked on a Mac; a credentials file is read either way.
+   */
+  readonly keychain: boolean;
+}
+
+function parseAuthHealth(raw: unknown, path: string): AuthHealthConfig | undefined {
+  if (raw === undefined) return undefined;
+  if (!isRecord(raw)) throw new TypeError(`config at ${path}: "authHealth" must be an object`);
+  for (const key of Object.keys(raw)) {
+    if (key === "keychain") continue;
+    throw new TypeError(`config at ${path}: unknown key "authHealth.${key}" (the key is "keychain")`);
+  }
+  const keychain = "keychain" in raw ? raw["keychain"] : false;
+  if (typeof keychain !== "boolean")
+    throw new TypeError(`config at ${path}: "authHealth.keychain" must be true or false`);
+  return { keychain };
 }
 
 export interface QuotaConfig {
@@ -125,9 +148,11 @@ export async function loadConfig(path: string = configPath()): Promise<Config> {
   }
   const reap = parseReap(obj["reap"], path);
   const quota = parseQuota(obj["quota"], path);
+  const authHealth = parseAuthHealth(obj["authHealth"], path);
   return {
     ...(reap === undefined ? {} : { reap }),
     ...(quota === undefined ? {} : { quota }),
+    ...(authHealth === undefined ? {} : { authHealth }),
     name: requireString(obj, "name", path),
     relayUrl: requireString(obj, "relayUrl", path),
     bearerToken: requireString(obj, "bearerToken", path),

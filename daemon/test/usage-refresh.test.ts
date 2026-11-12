@@ -9,7 +9,7 @@ import { scanExclaves, type ExclaveScan } from "../src/exclaves.ts";
 import { exec } from "../src/exec.ts";
 import { startDaemon } from "../src/run.ts";
 import { tmuxOk } from "../src/tmux.ts";
-import { createUsageRefresh, USAGE_ARGS, type UsageRefresh, type UsageRefreshOpts } from "../src/usage-refresh.ts";
+import { createUsageRefresh, USAGE_ARGS, type UsageRefresh, type UsageRefreshDeps } from "../src/usage-refresh.ts";
 import {
   captureLog,
   makeGitFixture,
@@ -181,7 +181,7 @@ async function started(): Promise<readonly Run[]> {
   return (await runs()).filter((run) => run.phase === "start");
 }
 
-async function refresher(opts: UsageRefreshOpts = {}): Promise<UsageRefresh> {
+async function refresher(opts: Partial<UsageRefreshDeps> = {}): Promise<UsageRefresh> {
   const scan: ExclaveScan = await scanExclaves(home);
   const instance = createUsageRefresh({ scan: () => scan, home, claudeBin: stub, now: () => clock, ...opts });
   instances.push(instance);
@@ -235,6 +235,32 @@ describe("the /usage refresh", () => {
     await usage.idle();
 
     expect(await started()).toEqual([]);
+  });
+
+  test("an exclave auth health reads expired never runs; every finished run reports to onRan", async () => {
+    await cacheAged("default", 11 * MIN);
+    await cacheAged("work", 11 * MIN);
+    const ran: string[] = [];
+    const usage = await refresher({ expired: (id) => id === "work", onRan: (id) => ran.push(id) });
+
+    usage.poke("work");
+    usage.poke("default");
+    await usage.idle();
+
+    expect((await started()).map((run) => run.exclave)).toEqual(["default"]);
+    expect(ran).toEqual(["default"]);
+  });
+
+  test("onRan fires after a run that refreshed nothing too", async () => {
+    await cacheAged("default", 11 * MIN);
+    await control({ default: "leave" });
+    const ran: string[] = [];
+    const usage = await refresher({ onRan: (id) => ran.push(id) });
+
+    usage.poke("default");
+    await usage.idle();
+
+    expect(ran).toEqual(["default"]);
   });
 
   test("an exclave with no cached reading yet is stale", async () => {
