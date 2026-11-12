@@ -262,6 +262,7 @@ function useSpawnActions(store: Store): SpawnActions {
       addAfter: (taskId, after) => store.addAfter(taskId, after),
       removeAfter: (taskId) => store.removeAfter(taskId),
       setUntil: (until) => store.setUntil(until),
+      toggleRequires: (trait) => store.toggleRequires(trait),
       addFiles: (files) => store.addFiles(files),
       removeFile: (key) => store.removeFile(key),
       retryHeld: (taskId) => store.retryHeld(taskId),

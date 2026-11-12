@@ -59,6 +59,7 @@ import {
 } from "./settle.ts";
 export { sourceOf } from "./settle.ts";
 import { advance, FINISHED, forgetPrompt, PLACED, type Reservation, type Task, type TaskSpec } from "./task.ts";
+import { traitsHolding } from "./traits.ts";
 
 export type { SessionSource } from "./settle.ts";
 export type { PauseResult } from "./pause.ts";
@@ -98,6 +99,11 @@ export interface SchedulerOptions {
    * no store nudge says it: the host tells apps to re-read that task.
    */
   readonly onIdleChange?: (taskId: string) => void;
+  /**
+   * A required trait first holds a task unplaced (`traitsHolding`), once per task and trait in this
+   * scheduler's memory: a new term tells again. The host logs it ("What to measure"); a throw goes to `onError`.
+   */
+  readonly onTraitHeld?: (taskId: string, trait: string) => void;
 }
 
 /**
@@ -166,12 +172,15 @@ export class Scheduler {
   readonly #onError: (err: unknown) => void;
   readonly #onAlert: (alert: SchedulerAlert) => void;
   readonly #onIdleChange: (taskId: string) => void;
+  readonly #onTraitHeld: (taskId: string, trait: string) => void;
   readonly #held = new Map<string, Held>();
   readonly #pause: PauseRecord;
   readonly #spills: SpillAlerts;
   /** Records the store holds that no reader can use: reported, never acted on, never deleted unasked. */
   readonly #unreadable = new Map<string, UnreadableTask>();
   readonly #decisions = new Map<string, Decision>();
+  /** The traits `onTraitHeld` has told per task, forgotten with the task's decision. */
+  readonly #traitHeld = new Map<string, Set<string>>();
   /**
    * deviceId → when a pass first saw it not connected (or gone from the
    * registry), for machines holding placed or `awaiting-merge` tasks: what
@@ -270,6 +279,7 @@ export class Scheduler {
       });
     this.#onAlert = options.onAlert ?? (() => {});
     this.#onIdleChange = options.onIdleChange ?? (() => {});
+    this.#onTraitHeld = options.onTraitHeld ?? (() => {});
     this.#pause = new PauseRecord(this.#store, this.#now, this.#onError);
     this.#spills = new SpillAlerts(this.#config.resetGraceMs);
     this.#sweptAt = this.#now();
@@ -281,6 +291,7 @@ export class Scheduler {
     this.#held.clear();
     this.#unreadable.clear();
     this.#decisions.clear();
+    this.#traitHeld.clear();
     for (const entry of stored) this.#keep(entry);
     // Windows an earlier term alerted, so this one does not alert an ongoing spill once more.
     for (const { task } of this.#held.values())
@@ -345,7 +356,7 @@ export class Scheduler {
       this.#held.delete(id);
       this.#unreadable.delete(id);
       if (entry === null) {
-        this.#decisions.delete(id);
+        this.#forgetDecision(id);
         return;
       }
       this.#keep(entry);
@@ -432,7 +443,7 @@ export class Scheduler {
           const write = await this.#store.delete(task.id, held.version);
           if (write.ok) {
             this.#held.delete(task.id);
-            this.#decisions.delete(task.id);
+            this.#forgetDecision(task.id);
             return;
           }
           if (write.code !== "version_conflict" && write.code !== "indeterminate") {
@@ -444,7 +455,7 @@ export class Scheduler {
           const fresh = await this.#store.get(task.id);
           this.#held.delete(task.id);
           if (fresh === null) {
-            this.#decisions.delete(task.id);
+            this.#forgetDecision(task.id);
             return;
           }
           this.#keep(fresh);
@@ -814,7 +825,7 @@ export class Scheduler {
       return null;
     });
     if (next === null) return outcome;
-    this.#decisions.delete(taskId);
+    this.#forgetDecision(taskId);
     return { ok: true, task: next };
   }
 
@@ -952,6 +963,7 @@ export class Scheduler {
       const now = this.#now();
       const decision = this.#route(task, now);
       this.#decisions.set(task.id, decision);
+      this.#tellTraitHeld(task, decision);
       if (decision.chosen === null) continue;
       // oxlint-disable-next-line no-await-in-loop -- each route must see the reservation before it
       await this.#reserve(task.id, decision.chosen, decision, now);
@@ -989,6 +1001,28 @@ export class Scheduler {
       this.#onAlert(alert);
     } catch (err) {
       this.#onError(err);
+    }
+  }
+
+  /** A decision and what was told of its task's held traits go together: a re-decided task tells again. */
+  #forgetDecision(id: string): void {
+    this.#decisions.delete(id);
+    this.#traitHeld.delete(id);
+  }
+
+  /** Once per task and trait: the first pass whose decision shows the trait holding it (`traitsHolding`). */
+  #tellTraitHeld(task: Task, decision: Decision): void {
+    const requires = task.spec.requires ?? [];
+    if (requires.length === 0) return;
+    for (const trait of traitsHolding(decision, requires)) {
+      const told = this.#traitHeld.get(task.id) ?? new Set<string>();
+      if (told.has(trait)) continue;
+      this.#traitHeld.set(task.id, told.add(trait));
+      try {
+        this.#onTraitHeld(task.id, trait);
+      } catch (err) {
+        this.#onError(err);
+      }
     }
   }
 
@@ -1083,7 +1117,7 @@ export class Scheduler {
       current.state === "ready" ? advance(current, "reserved", { reservation, decision, reservedAt: now }) : null,
     );
     if (reserved === null) return null;
-    this.#decisions.delete(id);
+    this.#forgetDecision(id);
     this.#launch(reserved, reservation, decision);
     return reserved;
   }
@@ -1413,7 +1447,7 @@ export class Scheduler {
   #keep(entry: StoreEntry): void {
     if (entry.body === undefined) {
       this.#unreadable.set(entry.id, entry);
-      this.#decisions.delete(entry.id);
+      this.#forgetDecision(entry.id);
       return;
     }
     this.#unreadable.delete(entry.id);

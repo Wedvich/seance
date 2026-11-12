@@ -86,6 +86,7 @@ import {
   ATTACHMENT_LIMITS,
   ATTACHMENTS_DEP_SENTINEL,
   PIN_SENTINEL,
+  REQUIRES_DEP_SENTINEL,
   ROUTING_ID_MAX_LENGTH,
   SESSIONS_MAX_PROGRESS,
   SIGKILL_STATUS,
@@ -124,6 +125,7 @@ import {
   type TaskRequest,
   type TaskSpec,
 } from "./types.ts";
+import { TRAIT_LIMITS } from "./traits.ts";
 
 const repo = { name: "seance", path: "/home/u/seance", defaultBranch: "main" };
 const info = { name: "mac", platform: "darwin", repos: [repo], scannedAt: 1_700_000_000_000 };
@@ -184,6 +186,22 @@ describe("parseExclaveList", () => {
     expect(parseExclaveList([exclave])?.[0]).not.toHaveProperty("seatTier");
     expect(parseExclaveList([{ ...exclave, seatTier: "" }])?.[0]).not.toHaveProperty("seatTier");
     expect(parseExclaveList([{ ...exclave, seatTier: 1 }])).toBeNull();
+  });
+
+  test("traits are read leniently: bad names, repeats and the excess dropped, an unreadable list as none, the exclave kept", () => {
+    expect(parseExclaveList([{ ...exclave, traits: ["atlas", "gpu"] }])?.[0]?.traits).toEqual(["atlas", "gpu"]);
+    expect(parseExclaveList([exclave])?.[0]).not.toHaveProperty("traits");
+    expect(parseExclaveList([{ ...exclave, traits: ["atlas", "Bad Name", "atlas", 7, "-x"] }])?.[0]?.traits).toEqual([
+      "atlas",
+    ]);
+    const many = Array.from({ length: TRAIT_LIMITS.perMachine + 3 }, (_, i) => `t${i}`);
+    expect(parseExclaveList([{ ...exclave, traits: many }])?.[0]?.traits).toEqual(
+      many.slice(0, TRAIT_LIMITS.perMachine),
+    );
+    for (const traits of ["atlas", [], ["Bad"], { atlas: true }, null]) {
+      const [read] = parseExclaveList([{ ...exclave, traits }]) ?? [];
+      expect(read).toEqual(exclave);
+    }
   });
 
   test("one unreadable exclave invalidates the list — status indexes into it", () => {
@@ -441,6 +459,20 @@ describe("parseRoutePreviewRequest", () => {
       expect(parseRoutePreviewRequest({ ...minimal, attachments })).toBeNull();
     expect(parseRoutePreviewRequest({ ...minimal, mode: "continue", attachments: true })).toBeNull();
   });
+
+  test("keeps `requires` as a spec holds it; a malformed list is a malformed request", () => {
+    expect(parseRoutePreviewRequest({ ...minimal, requires: ["atlas", "gpu"] })).toEqual({
+      ...minimal,
+      requires: ["atlas", "gpu"],
+    });
+    expect(parseRoutePreviewRequest({ ...minimal, attachments: true, requires: ["atlas"] })).toEqual({
+      ...minimal,
+      attachments: true,
+      requires: ["atlas"],
+    });
+    for (const requires of [[], ["Atlas"], ["a", "a"], "atlas", ["a", "b", "c", "d", "e"]])
+      expect(parseRoutePreviewRequest({ ...minimal, requires })).toBeNull();
+  });
 });
 
 describe("parseTaskRequest", () => {
@@ -628,6 +660,49 @@ describe("parseTaskSpec", () => {
   test("deps are bounded, the limit itself allowed", () => {
     expect(parseTaskSpec({ ...request, deps: deps(TASK_SPEC_LIMITS.deps) })).not.toBeNull();
     expect(parseTaskSpec({ ...request, deps: deps(TASK_SPEC_LIMITS.deps + 1) })).toBeNull();
+  });
+
+  describe("requires", () => {
+    const spec: TaskSpec = { ...request, requires: ["atlas", "gpu"] };
+
+    test("one to the bound of unique trait names, round-tripping beside every other field", () => {
+      expect(parseTaskSpec(spec)).toEqual(spec);
+      const both = { ...full, requires: spec.requires };
+      expect(parseTaskSpec(both)).toEqual(both);
+      const bound = Array.from({ length: TASK_SPEC_LIMITS.requires }, (_, i) => `${i}`.padEnd(32, "x"));
+      expect(parseTaskSpec({ ...request, requires: bound })?.requires).toEqual(bound);
+    });
+
+    test("a malformed list nulls the spec, never drops the field", () => {
+      const tooMany = Array.from({ length: TASK_SPEC_LIMITS.requires + 1 }, (_, i) => `t${i}`);
+      for (const requires of [[], tooMany, ["a", "a"], ["Atlas"], ["-a"], ["a".repeat(33)], [7], "atlas", null])
+        expect(parseTaskSpec({ ...request, requires })).toBeNull();
+    });
+
+    test("the dep sentinel is dropped beside `requires`; without it the spec still reads", () => {
+      expect(parseTaskSpec({ ...spec, deps: [REQUIRES_DEP_SENTINEL] })).toEqual(spec);
+      expect(parseTaskSpec(spec)).toEqual(spec);
+      const sealed = { ...spec, deps: [...deps(TASK_SPEC_LIMITS.deps), REQUIRES_DEP_SENTINEL] };
+      expect(parseTaskSpec(sealed)?.deps).toEqual(deps(TASK_SPEC_LIMITS.deps));
+    });
+
+    test("the sentinel without `requires` nulls the spec: a record something stripped the requirement from", () => {
+      expect(parseTaskSpec({ ...request, deps: [REQUIRES_DEP_SENTINEL] })).toBeNull();
+      expect(parseTaskSpec({ ...request, deps: deps(2).concat([REQUIRES_DEP_SENTINEL]) })).toBeNull();
+      // The attachments sentinel does not stand in for it, nor the reverse.
+      expect(parseTaskSpec({ ...spec, deps: [ATTACHMENTS_DEP_SENTINEL] })).toBeNull();
+    });
+
+    test("both sentinels beside both fields are dropped; either alone still nulls the spec", () => {
+      const both: TaskSpec = { ...request, attachments: [attachment(0)], requires: ["atlas"] };
+      expect(parseTaskSpec({ ...both, deps: [ATTACHMENTS_DEP_SENTINEL, REQUIRES_DEP_SENTINEL] })).toEqual(both);
+      expect(parseTaskSpec({ ...both, deps: [REQUIRES_DEP_SENTINEL, ATTACHMENTS_DEP_SENTINEL] })).toEqual(both);
+      const realDeps = deps(2);
+      expect(
+        parseTaskSpec({ ...both, deps: [...realDeps, ATTACHMENTS_DEP_SENTINEL, REQUIRES_DEP_SENTINEL] })?.deps,
+      ).toEqual(realDeps);
+      expect(parseTaskSpec({ ...request, requires: ["atlas"], deps: [ATTACHMENTS_DEP_SENTINEL] })).toBeNull();
+    });
   });
 
   describe("attachments", () => {
@@ -1316,6 +1391,7 @@ describe("store", () => {
       effort: "e".repeat(TASK_REQUEST_LIMITS.effort),
       plan: true,
       skill: "s".repeat(SKILL_NAME_MAX_LENGTH),
+      requires: Array.from({ length: TASK_SPEC_LIMITS.requires }, (_, i) => `${i}`.padEnd(32, "t")),
       // The longest account id and every avoid slot at its longest id: the sentinel rides along too.
       pin: { deviceId: device, account: "ø".repeat(TASK_SPEC_LIMITS.account) },
       avoid: Array.from({ length: TASK_SPEC_LIMITS.avoid }, (_, i) => `${i}`.padEnd(ROUTING_ID_MAX_LENGTH, "A")),
@@ -1372,10 +1448,10 @@ describe("store", () => {
     expect(await sealedLength(created)).toBeLessThanOrEqual(STORE_CREATE_MAX_CT_LENGTH);
   });
 
-  test("on top of that, all the leader adds at every bound fits a record with nine candidates beside it", async () => {
+  test("on top of that, all the leader adds at every bound fits a record with eight candidates beside it", async () => {
     const decided: Task = {
       ...written,
-      decision: { at: 1_760_000_000_000, chosen: target, candidates: Array.from({ length: 9 }, () => candidate) },
+      decision: { at: 1_760_000_000_000, chosen: target, candidates: Array.from({ length: 8 }, () => candidate) },
     };
     expect(parseTask(decided)).toEqual(decided);
     expect(await sealedLength(decided)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
@@ -1383,14 +1459,14 @@ describe("store", () => {
     expect(MAX_TASKS * STORE_MAX_CT_LENGTH).toBeLessThan(32 * 1024 * 1024);
   });
 
-  test("a needs-input record carrying its wait at every bound, in place of the failure, fits beside nine candidates", async () => {
+  test("a needs-input record carrying its wait at every bound, in place of the failure, fits beside eight candidates", async () => {
     const { failure: _failure, ...unfailed } = written;
     const waiting: Task = {
       ...unfailed,
       state: "needs-input",
       inputReason: "permission",
       inputTool: "t".repeat(TOOL_NAME_MAX_LENGTH),
-      decision: { at: 1_760_000_000_000, chosen: target, candidates: Array.from({ length: 9 }, () => candidate) },
+      decision: { at: 1_760_000_000_000, chosen: target, candidates: Array.from({ length: 8 }, () => candidate) },
     };
     expect(parseTask(waiting)).toEqual(waiting);
     expect(await sealedLength(waiting)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
@@ -1408,13 +1484,13 @@ describe("store", () => {
       ...written,
       prUrl: prs.at(-1)?.url ?? "",
       prs,
-      decision: { at: 1_760_000_000_000, chosen: target, candidates: Array.from({ length: 9 }, () => candidate) },
+      decision: { at: 1_760_000_000_000, chosen: target, candidates: Array.from({ length: 8 }, () => candidate) },
     };
     expect(parseTask(decided)).toEqual(decided);
     expect(await sealedLength(decided)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
   });
 
-  test("an awaiting-merge task, its blocked-state reading and alert stamp at every bound, fits beside nine candidates", async () => {
+  test("an awaiting-merge task, its blocked-state reading and alert stamp at every bound, fits beside eight candidates", async () => {
     // What `advance` and `inputClock` keep for this state: no failure, reservation or needs-input clock beside a reading.
     const {
       failure: _failure,
@@ -1450,7 +1526,7 @@ describe("store", () => {
       },
       prAlert: { reason: "unarmed", head, at: 1_760_000_000_000 },
       continuedBy: { task: "c".repeat(64), createdAt: 1_760_000_000_000, live: true },
-      decision: { at: 1_760_000_000_000, chosen: target, candidates: Array.from({ length: 9 }, () => candidate) },
+      decision: { at: 1_760_000_000_000, chosen: target, candidates: Array.from({ length: 8 }, () => candidate) },
     };
     expect(parseTask(awaiting)).toEqual(awaiting);
     expect(await sealedLength(awaiting)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
@@ -2034,6 +2110,8 @@ describe("M4 shapes", () => {
       { code: "auth_expired" },
       { code: "base_unpushed" },
       { code: "skill_absent", skill: "ship" },
+      { code: "trait_absent", trait: "atlas" },
+      { code: "trait_unhealthy", trait: "atlas" },
       { code: "continue_elsewhere" },
       { code: "continue_unsupported" },
       { code: "attachments_unsupported" },
@@ -2041,6 +2119,10 @@ describe("M4 shapes", () => {
     for (const reason of reasons) expect(parseDecision(decide(reason))?.candidates[0]?.rejected).toEqual([reason]);
     for (const skill of [undefined, "", "a/b"]) {
       expect(parseDecision(decide({ code: "skill_absent", skill }))?.candidates[0]?.rejected).toEqual([]);
+    }
+    for (const trait of [undefined, "", "Atlas", "a/b"]) {
+      expect(parseDecision(decide({ code: "trait_absent", trait }))?.candidates[0]?.rejected).toEqual([]);
+      expect(parseDecision(decide({ code: "trait_unhealthy", trait }))?.candidates[0]?.rejected).toEqual([]);
     }
   });
 

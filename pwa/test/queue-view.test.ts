@@ -817,6 +817,22 @@ describe("authoring on a row", () => {
     expect(placed({})).toBeNull();
   });
 
+  test("what a task requires reads after its pin and avoid list, with the machines that declare each trait", () => {
+    const withTraits = (m: Machine, traits: readonly string[]): Machine => ({
+      ...m,
+      exclaves: [{ id: "x", authOk: true, accountId: "org:x", extraUsageEnabled: null, skills: [], traits }],
+    });
+    const machines = [withTraits(machine(), ["atlas"]), machine({ deviceId: "dev-b", name: "WSL" })];
+    const placed = (fields: Partial<Task["spec"]>): string | null | undefined => {
+      const t = task("t", { state: "ready", spec: { repo: ORIGIN, mode: "worktree", ...fields } });
+      return deriveQueue(state(ok([t]), {}, { machines }), NOW).sections[0]?.rows[0]?.placement;
+    };
+    expect(placed({ requires: ["atlas"] })).toBe("Needs atlas (on Mac)");
+    expect(placed({ requires: ["atlas", "gone"], avoid: ["dev-b"] })).toBe(
+      "Avoids WSL. Needs atlas (on Mac) · Needs gone — no machine has it",
+    );
+  });
+
   test("an account pin reads by its alias, else by the email a machine reports", () => {
     const account = "org:acct-1234567890";
     const exclave: ExclaveInfo = {

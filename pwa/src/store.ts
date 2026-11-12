@@ -26,6 +26,10 @@ import {
   TASK_REQUEST_LIMITS,
   TASK_SPEC_LIMITS,
   taskRequest,
+  unknownTraits,
+  unknownTraitsText,
+  unreachableTraits,
+  unreachableTraitsText,
   withAutonomy,
   withReportInstruction,
   type RelayClient,
@@ -67,11 +71,13 @@ import {
   derivePinAccountAvailability,
   derivePinProblem,
   deriveReportedAvailability,
+  deriveTraitsAvailability,
   heldNeedsLeader,
   leaderVerified,
   resolveRepo,
   scopedRepos,
   settlesOnReport,
+  TRAITS_UNAVAILABLE,
 } from "./view.ts";
 
 /**
@@ -562,6 +568,17 @@ export class Store {
     this.#patch({ form: { ...this.#state.form, until } });
   }
 
+  /** Ticks or unticks a trait the task requires; a pick past the limit is ignored. Re-previews: the leader filters on it. */
+  toggleRequires(trait: string): void {
+    const { form } = this.#state;
+    if (form.requires.includes(trait)) {
+      this.#patch({ form: { ...form, requires: form.requires.filter((name) => name !== trait) } });
+    } else if (form.requires.length < TASK_SPEC_LIMITS.requires) {
+      this.#patch({ form: { ...form, requires: [...form.requires, trait] } });
+    } else return;
+    void this.refreshPreview();
+  }
+
   /**
    * "Follow up" on a queue row: the form takes that task as its one dependency.
    * The queue (and a verdict under it) closes like a machine pick's sheet does,
@@ -930,6 +947,11 @@ export class Store {
     if (attaching && !deriveAttachmentsAvailability(relay)) {
       return refused(`${attachmentsRefusal(relay)}.`);
     }
+    // A held task is checked when it is sent (`#sendOne`): no leader to ask now, and the registry may be stale.
+    if (form.requires.length > 0 && !holding) {
+      const traitsProblem = this.#requiresProblem(form.requires, relay, form.machine, form.account);
+      if (traitsProblem !== null) return refused(`${traitsProblem}.`);
+    }
     const { autonomy } = this.#state;
     const level = withAutonomy<Pick<TaskSpec, "autonomy" | "plan">>(autonomy === DEFAULT_AUTONOMY ? {} : { autonomy });
     // The form has no `plan` of its own, so the level can't contradict it; refused rather than dropped if it ever does.
@@ -962,12 +984,34 @@ export class Store {
         ...level,
         ...(prompt === undefined ? {} : { prompt }),
         ...(form.machine === null && form.account === null ? {} : { pin }),
+        ...(form.requires.length === 0 ? {} : { requires: form.requires }),
         client: "pwa" satisfies SpawnClient,
         ...(form.after.length === 0 ? {} : { deps: form.after }),
         ...(reported ? { until: form.until } : {}),
         ...(attachments === undefined ? {} : { attachments }),
       }),
     };
+  }
+
+  /**
+   * Why `requires` can't be written now, as a clause: the leader can't route on traits, a name no machine declares
+   * (a typo, or a trait since removed), or a combination nothing the pins leave could carry. Null when it can.
+   */
+  #requiresProblem(
+    requires: readonly string[],
+    relay: AppState["relay"],
+    machine: string | null,
+    account: string | null,
+  ): string | null {
+    if (!deriveTraitsAvailability(relay)) return TRAITS_UNAVAILABLE;
+    const unknown = unknownTraits(requires, relay.machines);
+    if (unknown.length > 0) return unknownTraitsText(unknown, relay.machines);
+    const pin = {
+      ...(machine === null ? {} : { deviceId: machine }),
+      ...(account === null ? {} : { account }),
+    };
+    const spec = { requires, ...(machine === null && account === null ? {} : { pin }) };
+    return unreachableTraits(spec, relay.machines).reachable ? null : unreachableTraitsText(spec, relay.machines);
   }
 
   /** Keeps `task` on this phone, clearing the form as a stored one does; it is sent when a registry next settles. */
@@ -999,6 +1043,7 @@ export class Store {
         prompt: "",
         after: [],
         until: "merged",
+        requires: [],
       },
       autonomy: DEFAULT_AUTONOMY,
       promptUndo: null,
@@ -1063,6 +1108,15 @@ export class Store {
         "The scheduler's leader doesn't take account pins yet. Update seanced on its machine, or discard it.",
       );
       return;
+    }
+    // The same checks the form made, against the registry as it stands when the task is sent.
+    if (task.spec.requires !== undefined) {
+      const { deviceId, account } = task.spec.pin ?? {};
+      const problem = this.#requiresProblem(task.spec.requires, this.#state.relay, deviceId ?? null, account ?? null);
+      if (problem !== null) {
+        this.#heldFailed(task, `${problem}. Edit what it requires on a new task, or discard it.`);
+        return;
+      }
     }
     this.#patchHeld(task.id, { sending: true });
     let reply: TaskCreated | StoreRefusal | null;

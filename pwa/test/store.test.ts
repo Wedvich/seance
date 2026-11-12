@@ -2586,6 +2586,38 @@ describe("the queue screen", () => {
       expect(view?.kind === "ok" ? view.tasks.map((t) => t.id) : []).toEqual([String(created?.id), "f-1"]);
     });
 
+    test("carries the task's requires only to a leader that routes on traits, and writes nothing to one that does not", async () => {
+      const requiring: Task = { ...failed, spec: { ...failed.spec, requires: ["atlas"] } };
+      const withTraits = (leader: readonly string[]): ScriptedClient => {
+        const client = new ScriptedClient({
+          machines: [
+            autoMachine("dev-a", {
+              capabilities: [CAPABILITIES.continueTask, CAPABILITIES.continueSession, ...leader],
+            }),
+            autoMachine("dev-b", { capabilities: [CAPABILITIES.continueTask, CAPABILITIES.continueSession] }),
+          ],
+        });
+        client.onQueue = async () => ({ tasks: [requiring], holds: [], at: 1 });
+        return client;
+      };
+      const open = async (client: ScriptedClient): Promise<Store> => {
+        const store = new Store(client);
+        store.openQueue();
+        await until(() => store.getState().queueView?.kind === "ok", "the queue read");
+        return store;
+      };
+
+      const old = withTraits([]);
+      const oldStore = await open(old);
+      await oldStore.continueTask("f-1");
+      expect(old.creates).toEqual([]);
+      expect(oldStore.getState().queueNotice).toContain("can't route on traits");
+
+      const current = withTraits([CAPABILITIES.traits]);
+      await (await open(current)).continueTask("f-1");
+      expect(current.creates[0]?.spec).toMatchObject({ mode: "continue", requires: ["atlas"] });
+    });
+
     test("an answer that never came says it may have landed; a refusal says nothing was stored", async () => {
       const client = capable();
       const store = await withFailed(client);
@@ -3195,6 +3227,157 @@ describe("the screen debounce's reveal", () => {
     const question: Task = { ...settling(1_000_000), inputReason: "question" };
     await open(client, [question], 1_010_000);
     expect(revealDelay()).toBeUndefined();
+  });
+});
+
+describe("requiring traits", () => {
+  const exclave = (id: string, traits: readonly string[]): ExclaveInfo => ({
+    id,
+    authOk: true,
+    accountId: `acct-${id}`,
+    email: `${id}@acme.dev`,
+    extraUsageEnabled: null,
+    skills: [],
+    traits,
+  });
+  const clones = (exclaveId: string): Machine["repos"] => [
+    { name: "app", path: "/r/app", defaultBranch: "main", origin: ORIGIN, exclave: exclaveId },
+  ];
+  /** dev-a leads and has atlas on its one exclave; dev-b has gpu. */
+  const tracing = (capabilities: string[] = [CAPABILITIES.traits]): ScriptedClient =>
+    new ScriptedClient({
+      machines: [
+        autoMachine("dev-a", { capabilities, exclaves: [exclave("a", ["atlas"])], repos: clones("a") }),
+        autoMachine("dev-b", { exclaves: [exclave("b", ["gpu"])], repos: clones("b") }),
+      ],
+    });
+  const form = { ...DEFAULT_FORM, prompt: "fix it" };
+
+  test("a plain form writes no requires; a required one is written as named, then cleared with the task", async () => {
+    const plain = tracing();
+    await new Store(plain, form).spawn();
+    expect(firstCreate(plain).spec).not.toHaveProperty("requires");
+
+    const client = tracing();
+    const store = new Store(client, { ...form, requires: ["atlas"] });
+    await store.spawn();
+    expect(firstCreate(client).spec.requires).toEqual(["atlas"]);
+    expect(store.getState().form.requires).toEqual([]);
+  });
+
+  test("a leader that does not advertise traits is refused before anything is written, and the form keeps them", async () => {
+    const client = tracing([]);
+    const store = new Store(client, { ...form, requires: ["atlas"] });
+    await store.spawn();
+    expect(client.creates).toEqual([]);
+    expect(store.getState().verdict).toMatchObject({ kind: "unqueued", mayHaveLanded: false });
+    expect(store.getState().form.requires).toEqual(["atlas"]);
+  });
+
+  test("a name no machine declares is refused with the ones that exist", async () => {
+    const client = tracing();
+    const store = new Store(client, { ...form, requires: ["atlsa"] });
+    await store.spawn();
+    expect(client.creates).toEqual([]);
+    const { verdict } = store.getState();
+    if (verdict === null) throw new Error("no verdict");
+    expect(describeVerdict(verdict, [], {}, 0, null).body).toContain(
+      "no machine declares the trait atlsa — known: atlas, gpu",
+    );
+  });
+
+  test("traits no reachable exclave carries together could never place, and are refused", async () => {
+    const client = tracing();
+    const split = new Store(client, { ...form, requires: ["atlas", "gpu"] });
+    await split.spawn();
+    expect(client.creates).toEqual([]);
+    const { verdict } = split.getState();
+    if (verdict === null) throw new Error("no verdict");
+    expect(describeVerdict(verdict, [], {}, 0, null).body).toContain("no exclave this task can reach carries");
+
+    const pinned = tracing();
+    const pinnedStore = new Store(pinned, { ...form, machine: "dev-b", requires: ["atlas"] });
+    await pinnedStore.spawn();
+    expect(pinned.creates).toEqual([]);
+    const pinnedVerdict = pinnedStore.getState().verdict;
+    if (pinnedVerdict === null) throw new Error("no verdict");
+    // The reachability check fired, not the pin, repo or gate checks: it names the holder as pinned elsewhere.
+    expect(describeVerdict(pinnedVerdict, [], {}, 0, null).body).toContain("atlas is on");
+    expect(describeVerdict(pinnedVerdict, [], {}, 0, null).body).toContain("(pinned elsewhere)");
+    // Pinned to the machine that has it, it places.
+    const ok = tracing();
+    await new Store(ok, { ...form, machine: "dev-a", requires: ["atlas"] }).spawn();
+    expect(firstCreate(ok).spec).toMatchObject({ pin: { deviceId: "dev-a" }, requires: ["atlas"] });
+  });
+
+  test("a held task is checked against the leader when sent, not when held", async () => {
+    const old = tracing([]);
+    old.emit({ status: "retrying", registrySettled: false });
+    const store = new Store(old, { ...form, requires: ["atlas"] });
+    store.attach();
+    await store.spawn();
+    expect(store.getState().held).toHaveLength(1);
+    old.emit({ status: "open", registrySettled: true });
+    await until(() => store.getState().held[0]?.failure !== null, "the send-time check");
+    expect(store.getState().held[0]?.failure).toContain("can't route on traits");
+    expect(old.creates).toEqual([]);
+
+    const current = tracing();
+    current.emit({ status: "retrying", registrySettled: false });
+    const sent = new Store(current, { ...form, requires: ["atlas"] });
+    sent.attach();
+    await sent.spawn();
+    current.emit({ status: "open", registrySettled: true });
+    await until(() => current.creates.length === 1, "the held send");
+    expect(firstCreate(current).spec.requires).toEqual(["atlas"]);
+  });
+
+  test("ticking a trait toggles it, at most four, and re-asks the preview with it only for a leader that takes it", async () => {
+    const client = tracing();
+    const store = new Store(client, form);
+    store.toggleRequires("atlas");
+    await until(() => client.previews.some((request) => "requires" in request), "a preview carrying requires");
+    expect(client.previews.at(-1)).toMatchObject({ requires: ["atlas"] });
+    store.toggleRequires("atlas");
+    expect(store.getState().form.requires).toEqual([]);
+    for (const trait of ["a", "b", "c", "d", "e"]) store.toggleRequires(trait);
+    expect(store.getState().form.requires).toEqual(["a", "b", "c", "d"]);
+
+    const old = tracing([]);
+    const older = new Store(old, form);
+    older.toggleRequires("atlas");
+    await drain();
+    expect(old.previews.every((request) => !("requires" in request))).toBe(true);
+  });
+
+  test("the tile appears only when the fleet declares a trait or the form holds one, and picking is off for an old leader", () => {
+    const none = new Store(new ScriptedClient(), form);
+    expect(deriveView(none.getState(), 0).requiresTile).toBeNull();
+
+    const current = new Store(tracing(), form);
+    const view = deriveView(current.getState(), 0);
+    expect(view.requiresTile).toMatchObject({ label: "REQUIRES", value: "Any" });
+    expect(view.requires.choices).toEqual([
+      { name: "atlas", holders: "dev-a", selected: false, disabled: false },
+      { name: "gpu", holders: "dev-b", selected: false, disabled: false },
+    ]);
+
+    const old = new Store(tracing([]), { ...form, requires: ["atlas"] });
+    const oldView = deriveView(old.getState(), 0);
+    expect(oldView.requires.note).toContain("can't route on traits");
+    // A held pick can still be unticked; a new one cannot be added.
+    expect(oldView.requires.choices.map((c) => [c.name, c.selected, c.disabled])).toEqual([
+      ["atlas", true, false],
+      ["gpu", false, true],
+    ]);
+
+    const stale = new Store(tracing(), { ...form, requires: ["gone"] });
+    expect(deriveView(stale.getState(), 0).requires.choices[0]).toEqual({
+      name: "gone",
+      holders: "no machine declares it",
+      selected: true,
+      disabled: false,
+    });
   });
 });
 

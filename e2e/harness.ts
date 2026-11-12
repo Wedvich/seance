@@ -11,7 +11,7 @@ import type { Subprocess } from "bun";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createBackend } from "../daemon/src/backend-default.ts";
-import type { Config } from "../daemon/src/config.ts";
+import type { Config, TraitsConfig } from "../daemon/src/config.ts";
 import { DEFAULT_EXCLAVE } from "../daemon/src/exclaves.ts";
 import type { QueueStore, Task } from "../daemon/src/leader.ts";
 import { createQueueStore, type StoreLeg } from "../daemon/src/queue-store.ts";
@@ -123,6 +123,8 @@ async function makeHome(dir: string, exclaves: readonly ExclaveFixture[]): Promi
 export interface SecondDaemonOpts {
   readonly name: string;
   readonly exclaves?: readonly ExclaveFixture[];
+  /** Its `config.json` `traits`: what this machine declares, as an operator writes it. */
+  readonly traits?: TraitsConfig;
   /**
    * Extra environment for the daemon process, spread last: its claude stub
    * (`SEANCE_CLAUDE_BIN`), or `SEANCE_E2E_SPAWN_WAIT_MS` for its spawn registration budget.
@@ -315,7 +317,15 @@ export async function startStack(
     const configDir = join(dir, "config");
     const tmuxSession = `${TMUX_SESSION}-${opts.name.toLowerCase()}`;
     await mkdir(configDir, { recursive: true });
-    await writeFile(join(configDir, "config.json"), JSON.stringify({ ...config, name: opts.name, tmuxSession }));
+    await writeFile(
+      join(configDir, "config.json"),
+      JSON.stringify({
+        ...config,
+        name: opts.name,
+        tmuxSession,
+        ...(opts.traits === undefined ? {} : { traits: opts.traits }),
+      }),
+    );
     const secondHome = await makeHome(join(dir, "home"), opts.exclaves ?? []);
     const log = join(dir, "daemon.log");
     if (opts.beforeBoot !== undefined) {

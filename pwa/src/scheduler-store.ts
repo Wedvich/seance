@@ -6,6 +6,7 @@ import type {
   SchedulerAvailability,
   Task,
   TaskReply,
+  TaskSpec,
 } from "@seance/shared";
 import {
   offeredSpec,
@@ -32,9 +33,11 @@ import {
   deriveContinueAvailability,
   deriveContinueHandoffAvailability,
   deriveRunNowAvailability,
+  deriveTraitsAvailability,
   previewAsked,
   resolveRepo,
   scopedRepos,
+  TRAITS_UNAVAILABLE,
 } from "./view.ts";
 
 /**
@@ -663,9 +666,13 @@ export class SchedulerStore {
     try {
       // A flag, never the manifest: the leader filters on it as it would route the task.
       const attaching = this.#state.attachments.length > 0 ? { attachments: true as const } : {};
+      // An older leader's parser drops `requires`, so its preview would ignore traits: not sent to one.
+      const { requires } = this.#state.form;
+      const requiring = requires.length > 0 && deriveTraitsAvailability(relay) ? { requires } : {};
       const reply = await this.#client.routePreview({
         ...taskRequest(this.#state.form, repo.origin, false),
         ...attaching,
+        ...requiring,
       });
       if (reply === null) result = { kind: "failed", repo: repo.origin, message: SCHEDULER_UNREADABLE };
       else if ("ok" in reply) {
@@ -881,7 +888,11 @@ export class SchedulerStore {
     };
     const offer = continueOffer(listed, this.#state.relay.machines, view?.kind === "ok" ? view.tasks : [], context);
     if (!offer.ok) return sentence(offer.reason);
-    const task = queuedTask({ ...offeredSpec(listed, offer), client: "pwa" }, Date.now());
+    const spec: TaskSpec = { ...offeredSpec(listed, offer), client: "pwa" };
+    // The target is exact, so no name check: a leader that cannot route on `requires` would drop it and resume anywhere.
+    if (spec.requires !== undefined && !deriveTraitsAvailability(this.#state.relay))
+      return sentence(TRAITS_UNAVAILABLE);
+    const task = queuedTask(spec, Date.now());
     const reply = await this.#client.createTask(task);
     if (reply === null) return `${STORE_UNREADABLE} ${MAY_HAVE_LANDED}`;
     if (!reply.ok) return sentence(storeErrorText(reply.code));

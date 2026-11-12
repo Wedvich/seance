@@ -1,6 +1,6 @@
 import { withAutonomy } from "@seance/shared";
 import { appRelayClient, importAppKeys, LazyRelay } from "./app-relay.ts";
-import { cliSink, type AuditSink } from "./audit.ts";
+import { cliSink, traitRefusalAudit, type AuditSink } from "./audit.ts";
 import {
   continueAuto,
   enqueueAuto,
@@ -14,6 +14,8 @@ import {
   startAuto,
   startGateError,
   startQueuedAuto,
+  traitsGateError,
+  requiresCheck,
   type AutoEnqueued,
   type AutoSpec,
   type PlacementInput,
@@ -25,13 +27,13 @@ import { loadConfig, loadPsk, type Config } from "./config.ts";
 import {
   brokerFailureText,
   brokerFleet,
+  ownDeviceId,
   relayFleet,
   SCHEDULER_NEEDS_NEWER_DAEMON,
   type Fleet,
   type FleetLease,
 } from "./fleet.ts";
 import type { PskStore } from "./psk-store.ts";
-import { readState } from "./state.ts";
 
 // `seanced spawn`: queue the spawn for the scheduler as an app-role
 // client, as `seanced mcp`'s `spawn_session` does — a sealed task `store-put` at
@@ -46,6 +48,8 @@ export interface AutoFleetOpts {
   readonly connectTimeoutMs?: number;
   /** Where the broker's socket is, for a shell with no key; tests point it at a double. */
   readonly broker?: BrokerCallOpts;
+  /** This box's deviceId, for the broker's traits gate (`brokerFleet`); tests pin it rather than read state.json. */
+  readonly self?: () => Promise<string | null>;
 }
 
 /**
@@ -58,7 +62,7 @@ export async function autoFleet(
   opts: AutoFleetOpts = {},
 ): Promise<{ readonly fleet: Fleet; readonly keyless: boolean }> {
   const resolved = await loadPsk(config, opts.stores);
-  if (resolved === null) return { fleet: brokerFleet(opts.broker), keyless: true };
+  if (resolved === null) return { fleet: brokerFleet(opts.broker, opts.self), keyless: true };
   const keys = await importAppKeys(resolved.psk);
   const relay = new LazyRelay({
     // The wire log is the client's per-frame chatter; the outcome line is this command's answer.
@@ -74,11 +78,6 @@ const CLI_PLACEMENT_NAMES: PlacementNames = { machine: "--machine", account: "--
 
 /** The word `--machine` and `--not` take for this box, resolved to its deviceId. */
 const HERE = "here";
-
-/** This box's deviceId from its state file; null before the daemon's first run. */
-async function ownDeviceId(): Promise<string | null> {
-  return (await readState())?.deviceId ?? null;
-}
 
 /**
  * `here` as this box's deviceId — the registry's own key for it, so a name
@@ -143,6 +142,7 @@ export async function spawnAuto(
     ...(args.title === undefined ? {} : { title: args.title }),
     ...(args.prompt === undefined ? {} : { prompt: args.prompt }),
     ...(args.autonomy === undefined ? {} : { autonomy: args.autonomy }),
+    ...(args.requires === undefined ? {} : { requires: args.requires }),
   };
   // `steer` is sealed with `plan: true`, for a leader that drops `autonomy`. Never null: the CLI takes no `plan`.
   const spec = withAutonomy(fields) ?? fields;
@@ -171,6 +171,8 @@ export async function spawnAuto(
       const gate = pinAccountGateError(leg, "--account / --not");
       if (gate !== null) return failed(gate);
     }
+    const traitsGate = args.requires === undefined ? null : traitsGateError(leg, "--requires");
+    if (traitsGate !== null) return failed(traitsGate);
     const placed = await resolvePlacement(leg.machines, leg.scheduler.accounts, placement.input, CLI_PLACEMENT_NAMES);
     if ("error" in placed) return failed(`spawn refused: ${placed.error}`);
     const resolved = resolveOrigin(placed.machines, args.repo, placed.scope);
@@ -178,6 +180,11 @@ export async function spawnAuto(
     const resolvedSpec: AutoSpec = { ...spec, repo: resolved.origin, ...placed.fields };
     const longOrigin = specError(resolvedSpec, "cli");
     if (longOrigin !== null) return failed(`spawn refused: ${longOrigin}`);
+    const refused = args.requires === undefined ? null : requiresCheck(resolvedSpec, leg.machines);
+    if (refused !== null) {
+      await traitRefusalAudit(audit, "cli")(refused.kind, args.requires?.length ?? 0, refused.count, refused.split);
+      return failed(`spawn refused: --requires: ${refused.text}`);
+    }
     const id = crypto.randomUUID();
     const enqueued = await enqueueAuto(lease.scheduler, resolvedSpec, audit, "cli", id);
     if (!enqueued.ok) return enqueued;

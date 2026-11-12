@@ -311,6 +311,33 @@ describe("autoFleet", () => {
     }
   });
 
+  test("a keyless shell whose own daemon predates traits refuses --requires, whoever runs the suite", async () => {
+    const double = await startBrokerDouble((raw, id) => {
+      if (!isRecord(raw)) return brokerFail(id, "invalid_request", "not a frame");
+      if (raw["action"] === "fleet") {
+        return brokerOk(id, {
+          machines: [machine({ deviceId: "device-self", capabilities: [] })],
+          scheduler: LEADING,
+        });
+      }
+      return brokerFail(id, "unsupported", "not in this double");
+    });
+    try {
+      const self = async (): Promise<string | null> => "device-self";
+      const built = await autoFleet(config({ psk: "" }), { stores: [], broker: { path: double.path }, self });
+      const outcome = await spawnAuto(
+        { repo: "seance", here: false, prompt: "fix it", requires: ["atlas"] },
+        built.fleet,
+        () => {},
+        { keyless: built.keyless, self },
+      );
+      expect(outcome.ok).toBe(false);
+      expect(outcome.text).toContain("daemon is older than this seanced");
+    } finally {
+      await double.stop();
+    }
+  });
+
   test("a keyless shell whose daemon does not broker is told to read the key itself, not about an MCP server", async () => {
     const double = await startBrokerDouble((_raw, id) =>
       brokerFail(id, "broker_disabled", "this daemon does not broker"),
@@ -460,6 +487,58 @@ describe("spawnAuto's placement flags", () => {
       expect(fake.creates).toEqual([]);
       expect(fake.accountLists).toBe(0);
     }
+  });
+
+  describe("--requires", () => {
+    /** This box (atlas) leads; the other holds gpu. */
+    const withTraits = (leaderCaps: readonly Capability[] = [CAPABILITIES.traits]) => {
+      const fake = fakeRelay([
+        machine({
+          deviceId: "device-self",
+          name: "Thad",
+          exclaves: [{ ...exclaveOf("org-a:me"), traits: ["atlas"] }],
+          repos: [clone],
+          capabilities: leaderCaps,
+        }),
+        machine({
+          deviceId: "device-other",
+          name: "WSL",
+          exclaves: [{ ...exclaveOf("org-b:me"), traits: ["gpu"] }],
+          repos: [clone],
+        }),
+      ]);
+      fake.setState({ scheduler: { kind: "ready", deviceId: "device-self", term: 3 } });
+      return fake;
+    };
+
+    test("is stored as given on a leader that advertises traits, and the audit counts it without naming it", async () => {
+      const fake = withTraits();
+      const { ok, audited } = await run(fake, { requires: ["atlas"] });
+      expect(ok).toBe(true);
+      expect(fake.creates[0]?.spec.requires).toEqual(["atlas"]);
+      expect(audited.join("\n")).not.toContain("atlas");
+    });
+
+    test("is refused, before anything is created, by a leader that does not route on it", async () => {
+      const fake = withTraits([]);
+      const { ok, text } = await run(fake, { requires: ["atlas"] });
+      expect(ok).toBe(false);
+      expect(text).toContain("leader does not route on --requires yet");
+      expect(fake.creates).toEqual([]);
+    });
+
+    test("an unknown trait names the ones that exist; a spec nothing could carry is refused too", async () => {
+      const fake = withTraits();
+      const typo = await run(fake, { requires: ["atlsa"] });
+      expect(typo.ok).toBe(false);
+      expect(typo.text).toContain("spawn refused: --requires: no machine declares the trait atlsa — known: atlas, gpu");
+      expect(typo.audited).toEqual(["audit enqueue origin=cli client=cli refused=unknown_trait requires=1 unknown=1"]);
+
+      const split = await run(fake, { requires: ["atlas", "gpu"] });
+      expect(split.ok).toBe(false);
+      expect(split.text).toContain("no exclave this task can reach carries atlas and gpu together");
+      expect(fake.creates).toEqual([]);
+    });
   });
 
   test("here without a state file is refused before the relay is dialled", async () => {

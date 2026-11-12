@@ -53,7 +53,7 @@ export const AUTONOMY_HINTS: Record<AutonomyLevel, string> = {
   auto: "Also makes reversible choices itself, and notes each one",
 };
 
-export type SheetKind = "machine" | "account" | "repo" | "model" | "effort" | "autonomy" | "after";
+export type SheetKind = "machine" | "account" | "repo" | "model" | "effort" | "autonomy" | "after" | "requires";
 
 /**
  * The Machine sheet's rescan action: inline scanning/failure state on the row it
@@ -159,6 +159,8 @@ export interface PersistedForm {
   readonly after: readonly TaskDep[];
   /** Per task: what settles it. `reported` waits for its session's own done report. */
   readonly until: TaskUntil;
+  /** Per task: the traits the machine must declare, sorted by the order they were ticked. Cleared once a task is queued. */
+  readonly requires: readonly string[];
 }
 
 export interface SessionsView {
@@ -277,6 +279,7 @@ export const DEFAULT_FORM: PersistedForm = {
   effort: DEFAULT_EFFORT,
   after: [],
   until: "merged",
+  requires: [],
 };
 
 export function isModel(value: unknown): value is Model {

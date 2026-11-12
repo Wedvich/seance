@@ -1,4 +1,5 @@
 import {
+  CAPABILITIES,
   parseAccountRecord,
   parseQueueReply,
   parseTaskReply,
@@ -28,6 +29,7 @@ import {
 } from "./broker-client.ts";
 import { parseTaskCreated, type BrokerOp } from "./broker-protocol.ts";
 import type { Check } from "./check.ts";
+import { readState } from "./state.ts";
 
 /**
  * How `seanced mcp` reaches machines other than its own. Two transports behind
@@ -54,6 +56,12 @@ import type { Check } from "./check.ts";
  * pick the task up).
  */
 export interface SchedulerLeg {
+  /**
+   * Set only by a broker leg whose own daemon does not advertise `CAPABILITIES.traits`: the text a spec
+   * carrying `requires` is refused with. That daemon parses the spec with a parser that drops `requires`,
+   * so the task would queue unrestricted, and its stripped registry view would make every trait read unknown.
+   */
+  readonly staleDaemonRequires?: string;
   readonly enqueue: (task: Task) => Promise<TaskCreated | StoreRefusal | null>;
   readonly availability: () => SchedulerAvailability;
   readonly queue: () => Promise<QueueReply | null>;
@@ -162,7 +170,11 @@ function brokerFailure(err: BrokerError): RequestFailure {
  * (no daemon, busy, stopping, not brokering) is `refused` — it must not read as
  * "may have landed".
  */
-export function brokerScheduler(availability: SchedulerAvailability, opts: BrokerCallOpts = {}): SchedulerLeg {
+export function brokerScheduler(
+  availability: SchedulerAvailability,
+  opts: BrokerCallOpts = {},
+  staleDaemonRequires?: string,
+): SchedulerLeg {
   /** `read` answers undefined for data that is not a reply to this op. */
   const send = async <T>(request: SchedulerCall, read: (data: unknown) => T | undefined): Promise<T> => {
     try {
@@ -177,7 +189,14 @@ export function brokerScheduler(availability: SchedulerAvailability, opts: Broke
   };
   return {
     availability: () => availability,
-    enqueue: (task) => send({ schedulerOp: "enqueue", taskId: task.id, spec: task.spec }, parseTaskCreated),
+    ...(staleDaemonRequires === undefined ? {} : { staleDaemonRequires }),
+    enqueue: (task) => {
+      // The gates refuse first; this keeps a caller that skipped them from sending a `requires` the daemon would drop.
+      if (task.spec.requires !== undefined && staleDaemonRequires !== undefined) {
+        return Promise.reject(new RequestFailure("refused", staleDaemonRequires, "daemon"));
+      }
+      return send({ schedulerOp: "enqueue", taskId: task.id, spec: task.spec }, parseTaskCreated);
+    },
     queue: () =>
       send({ schedulerOp: "queue" }, (data) => (data === null ? null : (parseQueueReply(data) ?? undefined))),
     cancel: (taskId) =>
@@ -215,20 +234,52 @@ export function brokerScheduler(availability: SchedulerAvailability, opts: Broke
  * daemon that predates brokered scheduler access answers `unsupported`, and the
  * lease falls back to `machines` with no scheduler (`SCHEDULER_NEEDS_NEWER_DAEMON`).
  */
-export function brokerFleet(opts: BrokerCallOpts = {}): Fleet {
+export function brokerFleet(opts: BrokerCallOpts = {}, self: () => Promise<string | null> = ownDeviceId): Fleet {
+  // A box's deviceId never changes once it exists, so a hit is kept and only a miss (no state yet) asks again.
+  let known: string | null = null;
+  const selfOnce = async (): Promise<string | null> => (known ??= await self());
   return {
     open: async (): Promise<FleetLease> => {
       const state = await brokerFleetState(opts);
+      const stale = await staleDaemonOf(state.machines, selfOnce);
       return {
         machines: state.machines,
         request: <T>(deviceId: string, op: BrokerOp, payload: unknown): Promise<T | ErrorResponse> =>
           brokerRequest<T>(deviceId, op, payload, opts),
-        scheduler: state.scheduler === null ? null : brokerScheduler(state.scheduler, opts),
+        scheduler: state.scheduler === null ? null : brokerScheduler(state.scheduler, opts, stale),
         release: (): void => {},
       };
     },
     stop: (): void => {},
   };
+}
+
+export const OLDER_DAEMON_TRAITS =
+  "this machine's daemon is older than this seanced: restart or update it (seanced update)";
+export const UNCONFIRMED_DAEMON_TRAITS =
+  "this machine is not in the fleet registry yet, so its daemon cannot be confirmed to carry traits: start seanced, or restart it (seanced update)";
+
+/** This box's deviceId from its state file; null before the daemon's first run. */
+export async function ownDeviceId(): Promise<string | null> {
+  return (await readState())?.deviceId ?? null;
+}
+
+/**
+ * Why a spec carrying `requires` cannot go through the daemon this peer brokers through, or undefined when it
+ * can. Older: its own registry entry does not advertise traits. Unconfirmed: no state or no entry, which fails
+ * closed because sending `requires` to a daemon that drops it is the failure. A registry where every machine
+ * advertises traits needs no lookup of who "self" is.
+ */
+async function staleDaemonOf(
+  machines: readonly Machine[],
+  self: () => Promise<string | null>,
+): Promise<string | undefined> {
+  const advertises = (m: Machine): boolean => m.capabilities?.includes(CAPABILITIES.traits) === true;
+  if (machines.length > 0 && machines.every(advertises)) return undefined;
+  const deviceId = await self();
+  const entry = deviceId === null ? undefined : machines.find((m) => m.deviceId === deviceId);
+  if (entry === undefined) return UNCONFIRMED_DAEMON_TRAITS;
+  return advertises(entry) ? undefined : OLDER_DAEMON_TRAITS;
 }
 
 /**

@@ -13,6 +13,11 @@ import {
   schedulerErrorText,
   schedulerRefusal,
   storeErrorText,
+  TRAIT_NAME_PATTERN,
+  unknownTraits,
+  unknownTraitsText,
+  unreachableTraits,
+  unreachableTraitsText,
   TASK_PHASES,
   TASK_REQUEST_LIMITS,
   TASK_SPEC_LIMITS,
@@ -26,7 +31,7 @@ import {
   type TaskSpec,
   lastHeardAt,
 } from "@seance/shared";
-import { enqueueAudit, type AuditSink, type EnqueueSurface } from "./audit.ts";
+import { enqueueAudit, type AuditSink, type EnqueueSurface, type TraitRefusalKind } from "./audit.ts";
 import { DaemonFault, type SchedulerLeg } from "./fleet.ts";
 import { originQuery } from "./scan.ts";
 
@@ -125,7 +130,7 @@ function overBound(
 
 /** What an `auto` enqueue may carry beyond a request: the authoring fields (M4), a pin and avoid, never lineage or base. */
 export type AutoSpec = TaskRequest &
-  Pick<TaskSpec, "deps" | "batch" | "until" | "linear" | "pin" | "avoid" | "continues">;
+  Pick<TaskSpec, "deps" | "batch" | "until" | "linear" | "pin" | "avoid" | "continues" | "requires">;
 
 /**
  * `machine` is the human name from the target's config, resolved against the
@@ -421,9 +426,20 @@ export function taskRequestError(request: TaskRequest, surface: EnqueueSurface =
 export function specError(spec: AutoSpec, surface: EnqueueSurface = "mcp"): string | null {
   const request = taskRequestError(spec, surface);
   if (request !== null) return request;
-  const { deps, linear, pin, avoid } = spec;
+  const { deps, linear, pin, avoid, requires } = spec;
   if (pin !== undefined && pin.deviceId === undefined && pin.account === undefined) {
     return "pin names neither a machine nor an account";
+  }
+  if (requires !== undefined) {
+    if (requires.length === 0) return "requires is empty; leave it out to require nothing";
+    if (requires.length > TASK_SPEC_LIMITS.requires) {
+      return `requires names ${requires.length} traits; a task requires at most ${TASK_SPEC_LIMITS.requires}`;
+    }
+    const stray = requires.find((trait) => !TRAIT_NAME_PATTERN.test(trait));
+    if (stray !== undefined) {
+      return `requires: ${JSON.stringify(stray.slice(0, 64))} is not a trait name (a-z, 0-9, -; at most 32 characters)`;
+    }
+    if (new Set(requires).size !== requires.length) return "requires names a trait twice";
   }
   if (avoid !== undefined && avoid.length > TASK_SPEC_LIMITS.avoid) {
     return `avoid names ${avoid.length} machines; a task avoids at most ${TASK_SPEC_LIMITS.avoid}`;
@@ -533,6 +549,10 @@ export async function continueAuto(
   const spec = offeredSpec(task, offer, prompt);
   const invalid = specError(spec, surface);
   if (invalid !== null) return failed(`${label} refused: ${invalid}`);
+  // No unknown-name check: the target is exact and the names came from the stored task. A leader that
+  // cannot route on them would drop them and resume wherever the target happens to lack the trait.
+  const traitsGate = spec.requires === undefined ? null : traitsGateError(lease, "requires", label);
+  if (traitsGate !== null) return failed(traitsGate);
   const enqueued = await enqueueAuto(lease.scheduler, spec, audit, surface);
   return enqueued.ok ? { ...enqueued, text: `continuing task ${taskId}\n${enqueued.text}` } : enqueued;
 }
@@ -547,6 +567,57 @@ export function pinAccountGateError(lease: SchedulerLease, fields: string): stri
   return lease.scheduler.availability().kind === "ready"
     ? `spawn refused: the scheduler's leader does not route on ${fields} yet — its daemon needs \`seanced update\``
     : `spawn refused: no verified scheduler is leading, so it cannot be confirmed to route on ${fields} — try again once one leads`;
+}
+
+/**
+ * The submit-time half of the `traits` gate (the record's `REQUIRES_DEP_SENTINEL` is the other): an older
+ * leader drops `requires` on its first write and so would place the task anywhere, so nothing is written
+ * to one — or to none, which cannot say. `field` names it as the surface does.
+ */
+export function traitsGateError(lease: SchedulerLease, field: string, label = "spawn"): string | null {
+  // First: a stripped registry from an older daemon would otherwise read as "no machine declares any traits".
+  if (lease.scheduler.staleDaemonRequires !== undefined)
+    return `${label} refused: ${lease.scheduler.staleDaemonRequires}`;
+  if (leaderAdvertises(lease, CAPABILITIES.traits)) return null;
+  return lease.scheduler.availability().kind === "ready"
+    ? `${label} refused: the scheduler's leader does not route on ${field} yet — its daemon needs \`seanced update\``
+    : `${label} refused: no verified scheduler is leading, so it cannot be confirmed to route on ${field} — try again once one leads`;
+}
+
+/** A refused `requires`: the line to show, and what to count in its audit line. */
+export interface RequiresCheckRefusal {
+  readonly kind: TraitRefusalKind;
+  readonly text: string;
+  /** Unknown names, or for `unreachable_trait` the required traits no reachable exclave carries. */
+  readonly count: number;
+  /** `unreachable_trait` with every trait on some reachable exclave, no one exclave on all: `count` is 0. */
+  readonly split: boolean;
+}
+
+/**
+ * The enqueue-time checks on `requires`, over the fleet as the registry shows it (offline machines count):
+ * a name no machine declares is a typo, listed with the names that exist; and a task whose pin, account
+ * pin and `avoid` leave no single exclave carrying every trait could never place, so it would wait until
+ * `pin_expired` (or forever, unpinned). One check for MCP, the CLI and `seanced continue`'s neighbours;
+ * `spec` is the whole spec with its pin and avoid already resolved to ids, not just `requires`.
+ */
+export function requiresCheck(
+  spec: Pick<TaskSpec, "requires" | "pin" | "avoid">,
+  machines: readonly Machine[],
+): RequiresCheckRefusal | null {
+  const requires = spec.requires ?? [];
+  const unknown = unknownTraits(requires, machines);
+  if (unknown.length > 0) {
+    return { kind: "unknown_trait", text: unknownTraitsText(unknown, machines), count: unknown.length, split: false };
+  }
+  const reach = unreachableTraits(spec, machines);
+  if (reach.reachable) return null;
+  return {
+    kind: "unreachable_trait",
+    text: unreachableTraitsText(spec, machines),
+    count: reach.missing.length,
+    split: reach.missing.length === 0,
+  };
 }
 
 /** The submit-time gate for a start: a leader without `runNow` refuses the op as unknown. */

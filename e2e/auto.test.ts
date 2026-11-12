@@ -10,6 +10,7 @@ import {
   taskKey,
   DAEMON_ROLES,
   RelayClient,
+  REQUIRES_DEP_SENTINEL,
   SCHEDULER_ID,
   signRegister,
   type QueueChanged,
@@ -434,6 +435,128 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       await Promise.all(windows.map((window) => killWindow(window).catch(() => {})));
       raw.close();
       built.fleet.stop();
+      await client.close();
+      lazy.stop();
+      app.stop();
+      await second.stop();
+    }
+  }, 90_000);
+
+  // M4's traits, end to end: a trait is declared in a machine's own config.json, rides its register,
+  // and the real leader places a task that requires it only there, rejecting the machine without it
+  // with exactly `trait_absent`. The record at rest carries the sentinel an older leader refuses.
+  test("a task requiring a trait lands on the machine that declares it, and the other is rejected for lacking it", async () => {
+    const second = await stack.startSecondDaemon({
+      name: "TraitBox",
+      exclaves: [{ id: "default", observedAtMs: Date.now() - 10 * 60_000, fiveHourPct: 20 }],
+      traits: { atlas: {} },
+    });
+    const app = startApp(stack, {}, { accounts: true });
+    const lazy = new LazyRelay({
+      create: () =>
+        new RelayClient({
+          url: wsUrl(stack.relay, "/app"),
+          token: TOKEN,
+          key: stack.appKey,
+          accountKey: stack.accountKey,
+          createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
+        }),
+    });
+    const client = new Client(
+      { name: "e2e-traits", version: "0.0.0" },
+      { versionNegotiation: { mode: { pin: "2026-07-28" } } },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    serveStdio(() => buildMcpServer(relayFleet(lazy), null), { transport: serverTransport });
+    await client.connect(clientTransport);
+    const raw = await connectApp(stack.relay);
+    const ids: string[] = [];
+    const windows: string[] = [];
+    const spawn = async (extra: Record<string, unknown>): Promise<{ text: string; error: boolean }> => {
+      const result = await client.callTool({
+        name: "spawn_session",
+        arguments: { machine: "auto", repo: "myrepo", prompt: "traits", ...extra },
+      });
+      const text = (result.content as { text: string }[]).map((entry) => entry.text).join("\n");
+      return { text, error: result.isError === true };
+    };
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      await app.waitForApp(
+        (state) =>
+          state.relay.scheduler.kind === "ready" &&
+          state.relay.machines.some(
+            (m) =>
+              m.deviceId === second.deviceId &&
+              m.connected &&
+              m.repos.length > 0 &&
+              m.exclaves?.some((x) => x.traits?.includes("atlas") === true) === true &&
+              m.status !== undefined,
+          ),
+        "the second machine live, declaring atlas",
+      );
+      // The suite's own daemon declares none, and says so by sending no field.
+      const listing = await client.callTool({ name: "list_machines", arguments: {} });
+      expect(exclavesOf(listing, second.deviceId)).toContainEqual(expect.objectContaining({ traits: ["atlas"] }));
+      expect(exclavesOf(listing, stack.deviceId)).not.toContainEqual(
+        expect.objectContaining({ traits: expect.anything() }),
+      );
+
+      // A name nobody declares is refused at submit, with the ones that exist.
+      const typo = await spawn({ requires: ["nosuch"] });
+      expect(typo.error).toBe(true);
+      expect(typo.text).toContain("no machine declares the trait nosuch — known: atlas");
+
+      const required = await spawn({ requires: ["atlas"] });
+      expect(required.error).toBe(false);
+      const requiredId = /^task (\S+):/u.exec(required.text)?.[1];
+      if (requiredId === undefined) throw new Error(`no task id in: ${required.text}`);
+      ids.push(requiredId);
+      await pollUntil(
+        async () => (await stack.queue().get(requiredId))?.body?.state === "running",
+        "the required task to run",
+        20_000,
+      );
+      const body = (await stack.queue().get(requiredId))?.body;
+      expect(body?.assignment?.deviceId).toBe(second.deviceId);
+      const window = body?.assignment?.window;
+      if (window !== undefined) windows.push(window);
+      expect(body?.spec.requires).toEqual(["atlas"]);
+      // Exactly the one reason: the machine lacks the trait, and nothing else is wrong with it.
+      expect(body?.decision?.candidates.find((c) => c.deviceId === stack.deviceId)?.rejected).toEqual([
+        { code: "trait_absent", trait: "atlas" },
+      ]);
+
+      // At rest: `requires` beside the sentinel an older leader refuses.
+      raw.send({ t: "store-get", id: "get-required", key: taskKey(requiredId) });
+      const stored = parseStoreReply(await raw.waitForRe<{ re: string }>("get-required", 10_000));
+      if (stored?.t !== "store-record" || stored.record === null) throw new Error("no stored record");
+      const atRest = JSON.stringify((await openAtRest(stack.appKey, stored.record.env, AT_REST_OPS.task)).payload);
+      expect(atRest).toContain('"requires":["atlas"]');
+      expect(atRest).toContain(JSON.stringify(REQUIRES_DEP_SENTINEL));
+
+      // The control: the same task without `requires` is not filtered on traits anywhere.
+      const control = await spawn({});
+      expect(control.error).toBe(false);
+      const controlId = /^task (\S+):/u.exec(control.text)?.[1];
+      if (controlId === undefined) throw new Error(`no task id in: ${control.text}`);
+      ids.push(controlId);
+      await pollUntil(
+        async () => (await stack.queue().get(controlId))?.body?.decision !== undefined,
+        "the control task to be decided",
+        20_000,
+      );
+      const controlBody = (await stack.queue().get(controlId))?.body;
+      const reasons = controlBody?.decision?.candidates.flatMap((c) => c.rejected) ?? [];
+      expect(reasons.some((r) => r.code === "trait_absent")).toBe(false);
+      expect(controlBody?.spec).not.toHaveProperty("requires");
+      const controlWindow = controlBody?.assignment?.window;
+      if (controlWindow !== undefined) windows.push(controlWindow);
+    } finally {
+      await Promise.all(ids.map((id) => app.client.cancel(id).catch(() => null)));
+      await Promise.all(windows.map((window) => killWindow(window).catch(() => {})));
+      raw.close();
       await client.close();
       lazy.stop();
       app.stop();

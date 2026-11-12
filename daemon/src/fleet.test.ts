@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  CAPABILITIES,
   failureReasonText,
   importPsk,
   isRecord,
@@ -16,7 +17,15 @@ import { machine } from "../test/fake-app-relay.ts";
 import { BrokerError } from "./broker-client.ts";
 import { brokerFail, brokerOk, type BrokerReply } from "./broker-protocol.ts";
 import { enqueueAuto } from "./auto.ts";
-import { brokerFleet, DaemonFault, FleetUnreachable, selectFleet, type Fleet, type FleetLease } from "./fleet.ts";
+import {
+  brokerFleet,
+  DaemonFault,
+  FleetUnreachable,
+  selectFleet,
+  UNCONFIRMED_DAEMON_TRAITS,
+  type Fleet,
+  type FleetLease,
+} from "./fleet.ts";
 
 interface CountingFleet extends Fleet {
   opened: number;
@@ -278,6 +287,89 @@ describe("brokerFleet", () => {
       expect(JSON.stringify(sent)).not.toContain("createdAt");
     } finally {
       await double.stop();
+    }
+  });
+
+  describe("a spec with requires, through a daemon that predates traits", () => {
+    const REQUIRING: Task = { ...TASK, spec: { ...TASK.spec, requires: ["atlas"] } };
+    const OLD = machine({ deviceId: "device-self", name: "Self", capabilities: [] });
+    const NEW = machine({ deviceId: "device-self", name: "Self", capabilities: [CAPABILITIES.traits] });
+    const daemonOf = (entry: Machine) =>
+      startBrokerDouble((raw, id) =>
+        actionOf(raw) === "fleet"
+          ? brokerOk(id, { machines: [entry, machine()], scheduler: LEADER })
+          : brokerOk(id, { ok: true, landedEarlier: false }),
+      );
+    const self = (): Promise<string | null> => Promise.resolve("device-self");
+
+    test("is refused at the gate and at the enqueue, and nothing but the fleet frame is sent", async () => {
+      const double = await daemonOf(OLD);
+      try {
+        const lease = await brokerFleet({ path: double.path }, self).open();
+        const scheduler = lease.scheduler;
+        if (scheduler === null) throw new Error("expected a scheduler leg");
+        const refused = "this machine's daemon is older than this seanced: restart or update it (seanced update)";
+        expect(scheduler.staleDaemonRequires).toBe(refused);
+        expect(await rejection(scheduler.enqueue(REQUIRING))).toMatchObject({ message: refused });
+        // A spec that requires nothing still goes through an old daemon.
+        expect(await scheduler.enqueue(TASK)).toEqual({ ok: true, landedEarlier: false });
+        expect(double.frames.map(actionOf)).toEqual(["fleet", "scheduler"]);
+      } finally {
+        await double.stop();
+      }
+    });
+
+    test("a daemon that advertises traits, or one whose own entry cannot be found, is told apart", async () => {
+      const current = await daemonOf(NEW);
+      try {
+        const lease = await brokerFleet({ path: current.path }, self).open();
+        expect(lease.scheduler?.staleDaemonRequires).toBeUndefined();
+        expect(await lease.scheduler?.enqueue(REQUIRING)).toEqual({ ok: true, landedEarlier: false });
+      } finally {
+        await current.stop();
+      }
+      const unknown = await daemonOf(NEW);
+      try {
+        const lease = await brokerFleet({ path: unknown.path }, () => Promise.resolve(null)).open();
+        // Not "older": nothing says the daemon is, only that this box is not in the registry.
+        expect(lease.scheduler?.staleDaemonRequires).toBe(UNCONFIRMED_DAEMON_TRAITS);
+      } finally {
+        await unknown.stop();
+      }
+    });
+  });
+
+  test("the lookup of this box's own deviceId is skipped when every machine advertises traits, and kept once found", async () => {
+    const entry = (deviceId: string, capabilities: Machine["capabilities"]): Machine =>
+      machine({ deviceId, name: deviceId, capabilities });
+    const all = await startBrokerDouble((raw, id) =>
+      actionOf(raw) === "fleet"
+        ? brokerOk(id, {
+            machines: [entry("a", [CAPABILITIES.traits]), entry("b", [CAPABILITIES.traits])],
+            scheduler: LEADER,
+          })
+        : brokerOk(id, { ok: true, landedEarlier: false }),
+    );
+    const mixed = await startBrokerDouble((raw, id) =>
+      actionOf(raw) === "fleet"
+        ? brokerOk(id, { machines: [entry("a", [CAPABILITIES.traits]), entry("b", [])], scheduler: LEADER })
+        : brokerOk(id, { ok: true, landedEarlier: false }),
+    );
+    try {
+      let asked = 0;
+      const self = (): Promise<string | null> => {
+        asked += 1;
+        return Promise.resolve("a");
+      };
+      await brokerFleet({ path: all.path }, self).open();
+      expect(asked).toBe(0);
+      const fleet = brokerFleet({ path: mixed.path }, self);
+      await fleet.open();
+      await fleet.open();
+      expect(asked).toBe(1);
+    } finally {
+      await all.stop();
+      await mixed.stop();
     }
   });
 

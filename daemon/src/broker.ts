@@ -291,6 +291,17 @@ export function createBroker(opts: BrokerOpts): Broker {
           const gate = continueGateError(scheduler, advertises(machines, scheduler, CAPABILITIES.continueTask));
           if (gate !== null) return await fail(id, "invalid_request", gate);
         }
+        // `requires` to a leader that cannot route it would place the task anywhere (it drops the field on its first write).
+        if (request.spec.requires !== undefined) {
+          const { machines, scheduler } = client.getState();
+          if (!advertises(machines, scheduler, CAPABILITIES.traits)) {
+            return await fail(
+              id,
+              "invalid_request",
+              "the scheduler's leader does not route on requires yet, or no verified scheduler is leading",
+            );
+          }
+        }
         // Built here, never taken from the peer: its id and spec, this daemon's clock.
         const task = queuedTask(request.spec, now(), request.taskId);
         const audited = enqueueAudit(opts.auditSink, "local-broker", surface);

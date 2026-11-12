@@ -692,10 +692,55 @@ describe("leader requests", () => {
     const admits = lines.filter((line) => line.includes("op=admit"));
     expect(admits).toEqual([
       expect.stringContaining(
-        `audit queue origin=leader op=admit task="from-phone" client="pwa" createdAt=${createdAt} state=ready`,
+        `audit queue origin=leader op=admit task="from-phone" client="pwa" createdAt=${createdAt} state=ready avoid=0 requires=0 pin=0`,
       ),
     ]);
     expect(lines.join("\n")).not.toContain("the secret plan");
+  });
+
+  test("a required trait that holds a task is logged once, and the admit line counts its restrictions without naming them", async () => {
+    const relay = startTestRelay(TOKEN);
+    relay.schedulerTerm = 1;
+    relay.setRegistry([await routableEntry("b")]);
+    const store = new MemoryQueueStore();
+    const { leader, replies } = leaderOver(relay, store, 30);
+    const lines = await captureLog(async () => {
+      try {
+        leader.lead(1);
+        await leader.settled();
+        await enqueueQueued(store, leader, "needy", {
+          spec: {
+            repo: "github.com/acme/app",
+            mode: "worktree",
+            requires: ["atlas", "gpu"],
+            avoid: ["x", "y"],
+            pin: { account: "org:secret-account" },
+          },
+        });
+        // The decision is set in the same turn that logs the held traits, so a queue reply showing it
+        // comes after the lines; further passes then say nothing new.
+        for (let pass = 0; pass < 3; pass += 1) {
+          // oxlint-disable-next-line no-await-in-loop -- each reply follows the pass before it
+          await pollUntil(async () => {
+            leader.deliver(await appRequest("queue", {}));
+            return queueReply((await replies.next()).response.payload).tasks[0]?.decision !== undefined;
+          }, "the task's decision");
+          // oxlint-disable-next-line no-await-in-loop -- a pass interval apart
+          await Bun.sleep(60);
+        }
+      } finally {
+        leader.stop();
+        relay.stop();
+      }
+    });
+    expect(lines.filter((line) => line.includes("scheduler: task held by trait:"))).toEqual([
+      expect.stringContaining("scheduler: task held by trait: task=needy trait=atlas"),
+      expect.stringContaining("scheduler: task held by trait: task=needy trait=gpu"),
+    ]);
+    const admit = lines.find((line) => line.includes("op=admit"));
+    expect(admit).toContain("avoid=2 requires=2 pin=1");
+    expect(admit).not.toContain("atlas");
+    expect(admit).not.toContain("secret-account");
   });
 
   test("pause holds dispatch and queue shows the hold; resume places the task; each is audited, refusals too", async () => {

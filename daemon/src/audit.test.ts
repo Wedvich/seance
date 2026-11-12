@@ -3,12 +3,14 @@ import { chmod, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  admitAudit,
   auditLogChecks,
   brokerAudit,
   cliSink,
   ensureAuditLog,
   enqueueAudit,
   spawnAudit,
+  traitRefusalAudit,
   type AuditSink,
 } from "./audit.ts";
 import { logPath } from "./paths.ts";
@@ -129,6 +131,34 @@ describe("enqueue audit lines", () => {
       'audit enqueue origin=local-broker claimed_client=mcp task="t-1" createdAt=42 refused code="rate\\"limited"',
     ]);
     expect(emitted()).not.toContain(" client=");
+  });
+});
+
+describe("trait audit lines", () => {
+  test("the leader's admit line counts avoid, requires and pin and names none of them", async () => {
+    await admitAudit(collect)({
+      id: "t-1",
+      createdAt: 42,
+      state: "ready",
+      spec: { client: "mcp", avoid: ["device-secret"], requires: ["atlas", "gpu"], pin: { deviceId: "device-x" } },
+    });
+    await admitAudit(collect)({ id: "t-2", createdAt: 43, state: "ready", spec: {} });
+    expect(collected).toEqual([
+      'audit queue origin=leader op=admit task="t-1" client="mcp" createdAt=42 state=ready avoid=1 requires=2 pin=1',
+      'audit queue origin=leader op=admit task="t-2" createdAt=43 state=ready avoid=0 requires=0 pin=0',
+    ]);
+    expect(emitted()).not.toMatch(/atlas|gpu|secret|device-x/u);
+  });
+
+  test("a refused enqueue is one line under the surface's origin, with counts only", async () => {
+    await traitRefusalAudit(collect, "mcp")("unknown_trait", 2, 1);
+    await traitRefusalAudit(collect, "cli")("unreachable_trait", 3, 2);
+    await traitRefusalAudit(collect, "cli")("unreachable_trait", 2, 0, true);
+    expect(collected).toEqual([
+      "audit enqueue origin=mcp client=mcp refused=unknown_trait requires=2 unknown=1",
+      "audit enqueue origin=cli client=cli refused=unreachable_trait requires=3 missing=2",
+      "audit enqueue origin=cli client=cli refused=unreachable_trait requires=2 missing=0 split=1",
+    ]);
   });
 });
 

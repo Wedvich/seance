@@ -42,6 +42,7 @@ const SHEET_TITLES: Record<SheetKind, string> = {
   effort: "How much effort?",
   autonomy: "How much should it decide?",
   after: "Wait for which tasks?",
+  requires: "Which traits must it have?",
 };
 
 const WHEN_LABELS: Record<DepAfter, string> = { opened: "Opened", merged: "Merged", done: "Done" };
@@ -77,6 +78,7 @@ export interface SpawnActions {
   readonly addAfter: (taskId: string, after: DepAfter) => void;
   readonly removeAfter: (taskId: string) => void;
   readonly setUntil: (until: TaskUntil) => void;
+  readonly toggleRequires: (trait: string) => void;
   /** Picked, pasted or dropped files; the store applies the limits. */
   readonly addFiles: (files: readonly File[]) => void;
   readonly removeFile: (key: string) => void;
@@ -503,6 +505,31 @@ function ActiveSheet(props: {
             onClick={() => actions.setAutonomy(level)}
           />
         ))}
+      </Sheet>
+    );
+  }
+
+  if (kind === "requires") {
+    const { choices, note } = view.requires;
+    return (
+      <Sheet title={SHEET_TITLES.requires} closing={closing} onExited={onExited} onClose={close}>
+        {choices.map((choice) => (
+          <SheetItem
+            key={choice.name}
+            label={choice.name}
+            sub={choice.holders}
+            mono
+            selected={choice.selected}
+            disabled={choice.disabled}
+            onClick={() => actions.toggleRequires(choice.name)}
+          />
+        ))}
+        {choices.length === 0 && <p className="sheet-note">No machine declares a trait.</p>}
+        {note !== null && <p className="sheet-note">{note}</p>}
+        <p className="sheet-note">
+          The task runs only where one exclave declares every trait ticked. A machine declares its traits in its own
+          config.json.
+        </p>
       </Sheet>
     );
   }
@@ -1090,6 +1117,9 @@ export function SpawnScreen(props: {
           <TileButton tile={view.effortTile} onClick={() => actions.openSheet("effort")} />
           <TileButton tile={view.autonomyTile} onClick={() => actions.openSheet("autonomy")} />
           <TileButton tile={view.afterTile} onClick={() => actions.openSheet("after")} />
+          {view.requiresTile !== null && (
+            <TileButton tile={view.requiresTile} onClick={() => actions.openSheet("requires")} />
+          )}
         </div>
 
         {view.ignoredNote !== null && <p className="ignored-note">{view.ignoredNote}</p>}

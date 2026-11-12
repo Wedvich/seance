@@ -24,6 +24,7 @@ import {
   decisionStartNowItem,
   inputWait,
   pinLine,
+  requiresLine,
   taskHeadline,
   waitingText,
   type StartNowItem,
@@ -355,9 +356,11 @@ function batchLine(task: Task): string | null {
 
 function placementLine(task: Task, state: AppState): string | null {
   const { machines } = state.relay;
-  const parts = [pinLine(task, machines, state.accounts.aliases), avoidLine(task, machines)].filter(
-    (part): part is string => part !== null,
-  );
+  const parts = [
+    pinLine(task, machines, state.accounts.aliases),
+    avoidLine(task, machines),
+    requiresLine(task, machines),
+  ].filter((part): part is string => part !== null);
   return parts.length === 0 ? null : parts.join(". ");
 }
 

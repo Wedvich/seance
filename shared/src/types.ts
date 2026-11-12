@@ -481,7 +481,7 @@ export const STORE_MAX_CT_LENGTH = 40 * 1024;
  * `TASK_REQUEST_LIMITS.prompt` where each character costs two UTF-8 bytes;
  * three-byte text (CJK) fits about 5,800 characters, and the sealer's check
  * refuses more. The 12 KiB left holds all the leader adds at every bound plus a
- * decision of nine candidates (both measured in parse.test.ts); past that the
+ * decision of eight candidates (both measured in parse.test.ts); past that the
  * leader cuts the decision to its winner (`Decision.trimmed`).
  */
 export const STORE_CREATE_MAX_CT_LENGTH = 28 * 1024;
@@ -863,6 +863,14 @@ export interface ExclaveInfo {
    * `SKILL.md` (symlinks followed). Read with the scan, served from the blob.
    */
   readonly skills: readonly string[];
+  /**
+   * Trait names that apply to this exclave, sorted: declared only in the machine's
+   * own `config.json` (`traits`), never taken from a frame, so a reader trusts a
+   * name only because that machine's own sealed blob says so. A task's `requires`
+   * is matched against it. Absent means none, and an unreadable list reads as none
+   * (the fail-closed direction for placement).
+   */
+  readonly traits?: readonly string[];
 }
 
 export interface SessionEntry {
@@ -1001,6 +1009,11 @@ export interface MachineInfo {
  * `authHealth`: as a daemon, reports each signed-in exclave's login state from its
  * credential store in `status` (`ax`/`ae`/`au`; DESIGN.md "Auth health"), so a reader
  * knows an exclave in none of the three is `ok` rather than unread.
+ * `traits`: as a daemon, fills `ExclaveInfo.traits` from its own config; as a leader,
+ * routes on `TaskSpec.requires` (`trait_absent`). Clients write `requires` only to a
+ * verified leader advertising it: an older one drops the field, and the sentinel
+ * (`REQUIRES_DEP_SENTINEL`) only keeps it from placing the task anywhere. One build
+ * does both halves.
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -1016,6 +1029,7 @@ export const CAPABILITIES = {
   runNow: "runNow",
   attachments: "attachments",
   authHealth: "authHealth",
+  traits: "traits",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -1874,10 +1888,12 @@ export const TASK_SPEC_LIMITS = {
   /**
    * Machines a task may avoid: a few to steer around, not a fleet to list. Four
    * keeps the record at every bound, the longest account pin included, under
-   * `STORE_MAX_CT_LENGTH` with nine candidates beside it, the alert stamps included
+   * `STORE_MAX_CT_LENGTH` with eight candidates beside it, the alert stamps included
    * (measured in parse.test.ts).
    */
   avoid: 4,
+  /** Traits a task may require: the few that make a machine the right one. `TRAIT_LIMITS.requires` reads it. */
+  requires: 4,
 } as const;
 
 /**
@@ -1939,6 +1955,15 @@ export const ATTACHMENT_ALLOWANCE = {
  * This build's parser drops it before the deps bound applies.
  */
 export const ATTACHMENTS_DEP_SENTINEL = { task: "", after: "merged" } as const;
+
+/**
+ * Sealed into `spec.deps` whenever a spec carries `requires` (`taskRecordAtRest`),
+ * as `ATTACHMENTS_DEP_SENTINEL` is for attachments: an older leader's dep parser
+ * refuses the empty `task`, so it holds the record unreadable rather than seal it
+ * back without the requirement or place it where the trait is missing. This build's
+ * parser drops it only beside `requires`, and refuses it without.
+ */
+export const REQUIRES_DEP_SENTINEL = { task: "", after: "opened" } as const;
 
 /** One file a task carries: uploaded sealed before the task was created. */
 export interface AttachmentRef {
@@ -2032,6 +2057,14 @@ export interface TaskSpec extends TaskRequest {
    */
   readonly attachments?: readonly AttachmentRef[];
   /**
+   * 1 to `TASK_SPEC_LIMITS.requires` unique trait names (`TRAIT_NAME_PATTERN`):
+   * placement considers only exclaves whose `ExclaveInfo.traits` carry all of them
+   * (`trait_absent`, one reason per missing name). An older leader holds the record
+   * unreadable (`REQUIRES_DEP_SENTINEL`); a client writes it only when the verified
+   * leader advertises `CAPABILITIES.traits`. Never in a `SpawnRequest`.
+   */
+  readonly requires?: readonly string[];
+  /**
    * Which app-role client enqueued it, as `SpawnRequest.client` — audit trail
    * only (the leader's admit line), at most `TASK_SPEC_LIMITS.client`. Absent
    * from older clients.
@@ -2097,6 +2130,13 @@ export type Reason =
    * fleet's inventory knows it, and neither this exclave nor this clone has it.
    */
   | { readonly code: "skill_absent"; readonly skill: string }
+  /** M4, Traits: the task requires `trait` and this exclave's `ExclaveInfo.traits` lacks it. One reason per missing trait. */
+  | { readonly code: "trait_absent"; readonly trait: string }
+  /**
+   * M4, Traits: the exclave declares `trait` but its probe is failing. Emitted only by
+   * the probes PR; parsed and worded now so a reader of this build does not drop it.
+   */
+  | { readonly code: "trait_unhealthy"; readonly trait: string }
   /**
    * M4, stacking: the branch the task stacks on is not pushed, so only the
    * exclave holding it could start from it, and this candidate is not that one.
@@ -2939,6 +2979,8 @@ export interface QueueChanged {
  */
 export interface RoutePreviewRequest extends TaskRequest {
   readonly attachments?: true;
+  /** As `TaskSpec.requires`; an older leader's parser drops it, so its preview ignores traits. */
+  readonly requires?: readonly string[];
 }
 
 /** `op: "route-preview"` (a `RoutePreviewRequest`) → what routing would decide now, reserving nothing. */

@@ -2,10 +2,12 @@ import {
   accountNameIn,
   CAPABILITIES,
   endedBySignal,
+  fleetTraits,
   knownAccounts,
   lastHeardAt,
   originLabel,
   sentence,
+  TASK_SPEC_LIMITS,
   taskFailureText,
   type TaskUntil,
 } from "@seance/shared";
@@ -168,6 +170,9 @@ export interface ViewModel {
   readonly autonomyTile: Tile;
   /** The authoring tile: the tasks this one waits on. */
   readonly afterTile: Tile;
+  /** Null while no machine declares a trait and the form requires none: there is nothing to pick. */
+  readonly requiresTile: Tile | null;
+  readonly requires: RequiresView;
   /**
    * The verified leader takes `until: "reported"` and `after: "done"` (DESIGN.md, capabilities),
    * or no relay can say: a held task is checked when it is sent.
@@ -407,6 +412,16 @@ export function attachmentsWithdrawn(relay: RelayState): boolean {
   return leaderVerified(relay) && relay.registrySettled && !deriveAttachmentsAvailability(relay);
 }
 
+/**
+ * `requires` is written only to a verified leader that advertises `traits`: an older one would drop it
+ * from the spec on its first write (or hold the record unreadable, by the sentinel) and place the task anywhere.
+ */
+export function deriveTraitsAvailability(relay: RelayState): boolean {
+  return verifiedLeaderAdvertises(relay, CAPABILITIES.traits);
+}
+
+export const TRAITS_UNAVAILABLE = "The scheduler's leader can't route on traits yet. Update seanced on its machine";
+
 export const ATTACHMENTS_UNAVAILABLE =
   "The scheduler's leader doesn't take attachments yet. Update seanced on its machine, or remove the files";
 
@@ -492,6 +507,57 @@ function verifiedLeaderAdvertises(relay: RelayState, capability: Capability): bo
   if (relay.status !== "open" || scheduler.kind !== "ready") return false;
   const leader = relay.machines.find((m) => m.deviceId === scheduler.deviceId);
   return leader?.capabilities?.includes(capability) === true;
+}
+
+export interface RequiresChoice {
+  readonly name: string;
+  /** The machines that declare it, as a line; says so when none does (a name the form kept). */
+  readonly holders: string;
+  readonly selected: boolean;
+  /** Not pickable: the form holds as many as a task may require, or the leader cannot route on traits. */
+  readonly disabled: boolean;
+}
+
+export interface RequiresView {
+  readonly choices: readonly RequiresChoice[];
+  /** Shown beneath the list: why picking is off, or that a task requires at most N. */
+  readonly note: string | null;
+}
+
+/** Machine names as one clause, capped like a wait reason's. */
+export function holdersText(machines: readonly string[]): string {
+  if (machines.length === 0) return "no machine declares it";
+  const shown = machines.slice(0, 3).join(", ");
+  return machines.length > 3 ? `${shown}, +${machines.length - 3} more` : shown;
+}
+
+/** What the form requires, then every trait the fleet declares: a kept name no machine declares still shows, to be removed. */
+function deriveRequires(state: AppState): RequiresView {
+  const { form, relay } = state;
+  const fleet = fleetTraits(relay.machines);
+  const available = deriveTraitsAvailability(relay);
+  const full = form.requires.length >= TASK_SPEC_LIMITS.requires;
+  const names = [...form.requires, ...[...fleet.keys()].filter((name) => !form.requires.includes(name))];
+  const choices = names.map((name) => {
+    const selected = form.requires.includes(name);
+    return {
+      name,
+      holders: holdersText(fleet.get(name) ?? []),
+      selected,
+      disabled: !selected && (full || !available),
+    };
+  });
+  const note = !available
+    ? `${TRAITS_UNAVAILABLE}.`
+    : full
+      ? `A task requires at most ${TASK_SPEC_LIMITS.requires} traits.`
+      : null;
+  return { choices, note };
+}
+
+function requiresValue(requires: PersistedForm["requires"]): string {
+  if (requires.length === 0) return "Any";
+  return requires.length <= 2 ? requires.join(", ") : `${requires.length} traits`;
 }
 
 function afterValue(after: PersistedForm["after"]): string {
@@ -822,7 +888,7 @@ function deriveIgnoredNote(relay: RelayState): string | null {
  * not yet verified.
  */
 export function heldNeedsLeader(task: Task): boolean {
-  return settlesOnReport(task) || task.spec.pin?.account !== undefined;
+  return settlesOnReport(task) || task.spec.pin?.account !== undefined || task.spec.requires !== undefined;
 }
 
 /** Whether a task needs a leader advertising `reportedDone`: it settles on its done report, or waits on another's. */
@@ -902,6 +968,16 @@ export function deriveView(state: AppState, now: number): ViewModel {
     },
     autonomyTile: { label: "AUTONOMY", value: AUTONOMY_LABELS[state.autonomy], mono: false, dot: null },
     afterTile: { label: "AFTER", value: afterValue(form.after), mono: false, dot: null },
+    requiresTile:
+      fleetTraits(relay.machines).size === 0 && form.requires.length === 0
+        ? null
+        : {
+            label: "REQUIRES",
+            value: requiresValue(form.requires),
+            mono: false,
+            dot: form.requires.length > 0 && !deriveTraitsAvailability(relay) ? "off" : null,
+          },
+    requires: deriveRequires(state),
     reportedAvailable: deriveReportedOffered(relay),
     held: state.held.map((entry) => heldRow(entry, relay)),
     heldDropped: heldDroppedText(state.heldDropped),

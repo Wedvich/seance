@@ -383,6 +383,38 @@ describe("the broker's scheduler actions", () => {
     });
   });
 
+  describe("an enqueue carrying requires", () => {
+    const spec = { requires: ["atlas"] };
+
+    test("is sealed with it once the leader advertises traits", async () => {
+      const { broker, fakes } = rig(undefined, {
+        now: () => 5_000,
+        scheduler: LEADING,
+        capabilities: [CAPABILITIES.traits],
+      });
+      expect(await broker.handle(enqueue({ ...spec, client: "cli" }))).toMatchObject({ ok: true, data: { ok: true } });
+      expect(fakes[0]?.creates).toEqual([expect.objectContaining({ spec: expect.objectContaining(spec) })]);
+      broker.stop();
+    });
+
+    test("is refused, nothing stored, when the leader lacks the capability, is unverified, or there is none", async () => {
+      const cases = [
+        rig(undefined, { scheduler: LEADING }),
+        rig(undefined, {
+          scheduler: { kind: "unverified", deviceId: SELF, term: 4 },
+          capabilities: [CAPABILITIES.traits],
+        }),
+        rig(),
+      ];
+      for (const { broker, fakes } of cases) {
+        // oxlint-disable-next-line no-await-in-loop -- sequential: each is its own broker reply
+        expect(failed(await broker.handle(enqueue(spec)))).toMatchObject({ code: "invalid_request" });
+        expect(fakes[0]?.creates ?? []).toEqual([]);
+        broker.stop();
+      }
+    });
+  });
+
   test("a peer's createdAt is ignored, not honoured", async () => {
     const { broker, fakes } = rig(undefined, { now: () => 7_000 });
     await broker.handle(enqueue({ createdAt: 1 }, { createdAt: 1, task: { createdAt: 1 } }));

@@ -174,6 +174,23 @@ describe("parseSpawnArgs", () => {
     });
   });
 
+  test("--requires is repeatable and takes the next word", () => {
+    expect(parseSpawnArgs(["--requires", "atlas", "seance", "--requires", "gpu", "go"])).toEqual({
+      repo: "seance",
+      here: false,
+      prompt: "go",
+      requires: ["atlas", "gpu"],
+    });
+    expect(parseSpawnArgs(["seance"])).not.toHaveProperty("requires");
+  });
+
+  test("--requires is refused with --now, and without a value is a usage error", () => {
+    expect(() => parseSpawnArgs(["--now", "seance", "--requires", "atlas"])).toThrow(
+      "--requires needs the scheduler: --now spawns directly and skips routing",
+    );
+    expect(() => parseSpawnArgs(["seance", "--requires"])).toThrow("usage:");
+  });
+
   test("--now refuses every pin flag", () => {
     expect(() => parseSpawnArgs(["--now", "seance", "--machine", "x"])).toThrow("--now spawns on this machine now");
     expect(() => parseSpawnArgs(["--now", "seance", "--account", "a"])).toThrow("--now spawns on this machine now");

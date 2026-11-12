@@ -1072,6 +1072,35 @@ describe("spawn_session on auto", () => {
     expect(fake.creates).toEqual([]);
   });
 
+  test("through a daemon that predates traits, requires is refused as an old daemon, before any check on what the stripped registry declares", async () => {
+    const double = await startBrokerDouble((raw, id) =>
+      isRecord(raw) && raw["action"] === "fleet"
+        ? brokerOk(id, { machines: autoMachines(), scheduler: LEADING })
+        : brokerFail(id, "unsupported", "not in this double"),
+    );
+    try {
+      const fleet = selectFleet({
+        key: () => Promise.resolve(null),
+        direct: () => {
+          throw new Error("no key, so no direct path");
+        },
+        // device-1's registry entry advertises no `traits`: its daemon is older than this seanced.
+        broker: brokerFleet({ path: double.path }, () => Promise.resolve("device-1")),
+      });
+      const client = await connectedClient(fleet, fakeLocal());
+      const result = await client.callTool({
+        name: "spawn_session",
+        arguments: { machine: "auto", repo: "seance", requires: ["atlas"] },
+      });
+      expect(result.isError).toBe(true);
+      expect(toolText(result)).toContain("this machine's daemon is older than this seanced");
+      expect(toolText(result)).not.toContain("no machine declares");
+      expect(double.frames.every((frame) => isRecord(frame) && frame["action"] === "fleet")).toBe(true);
+    } finally {
+      await double.stop();
+    }
+  });
+
   test("an ambiguous repo is refused with the candidates, and nothing is stored", async () => {
     const machines = [
       ...autoMachines(),
@@ -1831,6 +1860,214 @@ describe("spawn_session on auto, pinned", () => {
       expect(answer.text).toContain(`queue_batch refused: ${text}`);
       expect(refused.creates).toEqual([]);
     }
+  });
+});
+
+/**
+ * Thad: atlas on its default exclave, az on its work one (never both on one); WSL carries both on its
+ * one; Mac alone has gpu. So `atlas`+`az` places on WSL only, and pinned to Thad it could never place.
+ */
+function traitMachines(leaderCaps: readonly string[] = [CAPABILITIES.pinAccount, CAPABILITIES.traits]): Machine[] {
+  const declared: Record<string, readonly (readonly string[])[]> = {
+    "device-thad": [["atlas"], ["az"]],
+    "device-wsl": [["atlas", "az"]],
+    "device-mac": [["gpu"]],
+  };
+  return pinMachines().map((m) =>
+    machine({
+      ...m,
+      // oxlint-disable-next-line no-map-spread -- a fixture, built once per test
+      exclaves: (m.exclaves ?? []).map((e, i) => ({ ...e, traits: declared[m.deviceId]?.[i] ?? [] })),
+      ...(m.deviceId === "device-thad" ? { capabilities: leaderCaps } : {}),
+    }),
+  );
+}
+
+function traitRelay(leaderCaps?: readonly string[]): FakeRelay {
+  const fake = leaderRelay([], traitMachines(leaderCaps));
+  fake.setState({ scheduler: { kind: "ready", deviceId: "device-thad", term: 3 } });
+  fake.accounts = ALIASES;
+  return fake;
+}
+
+describe("spawn_session requires", () => {
+  test("is written only to a leader that advertises traits, before anything is created", async () => {
+    const old = traitRelay([CAPABILITIES.pinAccount]);
+    const refused = await callAuto(old, { repo: HQ, requires: ["atlas"] });
+    expect(refused.error).toBe(true);
+    expect(refused.text).toContain("leader does not route on requires yet");
+    expect(old.creates).toEqual([]);
+
+    const none = traitRelay();
+    none.setState({ scheduler: { kind: "none" } });
+    const unknown = await callAuto(none, { repo: HQ, requires: ["atlas"] });
+    expect(unknown.error).toBe(true);
+    expect(unknown.text).toContain("no verified scheduler is leading");
+    expect(none.creates).toEqual([]);
+  });
+
+  test("a task that requires nothing meets no check and no gate, whatever the leader advertises", async () => {
+    const old = traitRelay([CAPABILITIES.pinAccount]);
+    const { error } = await callAuto(old, { repo: HQ });
+    expect(error).toBe(false);
+    expect(old.creates[0]?.spec.requires).toBeUndefined();
+  });
+
+  test("a trait no machine declares is refused with the ones that exist, audited by count and never by name", async () => {
+    const fake = traitRelay();
+    const { text, error, audited } = await callAuto(fake, { repo: HQ, requires: ["atlsa"] });
+    expect(error).toBe(true);
+    expect(text).toContain("no machine declares the trait atlsa — known: atlas, az, gpu");
+    expect(fake.creates).toEqual([]);
+    expect(audited).toEqual(["audit enqueue origin=mcp client=mcp refused=unknown_trait requires=1 unknown=1"]);
+  });
+
+  test("a known combination is stored as written, and the audit counts it without naming it", async () => {
+    const fake = traitRelay();
+    const { error, audited } = await callAuto(fake, { repo: HQ, requires: ["atlas", "az"] });
+    expect(error).toBe(false);
+    expect(fake.creates[0]?.spec.requires).toEqual(["atlas", "az"]);
+    expect(audited.join("\n")).not.toContain("atlas");
+  });
+
+  test("bounds are the schema's: none empty, at most four", async () => {
+    const fake = traitRelay();
+    expect((await callAuto(fake, { repo: HQ, requires: [] })).error).toBe(true);
+    expect((await callAuto(fake, { repo: HQ, requires: ["a", "b", "c", "d", "e"] })).error).toBe(true);
+    expect(fake.creates).toEqual([]);
+  });
+
+  test("a pin to a machine whose exclaves each carry only one of the traits could never place, so it is refused", async () => {
+    const fake = traitRelay();
+    const { text, error, audited } = await callAuto(fake, {
+      repo: HQ,
+      pin: { machine: "Thad" },
+      requires: ["atlas", "az"],
+    });
+    expect(error).toBe(true);
+    expect(text).toContain("no exclave this task can reach carries atlas and az together");
+    // The two exclaves each carry one: named per exclave, not as "Thad" having both.
+    expect(text).toContain(
+      "atlas is on Thad/default, WSL (pinned elsewhere); az is on Thad/work, WSL (pinned elsewhere)",
+    );
+    expect(fake.creates).toEqual([]);
+    expect(audited).toEqual([
+      "audit enqueue origin=mcp client=mcp refused=unreachable_trait requires=2 missing=0 split=1",
+    ]);
+  });
+
+  test("avoiding the only machine that has the trait is refused; without the avoid it is accepted", async () => {
+    const fake = traitRelay();
+    const avoided = await callAuto(fake, { repo: HQ, requires: ["gpu"], avoid: ["Mac"] });
+    expect(avoided.error).toBe(true);
+    expect(avoided.text).toContain("no exclave this task can reach carries gpu");
+    expect(avoided.text).toContain("Mac (avoided)");
+    expect(fake.creates).toEqual([]);
+
+    const open = await callAuto(fake, { repo: HQ, requires: ["gpu"] });
+    expect(open.error).toBe(false);
+    expect(fake.creates).toHaveLength(1);
+  });
+
+  test("an offline machine's trait still counts: the task waits for it", async () => {
+    const offline = traitMachines().map((m) => (m.deviceId === "device-mac" ? machine({ ...m, connected: false }) : m));
+    const fake = leaderRelay([], offline);
+    fake.setState({ scheduler: { kind: "ready", deviceId: "device-thad", term: 3 } });
+    fake.accounts = ALIASES;
+    expect((await callAuto(fake, { repo: HQ, requires: ["gpu"] })).error).toBe(false);
+  });
+});
+
+describe("queue_batch requires", () => {
+  const member = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+    repo: HQ,
+    prompt: "do it",
+    ...extra,
+  });
+
+  test("one gate for the whole batch, before any create", async () => {
+    const old = traitRelay([CAPABILITIES.pinAccount]);
+    const { text, error } = await callTool(old, "queue_batch", { tasks: [member(), member({ requires: ["atlas"] })] });
+    expect(error).toBe(true);
+    expect(text).toContain("leader does not route on requires yet");
+    expect(old.creates).toEqual([]);
+  });
+
+  test("a member's unknown trait refuses the whole batch, naming the member", async () => {
+    const fake = traitRelay();
+    const { text, error } = await callTool(fake, "queue_batch", {
+      tasks: [member({ requires: ["atlas"] }), member({ requires: ["atlsa"] })],
+    });
+    expect(error).toBe(true);
+    expect(text).toContain("queue_batch refused: task 2: no machine declares the trait atlsa");
+    expect(fake.creates).toEqual([]);
+  });
+
+  test("a member that could never place refuses the batch; a placeable one is stored with its traits", async () => {
+    const fake = traitRelay();
+    const bad = await callTool(fake, "queue_batch", {
+      tasks: [member(), member({ requires: ["atlas", "az"], pin: { machine: "Thad" } })],
+    });
+    expect(bad.error).toBe(true);
+    expect(bad.text).toContain("queue_batch refused: task 2: no exclave this task can reach carries atlas and az");
+    expect(fake.creates).toEqual([]);
+
+    const ok = await callTool(fake, "queue_batch", { tasks: [member({ requires: ["atlas", "az"] }), member()] });
+    expect(ok.error).toBe(false);
+    expect(fake.creates.map((c) => c.spec.requires)).toEqual([["atlas", "az"], undefined]);
+  });
+});
+
+describe("traits in the tools' answers", () => {
+  test("list_machines gives each exclave its traits, and none where there are none", async () => {
+    const lazy = new LazyRelay({ create: () => traitRelay() });
+    const client = await connectedClient(lazy);
+    const machines: { name: string; exclaves: Record<string, unknown>[] }[] = JSON.parse(
+      toolText(await client.callTool({ name: "list_machines", arguments: {} })),
+    );
+    const byName = new Map(machines.map((m) => [m.name, m.exclaves.map((e) => [e.id, e.traits])]));
+    expect(byName.get("Thad")).toEqual([
+      ["default", ["atlas"]],
+      ["work", ["az"]],
+    ]);
+    expect(byName.get("Mac")).toEqual([["default", ["gpu"]]]);
+    lazy.stop();
+
+    const plain = new LazyRelay({ create: () => leaderRelay([], pinMachines()) });
+    const plainClient = await connectedClient(plain);
+    const listed: { exclaves: Record<string, unknown>[] }[] = JSON.parse(
+      toolText(await plainClient.callTool({ name: "list_machines", arguments: {} })),
+    );
+    for (const m of listed) for (const e of m.exclaves) expect(e).not.toHaveProperty("traits");
+    plain.stop();
+  });
+
+  test("get_queue shows what a task requires and which machines declare each trait", async () => {
+    const fake = leaderRelay(
+      [
+        {
+          tasks: [
+            task({
+              id: "t-1",
+              state: "ready",
+              spec: { repo: ORIGIN, mode: "worktree", requires: ["atlas", "nosuch"] },
+            }),
+            task({ id: "t-2", state: "ready", spec: { repo: ORIGIN, mode: "worktree" } }),
+          ],
+          at: 6_000,
+        },
+      ],
+      traitMachines(),
+    );
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const { tasks } = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} })));
+    expect(tasks[0].requires).toEqual([
+      { trait: "atlas", machines: ["Thad", "WSL"] },
+      { trait: "nosuch", machines: [] },
+    ]);
+    expect(tasks[1]).not.toHaveProperty("requires");
+    lazy.stop();
   });
 });
 

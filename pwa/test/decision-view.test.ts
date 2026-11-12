@@ -13,6 +13,7 @@ import {
   isPlaced,
   pinLine,
   queuedBody,
+  requiresLine,
   startNowItem,
   taskHeadline,
   waitingText,
@@ -217,6 +218,8 @@ test("every reason has its own words", () => {
     { code: "pressure_unknown" },
     { code: "pin_mismatch", field: "account" },
     { code: "avoided" },
+    { code: "trait_absent", trait: "atlas" },
+    { code: "trait_unhealthy", trait: "atlas" },
     { code: "auth_missing" },
     { code: "quota_unknown", why: "trimmed" },
     { code: "quota_over_line", window: "5h", projectedPct: 91.6 },
@@ -507,6 +510,41 @@ describe("waitingText and pinLine", () => {
     const chosen = { deviceId: "f", exclave: "default", clone: "app" };
     const candidates = [scored("f", "F", 1)];
     expect(waitingText({ ...waiting(candidates), decision: { at: NOW, chosen, candidates } })).toBeNull();
+  });
+
+  test("a place lacking a required trait is left out whole, as a pin mismatch is, and the others stay", () => {
+    const lacks: Reason = { code: "trait_absent", trait: "atlas" };
+    const task = waiting([
+      rejected("a", "OnlyTraits", [lacks]),
+      rejected("b", "Both", [lacks, over]),
+      rejected("c", "Carries", [over]),
+    ]);
+    expect(waitingText(task)).toBe(`Carries · work: ${reasonText(over)}`);
+    expect(waitingText(waiting([rejected("a", "OnlyTraits", [lacks])]))).toBeNull();
+  });
+
+  test("requiresLine names the machines that declare each trait, caps them, and says when none does", () => {
+    const declaring = (deviceId: string, name: string, traits: readonly string[]): Machine => ({
+      ...machine(deviceId, name),
+      exclaves: [{ id: "default", accountId: "org:a", extraUsageEnabled: null, authOk: true, skills: [], traits }],
+    });
+    const machines = [
+      declaring("m1", "Mac", ["atlas"]),
+      declaring("m2", "WSL", ["atlas", "gpu"]),
+      declaring("m3", "Thad", ["atlas"]),
+      declaring("m4", "Pi", ["atlas"]),
+      declaring("m5", "Box", ["atlas"]),
+    ];
+    const needing = (requires: readonly string[]): Task => ({
+      ...waiting([]),
+      spec: { repo: "github.com/acme/app", mode: "worktree", requires },
+    });
+    expect(requiresLine(waiting([]), machines)).toBeNull();
+    expect(requiresLine(needing(["gpu"]), machines)).toBe("Needs gpu (on WSL)");
+    expect(requiresLine(needing(["atlas"]), machines)).toBe("Needs atlas (on Box, Mac, Pi, +2 more)");
+    expect(requiresLine(needing(["gpu", "nosuch"]), machines)).toBe(
+      "Needs gpu (on WSL) · Needs nosuch — no machine has it",
+    );
   });
 
   test("pinLine words the machine and account from display labels, and is null without a pin", () => {

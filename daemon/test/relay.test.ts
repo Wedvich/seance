@@ -27,7 +27,7 @@ import {
   type SpawnResponse,
 } from "@seance/shared";
 import { createBackend } from "../src/backend-default.ts";
-import type { Config } from "../src/config.ts";
+import type { Config, TraitsConfig } from "../src/config.ts";
 import { MetricsStore, type Sample } from "../src/metrics-store.ts";
 import { RelayClient } from "../src/relay-client.ts";
 import { startDaemon, type DaemonHandle } from "../src/run.ts";
@@ -89,10 +89,15 @@ async function startTestDaemon(
     readonly maxBackoffMs?: number;
     readonly home?: string;
     readonly extraRoots?: readonly string[];
+    readonly traits?: TraitsConfig;
   } = {},
 ): Promise<DaemonHandle> {
-  const { spawnWaitMs = 700, extraRoots = [], ...rest } = overrides;
-  const config = { ...makeConfig(relayUrl), repoRoots: [fixture.root, ...extraRoots] };
+  const { spawnWaitMs = 700, extraRoots = [], traits, ...rest } = overrides;
+  const config = {
+    ...makeConfig(relayUrl),
+    repoRoots: [fixture.root, ...extraRoots],
+    ...(traits === undefined ? {} : { traits }),
+  };
   return startDaemon({
     config,
     backend: createBackend(config, { home: rest.home ?? join(base, "home"), waitMs: spawnWaitMs }),
@@ -699,6 +704,38 @@ describe("daemon ↔ relay integration", () => {
     }
   });
 
+  test("the blob carries the traits this machine's config declares, per exclave, and nothing from anywhere else", async () => {
+    const relay = startTestRelay(TOKEN);
+    const daemon = await startTestDaemon(relay.url, {
+      traits: { gpu: { exclaves: ["default"] }, atlas: {}, elsewhere: { exclaves: ["not-here"] } },
+    });
+    try {
+      const { info } = await registerWithRepo(relay, "myrepo");
+      const exclaves = info.exclaves ?? [];
+      expect(exclaves.length).toBeGreaterThan(0);
+      // Sorted, scoped by exclave id, and a trait scoped to an exclave this machine lacks is on none.
+      for (const exclave of exclaves) {
+        expect(exclave.traits).toEqual(exclave.id === "default" ? ["atlas", "gpu"] : ["atlas"]);
+      }
+      expect(info.capabilities).toContain("traits");
+    } finally {
+      daemon.stop();
+      relay.stop();
+    }
+  });
+
+  test("a daemon with no traits in its config sends no traits field", async () => {
+    const relay = startTestRelay(TOKEN);
+    const daemon = await startTestDaemon(relay.url);
+    try {
+      const { info } = await registerWithRepo(relay, "myrepo");
+      for (const exclave of info.exclaves ?? []) expect(exclave).not.toHaveProperty("traits");
+    } finally {
+      daemon.stop();
+      relay.stop();
+    }
+  });
+
   test("the blob advertises metrics, and the op answers from what the telemetry tick stored", async () => {
     const relay = startTestRelay(TOKEN);
     const daemon = await startTestDaemon(relay.url);
@@ -716,6 +753,7 @@ describe("daemon ↔ relay integration", () => {
         "continueHandoff",
         "runNow",
         "attachments",
+        "traits",
       ]);
       // A status leaves only after its tick wrote the store, so one in hand
       // means there is history to ask for.
