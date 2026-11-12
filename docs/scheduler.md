@@ -1235,9 +1235,12 @@ of M4 has landed.
       sessions push `HEAD:martin/…`, so `<b>` alone would leave a stray branch beside the PR's),
       else, for a branch with no upstream (an upstream on another remote counts as none): the PR head
       the leader read, when origin's tip of it is an ancestor of the local tip and of no default
-      branch's tip (else `branch_mismatch`, nothing pushed; the default branch itself is
-      `default_branch`, and a fetch that fails for a reason other than a missing branch is
-      `push_failed`), or, with no PR head, `<b>` (Q7 below). A dirty tree refuses `dirty_worktree`; the
+      branch's tip, the default fetched with it (else `branch_mismatch`, nothing pushed; the default
+      branch itself is `default_branch`, and a fetch that fails for a reason other than a missing
+      branch, or a clone with no `origin/HEAD`, is `push_failed`), or, with no PR head, `<b>` (Q7 below).
+      A push refused as a non-fast-forward is `push_rejected`, unless origin's branch moved on past a
+      tip already in it (a GitHub "Update branch"): then the pass goes on with origin's tip, nothing
+      pushed. A dirty tree refuses `dirty_worktree`; the
       daemon makes no WIP commits. This is the daemon's first write to GitHub, so a threat-model
       change (D12). _Rejected:_ daemon WIP commits; never pushing; always pushing to `<b>`.
     - **O3. The automatic trigger is specced now and built later** (stage 3).
@@ -1376,10 +1379,13 @@ of M4 has landed.
       needs a daemon-side spawn change this item avoids.
     - **Q7. No upstream, PR open on another branch.** A rate-limited session cannot set its own
       upstream, so refusing would strand the case the feature exists for. When the branch has no
-      upstream on `origin` and the scheduler-sealed `push-branch` carries `expect` (the PR head the
-      leader read), the daemon validates it with the same ref-format rule, fetches it, and pushes
-      `refs/heads/<b>:refs/heads/<expect>` only if that remote tip is an ancestor of the local tip:
-      the PR head is this worktree's own line of work. Otherwise `branch_mismatch`, nothing pushed.
+      upstream on `origin` (an upstream on another remote counts as none) and the scheduler-sealed
+      `push-branch` carries `expect` (the PR head the leader read), the daemon validates it with the
+      same ref-format rule, fetches it with the default branch, and pushes `<tip sha>:refs/heads/<expect>`
+      only if that remote tip is an ancestor of the local tip and not already in the default branch:
+      the PR head is this worktree's own line of work. A head that is the default branch is
+      `default_branch`; otherwise `branch_mismatch`, nothing pushed (a fetch that fails for any other
+      reason than a missing branch is `push_failed`).
       A branch with no upstream and no PR pushes to `<b>`. An upstream that is set always wins and
       is never overridden by `expect`. The value comes only from a request the scheduler sealed,
       never a session frame. The self path has no `expect` (the daemon has no PR head), but its

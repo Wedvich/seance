@@ -97,7 +97,8 @@ function isDefault(name: string, defaultBranch: string | null): boolean {
  * here) is an ancestor of the local tip and of no default branch, which is what a worktree started from that
  * branch's own tip looks like. Never forced, never a hook or a signed push, never the default branch, never a
  * dirty tree. A tip origin already holds is pushed all the same (git answers `=`, `pushed: false`): a tracking
- * ref the last fetch left behind may not be what origin holds.
+ * ref the last fetch left behind may not be what origin holds. A push refused as a non-fast-forward is
+ * `push_rejected` unless origin's branch has moved on past the local tip (see `containedInOrigin`).
  */
 export async function pushTaskBranch(site: TaskSite, options: PushOptions = {}): Promise<PushBranchResponse> {
   const { path } = site;
@@ -169,7 +170,7 @@ export async function pushTaskBranch(site: TaskSite, options: PushOptions = {}):
     .split("\n")
     .filter((line) => /^[ +\-*=!]\t/u.test(line))
     .map((line) => line.charAt(0));
-  if (flags.includes("!")) return fail("push_rejected");
+  if (flags.includes("!")) return containedInOrigin(path, remote, tip);
   if (pushed.exitCode !== 0) return fail("push_failed");
   // Not on exit 0 alone: success is a ref line saying origin now holds the sha (`=`: it already did).
   if (flags.length !== 1) return fail("push_failed");
@@ -177,46 +178,68 @@ export async function pushTaskBranch(site: TaskSite, options: PushOptions = {}):
 }
 
 /**
+ * A refused push where origin's branch has moved on (a GitHub "Update branch", a bot's commit) and the local tip
+ * is already part of it: nothing is unpushed, so the pass goes on, naming origin's tip, which is what the successor
+ * resets to. Anything else is `push_rejected`: a branch holding other work, a rewrite, or one this cannot read (a
+ * failed fetch, a timeout): never forced, never merged.
+ */
+async function containedInOrigin(path: string, remote: string, tip: string): Promise<PushBranchResponse> {
+  if ((await fetchBranches(path, [remote])) !== "fetched") return fail("push_rejected");
+  const origin = await resolve(path, `${REMOTES}${remote}`);
+  if (origin === null) return fail("push_rejected");
+  const contained = await hardenedGit(path, ["merge-base", "--is-ancestor", tip, origin]);
+  if (contained.exitCode !== 0) return fail("push_rejected");
+  return { ok: true, remoteBranch: remote, tip: origin, pushed: false };
+}
+
+/** One fetch of branches of `origin` into their tracking refs: `failed` is git's own refusal (a missing branch included), `unreachable` a refused call or a timeout. */
+async function fetchBranches(path: string, branches: readonly string[]): Promise<"fetched" | "failed" | "unreachable"> {
+  const fetched = await networkGit(
+    path,
+    [
+      "fetch",
+      "--no-tags",
+      "--no-recurse-submodules",
+      "origin",
+      ...branches.map((name) => `+${HEADS}${name}:${REMOTES}${name}`),
+    ],
+    FETCH_TIMEOUT_MS,
+  );
+  if ("refused" in fetched || fetched.timedOut) return "unreachable";
+  return fetched.exitCode === 0 ? "fetched" : "failed";
+}
+
+/**
  * A branch with no upstream may push to the PR's head only when that head's origin tip is already part of the
  * local branch and not already part of the default branch: `yes`, `no` (it is not, it is, or origin has no such
  * branch), or `error` (git or the network failed). A branch the default already holds (a `develop` the worktree was
- * cut past) is no one task's work, and an open PR cannot have one as its head.
+ * cut past) is no one task's work, and an open PR cannot have one as its head. The default branch is fetched with
+ * it, so "already merged" is judged against what origin holds now, not as of the last reap; a clone whose
+ * `origin/HEAD` names no default has nothing to refresh, so it is `error` rather than judged against a stale ref.
  */
 async function adoptable(
   path: string,
   expected: string,
   defaultBranch: string | null,
 ): Promise<"yes" | "no" | "error"> {
-  const fetched = await networkGit(
-    path,
-    ["fetch", "--no-tags", "--no-recurse-submodules", "origin", `+${HEADS}${expected}:${REMOTES}${expected}`],
-    FETCH_TIMEOUT_MS,
-  );
-  if ("refused" in fetched || fetched.timedOut) return "error";
-  if (fetched.exitCode !== 0) return (await absentOnOrigin(path, expected)) ? "no" : "error";
+  if (defaultBranch === null) return "error";
+  const fetched = await fetchBranches(path, [expected, defaultBranch]);
+  if (fetched === "unreachable") return "error";
+  if (fetched === "failed") return (await absentOnOrigin(path, expected)) ? "no" : "error";
   const ancestor = await hardenedGit(path, ["merge-base", "--is-ancestor", `${REMOTES}${expected}`, "HEAD"]);
   if (ancestor.exitCode !== 0) return ancestor.exitCode === 1 ? "no" : "error";
-  const merged = await heldByDefault(path, expected, defaultBranch);
-  if (merged === null) return "error";
-  return merged ? "no" : "yes";
+  const merged = await hardenedGit(path, [
+    "merge-base",
+    "--is-ancestor",
+    `${REMOTES}${expected}`,
+    `${REMOTES}${defaultBranch}`,
+  ]);
+  if (merged.exitCode !== 0 && merged.exitCode !== 1) return "error";
+  return merged.exitCode === 0 ? "no" : "yes";
 }
 
 /** A failed fetch is "no such branch" only when origin says so (`ls-remote --exit-code` answers 2); auth and network are not. */
 async function absentOnOrigin(path: string, branch: string): Promise<boolean> {
   const listed = await networkGit(path, ["ls-remote", "--exit-code", "origin", `${HEADS}${branch}`], FETCH_TIMEOUT_MS);
   return !("refused" in listed) && !listed.timedOut && listed.exitCode === 2;
-}
-
-/** Whether `origin/<branch>` is already in the default branch; null when git cannot say. With no default ref to compare, it is not. */
-async function heldByDefault(path: string, branch: string, defaultBranch: string | null): Promise<boolean | null> {
-  const candidates = defaultBranch === null ? [...FALLBACK_DEFAULTS] : [defaultBranch];
-  for (const name of candidates) {
-    // oxlint-disable-next-line no-await-in-loop -- at most two, and the first that exists decides
-    if ((await resolve(path, `${REMOTES}${name}`)) === null) continue;
-    // oxlint-disable-next-line no-await-in-loop -- as above
-    const held = await hardenedGit(path, ["merge-base", "--is-ancestor", `${REMOTES}${branch}`, `${REMOTES}${name}`]);
-    if (held.exitCode === 0) return true;
-    return held.exitCode === 1 ? false : null;
-  }
-  return false;
 }

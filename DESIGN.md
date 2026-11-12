@@ -948,13 +948,15 @@ nothing checked it. The last is the gap they leave.
     branch its own launch ledger's worktree has checked out; `<r>` is, in order: that branch's
     configured upstream on `origin` (an upstream on any other remote counts as none); with no upstream
     and a scheduler-sealed `push-branch`'s `expect`, that `expect`, only when origin's tip of it is an
-    ancestor of the local tip and of no default branch's tip (else nothing is pushed, `branch_mismatch`; the
-    default branch itself is `default_branch`); with neither, `<b>`, except
+    ancestor of the local tip and of no default branch's tip, the default fetched with it (else nothing is
+    pushed, `branch_mismatch`; the default branch itself is `default_branch`); with neither, `<b>`, except
     that the session's own `pass` frame for a task whose ledger holds a PR is refused `no_upstream`.
     Never a path, never a branch from a session frame; only on a clean tree and never to the default branch; refusing repo-local
     `remote.*.pushurl` and `url.*.pushinsteadof`; only on a `push-branch` sealed `from` the scheduler (or
     the leader in process) or the session's own bound `pass` frame; audited with no branch name, and with
-    git's stderr never in a reply, a log or an audit line.
+    git's stderr never in a reply, a log or an audit line. A refusal as a non-fast-forward is `push_rejected`,
+    never forced, merged or rebased, except that a pushed sha already part of origin's refetched `<r>` is `ok`
+    with `pushed: false`, naming origin's tip.
   - The leader reads a PR's head only with its own `gh`, bound to the task's `prUrl`, as GraphQL
     variables, and never logs it.
   - A task record's `successor` is written only by the leader and only after the successor's
@@ -1702,7 +1704,7 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   so every client checks the capability first.
 - `push-branch { taskId, expect? }` (`PushBranchRequest`) → `{ remoteBranch, tip, pushed }`
   (`PushBranchResponse`), scheduler → daemon, `OP_TIMEOUT_MS["push-branch"]` 90 s (the Q7 fetch has its
-  own 15 s and the push 45 s, beside the local git reads). `expect` is the PR head the leader read; the daemon only compares it, and uses it as the
+  own 15 s, the push 45 s and a `!` refusal's re-read another 15 s, beside the local git reads). `expect` is the PR head the leader read; the daemon only compares it, and uses it as the
   push target in one case (Scheduler, "Passing to a successor", "The push"). The local branch name
   never crosses the wire, and `remoteBranch` and `expect` are held to `isBranchName`, `tip` to 40
   or 64 lowercase hex. Codes (`PUSH_BRANCH_ERROR_CODES`): `not_launched`, `detached_head`,
@@ -7041,12 +7043,16 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
      `branch_mismatch`, nothing pushed; an upstream always wins and is never overridden by
      `expect`. **No upstream, `expect` given** (a rate-limited session cannot set one): the daemon
      validates `expect` with the same ref-format rule, fetches it into `refs/remotes/origin/<expect>`
-     through `networkGit` (15 s), and if that remote tip is an ancestor of the local tip
-     (`merge-base --is-ancestor`) and of no default branch's tip takes `<r> = expect`: the PR head is
-     this worktree's own line of work. Otherwise (not an ancestor, already in the default branch, or
+     together with the default branch's own tracking ref (one `networkGit` fetch, 15 s: "already merged" is
+     judged against what origin holds now, not as of the last reap), and if that remote tip is an ancestor of
+     the local tip (`merge-base --is-ancestor`) and not of the fetched default branch's tip takes
+     `<r> = expect`: the PR head is this worktree's own line of work. Otherwise (not an ancestor, already in the default branch, or
      origin has no such branch) `branch_mismatch`; a fetch that failed for any other reason (auth,
      network: `git ls-remote --exit-code` says whether the branch is absent, answer 2) is
-     `push_failed`, which the surfaces do not advise setting an upstream for. An `expect` that is the
+     `push_failed`, which the surfaces do not advise setting an upstream for; so is a clone whose
+     `origin/HEAD` names no default branch, which leaves nothing to refresh (_Decided_, round 2 of 2a: fail
+     closed, because judging against a stale `origin/main` would let a merged branch through; reap and
+     self-update keep `origin/HEAD` set). An `expect` that is the
      default branch is `default_branch`, before the fetch. _Decided_ (review of 2a): the gate stays the
      ancestry the owner approved, plus "not already merged", because an open PR's head always has a
      commit the default lacks, so a `develop` or release branch the worktree was cut past is refused
@@ -7073,7 +7079,7 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
      (the sha `HEAD` resolved to after the clean check, so a commit the live session makes meanwhile
      cannot leave origin holding something the successor's prompt does not name):
      never forced, no pre-push hook (`core.hooksPath=/dev/null`), a `!` flag in the porcelain
-     output is `push_rejected` whatever the exit code, any other failure, a timeout or a refusal
+     output is `push_rejected` whatever the exit code (bar item 10), any other failure, a timeout or a refusal
      `push_failed`; success is exit 0 **and** exactly one ref line (`=` up to date, any other flag
      pushed), never exit 0 alone. git's stderr
      can carry a credentialed URL, so a reply and an audit line hold fixed text and the exit code,
@@ -7082,6 +7088,14 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
      branch name (branch-state's rule), under the origin of the sender: `relay` for a request from
      another machine's leader, `leader` in process (settled default 3), `successor` for the session's
      own frame.
+  10. A `!` refusal is read once more: origin's branch may have moved on past this worktree from elsewhere
+      (GitHub's "Update branch", a bot's commit) while the local tip is already part of it, so nothing is
+      unpushed. The daemon fetches `<r>` (the same fetch as step 4, 15 s) and, when the pushed sha is an
+      ancestor of origin's tip, answers `ok` with `pushed: false` and **origin's tip** as `tip` (what the
+      successor resets to). A branch holding other work, a rewrite, a failed or timed-out fetch stays
+      `push_rejected`. _Decided_ (round 2 of 2a): never forced and never merged or rebased, since a
+      divergence is the session's to resolve, and the pass the feature exists for (a rate-limited session
+      that cannot pull) must not be refused for work origin already holds.
 - **The PR head cross-check (D14a).** When the task has a GitHub PR (`prUrl`), the leader reads its
   `headRefName`, `isCrossRepository` and `state` with its own `gh` ("PR status") before any push. A
   fork is `branch_mismatch`, an unreadable PR `pr_unreadable`, a merged or closed one `pr_not_open`

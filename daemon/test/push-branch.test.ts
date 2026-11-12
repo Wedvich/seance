@@ -246,6 +246,36 @@ describe("what stops a push", () => {
     expect(await originTip("task/taken")).toBe(before);
   });
 
+  test("origin's branch moved ahead past a tip already in it: nothing is unpushed, and origin's tip is named", async () => {
+    await fixture.pushBranch("pr/moved-ahead");
+    const path = await worktree("task/behind-origin", "origin/pr/moved-ahead");
+    await git(path, "branch", "--set-upstream-to=origin/pr/moved-ahead");
+    // GitHub's "Update branch", or a bot's commit: origin gains a commit this worktree never fetched.
+    const updater = await worktree("task/updater", "origin/pr/moved-ahead");
+    const ahead = await commit(updater);
+    await git(updater, "push", "-q", "origin", "HEAD:refs/heads/pr/moved-ahead");
+    expect(await pushTaskBranch(site(path))).toEqual({
+      ok: true,
+      remoteBranch: "pr/moved-ahead",
+      tip: ahead,
+      pushed: false,
+    });
+    expect(await originTip("pr/moved-ahead")).toBe(ahead);
+  });
+
+  test("origin's branch moved ahead while this one holds a commit of its own is a divergence, never forced", async () => {
+    await fixture.pushBranch("pr/moved-diverged");
+    const path = await worktree("task/diverged-from-origin", "origin/pr/moved-diverged");
+    await git(path, "branch", "--set-upstream-to=origin/pr/moved-diverged");
+    await commit(path);
+    const updater = await worktree("task/updater-two", "origin/pr/moved-diverged");
+    await commit(updater);
+    await git(updater, "push", "-q", "origin", "HEAD:refs/heads/pr/moved-diverged");
+    const before = await originTip("pr/moved-diverged");
+    expect(await pushTaskBranch(site(path))).toMatchObject({ ok: false, code: "push_rejected" });
+    expect(await originTip("pr/moved-diverged")).toBe(before);
+  });
+
   test("a tracking ref the last fetch left behind is not taken for what origin holds", async () => {
     await fixture.pushBranch("pr/rewritten");
     const path = await worktree("task/stale-tracking", "origin/pr/rewritten");
@@ -340,5 +370,51 @@ describe("what a reply carries", () => {
     await git(path, "config", "branch.task/secret-name.merge", "refs/heads/main");
     const refused = JSON.stringify(await pushTaskBranch(site(path)));
     expect(refused).not.toContain("secret-name");
+  });
+});
+
+describe("a branch the default merged after the last fetch", () => {
+  let own: GitFixture;
+  let outer: GitFixture;
+
+  beforeAll(async () => {
+    outer = fixture;
+    own = await makeGitFixture(join(base, "fresh-default"));
+    fixture = own;
+  });
+
+  afterAll(() => {
+    fixture = outer;
+  });
+
+  test("is not adopted: the default is fetched with the head, not read as the last reap left it", async () => {
+    await fixture.pushBranch("rel/merged-since");
+    const path = await worktree("task/past-merged-since", "origin/rel/merged-since");
+    await commit(path);
+    const staleMain = await git(fixture.repoPath, "rev-parse", "refs/remotes/origin/main");
+    // origin's main takes the branch (a merge, as GitHub does it) from elsewhere; this clone's tracking ref is behind.
+    await git(fixture.repoPath, "push", "-q", "origin", "origin/rel/merged-since:refs/heads/main");
+    await git(fixture.repoPath, "update-ref", "refs/remotes/origin/main", staleMain);
+    const before = await originTip("rel/merged-since");
+    expect(await pushTaskBranch(site(path), { expect: "rel/merged-since" })).toMatchObject({
+      ok: false,
+      code: "branch_mismatch",
+    });
+    expect(await originTip("rel/merged-since")).toBe(before);
+  });
+
+  test("a clone whose origin/HEAD names no default has none to refresh, so the head is not adopted", async () => {
+    await fixture.pushBranch("pr/no-default-ref");
+    const path = await worktree("task/no-default-ref", "origin/pr/no-default-ref");
+    await commit(path);
+    await git(fixture.repoPath, "remote", "set-head", "origin", "--delete");
+    try {
+      expect(await pushTaskBranch(site(path), { expect: "pr/no-default-ref" })).toMatchObject({
+        ok: false,
+        code: "push_failed",
+      });
+    } finally {
+      await git(fixture.repoPath, "remote", "set-head", "origin", "main");
+    }
   });
 });

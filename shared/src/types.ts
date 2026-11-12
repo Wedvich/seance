@@ -1532,7 +1532,8 @@ export type DespawnResponse =
  * leader in process): push that task's worktree branch to its remote branch on `origin`
  * (DESIGN.md, Scheduler, "Passing to a successor"). `expect` is the head of the task's PR as the
  * leader read it with its own `gh`: the daemon only compares it, and takes it as the push target
- * only for a branch with no upstream whose origin tip is an ancestor of the local tip. The task
+ * only for a branch with no upstream whose origin tip is an ancestor of the local tip and not of the default
+ * branch's (fetched with it). The task
  * names its worktree through the daemon's own launch ledger, never a path from the wire.
  */
 export interface PushBranchRequest {
@@ -1560,7 +1561,10 @@ export const PUSH_BRANCH_ERROR_CODES = [
 
 export type PushBranchErrorCode = (typeof PUSH_BRANCH_ERROR_CODES)[number];
 
-/** `remoteBranch` is the branch on `origin` now holding `tip`; `pushed` false when it already did and nothing was sent. */
+/**
+ * `remoteBranch` is the branch on `origin` now holding `tip`; `pushed` false when it already did and nothing was sent,
+ * or when origin's branch had moved on past the local tip, in which case `tip` is origin's.
+ */
 export type PushBranchResponse =
   | { readonly ok: true; readonly remoteBranch: string; readonly tip: string; readonly pushed: boolean }
   | { readonly ok: false; readonly code: PushBranchErrorCode; readonly message: string };
