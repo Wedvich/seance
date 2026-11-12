@@ -6,18 +6,24 @@ import { parseBranchState, parseTaskProgressList, type BranchState, type RepoEnt
 import { BRANCH_ENDED_GRACE_MS, createBranchStates, type BranchStates } from "../src/branch-state.ts";
 import { exec } from "../src/exec.ts";
 import { LaunchLedger } from "../src/launch-ledger.ts";
-import { captureLog, makeGitFixture, type GitFixture } from "./fixtures.ts";
+import { captureLog, makeGitFixture, scriptStub, type GitFixture } from "./fixtures.ts";
 
 const GIT_ID = ["-c", "user.email=test@seance.local", "-c", "user.name=Seance Test"];
 
 let base: string;
 let seq = 0;
+/** A `gpg.program` that leaves `gpgMarker` behind if anything runs it. */
+let gpgStub: string;
+let gpgMarker: string;
 
 beforeAll(async () => {
   base = await mkdtemp(join(tmpdir(), "seance-branch-state-"));
   // No machine config may reach these repos, as in reap.test.ts.
   process.env["GIT_CONFIG_GLOBAL"] = "/dev/null";
   process.env["GIT_CONFIG_NOSYSTEM"] = "1";
+  gpgMarker = join(base, "gpg-ran");
+  gpgStub = await scriptStub(base, "gpg", `: > '${gpgMarker}'\nexit 1`);
+  await rm(gpgMarker, { force: true });
 });
 
 afterAll(async () => {
@@ -136,6 +142,61 @@ describe("branch-state emitter", () => {
     expect(w.states.map((s) => s.pushed)).toEqual([false, true]);
     await emitter.check();
     expect(w.states).toHaveLength(2);
+    stopAll(w);
+  });
+
+  test("a branch rewritten before its first push (a restack) reads as pushed, and its new tip is the work", async () => {
+    const w = await world();
+    const path = await launch(w, "t1", "x");
+    const emitter = start(w);
+    await writeFile(join(path, "a.txt"), "a\n");
+    await git(path, "add", "a.txt");
+    await git(path, "commit", "-q", "-m", "add a");
+    await emitter.check();
+    const firstTip = w.ledger.notes()[0]?.tip;
+    expect(firstTip).toBe(await git(path, "rev-parse", "HEAD"));
+
+    await git(path, "commit", "-q", "--amend", "-m", "add a, restacked");
+    await git(path, "push", "-q", "origin", "worktree-x");
+    await emitter.check();
+    expect(w.states.at(-1)?.pushed).toBe(true);
+    expect(w.ledger.notes()[0]?.tip).toBe(await git(path, "rev-parse", "HEAD"));
+    stopAll(w);
+  });
+
+  test("reading a rewritten branch's reflog runs no repo-configured signature program", async () => {
+    const w = await world();
+    const path = await launch(w, "t1", "x");
+    const emitter = start(w);
+    await writeFile(join(path, "a.txt"), "a\n");
+    await git(path, "add", "a.txt");
+    await git(path, "commit", "-q", "-m", "add a");
+    await emitter.check();
+
+    // A session can write the clone's shared config and a commit carrying any signature.
+    const tree = await git(path, "rev-parse", "HEAD^{tree}");
+    const parent = await git(path, "rev-parse", "HEAD^");
+    const body = [
+      `tree ${tree}`,
+      `parent ${parent}`,
+      "author a <a@b> 1 +0000",
+      "committer a <a@b> 1 +0000",
+      "gpgsig -----BEGIN PGP SIGNATURE-----",
+      " x",
+      " -----END PGP SIGNATURE-----",
+      "",
+      "add a, restacked",
+      "",
+    ].join("\n");
+    const signed = await exec(["git", "hash-object", "-t", "commit", "-w", "--stdin"], { cwd: path, stdin: body });
+    const rewrittenTip = signed.stdout.trim();
+    await git(path, "update-ref", "refs/heads/worktree-x", rewrittenTip);
+    await git(path, "config", "log.showSignature", "true");
+    await git(path, "config", "gpg.program", gpgStub);
+
+    await emitter.check();
+    expect(w.ledger.notes()[0]?.tip).toBe(rewrittenTip);
+    expect(await Bun.file(gpgMarker).exists()).toBe(false);
     stopAll(w);
   });
 

@@ -96,6 +96,18 @@ async function isAncestor(cwd: string, ancestor: string, of: string): Promise<bo
 }
 
 /**
+ * Whether `refs/heads/<branch>` itself once held `tip`: a rebase or reset moved the task's own ref, whose reflog
+ * keeps the old value. Deleting a branch deletes its reflog, so a branch made under the name afterwards (the
+ * stranger `checkTask` guards against) never passes. False on any read failure, or with reflogs off: the recorded
+ * tip is then judged, as before. Plumbing `rev-list`, never `reflog show`: that is `git log -g`, which honours a
+ * repo-local `log.showSignature` and runs a session-written `gpg.program` on a signed entry.
+ */
+async function rewritten(repoPath: string, branch: string, tip: string): Promise<boolean> {
+  const result = await hardenedGit(repoPath, ["rev-list", "--walk-reflogs", `${HEADS}${branch}`, "--"]);
+  return result.exitCode === 0 && result.stdout.split("\n").includes(tip);
+}
+
+/**
  * Own work: a tip the default branch does not already contain, whose tree differs from the one it forked at.
  * An empty commit or a revert of the branch's only change has no net change, and `classifyTip` reads it as
  * an empty "squash" of the default. Null when git could not answer: callers treat it as no work (the safe
@@ -300,15 +312,16 @@ export function createBranchStates(deps: BranchStateDeps): BranchStates {
     // The branch can be deleted (claude's worktree-exit) before its PR merges; the commit outlives the ref until gc.
     // A non-owner's name now belongs to a newer launch (a freed worktree name frees its branch too): that local ref is
     // not this task's, so it is judged by its recorded tip alone.
-    // Even the owner's local ref must be the recorded work or grow from it: a branch of the same name made by
-    // something else once the task's own was removed (a spawn with no task id) is a stranger's, and would
-    // overwrite the recorded tip and read the stranger's merge as this task's.
+    // Even the owner's local ref must be the recorded work, grow from it, or be that same ref rewritten: a branch of
+    // the same name made by something else once the task's own was removed (a spawn with no task id) is a
+    // stranger's, and would overwrite the recorded tip and read the stranger's merge as this task's.
     let tip: string | undefined;
     if (owner && refs.local !== undefined) {
       const grown =
         note.tip === undefined ||
         refs.local === note.tip ||
-        (await isAncestor(ctx.repo.path, note.tip, refs.local)) === true;
+        (await isAncestor(ctx.repo.path, note.tip, refs.local)) === true ||
+        (await rewritten(ctx.repo.path, branch, note.tip));
       if (grown) tip = refs.local;
     }
     if (tip === undefined && note.tip !== undefined && branch === note.branch) {
