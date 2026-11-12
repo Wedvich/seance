@@ -6642,14 +6642,23 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   still waits. The task is whole at the tap, its id minted and `createdAt` stamped
   then, and kept in `seance:held` (at most `HELD_MAX`, written on every change, never
   debounced). It goes out once per socket, when that socket's registry settles,
-  oldest first and one create at a time so a batch lands in order. A send whose
+  oldest first and one create at a time. A send whose
   answer never came stays held and goes again on the next socket: the id is the key,
   so the resend answers `landedEarlier` if the first landed. A refusal fails it in
   place, with a retry and a discard on the form; a failed one is never resent by
-  itself. What needs a verified leader is checked at send, not at the tap: a task
-  settling on its done report, or with a `done` edge, fails there if the leader
-  doesn't advertise `reportedDone`, and so does an account pin when it doesn't advertise
-  `pinAccount`. A Start now held this way is a plain queue,
+  itself. What needs a verified leader (`heldNeedsLeader`) is checked at send, not at
+  the tap: until a leader is verified such a task is passed over, unfailed, and goes
+  when one is (an asleep or unverified leader says nothing about what it takes); a
+  verified leader that doesn't advertise `reportedDone` fails a task settling on its
+  done report or with a `done` edge, and one without `pinAccount` an account pin.
+  Holding rides out a dropped connection, not days offline: a task held past
+  `HELD_MAX_AGE_MS` (24 h) is dropped unsent, by `readHeld` and before each send,
+  since whatever it was for has likely moved on, and past the leader's admission age
+  it would be refused anyway. Each open tab keeps its held list in memory, so
+  `trackHeld` adopts another tab's write to `seance:held` from the `storage` event,
+  and a tab killed after holding loses nothing the others hold; a tab whose relay is
+  up sends what it adopts (a task both send answers `landedEarlier` the second time).
+  Two writes in the same instant can still drop one. A Start now held this way is a plain queue,
   since a `run-now` fired whenever the app next reconnects would skip the caps at a
   moment nobody chose. A task with files is never held: files upload at the tap and
   go only to a leader verified to advertise `attachments`, which a dropped socket

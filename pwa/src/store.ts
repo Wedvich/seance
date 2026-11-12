@@ -31,6 +31,7 @@ import {
   DEFAULT_FORM,
   DEFAULT_HISTORY_RANGE,
   HELD_MAX,
+  heldStale,
   RANGE_SPANS,
   RESCAN_IDLE,
   TARGET_METRICS,
@@ -60,8 +61,11 @@ import {
   derivePinAccountAvailability,
   derivePinProblem,
   deriveReportedAvailability,
+  heldNeedsLeader,
+  leaderVerified,
   resolveRepo,
   scopedRepos,
+  settlesOnReport,
 } from "./view.ts";
 
 /**
@@ -155,6 +159,8 @@ export class Store {
    */
   #sentOnSettle = false;
   #sendingHeld = false;
+  /** Whether the leader was verified at the last relay change: held tasks needing one go when it is. */
+  #leaderWasVerified = false;
   /** Held task ids sent on this socket; a retry takes its own back out. */
   #triedOnSocket = new Set<string>();
   readonly #queue: SchedulerStore;
@@ -279,10 +285,14 @@ export class Store {
       this.#queue.onDrop();
       this.#wasOpen = false;
       this.#sentOnSettle = false;
+      this.#leaderWasVerified = false;
       this.#triedOnSocket = new Set();
       return;
     }
-    if (relay.registrySettled && !this.#sentOnSettle) {
+    const verified = leaderVerified(relay);
+    const leaderArrived = verified && !this.#leaderWasVerified;
+    this.#leaderWasVerified = verified;
+    if (relay.registrySettled && (!this.#sentOnSettle || leaderArrived)) {
       this.#sentOnSettle = true;
       void this.#sendHeld();
     }
@@ -900,10 +910,12 @@ export class Store {
   }
 
   /**
-   * Sends every held task that has not failed, oldest first, one at a time, so a batch lands in the
-   * order it was numbered. Single-flight; a task retried mid-pass is picked up by the same pass.
-   * A send whose answer never came stays held without a failure, and is not sent again on this
-   * socket: its resend on the next answers `landedEarlier` if it had landed.
+   * Sends every held task that has not failed, oldest first, one at a time. Single-flight; a task
+   * retried mid-pass is picked up by the same pass. A send whose answer never came stays held
+   * without a failure, and is not sent again on this socket: its resend on the next answers
+   * `landedEarlier` if it had landed. One needing a verified leader (`heldNeedsLeader`) is passed
+   * over until there is one, never failed on a leader that is only asleep or unverified; one past
+   * `HELD_MAX_AGE_MS` is dropped unsent.
    */
   async #sendHeld(): Promise<void> {
     if (this.#sendingHeld) return;
@@ -914,7 +926,15 @@ export class Store {
         if (relay.status !== "open" || !relay.registrySettled) return;
         // Read each turn: a socket that settled while a send was out swapped the set, and this pass serves it too.
         const tried = this.#triedOnSocket;
-        const next = this.#state.held.find((entry) => entry.failure === null && !tried.has(entry.task.id));
+        this.#dropStaleHeld();
+        const verified = leaderVerified(relay);
+        const next = this.#state.held.find(
+          (entry) =>
+            entry.failure === null &&
+            !entry.sending &&
+            !tried.has(entry.task.id) &&
+            (verified || !heldNeedsLeader(entry.task)),
+        );
         if (next === undefined) return;
         tried.add(next.task.id);
         // oxlint-disable-next-line no-await-in-loop -- sequential on purpose: batch order, one create at a time
@@ -926,8 +946,7 @@ export class Store {
   }
 
   async #sendOne(task: Task): Promise<void> {
-    const reported = task.spec.until === "reported" || task.spec.deps?.some((dep) => dep.after === "done") === true;
-    if (reported && !deriveReportedAvailability(this.#state.relay)) {
+    if (settlesOnReport(task) && !deriveReportedAvailability(this.#state.relay)) {
       this.#heldFailed(task, `${REPORTED_UNAVAILABLE} Try again once it does, or discard it.`);
       return;
     }
@@ -935,7 +954,7 @@ export class Store {
     if (task.spec.pin?.account !== undefined && derivePinAccountAvailability(this.#state.relay) !== "available") {
       this.#heldFailed(
         task,
-        "The scheduler's leader can't pin an account right now. Try again once it can, or discard it.",
+        "The scheduler's leader doesn't take account pins yet. Update seanced on its machine, or discard it.",
       );
       return;
     }
@@ -951,6 +970,29 @@ export class Store {
     if (reply === null) this.#heldFailed(task, STORE_UNREADABLE);
     else if (!reply.ok) this.#heldFailed(task, this.#refusalText(reply.code));
     else this.#heldLanded(task);
+  }
+
+  #dropStaleHeld(): void {
+    const now = Date.now();
+    const held = this.#state.held.filter((entry) => entry.sending || !heldStale(entry.task, now));
+    if (held.length !== this.#state.held.length) this.#patch({ held });
+  }
+
+  /**
+   * Takes the list another tab wrote (`trackHeld`). A task this tab is sending stays, flagged, until
+   * its answer: dropping it would not stop it landing. Sends what came in when this tab's relay is
+   * up: the writer may have held it on a dead socket, and nothing else here would send it before
+   * this tab's own reconnect. A task both send answers `landedEarlier` the second time.
+   */
+  adoptHeld(incoming: readonly HeldTask[]): void {
+    const sending = new Set(this.#state.held.filter((entry) => entry.sending).map((entry) => entry.task.id));
+    const ids = new Set(incoming.map((entry) => entry.task.id));
+    const held = [
+      ...incoming.map((entry) => (sending.has(entry.task.id) ? { ...entry, sending: true } : entry)),
+      ...this.#state.held.filter((entry) => entry.sending && !ids.has(entry.task.id)),
+    ];
+    this.#patch({ held });
+    void this.#sendHeld();
   }
 
   #patchHeld(taskId: string, next: Partial<Pick<HeldTask, "failure" | "sending">>): void {

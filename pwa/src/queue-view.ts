@@ -5,7 +5,6 @@ import {
   TASK_SPEC_LIMITS,
   continueOffer,
   knownAccounts,
-  originLabel,
   waitingContinuation,
   type DepAfter,
   type KnownAccount,
@@ -25,6 +24,7 @@ import {
   type StartNowItem,
 } from "./decision-view.ts";
 import { accountDisplayName, formatUntil } from "./machines-view.ts";
+import { taskTitle } from "./task-title.ts";
 import {
   deriveContinueAvailability,
   deriveReportedOffered,
@@ -197,23 +197,6 @@ function holdRow(hold: PauseHold, state: AppState, known: readonly KnownAccount[
     text: holdText(hold, state, known, now),
     ...(hold.account === undefined ? {} : { account: hold.account }),
   };
-}
-
-/** The window `daemon/src/spawn.ts` names a spawn with no title or prompt (`session`, `session-<n>`): says nothing about the task. */
-const NO_SLUG_WINDOW = /^session(?:-\d+)?$/u;
-
-/** How a task is named wherever it is listed: its title, its prompt's first line, its window, else its repo. */
-export function taskTitle(task: Task): string {
-  const { spec } = task;
-  if (spec.title !== undefined && spec.title !== "") return spec.title;
-  const first = spec.prompt
-    ?.split("\n")
-    .find((l) => l.trim() !== "")
-    ?.trim();
-  if (first !== undefined) return first.length > 80 ? `${first.slice(0, 79)}…` : first;
-  const session = task.assignment?.window;
-  if (session !== undefined && !NO_SLUG_WINDOW.test(session)) return session;
-  return originLabel(spec.repo);
 }
 
 function dotOf(task: Task): QueueDot | null {

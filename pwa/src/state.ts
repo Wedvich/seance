@@ -91,6 +91,17 @@ export interface HeldTask {
 /** Plaintext prompts at rest, like the draft: bounded so a dead relay can't grow it without limit. */
 export const HELD_MAX = 10;
 
+/**
+ * Holding rides out a dropped connection, not a long trip offline: a task older than this is
+ * dropped unsent, since whatever it was for has likely moved on (and past the leader's admission
+ * age it would be refused anyway).
+ */
+export const HELD_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+export function heldStale(task: Task, now: number): boolean {
+  return now - task.createdAt > HELD_MAX_AGE_MS;
+}
+
 /** Why a Start now's `run-now` left its task where it was, as a sentence, for the queued verdict of `taskId`. */
 export interface StartNowRefusal {
   readonly taskId: string;

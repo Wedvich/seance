@@ -1,5 +1,5 @@
 import { DEP_AFTER, isTaskId, parseTask, TASK_SPEC_LIMITS, TASK_UNTIL, type TaskDep } from "@seance/shared";
-import { DEFAULT_FORM, HELD_MAX, isEffort, isModel, type HeldTask, type PersistedForm } from "./state.ts";
+import { DEFAULT_FORM, HELD_MAX, heldStale, isEffort, isModel, type HeldTask, type PersistedForm } from "./state.ts";
 
 /**
  * The form survives a reload because iOS kills backgrounded PWAs freely and the
@@ -82,7 +82,7 @@ export function writeForm(form: PersistedForm): void {
 }
 
 /** Stricter than the form: a held task is sent as it stands, so one this build can't parse is dropped, not sent. */
-export function readHeld(): readonly HeldTask[] {
+export function readHeld(now: number = Date.now()): readonly HeldTask[] {
   const raw = readJson(HELD_KEY);
   if (!Array.isArray(raw)) return [];
   const held: HeldTask[] = [];
@@ -93,6 +93,7 @@ export function readHeld(): readonly HeldTask[] {
     const task = parseTask(Reflect.get(entry, "task"));
     // Never one with files: those go only to a leader verified to take them, which holding never sees.
     if (task === null || task.state !== "queued" || task.spec.attachments !== undefined || ids.has(task.id)) continue;
+    if (heldStale(task, now)) continue;
     const failure: unknown = Reflect.get(entry, "failure");
     ids.add(task.id);
     held.push({ task, failure: typeof failure === "string" ? failure : null, sending: false });
@@ -103,6 +104,40 @@ export function readHeld(): readonly HeldTask[] {
 /** Written on every change, never debounced: a held task lost to a kill is a task that never runs. */
 export function writeHeld(held: readonly HeldTask[]): void {
   writeJson(HELD_KEY, held.length === 0 ? null : held.map(({ task, failure }) => ({ task, failure })));
+}
+
+/**
+ * Keeps `seance:held` and this tab's held list in step both ways. Each tab holds its own list in
+ * memory, so without the `storage` event (fired in every other same-origin tab on a write) one tab's
+ * write would replace another's held tasks, and a kill of the second would lose them. A list adopted
+ * from storage is not written back. Two tabs writing within the same instant can still drop one.
+ */
+export function trackHeld(
+  source: {
+    subscribe(listener: () => void): unknown;
+    getState(): { readonly held: readonly HeldTask[] };
+    adoptHeld(held: readonly HeldTask[]): void;
+  },
+  onStorage: (handler: (key: string | null) => void) => void,
+): void {
+  let written = source.getState().held;
+  let adopting = false;
+  source.subscribe(() => {
+    const { held } = source.getState();
+    if (held === written) return;
+    written = held;
+    if (!adopting) writeHeld(held);
+  });
+  onStorage((key) => {
+    // A null key is another tab's `localStorage.clear()`.
+    if (key !== HELD_KEY && key !== null) return;
+    adopting = true;
+    try {
+      source.adoptHeld(readHeld());
+    } finally {
+      adopting = false;
+    }
+  });
 }
 
 /** No spawn is sent directly any more, so a pending record has nothing left to reconcile; cleared like `dropLegacyHidden`. */

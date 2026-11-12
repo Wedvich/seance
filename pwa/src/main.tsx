@@ -12,8 +12,8 @@ import {
   readFormFiles,
   readHeld,
   trackFormFiles,
+  trackHeld,
   writeForm,
-  writeHeld,
 } from "./persist.ts";
 import { deriveAccountKey, FLEET_QUOTA_INTERVAL_MS, RelayClient } from "@seance/shared";
 import { loadPsk, loadPskBase, readBearer, readRelayUrl } from "./relay/keys.ts";
@@ -83,20 +83,17 @@ if (key === null || token === null) {
   const before = readFormFiles();
   trackFormFiles(store, (flush) => addEventListener("pagehide", flush));
 
+  // Not debounced, unlike the form: a held task lost to a kill inside the debounce would never run.
+  trackHeld(store, (handler) => addEventListener("storage", (event) => handler(event.key)));
+
   // Debounced because the store notifies on every keystroke in the prompt. Only a new
   // form is written: most notifies (relay status beats) leave it the same object. The
   // first is written whatever it is, so a legacy saved shape `readForm` dropped fields
-  // from is rewritten once per load, as before. Held tasks are not debounced: one lost
-  // to a kill inside the debounce would never run, and they change once per queue.
+  // from is rewritten once per load, as before.
   let timer: ReturnType<typeof setTimeout> | null = null;
   let written: PersistedForm | null = null;
-  let held = store.getState().held;
   store.subscribe(() => {
     const state = store.getState();
-    if (state.held !== held) {
-      held = state.held;
-      writeHeld(held);
-    }
     if (state.form === written) return;
     if (timer !== null) clearTimeout(timer);
     timer = setTimeout(() => {
@@ -109,9 +106,10 @@ if (key === null || token === null) {
   watchPushResync(client);
   watchDeepLinks(store);
   render(<App store={store} push={client} />, container);
+  // Only on this path: a Setup render is no launch "to the form", and Settings would list it as one.
+  recordLaunch();
 
   // After the form's writer, so appended share text is saved. The form is up first: Cache Storage
   // can stall, and the files stay in the inbox for a later boot, never dropped.
   void deliverShare("caches" in globalThis ? caches : undefined, marker, before, (share) => store.receiveShare(share));
 }
-recordLaunch();
