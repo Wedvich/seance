@@ -738,7 +738,7 @@ describe("the daemon", () => {
   }
 
   test("reports a lapsed login in ax and an expiring one in ae, and advertises authHealth", async () => {
-    await withDaemon({ authHealth: { bunBin: process.execPath } }, async (relay, next) => {
+    await withDaemon({ authHealth: { platform: "linux", bunBin: process.execPath } }, async (relay, next) => {
       const frame = await relay.registers.next(5_000);
       const info = parseMachineInfo((await openSealed(appKey, frame.info)).payload);
       expect(info?.capabilities).toContain(CAPABILITIES.authHealth);
