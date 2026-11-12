@@ -52,7 +52,15 @@ import {
   type Verdict,
 } from "./state.ts";
 import { AccountStore } from "./account-store.ts";
-import { admitFiles, manifestOf, notAttachedText, uploadRefusalText } from "./attachments.ts";
+import {
+  admitFiles,
+  manifestOf,
+  notAttachedText,
+  uploadFailureShort,
+  uploadRefusalText,
+  type PickedFile,
+  type UploadState,
+} from "./attachments.ts";
 import type { ReceivedShare } from "./share-inbox.ts";
 import { accountSeries } from "./chart.ts";
 import { SchedulerStore, STORE_UNREADABLE } from "./scheduler-store.ts";
@@ -171,6 +179,12 @@ export class Store {
   #leaderWasVerified = false;
   /** Held task ids sent on this socket; a retry takes its own back out. */
   #triedOnSocket = new Set<string>();
+  /** The abort handle of each upload in flight, by file key: removing the file cuts it off. */
+  readonly #uploadAborts = new Map<string, AbortController>();
+  /** Whether an upload is in flight. Checked and set synchronously, so a file added as one ends is never missed. */
+  #pumping = false;
+  /** A Queue press waiting for the uploads to go idle (`#awaitUploads`). */
+  #uploadIdleWaiters: (() => void)[] = [];
   readonly #queue: SchedulerStore;
   readonly #accounts: AccountStore;
 
@@ -214,7 +228,7 @@ export class Store {
       attachments: [],
       attachNotice: null,
       heldDropped: [],
-      upload: null,
+      awaitingUploads: false,
     };
   }
 
@@ -288,6 +302,8 @@ export class Store {
     // Only an authoritative registry may prune — while it is unsettled an empty
     // `machines` means "no push yet", not "every machine vanished".
     this.#patch({ relay, ...(relay.registrySettled ? this.#pruneGone(relay.machines) : {}) });
+    // Files admitted while attaching wasn't offered (a share at boot, a pick in a re-dial) start once it is.
+    this.#pumpUploads();
     const decided = relay.status === "open" ? relay.registrySettled : !relay.settling;
     if (decided && this.#settleWaiters.length > 0) {
       const waiters = this.#settleWaiters;
@@ -404,8 +420,9 @@ export class Store {
   }
 
   /**
-   * Adds picked, pasted or dropped files as far as the limits allow, and says
-   * why the rest were left out. Ignored mid-submit: the list is what is being sent.
+   * Adds picked, pasted or dropped files as far as the limits allow, says why the
+   * rest were left out, and starts uploading them. Ignored once Queue is pressed:
+   * the list is what is being sent.
    */
   addFiles(files: readonly File[]): void {
     if (files.length === 0 || this.#state.spawning) return;
@@ -434,10 +451,13 @@ export class Store {
     this.#patch({ attachments: next, attachNotice: sentences.length === 0 ? null : sentences.join(" ") });
     // route-preview filters on the flag; it changes only when the list empties or fills.
     if (before.length === 0 && next.length > 0) void this.refreshPreview();
+    this.#pumpUploads();
   }
 
+  /** Also mid-upload, which it aborts, and while Queue waits on uploads; never once the create is out. */
   removeFile(key: string): void {
-    if (this.#state.spawning) return;
+    if (this.#state.spawning && !this.#state.awaitingUploads) return;
+    this.#uploadAborts.get(key)?.abort();
     const next = this.#state.attachments.filter((f) => f.key !== key);
     this.#patch({ attachments: next, attachNotice: null });
     if (next.length === 0) void this.refreshPreview();
@@ -886,7 +906,7 @@ export class Store {
       );
       return;
     }
-    const attachments = attaching ? await this.#upload() : undefined;
+    const attachments = attaching ? await this.#awaitUploads() : undefined;
     if (attachments === null) return;
     // Only ids: an alias or email is display text and never goes in a record.
     const pin = {
@@ -941,7 +961,7 @@ export class Store {
       },
       autonomy: DEFAULT_AUTONOMY,
       promptUndo: null,
-      attachments: this.#state.attachments.filter((f) => f.stored === null || !sent.has(f.stored.id)),
+      attachments: this.#state.attachments.filter((f) => f.upload.kind !== "stored" || !sent.has(f.upload.id)),
       attachNotice: null,
     });
   }
@@ -1113,47 +1133,118 @@ export class Store {
   }
 
   /**
-   * Seals and uploads every file not yet stored, in order, then answers the
-   * manifest. The first refusal stops the run and shows why; what was stored
-   * stays stored for the next try, which mints fresh ids for the rest only.
-   * Null: nothing is to be queued, and the verdict already says why.
+   * Uploads waiting files one at a time, in list order, while attaching is offered:
+   * each holds its file and the sealed copy in memory, and the phone's uplink is the
+   * bottleneck, so parallel uploads would not finish the set sooner. Wakes the
+   * Queue press's waiters once nothing is left it can start.
    */
-  async #upload(): Promise<readonly AttachmentRef[] | null> {
-    const pending = this.#state.attachments.filter((f) => f.stored === null);
-    this.#patch({ spawning: true, verdict: null, upload: { done: 0, total: pending.length } });
-    let failure: string | null = null;
-    for (const [done, picked] of pending.entries()) {
-      this.#patch({ upload: { done, total: pending.length } });
+  #pumpUploads(): void {
+    if (this.#pumping) return;
+    const next = deriveAttachmentsAvailability(this.#state.relay)
+      ? this.#state.attachments.find((f) => f.upload.kind === "waiting")
+      : undefined;
+    if (next === undefined) {
+      const waiters = this.#uploadIdleWaiters;
+      this.#uploadIdleWaiters = [];
+      for (const resolve of waiters) resolve();
+      return;
+    }
+    this.#pumping = true;
+    void this.#uploadOne(next).finally(() => {
+      this.#pumping = false;
+      this.#pumpUploads();
+    });
+  }
+
+  /** Seals and uploads one file, recording where it got; a removed file's outcome is dropped. Never rejects. */
+  async #uploadOne(picked: PickedFile): Promise<void> {
+    const { key, name } = picked;
+    const controller = new AbortController();
+    this.#uploadAborts.set(key, controller);
+    this.#setUpload(key, { kind: "uploading", percent: 0 });
+    try {
       let bytes: Uint8Array<ArrayBuffer>;
       try {
-        // oxlint-disable-next-line no-await-in-loop -- one file in memory at a time, in order
         bytes = new Uint8Array(await picked.file.arrayBuffer());
       } catch {
-        failure = `Couldn't read ${picked.name} from this device. Remove it and attach it again. Nothing was queued.`;
-        break;
+        this.#setUpload(key, {
+          kind: "failed",
+          short: "couldn't read the file",
+          message: `Couldn't read ${name} from this device. Remove it and attach it again. Nothing was queued.`,
+        });
+        return;
       }
-      // oxlint-disable-next-line no-await-in-loop -- as above
-      const reply = await this.#client.uploadAttachment(bytes);
-      if (!reply.ok) {
-        failure = uploadRefusalText(picked.name, reply);
-        break;
-      }
-      const stored = { id: reply.id, hash: reply.hash };
-      // By key: the list can't change mid-run (add and remove wait), but the identity is what's kept.
-      this.#patch({
-        attachments: this.#state.attachments.map((f) => (f.key === picked.key ? { ...f, stored } : f)),
+      const reply = await this.#client.uploadAttachment(bytes, {
+        signal: controller.signal,
+        // Short of 100 until the relay answers `201`: the last byte sent is not a stored file.
+        onProgress: (sent, total) =>
+          this.#setUpload(key, {
+            kind: "uploading",
+            percent: total > 0 ? Math.min(99, Math.floor((sent / total) * 100)) : 0,
+          }),
       });
+      if (reply.ok) this.#setUpload(key, { kind: "stored", id: reply.id, hash: reply.hash });
+      else if (reply.code !== "aborted")
+        this.#setUpload(key, {
+          kind: "failed",
+          short: uploadFailureShort(reply),
+          message: uploadRefusalText(name, reply),
+        });
+    } catch (err) {
+      this.#setUpload(key, {
+        kind: "failed",
+        short: "upload failed",
+        message: `Couldn't upload ${name} (${String(err)}). Nothing was queued.`,
+      });
+    } finally {
+      this.#uploadAborts.delete(key);
     }
-    const manifest = manifestOf(this.#state.attachments);
+  }
+
+  /** Patches one file's upload state; nothing for a file since removed, or a percent that didn't move. */
+  #setUpload(key: string, upload: UploadState): void {
+    const current = this.#state.attachments.find((f) => f.key === key);
+    if (current === undefined) return;
+    if (upload.kind === "uploading" && current.upload.kind === "uploading" && current.upload.percent === upload.percent)
+      return;
+    this.#patch({ attachments: this.#state.attachments.map((f) => (f.key === key ? { ...f, upload } : f)) });
+  }
+
+  /**
+   * A Queue press with files: failed ones go again under fresh ids, and the press
+   * waits until nothing is uploading. Answers the manifest once every file still on
+   * the form is stored (undefined if every one was removed meanwhile), or null when
+   * nothing is to be queued, the verdict already saying why.
+   */
+  async #awaitUploads(): Promise<readonly AttachmentRef[] | undefined | null> {
+    this.#patch({
+      spawning: true,
+      awaitingUploads: true,
+      verdict: null,
+      attachments: this.#state.attachments.map((f) =>
+        f.upload.kind === "failed" ? { ...f, upload: { kind: "waiting" } } : f,
+      ),
+    });
+    await new Promise<void>((resolve) => {
+      this.#uploadIdleWaiters.push(resolve);
+      this.#pumpUploads();
+    });
+    const files = this.#state.attachments;
+    const manifest = manifestOf(files);
     // Still spawning on success: the create follows at once, and the button must not offer a second submit between.
-    if (failure === null && manifest !== null) {
-      this.#patch({ upload: null });
-      return manifest;
+    if (manifest !== null) {
+      this.#patch({ awaitingUploads: false });
+      return manifest.length === 0 ? undefined : manifest;
     }
-    this.#patch({ upload: null, spawning: false });
+    const failed = files.map((f) => f.upload).find((upload) => upload.kind === "failed");
+    this.#patch({ awaitingUploads: false, spawning: false });
     this.#showVerdict({
       kind: "unqueued",
-      message: failure ?? "Not every file uploaded. Nothing was queued.",
+      // Files still waiting: attaching stopped being offered mid-wait (a re-dial, or a leader without it).
+      message:
+        failed?.kind === "failed"
+          ? failed.message
+          : "Not every file uploaded: the connection or the scheduler's leader changed. Nothing was queued; files already uploaded aren't sent again.",
       mayHaveLanded: false,
     });
     return null;

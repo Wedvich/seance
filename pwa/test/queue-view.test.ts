@@ -81,7 +81,7 @@ function state(
     attachments: [],
     attachNotice: null,
     heldDropped: [],
-    upload: null,
+    awaitingUploads: false,
     ...overrides,
   };
 }

@@ -1,6 +1,14 @@
 import { ATTACHMENT_LIMITS, parseAttachmentManifest } from "@seance/shared";
 import { describe, expect, test } from "bun:test";
-import { admitFiles, attachmentName, attachmentType, manifestOf, uploadRefusalText } from "../src/attachments.ts";
+import {
+  admitFiles,
+  attachmentName,
+  attachmentType,
+  manifestOf,
+  typeLabel,
+  uploadFailureShort,
+  uploadRefusalText,
+} from "../src/attachments.ts";
 
 const MB = 1024 * 1024;
 
@@ -90,8 +98,10 @@ describe("manifestOf", () => {
       name,
       type,
       size,
-      stored: { id: `0000000${i}-0000-4000-8000-000000000000`, hash: "h".repeat(43) },
+      upload: { kind: "stored" as const, id: `0000000${i}-0000-4000-8000-000000000000`, hash: "h".repeat(43) },
     }));
+    const partly = stored.map((f, i) => (i === 0 ? { ...f, upload: { kind: "uploading" as const, percent: 50 } } : f));
+    expect(manifestOf(partly)).toBeNull();
     const manifest = manifestOf(stored);
     expect(manifest).not.toBeNull();
     expect(parseAttachmentManifest(manifest)).toEqual(manifest);
@@ -110,5 +120,23 @@ describe("uploadRefusalText", () => {
     expect(text).toContain("10 minutes");
     expect(text).toContain("Nothing was queued");
     expect(uploadRefusalText("a.png", { ok: false, code: "unreachable" })).toContain("Couldn't reach the relay");
+  });
+});
+
+describe("chip text", () => {
+  test("typeLabel is the extension upper-cased, null without a short one", () => {
+    expect(typeLabel("shot.png")).toBe("PNG");
+    expect(typeLabel("data.tar.gz")).toBe("GZ");
+    expect(typeLabel("Makefile")).toBeNull();
+    expect(typeLabel(".env")).toBeNull();
+    expect(typeLabel("notes.markdown")).toBeNull();
+  });
+
+  test("uploadFailureShort fits a chip's second row for every refusal", () => {
+    expect(uploadFailureShort({ ok: false, code: "allowance_exhausted", window: "hour", retryAfter: 60 })).toBe(
+      "limit reached",
+    );
+    expect(uploadFailureShort({ ok: false, code: "unreachable" })).toBe("unreachable");
+    expect(uploadFailureShort({ ok: false, code: "too_large" })).toBe("refused (too_large)");
   });
 });

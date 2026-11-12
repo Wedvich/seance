@@ -82,7 +82,8 @@ function securityHeaders(outDir: string, relay: string): Plugin {
         `script-src 'self' 'sha256-${hash}'`,
         "style-src 'self'",
         "font-src 'self'",
-        "img-src 'self' data:",
+        // blob: for the attachment chips' local previews (object URLs of picked images).
+        "img-src 'self' data: blob:",
         // The socket's wss: origin and the attachment uploads' https: one: browsers' scheme
         // upgrade between the two in source matching is not relied on.
         `connect-src 'self' ${relayOrigin(relay)} ${relayOrigin(attachmentUrl(relay, ""))}`,

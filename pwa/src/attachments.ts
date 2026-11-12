@@ -7,10 +7,21 @@ import {
 } from "@seance/shared";
 
 /**
+ * Where a file's upload stands. `waiting` until its turn (or until attaching is
+ * offered); `stored` is set by a `201` and kept for the compose session, so a retry
+ * uploads only the rest; `failed` holds the chip's short reason and the verdict's
+ * sentence, and goes back to `waiting` at the next Queue press.
+ */
+export type UploadState =
+  | { readonly kind: "waiting" }
+  | { readonly kind: "uploading"; readonly percent: number }
+  | { readonly kind: "stored"; readonly id: string; readonly hash: string }
+  | { readonly kind: "failed"; readonly short: string; readonly message: string };
+
+/**
  * A file on the form (DESIGN.md, "Attachments", The PWA). `name` and `type` are
  * what the manifest will carry, normalised once at pick time so the list shows
- * what the session gets. `stored` is set by a `201` and kept for the compose
- * session, so a retry uploads only the rest.
+ * what the session gets.
  */
 export interface PickedFile {
   /** Local only: the list's key and the remove handle; never sent. */
@@ -19,7 +30,7 @@ export interface PickedFile {
   readonly name: string;
   readonly type: string;
   readonly size: number;
-  readonly stored: { readonly id: string; readonly hash: string } | null;
+  readonly upload: UploadState;
 }
 
 const FALLBACK_TYPE = "application/octet-stream";
@@ -111,7 +122,14 @@ export function admitFiles(
       continue;
     }
     total += file.size;
-    files.push({ key: mintKey(), file, name, type: attachmentType(file.type), size: file.size, stored: null });
+    files.push({
+      key: mintKey(),
+      file,
+      name,
+      type: attachmentType(file.type),
+      size: file.size,
+      upload: { kind: "waiting" },
+    });
   }
   return { files, refused, notice: notAttachedText(refused) };
 }
@@ -119,11 +137,34 @@ export function admitFiles(
 /** The manifest once every file is stored; null while any is not. */
 export function manifestOf(files: readonly PickedFile[]): readonly AttachmentRef[] | null {
   const refs: AttachmentRef[] = [];
-  for (const { name, type, size, stored } of files) {
-    if (stored === null) return null;
-    refs.push({ id: stored.id, name, type, size, hash: stored.hash });
+  for (const { name, type, size, upload } of files) {
+    if (upload.kind !== "stored") return null;
+    refs.push({ id: upload.id, name, type, size, hash: upload.hash });
   }
   return refs;
+}
+
+/** The chip's label for a file's kind: its extension, upper-cased ("PNG"); null without one. */
+export function typeLabel(name: string): string | null {
+  const dot = name.lastIndexOf(".");
+  const ext = dot > 0 ? name.slice(dot + 1) : "";
+  return ext.length === 0 || ext.length > 5 ? null : ext.toUpperCase();
+}
+
+/** Why a file was not stored, in the few words a chip's second row holds. */
+export function uploadFailureShort(refusal: AttachmentRefusal): string {
+  switch (refusal.code) {
+    case "allowance_exhausted":
+      return "limit reached";
+    case "unauthorized":
+      return "token refused";
+    case "unreachable":
+      return "unreachable";
+    case "storage_error":
+      return "relay error";
+    default:
+      return `refused (${refusal.code})`;
+  }
 }
 
 function waitText(seconds: number): string {
@@ -148,6 +189,8 @@ export function uploadRefusalText(name: string, refusal: AttachmentRefusal): str
       return `The relay's storage failed while uploading ${name}. Try again.${tail}`;
     case "exists":
       return `The relay already held an upload under ${name}'s new id. Try again: it gets another.${tail}`;
+    case "aborted":
+      return `The upload of ${name} was stopped. Try again.${tail}`;
     default:
       return `The relay refused the upload of ${name} (${refusal.code}). Update the app and the relay to matching versions.${tail}`;
   }

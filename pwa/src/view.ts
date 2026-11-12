@@ -29,7 +29,7 @@ import {
   type Verdict,
 } from "./state.ts";
 import { needsAttention } from "./asleep.ts";
-import { formatBytes, type PickedFile } from "./attachments.ts";
+import { formatBytes, typeLabel, type PickedFile } from "./attachments.ts";
 import { taskTitle } from "./task-title.ts";
 
 /**
@@ -107,17 +107,34 @@ export interface AccountChoice {
   readonly dot: Dot;
 }
 
+/** One chip: the name and × on its first row, size and upload state on its second. */
+export interface AttachmentChip {
+  readonly key: string;
+  readonly name: string;
+  /** The file itself for an `image/*` one, so the chip can preview it; null for the rest. */
+  readonly image: Blob | null;
+  /** "PNG"; null without an extension. */
+  readonly ext: string | null;
+  /** "PNG · 14 KB", "14 KB · 45%", "14 KB · waiting", "Failed: token refused". */
+  readonly status: string;
+  /** 0 to 99 while uploading, for the bar; null otherwise. */
+  readonly percent: number | null;
+  readonly failed: boolean;
+}
+
 /** The form's files: offered only while the verified leader takes them. */
 export interface AttachmentsView {
   /** The attach button, paste and drop work. */
   readonly offered: boolean;
-  readonly files: readonly { readonly key: string; readonly name: string; readonly size: string }[];
+  readonly files: readonly AttachmentChip[];
   /** "3 files · 4.2 MB"; null with none. */
   readonly summary: string | null;
   /** Why files were not attached, or why attached ones can't go; cleared by the next pick. */
   readonly notice: string | null;
-  /** Remove is off while an upload runs: the list is what is being sent. */
-  readonly locked: boolean;
+  /** Adding is off from the Queue press on: the list is what is being sent. */
+  readonly addLocked: boolean;
+  /** Remove is off only while the create itself is out; waiting on uploads, a file can still go. */
+  readonly removeLocked: boolean;
 }
 
 /** One task held on this phone (`HeldTask`), as its row above the tiles. */
@@ -240,8 +257,8 @@ export interface AppState {
   readonly attachments: readonly PickedFile[];
   /** Why the last pick or paste left files out; cleared by the next pick or a remove. */
   readonly attachNotice: string | null;
-  /** The upload in flight: `done` files stored of `total` to send. */
-  readonly upload: { readonly done: number; readonly total: number } | null;
+  /** A Queue press waiting for the form's uploads before it creates the task. */
+  readonly awaitingUploads: boolean;
 }
 
 const MINUTE = 60_000;
@@ -379,7 +396,7 @@ export const ATTACHMENTS_UNAVAILABLE =
 /** Files wait on a leader not yet verified (a re-dial) rather than being told it lacks attachments. */
 export const ATTACHMENTS_VERIFYING = "Checking that the scheduler's leader takes attachments…";
 
-// Files upload at the queue and only to a leader verified to take them, so a held task carries none.
+// Files upload only while a leader verified to take them leads, so a held task carries none.
 export const ATTACHMENTS_NOT_HELD = "Files go only while connected. Remove them to keep the task on this phone";
 
 export function leaderVerified(relay: RelayState): boolean {
@@ -395,17 +412,45 @@ function attachmentsBlock(relay: RelayState): "unavailable" | "verifying" | "not
   return canHold(relay) && !relay.settling ? "not_held" : "verifying";
 }
 
+function chipStatus(file: PickedFile, ext: string | null): string {
+  const size = formatBytes(file.size);
+  switch (file.upload.kind) {
+    case "waiting":
+      return `${size} · waiting`;
+    case "uploading":
+      return `${size} · ${file.upload.percent}%`;
+    case "failed":
+      return `Failed: ${file.upload.short}`;
+    case "stored":
+      return ext === null ? size : `${ext} · ${size}`;
+  }
+}
+
+function attachmentChip(file: PickedFile): AttachmentChip {
+  const ext = typeLabel(file.name);
+  return {
+    key: file.key,
+    name: file.name,
+    image: file.type.startsWith("image/") ? file.file : null,
+    ext,
+    status: chipStatus(file, ext),
+    percent: file.upload.kind === "uploading" ? file.upload.percent : null,
+    failed: file.upload.kind === "failed",
+  };
+}
+
 function deriveAttachments(state: AppState): AttachmentsView {
   const offered = deriveAttachmentsAvailability(state.relay);
   const files = state.attachments;
   const total = files.reduce((sum, f) => sum + f.size, 0);
   return {
     offered,
-    files: files.map((f) => ({ key: f.key, name: f.name, size: formatBytes(f.size) })),
+    files: files.map(attachmentChip),
     summary:
       files.length === 0 ? null : `${files.length} ${files.length === 1 ? "file" : "files"} · ${formatBytes(total)}`,
     notice: state.attachNotice,
-    locked: state.upload !== null,
+    addLocked: state.spawning,
+    removeLocked: state.spawning && !state.awaitingUploads,
   };
 }
 
@@ -699,9 +744,10 @@ function deriveButton(
     if (relay.unbound > 0) return blocked("Registry tampered");
     return blocked(relay.skewed > 0 ? "Version mismatch" : "No machines listed");
   }
-  if (state.upload !== null) {
-    const { done, total } = state.upload;
-    return { label: `Uploading ${Math.min(done + 1, total)} of ${total}…`, enabled: false, busy: true };
+  if (state.awaitingUploads) {
+    const total = state.attachments.length;
+    const stored = state.attachments.filter((f) => f.upload.kind === "stored").length;
+    return { label: `Uploading ${Math.min(stored + 1, total)} of ${total}…`, enabled: false, busy: true };
   }
   if (state.spawning) return { label: "Queuing…", enabled: false, busy: true };
   if (!holding && !deriveAutoAvailability(relay).available) return blocked("Queuing is unavailable");
