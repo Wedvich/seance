@@ -518,6 +518,7 @@ describe("the broker's scheduler actions", () => {
     const queue = { at: 1, tasks: [] };
     const { broker, fakes, lines } = rig((op) => (op === "queue" ? queue : { task: { id: TASK_ID } }), {
       scheduler: LEADING,
+      capabilities: [CAPABILITIES.successor],
     });
     expect(await broker.handle(frame({ schedulerOp: "queue" }))).toMatchObject({ ok: true, data: queue });
     await broker.handle(frame({ id: "c1", schedulerOp: "cancel", taskId: TASK_ID }));
@@ -548,6 +549,15 @@ describe("the broker's scheduler actions", () => {
     }
     expect(none.fakes[0]?.requests).toEqual([]);
     none.broker.stop();
+  });
+
+  test("a pass to a verified leader that does not advertise it is refused with the reason, nothing sent", async () => {
+    const { broker, fakes } = rig(undefined, { scheduler: LEADING });
+    const reply = failed(await broker.handle(frame({ schedulerOp: "pass", taskId: TASK_ID })));
+    expect(reply).toMatchObject({ code: "invalid_request" });
+    expect(reply.message).toContain("cannot pass a task to a successor");
+    expect(fakes[0]?.requests).toEqual([]);
+    broker.stop();
   });
 
   test("an unverified leader is refused as leader_unverified, nothing sent", async () => {

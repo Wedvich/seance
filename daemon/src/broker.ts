@@ -324,6 +324,18 @@ export function createBroker(opts: BrokerOpts): Broker {
         await audited(task, outcome);
         return brokerOk(id, reply);
       }
+      if (request.schedulerOp === "pass") {
+        // A verified leader that does not advertise it answers an unknown op `invalid_request`: say why instead.
+        // With none, the client's own refusal (`no_leader`, `leader_unverified`) is the plainer answer.
+        const { machines, scheduler } = client.getState();
+        if (scheduler.kind === "ready" && !advertises(machines, scheduler, CAPABILITIES.successor)) {
+          return await fail(
+            id,
+            "invalid_request",
+            "the scheduler's leader cannot pass a task to a successor yet — its daemon needs `seanced update`",
+          );
+        }
+      }
       const data =
         request.schedulerOp === "queue"
           ? await client.queue()
