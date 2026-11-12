@@ -12,8 +12,10 @@ import {
 import type { Capability, KnownAccount, Machine, RelayState } from "@seance/shared";
 import {
   EFFORT_LABELS,
+  HELD_MAX,
   MODEL_LABELS,
   type AccountsState,
+  type HeldTask,
   type HistoryView,
   type PersistedForm,
   type PreviewState,
@@ -116,6 +118,16 @@ export interface AttachmentsView {
   readonly locked: boolean;
 }
 
+/** One task held on this phone (`HeldTask`), as its row above the tiles. */
+export interface HeldRow {
+  readonly taskId: string;
+  readonly title: string;
+  readonly repo: string;
+  readonly status: string;
+  readonly failed: boolean;
+  readonly sending: boolean;
+}
+
 /** Why the form's pins can't be queued, as the button's label and the sentence under it. */
 export interface PinProblem {
   readonly label: string;
@@ -136,8 +148,13 @@ export interface ViewModel {
   readonly effortTile: Tile;
   /** The authoring tile: the tasks this one waits on. */
   readonly afterTile: Tile;
-  /** The verified leader takes `until: "reported"` and `after: "done"` (DESIGN.md, capabilities). */
+  /**
+   * The verified leader takes `until: "reported"` and `after: "done"` (DESIGN.md, capabilities),
+   * or no relay can say: a held task is checked when it is sent.
+   */
   readonly reportedAvailable: boolean;
+  /** Tasks kept on this phone until the relay takes them, oldest first. */
+  readonly held: readonly HeldRow[];
   readonly worktreeHint: string;
   /** The line under the prompt card; null when there is nothing to say. */
   readonly formStatus: string | null;
@@ -182,6 +199,8 @@ export interface AppState {
   /** The Machine sheet's rescan action; a failure is cleared once its sheet closes. */
   readonly rescan: RescanState;
   readonly verdict: Verdict | null;
+  /** Tasks queued while the relay was unreachable, oldest first; persisted (`writeHeld`). */
+  readonly held: readonly HeldTask[];
   /** The form's `route-preview`; null while either picker is pinned. */
   readonly preview: PreviewState | null;
   /** By deviceId; "unknown" once a fetch failed or timed out. */
@@ -291,6 +310,21 @@ export function deriveAutoAvailability(relay: RelayState): AutoAvailability {
 }
 
 /**
+ * Whether Queue holds the task on this phone instead of putting it: the socket
+ * isn't open, but this document has seen the registry, so the repo and pins
+ * still resolve against it. Without one (a cold launch with no relay) there is
+ * nothing to pick from, and the button waits as before.
+ */
+export function canHold(relay: RelayState): boolean {
+  return relay.status !== "open" && relay.rejection === null && relay.machines.length > 0;
+}
+
+/** Offered while held: the leader's capability is read when the task is sent, not when it is queued. */
+export function deriveReportedOffered(relay: RelayState): boolean {
+  return deriveReportedAvailability(relay) || canHold(relay);
+}
+
+/**
  * `until: "reported"` and a `done` edge are written only to a leader that
  * advertises `reportedDone`: an older one would strip the first and hold the
  * second unreadable. Needs the verified leader's own entry, so no leader (or an
@@ -332,8 +366,20 @@ export const ATTACHMENTS_UNAVAILABLE =
 /** Files wait on a leader not yet verified (a re-dial) rather than being told it lacks attachments. */
 export const ATTACHMENTS_VERIFYING = "Checking that the scheduler's leader takes attachments…";
 
+// Files upload at the queue and only to a leader verified to take them, so a held task carries none.
+export const ATTACHMENTS_NOT_HELD = "Files go only while connected. Remove them to keep the task on this phone";
+
 function leaderVerified(relay: RelayState): boolean {
   return relay.status === "open" && relay.scheduler.kind === "ready";
+}
+
+/**
+ * Why files block the queue: a re-dial still settling is only checking; past it the task would be
+ * held, and a held task carries none.
+ */
+function attachmentsBlock(relay: RelayState): "unavailable" | "verifying" | "not_held" {
+  if (leaderVerified(relay)) return "unavailable";
+  return canHold(relay) && !relay.settling ? "not_held" : "verifying";
 }
 
 function deriveAttachments(state: AppState): AttachmentsView {
@@ -454,7 +500,8 @@ export function derivePinProblem(
         text: "The scheduler's leader can't pin an account yet — update seanced on its machine",
       };
     }
-    if (gate === "no-leader") {
+    // Held: no leader to ask until it is sent, where `#sendOne` checks it.
+    if (gate === "no-leader" && !canHold(relay)) {
       return {
         label: "Can't pin an account",
         text: "No verified scheduler is leading, so an account pin can't be confirmed; try again once one leads",
@@ -542,7 +589,9 @@ function deriveBanner(state: AppState): Banner | null {
     if (relay.settling) return null;
     return {
       title: "Relay unreachable",
-      body: "Nothing can be spawned until a daemon socket is back. Your prompt is kept.",
+      body: canHold(relay)
+        ? "A task you queue now is kept on this phone and sent once the app reconnects. Keep it open, or come back to it."
+        : "Nothing can be queued until the app has reached the relay once. Your prompt is kept.",
       tone: "err",
       opensSettings: false,
     };
@@ -599,11 +648,18 @@ function deriveBanner(state: AppState): Banner | null {
 /** An offline pin is not a block: the task waits for the machine, as `resolvePlacement` notes. */
 function deriveFormStatus(state: AppState, machine: Machine | null, problem: PinProblem | null): string | null {
   const { reason, note } = deriveAutoAvailability(state.relay);
-  if (reason !== null) return reason;
+  const holding = canHold(state.relay);
+  if (!holding && reason !== null) return reason;
   if (problem !== null) return problem.text;
   if (state.attachments.length > 0 && !deriveAttachmentsAvailability(state.relay)) {
-    return leaderVerified(state.relay) ? ATTACHMENTS_UNAVAILABLE : ATTACHMENTS_VERIFYING;
+    const block = attachmentsBlock(state.relay);
+    if (block === "not_held") return ATTACHMENTS_NOT_HELD;
+    return block === "unavailable" ? ATTACHMENTS_UNAVAILABLE : ATTACHMENTS_VERIFYING;
   }
+  if (holding && state.held.length >= HELD_MAX)
+    return `${HELD_MAX} tasks are held already. Discard one to hold another`;
+  // The settle window is a resume's re-dial: a task held in it goes out within a second, so it isn't news.
+  if (holding && !state.relay.settling) return "Not connected — a task you queue waits on this phone";
   // The tile says "Unknown machine" here, so the status line must not claim the scheduler picks.
   if (state.form.machine !== null && machine === null) return "The pinned machine isn't listed";
   if (machine !== null && !machine.connected) return `${machine.name} is offline — the task waits for it`;
@@ -622,7 +678,8 @@ function deriveButton(
   const { relay } = state;
 
   if (relay.rejection !== null) return blocked("Bearer token rejected");
-  if (relay.status !== "open") return blocked(relay.settling ? "Connecting…" : "Waiting for the relay");
+  const holding = canHold(relay);
+  if (relay.status !== "open" && !holding) return blocked(relay.settling ? "Connecting…" : "Waiting for the relay");
   if (relay.registrySize === 0) return blocked("No machines registered");
   if (relay.machines.length === 0) {
     if (relay.ignored > 0) return blocked("Check your key");
@@ -634,12 +691,14 @@ function deriveButton(
     return { label: `Uploading ${Math.min(done + 1, total)} of ${total}…`, enabled: false, busy: true };
   }
   if (state.spawning) return { label: "Queuing…", enabled: false, busy: true };
-  if (!deriveAutoAvailability(relay).available) return blocked("Queuing is unavailable");
+  if (!holding && !deriveAutoAvailability(relay).available) return blocked("Queuing is unavailable");
   if (problem !== null) return blocked(problem.label);
   if (state.attachments.length > 0 && !deriveAttachmentsAvailability(relay)) {
-    return blocked(leaderVerified(relay) ? "Can't attach files" : "Checking leader…");
+    return blocked(attachmentsBlock(relay) === "verifying" ? "Checking leader…" : "Can't attach files");
   }
   if (repo === null) return blocked("No repo to run");
+  if (holding && state.held.length >= HELD_MAX) return blocked("Too many held");
+  if (holding && !relay.settling) return { label: "Queue when connected", enabled: true, busy: false };
   return { label: machine === null ? "Queue" : `Queue on ${machine.name}`, enabled: true, busy: false };
 }
 
@@ -659,6 +718,19 @@ function deriveIgnoredNote(relay: RelayState): string | null {
   if (relay.skewed > 0)
     notes.push(`${relay.skewed} ${relay.skewed === 1 ? "entry" : "entries"} unreadable (version mismatch)`);
   return notes.length === 0 ? null : notes.join(" · ");
+}
+
+function heldRow(entry: HeldTask): HeldRow {
+  const { task, failure, sending } = entry;
+  const line = task.spec.prompt?.trim().split("\n", 1)[0] ?? "";
+  return {
+    taskId: task.id,
+    title: line === "" ? "No prompt" : line,
+    repo: originLabel(task.spec.repo),
+    status: sending ? "Sending…" : (failure ?? "Waiting for the relay"),
+    failed: failure !== null,
+    sending,
+  };
 }
 
 export function deriveView(state: AppState, now: number): ViewModel {
@@ -709,7 +781,8 @@ export function deriveView(state: AppState, now: number): ViewModel {
       dot: null,
     },
     afterTile: { label: "AFTER", value: afterValue(form.after), mono: false, dot: null },
-    reportedAvailable: deriveReportedAvailability(relay),
+    reportedAvailable: deriveReportedOffered(relay),
+    held: state.held.map(heldRow),
     worktreeHint: form.worktree ? "Branches off the default branch on origin" : "Runs in the repo as it stands",
     formStatus: deriveFormStatus(state, machine, problem),
     button: deriveButton(state, machine, repo, problem),

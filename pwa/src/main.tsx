@@ -1,9 +1,20 @@
 import { render } from "preact";
 import "./base.css";
 import { App } from "./app.tsx";
+import { Booting } from "./components/booting.tsx";
 import { Setup } from "./components/setup.tsx";
 import { watchDeepLinks } from "./deep-link-browser.ts";
-import { dropLegacyHidden, dropLegacyPending, readForm, readFormFiles, trackFormFiles, writeForm } from "./persist.ts";
+import { markKeys, markScript, recordLaunch } from "./launch.ts";
+import {
+  dropLegacyHidden,
+  dropLegacyPending,
+  readForm,
+  readFormFiles,
+  readHeld,
+  trackFormFiles,
+  writeForm,
+  writeHeld,
+} from "./persist.ts";
 import { deriveAccountKey, FLEET_QUOTA_INTERVAL_MS, RelayClient } from "@seance/shared";
 import { loadPsk, loadPskBase, readBearer, readRelayUrl } from "./relay/keys.ts";
 import "./screen.css";
@@ -16,6 +27,7 @@ import { watchSystemTheme } from "./theme.ts";
 
 const PERSIST_DEBOUNCE_MS = 300;
 
+markScript();
 watchSystemTheme();
 registerServiceWorker();
 
@@ -28,7 +40,12 @@ const marker = shareMarker(location.search);
 const container = document.querySelector("#root");
 if (container === null) throw new Error("#root is missing from index.html");
 
+// Before the key store is read: on a cold start that read can take seconds, and it used to be a blank screen.
+render(<Booting />, container);
+
+markKeys("from");
 const [key, base] = await Promise.all([loadPsk(), loadPskBase()]);
+markKeys("to");
 const token = readBearer();
 
 if (key === null || token === null) {
@@ -60,7 +77,7 @@ if (key === null || token === null) {
     fleetQuotaRefreshMs: FLEET_QUOTA_INTERVAL_MS,
     ...(accountKey === null ? {} : { accountKey }),
   });
-  const store = new Store(client, readForm());
+  const store = new Store(client, readForm(), readHeld());
 
   // Read before the first write below: it is the replaced document's, and only a share boot reports it.
   const before = readFormFiles();
@@ -69,11 +86,18 @@ if (key === null || token === null) {
   // Debounced because the store notifies on every keystroke in the prompt. Only a new
   // form is written: most notifies (relay status beats) leave it the same object. The
   // first is written whatever it is, so a legacy saved shape `readForm` dropped fields
-  // from is rewritten once per load, as before.
+  // from is rewritten once per load, as before. Held tasks are not debounced: one lost
+  // to a kill inside the debounce would never run, and they change once per queue.
   let timer: ReturnType<typeof setTimeout> | null = null;
   let written: PersistedForm | null = null;
+  let held = store.getState().held;
   store.subscribe(() => {
-    if (store.getState().form === written) return;
+    const state = store.getState();
+    if (state.held !== held) {
+      held = state.held;
+      writeHeld(held);
+    }
+    if (state.form === written) return;
     if (timer !== null) clearTimeout(timer);
     timer = setTimeout(() => {
       written = store.getState().form;
@@ -90,3 +114,4 @@ if (key === null || token === null) {
   // can stall, and the files stay in the inbox for a later boot, never dropped.
   void deliverShare("caches" in globalThis ? caches : undefined, marker, before, (share) => store.receiveShare(share));
 }
+recordLaunch();
