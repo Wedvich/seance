@@ -116,6 +116,12 @@ export interface TaskNote {
    */
   readonly handedOff?: true;
   /**
+   * The scheduler ended the session by hand (cancel, mark done): `closedHere` as well. Its PR is no scheduler
+   * watch's, so a continuation of it inherits none (`EndedTasks.continuation`). Sticky; internal, never in
+   * `TaskProgress`.
+   */
+  readonly cancelled?: true;
+  /**
    * The PR URL of the launch this one continued (its `prUrl`, else its own `continuedPr`), copied from this
    * ledger when the continuation landed, so a hand-off checks only its own note and the chain inherits it link
    * by link. Internal, never in `TaskProgress`: as `prUrl` it would settle the continuation `awaiting-merge`
@@ -210,6 +216,7 @@ function parseNote(raw: unknown, ids: ReadonlySet<string>): NotedTask | null {
     server,
     closedHere,
     handedOff,
+    cancelled,
     continuedPr,
     vanished,
   } = raw;
@@ -240,6 +247,7 @@ function parseNote(raw: unknown, ids: ReadonlySet<string>): NotedTask | null {
     ...(isServerPid(server) ? { server } : {}),
     ...(closedHere === true ? { closedHere: true as const } : {}),
     ...(handedOff === true ? { handedOff: true as const } : {}),
+    ...(cancelled === true ? { cancelled: true as const } : {}),
     ...(inherited === undefined ? {} : { continuedPr: inherited }),
     ...(vanished === true ? { vanished: true as const } : {}),
   };
@@ -347,6 +355,7 @@ function mergeNote(taskId: string, base: NotedTask | undefined, patch: TaskNote)
         : {}),
     ...(patch.closedHere === true || base?.closedHere === true ? { closedHere: true as const } : {}),
     ...(patch.handedOff === true || base?.handedOff === true ? { handedOff: true as const } : {}),
+    ...(patch.cancelled === true || base?.cancelled === true ? { cancelled: true as const } : {}),
     ...((patch.continuedPr ?? base?.continuedPr) === undefined
       ? {}
       : { continuedPr: patch.continuedPr ?? base?.continuedPr }),
@@ -384,7 +393,7 @@ function sameProgress(a: NotedTask, b: NotedTask): boolean {
   );
 }
 
-/** `server`, `closedHere`, `handedOff`, `continuedPr` and `session` write but are no progress: they never move `at`. */
+/** `server`, `closedHere`, `handedOff`, `cancelled`, `continuedPr` and `session` write but are no progress: they never move `at`. */
 function sameNote(a: NotedTask, b: NotedTask): boolean {
   return (
     sameProgress(a, b) &&
@@ -392,6 +401,7 @@ function sameNote(a: NotedTask, b: NotedTask): boolean {
     a.server === b.server &&
     a.closedHere === b.closedHere &&
     a.handedOff === b.handedOff &&
+    a.cancelled === b.cancelled &&
     a.continuedPr === b.continuedPr &&
     a.session === b.session
   );

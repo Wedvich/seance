@@ -471,6 +471,21 @@ describe("LaunchLedger hand-off notes", () => {
     expect(reopened.notes()[0]).not.toHaveProperty("continuedPr");
   });
 
+  test("cancelled survives a reopen and later patches, stays out of progress, and a relaunch starts without it", async () => {
+    const ledger = await LaunchLedger.open(path, () => 9);
+    await ledger.record("t1");
+    await ledger.startNote("t1", { repo: "/r", path: "/r/.claude/worktrees/a" });
+    expect(await ledger.note("t1", { closedHere: true, cancelled: true })).toBe(true);
+    await ledger.note("t1", { branch: "worktree-a" });
+    expect(ledger.notes()[0]).toMatchObject({ closedHere: true, cancelled: true });
+    expect(ledger.progress()[0]).not.toHaveProperty("cancelled");
+    const reopened = await LaunchLedger.open(path, () => 10);
+    expect(reopened.notes()[0]).toMatchObject({ closedHere: true, cancelled: true });
+    expect(await reopened.apply("t1", { cancelled: true })).toBe("same");
+    await reopened.startNote("t1", { repo: "/r", path: "/r/.claude/worktrees/b" });
+    expect(reopened.notes()[0]).not.toHaveProperty("cancelled");
+  });
+
   test("a continuedPr that is not an https URL as written, or a handedOff that is not true, is dropped on read", async () => {
     const ledger = await LaunchLedger.open(path, () => 9);
     for (const id of ["t1", "t2", "t3"]) await ledger.record(id);

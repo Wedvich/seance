@@ -360,7 +360,7 @@ describe("EndedTasks", () => {
     expect(ended.continuation("bare")).not.toHaveProperty("continuedPr");
   });
 
-  test("a PR is inherited only from a launch that ended handed off or by itself with status 0, never a cancelled or failed one", async () => {
+  test("a PR is inherited from a launch however it ended, but not from one the scheduler cancelled", async () => {
     const ledger = LaunchLedger.memory();
     const ended = new EndedTasks(ledger);
     const pr = "https://github.com/a/b/pull/1";
@@ -374,26 +374,44 @@ describe("EndedTasks", () => {
         ...note,
       });
     };
+    // Each of these leaves a task with a PR awaiting-merge (`ended()` in scheduler/src/done.ts).
     await noted("handed", {});
     await ended.handingOff("handed");
-    expect(ended.continuation("handed")).toMatchObject({ continuedPr: pr });
     await noted("exited", { exit: 0 });
-    expect(ended.continuation("exited")).toMatchObject({ continuedPr: pr });
-    // A cancel: this daemon closed the pane, nothing handed off.
-    await noted("cancelled", {});
-    await ended.closing("cancelled");
-    expect(ended.continuation("cancelled")).not.toHaveProperty("continuedPr");
-    await noted("cancelled-zero", { exit: 0 });
-    await ended.closing("cancelled-zero");
-    expect(ended.continuation("cancelled-zero")).not.toHaveProperty("continuedPr");
     await noted("failed", { exit: 1 });
-    expect(ended.continuation("failed")).not.toHaveProperty("continuedPr");
+    await noted("vanished", { vanished: true });
+    // A despawn or reap, and a harvest of a pane that kept no status: closed here, nothing cancelled.
+    await noted("despawned", { exit: 0 });
+    await ended.closing("despawned");
+    await noted("closed-bare", {});
+    await ended.closing("closed-bare");
     await noted("handed-killed", {});
     await ended.handingOff("handed-killed");
     await ledger.note("handed-killed", { exit: 137 });
-    expect(ended.continuation("handed-killed")).not.toHaveProperty("continuedPr");
     await noted("running", {});
-    expect(ended.continuation("running")).not.toHaveProperty("continuedPr");
+    for (const id of [
+      "handed",
+      "exited",
+      "failed",
+      "vanished",
+      "despawned",
+      "closed-bare",
+      "handed-killed",
+      "running",
+    ]) {
+      expect(ended.continuation(id), id).toMatchObject({ continuedPr: pr });
+    }
+    // The scheduler's cancel or mark-done: the task is no awaiting-merge one, and nothing watches its PR.
+    await noted("cancelled", {});
+    await ended.closing("cancelled", true);
+    await noted("cancelled-zero", { exit: 0 });
+    await ended.closing("cancelled-zero", true);
+    expect(ended.continuation("cancelled")).not.toHaveProperty("continuedPr");
+    expect(ended.continuation("cancelled-zero")).not.toHaveProperty("continuedPr");
+    // Inherited through a chain: a cancelled link drops it for the links after.
+    await noted("link", { prUrl: undefined, continuedPr: pr });
+    await ended.closing("link", true);
+    expect(ended.continuation("link")).not.toHaveProperty("continuedPr");
   });
 
   test("handingOff notes the hand-off and the close, and the continuation reports handedOff only for a clean end", async () => {
@@ -1082,6 +1100,35 @@ describe("a session's hand-off", () => {
     } finally {
       events.stop();
     }
+  });
+
+  test("a continuation of an awaiting-merge task hands off whatever ended the launch, and is prless after a cancel", async () => {
+    const site = { repo: "/r", path: "/r/.claude/worktrees/x", session: SESSION };
+    // What the daemon does for the continuation: note the PR the continued launch's note hands it, then take the hand-off.
+    const handoffAfter = async (
+      end: (ended: EndedTasks, ledger: LaunchLedger) => Promise<unknown>,
+    ): Promise<unknown> => {
+      const { ledger, ended, events, send } = setup();
+      try {
+        await ledger.record("t0");
+        await ledger.note("t0", { ...site, prUrl: PR });
+        await end(ended, ledger);
+        const continued = ended.continuation("t0");
+        await ledger.record("t1");
+        await ledger.note("t1", {
+          ...site,
+          ...("continuedPr" in continued ? { continuedPr: continued.continuedPr } : {}),
+        });
+        return await send("%1", { handoff: true });
+      } finally {
+        events.stop();
+      }
+    };
+    const accepted = { ok: true };
+    expect(await handoffAfter((_, ledger) => ledger.note("t0", { exit: 1 }))).toEqual(accepted);
+    expect(await handoffAfter((_, ledger) => ledger.note("t0", { vanished: true }))).toEqual(accepted);
+    expect(await handoffAfter((ended) => ended.closing("t0"))).toEqual(accepted);
+    expect(await handoffAfter((ended) => ended.closing("t0", true))).toEqual({ ok: false, code: "prless" });
   });
 
   test("a continuation with no PR of its own or inherited is prless, though another launch noted the same path and session", async () => {

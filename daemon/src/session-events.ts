@@ -489,10 +489,11 @@ export class EndedTasks {
    * This daemon is about to close the task's pane (despawn, reap): noted first, so the pane going
    * missing never reads as `vanished`. Best-effort; a failed note only risks a false `vanished` on a
    * close the leader itself asked for, which settles the task `failed` it was already ending.
+   * `cancelled`: the scheduler ends it by hand (cancel, mark done), noted too: its PR is no watch's.
    */
-  async closing(taskId: string): Promise<void> {
+  async closing(taskId: string, cancelled = false): Promise<void> {
     try {
-      await this.#ledger.note(taskId, { closedHere: true });
+      await this.#ledger.note(taskId, cancelled ? { closedHere: true, cancelled: true } : { closedHere: true });
     } catch (err) {
       log.warn(`launch ledger: could not note that task ${taskId} is being closed (${String(err)})`);
     }
@@ -602,13 +603,13 @@ export class EndedTasks {
     if (note.session === undefined) {
       return { refused: "it was launched before this daemon noted session ids; resume it by hand" };
     }
-    // The PR this session had, for the continuation to inherit: its own report, else what it inherited. Only
-    // from a launch that ended by its hand-off or by itself with status 0: a cancelled one (closed here, no
-    // hand-off) or a failed one leaves its PR to no scheduler watch, and a continuation of it must keep watching
-    // the PR itself (`hand_off_task` answers `prless`) rather than close and leave it unwatched.
+    // The PR this session had, for the continuation to inherit: its own report, else what it inherited. Every
+    // ending that leaves the task awaiting-merge keeps it (a crash, a vanished window, a despawn: `ended()` in
+    // scheduler/done.ts settles a task with a PR so however it ended), and the blocked continuation of it must
+    // be able to hand off. Only the scheduler's own cancel or mark-done does not: that task is no awaiting-merge
+    // one, its PR no scheduler watch's, so a continuation keeps watching the PR itself (`prless`).
     const handedOff = note.handedOff === true && (note.exit ?? 0) === 0;
-    const pr =
-      handedOff || (note.closedHere !== true && note.exit === 0) ? (note.prUrl ?? note.continuedPr) : undefined;
+    const pr = note.cancelled === true ? undefined : (note.prUrl ?? note.continuedPr);
     return {
       repo: note.repo,
       path: note.path,

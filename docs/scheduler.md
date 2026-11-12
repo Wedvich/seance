@@ -1067,8 +1067,8 @@ of M4 has landed.
      with `gh`. A fourth `continuePreamble` wording covers a session that ended by handing off
      (`TaskNote.handedOff`). The session resumed is the one the leader's `Task.continuedBy` pointer
      names (the newest landed continuation), and it can hand the PR off again though it opened none:
-     its note carries `continuedPr`, copied by the daemon from the continued launch (only one that ended
-     handed off or by itself with status 0, never a cancelled or failed one). The original task
+     its note carries `continuedPr`, copied by the daemon from the continued launch (any with a PR but one
+     the scheduler cancelled: that one is noted `cancelled`). The original task
      keeps the PR and its `after: "merged"` dependents, and the continuation ends `done` by `session`.
      A continuation that lands clears the alert stamp, so a fix that fails again on the same head
      alerts again; the chain's finished links are kept from pruning while the root awaits its merge.

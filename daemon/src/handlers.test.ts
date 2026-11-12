@@ -878,6 +878,37 @@ describe("despawn is audited and answers with the list it left", () => {
     expect(seen).toBeUndefined();
   });
 
+  test("only a despawn sealed from the scheduler and naming itself the scheduler's is noted cancelled", async () => {
+    const ledger = LaunchLedger.memory();
+    // The pane id names the task: `%1` is `t-1`.
+    const backend: SessionBackend = {
+      spawn: () => Promise.reject(new Error("unused")),
+      sessions: () => Promise.resolve([]),
+      doctor: () => Promise.resolve([]),
+      despawn: async (id, opts) => {
+        await opts.closing?.(`t-${id.slice(1)}`);
+        return { window: "w", outcome: "killed" };
+      },
+    };
+    const handle = createHandler({ ...ctx, backend, tasks: new EndedTasks(ledger) });
+    const cases: readonly [string, string | undefined, object, boolean][] = [
+      ["the scheduler's own", SCHEDULER_ID, { client: SCHEDULER_CLIENT }, true],
+      ["the scheduler, with no client named", SCHEDULER_ID, {}, false],
+      ["an app that claims to be the scheduler", "app", { client: SCHEDULER_CLIENT }, false],
+      ["an app", "app", { client: "pwa" }, false],
+    ];
+    for (const [i, [name, from, extra, cancelled]] of cases.entries()) {
+      // oxlint-disable-next-line no-await-in-loop -- each case is its own launch
+      await ledger.record(`t-${i + 1}`);
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      const reply = await handle(request("despawn", { id: `%${i + 1}`, ...extra }), from);
+      expect(reply?.payload, name).toMatchObject({ ok: true });
+      const note = ledger.notes().find((n) => n.taskId === `t-${i + 1}`);
+      expect(note?.closedHere, name).toBe(true);
+      expect(note?.cancelled === true, name).toBe(cancelled);
+    }
+  });
+
   test("a backend that can't despawn answers with a code instead of dropping the request", async () => {
     const startOnly: SessionBackend = {
       spawn: () => Promise.reject(new Error("not under test")),

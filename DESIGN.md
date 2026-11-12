@@ -6291,15 +6291,21 @@ fields carry over), under the same gates.
     The pointer is dropped when the task finishes (`advance`), and a malformed one at parse.
   - _The hand-off a continuation may make._ The session resumed to fix a PR must be able to hand it off
     again, though it opens none: the new launch's ledger note carries `continuedPr` (`LaunchSite.continuedPr`,
-    `startNote`), copied by the daemon from the launch it continues, and `hand_off_task` accepts it. Copied
-    only from a launch that ended handed off or by itself with status 0 (`EndedTasks.continuation`): a
-    cancelled one (closed by the daemon, nothing handed off) or a failed one leaves its PR to no scheduler
-    watch, so its continuation answers `prless` and keeps watching the PR itself, as before. A continuation's
+    `startNote`), copied by the daemon from the launch it continues, and `hand_off_task` accepts it
+    ("Session events", `handoff`). Copied from every launch with a PR but one the scheduler cancelled
+    (`EndedTasks.continuation`), however it ended: a task whose session reported a PR settles `awaiting-merge` whatever the exit (`ended()`, "Done
+    detection"), so a crash, a window closed from outside, a despawn or a pane that kept no status all leave
+    one that is offered this Continue. The one exclusion is the scheduler's own cancel or mark-done: its despawn
+    (`#endSession`, the scheduler's only one) is sealed from the scheduler with `client: "scheduler"`, which
+    the daemon notes `cancelled` beside `closedHere` (`EndedTasks.closing`, `handleDespawn`). That task is
+    no `awaiting-merge` one and nothing watches its PR, so its continuation answers `prless` and keeps
+    watching the PR itself, as before. Only a despawn sealed from the scheduler is noted: another sender's
+    claim of the client changes nothing. A continuation's
     hand-off ends it `done` (it carries no PR of its own): the task it continued stays `awaiting-merge` and
     keeps the PR, the alerts and the `after: "merged"` dependents. Residual, accepted: a task handed off and
-    then cancelled keeps its `handedOff` note, so its continuation may hand off and close with nothing
-    watching the PR; the daemon cannot see the task's state
-    ("Session events", `handoff`). The continued launch's own `handedOff` note is what chooses the fourth
+    then cancelled has no pane for the cancel to despawn, so it keeps its `handedOff` note without
+    `cancelled`, and its continuation may hand off and close with nothing watching the PR; the daemon cannot
+    see the task's state. The continued launch's own `handedOff` note is what chooses the fourth
     seed wording. Neither is progress: both stay out of `TaskProgress` and never move a note's `at`, like
     `closedHere`.
   - _Rollout._ A client offers it only to a leader and a machine advertising `continueHandoff` ("Forward
@@ -8409,7 +8415,7 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   session-event` drops it unsent, as it does a `done`. For the bound pane's own task, the daemon
   answers `untasked` for a pane with none, `unrecorded` for a task its ledger holds no launch of,
   `prless` for one whose launch noted no PR URL, its own or, for a continuation, the one it inherited
-  (`TaskNote.continuedPr`, below; its end would settle `done` or `failed`, never `awaiting-merge`), `stopping` once ingest stopped, and `unsupported` on a daemon wired without the
+  (`TaskNote.continuedPr`, below; a launch with no PR would settle `done` or `failed`, never `awaiting-merge`), `stopping` once ingest stopped, and `unsupported` on a daemon wired without the
   act (one whose session backend cannot despawn). Otherwise it marks the pane, in memory only, and answers `ok`. Nothing is forwarded: the
   leader learns of the hand-off from the session's end, as it would from any exit. A PR URL still
   on its way is waited for: the mod reports it from its own queue, which can hold one report in
@@ -8431,8 +8437,8 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   PR on (2026-11-12, "Continuing a session") has no PR of its own to report: the mod reports one only
   when it opens a PR, and a resumed session that fixes the old one never does. Its note carries
   `continuedPr`, which the daemon copied at launch from the continued launch's own note (`prUrl`, else its
-  own `continuedPr`), only when that launch ended handed off or by itself with status 0, never a cancelled or
-  failed one, under the same path-owner rule as the session id, never from a frame; the check
+  own `continuedPr`), from any launch but one the scheduler cancelled (noted `cancelled`, "Continuing a
+  session"), under the same path-owner rule as the session id, never from a frame; the check
   reads only the pane's own task's note, so another launch sharing the path or session cannot supply
   one, and it survives the continued launch's eviction. Watching the PR after
   that, and alerting on a red required check or a conflict, is the leader's (docs/scheduler.md,
