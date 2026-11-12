@@ -99,6 +99,8 @@ function health(
   return createAuthHealth({
     scan: () => ({ exclaves: fixtures.map((f) => f.exclave), info: fixtures.map((f) => f.info) }),
     home,
+    // The file read, on every host: on darwin the keychain-off default reads nothing.
+    platform: "linux",
     now: () => NOW,
     bunBin: process.execPath,
     // Per-test timers must not fire a second walk under a slow test.
@@ -371,6 +373,7 @@ describe("not read yet is unknown, never ok", () => {
     const h = createAuthHealth({
       scan: () => ({ exclaves: fixtures.map((f) => f.exclave), info: fixtures.map((f) => f.info) }),
       home,
+      platform: "linux",
       now: () => NOW,
       bunBin: stubs.record,
       checkIntervalMs: 20,
@@ -474,6 +477,7 @@ describe("no token reaches the daemon", () => {
         const h = createAuthHealth({
           scan: () => ({ exclaves: [f.exclave], info: [f.info] }),
           home,
+          platform: "linux",
           now: () => NOW,
           bunBin: process.execPath,
           checkIntervalMs: 3_600_000,
@@ -485,6 +489,7 @@ describe("no token reaches the daemon", () => {
       const wrong = createAuthHealth({
         scan: () => ({ exclaves: [shaped.exclave], info: [shaped.info] }),
         home,
+        platform: "linux",
         now: () => NOW,
         bunBin: stubs.wrongShape,
         checkIntervalMs: 3_600_000,
