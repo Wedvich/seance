@@ -26,16 +26,11 @@ import { StoreRevoked, type QueueStore, type Task } from "../src/leader.ts";
 import { createQueueStore } from "../src/queue-store.ts";
 import { log } from "../src/log.ts";
 import { RelayClient } from "../src/relay-client.ts";
-import { pollUntil } from "./fixtures.ts";
+import { bunFragmentedFrameBroken, pollUntil } from "./fixtures.ts";
 import { startTestRelay, type TestRelay } from "./harness.ts";
 
 const PSK = toBase64(new Uint8Array(32).fill(5));
 
-// Bun 1.4.4 regression: the relay socket dies with close 1002 "Received new message inside a
-// fragmented message" in these tests (CI pins 1.4.2). Exact versions, not a floor, so a fixed Bun
-// runs them again.
-const BUN_FRAGMENTED_FRAME_BROKEN: readonly string[] = ["1.4.4"];
-const fragmentedFrameBroken = BUN_FRAGMENTED_FRAME_BROKEN.includes(Bun.version);
 const TOKEN = "queue-store-test";
 let key: CryptoKey;
 
@@ -290,7 +285,7 @@ describe("reader rules", () => {
 });
 
 describe("write mapping", () => {
-  test.skipIf(fragmentedFrameBroken)("a term the relay does not hold revokes the store", async () => {
+  test.skipIf(bunFragmentedFrameBroken)("a term the relay does not hold revokes the store", async () => {
     await withRig(
       async ({ store }) => {
         await expect(store.put("a", 0, task("a"))).rejects.toBeInstanceOf(StoreRevoked);
@@ -324,7 +319,7 @@ describe("write mapping", () => {
     });
   });
 
-  test.skipIf(fragmentedFrameBroken)("not_leader from the relay throws, whatever the key", async () => {
+  test.skipIf(bunFragmentedFrameBroken)("not_leader from the relay throws, whatever the key", async () => {
     await withRig(async ({ relay, store }) => {
       relay.replyNextStore((frame) => ({ t: "store-refused", re: frame.id, code: "not_leader" }));
       await expect(store.put("a", 0, task("a"))).rejects.toThrow("store-put as not_leader");
@@ -393,7 +388,7 @@ describe("write mapping", () => {
     });
   });
 
-  test.skipIf(fragmentedFrameBroken)(
+  test.skipIf(bunFragmentedFrameBroken)(
     "a list waits out its own, longer deadline while a single read gives up at the short one",
     async () => {
       await withRig(
@@ -439,7 +434,7 @@ describe("write mapping", () => {
 });
 
 describe("read mapping", () => {
-  test.skipIf(fragmentedFrameBroken)(
+  test.skipIf(bunFragmentedFrameBroken)(
     "a page, a timeout and a record of another key reject rather than read as a short queue",
     async () => {
       await withRig(async ({ relay, store }) => {
