@@ -304,6 +304,13 @@ describe("taskHeadline", () => {
         "It's waiting for input on Mac · default.",
       );
       expect(taskHeadline(task({ state: "running", assignment: at }), [], NOW)).toBe("It's running on mac · default.");
+      const waiting = (fields: Partial<Task>): string =>
+        taskHeadline(task({ state: "needs-input", assignment: at, ...fields }), machines, NOW);
+      expect(waiting({ inputReason: "question" })).toBe("It's asking a question on Mac · default.");
+      expect(waiting({ inputReason: "permission", inputTool: "Bash" })).toBe(
+        "It may be waiting for permission to use Bash on Mac · default.",
+      );
+      expect(waiting({ inputReason: "permission" })).toBe("It may be waiting for permission on Mac · default.");
       expect(taskHeadline(task({ state: "awaiting-merge", assignment: at }), asleep, NOW)).toBe(
         "Its session ended on Mac · default — waiting for the PR to merge.",
       );

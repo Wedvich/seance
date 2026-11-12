@@ -35,7 +35,7 @@ export type SchedulerAlert =
 /**
  * The needs-input clock rides the write that moves the state: entering
  * `needs-input` stamps `needsInputSince`, leaving it for any state but `lost`
- * clears it, `inputAlerted` and `escalated`. `lost` keeps them: a machine's absence is not an
+ * clears it, `inputAlerted`, `escalated` and the stay's `inputReason`/`inputTool`. `lost` keeps them: a machine's absence is not an
  * answer, and the wait resumes where it was when the machine returns. On the
  * record, so a new leader does not restart the clock.
  */
@@ -44,10 +44,23 @@ export function inputClock(task: Task, now: number): Task {
     return task.needsInputSince === undefined ? { ...task, needsInputSince: now } : task;
   }
   if (task.state === "lost") return task;
-  if (task.needsInputSince === undefined && task.escalated === undefined && task.inputAlerted === undefined) {
+  if (
+    task.needsInputSince === undefined &&
+    task.escalated === undefined &&
+    task.inputAlerted === undefined &&
+    task.inputReason === undefined &&
+    task.inputTool === undefined
+  ) {
     return task;
   }
-  const { needsInputSince: _since, escalated: _escalated, inputAlerted: _alerted, ...rest } = task;
+  const {
+    needsInputSince: _since,
+    escalated: _escalated,
+    inputAlerted: _alerted,
+    inputReason: _reason,
+    inputTool: _tool,
+    ...rest
+  } = task;
   return rest;
 }
 

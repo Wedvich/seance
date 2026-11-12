@@ -610,6 +610,13 @@ export function isRemoteSessionId(value: unknown): value is string {
   return typeof value === "string" && REMOTE_SESSION_ID.test(value);
 }
 
+const TOOL_NAME = /^[A-Za-z0-9_-]{1,128}$/u;
+
+/** A tool name as Claude Code mints one; nothing that could carry a command line passes. */
+export function isToolName(value: unknown): value is string {
+  return typeof value === "string" && TOOL_NAME.test(value);
+}
+
 /**
  * The leader's check on a forwarded event. The sender is a PSK holder, so this
  * is skew and bug hygiene rather than a trust boundary — the daemon already
@@ -618,11 +625,13 @@ export function isRemoteSessionId(value: unknown): value is string {
  * `remoteSession` is dropped rather than the event: a link is not worth losing
  * the state it rode with. A `reason` is kept only when known and beside
  * `needs-input`, and dropped otherwise, never the event: a newer daemon's
- * reason costs this leader only the debounce it would have waited anyway.
+ * reason costs this leader only the debounce it would have waited anyway. A
+ * `tool` is kept only beside `permission` and only as `isToolName` passes it,
+ * dropped otherwise, never the event.
  */
 export function parseSessionEvent(value: unknown): SessionEvent | null {
   if (!isRecord(value)) return null;
-  const { session, taskId, exclave, state, prUrl, remoteSession, reason, at } = value;
+  const { session, taskId, exclave, state, prUrl, remoteSession, reason, tool, at } = value;
   if (typeof session !== "string" || session === "" || session.length > ROUTING_ID_MAX_LENGTH) return null;
   if (!isTaskId(taskId) || typeof exclave !== "string" || exclave.length > ROUTING_ID_MAX_LENGTH) return null;
   if (!isSessionState(state) || typeof at !== "number" || !Number.isFinite(at)) return null;
@@ -637,6 +646,7 @@ export function parseSessionEvent(value: unknown): SessionEvent | null {
     ...(url === null ? {} : { prUrl: url }),
     ...(isRemoteSessionId(remoteSession) ? { remoteSession } : {}),
     ...(state === "needs-input" && isNeedsInputReason(reason) ? { reason } : {}),
+    ...(state === "needs-input" && reason === "permission" && isToolName(tool) ? { tool } : {}),
   };
 }
 
@@ -1178,7 +1188,7 @@ export function parseTask(value: unknown): Task | null {
   // Dropped, never fatal, like `pr`: without it the task stands on `prUrl`, as under an older leader.
   const prs =
     value["prs"] === undefined || progress.prUrl === undefined ? null : parseTaskPrs(value["prs"], progress.prUrl);
-  const { remoteSession } = value;
+  const { remoteSession, inputReason, inputTool } = value;
   return {
     id,
     state: known,
@@ -1196,6 +1206,9 @@ export function parseTask(value: unknown): Task | null {
     ...(prs === null ? {} : { prs }),
     // Dropped, never fatal, like `pr`: a link is display-only.
     ...(isRemoteSessionId(remoteSession) ? { remoteSession } : {}),
+    // Dropped, never fatal, like `remoteSession`: display-only.
+    ...(isNeedsInputReason(inputReason) ? { inputReason } : {}),
+    ...(inputReason === "permission" && isToolName(inputTool) ? { inputTool } : {}),
   };
 }
 

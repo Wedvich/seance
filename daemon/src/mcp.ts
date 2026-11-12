@@ -721,6 +721,8 @@ function describeTask(
     ...(task.state === "done" && task.doneBy !== undefined ? { doneBy: task.doneBy } : {}),
     ...(task.escalated === true ? { escalated: true } : {}),
     ...(task.needsInputSince === undefined ? {} : { needsInputSince: new Date(task.needsInputSince).toISOString() }),
+    // The closed kind only: a tool name is a session- or MCP-server-chosen string, not for another agent's context.
+    ...(task.inputReason === undefined ? {} : { inputReason: task.inputReason }),
     ...(spec.until === "reported" ? { until: spec.until } : {}),
     // Only off the default: most tasks run at checkpoint, and `plan: true` alone reads as steer.
     ...(level === DEFAULT_AUTONOMY ? {} : { autonomy: level }),

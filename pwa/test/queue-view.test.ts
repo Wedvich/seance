@@ -13,7 +13,15 @@ import {
   type RelayState,
   type Task,
 } from "@seance/shared";
-import { armTap, deriveAfterSheet, deriveQueue, disarmRow, primaryAction } from "../src/queue-view.ts";
+import {
+  armTap,
+  deriveAfterSheet,
+  deriveQueue,
+  disarmRow,
+  NEEDS_INPUT_SCREEN_MS,
+  nextReveal,
+  primaryAction,
+} from "../src/queue-view.ts";
 import { DEFAULT_FORM, RESCAN_IDLE, type QueueState } from "../src/state.ts";
 import { CAPABILITIES, reasonText } from "@seance/shared";
 import { deriveView, failedBody, type AppState } from "../src/view.ts";
@@ -430,10 +438,12 @@ describe("deriveQueue", () => {
     const SESSION = "session_01TuECqfR7Twko9QJm98sWAw";
     const answerOf = (fields: Partial<Task>) =>
       deriveQueue(state(ok([task("a", fields)])), NOW).sections[0]?.rows[0]?.answer;
-    expect(answerOf({ state: "needs-input", needsInputSince: NOW, remoteSession: SESSION })).toBe(
+    expect(answerOf({ state: "needs-input", needsInputSince: NOW - 60_000, remoteSession: SESSION })).toBe(
       `https://claude.ai/code/${SESSION}`,
     );
-    expect(answerOf({ state: "needs-input", needsInputSince: NOW })).toBeNull();
+    // Under the screen debounce it reads as running: nothing to answer yet.
+    expect(answerOf({ state: "needs-input", needsInputSince: NOW, remoteSession: SESSION })).toBeNull();
+    expect(answerOf({ state: "needs-input", needsInputSince: NOW - 60_000 })).toBeNull();
     expect(answerOf({ state: "running", assignment: placedAt, remoteSession: SESSION })).toBeNull();
     expect(answerOf({ state: "lost", assignment: placedAt, needsInputSince: NOW, remoteSession: SESSION })).toBeNull();
   });
@@ -1132,5 +1142,74 @@ describe("the Start now menu item", () => {
 
   test("absent once the task is not waiting", () => {
     expect(item({ ...task("w"), state: "failed" })).toBeNull();
+  });
+});
+
+describe("the screen debounce on needs-input", () => {
+  const HOUR = 3_600_000;
+  const waiting = (fields: Partial<Task> = {}, skew = 0): Task =>
+    task("w", { state: "needs-input", assignment: placedAt, needsInputSince: NOW + skew - 10_000, ...fields });
+  const view = (t: Task, skew = 0) => deriveQueue(state(ok([t], [], skew)), NOW);
+
+  test("a young stay shows as running: Running section, running headline, no Answer, counted as running", () => {
+    const v = view(waiting({ remoteSession: "session_01TuECqfR7Twko9QJm98sWAw" }));
+    expect(titles(v)).toEqual(["Running"]);
+    expect(v.sections[0]?.rows[0]).toMatchObject({
+      headline: expect.stringMatching(/^It's running/u),
+      answer: null,
+      dot: "ok",
+    });
+    expect(v.summary).toContain("1 running");
+  });
+
+  test("once past the threshold it is under Needs you, worded by its reason", () => {
+    const v = view(
+      waiting({ needsInputSince: NOW - NEEDS_INPUT_SCREEN_MS - 1_000, inputReason: "permission", inputTool: "Bash" }),
+    );
+    expect(titles(v)).toEqual(["Needs you"]);
+    expect(v.sections[0]?.rows[0]?.headline).toMatch(/^It may be waiting for permission to use Bash on /u);
+  });
+
+  test("the comparison is on the leader's clock, whatever the device's", () => {
+    for (const skew of [HOUR, -HOUR]) {
+      expect(titles(view(waiting({}, skew), skew))).toEqual(["Running"]);
+      const old = waiting({ needsInputSince: NOW + skew - 31_000 }, skew);
+      expect(titles(view(old, skew))).toEqual(["Needs you"]);
+    }
+  });
+
+  test("a question, an alerted or escalated stay, or one with no clock shows at once", () => {
+    expect(titles(view(waiting({ inputReason: "question" })))).toEqual(["Needs you"]);
+    expect(titles(view(waiting({ inputAlerted: true })))).toEqual(["Needs you"]);
+    expect(titles(view(waiting({ escalated: true })))).toEqual(["Needs you"]);
+    const { needsInputSince: _since, ...clockless } = waiting();
+    expect(titles(view(clockless))).toEqual(["Needs you"]);
+  });
+
+  test("the escalated body says why, and a question reads as one", () => {
+    const body = (fields: Partial<Task>) =>
+      view(waiting({ escalated: true, needsInputSince: NOW - 31 * 60_000, ...fields })).sections[0]?.rows[0]?.body;
+    expect(body({ inputReason: "permission", inputTool: "Bash" })).toBe(
+      "May be waiting for permission to use Bash since 31m ago",
+    );
+    expect(body({ inputReason: "question" })).toBe("Asking a question since 31m ago");
+    expect(body({})).toBe("Waiting for input since 31m ago");
+  });
+
+  test("nextReveal names the earliest device-clock crossing, and null when nothing settles", () => {
+    const skew = 5_000;
+    const a = waiting({ needsInputSince: NOW + skew - 20_000 }, skew);
+    const b = { ...waiting({ needsInputSince: NOW + skew - 5_000 }, skew), id: "b" };
+    const spy = Date.now;
+    Date.now = () => NOW;
+    try {
+      expect(nextReveal([b, a], skew)).toBe(NOW + skew - 20_000 + NEEDS_INPUT_SCREEN_MS - skew);
+      expect(
+        nextReveal([waiting({ inputReason: "question" }, skew), task("r", { state: "running" })], skew),
+      ).toBeNull();
+      expect(nextReveal([], 0)).toBeNull();
+    } finally {
+      Date.now = spy;
+    }
   });
 });

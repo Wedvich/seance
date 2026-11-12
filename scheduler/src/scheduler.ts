@@ -585,7 +585,8 @@ export class Scheduler {
    * `done`. `done` is the session's own report (#21): it settles a
    * `until: "reported"` task from the machine it was placed on, and nothing else.
    * A `needs-input` whose source says `reason: "question"` is alerted in the
-   * same write, without the debounce (`questionAlert`).
+   * same write, without the debounce (`questionAlert`). The event's reason and
+   * tool are written onto the record (display-only) by `sessionChange`.
    */
   async onSession(taskId: string, state: SessionState, from?: SessionSource, prUrl?: string): Promise<void> {
     const awaitsExit = from !== undefined && this.#reportsExit(from.deviceId);

@@ -91,6 +91,7 @@ import {
   type StorePrefixRule,
   TARGET_LIMITS,
   TASK_FAILURE_LIMITS,
+  TOOL_NAME_MAX_LENGTH,
   TASK_PRS_MAX,
   TASK_PRS_MAX_LENGTH,
   TASK_REQUEST_LIMITS,
@@ -782,6 +783,20 @@ describe("tasks and their records", () => {
     }
   });
 
+  test("a wait reason and tool round-trip; a bad one is dropped, never the task", () => {
+    const waiting = { ...task, inputReason: "permission", inputTool: "Bash" } as const;
+    expect(parseTask(waiting)).toEqual(waiting);
+    const question = { ...task, inputReason: "question" } as const;
+    expect(parseTask(question)).toEqual(question);
+    expect(parseTask({ ...waiting, inputReason: "elicitation" })).toEqual(task);
+    expect(parseTask({ ...waiting, inputReason: 3 })).toEqual(task);
+    for (const inputTool of ["rm -rf /", "a/b", "", "t".repeat(129), 4]) {
+      expect(parseTask({ ...waiting, inputTool })).toEqual({ ...task, inputReason: "permission" });
+    }
+    expect(parseTask({ ...question, inputTool: "Bash" })).toEqual(question);
+    expect(parseTask({ ...task, inputTool: "Bash" })).toEqual(task);
+  });
+
   test("a forge reading round-trips, with or without checks", () => {
     const at = 1_700_000_300_000;
     expect(parseTask({ ...task, pr: { state: "open", checks: "passing", at } })?.pr).toEqual({
@@ -1126,8 +1141,32 @@ describe("parseSessionEvent", () => {
   test("a question reason rides needs-input only; elsewhere, or unknown, it is dropped and the event kept", () => {
     expect(parseSessionEvent({ ...event, reason: "question" })).toEqual({ ...event, reason: "question" });
     expect(parseSessionEvent({ ...event, state: "busy", reason: "question" })).toEqual({ ...event, state: "busy" });
-    expect(parseSessionEvent({ ...event, reason: "permission" })).toEqual(event);
+    expect(parseSessionEvent({ ...event, reason: "elicitation" })).toEqual(event);
     expect(parseSessionEvent({ ...event, reason: true })).toEqual(event);
+  });
+
+  test("a permission reason carries its tool only when it is a tool name; a bad tool is dropped, reason and event kept", () => {
+    const permission = { ...event, reason: "permission" } as const;
+    expect(parseSessionEvent(permission)).toEqual(permission);
+    expect(parseSessionEvent({ ...permission, tool: "Bash" })).toEqual({ ...permission, tool: "Bash" });
+    expect(parseSessionEvent({ ...permission, tool: "mcp__github__create_issue" })).toEqual({
+      ...permission,
+      tool: "mcp__github__create_issue",
+    });
+    for (const tool of ["rm -rf /", "a/b", "a=b", 'a"b', "", "t".repeat(129), 7]) {
+      expect(parseSessionEvent({ ...permission, tool })).toEqual(permission);
+    }
+    expect(parseSessionEvent({ ...permission, tool: "t".repeat(128) })).toEqual({
+      ...permission,
+      tool: "t".repeat(128),
+    });
+    expect(TOOL_NAME_MAX_LENGTH).toBe(128);
+    expect(parseSessionEvent({ ...event, reason: "question", tool: "Bash" })).toEqual({ ...event, reason: "question" });
+    expect(parseSessionEvent({ ...event, tool: "Bash" })).toEqual(event);
+    expect(parseSessionEvent({ ...event, state: "busy", reason: "permission", tool: "Bash" })).toEqual({
+      ...event,
+      state: "busy",
+    });
   });
 });
 

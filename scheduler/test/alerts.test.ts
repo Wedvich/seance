@@ -175,6 +175,19 @@ describe("needs-input escalation", () => {
     expect(left).not.toHaveProperty("escalated");
   });
 
+  test("inputClock: the stay's reason and tool go with the clock, but ride a lost task", () => {
+    const running: Task = { id: "x", spec: spec(), state: "running", createdAt: NOW };
+    const waiting = inputClock(
+      { ...advance(running, "needs-input"), inputReason: "permission", inputTool: "Bash" },
+      NOW,
+    );
+    const lost = inputClock(advance(waiting, "lost", { absentSince: NOW }), NOW + MINUTE);
+    expect(lost).toMatchObject({ inputReason: "permission", inputTool: "Bash" });
+    const left = inputClock(advance(waiting, "running"), NOW + MINUTE);
+    expect(left).not.toHaveProperty("inputReason");
+    expect(left).not.toHaveProperty("inputTool");
+  });
+
   test("inputAlert: due once per stay after the debounce, never for an escalated or unstamped one", () => {
     const running: Task = { id: "x", spec: spec(), state: "running", createdAt: NOW };
     const waiting = inputClock(advance(running, "needs-input"), NOW);
@@ -459,6 +472,12 @@ describe("needs-input question alert", () => {
     expect(alerts).toEqual([]);
     expect((await stored(store, id)).version).toBe(before);
     expect((await stored(store, id)).body).not.toHaveProperty("inputAlerted");
+  });
+
+  test("a permission reason never raises the at-once alert", async () => {
+    const { alerts, from, id, scheduler } = await running();
+    await scheduler.onSession(id, "needs-input", { ...from, reason: "permission", tool: "Bash" });
+    expect(alerts).toEqual([]);
   });
 
   test("a question reason beside any other state alerts nothing", async () => {

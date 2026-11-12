@@ -20,6 +20,7 @@ import { machineAsleep, needsAttention } from "./asleep.ts";
 import {
   avoidLine,
   decisionStartNowItem,
+  inputWait,
   pinLine,
   taskHeadline,
   waitingText,
@@ -232,9 +233,9 @@ function bodyOf(task: Task, machines: readonly Machine[], now: number, idleSince
     );
   }
   if (task.state === "needs-input" && task.escalated === true) {
-    return task.needsInputSince === undefined
-      ? "Waiting for input"
-      : `Waiting for input since ${formatSeen(task.needsInputSince, now)}`;
+    const wait = inputWait(task);
+    const clause = `${wait.slice(0, 1).toUpperCase()}${wait.slice(1)}`;
+    return task.needsInputSince === undefined ? clause : `${clause} since ${formatSeen(task.needsInputSince, now)}`;
   }
   if (idleSince !== undefined) return `Idle at its prompt since ${formatSeen(idleSince, now)} — its slot is free`;
   return null;
@@ -363,6 +364,49 @@ function rowOf(
   };
 }
 
+/**
+ * How long a needs-input stay must stand before the screen puts the task under Needs you. Auto
+ * mode's classifier asks settle in seconds and most approved calls run under half a minute, so
+ * they never show; Claude Code auto-denies an unanswered prompt after 120 s, so a 2-minute
+ * debounce (the push's `needsInputAlertMs`) would hide exactly the waits that matter, and 30 s
+ * leaves ~90 s to answer. A long approved call still reaches Needs you, worded "may be waiting".
+ * DESIGN.md, "The Queue screen".
+ */
+export const NEEDS_INPUT_SCREEN_MS = 30_000;
+
+/**
+ * A needs-input stay too young to call: not a question (cannot flicker), not already pushed
+ * (`inputAlerted`, `escalated`), and with a clock to measure on (an older leader's record has none).
+ */
+export function settlingInput(task: Task, leaderNow: number): boolean {
+  return (
+    task.state === "needs-input" &&
+    task.needsInputSince !== undefined &&
+    task.inputReason !== "question" &&
+    task.inputAlerted !== true &&
+    task.escalated !== true &&
+    leaderNow - task.needsInputSince < NEEDS_INPUT_SCREEN_MS
+  );
+}
+
+/**
+ * The device-clock time the first settling task crosses the threshold, or null when none does:
+ * the store re-renders then, since nothing else would.
+ */
+export function nextReveal(tasks: readonly Task[], skew: number): number | null {
+  const at = tasks
+    .filter((t) => settlingInput(t, Date.now() + skew))
+    .map((t) => (t.needsInputSince ?? 0) + NEEDS_INPUT_SCREEN_MS - skew);
+  return at.length === 0 ? null : Math.min(...at);
+}
+
+/** A settling task is shown as running, whole: every reader downstream (section, headline, dot, Answer) sees one. */
+function asRunning(task: Task, leaderNow: number): Task {
+  if (!settlingInput(task, leaderNow)) return task;
+  const { needsInputSince: _since, inputReason: _reason, inputTool: _tool, ...rest } = task;
+  return { ...rest, state: "running" };
+}
+
 /** `idle`: the running tasks the leader released for sitting idle at their prompt, by id. */
 type SectionPick = (task: Task, machines: readonly Machine[], idle: ReadonlyMap<string, number>) => number | null;
 
@@ -421,9 +465,9 @@ export function deriveQueue(state: AppState, now: number): QueueScreenView {
   const { text, available } = statusLine(state);
   const view = state.queueView;
   const ok = view?.kind === "ok" ? view : null;
-  const tasks = ok?.tasks ?? [];
-  const titles = new Map(tasks.map((task) => [task.id, taskTitle(task)]));
   const skew = ok?.skew ?? 0;
+  const tasks = (ok?.tasks ?? []).map((task) => asRunning(task, now + skew));
+  const titles = new Map(tasks.map((task) => [task.id, taskTitle(task)]));
   // Only while running: a task the reply's list outlived (settled by an action's own reply) is what it now is.
   const running = new Set(tasks.filter((t) => t.state === "running").map((t) => t.id));
   const idle = new Map((ok?.idle ?? []).filter((r) => running.has(r.taskId)).map((r) => [r.taskId, r.since]));

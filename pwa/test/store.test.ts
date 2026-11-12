@@ -575,7 +575,13 @@ const QUEUED: Task = {
  * preview's retry and debounce, the follow loop's polls — so nothing here waits
  * on the clock. A host boundary, stubbed as `captureUndoTimer` stubs it.
  */
-function captureTimers(): { fire: (ms: number) => void; armed: (ms: number) => number; restore: () => void } {
+function captureTimers(): {
+  fire: (ms: number) => void;
+  armed: (ms: number) => number;
+  /** The delays of the timers pending, for one whose delay depends on the clock. */
+  delays: () => number[];
+  restore: () => void;
+} {
   const realSet = globalThis.setTimeout;
   const realClear = globalThis.clearTimeout;
   let next = 1;
@@ -603,6 +609,7 @@ function captureTimers(): { fire: (ms: number) => void; armed: (ms: number) => n
       }
     },
     armed: (ms) => [...pending.values()].filter((timer) => timer.ms === ms).length,
+    delays: () => [...pending.values()].map((timer) => timer.ms),
     restore: () => {
       Object.defineProperty(globalThis, "setTimeout", { value: realSet, configurable: true });
       Object.defineProperty(globalThis, "clearTimeout", { value: realClear, configurable: true });
@@ -3059,6 +3066,68 @@ describe("the queue screen", () => {
     await drain();
     expect(client.queueRequests).toEqual([]);
     detach();
+  });
+});
+
+describe("the screen debounce's reveal", () => {
+  let timers: ReturnType<typeof captureTimers>;
+  let fake: ReturnType<typeof fakeHistory>;
+
+  beforeEach(() => {
+    timers = captureTimers();
+    fake = fakeHistory();
+  });
+
+  afterEach(() => {
+    timers.restore();
+    fake.restore();
+  });
+
+  const settling = (since: number): Task => ({ ...QUEUED, id: "s-1", state: "needs-input", needsInputSince: since });
+  const revealDelay = (): number | undefined => timers.delays().find((ms) => ms > 15_000 && ms < 25_000);
+
+  async function open(client: ScriptedClient, tasks: readonly Task[], at: number): Promise<Store> {
+    client.onQueue = async () => ({ tasks, holds: [], at });
+    const store = new Store(client);
+    store.openQueue();
+    await until(() => store.getState().queueView?.kind === "ok", "the queue read");
+    return store;
+  }
+
+  test("a settling task arms one timer for its crossing, which notifies subscribers with no other change", async () => {
+    // 10 s into the stay on the leader's clock: 20 s (+ slack) to go, whatever the device's.
+    const store = await open(new ScriptedClient(), [settling(1_000_000)], 1_010_000);
+    expect(revealDelay()).toBeGreaterThan(19_000);
+    expect(revealDelay()).toBeLessThan(21_000);
+    const before = store.getState().queueView;
+    let notified = 0;
+    store.subscribe(() => {
+      notified += 1;
+    });
+    const delay = revealDelay();
+    if (delay === undefined) throw new Error("no timer");
+    timers.fire(delay);
+    expect(notified).toBe(1);
+    const after = store.getState().queueView;
+    expect(after).not.toBe(before);
+    expect(after).toEqual(before);
+  });
+
+  test("a newer reply re-arms it rather than stacking a second", async () => {
+    const client = new ScriptedClient();
+    const store = await open(client, [settling(1_000_000)], 1_010_000);
+    client.onQueue = async () => ({ tasks: [settling(1_000_000)], holds: [], at: 1_015_000 });
+    await store.refreshQueue();
+    expect(timers.delays().filter((ms) => ms > 10_000 && ms < 25_000)).toHaveLength(1);
+  });
+
+  test("nothing settling arms nothing", async () => {
+    const client = new ScriptedClient();
+    await open(client, [{ ...QUEUED, id: "r-1", state: "running" }, settling(1_000_000 - 60_000)], 1_010_000);
+    expect(revealDelay()).toBeUndefined();
+    const question: Task = { ...settling(1_000_000), inputReason: "question" };
+    await open(client, [question], 1_010_000);
+    expect(revealDelay()).toBeUndefined();
   });
 });
 

@@ -963,7 +963,7 @@ of M4 has landed.
     do. The mod reports `reason: "question"` beside `needs-input`, and the leader raises the first
     alert in the write that applies it, pushed as "A task is asking you a question". The
     30-minute escalation and every other needs-input's 2-minute alert stand. The record is
-    DESIGN.md's "Session events" ("The question reason") and "Needs input".
+    DESIGN.md's "Session events" ("The wait reason") and "Needs input".
   - _Not built,_ and only if a re-cut of the transcripts shows that confirmations survive the preamble: a mod that,
     at `checkpoint` or `auto`, answers a turn ending on a plain-text "shall I proceed?" with one
     nudge to proceed or ask it properly. First check that an engine hook can continue a turn.

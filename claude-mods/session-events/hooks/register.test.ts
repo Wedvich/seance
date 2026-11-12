@@ -177,7 +177,10 @@ describe("reports", () => {
     tools($, on, { verdict: "ask" });
     await $.tool.call({ tool: "Bash", command: "rm -r build" });
     await settled(sent, 2);
-    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }, { state: "busy" }]);
+    expect(sent.map((s) => s.report)).toEqual([
+      { state: "needs-input", reason: "permission", tool: "Bash" },
+      { state: "busy" },
+    ]);
   });
 
   test("an ask a host answers, or a query, says nothing", async ($, on) => {
@@ -233,9 +236,9 @@ describe("reports", () => {
     await b;
     await settled(sent, 4);
     expect(sent.map((s) => s.report)).toEqual([
-      { state: "needs-input" },
+      { state: "needs-input", reason: "permission", tool: "Bash" },
       { state: "needs-input", reason: "question" },
-      { state: "needs-input" },
+      { state: "needs-input", reason: "permission", tool: "Bash" },
       { state: "busy" },
     ]);
   });
@@ -259,7 +262,10 @@ describe("reports", () => {
     const ran = await $.tool.call({ tool: "Bash", command: "gh pr create" });
     expect(ran).toMatchObject({ isError: true, text: "gh: not logged in" });
     await settled(sent, 2);
-    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }, { state: "busy" }]);
+    expect(sent.map((s) => s.report)).toEqual([
+      { state: "needs-input", reason: "permission", tool: "Bash" },
+      { state: "busy" },
+    ]);
   });
 
   test("a query a person would answer, with no tool_use_id, shows no dialog", async ($, on) => {
@@ -289,16 +295,53 @@ describe("reports", () => {
     tools($, on, { verdict: "ask", hold: () => holds[started++] });
     const a = $.tool.call({ tool: "Bash", command: "one" });
     const b = $.tool.call({ tool: "Bash", command: "two" });
-    await settled(sent, 1);
+    // With two open nothing says which prompt is on screen, so no tool is named; with one left, its own.
+    await settled(sent, 2);
     first.release();
     await a;
-    // A non-event cannot be polled for: wait as long as a send takes to land above.
-    await settled(sent, 2);
-    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }]);
+    await settled(sent, 3);
+    expect(sent.map((s) => s.report)).toEqual([
+      { state: "needs-input", reason: "permission", tool: "Bash" },
+      { state: "needs-input", reason: "permission" },
+      { state: "needs-input", reason: "permission", tool: "Bash" },
+    ]);
     second.release();
     await b;
+    await settled(sent, 4);
+    expect(sent.map((s) => s.report).at(-1)).toEqual({ state: "busy" });
+  });
+
+  test("prompts for different tools name one only while it is the only one open", async ($, on) => {
+    const sent = record(on);
+    const bash = latch();
+    const edit = latch();
+    on("tool.check", (_$, e) => ({ decision: e.approver === undefined ? "allow" : "ask" }));
+    on("tool.call", async (_$, e) => {
+      await $.tool.check({
+        tool: e.tool,
+        input: {},
+        ...(e.tool_use_id === undefined ? {} : { tool_use_id: e.tool_use_id }),
+        approver: "person",
+      });
+      await (e.tool === "Bash" ? bash.held : edit.held);
+      return { result: { stdout: "" } };
+    });
+    const b = $.tool.call({ tool: "Bash", command: "x", tool_use_id: "p-1" });
+    await settled(sent, 1);
+    const e = $.tool.call({ tool: "Edit", tool_use_id: "p-2" });
     await settled(sent, 2);
-    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }, { state: "busy" }]);
+    bash.release();
+    await b;
+    await settled(sent, 3);
+    edit.release();
+    await e;
+    await settled(sent, 4);
+    expect(sent.map((s) => s.report)).toEqual([
+      { state: "needs-input", reason: "permission", tool: "Bash" },
+      { state: "needs-input", reason: "permission" },
+      { state: "needs-input", reason: "permission", tool: "Edit" },
+      { state: "busy" },
+    ]);
   });
 
   test("an open question keeps a settled prompt from reporting busy", async ($, on) => {
@@ -346,12 +389,15 @@ describe("reports", () => {
     await $.turn.complete(answered);
     // A non-event cannot be polled for: wait as long as a send takes to land above.
     await settled(sent, 2);
-    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }]);
+    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input", reason: "permission", tool: "Bash" }]);
     dialog.release();
     await call;
     // The turn already ended, so the dialog closing returns to idle, not busy.
     await settled(sent, 2);
-    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }, { state: "idle", turnEnded: true }]);
+    expect(sent.map((s) => s.report)).toEqual([
+      { state: "needs-input", reason: "permission", tool: "Bash" },
+      { state: "idle", turnEnded: true },
+    ]);
   });
 
   test("a call that rejects after an ask is forgotten, and its error passes up", async ($, on) => {
@@ -362,15 +408,18 @@ describe("reports", () => {
     await expect($.tool.call({ tool: "Bash", command: "x" })).rejects.toThrow();
     // The rejection resumes the session.
     await settled(sent, 2);
-    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }, { state: "busy" }]);
+    expect(sent.map((s) => s.report)).toEqual([
+      { state: "needs-input", reason: "permission", tool: "Bash" },
+      { state: "busy" },
+    ]);
     // A leaked entry would swallow this call's busy.
     crashing = false;
     await $.tool.call({ tool: "Bash", command: "y" });
     await settled(sent, 4);
     expect(sent.map((s) => s.report)).toEqual([
-      { state: "needs-input" },
+      { state: "needs-input", reason: "permission", tool: "Bash" },
       { state: "busy" },
-      { state: "needs-input" },
+      { state: "needs-input", reason: "permission", tool: "Bash" },
       { state: "busy" },
     ]);
   });
@@ -385,7 +434,10 @@ describe("reports", () => {
     dialog.release();
     await expect(call).rejects.toThrow();
     await settled(sent, 2);
-    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }, { state: "idle", turnEnded: true }]);
+    expect(sent.map((s) => s.report)).toEqual([
+      { state: "needs-input", reason: "permission", tool: "Bash" },
+      { state: "idle", turnEnded: true },
+    ]);
   });
 
   test("a person denying the call resumes", async ($, on) => {
@@ -393,7 +445,10 @@ describe("reports", () => {
     tools($, on, { verdict: "ask", denied: true });
     await $.tool.call({ tool: "Bash", command: "rm -r build" });
     await settled(sent, 2);
-    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }, { state: "busy" }]);
+    expect(sent.map((s) => s.report)).toEqual([
+      { state: "needs-input", reason: "permission", tool: "Bash" },
+      { state: "busy" },
+    ]);
   });
 
   test("a new prompt drops dialogs that never settled", async ($, on) => {
@@ -405,14 +460,17 @@ describe("reports", () => {
     await settled(sent, 1);
     await $.turn.start({ ...turn, text: "carry on" });
     await settled(sent, 2);
-    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }, { state: "busy" }]);
+    expect(sent.map((s) => s.report)).toEqual([
+      { state: "needs-input", reason: "permission", tool: "Bash" },
+      { state: "busy" },
+    ]);
     // A leaked entry would still be outstanding here and swallow this call's busy.
     await $.tool.call({ tool: "Bash", command: "y" });
     await settled(sent, 4);
     expect(sent.map((s) => s.report)).toEqual([
-      { state: "needs-input" },
+      { state: "needs-input", reason: "permission", tool: "Bash" },
       { state: "busy" },
-      { state: "needs-input" },
+      { state: "needs-input", reason: "permission", tool: "Bash" },
       { state: "busy" },
     ]);
     stuck.release();
@@ -428,11 +486,14 @@ describe("reports", () => {
     await $.turn.start({ ...turn, text: "" });
     // A non-event cannot be polled for: wait as long as a send takes to land above.
     await settled(sent, 2);
-    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }]);
+    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input", reason: "permission", tool: "Bash" }]);
     dialog.release();
     await call;
     await settled(sent, 2);
-    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }, { state: "busy" }]);
+    expect(sent.map((s) => s.report)).toEqual([
+      { state: "needs-input", reason: "permission", tool: "Bash" },
+      { state: "busy" },
+    ]);
   });
 
   test("the main loop's turn ending drops its own dialog that never settled", async ($, on) => {
@@ -443,7 +504,10 @@ describe("reports", () => {
     await settled(sent, 1);
     await $.turn.complete(answered);
     await settled(sent, 2);
-    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }, { state: "idle", turnEnded: true }]);
+    expect(sent.map((s) => s.report)).toEqual([
+      { state: "needs-input", reason: "permission", tool: "Bash" },
+      { state: "idle", turnEnded: true },
+    ]);
     stuck.release();
     await call;
   });
@@ -474,10 +538,11 @@ describe("reports", () => {
     const first = $.tool.call({ tool: "Bash", command: "x", agentId: "a1" });
     await settled(sent, 1);
     await $.tool.call({ tool: "Bash", command: "gh pr create" });
-    await settled(sent, 2);
+    await settled(sent, 3);
     expect(sent.map((s) => s.report)).toEqual([
-      { state: "needs-input" },
-      { state: "needs-input", prUrl: "https://github.com/acme/app/pull/12" },
+      { state: "needs-input", reason: "permission", tool: "Bash" },
+      { state: "needs-input", reason: "permission" },
+      { state: "needs-input", reason: "permission", tool: "Bash", prUrl: "https://github.com/acme/app/pull/12" },
     ]);
     dialog.release();
     await first;
@@ -493,7 +558,10 @@ describe("reports", () => {
     });
     await $.tool.call({ tool: "Bash", command: "gh pr create" });
     await settled(sent, 2);
-    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }, { state: "busy" }]);
+    expect(sent.map((s) => s.report)).toEqual([
+      { state: "needs-input", reason: "permission", tool: "Bash" },
+      { state: "busy" },
+    ]);
   });
 
   test("a wedged daemon queues one report, the latest, with the PR URL kept", async ($, on) => {

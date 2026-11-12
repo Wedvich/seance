@@ -253,10 +253,13 @@ green:
   The frame's other carried claims are `remoteSession`, Remote Control's id for the session:
   display-only (the PWA's claude.ai link), kept only as `isRemoteSessionId` passes it, and
   never used to bind, route or move anything — and `reason`, kept only as a known
-  `NEEDS_INPUT_REASONS` value beside `needs-input` (dropped otherwise, never the event), whose one
-  effect is the leader alerting that needs-input stay at once instead of after its debounce
-  (`questionAlert`), only for the task's own machine and once per stay; it never binds, routes,
-  moves or settles anything.
+  `NEEDS_INPUT_REASONS` value (`question` or `permission`) beside `needs-input` (dropped otherwise,
+  never the event), whose one effect on behaviour is `question` making the leader alert that
+  needs-input stay at once instead of after its debounce (`questionAlert`), only for the task's
+  own machine and once per stay; it never binds, routes, moves or settles anything — and `tool`,
+  only beside `permission` and only as `isToolName` passes it, display-only like `remoteSession`
+  (written onto `Task.inputTool`, never used to bind, route, move, settle or alert, and kept out of
+  `get_queue`).
   Giving it any other act, or taking a session or task id from the frame to bind by, is the same
   kind of change too.
   Nothing reachable from `seanced mcp` may call `log.ts` — that writes to stdout, which is the MCP

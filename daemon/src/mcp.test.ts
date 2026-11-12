@@ -2257,7 +2257,14 @@ describe("get_queue", () => {
       [
         {
           tasks: [
-            task({ id: "t-1", state: "needs-input", escalated: true, needsInputSince: 4_500 }),
+            task({
+              id: "t-1",
+              state: "needs-input",
+              escalated: true,
+              needsInputSince: 4_500,
+              inputReason: "permission",
+              inputTool: "Bash",
+            }),
             task({ id: "t-2", state: "done", doneBy: "manual" }),
             task({ id: "t-3", state: "done", doneBy: "session" }),
             task({
@@ -2304,7 +2311,14 @@ describe("get_queue", () => {
       },
     ]);
     const [stuck, manual, finished, pinned] = parsed.tasks;
-    expect(stuck).toMatchObject({ escalated: true, needsInputSince: new Date(4_500).toISOString() });
+    expect(stuck).toMatchObject({
+      escalated: true,
+      needsInputSince: new Date(4_500).toISOString(),
+      inputReason: "permission",
+    });
+    // The closed kind only: a tool name is not carried into another agent's context.
+    expect(stuck).not.toHaveProperty("inputTool");
+    expect(manual).not.toHaveProperty("inputReason");
     expect(manual.doneBy).toBe("manual");
     expect(finished.doneBy).toBe("session");
     expect(pinned.pin).toEqual({ account: "me@pengefix.no (org org-c)", accountId: "org-c:acct-2" });

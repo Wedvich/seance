@@ -23,6 +23,7 @@ import {
   taskRequest,
   type RelayClient,
 } from "@seance/shared";
+import { nextReveal } from "./queue-view.ts";
 import type { FollowEnd, PreviewState, QueueState, TaskAction } from "./state.ts";
 import { taskTitle } from "./task-title.ts";
 import type { AppState } from "./view.ts";
@@ -220,6 +221,12 @@ export class SchedulerStore {
   #taskReadSeq = 0;
   #taskReadApplied = 0;
   #previewRetry: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Wakes subscribers when the first settling needs-input task crosses `NEEDS_INPUT_SCREEN_MS`:
+   * the app has no periodic render, so without it the task would stay shown as running until
+   * some other change.
+   */
+  #revealTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(client: RelayClient, getState: () => AppState, patch: (next: Partial<AppState>) => void) {
     this.#client = client;
@@ -232,7 +239,27 @@ export class SchedulerStore {
         this.#noticeKept = false;
       }
       patch(next);
+      if ("queueView" in next) this.#armReveal();
     };
+  }
+
+  #armReveal(): void {
+    if (this.#revealTimer !== null) clearTimeout(this.#revealTimer);
+    this.#revealTimer = null;
+    const view = this.#state.queueView;
+    if (view?.kind !== "ok") return;
+    const at = nextReveal(view.tasks, view.skew);
+    if (at === null) return;
+    // A little past, so a timer that fires early still finds the threshold crossed.
+    this.#revealTimer = setTimeout(
+      () => {
+        this.#revealTimer = null;
+        const now = this.#state.queueView;
+        // A new object, so subscribers render; the task list itself is unchanged.
+        if (now?.kind === "ok") this.#patch({ queueView: { ...now } });
+      },
+      Math.max(0, at - Date.now()) + 50,
+    );
   }
 
   get #state(): AppState {
@@ -302,6 +329,8 @@ export class SchedulerStore {
     this.stopFollowing();
     this.#endIntent();
     this.stopPreviewRetry();
+    if (this.#revealTimer !== null) clearTimeout(this.#revealTimer);
+    this.#revealTimer = null;
   }
 
   /** Starts following a task just queued, with the whole poll budget; `runNow` for a Start now. */

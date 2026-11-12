@@ -26,7 +26,10 @@ import type { EngineInterface, Register } from "claude-code";
  * dialog is an AskUserQuestion carries `reason: "question"`, a permission ask
  * open beside it or not: a real choice is waiting either way, and unlike auto
  * mode's asks it cannot flicker, so the leader alerts it without its debounce.
- * The reason is part of the state: it goes and comes with that dialog.
+ * Otherwise it carries `reason: "permission"`, with the `tool` only while exactly
+ * one permission dialog is open: with two, the older is usually an approved call
+ * still running and nothing says which prompt is on screen. Both are display-only
+ * and part of the state: they go and come with the dialogs.
  *
  * A dialog closes only when its `tool.call` settles, after the tool ran: core
  * prompts and runs under one `next`, and no engine event says an ask was settled.
@@ -50,8 +53,10 @@ interface Report {
   readonly prUrl?: string;
   /** Only beside `idle`: the main loop's own turn.complete put it there, not a `session.start`. */
   readonly turnEnded?: true;
-  /** Only beside `needs-input`: an outstanding dialog is an AskUserQuestion. */
-  readonly reason?: "question";
+  /** Only beside `needs-input`: an AskUserQuestion is open, else a permission ask. */
+  readonly reason?: "question" | "permission";
+  /** Only beside `reason: "permission"`: the one open prompt's tool. */
+  readonly tool?: string;
 }
 
 /** Long enough for the daemon's parent walk, short enough to never pile up behind a wedged one. */
@@ -108,11 +113,13 @@ function merge(older: Report | null, newer: Report): Report {
   // Belong to their state, so they go wherever the state comes from.
   const turnEnded = newer.state === undefined ? older?.turnEnded : newer.turnEnded;
   const reason = newer.state === undefined ? older?.reason : newer.reason;
+  const tool = newer.state === undefined ? older?.tool : newer.tool;
   return {
     ...(state === undefined ? {} : { state }),
     ...(prUrl === undefined ? {} : { prUrl }),
     ...(turnEnded === true ? { turnEnded } : {}),
     ...(reason === undefined ? {} : { reason }),
+    ...(tool === undefined ? {} : { tool }),
   };
 }
 
@@ -132,6 +139,8 @@ interface Tracker {
   readonly outstanding: Map<string, string | undefined>;
   /** The ids in `outstanding` that are AskUserQuestion dialogs, leaving with them. */
   readonly questions: Set<string>;
+  /** Tool names of the permission dialogs in `outstanding`, by tool_use_id. */
+  readonly tools: Map<string, string>;
   /** The main loop is at its prompt: its turn.complete came and no turn.start since. */
   atPrompt: boolean;
   /**
@@ -142,7 +151,8 @@ interface Tracker {
   turnEnded: boolean;
   lastState: State | undefined;
   lastTurnEnded: boolean;
-  lastQuestion: boolean;
+  /** What the last needs-input said about why: `""`, `"question"`, `"permission:<tool>"`. */
+  lastWait: string;
   lastPrUrl: string | undefined;
   anonymous: number;
 }
@@ -153,11 +163,12 @@ function newTracker(): Tracker {
     pending: null,
     outstanding: new Map(),
     questions: new Set(),
+    tools: new Map(),
     atPrompt: false,
     turnEnded: false,
     lastState: undefined,
     lastTurnEnded: false,
-    lastQuestion: false,
+    lastWait: "",
     lastPrUrl: undefined,
     anonymous: 0,
   };
@@ -204,24 +215,35 @@ function current(t: Tracker): State {
   return t.atPrompt ? "idle" : "busy";
 }
 
+/** Why a needs-input waits. Top-level: the hooks compiler follows `$` only into top-level functions. */
+function waitOf(t: Tracker): { reason?: "question" | "permission"; tool?: string } {
+  if (t.questions.size > 0) return { reason: "question" };
+  const perms = [...t.outstanding.keys()].filter((id) => !t.questions.has(id));
+  if (perms.length === 0) return {};
+  const [only] = perms;
+  const tool = perms.length === 1 && only !== undefined ? t.tools.get(only) : undefined;
+  return { reason: "permission", ...(tool === undefined ? {} : { tool }) };
+}
+
 /** Reports the current state; an unchanged one goes out only to carry a `prUrl`. */
 function sendCurrent($: EngineInterface, t: Tracker, prUrl?: string): void {
   const state = current(t);
   // Part of the state: a respawn's idle followed by the turn's own end is a change.
   const turnEnded = state === "idle" && t.turnEnded;
-  // Part of the state too: a question opening beside a permission ask, or closing before it, is a change.
-  const question = state === "needs-input" && t.questions.size > 0;
-  if (state === t.lastState && turnEnded === t.lastTurnEnded && question === t.lastQuestion && prUrl === undefined) {
+  // Part of the state too: a question opening beside a permission ask, or a different prompt being the only one left, is a change.
+  const wait = state === "needs-input" ? waitOf(t) : {};
+  const waitKey = `${wait.reason ?? ""}${wait.tool === undefined ? "" : `:${wait.tool}`}`;
+  if (state === t.lastState && turnEnded === t.lastTurnEnded && waitKey === t.lastWait && prUrl === undefined) {
     return;
   }
   t.lastState = state;
   t.lastTurnEnded = turnEnded;
-  t.lastQuestion = question;
+  t.lastWait = waitKey;
   send($, t, {
     state,
     ...(prUrl === undefined ? {} : { prUrl }),
     ...(turnEnded ? { turnEnded } : {}),
-    ...(question ? { reason: "question" } : {}),
+    ...wait,
   });
 }
 
@@ -230,6 +252,7 @@ function dropMain(t: Tracker): void {
     if (loop !== undefined) continue;
     t.outstanding.delete(id);
     t.questions.delete(id);
+    t.tools.delete(id);
   }
 }
 
@@ -277,6 +300,7 @@ export const register: Register = (on) => {
     const verdict = await next(e);
     if (verdict.decision === "ask" && e.approver === "person" && e.tool_use_id !== undefined) {
       t.outstanding.set(e.tool_use_id, e.agentId);
+      if (typeof e.tool === "string") t.tools.set(e.tool_use_id, e.tool);
       sendCurrent($, t);
     }
     return verdict;
@@ -293,11 +317,13 @@ export const register: Register = (on) => {
     /** Closes `id`; a dialog closing or a PR found reports the state the session is in now. */
     const finish = (prUrl?: string): void => {
       const wasOpen = id !== undefined && t.outstanding.delete(id);
-      const wasQuestion = id !== undefined && t.questions.delete(id);
+      if (id !== undefined) {
+        t.questions.delete(id);
+        t.tools.delete(id);
+      }
       if (prUrl !== undefined) t.lastPrUrl = prUrl;
-      // The last question closing beside a permission ask still open is needs-input without its reason.
-      const questionsGone = wasQuestion && t.questions.size === 0;
-      if (prUrl !== undefined || (wasOpen && (t.outstanding.size === 0 || questionsGone))) sendCurrent($, t, prUrl);
+      // sendCurrent dedupes: a closing prompt may change the reason or the one tool left.
+      if (prUrl !== undefined || wasOpen) sendCurrent($, t, prUrl);
     };
     // A rejection closes too, so the session resumes whatever the turn does next.
     const settled = async <R>(run: Promise<R>): Promise<R> =>

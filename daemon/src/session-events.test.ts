@@ -680,6 +680,23 @@ describe("coalescing", () => {
     }
   });
 
+  test("a permission reason and its tool are forwarded with their needs-input, and a later state drops both", async () => {
+    const { forwarded, events, send } = setup(150);
+    try {
+      await send({ state: "needs-input", reason: "permission", tool: "Bash" });
+      expect(forwarded.map((e) => [e.state, e.reason, e.tool])).toEqual([["needs-input", "permission", "Bash"]]);
+      await send({ state: "needs-input", reason: "permission", tool: "Bash" });
+      await send({ state: "busy" });
+      await pollUntil(() => forwarded.length === 2, "the folded event");
+      expect(forwarded.map((e) => [e.state, e.reason, e.tool])).toEqual([
+        ["needs-input", "permission", "Bash"],
+        ["busy", undefined, undefined],
+      ]);
+    } finally {
+      events.stop();
+    }
+  });
+
   test("stop cancels a pending send", async () => {
     const { forwarded, events, send } = setup(100);
     await send({ state: "busy" });
@@ -874,13 +891,32 @@ describe("a session's hand-off", () => {
       reason: "question",
     });
     expect(parseSessionEventFrame(frame({ state: "busy", reason: "question" }))).toEqual({ ...base, state: "busy" });
-    expect(parseSessionEventFrame(frame({ state: "needs-input", reason: "permission" }))).toEqual({
+    expect(parseSessionEventFrame(frame({ state: "needs-input", reason: "elicitation" }))).toEqual({
       ...base,
       state: "needs-input",
     });
     expect(parseSessionEventFrame(frame({ state: "needs-input", reason: 1 }))).toEqual({
       ...base,
       state: "needs-input",
+    });
+  });
+
+  test("a permission reason keeps a tool name beside it; a bad or misplaced tool is dropped, the frame kept", () => {
+    const base = { v: 1, kind: "session-event", state: "needs-input" } as const;
+    const permission = { ...base, reason: "permission" } as const;
+    expect(parseSessionEventFrame(frame({ ...permission, tool: "Bash" }))).toEqual({ ...permission, tool: "Bash" });
+    expect(parseSessionEventFrame(frame(permission))).toEqual(permission);
+    for (const tool of ["rm -rf /", "a/b", "", "t".repeat(129), 4]) {
+      expect(parseSessionEventFrame(frame({ ...permission, tool }))).toEqual(permission);
+    }
+    expect(parseSessionEventFrame(frame({ ...base, reason: "question", tool: "Bash" }))).toEqual({
+      ...base,
+      reason: "question",
+    });
+    expect(parseSessionEventFrame(frame({ state: "busy", reason: "permission", tool: "Bash" }))).toEqual({
+      v: 1,
+      kind: "session-event",
+      state: "busy",
     });
   });
 
