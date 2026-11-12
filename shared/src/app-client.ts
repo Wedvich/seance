@@ -29,7 +29,10 @@ import {
   type ErrorResponse,
   type ExclaveInfo,
   type FleetQuotaEntry,
+  type ArchiveMetricsRequest,
   type ArchiveStatusReply,
+  type ArchiveTasksReply,
+  type ArchiveTasksRequest,
   type ArchivistInfo,
   type MachineInfo,
   type MachineStatus,
@@ -73,6 +76,7 @@ import {
   isStoreKey,
   isTerm,
   parseArchiveStatusReply,
+  parseArchiveTasksReply,
   parseArchivistInfo,
   parseDiscardReply,
   parseEnvelope,
@@ -659,6 +663,8 @@ const RESENDABLE_OPS: ReadonlySet<RequestOp> = new Set<RequestOp>([
   "sessions",
   "metrics",
   "archive-status",
+  "archive-metrics",
+  "archive-tasks",
   "queue",
   "route-preview",
 ]);
@@ -1180,12 +1186,35 @@ export class RelayClient {
    * it unanswered and the request times out; the card then shows no rows.
    */
   async archiveStatus(): Promise<ArchiveStatusReply | null> {
+    return this.#askArchivist("archive-status", {}, parseArchiveStatusReply);
+  }
+
+  /**
+   * History from the archive (`archive-metrics`): one machine's own series,
+   * retired or asleep machines included, or one account's merged across every
+   * machine that observed it. Refused unsent like `archiveStatus`; null means
+   * the reply was unreadable. The reply is a `metrics` reply, `too_large` included.
+   */
+  async archiveMetrics(request: ArchiveMetricsRequest): Promise<MetricsReply | null> {
+    return this.#askArchivist("archive-metrics", request, parseMetricsReply);
+  }
+
+  /** One page of archived tasks (`archive-tasks`); pass the reply's `next` as `before` for the page after it. */
+  async archiveTasks(request: ArchiveTasksRequest): Promise<ArchiveTasksReply | null> {
+    return this.#askArchivist("archive-tasks", request, parseArchiveTasksReply);
+  }
+
+  async #askArchivist<T>(
+    op: "archive-status" | "archive-metrics" | "archive-tasks",
+    payload: unknown,
+    parse: (value: unknown) => T | null,
+  ): Promise<T | null> {
     const archivist = this.#state.archivist;
     if (archivist === null || !archivist.connected) {
       throw new RequestFailure("offline", "the archivist is offline");
     }
-    const parsed = parseArchiveStatusReply(await this.request<unknown>(archivist.deviceId, "archive-status", {}));
-    if (parsed === null) this.#wireLog("dropped", `from=${quote(archivist.deviceId)} reason=archive-status-shape`);
+    const parsed = parse(await this.request<unknown>(archivist.deviceId, op, payload));
+    if (parsed === null) this.#wireLog("dropped", `from=${quote(archivist.deviceId)} reason=${op}-shape`);
     return parsed;
   }
 
