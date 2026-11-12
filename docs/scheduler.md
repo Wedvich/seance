@@ -174,7 +174,7 @@ they now live:
 
 - Filters (the per-account cap and `skill_absent` are DESIGN.md "Routing caps" and "Skills
   filter"; the per-batch bound M3 built went 2026-10-26, "Batches"): stacked base unpushed and not on this exclave (M4,
-  _Stacking_); auth expired (M4, _Auth health_).
+  _Stacking_); auth expired (M4, _Auth health_); trait absent or unhealthy (M4, _Traits_).
 - Score: `dependencyDistance` gets an input once M4's stacking fills `TaskSpec.base`. The LXC
   pressure view (M4) reaches `machinePressure` folded into the LXC daemon's own `status`, so the
   library reads it as any other pressure.
@@ -370,11 +370,12 @@ report now reach apps, #184; the registry push's shape is otherwise unchanged).
 M4's items are **not independent**. The M3 review (2026-10-18) found four real dependencies in
 the code, so M4 runs in waves:
 
-- Auth health needs the `/usage` refresh, since a refresh that fails on auth is the signal.
+- Auth health needed the `/usage` refresh to spike its signal; the spike (2026-11-12) moved the
+  signal to the credential store, so it now needs only Web Push.
 - Web Push and Linear need `settings`.
 - Stacking and Linear need an authoring surface. Built (wave 1, 2026-10-23): MCP and the PWA
   write `deps`, `batch` and `linear` (below).
-- The disk and auth alerts need Web Push.
+- The disk and auth alerts need Web Push (built).
 
 Each item still lands as its own PR with its own DESIGN.md subsection. Budget one follow-up PR per
 item: every M3 item needed one within hours.
@@ -406,7 +407,10 @@ of M4 has landed.
 | 1     | Asleep machines on the Queue screen (new) — **Done**               | —                                                                      | S                        |
 | 2     | Spawn defaults to the scheduler (**Done**)                         | account pins (PR #303); keyless `auto` for MCP (**Done**)              | M–L                      |
 | 2     | Stacking                                                           | authoring surface; #28                                                 | L                        |
-| 2     | Auth health                                                        | `/usage` refresh; Web Push for its alert                               | M                        |
+| 2     | Auth health                                                        | Web Push (built); spiked 2026-11-12                                    | M                        |
+| 2     | Traits: core (new)                                                 | auth health's status lists (shape to copy)                             | M–L                      |
+| 2     | Traits: probes (new)                                               | traits core                                                            | M                        |
+| 2     | Traits: keep free (new)                                            | traits core                                                            | S                        |
 | 2     | Linear                                                             | settings; authoring surface                                            | L                        |
 | Later | LXC pressure view (was: Proxmox node view)                         | —                                                                      | S                        |
 | Later | Proxmox node view (follow-up)                                      | LXC pressure view; reopens #17                                         | M                        |
@@ -835,28 +839,159 @@ of M4 has landed.
   writer as built (its register gate, bounds and the unreadable-record rule) and its readers.
   `status` shrinking to pressure, the other payoff, is not done.
 - **Auth health** (after the `/usage` refresh) — `authOk` says only that `.claude.json` names an
-  `oauthAccount`: a revoked or lapsed login still reads as signed in, and the `auth missing`
-  filter routes to an exclave that cannot start a session. Per exclave `auth: ok | expired |
-  unknown` with its observed-at, carried in `status`, not the register blob (a change there
-  re-registers and drops the status, #102). Filter widens to "missing **or expired**"; `unknown`
-  routes, since it is every exclave before its first refresh. _Decided (#6):_ a compact,
-  never-trimmed list of expired exclaves in `status`, since auth shares about 680 bytes with
-  quota. Signals:
-  - _A `/usage` refresh that fails on auth._ Claude Code has already tried its own token
-    refresh by then, so — unlike the OAuth poll's 401, which needed reading against
-    `expiresAt` — the failure means the login is revoked or lapsed. **Unverified:** what such a
-    run prints and exits with (`is_error`, the result text); spike it on a signed-out exclave
-    before relying on it, and tell it apart from the silent `/cost` fallback a missing `USER`
-    causes (the `/usage` refresh, above).
-  - _A session that died on auth_ — only if a hook surfaces it, which is unverified; check
-    before relying on it.
-  - _A `claude setup-token` token_ (`CLAUDE_CODE_OAUTH_TOKEN`) has the one predictable expiry;
-    handled only if an exclave runs on one.
-
-  `expired` clears to `unknown` when a rescan sees the exclave's `.claude.json` or credentials
-  change (a `/login`); the next refresh decides. PWA: "needs `/login`" on the exclave row; a Web
-  Push beside the disk health alert. Exit: a revoked exclave is filtered `auth expired` and
-  clears after `/login`; a failed refresh for any other reason never reads as `expired` (daemon).
+  `oauthAccount`: a revoked or lapsed login still reads as signed in, and the `auth_missing`
+  filter routes to an exclave that cannot start a session. Per exclave `ok | expiring | expired |
+  unknown`, carried in `status`, not the register blob (a change there re-registers and drops the
+  status, #102). The filter widens to "missing **or expired**"; `expiring` and `unknown` route
+  (`unknown` is every exclave of an older daemon, and any the daemon could not read).
+  - _Spiked (2026-11-12, claude 2.1.322, Linux), the `/usage` signal is dead:_ the refresh's
+    fixed argv (now with `--no-session-persistence`, #376) exits 0 with `is_error: false` on a
+    lapsed refresh token, an expired access token with a bogus refresh token, a revoked access
+    token, and no `.credentials.json` at all — printing the `/cost` view or "You are currently
+    using your subscription…", never an auth error. Nothing in its output tells a lapsed login
+    from a fresh one, so it is not a signal.
+  - _What the spike found instead:_ on any of those, Claude Code rewrites its stored credentials to
+    `accessToken: ""`, `refreshToken: ""`, `expiresAt: 0`, keeping `refreshTokenExpiresAt` and
+    leaving `oauthAccount` in `.claude.json` (so `authOk` stays true). Its own "Your login expires
+    in N days" reads `claudeAiOauth.refreshTokenExpiresAt` (ms; a login's refresh token lives
+    ~30 days), shown when 0 < left ≤ 3 days and suppressed when `expiresAt` is past
+    `refreshTokenExpiresAt` + 3 days.
+  - _Decided (owner, 2026-11-12), the signal:_ the daemon reads each signed-in exclave's
+    credential store and keeps two values: `lapsed` (both tokens empty) and
+    `refreshTokenExpiresAt` (null under Claude Code's own suppression rule). Expired is `lapsed`
+    or that time past; expiring is within 3 days of it (Claude Code's threshold). Linux/WSL read
+    `<configDir>/.credentials.json`; macOS reads the login keychain item Claude Code names
+    `Claude Code-credentials` (plus `-` and the first 8 hex of the config dir's SHA-256 for a named
+    exclave, account the login name), falling back to the file when the item is absent, and to
+    `unknown` on any other failure — never a prompt. The macOS naming is read from the binary and
+    still needs a check on a Mac, so the keychain read is **off by default**: until the owner sets
+    `authHealth.keychain: true` in `config.json` after that check, a macOS exclave reads `unknown`
+    (a `.credentials.json` in its config dir is still read, as Claude Code's no-keychain fallback).
+  - _Decided (owner, 2026-11-12), the daemon never holds a token:_ the read runs in a short-lived
+    `bun -e` child running one constant script, the file handed over as a descriptor (macOS: the
+    child runs `security -w` itself), bare env, 5 s timeout. It prints only
+    `{"lapsed":bool,"refreshExpiresAt":number|null}`; the daemon takes exactly that shape, else
+    `unknown`, and logs only a fixed reason code. Rejected: parsing in the daemon (the token
+    strings would sit in a long-lived process's heap), a shell pipeline (breaks argv-array exec).
+  - _Cadence:_ checked every 60 s; an exclave is re-read when its credentials file's stamp moves
+    (the macOS keychain has no stamp, and `.claude.json` is rewritten constantly while sessions
+    run, so neither is watched), after each `/usage` run on it, on a rescan that changed it, and at
+    the latest hourly (macOS: every 10 min); never twice in 60 s, one child at a time. A `/login`
+    therefore clears `expired` within a minute on Linux/WSL, and within 10 min on macOS.
+    The `/usage` refresh skips an exclave read as expired.
+  - _Decided (#6), the wire:_ the compact, never-trimmed lists in `status`: `ax` (expired
+    indices), `ae` (`[index, expiry unix seconds]`, expiring within 3 days) and `au` (unreadable),
+    disjoint, 16 entries combined; an exclave in none is `ok` on a daemon advertising
+    `CAPABILITIES.authHealth` and `unknown` on any other. A reader treats an `ae` time already past
+    as expired. No per-exclave observed-at: a reading is at most the re-read interval old, and the
+    status's `at` bounds the rest — rejected as bytes in a field that is never trimmed.
+  - _Alerts:_ a Web Push beside the disk alert, for `expired` ("A Claude login needs /login.") and
+    `expiring` ("A Claude login expires within 3 days."), ids only, held in the settings record's
+    `authAlerts` so a new leader does not repeat one; escalation only (expiring then expired
+    alerts twice, the reverse not at all), cleared when the exclave reads `ok`. PWA: "needs
+    /login" or "login expires in 2d" on the exclave row; `unknown` shows nothing. MCP
+    `list_machines`: `auth` per exclave, `loginExpiresAt` when expiring.
+  - Exit: a lapsed exclave is filtered `auth_expired` and clears after `/login`; a read that fails
+    for any reason reads `unknown`, never `expired`; no token string reaches the daemon's memory,
+    logs or wire (a test with fake tokens).
+  - _Not handled:_ an exclave on a `claude setup-token` token (`CLAUDE_CODE_OAUTH_TOKEN`) stores
+    nothing and reads `unknown`; a session that dies on auth mid-run (no hook reports it).
+- **Traits** (new, 2026-11-12) — what a machine or exclave can do that the scheduler cannot see:
+  a CLI signed in on one machine only (Atlas, `az`), an MCP server configured there (ms365), the
+  iOS simulator, tailnet reach. Today the owner routes around these by hand, and sessions placed
+  elsewhere stall or ask for an OAuth callback (6 times on WSL in 30 days). A machine or exclave
+  declares named **traits**, a task names the ones it **requires**, and placement considers only
+  candidates that have them all. The word is "trait": "capability" already means a daemon
+  protocol feature (`CAPABILITIES`), and "tag" means the tmux machine tag. Decided by the planner
+  with the code in front of it (2026-11-12); the owner may revisit any entry before the build.
+  - _Decided, where a trait is declared:_ only in the machine's own `config.json` (`configDir()`),
+    never over the wire, never by the PWA or another machine:
+    `"traits": { "<name>": { "exclaves"?: ["<id>", …], "probe"?: { "argv": ["…"], "everyMinutes"?: 30, "timeoutSeconds"?: 10 }, "keepFree"?: true } }`.
+    A name is `^[a-z0-9][a-z0-9-]{0,31}$`, at most 16 per machine; `exclaves` absent means every
+    exclave; a strict parse (unknown keys refused, as `quota` and `reap` are) fails the config
+    load with a message, never silently drops a trait. Advertised as `ExclaveInfo.traits` (the
+    names that apply to that exclave), in the register blob: traits change when the file does,
+    which is when a re-register is due anyway. Rejected: declaring traits from the PWA or MCP (a
+    remote writer could make any machine claim anything, and the config file is already where a
+    machine says what it is); detecting tools automatically (`which az` says installed, not
+    signed in, and an MCP server's login state is not visible from outside).
+  - _Decided, health probes:_ a trait may name a probe — an argv array from that file only, never
+    a shell string and never a frame field — run with a bare env (`HOME`, `PATH`, `USER`,
+    `LOGNAME`, plus `CLAUDE_CONFIG_DIR` for an exclave-scoped trait), stdio ignored and never
+    logged, one probe at a time per daemon, every `everyMinutes` (at least 5, default 30) and
+    killed after `timeoutSeconds` (1–30, default 10). Exit 0 is healthy, any other exit is
+    failing, a timeout or spawn error is unknown. Failing is carried in `status` as
+    `tf: [[exclaveIndex, traitIndex], …]` (at most 16, never trimmed, like `ax`); unknown routes,
+    as for auth. Every probe runs once at daemon start, and a trait not yet probed is carried as
+    unknown (a `tu` list beside `tf`), never as healthy, so a restart does not route to a failing
+    trait for up to `everyMinutes`. Rejected: probes from the wire (remote code execution by definition), probes on
+    every routing pass (a slow `az account show` would load the box and stall the leader), and
+    a per-probe cadence below 5 minutes.
+  - _Decided, where a task says what it requires:_ one spelling per client, as #390 did for
+    autonomy: `requires` (a list of names) on `spawn_session` and each `queue_batch` member;
+    `--requires <name>` (repeatable) on `seanced auto`; a REQUIRES field on the PWA form offering
+    the traits the fleet advertises. `TaskSpec.requires`, at most 4 names. Not on `--now`
+    (the direct spawn bypasses routing) — refused there with a message. Not in Raycast for v1. A
+    continuation inherits its task's `requires`; a route preview carries it. A client refuses a
+    name no machine advertises at enqueue, listing the known ones, so a typo never waits forever.
+  - _Decided, what an older peer does:_ an older **leader** must refuse the task rather than place
+    it anywhere. Every task record carrying `requires` is sealed through the one task sealer
+    (`taskRecordAtRest`), which appends `REQUIRES_DEP_SENTINEL` (`{ task: "", after: "opened" }`)
+    to its deps; an older parser fails `isTaskId` on it and holds the record unreadable, as
+    `ATTACHMENTS_DEP_SENTINEL` does. The current parser drops it before the deps bound, only beside
+    `requires`, and nulls the spec over a sentinel without `requires` — never over `requires`
+    without the sentinel, since `parseTaskSpec`/`parseTask` also read specs that never pass the
+    sealer (a brokered enqueue, the CLI's spec check, `queue`/`cancel` replies, the PWA's
+    persisted cache): exactly the attachments rule. A client writes `requires` only to a verified leader advertising
+    `CAPABILITIES.traits`. An older **daemon** needs nothing: it advertises no traits, so it is
+    never a candidate for a task that requires one. Rejected: letting an older leader place it
+    (the whole point is that the wrong machine stalls), and a new record version (every reader
+    would need a migration).
+  - _Decided, what routing says:_ two reasons, `trait_absent { trait }` (no such trait on this
+    exclave) and `trait_unhealthy { trait }` (its probe is failing). `get_queue` gives each task
+    with `requires` a `requires: [{ trait, machines: [names that have it] }]`; the PWA's waiting
+    text leaves trait-rejected candidates out of its list as it does pin mismatches, and adds one
+    line: "Needs atlas (on MacBook)", "Needs atlas (MacBook's probe is failing)", or "Needs atlas
+    — no machine has it". An unpinned task requiring a trait no machine has waits without a bound,
+    as an unpinned `repo_absent` one does (_Settled defaults_ 21: out of scope on purpose); the
+    enqueue check is what keeps that rare.
+  - _Decided, "keep me free":_ a trait may say `keepFree: true` — "prefer not to place tasks here
+    that don't need this". Built as a score component, never a filter: a candidate exclave with a
+    `keepFree` trait the task does not require scores lower (`keepFree`, weight 4, beside
+    `machinePressure`), so the Mac fills last instead of never. `avoid` stays for "never here".
+    Advertised as `ExclaveInfo.keepFree` (names). An older leader ignores the extra component
+    (`parseScore` ignores extra keys). Rejected: a filter (a busy fleet would then refuse work the
+    Mac could take), and a per-task "prefer not" list (that is `avoid` again).
+  - _PRs:_ (1) core — config, `ExclaveInfo.traits`, `TaskSpec.requires` with the sentinel, the
+    filter and both reasons, MCP/CLI/PWA authoring, `get_queue`/PWA text, `CAPABILITIES.traits`;
+    (2) probes — `tf` in status, `trait_unhealthy`; (3) `keepFree`. Each with its DESIGN.md
+    subsection and threat-model entry (probes run operator-configured commands: a new exec
+    surface, audited under its own origin `probe`).
+- **Offline machines and the caps** (checked 2026-11-12; already decided, no change) — a task in
+  flight on a machine that went away holds its global and account slot, and its projected usage,
+  until the machine has been absent `slotReleaseAfterMs` (2 min, _Settled defaults_ 18), counted
+  from when the connected read lapses (~2.5 min), so about 4.5 min in all; `lost` (15 min) is
+  never counted. A reservation keeps its slot until its 240 s TTL. A new leader re-holds an away
+  machine's tasks for up to 2 min, since `#absentSince` is memory only. A session idle at its
+  prompt 10 min holds none either (_Settled defaults_ 20). On return or resume they count again
+  and the fleet may sit over its cap — accepted; `run-now` is uncapped by design. The "9 in flight
+  against 8" seen on 12 November is display, not routing: the PWA header counts only
+  reserved/running, the `cap_reached` text is the leader's own count, but `get_queue` listed
+  in-flight states with no sign that a task's machine was away or its session idle-released.
+  Fixed with Auth health's PR: `get_queue` marks such tasks `away` or `idle` and says they hold
+  no slot.
+- **What to measure** (auth health and traits) — from the leader's log, which already carries
+  every alert, plus three new lines; no new store record.
+  - Auth: `scheduler: login expired|expiring: device= exclave=` per alert, and
+    `scheduler: login restored: device= exclave= after=<m>m` when it clears — alerts per week and
+    time to re-login. Also the daemon's `auth: … state=unknown why=…` lines per platform: how
+    often the read fails, macOS above all.
+  - Traits: one leader line per task per trait the first time it is held
+    (`trait_absent`/`trait_unhealthy`), and one per client refusal of an unknown trait (logged by
+    the client); tasks held, for how long, and by which trait.
+  - `avoid`: the leader logs, per admitted task, whether it carries `avoid`, `requires` or a pin
+    (counts only, no ids or names); the share of tasks with `avoid` before traits ship and a
+    month after `keepFree` does says whether the workaround went away.
 
 - **Spawn defaults to the scheduler** — **Done** (owner, 2026-10-25; PRs #309, #310 and #311): every
   spawn is a task, a machine or an account is a pin on it, and a task's pin and `avoid` show on
