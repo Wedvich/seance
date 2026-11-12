@@ -1569,7 +1569,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
         "the machine registered after the seat",
       );
       expect(ownMachine(seen, archivistId)).toBeNull();
-      const names = { listing: [] as readonly string[] };
+      const names: { listing: readonly string[] } = { listing: [] };
       await pollUntil(async () => {
         names.listing = await listed();
         return names.listing.includes(plainId);
@@ -1585,20 +1585,24 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       );
     } finally {
       for (const socket of sockets) socket.close();
-      // Gone from the registry, so no later test meets either as an offline machine.
+      // The clients stop even when a poll below times out: they live in the shared stack.
       const raw = await connectApp(stack.relay);
-      await pollUntil(() => !watch.connected(archivistId) && !watch.connected(plainId), "both sockets gone");
-      raw.send({ t: "forget", deviceId: archivistId });
-      raw.send({ t: "forget", deviceId: plainId });
-      await pollUntil(
-        () => watch.entry(archivistId) === undefined && watch.entry(plainId) === undefined,
-        "both entries forgotten",
-      );
-      raw.close();
-      await mcp.close();
-      lazy.stop();
-      app.stop();
-      watch.close();
+      try {
+        // Gone from the registry, so no later test meets either as an offline machine.
+        await pollUntil(() => !watch.connected(archivistId) && !watch.connected(plainId), "both sockets gone");
+        raw.send({ t: "forget", deviceId: archivistId });
+        raw.send({ t: "forget", deviceId: plainId });
+        await pollUntil(
+          () => watch.entry(archivistId) === undefined && watch.entry(plainId) === undefined,
+          "both entries forgotten",
+        );
+      } finally {
+        raw.close();
+        await mcp.close();
+        lazy.stop();
+        app.stop();
+        watch.close();
+      }
     }
   }, 60_000);
 });

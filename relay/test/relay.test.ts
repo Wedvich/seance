@@ -1676,7 +1676,10 @@ describe("archivist seat", () => {
     // The stored claim is the relay's own; only the derived flag goes out.
     expect(entry !== undefined && "archivistClaim" in entry).toBe(false);
     expect(live.scheduler).toBeNull();
-    expect(seated.logs().some((line) => line.includes(`registered ${seat} (archivist)`))).toBe(true);
+    await pollUntil(
+      () => seated.logs().some((line) => line.includes(`registered ${seat} (archivist)`)),
+      "the registered line",
+    );
 
     daemon.close();
     const kept = await seen(app, seat, (candidate) => !candidate.connected);
@@ -1708,6 +1711,23 @@ describe("archivist seat", () => {
     app.close();
   });
 
+  // A socket that already holds an identity and then claims the role it may not
+  // is refused on that same socket: closed 4403, and the earlier entry stays an
+  // ordinary one that is not flagged and not nominated.
+  test("a registered socket re-registering with a refused role claim is closed, and its entry stays no seat", async () => {
+    const app = await connectApp(seated);
+    const id = await newDeviceId();
+    const daemon = await connectDaemon(seated);
+    daemon.send(await register(id));
+    await seen(app, id, (entry) => entry.connected);
+    daemon.send(await register(id, { roles: ARCHIVIST }));
+    expect(await daemon.waitClosed()).toBe(CLOSE_ROLE_REFUSED);
+    const gone = await seen(app, id, (entry) => !entry.connected);
+    expect(gone.entries.find((entry) => entry.deviceId === id)?.archivist).toBeUndefined();
+    expect(gone.scheduler).toBeNull();
+    app.close();
+  });
+
   // The seat's own key, claiming scheduler as well: refused before the
   // supersede, so the live seat keeps its route and never becomes a candidate.
   test("the seat claiming scheduler too is refused, and does not take the live seat's route", async () => {
@@ -1730,5 +1750,22 @@ describe("archivist seat", () => {
     incumbent.close();
     await seen(app, seat, (entry) => !entry.connected);
     app.close();
+  });
+
+  // A wildcard or list is no seat: ARCHIVIST parses to nobody, and says so once.
+  test("an ARCHIVIST that is not one deviceId is ignored with a log line, and nobody holds the seat", async () => {
+    await seated.dispose();
+    await Bun.sleep(500);
+    const bad = await startRelay(TOKEN, { archivist: "*", captureLogs: true });
+    try {
+      const daemon = await connectDaemon(bad);
+      daemon.send(await register(seat, { roles: ARCHIVIST }));
+      expect(await daemon.waitClosed()).toBe(CLOSE_ROLE_REFUSED);
+      await pollUntil(() => bad.logs().some((line) => line.includes("ARCHIVIST: ignored")), "the ignored line");
+    } finally {
+      await bad.dispose();
+    }
+    await Bun.sleep(500);
+    seated = await startRelay(TOKEN, { archivist: seat, captureLogs: true });
   });
 });
