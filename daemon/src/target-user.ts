@@ -30,10 +30,10 @@ const NEVER_ROOT = "the daemon must never run as root";
 export const SUDO_SEANCED = 'sudo --preserve-env=PATH "$(command -v seanced)"';
 
 /** The one privileged action per command, named in the message so the remedy is the whole answer. */
-export function requireRoot(uid: number | undefined, action: string): void {
+export function requireRoot(uid: number | undefined, action: string, sudo: string = SUDO_SEANCED): void {
   if (uid === 0) return;
   throw new Error(
-    `${action} writes /etc/systemd/system and must run as root — \`${SUDO_SEANCED} ${action}\` ` +
+    `${action} writes /etc/systemd/system and must run as root — \`${sudo} ${action}\` ` +
       "(full path, because sudo searches secure_path for the command; --preserve-env, because secure_path " +
       "also holds none of the binaries the unit has to record)",
   );
@@ -175,8 +175,12 @@ export const UNIT_BINARIES = ["bun", "git", "tmux", "claude"] as const;
  * Resolved as root, confirmed as the unit's user: a binary root can exec, in a
  * dir the user can search, may still lack the user's exec bit.
  */
-export async function missingUnitBinaries(pathEnv: string, asUser: readonly string[]): Promise<readonly string[]> {
-  const found = await Promise.all(UNIT_BINARIES.map(async (name) => [name, await whichIn(name, pathEnv)] as const));
+export async function missingUnitBinaries(
+  pathEnv: string,
+  asUser: readonly string[],
+  binaries: readonly string[] = UNIT_BINARIES,
+): Promise<readonly string[]> {
+  const found = await Promise.all(binaries.map(async (name) => [name, await whichIn(name, pathEnv)] as const));
   const reachable = await reachableAs(
     asUser,
     found.flatMap(([, path]) => (path === null ? [] : [path])),

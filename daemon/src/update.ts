@@ -160,6 +160,8 @@ export interface ManualUpdateOpts {
   /** The sha the live daemon serves; null when none runs. A checkout already current still restarts a stale one. */
   readonly servingSha: string | null;
   readonly effects: UpdateEffects;
+  /** What the audit lines name as the trigger; `cli` unless a service runs this on another's behalf (the archivist's update unit). */
+  readonly origin?: UpdateOrigin;
 }
 
 export interface ManualUpdate extends Verdict {
@@ -172,7 +174,7 @@ export interface ManualUpdate extends Verdict {
  * announces its new sha and clears a stale report on its first register check, as after any update.
  */
 export async function updateNow(opts: ManualUpdateOpts): Promise<ManualUpdate> {
-  const audit = updateAudit("cli", opts.sink);
+  const audit = updateAudit(opts.origin ?? "cli", opts.sink);
   const verdict = await pipeline(opts.root, opts.effects, audit);
   const behind = verdict.outcome === "current" ? await servingBehind(opts.root, opts.servingSha) : null;
   if (behind === null) {

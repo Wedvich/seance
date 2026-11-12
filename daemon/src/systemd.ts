@@ -49,7 +49,7 @@ export function unitPath(): string {
 }
 
 /** `--user` or `--system`, so no call site spells the scope itself. */
-function scopeArgv(scope: UnitScope): readonly string[] {
+export function scopeArgv(scope: UnitScope): readonly string[] {
   return ["systemctl", `--${scope}`];
 }
 
@@ -144,6 +144,11 @@ export function unitCredentialBlob(unit: string): string | null {
   return line === undefined ? null : unitUnescape(line.trim().slice(prefix.length));
 }
 
+/** The account a system unit runs as, or null when it names none. */
+export function unitUser(unit: string): string | null {
+  return unitField(unit, "User");
+}
+
 export function unitStateDirEnv(unit: string): string | null {
   const raw = /^Environment="SEANCE_STATE_DIR=([^"]*)"/mu.exec(unit)?.[1];
   return raw === undefined ? null : unitUnescape(raw);
@@ -158,7 +163,7 @@ export function unitStateDirEnv(unit: string): string | null {
  * Null when the unit isn't one of ours to compare.
  */
 export function expectedSystemUnit(unitText: string): string | null {
-  const user = unitField(unitText, "User");
+  const user = unitUser(unitText);
   const bunPath = unitBunPath(unitText);
   const pathEnv = unitPathEnv(unitText);
   const logFile = unitField(unitText, "StandardOutput")?.replace(/^append:/u, "") ?? null;
@@ -176,7 +181,7 @@ export function expectedSystemUnit(unitText: string): string | null {
 }
 
 /** systemd expands % specifiers inside unit values; paths and PATH must stay literal. */
-function unitEscape(s: string): string {
+export function unitEscape(s: string): string {
   return s.replaceAll("%", "%%");
 }
 
@@ -652,8 +657,8 @@ export function parseMainPid(stdout: string): number | null {
   return Number.isInteger(pid) && pid > 0 ? pid : null;
 }
 
-async function systemMainPid(): Promise<number | null> {
-  const result = await exec(scopeArgv("system").concat(["show", "-p", "MainPID", "--value", UNIT_NAME]));
+async function systemMainPid(unit: string): Promise<number | null> {
+  const result = await exec(scopeArgv("system").concat(["show", "-p", "MainPID", "--value", unit]));
   return result.exitCode === 0 ? parseMainPid(result.stdout) : null;
 }
 
@@ -667,17 +672,20 @@ const RELAUNCH_TIMEOUT_MS = 30_000;
  * and it stays root-only. MainPID comes from systemd rather than `runtime.json`
  * so a stale pid can never aim the signal at an unrelated process. Like
  * `selfRestart`, this can't apply a changed unit definition — doctor reports drift.
+ * The unit is a parameter for the archivist's `update`, which restarts its own
+ * system unit the same way (`Restart=always` there too).
  */
-async function signalRestart(): Promise<void> {
-  const pid = await systemMainPid();
+export async function signalRestartUnit(unit: string): Promise<void> {
+  const privileged = `sudo systemctl restart ${unit}`;
+  const pid = await systemMainPid(unit);
   if (pid === null) {
-    throw new Error(`the system unit isn't running, and starting it needs root: ${restartCommandFor("system")}`);
+    throw new Error(`the system unit isn't running, and starting it needs root: ${privileged}`);
   }
   try {
     process.kill(pid, "SIGTERM");
   } catch (err) {
     if (err instanceof Error && "code" in err && err.code === "EPERM") {
-      throw new Error(`the daemon runs as another user — restarting it needs root: ${restartCommandFor("system")}`, {
+      throw new Error(`${unit} runs as another user — restarting it needs root: ${privileged}`, {
         cause: err,
       });
     }
@@ -688,12 +696,12 @@ async function signalRestart(): Promise<void> {
     // oxlint-disable-next-line no-await-in-loop -- a poll is sequential by definition
     await Bun.sleep(500);
     // oxlint-disable-next-line no-await-in-loop -- ditto
-    const next = await systemMainPid();
+    const next = await systemMainPid(unit);
     if (next !== null && next !== pid) return;
   }
   throw new Error(
-    `the daemon exited but systemd hasn't relaunched it after ${RELAUNCH_TIMEOUT_MS / 1000}s — ` +
-      `check \`systemctl status ${UNIT_NAME}\` and \`seanced doctor\``,
+    `${unit} exited but systemd hasn't relaunched it after ${RELAUNCH_TIMEOUT_MS / 1000}s — ` +
+      `check \`systemctl status ${unit}\``,
   );
 }
 
@@ -702,7 +710,7 @@ export async function restartService(): Promise<void> {
   const scope = await ownerScope();
   // Root-owned unit, unprivileged caller: systemctl would answer with an
   // interactive-auth refusal, so signal the daemon instead.
-  if (scope === "system" && process.getuid?.() !== 0) return signalRestart();
+  if (scope === "system" && process.getuid?.() !== 0) return signalRestartUnit(UNIT_NAME);
   const result = await exec(scopeArgv(scope).concat(["restart", UNIT_NAME]));
   if (result.exitCode !== 0) {
     throw new Error(`systemctl --${scope} restart failed: ${result.stderr.trim()}`);
