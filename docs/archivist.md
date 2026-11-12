@@ -67,10 +67,13 @@ Each is the owner's, 2026-11-12, unless marked _derived_.
 - **A14.** No prompt text and no attachment is ever stored, logged or served. _Derived:_ the
   archivist applies `forgetPrompt` before writing a task row, in case a record it reads still
   carries one. Built: `forgetPrompt` moved to `shared/src/task-phase.ts` so the archivist can
-  load it.
+  load it. Also dropped from the stored record: `assignment.window`, `branch`,
+  `failure.message` and `decision`, which the daemon or router derive from the prompt (slugs of
+  its first words, a `/skill` name).
 - **A15.** _Derived._ An account is keyed in the archive by the HMAC'd account id the store
   already uses, never by a raw account identifier or email. An alias is stored for display only.
-  Built.
+  Built. A PSK rotation changes the HMAC key, so the same account files under a new key after it:
+  accepted, not engineered around (DESIGN.md, "Archivist", Accounts).
 
 ### 4. What it collects
 

@@ -10703,32 +10703,53 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   then `bindTaskRecord`; one they cannot read is counted in a log line and skipped, never deleted
   or written over. Only a `finished`-phase task gets a row, through `taskRow`: `forgetPrompt`
   first (prompt and attachment manifest gone even if a record still carries them), then
-  `spec.pin.account` and `spillAlert` dropped, the two fields that hold a raw account id. A row is
+  `spec.pin.account` and `spillAlert` dropped, the two fields that hold a raw account id, and
+  everything the daemon or the router derives from prompt text: `assignment.window` and `branch`
+  (a title-less task's window and worktree branch are slugged from the prompt's first words),
+  `failure.message` (a daemon's text, which may name the worktree; `failure.code` stays, in its
+  column too) and `decision` (a `skill_absent` reason carries a `/skill` read off the prompt; the
+  placement stays in `assignment`). The store prunes these with the task; the archive would keep
+  them for good. A row is
   written when the archive holds none or holds it at a lower store version (`ON CONFLICT … WHERE
   excluded.version > tasks.version`), so a PR that merges after its task settled lands, and an
-  older blob put back never wins; a machine name or account the archivist cannot resolve this
-  time keeps the one held. A record that leaves the store leaves its row as it was. The account is
-  resolved when archived: the assignment's machine's exclave in the registry, else `pin.account`,
-  HMAC'd with the account key (`accountStoreKey`) — so it names the account that exclave holds
-  then. Pacing, against the relay's list floors (4 lists per minute per socket per prefix, and a
-  shared bucket of one per 8 s): a `queue-changed` naming tasks reads each by `store-get`, which
-  has no floor, one at a time; one naming none, the leg's every (re)open, and a 10-minute poll
-  list, at most one list per prefix per 20 s, coalesced; a refused or failed read retries after a
-  minute, and a failed get falls back to the paced list.
+  older blob put back never wins; a machine name the archivist cannot resolve this time keeps the
+  one held. A record that leaves the store leaves its row as it was. The account is resolved when
+  archived: the assignment's machine's exclave in the registry, else `pin.account`, HMAC'd with
+  the account key (`accountStoreKey`) — so it names the account that exclave held then, and the
+  **first** one resolved stays (`coalesce(tasks.account, excluded.account)`): a later PR reading
+  never moves a task to whatever the exclave signed into since. A named get waits for the settled
+  registry (before it no exclave resolves; the listing at ready covers what was missed). Pacing, against the relay's list floors (4 lists per minute per socket per prefix, and a
+  shared bucket of one per 8 s): a `queue-changed` naming tasks adds each id to a set one worker
+  drains, a batch at a time by `store-get` (no floor), so a burst of nudges or a slow relay reads
+  each task once per round, never once per nudge; one naming none, the leg's every (re)open, and
+  a 10-minute poll list, at most one list per prefix per 20 s, coalesced; a refused or failed
+  list retries after a minute, and a failed get (task or account) falls back to the paced list.
+  The app leg's log drops the shared client's send and recv lines for `store-get` (two per get
+  would swamp a burst); timeouts, refusals and drops still log.
 - **Accounts** (A15). `listAccounts`/`getAccountRecord`, so only through `openAccountRecord`,
   on open, on the poll and on a `store-changed` nudge for an `account:` key (relay plaintext, a
-  hint only: the reader re-checks the key against the record's own HMAC). An alias moves only to a
-  higher store version. Every account signed in on a registry machine is noted by its store key,
-  alias empty, so a removed account's tasks still name a key (A24).
+  hint only: the reader re-checks the key against the record's own HMAC), coalesced per key. An
+  alias moves only to a higher store version. Every account signed in on a registry machine is
+  noted by its store key, alias empty, so a removed account's tasks still name a key (A24). A key
+  is marked noted only after its write lands. **A PSK rotation splits an account's history**: the
+  key is an HMAC under a key derived from the PSK, so the same account files under a new key
+  afterwards, and rows from before name one no later row or `accounts` entry shares. Inherent to
+  A15 (a stable key without the PSK would be a raw account id) and accepted: nothing records the
+  epoch, and a per-account query across a rotation reads the account as two.
 - **Fleet events** (A18). Diffed from the app leg's settled registry (`registrySettled` on an
   open socket, never before: an empty list then means no push yet) against the `machines` table,
   not memory, so a restart repeats no `first_seen`. Machines are the client's decrypted
   `Machine`s, the seat's own id skipped besides (A9). `first_seen` on a new id (then `connected`
-  if it is), `connected` when a machine not up is, `gone` when one up is not or its entry left
-  the registry, `build_changed` when its `SourceInfo.sha` moves (a daemon that stops saying is no
+  if it is), `connected` when a machine not up is, `gone` when one that was up is not, whether it
+  disconnected or its entry left the registry (a machine already down when its entry leaves writes
+  no event: its row's `in_registry = 0` and `updated_at` say when), `build_changed` when its `SourceInfo.sha` moves (a daemon that stops saying is no
   change), `term_changed` when a verified (`ready`) leader's term differs from the last recorded.
   `at` is the archivist's clock: what changed while it was down is recorded when it returns, and a
-  machine whose blob this build cannot read is absent to it.
+  machine whose blob this build cannot read is absent to it (after a PSK rotation that is every
+  machine, so each reads as `gone`, and `connected` again once its blob opens). The connection
+  waits up to 2 s on a lock (`busy_timeout`; a purge in `sqlite3` is expected, A23), and a write
+  that still fails is logged and tried again on the next registry change, never thrown into the
+  client's listener.
 
 ## Accepted trade-offs
 
