@@ -6,7 +6,11 @@ import {
   ACCOUNT_ALIAS_MAX_LENGTH,
   ATTACHMENT_HASH_PATTERN,
   ARCHIVE_INGEST_SOURCES,
+  ARCHIVE_METRICS_STEPS,
   ARCHIVE_STATUS_ERROR_CODES,
+  ARCHIVE_TASK_OUTCOMES,
+  ARCHIVE_TASKS_ERROR_CODES,
+  ARCHIVE_TASKS_MAX_PAGE,
   ATTACHMENT_ID_PATTERN,
   ATTACHMENT_LIMITS,
   ATTACHMENTS_DEP_SENTINEL,
@@ -62,6 +66,11 @@ import {
   TOOL_NAME_MAX_LENGTH,
   type AccountRecord,
   type ArchiveIngestSource,
+  type ArchiveMetricsRequest,
+  type ArchiveTasksCursor,
+  type ArchiveTasksReply,
+  type ArchiveTasksRequest,
+  type ArchivedTask,
   type ArchiveStatusRequest,
   type ArchiveStatusReply,
   type ArchiveStatusResponse,
@@ -590,12 +599,12 @@ export function isMetricsRequest(value: unknown): value is MetricsRequest {
   return labels === undefined || isLabelMatchers(labels);
 }
 
-function isMetricNames(value: unknown): boolean {
+function isMetricNames(value: unknown): value is readonly string[] {
   if (!isStringArray(value) || value.length === 0 || value.length > METRICS_MAX_FILTERS) return false;
   return value.every((name) => name !== "" && name.length <= METRICS_MAX_FILTER_LENGTH);
 }
 
-function isLabelMatchers(value: unknown): boolean {
+function isLabelMatchers(value: unknown): value is Readonly<Record<string, string>> {
   if (!isRecord(value)) return false;
   const entries = Object.entries(value);
   if (entries.length === 0 || entries.length > METRICS_MAX_FILTERS) return false;
@@ -710,6 +719,105 @@ export function parseArchivistInfo(value: unknown): ArchivistInfo | null {
   if (typeof name !== "string" || typeof platform !== "string") return null;
   const source = parseSourceInfo(value["source"]);
   return { archivist: true, name, platform, ...(source === null ? {} : { source }) };
+}
+
+/** An `account:<hex>` store key: how the archive names an account, never by its raw id (A15). */
+function isAccountStoreKey(value: unknown): value is string {
+  return isStoreKey(value) && value.startsWith(STORE_PREFIXES.account.prefix);
+}
+
+/**
+ * The archivist's `archive-metrics` request, as a fresh value: `metrics`'s
+ * range, step and filter bounds over the archive's steps, and exactly one
+ * target. A span past `METRICS_MAX_POINTS` per series is refused before the
+ * archive reads a row.
+ */
+export function parseArchiveMetricsRequest(value: unknown): ArchiveMetricsRequest | null {
+  if (!isRecord(value)) return null;
+  const { from, to, step, names, labels, machine, account } = value;
+  if (!isUint(from) || !isUint(to) || from > to) return null;
+  const known = ARCHIVE_METRICS_STEPS.find((s) => s === step);
+  if (known === undefined || (to - from) / known + 1 > METRICS_MAX_POINTS) return null;
+  if (names !== undefined && !isMetricNames(names)) return null;
+  if (labels !== undefined && !isLabelMatchers(labels)) return null;
+  const range = {
+    from,
+    to,
+    step: known,
+    ...(names === undefined ? {} : { names: [...names] }),
+    ...(labels === undefined ? {} : { labels: { ...labels } }),
+  };
+  if (account === undefined && isRoutingId(machine)) return { ...range, machine };
+  if (machine === undefined && isAccountStoreKey(account)) return { ...range, account };
+  return null;
+}
+
+function parseArchiveTasksCursor(value: unknown): ArchiveTasksCursor | null {
+  if (!isRecord(value)) return null;
+  const { endedAt, createdAt, id } = value;
+  return isUint(endedAt) && isUint(createdAt) && isTaskId(id) ? { endedAt, createdAt, id } : null;
+}
+
+/** The archivist's `archive-tasks` request, as a fresh value; any bound broken refuses the whole request. */
+export function parseArchiveTasksRequest(value: unknown): ArchiveTasksRequest | null {
+  if (!isRecord(value)) return null;
+  const { limit, before, repo, outcome, machine, account, since, until, title } = value;
+  if (limit !== undefined && !(isUint(limit) && limit >= 1 && limit <= ARCHIVE_TASKS_MAX_PAGE)) return null;
+  const cursor = before === undefined ? undefined : parseArchiveTasksCursor(before);
+  const known = outcome === undefined ? undefined : ARCHIVE_TASK_OUTCOMES.find((o) => o === outcome);
+  if (cursor === null || (outcome !== undefined && known === undefined)) return null;
+  if (repo !== undefined && !isName(repo, TASK_REQUEST_LIMITS.repo)) return null;
+  if (machine !== undefined && !isRoutingId(machine)) return null;
+  if (account !== undefined && !isAccountStoreKey(account)) return null;
+  if (!isOptionalUint(since) || !isOptionalUint(until)) return null;
+  if (title !== undefined && !isName(title, TASK_REQUEST_LIMITS.title)) return null;
+  return {
+    ...(limit === undefined ? {} : { limit }),
+    ...(cursor === undefined ? {} : { before: cursor }),
+    ...(repo === undefined ? {} : { repo }),
+    ...(known === undefined ? {} : { outcome: known }),
+    ...(machine === undefined ? {} : { machine }),
+    ...(account === undefined ? {} : { account }),
+    ...(since === undefined ? {} : { since }),
+    ...(until === undefined ? {} : { until }),
+    ...(title === undefined ? {} : { title }),
+  };
+}
+
+function isStringOrNull(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+function parseArchivedTask(value: unknown): ArchivedTask | null {
+  if (!isRecord(value)) return null;
+  const task = parseTask(value["task"]);
+  const { endedAt, machine, account, alias } = value;
+  if (task === null || !isUint(endedAt) || !isStringOrNull(machine)) return null;
+  if (!isStringOrNull(account) || !isStringOrNull(alias)) return null;
+  return { task, endedAt, machine, account, alias };
+}
+
+/**
+ * Lenient per entry, as `queue`'s tasks are: a row an archivist a version
+ * ahead writes in a shape this build cannot read costs that row, not the page.
+ */
+export function parseArchiveTasksReply(value: unknown): ArchiveTasksReply | null {
+  if (!isRecord(value)) return null;
+  if (value["ok"] === false) {
+    const code = ARCHIVE_TASKS_ERROR_CODES.find((c) => c === value["code"]);
+    if (code === undefined || typeof value["message"] !== "string") return null;
+    return { ok: false, code, message: value["message"] };
+  }
+  const { ok, tasks, total, next } = value;
+  if (ok !== true || !Array.isArray(tasks) || !isUint(total)) return null;
+  const cursor = next === null ? null : parseArchiveTasksCursor(next);
+  if (cursor === null && next !== null) return null;
+  return {
+    ok: true,
+    tasks: tasks.map(parseArchivedTask).filter((task) => task !== null),
+    total,
+    next: cursor,
+  };
 }
 
 /**

@@ -706,6 +706,8 @@ export type OpName =
   | "push-branch"
   | "pass-close"
   | "archive-status"
+  | "archive-metrics"
+  | "archive-tasks"
   | AtRestOp
   | EventOp
   | SchedulerOp;
@@ -762,6 +764,9 @@ export const OP_TIMEOUT_MS = {
   metrics: 15_000,
   // Answered from a cached count and two stat calls, never a scan.
   "archive-status": 10_000,
+  // As `metrics`: a bounded read of one SQLite file, a year at most at a coarse step.
+  "archive-metrics": 15_000,
+  "archive-tasks": 10_000,
   queue: 10_000,
   "route-preview": 10_000,
   cancel: 25_000,
@@ -1431,6 +1436,104 @@ export interface ArchiveStatusError {
 }
 
 export type ArchiveStatusReply = ArchiveStatusResponse | ArchiveStatusError;
+
+/**
+ * Steps `archive-metrics` takes, seconds: the daemon's three tiers, then 6 h and
+ * 1 d, which the archive averages from its hourly tier at query time so 90 days
+ * and a year fit `METRICS_MAX_POINTS`.
+ */
+export const ARCHIVE_METRICS_STEPS = [...METRICS_STEPS, 21_600, 86_400] as const;
+
+export type ArchiveMetricsStep = (typeof ARCHIVE_METRICS_STEPS)[number];
+
+/**
+ * `op: "archive-metrics"` — history from the archivist's `metrics.sqlite`
+ * (docs/archivist.md, A31–A33): `MetricsRequest`'s range, step and filters
+ * over exactly one target. `machine` is a device id, its own observed series
+ * (retired machines included). `account` is the `account:<hex>` store key,
+ * never a raw id: every series labelled with it from any observer, merged per
+ * bucket at query time. Same point cap per series as `metrics`. The reply is
+ * a `MetricsReply`.
+ */
+export type ArchiveMetricsRequest = Omit<MetricsRequest, "step"> & { readonly step: ArchiveMetricsStep } & (
+    | { readonly machine: string }
+    | { readonly account: string }
+  );
+
+/** The finished states the archive keeps (A16), each an `outcome` filter. */
+export const ARCHIVE_TASK_OUTCOMES = ["done", "failed", "cancelled"] as const satisfies readonly TaskState[];
+
+export type ArchiveTaskOutcome = (typeof ARCHIVE_TASK_OUTCOMES)[number];
+
+/** Rows an `archive-tasks` page holds when the request names no `limit`, and the most it may name. */
+export const ARCHIVE_TASKS_PAGE = 20;
+export const ARCHIVE_TASKS_MAX_PAGE = 50;
+
+/** Where the next page starts: the last row of the one before, in the page's order. */
+export interface ArchiveTasksCursor {
+  readonly endedAt: number;
+  readonly createdAt: number;
+  readonly id: string;
+}
+
+/**
+ * `op: "archive-tasks"` — one page of archived tasks, newest first by
+ * `ArchivedTask.endedAt`, then `createdAt`, then id. Every filter is optional
+ * and they combine. `since`/`until` bound `endedAt` (ms; `until` exclusive).
+ * `title` is a case-insensitive substring of the task's title; a task with no
+ * title never matches, since its shown title comes from the prompt the archive
+ * never holds.
+ */
+export interface ArchiveTasksRequest {
+  readonly limit?: number;
+  readonly before?: ArchiveTasksCursor;
+  readonly repo?: string;
+  readonly outcome?: ArchiveTaskOutcome;
+  /** The assigned machine's device id. */
+  readonly machine?: string;
+  /** The `account:<hex>` store key. */
+  readonly account?: string;
+  readonly since?: number;
+  readonly until?: number;
+  readonly title?: string;
+}
+
+/**
+ * One archived task. `task` is the archive's copy (`archivedTask`): no prompt,
+ * no attachment manifest, no raw account id. `endedAt` is when the archive
+ * first held it finished, the nearest the record allows (it carries no finish
+ * time). `machine` is the assigned machine's last known name, `account` the
+ * store key it ran under and `alias` that account's, display only.
+ */
+export interface ArchivedTask {
+  readonly task: Task;
+  readonly endedAt: number;
+  readonly machine: string | null;
+  readonly account: string | null;
+  readonly alias: string | null;
+}
+
+export interface ArchiveTasksResponse {
+  readonly ok: true;
+  /** Filled to `REPLY_JSON_BUDGET`: fewer than `limit` when the rows are large, never none while any match. */
+  readonly tasks: readonly ArchivedTask[];
+  /** Every task matching the filters, the cursor aside. */
+  readonly total: number;
+  /** Null when this page reached the last match. */
+  readonly next: ArchiveTasksCursor | null;
+}
+
+export const ARCHIVE_TASKS_ERROR_CODES = ["invalid_request", ...TRANSPORT_ERROR_CODES] as const;
+
+export type ArchiveTasksErrorCode = (typeof ARCHIVE_TASKS_ERROR_CODES)[number];
+
+export interface ArchiveTasksError {
+  readonly ok: false;
+  readonly code: ArchiveTasksErrorCode;
+  readonly message: string;
+}
+
+export type ArchiveTasksReply = ArchiveTasksResponse | ArchiveTasksError;
 
 /**
  * The series the daemon's store keeps, one per `MachineStatus` field plus the
