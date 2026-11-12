@@ -67,6 +67,8 @@ export async function exec(
     readonly stdinFd?: number;
     /** The child's stderr is ignored, never read: it may quote its input. `stderr` is then `""`. */
     readonly discardStderr?: boolean;
+    /** The child's stdout is ignored, never read, so a descendant holding the pipe cannot stall `exec`: `stdout` is then `""`. */
+    readonly discardStdout?: boolean;
     readonly env?: Readonly<Record<string, string | undefined>>;
     /** The child gets `env` alone, never the daemon's environment (`childEnv`'s `bare`). */
     readonly bareEnv?: boolean;
@@ -103,7 +105,7 @@ export async function exec(
     cwd: opts.cwd,
     env: childEnv(opts.env, opts.bareEnv === true),
     stdin: opts.stdinFd ?? (opts.stdin === undefined ? "ignore" : "pipe"),
-    stdout: "pipe",
+    stdout: opts.discardStdout === true ? "ignore" : "pipe",
     stderr: discardStderr ? "ignore" : "pipe",
     detached: opts.killGroup === true,
   });
@@ -171,7 +173,7 @@ export async function exec(
     }
   }
   const [stdout, stderr, exitCode] = await Promise.all([
-    readText(proc.stdout, opts.maxOutputBytes),
+    proc.stdout === undefined ? "" : readText(proc.stdout, opts.maxOutputBytes),
     proc.stderr === undefined ? "" : readText(proc.stderr, opts.maxOutputBytes),
     proc.exited,
   ]);

@@ -105,4 +105,12 @@ describe("exec environment", () => {
     const result = await exec(["sh", "-c", "echo out; echo secret >&2; exit 3"], { discardStderr: true });
     expect(result).toEqual({ exitCode: 3, stdout: "out\n", stderr: "", timedOut: false });
   });
+
+  test("discardStdout leaves the child's stdout unread: a flood cannot stall it, and the result carries none", async () => {
+    const result = await exec(["sh", "-c", "head -c 4000000 /dev/zero; exit 4"], {
+      discardStdout: true,
+      timeoutMs: 10_000,
+    });
+    expect(result).toEqual({ exitCode: 4, stdout: "", stderr: "", timedOut: false });
+  });
 });

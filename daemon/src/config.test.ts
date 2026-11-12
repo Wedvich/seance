@@ -223,10 +223,53 @@ describe("loadConfig", () => {
       }
     });
 
-    test("`probe` and `keepFree` are refused as not built yet, never silently ignored", async () => {
-      for (const key of ["probe", "keepFree"]) {
+    test("`keepFree` is refused as not built yet, never silently ignored", async () => {
+      await expect(load({ atlas: { keepFree: true } })).rejects.toThrow('"traits.atlas.keepFree" is not built yet');
+    });
+
+    test("a probe loads with its defaults filled in, beside `exclaves` or alone", async () => {
+      const probe = { argv: ["az", "account", "show"], everyMinutes: 30, timeoutSeconds: 10 };
+      expect((await load({ atlas: { probe: { argv: ["az", "account", "show"] } } })).traits).toEqual({
+        atlas: { probe },
+      });
+      const full = { argv: ["/usr/bin/true", "~/x"], everyMinutes: 5, timeoutSeconds: 30 };
+      expect((await load({ atlas: { exclaves: ["work"], probe: full } })).traits).toEqual({
+        atlas: { exclaves: ["work"], probe: full },
+      });
+      expect((await load({ atlas: { probe: { argv: ["x"], everyMinutes: 1440, timeoutSeconds: 1 } } })).traits).toEqual(
+        {
+          atlas: { probe: { argv: ["x"], everyMinutes: 1440, timeoutSeconds: 1 } },
+        },
+      );
+    });
+
+    test("every probe mistake fails the load, naming the key", async () => {
+      const argv = ["true"];
+      const bad: readonly (readonly [unknown, string])[] = [
+        [[], 'traits.atlas.probe" must be an object'],
+        ["true", 'traits.atlas.probe" must be an object'],
+        [{}, "traits.atlas.probe.argv"],
+        [{ argv: [] }, "traits.atlas.probe.argv"],
+        [{ argv: "true" }, "traits.atlas.probe.argv"],
+        [{ argv: ["true", 1] }, "traits.atlas.probe.argv"],
+        [{ argv: ["true", ""] }, "traits.atlas.probe.argv"],
+        [{ argv: ["true", "a\0b"] }, "traits.atlas.probe.argv"],
+        [{ argv: ["x".repeat(1025)] }, "traits.atlas.probe.argv"],
+        [{ argv: Array.from({ length: 33 }, () => "x") }, "traits.atlas.probe.argv"],
+        [{ argv: ["bin/probe"] }, "traits.atlas.probe.argv[0]"],
+        [{ argv: ["./probe"] }, "traits.atlas.probe.argv[0]"],
+        [{ argv, everyMinutes: 4 }, "traits.atlas.probe.everyMinutes"],
+        [{ argv, everyMinutes: 1441 }, "traits.atlas.probe.everyMinutes"],
+        [{ argv, everyMinutes: 5.5 }, "traits.atlas.probe.everyMinutes"],
+        [{ argv, everyMinutes: "30" }, "traits.atlas.probe.everyMinutes"],
+        [{ argv, timeoutSeconds: 0 }, "traits.atlas.probe.timeoutSeconds"],
+        [{ argv, timeoutSeconds: 31 }, "traits.atlas.probe.timeoutSeconds"],
+        [{ argv, timeoutSeconds: 1.5 }, "traits.atlas.probe.timeoutSeconds"],
+        [{ argv, shell: true }, 'unknown key "traits.atlas.probe.shell"'],
+      ];
+      for (const [probe, message] of bad) {
         // oxlint-disable-next-line no-await-in-loop -- one config at a time
-        await expect(load({ atlas: { [key]: {} } })).rejects.toThrow(`"traits.atlas.${key}" is not built yet`);
+        await expect(load({ atlas: { probe } })).rejects.toThrow(message);
       }
     });
   });

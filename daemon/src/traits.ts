@@ -10,12 +10,20 @@ import type { TraitsConfig } from "./config.ts";
 export function withTraits(info: readonly ExclaveInfo[], traits: TraitsConfig | undefined): readonly ExclaveInfo[] {
   if (traits === undefined) return info;
   return info.map((exclave) => {
-    const names = Object.entries(traits)
-      .filter(([, scope]) => scope.exclaves === undefined || scope.exclaves.includes(exclave.id))
-      .map(([name]) => name)
-      .toSorted();
+    const names = exclaveTraitNames(exclave.id, traits);
     return names.length === 0 ? exclave : { ...exclave, traits: names };
   });
+}
+
+/**
+ * The sorted trait names one exclave carries: the order of its advertised `ExclaveInfo.traits`, which a
+ * status's `tf`/`tu` trait index points into. The one rule for both, so the index cannot drift from the blob.
+ */
+export function exclaveTraitNames(exclaveId: string, traits: TraitsConfig | undefined): readonly string[] {
+  return Object.entries(traits ?? {})
+    .filter(([, scope]) => scope.exclaves === undefined || scope.exclaves.includes(exclaveId))
+    .map(([name]) => name)
+    .toSorted();
 }
 
 /**
