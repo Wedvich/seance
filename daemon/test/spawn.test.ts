@@ -448,6 +448,63 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     }
   });
 
+  // `--permission-mode plan` drops bypass from the shift+tab cycle unless the session is allowed it;
+  // only the exclave's user settings.json may say so, never a repo's own committed settings.
+  test("a plan spawn allows bypass only when the exclave's user settings default to it", async () => {
+    const BYPASS = "--allow-dangerously-skip-permissions";
+    const userSettings = join(home, ".claude", "settings.json");
+    const repoSettingsDir = join(fixture.repoPath, ".claude");
+    const argvOf = async (
+      request: { title: string; plan?: boolean },
+      entries: readonly RepoEntry[] = repos,
+    ): Promise<readonly string[]> => {
+      await rm(stub.argvFile, { force: true });
+      const outcome = await spawnSession({ repo: "myrepo", mode: "here", ...request }, entries, WAIT);
+      try {
+        return await stub.argv();
+      } finally {
+        await killWindow(outcome.window);
+      }
+    };
+    try {
+      await Bun.write(userSettings, JSON.stringify({ permissions: { defaultMode: "bypassPermissions" } }));
+      const allowed = await argvOf({ title: "Plan Bypass", plan: true });
+      expect(allowed[allowed.indexOf("--permission-mode") + 1]).toBe("plan");
+      expect(allowed).toContain(BYPASS);
+
+      const ambient = await argvOf({ title: "Ambient Bypass" });
+      expect(ambient).not.toContain(BYPASS);
+      expect(ambient).not.toContain("--permission-mode");
+
+      for (const contents of [JSON.stringify({ permissions: { defaultMode: "acceptEdits" } }), "{not json", "[]"]) {
+        await Bun.write(userSettings, contents);
+        expect(await argvOf({ title: "Plan Other", plan: true })).not.toContain(BYPASS);
+      }
+
+      await rm(userSettings, { force: true });
+      expect(await argvOf({ title: "Plan Missing", plan: true })).not.toContain(BYPASS);
+
+      await Bun.write(
+        join(repoSettingsDir, "settings.json"),
+        JSON.stringify({ permissions: { defaultMode: "bypassPermissions" } }),
+      );
+      expect(await argvOf({ title: "Plan Repo", plan: true })).not.toContain(BYPASS);
+      await rm(repoSettingsDir, { recursive: true, force: true });
+
+      await Bun.write(
+        join(home, ".claude-work", "settings.json"),
+        JSON.stringify({ permissions: { defaultMode: "bypassPermissions" } }),
+      );
+      const inWork = repos.map((repo) => ({ ...repo, exclave: "work" }));
+      expect(await argvOf({ title: "Plan Work", plan: true }, inWork)).toContain(BYPASS);
+      expect(await argvOf({ title: "Plan Default", plan: true })).not.toContain(BYPASS);
+    } finally {
+      await rm(userSettings, { force: true });
+      await rm(join(home, ".claude-work", "settings.json"), { force: true });
+      await rm(repoSettingsDir, { recursive: true, force: true });
+    }
+  });
+
   test("a taskId rides the pane: listed with the session, and a second spawn for it is refused with that pane", async () => {
     const first = await spawnSession(
       { repo: "myrepo", mode: "here", title: "Task One", taskId: "task-1" },

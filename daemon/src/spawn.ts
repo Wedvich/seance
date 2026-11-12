@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { DEFAULT_EFFORT, DEFAULT_MODEL, isTaskId, type RepoEntry, type SpawnRequest } from "@seance/shared";
@@ -6,7 +6,7 @@ import { SpawnFailure, type Continuation, type SessionAttachments, type SpawnOut
 import { freshenBase } from "./base-fetch.ts";
 import { git } from "./exec.ts";
 import { whileRegistering } from "./exit-status.ts";
-import { DEFAULT_EXCLAVE, exclaveConfigFile } from "./exclaves.ts";
+import { DEFAULT_EXCLAVE, exclaveConfigFile, exclaveSettingsFile } from "./exclaves.ts";
 import { canonical } from "./gitdir.ts";
 import { hardenedGit } from "./git-hardened.ts";
 import { log } from "./log.ts";
@@ -253,10 +253,33 @@ function attachmentsBlock(attachments: SessionAttachments | undefined): string {
   return `\nAttached files (the user's originals, at these paths):\n${rows.join("")}`;
 }
 
+/**
+ * Whether the exclave's user settings.json defaults to `bypassPermissions`. Read per spawn, uncached;
+ * anything unreadable or misshapen answers false — the flag fails closed, the spawn never fails on it.
+ * User settings only: a repo's `.claude/settings.json` is whoever committed it, so it unlocks nothing.
+ */
+async function userDefaultsToBypass(home: string, exclave: string): Promise<boolean> {
+  try {
+    const parsed: unknown = JSON.parse(await readFile(exclaveSettingsFile(home, exclave), "utf8"));
+    if (typeof parsed !== "object" || parsed === null || !("permissions" in parsed)) return false;
+    const { permissions } = parsed;
+    if (typeof permissions !== "object" || permissions === null || !("defaultMode" in permissions)) return false;
+    return permissions.defaultMode === "bypassPermissions";
+  } catch {
+    return false;
+  }
+}
+
+/** Only a plan spawn reads settings, so every other command line stays byte-identical. */
+async function planAllowsBypass(request: SpawnRequest, repo: RepoEntry, opts: SpawnOptions): Promise<boolean> {
+  return request.plan === true && (await userDefaultsToBypass(opts.home, repo.exclave ?? DEFAULT_EXCLAVE));
+}
+
 async function buildInnerCommand(
   prepared: Prepared,
   session: string,
   request: SpawnRequest,
+  allowBypass: boolean,
   attachments?: SessionAttachments,
 ): Promise<InnerCommand> {
   const claude = process.env["SEANCE_CLAUDE_BIN"] ?? "claude";
@@ -269,6 +292,9 @@ async function buildInnerCommand(
   // unconditionally would override whatever the machine's settings.json chose, so by
   // default the session inherits the same mode an in-terminal `claude` gets on that box.
   // `plan` is the one exception, and only ever a tightening the caller opted into.
+  // Any mode flag drops bypass out of the shift+tab cycle unless it started there, so on a
+  // machine whose own user settings default to bypass, plan adds `--allow-dangerously-skip-permissions`
+  // to keep it reachable — nothing an unflagged spawn there doesn't already start in.
   //
   // `--remote-control [name]` takes an optional value, so it sits before the
   // other flags: trailing, it swallowed a here-mode seed prompt as the session
@@ -283,6 +309,7 @@ async function buildInnerCommand(
     `--model ${shq(request.model ?? DEFAULT_MODEL)} --effort ${shq(request.effort ?? DEFAULT_EFFORT)}` +
     // literal value, so nothing wire-supplied reaches the command line — no shq() needed
     `${request.plan === true ? " --permission-mode plan" : ""}` +
+    `${request.plan === true && allowBypass ? " --allow-dangerously-skip-permissions" : ""}` +
     `${prepared.worktreeFlag.length > 0 ? ` --worktree ${shq(prepared.worktreeFlag[1] ?? "")}` : ""}` +
     // A daemon-made UUID, never a wire value (`continues` is a ledger key and never reaches the command line).
     // `--resume <id>`, not `--continue`: claude files a `--worktree` session under the project it started
@@ -637,7 +664,14 @@ async function continueLocked(
   const name = basename(path);
   const windowName = sanitizeWindowName(request.title ?? name);
   const prepared = prepareContinue(continuation);
-  const inner = await buildInnerCommand(prepared, sessionName(name, opts.machineTag), request, attachments);
+  const allowBypass = await planAllowsBypass(request, repo, opts);
+  const inner = await buildInnerCommand(
+    prepared,
+    sessionName(name, opts.machineTag),
+    request,
+    allowBypass,
+    attachments,
+  );
   return launchWindow(prepared, inner, windowName, request, opts);
 }
 
@@ -670,7 +704,14 @@ async function spawnUntracked(
   // Every task gets an id of the daemon's own, so a continuation can name the conversation it resumes.
   const session = request.taskId === undefined ? undefined : crypto.randomUUID();
   const prepared = request.mode === "here" ? prepareHere(repo, session) : prepareWorktree(repo, worktreeName, session);
-  const inner = await buildInnerCommand(prepared, sessionName(worktreeName, opts.machineTag), request, attachments);
+  const allowBypass = await planAllowsBypass(request, repo, opts);
+  const inner = await buildInnerCommand(
+    prepared,
+    sessionName(worktreeName, opts.machineTag),
+    request,
+    allowBypass,
+    attachments,
+  );
   // Before launch: claude reads the tracking ref, and `FETCH_HEAD`'s age, at startup.
   const note = await freshened;
   return launchWindow(prepared, inner, windowName, request, opts, note);
