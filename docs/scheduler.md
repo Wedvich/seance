@@ -412,7 +412,7 @@ of M4 has landed.
 | 2     | Traits: probes — **Done** (#409)                                   | traits core                                                            | M                        |
 | 2     | Traits: keep free — **Done** (#414)                                | traits core                                                            | S                        |
 | 2     | Linear                                                             | settings; authoring surface                                            | L                        |
-| 2     | Successor (new) — spec 2026-11-12                                  | account records; fleet quota record; Web Push                          | M–L                      |
+| 2     | Successor (new) — **Done** (#408, #416, #425, #429)                | account records; fleet quota record; Web Push                          | M–L                      |
 | Later | LXC pressure view (was: Proxmox node view)                         | —                                                                      | S                        |
 | Later | Proxmox node view (follow-up)                                      | LXC pressure view; reopens #17                                         | M                        |
 
