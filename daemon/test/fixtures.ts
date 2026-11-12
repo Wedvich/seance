@@ -150,6 +150,31 @@ const WARM_FLAG = "--stub-warm";
 export { EXIT_PROMPT_SCREEN } from "./exit-prompt-screen.ts";
 
 const TUI_STUB = join(import.meta.dir, "tui-stub.ts");
+const STUB_BIN = join(import.meta.dir, "bin", "stub");
+
+/**
+ * An executable at `<dir>/<name>` that runs `body` under bash with the caller's
+ * argv, pid and fds (`exec`). Writing a script per stub put a first-exec macOS
+ * scan behind each one (CLAUDE.md, Testing): nine in one `beforeAll` queued
+ * 15s past its timeout under the full suite. Each stub is instead a hard link
+ * to the committed `bin/stub`, whose scan verdict persists across runs, and the
+ * body a plain file bash reads. As in `makeClaudeStub`, nothing writes or
+ * chmods through the link, and a copy stands in where a link can't reach.
+ * The warm-up pays the one scan a fresh checkout owes, so the first call
+ * belongs in `beforeAll`.
+ */
+export async function scriptStub(dir: string, name: string, body: string): Promise<string> {
+  const path = join(dir, name);
+  await rm(path, { force: true });
+  await link(STUB_BIN, path).catch(async () => {
+    await Bun.write(path, Bun.file(STUB_BIN));
+    await chmod(path, 0o755);
+  });
+  await writeFile(`${path}.sh`, `${body}\n`);
+  const warmed = await exec([path, WARM_FLAG]);
+  if (warmed.exitCode !== 0) throw new Error(`stub ${name} failed to start: ${warmed.stderr}`);
+  return path;
+}
 
 /**
  * Reproduces what tmux sees of a real claude on each host. The native

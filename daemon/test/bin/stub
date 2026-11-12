@@ -1,0 +1,6 @@
+#!/bin/bash
+# Every bash stub is a hard link to this one committed file (`scriptStub`, ../fixtures.ts),
+# running the body beside its link. macOS scans each new inode on its first exec; this
+# one's verdict persists, so a run pays no scan per stub.
+[ "$1" = --stub-warm ] && exit 0
+exec /bin/bash "$0.sh" "$@"
