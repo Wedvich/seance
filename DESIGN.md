@@ -2949,7 +2949,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   `max(cpu, mem)` as a fraction (disk never scores); `dependencyDistance` 0 / 0.25 /
   0.5 from `TaskSpec.base` (absent until M4's stacking fills it); `queuePressure` the
   in-flight scheduler tasks on the machine; `keepFree` (2026-11-12) is 1 when the exclave carries a
-  keepFree trait the task does not `require`, else 0 and omitted from the record, weighted 4 and
+  keepFree trait the task does not `require`, else 0 and omitted from the record, weighted 8 and
   added to the total ("Traits filter", "Keep free"). Stickiness subtracts a fixed bonus from the
   `TaskSpec.lineage` owner's total, never overrides a filter. Projected usage is the
   effective reading plus a fixed estimate for this task and each in-flight one billed to
@@ -3085,19 +3085,24 @@ it through the store: an app's `store-put` create, read by the leader on `store-
     config only; `parseExclaveInfo` keeps only names also in the parsed `traits` and reads an
     unreadable list as none: a soft preference lost, never a task misplaced). `judge` sets
     `components.keepFree` to 1 when the exclave carries a keepFree trait outside `task.spec.requires`
-    and adds `weights.keepFree` (4) × it to the total; the lower total still wins, so the penalty
+    and adds `weights.keepFree` (8) × it to the total; the lower total still wins, so the penalty
     _raises_ the machine's total (docs/scheduler.md's "scores lower" meant "is preferred"). Binary: three
     kept-free traits are not three times as avoided, which would be a filter by another route. A task
     requiring one kept-free trait still pays for another the exclave carries and the task does not
     require. The component is omitted at 0, so every record without a penalty is byte-identical to
-    before; `parseScore` reads an optional finite `keepFree` (an invalid one nulls the score), which an
-    older reader drops with the rest of the unknown keys, so records stay readable both ways. Cost 4
-    is a fully loaded machine's: a kept-free idle machine still beats a candidate whose account is above
-    about 67% (`(u/(1-u))²` is 4 at 2/3), and stickiness (−2) cannot outweigh it alone. Rollout: an older
-    leader ignores the advertisement and places as before; an older daemon refuses `keepFree` in config,
-    so update the machine before setting it. Record size: a worst-case 8-candidate record with
-    `keepFree: 1` on every candidate measured 40,708 `ct` against `STORE_MAX_CT_LENGTH`'s 40,960
-    (40,568 without); ten such candidates would not fit, and the leader's `too_large` retry cuts
+    before; `parseScore` reads an optional finite `keepFree` (an invalid one nulls the score), which an older reader drops with the rest of the
+    unknown keys, so records stay readable both ways. Weight 8 is the global cap's worth
+    (`globalMax`): a kept-free idle machine loses to one carrying up to 7 in-flight scheduler tasks
+    (`queuePressure` is 1 each), and at 8 the cap refuses every candidate anyway; other load on the
+    competitor shifts that, and an exact tie goes to the lower deviceId. It is also two fully loaded machines' (`machinePressure` weighs 4),
+    and it beats a competitor's account pressure up to about 74% projected at the start of a window
+    (`(u/(1-u))²` is 8 at 0.74), a little more later in it, since that cost is scaled by the share of
+    the window still to run (80% at the halfway point). Weight 4 was considered and
+    rejected: another machine carrying four tasks is normal load, and the kept-free one would then
+    take work, so it would not replace `avoid`. Stickiness (−2) cannot outweigh it alone. Rollout: an
+    older leader ignores the advertisement and places as before; an older daemon refuses `keepFree` in
+    config, so update the machine before setting it. Record size: a worst-case 8-candidate record with `keepFree: 1` on every candidate
+    measured 40,708 `ct` against `STORE_MAX_CT_LENGTH`'s 40,960 (40,568 without); ten such candidates would not fit, and the leader's `too_large` retry cuts
     the decision to its winner. Surfaces: the PWA's decision text says "kept free" for a penalised
     candidate, and `list_machines` gives each exclave `keepFree: [names]`; `decisionText` shows totals
     only. Measuring `avoid`'s share: docs/scheduler.md, "What to measure".

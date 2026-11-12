@@ -1118,13 +1118,13 @@ describe("keepFree — a score penalty for placing here what does not need this 
   const scoreOf = (decision: Decision, deviceId: string): Candidate["score"] =>
     decision.candidates.find((c) => c.deviceId === deviceId)?.score;
 
-  test("a task not requiring the trait scores 4 higher with components.keepFree 1", () => {
+  test("a task not requiring the trait scores 8 higher with components.keepFree 1", () => {
     const decision = decide([kept("a"), plain("a2", { exclaves: [exclave("main", "org:a")] })]);
     const [penalised, free] = [scoreOf(decision, "a"), scoreOf(decision, "a2")];
     expect(penalised?.components.keepFree).toBe(1);
     expect(free?.components).not.toHaveProperty("keepFree");
     expect((penalised?.total ?? 0) - (free?.total ?? 0)).toBeCloseTo(DEFAULT_CONFIG.weights.keepFree, 10);
-    expect(DEFAULT_CONFIG.weights.keepFree).toBe(4);
+    expect(DEFAULT_CONFIG.weights.keepFree).toBe(8);
   });
 
   test("a task requiring the kept-free trait gets no penalty and no component", () => {
@@ -1141,8 +1141,8 @@ describe("keepFree — a score penalty for placing here what does not need this 
     const three = { traits: ["a1", "a2", "a3"], keepFree: ["a1", "a2", "a3"] };
     const total = (task_: Task): number | undefined => scoreOf(decide([kept("a", three)], { task: task_ }), "a")?.total;
     const none = total(requiring("a1", "a2", "a3"));
-    expect(total(task())).toBeCloseTo((none ?? 0) + 4, 10);
-    expect(total(requiring("a1"))).toBeCloseTo((none ?? 0) + 4, 10);
+    expect(total(task())).toBeCloseTo((none ?? 0) + 8, 10);
+    expect(total(requiring("a1"))).toBeCloseTo((none ?? 0) + 8, 10);
     expect(scoreOf(decide([kept("a", three)], { task: requiring("a1") }), "a")?.components.keepFree).toBe(1);
   });
 
@@ -1167,13 +1167,25 @@ describe("keepFree — a score penalty for placing here what does not need this 
     expect(decision.chosen?.deviceId).toBe("b");
   });
 
-  test("never a filter: the kept-free machine takes the task when it is the only candidate, or the other is loaded", () => {
+  test("never a filter: the kept-free machine takes the task when it is the only candidate", () => {
     expect(decide([kept("a")]).chosen?.deviceId).toBe("a");
     expect(codes(only(decide([kept("a")])))).toEqual([]);
-    // A saturated machine costs 4 as well: the tie goes to the lowest deviceId, the kept-free one.
-    const loaded = plain("b", { status: status({ cpu: 100, quota: [obs(0)] }) });
-    const idle = kept("a", {}, { status: status({ cpu: 0, mem: 0, quota: [obs(0)] }) });
-    expect(decide([idle, loaded]).chosen?.deviceId).toBe("a");
+  });
+
+  // The kept-free machine sorts first where it must lose and last where it must win, so the deviceId tie-break
+  // never explains the outcome.
+  test("fills last: an idle kept-free machine loses to a loaded one, and wins once the other costs more than the penalty", () => {
+    const idle = { status: status({ cpu: 0, mem: 0, quota: [obs(0)] }) };
+    const loaded = (id: string, fiveHourPct: number): Machine =>
+      plain(id, { status: status({ cpu: 100, quota: [obs(0, { h: fiveHourPct })] }) });
+    const running = (id: string): Task[] => [held("x", id), held("y", id), held("w", id)];
+    // 4 (saturated) + 3 in flight + a little account pressure < 8: still preferred over the idle machine.
+    const preferred = decide([kept("a", {}, idle), loaded("z", 10)], { tasks: running("z") });
+    expect(preferred.chosen?.deviceId).toBe("z");
+    // The same machine on a nearly spent account costs more than the penalty, so the kept-free one wins on score.
+    const spent = decide([loaded("a", 60), kept("z", {}, idle)], { tasks: running("a") });
+    expect(spent.chosen?.deviceId).toBe("z");
+    expect(scoreOf(spent, "z")?.total).toBeLessThan(scoreOf(spent, "a")?.total ?? 0);
   });
 });
 

@@ -981,9 +981,15 @@ of M4 has landed.
     enqueue check is what keeps that rare.
   - _Decided, "keep me free":_ a trait may say `keepFree: true` — "prefer not to place tasks here
     that don't need this". Built as a score component, never a filter: a candidate exclave with a
-    `keepFree` trait the task does not require scores worse (a `keepFree` component of 1, weight 4,
-    beside `machinePressure`: its total rises by 4, and a lower total wins), so the Mac fills last
-    instead of never. Binary: several kept-free traits still cost one. `avoid` stays for "never here".
+    `keepFree` trait the task does not require scores worse (a `keepFree` component of 1, weight 8,
+    beside `machinePressure`: its total rises by 8, and a lower total wins), so the Mac fills last
+    instead of never. Binary: several kept-free traits still cost one. The trade-off, stated honestly:
+    8 is `globalMax`'s worth of `queuePressure` (the Mac loses to a machine carrying up to 7 in-flight
+    tasks), two fully loaded machines (`machinePressure` weighs 4), or a competitor's account near 74%
+    projected at the start of a window, a little more later in it (account pressure is scaled by the
+    window still to run; 80% at the halfway point); ties go by deviceId. A weight of 4 was
+    rejected: another machine carrying four tasks is normal load, and the Mac would take work then,
+    so it would not replace `avoid`. `avoid` stays for "never here".
     Advertised as `ExclaveInfo.keepFree` (names). An older leader ignores the extra component
     (`parseScore` ignores extra keys). Rejected: a filter (a busy fleet would then refuse work the
     Mac could take), and a per-task "prefer not" list (that is `avoid` again).
@@ -1470,8 +1476,8 @@ same PR, with the reason.
    out-of-fleet use becomes routine.
 8. **Score weights and the rest of `SchedulerConfig`** (set with the library, 2026-10-16;
    `scheduler/src/config.ts` is the copy that runs): weights account 1, machine 4,
-   dependency 4, queue 1, keepFree 4 (a flat 0/1, added with traits, 2026-11-12: it costs what a
-   fully loaded machine does); sticky bonus 2; per-task estimate 5% of a 5h window and 1% of a
+   dependency 4, queue 1, keepFree 8 (a flat 0/1, added with traits, 2026-11-12: `globalMax`'s
+   worth of in-flight tasks on a competitor, two fully loaded machines); sticky bonus 2; per-task estimate 5% of a 5h window and 1% of a
    weekly (all-models or per-model); global max 8 in-flight tasks; a reservation's TTL 240 s
    (`reservationTtlMs`; 120 s, twice the replay window, until attachments (DESIGN.md, 2026-10-28)
    put a download of up to 120 s before launch: it outlives the leader's 210 s wait for a spawn

@@ -649,7 +649,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
   }, 90_000);
 
   // M4's keepFree, end to end: the second daemon's config marks its trait keepFree, so its register carries
-  // `ExclaveInfo.keepFree`, and the real leader scores that machine's candidate 4 higher for a task that
+  // `ExclaveInfo.keepFree`, and the real leader scores that machine's candidate 8 higher for a task that
   // does not require the trait: the other machine wins, though the kept-free one is not filtered.
   test("a task not requiring a keepFree trait lands on the other machine, and the kept-free candidate carries the penalty", async () => {
     const second = await stack.startSecondDaemon({
