@@ -32,6 +32,21 @@ describe("withTraits", () => {
     expect(withTraits(scan, { only: { exclaves: ["default"] } })[1]).not.toHaveProperty("traits");
   });
 
+  test("`keepFree` is the sorted subset of an exclave's traits marked so, and absent when none is", () => {
+    const out = withTraits(scan, {
+      zed: { keepFree: true },
+      alpha: { keepFree: true, exclaves: ["default"] },
+      mid: {},
+      gpu: { exclaves: ["work"], keepFree: true },
+    });
+    expect(out.map((e) => [e.id, e.traits, e.keepFree])).toEqual([
+      ["default", ["alpha", "mid", "zed"], ["alpha", "zed"]],
+      ["work", ["gpu", "mid", "zed"], ["gpu", "zed"]],
+    ]);
+    const none = withTraits(scan, { mid: {}, gpu: { exclaves: ["work"] } });
+    for (const e of none) expect(e).not.toHaveProperty("keepFree");
+  });
+
   test("a trait scoped to an exclave this machine lacks is on none; the rest of each exclave is untouched", () => {
     const out = withTraits(scan, { ghost: { exclaves: ["nowhere"] } });
     expect(out).toEqual(scan);
