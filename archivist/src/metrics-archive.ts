@@ -296,7 +296,11 @@ function mergeAccount(
 ): readonly MetricsSeries[] {
   const groups = new Map<
     string,
-    { readonly metric: string; readonly labels: Readonly<Record<string, string>>; readonly buckets: Map<number, TierRow> }
+    {
+      readonly metric: string;
+      readonly labels: Readonly<Record<string, string>>;
+      readonly buckets: Map<number, TierRow>;
+    }
   >();
   for (const row of rows) {
     const series = byId.get(row.series);
@@ -316,8 +320,6 @@ function mergeAccount(
   return [...groups.values()].map(({ metric, labels, buckets }) => ({
     metric,
     labels,
-    points: [...buckets]
-      .toSorted(([a], [b]) => a - b)
-      .map(([bucket, row]): [number, number] => [bucket, row.value]),
+    points: [...buckets].toSorted(([a], [b]) => a - b).map(([bucket, row]): [number, number] => [bucket, row.value]),
   }));
 }

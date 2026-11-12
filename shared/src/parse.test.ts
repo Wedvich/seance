@@ -2896,7 +2896,9 @@ describe("archive-metrics", () => {
     expect(parseArchiveMetricsRequest({ ...base, names: [] })).toBeNull();
     expect(parseArchiveMetricsRequest({ ...base, names: Array.from({ length: 9 }, (_, i) => `n${i}`) })).toBeNull();
     expect(parseArchiveMetricsRequest({ ...base, labels: { a: 1 } })).toBeNull();
-    expect(parseArchiveMetricsRequest({ ...base, labels: { a: "x".repeat(METRICS_MAX_FILTER_LENGTH + 1) } })).toBeNull();
+    expect(
+      parseArchiveMetricsRequest({ ...base, labels: { a: "x".repeat(METRICS_MAX_FILTER_LENGTH + 1) } }),
+    ).toBeNull();
   });
 });
 
