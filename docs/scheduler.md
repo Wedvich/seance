@@ -839,7 +839,7 @@ of M4 has landed.
   the relay when each account is in use. DESIGN.md _Scheduler_, "Fleet quota record" records the
   writer as built (its register gate, bounds and the unreadable-record rule) and its readers.
   `status` shrinking to pressure, the other payoff, is not done.
-- **Auth health** — **Done** (DESIGN.md "Auth health"; PR #<n>). `authOk` says only that `.claude.json` names an
+- **Auth health** — **Done** (DESIGN.md "Auth health"; PR #402). `authOk` says only that `.claude.json` names an
   `oauthAccount`: a revoked or lapsed login still reads as signed in, and the `auth_missing`
   filter routes to an exclave that cannot start a session. Per exclave `ok | expiring | expired |
   unknown`, carried in `status`, not the register blob (a change there re-registers and drops the
