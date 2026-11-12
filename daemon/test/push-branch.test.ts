@@ -287,6 +287,17 @@ describe("what stops a push", () => {
     expect(await pushTaskBranch(site(join(base, "nowhere")))).toMatchObject({ ok: false, code: "not_launched" });
   });
 
+  test("a repo's own checkout is not a task's worktree, whatever path asks for it", async () => {
+    await git(fixture.repoPath, "checkout", "-q", "-B", "task/in-the-clone", "origin/main");
+    await commit(fixture.repoPath);
+    try {
+      expect(await pushTaskBranch(site(fixture.repoPath))).toMatchObject({ ok: false, code: "not_launched" });
+      expect(await originTip("task/in-the-clone")).toBeNull();
+    } finally {
+      await git(fixture.repoPath, "checkout", "-q", "main");
+    }
+  });
+
   test("a head that is not a branch name never reaches git", async () => {
     const path = await worktree("task/bad-head");
     await commit(path);

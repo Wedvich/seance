@@ -102,7 +102,7 @@ function isDefault(name: string, defaultBranch: string | null): boolean {
 export async function pushTaskBranch(site: TaskSite, options: PushOptions = {}): Promise<PushBranchResponse> {
   const { path } = site;
   const checkout = await inspectCheckout(path);
-  if (checkout.kind !== "linked" && checkout.kind !== "main") return fail("not_launched");
+  if (checkout.kind !== "linked") return fail("not_launched");
   const here = await canonical(path);
   const trees = await listWorktrees(path);
   if (trees === null) return fail("push_failed");
