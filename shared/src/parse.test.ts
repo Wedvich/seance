@@ -860,6 +860,16 @@ describe("tasks and their records", () => {
     expect(parseDecision(decision({ ...over, creditsSpent: false }))?.candidates[0]?.rejected).toEqual([]);
   });
 
+  test("a spill may say it is spending; any other value voids the decision", () => {
+    const candidate = { deviceId: "d", machine: "mac", exclave: "default", rejected: [] };
+    const decision = (spill: unknown) => ({ at: 1, chosen: null, candidates: [{ ...candidate, spill }] });
+    const forecast = { window: "5h", projectedPct: 93 };
+    expect(parseDecision(decision(forecast))?.candidates[0]?.spill).toEqual(forecast);
+    const spending = parseDecision(decision({ ...forecast, spending: true }))?.candidates[0]?.spill;
+    expect(spending).toEqual({ ...forecast, spending: true });
+    expect(parseDecision(decision({ ...forecast, spending: false }))).toBeNull();
+  });
+
   test("an older leader's batch order hold drops the reason, never the candidate or the decision", () => {
     const candidate = { deviceId: "d", machine: "mac", exclave: "default", rejected: [] };
     const decision = {
@@ -1212,13 +1222,11 @@ describe("store", () => {
   });
 
   test("the alert stamps survive a parse, and a malformed one voids the task", () => {
-    const stamped: Task = {
-      ...created,
-      state: "needs-input",
-      inputAlerted: true,
-      spillAlert: { accountId: "org:acct", window: "7d", reset: 0, at: 1_760_000_000_000 },
-    };
+    const stamp = { accountId: "org:acct", window: "7d", reset: 0, at: 1_760_000_000_000 };
+    const stamped: Task = { ...created, state: "needs-input", inputAlerted: true, spillAlert: stamp };
     expect(parseTask(stamped)).toEqual(stamped);
+    const spending: Task = { ...stamped, spillAlert: { ...stamp, spending: true } };
+    expect(parseTask(spending)).toEqual(spending);
     for (const bad of [
       { ...stamped, inputAlerted: false },
       { ...stamped, spillAlert: { accountId: "org:acct", window: "7d", reset: 0 } },
@@ -1227,6 +1235,7 @@ describe("store", () => {
       { ...stamped, spillAlert: { accountId: "org:acct", window: "7d", reset: -1, at: 1 } },
       { ...stamped, spillAlert: { accountId: "org:acct", window: "7d", reset: 0, at: -1 } },
       { ...stamped, spillAlert: "7d" },
+      { ...stamped, spillAlert: { accountId: "org:acct", window: "7d", reset: 0, at: 1, spending: false } },
     ]) {
       expect(parseTask(bad)).toBeNull();
     }
@@ -2069,7 +2078,8 @@ describe("parsePushAlert", () => {
 
   test("accepts each kind as built, with a disk alert's readings optional", () => {
     const bare = { v: 1, kind: "disk", at: 5, deviceId: "dev-1" } as const;
-    for (const alert of [spill, input, disk, bare]) {
+    const spending = { ...spill, spending: true } as const;
+    for (const alert of [spill, spending, input, disk, bare]) {
       expect(parsePushAlert(alert)).toEqual(alert);
     }
   });
@@ -2084,6 +2094,7 @@ describe("parsePushAlert", () => {
       { ...spill, taskId: "../x" },
       { ...input, escalated: "yes" },
       { ...spill, projectedPct: Number.NaN },
+      { ...spill, spending: false },
       { ...disk, deviceId: "a/b" },
       { ...disk, freeMib: "400" },
       null,

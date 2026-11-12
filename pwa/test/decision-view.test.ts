@@ -149,22 +149,25 @@ describe("describeDecision", () => {
       "would",
     );
     expect(summary.chosen?.why).toBe(
-      "lowest score — score 0.50 (account 0.25 · load 40% · queue 1 · distance 0.25 · continuation −2.00) — would spend credits (7d at 93%)",
+      "lowest score — score 0.50 (account 0.25 · load 40% · queue 1 · distance 0.25 · continuation −2.00) — may spill into credits (7d projected at 93%)",
     );
   });
 
-  test("a placed task's record says it is spending credits, not that it would", () => {
+  test("a placed task's record says it is spending credits, not that it would; past the line alone says may in either tense", () => {
     const base = scored("mac", "Mac", 0.5);
-    const spilling: Candidate = { ...base, spill: { window: "7d", projectedPct: 93.4 } };
-    const placedDecision: Decision = {
+    const spending: Candidate = { ...base, spill: { window: "7d", projectedPct: 101, spending: true } };
+    const record: Decision = {
       at: NOW,
       chosen: { deviceId: "mac", exclave: "default", clone: "app" },
-      candidates: [spilling, { ...scored("pc", "PC", 0.9), spill: { window: "5h", projectedPct: 101 } }],
+      candidates: [spending, { ...scored("pc", "PC", 0.9), spill: { window: "5h", projectedPct: 93.4 } }],
     };
-    const placed = describeDecision(placedDecision, [], NOW, "did");
-    expect(placed.chosen?.why).toEndWith("— spending credits (7d projected at 93%)");
-    expect(placed.others[0]?.why).toEndWith("— spending credits (5h projected at 101%)");
+    const placed = describeDecision(record, [], NOW, "did");
+    expect(placed.chosen?.why).toEndWith("— spending credits (7d full)");
+    expect(placed.others[0]?.why).toEndWith("— may spill into credits (5h projected at 93%)");
     expect(JSON.stringify(placed)).not.toContain("would spend");
+    const preview = describeDecision(record, [], NOW, "would");
+    expect(preview.chosen?.why).toEndWith("— would spend credits (7d full)");
+    expect(preview.others[0]?.why).toEndWith("— may spill into credits (5h projected at 93%)");
   });
 });
 

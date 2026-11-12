@@ -279,7 +279,11 @@ function judgeAccount(
   // Spent credits can't take the spill. Unknown credits (a daemon that predates `c`) still may: refusing them would
   // stop every spill until the fleet upgrades.
   const spent = creditsSpent(observation, pass.now);
-  if (exclave.extraUsageEnabled === true && !spent) return { quota, spill: over, pressure };
+  if (exclave.extraUsageEnabled === true && !spent) {
+    // Past the line is a forecast: the estimate is a fixed guess, and credits bill only once a window is full.
+    const full = fullWindow(windows, added, pass.now, pass.config);
+    return { quota, spill: full === null ? over : { ...full, spending: true }, pressure };
+  }
   return {
     reason: { code: "quota_over_line", ...over, ...(exclave.extraUsageEnabled === true ? { creditsSpent: true } : {}) },
     quota,
@@ -528,18 +532,45 @@ function estimate(config: SchedulerConfig, capacity: number, tasks: number): (w:
   return (w) => (config.taskEstimatePct[w.span] / capacity) * tasks;
 }
 
-/** The worst window whose projected usage crosses the line; one resetting within the grace counts as empty. */
+/** The worst window whose projected usage crosses the line. */
 function overLine(
   windows: readonly QuotaWindow[],
   added: (w: QuotaWindow) => number,
   now: number,
   config: SchedulerConfig,
-): { readonly window: string; readonly projectedPct: number } | null {
-  let worst: { readonly window: string; readonly projectedPct: number } | null = null;
+): WorstWindow | null {
+  return worstWindow(windows, added, now, config, (_, projectedPct) => projectedPct > config.quotaLinePct);
+}
+
+/** The worst window already reading full: an account with extra usage on spends credits there now. */
+function fullWindow(
+  windows: readonly QuotaWindow[],
+  added: (w: QuotaWindow) => number,
+  now: number,
+  config: SchedulerConfig,
+): WorstWindow | null {
+  return worstWindow(windows, added, now, config, (readingPct) => readingPct >= 100);
+}
+
+interface WorstWindow {
+  readonly window: string;
+  readonly projectedPct: number;
+}
+
+/** The highest-projected window `crosses` admits; one resetting within the grace reads as empty. */
+function worstWindow(
+  windows: readonly QuotaWindow[],
+  added: (w: QuotaWindow) => number,
+  now: number,
+  config: SchedulerConfig,
+  crosses: (readingPct: number, projectedPct: number) => boolean,
+): WorstWindow | null {
+  let worst: WorstWindow | null = null;
   for (const w of windows) {
     const resetsSoon = w.resetsAt !== undefined && w.resetsAt * 1000 - now <= config.resetGraceMs;
-    const projectedPct = (resetsSoon ? 0 : w.pct) + added(w);
-    if (projectedPct > config.quotaLinePct && (worst === null || projectedPct > worst.projectedPct)) {
+    const readingPct = resetsSoon ? 0 : w.pct;
+    const projectedPct = readingPct + added(w);
+    if (crosses(readingPct, projectedPct) && (worst === null || projectedPct > worst.projectedPct)) {
       worst = { window: w.label, projectedPct };
     }
   }

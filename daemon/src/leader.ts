@@ -266,7 +266,8 @@ function watched(inner: QueueStore, changed: (id: string | null) => void): Queue
  */
 function alertToPush(alert: SchedulerAlert, at: number): PushAlert {
   if (alert.kind === "spill") {
-    return { v: 1, kind: "spill", at, taskId: alert.taskId, window: alert.window, projectedPct: alert.projectedPct };
+    const { taskId, window, projectedPct, spending } = alert;
+    return { v: 1, kind: "spill", at, taskId, window, projectedPct, ...(spending === undefined ? {} : { spending }) };
   }
   return { v: 1, kind: "needs-input", at, taskId: alert.taskId, since: alert.since, escalated: alert.escalated };
 }

@@ -793,6 +793,19 @@ describe("decisionText", () => {
       "no candidate can take it now; 4 more candidates not shown",
     );
   });
+
+  test("a chosen spill says spending only for a full window; past the line alone is a forecast", () => {
+    const [chosen, ...rest] = decision.candidates;
+    if (chosen === undefined) throw new Error("fixture has a chosen candidate");
+    const spilling = (spill: NonNullable<(typeof chosen)["spill"]>): string =>
+      decisionText({ ...decision, candidates: [{ ...chosen, spill }, ...rest] });
+    expect(spilling({ window: "5h", projectedPct: 93 })).toStartWith(
+      "chose Linux Box/work (lowest score, 0.30), may spill into credits (5h);",
+    );
+    expect(spilling({ window: "7d", projectedPct: 101, spending: true })).toStartWith(
+      "chose Linux Box/work (lowest score, 0.30), spending credits (7d);",
+    );
+  });
 });
 
 const running = task({

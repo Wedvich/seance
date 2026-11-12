@@ -445,7 +445,10 @@ export function decisionText(decision: Decision): string {
   if (chosen !== null) {
     const where = winner === undefined ? `${chosen.deviceId}/${chosen.exclave}` : candidateWhere(winner);
     const score = winner?.score === undefined ? "" : ` (lowest score, ${winner.score.total.toFixed(2)})`;
-    const spill = winner?.spill === undefined ? "" : `, spending credits (${winner.spill.window})`;
+    const spill =
+      winner?.spill === undefined
+        ? ""
+        : `, ${winner.spill.spending === true ? "spending credits" : "may spill into credits"} (${winner.spill.window})`;
     head = `chose ${where}${score}${spill}`;
   }
   const others = decision.candidates

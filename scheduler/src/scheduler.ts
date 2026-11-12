@@ -77,8 +77,9 @@ export interface SchedulerOptions {
    */
   readonly onError?: (err: unknown) => void;
   /**
-   * A dispatch spending credits (once its spawn is confirmed), or an escalated
-   * wait for input (once its write lands) — `SchedulerAlert`. A throw goes to `onError`.
+   * A dispatch past the quota line on an account that may spill into credits, or
+   * already spends them (once its spawn is confirmed), or an escalated wait for
+   * input (once its write lands) — `SchedulerAlert`. A throw goes to `onError`.
    */
   readonly onAlert?: (alert: SchedulerAlert) => void;
   /**
@@ -1369,9 +1370,12 @@ function stamped(task: Task, at: Reservation, stamp: SpillStamp): Task | null {
   if (parseSpillStamp(stamp) === null) return null;
   const mine = holds(task, at) || (PLACED.includes(task.state) && task.assignment?.deviceId === at.deviceId);
   const held = task.spillAlert;
-  if (!mine || (held?.accountId === stamp.accountId && held.window === stamp.window && held.reset === stamp.reset)) {
-    return null;
-  }
+  const same =
+    held?.accountId === stamp.accountId &&
+    held.window === stamp.window &&
+    held.reset === stamp.reset &&
+    held.spending === stamp.spending;
+  if (!mine || same) return null;
   return { ...task, spillAlert: stamp };
 }
 

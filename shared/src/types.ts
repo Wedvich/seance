@@ -2087,8 +2087,13 @@ export interface Candidate {
   readonly rejected: readonly Reason[];
   readonly score?: Score;
   readonly quota?: QuotaBasis;
-  /** Over the line but allowed to spend credits — dispatching here spills. The leader logs it once per account per window after a confirmed spawn; M4 adds the push. */
-  readonly spill?: { readonly window: string; readonly projectedPct: number };
+  /**
+   * Over the line but allowed to spend credits. `spending` when a window the task is judged on already
+   * reads full (it names that window): credits bill from the task's start. Without it the spill is a
+   * forecast — the projection crossed the line, the reading has not reached 100%. The leader pushes each
+   * once per account per window after a confirmed spawn.
+   */
+  readonly spill?: { readonly window: string; readonly projectedPct: number; readonly spending?: true };
 }
 
 /**
@@ -2147,13 +2152,15 @@ export const PR_STATUS_STALE_MS = 10 * 60_000;
 /**
  * The quota window a spill alert fired for (`Task.spillAlert`); `reset` is ms, 0 when the reading carried
  * none. `at` is when it alerted (ms, the leader's clock): with no reset it is all that tells a later term
- * the stamp is too old to describe the window now running.
+ * the stamp is too old to describe the window now running. `spending` when the alert was the spending one
+ * (`Candidate.spill`): the two de-dupe apart, so a window warned of still alerts once it fills.
  */
 export interface SpillStamp {
   readonly accountId: string;
   readonly window: string;
   readonly reset: number;
   readonly at: number;
+  readonly spending?: true;
 }
 
 export interface Task {
@@ -2776,6 +2783,8 @@ export type PushAlert =
       readonly taskId: string;
       readonly window: string;
       readonly projectedPct: number;
+      /** `Candidate.spill`'s: absent, the alert is a forecast, which a worker that predates the field still words as spending. */
+      readonly spending?: true;
     }
   | {
       readonly v: 1;

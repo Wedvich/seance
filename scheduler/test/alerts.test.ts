@@ -384,11 +384,11 @@ describe("needs-input first alert", () => {
   });
 });
 
-/** Machine `a` whose account is over the line in its 5h window, resetting at `hr`, with extra usage on. */
-function spilling(hr: number): ReturnType<typeof machine> {
+/** Machine `a` whose account reads `h`% in its 5h window — over the line by default — resetting at `hr`, with extra usage on. */
+function spilling(hr: number, h = 95): ReturnType<typeof machine> {
   return machine("a", {
     exclaves: [exclave("main", "org:a", { extraUsageEnabled: true })],
-    status: status({ quota: [obs(0, { h: 95, hr })] }),
+    status: status({ quota: [obs(0, { h, hr })] }),
   });
 }
 
@@ -442,6 +442,45 @@ describe("credits spill", () => {
 
     fleet.fleet = [spilling(NOW_S + 5 * 3600)];
     await spillOnce();
+    expect(alerts).toHaveLength(2);
+  });
+
+  test("a window warned of alerts once more when it fills, and a new leader holds both alerts", async () => {
+    const { alerts, clock, fleet, make, scheduler, store } = setup(
+      new FakeFleet([spilling(NOW_S + 3600)]),
+      undefined,
+      WIDE,
+    );
+    const forecast = await enqueue(store, scheduler, spec());
+    await pass(scheduler, fleet, clock.now);
+    expect(alerts).toEqual([expect.objectContaining({ kind: "spill", taskId: forecast.id, window: "5h" })]);
+    expect(alerts[0]).not.toHaveProperty("spending");
+    expect(alerts[0]?.message).toStartWith("may spill into credits:");
+
+    // The same window, now full: credits are billing, which the forecast did not say.
+    fleet.fleet = [spilling(NOW_S + 3600, 100)];
+    const spending = await enqueue(store, scheduler, spec());
+    await pass(scheduler, fleet, clock.now);
+    await enqueue(store, scheduler, spec());
+    await pass(scheduler, fleet, clock.now);
+    expect(alerts.map((a) => a.taskId)).toEqual([forecast.id, spending.id]);
+    expect(alerts[1]).toMatchObject({ kind: "spill", window: "5h", spending: true });
+    expect(alerts[1]?.message).toStartWith("spending credits:");
+    expect((await stored(store, spending.id)).body.spillAlert).toEqual({
+      accountId: "org:a",
+      window: "5h",
+      reset: (NOW_S + 3600) * 1000,
+      at: NOW,
+      spending: true,
+    });
+
+    const next = make();
+    await next.takeover();
+    await enqueue(store, next, spec());
+    await pass(next, fleet, clock.now);
+    fleet.fleet = [spilling(NOW_S + 3600)];
+    await enqueue(store, next, spec());
+    await pass(next, fleet, clock.now);
     expect(alerts).toHaveLength(2);
   });
 

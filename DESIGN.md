@@ -2403,7 +2403,7 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   as AAD"), and the residual cross-daemon duplicate is recorded there.
 - **Alerts are a log line plus a push** (M3 item 5, M4 Web Push). The term's `Scheduler` takes
   `onAlert`, which `startTerm` logs as `warn scheduler: <message>` and hands to the push sender
-  (_Web Push_, below): a dispatch spending credits, a wait for input (past 2 minutes, and again
+  (_Web Push_, below): a dispatch that may spill into credits or already spends them, a wait for input (past 2 minutes, and again
   past 30) and, from the leader's own watch, a nearly full disk (_The library_, "Credits spill"
   and "Needs input"; _Disk alerts_, below). The line names task, account and device ids, never
   a prompt or title; the push payload names a task or device id and state, and no account.
@@ -2673,13 +2673,18 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   the same account, per window span (`taskEstimatePct`: 5% of a 5h window, 1% of a weekly —
   a task's share of a week is a fraction of its share of five hours); the filter additionally treats a window resetting within 15 min as
   empty. An exclave with extra usage on is scored past the line and its candidate
-  carries `spill` ("Credits spill" below); `extraUsageEnabled: null` reads as off. Credits
+  carries `spill` ("Credits spill" below); `extraUsageEnabled: null` reads as off. The spill
+  carries `spending` (2026-11-11) only when a window the task is judged on already reads 100%
+  (by the filter's reading, so a window resetting within the grace is empty), naming that window
+  over one that projects higher; without it the spill is a forecast. Past the line alone is no
+  proof: the projection adds a fixed guess per task (25% of a standard seat's 5h window), and
+  credits bill only once a window is full. Credits
   spent to the cap (`cu` reaching `cl` on the account's reading; `c` at 100 only from a daemon
   that predates the amounts — `c` rounds for the card, so it alone can say 100 with credits
   left) can't take a spill, so that exclave is
   `quota_over_line` with `creditsSpent` instead. A reading without `c` (a daemon that predates
   it, or a trimmed status), or one from before this UTC month (credits reset then), still spills: refusing it would stop every spill until the fleet
-  upgrades, and the spill alert still says credits are being spent.
+  upgrades, and the spill alert still warns.
   Exact ties go to the lowest `deviceId`, then exclave, so a decision reproduces.
 - **Seats** (2026-10-18, docs/scheduler.md Settled defaults 17). `SchedulerConfig.seats`
   maps `ExclaveInfo.seatTier` to a `capacity` (quota relative to the largest seat) and the
@@ -2900,16 +2905,26 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   push per stay at the first threshold crossed, a second only for a wait that outlives the
   escalation.
 - **Credits spill** (M3 item 5). A reservation on a candidate carrying `spill` is recorded in
-  the decision the reservation writes — the PWA's verdict shows it on the chosen line, "would
-  spend credits (5h at 93%)" — and alerted through `onAlert` once its spawn is confirmed (a
+  the decision the reservation writes — the PWA's verdict shows it on the chosen line, "may
+  spill into credits (5h projected at 93%)", or "would spend credits (5h full)" for `spending`
+  — and alerted through `onAlert` once its spawn is confirmed (a
   refused spawn spent nothing, and must not burn the window's one alert), once per account per
-  quota window, not per task: the record is the per-task trace. A window is told apart by its
+  quota window per level, not per task: the record is the per-task trace. The two levels
+  (2026-11-11) are the forecast and `spending` (Routing, above), de-duped apart, so a window
+  warned of past the line alerts once more when a dispatch lands on it full. Until then every
+  spill alerted as spending credits from 90% projected, which on a standard seat with one task
+  in flight was a window reading 41%. A spend that starts mid-task, with no dispatch onto the
+  full window after it, gets no spending alert: the forecast was the warning. Not built: a
+  leader watch pushing whenever an extra-usage account reads full, whatever spent it (manual
+  sessions too) — it would need its own alert kind and de-dupe. A window is told apart by its
   reset, and two readings of one reset differ by seconds, so a later reset is a new window only
   by more than `resetGraceMs` (or once the alerted one has passed); a reading with no reset
   never is one. An `onAlert` that throws goes to `onError`, never into the pass.
   The de-dupe is `SpillAlerts` (`alerts.ts`), persisted: the alert's window is stamped on the
-  task as `spillAlert` (`{accountId, window, reset, at}`, `reset` and `at` in ms, `reset` 0 when
-  unknown, `at` when it alerted) by a write of its own after the reservation's verdict, and a
+  task as `spillAlert` (`{accountId, window, reset, at, spending?}`, `reset` and `at` in ms, `reset` 0 when
+  unknown, `at` when it alerted, `spending` the alert's level; a stamp without it, an older
+  leader's included, seeds the forecast level, so a window an older leader alerted may alert
+  spending once more) by a write of its own after the reservation's verdict, and a
   takeover seeds `SpillAlerts` from every held task's stamp, so a new leader does not alert an
   ongoing spill again. A stamp that cannot describe a window running now is dropped at the seed
   instead: its reset passed by more than `resetGraceMs`, or, with no reset, its `at` is older than
@@ -6568,8 +6583,11 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   the `skipWaiting`/`clientsClaim` update path stay the plugin's) shows every push as a generic
   "Séance" notification, even one it cannot read, because Chrome shows its own otherwise and
   WebKit revokes a subscription after a few silent pushes. The text is fixed per kind ("A task
-  is waiting for input", "… still waiting for input (30 min)", "A task is spending credits (7d
-  at 105%)", "A machine's disk is nearly full"); the spill's window is shown only when it is one
+  is waiting for input", "… still waiting for input (30 min)", "A task may spill into credits
+  (7d projected at 95%)", "A task is spending credits (5h full)", "A machine's disk is nearly
+  full"); the spill is worded as spending only for a payload's `spending: true`, anything else
+  being the forecast, the weaker claim (a worker that predates the field words both as
+  spending); the spill's window is shown only when it is one
   of the scheduler's labels (`5h`, `7d`, or a per-model `7d <model>`, shown as `7d`), never as
   the payload spells it. The payload's ids are the notification's tag, so a repeat replaces
   rather than stacks, and every notification sets `renotify` so that replacement is still
@@ -6989,7 +7007,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   Not in Needs you: nothing is owed to a session that finished its turn, and its slot is already free. A row shows the
   task's title (its own, else its prompt's first line cut to 80, else its session's window name, else its repo), where it is and
   why, with the decision's record on tap — in the past tense once the task was placed ("spending
-  credits", not "would spend"). A task whose session reported a PR (`Task.prUrl`, the newest one —
+  credits", not "would spend"; a forecast spill says "may spill into credits" in either). A task whose session reported a PR (`Task.prUrl`, the newest one —
   the record keeps no other) carries it as a chip linking out, leading the card's action row, `#123` where the URL names a
   number (GitHub's `/pull/`, GitLab's `/merge_requests/`), else `PR`; the URL is safe as an href
   because the parser admits only `https:`. Beside the chip the card shows one action inline, the
