@@ -22,6 +22,7 @@ import { createSettingsStore, type SettingsStore } from "../src/settings-store.t
 import { withinCap } from "../src/store-frames.ts";
 import { generateVapidKeys } from "../src/web-push.ts";
 import { VersionFloor } from "../src/version-floor.ts";
+import { bunFragmentedFrameBroken } from "./fixtures.ts";
 import { startTestRelay, type TestRelay } from "./harness.ts";
 
 const PSK = toBase64(new Uint8Array(32).fill(5));
@@ -179,12 +180,15 @@ describe("reader rules", () => {
     });
   });
 
-  test("a reply that cannot be answered rejects instead of reading as no record", async () => {
-    await withRig(async ({ relay, store }) => {
-      relay.replyNextStore((frame) => ({ t: "store-refused", re: frame.id, code: "invalid_request" }));
-      await expect(store.get()).rejects.toThrow("invalid_request");
-    });
-  });
+  test.skipIf(bunFragmentedFrameBroken)(
+    "a reply that cannot be answered rejects instead of reading as no record",
+    async () => {
+      await withRig(async ({ relay, store }) => {
+        relay.replyNextStore((frame) => ({ t: "store-refused", re: frame.id, code: "invalid_request" }));
+        await expect(store.get()).rejects.toThrow("invalid_request");
+      });
+    },
+  );
 });
 
 describe("size", () => {
@@ -227,7 +231,7 @@ describe("the term's fence", () => {
     );
   });
 
-  test("the relay answering not_leader throws it too", async () => {
+  test.skipIf(bunFragmentedFrameBroken)("the relay answering not_leader throws it too", async () => {
     await withRig(async ({ relay, store }) => {
       relay.replyNextStore((frame) => ({ t: "store-refused", re: frame.id, code: "not_leader" }));
       await expect(store.put(0, { vapid: await generateVapidKeys() })).rejects.toBeInstanceOf(Revoked);

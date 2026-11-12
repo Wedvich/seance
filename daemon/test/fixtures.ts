@@ -599,3 +599,11 @@ export async function captureLog(body: () => Promise<void>): Promise<string[]> {
   }
   return lines;
 }
+
+// Bun 1.4.4 regression: the relay socket dies with close 1002 "Received new message inside a
+// fragmented message" in six store tests (queue-store, settings-store). All six answer a store
+// frame via the fake relay's `replyNextStore`, but other `replyNextStore` tests pass and the exact
+// trigger is unidentified. CI pins 1.4.2. Exact versions, not a floor, so a fixed Bun runs them
+// again: drop "1.4.4" here once it is.
+const BUN_FRAGMENTED_FRAME_BROKEN: readonly string[] = ["1.4.4"];
+export const bunFragmentedFrameBroken: boolean = BUN_FRAGMENTED_FRAME_BROKEN.includes(Bun.version);
