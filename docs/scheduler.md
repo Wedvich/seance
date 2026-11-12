@@ -989,7 +989,9 @@ of M4 has landed.
     projected at the start of a window, a little more later in it (account pressure is scaled by the
     window still to run; 80% at the halfway point); ties go by deviceId. A weight of 4 was
     rejected: another machine carrying four tasks is normal load, and the Mac would take work then,
-    so it would not replace `avoid`. `avoid` stays for "never here".
+    so it would not keep the Mac free. `keepFree` covers only the standing "only when nothing better
+    is free"; `avoid` stays the owner's explicit "not here this time" for a batch (ahead of a reboot,
+    before closing the lid for a commute), which no config preference can know.
     Advertised as `ExclaveInfo.keepFree` (names). An older leader drops `ExclaveInfo.keepFree`
     (`parseExclaveInfo`) and places as before; an older reader's `parseScore` drops the component. Rejected: a filter (a busy fleet would then refuse work the
     Mac could take), and a per-task "prefer not" list (that is `avoid` again).
@@ -1022,7 +1024,8 @@ of M4 has landed.
     the client); tasks held, for how long, and by which trait.
   - `avoid`: the leader logs, per admitted task, whether it carries `avoid`, `requires` or a pin
     (counts only, no ids or names); the share of tasks with `avoid` before `keepFree` ships and a
-    month after it does says whether the workaround went away. The counts exist only from the traits-core
+    month after it does says how much of `avoid` was standing in for "keep this machine free". It is
+    not a target to drive to zero: `avoid` for a reboot or a commute is meant to go on. The counts exist only from the traits-core
     deploy (#406), so "before" is the window between that deploy and the `keepFree` deploy; there is no
     pre-traits baseline (earlier admit lines carry no counts, and no earlier line records `avoid`; the command skips them, or the
     months before the deploy would read 100%). Owner,
@@ -1039,8 +1042,8 @@ of M4 has landed.
 
     To count across leaders, feed the logs of all of them into the `grep` (e.g. `ssh <box> cat
     …/seanced.log`), so a task admitted under two leaders counts once. The "after" share is the month
-    starting a month after the `keepFree` deploy; a falling share means `avoid` was standing in for
-    "keep this machine free".
+    starting a month after the `keepFree` deploy; the drop, if any, is the part of `avoid` that was
+    standing in for "keep this machine free", and what remains is deliberate.
 
 - **Spawn defaults to the scheduler** — **Done** (owner, 2026-10-25; PRs #309, #310 and #311): every
   spawn is a task, a machine or an account is a pin on it, and a task's pin and `avoid` show on

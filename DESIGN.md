@@ -3113,7 +3113,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
     (`(u/(1-u))²` is 8 at 0.74), a little more later in it, since that cost is scaled by the share of
     the window still to run (80% at the halfway point). Weight 4 was considered and
     rejected: another machine carrying four tasks is normal load, and the kept-free one would then
-    take work, so it would not replace `avoid`. Stickiness (−2) cannot outweigh it alone. Rollout: an
+    take work, so it would not keep that machine free. It complements `avoid`, never replaces it:
+    `avoid` is the owner's explicit per-batch "not here this time" (a reboot, a closed lid). Stickiness (−2) cannot outweigh it alone. Rollout: an
     older leader ignores the advertisement and places as before; an older daemon refuses `keepFree` in
     config, so update the machine before setting it. Mixed versions: if leadership moves to a daemon
     built before this one, it rewrites a task's decision on its next write without
