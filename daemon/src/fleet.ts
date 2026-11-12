@@ -235,10 +235,13 @@ export function brokerScheduler(
  * lease falls back to `machines` with no scheduler (`SCHEDULER_NEEDS_NEWER_DAEMON`).
  */
 export function brokerFleet(opts: BrokerCallOpts = {}, self: () => Promise<string | null> = ownDeviceId): Fleet {
+  // A box's deviceId never changes once it exists, so a hit is kept and only a miss (no state yet) asks again.
+  let known: string | null = null;
+  const selfOnce = async (): Promise<string | null> => (known ??= await self());
   return {
     open: async (): Promise<FleetLease> => {
       const state = await brokerFleetState(opts);
-      const stale = (await daemonLacksTraits(state.machines, self)) ? OLDER_DAEMON_TRAITS : undefined;
+      const stale = await traitsRefusalOf(state.machines, selfOnce);
       return {
         machines: state.machines,
         request: <T>(deviceId: string, op: BrokerOp, payload: unknown): Promise<T | ErrorResponse> =>
@@ -253,21 +256,30 @@ export function brokerFleet(opts: BrokerCallOpts = {}, self: () => Promise<strin
 
 export const OLDER_DAEMON_TRAITS =
   "this machine's daemon is older than this seanced: restart or update it (seanced update)";
+export const UNCONFIRMED_DAEMON_TRAITS =
+  "this machine is not in the fleet registry yet, so its daemon cannot be confirmed to carry traits: start seanced, or restart it (seanced update)";
 
 /** This box's deviceId from its state file; null before the daemon's first run. */
-async function ownDeviceId(): Promise<string | null> {
+export async function ownDeviceId(): Promise<string | null> {
   return (await readState())?.deviceId ?? null;
 }
 
 /**
- * Whether the daemon this peer brokers through is one that predates traits: its own registry entry does not
- * advertise them. Unknowable (no state, no entry) reads as lacking, since the answer only matters to a spec
- * that carries `requires`, and sending one to a daemon that drops it is the failure.
+ * Why a spec carrying `requires` cannot go through the daemon this peer brokers through, or undefined when it
+ * can. Older: its own registry entry does not advertise traits. Unconfirmed: no state or no entry, which fails
+ * closed because sending `requires` to a daemon that drops it is the failure. A registry where every machine
+ * advertises traits needs no lookup of who "self" is.
  */
-async function daemonLacksTraits(machines: readonly Machine[], self: () => Promise<string | null>): Promise<boolean> {
+async function traitsRefusalOf(
+  machines: readonly Machine[],
+  self: () => Promise<string | null>,
+): Promise<string | undefined> {
+  const advertises = (m: Machine): boolean => m.capabilities?.includes(CAPABILITIES.traits) === true;
+  if (machines.length > 0 && machines.every(advertises)) return undefined;
   const deviceId = await self();
   const entry = deviceId === null ? undefined : machines.find((m) => m.deviceId === deviceId);
-  return entry?.capabilities?.includes(CAPABILITIES.traits) !== true;
+  if (entry === undefined) return UNCONFIRMED_DAEMON_TRAITS;
+  return advertises(entry) ? undefined : OLDER_DAEMON_TRAITS;
 }
 
 /**

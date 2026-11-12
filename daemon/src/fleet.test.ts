@@ -17,7 +17,15 @@ import { machine } from "../test/fake-app-relay.ts";
 import { BrokerError } from "./broker-client.ts";
 import { brokerFail, brokerOk, type BrokerReply } from "./broker-protocol.ts";
 import { enqueueAuto } from "./auto.ts";
-import { brokerFleet, DaemonFault, FleetUnreachable, selectFleet, type Fleet, type FleetLease } from "./fleet.ts";
+import {
+  brokerFleet,
+  DaemonFault,
+  FleetUnreachable,
+  selectFleet,
+  UNCONFIRMED_DAEMON_TRAITS,
+  type Fleet,
+  type FleetLease,
+} from "./fleet.ts";
 
 interface CountingFleet extends Fleet {
   opened: number;
@@ -323,11 +331,43 @@ describe("brokerFleet", () => {
       const unknown = await daemonOf(NEW);
       try {
         const lease = await brokerFleet({ path: unknown.path }, () => Promise.resolve(null)).open();
-        expect(lease.scheduler?.requiresRefusal).toBeDefined();
+        // Not "older": nothing says the daemon is, only that this box is not in the registry.
+        expect(lease.scheduler?.requiresRefusal).toBe(UNCONFIRMED_DAEMON_TRAITS);
       } finally {
         await unknown.stop();
       }
     });
+  });
+
+  test("the lookup of this box's own deviceId is skipped when every machine advertises traits, and kept once found", async () => {
+    const entry = (deviceId: string, capabilities: Machine["capabilities"]): Machine =>
+      machine({ deviceId, name: deviceId, capabilities });
+    const all = await startBrokerDouble((raw, id) =>
+      actionOf(raw) === "fleet"
+        ? brokerOk(id, { machines: [entry("a", [CAPABILITIES.traits]), entry("b", [CAPABILITIES.traits])], scheduler: LEADER })
+        : brokerOk(id, { ok: true, landedEarlier: false }),
+    );
+    const mixed = await startBrokerDouble((raw, id) =>
+      actionOf(raw) === "fleet"
+        ? brokerOk(id, { machines: [entry("a", [CAPABILITIES.traits]), entry("b", [])], scheduler: LEADER })
+        : brokerOk(id, { ok: true, landedEarlier: false }),
+    );
+    try {
+      let asked = 0;
+      const self = (): Promise<string | null> => {
+        asked += 1;
+        return Promise.resolve("a");
+      };
+      await brokerFleet({ path: all.path }, self).open();
+      expect(asked).toBe(0);
+      const fleet = brokerFleet({ path: mixed.path }, self);
+      await fleet.open();
+      await fleet.open();
+      expect(asked).toBe(1);
+    } finally {
+      await all.stop();
+      await mixed.stop();
+    }
   });
 
   test("a daemon that predates the fleet action answers unsupported, and the lease falls back to machines with no scheduler", async () => {
