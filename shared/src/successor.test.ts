@@ -13,7 +13,13 @@ import {
   parseTaskSpec,
 } from "./parse.ts";
 import { passOffer, successorPreamble, successorPrompt, successorSpec } from "./successor.ts";
-import { openTaskRecord, REPORT_DONE_INSTRUCTION, sealTaskRecord, taskKey, withReportInstruction } from "./task-record.ts";
+import {
+  openTaskRecord,
+  REPORT_DONE_INSTRUCTION,
+  sealTaskRecord,
+  taskKey,
+  withReportInstruction,
+} from "./task-record.ts";
 import { readsPrWhileWaiting, TASK_PHASES, wantsPrReading } from "./task-phase.ts";
 import {
   APP_ID,
@@ -317,7 +323,13 @@ describe("successorPrompt", () => {
       {},
       {
         attachments: [
-          { id: "0b6f0c9e-1a2b-4c3d-8e9f-001122334455", name: "a.png", type: "image/png", size: 1, hash: "A".repeat(43) },
+          {
+            id: "0b6f0c9e-1a2b-4c3d-8e9f-001122334455",
+            name: "a.png",
+            type: "image/png",
+            size: 1,
+            hash: "A".repeat(43),
+          },
         ],
       },
     );
