@@ -87,6 +87,8 @@ describe("push-sw.js", () => {
       { v: 1, kind: "spill", at: 5, taskId: TASK, window: "7d", projectedPct: 94.6 },
       { v: 1, kind: "spill", at: 5, taskId: TASK, window: "5h", projectedPct: 104.6, spending: true },
       { v: 1, kind: "disk", at: 5, deviceId: "dev-1", diskPct: 93 },
+      { v: 1, kind: "auth", at: 5, deviceId: "dev-1", exclave: "work", state: "expired" },
+      { v: 1, kind: "auth", at: 5, deviceId: "dev-1", exclave: "work", state: "expiring" },
     ];
     const worker = boot();
     for (const alert of alerts) await worker.push(JSON.stringify(alert));
@@ -145,6 +147,24 @@ describe("push-sw.js", () => {
           data: { url: "/?screen=machines" },
         },
       },
+      {
+        title: "Séance",
+        options: {
+          body: "A Claude login needs /login.",
+          tag: "auth:dev-1:work",
+          renotify: true,
+          data: { url: "/?screen=machines" },
+        },
+      },
+      {
+        title: "Séance",
+        options: {
+          body: "A Claude login expires within 3 days.",
+          tag: "auth:dev-1:work",
+          renotify: true,
+          data: { url: "/?screen=machines" },
+        },
+      },
     ]);
   });
 
@@ -172,6 +192,24 @@ describe("push-sw.js", () => {
         data: { url: `/?task=${TASK}` },
       });
     }
+  });
+
+  test("a login alert with an id isTaskId refuses, or a state it does not know, shows only the fallback and nothing the payload says", async () => {
+    const worker = boot();
+    const auth = (fields: Record<string, unknown>): string =>
+      JSON.stringify({ v: 1, kind: "auth", at: 1, deviceId: "dev-1", exclave: "work", state: "expired", ...fields });
+    await worker.push(auth({ deviceId: "a/b" }));
+    await worker.push(auth({ exclave: "../x" }));
+    await worker.push(auth({ exclave: 7 }));
+    await worker.push(auth({ state: "<b>soon</b>" }));
+    await worker.push(auth({ state: undefined }));
+    await worker.push(auth({ title: "secret" }));
+    expect(worker.shown).toHaveLength(6);
+    for (const { options } of worker.shown.slice(0, 5)) {
+      expect(options).toEqual({ body: "Something needs your attention.", tag: "seance", renotify: true });
+    }
+    expect(worker.shown[5]?.options.body).toBe("A Claude login needs /login.");
+    expect(JSON.stringify(worker.shown)).not.toContain("secret");
   });
 
   test("nothing a payload carries beyond its ids and numbers reaches the text, and only a known window label is shown", async () => {

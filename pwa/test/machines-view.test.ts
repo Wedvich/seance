@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
+  AUTH_EXPIRING_MS,
+  CAPABILITIES,
   METRIC_NAMES,
   MIN_FREE_MIB,
   type ExclaveInfo,
@@ -55,6 +57,46 @@ describe("deriveMachines", () => {
     ]);
     expect(card?.exclaves[0]?.sessions).toBe(2);
     expect(card?.charts).toBe(true);
+  });
+
+  describe("exclave login", () => {
+    const withAuth = (auth: Partial<MachineStatus>, caps: readonly string[] = [CAPABILITIES.authHealth]): Machine =>
+      machine({
+        capabilities: ["metrics", ...caps],
+        exclaves: [exclave("default", ACCOUNT), exclave("work", "org-2:acct-bbbbbbbb-2222"), exclave("soon", ACCOUNT)],
+        status: { at: S - 10, scan: 1, ...auth },
+      });
+    const rows = (m: Machine) => deriveMachines([m], NOW, NO_LEADER).cards[0]?.exclaves.map((row) => row.auth);
+    const at = (ms: number): number => Math.round((NOW + ms) / 1000);
+    const HOUR = 3_600_000;
+
+    test("a lapsed login reads as an error, an expiring one as a warning in days then hours, and ok says nothing", () => {
+      expect(rows(withAuth({ ax: [0], ae: [[2, at(2 * 24 * HOUR + 60_000)]] }))).toEqual([
+        { text: "needs /login", level: "err" },
+        null,
+        { text: "login expires in 2d", level: "warn" },
+      ]);
+      expect(rows(withAuth({ ae: [[1, at(5 * HOUR + 60_000)]] }))?.[1]).toEqual({
+        text: "login expires in 5h",
+        level: "warn",
+      });
+      // Under an hour is "1h", never "0h"; a time already past reads lapsed.
+      expect(rows(withAuth({ ae: [[1, at(10 * 60_000)]] }))?.[1]?.text).toBe("login expires in 1h");
+      expect(rows(withAuth({ ae: [[1, at(-5_000)]] }))?.[1]).toEqual({ text: "needs /login", level: "err" });
+      expect(rows(withAuth({ ae: [[1, at(AUTH_EXPIRING_MS)]] }))?.[1]?.text).toBe("login expires in 3d");
+    });
+
+    test("unread, no capability, an asleep machine and a stale status say nothing, never a false ok or a false lapse", () => {
+      expect(rows(withAuth({ au: [0, 1, 2] }))).toEqual([null, null, null]);
+      expect(rows(withAuth({ ax: [0] }, []))).toEqual([null, null, null]);
+      expect(rows({ ...withAuth({ ax: [0] }), connected: false })).toEqual([null, null, null]);
+      expect(rows({ ...withAuth({ ax: [0] }), status: { at: S - 3600, scan: 1, ax: [0] } })).toEqual([
+        null,
+        null,
+        null,
+      ]);
+      expect(rows(withAuth({}))).toEqual([null, null, null]);
+    });
   });
 
   // The scheduler's floor is free space, not percent: a small LXC root can be out of routing at 80%.

@@ -2172,6 +2172,20 @@
   color: var(--fg);
 }
 
+/* A login that needs attention takes its own line under the row's account and count, so the columns above keep their widths. */
+.exclave-auth {
+  grid-column: 2 / -1;
+  white-space: nowrap;
+}
+
+.exclave-auth-err {
+  color: var(--err);
+}
+
+.exclave-auth-warn {
+  color: var(--warn);
+}
+
 /* ---- history chart ---- */
 
 .chart {
