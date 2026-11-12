@@ -135,7 +135,7 @@ function AttachmentThumb(props: { image: Blob | null; ext: string | null }): JSX
   if (image !== null && url !== null && !broken) {
     return (
       <span className="attach-thumb" aria-hidden="true">
-        <img src={url} alt="" onError={() => setBroken(true)} />
+        <img src={url} alt="" decoding="async" onError={() => setBroken(true)} />
       </span>
     );
   }

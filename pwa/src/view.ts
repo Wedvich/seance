@@ -747,7 +747,7 @@ function deriveButton(
   if (state.awaitingUploads) {
     const total = state.attachments.length;
     const stored = state.attachments.filter((f) => f.upload.kind === "stored").length;
-    return { label: `Uploading ${Math.min(stored + 1, total)} of ${total}…`, enabled: false, busy: true };
+    return { label: `Uploading ${Math.min(stored + 1, total)}/${total}…`, enabled: false, busy: true };
   }
   if (state.spawning) return { label: "Queuing…", enabled: false, busy: true };
   if (!holding && !deriveAutoAvailability(relay).available) return blocked("Queuing is unavailable");

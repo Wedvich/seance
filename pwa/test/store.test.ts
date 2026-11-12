@@ -3407,7 +3407,7 @@ describe("attachments", () => {
     const labels: string[] = [];
     store.subscribe(() => labels.push(deriveView(store.getState(), 0).button.label));
     const spawned = store.spawn();
-    expect(deriveView(store.getState(), 0).button).toMatchObject({ label: "Uploading 1 of 2…", busy: true });
+    expect(deriveView(store.getState(), 0).button).toMatchObject({ label: "Uploading 1/2…", busy: true });
     release(0);
     await settled(() => client.uploads.length === 2, "the second upload");
     expect(statuses(store)).toEqual(["TXT · 5 B", "6 B · 0%"]);
@@ -3416,7 +3416,7 @@ describe("attachments", () => {
     await spawned;
 
     expect(client.uploads.map(decode)).toEqual(["first", "second"]);
-    expect(labels).toContain("Uploading 2 of 2…");
+    expect(labels).toContain("Uploading 2/2…");
     const created = firstCreate(client);
     expect(created.spec.attachments?.map(({ name, type, size }) => ({ name, type, size }))).toEqual([
       { name: "a.txt", type: "text/plain", size: 5 },
@@ -3436,10 +3436,12 @@ describe("attachments", () => {
         ? { ok: false, code: "allowance_exhausted", window: "month", retryAfter: 7200 }
         : stored();
     store.addFiles([file("a.txt", "first"), file("b.txt", "second"), file("c.txt", "third")]);
-    await settled(() => client.uploads.length === 3 && !statuses(store).some((s) => s.includes("%")), "every upload");
-    expect(statuses(store)).toEqual(["TXT · 5 B", "Failed: limit reached", "TXT · 5 B"]);
+    await settled(() => client.uploads.length === 2 && !statuses(store).some((s) => s.includes("%")), "both uploads");
+    // The limit would meet every file after it: the third isn't read, sealed or sent.
+    expect(statuses(store)).toEqual(["TXT · 5 B", "Failed: limit reached", "5 B · waiting"]);
 
     await store.spawn();
+    expect(client.uploads.map(decode)).toEqual(["first", "second", "second"]);
     expect(client.creates).toEqual([]);
     const verdict = store.getState().verdict;
     expect(verdict).toMatchObject({ kind: "unqueued", mayHaveLanded: false });
@@ -3454,7 +3456,7 @@ describe("attachments", () => {
     client.onUpload = async () => stored();
     store.dismissLayer();
     await store.spawn();
-    expect(client.uploads.map(decode)).toEqual(["second"]);
+    expect(client.uploads.map(decode)).toEqual(["second", "third"]);
     expect(firstCreate(client).spec.attachments?.map((ref) => ref.name)).toEqual(["a.txt", "b.txt", "c.txt"]);
   });
 
@@ -3500,6 +3502,109 @@ describe("attachments", () => {
     expect(verdict?.kind === "unqueued" ? verdict.message : "").toContain(
       `at most ${ATTACHMENT_LIMITS.prompt} beside attached files`,
     );
+  });
+
+  test("a leader that stops taking files mid-upload cuts the upload and no task is created", async () => {
+    const client = capable();
+    const release = heldUploads(client);
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "go" });
+    const detach = store.attach();
+    store.addFiles([file("a.txt", "first")]);
+    await settled(() => client.uploads.length === 1, "the upload");
+    const spawned = store.spawn();
+    client.emit({ machines: [autoMachine("dev-a"), autoMachine("dev-b")] });
+    expect(client.uploadOpts[0]?.signal?.aborted).toBe(true);
+    // Even an answer that got through would not make a task for a leader that can't take it.
+    release(0);
+    await spawned;
+    expect(client.creates).toEqual([]);
+    expect(store.getState().spawning).toBe(false);
+    expect(store.getState().verdict).toMatchObject({ kind: "unqueued", mayHaveLanded: false });
+    expect(store.getState().attachments).toHaveLength(1);
+    detach();
+  });
+
+  test("the task is built from the form as it stands after the wait, and checked again", async () => {
+    const client = capable();
+    const release = heldUploads(client);
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix the crash" });
+    store.addFiles([file("a.txt", "first")]);
+    await settled(() => client.uploads.length === 1, "the upload");
+    const spawned = store.spawn();
+    store.setPrompt("fix the crash in the login screen");
+    release(0);
+    await spawned;
+    expect(firstCreate(client).spec.prompt).toBe("fix the crash in the login screen");
+
+    // Past the lower bound by then: refused, nothing created, form kept.
+    const again = capable();
+    const releaseAgain = heldUploads(again);
+    const long = new Store(again, { ...DEFAULT_FORM, prompt: "short" });
+    long.addFiles([file("a.txt", "first")]);
+    await settled(() => again.uploads.length === 1, "the second upload");
+    const pressed = long.spawn();
+    long.setPrompt("x".repeat(ATTACHMENT_LIMITS.prompt + 1));
+    releaseAgain(0);
+    await pressed;
+    expect(again.creates).toEqual([]);
+    expect(long.getState().spawning).toBe(false);
+    expect(long.getState().form.prompt).toHaveLength(ATTACHMENT_LIMITS.prompt + 1);
+    const verdict = long.getState().verdict;
+    expect(verdict?.kind === "unqueued" ? verdict.message : "").toContain("beside attached files");
+  });
+
+  test("a second Queue press while waiting is ignored: one task", async () => {
+    const client = capable();
+    const release = heldUploads(client);
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "go" });
+    store.addFiles([file("a.txt", "first")]);
+    await settled(() => client.uploads.length === 1, "the upload");
+    const first = store.spawn();
+    await store.spawn();
+    await store.startNow();
+    release(0);
+    await first;
+    expect(client.creates).toHaveLength(1);
+  });
+
+  test("removing every file during the wait ends the press with no task", async () => {
+    const client = capable();
+    heldUploads(client);
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "go" });
+    store.addFiles([file("a.txt", "first")]);
+    await settled(() => client.uploads.length === 1, "the upload");
+    const spawned = store.spawn();
+    store.removeFile(store.getState().attachments[0]?.key ?? "");
+    await spawned;
+    expect(client.creates).toEqual([]);
+    expect(store.getState().spawning).toBe(false);
+    expect(store.getState().attachNotice).toBe("No files left. Nothing was queued.");
+  });
+
+  test("an aborted upload of a file still on the form goes back in line", async () => {
+    const client = capable();
+    const release = heldUploads(client);
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "go" });
+    store.addFiles([file("a.txt", "first")]);
+    await settled(() => client.uploads.length === 1, "the upload");
+    release(0, { ok: false, code: "aborted" });
+    await settled(() => client.uploads.length === 2, "the file tried again");
+    release(1);
+    await settled(() => statuses(store)[0] === "TXT · 5 B", "stored");
+  });
+
+  test("files added once Queue is pressed are refused with a notice", async () => {
+    const client = capable();
+    const release = heldUploads(client);
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "go" });
+    store.addFiles([file("a.txt", "first")]);
+    await settled(() => client.uploads.length === 1, "the upload");
+    const spawned = store.spawn();
+    store.addFiles([file("b.txt", "second")]);
+    expect(store.getState().attachments).toHaveLength(1);
+    expect(store.getState().attachNotice).toBe("Files can't be added once Queue is pressed.");
+    release(0);
+    await spawned;
   });
 
   test("files on the form block the button once the leader stops taking them, and no task is created", async () => {

@@ -387,6 +387,13 @@
   list-style: none;
 }
 
+/* A phone's half-card cuts names to a few letters; one chip a row, still two rows each. */
+@media (max-width: 480px) {
+  .attach-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .attach-chip:only-child {
   grid-column: 1 / -1;
   justify-self: start;
