@@ -1635,6 +1635,19 @@ same PR, with the reason.
   CPU load and as a full suite. The test's timeout messages now carry the route decision and the
   remote daemon's log, so the next occurrence names the mechanism. If it was a route rejection that
   cleared on its own, a placement that waits on the 30s tick is a product gap, not only a test one.
+  _Follow-up (2026-11-12):_ no such wait found in code. Admission and routing run in one pass
+  (`scheduler.ts`, the admit then route), and every routing input the relay delivers starts a pass
+  when it changes: a new `machines` array from `#rebuildMachines` (`sameMachine` compares status,
+  exclaves, capabilities, `connected` and the info fields, so a register, each status beat, a
+  connect or a disconnect), a `fleetQuota` change, a `task:` `store-changed` (`daemon/src/leader.ts`).
+  Exclaves arrive in the register blob, not the status, and the relay holds a status behind a
+  pending register (`relay/src/hub.ts`), so neither can land unticked. Only time-driven inputs (a
+  slot freed by an idle task, a `until: reset` hold lifting, a quota window resetting) wait for the
+  30s timer, and none applies to that test. Unproven alternative: a term change after the admit
+  (its writes then throw `StoreRevoked`, cutting the pass before the reserve) — the CI job log holds
+  only the failure, not the daemon's lines, so it can't be checked there. That run's test also died
+  at bun's 15s timeout before its 20s poll could report; #400's 90s budget lets the next one print
+  the decision. Still open.
 - **Reversibility is only as real as the adapter boundary.** If daemon code starts reaching into
   `scheduler/` internals, or the library grows an import from `daemon/`, the move to a fixed
   box becomes the rewrite this design exists to avoid. Enforced the way `raycast/` enforces
