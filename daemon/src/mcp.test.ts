@@ -910,7 +910,12 @@ describe("spawn_session on auto", () => {
     const fake = leaderRelay();
     const stdout = spyOn(console, "log");
     try {
-      const { text, error, audited } = await callAuto(fake, { title: "Fix it", mode: "here", model: "", plan: true });
+      const { text, error, audited } = await callAuto(fake, {
+        title: "Fix it",
+        mode: "here",
+        model: "",
+        autonomy: "steer",
+      });
       expect(error).toBe(false);
       expect(fake.creates).toHaveLength(1);
       const [created] = fake.creates;
@@ -935,6 +940,7 @@ describe("spawn_session on auto", () => {
       mode: "here",
       prompt: "fix it",
       title: "Fix it",
+      autonomy: "steer",
       plan: true,
       client: "mcp",
     } satisfies TaskSpec);
@@ -953,11 +959,23 @@ describe("spawn_session on auto", () => {
     expect(steer.creates[0]?.spec).toMatchObject({ autonomy: "steer", plan: true });
   });
 
-  test("plan beside a level other than steer is refused before anything is stored", async () => {
+  test("an unknown key at any level is a tool error naming it, and nothing is stored", async () => {
     const fake = leaderRelay();
-    const { text, error } = await callAuto(fake, { autonomy: "auto", plan: true });
-    expect(error).toBe(true);
-    expect(text).toContain("plan: true contradicts autonomy: auto");
+    const cases: [Record<string, unknown>, string][] = [
+      // The spelling the level replaced: refused, never stripped into a checkpoint task.
+      [{ plan: true }, 'Unrecognized key: "plan"'],
+      [{ autonomy: "auto", promt: "typo" }, 'Unrecognized key: "promt"'],
+      [{ pin: { machine: "Linux Box", acount: "work" } }, 'pin: Unrecognized key: "acount"'],
+      [{ after: [{ task: PRED, wehn: "merged" }] }, 'after.0: Unrecognized key: "wehn"'],
+      [{ linear: { issue: "ENG-1", title: "x" } }, 'linear: Unrecognized key: "title"'],
+    ];
+    for (const [extra, text] of cases) {
+      // oxlint-disable-next-line no-await-in-loop -- one call each
+      const answer = await callAuto(fake, extra);
+      expect(answer.error).toBe(true);
+      expect(answer.text).toContain("Invalid arguments for tool spawn_session");
+      expect(answer.text).toContain(text);
+    }
     expect(fake.creates).toEqual([]);
   });
 
@@ -1847,32 +1865,39 @@ describe("queue_batch", () => {
     expect(fake.requests).toEqual([]);
   });
 
-  test("the batch's autonomy fills every member that chose no level and no plan mode", async () => {
+  test("the batch's autonomy fills every member that chose no level; steer carries plan mode", async () => {
     const fake = leaderRelay([], reportingMachines());
     const { error } = await callTool(fake, "queue_batch", {
-      autonomy: "auto",
-      tasks: [member(), member({ autonomy: "checkpoint" }), member({ plan: true }), member({ plan: false })],
+      autonomy: "steer",
+      tasks: [member(), member({ autonomy: "checkpoint" }), member({ autonomy: "auto" })],
     });
     expect(error).toBe(false);
     expect(fake.creates.map((t) => [t.spec.autonomy, t.spec.plan])).toEqual([
-      ["auto", undefined],
+      ["steer", true],
       ["checkpoint", undefined],
-      // Its own plan is its choice: the batch's auto never lands beside it as a contradiction.
-      [undefined, true],
-      // An agent filling every boolean with false still gets the batch's level.
-      ["auto", false],
+      ["auto", undefined],
     ]);
   });
 
-  test("a batch's steer beside a member's plan: false is refused, never dropped to checkpoint", async () => {
-    const fake = leaderRelay([], reportingMachines());
-    const { error, text } = await callTool(fake, "queue_batch", {
-      autonomy: "steer",
-      tasks: [member(), member({ plan: false })],
-    });
-    expect(error).toBe(true);
-    expect(text).toContain("contradicts autonomy: steer");
-    expect(fake.creates).toEqual([]);
+  test("an unknown key in a member, its after or its pin refuses the batch by name before anything is stored", async () => {
+    const cases: [Record<string, unknown>, string][] = [
+      [{ tasks: [member(), member({ plan: true })] }, 'tasks.1: Unrecognized key: "plan"'],
+      [{ tasks: [member({ after: [{ task: PRED, after: "merged" }] })] }, 'tasks.0.after.0: Unrecognized key: "after"'],
+      [
+        { tasks: [member({ pin: { machine: "Linux Box", exclaves: "work" } })] },
+        'tasks.0.pin: Unrecognized key: "exclaves"',
+      ],
+      [{ tasks: [member()], plan: true }, 'Unrecognized key: "plan"'],
+    ];
+    for (const [args, text] of cases) {
+      const fake = leaderRelay([], reportingMachines());
+      // oxlint-disable-next-line no-await-in-loop -- one call each
+      const answer = await callTool(fake, "queue_batch", args);
+      expect(answer.error).toBe(true);
+      expect(answer.text).toContain("Invalid arguments for tool queue_batch");
+      expect(answer.text).toContain(text);
+      expect(fake.creates).toEqual([]);
+    }
   });
 
   test("a caller still sending an order or a limit is refused, not given a plain group; auto or none is fine", async () => {
@@ -2355,6 +2380,55 @@ describe("get_queue", () => {
     }
     expect(tools.find((tool) => tool.name === "get_queue")?.annotations?.readOnlyHint).toBe(true);
     lazy.stop();
+  });
+});
+
+describe("tool input schemas", () => {
+  /** Every object schema in a JSON schema, with its path. */
+  function objects(schema: unknown, path: string): { path: string; node: Record<string, unknown> }[] {
+    if (typeof schema !== "object" || schema === null) return [];
+    const node = Object.fromEntries(Object.entries(schema));
+    const nested = Object.entries(node).flatMap(([key, value]) =>
+      Array.isArray(value)
+        ? value.flatMap((item, i) => objects(item, `${path}.${key}[${i}]`))
+        : objects(value, `${path}.${key}`),
+    );
+    return node.type === "object" ? [{ path, node }, ...nested] : nested;
+  }
+
+  test("every tool lists additionalProperties: false at every object level, and none takes plan", async () => {
+    const lazy = new LazyRelay({ create: () => fakeRelay([]) });
+    const client = await connectedClient(lazy);
+    try {
+      const { tools } = await client.listTools();
+      expect(tools.length).toBeGreaterThan(10);
+      const open = tools.flatMap((tool) =>
+        objects(tool.inputSchema, tool.name)
+          .filter(({ node }) => node.additionalProperties !== false)
+          .map(({ path }) => path),
+      );
+      expect(open).toEqual([]);
+      // Nested objects are checked too, not only the top level.
+      const spawn = tools.find((tool) => tool.name === "spawn_session");
+      expect(objects(spawn?.inputSchema, "spawn_session").map(({ path }) => path)).toEqual(
+        expect.arrayContaining(["spawn_session.properties.pin", "spawn_session.properties.after.items"]),
+      );
+      expect(JSON.stringify(tools.map((tool) => tool.inputSchema))).not.toContain('"plan"');
+    } finally {
+      lazy.stop();
+    }
+  });
+
+  test("a tool with no input refuses arguments as a tool error, not a protocol error", async () => {
+    const lazy = new LazyRelay({ create: () => fakeRelay([]) });
+    const client = await connectedClient(lazy);
+    try {
+      const result = await client.callTool({ name: "get_queue", arguments: { all: true } });
+      expect(result.isError).toBe(true);
+      expect(toolText(result)).toContain('Invalid arguments for tool get_queue: Unrecognized key: "all"');
+    } finally {
+      lazy.stop();
+    }
   });
 });
 
