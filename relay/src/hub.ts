@@ -1,5 +1,6 @@
 import {
   APP_ID,
+  CLOSE_ROLE_REFUSED,
   DAEMON_ROLES,
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_MISSES_TO_SWEEP,
@@ -9,6 +10,7 @@ import {
   SCHEDULER_OPS,
   STATUS_MIN_INTERVAL_MS,
   STORE_TOMBSTONE_MS,
+  REGISTER_REFUSALS,
   quote,
   verifyRegister,
   type DaemonFrame,
@@ -46,6 +48,7 @@ import {
   type LeaderRecord,
   type LeaderSocket,
 } from "./leadership.ts";
+import { isSeat, parseArchivist, roleRefusal } from "./seat.ts";
 import {
   actOf,
   admitCreate,
@@ -62,6 +65,14 @@ import {
 import { isStoreRequest, parseAppFrame, parseDaemonFrame } from "./wire.ts";
 
 const ENTRY_PREFIX = "device:";
+
+/**
+ * A registry entry as stored: `archivistClaim` is the fact that this id's last
+ * accepted register signed the `archivist` role. Never pushed as is — `#views`
+ * turns it into `RegistryView.archivist` against the secret as it is now
+ * (`isSeat`), and a register without the role drops it.
+ */
+type StoredEntry = RegistryEntry & { readonly archivistClaim?: true };
 
 /**
  * One shape for every routing line. `iv` is the only per-message identifier a
@@ -244,6 +255,8 @@ export class Hub extends DurableObject<Env> {
   readonly #silenceLimitMs: number;
   /** Who may be nominated. Parsed per wake: a secret change rolls a new version, so it cannot change under one. */
   readonly #leaders: ReadonlySet<string>;
+  /** The id on `ARCHIVIST`, or null: honours nobody (`parseArchivist`). */
+  readonly #archivist: string | null;
   readonly #store: RelayStore;
   readonly #schedulerReplyWindowMs: number;
   /**
@@ -278,6 +291,9 @@ export class Hub extends DurableObject<Env> {
     this.#leaders = leaders.ids;
     this.#store = new RelayStore(ctx.storage, msOverride(env.STORE_TOMBSTONE_MS) ?? STORE_TOMBSTONE_MS);
     for (const entry of leaders.invalid) console.log(`SCHEDULER_LEADERS: ignored ${quote(entry)}, not a deviceId`);
+    const archivist = parseArchivist(env.ARCHIVIST);
+    this.#archivist = archivist.id;
+    if (archivist.invalid !== null) console.log(`ARCHIVIST: ignored ${quote(archivist.invalid)}, not one deviceId`);
     // Re-applied on every wake. Heartbeats are answered without waking the object;
     // only the sweep alarm reads their timestamps.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
@@ -373,7 +389,7 @@ export class Hub extends DurableObject<Env> {
     ws.close(1000, "no heartbeat");
     if (deviceId === null) return;
     const key = ENTRY_PREFIX + deviceId;
-    const entry = await this.#ctx.storage.get<RegistryEntry>(key);
+    const entry = await this.#ctx.storage.get<StoredEntry>(key);
     // Stamped with the last heartbeat, not sweep time: the machine has been gone since then.
     const left = entry === undefined ? null : this.#leftBy(ws, entry, lastAlive);
     if (left !== null) await this.#put(key, left);
@@ -568,7 +584,7 @@ export class Hub extends DurableObject<Env> {
       return;
     }
     const key = ENTRY_PREFIX + deviceId;
-    if ((await this.#ctx.storage.get<RegistryEntry>(key)) === undefined) {
+    if ((await this.#ctx.storage.get<StoredEntry>(key)) === undefined) {
       // Idempotent, and silent on the wire: gone is what the caller asked for.
       console.log(`forget ${deviceId}: not in the registry`);
       return;
@@ -624,12 +640,25 @@ export class Hub extends DurableObject<Env> {
       // Closed, not left open: a daemon re-registers on connect only, and the
       // reason is the one word it gets about why its identity was not accepted.
       ws.serializeAttachment({ ...attachment, rate, unverified: true } satisfies SocketAttachment);
-      ws.close(1000, "register unverified");
+      ws.close(1000, REGISTER_REFUSALS.unverified);
       return;
     }
 
+    // Behind the verify, so the roles are the key holder's own; ahead of the
+    // cap, the supersede and the put, so a refused claim takes no route and
+    // writes nothing. Marked like a failed verify: an identity an earlier
+    // register gave this socket no longer speaks for it.
+    const refusal = roleRefusal(deviceId, frame.roles ?? [], this.#archivist);
+    if (refusal !== null) {
+      console.log(`refused register from ${deviceId}: ${refusal}`);
+      ws.serializeAttachment({ ...attachment, rate, unverified: true } satisfies SocketAttachment);
+      ws.close(CLOSE_ROLE_REFUSED, REGISTER_REFUSALS.roleRefused);
+      return;
+    }
+    const claimsSeat = frame.roles?.includes(DAEMON_ROLES.archivist) === true;
+
     const key = ENTRY_PREFIX + deviceId;
-    const known = (await this.#ctx.storage.get<RegistryEntry>(key)) !== undefined;
+    const known = (await this.#ctx.storage.get<StoredEntry>(key)) !== undefined;
     if (!known && (await this.#entryCount()) >= MAX_DEVICES) {
       // Only unknown ids are turned away, so a full registry locks out machines
       // you have not added yet and never knocks a known one offline.
@@ -664,19 +693,22 @@ export class Hub extends DurableObject<Env> {
     }
     // Ahead of the put: the socket routes from here on, so it can lead from here on.
     await this.#renominate([]);
-    if (!(await this.#put(key, { deviceId, info, lastSeen: now }))) return;
+    if (!(await this.#put(key, { deviceId, info, lastSeen: now, ...(claimsSeat ? { archivistClaim: true } : {}) }))) {
+      return;
+    }
     // The one hint an operator gets for "auto is unavailable": a capable daemon the list leaves out.
     const unlisted = frame.roles?.includes(DAEMON_ROLES.scheduler) === true && !this.#leaders.has(deviceId);
-    console.log(`registered ${deviceId}${unlisted ? " (scheduler-capable, not in SCHEDULER_LEADERS)" : ""}`);
+    const note = claimsSeat ? " (archivist)" : unlisted ? " (scheduler-capable, not in SCHEDULER_LEADERS)" : "";
+    console.log(`registered ${deviceId}${note}`);
     await this.#pushRegistry();
   }
 
   async #entryCount(): Promise<number> {
-    return (await this.#ctx.storage.list<RegistryEntry>({ prefix: ENTRY_PREFIX })).size;
+    return (await this.#ctx.storage.list<StoredEntry>({ prefix: ENTRY_PREFIX })).size;
   }
 
   /** A failed put must not take the socket down with it — the daemon re-registers on reconnect. */
-  async #put(key: string, entry: RegistryEntry): Promise<boolean> {
+  async #put(key: string, entry: StoredEntry): Promise<boolean> {
     try {
       await this.#ctx.storage.put(key, entry);
       return true;
@@ -938,7 +970,7 @@ export class Hub extends DurableObject<Env> {
     }
     // No leader is `offline`, never `unknown`: the address is real, and one will be back.
     const known =
-      env.to === SCHEDULER_ID || (await this.#ctx.storage.get<RegistryEntry>(ENTRY_PREFIX + env.to)) !== undefined;
+      env.to === SCHEDULER_ID || (await this.#ctx.storage.get<StoredEntry>(ENTRY_PREFIX + env.to)) !== undefined;
     const code: UndeliverableCode = known ? "offline" : "unknown";
     // Correlated by `iv`: the request `id` is inside the ciphertext.
     const notice: RelayToAppFrame = { t: "undeliverable", to: env.to, iv: env.iv, code };
@@ -985,7 +1017,7 @@ export class Hub extends DurableObject<Env> {
     const deviceId = this.#deviceIdOf(ws);
     if (deviceId === null) return;
     const key = ENTRY_PREFIX + deviceId;
-    const entry = await this.#ctx.storage.get<RegistryEntry>(key);
+    const entry = await this.#ctx.storage.get<StoredEntry>(key);
     const left = entry === undefined ? null : this.#leftBy(ws, entry, Date.now());
     if (left !== null) await this.#put(key, left);
     await this.#renominate([ws]);
@@ -1002,7 +1034,7 @@ export class Hub extends DurableObject<Env> {
    * successor's own close kept. That holds whichever closes first, which
    * newest-socket order cannot say once the successor has gone.
    */
-  #leftBy(ws: WebSocket, entry: RegistryEntry, lastSeen: number): RegistryEntry | null {
+  #leftBy(ws: WebSocket, entry: StoredEntry, lastSeen: number): StoredEntry | null {
     const attachment = ws.deserializeAttachment() as SocketAttachment | null;
     if (attachment?.superseded === true) return null;
     const { status: _kept, ...rest } = entry;
@@ -1035,7 +1067,7 @@ export class Hub extends DurableObject<Env> {
   }
 
   async #views(live: ReadonlyMap<string, SocketAttachment>): Promise<RegistryView[]> {
-    const stored = await this.#ctx.storage.list<RegistryEntry>({ prefix: ENTRY_PREFIX });
+    const stored = await this.#ctx.storage.list<StoredEntry>({ prefix: ENTRY_PREFIX });
     const views: RegistryView[] = [];
     // Spelled out rather than spread: this is the wire projection of an entry.
     for (const entry of stored.values()) {
@@ -1048,6 +1080,7 @@ export class Hub extends DurableObject<Env> {
         info: entry.info,
         lastSeen: entry.lastSeen,
         connected: socket !== undefined,
+        ...(isSeat(entry, this.#archivist) ? { archivist: true } : {}),
         ...(status === undefined ? {} : { status }),
       });
     }

@@ -2,7 +2,9 @@ import {
   APP_ID,
   MACHINES_ID,
   CLOSE_BAD_REQUEST,
+  CLOSE_ROLE_REFUSED,
   CLOSE_UNAUTHORIZED,
+  DAEMON_ROLES,
   SCHEDULER_ID,
   STATUS_MAX_CT_LENGTH,
   type RegistryView,
@@ -403,6 +405,20 @@ describe("identity", () => {
     expect((await incumbent.waitFor<DaemonMsg>("msg")).env).toEqual(env);
     incumbent.close();
     app.close();
+  });
+
+  // The file's relay boots with ARCHIVIST unset, as a deploy that never set it
+  // does: the role is honoured from nobody, however well signed.
+  test("refuses a verified register claiming the archivist role while ARCHIVIST is unset", async () => {
+    const deviceId = await newDeviceId();
+    const daemon = await connectDaemon(relay);
+    daemon.send(await register(deviceId, { roles: [DAEMON_ROLES.archivist] }));
+    expect(await daemon.waitClosed()).toBe(CLOSE_ROLE_REFUSED);
+    expect(await registryIds(relay)).not.toContain(deviceId);
+    await pollUntil(
+      () => relay.logs().some((line) => line.includes(`refused register from ${deviceId}: archivist-not-seat`)),
+      "the refusal's log line",
+    );
   });
 
   test("refuses a register signed too long ago to be this connection's", async () => {
@@ -1618,4 +1634,97 @@ describe("scheduler leadership", () => {
     await leave(app, live.daemon, liveId);
     app.close();
   }, 15_000);
+});
+
+// Own instance: ARCHIVIST is fixed at boot, as a deploy fixes it, so the seat's
+// id is minted first.
+describe("archivist seat", () => {
+  const ARCHIVIST = [DAEMON_ROLES.archivist];
+  let seated: TestRelay;
+  let seat: string;
+
+  beforeAll(async () => {
+    // Same settle as the other suites that boot their own: a dispose() just ran.
+    await Bun.sleep(500);
+    seat = await newDeviceId();
+    seated = await startRelay(TOKEN, { archivist: seat, captureLogs: true });
+  });
+
+  afterAll(async () => {
+    await seated.dispose();
+  });
+
+  async function seen(app: Client, deviceId: string, matches: (entry: RegistryView) => boolean): Promise<RegistryFrame> {
+    for (;;) {
+      const frame = await app.waitFor<RegistryFrame>("registry");
+      const entry = frame.entries.find((candidate) => candidate.deviceId === deviceId);
+      if (entry !== undefined && matches(entry)) return frame;
+    }
+  }
+
+  test("the seat's id registers with the role: pushed as the archivist while live and kept, never nominated, and a roleless register clears it", async () => {
+    const app = await connectApp(seated);
+    const daemon = await connectDaemon(seated);
+    daemon.send(await register(seat, { roles: ARCHIVIST }));
+    const live = await seen(app, seat, (entry) => entry.connected);
+    const entry = live.entries.find((candidate) => candidate.deviceId === seat);
+    expect(entry?.archivist).toBe(true);
+    // The stored claim is the relay's own; only the derived flag goes out.
+    expect(entry !== undefined && "archivistClaim" in entry).toBe(false);
+    expect(live.scheduler).toBeNull();
+    expect(seated.logs().some((line) => line.includes(`registered ${seat} (archivist)`))).toBe(true);
+
+    daemon.close();
+    const kept = await seen(app, seat, (candidate) => !candidate.connected);
+    expect(kept.entries.find((candidate) => candidate.deviceId === seat)?.archivist).toBe(true);
+
+    const roleless = await connectDaemon(seated);
+    roleless.send(await register(seat));
+    const cleared = await seen(app, seat, (candidate) => candidate.connected);
+    expect(cleared.entries.find((candidate) => candidate.deviceId === seat)?.archivist).toBeUndefined();
+    roleless.close();
+    await seen(app, seat, (candidate) => !candidate.connected);
+    app.close();
+  });
+
+  test("any other id claiming the role is refused and writes nothing; an ordinary register beside it is no seat", async () => {
+    const app = await connectApp(seated);
+    const strangerId = await newDeviceId();
+    const stranger = await connectDaemon(seated);
+    stranger.send(await register(strangerId, { roles: ARCHIVIST }));
+    expect(await stranger.waitClosed()).toBe(CLOSE_ROLE_REFUSED);
+
+    const plainId = await newDeviceId();
+    const plain = await connectDaemon(seated);
+    plain.send(await register(plainId));
+    const frame = await seen(app, plainId, (entry) => entry.connected);
+    expect(frame.entries.map((entry) => entry.deviceId)).not.toContain(strangerId);
+    expect(frame.entries.find((entry) => entry.deviceId === plainId)?.archivist).toBeUndefined();
+    plain.close();
+    app.close();
+  });
+
+  // The seat's own key, claiming scheduler as well: refused before the
+  // supersede, so the live seat keeps its route and never becomes a candidate.
+  test("the seat claiming scheduler too is refused, and does not take the live seat's route", async () => {
+    const app = await connectApp(seated);
+    const incumbent = await connectDaemon(seated);
+    incumbent.send(await register(seat, { roles: ARCHIVIST }));
+    await seen(app, seat, (entry) => entry.connected && entry.archivist === true);
+
+    const claimant = await connectDaemon(seated);
+    claimant.send(await register(seat, { roles: [DAEMON_ROLES.scheduler, DAEMON_ROLES.archivist] }));
+    expect(await claimant.waitClosed()).toBe(CLOSE_ROLE_REFUSED);
+    await pollUntil(
+      () => seated.logs().some((line) => line.includes(`refused register from ${seat}: archivist-with-scheduler`)),
+      "the refusal's log line",
+    );
+
+    const env = envelope(seat, APP_ID);
+    app.send({ t: "msg", env });
+    expect((await incumbent.waitFor<DaemonMsg>("msg")).env).toEqual(env);
+    incumbent.close();
+    await seen(app, seat, (entry) => !entry.connected);
+    app.close();
+  });
 });

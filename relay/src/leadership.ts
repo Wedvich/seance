@@ -19,10 +19,10 @@ export interface Candidate {
 /**
  * The verified roles this relay acts on. What a register signed is kept raw only
  * until it verifies; a socket attachment (16 KiB, shared with `status`) then
- * holds just these.
+ * holds just these. Nomination reads only `scheduler` (`capable`).
  */
 export function knownRoles(roles: readonly string[]): readonly DaemonRole[] {
-  return roles.includes(DAEMON_ROLES.scheduler) ? [DAEMON_ROLES.scheduler] : [];
+  return Object.values(DAEMON_ROLES).filter((role) => roles.includes(role));
 }
 
 function capable(candidate: Candidate): boolean {

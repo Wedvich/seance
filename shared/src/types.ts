@@ -37,16 +37,30 @@ export const ROUTING_ID_PATTERN = new RegExp(`^[${ROUTING_ID_CHARS}]{1,${ROUTING
 
 /**
  * Plaintext `register.roles` values — the one capability the relay itself
- * reads. `scheduler`: the daemon may be nominated leader. Only a v2 register
- * (signature over the roles) carries them; the relay acts on no other value,
- * and accepts an unknown one only so the signature covering it still verifies.
+ * reads. `scheduler`: the daemon may be nominated leader. `archivist`: the
+ * fleet's one history seat (docs/archivist.md), honoured only from the id on
+ * the relay's `ARCHIVIST` secret and never beside `scheduler`. Only a v2
+ * register (signature over the roles) carries them; the relay acts on no other
+ * value, and accepts an unknown one only so the signature covering it still verifies.
  */
-export const DAEMON_ROLES = { scheduler: "scheduler" } as const;
+export const DAEMON_ROLES = { scheduler: "scheduler", archivist: "archivist" } as const;
 
 export type DaemonRole = (typeof DAEMON_ROLES)[keyof typeof DAEMON_ROLES];
 
-/** `register.roles` entries at most — a bound for the relay, far above the one role there is. */
+/** `register.roles` entries at most — a bound for the relay, far above the roles there are. */
 export const MAX_REGISTER_ROLES = 8;
+
+/**
+ * The `/daemon` close reasons a register is refused with: fixed words a daemon
+ * matches on, never prose. `unverified`: the signature, key or freshness
+ * failed (closed 1000). `roleRefused`: verified, but it claimed `archivist`
+ * from an id other than the relay's `ARCHIVIST`, or beside `scheduler`
+ * (closed `CLOSE_ROLE_REFUSED`). Neither writes the registry.
+ */
+export const REGISTER_REFUSALS = {
+  unverified: "register unverified",
+  roleRefused: "register role-refused",
+} as const;
 
 /** WS upgrade paths. Role is fixed by path, so the app sends no register frame. */
 export const DAEMON_PATH = "/daemon";
@@ -63,6 +77,8 @@ export const TOKEN_PARAM = "t";
  */
 export const CLOSE_BAD_REQUEST = 4400;
 export const CLOSE_UNAUTHORIZED = 4401;
+/** `/daemon`: a verified register claimed a role the relay will not honour from it (`REGISTER_REFUSALS.roleRefused`). */
+export const CLOSE_ROLE_REFUSED = 4403;
 
 export const DEFAULT_MODEL = "opus";
 export const DEFAULT_EFFORT = "medium";
@@ -270,6 +286,13 @@ export interface RegistryEntry {
  */
 export type RegistryView = RegistryEntry & {
   readonly connected: boolean;
+  /**
+   * The fleet's archivist seat (docs/archivist.md): derived per push like
+   * `connected`, set only when this id's last accepted register signed the
+   * role and it is the id on the relay's `ARCHIVIST` now. Never a machine:
+   * `RelayClient` skips it when it builds `machines`.
+   */
+  readonly archivist?: true;
   /**
    * The live socket's latest `status` while `connected`, else the one the
    * entry kept. A kept one describes the machine's accounts, not its pressure.

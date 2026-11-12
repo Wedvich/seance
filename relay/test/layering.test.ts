@@ -67,7 +67,7 @@ describe("relay/src stays blind", () => {
     expect(offenders).toEqual([]);
   });
 
-  test("the Worker's env holds no key: one secret, the leader allowlist, the attachment bucket and test-only bounds", async () => {
+  test("the Worker's env holds no key: one secret, the leader allowlist, the archivist seat, the attachment bucket and test-only bounds", async () => {
     // A new binding is where a PSK would arrive; pinning the list makes adding one a reviewed change.
     const env = await readFile(join(SRC, "env.ts"), "utf8");
     const fields = [...env.matchAll(/^\s*readonly\s+([A-Z_]+)\??:/gmu)].map((m) => m[1]);
@@ -77,6 +77,7 @@ describe("relay/src stays blind", () => {
       "ATTACHMENTS",
       "BEARER_TOKEN",
       "SCHEDULER_LEADERS",
+      "ARCHIVIST",
       "SWEEP_INTERVAL_MS",
       "SWEEP_SILENCE_LIMIT_MS",
       "STORE_TOMBSTONE_MS",
