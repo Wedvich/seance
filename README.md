@@ -395,7 +395,7 @@ pct set <ctid> --dev0 path=/dev/tpmrm0
 **In the container, as root**, add the TPM runtime and the archivist's user:
 
 ```sh
-apt install git unzip libtss2-dev    # tpm-udev's postinst may fail noisily; harmless here (docs/psk.md)
+apt install git unzip curl sqlite3 libtss2-dev    # tpm-udev's postinst may fail noisily; harmless here (docs/psk.md)
 adduser --disabled-password --gecos '' archivist
 ```
 
@@ -422,12 +422,26 @@ checkout:
   install --system --user archivist --path "/home/archivist/.bun/bin:/usr/local/bin:/usr/bin:/bin"
 ```
 
-`install --system` takes `--user` always and records nothing from root's own
-environment. It refuses root, the user a `seanced` unit on the box runs as, a checkout
-that user does not own, a missing config, and a blob that is missing or doesn't
-decrypt. It writes `seance-archivist.service` and two update units (docs/platform-notes.md,
+`install --system` takes `--user` and `--path` always and records nothing from root's
+own or the sudo caller's environment: the unit's PATH is the `--path` you give, never
+`$PATH`. It refuses root, the user a `seanced` unit on the box runs as (and
+`seanced install --system` refuses the archivist's), a checkout that user does not own,
+a missing config, a blob that is missing or doesn't decrypt, and any code the unit
+would run that someone else could rewrite: the checkout's whole tree and the
+directories above it, the resolved `bun` and `git`, and every `--path` entry must
+belong to root or `archivist` and be writable by neither anyone else nor a group other
+than root's or `archivist`'s. That is what keeps the daemon's user, whose sessions run
+arbitrary code, from swapping a binary the key is delivered to. A group-writable
+`/usr/local/bin` (Debian's `root:staff`) is refused for that reason: put bun in
+`~archivist/.bun/bin`, as above. It writes `seance-archivist.service` and two update units (docs/platform-notes.md,
 "The archivist's units") and starts the service. `uninstall --system` removes them and
 leaves the state dir.
+
+Install and uninstall run the archivist's own checkout and bun as root, so what the
+update unit pulls from origin runs as root the next time you run either. That is the
+trade for a service account that updates itself; before running `install --system` or
+`uninstall --system`, look at what changed (`git -C ~archivist/seance log -p
+ORIG_HEAD..`), or run it from a checkout you cloned and own as root.
 
 **Give it the seat.** The relay closes an archivist's register until the `ARCHIVIST`
 Worker secret names its device id, one id, never a list. The service mints its id on
@@ -449,9 +463,12 @@ once. The archivist redials with backoff, up to a minute apart, and `status` the
 
 **Updating** needs nothing: the archivist follows the fleet's update announce like a
 daemon, and also checks when it takes its seat. To update by hand, run
-`… main.ts update` as `archivist`. After a hand `git pull`, run
-`sudo systemctl restart seance-archivist` instead. A change to the units themselves lands
-only when root re-runs `install --system`.
+`… main.ts update` as `archivist`. The update remembers which sha it last restarted the
+service onto (`served-sha` in the state dir), so a checkout ahead of that, from a hand
+`git pull` or an install that failed after a fast-forward, is installed again and
+restarted onto by the next `update`. A change to the units themselves lands only when
+root re-runs `install --system`; `update` prints a warning, and the update unit's journal
+carries it, when the installed units differ from what the checkout would write.
 
 **Moving the seat** to another box is manual. The TPM blob is machine-bound and the seat
 is one id:
@@ -507,7 +524,10 @@ sqlite3 -readonly ~archivist/.local/state/seance-archivist/archive.sqlite
 `metrics.sqlite` (times in Unix seconds): `series` (`id`, `metric`, `labels` as JSON,
 with `machine` the observing daemon's device id and, on quota metrics, `account` the
 `account:<hex>` key), and one table per resolution of `(series, ts, value)`: `raw`
-(30 s, kept 48 h), `m5` (5 min, kept a year) and `h1` (hourly, kept for good). Metrics
+(30 s, kept 48 h), `m5` (5 min, kept a year) and `h1` (hourly, kept for good). `m5` and
+`h1` also carry `pulled`, set on a row the archivist pulled from a daemon rather than
+rolled up from its own samples, and `pull_marks` (`machine`, `step`, `series`, `ts`) is
+the newest point pulled per machine, tier and series. Metrics
 are `cpu_pct`, `mem_pct`, `disk_pct`, `disk_free_mib`, `disk_read_kibs`,
 `disk_write_kibs`, `sessions`, `quota_5h_pct`, `quota_7d_pct`, `quota_7d_model_pct` and
 `quota_credits_pct`.

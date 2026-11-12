@@ -361,7 +361,9 @@ green:
   drives tmux, dispatches ops, brokers, leads or writes the queue or store, `daemon/src/config.ts`,
   anything in `scheduler/`, or a client write method is refused. `install.ts`, `self-update.ts` and
   `units.ts` are the admin closure: reached only by `main.ts`'s `import()`, allowed the daemon's
-  exec path (`exec.ts`, `tpmcreds.ts`) and nothing else forbidden, and never run with the key. When a daemon module it needs sits
+  exec path (`exec.ts`, `tpmcreds.ts`) and, type-only (`import type`, checked per edge), the
+  two modules `audit.ts` names for its line formats (`backend.ts`, `broker-protocol.ts`), nothing else
+  forbidden, and never run with the key. When a daemon module it needs sits
   beside one it must not load, move the module (as `config-checks.ts` was), never copy it, and
   never widen the forbidden list's exceptions.
 - The daemon never runs as root. `install --system` / `uninstall --system` are the only commands

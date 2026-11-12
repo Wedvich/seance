@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createUpdateRequester, readRequestOrigin } from "./update-request.ts";
+import { createUpdateRequester, readRequestOrigin, runWhileRequested } from "./update-request.ts";
 
 let dir: string;
 let seq = 0;
@@ -54,10 +54,65 @@ describe("update requests", () => {
     expect(await readFile(path, "utf8")).toBe("register\n");
   });
 
+  test("a first connect inside the debounce of a request already on disk asks nothing (a crash loop)", async () => {
+    const path = fresh();
+    let clock = 10_000;
+    const askedAt = (): Promise<number | null> => Promise.resolve(9_950);
+    const requester = createUpdateRequester({ path, debounceMs: 100, now: () => clock, askedAt });
+    await requester.registered();
+    expect(await Bun.file(path).exists()).toBe(false);
+    clock += 50;
+    await requester.registered();
+    expect(await readFile(path, "utf8")).toBe("register\n");
+    // An older request, or none, lets a fresh process ask at once.
+    const olderPath = fresh();
+    const older = createUpdateRequester({
+      path: olderPath,
+      debounceMs: 100,
+      now: () => clock,
+      askedAt: () => Promise.resolve(1),
+    });
+    await older.registered();
+    expect(await Bun.file(olderPath).exists()).toBe(true);
+  });
+
   test("an absent or unrecognised file reads as announce", async () => {
     expect(await readRequestOrigin(join(dir, "never-written"))).toBe("announce");
     const path = fresh();
     await Bun.write(path, "registered elsewhere\n");
     expect(await readRequestOrigin(path)).toBe("announce");
+  });
+});
+
+describe("runWhileRequested", () => {
+  test("runs once when the request file is untouched, and again for each write during a run", async () => {
+    const path = fresh();
+    let runs = 0;
+    await runWhileRequested(path, async () => {
+      runs++;
+    });
+    expect(runs).toBe(1);
+
+    const results: number[] = [];
+    await runWhileRequested(path, async () => {
+      results.push(results.length);
+      // A write lands while the first two runs are going, none during the third.
+      if (results.length <= 2) await Bun.write(path, `announce ${results.length}\n`);
+    });
+    expect(results).toEqual([0, 1, 2]);
+  });
+
+  test("stops at max runs however often it is written", async () => {
+    const path = fresh();
+    let runs = 0;
+    await runWhileRequested(
+      path,
+      async () => {
+        runs++;
+        await Bun.write(path, `announce ${runs}\n`);
+      },
+      2,
+    );
+    expect(runs).toBe(2);
   });
 });

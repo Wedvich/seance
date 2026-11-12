@@ -155,6 +155,9 @@ describe("seance-archivist run", () => {
         relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env }));
       };
       await broadcast({ sha: "malformed" });
+      // A non-event, and frames are handled in order: the file must still hold the connect's request.
+      await Bun.sleep(200);
+      expect(await readFile(requestPath, "utf8")).toBe("register\n");
       const sha = "c".repeat(40);
       await broadcast({ sha, commitTs: Date.now() });
       await pollUntil(

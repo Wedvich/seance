@@ -106,6 +106,14 @@ export function specifiers(source: string): string[] {
   return [...source.matchAll(pattern)].map((m) => m[1] ?? "");
 }
 
+/** Imports of `file` (by basename) that load it at runtime: not `import type`, and `import()` included. */
+export function valueImportsOf(source: string, file: string): string[] {
+  const name = file.replaceAll(".", String.raw`\.`);
+  const statics = new RegExp(String.raw`^\s*(?:import|export)\s+(?!type\b)[^;]*?from\s*["'][^"']*/${name}["']`, "gmu");
+  const dynamic = new RegExp(String.raw`\bimport\s*\(\s*["'][^"']*/${name}["']`, "gu");
+  return [...source.matchAll(statics), ...source.matchAll(dynamic)].map((m) => m[0].trim());
+}
+
 /** The `import("…")` subset of `specifiers`: loaded only when that line runs. */
 export function dynamicSpecifiers(source: string): string[] {
   return [...source.matchAll(/\bimport\s*\(\s*["']([^"']+)["']/gu)].map((m) => m[1] ?? "");
@@ -223,6 +231,23 @@ describe("archivist layering", () => {
     expect(closureViolations(files, packages).filter((file) => !ADMIN_MAY_LOAD.has(file))).toEqual([]);
     // exec.ts is the one spawner, and it strips CREDENTIALS_DIRECTORY from every child.
     expect(await spawnersIn(files)).toEqual(["daemon/src/exec.ts"]);
+  });
+
+  test("the admin closure names backend.ts and broker-protocol.ts only as `import type`", async () => {
+    const { files } = await closure([...ADMIN_MODULES]);
+    const offenders: string[] = [];
+    for (const file of files) {
+      // oxlint-disable-next-line no-await-in-loop -- a handful of small files
+      const source = await readFile(join(ROOT, file), "utf8");
+      for (const name of ["backend", "broker-protocol"]) {
+        for (const specifier of valueImportsOf(source, `${name}.ts`)) offenders.push(`${file}: ${specifier}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+    expect(valueImportsOf(`import { X } from "./backend.ts";`, "backend.ts")).toHaveLength(1);
+    expect(valueImportsOf(`import type { X } from "./backend.ts";`, "backend.ts")).toEqual([]);
+    expect(valueImportsOf(`import {\n  a,\n} from "./backend.ts";`, "backend.ts")).toHaveLength(1);
+    expect(valueImportsOf(`await import("./backend.ts");`, "backend.ts")).toHaveLength(1);
   });
 
   test("archivist/src makes no write call and names no execPath", async () => {

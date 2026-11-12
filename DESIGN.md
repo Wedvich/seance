@@ -10837,21 +10837,30 @@ move-the-seat runbook, the schema and example queries are the README's step 9).
   `append:` file for root to create under the wrong owner). `seance-archivist-update.path`
   watches `<state dir>/update-requested` with `PathChanged=` and starts
   `seance-archivist-update.service`, a oneshot with the same `User=`, no credential,
-  `update --requested`, `TimeoutStartSec=15min`. All three come from one set of values through
+  `update --requested`, `TimeoutStartSec=15min`, `StartLimitIntervalSec=0` (a crash-looping service
+  asks on every start and a skip exits fast; the default start limit would fail this unit and then
+  the path unit, which would stop watching). All three come from one set of values through
   the daemon's `unitEscape` and `assertUnitFlag`, so they cannot disagree on user, checkout or
   PATH. The target user is resolved as the daemon's `install --system` resolves it
   (`daemon/src/target-user.ts`: `requireRoot`, `lookupUser`, `asTargetArgv`, `reachablePath`,
   `missingUnitBinaries` over bun and git, `whichIn`), never from root's environment, and never
   `process.execPath`; it never invokes `sudo`. `--user` is required (the sudo caller is usually
-  the daemon's user). Refused before anything is written: root or uid/gid 0, the user
+  the daemon's user), and so is `--path`: nothing ambient reaches a unit, and the sudo form drops
+  `--preserve-env=PATH`. Refused before anything is written: root or uid/gid 0, the user
   `/etc/systemd/system/seanced.service` names (`unitUser`, now exported) or one with a
   `seanced` user unit (A27a), a checkout not owned by the target uid (`update` fast-forwards it
-  as that user, and the unit runs its code with the key), a config `loadArchivistConfig`
+  as that user, and the unit runs its code with the key), any code the units run that the target
+  and root alone do not control (`untrustedCode`: the checkout's tree and ancestors, the resolved
+  bun and git, every PATH entry — owned by root or the target uid, not world-writable, not
+  group-writable by a group but root's or the target's; `writeRisk` in `target-user.ts`; a
+  `root:staff` 2775 `/usr/local/bin` fails on purpose, since membership is not checked), a config `loadArchivistConfig`
   refuses, and a blob that is missing or that `blobLoadable` cannot decrypt — unlike the
   daemon, the archivist has no keyless mode, so a unit without its key would fail and restart
   every five seconds. Then `daemon-reload`, `enable --now` of the path unit and the service, and
-  a restart when the service's definition changed, since `enable --now` leaves a running unit on
-  its old one. `uninstall --system` disables, stops and removes the three, leaving the state
+  a restart when the service's definition (or, for the path unit, its watch) changed, since
+  `enable --now` leaves a running unit on its old one. The daemon's `install --system` refuses the
+  user an installed `seance-archivist.service` runs as (`archivistUserRefusal`), the other half of
+  A27a. `uninstall --system` disables, stops and removes the three, leaving the state
   dir.
 - **The key's blob is the archivist's own** (A27b, settled). Sealed under the same credential
   id, `seance-psk`: the id is embedded in the blob and the archivist reads
@@ -10866,15 +10875,23 @@ move-the-seat runbook, the schema and example queries are the README's step 9).
   `update-available` broadcast the relay fans to every `/daemon` socket (the seat's included,
   through `RelayClient`'s broadcast allowlist; no wire change) and, for a sha it has not asked
   about, writes `update-requested` (0600, `archivist/src/update-request.ts`). It also writes one
-  when it takes its seat, at most every 30 minutes, to catch an announce it slept through. systemd
+  when it takes its seat, at most every 30 minutes (counted from the file's own mtime across
+  processes, so a crash loop does not fetch on every start), to catch an announce it slept
+  through. systemd
   starts the update unit, which runs the daemon's own `updateNow` (fetch, ff-only on the default
   branch, `bun install --frozen-lockfile`) against the archivist's checkout, audited under the
   request's origin, and restarts the service with `signalRestartUnit`. That is the daemon's
   system-unit restart, now parameterised by unit: SIGTERM to the `MainPID` as the same user,
-  `Restart=always` relaunching it. `servingSha` is null: the oneshot cannot know what the service
-  runs, so a current checkout reports `current` and restarts nothing; a hand `git pull` needs a
-  `systemctl restart`. No unit is ever rewritten by the service or the update (neither is root);
-  a unit change lands when root re-runs `install --system`. Rejected: the daemon's in-process
+  `Restart=always` relaunching it. The oneshot cannot know what the service runs, so `served-sha`
+  in the state dir stands for it: written after each restart the update made and, the first time,
+  with the HEAD it found. A checkout ahead of it (an install that failed after a fast-forward, or
+  a hand `git pull`) is installed again and restarted onto, the daemon's `servingSha` path. A
+  request landing while the oneshot runs merges into the running job and nothing re-fires it, so
+  the oneshot runs again while the request file changed during a run (at most three). No unit is
+  ever rewritten by the service or the update (neither is root); the update warns when the
+  installed units differ from what the checkout would write (a change a pull brings in is seen
+  on the next run, since the running code is the old), and the change lands when root re-runs
+  `install --system`. Rejected: the daemon's in-process
   `Updater` in `run` — it execs git and `bun install` from origin in the process holding the
   key, which Threat model item 2 and the layering test forbid — and a timer polling origin,
   which would update on a push the fleet has not announced.
@@ -10882,7 +10899,8 @@ move-the-seat runbook, the schema and example queries are the README's step 9).
   `install.ts`, `self-update.ts` and `units.ts` excluded by name. Those three are reachable only
   through `main.ts`'s `import()` in their own command branches, never a static import (checked
   per specifier). Their own closure may load `daemon/src/exec.ts` and `tpmcreds.ts` (and, as
-  type-only imports through `audit.ts`, `backend.ts` and `broker-protocol.ts`), and nothing else
+  type-only imports through `audit.ts`, `backend.ts` and `broker-protocol.ts`, checked per edge),
+  and nothing else
   the service closure forbids. Its only spawner is `exec.ts`.
 - **What moved in the daemon to allow it.** `isUpdateAvailable` from `handlers.ts` (an op
   dispatcher) to `daemon/src/update-notice.ts`; `requireRoot` and `missingUnitBinaries` take the
@@ -10892,6 +10910,14 @@ move-the-seat runbook, the schema and example queries are the README's step 9).
 
 ## Accepted trade-offs
 
+- Root runs the archivist's code at install and uninstall. `install --system` and `uninstall
+  --system` execute the archivist's own checkout and bun as root (the checkout must be the target's,
+  since `update` fast-forwards it), and the update unit pulls from origin unattended as that user. A
+  compromise of that account therefore reaches root the next time an operator runs either command,
+  where for the daemon the account is the operator. The runbook says to read what changed first.
+  Rejected: refusing a non-root-owned `process.execPath` (main.ts, the larger part of that code, is
+  the archivist's whatever bun runs it) and a root-owned copy of the checkout (a second tree to keep
+  in step with the one `update` moves).
 - Each archivist pull is one audit line on a daemon (`origin=relay op=metrics`, like any app
   request: the relay is blind and the archivist is an app-role client, so nothing tells its
   requests apart). That is about 300 a day a machine in steady state and a few hundred at a first

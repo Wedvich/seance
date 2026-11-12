@@ -34,6 +34,14 @@ export function updateRequestPathIn(stateDirectory: string): string {
   return join(stateDirectory, "update-requested");
 }
 
+/**
+ * The sha the running service was last started on, as `update` recorded it: the
+ * service cannot read its own HEAD without running git, which it never does.
+ */
+export function servedShaPathIn(stateDirectory: string): string {
+  return join(stateDirectory, "served-sha");
+}
+
 /** The per-state-dir files, taking the directory so tests and `status` can name one that isn't the default. */
 export function statePathIn(stateDirectory: string): string {
   return join(stateDirectory, "state.json");

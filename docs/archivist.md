@@ -132,7 +132,8 @@ Each is the owner's, 2026-11-12, unless marked _derived_.
 - **A27a.** On a shared box the archivist runs as a Unix user of its own, never the daemon's:
   sessions run as the daemon's user and must not be able to read or change `archive.sqlite`.
   `install --system` takes the target user, refuses root and refuses the user a `seanced` unit on
-  the box runs as. That user owns the archivist's state dir (0700) and its own checkout, which
+  the box runs as; `seanced install --system` refuses the user the archivist's unit runs as, the
+  other direction. Both are the same separation, held where each is installed. That user owns the archivist's state dir (0700) and its own checkout, which
   `update` fast-forwards; it shares neither with the daemon. A daemon's user who can `sudo` is
   outside what this protects against.
 - **A27b.** The archivist's PSK is its own sealed blob under its own unit, sealed by the operator

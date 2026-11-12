@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 
 /**
  * How the running archivist follows the fleet's update announce without running
@@ -15,7 +15,9 @@ export type RequestOrigin = "announce" | "register";
  * How often a reconnect may ask again. A daemon checks on every register to catch
  * up after sleep; the archivist sits on an always-on box, so its reconnects are
  * network blips and a refused seat's redials, and the announce is the main path.
- * The first connect of a process always asks.
+ * The first connect of a process asks unless the request file itself is younger
+ * than this, so a crash-looping service (which reconnects every few seconds) does
+ * not fetch from origin on each start.
  */
 export const REGISTER_DEBOUNCE_MS = 30 * 60_000;
 
@@ -30,21 +32,31 @@ export function createUpdateRequester(opts: {
   readonly path: string;
   readonly debounceMs?: number;
   readonly now?: () => number;
+  /** When the file was last written, as epoch ms; null when absent. Defaults to its mtime. */
+  readonly askedAt?: () => Promise<number | null>;
 }): UpdateRequester {
   const now = opts.now ?? Date.now;
   const debounceMs = opts.debounceMs ?? REGISTER_DEBOUNCE_MS;
   let lastSha: string | null = null;
   let lastRegister: number | null = null;
+  let seenFile = false;
+  const askedAt =
+    opts.askedAt ?? (async (): Promise<number | null> => (await stat(opts.path).catch(() => null))?.mtimeMs ?? null);
   // A sha is not a path or a flag anywhere downstream, but it is wire-supplied: one line, hex only.
   const write = (line: string): Promise<void> => writeFile(opts.path, `${line}\n`, { mode: 0o600 });
   return {
     announce: async (sha: string): Promise<void> => {
       if (sha === lastSha) return;
       lastSha = sha;
+      lastRegister = now();
       await write(/^[0-9a-f]{1,64}$/u.test(sha) ? `announce ${sha}` : "announce");
     },
     registered: async (): Promise<void> => {
       const at = now();
+      if (!seenFile) {
+        seenFile = true;
+        lastRegister ??= await askedAt();
+      }
       if (lastRegister !== null && at - lastRegister < debounceMs) return;
       lastRegister = at;
       await write("register");
@@ -56,4 +68,26 @@ export function createUpdateRequester(opts: {
 export async function readRequestOrigin(path: string): Promise<RequestOrigin> {
   const text = await readFile(path, "utf8").catch(() => "");
   return text.split(/\s/u, 1)[0] === "register" ? "register" : "announce";
+}
+
+/**
+ * Runs `run`, then again while the request file changed during it: the update
+ * unit is a oneshot, so a `PathChanged` that lands while it runs merges into the
+ * job already running and nothing re-fires it. At most `max` runs; the last result is returned.
+ */
+export async function runWhileRequested<T>(path: string, run: () => Promise<T>, max = 3): Promise<T> {
+  const stamp = async (): Promise<string> => {
+    const info = await stat(path).catch(() => null);
+    const text = await readFile(path, "utf8").catch(() => "");
+    return `${info?.mtimeMs ?? ""}:${text}`;
+  };
+  for (let runs = 1; ; runs++) {
+    // Taken before the run: a write during it differs from this stamp.
+    // oxlint-disable-next-line no-await-in-loop -- each run follows the last
+    const before = await stamp();
+    // oxlint-disable-next-line no-await-in-loop -- ditto
+    const result = await run();
+    // oxlint-disable-next-line no-await-in-loop -- ditto
+    if (runs >= max || (await stamp()) === before) return result;
+  }
 }

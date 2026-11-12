@@ -173,7 +173,9 @@ reach them (an ssh agent or a helper that works without a login session), or the
 - `seance-archivist-update.path` — watches `~/.local/state/seance-archivist/update-requested`
   and starts the update unit when it changes.
 - `seance-archivist-update.service` — a oneshot running `update --requested`: fetch,
-  fast-forward, `bun install --frozen-lockfile`, restart. It loads no credential.
+  fast-forward, `bun install --frozen-lockfile`, restart. It loads no credential, and
+  has no start limit (`StartLimitIntervalSec=0`): under the default one a crash loop
+  would fail it, and then the path unit with it.
 
 The split exists because the process that holds the key must never run anything. The
 running archivist neither execs git nor restarts itself (DESIGN.md, Threat model, item 2).
