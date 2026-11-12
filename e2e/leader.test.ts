@@ -620,6 +620,143 @@ describe("settings record: the leader's term creates it, and no later term repla
   }, 60_000);
 });
 
+describe("pass: a session's own pass ↔ local daemon ↔ leader ↔ the daemon's close", () => {
+  // The production wiring no unit test joins: the pane-bound `pass` frame, the daemon's push of the real
+  // spawned worktree, the leader's commit of the successor, its `pass-close` back, and the close at the
+  // session's turn end. Only the session is a stand-in: a script in the spawned pane that calls the tool's
+  // own function, then reports its turn's end through the real CLI.
+  test("the leader commits the successor from the session's record, and the pane closes only at its turn's end", async () => {
+    const taskId = "e2e-pass-task";
+    const record = "done: the e2e wiring; left: nothing";
+    // The suite's daemon audits to its stdout, which in-process is console.log.
+    const audit = spyOn(console, "log");
+    const closes = (): string[] =>
+      audit.mock.calls.map((args) => args.join(" ")).filter((l) => l.includes("audit despawn origin=successor"));
+    const app = startApp(stack);
+    let window: string | undefined;
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      const ready = await app.waitForApp(
+        (state) =>
+          state.relay.scheduler.kind === "ready" &&
+          state.relay.machines.some(
+            (m) =>
+              m.deviceId === stack.deviceId &&
+              m.connected &&
+              m.repos.length > 0 &&
+              m.capabilities?.includes(CAPABILITIES.successorSelf) === true,
+          ),
+        "the leader verified and the machine advertising successorSelf",
+      );
+      const origin = fixtureOrigin(ready);
+      if (origin === null) throw new Error("the fixture machine lists no repo origin");
+      const queued = await app.client.createTask({
+        id: taskId,
+        spec: { repo: origin, mode: "worktree" },
+        state: "queued",
+        createdAt: Date.now(),
+      });
+      expect(queued).toEqual({ ok: true, landedEarlier: false });
+      await pollUntil(
+        async () => (await stack.queue().get(taskId))?.body?.state === "running",
+        "the task to run",
+        20_000,
+      );
+      window = (await stack.queue().get(taskId))?.body?.assignment?.window;
+
+      // The claude stub makes no git worktree of its own at the path the daemon noted for the launch, and a push
+      // refuses a path that is not a linked checkout (`not_launched`): make the one a real session would run in.
+      const ledger = JSON.parse(
+        await Bun.file(join(process.env["SEANCE_STATE_DIR"] ?? "", "launched.json")).text(),
+      ) as {
+        readonly progress: readonly { readonly taskId: string; readonly path?: string }[];
+      };
+      const noted = ledger.progress.find((p) => p.taskId === taskId)?.path;
+      if (noted === undefined) throw new Error("the launch ledger noted no worktree for the task");
+      await rm(noted, { recursive: true, force: true });
+      const added = await exec(["git", "worktree", "add", "-q", "-b", "pass-e2e", noted], {
+        cwd: stack.fixture.repoPath,
+      });
+      expect(added.exitCode).toBe(0);
+
+      const out = join(base, "pass.json");
+      const go = join(base, "pass.go");
+      const idle = join(base, "pass-idle.json");
+      const script = join(base, "pass.ts");
+      await rm(out, { force: true });
+      await rm(go, { force: true });
+      await Bun.write(idle, JSON.stringify({ state: "idle", turnEnded: true }));
+      const tool = join(import.meta.dir, "..", "daemon", "src", "report-done.ts");
+      const main = join(import.meta.dir, "..", "daemon", "src", "main.ts");
+      const stateDir = process.env["SEANCE_STATE_DIR"] ?? "";
+      const socket = join(stateDir, "run", "seanced.sock");
+      await Bun.write(
+        script,
+        // The running state can precede the daemon's launch landing in its ledger (the stub never registers, so the
+        // launch stays in flight for the spawn's wait); the tool's own answer then is "call again".
+        `import { passToSuccessor } from ${JSON.stringify(tool)};
+let result = await passToSuccessor(${JSON.stringify(record)}, { path: ${JSON.stringify(socket)} });
+for (let i = 0; i < 40 && !result.ok && result.text.includes("holds no launch"); i++) {
+  await Bun.sleep(250);
+  result = await passToSuccessor(${JSON.stringify(record)}, { path: ${JSON.stringify(socket)} });
+}
+await Bun.write(${JSON.stringify(out)}, JSON.stringify(result));\n`,
+      );
+      const panes = async (): Promise<string> => tmuxOk(["list-panes", "-a", "-F", "#{pane_id} #{@seance-task}"]);
+      const pane = (await panes())
+        .split("\n")
+        .map((line) => line.split(" "))
+        .find(([, task]) => task === taskId)?.[0];
+      if (pane === undefined) throw new Error(`no pane carries ${taskId}`);
+      // The turn ends only when the test says so: a close before it would be the bug.
+      await tmuxOk([
+        "respawn-pane",
+        "-k",
+        "-t",
+        pane,
+        "sh",
+        "-c",
+        `${q(process.execPath)} ${q(script)}; while [ ! -e ${q(go)} ]; do sleep 0.05; done; SEANCE_STATE_DIR=${q(stateDir)} ${q(process.execPath)} ${q(main)} session-event < ${q(idle)}; exec sleep 600`,
+      ]);
+
+      await pollUntil(
+        async () => (await Bun.file(out).exists()) && (await Bun.file(out).text()) !== "",
+        "the pass",
+        30_000,
+      );
+      expect(JSON.parse(await Bun.file(out).text())).toMatchObject({ ok: true });
+      await pollUntil(
+        async () => (await stack.queue().get(taskId))?.body?.successor !== undefined,
+        "the leader to commit the successor",
+        10_000,
+      );
+      const successorId = (await stack.queue().get(taskId))?.body?.successor ?? "";
+      const successor = (await stack.queue().get(successorId))?.body;
+      expect(successor?.spec).toMatchObject({ succeeds: { task: taskId, trigger: "session" } });
+      expect(successor?.spec.prompt).toContain(record);
+
+      // The pass-close has had its time to arrive (the commit precedes it); nothing has closed the pane.
+      await Bun.sleep(1_000);
+      expect(await panes()).toContain(pane);
+      expect(closes()).toEqual([]);
+
+      await Bun.write(go, "");
+      // The audit line, not the pane's absence: the stand-in pane is no registered session, so the graceful
+      // despawn answers `session_not_found` after the close was decided, and what is under test is the decision.
+      await pollUntil(
+        () => closes().some((l) => l.includes(`target="${pane}"`)),
+        "the daemon to close the pane at its turn's end",
+        20_000,
+      );
+    } finally {
+      audit.mockRestore();
+      app.stop();
+      if (window !== undefined) await killWindow(window);
+    }
+  }, 60_000);
+});
+
 describe("continue: an app's continue task ↔ leader ↔ the machine that ran the failed session", () => {
   // Only the machine's own launch ledger knows where the old session ran, so the ledger is
   // seeded with a task note instead of running a failing session first; everything after the
