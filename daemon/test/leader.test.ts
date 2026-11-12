@@ -2398,7 +2398,8 @@ describe("leader in the daemon", () => {
           await daemon.leader.settled();
           await send("b", valid);
           await Bun.sleep(20);
-          return count("scheduler: session-pass") >= 1;
+          // Its answer, not the "no running term" drop an early send gets, which names the same prefix.
+          return count("outcome=not_found") >= 1;
         }, "the leader to handle a valid pass");
       } finally {
         console.log = capture;
@@ -2409,7 +2410,7 @@ describe("leader in the daemon", () => {
     const dropped = lines.filter((line) => line.includes('dropped op="session-pass"'));
     expect(dropped).toHaveLength(3);
     expect(dropped.filter((line) => line.includes(`from="${APP_ID}"`))).toHaveLength(1);
-    const handled = lines.filter((line) => line.includes("scheduler: session-pass"));
+    const handled = lines.filter((line) => line.includes("scheduler: session-pass") && line.includes("outcome="));
     // A task the queue does not hold: the leader's own pass refused it, and said who sent it.
     expect(handled.length).toBeGreaterThan(0);
     for (const line of handled) expect(line).toContain('task="t-gone" from="b" outcome=not_found');
