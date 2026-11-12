@@ -5,6 +5,7 @@ import { z } from "zod";
 import {
   accountNameIn,
   CAPABILITIES,
+  fleetTraits,
   AUTONOMY_LEVELS,
   autonomyOf,
   DEFAULT_AUTONOMY,
@@ -51,7 +52,7 @@ import {
   sleepingMachine,
 } from "@seance/shared";
 import { appRelayClient, importAppKeys, LazyRelay, type AppKeys } from "./app-relay.ts";
-import { cliSink, type AuditSink } from "./audit.ts";
+import { cliSink, traitRefusalAudit, type AuditSink } from "./audit.ts";
 import {
   continueAuto,
   enqueueAuto,
@@ -68,6 +69,8 @@ import {
   startAuto,
   startGateError,
   startQueuedAuto,
+  traitsGateError,
+  traitsRefusal,
   usesReported,
   type AutoSpec,
   type PlacementInput,
@@ -298,6 +301,7 @@ function describeMachine(
               id: info.id,
               ...(info.accountId === null ? {} : { accountId: info.accountId }),
               ...(info.email === undefined ? {} : { email: info.email }),
+              ...(info.traits === undefined ? {} : { traits: info.traits }),
               ...(info.accountId === null ? {} : describeName(names, info.accountId)),
               // A signed-out exclave has no login to read: the scheduler already filters it as `auth_missing`.
               ...(info.accountId === null ? {} : { auth: auth.state }),
@@ -415,7 +419,7 @@ function isAutoRef(ref: string): boolean {
  * task survives a leader change (docs/scheduler.md, M3).
  */
 const AUTO_LIMITS =
-  "The scheduler's queue is held by the relay: a task waits there for capacity, survives leader changes (every relay deploy and daemon self-update), and runs once a scheduler leads. A task already placed is an ordinary session. Dependencies, batches, Linear links, pins and avoided machines are set with spawn_session's after, until, linear, pin and avoid fields and with queue_batch.";
+  "The scheduler's queue is held by the relay: a task waits there for capacity, survives leader changes (every relay deploy and daemon self-update), and runs once a scheduler leads. A task already placed is an ordinary session. Dependencies, batches, Linear links, pins, avoided machines and required traits are set with spawn_session's after, until, linear, pin, avoid and requires fields and with queue_batch.";
 
 /** What `schedulerFailureText` and `olderDaemonText` name a scheduler call by. */
 type SchedulerCall = "get_queue" | "cancel_task";
@@ -628,6 +632,15 @@ const AVOID_FIELD = z
     `Machines (name or deviceId) the scheduler must not place the task on, at most ${TASK_SPEC_LIMITS.avoid}. Naming the pinned machine is refused; avoiding every other machine is not — the task waits`,
   );
 
+const REQUIRES_FIELD = z
+  .array(z.string())
+  .min(1)
+  .max(TASK_SPEC_LIMITS.requires)
+  .optional()
+  .describe(
+    `Traits the machine must declare (list_machines shows each exclave's \`traits\`): the task is placed only on an exclave carrying every one, at most ${TASK_SPEC_LIMITS.requires}. A trait no machine declares is refused, naming the ones that exist; so is a combination no exclave the task may reach carries. A trait on a machine that is offline makes the task wait for it`,
+  );
+
 const REPORTED_GATE =
   "spawn refused: the scheduler's leader does not take until: reported / after: done yet — its daemon needs `seanced update`";
 const REPORTED_UNKNOWN =
@@ -714,6 +727,7 @@ function describeTask(
   tasks: readonly Task[],
   offer: OfferContext,
   idle: ReadonlySet<string>,
+  traits: ReadonlyMap<string, readonly string[]>,
 ): Record<string, unknown> {
   const placement = placementOf(task, machines);
   const pin = describePin(task, machines, names);
@@ -731,6 +745,10 @@ function describeTask(
     ...(placement === null ? {} : { placement }),
     ...(pin === null ? {} : { pin }),
     ...(spec.avoid === undefined ? {} : { avoid: spec.avoid.map((id) => describeDevice(task, machines, id)) }),
+    // Where each trait is declared, so a task held for one reads with the machines that could end the wait.
+    ...(spec.requires === undefined
+      ? {}
+      : { requires: spec.requires.map((trait) => ({ trait, machines: traits.get(trait) ?? [] })) }),
     ...(task.decision === undefined ? {} : { decision: decisionText(task.decision) }),
     ...(task.failure === undefined ? {} : { failure: `${task.failure.code}: ${failureMessage(task, task.failure)}` }),
     // A `manual` mark reads apart from a finish: a person settled it, nothing observed it end.
@@ -934,7 +952,10 @@ export function buildMcpServer(
           leaderHandoff: advertises(lease.machines, lease.scheduler.availability(), CAPABILITIES.continueHandoff),
         };
         const idle = new Set((reply.idle ?? []).map((ref) => ref.taskId));
-        const tasks = reply.tasks.map((task) => describeTask(task, lease.machines, names, reply.tasks, offer, idle));
+        const traits = fleetTraits(lease.machines);
+        const tasks = reply.tasks.map((task) =>
+          describeTask(task, lease.machines, names, reply.tasks, offer, idle, traits),
+        );
         const holds = (reply.holds ?? []).map((hold) => describeHold(hold, names));
         return textResult(JSON.stringify({ at: new Date(reply.at).toISOString(), holds, tasks }, null, 2));
       }),
@@ -1064,6 +1085,7 @@ export function buildMcpServer(
         linear: LINEAR_FIELD,
         pin: PIN_FIELD,
         avoid: AVOID_FIELD,
+        requires: REQUIRES_FIELD,
         start: z
           .boolean()
           .optional()
@@ -1087,6 +1109,7 @@ export function buildMcpServer(
       linear,
       pin,
       avoid,
+      requires,
       start,
     }) => {
       const machinePin = machine === undefined || isAutoRef(machine) ? undefined : machine;
@@ -1111,6 +1134,7 @@ export function buildMcpServer(
           until,
           linear,
         ),
+        ...(requires === undefined ? {} : { requires }),
       };
       // Refused before the fleet opens: no relay round trip to learn the prompt is too long.
       const invalid = specError(spec);
@@ -1126,10 +1150,17 @@ export function buildMcpServer(
         // Before any account listing: a leader that cannot route on them never gets the fields.
         const gate = placementNeedsPinAccount(placement.input) ? pinAccountGateError(leg, "pin.account / avoid") : null;
         if (gate !== null) return errorResult(gate);
+        const traitsGate = requires === undefined ? null : traitsGateError(leg, "requires");
+        if (traitsGate !== null) return errorResult(traitsGate);
         const resolved = await autoTarget(leg, repo, placement.input, names);
         if ("error" in resolved) return errorResult(`spawn refused: ${resolved.error}`);
         // The origin a clone name resolved to is what the leader bounds, not the name.
         const resolvedSpec: AutoSpec = { ...spec, ...resolved.fields };
+        const refused = requires === undefined ? null : traitsRefusal(resolvedSpec, lease.machines);
+        if (refused !== null) {
+          await traitRefusalAudit(audit, "mcp")(refused.kind, requires?.length ?? 0, refused.count);
+          return errorResult(`spawn refused: ${refused.text}`);
+        }
         const longOrigin = specError(resolvedSpec);
         if (longOrigin !== null) return errorResult(`spawn refused: ${longOrigin}${lengthNote(longOrigin, until)}`);
         const id = crypto.randomUUID();
@@ -1184,6 +1215,7 @@ export function buildMcpServer(
               linear: LINEAR_FIELD,
               pin: PIN_FIELD,
               avoid: AVOID_FIELD,
+              requires: REQUIRES_FIELD,
             }),
           )
           .min(1)
@@ -1246,6 +1278,7 @@ export function buildMcpServer(
             prompt: reported.prompt,
           }),
           ...authoredFields(deps, member.until, member.linear),
+          ...(member.requires === undefined ? {} : { requires: member.requires }),
           batch: { id: batchId, index: n },
         };
         const invalid = specError(spec);
@@ -1264,6 +1297,10 @@ export function buildMcpServer(
           const gate = pinAccountGateError(leg, "pin.account / avoid");
           if (gate !== null) return errorResult(gate);
         }
+        if (planned.some(({ spec }) => spec.requires !== undefined)) {
+          const gate = traitsGateError(leg, "requires");
+          if (gate !== null) return errorResult(gate);
+        }
         // All resolved and bounded before the first create, so a batch is never half-written for want of a repo name or a pin.
         const resolvedPlan: { readonly id: string; readonly ref: string | undefined; readonly spec: AutoSpec }[] = [];
         const echoes: { readonly task: number; readonly text: string }[] = [];
@@ -1278,6 +1315,12 @@ export function buildMcpServer(
             return errorResult(
               `queue_batch refused: task ${i + 1}: ${invalid}${lengthNote(invalid, member.spec.until)}`,
             );
+          }
+          const refused = spec.requires === undefined ? null : traitsRefusal(spec, lease.machines);
+          if (refused !== null) {
+            // oxlint-disable-next-line no-await-in-loop -- a refusal ends the loop
+            await traitRefusalAudit(audit, "mcp")(refused.kind, spec.requires?.length ?? 0, refused.count);
+            return errorResult(`queue_batch refused: task ${i + 1}: ${refused.text}`);
           }
           resolvedPlan.push({ id: member.id, ref: member.ref, spec });
         }

@@ -1,6 +1,7 @@
 import { watch } from "node:fs";
 import { dirname } from "node:path";
-import { fromBase64, isRecord } from "@seance/shared";
+import { fromBase64, isRecord, isTraitName, TRAIT_LIMITS, TRAIT_NAME_PATTERN } from "@seance/shared";
+import { EXCLAVE_NAME } from "./exclaves.ts";
 import { fingerprint } from "./hash.ts";
 import { log } from "./log.ts";
 import { configPath, expandTilde } from "./paths.ts";
@@ -28,6 +29,67 @@ export interface Config {
   readonly quota?: QuotaConfig;
   /** Auth health's settings (`auth-health.ts`); absent means the defaults. */
   readonly authHealth?: AuthHealthConfig;
+  /**
+   * Traits this machine declares about itself (DESIGN.md, "Traits"): the only place one is
+   * ever declared, so no frame, client or other machine can make this one claim anything.
+   */
+  readonly traits?: TraitsConfig;
+}
+
+/** Trait name → where it applies. `exclaves` absent means every exclave of this machine. */
+export type TraitsConfig = Readonly<Record<string, TraitScope>>;
+
+export interface TraitScope {
+  readonly exclaves?: readonly string[];
+}
+
+/** Keys the spec defines for a trait that this build does not act on yet: refused, so no one believes a probe guards routing. */
+const UNBUILT_TRAIT_KEYS: ReadonlySet<string> = new Set(["probe", "keepFree"]);
+
+/**
+ * Strict, as `parseAuthHealth` is: a trait dropped silently would route work away from (or, worse,
+ * onto) a machine on the strength of a typo. Any mistake fails the load, naming where.
+ */
+function parseTraits(raw: unknown, path: string): TraitsConfig | undefined {
+  if (raw === undefined) return undefined;
+  if (!isRecord(raw)) throw new TypeError(`config at ${path}: "traits" must be an object`);
+  const names = Object.keys(raw);
+  if (names.length > TRAIT_LIMITS.perMachine) {
+    throw new TypeError(`config at ${path}: "traits" names ${names.length} traits; at most ${TRAIT_LIMITS.perMachine}`);
+  }
+  const traits: Record<string, TraitScope> = {};
+  for (const name of names) {
+    if (!isTraitName(name)) {
+      throw new TypeError(`config at ${path}: "traits.${name}" is not a trait name (${TRAIT_NAME_PATTERN})`);
+    }
+    const scope = raw[name];
+    if (!isRecord(scope)) throw new TypeError(`config at ${path}: "traits.${name}" must be an object`);
+    for (const key of Object.keys(scope)) {
+      if (key === "exclaves") continue;
+      throw new TypeError(
+        UNBUILT_TRAIT_KEYS.has(key)
+          ? `config at ${path}: "traits.${name}.${key}" is not built yet in this seanced`
+          : `config at ${path}: unknown key "traits.${name}.${key}" (the key is "exclaves")`,
+      );
+    }
+    const exclaves = scope["exclaves"];
+    if (exclaves === undefined) {
+      traits[name] = {};
+      continue;
+    }
+    const valid =
+      Array.isArray(exclaves) &&
+      exclaves.length > 0 &&
+      exclaves.every((id) => typeof id === "string" && EXCLAVE_NAME.test(id)) &&
+      new Set(exclaves).size === exclaves.length;
+    if (!valid) {
+      throw new TypeError(
+        `config at ${path}: "traits.${name}.exclaves" must be a non-empty array of distinct exclave names ("default" or one from ~/.exclaves)`,
+      );
+    }
+    traits[name] = { exclaves: [...exclaves] };
+  }
+  return traits;
 }
 
 export interface AuthHealthConfig {
@@ -150,10 +212,12 @@ export async function loadConfig(path: string = configPath()): Promise<Config> {
   const reap = parseReap(obj["reap"], path);
   const quota = parseQuota(obj["quota"], path);
   const authHealth = parseAuthHealth(obj["authHealth"], path);
+  const traits = parseTraits(obj["traits"], path);
   return {
     ...(reap === undefined ? {} : { reap }),
     ...(quota === undefined ? {} : { quota }),
     ...(authHealth === undefined ? {} : { authHealth }),
+    ...(traits === undefined ? {} : { traits }),
     name: requireString(obj, "name", path),
     relayUrl: requireString(obj, "relayUrl", path),
     bearerToken: requireString(obj, "bearerToken", path),

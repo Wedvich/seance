@@ -574,6 +574,9 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
       else if (parked.length < PARKED_ALERTS_MAX) parked.push(push);
     },
     onIdleChange: nudge.note,
+    // The trait is a config-validated name on a machine's own blob, and the task id is already on its
+    // `op=admit` line: a count of how often a trait is what holds work back ("What to measure").
+    onTraitHeld: (taskId, trait) => log.info(`scheduler: task held by trait: task=${taskId} trait=${trait}`),
     ...(opts.config === undefined ? {} : { config: opts.config }),
   });
 

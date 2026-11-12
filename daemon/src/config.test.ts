@@ -171,6 +171,65 @@ describe("loadConfig", () => {
       await expect(loadConfig(path)).rejects.toThrow("authHealth");
     }
   });
+
+  describe("traits", () => {
+    const load = async (traits: unknown): Promise<Config> => {
+      const path = join(await tempDir(), "traits.json");
+      await writeFile(path, JSON.stringify({ ...VALID, traits }));
+      return loadConfig(path);
+    };
+
+    test("absent is no traits, and a valid block reads as written, `exclaves` optional", async () => {
+      const bare = join(await tempDir(), "bare-traits.json");
+      await writeFile(bare, JSON.stringify(VALID));
+      expect(await loadConfig(bare)).not.toHaveProperty("traits");
+      expect((await load({})).traits).toEqual({});
+      expect((await load({ atlas: {}, "gpu-2": { exclaves: ["default", "work"] } })).traits).toEqual({
+        atlas: {},
+        "gpu-2": { exclaves: ["default", "work"] },
+      });
+      const longest = "a".repeat(32);
+      expect((await load({ [longest]: {} })).traits).toEqual({ [longest]: {} });
+      const sixteen = Object.fromEntries(Array.from({ length: 16 }, (_, i) => [`t${i}`, {}]));
+      expect(Object.keys((await load(sixteen)).traits ?? {})).toHaveLength(16);
+    });
+
+    test("every mistake fails the load, naming the config and the trait", async () => {
+      const seventeen = Object.fromEntries(Array.from({ length: 17 }, (_, i) => [`t${i}`, {}]));
+      const bad: readonly (readonly [unknown, string])[] = [
+        [[], '"traits" must be an object'],
+        ["atlas", '"traits" must be an object'],
+        [null, '"traits" must be an object'],
+        [{ Atlas: {} }, "not a trait name"],
+        [{ "-x": {} }, "not a trait name"],
+        [{ ["a".repeat(33)]: {} }, "not a trait name"],
+        [{ "": {} }, "not a trait name"],
+        [seventeen, "at most 16"],
+        [{ atlas: true }, '"traits.atlas" must be an object'],
+        [{ atlas: [] }, '"traits.atlas" must be an object'],
+        [{ atlas: { exclave: ["x"] } }, 'unknown key "traits.atlas.exclave"'],
+        [{ atlas: { exclaves: [] } }, "non-empty array"],
+        [{ atlas: { exclaves: "default" } }, "non-empty array"],
+        [{ atlas: { exclaves: ["Work"] } }, "non-empty array"],
+        [{ atlas: { exclaves: ["a b"] } }, "non-empty array"],
+        [{ atlas: { exclaves: [1] } }, "non-empty array"],
+        [{ atlas: { exclaves: ["work", "work"] } }, "distinct"],
+      ];
+      for (const [traits, message] of bad) {
+        // oxlint-disable-next-line no-await-in-loop -- one config at a time
+        await expect(load(traits)).rejects.toThrow(message);
+        // oxlint-disable-next-line no-await-in-loop
+        await expect(load(traits)).rejects.toThrow("config at ");
+      }
+    });
+
+    test("`probe` and `keepFree` are refused as not built yet, never silently ignored", async () => {
+      for (const key of ["probe", "keepFree"]) {
+        // oxlint-disable-next-line no-await-in-loop -- one config at a time
+        await expect(load({ atlas: { [key]: {} } })).rejects.toThrow(`"traits.atlas.${key}" is not built yet`);
+      }
+    });
+  });
 });
 
 describe("runnableProblems", () => {

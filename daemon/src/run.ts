@@ -50,6 +50,7 @@ import type { Fetch } from "./seams.ts";
 import type { HostProbe, Registered } from "./telemetry.ts";
 import { createUpdater, type UpdateEffects, type Updater } from "./update.ts";
 import { createUsageRefresh, type UsageRefreshOpts } from "./usage-refresh.ts";
+import { withTraits } from "./traits.ts";
 import { identityOfState, loadOrInitState, saveState, writeRuntime, type State } from "./state.ts";
 
 export interface DaemonHandle {
@@ -287,7 +288,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       platform: process.platform,
       repos: state.repos,
       scannedAt: state.scannedAt ?? 0,
-      exclaves: exclaveScan.info,
+      // Declared in this machine's config only. Never dropped by `sealMachineInfo` (16 names of 32
+      // characters an exclave at most): only project skills are, so a trait is never lost to size.
+      exclaves: withTraits(exclaveScan.info, config.traits),
       source,
       lastUpdate: state.lastUpdate ?? null,
       capabilities: [
@@ -302,6 +305,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         CAPABILITIES.continueHandoff,
         CAPABILITIES.runNow,
         CAPABILITIES.attachments,
+        CAPABILITIES.traits,
         ...(authHealth === null ? [] : [CAPABILITIES.authHealth]),
       ],
     };

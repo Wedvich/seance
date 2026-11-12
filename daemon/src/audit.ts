@@ -271,7 +271,9 @@ export interface QueueAudit {
  * `origin=relay`: apps reach the scheduler only through it. `id` is the
  * request's, so the app's side can be found; `task` is what joins the line to
  * the `task=` on the spawn it leads to, on whichever machine runs it. Never the
- * prompt — that spawn line fingerprints it.
+ * prompt — that spawn line fingerprints it. The restrictions it carries are counted,
+ * never named (`avoid`, `requires` as numbers, `pin` as 0 or 1): what the measurement
+ * of placement wants, and a machine, account or trait name is the task's own business.
  */
 export function queueAudit(sink: AuditSink): QueueAudit {
   const emit = async (rest: string): Promise<void> => {
@@ -303,18 +305,22 @@ export function queueAudit(sink: AuditSink): QueueAudit {
  * relay answers, never a request. `client` is the record's own (`TaskSpec.client`),
  * a PSK holder's word; `createdAt` is the app's clock. Never the prompt.
  */
-export function admitAudit(
-  sink: AuditSink,
-): (task: {
+export function admitAudit(sink: AuditSink): (task: {
   readonly id: string;
   readonly createdAt: number;
   readonly state: string;
-  readonly spec: { readonly client?: string };
+  readonly spec: {
+    readonly client?: string;
+    readonly avoid?: readonly unknown[];
+    readonly requires?: readonly unknown[];
+    readonly pin?: unknown;
+  };
 }) => Promise<void> {
   return async (task) => {
     const client = task.spec.client === undefined ? "" : ` client=${quote(task.spec.client)}`;
+    const counts = `avoid=${task.spec.avoid?.length ?? 0} requires=${task.spec.requires?.length ?? 0} pin=${task.spec.pin === undefined ? 0 : 1}`;
     await sink(
-      `audit queue origin=leader op=admit task=${quote(task.id)}${client} createdAt=${task.createdAt} state=${task.state}`,
+      `audit queue origin=leader op=admit task=${quote(task.id)}${client} createdAt=${task.createdAt} state=${task.state} ${counts}`,
     );
   };
 }
@@ -375,6 +381,28 @@ export function enqueueAudit(sink: AuditSink, origin: EnqueueOrigin, claimedClie
     const continues = continued === undefined ? "" : ` continues=${quote(continued)}`;
     await sink(
       `audit enqueue origin=${origin} ${who}=${client} task=${quote(task.id)}${continues} createdAt=${task.createdAt} ${how}`,
+    );
+  };
+}
+
+/** Why an enqueue was refused before it was written, for the trait checks (`traitsRefusal`). */
+export type TraitRefusal = "unknown_trait" | "unreachable_trait";
+
+/**
+ * An enqueue refused locally for what it requires (`traitsRefusal`): one line per refusal, under the
+ * surface's own origin, the same shape as `enqueueAudit`'s so the measurement reads both. Counts
+ * only — `requires` is how many traits it asked for, `count` how many were unknown (or, for
+ * `unreachable_trait`, missing from every place it could go). The names are user-typed free text
+ * and stay out, as a prompt does.
+ */
+export function traitRefusalAudit(
+  sink: AuditSink,
+  surface: EnqueueSurface,
+): (refusal: TraitRefusal, requested: number, count: number) => Promise<void> {
+  return async (refusal, requested, count) => {
+    const counted = refusal === "unknown_trait" ? "unknown" : "missing";
+    await sink(
+      `audit enqueue origin=${surface} client=${surface} refused=${refusal} requires=${requested} ${counted}=${count}`,
     );
   };
 }

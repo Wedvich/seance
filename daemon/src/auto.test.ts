@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { TASK_REQUEST_LIMITS, TASK_SPEC_LIMITS } from "@seance/shared";
-import { specError, usesReported, type AutoSpec } from "./auto.ts";
+import { machine } from "../test/fake-app-relay.ts";
+import { specError, traitsRefusal, usesReported, type AutoSpec } from "./auto.ts";
 
 const BASE: AutoSpec = { repo: "github.com/m/seance", mode: "worktree" };
 const ID = "3f1c2b7e-9d4a-4c1e-8a55-0b6f2d9e7a10";
@@ -44,6 +45,73 @@ describe("specError", () => {
         batch: { id: ID, index: TASK_SPEC_LIMITS.batchIndex + 1 },
       }),
     ).toBe("invalid task spec");
+  });
+});
+
+describe("specError, requires", () => {
+  test("a bounded list of trait names is accepted", () => {
+    expect(specError({ ...BASE, requires: ["atlas", "gpu-2"] })).toBeNull();
+    expect(specError({ ...BASE, requires: ["a", "b", "c", "d"] })).toBeNull();
+  });
+
+  test("each bound is named, since the parser would only null the whole spec", () => {
+    expect(specError({ ...BASE, requires: [] })).toContain("requires is empty");
+    expect(specError({ ...BASE, requires: ["a", "b", "c", "d", "e"] })).toContain(
+      `at most ${TASK_SPEC_LIMITS.requires}`,
+    );
+    expect(specError({ ...BASE, requires: ["Atlas"] })).toContain('"Atlas" is not a trait name');
+    expect(specError({ ...BASE, requires: ["-x"] })).toContain("is not a trait name");
+    expect(specError({ ...BASE, requires: ["a".repeat(33)] })).toContain("is not a trait name");
+    expect(specError({ ...BASE, requires: ["atlas", "atlas"] })).toBe("requires names a trait twice");
+  });
+});
+
+describe("traitsRefusal", () => {
+  const exclave = (id: string, traits: readonly string[], accountId = `org:${id}`) => ({
+    id,
+    accountId,
+    extraUsageEnabled: false,
+    authOk: true,
+    skills: [],
+    ...(traits.length === 0 ? {} : { traits }),
+  });
+  const fleet = [
+    machine({ deviceId: "d-1", name: "Thad", exclaves: [exclave("default", ["atlas"]), exclave("work", ["az"])] }),
+    machine({ deviceId: "d-2", name: "WSL", exclaves: [exclave("default", ["atlas", "az"], "org:wsl")] }),
+    machine({ deviceId: "d-3", name: "Mac", exclaves: [exclave("default", ["gpu"])] }),
+  ];
+
+  test("a name no machine declares is unknown, counted, and listed with the names that exist", () => {
+    const refusal = traitsRefusal({ requires: ["atlas", "nope", "nada"] }, fleet);
+    expect(refusal).toEqual({
+      kind: "unknown_trait",
+      text: "no machine declares the traits nope, nada — known: atlas, az, gpu",
+      count: 2,
+    });
+  });
+
+  test("a typo is reported before reachability, even where the pin would also have refused it", () => {
+    expect(traitsRefusal({ requires: ["nope"], pin: { deviceId: "d-3" } }, fleet)?.kind).toBe("unknown_trait");
+  });
+
+  test("(a) a pin to a machine whose exclaves each carry one of the traits, (b) the avoid of the only holder", () => {
+    expect(traitsRefusal({ requires: ["atlas", "az"], pin: { deviceId: "d-1" } }, fleet)?.kind).toBe(
+      "unreachable_trait",
+    );
+    expect(traitsRefusal({ requires: ["gpu"], avoid: ["d-3"] }, fleet)).toMatchObject({
+      kind: "unreachable_trait",
+      count: 1,
+    });
+    expect(traitsRefusal({ requires: ["atlas"], pin: { account: "org:wsl" }, avoid: ["d-2"] }, fleet)?.kind).toBe(
+      "unreachable_trait",
+    );
+  });
+
+  test("(c) the same specs without the restriction place, and a spec requiring nothing is never checked", () => {
+    expect(traitsRefusal({ requires: ["atlas", "az"] }, fleet)).toBeNull();
+    expect(traitsRefusal({ requires: ["gpu"] }, fleet)).toBeNull();
+    expect(traitsRefusal({ requires: ["atlas"], pin: { account: "org:wsl" } }, fleet)).toBeNull();
+    expect(traitsRefusal({ pin: { deviceId: "d-3" }, avoid: ["d-3"] }, [])).toBeNull();
   });
 });
 
