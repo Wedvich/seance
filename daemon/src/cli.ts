@@ -8,6 +8,7 @@ import {
   fromBase64,
   isAutonomyLevel,
   withAutonomy,
+  type AmendDraft,
   type AutonomyLevel,
   type DespawnRequest,
   type SpawnRequest,
@@ -15,7 +16,7 @@ import {
 import { attachmentsRoot } from "./attachments.ts";
 import { auditLogChecks, cliSink, despawnAudit, reapAudit, spawnAudit } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
-import { cmdContinueAuto, cmdPassAuto, cmdSpawnAuto, cmdStartAuto } from "./cli-auto.ts";
+import { cmdAmendAuto, cmdContinueAuto, cmdPassAuto, cmdSpawnAuto, cmdStartAuto } from "./cli-auto.ts";
 import { installMods, modChecks, uninstallMods } from "./claude-mod.ts";
 import { DespawnFailure, SpawnFailure } from "./backend.ts";
 import {
@@ -349,6 +350,49 @@ export function parsePassArgs(argv: readonly string[]): PassCliArgs {
 /** Passes a running task to a successor: pushes its branch, ends its session, queues the task that carries on (`cli-auto.ts`). */
 export async function cmdPass(argv: readonly string[]): Promise<void> {
   return cmdPassAuto(parsePassArgs(argv));
+}
+
+const AMEND_USAGE =
+  'usage: seanced amend <task-id> [--replace] [--title <title>] [--model <model>] [--effort <effort>] [text…]  (text is appended to the prompt; --replace makes it the prompt; --title "" clears the title; --model default and --effort default restore the default)';
+
+/** Exported for tests. Bare words after the task id are the text, as `spawn`'s are its prompt. */
+export function parseAmendArgs(argv: readonly string[]): AmendDraft {
+  let taskId: string | undefined;
+  let replace = false;
+  const textParts: string[] = [];
+  const set: { title?: string | null; model?: string | null; effort?: string | null } = {};
+  let expect: "title" | "model" | "effort" | null = null;
+  for (const arg of argv) {
+    if (expect === "title") set.title = arg === "" ? null : arg;
+    else if (expect === "model") set.model = arg === "default" ? null : arg;
+    else if (expect === "effort") set.effort = arg === "default" ? null : arg;
+    if (expect !== null) {
+      expect = null;
+      continue;
+    }
+    if (arg === "--replace") replace = true;
+    else if (arg === "--title") expect = "title";
+    else if (arg === "--model") expect = "model";
+    else if (arg === "--effort") expect = "effort";
+    else if (arg.startsWith("-")) throw new Error(AMEND_USAGE);
+    else if (taskId === undefined) taskId = arg;
+    else textParts.push(arg);
+  }
+  if (taskId === undefined || expect !== null) throw new Error(AMEND_USAGE);
+  const text = textParts.join(" ");
+  // A replace with no words clears the prompt; an append of nothing is no amendment.
+  if (text === "" && !replace && Object.keys(set).length === 0) throw new Error(AMEND_USAGE);
+  const prompt = replace
+    ? { mode: "replace" as const, text }
+    : text === ""
+      ? undefined
+      : { mode: "append" as const, text };
+  return { taskId, ...(prompt === undefined ? {} : { prompt }), ...set };
+}
+
+/** Amends a task still waiting in the queue (`cli-auto.ts`), as MCP `amend_task` does. */
+export async function cmdAmend(argv: readonly string[]): Promise<void> {
+  return cmdAmendAuto(parseAmendArgs(argv));
 }
 
 /**

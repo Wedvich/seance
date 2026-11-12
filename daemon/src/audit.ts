@@ -4,9 +4,11 @@ import { access, appendFile, chmod, mkdir, open, stat } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { basename, dirname } from "node:path";
 import {
+  amendedFields,
   DEFAULT_EFFORT,
   DEFAULT_MODEL,
   quote,
+  type AmendRequest,
   type DespawnRequest,
   type FailureReason,
   type SpawnClient,
@@ -302,12 +304,22 @@ export interface QueueAudit {
   ) => Promise<void>;
   /** A `discard` that deleted the unreadable record at `task` and `version`. */
   readonly discarded: (id: string, taskId: string, version: number) => Promise<void>;
+  /**
+   * An `amend` answered with `task`: the fields it named and, beside the prompt, its mode and the
+   * prompt's length after — never a field's value, the prompt and the amendment least of all.
+   */
+  readonly amended: (
+    id: string,
+    task: { readonly id: string; readonly spec: { readonly prompt?: string } },
+    request: AmendRequest,
+  ) => Promise<void>;
   readonly refused: (
     op:
       | "cancel"
       | "mark-done"
       | "run-now"
       | "pass"
+      | "amend"
       | "pause"
       | "resume"
       | "discard"
@@ -349,6 +361,13 @@ export function queueAudit(sink: AuditSink): QueueAudit {
     passed: (id, task, successorId, trigger) =>
       emit(`op=pass id=${quote(id)} task=${quote(task.id)} successor=${quote(successorId)} trigger=${trigger} ok`),
     discarded: (id, taskId, version) => emit(`op=discard id=${quote(id)} task=${quote(taskId)} version=${version} ok`),
+    amended: (id, task, request) => {
+      const prompt =
+        request.prompt === undefined ? "" : ` mode=${request.prompt.mode} chars=${task.spec.prompt?.length ?? 0}`;
+      return emit(
+        `op=amend id=${quote(id)} task=${quote(task.id)} fields=${amendedFields(request).join(",")}${prompt} ok`,
+      );
+    },
     held: (op, id, account) =>
       emit(`op=${op} id=${quote(id)}${account === undefined ? "" : ` account=${quote(account)}`} ok`),
     subscribed: (id) => emit(`op=push-subscribe id=${quote(id)} ok`),

@@ -1,4 +1,8 @@
 import {
+  AMEND_READ_FAILURES,
+  amendedFields,
+  parseAmendDraft,
+  type AmendDraft,
   CAPABILITIES,
   withAutonomy,
   offeredSpec,
@@ -774,6 +778,91 @@ export async function passAuto(lease: SchedulerLease, taskId: string, surface: E
   return done(
     `task ${taskId} passed to successor ${reply.successorId}; its branch is pushed and this session is ending`,
   );
+}
+
+/** What an amend's reply leaves to check when it was lost: it may have landed, and an append sent again would land twice. */
+const AMEND_CHECK: Readonly<Record<EnqueueSurface, string>> = {
+  mcp: "check get_queue before amending again",
+  cli: "check the app's queue before amending again",
+};
+
+/** Why `draft` would be refused as malformed, in a caller's words, or null. The leader's parser is the authority. */
+export function amendDraftError(draft: AmendDraft): string | null {
+  const limits = TASK_REQUEST_LIMITS;
+  const { prompt, title, model, effort } = draft;
+  if (prompt === undefined && title === undefined && model === undefined && effort === undefined) {
+    return "nothing to amend: give a prompt, title, model or effort";
+  }
+  if (prompt !== undefined && prompt.text.length > limits.prompt) {
+    return `the prompt text is past the ${limits.prompt}-character bound`;
+  }
+  if (prompt?.mode === "append" && prompt.text.trim() === "") return "an append needs text";
+  if (typeof title === "string" && title.length > limits.title) {
+    return `the title is past the ${limits.title}-character bound`;
+  }
+  for (const [name, value, max] of [
+    ["model", model, limits.model],
+    ["effort", effort, limits.effort],
+  ] as const) {
+    if (typeof value === "string" && (value === "" || value.length > max)) {
+      return `${name} must be 1 to ${max} characters (null restores the default)`;
+    }
+  }
+  return parseAmendDraft(draft) === null ? "the amendment is malformed" : null;
+}
+
+/**
+ * `amend_task` / `seanced amend`: one `amend` for a task still waiting in
+ * the queue (DESIGN.md "Amending a waiting task"). An append (or a replace without a `basis`) is made
+ * against the prompt the store holds when it is sent (`sendAmend`). Sent once, never retried after a
+ * lost answer: an append sent twice lands twice. Never logs; the leader's own `op=amend` audit line,
+ * and the broker's where it carried it, are the record.
+ */
+export async function amendAuto(
+  lease: SchedulerLease,
+  draft: AmendDraft,
+  surface: EnqueueSurface,
+): Promise<AutoEnqueued> {
+  const label = surface === "mcp" ? "amend_task" : "amend";
+  const { taskId } = draft;
+  const shown = JSON.stringify(taskId.slice(0, 64));
+  if (!isTaskId(taskId)) return failed(`${label} refused: ${shown} is not a task id`);
+  const malformed = amendDraftError(draft);
+  if (malformed !== null) return failed(`${label} refused: ${malformed}`);
+  if (!leaderAdvertises(lease, CAPABILITIES.amend)) {
+    return failed(
+      `${label} refused: ${
+        lease.scheduler.availability().kind === "ready"
+          ? "the scheduler's leader cannot amend a queued task yet — its daemon needs `seanced update`"
+          : "no verified scheduler is leading, so nothing can be amended now — try again once one leads"
+      }`,
+    );
+  }
+  const mayHave = `the amend may have landed anyway — ${AMEND_CHECK[surface]}`;
+  let reply: Awaited<ReturnType<SchedulerLeg["amend"]>>;
+  try {
+    reply = await lease.scheduler.amend(draft);
+  } catch (err) {
+    if (!(err instanceof RequestFailure)) {
+      const detail = err instanceof Error ? err.message : String(err);
+      return failed(`${label}: ${detail} — ${mayHave}`);
+    }
+    if (err.reason === "timeout" || err.reason === "dropped") {
+      return failed(`${label}: no answer from the scheduler (${err.message}) — ${mayHave}`);
+    }
+    return failed(`${label} failed: ${failureReasonText(err)}`);
+  }
+  if (reply === null) {
+    return failed(`${label}: the scheduler's answer was unreadable (a seanced version mismatch?) — ${mayHave}`);
+  }
+  if ("ok" in reply) {
+    // Refused before any leader was asked: the store read for `basis` failed.
+    const read = Object.entries(AMEND_READ_FAILURES).find(([code]) => code === reply.code)?.[1];
+    const said = `${label} refused (${reply.code}): ${read ?? schedulerErrorText(reply.code)}`;
+    return failed(isTransportError(reply.code) ? `${said} — ${mayHave}` : said);
+  }
+  const fields = amendedFields(draft).join(", ");
+  return done(`task ${taskId}: amended (${fields}); it is still ${reply.task.state} and starts with the amended spec`);
 }
 
 /** The reads between a `--start` spawn's create and its `run-now`, as the PWA's Start now waits for `ready`. */

@@ -13,6 +13,7 @@ import {
   type Task,
   type TaskCreated,
   type PassReply,
+  type TaskLookup,
   type TaskReply,
 } from "@seance/shared";
 import type { AppRelay } from "../src/app-relay.ts";
@@ -55,6 +56,8 @@ export interface FakeRelay extends AppRelay {
     | null
     | Error
     | (() => Promise<AccountListing | StoreRefusal | null>);
+  /** What `getTask` reads, by task id: absent reads as no such task. */
+  stored: Map<string, Task>;
   /** How many `listAccounts` calls reached the fake: the relay's list floor is what the cache saves. */
   accountLists: number;
   /** Delivers a `store-changed` nudge to every listener, as the relay does after another client's write. */
@@ -140,6 +143,12 @@ export function fakeRelay(
     cancel: (taskId) => schedule<TaskReply | null>("cancel", { taskId }),
     runNow: (taskId) => schedule<TaskReply | null>("run-now", { taskId }),
     pass: (taskId) => schedule<PassReply | null>("pass", { taskId }),
+    stored: new Map(),
+    getTask: async (taskId): Promise<TaskLookup> => {
+      const task = fake.stored.get(taskId);
+      return { ok: true, task: task === undefined ? null : { version: 1, task } };
+    },
+    amend: (request) => schedule<TaskReply | null>("amend", request),
     accounts: [],
     accountLists: 0,
     listAccounts: async (): Promise<AccountListing | StoreRefusal | null> => {

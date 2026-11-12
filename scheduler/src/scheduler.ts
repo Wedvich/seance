@@ -1,4 +1,5 @@
 import {
+  amendSpec,
   CAPABILITIES,
   continuationUnderway,
   DECISION_MAX_CANDIDATES,
@@ -6,10 +7,13 @@ import {
   PASS_CLOSE_GRACE_MS,
   parseSpillStamp,
   passOffer,
+  promptBasis,
   queuedTask,
   quote,
   successorPrompt,
   successorSpec,
+  type AmendRefusal,
+  type AmendRequest,
   type BranchState,
   type FleetQuotaEntry,
   type IdleTaskRef,
@@ -51,6 +55,7 @@ import {
   type QueueStore,
   type StoreEntry,
   type StoreWrite,
+  type StoreWriteFailure,
   type TaskCreateResult,
   type TaskSessionsReply,
   type UnreadableTask,
@@ -164,6 +169,26 @@ export type RunNowResult =
       readonly ok: false;
       readonly code: "not_found" | "dispatching" | "finished" | "not_waiting" | "unplaceable" | "conflict";
     };
+
+/**
+ * `amend`: the task as amended (or as it stands, when the amendment changed nothing), or why not.
+ * `placed`: it left the waiting states; `dispatching`: it is `reserved`, or its spawn is still out.
+ * `prompt_changed`: its prompt is not the one `basis` names. `prompt_too_long` and `append_only`:
+ * `amendSpec`'s, or the store refused the record as too large. `conflict`: it kept moving under the write.
+ */
+export type AmendResult =
+  | { readonly ok: true; readonly task: Task }
+  | {
+      readonly ok: false;
+      readonly code: "not_found" | "finished" | "dispatching" | "placed" | "prompt_changed" | AmendRefusal | "conflict";
+    };
+
+type AmendFailure = Extract<AmendResult, { readonly ok: false }>;
+
+const PROMPT_CHANGED: AmendFailure = { ok: false, code: "prompt_changed" };
+
+/** What `amend` takes: a task no reservation has been made for yet. */
+const AMENDABLE: ReadonlySet<Task["state"]> = new Set<Task["state"]>(["queued", "blocked", "ready"]);
 
 /**
  * `pass`: the old task and its successor, or why not. `ok` also answers a task that already carries
@@ -1083,11 +1108,68 @@ export class Scheduler {
     const now = this.#now();
     const decision = this.#route(task, now, true);
     if (decision.chosen === null) return { ok: false, code: "unplaceable" };
-    const reserved = await this.#reserve(taskId, decision.chosen, decision, now);
+    const reserved = await this.#reserve(taskId, task.spec, decision.chosen, decision, now);
     if (reserved !== null) return { ok: true, task: reserved };
     // A pass may have placed it meanwhile, which is what was asked.
     const current = this.task(taskId);
     return current?.state === "reserved" ? { ok: true, task: current } : { ok: false, code: "conflict" };
+  }
+
+  /**
+   * Amends a task that has not been placed (DESIGN.md, Scheduler, "Amending a waiting task"): its
+   * prompt, title, model or effort, in place, through the one write path, so a reservation or a
+   * cancel serialized ahead of it wins and it answers what the task became instead. `basis` is
+   * checked against the prompt held when the request arrives and again inside the write, so a prompt
+   * changed by another amend in between is `prompt_changed`, never overwritten. An amendment that
+   * changes nothing answers the task as it stands, writing nothing.
+   */
+  async amend(request: AmendRequest): Promise<AmendResult> {
+    const { taskId } = request;
+    const task = this.task(taskId);
+    const early = this.#unamendable(task, taskId);
+    if (early !== null) return early;
+    const against = task?.spec.prompt;
+    if (request.basis !== undefined && (await promptBasis(against)) !== request.basis) {
+      return { ok: false, code: "prompt_changed" };
+    }
+    let outcome: AmendResult = { ok: false, code: "conflict" };
+    let tooLarge = false;
+    const next = await this.#update(
+      taskId,
+      (current) => {
+        const moved = request.basis !== undefined && current.spec.prompt !== against;
+        const refused = this.#unamendable(current, taskId) ?? (moved ? PROMPT_CHANGED : null);
+        if (refused !== null) {
+          outcome = refused;
+          return null;
+        }
+        const spec = amendSpec(current.spec, request);
+        if (typeof spec === "string") {
+          outcome = { ok: false, code: spec };
+          return null;
+        }
+        if (isDeepStrictEqual(spec, current.spec)) {
+          outcome = { ok: true, task: current };
+          return null;
+        }
+        return { ...current, spec };
+      },
+      (code) => {
+        tooLarge = code === "too_large";
+      },
+    );
+    if (next === null) return tooLarge ? { ok: false, code: "prompt_too_long" } : outcome;
+    this.#forgetDecision(taskId);
+    return { ok: true, task: next };
+  }
+
+  /** Why `task` cannot be amended now, or null: only the three states before a reservation take one. */
+  #unamendable(task: Task | undefined, taskId: string): AmendFailure | null {
+    if (task === undefined) return { ok: false, code: "not_found" };
+    if (FINISHED.includes(task.state)) return { ok: false, code: "finished" };
+    if (task.state === "reserved" || this.#dispatches.has(taskId)) return { ok: false, code: "dispatching" };
+    if (!AMENDABLE.has(task.state)) return { ok: false, code: "placed" };
+    return null;
   }
 
   /**
@@ -1512,7 +1594,7 @@ export class Scheduler {
       this.#tellTraitHeld(task, decision);
       if (decision.chosen === null) continue;
       // oxlint-disable-next-line no-await-in-loop -- each route must see the reservation before it
-      await this.#reserve(task.id, decision.chosen, decision, now);
+      await this.#reserve(task.id, task.spec, decision.chosen, decision, now);
     }
     // Lazily: a finished task an app is about to name in `deps` must outlive the refresh that tells us of it.
     await this.#pruneDue();
@@ -1818,17 +1900,22 @@ export class Scheduler {
   /**
    * Reserves a `ready` task where `decision` chose and sends its spawn: the
    * task as reserved, or null when it moved since it was routed (a cancel, or
-   * another reservation) and keeps what it moved to.
+   * another reservation) and keeps what it moved to. An `amend` landed since
+   * (`routed` differs) declines too: the decision was made for the old spec
+   * (a model, or a `/skill` in the prompt), and the next pass routes the new one.
    */
   async #reserve(
     id: string,
+    routed: TaskSpec,
     chosen: NonNullable<Decision["chosen"]>,
     decision: Decision,
     now: number,
   ): Promise<Task | null> {
     const reservation: Reservation = { ...chosen, expiresAt: now + this.#config.reservationTtlMs };
     const reserved = await this.#update(id, (current) =>
-      current.state === "ready" ? advance(current, "reserved", { reservation, decision, reservedAt: now }) : null,
+      current.state === "ready" && isDeepStrictEqual(current.spec, routed)
+        ? advance(current, "reserved", { reservation, decision, reservedAt: now })
+        : null,
     );
     if (reserved === null) return null;
     this.#forgetDecision(id);
@@ -2124,7 +2211,11 @@ export class Scheduler {
    * unreadable, the store refused the write, or the conflicts outlast
    * `WRITE_ATTEMPTS`. `StoreRevoked` is not caught: the term is over.
    */
-  #update(id: string, change: (task: Task) => Task | null): Promise<Task | null> {
+  #update(
+    id: string,
+    change: (task: Task) => Task | null,
+    onRefused?: (code: StoreWriteFailure) => void,
+  ): Promise<Task | null> {
     return this.#serial(id, async () => {
       let trim = false;
       for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt += 1) {
@@ -2150,6 +2241,7 @@ export class Scheduler {
         }
         if (write.code !== "version_conflict" && write.code !== "indeterminate") {
           this.#refused(id, "put", write);
+          onRefused?.(write.code);
           return null;
         }
         // oxlint-disable-next-line no-await-in-loop -- as above

@@ -1549,6 +1549,21 @@ of M4 has landed.
       never ran, and its settle would count as a merge it did not carry.
     - Also: refusals by code (the request audit line's outcome), and successors that wait past an hour on
       `quota_over_line`, which says whether never spilling costs more than it saves.
+- **Amending a waiting task** — **Done** (owner, 2026-11-12; DESIGN.md, Scheduler, "Amending a
+  waiting task"). A stack learns as it runs: what session 1 finds may change what sessions 6, 8 and 9
+  should do, and cancelling and requeuing them would break every `after` naming them. One scheduler op,
+  `amend`, changes a waiting task's prompt, title, model and effort under its own id.
+  - _Owner's choices:_ both an append and a replace, by explicit `mode`; each names a `basis` (the
+    hash of the prompt read), so a stale edit is `prompt_changed` and a replayed append cannot land
+    twice. A successor takes append only. The fields are those four; `repo`, `pin`, `avoid`,
+    `requires`, deps and attachments stay a cancel and requeue's job.
+  - Accepted only while `queued`, `blocked` or `ready` with no spawn out; a reservation or dispatch wins
+    with a structured code (`dispatching`, `placed`), and a reservation routed on the old spec declines.
+  - Surfaces: MCP `amend_task` and `seanced amend` (append by default, replace on request), through
+    the broker when keyless. Offered only to a verified leader advertising `CAPABILITIES.amend`. No
+    PWA surface in V1 (owner): amending is asked for from an orchestration session, through MCP.
+  - _Measure:_ the leader's `audit queue op=amend` lines, by `fields` and `mode`, against cancels of
+    waiting tasks followed by an enqueue from the same client: whether amend replaced the workaround.
 
 ## Settled defaults (interview, 2026-10-15)
 

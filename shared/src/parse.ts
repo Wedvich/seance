@@ -1,6 +1,7 @@
 import { REPLAY_WINDOW_MS } from "./crypto.ts";
 import { isAutonomyLevel, withAutonomy } from "./autonomy.ts";
 import { isTraitName, TRAIT_LIMITS } from "./traits.ts";
+import { isPromptBasis } from "./amend.ts";
 import {
   ACCOUNT_ALIAS_MAX_LENGTH,
   ATTACHMENT_HASH_PATTERN,
@@ -109,6 +110,8 @@ import {
   type TaskRef,
   type TaskReply,
   type TaskSpec,
+  AMEND_MODES,
+  type AmendRequest,
   type UnreadableTaskRef,
   type IdleTaskRef,
   METRICS_ERROR_CODES,
@@ -1864,6 +1867,48 @@ function parseDiskAlerts(value: unknown): readonly DiskAlerted[] | null {
 /** `cancel`, `mark-done` and `run-now`, at the leader: the one field, nothing else carried on. */
 export function parseTaskRef(value: unknown): TaskRef | null {
   return isRecord(value) && isTaskId(value["taskId"]) ? { taskId: value["taskId"] } : null;
+}
+
+/** A field an amendment sets, or `null` to drop it; `undefined` when the value is neither. */
+function amendField(value: unknown, max: number, empty: boolean): string | null | undefined {
+  if (value === null) return null;
+  return isBoundedString(value, max) && (empty || value !== "") ? value : undefined;
+}
+
+/**
+ * `amend`, at the leader, which rewrites a task from it: built field by field, each held to
+ * `TASK_REQUEST_LIMITS` as a create's is (an empty model or effort would reach the spawn as a flag
+ * with no value; `null` drops one). `basis` comes exactly with `prompt`; an append of nothing, or an
+ * amendment of nothing, is malformed. The amended prompt's own bound is the leader's (`amendSpec`),
+ * since it depends on the task.
+ */
+export function parseAmendRequest(value: unknown): AmendRequest | null {
+  if (!isRecord(value) || !isTaskId(value["taskId"])) return null;
+  const { prompt, basis } = value;
+  const limits = TASK_REQUEST_LIMITS;
+  let amended: AmendRequest["prompt"];
+  if (prompt !== undefined) {
+    if (!isRecord(prompt) || !isPromptBasis(basis)) return null;
+    const mode = AMEND_MODES.find((m) => m === prompt["mode"]);
+    const text = prompt["text"];
+    if (mode === undefined || !isBoundedString(text, limits.prompt)) return null;
+    if (mode === "append" && text.trim() === "") return null;
+    amended = { mode, text };
+  } else if (basis !== undefined) return null;
+  const { title, model, effort } = value;
+  const titled = title === undefined ? undefined : amendField(title, limits.title, true);
+  const modelled = model === undefined ? undefined : amendField(model, limits.model, false);
+  const efforted = effort === undefined ? undefined : amendField(effort, limits.effort, false);
+  if ((title !== undefined && titled === undefined) || (model !== undefined && modelled === undefined)) return null;
+  if (effort !== undefined && efforted === undefined) return null;
+  if (amended === undefined && titled === undefined && modelled === undefined && efforted === undefined) return null;
+  return {
+    taskId: value["taskId"],
+    ...(amended === undefined || !isPromptBasis(basis) ? {} : { prompt: amended, basis }),
+    ...(titled === undefined ? {} : { title: titled }),
+    ...(modelled === undefined ? {} : { model: modelled }),
+    ...(efforted === undefined ? {} : { effort: efforted }),
+  };
 }
 
 /**

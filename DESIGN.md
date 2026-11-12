@@ -992,6 +992,13 @@ nothing checked it. The last is the gap they leave.
     the pass (a later non-idle state clears it), after re-reading that it still carries the task. A
     mark a restart recreated has seen no turn end, so a session already idle is closed only by the
     leader's backstop.
+- **An amend** (built 2026-11-12, a threat-model change; Scheduler, "Amending a waiting task"): a
+  waiting task's prompt, title, model and effort change only by the leader's own write, on an `amend`
+  sealed `from: "app"`, parsed by `parseAmendRequest` and checked against `schedulerGuard`, and only
+  while the task is `queued`, `blocked` or `ready` with no spawn out. A prompt change names the
+  `basis` it was read at and is refused `prompt_changed` against any other, so a replayed append
+  never lands twice. The amended record goes back through the one task sealer, sentinels and all; no
+  log or audit line carries prompt text, the amendment's included.
 - **Attachments** (built 2026-10-28) carry invariants of their own, recorded under
   Attachments and as requirements in `CLAUDE.md`. In short:
   - A daemon fetches only from its own config's relay origin, by an id held to
@@ -1340,6 +1347,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | records `task` / `pause-state` (at rest)                            | `task`: `sealTaskRecord` (`shared/src/task-record.ts`), by the app-client's `createTask` and the queue store; a continue task (`TaskSpec.continues`, from `shared/src/continue-task.ts`) is written the same way, and the leader dispatches it as a `spawn` with `mode: "continue"` (`#dispatch` in `scheduler/src/scheduler.ts`); `pause-state`: `sealAtRest`, by the queue store | `task`: `openTaskRecord` (`shared/src/task-record.ts`) — `openAtRest`, no replay guard, sealed `to: "scheduler"`, then `bindTaskRecord`; `pause-state`: `openAtRest` and `parsePauseRecord` in the queue store, held by `Scheduler.load`                                                                                                                                                                |
 | ops `mark-done` / `run-now` / `pause` / `resume` / `discard`        | an app via `shared/src/app-client.ts`: `pwa/src/scheduler-store.ts` (the Queue screen; `run-now` also the Spawn screen's Start now); `run-now` also `daemon/src/auto.ts` (`startAuto`, `startQueuedAuto`: MCP's `start_task` and `spawn_session` `start`, `seanced start` and `spawn --start`)                                                                                     | `daemon/src/leader-requests.ts` `answer`, parsed by `parsePauseRequest` / `parseResumeRequest` / `parseDiscardRequest`, run by `Scheduler.pause` / `resume`, `Scheduler.markDone`, `Scheduler.runNow` and `Scheduler.discard`                                                                                                                                                                           |
 | op `pass` (→`"scheduler"`, built 2026-11-12)                        | an app via `shared/src/app-client.ts` `pass`: `pwa/src/scheduler-store.ts`, and `daemon/src/auto.ts` `passAuto` (MCP `pass_task`) and `daemon/src/cli-auto.ts` `passTaskAuto` (`seanced pass`), through the broker when keyless                                                                                                                                                    | `daemon/src/leader-requests.ts` → `Scheduler.pass` (Scheduler, "Passing to a successor")                                                                                                                                                                                                                                                                                                                |
+| op `amend` (→`"scheduler"`, built 2026-11-12)                       | an app via `shared/src/amend-client.ts` `sendAmend` (a store read for `basis`, then `app-client.ts` `amend`): `daemon/src/mcp.ts` (`amend_task`) and `daemon/src/cli.ts` (`seanced amend`), through the broker when keyless; no PWA surface yet                                                                                            | `daemon/src/leader-requests.ts`, parsed by `parseAmendRequest` → `Scheduler.amend` (Scheduler, "Amending a waiting task")                                                                                                                                                                                                                                                                               |
 | op `push-branch` (scheduler→daemon, built 2026-11-12)               | the leader's `termFleet` in `daemon/src/leader-adapters.ts`, sealed `from: "scheduler"`, or in process through `createLocalOps(…, "leader")`                                                                                                                                                                                                                                       | `daemon/src/push-branch.ts` through `daemon/src/handlers.ts`                                                                                                                                                                                                                                                                                                                                            |
 | op `pass-close` (scheduler→daemon, built 2026-11-12)                | the leader's `termFleet`, once the commit point of a session-triggered pass is written                                                                                                                                                                                                                                                                                             | `daemon/src/session-events.ts` (`armPassClose`) through `daemon/src/handlers.ts`                                                                                                                                                                                                                                                                                                                        |
 | frame `pass` (local socket, built 2026-11-12)                       | `daemon/src/report-done.ts` (`passToSuccessor`), from MCP's `pass_to_successor` only                                                                                                                                                                                                                                                                                               | `daemon/src/session-events.ts`                                                                                                                                                                                                                                                                                                                                                                          |
@@ -1769,6 +1777,15 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   term ended answers `internal_error`, a transport code, so MCP adds "may have landed anyway". Only to a
   leader advertising `CAPABILITIES.successor`; an older one answers an unknown op `invalid_request`,
   so every client checks the capability first.
+- `amend { taskId, prompt?: { mode: "append" | "replace", text }, basis?, title?, model?, effort? }`
+  (`AmendRequest`) → `{ task }` (`TaskResponse`), the task as amended (built 2026-11-12; Scheduler,
+  "Amending a waiting task"). In `SCHEDULER_OPS`, 10 s timeout (one serialized write). `basis` comes
+  exactly with `prompt`: SHA-256 hex of the prompt the client read. A null `title`/`model`/`effort`
+  drops it. Refused `task_not_found`, `finished`, `dispatching` (`reserved`, or its spawn still out),
+  `placed` (on a machine: its session has its prompt), `prompt_changed` (the held prompt does not hash
+  to `basis`), `prompt_too_long`, `append_only` (a `replace` on a successor), `conflict` and
+  `invalid_request`. Only to a leader advertising `CAPABILITIES.amend`; an older one answers the
+  unknown op `invalid_request`, so every client checks the capability first.
 - `push-branch { taskId, expect? }` (`PushBranchRequest`) → `{ remoteBranch, tip, pushed }`
   (`PushBranchResponse`), scheduler → daemon, `OP_TIMEOUT_MS["push-branch"]` 90 s (the Q7 fetch has its
   own 15 s, the push 45 s and a `!` refusal's re-read another 15 s, beside the local git reads). `expect` is the PR head the leader read; the daemon only compares it, and uses it as the
@@ -2552,7 +2569,7 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   build's `submit` is refused.
   The payload is parsed into a fresh value before anything reads it, each op by its own parser
   (`parseQueueRequest`, `parseTaskRequest` for `route-preview`, bounded by `TASK_REQUEST_LIMITS`,
-  `parseTaskRef` for `cancel`, `mark-done` and `run-now`, `parsePauseRequest`, `parseResumeRequest`): the
+  `parseTaskRef` for `cancel`, `mark-done` and `run-now`, `parseAmendRequest` for `amend`, `parsePauseRequest`, `parseResumeRequest`): the
   leader is a PSK holder that reserves, holds and spawns from it.
   The answer is sealed from this machine to `env.from` and goes out on the daemon socket
   (`RelayClient.reply`, sized like every daemon reply, so an oversized one is `too_large`), not on
@@ -2605,7 +2622,10 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   `task=<task>` or `account=<account>` where one applies, and `ok` or `refused
   code=…`: the request id finds the app's side, and the task id joins the line to the
   `task=` on the spawn it leads to, on whichever machine runs it. The prompt is never on it —
-  the spawn line fingerprints that. `origin=relay` because apps reach the leader only through
+  the spawn line fingerprints that. `amend` audits the same way, as
+  `op=amend id=<request> task=<task> fields=<names> mode=<append|replace> chars=<length after> ok` (or
+  `refused code=…`): field names and the amended prompt's length, never a value, so never the
+  amendment's text. `origin=relay` because apps reach the leader only through
   the relay; the despawn a cancel sends audits on its target as any scheduler dispatch does.
   An enqueue is no request — an app's create is a store write the relay answers — so the
   leader's record of one is its admission, the first write after the version-1 create:
@@ -3470,7 +3490,9 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   read the same way, except that the one version past ours is ours, every task overwrite being
   the leader's. `too_large` writes again with the decision cut to its winner; any other refusal
   goes to `onError`. Each change re-checks the state it acts on, so one that no
-  longer applies (a reservation routed from a snapshot taken before a cancel) declines.
+  longer applies (a reservation routed from a snapshot taken before a cancel) declines. A
+  reservation also declines when the held spec is no longer the one it routed (2026-11-12: an
+  `amend` that landed between the route and the reserve), and the next pass routes the new one.
   The transitions themselves are pure functions of the task and what was observed.
 - **The sweep** (M2 review, 2026-10-17). A running task whose `ended` event never arrived
   would read `running` forever and hold its slot; after `globalMax` of them `auto` places
@@ -7568,6 +7590,70 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   docs/scheduler.md's Later). Not changed: no relay store rule, and Raycast, which is spawn-only and
   reads no task states.
 
+### Amending a waiting task — built 2026-11-12
+
+A queued stack learns things as it runs: session 1 finds what sessions 6, 8 and 9 should be told.
+Cancelling and requeuing them loses their ids, so every `after` naming them breaks. `amend` changes a
+waiting task's prompt, title, model and effort in place, under its own id.
+
+- **The op.** `amend` (wire spec above), sent `from: "app"`, parsed by `parseAmendRequest` into a fresh
+  value, checked against the one `schedulerGuard`, and run by `Scheduler.amend` through `#update`, the
+  per-task serialized write path ("One write at a time per task"). The id stays, so dependents' `after`
+  links and a held successor's `succeeds` link are untouched. It forgets the task's held decision and
+  ticks, since that decision routed the old spec.
+- **Only before dispatch.** Accepted only while the task is `queued`, `blocked` or `ready` with no spawn
+  out. A `reserved` task, or one whose spawn is in `#dispatches`, is `dispatching`; anything placed is
+  `placed` (the session already has its prompt; there is no live edit); a finished one is `finished`.
+  Each check runs again inside the write, against the copy held when its turn comes. A reservation
+  routed before the amend landed declines on the spec check in `#reserve`, so the spawn never carries
+  a spec the leader no longer holds, and the next pass routes the amended one. A race with dispatch is
+  lost cleanly, with a code, never half-applied.
+- **Append or replace, explicit (owner's choice, 2026-11-12).** `prompt.mode` is `append` (joined after
+  a blank line, `appendToPrompt`) or `replace`. Either names `basis`, the SHA-256 of the prompt it was
+  read at, and a held prompt that hashes otherwise is `prompt_changed`. For `replace` that stops a stale
+  edit from writing over a newer one. For `append` it is what makes a replay safe: a replayed append,
+  even to a new leader process whose guard never saw it, finds the prompt already moved. A client with
+  no basis of its own (MCP's and the CLI's default append) reads the record through the store
+  (`sendAmend`, `shared/src/amend-client.ts`) and re-sends only on `prompt_changed`, at most three times;
+  a lost answer is never re-sent, since it may have landed. A `replace` from a client that read the
+  prompt itself carries the basis of what it read, so its edit lands only on that text. A
+  successor (`succeeds`) takes `append` only (`append_only`): its prompt is the leader's preamble around
+  the predecessor's record, and a replace would drop the branch reset.
+- **Bounds.** The amended prompt meets a create's: `TASK_REQUEST_LIMITS.prompt` (8 192 UTF-16 units),
+  `ATTACHMENT_LIMITS.prompt` beside attachments, and `SUCCESSOR_PROMPT_BYTES` in UTF-8
+  (`amendedPromptFits`), else `prompt_too_long` with nothing written. A store `too_large` on the write
+  reads as the same code, so the record bound holds too. The transport's own `too_large` is not reused:
+  it means "may have landed".
+- **Sentinels.** The amended record is written through the one task sealer like every leader write, so
+  `pin.exclave: ""` and the attachments, requires and successor dep sentinels are emitted again for
+  their fields. `amendSpec` touches the four fields and keeps every other one as it was.
+- **Capability.** `CAPABILITIES.amend`; MCP and the CLI offer amend only to a verified leader
+  advertising it, and the broker's gate refuses for a ready leader without it. An older leader answers
+  the unknown op `invalid_request`. `OP_TIMEOUT_MS.amend` is 10 s, under the relay's reply window, so
+  the relay needs no redeploy.
+- **Never logged.** The leader audits field names, mode and the amended prompt's length, never a value
+  (leader, "All five are audited"). The broker logs the op and task id only. No surface echoes the
+  prompt back: MCP and the CLI answer with the fields changed and the task's state.
+- **Threat-model change (accepted 2026-11-12).** Before this, a task record's spec was fixed at its
+  create: the leader rewrote state, never the prompt a machine would run. Now any PSK holder can
+  change the prompt of a task it did not write, until the task is placed. Acceptable because it is
+  exactly what that holder could already do by cancelling the task and queueing one with the new
+  prompt (it holds the key that seals `from: "app"`), the change is the leader's own write under the
+  term fence, never an app overwrite (the store rule that the app leg creates only under `task:` is
+  unchanged), and what runs is still decided at dispatch by the leader. The keyless broker peer gains
+  it too ("Fleet broker").
+- **Surfaces.** MCP `amend_task` (`append` by default, `replacePrompt` to replace; `title`, `model` and
+  `effort`, null to clear). `seanced amend <task-id> [text…] [--replace] [--title t] [--model m]
+  [--effort e]` (`--title ""` and `default` clear). Raycast is spawn-only and unchanged. **No PWA
+  surface in V1 (owner, 2026-11-12):** amending is an orchestration act, done from a Claude planning
+  or orchestration session that queued the stack and learns what later sessions need, so MCP and the
+  CLI are where it is asked for. A Queue-screen editor is deferred until it is wanted.
+- **Rejected.** A live edit of a placed task (its session is the prompt's reader by then; message it
+  instead). Amending `repo`, `pin`, `avoid`, `requires`, `deps` or attachments: they change where and
+  after what the task runs, and are a cancel and requeue's job; the owner kept the set to prompt,
+  title, model and effort. A version-number `expect` in place of `basis`: an app never sees the store
+  version of a leader write it did not make, and a hash survives a leader rewriting only state.
+
 ## Reap (`seanced reap`) — designed 2026-10-09
 
 Remote sessions leave residue: linked worktrees, the branches they were on,
@@ -8864,6 +8950,14 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   carried it, are the record, as `start_task`'s are. `get_queue` marks `passable`, `passedTo` and
   `succeeds`. Its description says it ends the task's session and pushes its branch, is refused on a
   dirty tree, and is not for the calling session's own task.
+- **`amend_task { taskId, append?, replacePrompt?, title?, model?, effort? }`** (built 2026-11-12;
+  Scheduler, "Amending a waiting task"). Changes a task still waiting in the queue. `append` adds text
+  after a blank line; `replacePrompt` replaces the prompt; both together are refused before anything
+  is sent. A null `title`, `model` or `effort` clears it. Gated on `leaderAdvertises(lease,
+  CAPABILITIES.amend)`, then `lease.scheduler.amend` (`sendAmend` on the direct path, the broker's
+  `amend` when keyless), which names the `basis` from a store read. It sends once; a lost answer says
+  it may have landed, since a second append would add the text twice. On success it names the fields
+  changed and the state the task is still in, never the prompt.
 - **`pass_to_successor { record }`** (built 2026-11-12; `record` is 1 to
   `SUCCESSOR_RECORD_MAX` UTF-16 units, which the tool counts itself and refuses past before any push:
   the schema's `maxLength` counts code points). The session's own path, registered beside
@@ -9346,7 +9440,7 @@ app-role relay client with the key it imported at start.
   what `list_machines`' leader mark and a brokered `auto` need), `request` (`remoteOp` ∈
   `sessions`/`spawn`/`despawn`, to an exact `deviceId` this daemon's key can read — never a
   name, `"app"`, `"machines"`, or the daemon's own id, which belongs on the local op path)
-  and `scheduler` (`schedulerOp` ∈ `enqueue`/`queue`/`cancel`/`run-now`/`pass`/`accounts`). The payload is
+  and `scheduler` (`schedulerOp` ∈ `enqueue`/`queue`/`cancel`/`run-now`/`pass`/`amend`/`accounts`). The payload is
   validated with the handler's own checks and rebuilt from the validated fields, so nothing
   else a peer adds reaches the wire. For `request`, `client` is stamped `"mcp"` by the
   broker, never copied from the peer, so the target audits the spawn as
@@ -9371,7 +9465,7 @@ app-role relay client with the key it imported at start.
 - **Its own audit origin.** `audit broker origin=local-broker` with action, op, target
   and client — never the payload, so never the prompt. Not `local`: a `local` line
   says this box's tmux was touched, and a brokered spawn touches someone else's. A
-  scheduler frame logs `action=scheduler op="enqueue|queue|cancel|run-now|accounts"` with the task id
+  scheduler frame logs `action=scheduler op="enqueue|queue|cancel|run-now|pass|amend|accounts"` with the task id
   and, for an enqueue, `claimed_client` (and `continues=<old id>` on a continue spec); `fleet` logs `action=fleet`. An enqueue also writes
   `audit enqueue origin=local-broker claimed_client=<mcp|cli> task="…" createdAt=<ms> queued`
   (or `queued landedEarlier=true`, `refused code="…"`, `unanswered`), one per try the relay
@@ -9492,6 +9586,15 @@ app-role relay client with the key it imported at start.
   `cancel` and `run-now`, checks that the verified leader advertises `CAPABILITIES.successor` and
   refuses plainly otherwise (as the continue gate does), and calls its own app-role client's `pass`.
   Its timeout is `OP_TIMEOUT_MS.pass`. It audits `action=scheduler op="pass"` with the task id.
+- **`amend`** (built 2026-11-12; Scheduler, "Amending a waiting task"). A seventh scheduler action:
+  the peer sends a draft, which `parseAmendDraft` holds to `parseAmendRequest`'s rules with `basis`
+  optional beside `prompt`, rebuilt from the parsed fields. The gate refuses plainly unless the
+  verified leader advertises `CAPABILITIES.amend`. The broker's daemon then runs `sendAmend` on its
+  own app-role client: with no `basis`, it reads the record through the store and names the basis
+  itself, since the keyless peer cannot open a record. It is never re-sent across a daemon restart
+  (not in `RESENDABLE_SCHEDULER_OPS`), since a lost append may have landed. Its budget is three
+  store reads and three sends (`SCHEDULER_OP_BUDGET_MS`). It audits `action=scheduler op="amend"`
+  with the task id, never the draft; the leader's `op=amend` line records the fields changed.
 - **Threat-model delta.** For the same-uid process on a credential-delivered box, new: it can
   create `task:` records sealed `from: "app"` and bounded as above; read the fleet queue,
   including other clients' titles and prompt previews; cancel any task; start any `ready` task past
@@ -9511,7 +9614,11 @@ app-role relay client with the key it imported at start.
   broker grants a keyless local process only what a keyed one could already do. `pass` (2026-11-12)
   adds one: a keyless same-uid process can pass any running task, which ends a
   session as `cancel` already can, but pushes its clean branch to `origin` first. That is the
-  daemon's push under the scheduler's seal (Threat model), never a branch the peer names.
+  daemon's push under the scheduler's seal (Threat model), never a branch the peer names. `amend`
+  (2026-11-12) adds another: a keyless same-uid process can change the prompt, title, model and
+  effort of any task still waiting, which it could already do by cancelling it and enqueueing a
+  replacement, but now under the task's own id, so what waits on it follows the new prompt. Still
+  the leader's write, still only before dispatch.
 - **Raycast is unchanged**: it is a local-only app-role client with the key, never keyless.
   A `seanced doctor` line probing `fleet` is deferred.
 

@@ -7,6 +7,7 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import {
   CAPABILITIES,
   isRecord,
+  promptBasis,
   QUEUE_MAX_TASKS,
   SUCCESSOR_RECORD_MAX,
   RequestFailure,
@@ -3164,6 +3165,102 @@ describe("pass_task", () => {
       expect(by("t-3")).toMatchObject({ succeeds: "t-0" });
     } finally {
       lazy.stop();
+    }
+  });
+});
+
+describe("amend_task", () => {
+  const waiting = task({ id: "t-1", state: "queued", spec: { repo: ORIGIN, mode: "worktree", prompt: "fix it" } });
+
+  function amendMachines(leader = true): Machine[] {
+    const [first, ...rest] = autoMachines();
+    return [machine({ ...first, ...(leader ? { capabilities: [CAPABILITIES.amend] } : {}) }), ...rest];
+  }
+
+  async function callAmend(
+    args: Record<string, unknown>,
+    answer: () => unknown,
+    opts: { readonly machines?: readonly Machine[]; readonly stored?: Task | null } = {},
+  ): Promise<{ text: string; error: boolean; fake: FakeRelay }> {
+    const fake = fakeRelay(opts.machines ?? amendMachines(), (op) =>
+      op === "amend" ? answer() : new Error(`unexpected ${op}`),
+    );
+    fake.setState({ scheduler: LEADING });
+    if (opts.stored !== null) fake.stored.set("t-1", opts.stored ?? waiting);
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    try {
+      const result = await client.callTool({ name: "amend_task", arguments: { taskId: "t-1", ...args } });
+      return { text: toolText(result), error: result.isError === true, fake };
+    } finally {
+      lazy.stop();
+    }
+  }
+
+  test("an append is sent once, naming the basis of the prompt the store holds, and answers the state", async () => {
+    const { text, error, fake } = await callAmend({ append: "also this", title: null }, () => ({
+      task: { ...waiting, spec: { ...waiting.spec, prompt: "fix it\n\nalso this" } },
+    }));
+    expect(error).toBe(false);
+    expect(text).toBe("task t-1: amended (prompt, title); it is still queued and starts with the amended spec");
+    expect(fake.requests).toEqual([
+      {
+        deviceId: SCHEDULER_ID,
+        op: "amend",
+        payload: {
+          taskId: "t-1",
+          prompt: { mode: "append", text: "also this" },
+          basis: await promptBasis("fix it"),
+          title: null,
+        },
+      },
+    ]);
+  });
+
+  test("a prompt that moved between the read and the send is read again and resent; a lost answer never is", async () => {
+    let asked = 0;
+    const moved = await callAmend({ replacePrompt: "new" }, () =>
+      asked++ === 0 ? { ok: false, code: "prompt_changed", message: "x" } : { task: waiting },
+    );
+    expect(moved.error).toBe(false);
+    expect(moved.fake.requests.filter((r) => r.op === "amend")).toHaveLength(2);
+
+    const lost = await callAmend({ append: "x" }, () => new RequestFailure("timeout", "no reply within 10000ms"));
+    expect(lost).toMatchObject({
+      error: true,
+      text: expect.stringContaining("the amend may have landed anyway — check get_queue before amending again"),
+    });
+    expect(lost.fake.requests).toHaveLength(1);
+  });
+
+  test("refused before anything is sent: both prompt forms, nothing to amend, an older leader, a task the store lacks", async () => {
+    const cases = [
+      [{ append: "a", replacePrompt: "b" }, {}, "give append or replacePrompt, not both"],
+      [{}, {}, "nothing to amend"],
+      [{ append: "   " }, {}, "an append needs text"],
+      [{ model: "" }, {}, "model must be 1 to"],
+      [{ title: "t" }, { machines: amendMachines(false) }, "cannot amend a queued task yet"],
+      [{ append: "x" }, { stored: null }, "amend_task refused (task_not_found)"],
+    ] as const;
+    for (const [args, opts, said] of cases) {
+      // oxlint-disable-next-line no-await-in-loop -- one relay per case
+      const result = await callAmend(args, () => new Error("must not be asked"), opts);
+      expect({ args, error: result.error, text: result.text }).toEqual({
+        args,
+        error: true,
+        text: expect.stringContaining(said),
+      });
+      expect(result.fake.requests.map((r) => r.op)).not.toContain("amend");
+    }
+  });
+
+  test("the leader's refusals are worded, and none says it may have landed", async () => {
+    for (const code of ["placed", "dispatching", "append_only", "prompt_too_long", "task_not_found"]) {
+      // oxlint-disable-next-line no-await-in-loop -- one relay per case
+      const result = await callAmend({ append: "x" }, () => ({ ok: false, code, message: "x" }));
+      expect(result.error).toBe(true);
+      expect(result.text).toContain(`amend_task refused (${code})`);
+      expect(result.text).not.toContain("may have landed");
     }
   });
 });

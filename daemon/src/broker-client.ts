@@ -1,6 +1,7 @@
 import {
   isRecord,
   RequestFailure,
+  type AmendDraft,
   type ErrorResponse,
   type Machine,
   type SchedulerAvailability,
@@ -178,6 +179,7 @@ export async function brokerFleetState(
 export type SchedulerCall =
   | { readonly schedulerOp: "enqueue"; readonly taskId: string; readonly spec: TaskSpec }
   | { readonly schedulerOp: "cancel" | "run-now" | "pass"; readonly taskId: string }
+  | { readonly schedulerOp: "amend"; readonly amend: AmendDraft }
   | { readonly schedulerOp: "queue" | "accounts" };
 
 /** Repeats that change nothing: reads, and an enqueue, whose second create of the same task id reads `landedEarlier`. */

@@ -805,6 +805,7 @@ describe("daemon ↔ relay integration", () => {
         "successor",
         "successorSelf",
         "successorAuto",
+        "amend",
       ]);
       // A status leaves only after its tick wrote the store, so one in hand
       // means there is history to ask for.

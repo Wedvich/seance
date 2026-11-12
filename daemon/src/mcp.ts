@@ -32,6 +32,7 @@ import {
   taskFailureText,
   TASK_FAILURE_LIMITS,
   TASK_REQUEST_LIMITS,
+  ATTACHMENT_LIMITS,
   TASK_SPEC_LIMITS,
   TASK_UNTIL,
   withReportInstruction,
@@ -72,6 +73,7 @@ import {
   resolvePlacement,
   specError,
   passAuto,
+  amendAuto,
   startAuto,
   startGateError,
   startQueuedAuto,
@@ -453,7 +455,14 @@ const AUTO_LIMITS =
 
 /** What `schedulerFailureText` and `olderDaemonText` name a scheduler call by. */
 type SchedulerCall = "get_queue" | "cancel_task";
-type SchedulerTool = "spawn_session" | "queue_batch" | "continue_task" | "start_task" | "pass_task" | SchedulerCall;
+type SchedulerTool =
+  | "spawn_session"
+  | "queue_batch"
+  | "continue_task"
+  | "start_task"
+  | "pass_task"
+  | "amend_task"
+  | SchedulerCall;
 
 /**
  * A keyless box's daemon brokers the scheduler (DESIGN.md "Fleet broker"), so a
@@ -1074,6 +1083,48 @@ export function buildMcpServer(
       withFleet(async (lease) => {
         if (lease.scheduler === null) return errorResult(olderDaemonText("pass_task"));
         const outcome = await passAuto({ machines: lease.machines, scheduler: lease.scheduler }, taskId, "mcp");
+        return outcome.ok ? textResult(outcome.text) : errorResult(outcome.text);
+      }),
+  );
+
+  server.registerTool(
+    "amend_task",
+    {
+      title: "Amend a task still waiting in the scheduler's queue",
+      description: `Change a task that has not started yet — queued, blocked on its dependencies, or ready — in place, so its id, and everything waiting on it, stay as they are. \`append\` adds a note after a blank line at the end of its prompt (say what changed, e.g. "New information: …"); \`replacePrompt\` replaces the whole prompt instead (\`""\` clears it), against the prompt as the queue holds it when this is sent. Give one of the two at most. \`title\`, \`model\` and \`effort\` set those fields; null restores the default. The amended prompt stays within ${TASK_REQUEST_LIMITS.prompt} characters (${ATTACHMENT_LIMITS.prompt} with attachments). Refused once the task is starting (dispatching) or placed: a running session already has its prompt, so tell it directly. A successor's prompt takes an append only. Needs a scheduler leader whose daemon supports it. Sent once and never retried: if the answer is lost, check get_queue before amending again, since an append sent twice lands twice. Answers with the task's state.`,
+      inputSchema: z.strictObject({
+        taskId: z.string().describe("The waiting task's id from get_queue"),
+        append: z.string().optional().describe("Text to add at the end of the prompt, after a blank line"),
+        replacePrompt: z.string().optional().describe("The whole new prompt, in place of the current one"),
+        title: z.string().nullable().optional().describe("A new title; null clears it"),
+        model: z.string().nullable().optional().describe("A new model; null restores the default"),
+        effort: z.string().nullable().optional().describe("A new effort; null restores the default"),
+      }),
+      annotations: { readOnlyHint: false },
+    },
+    async ({ taskId, append, replacePrompt, title, model, effort }) =>
+      withFleet(async (lease) => {
+        if (lease.scheduler === null) return errorResult(olderDaemonText("amend_task"));
+        if (append !== undefined && replacePrompt !== undefined) {
+          return errorResult("amend_task refused: give append or replacePrompt, not both");
+        }
+        const prompt =
+          append !== undefined
+            ? { mode: "append" as const, text: append }
+            : replacePrompt !== undefined
+              ? { mode: "replace" as const, text: replacePrompt }
+              : undefined;
+        const outcome = await amendAuto(
+          { machines: lease.machines, scheduler: lease.scheduler },
+          {
+            taskId,
+            ...(prompt === undefined ? {} : { prompt }),
+            ...(title === undefined ? {} : { title }),
+            ...(model === undefined ? {} : { model }),
+            ...(effort === undefined ? {} : { effort }),
+          },
+          "mcp",
+        );
         return outcome.ok ? textResult(outcome.text) : errorResult(outcome.text);
       }),
   );

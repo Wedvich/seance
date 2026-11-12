@@ -3,6 +3,7 @@ import { CONNECT_TIMEOUT_MS, LazyRelay } from "./app-relay.ts";
 import {
   OP_TIMEOUT_MS,
   CAPABILITIES,
+  promptBasis,
   RequestFailure,
   STORE_LIST_TIMEOUT_MS,
   STORE_TIMEOUT_MS,
@@ -229,6 +230,11 @@ describe("parseBrokerRequest on scheduler frames", () => {
       taskId: TASK_ID,
     });
     expect(parsedRequest(enqueue())).toMatchObject({ schedulerOp: "enqueue", taskId: TASK_ID });
+    // A keyless peer names no basis: its broker's daemon reads the prompt for one.
+    const append = { taskId: TASK_ID, prompt: { mode: "append", text: "more" } };
+    const parsed = parsedRequest(frame({ schedulerOp: "amend", amend: { ...append, extra: "dropped" } }));
+    expect(parsed).toMatchObject({ schedulerOp: "amend" });
+    expect(parsed["amend"]).toEqual(append);
   });
 
   const refused: [string, Record<string, unknown>, string][] = [
@@ -242,6 +248,31 @@ describe("parseBrokerRequest on scheduler frames", () => {
     ["a run-now of an id that is not one", frame({ schedulerOp: "run-now", taskId: "../x" }), "invalid_request"],
     ["a pass of an id that is not one", frame({ schedulerOp: "pass", taskId: "../x" }), "invalid_request"],
     ["a pass with no task id", frame({ schedulerOp: "pass" }), "invalid_request"],
+    ["an amend with no amendment", frame({ schedulerOp: "amend" }), "invalid_request"],
+    ["an amend that changes nothing", frame({ schedulerOp: "amend", amend: { taskId: TASK_ID } }), "invalid_request"],
+    [
+      "an amend of an id that is not one",
+      frame({ schedulerOp: "amend", amend: { taskId: "../x", title: "t" } }),
+      "invalid_request",
+    ],
+    [
+      "an amend with a mode it does not know",
+      frame({ schedulerOp: "amend", amend: { taskId: TASK_ID, prompt: { mode: "rewrite", text: "x" } } }),
+      "invalid_request",
+    ],
+    [
+      "an amend past the prompt bound",
+      frame({ schedulerOp: "amend", amend: { taskId: TASK_ID, prompt: { mode: "append", text: "x".repeat(8_193) } } }),
+      "invalid_request",
+    ],
+    [
+      "an amend whose basis is not one",
+      frame({
+        schedulerOp: "amend",
+        amend: { taskId: TASK_ID, prompt: { mode: "append", text: "x" }, basis: "nope" },
+      }),
+      "invalid_request",
+    ],
     ["an enqueue with a bad task id", enqueue({}, { taskId: "not an id" }), "invalid_request"],
     ["an enqueue with no spec", frame({ schedulerOp: "enqueue", taskId: TASK_ID }), "invalid_request"],
     ["an unparseable spec", enqueue({ mode: "sideways" }), "invalid_request"],
@@ -558,6 +589,83 @@ describe("the broker's scheduler actions", () => {
     expect(reply.message).toContain("cannot pass a task to a successor");
     expect(fakes[0]?.requests).toEqual([]);
     broker.stop();
+  });
+
+  describe("an amend", () => {
+    const amend = (draft: Record<string, unknown>, extra: Record<string, unknown> = {}): Record<string, unknown> =>
+      frame({ id: "a1", schedulerOp: "amend", amend: { taskId: TASK_ID, ...draft }, ...extra });
+    const stored = (prompt: string): Task => ({
+      id: TASK_ID,
+      spec: { repo: "github.com/m/seance", mode: "worktree", prompt },
+      state: "queued",
+      createdAt: 1,
+    });
+
+    test("is sent with the basis the broker's daemon read for its keyless peer, audited by task and never by text", async () => {
+      const { broker, fakes, lines } = rig(() => ({ task: { id: TASK_ID } }), {
+        scheduler: LEADING,
+        capabilities: [CAPABILITIES.amend],
+      });
+      await broker.handle(frame({ id: "warm", schedulerOp: "queue" }));
+      const fake = fakes[0];
+      if (fake === undefined) throw new Error("expected a relay");
+      fake.stored.set(TASK_ID, stored("secret plans"));
+      const reply = await broker.handle(amend({ prompt: { mode: "append", text: "more secret" }, extra: "dropped" }));
+      expect(reply).toMatchObject({ ok: true, data: { task: { id: TASK_ID } } });
+      const sent = fake.requests.find((r) => r.op === "amend");
+      // Rebuilt from the parsed draft: the peer's stray field never reaches the leader.
+      expect(sent?.payload).toEqual({
+        taskId: TASK_ID,
+        prompt: { mode: "append", text: "more secret" },
+        basis: await promptBasis("secret plans"),
+      });
+      expect(lines).toContain(`audit broker origin=local-broker action=scheduler op="amend" task="${TASK_ID}" id="a1"`);
+      expect(lines).toContain('audit broker origin=local-broker ok id="a1"');
+      expect(lines.some((line) => line.includes("secret"))).toBe(false);
+      broker.stop();
+    });
+
+    test("a draft naming its own basis, or no prompt, is sent as it is, with no read", async () => {
+      const { broker, fakes } = rig(() => ({ task: { id: TASK_ID } }), {
+        scheduler: LEADING,
+        capabilities: [CAPABILITIES.amend],
+      });
+      const basis = await promptBasis("whatever the peer read");
+      await broker.handle(amend({ prompt: { mode: "replace", text: "new" }, basis }));
+      await broker.handle(amend({ title: null, model: "opus" }, { id: "a2" }));
+      expect(fakes[0]?.requests.map((r) => r.payload)).toEqual([
+        { taskId: TASK_ID, prompt: { mode: "replace", text: "new" }, basis },
+        { taskId: TASK_ID, title: null, model: "opus" },
+      ]);
+      broker.stop();
+    });
+
+    test("a task the store does not hold is answered as a read failure, nothing sent to the leader", async () => {
+      const { broker, fakes } = rig(undefined, { scheduler: LEADING, capabilities: [CAPABILITIES.amend] });
+      const reply = await broker.handle(amend({ prompt: { mode: "append", text: "x" } }));
+      expect(reply).toMatchObject({ ok: true, data: { ok: false, code: "task_not_found" } });
+      expect(fakes[0]?.requests).toEqual([]);
+      broker.stop();
+    });
+
+    test("to a verified leader that does not advertise it is refused with the reason, nothing read or sent", async () => {
+      const { broker, fakes } = rig(undefined, { scheduler: LEADING });
+      const reply = failed(await broker.handle(amend({ title: "t" })));
+      expect(reply).toMatchObject({ code: "invalid_request" });
+      expect(reply.message).toContain("cannot amend a queued task");
+      expect(fakes[0]?.requests).toEqual([]);
+      broker.stop();
+    });
+
+    test("with no leader is refused as no_leader, nothing sent", async () => {
+      const { broker, fakes } = rig();
+      expect(failed(await broker.handle(amend({ title: "t" })))).toMatchObject({
+        code: "request_failed",
+        reason: "no_leader",
+      });
+      expect(fakes[0]?.requests).toEqual([]);
+      broker.stop();
+    });
   });
 
   test("an unverified leader is refused as leader_unverified, nothing sent", async () => {

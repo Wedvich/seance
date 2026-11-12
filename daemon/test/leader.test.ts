@@ -46,6 +46,7 @@ import {
   type WebPushSubscription,
   type RegistryView,
   parsePushAlert,
+  promptBasis,
   type SessionsResponse,
 } from "@seance/shared";
 import { IDLE_MS } from "../src/app-relay.ts";
@@ -2540,6 +2541,57 @@ describe("leader in the daemon", () => {
     }
   });
 
+  // An append is not idempotent: acted on twice, its text would land twice.
+  test("an app's amend redelivered is dropped as a replay by the shared guard, and the append lands once", async () => {
+    const relay = startTestRelay(TOKEN);
+    const store = new MemoryQueueStore();
+    await store.put(
+      "amend-q",
+      0,
+      task("amend-q", { state: "queued", spec: { repo: "x", mode: "worktree", prompt: "base" } }),
+    );
+    const lines: string[] = [];
+    const realLog = console.log;
+    console.log = (...args: unknown[]): void => void lines.push(args.map(String).join(" "));
+    const { daemon, deviceId } = await startLeaderDaemon(relay, store);
+    try {
+      const amend = await appRequest("amend", {
+        taskId: "amend-q",
+        prompt: { mode: "append", text: "more" },
+        basis: await promptBasis("base"),
+      });
+      const redeliver = (): void => relay.sendRawToDaemon(deviceId, JSON.stringify({ t: "msg", env: amend }));
+      relay.lead(deviceId, 1);
+      await pollUntil(() => daemon.leader.term() === 1, "term 1");
+      await daemon.leader.settled();
+      redeliver();
+      const asked = await open(key, amend);
+      // The write's queue-changed nudge may reach the app first.
+      let answer = await open(key, await relay.messages.next(5_000));
+      while (answer.re !== asked.id) {
+        // oxlint-disable-next-line no-await-in-loop -- one message at a time, in arrival order
+        answer = await open(key, await relay.messages.next(5_000));
+      }
+      expect(answer.payload).toMatchObject({ task: { id: "amend-q" } });
+      redeliver();
+      await pollUntil(
+        () => lines.some((l) => l.includes(amend.iv) && l.includes("reason=replay")),
+        "the second delivery dropped as a replay",
+      );
+      await Bun.sleep(100);
+      while (relay.messages.size > 0) {
+        // oxlint-disable-next-line no-await-in-loop -- draining what is already queued
+        expect((await open(key, await relay.messages.next())).re).not.toBe(asked.id);
+      }
+      expect((await store.get("amend-q"))?.body?.spec.prompt).toBe("base\n\nmore");
+      expect(lines.filter((l) => l.includes("op=amend") && l.includes(" ok"))).toHaveLength(1);
+    } finally {
+      console.log = realLog;
+      daemon.stop();
+      relay.stop();
+    }
+  });
+
   test("the daemon's relay socket dropping ends the term", async () => {
     const relay = startTestRelay(TOKEN);
     const { daemon, deviceId } = await startLeaderDaemon(relay, new MemoryQueueStore(), { pingIntervalMs: 100 });
@@ -2876,6 +2928,196 @@ describe("pass", () => {
       // A non-event cannot be polled for.
       await Bun.sleep(100);
       expect(replies.size).toBe(0);
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+});
+
+describe("amend", () => {
+  const SECRET = "SECRET-PROMPT-TEXT";
+
+  test("lands on a waiting task, audited with field names and lengths only, and the stored spec carries it", async () => {
+    const relay = startTestRelay(TOKEN);
+    const store = new MemoryQueueStore();
+    const prompt = `first ${SECRET}`;
+    await store.put(
+      "q1",
+      0,
+      task("q1", { state: "queued", spec: { repo: "github.com/acme/app", mode: "worktree", prompt, model: "opus" } }),
+    );
+    const { leader, replies } = leaderOver(relay, store);
+    const amended = `${prompt}\n\nmore ${SECRET}-2`;
+    let id = "";
+    const lines = await captureLog(async () => {
+      try {
+        leader.lead(1);
+        await leader.settled();
+        const request = await appRequest("amend", {
+          taskId: "q1",
+          prompt: { mode: "append", text: `more ${SECRET}-2` },
+          basis: await promptBasis(prompt),
+          title: "Retitled",
+          model: null,
+        });
+        id = (await open(key, request)).id;
+        leader.deliver(request);
+        const reply = (await replies.next()).response.payload;
+        expect(reply).toMatchObject({ task: { id: "q1", spec: { prompt: amended, title: "Retitled" } } });
+        expect(reply).not.toHaveProperty("task.spec.model");
+      } finally {
+        leader.stop();
+        relay.stop();
+      }
+    });
+    const stored = (await store.get("q1"))?.body;
+    expect(stored?.spec).toMatchObject({ prompt: amended, title: "Retitled" });
+    expect(stored?.spec.model).toBeUndefined();
+    expect(lines).toContainEqual(
+      expect.stringContaining(
+        `op=amend id="${id}" task="q1" fields=prompt,title,model mode=append chars=${amended.length} ok`,
+      ),
+    );
+    expect(lines.some((line) => line.includes(SECRET))).toBe(false);
+  });
+
+  test("each refusal answers its code, is audited by task, and changes nothing", async () => {
+    const relay = startTestRelay(TOKEN);
+    const store = new MemoryQueueStore();
+    const spec = { repo: "github.com/acme/app", mode: "worktree", prompt: SECRET } as const;
+    const reservation = { deviceId: "b", ...target, expiresAt: Date.now() + 60_000 };
+    await store.put("q1", 0, task("q1", { state: "queued", spec }));
+    await store.put("sent", 0, task("sent", { state: "reserved", spec, reservation }));
+    await store.put(
+      "run",
+      0,
+      task("run", { state: "running", spec, assignment: { deviceId: "b", ...target, window: "w", pane: "%1" } }),
+    );
+    await store.put("fin", 0, task("fin", { state: "done", doneBy: "manual", spec }));
+    await store.put(
+      "succ",
+      0,
+      task("succ", {
+        state: "blocked",
+        // Held blocked while its predecessor still runs; one that finished any other way would fail it.
+        spec: {
+          ...spec,
+          succeeds: { task: "run", account: "org:b", at: { deviceId: "b", ...target }, trigger: "manual" },
+        },
+      }),
+    );
+    const { leader, replies } = leaderOver(relay, store);
+    const ids: Record<string, string> = {};
+    const basis = await promptBasis(SECRET);
+    const ask = async (name: string, payload: unknown): Promise<unknown> => {
+      const request = await appRequest("amend", payload);
+      ids[name] = (await open(key, request)).id;
+      leader.deliver(request);
+      const reply = await replies.next().catch(() => {
+        throw new Error(`no answer to ${name}`);
+      });
+      return reply.response.payload;
+    };
+    const replace = { mode: "replace", text: "new" } as const;
+    relay.schedulerTerm = 1;
+    const lines = await captureLog(async () => {
+      try {
+        leader.lead(1);
+        // Takeover reconciles the running task against its machine's sessions before it answers anyone.
+        const asked = await open(key, (await nextRequest(relay, 5_000)).env);
+        expect(asked).toMatchObject({ op: "sessions" });
+        const session = { id: "%1", window: "w", repo: "app", path: "/wt/run", taskId: "run" };
+        const answer = await seal(
+          key,
+          { to: SCHEDULER_ID, from: "b" },
+          {
+            id: crypto.randomUUID(),
+            ts: Date.now(),
+            op: "sessions",
+            re: asked.id,
+            payload: { sessions: [session], at: Date.now() } satisfies SessionsResponse,
+          },
+        );
+        relay.sendToApps({ t: "msg", env: answer });
+        await leader.settled();
+        const before = new Map((await store.list()).map((e) => [e.id, e.body?.spec]));
+        expect(await ask("nobody", { taskId: "nobody", title: "t" })).toMatchObject({
+          ok: false,
+          code: "task_not_found",
+        });
+        expect(await ask("fin", { taskId: "fin", title: "t" })).toMatchObject({ ok: false, code: "finished" });
+        expect(await ask("sent", { taskId: "sent", title: "t" })).toMatchObject({ ok: false, code: "dispatching" });
+        expect(await ask("run", { taskId: "run", prompt: replace, basis })).toMatchObject({
+          ok: false,
+          code: "placed",
+        });
+        const stale = await promptBasis("other");
+        expect(await ask("stale", { taskId: "q1", prompt: replace, basis: stale })).toMatchObject({
+          ok: false,
+          code: "prompt_changed",
+        });
+        expect(await ask("succ", { taskId: "succ", prompt: replace, basis })).toMatchObject({
+          ok: false,
+          code: "append_only",
+        });
+        const long = { mode: "append", text: "x".repeat(8_192) };
+        expect(await ask("long", { taskId: "q1", prompt: long, basis })).toMatchObject({
+          ok: false,
+          code: "prompt_too_long",
+        });
+        for (const malformed of [
+          { taskId: "q1" },
+          { taskId: "q1", prompt: replace },
+          { taskId: "q1", prompt: { mode: "rewrite", text: "x" }, basis },
+          { taskId: "q1", prompt: { mode: "append", text: "x".repeat(8_193) }, basis },
+          { taskId: 1, title: "t" },
+        ]) {
+          // oxlint-disable-next-line no-await-in-loop -- each refusal answers its own request
+          expect(await ask("malformed", malformed)).toMatchObject({ ok: false, code: "invalid_request" });
+        }
+        // Every refused amend left the record as it was; a finished task's prompt is the leader's to forget meanwhile.
+        for (const [taskId, was] of before) {
+          // oxlint-disable-next-line no-await-in-loop -- read back in order
+          const now = (await store.get(taskId))?.body?.spec;
+          expect(now?.title).toBeUndefined();
+          if (taskId !== "fin") expect(now).toEqual(was);
+        }
+      } finally {
+        leader.stop();
+        relay.stop();
+      }
+    });
+    const audits = lines.filter((line) => line.includes("audit queue"));
+    for (const [name, taskId, code] of [
+      ["nobody", "nobody", "not_found"],
+      ["fin", "fin", "finished"],
+      ["sent", "sent", "dispatching"],
+      ["run", "run", "placed"],
+      ["stale", "q1", "prompt_changed"],
+      ["succ", "succ", "append_only"],
+      ["long", "q1", "prompt_too_long"],
+    ] as const) {
+      expect(audits).toContainEqual(
+        expect.stringContaining(`op=amend id="${ids[name]}" task="${taskId}" refused code=${code}`),
+      );
+    }
+    expect(lines.some((line) => line.includes(SECRET))).toBe(false);
+  });
+
+  test("sealed by a daemon is an event, never a request", async () => {
+    const relay = startTestRelay(TOKEN);
+    const store = new MemoryQueueStore();
+    await store.put("w1", 0, task("w1", { state: "queued" }));
+    const { leader, replies } = leaderOver(relay, store);
+    try {
+      leader.lead(1);
+      await leader.settled();
+      leader.deliver(await appRequest("amend", { taskId: "w1", title: "t" }, "remote"));
+      // A non-event cannot be polled for.
+      await Bun.sleep(100);
+      expect(replies.size).toBe(0);
+      expect((await store.get("w1"))?.body?.spec.title).toBeUndefined();
     } finally {
       leader.stop();
       relay.stop();

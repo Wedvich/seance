@@ -1,10 +1,11 @@
-import { withAutonomy } from "@seance/shared";
+import { withAutonomy, type AmendDraft } from "@seance/shared";
 import { appRelayClient, importAppKeys, LazyRelay } from "./app-relay.ts";
 import { cliSink, traitRefusalAudit, type AuditSink } from "./audit.ts";
 import {
   continueAuto,
   enqueueAuto,
   passAuto,
+  amendAuto,
   pinAccountGateError,
   placementInputError,
   placementNeedsPinAccount,
@@ -279,6 +280,43 @@ export async function passTaskAuto(
   } finally {
     lease.release();
   }
+}
+
+/** `seanced amend`: MCP's `amend_task` (`amendAuto`) from this shell, through its key or the daemon's broker. */
+export async function amendTaskAuto(
+  draft: AmendDraft,
+  fleet: Fleet,
+  opts: { readonly keyless?: boolean } = {},
+): Promise<AutoEnqueued> {
+  let lease: FleetLease;
+  try {
+    lease = await fleet.open();
+  } catch (err) {
+    const why = err instanceof BrokerError ? brokerFailureText(err) : err instanceof Error ? err.message : String(err);
+    return failed(
+      opts.keyless === true
+        ? `amend: not sent — this shell could not read the PSK, so the daemon's broker was the only way to the scheduler, and it failed: ${why}`
+        : `amend: not sent — ${why}`,
+    );
+  }
+  try {
+    if (lease.scheduler === null) return failed(`amend unavailable: ${SCHEDULER_NEEDS_NEWER_DAEMON}`);
+    return await amendAuto({ machines: lease.machines, scheduler: lease.scheduler }, draft, "cli");
+  } finally {
+    lease.release();
+  }
+}
+
+export async function cmdAmendAuto(draft: AmendDraft): Promise<void> {
+  const config = await loadConfig();
+  const built = await autoFleet(config);
+  const outcome = await amendTaskAuto(draft, built.fleet, { keyless: built.keyless }).finally(() => built.fleet.stop());
+  if (!outcome.ok) {
+    console.error(outcome.text);
+    process.exit(1);
+  }
+  console.log(outcome.text);
+  process.exit(0);
 }
 
 export async function cmdPassAuto(args: PassCliArgs): Promise<void> {

@@ -1,6 +1,7 @@
 import {
   FINISHED,
   StoreRevoked,
+  type AmendResult,
   type CancelResult,
   type DiscardResult,
   type MarkDoneResult,
@@ -13,6 +14,7 @@ import {
 import {
   APP_ID,
   MAX_PAUSE_HOLDS,
+  parseAmendRequest,
   parseDiscardRequest,
   parsePauseRequest,
   parsePushSubscribeRequest,
@@ -240,6 +242,17 @@ const RUN_NOW_REFUSALS: Record<Exclude<RunNowResult, { readonly ok: true }>["cod
     "past the concurrency caps it still places nowhere; its decision says why",
   ),
   conflict: schedulerError("conflict", "the task changed while it was placed; ask again"),
+};
+
+const AMEND_REFUSALS: Record<Exclude<AmendResult, { readonly ok: true }>["code"], SchedulerError> = {
+  not_found: schedulerError("task_not_found", "the leader holds no task by that id"),
+  finished: schedulerError("finished", "the task has already finished"),
+  dispatching: schedulerError("dispatching", "its spawn is in flight, so it starts with the prompt it had"),
+  placed: schedulerError("placed", "the task was placed: its session already has its prompt"),
+  prompt_changed: schedulerError("prompt_changed", "the prompt changed since it was read; read it again"),
+  prompt_too_long: schedulerError("prompt_too_long", "the amended prompt is past the task's bound; nothing changed"),
+  append_only: schedulerError("append_only", "a successor's prompt is the leader's; it takes an append only"),
+  conflict: schedulerError("conflict", "the task changed while it was amended; ask again"),
 };
 
 const DISCARD_REFUSALS: Record<Exclude<DiscardResult, { readonly ok: true }>["code"], SchedulerError> = {
@@ -501,6 +514,20 @@ async function answer(asked: Asked, op: SchedulerOp, payload: unknown): Promise<
       }
       // The spawn line on the chosen machine joins this by `task=`.
       await audit.ranNow(id, result.task);
+      const reply: TaskResponse = { task: result.task };
+      return reply;
+    }
+    case "amend": {
+      const request = parseAmendRequest(payload);
+      if (request === null) return schedulerError("invalid_request", "malformed amend request");
+      const result = await scheduler.amend(request);
+      if (!result.ok) {
+        await audit.refused("amend", id, result.code, { taskId: request.taskId });
+        return AMEND_REFUSALS[result.code];
+      }
+      await audit.amended(id, result.task, request);
+      // Its decision was made for the old spec: route the new one now rather than at the next pass.
+      tick();
       const reply: TaskResponse = { task: result.task };
       return reply;
     }
