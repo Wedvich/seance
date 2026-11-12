@@ -856,6 +856,19 @@ describe("holding a task while the relay is down", () => {
     ]);
   });
 
+  // The writer may have held it on a dead socket of its own; this tab's socket is up and sends it.
+  test("a task adopted from another tab is sent while this one is connected", async () => {
+    const client = new ScriptedClient(DOWN);
+    const store = attached(client);
+    client.emit({ status: "open", registrySettled: true });
+    await drain();
+
+    const theirs = { ...QUEUED, id: "t-theirs", state: "queued" as const, createdAt: Date.now() };
+    store.adoptHeld([{ task: theirs, failure: null, sending: false }]);
+    await until(() => store.getState().held.length === 0, "the adopted task sent");
+    expect(client.creates).toEqual([theirs]);
+  });
+
   // A run-now sent whenever the app next reconnects would skip the caps at a moment nobody chose.
   test("Start now with the relay down is a plain queue", async () => {
     const client = new ScriptedClient(DOWN);

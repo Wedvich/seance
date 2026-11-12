@@ -65,6 +65,7 @@ import {
   leaderVerified,
   resolveRepo,
   scopedRepos,
+  settlesOnReport,
 } from "./view.ts";
 
 /**
@@ -945,8 +946,7 @@ export class Store {
   }
 
   async #sendOne(task: Task): Promise<void> {
-    const reported = task.spec.until === "reported" || task.spec.deps?.some((dep) => dep.after === "done") === true;
-    if (reported && !deriveReportedAvailability(this.#state.relay)) {
+    if (settlesOnReport(task) && !deriveReportedAvailability(this.#state.relay)) {
       this.#heldFailed(task, `${REPORTED_UNAVAILABLE} Try again once it does, or discard it.`);
       return;
     }
@@ -980,7 +980,9 @@ export class Store {
 
   /**
    * Takes the list another tab wrote (`trackHeld`). A task this tab is sending stays, flagged, until
-   * its answer: dropping it would not stop it landing.
+   * its answer: dropping it would not stop it landing. Sends what came in when this tab's relay is
+   * up: the writer may have held it on a dead socket, and nothing else here would send it before
+   * this tab's own reconnect. A task both send answers `landedEarlier` the second time.
    */
   adoptHeld(incoming: readonly HeldTask[]): void {
     const sending = new Set(this.#state.held.filter((entry) => entry.sending).map((entry) => entry.task.id));
@@ -990,6 +992,7 @@ export class Store {
       ...this.#state.held.filter((entry) => entry.sending && !ids.has(entry.task.id)),
     ];
     this.#patch({ held });
+    void this.#sendHeld();
   }
 
   #patchHeld(taskId: string, next: Partial<Pick<HeldTask, "failure" | "sending">>): void {

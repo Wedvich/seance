@@ -727,12 +727,13 @@ function deriveIgnoredNote(relay: RelayState): string | null {
  * not yet verified.
  */
 export function heldNeedsLeader(task: Task): boolean {
+  return settlesOnReport(task) || task.spec.pin?.account !== undefined;
+}
+
+/** Whether a task needs a leader advertising `reportedDone`: it settles on its done report, or waits on another's. */
+export function settlesOnReport(task: Task): boolean {
   const { spec } = task;
-  return (
-    spec.until === "reported" ||
-    spec.deps?.some((dep) => dep.after === "done") === true ||
-    spec.pin?.account !== undefined
-  );
+  return spec.until === "reported" || spec.deps?.some((dep) => dep.after === "done") === true;
 }
 
 function heldRow(entry: HeldTask, relay: RelayState): HeldRow {

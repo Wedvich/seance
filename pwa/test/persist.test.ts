@@ -254,7 +254,7 @@ describe("tracking held tasks across tabs", () => {
     expect(t.adopted.map((list) => list.map((e) => e.task.id))).toEqual([[TASK, other]]);
     expect(store.get("seance:held")).toBe(written);
 
-    // Another key, or this key's own echo, adopts nothing new.
+    // Another key adopts nothing.
     t.fire("seance:form");
     expect(t.adopted).toHaveLength(1);
   });

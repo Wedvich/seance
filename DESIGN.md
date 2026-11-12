@@ -6656,8 +6656,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   since whatever it was for has likely moved on, and past the leader's admission age
   it would be refused anyway. Each open tab keeps its held list in memory, so
   `trackHeld` adopts another tab's write to `seance:held` from the `storage` event,
-  and a tab killed after holding loses nothing the others hold; two writes in the
-  same instant can still drop one. A Start now held this way is a plain queue,
+  and a tab killed after holding loses nothing the others hold; a tab whose relay is
+  up sends what it adopts (a task both send answers `landedEarlier` the second time).
+  Two writes in the same instant can still drop one. A Start now held this way is a plain queue,
   since a `run-now` fired whenever the app next reconnects would skip the caps at a
   moment nobody chose. A task with files is never held: files upload at the tap and
   go only to a leader verified to advertise `attachments`, which a dropped socket
