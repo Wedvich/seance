@@ -101,6 +101,26 @@ describe("a queued verdict's body", () => {
     expect(body).not.toContain("pinned machine");
   });
 
+  test("says what the task requires and which machines have it, and drops the trait rejections from the wait", () => {
+    const lacks: Reason = { code: "trait_absent", trait: "atlas" };
+    const needing = task("ready", {
+      spec: { repo: "github.com/acme/app", mode: "worktree", requires: ["atlas"] },
+      decision: {
+        at: NOW,
+        chosen: null,
+        candidates: [
+          { deviceId: "full", machine: "FullBox", exclave: "default", rejected: [lacks] },
+          { deviceId: "mac", machine: "Mac", exclave: "default", rejected: [lacks, over] },
+        ],
+      },
+    });
+    const { body } = describeVerdict({ kind: "queued", task: needing }, machines, {}, NOW, null);
+    expect(body).toContain("Needs atlas — no machine has it.");
+    expect(body).toContain(`Waiting: Mac · default: ${reasonText(over)}.`);
+    expect(body).not.toContain("lacks the atlas trait");
+    expect(body).not.toContain("FullBox");
+  });
+
   test("a pin on an offline machine says the task waits for it", () => {
     const offline = [machine("full", "FullBox", false)];
     const { body } = describeVerdict(

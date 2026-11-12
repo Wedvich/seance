@@ -1,4 +1,12 @@
-import { DEP_AFTER, isTaskId, parseTask, TASK_SPEC_LIMITS, TASK_UNTIL, type TaskDep } from "@seance/shared";
+import {
+  DEP_AFTER,
+  isTaskId,
+  isTraitName,
+  parseTask,
+  TASK_SPEC_LIMITS,
+  TASK_UNTIL,
+  type TaskDep,
+} from "@seance/shared";
 import { DEFAULT_FORM, HELD_MAX, heldOrder, isEffort, isModel, type HeldTask, type PersistedForm } from "./state.ts";
 
 /**
@@ -55,6 +63,17 @@ function asDeps(value: unknown): readonly TaskDep[] {
   return deps;
 }
 
+/** Drafts persist and are read untrusted: trait names only, once each, at most a task may require. */
+function asRequires(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) return [];
+  const names: string[] = [];
+  for (const entry of value) {
+    if (names.length === TASK_SPEC_LIMITS.requires) break;
+    if (isTraitName(entry) && !names.includes(entry)) names.push(entry);
+  }
+  return names;
+}
+
 /** Hand-validated rather than trusted: this is last week's build's output. */
 export function readForm(): PersistedForm {
   const raw = readJson(FORM_KEY);
@@ -76,6 +95,7 @@ export function readForm(): PersistedForm {
     effort: isEffort(record["effort"]) ? record["effort"] : DEFAULT_FORM.effort,
     after: asDeps(record["after"]),
     until: TASK_UNTIL.find((until) => until === record["until"]) ?? DEFAULT_FORM.until,
+    requires: asRequires(record["requires"]),
   };
 }
 

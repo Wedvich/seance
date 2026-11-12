@@ -1,5 +1,5 @@
 import { isSettled, TASK_PHASES, type Machine, type Task } from "@seance/shared";
-import { pinLine, queuedBody, taskHeadline, waitingText } from "./decision-view.ts";
+import { pinLine, queuedBody, requiresLine, taskHeadline, waitingText } from "./decision-view.ts";
 import type { FollowEnd, StartNowRefusal, Verdict } from "./state.ts";
 
 /**
@@ -73,10 +73,12 @@ export function describeVerdict(
     const { task } = verdict;
     const settled = isSettled(task.state);
     const pin = pinLine(task, machines, aliases);
+    const requires = requiresLine(task, machines);
     const waiting = waitingText(task);
     const parts = [
       queuedBody(task),
       pin === null ? null : `${pin}.`,
+      requires === null ? null : `${requires}.`,
       waiting === null ? null : `Waiting: ${waiting}.`,
       offlinePinNote(task, machines),
       // No leader to read it yet: the store holds it, and the note says so instead of promising a pickup.

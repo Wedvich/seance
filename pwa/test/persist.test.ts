@@ -56,6 +56,7 @@ describe("form persistence", () => {
       effort: "max",
       after: [{ task: TASK, after: "done" }],
       until: "reported",
+      requires: ["atlas", "gpu-2"],
     } as const;
     writeForm(form);
     expect(readForm()).toEqual(form);
@@ -80,6 +81,18 @@ describe("form persistence", () => {
   test("a form from before authoring reads with the authoring fields at their defaults", () => {
     store.set("seance:form", JSON.stringify({ prompt: "old", worktree: true, model: "opus", effort: "high" }));
     expect(readForm()).toMatchObject({ after: [], until: "merged", prompt: "old" });
+  });
+
+  test("requires is read as trait names only, once each, at most four, and as none when it is not a list", () => {
+    store.set(
+      "seance:form",
+      JSON.stringify({ requires: ["atlas", "Atlas", 7, null, "atlas", "has space", "a", "b", "c", "d", "e"] }),
+    );
+    expect(readForm().requires).toEqual(["atlas", "a", "b", "c"]);
+    store.set("seance:form", JSON.stringify({ requires: "atlas" }));
+    expect(readForm().requires).toEqual([]);
+    store.set("seance:form", JSON.stringify({ prompt: "from before traits" }));
+    expect(readForm().requires).toEqual([]);
   });
 
   test("authoring fields are validated one by one: junk entries drop, the rest stay", () => {
