@@ -104,7 +104,8 @@ describe("seance-archivist run", () => {
     console.log = (...args: unknown[]): void => {
       lines.push(args.map(String).join(" "));
     };
-    const drops = (): number => lines.filter((line) => line.includes("the archivist answers only archive-status")).length;
+    const drops = (): number =>
+      lines.filter((line) => line.includes("the archivist answers only archive-status")).length;
     let archivist: Awaited<ReturnType<typeof startArchivist>> | undefined;
     try {
       archivist = await startArchivist({ ...paths, credentialPath });

@@ -7,7 +7,7 @@ import { SpawnScreen, type SpawnActions } from "./components/spawn-screen.tsx";
 import { VerdictView } from "./components/verdict.tsx";
 import type { PushClient } from "./push.ts";
 import { readRelayUrl } from "./relay/keys.ts";
-import { deriveMachines } from "./machines-view.ts";
+import { deriveArchivist, deriveMachines } from "./machines-view.ts";
 import { deriveAfterSheet, deriveQueue } from "./queue-view.ts";
 import "./screen.css";
 import type { Store } from "./store.ts";
@@ -121,6 +121,7 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
         state.accounts.aliases,
         state.relay.fleetQuota,
       )}
+      archivist={deriveArchivist(state.relay.archivist, state.archiveStatus, now)}
       relayLine={view.relayLine}
       relayState={view.relayState}
       settled={state.relay.registrySettled}

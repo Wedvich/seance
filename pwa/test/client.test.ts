@@ -431,10 +431,11 @@ describe("registry", () => {
       const daemon = await connectDaemon(relay);
       let client: RelayClient | null = null;
       try {
-        daemon.send(await register(seat, { info, roles: [DAEMON_ROLES.archivist] }));
+        const seatId = seat;
+        daemon.send(await register(seatId, { info, roles: [DAEMON_ROLES.archivist] }));
         for (;;) {
           const frame = await raw.waitFor<{ t: "registry"; entries: readonly RegistryView[] }>("registry");
-          if (frame.entries.some((entry) => entry.deviceId === seat && entry.info.iv === info.iv)) break;
+          if (frame.entries.some((entry) => entry.deviceId === seatId && entry.info.iv === info.iv)) break;
         }
         // Started after the push that holds it, so its first registry is the one under test.
         const started = startClient();

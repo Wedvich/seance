@@ -56,6 +56,7 @@ import {
   type Verdict,
 } from "./state.ts";
 import { AccountStore } from "./account-store.ts";
+import { ArchiveStore } from "./archivist-store.ts";
 import { admitFiles, manifestOf, notAttachedText } from "./attachments.ts";
 import type { ReceivedShare } from "./share-inbox.ts";
 import { accountSeries } from "./chart.ts";
@@ -183,6 +184,7 @@ export class Store {
   #triedOnSocket = new Set<string>();
   readonly #queue: SchedulerStore;
   readonly #accounts: AccountStore;
+  readonly #archive: ArchiveStore;
   readonly #uploads: UploadQueue;
 
   constructor(client: RelayClient, form: PersistedForm = DEFAULT_FORM, held: readonly HeldTask[] = []) {
@@ -193,6 +195,11 @@ export class Store {
       (next) => this.#patch(next),
     );
     this.#accounts = new AccountStore(
+      client,
+      () => this.#state,
+      (next) => this.#patch(next),
+    );
+    this.#archive = new ArchiveStore(
       client,
       () => this.#state,
       (next) => this.#patch(next),
@@ -227,6 +234,7 @@ export class Store {
       pausing: false,
       discarding: false,
       accounts: { aliases: {}, nameable: client.accountsNamed, saving: null, renaming: null, notice: null },
+      archiveStatus: null,
       attachments: [],
       attachNotice: null,
       heldDropped: [],
@@ -267,6 +275,7 @@ export class Store {
         if (relay.status !== "open") return;
         this.#queue.onShown(relay);
         this.#accounts.onShown();
+        this.#archive.sync();
       });
     };
     document.addEventListener("visibilitychange", onVisibility);
@@ -285,6 +294,7 @@ export class Store {
       this.#disarmUndo();
       this.#queue.dispose();
       this.#accounts.dispose();
+      this.#archive.dispose();
       this.#uploads.dispose();
     };
   }
@@ -295,6 +305,9 @@ export class Store {
     if (keys.every((key) => Object.is(this.#state[key], next[key]))) return;
     this.#state = { ...this.#state, ...next };
     for (const listener of this.#listeners) listener();
+    // Whether the card's counts are wanted turns on these three alone, however each one moved (the Machines
+    // layer opening or closing by any path, the desktop layout, the registry's archivist).
+    if (keys.some((key) => key === "machines" || key === "wide" || key === "relay")) this.#archive.sync();
   }
 
   #onRelay(): void {

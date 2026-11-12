@@ -84,6 +84,7 @@ function state(
     attachNotice: null,
     heldDropped: [],
     awaitingUploads: false,
+    archiveStatus: null,
     ...overrides,
   };
 }

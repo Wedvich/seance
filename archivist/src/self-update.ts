@@ -10,7 +10,13 @@ import { daemonSink } from "../../daemon/src/audit.ts";
 import { checkoutRoot, readSource, trimRoot } from "../../daemon/src/selfsource.ts";
 import { signalRestartUnit } from "../../daemon/src/systemd.ts";
 import { defaultUpdateEffects, updateNow, type ManualUpdate } from "../../daemon/src/update.ts";
-import { archivistStateDir, servedShaPathIn, servedSourcePathIn, updateLockPathIn, updateRequestPathIn } from "./paths.ts";
+import {
+  archivistStateDir,
+  servedShaPathIn,
+  servedSourcePathIn,
+  updateLockPathIn,
+  updateRequestPathIn,
+} from "./paths.ts";
 import { ARCHIVIST_UNIT, expectedArchivistUnits } from "./units.ts";
 import { rootRefusal } from "./unprivileged.ts";
 import { withUpdateLock } from "./update-lock.ts";

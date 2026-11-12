@@ -1,6 +1,12 @@
 import { Database } from "bun:sqlite";
 import { writeFile } from "node:fs/promises";
-import { METRICS_STEPS, type ArchiveTableStatus, type MetricsRequest, type MetricsSeries, type MetricsStep } from "@seance/shared";
+import {
+  METRICS_STEPS,
+  type ArchiveTableStatus,
+  type MetricsRequest,
+  type MetricsSeries,
+  type MetricsStep,
+} from "@seance/shared";
 import { TIERS, tierSchema, TieredMetrics, type Retention, type Sample } from "../../daemon/src/metrics-tiers.ts";
 
 const HOUR_S = 3_600;
@@ -169,7 +175,9 @@ export class MetricsArchive {
       for (let from = bounds.lo; from <= bounds.hi; from += span) {
         rows += count.get(from, from + span)?.n ?? 0;
         // oxlint-disable-next-line no-await-in-loop -- the yield between ranges is the point
-        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 0);
+        });
       }
     }
     return { rows, oldest: oldestS === null ? null : oldestS * 1000 };

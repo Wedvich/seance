@@ -11,7 +11,15 @@ import {
   taskFailureText,
   type TaskUntil,
 } from "@seance/shared";
-import type { AutonomyLevel, Capability, KnownAccount, Machine, RelayState, Task } from "@seance/shared";
+import type {
+  ArchiveStatusResponse,
+  AutonomyLevel,
+  Capability,
+  KnownAccount,
+  Machine,
+  RelayState,
+  Task,
+} from "@seance/shared";
 import {
   AUTONOMY_LABELS,
   EFFORT_LABELS,
@@ -258,6 +266,11 @@ export interface AppState {
   /** Unreadable records being discarded. */
   readonly discarding: boolean;
   readonly accounts: AccountsState;
+  /**
+   * The archivist's last `archive-status` reply and the device it came from, for the Machines screen's card;
+   * null until one lands, and dropped when the seat moves or the archivist is offline.
+   */
+  readonly archiveStatus: { readonly deviceId: string; readonly reply: ArchiveStatusResponse } | null;
   /** Files on the form. Not in `form`: a `File` can't be persisted, and a reload drops them. */
   readonly attachments: readonly PickedFile[];
   /** Why the last pick or paste left files out; cleared by the next pick or a remove. */

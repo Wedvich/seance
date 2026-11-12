@@ -1,7 +1,7 @@
 import type { JSX } from "preact";
 import { useEffect, useId, useMemo, useRef, useState } from "preact/hooks";
 import { type ChartLine, chartLines } from "../chart.ts";
-import type { AccountCard, Gauge, GaugeIcon, MachineCard, MachinesView } from "../machines-view.ts";
+import type { AccountCard, ArchivistCard, Gauge, GaugeIcon, MachineCard, MachinesView } from "../machines-view.ts";
 import {
   HISTORY_RANGES,
   type AccountsState,
@@ -32,6 +32,8 @@ const PALETTE_SIZE = 5;
  */
 export function MachinesScreen(props: {
   view: MachinesView;
+  /** The archivist's own card, after the machines; null with no archivist in the registry. */
+  archivist: ArchivistCard | null;
   relayLine: string;
   relayState: ConnectionState;
   /** The registry is authoritative (`RelayState.registrySettled`). */
@@ -50,6 +52,7 @@ export function MachinesScreen(props: {
 }): JSX.Element {
   const {
     view,
+    archivist,
     relayLine,
     relayState,
     settled,
@@ -103,6 +106,7 @@ export function MachinesScreen(props: {
             onHideHistory={onHideHistory}
           />
         ))}
+        {archivist !== null && <ArchivistCardView card={archivist} />}
 
         {view.accounts.length > 0 && <h2 className="label fleet-heading">Accounts</h2>}
         {view.accounts.map((account) => (
@@ -206,6 +210,40 @@ function MachineCardView(props: {
       )}
 
       {history !== null && <HistoryChart history={history} onPick={(range) => onShowHistory(target, range)} />}
+    </section>
+  );
+}
+
+/** No actions: it is a status, not a target, so no menu and no spawn. */
+function ArchivistCardView(props: { card: ArchivistCard }): JSX.Element {
+  const { card } = props;
+  return (
+    <section className="fleet-card card" aria-label="Archivist">
+      <div className="fleet-card-head">
+        <div className="fleet-card-title">
+          <div className="fleet-name-row">
+            <span className={card.online ? "dot dot-ok" : "dot"} aria-hidden="true" />
+            <h2 className="fleet-name">{card.name}</h2>
+          </div>
+          <p className="fleet-meta">{card.meta}</p>
+          {card.build !== null && <p className="fleet-meta fleet-build">{card.build}</p>}
+        </div>
+      </div>
+      {card.rows.length > 0 && (
+        <ul className="exclaves">
+          {card.rows.map((row) => (
+            <li key={row.label} className="exclave">
+              <span className="exclave-id">{row.label}</span>
+              <span className="exclave-account">{row.detail}</span>
+              <span className="exclave-sessions exclave-sessions-wide">
+                <b>{row.value}</b>
+                <span>{row.unit}</span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="fleet-note">{card.note}</p>
     </section>
   );
 }
