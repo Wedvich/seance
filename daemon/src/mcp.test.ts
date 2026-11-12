@@ -3609,7 +3609,13 @@ describe("pass_to_successor", () => {
     assignment: { ...AT, window: "fix-it" },
   });
   const ACK = { taskId: "t-1", remoteBranch: "feature/x", tip: "a".repeat(40), pushed: true };
+  /** Short enough that a test of the window running out is quick. */
   const FAST: PassPoll = { windowMs: 60, everyMs: 10 };
+  /**
+   * For a confirmation that does land: the poll returns at the read that finds it, so a wide window costs
+   * nothing, where a 60 ms one is a latent flake — three reads 10 ms apart overran it on a busy macOS runner.
+   */
+  const ROOMY: PassPoll = { windowMs: 10_000, everyMs: 10 };
 
   /** The leader (device-1), advertising `successorSelf` unless held back. */
   function leaderMachines(capable = true): Machine[] {
@@ -3628,6 +3634,7 @@ describe("pass_to_successor", () => {
       readonly queued?: (n: number) => readonly Task[];
       readonly machines?: readonly Machine[];
       readonly leading?: boolean;
+      readonly poll?: PassPoll;
     } = {},
   ): Promise<{
     text: string;
@@ -3656,7 +3663,7 @@ describe("pass_to_successor", () => {
         signals.push(passOpts?.signal);
         return Promise.resolve(opts.pass ?? { ok: true, text: "pushed", pass: ACK });
       },
-      FAST,
+      opts.poll ?? FAST,
     );
     try {
       const result = await client.callTool({
@@ -3747,7 +3754,10 @@ describe("pass_to_successor", () => {
   });
 
   test("the confirmation is polled for, and found when it lands within the window", async () => {
-    const result = await callSelf({ queued: (n) => [n < 2 ? active : { ...active, successor: "t-2" }] });
+    const result = await callSelf({
+      queued: (n) => [n < 2 ? active : { ...active, successor: "t-2" }],
+      poll: ROOMY,
+    });
     expect(result.text).toContain("recorded successor t-2");
     expect(result.queueReads).toBe(3);
   });
