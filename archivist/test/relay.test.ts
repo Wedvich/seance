@@ -362,6 +362,9 @@ describe("collection against the real relay", () => {
 describe("metrics against the real relay", () => {
   const METRICS_ACCOUNT = "1a1a1a1a-2b2b-3c3c-4d4d-5e5e5e5e5e5e:6f6f6f6f-7a7a-8b8b-9c9c-0d0d0d0d0d0d";
   let store: MetricsStore;
+  // `daemon.stop()` leaves an envelope already read to run its handler: one the archivist's pull
+  // timer sent just before teardown must not reach a closed store.
+  let storeOpen = true;
   let daemon: DaemonClient;
   let daemonId: string;
   let archivist: Awaited<ReturnType<typeof startArchivist>> | undefined;
@@ -413,7 +416,7 @@ describe("metrics against the real relay", () => {
       // The daemon's metrics op, from its own store: what the archivist pulls.
       handle: (plain: Plain): Promise<Plain | null> =>
         Promise.resolve(
-          plain.op === "metrics" && isMetricsRequest(plain.payload)
+          storeOpen && plain.op === "metrics" && isMetricsRequest(plain.payload)
             ? {
                 id: crypto.randomUUID(),
                 ts: Date.now(),
@@ -436,6 +439,7 @@ describe("metrics against the real relay", () => {
   afterAll(() => {
     archivist?.stop();
     daemon.stop();
+    storeOpen = false;
     store.close();
   });
 
