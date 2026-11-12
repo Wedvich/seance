@@ -3881,7 +3881,7 @@ error.
   IndexedDB entry, `psk-base`, in the same transaction as the AES key, and `main.tsx` derives the
   account key from it at launch. A later PSK-derived key then needs no second re-entry on every
   install. An install saved before this has no `psk-base`: it works unchanged, shows no alias, and
-  the accounts section says to re-enter the PSK in Settings to name accounts (saving it there
+  the account menu's Rename says to re-enter the PSK in Settings (saving it there
   stores both). Rejected: forcing a re-setup, which would lock every install out until the PSK
   is typed, for a display-only feature; persisting the PSK's base64 to migrate silently, which
   defeats the non-extractable key.
@@ -3900,9 +3900,13 @@ error.
   an account it no longer names, or not at all. Both are bounded to the owner's own accounts — the
   registry check means no record names an account no machine of this fleet reports — and the
   echoed id and email are what the person checks.
-- **PWA.** The account card's "Rename" opens an inline field (at most 64 characters, trimmed; empty
-  clears). Names show on the account cards, a machine card's exclave rows and the Queue screen's
-  pause holds: alias, else email, else `acct` and the first eight characters of the account half.
+- **PWA.** "Rename" in the account card's ⋯ menu opens a dialog (a bottom sheet on a phone, centred
+  on a desk; at most 64 characters, trimmed; empty clears) that stays open on a refusal with the
+  reason under the field; without the account key the item is disabled and says to re-enter the
+  PSK. An alias is the account card's title, and the exclave ids it replaces lead the meta line
+  (`<exclaves> · <email> · on <machines>`); an unnamed card is titled by its exclave ids. Names show
+  on a machine card's exclave rows and the Queue screen's pause holds as alias, else email, else
+  `acct` and the first eight characters of the account half.
   One person on a personal plan and a Team org has one email and one account half under two org
   halves, so where another account the registry reports would read the same, the email or short id
   gains `(org <first eight of the org half>)` (the whole org half where that still collides, the
@@ -7938,9 +7942,10 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
 - **Machines show load, accounts show quota.** A machine card carries CPU and memory bars and
   its exclaves (account, running sessions, and a line when the login needs /login or expires within 3
   days: `exclaveAuth`, error or warning colour, nothing for ok or unknown), while connected; quota is a property of an account, not of any
-  machine, so it sits on account cards: one per `accountId` across the fleet, named by its
-  alias if any client set one (_Scheduler_, "Account records"), else the
-  email any of its exclaves reports (the short account id from a daemon that predates it), newest
+  machine, so it sits on account cards: one per `accountId` across the fleet, titled by its
+  alias if any client set one (_Scheduler_, "Account records"), else its exclave ids, and named
+  in its meta line by the email any of its exclaves reports (the short account id from a daemon
+  that predates it), newest
   observation wins, since every daemon hosting one of its exclaves reports it, each window
   it lacks filled from the next newest that has one (`mergeQuota`) — per-model caps reach
   the cache only through `/usage`, so a machine whose newer cache never saw one must not
@@ -7964,7 +7969,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   "reset", however full the reading was — a cache reading can be hours old, and its
   percentage describes a window that no longer exists. Both rules are one shared copy,
   `newestQuotaByAccount` and `effectivePct` in `shared/src/quota.ts`, so M2's scheduler
-  filter and score read quota exactly as the cards do. Charts follow the split — History on a machine asks
+  filter and score read quota exactly as the cards do. Charts follow the split — the History switch in
+  a card's ⋯ menu (it leaves the menu open, so it can be flipped back; a machine card with no
+  chart to offer has no menu) on a machine asks
   that daemon for `cpu_pct`/`mem_pct`/`disk_pct`; on an account it asks one online host of the account
   (the newest observer when it serves `metrics`) for the quota series and folds its exclaves'
   copies into one line per window. One chart at a time, its window fixed when asked, a reply
