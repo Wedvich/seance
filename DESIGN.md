@@ -5160,6 +5160,15 @@ Where the build adds to or departs from the wording above:
   the relay's preflight already allows them. A `signal` that fires answers the local code
   `aborted`. Before, progress was "Uploading 2/5…" on the Queue button alone, because
   `fetch` reports no upload progress.
+- **Neither path waits on the OS for `unreachable`** (since 2026-11-12). A relay that drops
+  packets rather than refusing them would hold a connect for minutes. The XHR path aborts after
+  60 s without upload progress or, once sent, an answer; its timer is armed before the send, so it
+  covers the connect. `fetch` reports no progress, so it gets one deadline over the whole `PUT`: the
+  same 60 s plus the object's bytes at 64 B/ms (~0.5 Mbit/s), ~9 minutes for a 30 MiB file and
+  ~1 for a small one. Either answers `unreachable` when it fires; `aborted` stays the caller's own
+  signal's. Rejected: a flat deadline for `fetch`, which would either cut off a large file on a
+  slow uplink or leave a dead connect a small file's ~9 minutes. Found on WSL's mirrored networking,
+  where a dial to a closed localhost port is held rather than refused.
 - **Limits at pick time** (`admitFiles`, `pwa/src/attachments.ts`): a file over 30 MiB is
   skipped and the next tried; once 10 files are on the form nothing after is added; a
   file that would pass 100 MiB in all is skipped. One line under the list names each

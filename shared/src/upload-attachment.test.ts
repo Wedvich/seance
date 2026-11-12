@@ -1,5 +1,6 @@
 // `RelayClient.uploadAttachment`'s XMLHttpRequest path, which only a browser reaches:
-// Bun has no XHR, so the real-relay tests (pwa/test/client.test.ts) cover the fetch path,
+// Bun has no XHR, so the real-relay tests (pwa/test/client.test.ts) cover the fetch path
+// (its deadline is below, on a held socket),
 // and this one installs a stand-in. No relay: the stand-in answers as the route does.
 import { afterEach, describe, expect, jest, test } from "bun:test";
 import { RelayClient } from "./app-client.ts";
@@ -71,6 +72,26 @@ function installXhr(): void {
 afterEach(() => {
   Reflect.deleteProperty(globalThis, "XMLHttpRequest");
 });
+
+/**
+ * Fake timers must be on before the upload arms its timer. Sealing and the connect need no timer, so
+ * the poll yields with `setImmediate`, which the fake clock leaves alone, and real time bounds it.
+ */
+async function underFakeTimersUntil(done: () => boolean): Promise<void> {
+  const until = performance.now() + 4_000;
+  while (!done() && performance.now() < until) {
+    // oxlint-disable-next-line no-await-in-loop -- a poll: sealing and the connect land off the microtask queue
+    await loopTurn();
+  }
+  if (!done()) throw new Error("condition never held");
+}
+
+/** A turn of the event loop that the fake clock does not hold back, as it does `Bun.sleep`. */
+async function loopTurn(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    setImmediate(resolve);
+  });
+}
 
 describe("uploadAttachment over XMLHttpRequest", () => {
   test("PUTs the sealed object with the token in the header, reports progress over its bytes, and reads the 201", async () => {
@@ -144,16 +165,8 @@ describe("uploadAttachment over XMLHttpRequest", () => {
     expect(FakeXhr.sent).toHaveLength(1);
   });
 
-  /** Fake timers must be on before the send arms the stall timer, but sealing needs real ones to finish. */
   async function sentUnderFakeTimers(): Promise<FakeXhr> {
-    for (let turn = 0; turn < 200 && FakeXhr.sent.length === 0; turn += 1) {
-      // oxlint-disable-next-line no-await-in-loop -- a poll: sealing resolves off the microtask queue
-      await new Promise<void>((resolve) => {
-        jest.useRealTimers();
-        setTimeout(resolve, 1);
-      });
-      jest.useFakeTimers();
-    }
+    await underFakeTimersUntil(() => FakeXhr.sent.length > 0);
     const xhr = FakeXhr.sent[0];
     if (xhr === undefined) throw new Error("nothing sent");
     return xhr;
@@ -218,6 +231,88 @@ describe("uploadAttachment over XMLHttpRequest", () => {
     } finally {
       FakeXhr.prototype.send = send;
       jest.useRealTimers();
+    }
+  });
+});
+
+// The fetch path (Bun, Raycast) against a relay that takes the connection and never answers: what a
+// blackholed connect looks like from here, without depending on how the OS treats a closed port
+// (WSL's mirrored networking holds a connect to one rather than refusing it).
+describe("uploadAttachment over fetch", () => {
+  async function heldRelay(): Promise<{ client: RelayClient; connected: () => boolean; stop: () => void }> {
+    let opened = 0;
+    const listener = Bun.listen({
+      hostname: "127.0.0.1",
+      port: 0,
+      socket: {
+        open: () => {
+          opened += 1;
+        },
+        data: () => {},
+      },
+    });
+    const key = await importPsk(toBase64(new Uint8Array(32).fill(5)));
+    return {
+      client: new RelayClient({ url: `ws://127.0.0.1:${listener.port}/app`, token: TOKEN, key }),
+      connected: () => opened > 0,
+      stop: () => listener.stop(true),
+    };
+  }
+
+  test("a relay that never answers is cut off at the deadline and answers unreachable", async () => {
+    const relay = await heldRelay();
+    jest.useFakeTimers();
+    try {
+      let settled = false;
+      const pending = relay.client.uploadAttachment(new Uint8Array(4)).finally(() => {
+        settled = true;
+      });
+      await underFakeTimersUntil(relay.connected);
+      jest.advanceTimersByTime(59_000);
+      await loopTurn();
+      expect(settled).toBe(false);
+      jest.advanceTimersByTime(2_000);
+      expect(await pending).toEqual({ ok: false, code: "unreachable" });
+    } finally {
+      jest.useRealTimers();
+      relay.stop();
+    }
+  });
+
+  test("a larger object gets time for its bytes past the minute", async () => {
+    const relay = await heldRelay();
+    jest.useFakeTimers();
+    try {
+      let settled = false;
+      // 6 MiB at the floor of 64 bytes a millisecond: ~98 s on top of the minute.
+      const pending = relay.client.uploadAttachment(new Uint8Array(6 * 1024 * 1024)).finally(() => {
+        settled = true;
+      });
+      await underFakeTimersUntil(relay.connected);
+      jest.advanceTimersByTime(150_000);
+      await loopTurn();
+      expect(settled).toBe(false);
+      jest.advanceTimersByTime(10_000);
+      expect(await pending).toEqual({ ok: false, code: "unreachable" });
+    } finally {
+      jest.useRealTimers();
+      relay.stop();
+    }
+  });
+
+  test("the caller's own abort answers aborted, and leaves no deadline behind", async () => {
+    const relay = await heldRelay();
+    jest.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const pending = relay.client.uploadAttachment(new Uint8Array(4), { signal: controller.signal });
+      await underFakeTimersUntil(relay.connected);
+      controller.abort();
+      expect(await pending).toEqual({ ok: false, code: "aborted" });
+      expect(jest.getTimerCount()).toBe(0);
+    } finally {
+      jest.useRealTimers();
+      relay.stop();
     }
   });
 });

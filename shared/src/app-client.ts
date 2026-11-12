@@ -360,7 +360,10 @@ function isXhrConstructor(value: unknown): value is XhrConstructor {
   return typeof value === "function";
 }
 
-/** Longest an upload may go without progress (or, once sent, without the relay answering). */
+/**
+ * Longest an XHR upload may go without progress (or, once sent, without the relay answering); armed
+ * before the send, so it also bounds a connect that never completes.
+ */
 const UPLOAD_STALL_MS = 60_000;
 
 type PutAnswer = { readonly status: number; readonly body: unknown } | "unreachable" | "aborted";
@@ -423,22 +426,44 @@ function putByXhr(
   });
 }
 
+/**
+ * The slowest uplink the `fetch` path waits out. `fetch` reports no upload progress, so instead of
+ * the XHR path's stall timer it gets one deadline over the whole `PUT`: `UPLOAD_STALL_MS` for the
+ * connect and the relay's answer, plus the object's bytes at this rate. 64 B/ms (~0.5 Mbit/s) puts
+ * the largest object (`ATTACHMENT_MAX_OBJECT_BYTES`, 30 MiB) at ~9 minutes and a small one at ~1.
+ */
+const UPLOAD_FLOOR_BYTES_PER_MS = 64;
+
 async function putByFetch(
   url: string,
   headers: Readonly<Record<string, string>>,
   object: Uint8Array<ArrayBuffer>,
   signal: AbortSignal | undefined,
 ): Promise<PutAnswer> {
-  let res: Response;
+  // Its own deadline, not the OS's: a relay that drops packets rather than refusing them holds a
+  // connect for minutes. `setTimeout`, not `AbortSignal.timeout`, so a test's fake clock drives it.
+  const deadline = new AbortController();
+  const timer = setTimeout(
+    () => deadline.abort(),
+    UPLOAD_STALL_MS + Math.ceil(object.length / UPLOAD_FLOOR_BYTES_PER_MS),
+  );
+  const either = signal === undefined ? deadline.signal : AbortSignal.any([signal, deadline.signal]);
+  // Only the caller's own signal answers `aborted`; the deadline, like a refused connect, is `unreachable`.
+  const failed = (): PutAnswer => (signal?.aborted === true ? "aborted" : "unreachable");
   try {
-    res = await fetch(url, { method: "PUT", headers, body: object, ...(signal === undefined ? {} : { signal }) });
-  } catch {
-    return signal?.aborted === true ? "aborted" : "unreachable";
+    let res: Response;
+    try {
+      res = await fetch(url, { method: "PUT", headers, body: object, signal: either });
+    } catch {
+      return failed();
+    }
+    const body: unknown = await res.json().catch(() => null);
+    // An abort during the body read fails the read; same answer as the XHR path gives.
+    if (either.aborted) return failed();
+    return { status: res.status, body };
+  } finally {
+    clearTimeout(timer);
   }
-  const body: unknown = await res.json().catch(() => null);
-  // An abort during the body read fails the read; same answer as the XHR path gives.
-  if (signal?.aborted === true) return "aborted";
-  return { status: res.status, body };
 }
 
 /** A registry entry whose `info` decrypted. Entries that don't are counted, not shown. */
