@@ -26,6 +26,9 @@ import { exclave, FakeFleet, machine, NOW, obs, readerChecked, spec, status, unr
 
 const PR = "https://github.com/acme/app/pull/7";
 const CAPABLE = [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.successor];
+const SELF = [...CAPABLE, CAPABILITIES.successorSelf];
+const TIP = "b".repeat(40);
+const PUSHED = { remoteBranch: "feature/x", tip: TIP };
 const FAILED_DESPAWN = { ok: false, code: "internal_error", message: "no" } as const;
 const OPEN: PrHeadReading = { kind: "read", head: "feature/x", crossRepository: false, state: "open" };
 
@@ -883,5 +886,179 @@ describe("dependents of a passed task", () => {
     await tick(s.scheduler);
     await s.scheduler.prune(0);
     expect(s.scheduler.task("t0")).toBeDefined();
+  });
+});
+
+describe("the session's own pass", () => {
+  const self = (record?: string, from = "a") => ({ from, pushed: PUSHED, ...(record === undefined ? {} : { record }) });
+
+  test("skips the push, builds the prompt from the record, arms the daemon's close and leaves the session to it", async () => {
+    const s = setup([machine("a", { capabilities: SELF })]);
+    const old = await running(s);
+    const result = ok(await s.scheduler.pass(old.id, "session", self("done: a; left: b")));
+
+    expect(s.fleet.pushes).toEqual([]);
+    expect(s.fleet.passCloses).toEqual([{ deviceId: "a", request: { taskId: "old" } }]);
+    // The daemon closes at the turn's end: the leader neither despawns nor settles now.
+    expect(s.fleet.despawns).toEqual([]);
+    expect(result.task).toMatchObject({ id: "old", state: "running", successor: result.successorId });
+    const successor = s.scheduler.task(result.successorId);
+    expect(successor?.spec).toMatchObject({ succeeds: { task: "old", trigger: "session" }, client: "scheduler" });
+    expect(successor?.spec.prompt).toContain("origin/feature/x");
+    expect(successor?.spec.prompt).toContain(TIP);
+    expect(successor?.spec.prompt).toContain("done: a; left: b");
+    expect(s.lines).toContain(`audit pass task="old" successor="${result.successorId}" trigger=session`);
+    expect(s.lines).toContain(`audit pass-close task="old" outcome=armed`);
+    expect(s.lines.join("\n")).not.toContain("done: a; left: b");
+  });
+
+  test("the session's end settles the old task superseded and releases the successor", async () => {
+    const s = setup([machine("a", { capabilities: SELF })]);
+    const old = await running(s, false);
+    const result = ok(await s.scheduler.pass(old.id, "session", self()));
+    await s.scheduler.onSession(old.id, "ended", { deviceId: "a", pane: "%1" });
+    await tick(s.scheduler);
+    expect(s.scheduler.task(old.id)).toMatchObject({ state: "superseded", successor: result.successorId });
+  });
+
+  test("a task waiting on a person is passed, the session being the one that called", async () => {
+    const s = setup([machine("a", { capabilities: SELF })]);
+    const old = await running(s, false);
+    await s.scheduler.onSession(old.id, "needs-input", { deviceId: "a", pane: "%1" });
+    expect(s.scheduler.task(old.id)?.state).toBe("needs-input");
+    const result = ok(await s.scheduler.pass(old.id, "session", self()));
+    expect(result.task).toMatchObject({ state: "needs-input", successor: result.successorId });
+    expect(s.fleet.passCloses).toHaveLength(1);
+    // The outside paths still refuse it.
+    const other = setup();
+    const waiting = await running(other, false);
+    await other.scheduler.onSession(waiting.id, "needs-input", { deviceId: "a", pane: "%1" });
+    expect(await other.scheduler.pass(waiting.id)).toMatchObject({ ok: false, code: "needs_input" });
+  });
+
+  test("only the task's own machine may ask, and a refusal changes nothing", async () => {
+    const s = setup([machine("a", { capabilities: SELF }), machine("b", { capabilities: SELF })]);
+    const old = await running(s, false);
+    expect(await s.scheduler.pass(old.id, "session", self(undefined, "b"))).toMatchObject({ ok: false });
+    expect(s.creates).toEqual([]);
+    expect(s.fleet.passCloses).toEqual([]);
+    expect(s.scheduler.task(old.id)?.successor).toBeUndefined();
+    expect(s.lines.some((l) => l.includes("op=session-pass") && l.includes(`from="b"`))).toBe(true);
+  });
+
+  test("the pass is refused before anything is created when the machine lacks successorSelf or the host cannot arm a close", async () => {
+    const plain = setup();
+    const a = await running(plain, false);
+    expect(await plain.scheduler.pass(a.id, "session", self())).toEqual({ ok: false, code: "successor_unsupported" });
+    expect(plain.creates).toEqual([]);
+
+    const noPort = setup([machine("a", { capabilities: SELF })]);
+    const b = await running(noPort, false);
+    noPort.fleet.passClose = undefined;
+    expect(await noPort.scheduler.pass(b.id, "session", self())).toEqual({ ok: false, code: "successor_unsupported" });
+    expect(noPort.creates).toEqual([]);
+  });
+
+  test("the PR's head is compared with the branch the daemon pushed", async () => {
+    const s = setup([machine("a", { capabilities: SELF })]);
+    const old = await running(s);
+    s.prHead = { ...OPEN, head: "other/branch" };
+    expect(await s.scheduler.pass(old.id, "session", self())).toEqual({ ok: false, code: "branch_mismatch" });
+    expect(s.creates).toEqual([]);
+    expect(s.fleet.passCloses).toEqual([]);
+
+    s.prHead = { ...OPEN, state: "merged" };
+    expect(await s.scheduler.pass(old.id, "session", self())).toEqual({ ok: false, code: "pr_not_open" });
+    s.prHead = { kind: "unreadable" };
+    expect(await s.scheduler.pass(old.id, "session", self())).toEqual({ ok: false, code: "pr_unreadable" });
+  });
+
+  test("a record is cut, and only its fact logged, when the prompt would not fit", async () => {
+    const s = setup([machine("a", { capabilities: SELF })]);
+    const old = await running(s, false);
+    // Three-byte text passes the unit bound and meets the byte bound.
+    const record = "€".repeat(7_168);
+    const result = ok(await s.scheduler.pass(old.id, "session", self(record)));
+    expect(s.scheduler.task(result.successorId)?.spec.prompt?.length).toBeLessThanOrEqual(8_192);
+    expect(s.lines).toContain(`pass record cut task="old"`);
+    expect(s.lines.join("\n")).not.toContain("€€€€");
+  });
+
+  test("a second ask joins the first, and a repeat after the commit answers the same successor", async () => {
+    const s = setup([machine("a", { capabilities: SELF })]);
+    const old = await running(s, false);
+    const [x, y] = await Promise.all([
+      s.scheduler.pass(old.id, "session", self("one")),
+      s.scheduler.pass(old.id, "session", self("two")),
+    ]);
+    expect(ok(x).successorId).toBe(ok(y).successorId);
+    expect(ok(await s.scheduler.pass(old.id, "session", self("three"))).successorId).toBe(ok(x).successorId);
+    expect(s.creates).toHaveLength(1);
+    expect(s.fleet.passCloses).toHaveLength(1);
+  });
+
+  test("a cancel out for the task wins, as it does over an outside pass", async () => {
+    const s = setup([machine("a", { capabilities: SELF })]);
+    const old = await running(s, false);
+    await s.scheduler.cancel(old.id);
+    expect(await s.scheduler.pass(old.id, "session", self())).toMatchObject({ ok: false });
+    expect(s.fleet.passCloses).toEqual([]);
+  });
+
+  describe("the close the daemon was asked for", () => {
+    test("a daemon that answers no_pane or never answers leaves the pass committed, and the deadline closes it through the leader", async () => {
+      for (const reply of [() => ({ ok: false, code: "no_pane", message: "gone" }) as const, () => unreachable]) {
+        const s = setup([machine("a", { capabilities: SELF })]);
+        const old = await running(s, false);
+        s.fleet.passCloseReply = reply;
+        const result = ok(await s.scheduler.pass(old.id, "session", self()));
+        expect(result.task.state).toBe("running");
+        await tick(s.scheduler);
+        expect(s.fleet.despawns).toEqual([]);
+        s.clock.now += PASS_CLOSE_GRACE_MS + 1;
+        await tick(s.scheduler);
+        expect(s.fleet.despawns).toHaveLength(1);
+        expect(s.scheduler.task(old.id)?.state).toBe("superseded");
+      }
+    });
+
+    test("a takeover asks the daemon again for a session-triggered pass and waits a fresh grace", async () => {
+      const s = setup([machine("a", { capabilities: SELF })]);
+      const viaSession = await running(s, false);
+      ok(await s.scheduler.pass(viaSession.id, "session", self()));
+      expect(s.fleet.passCloses).toHaveLength(1);
+
+      const next = new Scheduler({
+        store: readerChecked(s.store, () => s.clock.now),
+        fleet: s.fleet,
+        now: () => s.clock.now,
+      });
+      await next.takeover();
+      await tick(next);
+      expect(s.fleet.passCloses).toHaveLength(2);
+      expect(s.fleet.despawns).toEqual([]);
+      expect(next.task(viaSession.id)?.state).toBe("running");
+      s.clock.now += PASS_CLOSE_GRACE_MS + 1;
+      await tick(next);
+      expect(next.task(viaSession.id)?.state).toBe("superseded");
+      expect(s.fleet.despawns).toHaveLength(1);
+    });
+
+    test("an outside pass whose close failed is closed at once by the next leader, never asked of the daemon", async () => {
+      const s = setup([machine("a", { capabilities: SELF })]);
+      const old = await running(s, false);
+      s.fleet.despawnReply = () => FAILED_DESPAWN;
+      ok(await s.scheduler.pass(old.id));
+      s.fleet.despawnReply = null;
+      const next = new Scheduler({
+        store: readerChecked(s.store, () => s.clock.now),
+        fleet: s.fleet,
+        now: () => s.clock.now,
+      });
+      await next.takeover();
+      await tick(next);
+      expect(s.fleet.passCloses).toEqual([]);
+      expect(next.task(old.id)?.state).toBe("superseded");
+    });
   });
 });

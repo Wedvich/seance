@@ -6,6 +6,8 @@ import type {
   ExclaveInfo,
   Machine,
   MachineStatus,
+  PassCloseRequest,
+  PassCloseResponse,
   PushBranchRequest,
   PushBranchResponse,
   QuotaObservation,
@@ -116,6 +118,14 @@ export class FakeFleet implements Fleet {
   pushBranch: Fleet["pushBranch"] = async (deviceId, request) => {
     this.pushes.push({ deviceId, request });
     return this.pushReply(request);
+  };
+  /** Every `pass-close` asked, and what the machine answers: armed unless a test says otherwise. */
+  readonly passCloses: { readonly deviceId: string; readonly request: PassCloseRequest }[] = [];
+  passCloseReply: () => PassCloseResponse | ErrorResponse | NoAnswer = () => ({ ok: true });
+  /** A daemon that cannot arm a close is a host without the port; a test sets this undefined for one. */
+  passClose: Fleet["passClose"] = async (deviceId, request) => {
+    this.passCloses.push({ deviceId, request });
+    return this.passCloseReply();
   };
   /** What `despawn` answers instead of success, while set. */
   despawnReply: (() => DespawnResponse) | null = null;
