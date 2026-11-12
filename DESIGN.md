@@ -1347,7 +1347,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | records `task` / `pause-state` (at rest)                            | `task`: `sealTaskRecord` (`shared/src/task-record.ts`), by the app-client's `createTask` and the queue store; a continue task (`TaskSpec.continues`, from `shared/src/continue-task.ts`) is written the same way, and the leader dispatches it as a `spawn` with `mode: "continue"` (`#dispatch` in `scheduler/src/scheduler.ts`); `pause-state`: `sealAtRest`, by the queue store | `task`: `openTaskRecord` (`shared/src/task-record.ts`) — `openAtRest`, no replay guard, sealed `to: "scheduler"`, then `bindTaskRecord`; `pause-state`: `openAtRest` and `parsePauseRecord` in the queue store, held by `Scheduler.load`                                                                                                                                                                |
 | ops `mark-done` / `run-now` / `pause` / `resume` / `discard`        | an app via `shared/src/app-client.ts`: `pwa/src/scheduler-store.ts` (the Queue screen; `run-now` also the Spawn screen's Start now); `run-now` also `daemon/src/auto.ts` (`startAuto`, `startQueuedAuto`: MCP's `start_task` and `spawn_session` `start`, `seanced start` and `spawn --start`)                                                                                     | `daemon/src/leader-requests.ts` `answer`, parsed by `parsePauseRequest` / `parseResumeRequest` / `parseDiscardRequest`, run by `Scheduler.pause` / `resume`, `Scheduler.markDone`, `Scheduler.runNow` and `Scheduler.discard`                                                                                                                                                                           |
 | op `pass` (→`"scheduler"`, built 2026-11-12)                        | an app via `shared/src/app-client.ts` `pass`: `pwa/src/scheduler-store.ts`, and `daemon/src/auto.ts` `passAuto` (MCP `pass_task`) and `daemon/src/cli-auto.ts` `passTaskAuto` (`seanced pass`), through the broker when keyless                                                                                                                                                    | `daemon/src/leader-requests.ts` → `Scheduler.pass` (Scheduler, "Passing to a successor")                                                                                                                                                                                                                                                                                                                |
-| op `amend` (→`"scheduler"`, built 2026-11-12)                       | an app via `shared/src/amend-client.ts` `sendAmend` (a store read for `basis`, then `app-client.ts` `amend`): `daemon/src/mcp.ts` (`amend_task`) and `daemon/src/cli.ts` (`seanced amend`), through the broker when keyless; no PWA surface yet                                                                                            | `daemon/src/leader-requests.ts`, parsed by `parseAmendRequest` → `Scheduler.amend` (Scheduler, "Amending a waiting task")                                                                                                                                                                                                                                                                               |
+| op `amend` (→`"scheduler"`, built 2026-11-12)                       | an app via `shared/src/amend-client.ts` `sendAmend` (a store read for `basis`, then `app-client.ts` `amend`): `daemon/src/mcp.ts` (`amend_task`) and `daemon/src/cli.ts` (`seanced amend`), through the broker when keyless; no PWA surface yet                                                                                                                                    | `daemon/src/leader-requests.ts`, parsed by `parseAmendRequest` → `Scheduler.amend` (Scheduler, "Amending a waiting task")                                                                                                                                                                                                                                                                               |
 | op `push-branch` (scheduler→daemon, built 2026-11-12)               | the leader's `termFleet` in `daemon/src/leader-adapters.ts`, sealed `from: "scheduler"`, or in process through `createLocalOps(…, "leader")`                                                                                                                                                                                                                                       | `daemon/src/push-branch.ts` through `daemon/src/handlers.ts`                                                                                                                                                                                                                                                                                                                                            |
 | op `pass-close` (scheduler→daemon, built 2026-11-12)                | the leader's `termFleet`, once the commit point of a session-triggered pass is written                                                                                                                                                                                                                                                                                             | `daemon/src/session-events.ts` (`armPassClose`) through `daemon/src/handlers.ts`                                                                                                                                                                                                                                                                                                                        |
 | frame `pass` (local socket, built 2026-11-12)                       | `daemon/src/report-done.ts` (`passToSuccessor`), from MCP's `pass_to_successor` only                                                                                                                                                                                                                                                                                               | `daemon/src/session-events.ts`                                                                                                                                                                                                                                                                                                                                                                          |
@@ -1784,7 +1784,8 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   drops it. Refused `task_not_found`, `finished`, `dispatching` (`reserved`, or its spawn still out),
   `placed` (on a machine: its session has its prompt), `prompt_changed` (the held prompt does not hash
   to `basis`), `prompt_too_long`, `append_only` (a `replace` on a successor), `conflict` and
-  `invalid_request`. Only to a leader advertising `CAPABILITIES.amend`; an older one answers the
+  `invalid_request`, which includes any key the op does not take (fail closed for later fields, such
+  as the planned `deps`). Only to a leader advertising `CAPABILITIES.amend`; an older one answers the
   unknown op `invalid_request`, so every client checks the capability first.
 - `push-branch { taskId, expect? }` (`PushBranchRequest`) → `{ remoteBranch, tip, pushed }`
   (`PushBranchResponse`), scheduler → daemon, `OP_TIMEOUT_MS["push-branch"]` 90 s (the Q7 fetch has its
@@ -7648,10 +7649,33 @@ waiting task's prompt, title, model and effort in place, under its own id.
   surface in V1 (owner, 2026-11-12):** amending is an orchestration act, done from a Claude planning
   or orchestration session that queued the stack and learns what later sessions need, so MCP and the
   CLI are where it is asked for. A Queue-screen editor is deferred until it is wanted.
+- **Unknown keys refuse the request.** `parseAmendRequest` (and the broker's `parseAmendDraft` through
+  it) refuses any key it does not take, at the top or inside `prompt`, rather than dropping it as most
+  parsers here do. An amendment is a set of changes. A leader that applied some of them and ignored a
+  field a newer client added would answer `ok` for a change it never made, so every later field fails
+  closed on an older leader as `invalid_request`. A newer client still checks the capability first.
+- **Planned: amending `deps`** (owner, 2026-11-12; a follow-up, not built). New information at step 3
+  of a stack can change what steps 6 and 7 wait on: a task gains a dependency, loses one, or swaps
+  one. The op is shaped to take it as one more optional field, under its own capability, so a client
+  never sends it to a leader that only reads V1's fields. What that change needs, recorded so this
+  design does not close it off:
+  - **Replace the whole list, against a basis.** `deps` is the complete new list, compared against
+    the list read, as `prompt` is, so two orchestrators editing a stack never merge edges silently.
+  - **Refuse, don't fail.** The leader checks the amended graph before it writes. It refuses an edge
+    to an unknown task, a self-edge, and a cycle through held tasks (`cycles` in `scheduler/src/deps.ts`
+    finds the loop). A create's cycle fails the task `dependency_cycle` instead, and an amend must not
+    turn a waiting task into a failed one.
+  - **Re-evaluate state in the same write.** Adding an unmet edge takes a `ready` task back to
+    `blocked`; dropping the last one frees it. An edge to an already-failed task refuses, as a create
+    would fail on it.
+  - **Sentinels stay the sealer's.** The attachments, requires and successor sentinels live in the
+    stored deps array but never in `spec.deps`, so the amend replaces `spec.deps` and the sealer adds
+    them back. A successor's edge to its predecessor (`succeeds`) is not in `deps` and cannot be amended.
+  - The same states, refusals and audit as V1: names only, the edge count, no ids beyond the task's.
 - **Rejected.** A live edit of a placed task (its session is the prompt's reader by then; message it
-  instead). Amending `repo`, `pin`, `avoid`, `requires`, `deps` or attachments: they change where and
-  after what the task runs, and are a cancel and requeue's job; the owner kept the set to prompt,
-  title, model and effort. A version-number `expect` in place of `basis`: an app never sees the store
+  instead). Amending `repo`, `pin`, `avoid`, `requires` or attachments in V1: they change where the
+  task runs and what it carries, and stay a cancel and requeue's job until there is a need. The
+  op's strict keys leave room for them as they leave it for `deps`. A version-number `expect` in place of `basis`: an app never sees the store
   version of a leader write it did not make, and a hash survives a leader rewriting only state.
 
 ## Reap (`seanced reap`) — designed 2026-10-09

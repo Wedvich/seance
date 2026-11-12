@@ -232,9 +232,11 @@ describe("parseBrokerRequest on scheduler frames", () => {
     expect(parsedRequest(enqueue())).toMatchObject({ schedulerOp: "enqueue", taskId: TASK_ID });
     // A keyless peer names no basis: its broker's daemon reads the prompt for one.
     const append = { taskId: TASK_ID, prompt: { mode: "append", text: "more" } };
-    const parsed = parsedRequest(frame({ schedulerOp: "amend", amend: { ...append, extra: "dropped" } }));
+    const parsed = parsedRequest(frame({ schedulerOp: "amend", amend: { ...append } }));
     expect(parsed).toMatchObject({ schedulerOp: "amend" });
     expect(parsed["amend"]).toEqual(append);
+    // A field the leader would not know is refused here too, never dropped on the way.
+    expect(refusedCode(frame({ schedulerOp: "amend", amend: { ...append, deps: [] } }))).toBe("invalid_request");
   });
 
   const refused: [string, Record<string, unknown>, string][] = [
@@ -610,10 +612,10 @@ describe("the broker's scheduler actions", () => {
       const fake = fakes[0];
       if (fake === undefined) throw new Error("expected a relay");
       fake.stored.set(TASK_ID, stored("secret plans"));
-      const reply = await broker.handle(amend({ prompt: { mode: "append", text: "more secret" }, extra: "dropped" }));
+      const reply = await broker.handle(amend({ prompt: { mode: "append", text: "more secret" } }));
       expect(reply).toMatchObject({ ok: true, data: { task: { id: TASK_ID } } });
       const sent = fake.requests.find((r) => r.op === "amend");
-      // Rebuilt from the parsed draft: the peer's stray field never reaches the leader.
+      // Rebuilt from the parsed draft, with the basis the broker's daemon read.
       expect(sent?.payload).toEqual({
         taskId: TASK_ID,
         prompt: { mode: "append", text: "more secret" },

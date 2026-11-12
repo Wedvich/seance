@@ -1555,8 +1555,15 @@ of M4 has landed.
   `amend`, changes a waiting task's prompt, title, model and effort under its own id.
   - _Owner's choices:_ both an append and a replace, by explicit `mode`; each names a `basis` (the
     hash of the prompt read), so a stale edit is `prompt_changed` and a replayed append cannot land
-    twice. A successor takes append only. The fields are those four; `repo`, `pin`, `avoid`,
-    `requires`, deps and attachments stay a cancel and requeue's job.
+    twice. A successor takes append only. V1's fields are those four.
+  - _Next: amending deps_ (owner, 2026-11-12, a follow-up). A task gains, loses or swaps a dependency
+    when what comes up at step 3 changes what step 6 or 7 waits on. Replace the whole list against a
+    basis, refuse unknown ids, self-edges and cycles before writing (never fail the task
+    `dependency_cycle`), re-evaluate `ready`/`blocked` in the same write, and keep the sentinels the
+    sealer's. It comes under its own capability. V1's parser refuses unknown keys, so an older leader
+    refuses a deps amend instead of applying half of it. DESIGN.md, "Amending a waiting task", has the
+    detail. `repo`, `pin`, `avoid`, `requires` and attachments stay a cancel and requeue's job until
+    they're needed.
   - Accepted only while `queued`, `blocked` or `ready` with no spawn out; a reservation or dispatch wins
     with a structured code (`dispatching`, `placed`), and a reservation routed on the old spec declines.
   - Surfaces: MCP `amend_task` and `seanced amend` (append by default, replace on request), through

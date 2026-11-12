@@ -1869,6 +1869,13 @@ export function parseTaskRef(value: unknown): TaskRef | null {
   return isRecord(value) && isTaskId(value["taskId"]) ? { taskId: value["taskId"] } : null;
 }
 
+const AMEND_REQUEST_KEYS: ReadonlySet<string> = new Set(["taskId", "prompt", "basis", "title", "model", "effort"]);
+const AMEND_PROMPT_KEYS: ReadonlySet<string> = new Set(["mode", "text"]);
+
+function onlyKeys(value: Record<string, unknown>, known: ReadonlySet<string>): boolean {
+  return Object.keys(value).every((key) => known.has(key));
+}
+
 /** A field an amendment sets, or `null` to drop it; `undefined` when the value is neither. */
 function amendField(value: unknown, max: number, empty: boolean): string | null | undefined {
   if (value === null) return null;
@@ -1881,14 +1888,19 @@ function amendField(value: unknown, max: number, empty: boolean): string | null 
  * with no value; `null` drops one). `basis` comes exactly with `prompt`; an append of nothing, or an
  * amendment of nothing, is malformed. The amended prompt's own bound is the leader's (`amendSpec`),
  * since it depends on the task.
+ *
+ * Unlike most parsers here, a key it does not know refuses the whole request rather than being
+ * dropped: an amendment is a set of changes, and a leader that applied some and ignored a field a
+ * newer client added (deps, planned) would answer `ok` for a change it never made.
  */
 export function parseAmendRequest(value: unknown): AmendRequest | null {
   if (!isRecord(value) || !isTaskId(value["taskId"])) return null;
+  if (!onlyKeys(value, AMEND_REQUEST_KEYS)) return null;
   const { prompt, basis } = value;
   const limits = TASK_REQUEST_LIMITS;
   let amended: AmendRequest["prompt"];
   if (prompt !== undefined) {
-    if (!isRecord(prompt) || !isPromptBasis(basis)) return null;
+    if (!isRecord(prompt) || !onlyKeys(prompt, AMEND_PROMPT_KEYS) || !isPromptBasis(basis)) return null;
     const mode = AMEND_MODES.find((m) => m === prompt["mode"]);
     const text = prompt["text"];
     if (mode === undefined || !isBoundedString(text, limits.prompt)) return null;

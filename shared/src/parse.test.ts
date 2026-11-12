@@ -2710,10 +2710,16 @@ describe("parseAmendRequest", () => {
     });
   });
 
-  test("is built afresh: fields it does not take are dropped, as are a prompt's own extras", () => {
-    const parsed = parseAmendRequest({ ...append, prompt: { ...append.prompt, extra: 1 }, state: "running", spec: {} });
+  test("is built afresh", () => {
+    const parsed = parseAmendRequest({ ...append });
     expect(parsed).toEqual(append);
     expect(parsed?.prompt).not.toBe(append.prompt);
+  });
+
+  test("refuses a key it does not know, at the top or in the prompt, so a newer field never half-applies", () => {
+    expect(parseAmendRequest({ ...append, deps: [] })).toBeNull();
+    expect(parseAmendRequest({ ...append, state: "running" })).toBeNull();
+    expect(parseAmendRequest({ ...append, prompt: { ...append.prompt, extra: 1 } })).toBeNull();
   });
 
   test("refuses a missing or malformed task id", () => {
