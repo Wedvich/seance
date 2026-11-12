@@ -576,7 +576,8 @@ export function pinAccountGateError(lease: SchedulerLease, fields: string): stri
  */
 export function traitsGateError(lease: SchedulerLease, field: string, label = "spawn"): string | null {
   // First: a stripped registry from an older daemon would otherwise read as "no machine declares any traits".
-  if (lease.scheduler.staleDaemonRequires !== undefined) return `${label} refused: ${lease.scheduler.staleDaemonRequires}`;
+  if (lease.scheduler.staleDaemonRequires !== undefined)
+    return `${label} refused: ${lease.scheduler.staleDaemonRequires}`;
   if (leaderAdvertises(lease, CAPABILITIES.traits)) return null;
   return lease.scheduler.availability().kind === "ready"
     ? `${label} refused: the scheduler's leader does not route on ${field} yet — its daemon needs \`seanced update\``

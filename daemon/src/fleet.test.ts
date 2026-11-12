@@ -344,7 +344,10 @@ describe("brokerFleet", () => {
       machine({ deviceId, name: deviceId, capabilities });
     const all = await startBrokerDouble((raw, id) =>
       actionOf(raw) === "fleet"
-        ? brokerOk(id, { machines: [entry("a", [CAPABILITIES.traits]), entry("b", [CAPABILITIES.traits])], scheduler: LEADER })
+        ? brokerOk(id, {
+            machines: [entry("a", [CAPABILITIES.traits]), entry("b", [CAPABILITIES.traits])],
+            scheduler: LEADER,
+          })
         : brokerOk(id, { ok: true, landedEarlier: false }),
     );
     const mixed = await startBrokerDouble((raw, id) =>

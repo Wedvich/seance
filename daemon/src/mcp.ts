@@ -1319,7 +1319,12 @@ export function buildMcpServer(
           const refused = spec.requires === undefined ? null : requiresCheck(spec, lease.machines);
           if (refused !== null) {
             // oxlint-disable-next-line no-await-in-loop -- a refusal ends the loop
-            await traitRefusalAudit(audit, "mcp")(refused.kind, spec.requires?.length ?? 0, refused.count, refused.split);
+            await traitRefusalAudit(audit, "mcp")(
+              refused.kind,
+              spec.requires?.length ?? 0,
+              refused.count,
+              refused.split,
+            );
             return errorResult(`queue_batch refused: task ${i + 1}: ${refused.text}`);
           }
           resolvedPlan.push({ id: member.id, ref: member.ref, spec });
