@@ -2693,6 +2693,21 @@
   opacity: 0.5;
 }
 
+/* The shared primary is the form's full-width button; on a card it sizes to its label like the quiet one. */
+.queue-actions .primary {
+  width: auto;
+  padding: 8px 14px;
+  border-radius: 10px;
+  font-size: 0.875rem;
+  text-decoration: none;
+}
+
+/* Inline in the mono meta line, after the age; back to the body face for `.fleet-badge`'s reason. */
+.queue-autonomy {
+  margin-left: 6px;
+  font-family: var(--sans);
+}
+
 /* The card's ⋯: every action it allows (menu.tsx). Pulled into the card's padding so the dots sit
    flush with its corner while the target stays 36px. */
 .queue-more {

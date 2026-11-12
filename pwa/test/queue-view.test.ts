@@ -411,6 +411,30 @@ describe("deriveQueue", () => {
     expect(sessionOf()).toBeNull();
   });
 
+  test("Answer in Claude is offered only on a task waiting for input with a session link", () => {
+    const SESSION = "session_01TuECqfR7Twko9QJm98sWAw";
+    const answerOf = (fields: Partial<Task>) =>
+      deriveQueue(state(ok([task("a", fields)])), NOW).sections[0]?.rows[0]?.answer;
+    expect(answerOf({ state: "needs-input", needsInputSince: NOW, remoteSession: SESSION })).toBe(
+      `https://claude.ai/code/${SESSION}`,
+    );
+    expect(answerOf({ state: "needs-input", needsInputSince: NOW })).toBeNull();
+    expect(answerOf({ state: "running", assignment: placedAt, remoteSession: SESSION })).toBeNull();
+    expect(answerOf({ state: "lost", assignment: placedAt, needsInputSince: NOW, remoteSession: SESSION })).toBeNull();
+  });
+
+  test("the autonomy chip names a level off the default; plan alone reads as steer", () => {
+    const chipOf = (spec: Partial<Task["spec"]>) =>
+      deriveQueue(state(ok([task("a", { spec: { repo: ORIGIN, mode: "worktree", ...spec } })])), NOW).sections[0]
+        ?.rows[0]?.autonomy;
+    expect(chipOf({})).toBeNull();
+    expect(chipOf({ autonomy: "checkpoint" })).toBeNull();
+    expect(chipOf({ plan: false })).toBeNull();
+    expect(chipOf({ autonomy: "steer", plan: true })).toBe("Steer");
+    expect(chipOf({ plan: true })).toBe("Steer");
+    expect(chipOf({ autonomy: "auto" })).toBe("Auto");
+  });
+
   describe("the leader's forge reading of the PR", () => {
     const URL = "https://github.com/acme/app/pull/123";
     const chip = (pr: PrStatus | undefined, now = NOW, skew = 0) =>
