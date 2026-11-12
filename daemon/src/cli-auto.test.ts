@@ -462,6 +462,58 @@ describe("spawnAuto's placement flags", () => {
     }
   });
 
+  describe("--requires", () => {
+    /** This box (atlas) leads; the other holds gpu. */
+    const withTraits = (leaderCaps: readonly Capability[] = [CAPABILITIES.traits]) => {
+      const fake = fakeRelay([
+        machine({
+          deviceId: "device-self",
+          name: "Thad",
+          exclaves: [{ ...exclaveOf("org-a:me"), traits: ["atlas"] }],
+          repos: [clone],
+          capabilities: leaderCaps,
+        }),
+        machine({
+          deviceId: "device-other",
+          name: "WSL",
+          exclaves: [{ ...exclaveOf("org-b:me"), traits: ["gpu"] }],
+          repos: [clone],
+        }),
+      ]);
+      fake.setState({ scheduler: { kind: "ready", deviceId: "device-self", term: 3 } });
+      return fake;
+    };
+
+    test("is stored as given on a leader that advertises traits, and the audit counts it without naming it", async () => {
+      const fake = withTraits();
+      const { ok, audited } = await run(fake, { requires: ["atlas"] });
+      expect(ok).toBe(true);
+      expect(fake.creates[0]?.spec.requires).toEqual(["atlas"]);
+      expect(audited.join("\n")).not.toContain("atlas");
+    });
+
+    test("is refused, before anything is created, by a leader that does not route on it", async () => {
+      const fake = withTraits([]);
+      const { ok, text } = await run(fake, { requires: ["atlas"] });
+      expect(ok).toBe(false);
+      expect(text).toContain("leader does not route on --requires yet");
+      expect(fake.creates).toEqual([]);
+    });
+
+    test("an unknown trait names the ones that exist; a spec nothing could carry is refused too", async () => {
+      const fake = withTraits();
+      const typo = await run(fake, { requires: ["atlsa"] });
+      expect(typo.ok).toBe(false);
+      expect(typo.text).toContain("spawn refused: --requires: no machine declares the trait atlsa — known: atlas, gpu");
+      expect(typo.audited).toEqual(["audit enqueue origin=cli client=cli refused=unknown_trait requires=1 unknown=1"]);
+
+      const split = await run(fake, { requires: ["atlas", "gpu"] });
+      expect(split.ok).toBe(false);
+      expect(split.text).toContain("no exclave this task can reach carries atlas and gpu together");
+      expect(fake.creates).toEqual([]);
+    });
+  });
+
   test("here without a state file is refused before the relay is dialled", async () => {
     const fake = placingRelay();
     const { ok, text } = await run(fake, { not: ["here"] }, async () => null);

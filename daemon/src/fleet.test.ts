@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  CAPABILITIES,
   failureReasonText,
   importPsk,
   isRecord,
@@ -279,6 +280,54 @@ describe("brokerFleet", () => {
     } finally {
       await double.stop();
     }
+  });
+
+  describe("a spec with requires, through a daemon that predates traits", () => {
+    const REQUIRING: Task = { ...TASK, spec: { ...TASK.spec, requires: ["atlas"] } };
+    const OLD = machine({ deviceId: "device-self", name: "Self", capabilities: [] });
+    const NEW = machine({ deviceId: "device-self", name: "Self", capabilities: [CAPABILITIES.traits] });
+    const daemonOf = (entry: Machine) =>
+      startBrokerDouble((raw, id) =>
+        actionOf(raw) === "fleet"
+          ? brokerOk(id, { machines: [entry, machine()], scheduler: LEADER })
+          : brokerOk(id, { ok: true, landedEarlier: false }),
+      );
+    const self = (): Promise<string | null> => Promise.resolve("device-self");
+
+    test("is refused at the gate and at the enqueue, and nothing but the fleet frame is sent", async () => {
+      const double = await daemonOf(OLD);
+      try {
+        const lease = await brokerFleet({ path: double.path }, self).open();
+        const scheduler = lease.scheduler;
+        if (scheduler === null) throw new Error("expected a scheduler leg");
+        const refused = "this machine's daemon is older than this seanced: restart or update it (seanced update)";
+        expect(scheduler.requiresRefusal).toBe(refused);
+        expect(await rejection(scheduler.enqueue(REQUIRING))).toMatchObject({ message: refused });
+        // A spec that requires nothing still goes through an old daemon.
+        expect(await scheduler.enqueue(TASK)).toEqual({ ok: true, landedEarlier: false });
+        expect(double.frames.map(actionOf)).toEqual(["fleet", "scheduler"]);
+      } finally {
+        await double.stop();
+      }
+    });
+
+    test("a daemon that advertises traits, or one whose own entry cannot be found, is told apart", async () => {
+      const current = await daemonOf(NEW);
+      try {
+        const lease = await brokerFleet({ path: current.path }, self).open();
+        expect(lease.scheduler?.requiresRefusal).toBeUndefined();
+        expect(await lease.scheduler?.enqueue(REQUIRING)).toEqual({ ok: true, landedEarlier: false });
+      } finally {
+        await current.stop();
+      }
+      const unknown = await daemonOf(NEW);
+      try {
+        const lease = await brokerFleet({ path: unknown.path }, () => Promise.resolve(null)).open();
+        expect(lease.scheduler?.requiresRefusal).toBeDefined();
+      } finally {
+        await unknown.stop();
+      }
+    });
   });
 
   test("a daemon that predates the fleet action answers unsupported, and the lease falls back to machines with no scheduler", async () => {

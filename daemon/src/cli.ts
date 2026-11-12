@@ -119,13 +119,15 @@ export interface SpawnCliArgs {
   readonly account?: string;
   /** Queued spawn only (refused with `--now`): machines to keep it off, each as `machine` takes one; present only when given. */
   readonly not?: readonly string[];
+  /** Queued spawn only (refused with `--now`): traits the machine must declare, each given by one `--requires`; present only when given. */
+  readonly requires?: readonly string[];
   /** Queued spawn only (refused with `--now`): start it past the concurrency cap once admitted, as `seanced start`; present only when given. */
   readonly start?: true;
   /** The task's autonomy level, queued or `--now`; present only when given. */
   readonly autonomy?: AutonomyLevel;
 }
 
-const SPAWN_USAGE = `usage: seanced spawn [--now | [--start] [--machine <name|here>] [--account <alias|email|id>] [--not <machine|here>]...] [--autonomy <${AUTONOMY_LEVELS.join("|")}>] <repo> [--here] [-t <title>] [[-p] <task>]`;
+const SPAWN_USAGE = `usage: seanced spawn [--now | [--start] [--machine <name|here>] [--account <alias|email|id>] [--not <machine|here>]... [--requires <trait>]...] [--autonomy <${AUTONOMY_LEVELS.join("|")}>] <repo> [--here] [-t <title>] [[-p] <task>]`;
 
 /** The flags that take a value, and the field each fills. */
 const SPAWN_VALUE_FLAGS = {
@@ -134,6 +136,7 @@ const SPAWN_VALUE_FLAGS = {
   "--machine": "machine",
   "--account": "account",
   "--not": "not",
+  "--requires": "requires",
   "--autonomy": "autonomy",
 } as const;
 
@@ -163,6 +166,7 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
   let account: string | undefined;
   let autonomy: AutonomyLevel | undefined;
   const not: string[] = [];
+  const requires: string[] = [];
   const promptParts: string[] = [];
   const given = new Set<string>();
   let expect: (typeof SPAWN_VALUE_FLAGS)[SpawnValueFlag] | null = null;
@@ -171,6 +175,7 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
       if (expect === "title") title = arg;
       else if (expect === "prompt") promptParts.push(arg);
       else if (expect === "not") not.push(arg);
+      else if (expect === "requires") requires.push(arg);
       else if (expect === "machine") machine = arg;
       else if (expect === "account") account = arg;
       else if (isAutonomyLevel(arg)) autonomy = arg;
@@ -197,7 +202,13 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
     }
   }
   if (repo === undefined) throw new Error(SPAWN_USAGE);
-  if (expect === "machine" || expect === "account" || expect === "not" || expect === "autonomy") {
+  if (
+    expect === "machine" ||
+    expect === "account" ||
+    expect === "not" ||
+    expect === "requires" ||
+    expect === "autonomy"
+  ) {
     throw new Error(SPAWN_USAGE);
   }
   const placed = machine !== undefined || account !== undefined || not.length > 0;
@@ -205,6 +216,9 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
     throw new Error(
       `--now spawns on this machine now; --machine, --account and --not pin a queued spawn\n${SPAWN_USAGE}`,
     );
+  }
+  if (now && requires.length > 0) {
+    throw new Error(`--requires needs the scheduler: --now spawns directly and skips routing\n${SPAWN_USAGE}`);
   }
   if (now && start) {
     throw new Error(
@@ -222,6 +236,7 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
     ...(machine === undefined ? {} : { machine }),
     ...(account === undefined ? {} : { account }),
     ...(not.length === 0 ? {} : { not }),
+    ...(requires.length === 0 ? {} : { requires }),
     ...(autonomy === undefined ? {} : { autonomy }),
   };
 }

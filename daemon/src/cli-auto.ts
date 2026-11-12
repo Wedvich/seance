@@ -1,6 +1,6 @@
 import { withAutonomy } from "@seance/shared";
 import { appRelayClient, importAppKeys, LazyRelay } from "./app-relay.ts";
-import { cliSink, type AuditSink } from "./audit.ts";
+import { cliSink, traitRefusalAudit, type AuditSink } from "./audit.ts";
 import {
   continueAuto,
   enqueueAuto,
@@ -14,6 +14,8 @@ import {
   startAuto,
   startGateError,
   startQueuedAuto,
+  traitsGateError,
+  traitsRefusal,
   type AutoEnqueued,
   type AutoSpec,
   type PlacementInput,
@@ -143,6 +145,7 @@ export async function spawnAuto(
     ...(args.title === undefined ? {} : { title: args.title }),
     ...(args.prompt === undefined ? {} : { prompt: args.prompt }),
     ...(args.autonomy === undefined ? {} : { autonomy: args.autonomy }),
+    ...(args.requires === undefined ? {} : { requires: args.requires }),
   };
   // `steer` is sealed with `plan: true`, for a leader that drops `autonomy`. Never null: the CLI takes no `plan`.
   const spec = withAutonomy(fields) ?? fields;
@@ -171,6 +174,8 @@ export async function spawnAuto(
       const gate = pinAccountGateError(leg, "--account / --not");
       if (gate !== null) return failed(gate);
     }
+    const traitsGate = args.requires === undefined ? null : traitsGateError(leg, "--requires");
+    if (traitsGate !== null) return failed(traitsGate);
     const placed = await resolvePlacement(leg.machines, leg.scheduler.accounts, placement.input, CLI_PLACEMENT_NAMES);
     if ("error" in placed) return failed(`spawn refused: ${placed.error}`);
     const resolved = resolveOrigin(placed.machines, args.repo, placed.scope);
@@ -178,6 +183,11 @@ export async function spawnAuto(
     const resolvedSpec: AutoSpec = { ...spec, repo: resolved.origin, ...placed.fields };
     const longOrigin = specError(resolvedSpec, "cli");
     if (longOrigin !== null) return failed(`spawn refused: ${longOrigin}`);
+    const refused = args.requires === undefined ? null : traitsRefusal(resolvedSpec, leg.machines);
+    if (refused !== null) {
+      await traitRefusalAudit(audit, "cli")(refused.kind, args.requires?.length ?? 0, refused.count);
+      return failed(`spawn refused: --requires: ${refused.text}`);
+    }
     const id = crypto.randomUUID();
     const enqueued = await enqueueAuto(lease.scheduler, resolvedSpec, audit, "cli", id);
     if (!enqueued.ok) return enqueued;
