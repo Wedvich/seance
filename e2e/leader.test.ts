@@ -634,6 +634,29 @@ describe("settings record: the leader's term creates it, and no later term repla
   }, 60_000);
 });
 
+/**
+ * The claude stub makes no git worktree of its own at the path the daemon noted for the launch, and a push
+ * refuses a path that is not a linked checkout (`not_launched`): make the one a real session would run in,
+ * on a new `branch` of the fixture clone. Returns its path.
+ */
+async function realWorktree(taskId: string, branch: string): Promise<string> {
+  const ledger = JSON.parse(await Bun.file(join(process.env["SEANCE_STATE_DIR"] ?? "", "launched.json")).text()) as {
+    readonly progress: readonly { readonly taskId: string; readonly path?: string }[];
+  };
+  const noted = ledger.progress.find((p) => p.taskId === taskId)?.path;
+  if (noted === undefined) throw new Error("the launch ledger noted no worktree for the task");
+  await rm(noted, { recursive: true, force: true });
+  const added = await exec(["git", "worktree", "add", "-q", "-b", branch, noted], { cwd: stack.fixture.repoPath });
+  expect(added.exitCode).toBe(0);
+  return noted;
+}
+
+/** A ref's sha in the fixture's origin, or null when it has none. */
+async function originRef(ref: string): Promise<string | null> {
+  const found = await exec(["git", "--git-dir", stack.fixture.barePath, "rev-parse", "--verify", "-q", ref]);
+  return found.exitCode === 0 ? found.stdout.trim() : null;
+}
+
 describe("pass: a session's own pass ↔ local daemon ↔ leader ↔ the daemon's close", () => {
   // The production wiring no unit test joins: the pane-bound `pass` frame, the daemon's push of the real
   // spawned worktree, the leader's commit of the successor, its `pass-close` back, and the close at the
@@ -679,20 +702,7 @@ describe("pass: a session's own pass ↔ local daemon ↔ leader ↔ the daemon'
       );
       window = (await stack.queue().get(taskId))?.body?.assignment?.window;
 
-      // The claude stub makes no git worktree of its own at the path the daemon noted for the launch, and a push
-      // refuses a path that is not a linked checkout (`not_launched`): make the one a real session would run in.
-      const ledger = JSON.parse(
-        await Bun.file(join(process.env["SEANCE_STATE_DIR"] ?? "", "launched.json")).text(),
-      ) as {
-        readonly progress: readonly { readonly taskId: string; readonly path?: string }[];
-      };
-      const noted = ledger.progress.find((p) => p.taskId === taskId)?.path;
-      if (noted === undefined) throw new Error("the launch ledger noted no worktree for the task");
-      await rm(noted, { recursive: true, force: true });
-      const added = await exec(["git", "worktree", "add", "-q", "-b", "pass-e2e", noted], {
-        cwd: stack.fixture.repoPath,
-      });
-      expect(added.exitCode).toBe(0);
+      const noted = await realWorktree(taskId, "pass-e2e");
 
       const out = join(base, "pass.json");
       const go = join(base, "pass.go");
@@ -749,6 +759,9 @@ await Bun.write(${JSON.stringify(out)}, JSON.stringify(result));\n`,
       const successor = (await stack.queue().get(successorId))?.body;
       expect(successor?.spec).toMatchObject({ succeeds: { task: taskId, trigger: "session" } });
       expect(successor?.spec.prompt).toContain(record);
+      // The daemon's push is what the successor's prompt names: the branch is on origin at the worktree's tip.
+      const head = await exec(["git", "rev-parse", "HEAD"], { cwd: noted });
+      expect(await originRef("refs/heads/pass-e2e")).toBe(head.stdout.trim());
 
       // The pass-close has had its time to arrive (the commit precedes it); nothing has closed the pane.
       await Bun.sleep(1_000);
@@ -765,6 +778,152 @@ await Bun.write(${JSON.stringify(out)}, JSON.stringify(result));\n`,
       );
     } finally {
       audit.mockRestore();
+      app.stop();
+      if (window !== undefined) await killWindow(window);
+    }
+  }, 60_000);
+});
+
+describe("pass: an app's pass ↔ leader ↔ the machine's push and close", () => {
+  // The outside path no unit test joins: the app's `pass` op, the leader pushing through its own machine's
+  // op (origin=leader) with the real git of a real worktree, the successor's create and commit, and the
+  // old pane's close. Only the session is a stand-in (the stub's pane).
+  test("a dirty worktree refuses and writes nothing; a clean one pushes, passes once, and a repeat answers the same successor", async () => {
+    const taskId = "e2e-outside-pass";
+    const branch = "outside-pass-e2e";
+    const audit = spyOn(console, "log");
+    const lines = (needle: string): string[] =>
+      audit.mock.calls.map((args) => args.join(" ")).filter((l) => l.includes(needle));
+    const successorsOf = async (): Promise<string[]> =>
+      (await stack.queue().list()).flatMap((entry) =>
+        "body" in entry && entry.body?.spec.succeeds?.task === taskId ? [entry.id] : [],
+      );
+    const app = startApp(stack);
+    let window: string | undefined;
+    let successorId: string | undefined;
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      const ready = await app.waitForApp(
+        (state) =>
+          state.relay.scheduler.kind === "ready" &&
+          state.relay.machines.some(
+            (m) =>
+              m.deviceId === stack.deviceId &&
+              m.connected &&
+              m.repos.length > 0 &&
+              m.capabilities?.includes(CAPABILITIES.successor) === true,
+          ),
+        "the leader verified and the machine advertising successor",
+      );
+      const origin = fixtureOrigin(ready);
+      if (origin === null) throw new Error("the fixture machine lists no repo origin");
+      const queued = await app.client.createTask({
+        id: taskId,
+        spec: { repo: origin, mode: "worktree" },
+        state: "queued",
+        createdAt: Date.now(),
+      });
+      expect(queued).toEqual({ ok: true, landedEarlier: false });
+      await pollUntil(
+        async () => (await stack.queue().get(taskId))?.body?.state === "running",
+        "the task to run",
+        20_000,
+      );
+      window = (await stack.queue().get(taskId))?.body?.assignment?.window;
+      const worktree = await realWorktree(taskId, branch);
+
+      const unchanged = async (): Promise<void> => {
+        expect(await originRef(`refs/heads/${branch}`)).toBeNull();
+        expect(await successorsOf()).toEqual([]);
+        expect((await stack.queue().get(taskId))?.body?.successor).toBeUndefined();
+      };
+
+      // Dirty first. The launch may still be in flight (the stub never registers), which the machine answers
+      // `not_launched`: ask again until it answers about the worktree, with nothing written after each refusal.
+      await Bun.write(join(worktree, "dirty.txt"), "uncommitted\n");
+      let refusal: Awaited<ReturnType<typeof app.client.pass>> = null;
+      for (let i = 0; i < 40; i++) {
+        // oxlint-disable-next-line no-await-in-loop -- each ask follows the refusal before it
+        refusal = await app.client.pass(taskId);
+        // oxlint-disable-next-line no-await-in-loop -- the same
+        await unchanged();
+        if (refusal !== null && "ok" in refusal && refusal.code !== "not_launched") break;
+        // oxlint-disable-next-line no-await-in-loop -- a retry delay, not an assertion's wait
+        await Bun.sleep(250);
+      }
+      expect(refusal).toMatchObject({ ok: false, code: "dirty_worktree" });
+
+      // Clean: commit, then the same pass goes through.
+      await rm(join(worktree, "dirty.txt"));
+      await Bun.write(join(worktree, "outside.txt"), "work\n");
+      expect((await exec(["git", "add", "outside.txt"], { cwd: worktree })).exitCode).toBe(0);
+      const committed = await exec(
+        [
+          "git",
+          "-c",
+          "user.email=e2e@seance.test",
+          "-c",
+          "user.name=e2e",
+          "commit",
+          "-q",
+          "--no-gpg-sign",
+          "-m",
+          "outside pass",
+        ],
+        { cwd: worktree },
+      );
+      expect(committed.exitCode).toBe(0);
+      const tip = (await exec(["git", "rev-parse", "HEAD"], { cwd: worktree })).stdout.trim();
+
+      const passed = await app.client.pass(taskId);
+      if (passed === null || "ok" in passed) throw new Error(`the pass was refused: ${JSON.stringify(passed)}`);
+      successorId = passed.successorId;
+      expect(await originRef(`refs/heads/${branch}`)).toBe(tip);
+
+      await pollUntil(
+        () =>
+          lines(`audit queue origin=relay op=pass`).some((l) =>
+            l.includes(`successor="${successorId}" trigger=manual`),
+          ),
+        "the pass's audit line",
+        10_000,
+      );
+      await pollUntil(
+        () => lines(`audit push origin=leader task="${taskId}"`).length > 0,
+        "the leader's push audit",
+        10_000,
+      );
+      await pollUntil(
+        async () => {
+          const old = (await stack.queue().get(taskId))?.body;
+          return old?.state === "superseded" && old.successor === successorId;
+        },
+        "the old task to be superseded, naming the successor",
+        20_000,
+      );
+      expect(await successorsOf()).toEqual([successorId]);
+      const prompt = (await stack.queue().get(successorId))?.body?.spec.prompt ?? "";
+      expect(prompt).toContain(branch);
+      expect(prompt).toContain(tip);
+
+      // A repeat answers the same successor and pushes nothing more.
+      const pushes = lines(`audit push origin=leader task="${taskId}"`).length;
+      const again = await app.client.pass(taskId);
+      if (again === null || "ok" in again) throw new Error(`the repeat was refused: ${JSON.stringify(again)}`);
+      expect(again.successorId).toBe(successorId);
+      expect(await successorsOf()).toEqual([successorId]);
+      expect(lines(`audit push origin=leader task="${taskId}"`).length).toBe(pushes);
+
+      // The old pane is closed.
+      await pollUntil(
+        async () => !(await tmuxOk(["list-panes", "-a", "-F", "#{@seance-task}"])).split("\n").includes(taskId),
+        "the old task's pane to close",
+        20_000,
+      );
+    } finally {
+      audit.mockRestore();
+      if (successorId !== undefined) await cancelTask(app.client, successorId);
       app.stop();
       if (window !== undefined) await killWindow(window);
     }
