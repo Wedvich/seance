@@ -321,7 +321,7 @@ Séance's noise is cover for a real intruder.
    `archive-tasks`, only when sealed `from: "app"` to its own device id and past the seat leg's
    replay guard, each through its own parser into a fresh value, with counts, sizes and
    timestamps (added 2026-11-12, item 6), metric points, and task records stripped of prompt,
-   attachments and raw account ids, which the archive never stored (added 2026-11-12, item 7). Even its own update is not run by the process that holds the key (added 2026-11-12,
+   attachments and raw account ids, which the archive never stored (added 2026-11-13, item 7). Even its own update is not run by the process that holds the key (added 2026-11-12,
    item 5): on the fleet's announce it writes one request file, and a separate unit, with the same
    user and no credential, runs git and `bun install`. `install`, `uninstall` and `update` load
    the daemon's exec path only through `import()` in their own command branches, never into
