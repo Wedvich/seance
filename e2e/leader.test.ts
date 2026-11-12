@@ -1088,15 +1088,16 @@ await Bun.write(${JSON.stringify(out)}, JSON.stringify(result));\n`,
       expect(await app.client.createTask(successor(S2, P2))).toEqual({ ok: true, landedEarlier: false });
       // The verdict's window is written from the spawn's reply, which the daemon sends only after its ledger
       // note; a bare `running` can come from a hook event before the note lands.
-      for (const id of [S1, S2]) {
-        // oxlint-disable-next-line no-await-in-loop -- each wait is on its own task
+      const spawned = async (id: string): Promise<void> => {
         await pollUntil(
           async () => (await stack.queue().get(id))?.body?.assignment?.window !== undefined,
           `${id} to be spawned`,
           30_000,
         );
         windows.push((await stack.queue().get(id))?.body?.assignment?.window ?? "");
-      }
+      };
+      await spawned(S1);
+      await spawned(S2);
       const notes = await launched();
       expect(notes.find((n) => n.taskId === S1)?.continuedPr).toBe(PR);
       expect(notes.find((n) => n.taskId === S2)?.continuedPr).toBeUndefined();
