@@ -1,8 +1,6 @@
-import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { delimiter, join } from "node:path";
-import { exec } from "../src/exec.ts";
-
-const WARM_FLAG = "--shim-warm";
+import { scriptStub } from "./fixtures.ts";
 
 /** Between recorded calls, and between a call's arguments: neither occurs in an argument the daemon passes. */
 const CALL_SEP = "\u001E";
@@ -35,8 +33,7 @@ function shq(value: string): string {
  * than pretend. Raycast's reader runs `/usr/bin/security` by absolute path, so
  * this cannot reach it; its tests inject `readKeychain` instead.
  *
- * Call from `beforeAll`: the script is a new file, so its first exec pays the
- * macOS scan (CLAUDE.md, Testing), which the warm-up here takes in setup.
+ * Call from `beforeAll`, as `scriptStub` asks.
  */
 export async function makeSecurityShim(base: string): Promise<SecurityShim> {
   const dir = join(base, "security-shim");
@@ -46,12 +43,10 @@ export async function makeSecurityShim(base: string): Promise<SecurityShim> {
   await mkdir(binDir, { recursive: true });
   await mkdir(items, { recursive: true });
 
-  const shim = join(binDir, "security");
-  await Bun.write(
-    shim,
+  await scriptStub(
+    binDir,
+    "security",
     [
-      "#!/bin/bash",
-      `[ "$1" = ${WARM_FLAG} ] && exit 0`,
       // Record built first, appended once: concurrent calls must not interleave. A no-arg call
       // records an empty argv, not [""].
       `rec=""; for a in "$@"; do rec="$rec$a"$'\\x1f'; done`,
@@ -78,12 +73,8 @@ export async function makeSecurityShim(base: string): Promise<SecurityShim> {
       "fi",
       // `-w` prints the password and a newline; without it the real tool prints attributes.
       'if [ "$print" = 1 ]; then cat "$item"; echo; else echo "class: \\"genp\\""; fi',
-      "",
     ].join("\n"),
   );
-  await chmod(shim, 0o755);
-  const warmed = await exec([shim, WARM_FLAG]);
-  if (warmed.exitCode !== 0) throw new Error(`security shim failed to start: ${warmed.stderr}`);
 
   const itemPath = (service: string): string => {
     if (service === "" || service === "." || service === ".." || service.includes("/") || service.includes("\0")) {

@@ -275,6 +275,14 @@ product code touched:
   overrides it for every server a run boots. `set -g automatic-rename-format ''`
   pinned every unnamed window's name to `""` (#83).
 
+- **A deep scan queue.** macOS scans each never-executed file on its first exec,
+  one at a time machine-wide, which a full run's shards queue behind each other
+  (CLAUDE.md, Testing). `bun scripts/scan-flood.ts [workers]` keeps that queue
+  deep, so one suite run beside it meets the full run's wait every time: under
+  16 workers, `auth-health.test.ts`'s nine scripts written in `beforeAll` timed
+  the hook out 10/10. It slows only first execs of new files, never a re-exec or
+  a link, so it reproduces this and nothing else.
+
 - **A slow claude.** Panes inherit the environment of the tmux server, which the
   suite boots, so a temporary env-gated `Bun.sleep` in `daemon/test/tui-stub.ts`
   (or a stub wrapper) delays one stub without slowing the rest.

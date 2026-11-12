@@ -81,9 +81,10 @@ green:
   scans every never-executed file on first exec, one at a time machine-wide, so concurrent shards
   queue behind each other's stubs; GitHub's macOS runners measurably skip the scan, which is how
   this stays green in CI while failing every local run. Link rather than copy, and exec it once in
-  setup — `makeClaudeStub` shows both and carries the measurements. Setup means `beforeAll`: a stub
-  written in `beforeEach` is a new file every test (`raycast-cli.test.ts` passes per-test paths in
-  by env instead).
+  setup — `makeClaudeStub` shows both and carries the measurements; a bash stub is a `scriptStub`
+  (`daemon/test/fixtures.ts`), a link to one committed file, never a new script. Setup means
+  `beforeAll`: a stub written in `beforeEach` is a new file every test (`raycast-cli.test.ts` passes
+  per-test paths in by env instead).
 - A shell stub that a test stops with SIGINT traps it before writing anything the test waits on,
   and idles as `sleep 1 >/dev/null 2>&1 & wait $!` in a loop, never a foreground `sleep`. macOS
   `/bin/sh` is bash 3.2: a SIGINT landing while it waits on a foreground child is ignored outright

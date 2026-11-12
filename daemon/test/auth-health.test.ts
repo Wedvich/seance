@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -32,6 +32,7 @@ import {
   captureLog,
   makeGitFixture,
   pollUntil,
+  scriptStub,
   usePrivateTmux,
   type GitFixture,
   type PrivateTmux,
@@ -46,7 +47,6 @@ const MARKERS = ["FAKEACCESS", "FAKEREFRESH"];
 
 const NOW = 1_790_000_000_000;
 const DAY = 86_400_000;
-const WARM_FLAG = "--stub-warm";
 
 let base = "";
 let home = "";
@@ -133,16 +133,6 @@ async function readOne(
   return (await run(health([f], over))).get(id);
 }
 
-async function stub(name: string, body: string): Promise<string> {
-  const path = join(stubs.binDir, name);
-  await writeFile(path, `#!/bin/bash\n[ "$1" = ${WARM_FLAG} ] && exit 0\n${body}\n`);
-  await chmod(path, 0o755);
-  // First exec in setup: macOS scans a never-executed file, which must not land in a timed window.
-  const warmed = await exec([path, WARM_FLAG]);
-  if (warmed.exitCode !== 0) throw new Error(`stub ${name} failed to start`);
-  return path;
-}
-
 beforeAll(async () => {
   base = await mkdtemp(join(tmpdir(), "auth-health-"));
   home = join(base, "home");
@@ -150,7 +140,7 @@ beforeAll(async () => {
   shim = await makeSecurityShim(base);
   const binDir = join(base, "stubs");
   await mkdir(binDir, { recursive: true });
-  stubs = { binDir, wrongShape: "", hang: "", record: "", slow: "", seconds: "", fdcheck: "", escaper: "" };
+  const stub = (name: string, body: string): Promise<string> => scriptStub(binDir, name, body);
   stubs = {
     binDir,
     // Both of the child's streams carry a marker: nothing it prints may reach a log or a view.
@@ -325,13 +315,7 @@ describe("bun resolves through PATH at each spawn, never process.execPath", () =
     const dir = join(base, "pathbin");
     await mkdir(dir, { recursive: true });
     const log = join(base, "pathbun.log");
-    const bun = join(dir, "bun");
-    await writeFile(
-      bun,
-      `#!/bin/bash\n[ "$1" = ${WARM_FLAG} ] && exit 0\necho "$@" >> "${log}"\nprintf '{"lapsed":false,"refreshExpiresAt":null}'\n`,
-    );
-    await chmod(bun, 0o755);
-    await exec([bun, WARM_FLAG]);
+    await scriptStub(dir, "bun", `echo "$@" >> "${log}"\nprintf '{"lapsed":false,"refreshExpiresAt":null}'`);
     const realPath = process.env["PATH"];
     process.env["PATH"] = `${dir}:${realPath ?? ""}`;
     try {
