@@ -396,8 +396,6 @@ function putByXhr(
       signal?.removeEventListener("abort", onAbort);
       resolve(answer);
     };
-    xhr.open("PUT", url);
-    for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value);
     xhr.addEventListener("load", () => settle({ status: xhr.status, body: parseJson(xhr.responseText) }));
     xhr.addEventListener("error", () => settle("unreachable"));
     xhr.addEventListener("timeout", () => settle("unreachable"));
@@ -410,8 +408,15 @@ function putByXhr(
       });
     } else xhr.upload.addEventListener("progress", arm);
     signal?.addEventListener("abort", onAbort, { once: true });
-    arm();
-    xhr.send(object);
+    // A throw here (a bad URL, a send in the wrong state) must not leave the timer and listener behind.
+    try {
+      xhr.open("PUT", url);
+      for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value);
+      arm();
+      xhr.send(object);
+    } catch {
+      settle("unreachable");
+    }
   });
 }
 

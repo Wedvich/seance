@@ -144,29 +144,79 @@ describe("uploadAttachment over XMLHttpRequest", () => {
     expect(FakeXhr.sent).toHaveLength(1);
   });
 
+  /** Fake timers must be on before the send arms the stall timer, but sealing needs real ones to finish. */
+  async function sentUnderFakeTimers(): Promise<FakeXhr> {
+    for (let turn = 0; turn < 200 && FakeXhr.sent.length === 0; turn += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- a poll: sealing resolves off the microtask queue
+      await new Promise<void>((resolve) => {
+        jest.useRealTimers();
+        setTimeout(resolve, 1);
+      });
+      jest.useFakeTimers();
+    }
+    const xhr = FakeXhr.sent[0];
+    if (xhr === undefined) throw new Error("nothing sent");
+    return xhr;
+  }
+
   test("an upload with no progress for a minute is cut off and answers unreachable; progress holds it off", async () => {
     installXhr();
     const { client: relay } = await client();
     jest.useFakeTimers();
     try {
       const pending = relay.uploadAttachment(new Uint8Array(4));
-      for (let turn = 0; turn < 200 && FakeXhr.sent.length === 0; turn += 1) {
-        // oxlint-disable-next-line no-await-in-loop -- sealing resolves off the microtask queue
+      const xhr = await sentUnderFakeTimers();
+      jest.advanceTimersByTime(50_000);
+      xhr.progress(1, 4);
+      jest.advanceTimersByTime(50_000);
+      expect(xhr.aborted).toBe(false);
+      jest.advanceTimersByTime(11_000);
+      expect(xhr.aborted).toBe(true);
+      expect(await pending).toEqual({ ok: false, code: "unreachable" });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test("an answer clears the stall timer: a minute later nothing is cut off", async () => {
+    installXhr();
+    const { client: relay } = await client();
+    jest.useFakeTimers();
+    try {
+      const pending = relay.uploadAttachment(new Uint8Array(4));
+      const xhr = await sentUnderFakeTimers();
+      xhr.answer(201, { code: "stored" });
+      const reply = await pending;
+      jest.advanceTimersByTime(61_000);
+      expect(xhr.aborted).toBe(false);
+      expect(reply.ok).toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test("a send that throws answers unreachable and leaves no timer to abort anything later", async () => {
+    installXhr();
+    const { client: relay } = await client();
+    jest.useFakeTimers();
+    const send = FakeXhr.prototype.send;
+    FakeXhr.prototype.send = () => {
+      throw new Error("InvalidStateError");
+    };
+    try {
+      const pending = relay.uploadAttachment(new Uint8Array(4));
+      for (let turn = 0; turn < 200 && jest.getTimerCount() === 0; turn += 1) {
+        // oxlint-disable-next-line no-await-in-loop -- a poll
         await new Promise<void>((resolve) => {
           jest.useRealTimers();
           setTimeout(resolve, 1);
         });
         jest.useFakeTimers();
       }
-      const xhr = FakeXhr.sent[0];
-      jest.advanceTimersByTime(50_000);
-      xhr?.progress(1, 4);
-      jest.advanceTimersByTime(50_000);
-      expect(xhr?.aborted).toBe(false);
-      jest.advanceTimersByTime(11_000);
-      expect(xhr?.aborted).toBe(true);
       expect(await pending).toEqual({ ok: false, code: "unreachable" });
+      expect(jest.getTimerCount()).toBe(0);
     } finally {
+      FakeXhr.prototype.send = send;
       jest.useRealTimers();
     }
   });
