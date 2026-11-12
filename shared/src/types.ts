@@ -718,10 +718,13 @@ export type SchedulerOp = (typeof SCHEDULER_OPS)[number];
  * despawn's clears its ~5s graceful exit plus the kill and its escalation.
  * `cancel` may despawn on the task's machine first, so it clears `despawn`'s.
  * `push-branch` covers the daemon's local git reads, the fetch of the no-upstream
- * fallback (its own 15 s) and the push (its own 45 s). `pass` is the worst path of
- * a pass: the PR head read 15 s, `push-branch` 90 s, the create 10 s, the overwrite
+ * fallback (its own 15 s) and the push (its own 45 s, never started more than 30 s after the
+ * request began: `PUSH_START_DEADLINE_MS`). `pass` is the worst path of
+ * a pass: the PR head read 15 s, `push-branch` 90 s, the create 10 s (plus, when the create's reply
+ * is lost, one re-send and one read-back, 10 s each), the overwrite
  * with its retries about 30 s, then the `sessions` read 10 s and the despawn 20 s,
- * about 175 s. A client that gives up early retries safely (one pass per task at a time).
+ * about 175 s, about 195 s on a doubly lost create, which a client outlasting the window retries
+ * safely (one pass per task at a time).
  * `pass-close` answers at once (the daemon arms a close and never waits for it).
  */
 export const OP_TIMEOUT_MS = {
@@ -3113,11 +3116,11 @@ export const SCHEDULER_ERROR_CODES = [
   "default_branch",
   /** `pass`: origin refused the push (not a fast-forward, or a protected ref); never forced. */
   "push_rejected",
-  /** `pass`: git failed, timed out or refused the repo's config, or the machine did not answer. */
+  /** `pass`: git failed, timed out or refused the repo's config, or the machine did not answer (the push may still have landed). */
   "push_failed",
   /** `pass`: the old machine's launch ledger holds no worktree launch of the task. */
   "not_launched",
-  /** `pass`: the successor's create failed; nothing else was written. */
+  /** `pass`: the successor's create was refused, or went unanswered and was not seen on a read-back. */
   "pass_failed",
   ...TRANSPORT_ERROR_CODES,
 ] as const;
