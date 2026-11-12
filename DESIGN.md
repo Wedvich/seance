@@ -584,6 +584,12 @@ Séance's noise is cover for a real intruder.
    would be the timeline this item refuses. What stays visible is the store's metadata
    class: each object's length (its plaintext length plus 28, unpadded) and, by timing,
    how many files one task carried.
+   **The archivist's seat** (added 2026-11-12; Scheduler, "Leadership"). A holder can mint an id
+   and sign the `archivist` role, but the relay closes any register claiming it from an id other
+   than the one on `ARCHIVIST` (`register role-refused`) and writes nothing, so it cannot take the
+   seat or hide an entry of its own as one. A seed copied out of the seat's `state.json` registers
+   as the seat, which today buys nothing: the relay answers no op for it and apps make no
+   `Machine` of it. Remedy as for a leader's seed: a new identity, its id on `ARCHIVIST`.
 4. **Relay compromise** (T1557 — the relay _is_ the AiTM position). Handled:
    AAD binding makes re-addressing fail closed. Residual is availability and
    traffic analysis, both accepted — the accepted kind is a relay that stops
@@ -661,6 +667,10 @@ Séance's noise is cover for a real intruder.
    accepts. Rolling a task record back to an older version carries that version's manifest,
    whose objects still match their hashes. That is the rollback above, closed by the same
    floor and ledger refusal.
+   The archivist's seat (added 2026-11-12) is the relay's word alone: `ARCHIVIST` is
+   enforced only by the relay, and apps skip an entry it flags as the seat, so it can
+   hide any machine from every spawn target. That is availability, as dropping the entry
+   from the push already is.
 5. **Supply chain** (T1195.001). `git pull` + `launchctl kickstart -k` is
    unsigned; a compromised repo is RCE on every machine, onto boxes that
    already carry launchd persistence. Bounded by 2FA and branch protection
@@ -2059,8 +2069,9 @@ in #132–#149; its findings are labelled Q, S, P and M. The **M3 review** (2026
 
 ### Leadership (`relay/src/leadership.ts`) — landed 2026-10-16, M2
 
-- **Capable is signed `roles`.** `register` carries a plaintext `roles` list — today only
-  `"scheduler"` (`DAEMON_ROLES`) — because the relay must read it to nominate on it. Since the
+- **Capable is signed `roles`.** `register` carries a plaintext `roles` list — `"scheduler"`, and
+  since 2026-11-12 `"archivist"` (`DAEMON_ROLES`; the seat, below) — because the relay must read it
+  to nominate on it. Since the
   relay acts on it, the signature covers it: a register with `roles` is signed over
   `seance-register-v2|<deviceId>|<ts>|<roles joined by ",">` and verified against that message
   only (`shared/src/identity.ts`). A register without `roles` is v1 and verifies as before, as a
@@ -2069,7 +2080,7 @@ in #132–#149; its findings are labelled Q, S, P and M. The **M3 review** (2026
   roleless: the relay never guesses which half of a frame to believe. Roles stay raw strings on
   the wire, bounded like ids (≤8, id charset, so neither separator can appear), because the
   signature covers the list as sent and a role minted later must still verify; the hub keeps only
-  the roles it knows on the socket attachment (`knownRoles`). Every daemon advertises the role.
+  the roles it knows on the socket attachment (`knownRoles`). Every daemon advertises `scheduler`.
   A daemon whose v2 register is refused signs its next one v1 and alternates from there
   (`#signV1` in `daemon/src/relay-client.ts`), so a daemon that self-updated ahead of its relay's
   deploy gets in roleless instead of being locked out; any other refusal cause fails both alike.
@@ -2161,6 +2172,30 @@ in #132–#149; its findings are labelled Q, S, P and M. The **M3 review** (2026
   list. Rejected: a wildcard entry (it would reopen capture by configuration), a committed var
   (CI would overwrite it), and the reader check alone (it changes what readers believe, not who
   holds the term).
+- **The archivist's seat** (`relay/src/seat.ts`; built 2026-11-12, docs/archivist.md A5/A6/A9).
+  The fleet's one history service registers on `/daemon` with the role `archivist`, signed in the
+  v2 register like `scheduler`. The relay honours it only from the one device id on the Worker
+  secret `ARCHIVIST` — one id, never a list, since a second archivist would hold a different
+  database and failover would leave two partial archives. `parseArchivist` trims it; unset, blank,
+  a list, a reserved name or anything outside the deviceId bounds honours nobody (logged once per
+  wake, never fatal), and no wildcard exists: `*` is outside the id charset, and no test option
+  adds one. After `verifyRegister` passes and before the entry cap, the supersede or the put, a
+  register claiming the role from any other id — or from the seat beside `scheduler`, so the seat
+  can never be a leader candidate — is closed `CLOSE_ROLE_REFUSED` (4403) with the reason
+  `register role-refused` (`REGISTER_REFUSALS`, `shared/src/types.ts`), its socket marked like an
+  unverified one; it takes no route and writes nothing. An honoured register stores the signed
+  claim on its entry (`archivistClaim`, the relay's own field, never pushed), and `#leftBy` keeps it
+  across a close or sweep; a register without the role drops it. Each registry push derives
+  `RegistryView.archivist` from that claim against the secret as it is now (`isSeat`), like
+  `connected`: a stored flag would outlive a moved or unset seat and hide the old entry from every
+  app for good, where derived the old entry reads as an ordinary offline one apps show and can
+  `forget`. `RelayClient` skips a flagged entry in `#rebuildMachines`, before its blob is read, and
+  leaves it out of `registrySize` and `ignored`; every `Machine` reader — the PWA's Machines screen
+  and spawn form, the leader's candidates, MCP `list_machines`, the fleet broker, Raycast — reads
+  that list, so the seat is never a spawn target. No terms, no nomination, no standby, no op the
+  relay answers for it. Rejected: a list (above), a wildcard (as for `SCHEDULER_LEADERS`), and a
+  plain app-role client with no seat (every app socket is the anonymous `"app"`, so the relay
+  could not refuse a second archivist — docs/archivist.md).
 - **Scheduler replies log no line, paired by credit** (M2 review; the rule is Threat model,
   item 3). The leader's reply to an app is sealed `to: "app"` on its daemon socket, wire-identical
   to that machine's replies to its own `sessions` or `spawn`, and a blind relay cannot read `re`.

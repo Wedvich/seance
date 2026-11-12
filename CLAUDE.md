@@ -176,7 +176,13 @@ green:
   relay acts on — today `roles`, which decides nomination — is covered by that signature (the v2
   message), never trusted as plaintext, and the relay nominates only ids on its
   `SCHEDULER_LEADERS` secret — unset nominates nobody, and no wildcard exists, in product code or
-  as a test escape hatch, and the leader honours a scheduler request only when it was sealed
+  as a test escape hatch, and the relay honours the `archivist` role only on a verified v2
+  register from the one id on its `ARCHIVIST` secret (`relay/src/seat.ts`) — unset honours nobody,
+  no wildcard in product code or tests, and any other claim, or one beside `scheduler`, is closed
+  `register role-refused` and writes nothing — and pushes an entry as the seat only while its
+  stored claim's id is the secret's now (`isSeat`), never a stored flag, and `RelayClient` never
+  makes a seat entry a `Machine` (`#rebuildMachines`), so it is no spawn target to any reader,
+  and the leader honours a scheduler request only when it was sealed
   `from: "app"`, parsed into a fresh value by that op's own parser (`parseQueueRequest`,
   `parseTaskRequest`, `parseTaskRef`, `parseAmendRequest`, …), and checked against the one replay guard per daemon
   process that every term's leg and the `not_leader` answer share (`schedulerGuard` in
