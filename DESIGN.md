@@ -424,7 +424,10 @@ Séance's noise is cover for a real intruder.
    why resetting `account:` storage is an operator act with a rule: Account records, "Rollback")
    — and, the residual, create junk keys
    under `account:` up to its cap of 64, which nothing in the product removes, since
-   deletes are refused. The singleton prefixes take one key (`StorePrefixRule.key`:
+   deletes are refused. It is an accepted residual (owner decision #22, 2026-11-12:
+   rotate the token, no purge; docs/scheduler.md, M4 "Account records"), revisited
+   when unreadable `account:` records take a meaningful share of the cap or a token
+   is known to have leaked. The singleton prefixes take one key (`StorePrefixRule.key`:
    `queue:pause`, `quota:fleet`) and refuse any other `invalid_request`, so a holder
    cannot squat their only slot; what it can still do is overwrite the real key with
    junk, which an honest writer replaces (the readers skip what does not open): the
@@ -4024,7 +4027,7 @@ error.
   length through its ciphertext length. Not the account id, since the HMAC is PSK-keyed, and not
   the alias.
 - **Residuals.** Junk keys under `account:` up to its cap of 64, which nothing in the product removes
-  (#22, still open); records sealed under an earlier PSK, which a rotation orphans as unopenable
+  (#22: accepted by the owner, 2026-11-12; see Threat model, item 3); records sealed under an earlier PSK, which a rotation orphans as unopenable
   slots that deletes cannot free. An alias is rendered only as text, and never used to route, bind or
   place. The one exception, by owner decision: a person may name an account pin by its alias, which
   `seanced mcp` and `seanced spawn` resolve once, at submit time, to an `accountId` some
