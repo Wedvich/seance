@@ -910,7 +910,9 @@ of M4 has landed.
      only the failing names kept, at most 5 of 100 characters), plus `mergeStateStatus` and whether
      auto-merge is armed. Today's rollup counts optional checks too, so it cannot be the trigger.
   3. **A `pr-blocked` alert**, with reason `checks`, `conflict` (`DIRTY`) or `behind` (`BEHIND`, which
-     blocks only on a repo whose ruleset requires an up-to-date branch). Raised in `prChange` for an
+     blocks only on a repo whose ruleset requires an up-to-date branch). `behind` is raised on
+     `mergeStateStatus` `BEHIND` and nothing else — not on a base that merely moved — so a repo that
+     turns "require up to date" on later is covered with no change; the read's tests pin that. Raised in `prChange` for an
      `awaiting-merge` task with no continuation queued or running. Deduped on reason plus head oid,
      persisted on the task as `spillAlert` is, so a fix that fails again alerts again. Pushed as a new
      `PushAlert` kind with ids only, fixed wording in `push-sw.js`, and a click opening `/?task=<id>`. A
@@ -936,10 +938,18 @@ of M4 has landed.
   - _Built 2026-11-12:_ several PRs per task (`Task.prs`, DESIGN.md "PR status", "Several PRs"):
     the task stands on its newest PR not read closed. _Later:_ one alert per PR.
   - _Later:_ stacked PRs, once Stacking lands. A `reviewDecision` chip, with `CHANGES_REQUESTED` as a
-    `pr-blocked` reason.
-  - _Deferred:_ the leader writing to GitHub (`gh pr update-branch`, re-running a flaky job). That is
-    its first write there, so a threat-model change. On a strict repo, prefer a ruleset change (drop
-    "require up to date", or a merge queue) to an alert on every `behind`.
+    `pr-blocked` reason. GitHub's native stacks (`gh stack`) merge the whole stack in the same second
+    when the top PR merges (seen on #302/#304 and #352–#358), so a child needs a restack only when a
+    branch below it is force-pushed, never because its parent merged.
+  - _Landing, decided 2026-11-12:_ no repo the fleet works in requires an up-to-date branch
+    (`strict_required_status_checks_policy` is false on Pengefix web, backend, ai, admin-ui, bin,
+    shared and evals, and on Wedvich/seance), so `behind` is not expected to fire. No ruleset change
+    and no merge queue: main-CI failure rates run 1–10%, mostly flakes. Pengefix's notes are in
+    Linear PEN-3465. `behind` stays a reason for a repo that turns strict on later.
+  - _Deferred:_ the leader writing to GitHub. `gh pr update-branch` is no longer wanted for `behind`
+    (above); re-running a flaky job is the remaining reason. That is the leader's first write there,
+    so a threat-model change. Should a repo turn strict, prefer a ruleset change (drop "require up to
+    date", or a merge queue) to an alert on every `behind`.
   - _Rejected for now:_ automatic continue on `pr-blocked`, which DESIGN.md "Continuing a session"
     rejects in general. Revisit once the alerts show how often a tap does the obvious thing.
   - _Measure:_ sleep and poll calls per session, p90 session lifetime, and merges without auto-merge,
