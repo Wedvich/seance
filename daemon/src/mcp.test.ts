@@ -245,8 +245,8 @@ describe("mcp tools", () => {
       toolText(await client.callTool({ name: "list_machines", arguments: {} })),
     );
     expect(updated?.exclaves).toEqual([
-      { id: "default", accountId: "org:default", account: "acct default" },
-      { id: "work", accountId: "org:work", email: "me@pengefix.no", account: "me@pengefix.no" },
+      { id: "default", accountId: "org:default", account: "acct default", auth: "unknown" },
+      { id: "work", accountId: "org:work", email: "me@pengefix.no", account: "me@pengefix.no", auth: "unknown" },
       { id: "spare" },
     ]);
     expect(old).not.toHaveProperty("exclaves");
@@ -268,9 +268,9 @@ describe("mcp tools", () => {
         toolText(await client.callTool({ name: "list_machines", arguments: {} })),
       );
       expect(listed.map((entry) => entry.exclaves)).toEqual([
-        [{ id: "default", accountId: PERSONAL, email: EMAIL, account: "personal", alias: "personal" }],
+        [{ id: "default", accountId: PERSONAL, email: EMAIL, account: "personal", alias: "personal", auth: "unknown" }],
         // The unaliased twin keeps its org tag, as the PWA draws it.
-        [{ id: "work", accountId: EMPLOYER, email: EMAIL, account: `${EMAIL} (org org-b)` }],
+        [{ id: "work", accountId: EMPLOYER, email: EMAIL, account: `${EMAIL} (org org-b)`, auth: "unknown" }],
       ]);
     }
     expect(fake.accountLists).toBe(1);
@@ -295,8 +295,8 @@ describe("mcp tools", () => {
         expect(result.isError, label).toBeFalsy();
         const [listed]: { exclaves: unknown[] }[] = JSON.parse(toolText(result));
         expect(listed?.exclaves, label).toEqual([
-          { id: "default", accountId: PERSONAL, email: EMAIL, account: EMAIL },
-          { id: "spare", accountId: "org:spare", account: "acct spare" },
+          { id: "default", accountId: PERSONAL, email: EMAIL, account: EMAIL, auth: "unknown" },
+          { id: "spare", accountId: "org:spare", account: "acct spare", auth: "unknown" },
         ]);
         lazy.stop();
       }
@@ -316,7 +316,9 @@ describe("mcp tools", () => {
     const result = await client.callTool({ name: "list_machines", arguments: {} });
     expect(Date.now() - started).toBeLessThan(ACCOUNT_LABEL_DEADLINE_MS + 1_000);
     const [listed]: { exclaves: unknown[] }[] = JSON.parse(toolText(result));
-    expect(listed?.exclaves).toEqual([{ id: "default", accountId: PERSONAL, email: EMAIL, account: EMAIL }]);
+    expect(listed?.exclaves).toEqual([
+      { id: "default", accountId: PERSONAL, email: EMAIL, account: EMAIL, auth: "unknown" },
+    ]);
     lazy.stop();
   });
 
@@ -388,7 +390,9 @@ describe("mcp tools", () => {
       const [listed]: { exclaves: unknown[] }[] = JSON.parse(
         toolText(await client.callTool({ name: "list_machines", arguments: {} })),
       );
-      expect(listed?.exclaves).toEqual([{ id: "default", accountId: PERSONAL, email: EMAIL, account: EMAIL }]);
+      expect(listed?.exclaves).toEqual([
+        { id: "default", accountId: PERSONAL, email: EMAIL, account: EMAIL, auth: "unknown" },
+      ]);
       const parsed = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} })));
       expect(parsed.tasks[0].pin).toEqual({ account: EMAIL, accountId: PERSONAL });
       expect(double.frames.some((frame) => isRecord(frame) && frame["schedulerOp"] === "accounts")).toBe(false);
