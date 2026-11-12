@@ -505,7 +505,11 @@ pinned machine (or the account's clones) list it; `account` is an alias, an emai
 accountId, and the answer names the account it resolved to. `avoid: [machine, …]` (at most 4)
 keeps it off machines. An unknown or ambiguous machine or account, an account no machine reports
 signed in, or a machine whose daemon reports no exclaves is refused; an account pin or `avoid`
-also needs a scheduler leader on a build that routes on them. The queue is the relay's, so a task waiting for capacity
+also needs a scheduler leader on a build that routes on them. `autonomy` (`steer`, `checkpoint`,
+the default, or `auto`) says how much the session decides on its own: `steer` is plan mode and
+waits for approval, `auto` decides reversible choices itself and records them for review
+(DESIGN.md, "Autonomy level"); `queue_batch` takes one for the whole batch, and a continuation
+keeps its task's. The queue is the relay's, so a task waiting for capacity
 survives leadership moving — every relay deploy and daemon self-update — and so does one
 queued while no scheduler leads: the next leader runs it.
 On a box where only the daemon can read the key (below), a spawn goes through the daemon.

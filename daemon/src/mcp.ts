@@ -5,6 +5,8 @@ import { z } from "zod";
 import {
   accountNameIn,
   AUTONOMY_LEVELS,
+  autonomyOf,
+  DEFAULT_AUTONOMY,
   withAutonomy,
   type AutonomyLevel,
   continueOffer,
@@ -714,6 +716,8 @@ function describeTask(
     ...(task.escalated === true ? { escalated: true } : {}),
     ...(task.needsInputSince === undefined ? {} : { needsInputSince: new Date(task.needsInputSince).toISOString() }),
     ...(spec.until === "reported" ? { until: spec.until } : {}),
+    // Only off the default: most tasks run at checkpoint, and `plan: true` alone reads as steer.
+    ...(autonomyOf(spec) === DEFAULT_AUTONOMY ? {} : { autonomy: autonomyOf(spec) }),
     // A merge under `until: "reported"` settles nothing, so it is told apart from a finish here too.
     ...(task.merged === true ? { merged: true } : {}),
     ...(spec.batch === undefined ? {} : { batch: { id: spec.batch.id, index: spec.batch.index } }),
@@ -872,7 +876,7 @@ export function buildMcpServer(
     "get_queue",
     {
       title: "List the scheduler's queue",
-      description: `List the scheduler's queue — the tasks spawn_session and queue_batch queued, and other clients' (the app, the CLI), and what holds dispatch (a paused queue, or an account named as a pin names it) — with each one's state, its pin (whichever of machine and account it pins: the machine by name where known, plus its deviceId; the account by its alias where one is set (none on a box whose daemon brokers for it), else the email a machine reports, else a short id, plus its accountId; an email or short id two accounts share, case aside, gains a tag telling them apart: the org's short id, or more of it where that still collides; pinned and held accounts no machine reports count as accounts too), the machines it avoids, where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). ${AUTO_LIMITS}`,
+      description: `List the scheduler's queue — the tasks spawn_session and queue_batch queued, and other clients' (the app, the CLI), and what holds dispatch (a paused queue, or an account named as a pin names it) — with each one's state, its pin (whichever of machine and account it pins: the machine by name where known, plus its deviceId; the account by its alias where one is set (none on a box whose daemon brokers for it), else the email a machine reports, else a short id, plus its accountId; an email or short id two accounts share, case aside, gains a tag telling them apart: the org's short id, or more of it where that still collides; pinned and held accounts no machine reports count as accounts too), the machines it avoids, its autonomy level where it is not the default checkpoint, where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). ${AUTO_LIMITS}`,
       annotations: { readOnlyHint: true },
     },
     async () =>
@@ -959,7 +963,7 @@ export function buildMcpServer(
     "continue_task",
     {
       title: "Continue a failed or cancelled scheduler task",
-      description: `Resume a task whose session ended in failure, or that was cancelled after it started (get_queue marks one \`continuable\`): the same conversation, in the same worktree on the same machine, as a new task the scheduler dispatches there. Continue moves to the newest continuation that ran in a chain, and is withheld while one still waits in the queue (cancel that one to continue again); the old task stays as it was, and so do the tasks that wait on it. The new task waits in the queue like any other, and fails if the worktree is gone (reaped), a session is open in it, or a later task ran in the worktree, or the machine no longer holds the launch record (kept a week, at most 128 launches). \`prompt\` is an optional note the resumed session is told, within the ${TASK_REQUEST_LIMITS.prompt}-character prompt bound. Answers with the new task id; get_queue shows where it lands. ${AUTO_LIMITS}`,
+      description: `Resume a task whose session ended in failure, or that was cancelled after it started (get_queue marks one \`continuable\`): the same conversation, in the same worktree on the same machine, as a new task the scheduler dispatches there, at the task's own autonomy level. Continue moves to the newest continuation that ran in a chain, and is withheld while one still waits in the queue (cancel that one to continue again); the old task stays as it was, and so do the tasks that wait on it. The new task waits in the queue like any other, and fails if the worktree is gone (reaped), a session is open in it, or a later task ran in the worktree, or the machine no longer holds the launch record (kept a week, at most 128 launches). \`prompt\` is an optional note the resumed session is told, within the ${TASK_REQUEST_LIMITS.prompt}-character prompt bound. Answers with the new task id; get_queue shows where it lands. ${AUTO_LIMITS}`,
       inputSchema: z.object({
         taskId: z.string().describe("The failed or cancelled task's id from get_queue"),
         prompt: z.string().optional().describe("Optional: a note for the resumed session, from the user"),

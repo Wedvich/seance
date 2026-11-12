@@ -2015,6 +2015,34 @@ describe("get_queue", () => {
     lazy.stop();
   });
 
+  test("names a task's autonomy level only off the default, and reads plan alone as steer", async () => {
+    const at = (id: string, fields: Pick<Task["spec"], "autonomy" | "plan">) =>
+      task({ id, state: "ready", spec: { repo: ORIGIN, mode: "worktree", ...fields } });
+    const fake = leaderRelay([
+      {
+        tasks: [
+          at("t-1", { autonomy: "auto" }),
+          at("t-2", { autonomy: "steer", plan: true }),
+          at("t-3", { plan: true }),
+          at("t-4", { autonomy: "checkpoint" }),
+          at("t-5", {}),
+        ],
+        at: 6_000,
+      },
+    ]);
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const { tasks } = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} })));
+    expect(tasks.map((t: { autonomy?: unknown }) => t.autonomy)).toEqual([
+      "auto",
+      "steer",
+      "steer",
+      undefined,
+      undefined,
+    ]);
+    lazy.stop();
+  });
+
   test("shows a task's pin and avoided machines, naming each machine where the fleet knows it and an account by email", async () => {
     const pinned = (id: string, pin: NonNullable<Task["spec"]["pin"]>, avoid?: readonly string[]) =>
       task({
