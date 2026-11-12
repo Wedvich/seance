@@ -50,7 +50,7 @@ import type { Fetch } from "./seams.ts";
 import type { HostProbe, Registered } from "./telemetry.ts";
 import { createUpdater, type UpdateEffects, type Updater } from "./update.ts";
 import { createUsageRefresh, type UsageRefreshOpts } from "./usage-refresh.ts";
-import { withTraits } from "./traits.ts";
+import { unmatchedTraitExclaves, withTraits } from "./traits.ts";
 import { identityOfState, loadOrInitState, saveState, writeRuntime, type State } from "./state.ts";
 
 export interface DaemonHandle {
@@ -311,11 +311,18 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     };
     const candidate: Registered = { scan: info.scannedAt, exclaves: exclaveScan };
     const { sealed, droppedSkills, oversized } = await sealMachineInfo(key, state.deviceId, info);
-    // Once per size-deciding content: `scannedAt`/`lastUpdate` change every rescan without changing the
-    // size, and a line after each hourly rescan and reconnect would say nothing new.
+    // Once per size-deciding content (the exclave set among it, so the trait warning too): `scannedAt` and
+    // `lastUpdate` change every rescan without changing the size, and a line after each hourly rescan and
+    // reconnect would say nothing new.
     const content = JSON.stringify({ repos: info.repos, exclaves: info.exclaves });
     if (content !== lastSizeReport) {
       lastSizeReport = content;
+      for (const { trait, exclaves } of unmatchedTraitExclaves(exclaveScan.info, config.traits)) {
+        log.warn(
+          `config traits.${trait}.exclaves names ${exclaves.join(", ")}, not among this machine's exclaves ` +
+            `(${exclaveScan.info.map((e) => e.id).join(", ")}) — ${trait} is not declared there`,
+        );
+      }
       if (droppedSkills) log.warn(`register blob over ${ENVELOPE_MAX_CT_LENGTH} chars — sent without project skills`);
       if (oversized)
         log.error(

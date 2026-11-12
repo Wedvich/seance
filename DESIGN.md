@@ -6131,7 +6131,7 @@ of this section built.
 - **Traits** (`daemon/src/traits.ts`, `config.ts`, 2026-11-12, scheduler M4 PR 1): `config.json`'s
   `traits` map declares what this box's exclaves carry (Scheduler, "Traits filter"). `parseTraits` is
   strict: names pass `isTraitName` (`TRAIT_LIMITS`), values are objects holding only `exclaves` (a
-  non-empty list of distinct exclave names; one matching no exclave never applies), at most
+  non-empty list of distinct exclave names; one matching no exclave never applies — config parse cannot see the scan, so `buildInfo` logs a warning naming the trait and the unknown ids once per exclave-set change, `unmatchedTraitExclaves`), at most
   `TRAIT_LIMITS.perMachine` traits, and `probe` and `keepFree` are refused by name as "not built yet". `withTraits` stamps the sorted names onto each exclave in the
   register blob; the daemon advertises `CAPABILITIES.traits`. Nothing about a trait is read from the
   wire, the PWA or another machine, and nothing here calls `log.ts` from the MCP path.

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ExclaveInfo } from "@seance/shared";
-import { withTraits } from "./traits.ts";
+import { unmatchedTraitExclaves, withTraits } from "./traits.ts";
 
 const exclave = (id: string): ExclaveInfo => ({
   id,
@@ -35,5 +35,18 @@ describe("withTraits", () => {
   test("a trait scoped to an exclave this machine lacks is on none; the rest of each exclave is untouched", () => {
     const out = withTraits(scan, { ghost: { exclaves: ["nowhere"] } });
     expect(out).toEqual(scan);
+  });
+});
+
+describe("unmatchedTraitExclaves", () => {
+  test("names each trait's exclave ids the scan lacks, and nothing when all match or none is listed", () => {
+    expect(
+      unmatchedTraitExclaves(scan, { gpu: { exclaves: ["wrok", "work"] }, ghost: { exclaves: ["x", "y"] } }),
+    ).toEqual([
+      { trait: "gpu", exclaves: ["wrok"] },
+      { trait: "ghost", exclaves: ["x", "y"] },
+    ]);
+    expect(unmatchedTraitExclaves(scan, { atlas: {}, gpu: { exclaves: ["work"] } })).toEqual([]);
+    expect(unmatchedTraitExclaves(scan, undefined)).toEqual([]);
   });
 });
