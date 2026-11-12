@@ -29,6 +29,7 @@ import type { SchedulerConfig, SeatProfile, WindowSpan } from "./config.ts";
 import { codeUnitOrder } from "./order.ts";
 import { accountPause, activeHolds, queuePause } from "./pause.ts";
 import { IN_FLIGHT, type Placement, type Task } from "./task.ts";
+import { traitFilter } from "./traits.ts";
 
 // The decision record is a wire type — `route-preview` and `queue` carry it —
 // so its shapes live in the schema of record.
@@ -184,6 +185,7 @@ function judge(
   if (clone === undefined) rejected.push({ code: "repo_absent" });
   const missing = lacking(clone);
   if (missing !== undefined) rejected.push({ code: "skill_absent", skill: missing });
+  rejected.push(...traitFilter(task, exclave));
   // One code per exclave: signed out says everything an expired login would. Only `expired` filters —
   // `expiring` and `unknown` (an older daemon, an unreadable store) still route.
   if (!exclave.authOk || exclave.accountId === null) rejected.push({ code: "auth_missing" });

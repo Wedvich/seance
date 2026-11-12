@@ -7,6 +7,7 @@ import {
   REPLAY_WINDOW_MS,
   type DespawnRequest,
   type DespawnResponse,
+  type Machine,
   type SessionState,
 } from "@seance/shared";
 import {
@@ -26,6 +27,7 @@ import {
   accountMax,
   attachment,
   enqueue,
+  exclave,
   FakeFleet,
   machine,
   NOW,
@@ -2333,5 +2335,82 @@ describe("writes to one task never race", () => {
     await scheduler.onSession(task.id, "needs-input", { deviceId: "a", pane: "%1" });
     expect((await store.get(task.id))?.body).toMatchObject({ state: "needs-input", spec: { title: "renamed" } });
     expect(fleet.spawns).toHaveLength(1);
+  });
+});
+
+describe("traits", () => {
+  const holder = (traits: string[]): Machine => machine("a", { exclaves: [exclave("main", "org:a", { traits })] });
+
+  function traitSetup(machines: Machine[]) {
+    const store = new MemoryQueueStore();
+    const clock = { now: NOW };
+    const held: [string, string][] = [];
+    const fleet = new FakeFleet(machines);
+    const scheduler = new Scheduler({
+      store: readerChecked(store, () => clock.now),
+      fleet,
+      config: DEFAULT_CONFIG,
+      now: () => clock.now,
+      onTraitHeld: (id, trait) => held.push([id, trait]),
+    });
+    return { store, fleet, scheduler, held };
+  }
+
+  test("onTraitHeld fires once per task and trait across passes, and again after the scheduler loads anew", async () => {
+    const { store, scheduler, held } = traitSetup([holder([])]);
+    const task = await enqueue(store, scheduler, spec({ requires: ["atlas", "az"] }));
+    await pass(scheduler);
+    await pass(scheduler);
+    await pass(scheduler);
+    expect(held).toEqual([
+      [task.id, "atlas"],
+      [task.id, "az"],
+    ]);
+    await scheduler.load();
+    await pass(scheduler);
+    expect(held).toHaveLength(4);
+  });
+
+  test("a task that places, or one with no requirement, tells nothing; the trait appearing places the held one", async () => {
+    const { store, fleet, scheduler, held } = traitSetup([holder([])]);
+    const plain = await enqueue(store, scheduler, spec());
+    const needy = await enqueue(store, scheduler, spec({ requires: ["atlas"] }));
+    await pass(scheduler);
+    expect(held).toEqual([[needy.id, "atlas"]]);
+    expect(scheduler.task(plain.id)?.state).toBe("running");
+    expect(scheduler.task(needy.id)?.state).toBe("ready");
+    fleet.fleet = [holder(["atlas"])];
+    await pass(scheduler);
+    expect(scheduler.task(needy.id)?.state).toBe("running");
+    expect(held).toHaveLength(1);
+  });
+
+  test("a throwing host does not end the pass: the error goes to onError", async () => {
+    const errors: unknown[] = [];
+    const store = new MemoryQueueStore();
+    const scheduler = new Scheduler({
+      store: readerChecked(store, () => NOW),
+      fleet: new FakeFleet([holder([])]),
+      config: DEFAULT_CONFIG,
+      now: () => NOW,
+      onError: (err) => errors.push(err),
+      onTraitHeld: () => {
+        throw new Error("log failed");
+      },
+    });
+    await enqueue(store, scheduler, spec({ requires: ["atlas"] }));
+    await pass(scheduler);
+    expect(errors).toHaveLength(1);
+  });
+
+  test("preview with `requires` filters like a pass, and a preview holds nothing", () => {
+    const { scheduler, held } = traitSetup([holder(["atlas"]), machine("b")]);
+    const decision = scheduler.preview(spec({ requires: ["atlas"] }));
+    expect(decision.chosen?.deviceId).toBe("a");
+    expect(decision.candidates.find((c) => c.deviceId === "b")?.rejected).toEqual([
+      { code: "trait_absent", trait: "atlas" },
+    ]);
+    scheduler.preview(spec({ requires: ["nope"] }));
+    expect(held).toEqual([]);
   });
 });

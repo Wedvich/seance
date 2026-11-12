@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { CAPABILITIES, parseTask, type ExclaveInfo, type Machine } from "@seance/shared";
 import { DEFAULT_CONFIG, route, type Candidate, type Decision, type SchedulerConfig, type Task } from "../src/index.ts";
 import { accountResetAt } from "../src/route.ts";
+import { traitsHolding } from "../src/traits.ts";
 import { accountMax, attachment, clone, exclave, machine, NOW, NOW_S, obs, spec, status } from "./fixtures.ts";
 
 function task(fields: Partial<Task> = {}): Task {
@@ -1099,6 +1100,144 @@ describe("stickiness", () => {
       task: task({ spec: spec({ lineage: { deviceId: "owner", exclave: "main" } }) }),
     });
     expect(decision.chosen?.deviceId).toBe("other");
+  });
+});
+
+describe("trait_absent — a required trait is an exclave's own, and every one is needed", () => {
+  const atlas = (): Machine =>
+    machine("a", {
+      exclaves: [exclave("main", "org:a", { traits: ["atlas", "gpu"] }), exclave("alt", "org:b", { traits: ["gpu"] })],
+      repos: [clone("app", "main"), clone("app2", "alt")],
+      status: status({ quota: [obs(0), obs(1)] }),
+    });
+  const plain = (): Machine => machine("b");
+  const requiring = (...requires: string[]): Task => task({ spec: spec({ requires }) });
+
+  test("a task requiring atlas places only on the exclave carrying it; the others say what they lack", () => {
+    const decision = decide([plain(), atlas()], { task: requiring("atlas") });
+    expect(decision.chosen).toEqual({ deviceId: "a", exclave: "main", clone: "app" });
+    expect(byExclave(decision, "alt")?.rejected).toEqual([{ code: "trait_absent", trait: "atlas" }]);
+    expect(decision.candidates.find((c) => c.deviceId === "b")?.rejected).toEqual([
+      { code: "trait_absent", trait: "atlas" },
+    ]);
+  });
+
+  test("control: the same task without `requires` is rejected for no trait anywhere", () => {
+    const decision = decide([plain(), atlas()]);
+    expect(decision.candidates.flatMap(codes)).not.toContain("trait_absent");
+  });
+
+  test("a task requiring two traits gets one reason per missing trait, in `requires` order", () => {
+    const decision = decide([plain(), atlas()], { task: requiring("gpu", "atlas", "az") });
+    expect(decision.candidates.find((c) => c.deviceId === "b")?.rejected).toEqual([
+      { code: "trait_absent", trait: "gpu" },
+      { code: "trait_absent", trait: "atlas" },
+      { code: "trait_absent", trait: "az" },
+    ]);
+    expect(byExclave(decision, "alt")?.rejected).toEqual([
+      { code: "trait_absent", trait: "atlas" },
+      { code: "trait_absent", trait: "az" },
+    ]);
+    expect(decision.chosen).toBeNull();
+  });
+
+  test("every trait must be on the one exclave: two exclaves splitting them place nothing", () => {
+    const split = machine("a", {
+      exclaves: [exclave("main", "org:a", { traits: ["atlas"] }), exclave("alt", "org:b", { traits: ["gpu"] })],
+      repos: [clone("app", "main"), clone("app2", "alt")],
+      status: status({ quota: [obs(0), obs(1)] }),
+    });
+    const decision = decide([split], { task: requiring("atlas", "gpu") });
+    expect(decision.chosen).toBeNull();
+    expect(Object.fromEntries(decision.candidates.map((c) => [c.exclave ?? "", codes(c)]))).toEqual({
+      main: ["trait_absent"],
+      alt: ["trait_absent"],
+    });
+  });
+
+  test("a pinned task and a run-now (uncapped) route filter too", () => {
+    const pinned = decide([plain(), atlas()], {
+      task: task({ spec: spec({ requires: ["atlas"], pin: { deviceId: "b" } }) }),
+    });
+    expect(pinned.chosen).toBeNull();
+    expect(pinned.candidates.find((c) => c.deviceId === "b")?.rejected).toEqual([
+      { code: "trait_absent", trait: "atlas" },
+    ]);
+    const runNow = route({
+      task: requiring("atlas"),
+      machines: [plain()],
+      tasks: [],
+      now: NOW,
+      config: DEFAULT_CONFIG,
+      uncapped: true,
+    });
+    expect(runNow.chosen).toBeNull();
+    expect(codes(only(runNow))).toEqual(["trait_absent"]);
+  });
+
+  test("a continuation whose target lost the trait is rejected there, and nowhere else is the target", () => {
+    const capable = [
+      CAPABILITIES.metrics,
+      CAPABILITIES.taskId,
+      CAPABILITIES.continueTask,
+      CAPABILITIES.continueSession,
+    ];
+    const at = { deviceId: "b", exclave: "main", clone: "app" };
+    const decision = decide(
+      [
+        machine("b", { capabilities: capable }),
+        machine("a", { capabilities: capable, exclaves: [exclave("main", "org:a", { traits: ["atlas"] })] }),
+      ],
+      { task: task({ spec: spec({ mode: "continue", requires: ["atlas"], continues: { task: "t-old", at } }) }) },
+    );
+    expect(decision.chosen).toBeNull();
+    expect(decision.candidates.find((c) => c.deviceId === "b")?.rejected).toEqual([
+      { code: "trait_absent", trait: "atlas" },
+    ]);
+  });
+
+  test("a machine whose blob lists no exclave is exclaves_unknown and never judged for traits", () => {
+    const blind = machine("c", { exclaves: [] });
+    const decision = decide([blind], { task: requiring("atlas") });
+    expect(only(decision).exclave).toBeNull();
+    expect(codes(only(decision))).not.toContain("trait_absent");
+  });
+
+  describe("traitsHolding", () => {
+    const hold = (machines: readonly Machine[], requires: string[]): readonly string[] =>
+      traitsHolding(decide(machines, { task: task({ spec: spec({ requires }) }) }), requires);
+    const asleep = (id: string, traits?: string[]): Machine =>
+      machine(id, {
+        connected: false,
+        ...(traits === undefined ? {} : { exclaves: [exclave("main", `org:${id}`, { traits })] }),
+      });
+
+    test("(a) a place only traits stop: each trait that place lacks holds the task", () => {
+      expect(hold([plain(), atlas()], ["atlas", "az"])).toEqual(["atlas", "az"]);
+      // gpu is on every exclave of `a`, so only az holds.
+      expect(hold([atlas()], ["gpu", "az"])).toEqual(["az"]);
+    });
+
+    test("(b) no machine has it, though other reasons stop every place too", () => {
+      expect(hold([asleep("x"), asleep("y")], ["atlas"])).toEqual(["atlas"]);
+    });
+
+    test("not held when something was chosen", () => {
+      expect(hold([plain(), atlas()], ["atlas"])).toEqual([]);
+    });
+
+    test("not held when other reasons block every place and some machine has the trait", () => {
+      expect(hold([asleep("x", ["atlas"]), asleep("y")], ["atlas"])).toEqual([]);
+    });
+
+    test("an exclave-less machine is ignored: it neither blocks nor makes the trait held", () => {
+      expect(hold([machine("c", { exclaves: [] }), asleep("y")], ["atlas"])).toEqual(["atlas"]);
+      expect(hold([machine("c", { exclaves: [] })], ["atlas"])).toEqual([]);
+    });
+
+    test("a task without requires holds nothing", () => {
+      expect(traitsHolding(decide([plain()]), [])).toEqual([]);
+    });
   });
 });
 
