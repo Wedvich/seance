@@ -356,6 +356,9 @@ function isXhrConstructor(value: unknown): value is XhrConstructor {
   return typeof value === "function";
 }
 
+/** Longest an upload may go without progress (or, once sent, without the relay answering). */
+const UPLOAD_STALL_MS = 60_000;
+
 type PutAnswer = { readonly status: number; readonly body: unknown } | "unreachable" | "aborted";
 
 function parseJson(text: string): unknown {
@@ -378,7 +381,18 @@ function putByXhr(
   return new Promise((resolve) => {
     const xhr = new Xhr();
     const onAbort = (): void => xhr.abort();
+    let stalled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // No byte sent and no answer for this long: a dead connection that never errors would hold the press.
+    const arm = (): void => {
+      if (timer !== undefined) clearTimeout(timer);
+      timer = setTimeout(() => {
+        stalled = true;
+        xhr.abort();
+      }, UPLOAD_STALL_MS);
+    };
     const settle = (answer: PutAnswer): void => {
+      if (timer !== undefined) clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
       resolve(answer);
     };
@@ -387,14 +401,16 @@ function putByXhr(
     xhr.addEventListener("load", () => settle({ status: xhr.status, body: parseJson(xhr.responseText) }));
     xhr.addEventListener("error", () => settle("unreachable"));
     xhr.addEventListener("timeout", () => settle("unreachable"));
-    xhr.addEventListener("abort", () => settle("aborted"));
+    xhr.addEventListener("abort", () => settle(stalled ? "unreachable" : "aborted"));
     // A listener on `upload` forces a preflight; the Authorization header forces one anyway.
     if (onProgress !== undefined) {
-      xhr.upload.addEventListener("progress", (event) =>
-        onProgress(event.loaded, event.lengthComputable ? event.total : object.length),
-      );
-    }
+      xhr.upload.addEventListener("progress", (event) => {
+        arm();
+        onProgress(event.loaded, event.lengthComputable ? event.total : object.length);
+      });
+    } else xhr.upload.addEventListener("progress", arm);
     signal?.addEventListener("abort", onAbort, { once: true });
+    arm();
     xhr.send(object);
   });
 }
@@ -411,7 +427,10 @@ async function putByFetch(
   } catch {
     return signal?.aborted === true ? "aborted" : "unreachable";
   }
-  return { status: res.status, body: await res.json().catch(() => null) };
+  const body: unknown = await res.json().catch(() => null);
+  // An abort during the body read fails the read; same answer as the XHR path gives.
+  if (signal?.aborted === true) return "aborted";
+  return { status: res.status, body };
 }
 
 /** A registry entry whose `info` decrypted. Entries that don't are counted, not shown. */

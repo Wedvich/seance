@@ -1,7 +1,7 @@
 // `RelayClient.uploadAttachment`'s XMLHttpRequest path, which only a browser reaches:
 // Bun has no XHR, so the real-relay tests (pwa/test/client.test.ts) cover the fetch path,
 // and this one installs a stand-in. No relay: the stand-in answers as the route does.
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, jest, test } from "bun:test";
 import { RelayClient } from "./app-client.ts";
 import { attachmentHash, importPsk, openAttachment, toBase64 } from "./crypto.ts";
 
@@ -142,5 +142,32 @@ describe("uploadAttachment over XMLHttpRequest", () => {
       code: "aborted",
     });
     expect(FakeXhr.sent).toHaveLength(1);
+  });
+
+  test("an upload with no progress for a minute is cut off and answers unreachable; progress holds it off", async () => {
+    installXhr();
+    const { client: relay } = await client();
+    jest.useFakeTimers();
+    try {
+      const pending = relay.uploadAttachment(new Uint8Array(4));
+      for (let turn = 0; turn < 200 && FakeXhr.sent.length === 0; turn += 1) {
+        // oxlint-disable-next-line no-await-in-loop -- sealing resolves off the microtask queue
+        await new Promise<void>((resolve) => {
+          jest.useRealTimers();
+          setTimeout(resolve, 1);
+        });
+        jest.useFakeTimers();
+      }
+      const xhr = FakeXhr.sent[0];
+      jest.advanceTimersByTime(50_000);
+      xhr?.progress(1, 4);
+      jest.advanceTimersByTime(50_000);
+      expect(xhr?.aborted).toBe(false);
+      jest.advanceTimersByTime(11_000);
+      expect(xhr?.aborted).toBe(true);
+      expect(await pending).toEqual({ ok: false, code: "unreachable" });
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
