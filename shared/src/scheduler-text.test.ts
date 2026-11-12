@@ -106,6 +106,11 @@ describe("reasonText", () => {
     expect(reasonText({ code: "continue_unsupported" })).toContain("seanced update");
   });
 
+  test("a missing trait names it; an unhealthy one says its probe fails", () => {
+    expect(reasonText({ code: "trait_absent", trait: "atlas" })).toBe("it lacks the atlas trait");
+    expect(reasonText({ code: "trait_unhealthy", trait: "atlas" })).toBe("its atlas trait's probe is failing");
+  });
+
   test("a machine whose daemon can't fetch attachments says it needs an update", () => {
     expect(reasonText({ code: "attachments_unsupported" })).toBe(
       "its daemon can't fetch attachments yet (needs seanced update)",

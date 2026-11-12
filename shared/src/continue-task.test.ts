@@ -266,6 +266,7 @@ describe("continuationSpec", () => {
         batch: { id: "b", index: 1 },
         deps: [{ task: "t-0", after: "merged" }],
         client: "pwa",
+        requires: ["atlas", "gpu"],
         // The files were the first launch's; a continuation finds them in the worktree, and the mode refuses them.
         attachments: [
           {
@@ -288,6 +289,8 @@ describe("continuationSpec", () => {
       autonomy: "auto",
       until: "reported",
       linear: { issue: "ENG-1" },
+      // Without it a continuation could resume on an exclave that lost the trait.
+      requires: ["atlas", "gpu"],
       continues: { task: "t-old", at },
     });
     // The result is a spec a leader's parser keeps whole.

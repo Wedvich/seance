@@ -1,6 +1,7 @@
 import {
   AT_REST_OPS,
   ATTACHMENTS_DEP_SENTINEL,
+  REQUIRES_DEP_SENTINEL,
   PIN_SENTINEL,
   SCHEDULER_ID,
   STORE_PREFIXES,
@@ -72,8 +73,8 @@ export function sealTaskRecord(key: CryptoKey, from: string, record: TaskRecord)
 
 /**
  * The record as it is sealed: a spec carrying `pin.account` or `avoid` gains
- * `pin.exclave: PIN_SENTINEL`, and one carrying `attachments` gains
- * `ATTACHMENTS_DEP_SENTINEL` in its deps. An older leader's parser refuses
+ * `pin.exclave: PIN_SENTINEL`, and one carrying `attachments` or `requires` gains
+ * `ATTACHMENTS_DEP_SENTINEL` or `REQUIRES_DEP_SENTINEL` in its deps. An older leader's parser refuses
  * each, so it holds the record unreadable instead of re-sealing it without
  * them. Here, in the one sealer, so the app's create and every leader write
  * emit them alike.
@@ -82,11 +83,20 @@ export function taskRecordAtRest(record: TaskRecord): unknown {
   const { spec } = record.task;
   const pinned = spec.pin?.account !== undefined || spec.avoid !== undefined;
   const attached = spec.attachments !== undefined;
-  if (!pinned && !attached) return record;
+  const required = spec.requires !== undefined;
+  if (!pinned && !attached && !required) return record;
   const sealed = {
     ...spec,
     ...(pinned ? { pin: { ...spec.pin, exclave: PIN_SENTINEL } } : {}),
-    ...(attached ? { deps: [...(spec.deps ?? []), ATTACHMENTS_DEP_SENTINEL] } : {}),
+    ...(attached || required
+      ? {
+          deps: [
+            ...(spec.deps ?? []),
+            ...(attached ? [ATTACHMENTS_DEP_SENTINEL] : []),
+            ...(required ? [REQUIRES_DEP_SENTINEL] : []),
+          ],
+        }
+      : {}),
   };
   return { ...record, task: { ...record.task, spec: sealed } };
 }

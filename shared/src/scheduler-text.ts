@@ -127,6 +127,10 @@ export function reasonText(reason: Reason): string {
       return "its login has expired (needs /login)";
     case "skill_absent":
       return `the ${reason.skill} skill is not installed there`;
+    case "trait_absent":
+      return `it lacks the ${reason.trait} trait`;
+    case "trait_unhealthy":
+      return `its ${reason.trait} trait's probe is failing`;
     case "base_unpushed":
       return "the branch it stacks on is not pushed, and sits on another exclave";
     case "quota_unknown":

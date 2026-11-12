@@ -1,5 +1,6 @@
 import { REPLAY_WINDOW_MS } from "./crypto.ts";
 import { isAutonomyLevel, withAutonomy } from "./autonomy.ts";
+import { isTraitName, TRAIT_LIMITS } from "./traits.ts";
 import {
   ACCOUNT_ALIAS_MAX_LENGTH,
   ATTACHMENT_HASH_PATTERN,
@@ -33,6 +34,7 @@ import {
   PUSH_SERVICE_HOSTS,
   PUSH_SERVICE_VENDORS,
   REPO_MAX_SKILLS,
+  REQUIRES_DEP_SENTINEL,
   SKILL_NAME_MAX_LENGTH,
   STATUS_MAX_AUTH_EXPIRED,
   TASK_UNTIL,
@@ -327,6 +329,7 @@ export function parseExclaveInfo(value: unknown): ExclaveInfo | null {
   if (typeof value["authOk"] !== "boolean") return null;
   const skills = value["skills"];
   if (!isStringArray(skills)) return null;
+  const traits = parseExclaveTraits(value["traits"]);
   return {
     id: value["id"],
     accountId,
@@ -335,7 +338,20 @@ export function parseExclaveInfo(value: unknown): ExclaveInfo | null {
     ...(seatTier === undefined || seatTier === "" ? {} : { seatTier }),
     authOk: value["authOk"],
     skills,
+    ...(traits === undefined ? {} : { traits }),
   };
+}
+
+/**
+ * Lenient, as `parseRepoSkills` is: a list this build cannot read is read as no
+ * traits, which only ever keeps a task off the exclave (the fail-closed direction),
+ * and never costs the exclave or the machine its blob. Names failing the pattern are
+ * dropped one by one, repeats collapse, and the list is cut at `TRAIT_LIMITS.perMachine`.
+ */
+function parseExclaveTraits(value: unknown): readonly string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const names = [...new Set(value.filter(isTraitName))].slice(0, TRAIT_LIMITS.perMachine);
+  return names.length === 0 ? undefined : names;
 }
 
 export function parseExclaveList(value: unknown): readonly ExclaveInfo[] | null {
@@ -684,13 +700,19 @@ export function parseTaskRequest(value: unknown): TaskRequest | null {
   return parseRequestFields(value, ["worktree", "here"]);
 }
 
-/** `parseTaskRequest`, plus route-preview's `attachments` flag: `true` or absent. */
+/** `parseTaskRequest`, plus route-preview's `attachments` flag (`true` or absent) and `requires`. */
 export function parseRoutePreviewRequest(value: unknown): RoutePreviewRequest | null {
   const request = parseTaskRequest(value);
   if (request === null || !isRecord(value)) return null;
   const { attachments } = value;
-  if (attachments === undefined) return request;
-  return attachments === true ? { ...request, attachments } : null;
+  if (attachments !== undefined && attachments !== true) return null;
+  const requires = value["requires"] === undefined ? undefined : parseRequires(value["requires"]);
+  if (requires === null) return null;
+  return {
+    ...request,
+    ...(attachments === undefined ? {} : { attachments }),
+    ...(requires === undefined ? {} : { requires }),
+  };
 }
 
 /**
@@ -762,6 +784,13 @@ function parseAvoid(value: unknown): readonly string[] | null {
   return ids;
 }
 
+/** A spec's `requires`: 1 to `TASK_SPEC_LIMITS.requires` unique trait names, nothing else. */
+function parseRequires(value: unknown): readonly string[] | null {
+  if (!Array.isArray(value) || value.length === 0 || value.length > TASK_SPEC_LIMITS.requires) return null;
+  if (!value.every(isTraitName) || new Set(value).size !== value.length) return null;
+  return [...value];
+}
+
 /**
  * Any `strategy` an older writer stored (`sequential`, `parallel`, `auto`,
  * malformed) is ignored and dropped: no batch schedules, so a live record from before must
@@ -808,10 +837,11 @@ export function parseTaskSpec(value: unknown): TaskSpec | null {
   const builds = base === undefined ? undefined : parsePlacement(base);
   const member = batch === undefined ? undefined : parseBatch(batch);
   const files = value["attachments"] === undefined ? undefined : parseAttachmentManifest(value["attachments"]);
-  const edges = deps === undefined ? undefined : parseDeps(deps, files !== undefined);
+  const needs = value["requires"] === undefined ? undefined : parseRequires(value["requires"]);
+  const edges = deps === undefined ? undefined : parseDeps(deps, files !== undefined, needs !== undefined);
   const issue = linear === undefined ? undefined : parseLinear(linear);
   if (pinned === null || avoids === null || lineal === null || builds === null || member === null) return null;
-  if (issue === null || resumes === null || files === null) return null;
+  if (issue === null || resumes === null || files === null || needs === null) return null;
   if (files !== undefined && (request.mode === "continue" || (request.prompt?.length ?? 0) > ATTACHMENT_LIMITS.prompt))
     return null;
   // The mode is what an older leader refuses, so the field never travels without it.
@@ -833,17 +863,23 @@ export function parseTaskSpec(value: unknown): TaskSpec | null {
     ...(settles === undefined ? {} : { until: settles }),
     ...(resumes === undefined ? {} : { continues: resumes }),
     ...(files === undefined ? {} : { attachments: files }),
+    ...(needs === undefined ? {} : { requires: needs }),
   };
 }
 
 /**
- * `ATTACHMENTS_DEP_SENTINEL` is dropped before the bound applies, and only beside a
- * manifest: one without it is a record something stripped the files from. Deps that
- * were the sentinel alone read as none, as the spec was before sealing.
+ * Each sentinel (`ATTACHMENTS_DEP_SENTINEL`, `REQUIRES_DEP_SENTINEL`) is dropped before
+ * the bound applies, and only beside its field: one without it is a record something
+ * stripped the field from — or a sentinel with nothing it guards — and fails `isTaskId`,
+ * nulling the spec. A requirement stripped is the reverse, `requires` without its
+ * sentinel, and reads fine: no leader older than this one wrote it. Deps that were
+ * sentinels alone read as none, as the spec was before sealing.
  */
-function parseDeps(value: unknown, attached: boolean): readonly TaskDep[] | null | undefined {
+function parseDeps(value: unknown, attached: boolean, required: boolean): readonly TaskDep[] | null | undefined {
   if (!Array.isArray(value)) return null;
-  const real = attached ? value.filter((dep) => !isAttachmentsSentinel(dep)) : value;
+  const real = value.filter(
+    (dep) => !((attached && isAttachmentsSentinel(dep)) || (required && isRequiresSentinel(dep))),
+  );
   if (real.length === 0 && value.length > 0) return undefined;
   const edges = parseList(real, parseDep);
   return edges === null || edges.length > TASK_SPEC_LIMITS.deps ? null : edges;
@@ -854,6 +890,12 @@ function isAttachmentsSentinel(value: unknown): boolean {
     isRecord(value) &&
     value["task"] === ATTACHMENTS_DEP_SENTINEL.task &&
     value["after"] === ATTACHMENTS_DEP_SENTINEL.after
+  );
+}
+
+function isRequiresSentinel(value: unknown): boolean {
+  return (
+    isRecord(value) && value["task"] === REQUIRES_DEP_SENTINEL.task && value["after"] === REQUIRES_DEP_SENTINEL.after
   );
 }
 
@@ -942,6 +984,11 @@ function parseReason(value: unknown): Reason | null {
     case "skill_absent": {
       const { skill } = value;
       return isSkillName(skill) ? { code, skill } : null;
+    }
+    case "trait_absent":
+    case "trait_unhealthy": {
+      const { trait } = value;
+      return isTraitName(trait) ? { code, trait } : null;
     }
     case "disk_low":
       return isFiniteNumber(value["freeMib"]) ? { code, freeMib: value["freeMib"] } : null;

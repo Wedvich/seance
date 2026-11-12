@@ -7,6 +7,7 @@ import {
   AT_REST_OPS,
   ATTACHMENTS_DEP_SENTINEL,
   PIN_SENTINEL,
+  REQUIRES_DEP_SENTINEL,
   SCHEDULER_ID,
   TASK_SPEC_LIMITS,
   type Task,
@@ -163,6 +164,40 @@ describe("task records at rest", () => {
     // Without a manifest nothing changes.
     expect(await sealedDeps(base.spec)).toBeUndefined();
     expect(await sealedDeps({ ...base.spec, deps: withDeps.deps })).toEqual(withDeps.deps);
+  });
+
+  test("`requires` is sealed with its own dep sentinel, both sentinels beside a manifest, and reads back without them", async () => {
+    const attachments = [
+      { id: "0b6f0c9e-1a2b-4c3d-8e9f-001122334455", name: "t.txt", type: "text/plain", size: 1, hash: "A".repeat(43) },
+    ];
+    const base = queued();
+    const sealedDeps = async (spec: Task["spec"]): Promise<unknown> => {
+      const task = { ...base, spec };
+      const env = await sealTaskRecord(key, APP_ID, { version: 1, task });
+      // Reopened through this build's reader, the spec is the one sealed: no sentinel reaches it.
+      expect(await openTaskRecord(key, { key: taskKey(task.id), version: 1, env }, NOW)).toEqual({ version: 1, task });
+      const { payload } = await openAtRest(key, env, "task");
+      return field(field(field(payload, "task"), "spec"), "deps");
+    };
+    const olderDepParses = (dep: unknown): boolean => isTaskId(field(dep, "task"));
+    const requires = ["atlas"];
+    const real = [{ task: "t-1", after: "done" as const }];
+    const alone = await sealedDeps({ ...base.spec, requires });
+    expect(alone).toEqual([REQUIRES_DEP_SENTINEL]);
+    expect(Array.isArray(alone) && alone.every(olderDepParses)).toBe(false);
+    expect(await sealedDeps({ ...base.spec, requires, deps: real })).toEqual([...real, REQUIRES_DEP_SENTINEL]);
+    expect(await sealedDeps({ ...base.spec, requires, attachments })).toEqual([
+      ATTACHMENTS_DEP_SENTINEL,
+      REQUIRES_DEP_SENTINEL,
+    ]);
+    expect(await sealedDeps({ ...base.spec, requires, attachments, deps: real })).toEqual([
+      ...real,
+      ATTACHMENTS_DEP_SENTINEL,
+      REQUIRES_DEP_SENTINEL,
+    ]);
+    // Without `requires` the manifest's sentinel stands alone, and no deps are invented.
+    expect(await sealedDeps({ ...base.spec, attachments })).toEqual([ATTACHMENTS_DEP_SENTINEL]);
+    expect(await sealedDeps(base.spec)).toBeUndefined();
   });
 
   test("a continuation keeps its mode and link through seal and open; the link without the mode is unreadable", async () => {

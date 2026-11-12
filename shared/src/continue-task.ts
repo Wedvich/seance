@@ -315,6 +315,7 @@ export function continuationSpec(task: Task, at: Target, prompt?: string, contin
         }),
     ...(spec.until === undefined ? {} : { until: spec.until }),
     ...(spec.linear === undefined ? {} : { linear: spec.linear }),
+    ...(spec.requires === undefined ? {} : { requires: spec.requires }),
     continues: { task: continues, at },
   };
 }
