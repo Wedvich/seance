@@ -311,8 +311,21 @@ function settlePlaced(task: Task, reply: SessionsAnswer): Task | null {
       ? advance(task, task.needsInputSince === undefined ? "running" : "needs-input", {
           assignment: assignmentOf(assignment, session),
         })
-      : task;
+      : renamed(task, session.window);
   return changed(task, progressed(live, entry));
+}
+
+/**
+ * `task` with its session's window as listed now: a `/rename` (the tmux-rename mod) or a hand rename moves
+ * the window, and the window is the name the PWA lists a task by. Display-only — nothing routes, binds or
+ * places on `assignment.window` — so the record follows the pane. An empty name is no name; the same one is
+ * no write.
+ */
+function renamed(task: Task, listed: string): Task {
+  const { assignment } = task;
+  const window = listed.slice(0, TARGET_LIMITS.window);
+  if (assignment === undefined || window === "" || window === assignment.window) return task;
+  return { ...task, assignment: { ...assignment, window } };
 }
 
 /**

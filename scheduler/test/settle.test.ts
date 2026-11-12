@@ -207,3 +207,27 @@ describe("settle an interrupted launch", () => {
     expect(settled).toMatchObject({ state: "failed", failure: { code: "dispatch_unconfirmed" } });
   });
 });
+
+describe("settle a renamed session", () => {
+  const observed: Observed = { now: NOW, connected: true, reservationTtlMs: 120_000, lostAfterMs: 900_000 };
+  const placed = task({ assignment: { ...ON_A, window: "fix-the-thing" } });
+  const listing = (window: string): TaskSessionsReply => ({
+    ok: true,
+    sessions: [{ id: "%1", window, repo: "app", path: "/p", taskId: "t" }],
+  });
+
+  test("a placed task takes the window its machine lists now, keeping its state and the rest of its assignment", () => {
+    for (const state of ["running", "needs-input"] as const) {
+      expect(settle({ ...placed, state }, listing("login-bug"), observed)).toEqual({
+        ...placed,
+        state,
+        assignment: { ...ON_A, window: "login-bug" },
+      });
+    }
+  });
+
+  test("the same window, or an empty one, is no write", () => {
+    expect(settle(placed, listing("fix-the-thing"), observed)).toBeNull();
+    expect(settle(placed, listing(""), observed)).toBeNull();
+  });
+});

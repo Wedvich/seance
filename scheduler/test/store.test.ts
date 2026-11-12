@@ -321,7 +321,7 @@ describe("a finished task is kept lean: no prompt, and its decision cut to the w
     const fleet = new FakeFleet([machine("a")]);
     fleet.running.set("a", [{ id: "%1", window: "w", repo: "app", path: "/wt/r", taskId: "r" }]);
     const { store, scheduler } = setup(fleet);
-    await store.put("r", 0, queued("r", { state: "running", assignment: ON_A }));
+    await store.put("r", 0, queued("r", { state: "running", assignment: { ...ON_A, window: "w" } }));
     await store.put("t", 0, queued("t"));
     await scheduler.takeover();
     await pass(scheduler);
@@ -329,6 +329,20 @@ describe("a finished task is kept lean: no prompt, and its decision cut to the w
     const running = await read(store, "r");
     expect(running.version).toBe(1);
     expect(running.body.spec.prompt).toBe("do it");
+  });
+
+  test("a session renamed on its machine renames the task's window once, and the next pass leaves it", async () => {
+    const fleet = new FakeFleet([machine("a")]);
+    fleet.running.set("a", [{ id: "%1", window: "login-bug", repo: "app", path: "/wt/r", taskId: "r" }]);
+    const { store, scheduler } = setup(fleet);
+    await store.put("r", 0, queued("r", { state: "running", assignment: { ...ON_A, window: "fix-the-thing" } }));
+    await scheduler.takeover();
+    await pass(scheduler);
+    const renamed = await read(store, "r");
+    expect(renamed.version).toBe(2);
+    expect(renamed.body).toMatchObject({ state: "running", assignment: { ...ON_A, window: "login-bug" } });
+    await pass(scheduler);
+    expect((await read(store, "r")).version).toBe(2);
   });
 
   test("a finished record an earlier leader left with its prompt is rewritten once, in the first pass", async () => {

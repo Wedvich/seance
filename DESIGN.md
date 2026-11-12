@@ -3268,7 +3268,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   prompt, and the next leader on this build strips it. Apps cannot write a finished record
   (`bindTaskRecord` refuses a version-1 record that is not `queued`; apps create `task:`
   records, only overwrites and deletes are the leader's), and no transition leaves a finished state, so nothing re-adds one. The surfaces:
-  the PWA titles a finished task with neither title nor prompt by its session's window name, else
+  the PWA titles a finished task with no title by its session's window name, else
   its repo; MCP `get_queue` lists it without a `prompt` key, `placement.window` still naming it.
   The slugs (`assignment.window`, `branch`) stay as labels; git and the launch ledger hold the
   same slug anyway. **Rejected: a separate `prompt:<id>` record**, dropped when its task
@@ -8636,6 +8636,15 @@ are tmux-rename's, except where they say mods.
   window `abc`. The mod rewrites the command's args before Claude Code's own
   `/rename` runs. Changed 2026-10-09: the first version only stripped the tag
   for the window, so a `/rename` without it left the session untagged.
+- **The renamed window reaches the task, not the mod.** The leader's `sessions` sweep
+  (`settlePlaced`) writes the window each placed task's session lists now onto
+  `assignment.window`, and the PWA names a task by that window (`taskTitle`), so a `/rename`
+  shows on its card within one sweep (`sweepIntervalMs`, 2 min); a hand `rename-window` too.
+  Display-only: nothing routes, binds or places on the window, and an empty one or the same one
+  is no write. Bare `/rename` (Claude picks the name) and a rename on claude.ai move no window
+  and so reach no card: no hook sees either. Rejected: the mod reporting the name as a
+  session-event claim — a new frame field for a value the daemon already reads off the pane
+  itself, and racing tmux-rename's own `rename-window`, since mods' hook order is not fixed.
 - **The tag reaches the session as `SEANCE_MACHINE_TAG`**, from two places
   (the value is the slugified tag, the same `machineTagSlug` the session name
   uses, empty when untagged). Each daemon start — boot and every config reload —
