@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { unitBunPath, unitCredentialBlob, unitPathEnv, unitUser } from "../../daemon/src/systemd.ts";
-import { ARCHIVIST_UNIT, archivistUnits, UPDATE_PATH_UNIT, UPDATE_UNIT } from "./units.ts";
+import { ARCHIVIST_UNIT, archivistUnits, expectedArchivistUnits, UPDATE_PATH_UNIT, UPDATE_UNIT } from "./units.ts";
 
 const OPTS = {
   user: "archivist",
@@ -29,6 +29,8 @@ describe("archivist units", () => {
     expect(unitUser(unit)).toBe("archivist");
     expect(unit).toContain(`"${OPTS.mainPath}" update --requested\n`);
     expect(unit).toContain("Type=oneshot\n");
+    // Else a crash loop of fast skips fails the unit, and then the path unit that starts it.
+    expect(unit).toContain("StartLimitIntervalSec=0\n");
     expect(unitCredentialBlob(unit)).toBeNull();
     expect(unit).not.toContain("LoadCredential");
     expect(unitPathEnv(unit)).toBe(OPTS.pathEnv);
@@ -46,5 +48,15 @@ describe("archivist units", () => {
     expect(unitPathEnv(units[ARCHIVIST_UNIT])).toBe("/opt/100%/bin:/usr/bin");
     expect(() => archivistUnits({ ...OPTS, pathEnv: '/usr/bin"\nUser=root' })).toThrow(/no quote or newline/u);
     expect(() => archivistUnits({ ...OPTS, stateDir: "relative/state" })).toThrow(/absolute path/u);
+  });
+});
+
+describe("expectedArchivistUnits", () => {
+  test("rebuilds exactly the units installed from the service's own values, and sees another main.ts or a stale unit", () => {
+    const units = archivistUnits(OPTS);
+    expect(expectedArchivistUnits(units[ARCHIVIST_UNIT], OPTS.mainPath)).toEqual(units);
+    const moved = expectedArchivistUnits(units[ARCHIVIST_UNIT], "/home/archivist/other/archivist/src/main.ts");
+    expect(moved?.[ARCHIVIST_UNIT]).not.toBe(units[ARCHIVIST_UNIT]);
+    expect(expectedArchivistUnits("[Service]\nUser=x\n", OPTS.mainPath)).toBeNull();
   });
 });

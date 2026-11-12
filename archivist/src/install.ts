@@ -7,7 +7,7 @@
 
 import { existsSync } from "node:fs";
 import { rm, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { exec } from "../../daemon/src/exec.ts";
 import { pskBlobPathIn } from "../../daemon/src/paths.ts";
@@ -19,6 +19,8 @@ import {
   missingUnitBinaries,
   reachablePath,
   requireRoot,
+  untrustedChain,
+  untrustedTree,
   whichIn,
 } from "../../daemon/src/target-user.ts";
 import { blobLoadable } from "../../daemon/src/tpmcreds.ts";
@@ -31,11 +33,12 @@ const MAIN_PATH = fileURLToPath(new URL("./main.ts", import.meta.url));
 
 /**
  * The sudo form every refusal names, as `SUDO_SEANCED` is the daemon's: bun by
- * full path, because sudo searches secure_path for the command, and PATH
- * preserved, because the unit records the PATH it is given. The archivist has
- * no `link`, so main.ts is named by its own path.
+ * full path, because sudo searches secure_path for the command. PATH is
+ * deliberately not preserved: the sudo caller is usually the daemon's user, and
+ * their PATH is theirs to write — the unit records only the `--path` it is
+ * given. The archivist has no `link`, so main.ts is named by its own path.
  */
-export const SUDO_ARCHIVIST = `sudo --preserve-env=PATH "$(command -v bun)" "${MAIN_PATH}"`;
+export const SUDO_ARCHIVIST = `sudo "$(command -v bun)" "${MAIN_PATH}"`;
 
 /** bun runs the service; git is what `update` fast-forwards with. No tmux or claude: it spawns nothing. */
 const ARCHIVIST_BINARIES = ["bun", "git"] as const;
@@ -43,6 +46,7 @@ const ARCHIVIST_BINARIES = ["bun", "git"] as const;
 export interface ArchivistInstallOptions {
   /** Required: the sudo caller is usually the daemon's user, which A27a refuses. */
   readonly user?: string;
+  /** Required: no ambient fallback, since the sudo caller's PATH is the daemon user's. */
   readonly pathEnv?: string;
 }
 
@@ -85,6 +89,28 @@ export function checkoutRefusal(
   );
 }
 
+/**
+ * What a unit running as `user` executes, held to `WriteTrust`: the checkout (its
+ * whole tree and the dirs above it), the resolved bun and git, and every PATH
+ * entry (a shim in one is as good as a replaced bun). Anything the daemon's user
+ * — or anyone but root and the archivist — can rewrite would run with the key, or
+ * with the update unit's ability to rewrite the checkout the key holder runs from.
+ */
+export async function untrustedCode(
+  user: { readonly uid: number; readonly gid: number },
+  checkout: string,
+  binaries: readonly string[],
+  pathEntries: readonly string[],
+): Promise<readonly string[]> {
+  const trust = { uids: [0, user.uid], gids: [0, user.gid] };
+  const found = [...(await untrustedChain(checkout, trust)), ...(await untrustedTree(checkout, trust))];
+  for (const path of [...binaries, ...pathEntries]) {
+    // oxlint-disable-next-line no-await-in-loop -- a handful of paths
+    found.push(...(await untrustedChain(path, trust)));
+  }
+  return [...new Set(found)];
+}
+
 function unitFile(name: ArchivistUnitName): string {
   return join(SYSTEM_UNIT_DIR, name);
 }
@@ -113,7 +139,14 @@ async function systemctl(args: readonly string[]): Promise<void> {
  */
 export async function installArchivistSystem(opts: ArchivistInstallOptions): Promise<readonly string[]> {
   assertSystemd("install --system");
-  if (opts.pathEnv !== undefined) assertUnitFlag("--path", opts.pathEnv);
+  if (opts.pathEnv === undefined || opts.pathEnv === "") {
+    throw new Error(
+      "pass `--path <dirs>` — the unit's PATH, which must hold bun and git; it is never taken from the environment, " +
+        "since the sudo caller is usually the daemon's user and everything on the PATH runs with the archivist's key: " +
+        `\`${SUDO_ARCHIVIST} install --system --user <name> --path "<dir holding bun>:/usr/bin:/bin"\``,
+    );
+  }
+  assertUnitFlag("--path", opts.pathEnv);
   if (opts.user === undefined || opts.user === "") {
     throw new Error(
       "pass `--user <name>` — the archivist's own unprivileged account, never root and never the daemon's",
@@ -155,7 +188,7 @@ export async function installArchivistSystem(opts: ArchivistInstallOptions): Pro
   }
 
   const asUser = asTargetArgv(user);
-  const { pathEnv, dropped } = await reachablePath(opts.pathEnv ?? process.env["PATH"] ?? "", asUser);
+  const { pathEnv, dropped } = await reachablePath(opts.pathEnv, asUser);
   const missing = await missingUnitBinaries(pathEnv, asUser, ARCHIVIST_BINARIES);
   const bunPath = await whichIn("bun", pathEnv);
   if (missing.length > 0 || bunPath === null) {
@@ -163,8 +196,24 @@ export async function installArchivistSystem(opts: ArchivistInstallOptions): Pro
     throw new Error(
       `the PATH this would record resolves no ${missing.join(", ") || "bun"} for ${user.name}${left} — the service ` +
         `runs on bun and \`update\` needs git; name ${user.name}'s own dirs: ` +
-        `\`${SUDO_ARCHIVIST} install --system --user ${user.name} --path "<dir holding bun>:$PATH"\` ` +
+        `\`${SUDO_ARCHIVIST} install --system --user ${user.name} --path "<dir holding bun>:/usr/bin:/bin"\` ` +
         `(recorded PATH was: ${pathEnv})`,
+    );
+  }
+
+  const gitPath = await whichIn("git", pathEnv);
+  const writable = await untrustedCode(
+    user,
+    root,
+    [bunPath, ...(gitPath === null ? [] : [gitPath])],
+    pathEnv.split(delimiter),
+  );
+  if (writable.length > 0) {
+    throw new Error(
+      `the archivist would run code that ${user.name} does not hold alone — it executes with the key, and the ` +
+        `update unit rewrites the checkout, so each of these must belong to root or ${user.name} and be writable ` +
+        `by nobody else, nor by any group but root's or ${user.name}'s: ${writable.join("; ")}. Fix the ` +
+        "permissions, or name other dirs with --path (a group-writable /usr/local/bin is refused on purpose)",
     );
   }
 
@@ -174,6 +223,9 @@ export async function installArchivistSystem(opts: ArchivistInstallOptions): Pro
   }
   const units = archivistUnits({ user: user.name, bunPath, mainPath: MAIN_PATH, pathEnv, stateDir });
   const previous = await Bun.file(unitFile(ARCHIVIST_UNIT))
+    .text()
+    .catch(() => null);
+  const previousPath = await Bun.file(unitFile(UPDATE_PATH_UNIT))
     .text()
     .catch(() => null);
   for (const [name, text] of Object.entries(units)) {
@@ -192,6 +244,10 @@ export async function installArchivistSystem(opts: ArchivistInstallOptions): Pro
         : `the unit definition changed but the restart failed (${restart.stderr.trim() || "denied"}): ` +
             `sudo systemctl restart ${ARCHIVIST_UNIT}`,
     );
+  }
+  // A running .path unit keeps the watch it was loaded with.
+  if (previousPath !== null && previousPath !== units[UPDATE_PATH_UNIT]) {
+    await exec(scopeArgv("system").concat(["restart", UPDATE_PATH_UNIT]));
   }
   notes.push(
     `the archivist runs as ${user.name}; \`journalctl -u ${ARCHIVIST_UNIT}\` is its log, and ` +

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { logPath } from "./paths.ts";
 import {
+  archivistUserRefusal,
   assertUnitFlag,
   configHoldsPsk,
   conflictingScopeMessage,
@@ -383,5 +384,19 @@ describe("conflictingScopeMessage", () => {
     expect(conflictingScopeMessage("user", "/etc/systemd/system/seanced.service")).toContain(
       `${SUDO_SEANCED} uninstall --system`,
     );
+  });
+});
+
+describe("archivistUserRefusal", () => {
+  const unit =
+    '[Service]\nUser=archivist\nExecStart="/usr/bin/bun" "/home/archivist/seance/archivist/src/main.ts" run\n';
+
+  test("the user an installed archivist unit runs as is refused", () => {
+    expect(archivistUserRefusal("archivist", unit)).toMatch(/runs the archivist as .*A27a/u);
+  });
+
+  test("another user, or no archivist unit, passes", () => {
+    expect(archivistUserRefusal("martin", unit)).toBeNull();
+    expect(archivistUserRefusal("archivist", null)).toBeNull();
   });
 });

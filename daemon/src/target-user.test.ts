@@ -13,7 +13,10 @@ import {
   reachablePath,
   requireRoot,
   targetUserName,
+  untrustedChain,
+  untrustedTree,
   whichIn,
+  writeRisk,
   type TargetUser,
   SUDO_SEANCED,
 } from "./target-user.ts";
@@ -191,5 +194,59 @@ describe("mkdirAsTarget", () => {
     const user: TargetUser = { name: "self", uid: process.getuid?.() ?? 0, gid: gid ?? 0, home: dir };
     await mkdirAsTarget(dir, user);
     expect((await stat(dir)).gid).toBe(user.gid);
+  });
+});
+
+describe("write trust", () => {
+  const trust = { uids: [0, 1001], gids: [0, 1001] };
+  const file = { uid: 1001, gid: 1001, mode: 0o755, directory: false };
+
+  test("writeRisk accepts the trusted owners and refuses another owner, a world or an untrusted group write", () => {
+    expect(writeRisk(file, trust)).toBeNull();
+    expect(writeRisk({ ...file, uid: 0, gid: 0, mode: 0o755 }, trust)).toBeNull();
+    expect(writeRisk({ ...file, uid: 1000 }, trust)).toBe("owned by uid 1000");
+    expect(writeRisk({ ...file, mode: 0o757 }, trust)).toBe("writable by anyone");
+    expect(writeRisk({ ...file, gid: 50, mode: 0o775 }, trust)).toBe("writable by group 50");
+    // A group write by a trusted group is the user's own.
+    expect(writeRisk({ ...file, mode: 0o775 }, trust)).toBeNull();
+  });
+
+  test("a sticky world-writable directory passes as an ancestor, never as the entry", () => {
+    const tmp = { uid: 0, gid: 0, mode: 0o1777, directory: true };
+    expect(writeRisk(tmp, trust, true)).toBeNull();
+    expect(writeRisk(tmp, trust)).toBe("writable by anyone");
+    expect(writeRisk({ ...tmp, mode: 0o777 }, trust, true)).toBe("writable by anyone");
+  });
+
+  test("untrustedChain walks the realpath and every ancestor", async () => {
+    const dir = await fixtureDir();
+    const bin = join(dir, "bin");
+    await mkdir(bin);
+    await writeFile(join(bin, "bun"), "#!/bin/sh\n", { mode: 0o755 });
+    const uid = process.getuid?.() ?? 0;
+    const gid = process.getgid?.() ?? 0;
+    const mine = { uids: [0, uid], gids: [0, gid] };
+    // The sandbox's own tmpdir ancestors are root's or sticky, so nothing in the chain is flagged.
+    expect(await untrustedChain(join(bin, "bun"), mine)).toEqual([]);
+    await chmod(bin, 0o777);
+    expect((await untrustedChain(join(bin, "bun"), mine)).join("\n")).toContain(`${bin} (writable by anyone)`);
+    expect((await untrustedChain(join(bin, "bun"), { uids: [0], gids: [0] })).length).toBeGreaterThan(0);
+    expect(await untrustedChain(join(dir, "missing"), mine)).toEqual([]);
+  });
+
+  test("untrustedTree reports a writable entry and stops at the limit", async () => {
+    const dir = await fixtureDir();
+    await mkdir(join(dir, "src"));
+    for (const name of ["a", "b", "c"]) {
+      await writeFile(join(dir, "src", name), "x");
+      // After the write: the umask would strip these bits from the create mode.
+      await chmod(join(dir, "src", name), 0o666);
+    }
+    const uid = process.getuid?.() ?? 0;
+    const gid = process.getgid?.() ?? 0;
+    const found = await untrustedTree(dir, { uids: [uid], gids: [gid] }, 2);
+    expect(found).toHaveLength(2);
+    expect(found[0]).toContain("writable by anyone");
+    expect(await untrustedTree(dir, { uids: [uid + 1], gids: [gid] }, 10)).toHaveLength(4);
   });
 });

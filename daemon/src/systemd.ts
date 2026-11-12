@@ -26,6 +26,22 @@ import { NO_SERVICE_MANAGER, type InstallResult } from "./service-types.ts";
 import { isWsl, schtasksExe } from "./wsl.ts";
 
 export const UNIT_NAME = "seanced.service";
+/** The archivist's service (archivist/src/units.ts); named here so the daemon's install can refuse its user. */
+export const ARCHIVIST_UNIT_NAME = "seance-archivist.service";
+
+/**
+ * The other half of A27a (docs/archivist.md): the archivist's user must not run
+ * sessions, so `install --system` refuses the user an installed archivist unit
+ * runs as. Pure over the unit text read, null when there is none.
+ */
+export function archivistUserRefusal(target: string, archivistUnit: string | null): string | null {
+  if (archivistUnit === null || unitUser(archivistUnit) !== target) return null;
+  return (
+    `${target} is the user /etc/systemd/system/${ARCHIVIST_UNIT_NAME} runs the archivist as — sessions run as the ` +
+    "daemon's user and must not be able to read or change archive.sqlite (docs/archivist.md, A27a); pass " +
+    "`--user <name>` naming another account"
+  );
+}
 
 /** Windows scheduled task that boots the distro at logon and pins the VM against its idle timeout. */
 export const PIN_TASK_NAME = "SeanceWslPin";
@@ -485,6 +501,11 @@ export async function installSystemService(opts: SystemInstallOptions = {}): Pro
   // default location; a relocated user unit is caught by doctor instead.
   const userUnit = join(user.home, ".config", "systemd", "user", UNIT_NAME);
   if (existsSync(userUnit)) throw new Error(conflictingScopeMessage("system", userUnit));
+  const archivistUnit = await Bun.file(join("/etc/systemd/system", ARCHIVIST_UNIT_NAME))
+    .text()
+    .catch(() => null);
+  const archivistRefusal = archivistUserRefusal(user.name, archivistUnit);
+  if (archivistRefusal !== null) throw new Error(archivistRefusal);
 
   const asUser = asTargetArgv(user);
   const { pathEnv, dropped } = await reachablePath(opts.pathEnv ?? process.env["PATH"] ?? "", asUser);
@@ -665,6 +686,21 @@ async function systemMainPid(unit: string): Promise<number | null> {
 /** RestartSec plus a cold start, with room to spare on a slow box. */
 const RELAUNCH_TIMEOUT_MS = 30_000;
 
+export interface RestartWording {
+  /** Who runs as the unit's user, for the messages. */
+  readonly who: string;
+  /** The root command a refusal names. */
+  readonly privileged: string;
+  /** Appended to the relaunch-timeout message: where else to look. */
+  readonly checkAlso: string;
+}
+
+const DAEMON_RESTART_WORDING: RestartWording = {
+  who: "the daemon",
+  privileged: restartCommandFor("system"),
+  checkAlso: " and `seanced doctor`",
+};
+
 /**
  * Restarts a system unit's daemon without root, by the same route `selfRestart`
  * takes: the process runs as this user, so this user may SIGTERM it, and
@@ -672,11 +708,11 @@ const RELAUNCH_TIMEOUT_MS = 30_000;
  * and it stays root-only. MainPID comes from systemd rather than `runtime.json`
  * so a stale pid can never aim the signal at an unrelated process. Like
  * `selfRestart`, this can't apply a changed unit definition — doctor reports drift.
- * The unit is a parameter for the archivist's `update`, which restarts its own
- * system unit the same way (`Restart=always` there too).
+ * The unit and the wording are parameters for the archivist's `update`, which
+ * restarts its own system unit the same way (`Restart=always` there too).
  */
-export async function signalRestartUnit(unit: string): Promise<void> {
-  const privileged = `sudo systemctl restart ${unit}`;
+export async function signalRestartUnit(unit: string, wording: RestartWording = DAEMON_RESTART_WORDING): Promise<void> {
+  const { privileged } = wording;
   const pid = await systemMainPid(unit);
   if (pid === null) {
     throw new Error(`the system unit isn't running, and starting it needs root: ${privileged}`);
@@ -685,7 +721,7 @@ export async function signalRestartUnit(unit: string): Promise<void> {
     process.kill(pid, "SIGTERM");
   } catch (err) {
     if (err instanceof Error && "code" in err && err.code === "EPERM") {
-      throw new Error(`${unit} runs as another user — restarting it needs root: ${privileged}`, {
+      throw new Error(`${wording.who} runs as another user — restarting it needs root: ${privileged}`, {
         cause: err,
       });
     }
@@ -700,8 +736,8 @@ export async function signalRestartUnit(unit: string): Promise<void> {
     if (next !== null && next !== pid) return;
   }
   throw new Error(
-    `${unit} exited but systemd hasn't relaunched it after ${RELAUNCH_TIMEOUT_MS / 1000}s — ` +
-      `check \`systemctl status ${unit}\``,
+    `${wording.who} exited but systemd hasn't relaunched it after ${RELAUNCH_TIMEOUT_MS / 1000}s — ` +
+      `check \`systemctl status ${unit}\`${wording.checkAlso}`,
   );
 }
 

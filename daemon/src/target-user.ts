@@ -6,7 +6,7 @@
 // argument, which also makes it testable without a second user on the box.
 
 import { constants, existsSync } from "node:fs";
-import { access, chown, mkdir } from "node:fs/promises";
+import { access, chown, lstat, mkdir, readdir, realpath } from "node:fs/promises";
 import { delimiter, dirname, join } from "node:path";
 import { exec } from "./exec.ts";
 
@@ -231,4 +231,77 @@ export async function mkdirAsTarget(dir: string, user: TargetUser): Promise<void
     // oxlint-disable-next-line no-await-in-loop -- outermost first, and a handful of components at most
     await chown(path, user.uid, user.gid);
   }
+}
+
+/**
+ * Who may own, or hold write access to, code a root-installed unit runs as
+ * another user. The unit's binaries and checkout are the key holder's
+ * interpreter: one the daemon's user — whose sessions run arbitrary code — can
+ * replace runs with the key on the next start.
+ */
+export interface WriteTrust {
+  readonly uids: readonly number[];
+  readonly gids: readonly number[];
+}
+
+export interface FileOwnership {
+  readonly uid: number;
+  readonly gid: number;
+  readonly mode: number;
+  readonly directory: boolean;
+}
+
+const WORLD_WRITE = 0o002;
+const GROUP_WRITE = 0o020;
+const STICKY = 0o1000;
+
+/**
+ * Why `entry` could be rewritten by someone outside `trust`, or null. An owner
+ * outside the trusted uids can chmod it whatever its mode says; a group other
+ * than a trusted one reaches it through membership, which isn't checked here —
+ * Debian's `/usr/local` is `root:staff` 2775, and that is refused on purpose. A
+ * sticky world-writable directory (`/tmp`) is fine as an ancestor only: it
+ * stops others renaming what they don't own, and says nothing of the entry itself.
+ */
+export function writeRisk(entry: FileOwnership, trust: WriteTrust, ancestor = false): string | null {
+  if (!trust.uids.includes(entry.uid)) return `owned by uid ${entry.uid}`;
+  if ((entry.mode & WORLD_WRITE) !== 0 && !(ancestor && entry.directory && (entry.mode & STICKY) !== 0)) {
+    return "writable by anyone";
+  }
+  if ((entry.mode & GROUP_WRITE) !== 0 && !trust.gids.includes(entry.gid)) return `writable by group ${entry.gid}`;
+  return null;
+}
+
+/** `path` after symlinks, then it and every directory above it, each checked by `writeRisk`. */
+export async function untrustedChain(path: string, trust: WriteTrust): Promise<readonly string[]> {
+  const real = await realpath(path).catch(() => null);
+  if (real === null) return [];
+  const found: string[] = [];
+  for (let cur = real; ; cur = dirname(cur)) {
+    // oxlint-disable-next-line no-await-in-loop -- a handful of ancestors, innermost first
+    const info = await lstat(cur);
+    const why = writeRisk(
+      { uid: info.uid, gid: info.gid, mode: info.mode, directory: info.isDirectory() },
+      trust,
+      cur !== real,
+    );
+    if (why !== null) found.push(`${cur} (${why})`);
+    if (dirname(cur) === cur) return found;
+  }
+}
+
+/** Every entry under `root` (symlinks not followed) that `writeRisk` refuses, at most `limit` of them. */
+export async function untrustedTree(root: string, trust: WriteTrust, limit = 5): Promise<readonly string[]> {
+  const found: string[] = [];
+  const entries = await readdir(root, { recursive: true, withFileTypes: true });
+  for (const entry of entries) {
+    const path = join(entry.parentPath, entry.name);
+    // oxlint-disable-next-line no-await-in-loop -- one lstat per entry, stopping at the limit
+    const info = await lstat(path);
+    if (info.isSymbolicLink()) continue;
+    const why = writeRisk({ uid: info.uid, gid: info.gid, mode: info.mode, directory: info.isDirectory() }, trust);
+    if (why !== null) found.push(`${path} (${why})`);
+    if (found.length >= limit) break;
+  }
+  return found;
 }

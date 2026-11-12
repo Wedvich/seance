@@ -1,10 +1,19 @@
 import { CRED_NAME } from "../../daemon/src/credential.ts";
+import { dirname } from "node:path";
 import { pskBlobPathIn } from "../../daemon/src/paths.ts";
-import { assertUnitFlag, unitEscape } from "../../daemon/src/systemd.ts";
+import {
+  ARCHIVIST_UNIT_NAME,
+  assertUnitFlag,
+  unitBunPath,
+  unitCredentialBlob,
+  unitEscape,
+  unitPathEnv,
+  unitUser,
+} from "../../daemon/src/systemd.ts";
 import { updateRequestPathIn } from "./paths.ts";
 
 /** The service that holds the seat and the key. */
-export const ARCHIVIST_UNIT = "seance-archivist.service";
+export const ARCHIVIST_UNIT = ARCHIVIST_UNIT_NAME;
 /** The oneshot that runs `update`: same user, no credential. */
 export const UPDATE_UNIT = "seance-archivist-update.service";
 /** Starts the update unit when the running archivist writes its request. */
@@ -65,6 +74,9 @@ export function archivistUnits(opts: ArchivistUnitOptions): Readonly<Record<Arch
     [UPDATE_UNIT]: lines([
       "[Unit]",
       "Description=Seance archivist update check (seance-archivist update)",
+      // A crash-looping service asks on each start and a skip exits fast; under the default limit (5 starts
+      // in 10s) systemd would fail this unit and then the path unit, which would stop watching for good.
+      "StartLimitIntervalSec=0",
       "",
       "[Service]",
       "Type=oneshot",
@@ -86,6 +98,25 @@ export function archivistUnits(opts: ArchivistUnitOptions): Readonly<Record<Arch
       "WantedBy=multi-user.target",
     ]),
   };
+}
+
+/**
+ * The units `install --system` would write now for the service already
+ * installed: its own user, bun, PATH and state dir (read back from its text),
+ * this checkout's main.ts and the current generators. What differs from the
+ * installed files is drift an automatic update cannot apply (the units are
+ * root's). Null when the installed service isn't one of ours to compare.
+ */
+export function expectedArchivistUnits(
+  installedService: string,
+  mainPath: string,
+): Readonly<Record<ArchivistUnitName, string>> | null {
+  const user = unitUser(installedService);
+  const bunPath = unitBunPath(installedService);
+  const pathEnv = unitPathEnv(installedService);
+  const blob = unitCredentialBlob(installedService);
+  if (user === null || bunPath === null || pathEnv === null || blob === null) return null;
+  return archivistUnits({ user, bunPath, mainPath, pathEnv, stateDir: dirname(blob) });
 }
 
 function lines(body: readonly string[]): string {
