@@ -28,7 +28,9 @@ export type { Assignment, Placement, Reservation, Target, Task, TaskSpec, TaskSt
  * session is gone (`awaiting-merge` with a PR open, `failed` on a nonzero exit, else `done`). One lost from `reserved` (`reservedAt` kept) never had its
  * spawn confirmed: with no session it is `ready` again only when the machine's
  * ledger proves the spawn never landed, and `failed` otherwise. `lost → ready`
- * is legal for that task alone, and `advance` refuses it for any other. `done` from `queued`, `blocked` or `ready` is `mark-done`'s alone: no signal ever settles never-placed work, and it always wins. `lost`
+ * is legal for that task alone, and `advance` refuses it for any other. `done` from `queued`, `blocked` or `ready` is `mark-done`'s, and, for a waiting
+ * successor only, a merge's: admission's when its predecessor merged (`judgeSuccessor`) and `prChange`'s when its
+ * own PR reads merged (D16). No other signal settles never-placed work, and mark-done always wins. `lost`
  * and `awaiting-merge` both fail past their expiry (`expiry.ts`), and so does a `ready` continuation; `ready → failed` is expiry's alone.
  *
  * `superseded` is a pass's end (DESIGN.md, "Passing to a successor"): only from the three states that
