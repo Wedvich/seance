@@ -49,6 +49,8 @@ export function QueueScreen(props: {
   onRunNow: (taskId: string) => void;
   /** Queues a task that resumes this failed or cancelled one's session in its worktree, on its machine. */
   onContinue: (taskId: string) => void;
+  /** Passes a running task to a successor: pushes its branch, ends its session, queues the task that carries on. */
+  onPass: (taskId: string) => void;
   /** Starts a new task that waits on this one: the form opens on `auto` with it in After. */
   onFollowUp: (taskId: string) => void;
   onPause: () => void;
@@ -116,6 +118,7 @@ export function QueueScreen(props: {
     setArmed(tap.armed);
     if (!tap.fire) return;
     if (op === "cancel") onCancel(row.id);
+    else if (op === "pass") props.onPass(row.id);
     else onMarkDone(row.id);
   };
 
@@ -232,6 +235,7 @@ export function QueueScreen(props: {
                     onMenuClosed={onMenuClosed}
                     onRunNow={props.onRunNow}
                     onContinue={props.onContinue}
+                    onPass={props.onPass}
                     onFollowUp={props.onFollowUp}
                     onReveal={reveal}
                   />
@@ -256,6 +260,9 @@ export function QueueScreen(props: {
   );
 }
 
+/** What a pass does, under its item: the push and the end of the session are the parts a person should know first. */
+const PASS_CONFIRM = "Pushes its branch and ends this session; a new task picks it up.";
+
 const INLINE_LABEL: Record<NonNullable<QueueRow["inline"]>, string> = {
   continue: "Continue",
 };
@@ -273,6 +280,7 @@ function QueueCard(props: {
   onMenuClosed: (rowId: string) => void;
   onRunNow: (taskId: string) => void;
   onContinue: (taskId: string) => void;
+  onPass: (taskId: string) => void;
   onFollowUp: (taskId: string) => void;
   /** Scrolls the queue to another task's card. */
   onReveal: (taskId: string) => void;
@@ -291,7 +299,7 @@ function QueueCard(props: {
     },
   };
   const disabled = !props.available || row.busy;
-  const opens = row.canFollowUp || row.startNow !== null || row.canContinue || row.session !== null;
+  const opens = row.canFollowUp || row.startNow !== null || row.canContinue || row.canPass || row.session !== null;
   const ends = row.canMarkDone || row.canCancel;
   const hasMenu = opens || ends;
   // Removing an open popover fires no `toggle`, so a card that unmounts (a poll moving its task
@@ -304,10 +312,18 @@ function QueueCard(props: {
   const run: Record<NonNullable<QueueRow["inline"]>, (taskId: string) => void> = {
     continue: props.onContinue,
   };
-  const armItem = (op: ArmOp, label: string, armedLabel: string, icon: JSX.Element, destructive: boolean) => (
+  const armItem = (
+    op: ArmOp,
+    label: string,
+    armedLabel: string,
+    icon: JSX.Element,
+    destructive: boolean,
+    sub?: string,
+  ) => (
     <MenuItem
       label={armed === armKey(op, row.id) ? armedLabel : label}
       icon={icon}
+      {...(sub === undefined ? {} : { sub })}
       disabled={disabled}
       destructive={destructive}
       keepOpen={!armTap(row, op, armed).fire}
@@ -386,6 +402,8 @@ function QueueCard(props: {
                   onClick={() => props.onContinue(row.id)}
                 />
               )}
+              {row.canPass &&
+                armItem("pass", "Pass to successor", "Tap again to pass it on", <PassIcon />, false, PASS_CONFIRM)}
               {row.session !== null && (
                 <MenuItem label="Open on claude.ai" icon={<ExternalIcon />} href={row.session} external />
               )}
@@ -398,6 +416,8 @@ function QueueCard(props: {
       </div>
       {row.deps !== null && <p className="fleet-card-body">{row.deps}</p>}
       {row.continues !== null && <p className="fleet-card-body">{row.continues}</p>}
+      {row.carriesOn !== null && <p className="fleet-card-body">{row.carriesOn}</p>}
+      {row.passedTo !== null && <p className="fleet-card-body">{row.passedTo}</p>}
       {continuing !== null && (
         <p className="fleet-card-body">
           <button
@@ -468,6 +488,16 @@ function StartNowIcon(): JSX.Element {
     <MenuGlyph>
       <path d="M3 6l8 6-8 6z" />
       <path d="M12 6l8 6-8 6z" />
+    </MenuGlyph>
+  );
+}
+
+function PassIcon(): JSX.Element {
+  return (
+    <MenuGlyph>
+      <path d="M4 12h12" />
+      <path d="M12 6l6 6-6 6" />
+      <path d="M20 5v14" />
     </MenuGlyph>
   );
 }

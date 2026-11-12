@@ -20,6 +20,7 @@ import {
   type MetricsReply,
   type MetricsRequest,
   type MetricsSeries,
+  type PassReply,
   type PauseReply,
   type PauseRequest,
   type QueueChanged,
@@ -423,6 +424,12 @@ class ScriptedClient extends RelayClient {
   onRunNow: (taskId: string) => Promise<TaskReply | null> = async (id) => ({
     task: { ...QUEUED, id, state: "reserved" },
   });
+  readonly passes: string[] = [];
+  onPass: (taskId: string) => Promise<PassReply | null> = async (id) => ({
+    task: { ...QUEUED, id, state: "superseded", successor: "t-next" },
+    successorId: "t-next",
+    successor: null,
+  });
   onPause: (request: PauseRequest) => Promise<PauseReply | null> = async () => ({
     holds: [{ until: "resume", at: 5 }],
   });
@@ -521,6 +528,11 @@ class ScriptedClient extends RelayClient {
   override runNow(taskId: string): Promise<TaskReply | null> {
     this.runNows.push(taskId);
     return this.onRunNow(taskId);
+  }
+
+  override pass(taskId: string): Promise<PassReply | null> {
+    this.passes.push(taskId);
+    return this.onPass(taskId);
   }
 
   override pause(request: PauseRequest): Promise<PauseReply | null> {
@@ -2528,6 +2540,101 @@ describe("the queue screen", () => {
     expect(store.getState().queueNotice).toBe(
       "Something besides the concurrency caps keeps it from every machine — see why it waits.",
     );
+  });
+
+  describe("passTask", () => {
+    const at = { deviceId: "dev-a", exclave: "default", clone: "app" };
+    const live: Task = {
+      id: "r-1",
+      spec: { repo: ORIGIN, mode: "worktree", prompt: "fix it", title: "fix-it" },
+      state: "running",
+      assignment: { ...at, window: "fix-it" },
+      createdAt: 1,
+    };
+    const successor: Task = {
+      id: "t-next",
+      spec: {
+        repo: ORIGIN,
+        mode: "worktree",
+        succeeds: { task: "r-1", account: "acct", at, trigger: "manual" },
+      },
+      state: "blocked",
+      createdAt: 2,
+    };
+
+    /** The leader (dev-a) and the machine the task runs on (also dev-a) advertise `successor` unless held back. */
+    const capable = (capabilities: readonly string[] = [CAPABILITIES.successor]): ScriptedClient =>
+      new ScriptedClient({
+        machines: [autoMachine("dev-a", { capabilities: [...capabilities] }), autoMachine("dev-b")],
+      });
+
+    async function withRunning(client: ScriptedClient): Promise<Store> {
+      client.onQueue = async () => ({ tasks: [live], holds: [], at: 1 });
+      const store = new Store(client);
+      store.openQueue();
+      await until(() => store.getState().queueView?.kind === "ok", "the queue read");
+      return store;
+    }
+
+    test("sends one pass, and lists the task as it now stands and the successor at once", async () => {
+      const client = capable();
+      client.onPass = async (id) => ({
+        task: { ...live, id, state: "superseded", successor: "t-next" },
+        successorId: "t-next",
+        successor,
+      });
+      const store = await withRunning(client);
+      await store.passTask("r-1");
+      expect(client.passes).toEqual(["r-1"]);
+      expect(store.getState().queueNotice).toBeNull();
+      expect(store.getState().taskAction).toBeNull();
+      const view = store.getState().queueView;
+      const listed = view?.kind === "ok" ? view.tasks : [];
+      expect(listed.map((t) => [t.id, t.state])).toEqual([
+        ["t-next", "blocked"],
+        ["r-1", "superseded"],
+      ]);
+    });
+
+    test("writes nothing for a task the list no longer holds, or one the offer refuses, or a leader that cannot", async () => {
+      const client = capable();
+      const store = await withRunning(client);
+      await store.passTask("gone");
+      expect(store.getState().queueNotice).toBe("That task is no longer listed.");
+      const old = capable([]);
+      const oldStore = await withRunning(old);
+      await oldStore.passTask("r-1");
+      expect(oldStore.getState().queueNotice).toContain("No verified scheduler that can pass a task to a successor");
+      const asking = capable();
+      asking.onQueue = async () => ({ tasks: [{ ...live, state: "needs-input" }], holds: [], at: 1 });
+      const waitingStore = new Store(asking);
+      waitingStore.openQueue();
+      await until(() => waitingStore.getState().queueView?.kind === "ok", "the queue read");
+      await waitingStore.passTask("r-1");
+      expect(waitingStore.getState().queueNotice).toContain("waiting for you");
+      expect([client.passes, old.passes, asking.passes]).toEqual([[], [], []]);
+    });
+
+    test("a refusal is worded; a lost answer or a crashed reply says it may have landed", async () => {
+      const client = capable();
+      const store = await withRunning(client);
+      client.onPass = async () => ({ ok: false, code: "dirty_worktree", message: "m" });
+      await store.passTask("r-1");
+      expect(store.getState().queueNotice).toContain("uncommitted");
+      expect(store.getState().queueNotice).not.toContain("may have landed");
+      client.onPass = async () => null;
+      await store.passTask("r-1");
+      expect(store.getState().queueNotice).toContain("It may have landed anyway.");
+      client.onPass = async () => ({ ok: false, code: "too_large", message: "m" });
+      await store.passTask("r-1");
+      expect(store.getState().queueNotice).toContain("It may have landed anyway.");
+      client.onPass = async () => {
+        throw new RequestFailure("timeout", "no reply");
+      };
+      await store.passTask("r-1");
+      expect(store.getState().queueNotice).toContain("Refresh to see whether it did.");
+      expect(store.getState().taskAction).toBeNull();
+    });
   });
 
   describe("continueTask", () => {

@@ -1127,6 +1127,74 @@ describe("the card's inline action", () => {
   });
 });
 
+describe("passing a running task to a successor", () => {
+  const CAN = [CAPABILITIES.successor];
+  const running = task("r", {
+    state: "running",
+    spec: { repo: ORIGIN, mode: "worktree", title: "Fix the thing" },
+    assignment: placedAt,
+  });
+
+  const rowOf = (tasks: readonly Task[], id: string, capabilities?: readonly string[]) =>
+    deriveQueue(
+      state(ok(tasks), {}, { machines: [machine({ ...(capabilities === undefined ? {} : { capabilities }) })] }),
+      NOW,
+    )
+      .sections.flatMap((section) => section.rows)
+      .find((row) => row.id === id);
+
+  test("offered on a running task when the leader and its machine both advertise it", () => {
+    expect(rowOf([running], "r", CAN)?.canPass).toBe(true);
+    expect(rowOf([running], "r")?.canPass).toBe(false);
+  });
+
+  test("never inline: the menu alone carries it", () => {
+    expect(rowOf([running], "r", CAN)?.inline).toBeNull();
+  });
+
+  test("not offered for a task in place, one waiting on a person or a merge, one already passed, or a finished one", () => {
+    const refused = [
+      task("here", { state: "running", spec: { repo: ORIGIN, mode: "here" }, assignment: placedAt }),
+      task("input", { state: "needs-input", assignment: placedAt }),
+      task("merge", { state: "awaiting-merge", assignment: placedAt }),
+      task("passed", { state: "running", successor: "n", assignment: placedAt }),
+      task("done", { state: "done", assignment: placedAt }),
+      task("queued", { state: "queued" }),
+    ];
+    for (const t of refused) expect(rowOf([t], t.id, CAN)?.canPass, t.id).toBe(false);
+  });
+
+  test("a superseded task and its successor name each other", () => {
+    const old = task("old", {
+      state: "superseded",
+      successor: "next",
+      spec: { repo: ORIGIN, mode: "worktree", title: "Old work" },
+      assignment: placedAt,
+    });
+    const next = task("next", {
+      state: "blocked",
+      spec: {
+        repo: ORIGIN,
+        mode: "worktree",
+        title: "New work",
+        succeeds: { task: "old", account: "acct", at: placedAt, trigger: "manual" },
+      },
+    });
+    expect(rowOf([old, next], "old", CAN)).toMatchObject({ passedTo: "Passed to New work", canPass: false });
+    expect(rowOf([old, next], "next", CAN)?.carriesOn).toBe("Carries on Old work");
+    expect(rowOf([old], "old", CAN)?.passedTo).toBe("Passed to task next");
+  });
+
+  test("a pass always asks twice, and its arm is disarmed with the row's menu", () => {
+    const row = { id: "a", cancelEndsSession: false, markDoneEndsSession: false };
+    const first = armTap(row, "pass", null);
+    expect(first).toEqual({ fire: false, armed: "pass:a" });
+    expect(armTap(row, "pass", first.armed)).toEqual({ fire: true, armed: null });
+    expect(disarmRow("a", "pass:a")).toBeNull();
+    expect(disarmRow("a", "pass:b")).toBe("pass:b");
+  });
+});
+
 describe("arming a session-ending act in the card's menu", () => {
   const live = { id: "a", cancelEndsSession: true, markDoneEndsSession: true };
   const queued = { id: "a", cancelEndsSession: false, markDoneEndsSession: false };

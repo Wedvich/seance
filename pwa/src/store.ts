@@ -666,6 +666,10 @@ export class Store {
     return this.#queue.runNow(taskId);
   }
 
+  passTask(taskId: string): Promise<void> {
+    return this.#queue.passTask(taskId);
+  }
+
   continueTask(taskId: string): Promise<void> {
     return this.#queue.continueTask(taskId);
   }

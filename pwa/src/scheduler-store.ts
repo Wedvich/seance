@@ -14,6 +14,7 @@ import {
   failureReasonText,
   isSettled,
   isTransportError,
+  passOffer,
   QUEUE_MAX_TASKS,
   queuedTask,
   RequestFailure,
@@ -32,6 +33,7 @@ import {
   deriveAutoAvailability,
   deriveContinueAvailability,
   deriveContinueHandoffAvailability,
+  derivePassAvailability,
   deriveRunNowAvailability,
   deriveTraitsAvailability,
   previewAsked,
@@ -53,6 +55,9 @@ export const STORE_UNREADABLE = "Couldn't read the relay's answer. Update the ap
 
 const CONTINUE_UNAVAILABLE =
   "No verified scheduler that can continue a session is leading right now. Try again once one is.";
+
+const PASS_UNAVAILABLE =
+  "No verified scheduler that can pass a task to a successor is leading right now. Try again once one is.";
 
 const SCHEDULER_UNREADABLE = "Couldn't read the scheduler's answer. Update seanced and the app to matching versions.";
 
@@ -876,6 +881,30 @@ export class SchedulerStore {
     return this.#actOnTask({ taskId, op: "continue" });
   }
 
+  /**
+   * Passes a running task to a successor: the leader has its machine push the branch, queues the
+   * task that carries on and ends the session, and answers last, so the row stays busy until then.
+   * A lost answer says it may have landed: the push, and the successor, may be there anyway.
+   */
+  passTask(taskId: string): Promise<void> {
+    return this.#actOnTask({ taskId, op: "pass" });
+  }
+
+  async #pass(taskId: string): Promise<string | null> {
+    const view = this.#state.queueView;
+    const listed = view?.kind === "ok" ? view.tasks.find((t) => t.id === taskId) : undefined;
+    if (listed === undefined) return "That task is no longer listed.";
+    // The item was gated on this when drawn; the leader may have changed or gone since the tap.
+    if (!derivePassAvailability(this.#state.relay)) return PASS_UNAVAILABLE;
+    const offer = passOffer(listed, this.#state.relay.machines, true);
+    if (!offer.ok) return sentence(offer.reason);
+    const reply = await this.#client.pass(taskId);
+    if (reply === null || "ok" in reply) return actionReplyText(reply);
+    this.#mergeTask(reply.task);
+    if (reply.successor !== null) this.#mergeTask(reply.successor);
+    return null;
+  }
+
   async #continue(taskId: string): Promise<string | null> {
     const view = this.#state.queueView;
     const listed = view?.kind === "ok" ? view.tasks.find((t) => t.id === taskId) : undefined;
@@ -907,6 +936,11 @@ export class SchedulerStore {
     try {
       if (action.op === "continue") {
         notice = await this.#continue(action.taskId);
+        this.#patch({ taskAction: null, queueNotice: notice });
+        return;
+      }
+      if (action.op === "pass") {
+        notice = await this.#pass(action.taskId);
         this.#patch({ taskAction: null, queueNotice: notice });
         return;
       }
