@@ -126,11 +126,32 @@ describe("the collector registry", () => {
     const quiet = await createTelemetry(MetricsStore.memory(), {
       ...sources,
       registered: () => four,
-      auth: () => new Map([["default", { state: "ok" as const }]]),
+      auth: () => new Map(["default", "a", "b", "c"].map((id) => [id, { state: "ok" as const }])),
     }).tick(T0);
     expect(quiet).not.toHaveProperty("ax");
     expect(quiet).not.toHaveProperty("ae");
     expect(quiet).not.toHaveProperty("au");
+    // Signed in by the registered blob but missing from the view (signed out since the scan): unread,
+    // not `ok` by omission. One the blob lists as signed out is no login to report on.
+    const mixed: Registered = {
+      ...four,
+      exclaves: {
+        ...four.exclaves,
+        info: ["default", "a", "b", "c"].map((id) => ({
+          id,
+          accountId: null,
+          extraUsageEnabled: null,
+          authOk: id !== "c",
+          skills: [],
+        })),
+      },
+    };
+    const missing = await createTelemetry(MetricsStore.memory(), {
+      ...sources,
+      registered: () => mixed,
+      auth: () => new Map([["default", { state: "ok" as const }]]),
+    }).tick(T0);
+    expect(missing.au).toEqual([1, 2]);
     expect(await createTelemetry(MetricsStore.memory(), sources).tick(T0)).not.toHaveProperty("au");
     const metrics = new Set(store.query({ from: 0, to: T0 / 1000, step: 30 }).map((s) => s.metric));
     expect(metrics).toEqual(new Set([METRIC_NAMES.mem, METRIC_NAMES.disk, METRIC_NAMES.free, METRIC_NAMES.sess]));

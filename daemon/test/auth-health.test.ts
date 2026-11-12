@@ -57,6 +57,9 @@ let stubs: {
   readonly hang: string;
   readonly record: string;
   readonly slow: string;
+  readonly seconds: string;
+  readonly fdcheck: string;
+  readonly escaper: string;
 };
 
 function creds(over: Record<string, unknown> = {}): string {
@@ -145,11 +148,30 @@ beforeAll(async () => {
   shim = await makeSecurityShim(base);
   const binDir = join(base, "stubs");
   await mkdir(binDir, { recursive: true });
-  stubs = { binDir, wrongShape: "", hang: "", record: "", slow: "" };
+  stubs = { binDir, wrongShape: "", hang: "", record: "", slow: "", seconds: "", fdcheck: "", escaper: "" };
   stubs = {
     binDir,
-    // The child's stdout carries a marker too: nothing it prints may reach a log or a view.
-    wrongShape: await stub("wrong-shape", `echo "${ACCESS}" >&2\nprintf '{"lapsed":false,"refreshExpiresAt":1,"x":1}'`),
+    // Both of the child's streams carry a marker: nothing it prints may reach a log or a view.
+    wrongShape: await stub(
+      "wrong-shape",
+      `echo "${ACCESS}" >&2\nprintf '{"lapsed":false,"refreshExpiresAt":${NOW},"x":"${ACCESS}"}'`,
+    ),
+    seconds: await stub("seconds", `printf '{"lapsed":false,"refreshExpiresAt":1790000000}'`),
+    // What the daemon hands the child, as the child sees it: the credentials file itself on stdin (not a pipe
+    // the daemon wrote into) and /dev/null for stderr. /proc is Linux's; elsewhere only the shape is checked.
+    fdcheck: await stub(
+      "fdcheck",
+      [
+        "if [ -e /proc/self/fd/0 ]; then",
+        "  in=$(readlink /proc/self/fd/0); err=$(readlink /proc/self/fd/2)",
+        '  case "$in" in */.claude-fdcheck/.credentials.json) ;; *) exit 9 ;; esac',
+        '  [ "$err" = /dev/null ] || exit 9',
+        "fi",
+        `printf '{"lapsed":false,"refreshExpiresAt":null}'`,
+      ].join("\n"),
+    ),
+    // A descendant in its own session keeps the child's stdout open past the group kill.
+    escaper: await stub("escaper", "setsid sleep 6 &\nsleep 30"),
     hang: await stub("hang", "sleep 30"),
     record: await stub(
       "record",
@@ -196,6 +218,13 @@ describe("the reader, through the real bun child", () => {
     expect(await readOne("half", creds({ accessToken: "" }))).toEqual({ state: "ok" });
   });
 
+  test("an expiry that is no ms epoch (seconds, a duration) is no expiry: never expired", async () => {
+    expect(await readOne("secs", creds({ refreshTokenExpiresAt: 1_790_000_000 }))).toEqual({ state: "ok" });
+    expect(await readOne("dur", creds({ refreshTokenExpiresAt: 2_592_000 }))).toEqual({ state: "ok" });
+    // And a child that prints one is not believed either.
+    expect(await readOne("printed", creds(), { bunBin: stubs.seconds })).toEqual({ state: "unknown", why: "output" });
+  });
+
   test("a refresh expiry in the past is expired", async () => {
     expect(await readOne("past", creds({ refreshTokenExpiresAt: NOW - 1000 }))).toEqual({ state: "expired" });
   });
@@ -221,11 +250,59 @@ describe("the reader, through the real bun child", () => {
     expect(await readOne("shape", creds(), { bunBin: stubs.wrongShape })).toEqual({ state: "unknown", why: "output" });
   });
 
+  test("the file reaches the child as its own descriptor, and stderr as /dev/null: the daemon reads neither", async () => {
+    expect(await readOne("fdcheck", creds(), { bunBin: stubs.fdcheck })).toEqual({ state: "ok" });
+  });
+
+  test("a path that is not a regular file is refused without blocking: unknown/unreadable", async () => {
+    const f = await exclave("fifo", null);
+    const made = Bun.spawnSync(["mkfifo", join(f.exclave.configDir, ".credentials.json")]);
+    expect(made.exitCode).toBe(0);
+    expect((await run(health([f], { bunBin: stubs.record }))).get("fifo")).toEqual({
+      state: "unknown",
+      why: "unreadable",
+    });
+  });
+
+  test.skipIf(Bun.which("setsid") === null)(
+    "a descendant holding the child's stdout past the kill cannot wedge the lane: unknown/timeout at the hard deadline",
+    async () => {
+      const f = await exclave("wedge", creds());
+      const started = Date.now();
+      const view = (await run(health([f], { bunBin: stubs.escaper, timeoutMs: 200 }))).get("wedge");
+      expect(view).toEqual({ state: "unknown", why: "timeout" });
+      // 200 ms + 1 s kill grace + 1 s slack, well before the descendant's 6 s.
+      expect(Date.now() - started).toBeLessThan(4_500);
+    },
+    10_000,
+  );
+
   test("a child that never answers is killed at the timeout: unknown/timeout", async () => {
     expect(await readOne("slowpoke", creds(), { bunBin: stubs.hang, timeoutMs: 200 })).toEqual({
       state: "unknown",
       why: "timeout",
     });
+  });
+
+  test("a global ~/.bunfig.toml preload does not run in the child: bun reads that file for package-manager commands only", async () => {
+    const marker = join(base, "preload-ran");
+    const preload = join(base, "preload.js");
+    await writeFile(preload, `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran");\n`);
+    const toml = `preload = [${JSON.stringify(preload)}]\n`;
+    // Control: the same file as a project bunfig.toml does fire, so a silent marker below means something.
+    const project = join(base, "preload-project");
+    await mkdir(project, { recursive: true });
+    await writeFile(join(project, "bunfig.toml"), toml);
+    await exec([process.execPath, "--no-env-file", "--no-install", "-e", "1"], { cwd: project });
+    expect(await Bun.file(marker).exists()).toBe(true);
+    await rm(marker);
+
+    const preloadHome = join(base, "preload-home");
+    await mkdir(preloadHome, { recursive: true });
+    await writeFile(join(preloadHome, ".bunfig.toml"), toml);
+    const f = await exclave("preloaded", creds());
+    expect((await run(health([f], { home: preloadHome }))).get("preloaded")).toEqual({ state: "ok" });
+    expect(await Bun.file(marker).exists()).toBe(false);
   });
 
   test("a bun that cannot be started reads unknown/spawn", async () => {
@@ -314,9 +391,12 @@ describe("macOS", () => {
     expect(await Bun.file(join(base, "record.log")).exists()).toBe(false);
   });
 
-  test("keychain off still reads a credentials file in the config dir", async () => {
-    const view = await readOne("mac-file", creds({ refreshTokenExpiresAt: NOW + DAY }), { platform: "darwin" });
-    expect(view).toEqual({ state: "expiring", expiresAt: NOW + DAY });
+  test("keychain off ignores a credentials file in the config dir: a Mac's login lives in the keychain, so a leftover file must not read as its truth", async () => {
+    await rm(join(base, "record.log"), { force: true });
+    const stale = creds({ accessToken: "", refreshToken: "", refreshTokenExpiresAt: NOW - DAY });
+    const view = await readOne("mac-file", stale, { platform: "darwin", bunBin: stubs.record });
+    expect(view).toEqual({ state: "unknown", why: "keychain_off" });
+    expect(await Bun.file(join(base, "record.log")).exists()).toBe(false);
   });
 
   test("keychain on: the item's value is judged, through the child's `security -w`", async () => {
@@ -475,6 +555,56 @@ describe("cadence", () => {
     await writeFile(file, creds({ accessToken: "", refreshToken: "" }));
     await utimes(file, new Date(NOW), new Date(NOW + 1000));
     await pollUntil(async () => (await count(log)) === 2, "re-read after the file changed");
+    await h.stop();
+  });
+
+  test("one child at a time across instances: a reload's two daemons never read at once", async () => {
+    const log = join(base, "slow.log");
+    await rm(log, { force: true });
+    const first = health([await exclave("c1", creds()), await exclave("c2", creds())], { bunBin: stubs.slow });
+    const second = health([await exclave("d1", creds()), await exclave("d2", creds())], { bunBin: stubs.slow });
+    first.start();
+    second.start();
+    const allRead = (h: AuthHealth): boolean => [...h.view().values()].every(settled);
+    await pollUntil(() => allRead(first) && allRead(second), "both instances read", 15_000);
+    await Promise.all([first.idle(), second.idle()]);
+    await Promise.all([first.stop(), second.stop()]);
+    const events = (await readFile(log, "utf8")).split("\n").filter((l) => l !== "");
+    expect(events.map((e) => e.split(" ")[0])).toEqual([
+      "start",
+      "end",
+      "start",
+      "end",
+      "start",
+      "end",
+      "start",
+      "end",
+    ]);
+  });
+
+  test("onChange fires once the reader is quiet, not per exclave; and again when the clock alone flips a state", async () => {
+    const fixtures = [
+      await exclave("o1", creds()),
+      await exclave("o2", creds({ refreshTokenExpiresAt: NOW + DAY })),
+      await exclave("o3", creds()),
+    ];
+    let clock = NOW;
+    let h: AuthHealth | null = null;
+    const seen: boolean[] = [];
+    h = health(fixtures, {
+      now: () => clock,
+      checkIntervalMs: 20,
+      // The clock jump must flip the state by itself, not through a re-read.
+      rereadMs: 10 * DAY,
+      onChange: () => seen.push([...(h?.view().values() ?? [])].every(settled)),
+    });
+    h.start();
+    await pollUntil(() => seen.length > 0, "the settled walk");
+    // Every exclave had a reading by the time it told.
+    expect(seen).toEqual([true]);
+    clock = NOW + DAY + 1;
+    await pollUntil(() => seen.length >= 2, "the flip to expired");
+    expect(h.view().get("o2")).toEqual({ state: "expired" });
     await h.stop();
   });
 

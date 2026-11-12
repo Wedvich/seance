@@ -867,7 +867,9 @@ of M4 has landed.
     `unknown` on any other failure — never a prompt. The macOS naming is read from the binary and
     still needs a check on a Mac, so the keychain read is **off by default**: until the owner sets
     `authHealth.keychain: true` in `config.json` after that check, a macOS exclave reads `unknown`
-    (a `.credentials.json` in its config dir is still read, as Claude Code's no-keychain fallback).
+    and nothing is read (Claude Code keeps a Mac's login in the keychain and uses its file only
+    when there is no item, so a file found beside a keychain login can be a stale leftover and
+    would read as a false `expired`; with the read on, the file is read only after exit 44).
   - _Decided (owner, 2026-11-12), the daemon never holds a token:_ the read runs in a short-lived
     `bun -e` child running one constant script, the file handed over as a descriptor (macOS: the
     child runs `security -w` itself), bare env, 5 s timeout. It prints only

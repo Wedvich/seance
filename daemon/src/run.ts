@@ -273,6 +273,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       ? null
       : createAuthHealth({
           keychain: config.authHealth?.keychain === true,
+          // Late-bound: the status loop is built after this. A routing field changed, as the launch gate does.
+          onChange: () => status.refresh(),
           ...opts.authHealth,
           scan: () => exclaveScan,
           home,
@@ -437,7 +439,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       now,
       httpFetch,
       draining: () => endedTasks.draining,
-      auth: () => authHealth?.view() ?? new Map(),
+      ...(authHealth === null ? {} : { auth: () => authHealth.view() }),
       ...(opts.probe === undefined ? {} : { probe: opts.probe }),
     },
     {

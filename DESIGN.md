@@ -752,7 +752,9 @@ nothing checked it. The last is the gap they leave.
   `{lapsed, refreshExpiresAt}` after an exact-shape check. The child's stdout and stderr never reach
   a log (stderr is never read), and nothing but the `ax`/`ae`/`au` indices, an expiry time and
   `CAPABILITIES.authHealth` reaches the wire. Any failure reads `unknown`, which still routes,
-  never `expired`. A test holds fake tokens against the view, the status, the log and the audit.
+  never `expired`. A test holds fake tokens against the view, the status and the log (auth health
+  writes no audit line), and others hold the hand-off itself: the file reaches the child as its own
+  descriptor and the child's stderr as `/dev/null`.
 - The OOM confirmation's reads (`daemon/src/oom-kill.ts`, Daemon, "Exit status") take no
   wire value: the pid comes from tmux's `#{pane_pid}`, so the paths are `/proc/<pid>/{cgroup,status}`
   and `memory.events` under the cgroup mount named by the kernel's own line. A cgroup path must be
@@ -2769,7 +2771,9 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     unread or unreadable, a stale or disconnected machine all say nothing, so a daemon restart,
     which lists every signed-in exclave in `au` until its first read lands, cannot read as a recovery
     and re-alert later. A signed-out exclave (`authOk` false) is `auth_missing`, not a lapse: its entry
-    just drops, with no restore line. The cap never evicts a held entry (the disk list drops its oldest,
+    just drops, with no restore line. A clearing write whose answer was lost is kept like an alert's:
+    once a later check's re-read record no longer holds the entry (at its own `at`) the clear landed
+    and the restore is logged then, so the "time to re-login" line is not lost with the answer. The cap never evicts a held entry (the disk list drops its oldest,
     since its cap exceeds the registry; an evicted lapsed login would alert again at every check): a
     new lapse beyond 16 is neither alerted nor added, and alerts once a slot frees, while a held
     entry still escalates at the cap. The push payload is `{v: 1, kind: "auth", at, deviceId,
@@ -5892,11 +5896,15 @@ of this section built.
     and the refresh token's expiry (ms; null under Claude Code's own suppression rule, which treats an access
     token that outlives it by more than 3 days as not the login's expiry). Expired is `lapsed` or that time
     past; expiring is within `AUTH_EXPIRING_MS` (3 days) of it, Claude Code's own "login expires" threshold.
+    An expiry under 1e12 is not a plausible ms epoch (seconds, a duration: a Claude Code that changed
+    the format) and is no expiry at all, in the script and again in the daemon's shape check, so a format
+    drift reads `ok`/`unknown`, never a fleet-wide `expired`.
   - **The daemon never holds a token.** The read runs in a short-lived child, `bun -e` running one
     constant script (`AUTH_READ_SCRIPT`: nothing from a frame, a file or a config reaches it but argv words it
     only passes to `security`). On Linux/WSL the credentials file (`<configDir>/.credentials.json`) is opened
     by the daemon and handed over as the child's stdin descriptor: the daemon never calls `read` on it
-    (past 64 KiB it is not a credentials file and reads `unknown`). On macOS the child runs
+    (opened first, with `O_NONBLOCK`, and judged by that descriptor — a regular file of at most 64 KiB, else
+    `unknown` — so what is checked is what the child gets, and a FIFO swapped in cannot block the open). On macOS the child runs
     `/usr/bin/security find-generic-password -a <login name> -w -s <service>` itself; exit 44 (no item: a
     Claude Code with no keychain uses the file) falls back to the file, and any other failure is `unknown`,
     never a prompt. The child prints `{"lapsed":bool,"refreshExpiresAt":number|null}` and nothing else; the
@@ -5904,15 +5912,25 @@ of this section built.
     `exec.ts` (so `CREDENTIALS_DIRECTORY` is stripped), bun resolved through `PATH` at each spawn
     (`bunPathFor`; `process.execPath` is only the use-time fallback and is never recorded), the env the
     `/usage` refresh gets (`baseChildEnv`: `HOME`, `PATH`, `USER`/`LOGNAME`), cwd `/`, `--no-env-file
-    --no-install`, a 5 s timeout, stderr discarded and never read. Limitation: a `~/.bunfig.toml` `preload`
-    still runs inside the child, as it would for any bun the user starts; it is the user's own file.
+    --no-install`, a 5 s timeout, stderr discarded and never read. The lane is process-wide and `exec`
+    waits for stdout's EOF, which a setsid'd descendant could hold past the group kill, so a read is also
+    raced against the timeout plus kill grace plus 1 s and lost as `timeout`: the lane always moves, as the
+    `/usage` refresh's does. No user code runs beside the token through bun's config: checked on bun 1.4.4
+    that `bun -e` reads a project `bunfig.toml` from its cwd (`/`, root-owned, hence the cwd) but not the
+    global `~/.bunfig.toml` (that file is read for package-manager commands only), and a test holds both
+    halves (a preload in the global file does not run, the same file as a project one does). Should a later
+    bun read it, `XDG_CONFIG_HOME` pointed at nowhere in `authEnv` is the one-line answer (`HOME` stays:
+    `security` needs it).
   - **macOS naming, unverified.** The item is `Claude Code-credentials` for the default exclave and, for a
     named one, `Claude Code-credentials-` plus the first 8 hex of the SHA-256 of its config dir, account the
     login name (`claude-code-user` when that has odd characters). Read from the binary on a Linux box and
     checked on no Mac, and whether a launchd daemon's `-w` read of Claude Code's item raises no prompt is
     unchecked too, so the keychain read is **off unless `authHealth.keychain` is `true` in config.json**:
-    a macOS exclave then reads `unknown` (`keychain_off`, still a credentials file in its config dir is read)
-    and nothing else changes. The owner turns it on after checking a Mac: `launchctl asuser` the read once, with no dialog.
+    a macOS exclave then reads `unknown` (`keychain_off`) and nothing is read, a credentials file in its config
+    dir included: Claude Code keeps a Mac's login in the keychain and uses the plaintext file only when
+    there is no item, so a leftover or synced file beside a keychain login would otherwise read as the
+    login's truth (a false `expired` that routes nothing there and pushes "needs /login"). With the read on,
+    the file is read only after exit 44. The owner turns it on after checking a Mac: `launchctl asuser` the read once, with no dialog.
   - **Cadence.** Checked every 60 s. An exclave is read at start, when its credentials file's stamp
     (inode, size, mtime) moves, after each `/usage` run on it, on a rescan that changed it, and at the latest
     hourly (macOS: every 10 min, which has no stamp to watch, and no `.claude.json` marker either, since
@@ -5920,7 +5938,15 @@ of this section built.
     child at a time per process (across a reload's two daemons). An unreadable reading that may pass (not a
     missing file) is retried within 10 min. A `/login` clears `expired` within a minute on Linux/WSL. The
     view is computed lazily: an expiry that passes flips to `expired` without a re-read. An exclave not read
-    yet is `unknown`, listed in `au`, never `ok`: a fresh daemon cannot read as a clean bill of health.
+    yet is `unknown`, listed in `au`, never `ok`: a fresh daemon cannot read as a clean bill of health, and
+    neither does one the view omits (signed in by the registered blob, signed out by the live scan).
+    _Decided: `unknown` routes, restart window included, because it is the spec's one rule and the
+    alternative (a held-back exclave until a read lands) would make a failed read stall placement._ The
+    window after a restart, reload or self-update is shortened, not closed: when a walk has settled with a
+    state change (or an expiry passed on the clock) the reader tells the status loop, which samples as soon
+    as the relay's floor lets it (the launch gate's `refresh`), so an exclave already lapsed is `ax` in
+    the first status after the first walk (about the 10 s floor), not up to a beat (30 s) later. A task
+    routed in that gap fails on auth like one routed to a disconnected machine's last-known state.
   - **Reading it.** `ax` (expired), `ae` (expiring, with the expiry) and `au` (unread) in `status`
     ("Presence & identity"), `CAPABILITIES.authHealth` in the register blob so a reader can tell "none
     listed" from "cannot say". The `auth_expired` filter ("Scheduler", routing reasons), the Machines
@@ -5929,7 +5955,9 @@ of this section built.
   - **Logging.** One line per state change, `auth: exclave=<id> state=<ok|expiring|expired|unknown>` with
     ` why=<code>` for unknown (`pending`, `absent`, `too_large`, `keychain`, `keychain_off`, `unreadable`,
     `timeout`, `output`, `spawn`): fixed codes only. Neither stream of the child ever reaches a log or the
-    audit, and a test with fake tokens holds the view, the status, the log and the audit clear of them.
+    audit (auth health writes none), and a test with fake tokens holds the view, the status and the log clear
+    of them, one holds the hand-off itself (the file as the child's own stdin descriptor, its stderr
+    `/dev/null`), and another puts a marker on the child's stdout off the shape and holds it out too.
   - **Rejected.** The `/usage` exit or text as the signal (identical either way, per the spike). Parsing
     the file in the daemon (the token strings would sit in a long-lived process's heap). A shell pipeline
     (a shell string breaks the argv-array invariant). A per-exclave observed-at on the wire (bytes in a

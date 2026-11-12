@@ -137,8 +137,10 @@ function drainCollector(sources: CollectorSources): Collect {
  * `ax`, `ae` and `au` from auth health's view, indexed through the registered blob's exclave
  * list — the one `sess` and `quota` index — never a fresh scan. No metric: routing reads the
  * lists live, and a login's state has no history worth a series. An id the registered list
- * lacks is skipped; past `STATUS_MAX_AUTH_EXPIRED` combined, `au` gives way first, then `ae`,
- * so the lists never exceed what a reader accepts.
+ * lacks is skipped, and a signed-in one (by that list) the view lacks is `au`, never silently
+ * `ok`. Past `STATUS_MAX_AUTH_EXPIRED` combined, `au` gives way first, then `ae`, so the lists
+ * never exceed what a reader accepts; that takes 17 exclaves at once not `ok`, and only the
+ * unread ones among them then read `ok` until they settle.
  */
 function authCollector(sources: CollectorSources): Collect {
   return (tick) => {
@@ -147,9 +149,15 @@ function authCollector(sources: CollectorSources): Collect {
     const ax: number[] = [];
     const ae: [number, number][] = [];
     const au: number[] = [];
-    tick.registered.exclaves.exclaves.forEach((exclave, x) => {
+    const { exclaves, info } = tick.registered.exclaves;
+    exclaves.forEach((exclave, x) => {
       const state = view.get(exclave.id);
-      if (state === undefined) return;
+      if (state === undefined) {
+        // Signed in by the blob a reader holds, but not in the view (signed out since the scan, and the
+        // re-register not committed yet): "not listed" would read `ok` there, so it is unread instead.
+        if (info[x]?.authOk === true) au.push(x);
+        return;
+      }
       if (state.state === "expired") ax.push(x);
       else if (state.state === "expiring") ae.push([x, Math.floor(state.expiresAt / 1000)]);
       else if (state.state === "unknown") au.push(x);

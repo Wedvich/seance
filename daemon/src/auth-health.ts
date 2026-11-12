@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { constants } from "node:fs";
 import { open, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { AUTH_EXPIRING_MS, isRecord } from "@seance/shared";
@@ -26,17 +27,26 @@ import { baseChildEnv, loginName } from "./usage-refresh.ts";
 const DAY_MS = 86_400_000;
 
 /**
+ * Below this (September 2001, in ms) a `refreshTokenExpiresAt` is not a plausible ms epoch: a Claude Code
+ * that wrote seconds, or a duration, would otherwise read every exclave as long expired. Such a value is
+ * no expiry at all (the script prints null, the parser refuses it), never a time.
+ */
+const MIN_EXPIRY_MS = 1_000_000_000_000;
+
+/**
  * The one script every read runs: `bun -e <this> <mode> <security> <service> <account>`.
  * Constant — nothing from a frame, a file or a config reaches it but as an argv word it
  * only passes to `security`. `expiresAt > refreshTokenExpiresAt + 3d` copies Claude Code's
  * own suppression of its "login expires" notice: an access token outliving the refresh
- * token by days means that refresh expiry is not the login's. Exits: 2 bad mode, 3 not
+ * token by days means that refresh expiry is not the login's. An expiry under `MIN_EXPIRY_MS`
+ * is no expiry. Exits: 2 bad mode, 3 not
  * JSON, 4 not a credential store, 5 `security` failed, 44 `security` found no item
  * (a keychain-less Claude Code uses the file), 6 anything else. `lapsed` needs both tokens
  * empty, which is what Claude Code writes on a lapse; one empty field alone is not proof.
  */
 export const AUTH_READ_SCRIPT = `
 const DAY = ${DAY_MS};
+const MIN_EXPIRY = ${MIN_EXPIRY_MS};
 const out = (lapsed, at) => process.stdout.write(JSON.stringify({ lapsed, refreshExpiresAt: at }));
 const judge = (text) => {
   let doc;
@@ -51,7 +61,7 @@ const judge = (text) => {
   }
   const r = o.refreshTokenExpiresAt;
   const e = o.expiresAt;
-  let at = typeof r === "number" && Number.isFinite(r) && r > 0 ? r : null;
+  let at = typeof r === "number" && Number.isFinite(r) && r >= MIN_EXPIRY ? r : null;
   if (at !== null && typeof e === "number" && e > at + 3 * DAY) at = null;
   out(o.refreshToken === "" && o.accessToken === "", at);
 };
@@ -105,6 +115,7 @@ export const MIN_REREAD_MS = 60_000;
 export const CHECK_INTERVAL_MS = 60_000;
 export const READ_TIMEOUT_MS = 5_000;
 const KILL_AFTER_MS = 1_000;
+const HARD_DEADLINE_SLACK_MS = 1_000;
 
 /** A file's stamp is watched on Linux; the macOS keychain has none, so it is polled more often. */
 const REREAD_LINUX_MS = 60 * 60_000;
@@ -137,13 +148,21 @@ export interface AuthHealthDeps {
   /**
    * Read the macOS keychain. Off by default: the item naming and a no-prompt read are verified
    * on no Mac yet, so until the owner turns it on (config `authHealth.keychain`) a macOS
-   * exclave reads `unknown/keychain_off` — a credentials file in its config dir is still read.
+   * exclave reads `unknown/keychain_off` and nothing is read: Claude Code keeps a Mac's login in
+   * the keychain and uses its plaintext file only when there is no item, so a file found beside
+   * a keychain login can be a stale leftover and would read as a false `expired`.
    */
   readonly keychain?: boolean;
   readonly checkIntervalMs?: number;
   readonly minRereadMs?: number;
   readonly rereadMs?: number;
   readonly timeoutMs?: number;
+  /**
+   * Some exclave's state changed (a first read counts) and the reader has gone quiet: the daemon
+   * sends a status now rather than at its next beat, so a restart's window of `au` (which still
+   * routes) is one walk plus the status floor, not up to a whole beat.
+   */
+  readonly onChange?: () => void;
   /** Fixed-text lines only; default `log.info`. */
   readonly log?: (line: string) => void;
 }
@@ -210,7 +229,7 @@ function keychainAccount(): string {
   return user !== null && KEYCHAIN_ACCOUNT_PATTERN.test(user) ? user : KEYCHAIN_ACCOUNT_FALLBACK;
 }
 
-/** The child's stdout, exactly `{lapsed: boolean, refreshExpiresAt: finite number > 0 | null}` or nothing. */
+/** The child's stdout, exactly `{lapsed: boolean, refreshExpiresAt: a plausible ms epoch | null}` or nothing. */
 function parseChildOutput(stdout: string): Extract<Reading, { kind: "read" }> | null {
   let parsed: unknown;
   try {
@@ -224,7 +243,9 @@ function parseChildOutput(stdout: string): Extract<Reading, { kind: "read" }> | 
   const { lapsed, refreshExpiresAt } = parsed;
   if (typeof lapsed !== "boolean") return null;
   if (refreshExpiresAt === null) return { kind: "read", lapsed, refreshExpiresAt: null };
-  if (typeof refreshExpiresAt !== "number" || !Number.isFinite(refreshExpiresAt) || refreshExpiresAt <= 0) return null;
+  if (typeof refreshExpiresAt !== "number" || !Number.isFinite(refreshExpiresAt) || refreshExpiresAt < MIN_EXPIRY_MS) {
+    return null;
+  }
   return { kind: "read", lapsed, refreshExpiresAt };
 }
 
@@ -237,6 +258,7 @@ export function createAuthHealth(deps: AuthHealthDeps): AuthHealth {
   const now = deps.now ?? Date.now;
   const securityBin = deps.securityBin ?? "/usr/bin/security";
   const keychain = deps.keychain === true;
+  const keychainOff = platform === "darwin" && !keychain;
   const minRereadMs = deps.minRereadMs ?? MIN_REREAD_MS;
   const rereadMs = deps.rereadMs ?? (platform === "darwin" ? REREAD_DARWIN_MS : REREAD_LINUX_MS);
   const timeoutMs = deps.timeoutMs ?? READ_TIMEOUT_MS;
@@ -248,6 +270,7 @@ export function createAuthHealth(deps: AuthHealthDeps): AuthHealth {
   let checking = false;
   let stopped = false;
   let running: number | null = null;
+  let changed = false;
 
   const signedIn = (): readonly Exclave[] => {
     const scan = deps.scan();
@@ -271,7 +294,15 @@ export function createAuthHealth(deps: AuthHealthDeps): AuthHealth {
     const line = `auth: exclave=${id} state=${describeView(viewOf(entry))}`;
     if (entry.reading === null || entry.logged === line) return;
     entry.logged = line;
+    changed = true;
     say(line);
+  };
+
+  /** Once the reader is quiet, not per exclave: a first walk over several is one nudge. */
+  const settle = (): void => {
+    if (!changed || stopped || draining !== null) return;
+    changed = false;
+    deps.onChange?.();
   };
 
   const markerOf = async (exclave: Exclave): Promise<string | null> => {
@@ -288,42 +319,49 @@ export function createAuthHealth(deps: AuthHealthDeps): AuthHealth {
     const env = authEnv(deps.home);
     const bunBin = deps.bunBin ?? bunPathFor(Bun.which("bun", { PATH: env["PATH"] ?? "" }));
     const keychainMode = mode.kind === "keychain";
-    let result;
-    try {
-      result = await exec(
-        [
-          bunBin,
-          "--no-env-file",
-          "--no-install",
-          "-e",
-          AUTH_READ_SCRIPT,
-          mode.kind,
-          keychainMode ? securityBin : "",
-          keychainMode ? mode.service : "",
-          keychainMode ? mode.account : "",
-        ],
-        {
-          cwd: "/",
-          env,
-          bareEnv: true,
-          killGroup: true,
-          killAfterMs: KILL_AFTER_MS,
-          timeoutMs,
-          maxOutputBytes: MAX_OUTPUT_BYTES,
-          discardStderr: true,
-          ...(stdinFd === undefined ? {} : { stdinFd }),
-          onSpawn: (pid) => {
-            running = pid;
-          },
-          onExit: () => {
-            running = null;
-          },
+    // `exec` waits for stdout's EOF, which a setsid'd descendant can hold long after the kill; the lane
+    // is process-wide, so one such child would leave every exclave `pending` for good. Past the kill
+    // grace plus a second, the read is lost as a timeout and the lane moves on.
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const abandoned = new Promise<"abandoned">((resolve) => {
+      deadline = setTimeout(() => resolve("abandoned"), timeoutMs + KILL_AFTER_MS + HARD_DEADLINE_SLACK_MS);
+    });
+    const ran = exec(
+      [
+        bunBin,
+        "--no-env-file",
+        "--no-install",
+        "-e",
+        AUTH_READ_SCRIPT,
+        mode.kind,
+        keychainMode ? securityBin : "",
+        keychainMode ? mode.service : "",
+        keychainMode ? mode.account : "",
+      ],
+      {
+        cwd: "/",
+        env,
+        bareEnv: true,
+        killGroup: true,
+        killAfterMs: KILL_AFTER_MS,
+        timeoutMs,
+        maxOutputBytes: MAX_OUTPUT_BYTES,
+        discardStderr: true,
+        ...(stdinFd === undefined ? {} : { stdinFd }),
+        onSpawn: (pid) => {
+          running = pid;
         },
-      );
-    } catch {
-      return { kind: "unknown", why: "spawn" };
-    }
-    if (result.timedOut) return { kind: "unknown", why: "timeout" };
+        onExit: () => {
+          running = null;
+        },
+      },
+    ).catch(() => "spawn" as const);
+    const result = await Promise.race([ran, abandoned]).finally(() => {
+      clearTimeout(deadline);
+      running = null;
+    });
+    if (result === "spawn") return { kind: "unknown", why: "spawn" };
+    if (result === "abandoned" || result.timedOut) return { kind: "unknown", why: "timeout" };
     if (keychainMode && result.exitCode === KEYCHAIN_NOT_FOUND) return "not_found";
     if (result.exitCode !== 0)
       return { kind: "unknown", why: keychainMode && result.exitCode === KEYCHAIN_FAILED ? "keychain" : "output" };
@@ -332,24 +370,20 @@ export function createAuthHealth(deps: AuthHealthDeps): AuthHealth {
 
   /** The file, by descriptor: the daemon opens it and never reads a byte. */
   const readFile = async (exclave: Exclave): Promise<Reading> => {
-    const path = credentialsPath(exclave);
-    try {
-      const s = await stat(path);
-      if (!s.isFile()) return { kind: "unknown", why: "unreadable" };
-      if (s.size > MAX_CREDENTIALS_BYTES) return { kind: "unknown", why: "too_large" };
-    } catch (err) {
-      const code = isRecord(err) ? err["code"] : undefined;
-      if (code === "ENOENT")
-        return { kind: "unknown", why: platform === "darwin" && !keychain ? "keychain_off" : "absent" };
-      return { kind: "unknown", why: "unreadable" };
-    }
+    // Opened first and judged by descriptor, so what is checked is what the child is handed: a path
+    // swapped between a stat and an open could otherwise bring a larger file, or a FIFO whose open blocks
+    // (O_NONBLOCK: it returns at once, and is refused as not a regular file).
     let handle;
     try {
-      handle = await open(path, "r");
-    } catch {
-      return { kind: "unknown", why: "unreadable" };
+      handle = await open(credentialsPath(exclave), constants.O_RDONLY | constants.O_NONBLOCK);
+    } catch (err) {
+      const code = isRecord(err) ? err["code"] : undefined;
+      return { kind: "unknown", why: code === "ENOENT" ? "absent" : "unreadable" };
     }
     try {
+      const s = await handle.stat().catch(() => null);
+      if (s === null || !s.isFile()) return { kind: "unknown", why: "unreadable" };
+      if (s.size > MAX_CREDENTIALS_BYTES) return { kind: "unknown", why: "too_large" };
       const reading = await runChild(exclave, { kind: "stdin" }, handle.fd);
       return reading === "not_found" ? { kind: "unknown", why: "output" } : reading;
     } finally {
@@ -358,7 +392,8 @@ export function createAuthHealth(deps: AuthHealthDeps): AuthHealth {
   };
 
   const readOnce = async (exclave: Exclave): Promise<Reading> => {
-    if (platform !== "darwin" || !keychain) return readFile(exclave);
+    if (keychainOff) return { kind: "unknown", why: "keychain_off" };
+    if (platform !== "darwin") return readFile(exclave);
     const reading = await runChild(exclave, {
       kind: "keychain",
       service: keychainService(exclave),
@@ -399,6 +434,7 @@ export function createAuthHealth(deps: AuthHealthDeps): AuthHealth {
         }
       } finally {
         draining = null;
+        settle();
       }
     })();
   };
@@ -436,6 +472,8 @@ export function createAuthHealth(deps: AuthHealthDeps): AuthHealth {
       }
     } finally {
       checking = false;
+      // A state the clock flipped (an expiry passing) with no read behind it.
+      settle();
     }
   };
 

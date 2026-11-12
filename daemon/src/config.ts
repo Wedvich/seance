@@ -33,7 +33,8 @@ export interface Config {
 export interface AuthHealthConfig {
   /**
    * Read the macOS keychain for each exclave's login. Off by default until the item naming and a
-   * no-prompt `security -w` read are checked on a Mac; a credentials file is read either way.
+   * no-prompt `security -w` read are checked on a Mac; until then a macOS exclave reads `unknown`
+   * and nothing is read, a credentials file included (a leftover one is not the keychain login's truth).
    */
   readonly keychain: boolean;
 }
