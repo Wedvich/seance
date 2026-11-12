@@ -8602,10 +8602,11 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   Online it shows the platform, last ingest, the build line and Tasks, Samples, Events and
   Database rows from the last `archive-status` reply held for that same device; offline, `offline ·
   last seen`, no rows and a line on what is hidden. No menu, no spawn, no gauges. The counts are
-  read when the Machines screen is visible and the archivist connected, then every 60 s while it
+  read when the Machines screen is visible (tab shown, socket open) and the archivist connected, then every 60 s while it
   stays so (`pwa/src/archivist-store.ts`), dropped when the seat moves or goes offline; a timeout
   or error leaves the card without rows and does not mark it offline — the card follows the
-  registry.- **Stored secrets show as a masked placeholder, and a blank field keeps them.**
+  registry.
+- **Stored secrets show as a masked placeholder, and a blank field keeps them.**
   The PSK cannot be read back at all and the bearer is not worth redisplaying,
   but two empty inputs read as "credentials lost" on a working install. So
   Settings is editable without being a re-entry chore, and only a field

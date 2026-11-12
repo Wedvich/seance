@@ -175,7 +175,8 @@ Each is the owner's, 2026-11-12, unless marked _derived_.
 (https://claude.ai/artifact/B83Ftm67X654rGd4siUeBe, phone width, built from the PWA's own
 `tokens.css`/`screen.css` and the markup of `machines.tsx`/`queue.tsx`). Nothing here adds a new
 component or style. (A36b, as built: one modifier class, `.exclave-sessions-wide`, widens the
-number column, since `18.4M` does not fit a session count's width.)
+number column, since `18.4M` does not fit a session count's width; the Database row, as built,
+is `archive.sqlite` plus `metrics.sqlite`, each with its `-wal`, detail "archive + metrics".)
 
 - **A36a. Where the card sits.** Last in the machine list, after every machine and before
   Accounts; no heading of its own. It is a `fleet-card` like a machine's but carries no gauges,
@@ -183,7 +184,7 @@ number column, since `18.4M` does not fit a session count's width.)
   reads `<platform> · last ingest <age>`, then the build line; both need the open detail on a
   `machine-info` blob below, and drop what it does not say.
 - **A36b. Its rows.** Tasks, Samples, Events (row counts) and Database (size of
-  `archive.sqlite`), each with the oldest date it holds, laid out in the exclave table's columns so
+  `archive.sqlite`; as built, plus `metrics.sqlite`), each with the oldest date it holds, laid out in the exclave table's columns so
   the numbers share the right edge with every other card. One quiet line under them: "Keeps task,
   chart and fleet history. Never runs sessions."
 - **A36c. Offline.** Grey dot, `offline · last seen <age>`, no rows (the status op needs it
