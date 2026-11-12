@@ -69,11 +69,13 @@ export const APP_PATH = "/app";
 export const TOKEN_PARAM = "t";
 
 /**
- * App-side close codes (4000–4999 is the app-defined range). A browser cannot
- * read the HTTP status of a failed WS handshake, so `/app` accepts the upgrade
- * and then closes with one of these; both are permanent, so the app must stop
- * reconnecting rather than back off. Daemons read the real 401 from `fetch`,
- * so `/daemon` keeps refusing pre-upgrade.
+ * Close codes (4000–4999 is the app-defined range, used on both legs). A
+ * browser cannot read the HTTP status of a failed WS handshake, so `/app`
+ * accepts the upgrade and then closes with `CLOSE_BAD_REQUEST` or
+ * `CLOSE_UNAUTHORIZED`; both are permanent, so the app must stop reconnecting
+ * rather than back off. Daemons read the real 401 from `fetch`, so `/daemon`
+ * keeps refusing pre-upgrade; only after the upgrade, on a verified register,
+ * does it close with `CLOSE_ROLE_REFUSED`.
  */
 export const CLOSE_BAD_REQUEST = 4400;
 export const CLOSE_UNAUTHORIZED = 4401;

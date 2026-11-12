@@ -44,7 +44,8 @@ export function roleRefusal(deviceId: string, roles: readonly string[], seat: st
  * Whether a registry entry is pushed as the seat: decided per push, like
  * `connected`, against the secret as it is now. A stored flag would outlive a
  * moved or unset seat and hide the old entry from every app for good; derived,
- * the old entry reads as an ordinary one apps show and can `forget`.
+ * the old entry reads as an ordinary offline one, which `forget` removes (by id: its
+ * blob is not a `MachineInfo`, so no app lists it as a machine to forget).
  */
 export function isSeat(
   entry: { readonly deviceId: string; readonly archivistClaim?: true },

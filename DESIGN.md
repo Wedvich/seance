@@ -2188,8 +2188,9 @@ in #132–#149; its findings are labelled Q, S, P and M. The **M3 review** (2026
   across a close or sweep; a register without the role drops it. Each registry push derives
   `RegistryView.archivist` from that claim against the secret as it is now (`isSeat`), like
   `connected`: a stored flag would outlive a moved or unset seat and hide the old entry from every
-  app for good, where derived the old entry reads as an ordinary offline one apps show and can
-  `forget`. `RelayClient` skips a flagged entry in `#rebuildMachines`, before its blob is read, and
+  app for good, where derived the old entry reads as an ordinary offline one that `forget` removes by id (its blob
+  is not a `MachineInfo`, so no app lists it as a machine to forget). `RelayClient` skips a flagged
+  entry in `#rebuildMachines` (its blob is still opened like any entry's) and
   leaves it out of `registrySize` and `ignored`; every `Machine` reader — the PWA's Machines screen
   and spawn form, the leader's candidates, MCP `list_machines`, the fleet broker, Raycast — reads
   that list, so the seat is never a spawn target. No terms, no nomination, no standby, no op the

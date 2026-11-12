@@ -259,14 +259,20 @@ One stack of PRs, each based on the one before, merged together.
   A8's "no repos, no exclaves". **Constraint from item 1:** a client built before it parses no
   `archivist` flag and makes a `Machine` of any entry whose blob opens as a `MachineInfo` (empty
   `repos` included) — an old daemon's leader candidates, machine alerts and broker, a cached PWA,
-  a Raycast build. So item 2 must not register a blob a pre-item-1 client opens as one: no blob it
-  can open as `machine-info` (sealed under another op, `openAtRest` refuses it and old clients
-  count it unopenable), never a real `MachineInfo`. The skip in `RelayClient` is the main line;
-  this is the fallback for clients that predate it.
+  a Raycast build. So item 2 must not register a blob a pre-item-1 client opens as one.
+  _Decided: seal it under op `machine-info` with a shape `parseMachineInfo` refuses (never a
+  real `MachineInfo`), because a client counts that as `skewed`, the PWA's "Version mismatch,
+  update", which is true of a client that predates the flag. Sealed under another op it would be
+  `unopenable`, counted in `ignored` and rendered "Key mismatch, check the pre-shared key", which
+  sends someone to rotate a credential that is correct._ A client with the flag skips the entry
+  when it builds machines (its blob is still opened and parsed like any entry's, so it may log
+  one `dropped … reason=info-shape` line per blob). The skip in `RelayClient` is the main line;
+  the skewed blob is the fallback for clients that predate it.
 - **The flag is per push.** The relay stores the signed claim and derives `archivist` against
   `ARCHIVIST` as it is at each push. Moving the seat (A29, the runbook in item 5) turns the old
-  id's kept entry into an ordinary offline entry that apps show and can `forget`; the runbook
-  should say to forget it. Item 6's health card and item 10's silence alert read the flag, so
+  id's kept entry into an ordinary offline entry. With the blob above it is never a `Machine`
+  row, so the PWA counts it as skewed and offers no forget button; the runbook must say to
+  forget it by id (`RelayClient.forget`, or a raw `forget` frame from an app socket). Item 6's health card and item 10's silence alert read the flag, so
   they follow the seat, not the old entry.
 - **The refusal's backoff.** A refused claim is closed 4403 (`CLOSE_ROLE_REFUSED`) with the
   reason `register role-refused`. The daemon's relay client treats only `register unverified` as
