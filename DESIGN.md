@@ -7151,7 +7151,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   action's own reply wins), each saying "Idle at its prompt since … — its slot is free", and the
   summary counts them ("2 running · 3 idle · 1 waiting", the idle count only when there are some).
   Not in Needs you: nothing is owed to a session that finished its turn, and its slot is already free. A row shows the
-  task's title (its own, else its prompt's first line cut to 80, else its session's window name, else its repo), where it is and
+  task's title (its own, else its session's window name, which tmux and claude.ai show too, else its prompt's first line cut to 80, else its repo), where it is and
   why, with the decision's record on tap — in the past tense once the task was placed ("spending
   credits", not "would spend"; a forecast spill says "may spill into credits" in either). A task whose session reported a PR (`Task.prUrl`, its primary: the
   newest not read closed, "Several PRs") carries it as a chip linking out, leading the card's action row, `#123` where the URL names a
