@@ -390,6 +390,14 @@ export function deriveAttachmentsAvailability(relay: RelayState): boolean {
   return verifiedLeaderAdvertises(relay, CAPABILITIES.attachments);
 }
 
+/**
+ * A settled registry with a verified leader that lacks `attachments`: attaching is positively over,
+ * unlike a dropped or re-dialing socket, which only means it can't be checked for now.
+ */
+export function attachmentsWithdrawn(relay: RelayState): boolean {
+  return leaderVerified(relay) && relay.registrySettled && !deriveAttachmentsAvailability(relay);
+}
+
 export const ATTACHMENTS_UNAVAILABLE =
   "The scheduler's leader doesn't take attachments yet. Update seanced on its machine, or remove the files";
 

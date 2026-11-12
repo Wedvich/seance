@@ -175,23 +175,23 @@ function waitText(seconds: number): string {
   return hours < 48 ? `${hours} hours` : `${Math.round(hours / 24)} days`;
 }
 
-/** Why `name` was not stored, as a sentence. Always ends by saying nothing was queued. */
-export function uploadRefusalText(name: string, refusal: AttachmentRefusal): string {
+/** Why an upload was refused, as a sentence naming no file (the chip says which). Always ends by saying nothing was queued. */
+export function uploadRefusalText(refusal: AttachmentRefusal): string {
   const tail = " Nothing was queued; files already uploaded aren't sent again.";
   switch (refusal.code) {
     case "allowance_exhausted":
       return `Upload limit reached: the relay's ${refusal.window === "hour" ? "hourly" : "30-day"} allowance is spent. Try again in ${waitText(refusal.retryAfter)}.${tail}`;
     case "unauthorized":
-      return `The relay refused the bearer token for the upload of ${name}. Check it in Settings.${tail}`;
+      return `The relay refused the bearer token for the upload. Check it in Settings.${tail}`;
     case "unreachable":
-      return `Couldn't reach the relay to upload ${name}. Check the connection and try again.${tail}`;
+      return `Couldn't reach the relay to upload. Check the connection and try again.${tail}`;
     case "storage_error":
-      return `The relay's storage failed while uploading ${name}. Try again.${tail}`;
+      return `The relay's storage failed while uploading a file. Try again.${tail}`;
     case "exists":
-      return `The relay already held an upload under ${name}'s new id. Try again: it gets another.${tail}`;
+      return `The relay already held an upload under the file's new id. Try again: it gets another.${tail}`;
     case "aborted":
-      return `The upload of ${name} was stopped. Try again.${tail}`;
+      return `The upload was stopped. Try again.${tail}`;
     default:
-      return `The relay refused the upload of ${name} (${refusal.code}). Update the app and the relay to matching versions.${tail}`;
+      return `The relay refused an upload (${refusal.code}). Update the app and the relay to matching versions.${tail}`;
   }
 }

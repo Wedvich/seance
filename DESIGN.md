@@ -4554,17 +4554,24 @@ with files queues as soon as its last upload ends, and a refusal shows before th
 - **When**: a file admitted by pick, paste, drop or share starts at once while attaching
   is offered (`deriveAttachmentsAvailability`). One admitted while it isn't (a share at
   boot, a pick during a re-dial) waits and starts when the relay state next offers it.
-  No upload starts while not offered, and one in flight when it stops being offered is
-  aborted (it goes back to waiting; its object may still have landed). The create
-  re-checks at the end, so the CLAUDE.md rule that a task carrying files goes only to a
-  verified leader advertising `attachments` holds however the wait ended.
+  No upload starts while not offered. An upload is its own HTTP request, so a dropped or
+  re-dialing socket does not cut one in flight (a 25 MiB video must not restart from zero
+  because a ping was late); one is aborted only when a settled registry shows a verified
+  leader lacking `attachments` (`attachmentsWithdrawn`), and goes back to waiting (its
+  object may still have landed). The create re-checks at the end (`#prepare`, again
+  after the wait), and a retry of an unqueued task carrying files re-checks too, so the
+  CLAUDE.md rule that a task carrying files goes only to a verified leader advertising
+  `attachments` holds however the wait ended.
 - **One at a time**, in list order (`#pumpUploads` in `pwa/src/store.ts`): each upload
   holds the file and its sealed copy in memory, up to twice 30 MiB on a phone; the
   phone's uplink is the bottleneck, so parallel uploads would not finish the set sooner;
   and a refusal every later file would meet (`429` allowance, `401`, no answer) halts the
   pump, leaving the rest waiting, so the next file doesn't spend allowance. A Queue press
-  or a new pick lifts the halt. An upload with no progress for a minute is cut off and
-  fails as unreachable, so a dead connection can't hold a Queue press.
+  or a new pick that admits a file lifts the halt (a refused pick doesn't); a halt on no
+  answer also lifts when the socket reopens or a file is removed. An upload with no
+  progress for a minute is cut off and fails as unreachable, so a dead connection can't
+  hold a Queue press. The timer is wall-clock: a page suspended past a minute may cut a
+  healthy upload on resume. Accepted: the file fails and a press sends it again.
 - **Per-file state** (`UploadState`, `pwa/src/attachments.ts`): waiting, uploading with a
   percent (held under 100 until the `201`), stored with id and hash, or failed with the
   chip's short reason and the verdict's sentence. Failed files are not retried on their
@@ -4573,25 +4580,28 @@ with files queues as soon as its last upload ends, and a refusal shows before th
   attachments), then waits until nothing is uploading; the button reads "Uploading N/M…".
   The form stays live during the wait, so once the uploads settle the checks run again
   and the task is built from the form as it then stands (prompt, pins, deps), not as it
-  was at the press. It is created only when every file still listed is stored. A failed
-  file stops it with that file's refusal; files still waiting because attaching stopped
+  was at the press; one that no longer resolves a repo stops it with a verdict. It is
+  created only when every file still listed is stored. A failed file stops it with its
+  refusal, which names no file (the chip marks which failed); files still waiting because attaching stopped
   being offered mid-wait stop it too. Removing every file during the wait ends the press
   with a notice and no task. A second press during the wait does nothing.
 - **Remove** works at any time except while the create (or a settle wait, or a retry's
   create) is out: removing a file mid-upload aborts its request, and the next starts.
   While Queue waits on uploads, a file can still be removed and the task carries the
   rest. Adding is locked from the Queue press on, as before; a pick, paste or drop then
-  says so in the notice line instead of being dropped silently.
+  says so in the notice line instead of being dropped silently; the notice clears when
+  the press ends.
 - **Chips**: one column on a phone (up to 480px), two columns beyond, so a name isn't cut
   to a few letters; two rows beside a 40px thumbnail: the name and × on the first, size and
   state on the second ("PNG · 14 KB", "14 KB · 45%", "14 KB · waiting", "Failed: limit
   reached"), with a bar along the bottom while uploading. An `image/*` file previews
   through an object URL the chip makes in an effect and revokes on cleanup, so remove,
-  a stored task or leaving the screen frees it; decoded asynchronously. An image the browser can't decode (HEIC
+  a stored task or leaving the screen frees it. An image the browser can't decode (HEIC
   on Chrome) falls back to the file glyph with its extension.
-- **Cost**: allowance is spent at pick time. A file removed after it stored, or a form
-  abandoned, or a file removed mid-upload whose `PUT` had already landed, leaves an object no task names until the lifecycle rule expires it (30
-  days), counted against the allowance. Accepted: deleting needs a principal the relay
+- **Cost**: allowance is spent at pick time. A file removed after it stored, a form
+  abandoned, or a file removed mid-upload whose `PUT` had already landed leaves an
+  object no task names until the lifecycle rule expires it (30 days), counted against
+  the allowance. Accepted: deleting needs a principal the relay
   doesn't have (Rejected alternatives, "Deleting at task end").
 
 ### Share target (`pwa/src/share*.ts`) — built 2026-11-02

@@ -110,7 +110,7 @@ describe("manifestOf", () => {
 
 describe("uploadRefusalText", () => {
   test("names the allowance window and the wait, and always says nothing was queued", () => {
-    const text = uploadRefusalText("a.png", {
+    const text = uploadRefusalText({
       ok: false,
       code: "allowance_exhausted",
       window: "hour",
@@ -119,7 +119,7 @@ describe("uploadRefusalText", () => {
     expect(text).toContain("hourly allowance");
     expect(text).toContain("10 minutes");
     expect(text).toContain("Nothing was queued");
-    expect(uploadRefusalText("a.png", { ok: false, code: "unreachable" })).toContain("Couldn't reach the relay");
+    expect(uploadRefusalText({ ok: false, code: "unreachable" })).toContain("Couldn't reach the relay");
   });
 });
 
