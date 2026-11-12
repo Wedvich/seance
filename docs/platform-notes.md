@@ -135,7 +135,7 @@ What the user-unit flow still does that this doesn't:
   `doctor` says so instead of probing user scope. The sessions it spawns can still
   depend on the user manager: see "Sessions under the user manager" above.
 
-`seanced restart` works without root here, so `git pull && seanced restart` is the same
+`seanced restart` works without root here, so `seanced update` (or `git pull && seanced restart`) is the same
 update as on a user unit. It can't ask the system manager to restart the unit, so it
 reads the unit's `MainPID` (a read-only query anyone may make), SIGTERMs that process —
 it runs as you — and waits for `Restart=always` to relaunch it, about five seconds

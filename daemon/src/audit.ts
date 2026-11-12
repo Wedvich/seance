@@ -490,8 +490,8 @@ export function reapAudit(origin: ReapOrigin, sink: AuditSink): ReapAudit {
   };
 }
 
-/** What triggered a self-update check: a fleet announce, or this daemon's own register. */
-export type UpdateOrigin = "announce" | "register";
+/** What triggered a self-update check: a fleet announce, this daemon's own register, or `seanced update`. */
+export type UpdateOrigin = "announce" | "register" | "cli";
 
 export interface UpdateAudit {
   readonly checking: (sha: string) => Promise<void>;

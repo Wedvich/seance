@@ -16,7 +16,10 @@ import { selfRestartService } from "./service.ts";
 export interface UpdateEffects {
   /** Dependency install at the checkout root, after a fast-forward. */
   readonly install: (root: string) => Promise<{ readonly ok: boolean; readonly detail?: string }>;
-  /** Refresh the service definition if drifted, then restart this process. May not return. */
+  /**
+   * Restart the daemon. The self-update's refreshes the service definition if drifted and restarts this
+   * process, so may not return; `seanced update`'s is `seanced restart`'s, which rewrites nothing.
+   */
   readonly restart: () => Promise<void>;
 }
 
@@ -97,7 +100,7 @@ interface Verdict {
   readonly detail?: string;
 }
 
-async function pipeline(root: string, effects: UpdateEffects, audit: UpdateAudit): Promise<Verdict> {
+async function pipeline(root: string, effects: Pick<UpdateEffects, "install">, audit: UpdateAudit): Promise<Verdict> {
   const source = await readSource(root);
   if (source === null) {
     return { outcome: "fetch_failed", detail: "checkout version unreadable — not a git checkout?" };
@@ -149,6 +152,64 @@ async function pipeline(root: string, effects: UpdateEffects, audit: UpdateAudit
 
   const updated = await readSource(root);
   return { outcome: "ok", detail: `${source.sha.slice(0, 12)} → ${updated?.sha.slice(0, 12) ?? "?"}` };
+}
+
+export interface ManualUpdateOpts {
+  readonly root: string;
+  readonly sink: AuditSink;
+  /** The sha the live daemon serves; null when none runs. A checkout already current still restarts a stale one. */
+  readonly servingSha: string | null;
+  readonly effects: UpdateEffects;
+}
+
+export interface ManualUpdate extends Verdict {
+  readonly restarted: boolean;
+}
+
+/**
+ * `seanced update`: the announce's pipeline, run from a shell. No report and no quiesce: state.json
+ * belongs to the live daemon, whose SIGTERM drain already holds launches, and the restarted one
+ * announces its new sha and clears a stale report on its first register check, as after any update.
+ */
+export async function updateNow(opts: ManualUpdateOpts): Promise<ManualUpdate> {
+  const audit = updateAudit("cli", opts.sink);
+  const verdict = await pipeline(opts.root, opts.effects, audit);
+  const behind = verdict.outcome === "current" ? await servingBehind(opts.root, opts.servingSha) : null;
+  if (behind === null) {
+    await audit.outcome(verdict.outcome, verdict.detail);
+    if (verdict.outcome !== "ok") return { ...verdict, restarted: false };
+    return restartOnto(verdict, opts.effects, audit);
+  }
+  const current: Verdict = { outcome: "current", detail: behind };
+  await audit.outcome(current.outcome, current.detail);
+  // HEAD may sit where an earlier install failed, here or in the daemon's own update: restarting
+  // onto it uninstalled is the stuck state `clearedByCurrent` keeps visible in the daemon.
+  const install = await opts.effects.install(opts.root);
+  if (!install.ok) {
+    const detail = install.detail ?? "install failed";
+    await audit.outcome("install_failed", detail);
+    return { outcome: "install_failed", detail, restarted: false };
+  }
+  return restartOnto(current, opts.effects, audit);
+}
+
+/** Why a current checkout still needs a restart — the live daemon runs an older sha — or null. */
+async function servingBehind(root: string, servingSha: string | null): Promise<string | null> {
+  if (servingSha === null) return null;
+  const head = (await readSource(root))?.sha;
+  if (head === undefined || head === servingSha) return null;
+  return `daemon serves ${servingSha.slice(0, 12)}, checkout at ${head.slice(0, 12)}`;
+}
+
+async function restartOnto(verdict: Verdict, effects: UpdateEffects, audit: UpdateAudit): Promise<ManualUpdate> {
+  try {
+    await effects.restart();
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    await audit.outcome("restart_failed", detail);
+    return { outcome: "restart_failed", detail, restarted: false };
+  }
+  return { ...verdict, restarted: true };
 }
 
 export function createUpdater(opts: UpdaterOpts): Updater {

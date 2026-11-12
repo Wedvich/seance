@@ -6460,7 +6460,7 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
 
 ## Self-update (added 2026-08-02)
 
-Update one machine by hand (`git pull` + restart) and the rest follow. The
+Update one machine by hand (`seanced update`, or `git pull` + restart) and the rest follow. The
 restarted daemon sees its sha changed since the last run (`state.lastRunSha`)
 and broadcasts `update-available` to `"machines"` once per process; every
 other daemon runs the same pipeline it would run anyway. Rejected: polling
@@ -6469,6 +6469,18 @@ sha comparison already eliminates), relay-buffered or relay-stored "latest"
 blobs (see the wire-protocol bullet — the startup convergence below makes
 relay state unnecessary).
 
+- **`seanced update` (added 2026-11-12) is the same pipeline from a shell**
+  (`updateNow` in `daemon/src/update.ts`), on the clone `runtime.json` says
+  the live daemon serves from, audited `origin=cli`. It restarts through
+  `seanced restart`'s path, not the self-update's exit, so it needs no
+  supervisor-started process, and it restarts when the checkout is already
+  current but the live daemon's sha is older — after `bun install`, since that
+  HEAD may be where an earlier install failed. It writes no `lastUpdate`:
+  state.json is the live daemon's, its SIGTERM drain already holds launches,
+  and the restarted daemon announces the new sha and clears a stale report on
+  its first register check. Rejected: asking the running daemon over the local
+  op socket — it would widen that socket's allowlist (a threat-model change)
+  for what a shell can already do with the user's own rights.
 - **Origin is the arbiter.** The announce carries a sha but receivers never
   trust it: they `git fetch` and `merge --ff-only` against their own upstream.
   A forged or replayed announce — even from a full PSK holder — buys one extra

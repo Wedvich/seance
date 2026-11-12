@@ -19,7 +19,7 @@ Spawn new Claude Code sessions on any of your machines, from your phone.
   own devices.
 - **Free to run.** A Worker and a SQLite-backed Durable Object for the relay, a
   static-assets Worker for the app — all inside Cloudflare's free tier.
-- **Daemons update themselves.** `git pull` and restart on one machine; the rest
+- **Daemons update themselves.** `seanced update` on one machine; the rest
   fetch, fast-forward, and restart on their own.
 
 ## Why
@@ -139,7 +139,8 @@ too — the step 2 propagation note applies again.
 ### 4. Install seanced on each machine
 
 Distribution is the git checkout itself: the service runs
-`bun <checkout>/daemon/src/main.ts`, so updating is `git pull` + restart.
+`bun <checkout>/daemon/src/main.ts`, so updating is `git pull` + restart, which
+`seanced update` does for you.
 
 ```sh
 git clone <this repo> && cd seance && bun install
@@ -550,8 +551,15 @@ behind Claude Code's per-tool approval rather than allowlisting them.
 ## Updating
 
 ```sh
-git pull && bun daemon/src/main.ts restart    # daemon, on one machine
+seanced update    # daemon, on one machine, from any directory
 ```
+
+`update` runs what a fleet announce runs, against the clone the live daemon serves
+from: fetch, fast-forward its default branch, `bun install --frozen-lockfile`,
+restart. It refuses a dirty, re-branched or diverged checkout exactly as the
+self-update does, and exits non-zero saying which. When the checkout is already
+current but the daemon still runs an older sha (a hand `git pull` with no restart),
+it installs and restarts the daemon onto it.
 
 Daemons self-propagate: the restarted daemon notices its version changed and
 announces it over the relay, and every other machine fetches, fast-forwards
