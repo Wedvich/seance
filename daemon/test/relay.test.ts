@@ -1076,12 +1076,14 @@ describe("daemon ↔ relay integration", () => {
     const daemon = await startTestDaemon(relay.url, { maxBackoffMs: 400 });
     try {
       await relay.registers.next();
+      await pollUntil(
+        () => lines.some((line) => line.includes('relay socket closed code=4403 reason="register role-refused"')),
+        "the role refusal",
+      );
+      // A non-event window: how many dials the backoff lets through.
       await Bun.sleep(1_000);
       // As the unverified case above: on the order of ten attempts, where a reset on every open gives ~50.
       expect(relay.connectionCount()).toBeLessThanOrEqual(25);
-      expect(lines.some((line) => line.includes('relay socket closed code=4403 reason="register role-refused"'))).toBe(
-        true,
-      );
       const roles: (readonly string[] | undefined)[] = [];
       while (relay.registers.size > 0) roles.push((await relay.registers.next()).roles);
       expect(roles.length).toBeGreaterThan(0);

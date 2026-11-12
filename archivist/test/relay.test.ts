@@ -89,6 +89,14 @@ describe("seance-archivist against the real relay", () => {
         "the role refusal",
         10_000,
       );
+      // The relay half of "squats nothing": the refused claim left no registry entry behind.
+      const app = await connectApp(relay);
+      try {
+        const frame = await app.waitFor<{ t: "registry"; entries: readonly RegistryView[] }>("registry", 5_000);
+        expect(frame.entries.some((entry) => entry.deviceId === archivist?.deviceId)).toBe(false);
+      } finally {
+        app.close();
+      }
     } finally {
       console.log = realLog;
       archivist?.stop();

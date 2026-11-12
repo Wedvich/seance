@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -15,7 +15,7 @@ import {
   verifyRegister,
 } from "@seance/shared";
 import { readRuntime } from "../../daemon/src/state.ts";
-import { captureLog, pollUntil } from "../../daemon/test/fixtures.ts";
+import { pollUntil } from "../../daemon/test/fixtures.ts";
 import { startTestRelay } from "../../daemon/test/harness.ts";
 import { startArchivist, type ArchivistOpts } from "../src/run.ts";
 
@@ -140,20 +140,47 @@ describe("seance-archivist run", () => {
     const paths = await setup(relay.url);
     let archivist: Awaited<ReturnType<typeof startArchivist>> | undefined;
     try {
-      const lines = await captureLog(async () => {
-        archivist = await startArchivist({ ...paths, credentialPath, maxBackoffMs: 400 });
+      const lines: string[] = [];
+      const realLog = console.log;
+      console.log = (...args: unknown[]): void => {
+        lines.push(args.map(String).join(" "));
+      };
+      try {
+        // Base backoff below the cap: a cap under the default base would make every delay the cap, reset or not.
+        archivist = await startArchivist({ ...paths, credentialPath, baseBackoffMs: 20, maxBackoffMs: 400 });
         await relay.registers.next();
+        await pollUntil(
+          () => lines.some((line) => line.includes('code=4403 reason="register role-refused"')),
+          "the role refusal",
+        );
+        // A non-event window: how many dials the backoff lets through.
         await Bun.sleep(1_000);
-      });
+      } finally {
+        console.log = realLog;
+      }
       // On the order of ten attempts, where a backoff reset on every open gives ~50.
       expect(relay.connectionCount()).toBeLessThanOrEqual(25);
-      expect(lines.some((line) => line.includes('code=4403 reason="register role-refused"'))).toBe(true);
       const roles: (readonly string[] | undefined)[] = [];
       while (relay.registers.size > 0) roles.push((await relay.registers.next()).roles);
       expect(roles.every((claim) => claim?.length === 1 && claim[0] === "archivist")).toBe(true);
     } finally {
       archivist?.stop();
       relay.stop();
+    }
+  });
+
+  // The seat's id is configuration: a re-mint would squat forever, so damage stops the start and leaves the file.
+  test("refuses to replace a state file it cannot use", async () => {
+    const paths = await setup("ws://127.0.0.1:1");
+    await mkdir(paths.stateDir, { recursive: true });
+    const statePath = join(paths.stateDir, "state.json");
+    for (const damaged of ["{ truncated", JSON.stringify({ deviceId: "abc", repos: [], identitySeed: "AAAA" })]) {
+      // oxlint-disable-next-line no-await-in-loop -- one damaged file at a time
+      await writeFile(statePath, damaged);
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await expect(startArchivist({ ...paths, credentialPath })).rejects.toThrow("refusing to replace");
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      expect(await readFile(statePath, "utf8")).toBe(damaged);
     }
   });
 
