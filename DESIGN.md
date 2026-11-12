@@ -887,10 +887,10 @@ nothing checked it. The last is the gap they leave.
 - **A PR status is read by the leader's own `gh`, never carried by a frame** (2026-10-23, Scheduler,
   "PR status"). `Scheduler.onPrStatus` is reachable from the leader's poller alone, never
   from `onEvent` or a request handler, and nothing on the wire carries a reading. It is bound
-  to the `prUrl` the record held when read, which only the machine the task was placed on, or
-  the app that created the queued record carrying it (a PSK holder, trusted as for the rest of
-  the record: `bindTaskRecord` checks only the state on a create), can have set
-  (`sessionChange`), and `prBound` drops it whenever a write moves that URL. Owner,
+  to one of the PR URLs the record held when read (`taskPrs`: `prUrl` and `prs`), which only the
+  machine the task was placed on, or the app that created the queued record carrying it (a PSK
+  holder, trusted as for the rest of the record: `bindTaskRecord` checks only the state on a
+  create), can have set (`sessionChange`), and `prBound` drops it whenever a write moves `prUrl`. Owner,
   repo and number reach `gh` as GraphQL variables under argv-array exec, the URL first held to
   `github.com`'s pull-request shape. The residual: a session can make the leader read any PR
   in any repo the operator's token can see, and the result lands only in a sealed record, so the worst
@@ -3183,13 +3183,15 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   Under `until: "reported"` it only records `merged: true`, as above. `closed` is recorded in
   `Task.pr` and moves nothing, and a finished task is never written. The local-git merge above stays as the
   fallback where `gh` is absent. No ordering of one reading against the last by `at`: it would
-  compare two leaders' clocks. Known gaps: only a task's newest PR is read, so a session that
-  opens several is settled by the last; a task marked done by hand is not polled; the forge's
+  compare two leaders' clocks. A session that opens several PRs is settled by its primary, the
+  newest not read closed (PR status, "Several PRs"), so one that folds a newer PR back into an
+  older and closes it settles on the older's merge. Known gaps: a PR reported while no leader
+  listened is read back only as the newest (`TaskProgress` carries one `prUrl`); a task marked done by hand is read once a term, not every poll (PR status, "A finished task is read once"); the forge's
   "open" does not release `after: "opened"`, which still reads the recorded `prUrl`; and
   `absorb` keeps `prUrl` across a branch switch, so a session that opens PR 1, switches
   branch for more work and has PR 1 merge before a new `gh pr create` settles the task on PR 1
   with the new branch's work unpushed. Accepted: /ship creates its branches by hand, so a
-  recorded branch cannot be required to match the PR's head. A live session's newer PR URL is
+  recorded branch cannot be required to match the PR's head. A live session's PR URL the task does not hold yet is
   recorded even when its state stands, since `after: "opened"` reads it. `onBranchState`, from the machine
   the task was placed on only, records `branch` and `pushed` — `pushed` never goes back
   within one branch, so the first pushed report with a PR releases `opened` for good — and
@@ -3814,7 +3816,7 @@ Branch state sees a merge only through the clone that launched the task, so a PR
 branch the daemon does not track (a /ship session creates its branches by hand, a hub opens PRs
 in sub-repos) never settled, and the PWA could say nothing of a PR beyond its number. The
 forge knows. The scheduler leader reads it: every minute from the start of its term (after
-takeover's load) it takes the `prUrl` of every unfinished task, and of every finished one that
+takeover's load) it takes every PR URL (`taskPrs`) of every unfinished task, and of every finished one that
 holds no merged reading and has not been read this term, that matches `https://github.com/<owner>/<repo>/pull/<n>` and asks GitHub
 for the lot with its own `gh`.
 
@@ -3852,8 +3854,9 @@ for the lot with its own `gh`.
   so once when it recovers. Nothing to poll means `gh` never runs.
 - **What writes.** `Scheduler.onPrStatus` → `prChange` (`scheduler/src/done.ts`) through `#update`,
   so the write has the per-task serial chain, the term fence and the version floor of every other,
-  and apps are nudged. A reading for a URL other than the task's current `prUrl` writes nothing,
-  nor does one on a task that is waiting or reserved, or finished with a merged reading: the
+  and apps are nudged. A reading for a URL that is none of the task's PRs writes nothing, one
+  for a PR other than its primary writes only its `closed` flag ("Several PRs"),
+  nor does any on a task that is waiting or reserved, or finished with a merged reading: the
   poller and `prChange` ask one predicate for which tasks to read (`wantsPrReading`,
   `shared/src/task-phase.ts`), so nothing is polled that cannot be applied.
 - **A finished task is read once.** One marked done by hand, or finished before this poller
@@ -3886,9 +3889,37 @@ for the lot with its own `gh`.
   is serial per task, and a past term's write is refused by the term fence, so a check could
   only compare two leaders' clocks, which drift after a host sleeps, and block a merge for
   good. A reading behind the stored `at` counts as not fresh, so a slower leader's refresh lands.
+- **Several PRs** (2026-11-12). A session can open more than one PR — /ship opening #6 and then
+  folding it back into #5 and closing it — and the record kept only the newest, so the task sat
+  `awaiting-merge` on a closed #6, failed `merge_expired` after #5 landed, and its `after:
+  "merged"` dependents waited on nothing. `Task.prs` now keeps every PR URL its session reported,
+  oldest first, each `closed` when the poller last read it so (a reopen clears it), at most
+  `TASK_PRS_MAX` (8) and `TASK_PRS_MAX_LENGTH` characters, the oldest that is not the primary
+  dropped first. `prUrl` stays, as the primary (`primaryPr`): the newest not read closed, else the
+  newest. Every reader that read `prUrl` — `after: "opened"`, `awaiting-merge`, the PWA's chip, an
+  older leader — still does, and `taskPrs` gives a record with `prUrl` alone (an older leader's,
+  which drops `prs` on its next write) as a list of one; `prs` is written only with two or more or
+  with a `closed` flag, so a lone PR read closed keeps it for a second one reported later.
+  A reported URL (session event, `progress` entry) is matched against every PR the task holds,
+  never only `prUrl`: the daemon keeps reporting its newest after the task fell back, and that
+  must not move it back. The poller reads every PR of a wanted task, newest first, so a fallback's
+  own reading lands in the same poll. A malformed `prs` is dropped at parse, never fatal. No
+  sentinel for older leaders: one that drops `prs` leaves the task on `prUrl`, today's behaviour.
+  Accepted gap: that loss is permanent, not only while the older leader leads. Its write drops the
+  list and the flags, and its daemon-reported newest PR can move `prUrl` back to a closed one; a
+  newer leader that takes over rebuilds the list from `prUrl` alone, so a rollback or a mixed
+  fleet forgets earlier PRs and the task can fail `merge_expired` as before.
+  The length bound keeps a record at every bound within `STORE_MAX_CT_LENGTH`: a list at its bound
+  beside its primary costs no more than a `prUrl` at `PR_URL_MAX_LENGTH` alone (parse.test.ts).
+  Accepted gap: the launch ledger's `TaskProgress` carries only the newest `prUrl`, so a PR reported
+  while no leader listened is missed. Rejected: "done once all merged", which a PR folded away and
+  closed would hold open for good.
 - **`prBound`.** A reading speaks only for the URL it was taken for, and `prUrl` changes on
-  several paths (`absorb` on a session event, a resumed `progress` entry), so `#update` drops
-  `pr` from any write that moved `prUrl` rather than each path remembering to.
+  several paths (`absorb` on a session event, a resumed `progress` entry, a fallback in
+  `prChange`), so `#update` drops
+  `pr` from any write that moved `prUrl` and carried the old reading, rather than each path remembering to;
+  a reading the write itself set (a fallback's own, in `prChange`) is for the new `prUrl` and stays.
+  A write that drops the list (`prFields`) sets `prs` to `undefined`, so no merge keeps a stale one.
 - **Rejected.** A poller in each daemon: the machine a session ran on may hold no GitHub token,
   cannot see a hub's sub-repo PRs, and would send one `branch-state`-like frame per daemon for a
   fact only one reader needs. Webhooks: the relay is blind and holds no secrets worth a
@@ -7074,8 +7105,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   Not in Needs you: nothing is owed to a session that finished its turn, and its slot is already free. A row shows the
   task's title (its own, else its prompt's first line cut to 80, else its session's window name, else its repo), where it is and
   why, with the decision's record on tap — in the past tense once the task was placed ("spending
-  credits", not "would spend"; a forecast spill says "may spill into credits" in either). A task whose session reported a PR (`Task.prUrl`, the newest one —
-  the record keeps no other) carries it as a chip linking out, leading the card's action row, `#123` where the URL names a
+  credits", not "would spend"; a forecast spill says "may spill into credits" in either). A task whose session reported a PR (`Task.prUrl`, its primary: the
+  newest not read closed, "Several PRs") carries it as a chip linking out, leading the card's action row, `#123` where the URL names a
   number (GitHub's `/pull/`, GitLab's `/merge_requests/`), else `PR`; the URL is safe as an href
   because the parser admits only `https:`. Beside the chip the card shows one action inline, the
   likeliest next step (`primaryAction` in `queue-view.ts`): **Continue**, else **Start now**, else

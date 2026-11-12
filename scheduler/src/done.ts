@@ -1,10 +1,15 @@
 import {
   isPrReadable,
+  primaryPr,
   PR_STATUS_REFRESH_MS,
   SIGKILL_STATUS,
+  TASK_PRS_MAX,
+  TASK_PRS_MAX_LENGTH,
+  taskPrs,
   wantsPrReading,
   type BranchState,
   type PrStatus,
+  type TaskPr,
   type TaskProgress,
 } from "@seance/shared";
 import { advance, PLACED, type Task, type TaskFields } from "./task.ts";
@@ -32,13 +37,54 @@ function trusted(task: Task, entry: Progress): Progress {
   return rest;
 }
 
+/**
+ * `prs` within `TASK_PRS_MAX` and `TASK_PRS_MAX_LENGTH`: the oldest that is not the primary
+ * dropped first. Dropping one that is not the primary never changes which is.
+ */
+function capped(prs: readonly TaskPr[]): readonly TaskPr[] {
+  const primary = primaryPr(prs);
+  let kept = prs;
+  const length = (list: readonly TaskPr[]): number => list.reduce((sum, pr) => sum + pr.url.length, 0);
+  while (kept.length > 1 && (kept.length > TASK_PRS_MAX || length(kept) > TASK_PRS_MAX_LENGTH)) {
+    const oldest = kept.findIndex((pr) => pr.url !== primary);
+    kept = kept.toSpliced(oldest, 1);
+  }
+  return kept;
+}
+
+/**
+ * A task's PR fields for `prs`: its primary as `prUrl`, and the list itself only when it says more
+ * than that — two or more, or a closed flag. An unwritten list is an explicit `undefined`, so
+ * every `{ ...task, ...fields }` merge drops a stale one instead of keeping it beside a new
+ * `prUrl`. A lone URL past `TASK_PRS_MAX_LENGTH` is no list either: the parser would refuse it.
+ */
+function prFields(prs: readonly TaskPr[]): Pick<Task, "prUrl" | "prs"> {
+  const prUrl = primaryPr(prs);
+  const listed =
+    (prs.length > 1 || prs.some((pr) => pr.closed === true)) &&
+    prs.reduce((sum, pr) => sum + pr.url.length, 0) <= TASK_PRS_MAX_LENGTH;
+  return { ...(prUrl === undefined ? {} : { prUrl }), prs: listed ? prs : undefined };
+}
+
+/**
+ * The fields a reported PR URL writes: none when the task already holds it — a daemon keeps
+ * reporting its newest after the task fell back to an older one (`prChange`), and that must not
+ * move it back — else appended to its PRs, which makes it the primary.
+ */
+export function reportedPr(task: Task, url: string | undefined): TaskFields {
+  if (url === undefined) return {};
+  const prs = taskPrs(task);
+  if (prs.some((pr) => pr.url === url)) return {};
+  return prFields(capped([...prs, { url }]));
+}
+
 /** Whether `entry` moves the task onto a branch other than the one recorded. */
 function switched(task: Task, entry: Progress): boolean {
   return entry.branch !== undefined && task.branch !== undefined && entry.branch !== task.branch;
 }
 
 /**
- * `task` with `entry` applied: a newer PR URL or branch, and `pushed` once true.
+ * `task` with `entry` applied: a new PR URL (`reportedPr`) or branch, and `pushed` once true.
  * None goes back within one branch, so the first report of a pushed branch with
  * a PR releases `after: "opened"` for good; a different branch starts unpushed,
  * since the old one's push says nothing of it. The same object when `entry`
@@ -49,7 +95,7 @@ function absorb(task: Task, entry: Progress): Task {
   const { pushed: _pushed, ...unpushed } = task;
   const base: Task = moved ? unpushed : task;
   const fields: TaskFields = {
-    ...(entry.prUrl === undefined || entry.prUrl === base.prUrl ? {} : { prUrl: entry.prUrl }),
+    ...reportedPr(base, entry.prUrl),
     ...(entry.branch === undefined || entry.branch === base.branch ? {} : { branch: entry.branch }),
     ...(entry.pushed === true && base.pushed !== true ? { pushed: true } : {}),
   };
@@ -157,16 +203,21 @@ export function branchChange(task: Task, state: BranchState, from: string): Task
 }
 
 /**
- * The leader's forge reading of `prUrl` (`daemon/src/pr-status.ts`), applied to
- * `task`: recorded as `Task.pr`, and a merge into the default branch settling it
+ * The leader's forge reading of one of the task's PRs (`taskPrs`; `daemon/src/pr-status.ts`).
+ * Each reading sets that PR's `closed` flag (closed iff read `closed`, so a reopen clears it),
+ * and the primary (`prUrl`, `primaryPr`) follows: a moved primary is written alone — `prBound`
+ * drops the old one's reading, and the poller reads the new one, newest first, in the same poll.
+ * A reading for any other PR writes only when its flag changed.
+ *
+ * The primary's own reading is applied to `task`: recorded as `Task.pr`, and a merge into the default branch settling it
  * `done` by `merged` — a session still running included, so a placed task is
  * marked `leftRunning` as `markDone` marks a `lost` one. A `stacked` merge (into
  * another PR's branch) is recorded and settles nothing: the work is not on the
  * default branch, and a dependent would be released on nothing. Under `until: "reported"` a merge is only recorded
  * (`Task.merged`), as `progressed` does. `closed` is recorded and moves
- * nothing. Null when it changes nothing: the task finished, waiting or
- * reserved (no session to have opened a PR yet), `prUrl` no longer the one read,
- * or an unchanged reading still inside `PR_STATUS_REFRESH_MS`.
+ * nothing but the primary. Null when it changes nothing: the task finished with a merged
+ * reading, waiting or reserved (no session to have opened a PR yet), the URL read not one of its
+ * PRs, or an unchanged reading still inside `PR_STATUS_REFRESH_MS`.
  *
  * No `trusted`/`hasWork`/branch gate, unlike `progressed`: the forge answers
  * for the exact PR the session reported, so a `here` task settles too, and
@@ -181,8 +232,20 @@ export function branchChange(task: Task, state: BranchState, from: string): Task
  * stored `at` just counts as not fresh.
  */
 export function prChange(task: Task, prUrl: string, status: PrStatus): Task | null {
-  if (task.prUrl !== prUrl) return null;
   if (!wantsPrReading(task)) return null;
+  const prs = taskPrs(task);
+  const at = prs.findIndex((p) => p.url === prUrl);
+  if (at === -1) return null;
+  const closed = status.state === "closed";
+  const flipped = (prs[at]?.closed === true) !== closed;
+  const listed = flipped ? prs.with(at, closed ? { url: prUrl, closed } : { url: prUrl }) : prs;
+  const relisted = flipped ? prFields(listed) : {};
+  if (primaryPr(listed) !== task.prUrl) {
+    const moved = { ...task, ...prFields(listed) };
+    // The PR read is the new primary: its reading is the primary's, applied to the moved task.
+    return primaryPr(listed) === prUrl ? prChange(prBound(task, moved), prUrl, status) : moved;
+  }
+  if (prUrl !== task.prUrl) return flipped ? { ...task, ...relisted } : null;
   const pr: PrStatus = {
     state: status.state,
     ...(status.checks === undefined ? {} : { checks: status.checks }),
@@ -190,7 +253,7 @@ export function prChange(task: Task, prUrl: string, status: PrStatus): Task | nu
     at: status.at,
   };
   // A finished task's one reading is for its chip alone: nothing is left for a merge to settle.
-  if (!isPrReadable(task.state)) return { ...task, pr };
+  if (!isPrReadable(task.state)) return { ...task, ...relisted, pr };
   const landed = status.state === "merged" && status.stacked !== true;
   const settles = landed && !settlesOnReport(task);
   const marks = landed && settlesOnReport(task) && task.merged !== true;
@@ -198,8 +261,9 @@ export function prChange(task: Task, prUrl: string, status: PrStatus): Task | nu
     task.pr?.state === status.state && task.pr?.checks === status.checks && task.pr?.stacked === status.stacked;
   const fresh = task.pr !== undefined && status.at >= task.pr.at && status.at - task.pr.at < PR_STATUS_REFRESH_MS;
   // A merged chip never greys (`PR_STATUS_STALE_MS`), so an unchanged one needs no refresh write.
-  if (same && (fresh || status.state === "merged") && !settles && !marks) return null;
-  const recorded: Task = { ...task, pr };
+  const relists = Object.keys(relisted).length > 0;
+  if (same && (fresh || status.state === "merged") && !settles && !marks && !relists) return null;
+  const recorded: Task = { ...task, ...relisted, pr };
   if (!landed) return recorded;
   if (settlesOnReport(task)) return mergedOpen(recorded);
   // The session is left alive, as for a `branch-state` settle; a placed task says so, as a lost one does.
@@ -209,12 +273,13 @@ export function prChange(task: Task, prUrl: string, status: PrStatus): Task | nu
 }
 
 /**
- * `after` without `pr` when it moved `prUrl` off `before`'s: a reading speaks
+ * `after` without `pr` when it moved `prUrl` off `before`'s and carried `before`'s reading: a reading speaks
  * only for the URL it was taken for, and `prUrl` changes in several paths
  * (`absorb`, a resumed `progress` entry), so this holds at the write boundary.
  */
 export function prBound(before: Task, after: Task): Task {
-  if (after.prUrl === before.prUrl || after.pr === undefined) return after;
+  // A `pr` the write itself set is for the `prUrl` it moved to (`prChange`): only a carried one is stale.
+  if (after.prUrl === before.prUrl || after.pr === undefined || after.pr !== before.pr) return after;
   const { pr: _pr, ...rest } = after;
   return rest;
 }

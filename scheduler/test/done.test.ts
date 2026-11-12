@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import {
   CAPABILITIES,
   PR_STATUS_REFRESH_MS,
+  TASK_PRS_MAX,
+  TASK_PRS_MAX_LENGTH,
   type BranchState,
   type DespawnRequest,
   type DespawnResponse,
@@ -11,7 +13,7 @@ import {
   wantsPrReading,
 } from "@seance/shared";
 import { advance, DEFAULT_CONFIG, MemoryQueueStore, Scheduler, type Task } from "../src/index.ts";
-import { branchChange, ended, prBound, progressed } from "../src/done.ts";
+import { branchChange, ended, prBound, progressed, reportedPr } from "../src/done.ts";
 import { expiry } from "../src/expiry.ts";
 import { enqueue, FakeFleet, machine, NOW, readerChecked, spec } from "./fixtures.ts";
 
@@ -1091,6 +1093,177 @@ describe("PR status", () => {
     const moved = prBound(before, { ...before, prUrl: "https://github.com/acme/app/pull/9" });
     expect(moved.pr).toBeUndefined();
     expect(moved.prUrl).toBe("https://github.com/acme/app/pull/9");
+  });
+});
+
+describe("a task that opened several PRs", () => {
+  const READ = NOW + 1_000;
+  const reading = (state: PrStatus["state"], at = READ): PrStatus => ({ state, at });
+  const pull = (n: number): string => `https://github.com/acme/app/pull/${n}`;
+  const version = async (store: MemoryQueueStore, id: string): Promise<number | undefined> =>
+    (await store.get(id))?.version;
+
+  test("folding the newer PR into the older one leaves the task on the older: re-reports don't move it back, and its merge settles", async () => {
+    const { scheduler, put, store } = setup();
+    await put("t", { assignment: ON_A });
+    await scheduler.load();
+    await scheduler.onSession("t", "busy", FROM_A, pull(5));
+    // One PR: `prUrl` says it all, so no list is written.
+    expect(scheduler.task("t")?.prUrl).toBe(pull(5));
+    expect(scheduler.task("t")?.prs).toBeUndefined();
+    await scheduler.onSession("t", "busy", FROM_A, pull(6));
+    expect(scheduler.task("t")).toMatchObject({ prUrl: pull(6), prs: [{ url: pull(5) }, { url: pull(6) }] });
+
+    await scheduler.onPrStatus("t", pull(6), reading("closed"));
+    expect(scheduler.task("t")).toMatchObject({
+      state: "running",
+      prUrl: pull(5),
+      prs: [{ url: pull(5) }, { url: pull(6), closed: true }],
+    });
+    // The closed PR's reading spoke for #6 alone.
+    expect(scheduler.task("t")?.pr).toBeUndefined();
+
+    // The session's mod keeps reporting the newest PR it saw.
+    const fallen = await version(store, "t");
+    await scheduler.onSession("t", "busy", FROM_A, pull(6));
+    await scheduler.onSession("t", "needs-input", FROM_A, pull(6));
+    await scheduler.onSession("t", "busy", FROM_A, pull(5));
+    expect(await version(store, "t")).toBe((fallen ?? 0) + 2);
+    expect(scheduler.task("t")).toMatchObject({ state: "running", prUrl: pull(5) });
+    const task = scheduler.task("t");
+    if (task === undefined) throw new Error("no task");
+    expect(progressed(task, { prUrl: pull(6) })).toBe(task);
+
+    await scheduler.onPrStatus("t", pull(5), reading("merged"));
+    expect(scheduler.task("t")).toMatchObject({
+      state: "done",
+      doneBy: "merged",
+      leftRunning: true,
+      prUrl: pull(5),
+      pr: { state: "merged" },
+    });
+  });
+
+  test("a reopen clears the flag and the newer PR is primary again; with every PR closed the newest is", async () => {
+    const { scheduler, put } = setup();
+    const prs = [{ url: pull(5) }, { url: pull(6), closed: true as const }];
+    await put("t", { assignment: ON_A, prUrl: pull(5), prs });
+    await scheduler.load();
+    await scheduler.onPrStatus("t", pull(6), reading("open"));
+    expect(scheduler.task("t")).toMatchObject({ prUrl: pull(6), prs: [{ url: pull(5) }, { url: pull(6) }] });
+    expect(scheduler.task("t")?.prs?.[1]?.closed).toBeUndefined();
+
+    await scheduler.onPrStatus("t", pull(6), reading("closed"));
+    expect(scheduler.task("t")?.prUrl).toBe(pull(5));
+    await scheduler.onPrStatus("t", pull(5), reading("closed"));
+    expect(scheduler.task("t")).toMatchObject({
+      state: "running",
+      prUrl: pull(6),
+      prs: [
+        { url: pull(5), closed: true },
+        { url: pull(6), closed: true },
+      ],
+    });
+  });
+
+  test("a reading of a PR that is not the primary writes only when its closed flag changes, a merge included", async () => {
+    const { scheduler, put, store } = setup();
+    await put("t", { assignment: ON_A, prUrl: pull(6), prs: [{ url: pull(5) }, { url: pull(6) }] });
+    await scheduler.load();
+    const written = await version(store, "t");
+    await scheduler.onPrStatus("t", pull(5), reading("open"));
+    await scheduler.onPrStatus("t", pull(5), reading("merged"));
+    await scheduler.onPrStatus("t", pull(7), reading("closed"));
+    expect(await version(store, "t")).toBe(written);
+    expect(scheduler.task("t")).toMatchObject({ state: "running", prUrl: pull(6) });
+    expect(scheduler.task("t")?.pr).toBeUndefined();
+  });
+
+  test("the primary's own closed reading with no PR to fall back to is recorded, its flag beside it", async () => {
+    const { scheduler, put } = setup();
+    await put("t", { assignment: ON_A, prUrl: pull(6), prs: [{ url: pull(5), closed: true }, { url: pull(6) }] });
+    await scheduler.load();
+    await scheduler.onPrStatus("t", pull(6), reading("closed"));
+    expect(scheduler.task("t")).toMatchObject({
+      prUrl: pull(6),
+      prs: [
+        { url: pull(5), closed: true },
+        { url: pull(6), closed: true },
+      ],
+      pr: { state: "closed" },
+    });
+  });
+
+  test("a lone PR read closed keeps its flag, so a second one reported later settles on its own reading without flip-flopping", async () => {
+    const { scheduler, put, store } = setup();
+    await put("t", { assignment: ON_A, prUrl: pull(6) });
+    await scheduler.load();
+    await scheduler.onPrStatus("t", pull(6), reading("closed"));
+    expect(scheduler.task("t")).toMatchObject({ prUrl: pull(6), prs: [{ url: pull(6), closed: true }] });
+    await scheduler.onSession("t", "busy", FROM_A, pull(7));
+    expect(scheduler.task("t")).toMatchObject({
+      prUrl: pull(7),
+      prs: [{ url: pull(6), closed: true }, { url: pull(7) }],
+    });
+    await scheduler.onPrStatus("t", pull(7), reading("closed"));
+    expect(scheduler.task("t")).toMatchObject({ prUrl: pull(7), pr: { state: "closed" } });
+    const settled = await version(store, "t");
+    await scheduler.onPrStatus("t", pull(6), reading("closed"));
+    expect(await version(store, "t")).toBe(settled);
+  });
+
+  test("a reopen of the only flagged PR drops its list; a reading that makes its PR primary is applied", async () => {
+    const { scheduler, put } = setup();
+    await put("t", { assignment: ON_A, prUrl: pull(6), prs: [{ url: pull(6), closed: true }] });
+    await scheduler.load();
+    await scheduler.onPrStatus("t", pull(6), reading("open"));
+    expect(scheduler.task("t")?.prs).toBeUndefined();
+    expect(scheduler.task("t")).toMatchObject({ prUrl: pull(6), pr: { state: "open" } });
+
+    await put("u", { assignment: ON_A, prUrl: pull(5), prs: [{ url: pull(5) }, { url: pull(6), closed: true }] });
+    await scheduler.load();
+    await scheduler.onPrStatus("u", pull(6), reading("merged"));
+    expect(scheduler.task("u")).toMatchObject({ prUrl: pull(6), state: "done", pr: { state: "merged" } });
+  });
+
+  test("a reported URL too long to share a list leaves no stale list beside it, in memory or stored", async () => {
+    const { scheduler, put, store } = setup();
+    await put("t", { assignment: ON_A, prUrl: pull(2), prs: [{ url: pull(1) }, { url: pull(2) }] });
+    await scheduler.load();
+    const longer = `https://github.com/acme/${"r".repeat(TASK_PRS_MAX_LENGTH)}/pull/4`;
+    await scheduler.onSession("t", "busy", FROM_A, longer);
+    expect(scheduler.task("t")?.prUrl).toBe(longer);
+    expect(scheduler.task("t")?.prs).toBeUndefined();
+    expect(JSON.stringify(await store.get("t"))).not.toContain(pull(1));
+  });
+
+  test("a record from an older leader, prUrl alone, gains its list on the next new PR", () => {
+    const task: Task = { id: "t", spec: spec(), state: "running", createdAt: NOW, prUrl: pull(5) };
+    expect(reportedPr(task, pull(5))).toEqual({});
+    expect(reportedPr(task, pull(6))).toEqual({ prUrl: pull(6), prs: [{ url: pull(5) }, { url: pull(6) }] });
+  });
+
+  test("the list is capped, oldest dropped first, and the primary never", () => {
+    const urls = Array.from({ length: TASK_PRS_MAX }, (_, i) => pull(i + 1));
+    const full: Task = {
+      id: "t",
+      spec: spec(),
+      state: "running",
+      createdAt: NOW,
+      prUrl: pull(1),
+      // Every one but the oldest closed: it is the primary.
+      prs: urls.map((url, i) => (i === 0 ? { url } : { url, closed: true as const })),
+    };
+    const next = reportedPr(full, pull(99));
+    expect(next.prUrl).toBe(pull(99));
+    expect(next.prs?.map((pr) => pr.url)).toEqual([...urls.slice(1), pull(99)]);
+
+    // Past the length bound the oldest go until it fits; a primary longer than the bound alone leaves no list.
+    const long = (n: number): string => `https://github.com/acme/${"r".repeat(TASK_PRS_MAX_LENGTH - 80)}/pull/${n}`;
+    const two: Task = { ...full, prUrl: pull(2), prs: [{ url: pull(1) }, { url: pull(2) }] };
+    expect(reportedPr(two, long(3))).toEqual({ prUrl: long(3), prs: [{ url: pull(2) }, { url: long(3) }] });
+    const longer = `https://github.com/acme/${"r".repeat(TASK_PRS_MAX_LENGTH)}/pull/4`;
+    expect(reportedPr(two, longer)).toEqual({ prUrl: longer });
   });
 });
 

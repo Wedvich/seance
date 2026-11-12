@@ -6,19 +6,20 @@ import {
   type PrState,
   type PrStatus,
   type Task,
+  taskPrs,
   wantsPrReading,
 } from "@seance/shared";
 import { exec } from "./exec.ts";
 
 /**
  * Live PR status from the scheduler leader (DESIGN.md, "PR status"): one
- * batched GraphQL read per poll, through the operator's own `gh`, of the PR of
- * every task `wantsPrReading` names. Runs only on the leader (`leader.ts` starts it
+ * batched GraphQL read per poll, through the operator's own `gh`, of every PR
+ * (`taskPrs`) of every task `wantsPrReading` names. Runs only on the leader (`leader.ts` starts it
  * after takeover and stops it with the term) and is never reachable from
  * `seanced mcp`, whose stdout is its JSON-RPC channel — hence `log` is passed
  * in, and this module imports no `log.ts`.
  *
- * What it reads is a task's `prUrl`, which a session reported; owner, repo and
+ * What it reads are a task's PR URLs, which a session reported; owner, repo and
  * number reach `gh` only as GraphQL variables in an argv array, never in the
  * query text, which is built from alias indices alone.
  */
@@ -321,20 +322,29 @@ async function readChunk(deps: PrPollerDeps, prs: readonly GithubPr[]): Promise<
  * A finished task is read once a term: `read` holds those already read, `unreadable` the PRs the
  * forge would not answer. Its chip is not worth a read a minute, and an abandoned open PR would
  * otherwise be read for as long as the store keeps the task.
+ *
+ * Every PR of a task is read, newest first: a newer one read closed moves the task to an older
+ * (`prChange`), whose reading then lands in the same poll — the writes keep this order, and a
+ * finished task gets no second poll this term. Two tasks sharing a PR can put an older one first;
+ * the next poll catches it up.
  */
 function targets(tasks: readonly Task[], unreadable: ReadonlySet<string>, read: ReadonlySet<string>): Target[] {
   const byKey = new Map<string, Target>();
   for (const task of tasks) {
-    if (!wantsPrReading(task) || task.prUrl === undefined) continue;
-    if (!isPrReadable(task.state) && (unreadable.has(task.prUrl) || read.has(task.id))) continue;
-    const pr = parseGithubPr(task.prUrl);
-    if (pr === null) continue;
-    // GitHub names are case-insensitive: two spellings are one PR.
-    const key = `${pr.owner}/${pr.repo}#${pr.number}`.toLowerCase();
-    const known = byKey.get(key);
-    const entry = { id: task.id, prUrl: task.prUrl, finished: !isPrReadable(task.state) };
-    if (known === undefined) byKey.set(key, { pr, tasks: [entry] });
-    else known.tasks.push(entry);
+    if (!wantsPrReading(task)) continue;
+    const finished = !isPrReadable(task.state);
+    if (finished && read.has(task.id)) continue;
+    for (const { url } of taskPrs(task).toReversed()) {
+      if (finished && unreadable.has(url)) continue;
+      const pr = parseGithubPr(url);
+      if (pr === null) continue;
+      // GitHub names are case-insensitive: two spellings are one PR.
+      const key = `${pr.owner}/${pr.repo}#${pr.number}`.toLowerCase();
+      const known = byKey.get(key);
+      const entry = { id: task.id, prUrl: url, finished };
+      if (known === undefined) byKey.set(key, { pr, tasks: [entry] });
+      else known.tasks.push(entry);
+    }
   }
   return [...byKey.values()];
 }
@@ -367,6 +377,8 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
   async function poll(): Promise<"ok" | Failure | null> {
     const wanted = targets(deps.tasks(), unreadable, readThisTerm);
     if (wanted.length === 0) return null;
+    // A finished task's read is spent only once every chunk answered: its PRs may sit in several.
+    const spent = new Set<string>();
     for (let from = 0; from < wanted.length; from += CHUNK) {
       const chunk = wanted.slice(from, from + CHUNK);
       // oxlint-disable-next-line no-await-in-loop -- chunks run one after another, never overlapping
@@ -383,7 +395,7 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
         if (read === undefined) return;
         // Any answer spends a finished task's read, an unusable one too: else it is asked every poll.
         // Only a task finished when targeted: one read while placed still owes its finished read.
-        for (const task of target.tasks) if (task.finished) readThisTerm.add(task.id);
+        for (const task of target.tasks) if (task.finished) spent.add(task.id);
         if (read.kind === "none") {
           const url = target.tasks[0]?.prUrl;
           if (read.error !== null && url !== undefined && !unreadable.has(url)) {
@@ -404,6 +416,7 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
       await Promise.all(writes);
       if (stopped) return null;
     }
+    for (const id of spent) readThisTerm.add(id);
     return "ok";
   }
 

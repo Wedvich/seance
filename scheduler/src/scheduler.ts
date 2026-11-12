@@ -639,8 +639,9 @@ export class Scheduler {
 
   /**
    * The leader's own forge reading of a task's PR (`prChange`): never a frame,
-   * so it carries no `from`. Bound to `prUrl`, the URL it was read for. A
-   * dependent it releases moves on the next pass, as with `onBranchState`.
+   * so it carries no `from`. Bound to `prUrl`, the URL it was read for: one of
+   * the task's PRs (`taskPrs`). A dependent it releases moves on the next pass,
+   * as with `onBranchState`.
    */
   async onPrStatus(taskId: string, prUrl: string, status: PrStatus): Promise<void> {
     await this.#update(taskId, (task) => prChange(task, prUrl, status));

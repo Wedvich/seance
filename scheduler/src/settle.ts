@@ -8,7 +8,7 @@ import {
   type TaskFailureCode,
   type TaskProgress,
 } from "@seance/shared";
-import { ended, progressed } from "./done.ts";
+import { ended, progressed, reportedPr } from "./done.ts";
 import { UNDELIVERED, UNREACHABLE, type TaskSessionsReply, type TaskSpawnReply } from "./ports.ts";
 import {
   advance,
@@ -48,10 +48,13 @@ export function sourceOf(deviceId: string, event: SessionEvent): SessionSource {
   return { deviceId, pane, ...(remoteSession === undefined ? {} : { remoteSession }) };
 }
 
-/** The fields a session event writes besides its state: its PR URL and its remote session, each when it carried one. */
-function factsOf(from: SessionSource | undefined, prUrl: string | undefined): Partial<Task> {
+/**
+ * The fields a session event writes besides its state: its PR URL when `task` does not hold it
+ * yet (`reportedPr`), and its remote session when it carried one.
+ */
+function factsOf(task: Task, from: SessionSource | undefined, prUrl: string | undefined): Partial<Task> {
   const remoteSession = from?.remoteSession;
-  return { ...(prUrl === undefined ? {} : { prUrl }), ...(remoteSession === undefined ? {} : { remoteSession }) };
+  return { ...reportedPr(task, prUrl), ...(remoteSession === undefined ? {} : { remoteSession }) };
 }
 
 /** What a settle reads besides the task and the machine's answer. */
@@ -147,7 +150,7 @@ export function waitsForExit(
  */
 function reported(task: Task, from: SessionSource | undefined, prUrl: string | undefined): Task | null {
   if (task.spec.until !== "reported" || from === undefined) return null;
-  const pr = factsOf(from, prUrl);
+  const pr = factsOf(task, from, prUrl);
   if (task.state === "reserved") {
     const at = task.reservation;
     if (at === undefined || at.deviceId !== from.deviceId) return null;
@@ -164,8 +167,8 @@ function reported(task: Task, from: SessionSource | undefined, prUrl: string | u
 /**
  * A session event, with the PR URL it carried. A session that ended settles as
  * `ended` does (`awaiting-merge` with a PR, else `done`); one still live moves
- * between `running` and `needs-input`, and records a new PR URL even when its
- * state stands — `after: "opened"` and `awaiting-merge` read it. One that
+ * between `running` and `needs-input`, and records a PR URL it does not hold yet
+ * even when its state stands — `after: "opened"` and `awaiting-merge` read it. One that
  * reports `done` settles as `reported` says.
  *
  * `awaitsExit`: the sender's daemon reports exit statuses (`CAPABILITIES.exitStatus`).
@@ -182,7 +185,7 @@ export function sessionChange(
   awaitsExit = false,
 ): Task | null {
   if (state === "done") return reported(task, from, prUrl);
-  const pr = factsOf(from, prUrl);
+  const pr = factsOf(task, from, prUrl);
   const deferred = waitsForExit(task, state, from, prUrl, awaitsExit);
   if (task.state === "reserved") {
     const at = task.reservation;
@@ -206,7 +209,7 @@ export function sessionChange(
   if (state === "ended") return ended(task, undefined, fields);
   const to = liveState(state);
   if (task.state !== to) return advance(task, to, fields);
-  return (prUrl === undefined || prUrl === task.prUrl) && !newRemote ? null : { ...task, ...fields };
+  return pr.prUrl === undefined && !newRemote ? null : { ...task, ...fields };
 }
 
 /**

@@ -933,8 +933,8 @@ of M4 has landed.
     or reuse by another task; a pane killed with no further event (tmux server gone, a window closed
     by hand that the mod never reports) leaves its entry until the daemon restarts. Bounded by the
     panes one daemon ever ran, a few bytes each, so not worth a sweep until something reads the map.
-  - _Later:_ several PRs per task (`prUrls`, done once all merged, one alert per PR). Until then a
-    task tracks only the last PR its session opened, so a multi-PR run keeps watching.
+  - _Built 2026-11-12:_ several PRs per task (`Task.prs`, DESIGN.md "PR status", "Several PRs"):
+    the task stands on its newest PR not read closed. _Later:_ one alert per PR.
   - _Later:_ stacked PRs, once Stacking lands. A `reviewDecision` chip, with `CHANGES_REQUESTED` as a
     `pr-blocked` reason.
   - _Deferred:_ the leader writing to GitHub (`gh pr update-branch`, re-running a flaky job). That is
