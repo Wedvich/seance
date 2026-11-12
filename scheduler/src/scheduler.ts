@@ -293,6 +293,13 @@ export class Scheduler {
    * its session ended.
    */
   readonly #cancelling = new Map<string, number>();
+  /**
+   * Task id → its `cancel` and `markDone` calls still out, counted or not (`#cancelling` is the subset that
+   * holds the despawn's own `ended`). A pass refuses `conflict` while one is out, before it pushes, before
+   * it creates and inside the commit write, so a stop that began first wins over a pass that starts or
+   * commits under its despawn, as one that begins after the commit does (`#counting`).
+   */
+  readonly #stopping = new Map<string, number>();
   /** Task id → its pass, still out (`pass`): a second pass of the task waits for it and answers its result. */
   readonly #passInFlight = new Map<string, Promise<PassResult>>();
   /**
@@ -808,23 +815,37 @@ export class Scheduler {
    * safe (the despawn finds no session).
    */
   async cancel(taskId: string): Promise<CancelResult> {
-    const result = await this.#counting(taskId, () =>
-      this.#byHand(taskId, (current, { task, live }) => {
-        if (FINISHED.includes(current.state)) return { ok: true, task: current };
-        if (current.state === "reserved") return { ok: false, code: "dispatching" };
-        const leftRunning = task.state === "lost" && task.assignment !== undefined && !live;
-        // What was despawned, or found gone, must still be what is cancelled.
-        if (leftRunning ? current.state !== "lost" : current.assignment?.deviceId !== task.assignment?.deviceId) {
-          return null;
-        }
-        return advance(current, "cancelled", leftRunning ? { leftRunning: true } : {});
-      }),
+    const result = await this.#stopOut(taskId, () =>
+      this.#counting(taskId, () =>
+        this.#byHand(taskId, (current, { task, live }) => {
+          if (FINISHED.includes(current.state)) return { ok: true, task: current };
+          if (current.state === "reserved") return { ok: false, code: "dispatching" };
+          const leftRunning = task.state === "lost" && task.assignment !== undefined && !live;
+          // What was despawned, or found gone, must still be what is cancelled.
+          if (leftRunning ? current.state !== "lost" : current.assignment?.deviceId !== task.assignment?.deviceId) {
+            return null;
+          }
+          return advance(current, "cancelled", leftRunning ? { leftRunning: true } : {});
+        }),
+      ),
     );
     // A settle held for this cancel waits on the machine's answer: ask now, not at the next sweep.
     if (!result.ok && result.code === "despawn_failed" && this.#heldNotes.has(taskId)) {
       this.tick().catch(this.#onError);
     }
     return result;
+  }
+
+  /** `run` with a stop (`cancel`, `markDone`) registered for `taskId` (`#stopping`), whatever it returns or throws. */
+  async #stopOut<T>(taskId: string, run: () => Promise<T>): Promise<T> {
+    this.#stopping.set(taskId, (this.#stopping.get(taskId) ?? 0) + 1);
+    try {
+      return await run();
+    } finally {
+      const left = (this.#stopping.get(taskId) ?? 1) - 1;
+      if (left > 0) this.#stopping.set(taskId, left);
+      else this.#stopping.delete(taskId);
+    }
   }
 
   /**
@@ -969,10 +990,10 @@ export class Scheduler {
     };
     // A passed task's despawn ends its session as a cancel's does, and would settle it `superseded` first; so
     // would one whose pass is in flight, which may commit while this despawn runs.
-    if (this.task(taskId)?.successor === undefined && !this.#passInFlight.has(taskId)) {
-      return this.#byHand(taskId, decide);
-    }
-    return this.#counting(taskId, () => this.#byHand(taskId, decide));
+    const counted = this.task(taskId)?.successor !== undefined || this.#passInFlight.has(taskId);
+    return this.#stopOut(taskId, () =>
+      counted ? this.#counting(taskId, () => this.#byHand(taskId, decide)) : this.#byHand(taskId, decide),
+    );
   }
 
   /**
@@ -1008,7 +1029,7 @@ export class Scheduler {
    * already carries `successor` answers `ok` with it, so a client that timed out can ask again.
    * Refused, with nothing written beyond a pushed branch, before the successor exists; after the commit
    * a failed close still answers `ok` (the old task stays `running` with `successor` set, and `#closePasses`
-   * retries it every pass).
+   * retries it every pass). A `cancel` or `markDone` out for the task is `conflict` (`#stopping`).
    */
   pass(taskId: string, trigger: SuccessorTrigger = "manual"): Promise<PassResult> {
     const joined = this.#passInFlight.get(taskId);
@@ -1035,6 +1056,8 @@ export class Scheduler {
     const { assignment } = task;
     if (task.state !== "running" || assignment === undefined) return { ok: false, code: "not_running" };
     if (task.spec.mode === "here") return { ok: false, code: "here" };
+    // A cancel or mark-done already out wins: its despawn would otherwise end a session this pass then supersedes.
+    if (this.#stopping.has(taskId)) return { ok: false, code: "conflict" };
     const fleet = this.#fleet;
     const create = this.#create;
     // Before any push: an older host answers an unknown op `invalid_request`, which would read as a failure to push.
@@ -1071,7 +1094,8 @@ export class Scheduler {
       current.state !== "running" ||
       current.successor !== undefined ||
       at === undefined ||
-      at.deviceId !== assignment.deviceId
+      at.deviceId !== assignment.deviceId ||
+      this.#stopping.has(taskId)
     ) {
       return { ok: false, code: "conflict" };
     }
@@ -1096,7 +1120,10 @@ export class Scheduler {
     let committed: Task | null = null;
     try {
       committed = await this.#update(taskId, (c) =>
-        c.state === "running" && c.successor === undefined && c.assignment?.deviceId === assignment.deviceId
+        c.state === "running" &&
+        c.successor === undefined &&
+        c.assignment?.deviceId === assignment.deviceId &&
+        !this.#stopping.has(taskId)
           ? { ...c, successor: successor.id }
           : null,
       );

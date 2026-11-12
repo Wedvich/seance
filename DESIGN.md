@@ -3422,6 +3422,12 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   one, and `markDone` of a task carrying `successor`, or whose pass is in flight (`#passInFlight`: the pass
   may commit while the despawn runs), counts in `#cancelling` for its call as `cancel`
   does, so neither answers `superseded` nor lets the successor run on after the person said stop.
+  The other order wins too: `#stopping` registers every `cancel` and `markDone` out (counted or not), and a
+  pass refuses `conflict` while one is, at its start, again after the push, and inside the commit write, so a
+  stop that began first is never overtaken by a pass that starts or commits under its despawn; a successor
+  already created by then is an orphan, failed `pass_abandoned` when the stop settles the task. A stop whose
+  despawn fails writes nothing: a pass it raced stands, its close held until `PASS_CLOSE_GRACE_MS` and then
+  settled `superseded`, and a mark-done asked again before then wins, after it answers `finished`.
   `successor` is written only by the leader
   (`appWrite: false`), and a `superseded` task without it is malformed. Rejected: `failed` with a
   code `superseded`; `done` with `doneBy: "successor"`.
@@ -6994,7 +7000,7 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
     threat-model change ("The push", below). Rejected: daemon WIP commits, never pushing, always
     pushing to the local branch's name.
   - **O3: the automatic trigger is specced now and built later** ("The automatic trigger").
-- **Ordering, the same for every trigger (D1).** Leader-driven: (0) the in-flight guard; (1) validate;
+- **Ordering, the same for every trigger (D1).** Leader-driven: (0) the in-flight guard; (1) validate (a `cancel` or `mark-done` already out for the task is `conflict`);
   (2) read the PR's head and state when the task has a GitHub PR (a merged or closed one is
   `pr_not_open`); (3) push (outside path: the leader asks the old
   machine with `push-branch { taskId, expect }`, `expect` being that head; self path: the daemon

@@ -1270,7 +1270,11 @@ of M4 has landed.
       the despawn's own `ended`: `#yieldToCancel` holds a `superseded` settle as it holds a `failed`
       one, and `markDone` of a task carrying `successor`, or whose pass is in flight (it may commit
       while the despawn runs), counts in `#cancelling` for its call, so
-      neither answers `superseded` or lets the successor run after the person said stop.
+      neither answers `superseded` or lets the successor run after the person said stop. The other
+      order wins too: a pass refuses `conflict` while a `cancel` or `mark-done` is out (`#stopping`), at
+      its start, after the push and inside the commit write. A stop whose despawn fails writes
+      nothing: a pass it raced stands and is closed at its grace; a mark-done asked again before
+      then wins.
     - **D5. The successor waits for its predecessor.** It is released only when the predecessor is
       `superseded` naming it; `blocked` while the predecessor is unfinished, unreadable, or missing
       inside `DEP_MISSING_GRACE_MS`; `done` by `merged` when the predecessor was merged (the same answer

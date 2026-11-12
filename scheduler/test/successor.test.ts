@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   CAPABILITIES,
   DEP_MISSING_GRACE_MS,
+  type DespawnResponse,
   PASS_CLOSE_GRACE_MS,
   SUCCESSOR_CHAIN_MAX,
   type PrStatus,
@@ -471,31 +472,49 @@ describe("pass", () => {
       expect(s.scheduler.task(result.successorId)?.state).toBe("failed");
     });
 
-    test("mark-done while the pass is still pushing wins over the commit that lands under its despawn", async () => {
+    /** The old task's commit write (the first with `successor` set) stays out until the returned gate opens. */
+    function holdCommit(s: Setup): { readonly landing: Promise<void>; readonly release: () => void } {
+      const gate = Promise.withResolvers<void>();
+      const reached = Promise.withResolvers<void>();
+      const original = s.store.put.bind(s.store);
+      s.store.put = async (id, version, body) => {
+        if (id === "old" && body.successor !== undefined) {
+          reached.resolve();
+          await gate.promise;
+        }
+        return original(id, version, body);
+      };
+      return { landing: reached.promise, release: () => gate.resolve() };
+    }
+
+    /** The first despawn stays out until the returned gate opens (a stop's own, when it is the one begun first). */
+    function holdFirstDespawn(s: Setup, reply?: () => DespawnResponse): () => void {
+      const gate = Promise.withResolvers<void>();
+      const base = s.fleet.despawn.bind(s.fleet);
+      let calls = 0;
+      s.fleet.despawn = async (deviceId, request) => {
+        calls += 1;
+        if (calls > 1) return base(deviceId, request);
+        await gate.promise;
+        return reply === undefined ? base(deviceId, request) : reply();
+      };
+      return () => gate.resolve();
+    }
+
+    test("mark-done while the pass is committing wins over the commit that lands under its despawn", async () => {
       const s = setup();
       const old = await running(s, false);
-      const pushGate = Promise.withResolvers<void>();
-      const despawnGate = Promise.withResolvers<void>();
-      const answer = s.fleet.pushReply;
-      s.fleet.pushReply = async (request) => {
-        await pushGate.promise;
-        return answer(request);
-      };
-      const base = s.fleet.despawn.bind(s.fleet);
-      let despawns = 0;
-      s.fleet.despawn = async (deviceId, request) => {
-        despawns += 1;
-        // The first despawn is mark-done's: it stays out while the pass commits.
-        if (despawns === 1) await despawnGate.promise;
-        return base(deviceId, request);
-      };
+      const commit = holdCommit(s);
+      const releaseDespawn = holdFirstDespawn(s);
       const passing = s.scheduler.pass(old.id);
-      await Bun.sleep(5);
+      await commit.landing;
+      // The commit has passed its check and is writing: the task still reads `running`, so only the in-flight pass tells.
+      expect(s.scheduler.task(old.id)?.successor).toBeUndefined();
       const marking = s.scheduler.markDone(old.id);
       await Bun.sleep(5);
-      pushGate.resolve();
+      commit.release();
       const passed = ok(await passing);
-      despawnGate.resolve();
+      releaseDespawn();
       const marked = await marking;
       expect(marked).toMatchObject({ ok: true, task: { state: "done", doneBy: "manual" } });
       expect(s.scheduler.task(old.id)).toMatchObject({ state: "done", doneBy: "manual" });
@@ -505,6 +524,122 @@ describe("pass", () => {
         state: "failed",
         failure: { code: "pass_abandoned" },
       });
+    });
+
+    test("mark-done while the pass is still pushing refuses the pass before it creates anything", async () => {
+      const s = setup();
+      const old = await running(s, false);
+      const pushGate = Promise.withResolvers<void>();
+      const answer = s.fleet.pushReply;
+      s.fleet.pushReply = async (request) => {
+        await pushGate.promise;
+        return answer(request);
+      };
+      const releaseDespawn = holdFirstDespawn(s);
+      const passing = s.scheduler.pass(old.id);
+      await Bun.sleep(5);
+      const marking = s.scheduler.markDone(old.id);
+      await Bun.sleep(5);
+      pushGate.resolve();
+      expect(await passing).toEqual({ ok: false, code: "conflict" });
+      releaseDespawn();
+      expect(await marking).toMatchObject({ ok: true, task: { state: "done", doneBy: "manual" } });
+      expect(s.creates).toEqual([]);
+      expect(s.scheduler.task(old.id)?.successor).toBeUndefined();
+    });
+
+    test("mark-done while the successor is being created refuses the commit, and the successor fails", async () => {
+      const s = setup();
+      const old = await running(s, false);
+      const createGate = Promise.withResolvers<void>();
+      s.create = async () => {
+        await createGate.promise;
+        return { ok: true };
+      };
+      const releaseDespawn = holdFirstDespawn(s);
+      const passing = s.scheduler.pass(old.id);
+      await Bun.sleep(5);
+      expect(s.creates).toHaveLength(1);
+      const marking = s.scheduler.markDone(old.id);
+      await Bun.sleep(5);
+      createGate.resolve();
+      expect(await passing).toEqual({ ok: false, code: "conflict" });
+      releaseDespawn();
+      expect(await marking).toMatchObject({ ok: true, task: { state: "done", doneBy: "manual" } });
+      expect(s.scheduler.task(old.id)?.successor).toBeUndefined();
+      await tick(s.scheduler);
+      expect(s.scheduler.task(s.creates[0]?.id ?? "")).toMatchObject({
+        state: "failed",
+        failure: { code: "pass_abandoned" },
+      });
+    });
+
+    for (const stop of ["markDone", "cancel"] as const) {
+      test(`a ${stop} begun first wins over a pass that starts during its despawn`, async () => {
+        const s = setup();
+        const old = await running(s, false);
+        const release = holdFirstDespawn(s);
+        const stopping = s.scheduler[stop](old.id);
+        await Bun.sleep(5);
+        expect(await s.scheduler.pass(old.id)).toEqual({ ok: false, code: "conflict" });
+        // Refused before anything left the leader: no read, no push, no successor.
+        expect(s.heads).toEqual([]);
+        expect(s.fleet.pushes).toEqual([]);
+        expect(s.creates).toEqual([]);
+        release();
+        expect(await stopping).toMatchObject({ ok: true, task: { state: stop === "cancel" ? "cancelled" : "done" } });
+        expect(s.scheduler.task(old.id)?.successor).toBeUndefined();
+        expect(s.fleet.despawns).toHaveLength(1);
+      });
+    }
+
+    test("a stop whose despawn failed no longer blocks a pass", async () => {
+      const s = setup();
+      const old = await running(s, false);
+      s.fleet.despawnReply = () => FAILED_DESPAWN;
+      expect(await s.scheduler.markDone(old.id)).toMatchObject({ ok: false, code: "despawn_failed" });
+      s.fleet.despawnReply = null;
+      const result = ok(await s.scheduler.pass(old.id));
+      expect(result.task).toMatchObject({ state: "superseded" });
+    });
+
+    /** A mark-done whose despawn fails while the pass commits: refused, and the pass's own close is held by it. */
+    async function failedMarkDuringCommit(s: Setup): Promise<{ readonly oldId: string; readonly successorId: string }> {
+      const old = await running(s, false);
+      const commit = holdCommit(s);
+      const releaseDespawn = holdFirstDespawn(s, () => FAILED_DESPAWN);
+      const passing = s.scheduler.pass(old.id);
+      await commit.landing;
+      const marking = s.scheduler.markDone(old.id);
+      await Bun.sleep(5);
+      commit.release();
+      const passed = ok(await passing);
+      releaseDespawn();
+      // The person saw it fail: nothing was written for it.
+      expect(await marking).toMatchObject({ ok: false, code: "despawn_failed" });
+      expect(passed.task).toMatchObject({ state: "running", successor: passed.successorId });
+      return { oldId: old.id, successorId: passed.successorId };
+    }
+
+    test("a mark-done whose despawn failed leaves the pass standing, retried at its grace", async () => {
+      const s = setup();
+      const { oldId, successorId } = await failedMarkDuringCommit(s);
+      await tick(s.scheduler);
+      expect(s.scheduler.task(oldId)).toMatchObject({ state: "running", successor: successorId });
+      s.clock.now += PASS_CLOSE_GRACE_MS + 1;
+      await tick(s.scheduler);
+      expect(s.scheduler.task(oldId)).toMatchObject({ state: "superseded", successor: successorId });
+      // Once superseded the successor may run, so a later mark-done says it is finished rather than rewriting it.
+      expect(await s.scheduler.markDone(oldId)).toMatchObject({ ok: false, code: "finished" });
+    });
+
+    test("a mark-done retried before that grace wins, and the successor fails", async () => {
+      const s = setup();
+      const { oldId, successorId } = await failedMarkDuringCommit(s);
+      expect(await s.scheduler.markDone(oldId)).toMatchObject({ ok: true, task: { state: "done", doneBy: "manual" } });
+      expect(s.scheduler.task(oldId)?.successor).toBeUndefined();
+      await tick(s.scheduler);
+      expect(s.scheduler.task(successorId)).toMatchObject({ state: "failed", failure: { code: "pass_abandoned" } });
     });
 
     test("mark-done after the commit ends the task done, and the successor fails", async () => {
