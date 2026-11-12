@@ -32,6 +32,9 @@ const FORBIDDEN_DAEMON: ReadonlySet<string> = new Set(
     "report-done",
     "usage-refresh",
     "tpmcreds",
+    // Acts on the fleet's subscribers, and the leader's floor in the daemon's own state dir; neither reaches exec.ts.
+    "web-push",
+    "version-floor",
     // Op dispatch and the local socket.
     "handlers",
     "local-socket",
@@ -64,17 +67,25 @@ const FORBIDDEN_DAEMON: ReadonlySet<string> = new Set(
  * client and the daemon leg's client offer (enqueue, cancel, store, reply,
  * status, scheduler frames), and `execPath`, which nothing may persist.
  */
-const FORBIDDEN_CALLS =
-  /\.(?:createTask|cancel|markDone|runNow|pause|resume|discard|pushSubscribe|pushUnsubscribe|queueChanged|forget|request|store|broadcast|sendStatus|sendToScheduler|sendBranchState|reply|resign)\s*\(|\bexecPath\b/gu;
+const WRITE_METHODS =
+  "createTask|cancel|markDone|runNow|pause|resume|discard|pushSubscribe|pushUnsubscribe|queueChanged|forget|request|store|broadcast|sendStatus|sendToScheduler|sendBranchState|reply|resign|putAccountAlias|uploadAttachment";
+// Dotted call, bracket access, or destructuring: each reaches the same method.
+const FORBIDDEN_CALLS = new RegExp(
+  String.raw`\.(?:${WRITE_METHODS})\s*\(|\[\s*["'](?:${WRITE_METHODS})["']\s*\]|\{[^}]*\b(?:${WRITE_METHODS})\b[^}]*\}\s*=|\bexecPath\b`,
+  "gu",
+);
+
+/** Direct process spawning, which would inherit CREDENTIALS_DIRECTORY unstripped (`exec.ts` is what strips it). */
+const SPAWN_CALLS = /\bBun\s*\.\s*(?:spawn(?:Sync)?\b|\$)/gu;
 
 export function specifiers(source: string): string[] {
   const pattern = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)["']([^"']+)["']/gu;
   return [...source.matchAll(pattern)].map((m) => m[1] ?? "");
 }
 
-/** A specifier the archivist may not name at all, wherever it sits: the scheduler library or the daemon as a package. */
+/** A specifier the archivist may not name at all, wherever it sits: the scheduler library, the daemon as a package, or `child_process`. */
 export function forbiddenPackage(specifier: string): boolean {
-  return /^@seance\/(?:scheduler|daemon)(?:\/|$)/u.test(specifier);
+  return /^@seance\/(?:scheduler|daemon)(?:\/|$)/u.test(specifier) || /^(?:node:)?child_process$/u.test(specifier);
 }
 
 /** Repo-relative path a relative specifier names from `file`; null for a package. */
@@ -111,6 +122,10 @@ export function closureViolations(files: ReadonlySet<string>, packages: Readonly
   ].toSorted();
 }
 
+export function spawnCalls(source: string): string[] {
+  return [...source.matchAll(SPAWN_CALLS)].map((m) => m[0]);
+}
+
 export function forbiddenCalls(source: string): string[] {
   return [...source.matchAll(FORBIDDEN_CALLS)].map((m) => m[0]);
 }
@@ -130,6 +145,12 @@ describe("archivist layering", () => {
     // The reuse is real: the walk does reach into the daemon.
     expect(files).toContain("daemon/src/relay-client.ts");
     expect(closureViolations(files, packages)).toEqual([]);
+    const spawners: string[] = [];
+    for (const file of files) {
+      // oxlint-disable-next-line no-await-in-loop -- a handful of small files
+      if (spawnCalls(await readFile(join(ROOT, file), "utf8")).length > 0) spawners.push(file);
+    }
+    expect(spawners).toEqual([]);
   });
 
   test("archivist/src makes no write call and names no execPath", async () => {
@@ -160,5 +181,17 @@ describe("archivist layering", () => {
     expect(forbiddenCalls(`seat.store ({ op: "put" })`)).toHaveLength(1);
     expect(forbiddenCalls(`const bin = process.execPath;`)).toEqual(["execPath"]);
     expect(forbiddenCalls(`appLeg.start(); seat.stop(); appLeg.getState();`)).toEqual([]);
+    expect(forbiddenCalls(`await appLeg.putAccountAlias(a);`)).toEqual([".putAccountAlias("]);
+    expect(forbiddenCalls(`await appLeg.uploadAttachment(a);`)).toEqual([".uploadAttachment("]);
+    expect(forbiddenCalls(`appLeg["createTask"](task);`)).toHaveLength(1);
+    expect(forbiddenCalls(`const { createTask } = appLeg;`)).toHaveLength(1);
+  });
+
+  test("the process scan catches Bun.spawn, Bun.$ and child_process, and passes other Bun calls", () => {
+    expect(spawnCalls("Bun.spawn(['git']); Bun.spawnSync(['git']); Bun.$`ls`;")).toHaveLength(3);
+    expect(spawnCalls("Bun.file(path); Bun.write(path, x); Bun.sleep(1);")).toEqual([]);
+    expect(forbiddenPackage("node:child_process")).toBe(true);
+    expect(forbiddenPackage("child_process")).toBe(true);
+    expect(forbiddenPackage("node:fs/promises")).toBe(false);
   });
 });
