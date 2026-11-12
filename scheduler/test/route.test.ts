@@ -290,6 +290,61 @@ describe("filter", () => {
     expect(codes(only(decide([revoked])))).toEqual(["auth_missing"]);
   });
 
+  describe("auth_expired — a lapsed login is filtered, an expiring or unreadable one still routes", () => {
+    const withAuth = [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.authHealth];
+    const lapsed = (extra: Partial<Machine> = {}): Machine =>
+      machine("a", { capabilities: withAuth, status: status({ quota: [obs(0)], ax: [0] }), ...extra });
+
+    test("an exclave in ax on a daemon that advertises authHealth is rejected auth_expired, alone", () => {
+      const decision = decide([lapsed()]);
+      expect(codes(only(decision))).toEqual(["auth_expired"]);
+      expect(decision.chosen).toBeNull();
+    });
+
+    test("the same status from a daemon without the capability routes: it says nothing about auth", () => {
+      const decision = decide([lapsed({ capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId] })]);
+      expect(codes(only(decision))).toEqual([]);
+      expect(decision.chosen).not.toBeNull();
+    });
+
+    test("an ae time already past rejects; one still ahead (expiring) routes", () => {
+      const past = decide([lapsed({ status: status({ quota: [obs(0)], ae: [[0, NOW_S - 1]] }) })]);
+      expect(codes(only(past))).toEqual(["auth_expired"]);
+      const ahead = decide([lapsed({ status: status({ quota: [obs(0)], ae: [[0, NOW_S + 86_400]] }) })]);
+      expect(codes(only(ahead))).toEqual([]);
+      expect(ahead.chosen).not.toBeNull();
+    });
+
+    test("au (unreadable or not read yet) routes", () => {
+      const decision = decide([lapsed({ status: status({ quota: [obs(0)], au: [0] }) })]);
+      expect(codes(only(decision))).toEqual([]);
+      expect(decision.chosen).not.toBeNull();
+    });
+
+    test("a stale status or a disconnected machine says nothing: it routes as before", () => {
+      const stale = decide([lapsed({ status: status({ quota: [obs(0)], ax: [0], at: NOW_S - 3600 }) })]);
+      expect(codes(only(stale))).not.toContain("auth_expired");
+      const gone = decide([lapsed({ connected: false })]);
+      expect(codes(only(gone))).not.toContain("auth_expired");
+    });
+
+    test("signed out and in ax gives auth_missing alone, never both codes", () => {
+      const both = lapsed({ exclaves: [exclave("main", "org:a", { authOk: false })] });
+      expect(codes(only(decide([both])))).toEqual(["auth_missing"]);
+    });
+
+    test("only the listed exclave of a machine is filtered", () => {
+      const two = lapsed({
+        exclaves: [exclave("main", "org:a"), exclave("alt", "org:b")],
+        repos: [clone("app", "main"), clone("app2", "alt")],
+        status: status({ quota: [obs(0), obs(1)], ax: [1] }),
+      });
+      const decision = decide([two]);
+      expect(decision.chosen?.exclave).toBe("main");
+      expect(byExclave(decision, "alt")?.rejected).toEqual([{ code: "auth_expired" }]);
+    });
+  });
+
   describe("skill_absent — only a name the inventory knows restricts", () => {
     /** Machine `a`: exclave `main` with `ship`, `alt` without, each holding a clone. */
     function skilled(): Machine {

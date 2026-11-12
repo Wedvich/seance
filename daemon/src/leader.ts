@@ -28,7 +28,7 @@ import {
 import type { AppRelay } from "./app-relay.ts";
 import { admitAudit, daemonSink } from "./audit.ts";
 import type { LocalOps } from "./handlers.ts";
-import { createDiskWatch } from "./disk-alerts.ts";
+import { createMachineAlertWatch } from "./machine-alerts.ts";
 import { fencedStore, termFleet } from "./leader-adapters.ts";
 import { requestHandler } from "./leader-requests.ts";
 import { log } from "./log.ts";
@@ -496,7 +496,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
         // A term that ended while the read was out sends nothing: its successor owns the alerts now.
         if (state === "ready" && live) {
           for (const alert of waiting) pushSender?.send(alert);
-          diskWatch.check(false);
+          machineAlerts.check(false);
         }
       },
       (err: unknown) => {
@@ -531,16 +531,23 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
           log,
           onError: fail,
         });
-  // Disk alerts ride the registry, not the scheduler: the record's `diskAlerts` list is what keeps a new
-  // term from repeating one, and an alert is raised only once that write has landed.
-  const diskWatch = createDiskWatch({
+  // Disk and login alerts ride the registry, not the scheduler: the record's `diskAlerts` and `authAlerts` lists
+  // are what keep a new term from repeating one, and an alert is raised only once that write has landed.
+  const machineAlerts = createMachineAlertWatch({
     settings: () => settings,
     ready: () => settingsState === "ready",
     machines: () => relay.getState().machines,
     onAlert: (alert) => {
       if (alert.kind === "disk") log.warn(`scheduler: disk nearly full: device=${quote(alert.deviceId)}`);
+      if (alert.kind === "auth") {
+        log.warn(`scheduler: login ${alert.state}: device=${quote(alert.deviceId)} exclave=${quote(alert.exclave)}`);
+      }
       pushSender?.send(alert);
     },
+    onRestored: (entry, at) =>
+      log.info(
+        `scheduler: login restored: device=${quote(entry.deviceId)} exclave=${quote(entry.exclave)} after=${Math.max(0, Math.round((at - entry.at) / 60_000))}m`,
+      ),
     onError: fail,
     now,
     minGapMs: opts.tickIntervalMs ?? TICK_INTERVAL_MS,
@@ -603,7 +610,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     if (state.machines !== seen || state.fleetQuota !== seenQuota) {
       seen = state.machines;
       seenQuota = state.fleetQuota;
-      diskWatch.check(true);
+      machineAlerts.check(true);
       tick();
     }
   });
@@ -670,7 +677,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
         else loadSettings();
       }
       // Also on the clock: the first check after settings turn ready, and the retry of one a conflict lost.
-      diskWatch.check(false);
+      machineAlerts.check(false);
       tick();
     }, intervalMs);
     // Only after takeover's load: the poller reads the held tasks and writes through the term's fenced store.

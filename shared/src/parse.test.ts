@@ -64,6 +64,7 @@ import {
   FLEET_QUOTA_MAX_ACCOUNTS,
   FLEET_QUOTA_MAX_WINDOWS,
   FLEET_QUOTA_WINDOW_MODEL_MAX_LENGTH,
+  AUTH_ALERTS_MAX,
   DISK_ALERTS_MAX,
   LINEAR_KEY_MAX_LENGTH,
   PUSH_ENDPOINT_MAX_LENGTH,
@@ -1969,6 +1970,43 @@ describe("M4 shapes", () => {
     expect(parsed?.sess).not.toBe(sess);
   });
 
+  test("a status carries expiring and unreadable exclaves beside ax: disjoint, bounded together", () => {
+    const status = { at: 1, scan: 2, ax: [0], ae: [[1, 1_760_000_000]], au: [2] } as const;
+    expect(parseMachineStatus(status)).toEqual(status);
+    expect(parseMachineStatus({ at: 1, scan: 2 })).not.toHaveProperty("ae");
+    expect(parseMachineStatus({ at: 1, scan: 2 })).not.toHaveProperty("au");
+    const full = Array.from({ length: STATUS_MAX_AUTH_EXPIRED }, (_, i) => i);
+    expect(parseMachineStatus({ at: 1, scan: 2, ae: full.map((i) => [i, 5]) })?.ae).toHaveLength(full.length);
+    expect(parseMachineStatus({ at: 1, scan: 2, au: full })?.au).toEqual(full);
+    for (const bad of [
+      { ae: [[1]] },
+      { ae: [[1, 2, 3]] },
+      { ae: [[-1, 5]] },
+      { ae: [[1.5, 5]] },
+      { ae: [[1, -5]] },
+      { ae: [[1, 5.5]] },
+      { ae: [1, 5] },
+      { ae: "x" },
+      { au: [-1] },
+      { au: [1.5] },
+      { au: [2, 2] },
+      { ax: [1], au: [1] },
+      { ax: [1], ae: [[1, 5]] },
+      { ae: [[1, 5]], au: [1] },
+      {
+        ae: [
+          [1, 5],
+          [1, 6],
+        ],
+      },
+      { ax: full.slice(0, 6), ae: full.slice(6, 12).map((i) => [i, 5]), au: [...full.slice(12), 99] },
+    ]) {
+      expect(parseMachineStatus({ at: 1, scan: 2, ...bad })).toBeNull();
+    }
+    const given = [[1, 5]];
+    expect(parseMachineStatus({ at: 1, scan: 2, ae: given })?.ae).not.toBe(given);
+  });
+
   test("a status says its launch gate is closed only as `drn: true`; an open gate or an old daemon says nothing", () => {
     expect(parseMachineStatus({ at: 1, scan: 2, drn: true })).toEqual({ at: 1, scan: 2, drn: true });
     expect(parseMachineStatus({ at: 1, scan: 2 })).not.toHaveProperty("drn");
@@ -2182,6 +2220,10 @@ describe("M4 shapes", () => {
       linearKey: "k".repeat(LINEAR_KEY_MAX_LENGTH),
       subscriptions: [{ ...subscription, label: "Firefox · Linux", addedAt: 1_760_000_000_000 }],
       diskAlerts: [{ deviceId: "dev-1", at: 1_760_000_000_000 }],
+      authAlerts: [
+        { deviceId: "dev-1", exclave: "default", state: "expired", at: 1_760_000_000_000 },
+        { deviceId: "dev-1", exclave: "work", state: "expiring", at: 1_760_000_000_001 },
+      ],
     };
     expect(parseSettingsRecord(settings)).toEqual(settings);
     expect(parseSettingsRecord({ version: 1 })).toEqual({ version: 1 });
@@ -2207,6 +2249,25 @@ describe("M4 shapes", () => {
           { deviceId: "dev-1", at: 1 },
           { deviceId: "dev-1", at: 2 },
         ],
+      },
+      { ...settings, authAlerts: [{ deviceId: "dev-1", exclave: "x", state: "ok", at: 1 }] },
+      { ...settings, authAlerts: [{ deviceId: "dev-1", exclave: "x/y", state: "expired", at: 1 }] },
+      { ...settings, authAlerts: [{ deviceId: "dev-1", exclave: "x", state: "expired" }] },
+      {
+        ...settings,
+        authAlerts: [
+          { deviceId: "dev-1", exclave: "x", state: "expired", at: 1 },
+          { deviceId: "dev-1", exclave: "x", state: "expiring", at: 2 },
+        ],
+      },
+      {
+        ...settings,
+        authAlerts: Array.from({ length: AUTH_ALERTS_MAX + 1 }, (_, i) => ({
+          deviceId: "dev-1",
+          exclave: `x${i}`,
+          state: "expired",
+          at: 1,
+        })),
       },
       { ...settings, diskAlerts: [{ deviceId: "dev/1", at: 1 }] },
       { ...settings, diskAlerts: [{ deviceId: "dev-1" }] },
@@ -2324,6 +2385,12 @@ describe("M4 shapes", () => {
         deviceId: `${"d".repeat(ROUTING_ID_MAX_LENGTH - 2)}${String(i).padStart(2, "0")}`,
         at: 1_760_000_000_000,
       })),
+      authAlerts: Array.from({ length: AUTH_ALERTS_MAX }, (_, i) => ({
+        deviceId: "d".repeat(ROUTING_ID_MAX_LENGTH),
+        exclave: `${"x".repeat(ROUTING_ID_MAX_LENGTH - 2)}${String(i).padStart(2, "0")}`,
+        state: "expiring" as const,
+        at: 1_760_000_000_000,
+      })),
     };
     expect(parseSettingsRecord(full)).toEqual(full);
     expect(await sealedRecordLength("settings", full)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
@@ -2347,7 +2414,9 @@ describe("parsePushAlert", () => {
     const bare = { v: 1, kind: "disk", at: 5, deviceId: "dev-1" } as const;
     const spending = { ...spill, spending: true } as const;
     const question = { ...input, escalated: false, question: true } as const;
-    for (const alert of [spill, spending, input, question, disk, bare]) {
+    const auth = { v: 1, kind: "auth", at: 5, deviceId: "dev-1", exclave: "default", state: "expired" } as const;
+    const expiring = { ...auth, state: "expiring" } as const;
+    for (const alert of [spill, spending, input, question, disk, bare, auth, expiring]) {
       expect(parsePushAlert(alert)).toEqual(alert);
     }
   });
@@ -2382,6 +2451,10 @@ describe("parsePushAlert", () => {
       { ...input, question: false },
       { ...disk, deviceId: "a/b" },
       { ...disk, freeMib: "400" },
+      { v: 1, kind: "auth", at: 5, deviceId: "dev-1", exclave: "default", state: "ok" },
+      { v: 1, kind: "auth", at: 5, deviceId: "dev-1", exclave: "default", state: "expired", account: "a" },
+      { v: 1, kind: "auth", at: 5, deviceId: "dev-1", exclave: "a/b", state: "expired" },
+      { v: 1, kind: "auth", at: 5, deviceId: "dev-1", state: "expired" },
       null,
       "spill",
     ]) {

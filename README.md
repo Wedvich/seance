@@ -184,6 +184,12 @@ Edit `~/.config/seance/config.json`:
 - `quota` — optional: `{ "staleAfterMinutes": 10 }` (the default) is how old an
   account's cached quota may get before the daemon refreshes it with `claude -p /usage`.
   Values under 1 are refused: Claude Code debounces `/usage` for 60 s anyway.
+- `authHealth` — optional: `{ "keychain": false }` (the default). The daemon reports whether each
+  exclave's Claude login has expired or is about to, from its credential store, read by a
+  short-lived child so the daemon never holds a token. On macOS the store is the login keychain:
+  that read stays off until `"keychain": true`, which you set once you have checked on that Mac
+  that it reads without a prompt. Until then a Mac's exclaves read as unknown and nothing is read,
+  a `.credentials.json` in the config dir included: Claude Code keeps a Mac's login in the keychain.
 
 Optional: `~/.exclaves` lists extra Claude Code accounts on the box, one name per line.
 Each name is a tree at `~/<name>` whose sessions use the config dir `~/.claude-<name>`;

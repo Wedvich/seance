@@ -82,6 +82,13 @@ export interface UsageRefreshDeps extends UsageRefreshOpts {
   readonly scan: () => ExclaveScan;
   /** The daemon's home, the one `scanExclaves` read: `HOME` for the run, and its cwd. */
   readonly home: string;
+  /**
+   * True for an exclave whose login auth health reads expired: a run there only prints the
+   * `/cost` view (docs/scheduler.md, "Auth health"), so it is skipped.
+   */
+  readonly expired?: (exclaveId: string) => boolean;
+  /** After each finished run, whatever its outcome: it may have refreshed or emptied the tokens, so auth health re-reads. */
+  readonly onRan?: (exclaveId: string) => void;
 }
 
 export interface UsageRefresh {
@@ -109,17 +116,24 @@ export interface UsageRefresh {
  * credential (`CREDENTIALS_DIRECTORY`) cannot reach it: nothing is inherited.
  */
 export function usageEnv(exclave: Exclave, home: string): Readonly<Record<string, string>> {
+  return {
+    ...baseChildEnv(home),
+    ...(exclave.id === DEFAULT_EXCLAVE ? {} : { CLAUDE_CONFIG_DIR: exclave.configDir }),
+  };
+}
+
+/** `HOME`, `PATH`, `USER` and `LOGNAME` — the part of a bare child env every Claude-adjacent child needs (`usageEnv`, auth health). */
+export function baseChildEnv(home: string): Readonly<Record<string, string>> {
   const user = loginName();
   const path = process.env["PATH"];
   return {
     HOME: home,
     ...(path === undefined ? {} : { PATH: path }),
     ...(user === null ? {} : { USER: user, LOGNAME: user }),
-    ...(exclave.id === DEFAULT_EXCLAVE ? {} : { CLAUDE_CONFIG_DIR: exclave.configDir }),
   };
 }
 
-function loginName(): string | null {
+export function loginName(): string | null {
   try {
     return userInfo().username;
   } catch {
@@ -191,8 +205,10 @@ export function createUsageRefresh(deps: UsageRefreshDeps): UsageRefresh {
     const scan = deps.scan();
     const x = scan.exclaves.findIndex((exclave) => exclave.id === id);
     const exclave = scan.exclaves[x];
-    // Signed out, a run could only fail: there is no account to read usage for.
-    return exclave === undefined || scan.info[x]?.authOk !== true ? null : exclave;
+    // Signed out, a run could only fail: there is no account to read usage for. Lapsed, it
+    // prints the `/cost` view and changes nothing.
+    if (exclave === undefined || scan.info[x]?.authOk !== true) return null;
+    return deps.expired?.(id) === true ? null : exclave;
   };
 
   /** The reading's stamp in seconds, or null when the cache holds none. */
@@ -245,6 +261,7 @@ export function createUsageRefresh(deps: UsageRefreshDeps): UsageRefresh {
     const before = await readingAt(exclave);
     if (stopped || (before !== null && startedAt - before * 1000 <= staleAfterMs)) return;
     const outcome = await run(exclave);
+    deps.onRan?.(id);
     if (stopped) return;
     const after = await readingAt(exclave);
     // The cache is the result, not stdout: whatever the run printed, a cache that

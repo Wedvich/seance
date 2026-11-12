@@ -1,6 +1,7 @@
 import { readFile, statfs } from "node:fs/promises";
 import { cpus, totalmem } from "node:os";
 import type { MachineStatus, SessionEntry } from "@seance/shared";
+import type { AuthView } from "./auth-health.ts";
 import type { ExclaveScan } from "./exclaves.ts";
 import { exec } from "./exec.ts";
 import type { MetricsStore } from "./metrics-store.ts";
@@ -73,6 +74,8 @@ export interface TelemetrySources {
   readonly now?: () => number;
   /** True while the daemon refuses task launches (`EndedTasks.draining`); absent reads as never. */
   readonly draining?: () => boolean;
+  /** Auth health's view by exclave id (`ax`/`ae`/`au`); absent reads as no auth fields. */
+  readonly auth?: () => ReadonlyMap<string, AuthView>;
   /** Outbound HTTP for a collector that polls an endpoint; defaults to the global `fetch`. */
   readonly httpFetch?: Fetch;
   /**

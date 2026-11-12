@@ -407,7 +407,7 @@ of M4 has landed.
 | 1     | Asleep machines on the Queue screen (new) — **Done**               | —                                                                      | S                        |
 | 2     | Spawn defaults to the scheduler (**Done**)                         | account pins (PR #303); keyless `auto` for MCP (**Done**)              | M–L                      |
 | 2     | Stacking                                                           | authoring surface; #28                                                 | L                        |
-| 2     | Auth health                                                        | Web Push (built); spiked 2026-11-12                                    | M                        |
+| 2     | Auth health — **Done**                                             | Web Push (built); spiked 2026-11-12                                    | M                        |
 | 2     | Traits: core (new)                                                 | auth health's status lists (shape to copy)                             | M–L                      |
 | 2     | Traits: probes (new)                                               | traits core                                                            | M                        |
 | 2     | Traits: keep free (new)                                            | traits core                                                            | S                        |
@@ -839,7 +839,7 @@ of M4 has landed.
   the relay when each account is in use. DESIGN.md _Scheduler_, "Fleet quota record" records the
   writer as built (its register gate, bounds and the unreadable-record rule) and its readers.
   `status` shrinking to pressure, the other payoff, is not done.
-- **Auth health** (after the `/usage` refresh) — `authOk` says only that `.claude.json` names an
+- **Auth health** — **Done** (DESIGN.md "Auth health"; PR #402). `authOk` says only that `.claude.json` names an
   `oauthAccount`: a revoked or lapsed login still reads as signed in, and the `auth_missing`
   filter routes to an exclave that cannot start a session. Per exclave `ok | expiring | expired |
   unknown`, carried in `status`, not the register blob (a change there re-registers and drops the
@@ -867,7 +867,9 @@ of M4 has landed.
     `unknown` on any other failure — never a prompt. The macOS naming is read from the binary and
     still needs a check on a Mac, so the keychain read is **off by default**: until the owner sets
     `authHealth.keychain: true` in `config.json` after that check, a macOS exclave reads `unknown`
-    (a `.credentials.json` in its config dir is still read, as Claude Code's no-keychain fallback).
+    and nothing is read (Claude Code keeps a Mac's login in the keychain and uses its file only
+    when there is no item, so a file found beside a keychain login can be a stale leftover and
+    would read as a false `expired`; with the read on, the file is read only after exit 44).
   - _Decided (owner, 2026-11-12), the daemon never holds a token:_ the read runs in a short-lived
     `bun -e` child running one constant script, the file handed over as a descriptor (macOS: the
     child runs `security -w` itself), bare env, 5 s timeout. It prints only

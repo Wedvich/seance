@@ -4,6 +4,7 @@ import {
   knownAccounts,
   type KnownAccount,
   effectivePct,
+  exclaveAuth,
   lastHeardAt,
   liveStatus,
   METRIC_NAMES,
@@ -48,6 +49,8 @@ export interface ExclaveRow {
   readonly account: string;
   /** Running sessions from the latest status; null when it doesn't say. */
   readonly sessions: number | null;
+  /** A login that needs attention: lapsed (err) or expiring within `AUTH_EXPIRING_MS` (warn). Null for ok and for unknown: unread says nothing. */
+  readonly auth: { readonly text: string; readonly level: "err" | "warn" } | null;
 }
 
 export interface MachineCard {
@@ -134,6 +137,19 @@ export function formatUntil(at: number, now: number): string {
   if (left < HOUR) return `resets in ${Math.max(1, Math.floor(left / MINUTE))}m`;
   if (left < DAY) return `resets in ${Math.floor(left / HOUR)}h`;
   return `resets in ${Math.floor(left / DAY)}d`;
+}
+
+/**
+ * One exclave's login line (`exclaveAuth` is the one rule). Whole days from a day out, else whole hours,
+ * floored like `formatUntil` and never under 1h: "expires in 0h" would read as lapsed.
+ */
+function authNote(machine: Machine, index: number, now: number): ExclaveRow["auth"] {
+  const auth = exclaveAuth(machine, index, now);
+  if (auth.state === "expired") return { text: "needs /login", level: "err" };
+  if (auth.state !== "expiring") return null;
+  const left = auth.expiresAt - now;
+  const text = left >= DAY ? `${Math.floor(left / DAY)}d` : `${Math.max(1, Math.floor(left / HOUR))}h`;
+  return { text: `login expires in ${text}`, level: "warn" };
 }
 
 /** An account as the cards name it, for a screen that holds only its id (a pause's hold). */
@@ -236,6 +252,7 @@ function machineCard(
       id: exclave.id,
       account: accountLabel(exclave, aliases, known),
       sessions: status?.sess?.[index] ?? null,
+      auth: authNote(machine, index, now),
     })),
     charts: servesMetrics(machine),
   };

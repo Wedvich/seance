@@ -3,6 +3,7 @@ import {
   APP_ID,
   importPsk,
   seal,
+  STATUS_MAX_AUTH_EXPIRED,
   STATUS_MAX_CT_LENGTH,
   toBase64,
   type MachineStatus,
@@ -101,15 +102,27 @@ describe("fitStatus", () => {
     }
   });
 
-  test("the expired-login list is never trimmed: routing reads it when every quota field is gone", () => {
-    const expired = { ...status(3), ax: [1, 2] };
-    const { quota: _quota, ...rest } = expired;
-    const fitted = fitStatus(expired, padded({ ...rest, tr: 3 }));
+  test("the auth lists are never trimmed: routing reads them when every quota field is gone", () => {
+    const auth: MachineStatus = { ...status(3), ax: [1], ae: [[2, 1_760_000_000]], au: [0] };
+    const { quota: _quota, ...rest } = auth;
+    const fitted = fitStatus(auth, padded({ ...rest, tr: 3 }));
     expect(fitted.quota).toBeUndefined();
-    expect(fitted.ax).toEqual([1, 2]);
-    const crowded = fitStatus({ ...expired, sess: Array.from({ length: 600 }, () => 9) });
+    expect(fitted.ax).toEqual([1]);
+    expect(fitted.ae).toEqual([[2, 1_760_000_000]]);
+    expect(fitted.au).toEqual([0]);
+    const crowded = fitStatus({ ...auth, sess: Array.from({ length: 600 }, () => 9) });
     expect(crowded.sess).toBeUndefined();
-    expect(crowded.ax).toEqual([1, 2]);
+    expect(crowded.ax).toEqual([1]);
+    expect(crowded.ae).toEqual([[2, 1_760_000_000]]);
+    expect(crowded.au).toEqual([0]);
+  });
+
+  test("the worst case — 16 expiring exclaves, full quota, a huge sess — keeps every entry and lands on the budget", () => {
+    const ae = Array.from({ length: STATUS_MAX_AUTH_EXPIRED }, (_, x): [number, number] => [x, 1_999_999_999]);
+    const worst = fitStatus({ ...status(12), ae, sess: Array.from({ length: 600 }, () => 9) });
+    expect(worst.ae).toEqual(ae);
+    expect(worst.sess).toBeUndefined();
+    expect(statusBytes(worst)).toBe(STATUS_PAYLOAD_BUDGET);
   });
 
   test("the drain flag is never trimmed: routing reads it when quota and sess are gone", () => {

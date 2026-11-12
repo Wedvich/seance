@@ -998,6 +998,9 @@ export interface MachineInfo {
  * `attachments`: as a daemon, fetches and seeds `SpawnRequest.attachments`; as a
  * leader, routes, dispatches and leans them — what the PWA checks of the verified
  * leader before offering to attach. One build does both halves.
+ * `authHealth`: as a daemon, reports each signed-in exclave's login state from its
+ * credential store in `status` (`ax`/`ae`/`au`; DESIGN.md "Auth health"), so a reader
+ * knows an exclave in none of the three is `ok` rather than unread.
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -1012,6 +1015,7 @@ export const CAPABILITIES = {
   continueHandoff: "continueHandoff",
   runNow: "runNow",
   attachments: "attachments",
+  authHealth: "authHealth",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -1128,15 +1132,30 @@ export interface MachineStatus {
   /**
    * Exclaves whose login has expired, by index, as `quota[].x` (M4, Auth
    * health; decided #6): the compact form, since auth shares the status's
-   * budget with quota. An exclave not listed is `ok` or `unknown`, and both
-   * route. Never trimmed — `fitStatus` (`daemon/src/status.ts`) takes only quota
-   * detail, quota and `sess` — so at most `STATUS_MAX_AUTH_EXPIRED` entries, a
-   * reader refusing more, or a repeated index. Status and info arrive
-   * separately, so an index may name no exclave of the info a reader holds:
-   * range-check against its `exclaves`, as for `sess` and `quota[].x`. Absent
-   * from older daemons, and when none has expired.
+   * budget with quota. `ax`, `ae` and `au` are disjoint; an exclave in none of
+   * them is `ok` on a daemon advertising `CAPABILITIES.authHealth` and `unknown`
+   * on any other, and only `ax` is filtered from placement. Never trimmed —
+   * `fitStatus` (`daemon/src/status.ts`) takes only quota detail, quota and
+   * `sess` — so at most `STATUS_MAX_AUTH_EXPIRED` entries across the three
+   * lists, a reader refusing more, or an index repeated within or across them.
+   * Status and info arrive separately, so an index may name no exclave of the
+   * info a reader holds: range-check against its `exclaves`, as for `sess` and
+   * `quota[].x`. Absent from older daemons, and when none has expired.
    */
   readonly ax?: readonly number[];
+  /**
+   * Exclaves whose login expires within `AUTH_EXPIRING_MS`, as
+   * `[exclave index, expiry in unix seconds]`. Still placed. A reader treats a
+   * time already past as expired. Absent from older daemons (which ignore it),
+   * and when none is expiring.
+   */
+  readonly ae?: readonly (readonly [number, number])[];
+  /**
+   * Exclaves whose credentials the daemon could not read, or has not read yet
+   * (a fresh daemon lists every signed-in exclave here until its first read
+   * lands). Still placed; says nothing, so it neither alerts nor clears one.
+   */
+  readonly au?: readonly number[];
   /**
    * The daemon's task-launch gate is closed (`EndedTasks.drain`: a self-update's
    * restart, or a shutdown), so a task launch sent now is refused `internal_error`
@@ -1148,12 +1167,20 @@ export interface MachineStatus {
 }
 
 /**
- * `MachineStatus.ax` entries at most. What bounds the list is the machine's
- * exclave count; 16 is far past any real one (the budget holds five exclaves'
- * quota whole), and 16 indices cost under 60 of the ~1,100 bytes a status may
- * hold, which is what lets the list go untrimmed.
+ * `MachineStatus.ax`, `ae` and `au` entries at most, **combined**. What bounds
+ * them is the machine's exclave count; 16 is far past any real one (the budget
+ * holds five exclaves' quota whole), and 16 entries cost under 200 of the
+ * ~1,100 bytes a status may hold, which is what lets the lists go untrimmed.
+ * The name predates `ae`/`au`; kept, since a rename touches older-reader-facing
+ * code for nothing.
  */
 export const STATUS_MAX_AUTH_EXPIRED = 16;
+
+/**
+ * A refresh token's remaining life at which an exclave reads `expiring`: Claude
+ * Code's own "Your login expires in N days" threshold.
+ */
+export const AUTH_EXPIRING_MS = 3 * 24 * 60 * 60 * 1000;
 
 /** Resolutions the daemon's metrics store keeps, seconds — raw, 5-min and hourly tiers. */
 export const METRICS_STEPS = [30, 300, 3600] as const;
@@ -2601,7 +2628,7 @@ export const PUSH_SERVICE_HOSTS = [
  * A push endpoint's length at most. Real ones run a few hundred characters;
  * the cap is what keeps the settings record under the store's cap: 16
  * subscriptions at it, each with a `PUSH_LABEL_MAX_LENGTH` label and an `addedAt`, the
- * `DISK_ALERTS_MAX` disk alerts, the VAPID pair and a `LINEAR_KEY_MAX_LENGTH` key at
+ * `DISK_ALERTS_MAX` disk alerts, `AUTH_ALERTS_MAX` auth alerts, the VAPID pair and a `LINEAR_KEY_MAX_LENGTH` key at
  * their bounds, seal to ~40.1 KB of `STORE_MAX_CT_LENGTH` (40 KiB), measured by the
  * bound test in parse.test.ts. Little headroom is left: grow nothing here unchecked.
  */
@@ -2642,6 +2669,8 @@ export interface SettingsRecord extends VersionBound {
   readonly subscriptions?: readonly PushSubscriptionEntry[];
   /** Machines whose full disk was alerted and has not recovered yet (`daemon/src/disk-alerts.ts`). */
   readonly diskAlerts?: readonly DiskAlerted[];
+  /** Exclaves whose login alert was sent and has not cleared yet (`daemon/src/auth-alerts.ts`). */
+  readonly authAlerts?: readonly AuthAlerted[];
 }
 
 /**
@@ -2649,7 +2678,22 @@ export interface SettingsRecord extends VersionBound {
  * step drops entries for machines gone from it, so this is headroom: a record over its parser's
  * bound reads malformed as a whole, which would switch push off.
  */
-export const DISK_ALERTS_MAX = 64;
+export const DISK_ALERTS_MAX = 32;
+
+/**
+ * Exclaves held in `SettingsRecord.authAlerts` at most. Held entries are never evicted
+ * to make room (`authAlertStep`), so a machine beyond the cap alerts once a slot frees.
+ * The bytes come from `DISK_ALERTS_MAX`, which went from 64 to 32.
+ */
+export const AUTH_ALERTS_MAX = 16;
+
+/** An exclave alerted for its login, the state alerted, and when (ms). */
+export interface AuthAlerted {
+  readonly deviceId: string;
+  readonly exclave: string;
+  readonly state: "expired" | "expiring";
+  readonly at: number;
+}
 
 /** A machine alerted for a nearly full disk, and when (ms). */
 export interface DiskAlerted {
@@ -2958,6 +3002,14 @@ export type PushAlert =
       readonly at: number;
       readonly taskId: string;
       readonly reason: PrBlockedReason;
+    }
+  | {
+      readonly v: 1;
+      readonly kind: "auth";
+      readonly at: number;
+      readonly deviceId: string;
+      readonly exclave: string;
+      readonly state: "expired" | "expiring";
     };
 
 /** A push payload's plaintext at most, in bytes: well under the 4096-byte record a push service must accept. */

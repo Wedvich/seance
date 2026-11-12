@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, open, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { exec } from "./exec.ts";
 
 // Big enough to overflow the pipe buffer, so a child that never reads stdin
@@ -78,5 +81,28 @@ describe("exec environment", () => {
     } finally {
       delete process.env["SEANCE_EXEC_CANARY"];
     }
+  });
+
+  test("stdinFd hands the child an open file as its stdin, and refuses a second stdin", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "exec-fd-"));
+    try {
+      const file = join(dir, "in.txt");
+      await writeFile(file, "from the file");
+      const handle = await open(file, "r");
+      try {
+        const result = await exec(["cat"], { stdinFd: handle.fd });
+        expect(result.stdout).toBe("from the file");
+        await expect(exec(["cat"], { stdinFd: handle.fd, stdin: "x" })).rejects.toThrow("exclusive");
+      } finally {
+        await handle.close();
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("discardStderr leaves the child's stderr unread: the result carries none", async () => {
+    const result = await exec(["sh", "-c", "echo out; echo secret >&2; exit 3"], { discardStderr: true });
+    expect(result).toEqual({ exitCode: 3, stdout: "out\n", stderr: "", timedOut: false });
   });
 });

@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { METRIC_NAMES } from "@seance/shared";
+import type { AuthView } from "./auth-health.ts";
 import { MetricsStore } from "./metrics-store.ts";
 import {
   TELEMETRY_COLLECTORS,
@@ -87,6 +88,72 @@ describe("the collector registry", () => {
     draining = false;
     expect(await telemetry.tick(T0 + 60_000)).not.toHaveProperty("drn");
     const metrics = new Set(store.query({ from: 0, to: T0 / 1000 + 60, step: 30 }).map((s) => s.metric));
+    expect(metrics).toEqual(new Set([METRIC_NAMES.mem, METRIC_NAMES.disk, METRIC_NAMES.free, METRIC_NAMES.sess]));
+  });
+
+  test("auth health's view becomes ax, ae and au through the registered list; empty lists and unknown ids say nothing", async () => {
+    const four: Registered = {
+      scan: 1,
+      exclaves: {
+        exclaves: ["default", "a", "b", "c"].map((id) => ({
+          id,
+          root: `/home/u/${id}`,
+          configDir: `/nonexistent/.claude-${id}`,
+          configFile: `/nonexistent/.claude-${id}.json`,
+        })),
+        info: ["default", "a", "b", "c"].map((id) => ({
+          id,
+          accountId: null,
+          extraUsageEnabled: null,
+          authOk: true,
+          skills: [],
+        })),
+        rejected: [],
+      },
+    };
+    const view = new Map<string, AuthView>([
+      ["default", { state: "ok" }],
+      ["a", { state: "expired" }],
+      ["b", { state: "expiring", expiresAt: 1_760_000_123_999 }],
+      ["c", { state: "unknown", why: "pending" }],
+      ["gone", { state: "expired" }],
+    ]);
+    const store = MetricsStore.memory();
+    const snapshot = await createTelemetry(store, { ...sources, registered: () => four, auth: () => view }).tick(T0);
+    expect(snapshot.ax).toEqual([1]);
+    expect(snapshot.ae).toEqual([[2, 1_760_000_123]]);
+    expect(snapshot.au).toEqual([3]);
+    const quiet = await createTelemetry(MetricsStore.memory(), {
+      ...sources,
+      registered: () => four,
+      auth: () => new Map(["default", "a", "b", "c"].map((id) => [id, { state: "ok" as const }])),
+    }).tick(T0);
+    expect(quiet).not.toHaveProperty("ax");
+    expect(quiet).not.toHaveProperty("ae");
+    expect(quiet).not.toHaveProperty("au");
+    // Signed in by the registered blob but missing from the view (signed out since the scan): unread,
+    // not `ok` by omission. One the blob lists as signed out is no login to report on.
+    const mixed: Registered = {
+      ...four,
+      exclaves: {
+        ...four.exclaves,
+        info: ["default", "a", "b", "c"].map((id) => ({
+          id,
+          accountId: null,
+          extraUsageEnabled: null,
+          authOk: id !== "c",
+          skills: [],
+        })),
+      },
+    };
+    const missing = await createTelemetry(MetricsStore.memory(), {
+      ...sources,
+      registered: () => mixed,
+      auth: () => new Map([["default", { state: "ok" as const }]]),
+    }).tick(T0);
+    expect(missing.au).toEqual([1, 2]);
+    expect(await createTelemetry(MetricsStore.memory(), sources).tick(T0)).not.toHaveProperty("au");
+    const metrics = new Set(store.query({ from: 0, to: T0 / 1000, step: 30 }).map((s) => s.metric));
     expect(metrics).toEqual(new Set([METRIC_NAMES.mem, METRIC_NAMES.disk, METRIC_NAMES.free, METRIC_NAMES.sess]));
   });
 

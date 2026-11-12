@@ -3,6 +3,7 @@ import {
   isRecord,
   METRIC_NAMES,
   QUOTA_CLOCK_SKEW_MS,
+  STATUS_MAX_AUTH_EXPIRED,
   type QuotaObservation,
   type ScopedWindow,
   type SessionEntry,
@@ -17,7 +18,7 @@ import type { CpuTimes, HostProbe, Registered, Snapshot, TelemetrySources } from
  * own modules. `createTelemetry` owns what all entries share — the tick queue,
  * `at`, the time-aware smoothing, the one store write; an entry owns its read,
  * its state across ticks, and the fields and samples it contributes. A new
- * source (M4's auth health, a Proxmox cgroup/PSI reader) is one more entry
+ * source (a Proxmox cgroup/PSI reader) is one more entry
  * in `TELEMETRY_COLLECTORS`, plus a `TelemetrySources` field if it needs a dep
  * `run-collectors.ts` doesn't pass yet.
  */
@@ -77,6 +78,7 @@ export const TELEMETRY_COLLECTORS: readonly TelemetryCollector[] = [
   sessionsCollector,
   quotaCollector,
   drainCollector,
+  authCollector,
 ];
 
 function cpuCollector(sources: CollectorSources): Collect {
@@ -129,6 +131,49 @@ function diskIoCollector(sources: CollectorSources): Collect {
 function drainCollector(sources: CollectorSources): Collect {
   return () =>
     Promise.resolve(sources.draining?.() === true ? { fields: { drn: true }, samples: [] } : NO_CONTRIBUTION);
+}
+
+/**
+ * `ax`, `ae` and `au` from auth health's view, indexed through the registered blob's exclave
+ * list — the one `sess` and `quota` index — never a fresh scan. No metric: routing reads the
+ * lists live, and a login's state has no history worth a series. An id the registered list
+ * lacks is skipped, and a signed-in one (by that list) the view lacks is `au`, never silently
+ * `ok`. Past `STATUS_MAX_AUTH_EXPIRED` combined, `au` gives way first, then `ae`, so the lists
+ * never exceed what a reader accepts; that takes 17 exclaves at once not `ok`, and only the
+ * unread ones among them then read `ok` until they settle.
+ */
+function authCollector(sources: CollectorSources): Collect {
+  return (tick) => {
+    const view = sources.auth?.();
+    if (view === undefined) return Promise.resolve(NO_CONTRIBUTION);
+    const ax: number[] = [];
+    const ae: [number, number][] = [];
+    const au: number[] = [];
+    const { exclaves, info } = tick.registered.exclaves;
+    exclaves.forEach((exclave, x) => {
+      const state = view.get(exclave.id);
+      if (state === undefined) {
+        // Signed in by the blob a reader holds, but not in the view (signed out since the scan, and the
+        // re-register not committed yet): "not listed" would read `ok` there, so it is unread instead.
+        if (info[x]?.authOk === true) au.push(x);
+        return;
+      }
+      if (state.state === "expired") ax.push(x);
+      else if (state.state === "expiring") ae.push([x, Math.floor(state.expiresAt / 1000)]);
+      else if (state.state === "unknown") au.push(x);
+    });
+    const keptAx = ax.slice(0, STATUS_MAX_AUTH_EXPIRED);
+    const keptAe = ae.slice(0, STATUS_MAX_AUTH_EXPIRED - keptAx.length);
+    const keptAu = au.slice(0, STATUS_MAX_AUTH_EXPIRED - keptAx.length - keptAe.length);
+    return Promise.resolve({
+      fields: {
+        ...(keptAx.length === 0 ? {} : { ax: keptAx }),
+        ...(keptAe.length === 0 ? {} : { ae: keptAe }),
+        ...(keptAu.length === 0 ? {} : { au: keptAu }),
+      },
+      samples: [],
+    });
+  };
 }
 
 function sessionsCollector(sources: CollectorSources): Collect {

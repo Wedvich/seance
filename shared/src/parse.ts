@@ -28,6 +28,7 @@ import {
   PUSH_ENDPOINT_MAX_LENGTH,
   PUSH_LABEL_MAX_LENGTH,
   PUSH_MAX_SUBSCRIPTIONS,
+  AUTH_ALERTS_MAX,
   DISK_ALERTS_MAX,
   PUSH_SERVICE_HOSTS,
   PUSH_SERVICE_VENDORS,
@@ -61,6 +62,7 @@ import {
   type PushUnsubscribeRequest,
   type QuotaReading,
   type SettingsRecord,
+  type AuthAlerted,
   type DiskAlerted,
   type SpillStamp,
   type TaskPr,
@@ -455,6 +457,12 @@ function parseQuotaObservation(value: unknown): QuotaObservation | null {
   return reading === null ? null : { x: value["x"], ...reading };
 }
 
+function parseExpiring(value: unknown): readonly [number, number] | null {
+  if (!Array.isArray(value) || value.length !== 2) return null;
+  const [index, at] = value;
+  return isUint(index) && isUint(at) ? [index, at] : null;
+}
+
 /**
  * The decrypted `status` blob. Strict where `parseMachineInfo` is lenient: a
  * status is regenerated every tick and renders nothing on its own, so one bad
@@ -473,9 +481,12 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
   const { tr } = value;
   if (!isOptionalUint(tr)) return null;
   const ax = value["ax"] === undefined ? undefined : parseUintList(value["ax"]);
-  if (ax === null || (ax !== undefined && (ax.length > STATUS_MAX_AUTH_EXPIRED || new Set(ax).size !== ax.length))) {
-    return null;
-  }
+  const ae = value["ae"] === undefined ? undefined : parseList(value["ae"], parseExpiring);
+  const au = value["au"] === undefined ? undefined : parseUintList(value["au"]);
+  if (ax === null || ae === null || au === null) return null;
+  // Disjoint and bounded together: one exclave is in at most one list.
+  const authIndices = [...(ax ?? []), ...(ae ?? []).map(([index]) => index), ...(au ?? [])];
+  if (authIndices.length > STATUS_MAX_AUTH_EXPIRED || new Set(authIndices).size !== authIndices.length) return null;
   const { drn } = value;
   if (drn !== undefined && drn !== true) return null;
   return {
@@ -491,6 +502,8 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
     ...(quota === undefined ? {} : { quota }),
     ...(tr === undefined ? {} : { tr }),
     ...(ax === undefined ? {} : { ax }),
+    ...(ae === undefined ? {} : { ae }),
+    ...(au === undefined ? {} : { au }),
     ...(drn === undefined ? {} : { drn }),
   };
 }
@@ -1514,6 +1527,7 @@ const PUSH_ALERT_KEYS = {
   "needs-input": ["v", "kind", "at", "taskId", "since", "escalated", "question"],
   disk: ["v", "kind", "at", "deviceId", "diskPct", "freeMib"],
   "pr-blocked": ["v", "kind", "at", "taskId", "reason"],
+  auth: ["v", "kind", "at", "deviceId", "exclave", "state"],
 } as const;
 
 /**
@@ -1561,6 +1575,12 @@ export function parsePushAlert(value: unknown): PushAlert | null {
     if (!known(PUSH_ALERT_KEYS["pr-blocked"]) || !isTaskId(taskId) || blockedReason === undefined) return null;
     return { v: 1, kind, at, taskId, reason: blockedReason };
   }
+  if (kind === "auth") {
+    const { deviceId, exclave, state } = value;
+    if (!known(PUSH_ALERT_KEYS.auth) || !isRoutingId(deviceId) || !isRoutingId(exclave)) return null;
+    if (state !== "expired" && state !== "expiring") return null;
+    return { v: 1, kind, at, deviceId, exclave, state };
+  }
   return null;
 }
 
@@ -1592,7 +1612,7 @@ function parseVapidKeys(value: unknown): VapidKeys | null {
  */
 export function parseSettingsRecord(value: unknown): SettingsRecord | null {
   if (!isRecord(value) || !isVersion(value["version"])) return null;
-  const { vapid, linearKey, subscriptions, diskAlerts } = value;
+  const { vapid, linearKey, subscriptions, diskAlerts, authAlerts } = value;
   const keys = vapid === undefined ? undefined : parseVapidKeys(vapid);
   if (keys === null) return null;
   if (linearKey !== undefined && !isPrintableName(linearKey, LINEAR_KEY_MAX_LENGTH)) return null;
@@ -1606,13 +1626,31 @@ export function parseSettingsRecord(value: unknown): SettingsRecord | null {
   }
   const disk = diskAlerts === undefined ? undefined : parseDiskAlerts(diskAlerts);
   if (disk === null) return null;
+  const auth = authAlerts === undefined ? undefined : parseAuthAlerts(authAlerts);
+  if (auth === null) return null;
   return {
     version: value["version"],
     ...(keys === undefined ? {} : { vapid: keys }),
     ...(linearKey === undefined ? {} : { linearKey }),
     ...(subscribed === undefined ? {} : { subscriptions: subscribed }),
     ...(disk === undefined ? {} : { diskAlerts: disk }),
+    ...(auth === undefined ? {} : { authAlerts: auth }),
   };
+}
+
+/** One entry per device and exclave. */
+function parseAuthAlerts(value: unknown): readonly AuthAlerted[] | null {
+  if (!Array.isArray(value) || value.length > AUTH_ALERTS_MAX) return null;
+  const parsed = parseList(value, (entry): AuthAlerted | null => {
+    if (!isRecord(entry)) return null;
+    const { deviceId, exclave, state, at } = entry;
+    if (!isRoutingId(deviceId) || !isRoutingId(exclave) || !isFiniteNumber(at)) return null;
+    if (state !== "expired" && state !== "expiring") return null;
+    return { deviceId, exclave, state, at };
+  });
+  if (parsed === null) return null;
+  if (new Set(parsed.map((e) => `${e.deviceId}\n${e.exclave}`)).size !== parsed.length) return null;
+  return parsed;
 }
 
 /** One entry per machine, as `subscriptions` has one per endpoint. */

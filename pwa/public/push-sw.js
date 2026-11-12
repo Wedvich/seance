@@ -5,7 +5,7 @@
  * A push always shows a notification, even for a payload it cannot read: Chrome shows its own
  * "updated in the background" one otherwise, and WebKit revokes a subscription after a few
  * silent pushes. The text is fixed per kind, a spill's window label shown only as one of the known
- * `5h`/`7d`; the payload carries ids and state, never a title or a prompt, and this worker holds no
+ * `5h`/`7d` and a login alert's state only as one of two fixed texts; the payload carries ids and state, never a title or a prompt, and this worker holds no
  * PSK to open anything more.
  */
 
@@ -52,6 +52,19 @@
     if (alert.kind === "disk") {
       if (typeof alert.deviceId !== "string" || !TASK_ID.test(alert.deviceId)) return null;
       return { body: "A machine's disk is nearly full.", tag: `disk:${alert.deviceId}`, url: MACHINES_URL };
+    }
+    if (alert.kind === "auth") {
+      // Both ids are routing ids; the state only picks one of two fixed texts.
+      if (typeof alert.deviceId !== "string" || !TASK_ID.test(alert.deviceId)) return null;
+      if (typeof alert.exclave !== "string" || !TASK_ID.test(alert.exclave)) return null;
+      const body =
+        alert.state === "expired"
+          ? "A Claude login needs /login."
+          : alert.state === "expiring"
+            ? "A Claude login expires within 3 days."
+            : null;
+      if (body === null) return null;
+      return { body, tag: `auth:${alert.deviceId}:${alert.exclave}`, url: MACHINES_URL };
     }
     if (typeof alert.taskId !== "string" || !TASK_ID.test(alert.taskId)) return null;
     const url = `/?task=${encodeURIComponent(alert.taskId)}`;

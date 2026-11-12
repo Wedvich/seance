@@ -182,6 +182,9 @@ function MachineCardView(props: {
               <span className="exclave-sessions">
                 {row.sessions === null ? <b>—</b> : <SessionCount count={row.sessions} />}
               </span>
+              {row.auth !== null && (
+                <span className={`exclave-auth exclave-auth-${row.auth.level}`}>{row.auth.text}</span>
+              )}
             </li>
           ))}
         </ul>

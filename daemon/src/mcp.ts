@@ -46,7 +46,9 @@ import {
   type Task,
   type TaskDep,
   type TaskUntil,
+  exclaveAuth,
   lastHeardAt,
+  sleepingMachine,
 } from "@seance/shared";
 import { appRelayClient, importAppKeys, LazyRelay, type AppKeys } from "./app-relay.ts";
 import { cliSink, type AuditSink } from "./audit.ts";
@@ -274,6 +276,7 @@ function describeMachine(
   local: LocalMachine | null,
   scheduler: SchedulerAvailability | null,
   names: AccountNames,
+  now: number,
 ): Record<string, unknown> {
   // Null when this transport has no view of the scheduler at all (a broker daemon that predates brokered scheduler access).
   const role = scheduler === null ? null : schedulerRole(machine.deviceId, scheduler);
@@ -289,12 +292,18 @@ function describeMachine(
     ...(machine.exclaves === undefined
       ? {}
       : {
-          exclaves: machine.exclaves.map((info) => ({
-            id: info.id,
-            ...(info.accountId === null ? {} : { accountId: info.accountId }),
-            ...(info.email === undefined ? {} : { email: info.email }),
-            ...(info.accountId === null ? {} : describeName(names, info.accountId)),
-          })),
+          exclaves: machine.exclaves.map((info, index) => {
+            const auth = exclaveAuth(machine, index, now);
+            return {
+              id: info.id,
+              ...(info.accountId === null ? {} : { accountId: info.accountId }),
+              ...(info.email === undefined ? {} : { email: info.email }),
+              ...(info.accountId === null ? {} : describeName(names, info.accountId)),
+              // A signed-out exclave has no login to read: the scheduler already filters it as `auth_missing`.
+              ...(info.accountId === null ? {} : { auth: auth.state }),
+              ...(auth.state === "expiring" ? { loginExpiresAt: new Date(auth.expiresAt).toISOString() } : {}),
+            };
+          }),
         }),
     // Named so the model knows which target costs nothing to reach; get_sessions
     // and despawn_session there go straight to the daemon on this box.
@@ -704,6 +713,7 @@ function describeTask(
   names: AccountNames,
   tasks: readonly Task[],
   offer: OfferContext,
+  idle: ReadonlySet<string>,
 ): Record<string, unknown> {
   const placement = placementOf(task, machines);
   const pin = describePin(task, machines, names);
@@ -726,6 +736,9 @@ function describeTask(
     // A `manual` mark reads apart from a finish: a person settled it, nothing observed it end.
     ...(task.state === "done" && task.doneBy !== undefined ? { doneBy: task.doneBy } : {}),
     ...(task.escalated === true ? { escalated: true } : {}),
+    // The PWA's asleep rule, and the leader's: neither holds a concurrency slot once the machine has been gone ~2 min.
+    ...(sleepingMachine(task, machines) !== undefined && task.state !== "lost" ? { away: true } : {}),
+    ...(idle.has(task.id) ? { idle: true } : {}),
     ...(task.needsInputSince === undefined ? {} : { needsInputSince: new Date(task.needsInputSince).toISOString() }),
     // The closed kind only: a tool name is a session- or MCP-server-chosen string, not for another agent's context.
     ...(task.inputReason === undefined ? {} : { inputReason: task.inputReason }),
@@ -827,7 +840,7 @@ export function buildMcpServer(
     {
       title: "List machines",
       description:
-        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any, plus `account`, the name every Séance client shows for it (its alias where one is set, else the email, else a short id; tagged where two accounts would read alike; no alias on a box whose daemon brokers for it, with no readable PSK) — a display name only, never a value for pin.account — and `alias` where one is set: a spawn's pin.account takes the `accountId`, the `email` or the `alias`, not `account`; a machine with the field absent or empty reports none, so the scheduler cannot place there until its daemon updates. Offline machines are listed with their last-seen time: `lastSeen` is when the machine was last heard from (its last register or status beat, whichever is later). `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that every spawn goes through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue, cancel_task and start_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
+        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any, plus `account`, the name every Séance client shows for it (its alias where one is set, else the email, else a short id; tagged where two accounts would read alike; no alias on a box whose daemon brokers for it, with no readable PSK) — a display name only, never a value for pin.account — and `alias` where one is set: a spawn's pin.account takes the `accountId`, the `email` or the `alias`, not `account`; a machine with the field absent or empty reports none, so the scheduler cannot place there until its daemon updates. Each signed-in exclave's `auth` is `expired` (its login needs /login; the scheduler does not place there), `expiring` (within 3 days, with `loginExpiresAt`; still placed), `ok`, or `unknown` (not read, or the machine is asleep or its daemon older; still placed). Offline machines are listed with their last-seen time: `lastSeen` is when the machine was last heard from (its last register or status beat, whichever is later). `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that every spawn goes through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue, cancel_task and start_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
       inputSchema: NO_INPUT,
       annotations: { readOnlyHint: true },
     },
@@ -852,7 +865,7 @@ export function buildMcpServer(
       try {
         const scheduler = lease.scheduler?.availability() ?? null;
         const names = await accountNames(lease);
-        const machines = lease.machines.map((machine) => describeMachine(machine, local, scheduler, names));
+        const machines = lease.machines.map((machine) => describeMachine(machine, local, scheduler, names, Date.now()));
         return textResult(JSON.stringify(machines, null, 2));
       } finally {
         lease.release();
@@ -893,7 +906,7 @@ export function buildMcpServer(
     "get_queue",
     {
       title: "List the scheduler's queue",
-      description: `List the scheduler's queue — the tasks spawn_session and queue_batch queued, and other clients' (the app, the CLI), and what holds dispatch (a paused queue, or an account named as a pin names it) — with each one's state, its pin (whichever of machine and account it pins: the machine by name where known, plus its deviceId; the account by its alias where one is set (none on a box whose daemon brokers for it), else the email a machine reports, else a short id, plus its accountId; an email or short id two accounts share, case aside, gains a tag telling them apart: the org's short id, or more of it where that still collides; pinned and held accounts no machine reports count as accounts too), the machines it avoids, its autonomy level where it is not the default checkpoint, where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); an awaiting-merge task whose open PR is stuck carries \`prBlocked\` — \`checks\` (a required check failed), \`conflict\`, \`behind\` (its branch is behind its base) or \`unarmed\` (its required checks passed but nothing will merge it: no auto-merge, no review requested); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). ${AUTO_LIMITS}`,
+      description: `List the scheduler's queue — the tasks spawn_session and queue_batch queued, and other clients' (the app, the CLI), and what holds dispatch (a paused queue, or an account named as a pin names it) — with each one's state, its pin (whichever of machine and account it pins: the machine by name where known, plus its deviceId; the account by its alias where one is set (none on a box whose daemon brokers for it), else the email a machine reports, else a short id, plus its accountId; an email or short id two accounts share, case aside, gains a tag telling them apart: the org's short id, or more of it where that still collides; pinned and held accounts no machine reports count as accounts too), the machines it avoids, its autonomy level where it is not the default checkpoint, where it was placed, and why the latest routing decision chose or rejected each machine. At most ${QUEUE_MAX_TASKS} tasks, unfinished first (a task waiting on a person leads); an awaiting-merge task whose open PR is stuck carries \`prBlocked\` — \`checks\` (a required check failed), \`conflict\`, \`behind\` (its branch is behind its base) or \`unarmed\` (its required checks passed but nothing will merge it: no auto-merge, no review requested); prompts are cut to a preview, and a finished task's is not kept (a task that ran has its transcript on its machine; one that never ran has no copy). A task marked away (its machine not connected) holds no concurrency slot once its machine has been gone about 2 minutes, and one marked idle (its session idle at its prompt 10+ minutes) holds none either; both count again when they resume, so the fleet can sit briefly over its cap. ${AUTO_LIMITS}`,
       inputSchema: NO_INPUT,
       annotations: { readOnlyHint: true },
     },
@@ -920,7 +933,8 @@ export function buildMcpServer(
           now: reply.at,
           leaderHandoff: advertises(lease.machines, lease.scheduler.availability(), CAPABILITIES.continueHandoff),
         };
-        const tasks = reply.tasks.map((task) => describeTask(task, lease.machines, names, reply.tasks, offer));
+        const idle = new Set((reply.idle ?? []).map((ref) => ref.taskId));
+        const tasks = reply.tasks.map((task) => describeTask(task, lease.machines, names, reply.tasks, offer, idle));
         const holds = (reply.holds ?? []).map((hold) => describeHold(hold, names));
         return textResult(JSON.stringify({ at: new Date(reply.at).toISOString(), holds, tasks }, null, 2));
       }),

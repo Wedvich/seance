@@ -147,6 +147,30 @@ describe("loadConfig", () => {
       await expect(loadConfig(path)).rejects.toThrow("quota");
     }
   });
+
+  test("authHealth is optional, an empty block keeps the macOS keychain off, and only a boolean turns it on", async () => {
+    const dir = await tempDir();
+    const bare = join(dir, "bare-auth.json");
+    await writeFile(bare, JSON.stringify(VALID));
+    expect((await loadConfig(bare)).authHealth).toBeUndefined();
+
+    const empty = join(dir, "empty-auth.json");
+    await writeFile(empty, JSON.stringify({ ...VALID, authHealth: {} }));
+    expect((await loadConfig(empty)).authHealth).toEqual({ keychain: false });
+
+    const on = join(dir, "on-auth.json");
+    await writeFile(on, JSON.stringify({ ...VALID, authHealth: { keychain: true } }));
+    expect((await loadConfig(on)).authHealth).toEqual({ keychain: true });
+
+    const bad = [{ keychain: "yes" }, { keychain: 1 }, { keychain: null }, { keychains: true }, "on", [], null];
+    for (const [i, authHealth] of bad.entries()) {
+      const path = join(dir, `bad-auth-${i}.json`);
+      // oxlint-disable-next-line no-await-in-loop
+      await writeFile(path, JSON.stringify({ ...VALID, authHealth }));
+      // oxlint-disable-next-line no-await-in-loop
+      await expect(loadConfig(path)).rejects.toThrow("authHealth");
+    }
+  });
 });
 
 describe("runnableProblems", () => {

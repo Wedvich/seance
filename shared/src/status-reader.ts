@@ -1,6 +1,6 @@
 import type { Machine } from "./app-client.ts";
 import { REPLAY_WINDOW_MS } from "./crypto.ts";
-import { STATUS_INTERVAL_MS, type MachineStatus, type QuotaObservation } from "./types.ts";
+import { CAPABILITIES, STATUS_INTERVAL_MS, type MachineStatus, type QuotaObservation, type Task } from "./types.ts";
 
 /**
  * The rules every reader of a `status` goes through, so the PWA and the
@@ -35,6 +35,37 @@ export function isStatusStale(status: MachineStatus, nowMs: number): boolean {
  */
 export function liveStatus(machine: Pick<Machine, "connected" | "status">): MachineStatus | undefined {
   return machine.connected ? machine.status : undefined;
+}
+
+/** One exclave's login as a reader sees it; `expiresAt` is ms. */
+export type ExclaveAuth =
+  | { readonly state: "ok" }
+  | { readonly state: "expiring"; readonly expiresAt: number }
+  | { readonly state: "expired" }
+  | { readonly state: "unknown" };
+
+/**
+ * The one rule for an exclave's login — routing, the PWA, MCP and the alert step read it
+ * here. `unknown` when there is no live fresh status or the daemon does not advertise
+ * `authHealth` (then "not listed" means nothing), and for an exclave in `au`. An `ae` time
+ * already past reads expired: the daemon's next read lags it by up to its reread interval.
+ */
+export function exclaveAuth(
+  machine: Pick<Machine, "connected" | "status" | "capabilities">,
+  index: number,
+  nowMs: number,
+): ExclaveAuth {
+  const status = liveStatus(machine);
+  if (status === undefined || isStatusStale(status, nowMs)) return { state: "unknown" };
+  if (machine.capabilities?.includes(CAPABILITIES.authHealth) !== true) return { state: "unknown" };
+  if (status.ax?.includes(index) === true) return { state: "expired" };
+  const expiring = status.ae?.find(([x]) => x === index);
+  if (expiring !== undefined) {
+    const expiresAt = expiring[1] * 1000;
+    return expiresAt <= nowMs ? { state: "expired" } : { state: "expiring", expiresAt };
+  }
+  if (status.au?.includes(index) === true) return { state: "unknown" };
+  return { state: "ok" };
 }
 
 /**
@@ -94,4 +125,20 @@ function isSaneObservation(q: QuotaObservation): boolean {
 
 function isPct(value: number | undefined): boolean {
   return value === undefined || value <= MAX_PCT;
+}
+
+/** States whose headline says the machine is asleep: a session may be alive there, waiting on the lid. */
+const SLEEP_AWARE: ReadonlySet<Task["state"]> = new Set(["reserved", "running", "needs-input", "lost"]);
+
+/**
+ * The task's machine when it is listed and not `connected` as this client sees
+ * it — the signal the Machines card's "asleep" reads, never the relay flag alone
+ * (DESIGN.md, "The Queue screen"). A derived view: the leader's state is unchanged.
+ */
+export function sleepingMachine(task: Task, machines: readonly Machine[]): Machine | undefined {
+  if (!SLEEP_AWARE.has(task.state)) return undefined;
+  const at = task.assignment ?? task.reservation;
+  if (at === undefined) return undefined;
+  const machine = machines.find((m) => m.deviceId === at.deviceId);
+  return machine?.connected === false ? machine : undefined;
 }
