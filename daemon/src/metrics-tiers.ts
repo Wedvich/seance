@@ -38,6 +38,11 @@ export interface Retention {
   readonly m5KeepS: number;
 }
 
+/** The daemon's retention (`metrics-store.ts`); here so the archivist reads them without loading the store's `bun:sqlite` opener. */
+const HOUR_S = 3_600;
+export const RAW_KEEP_S = 48 * HOUR_S;
+export const M5_KEEP_S = 30 * 24 * HOUR_S;
+
 /** Table per tier; names are constants here and nowhere else, so the SQL below concatenates nothing wire-supplied. */
 export const TIERS: Readonly<Record<MetricsStep, string>> = { 30: "raw", 300: "m5", 3600: "h1" };
 

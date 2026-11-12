@@ -185,6 +185,33 @@ describe("archivist layering", () => {
     expect(sources.join("\n").match(/\bUPDATE\s+events\b/giu)).toBeNull();
   });
 
+  test("bun:sqlite reaches the archivist only through its two files and the shared tiers' type", async () => {
+    const { files } = await closure(await archivistSources());
+    const users: string[] = [];
+    for (const file of files) {
+      // oxlint-disable-next-line no-await-in-loop -- a handful of small files
+      if (specifiers(await readFile(join(ROOT, file), "utf8")).includes("bun:sqlite")) users.push(file);
+    }
+    // metrics-tiers.ts takes the Database it is handed (a type import); metrics-store.ts, which opens the daemon's own file, is not here.
+    expect(users.toSorted()).toEqual([
+      "archivist/src/archive.ts",
+      "archivist/src/metrics-archive.ts",
+      "daemon/src/metrics-tiers.ts",
+    ]);
+  });
+
+  test("the archive's tiers are built pulled, and the one replacing rollup is the unguarded branch", async () => {
+    const archive = await readFile(join(ROOT, "archivist/src/metrics-archive.ts"), "utf8");
+    expect(archive).toMatch(/new TieredMetrics\(db, \{[^}]*\bpulled: true\b/u);
+    const tiers = (await readFile(join(ROOT, "daemon/src/metrics-tiers.ts"), "utf8")).replaceAll(
+      /\/\*[\s\S]*?\*\/|^\s*\/\/.*$/gmu,
+      "",
+    );
+    // Only `rollupSql`'s `if (!guarded)` statement replaces a row, and `pulled: true` is what keeps the archive off it.
+    expect(tiers.match(/\bINSERT OR REPLACE\b/gu)).toHaveLength(1);
+    expect(tiers.match(/\bREPLACE\b/gu)).toHaveLength(1);
+  });
+
   test("the archive's metrics prune only through the shared tiers' two horizon deletes", async () => {
     const source = await readFile(join(ROOT, "archivist/src/metrics-archive.ts"), "utf8");
     expect(specifiers(source)).toContain("../../daemon/src/metrics-tiers.ts");

@@ -90,6 +90,15 @@ interface Fleet {
   readonly asked: string[];
   readonly source: Parameters<typeof startMetricsCollector>[0]["source"];
   push: (machines: readonly Machine[]) => void;
+  /** A request the daemon's transport loses (a timeout): the reply never comes. */
+  fail: (request: MetricsRequest) => boolean;
+  /** What a misbehaving daemon makes of a good reply. */
+  tamper: (series: readonly MetricsSeries[]) => readonly MetricsSeries[];
+}
+
+/** `handleMetrics` rounds every value to one decimal before the reply is sealed. */
+function rounded(series: readonly MetricsSeries[]): MetricsSeries[] {
+  return series.map((s) => ({ ...s, points: s.points.map(([ts, value]) => [ts, Math.round(value * 10) / 10]) }));
 }
 
 function fleet(daemon: MetricsStore, replyBudget: number, initial: readonly Machine[] = [machine()]): Fleet {
@@ -97,9 +106,11 @@ function fleet(daemon: MetricsStore, replyBudget: number, initial: readonly Mach
   const listeners = new Set<() => void>();
   const requests: MetricsRequest[] = [];
   const asked: string[] = [];
-  return {
+  const self: Fleet = {
     requests,
     asked,
+    fail: () => false,
+    tamper: (series) => series,
     push: (machines) => {
       state = stateOf(machines);
       for (const listener of listeners) listener();
@@ -116,7 +127,8 @@ function fleet(daemon: MetricsStore, replyBudget: number, initial: readonly Mach
         if (!isMetricsRequest(request)) {
           return Promise.resolve({ ok: false, code: "invalid_request", message: "bad request" });
         }
-        const series = daemon.query(request);
+        if (self.fail(request)) return Promise.reject(new Error("timed out"));
+        const series = self.tamper(rounded(daemon.query(request)));
         // The daemon's transport refuses a reply that would not fit one envelope.
         if (JSON.stringify({ series }).length > replyBudget) {
           return Promise.resolve({ ok: false, code: "too_large", message: "too large" });
@@ -125,6 +137,7 @@ function fleet(daemon: MetricsStore, replyBudget: number, initial: readonly Mach
       },
     },
   };
+  return self;
 }
 
 /** The daemon's series as the archive files them: the observer added, the account keyed by its HMAC. */
@@ -185,11 +198,16 @@ describe("metrics collection", () => {
     const { archive } = start(daemon, source, { ms: NOW * 1000 });
 
     await pollUntil(
-      () => JSON.stringify(tier(archive, 30)) === JSON.stringify(archived(tier(daemon, 30))),
+      () => JSON.stringify(tier(archive, 30)) === JSON.stringify(archived(rounded(tier(daemon, 30)))),
       "the raw tier imported",
     );
-    expect(tier(archive, 3600)).toEqual(archived(tier(daemon, 3600)));
-    expect(tier(archive, 300)).toEqual(archived(tier(daemon, 300)));
+    // Rolled rows are the daemon's own averages, as far as the last bucket settled; the rest the archive rolls itself.
+    const upTo = (series: readonly MetricsSeries[], settled: number): MetricsSeries[] =>
+      series.map((s) => ({ ...s, points: s.points.filter(([ts]) => ts <= settled) }));
+    expect(upTo(tier(archive, 3600), NOW - 2 * 3600)).toEqual(
+      upTo(archived(rounded(tier(daemon, 3600))), NOW - 2 * 3600),
+    );
+    expect(upTo(tier(archive, 300), NOW - 20 * 60)).toEqual(upTo(archived(rounded(tier(daemon, 300))), NOW - 20 * 60));
     // Every page within the daemon's bound; some had to be asked one metric at a time.
     expect(requests.every(isMetricsRequest)).toBe(true);
     expect(requests.some((request) => request.names !== undefined)).toBe(true);
@@ -207,14 +225,14 @@ describe("metrics collection", () => {
     await pollUntil(() => archive.pullFrom("dev-a", 30, 900) === NOW, "the first import");
     const imported = requests.length;
 
-    // The next tick: the daemon stores the unrounded value, the status frame carries it rounded.
+    // The next tick: the daemon stores the unrounded value, the status frame carries it as a whole percent.
     daemon.write([{ metric: "cpu_pct", labels: {}, ts: NOW + 30, value: 12.25 }], NOW + 30);
     const status: MachineStatus = { at: NOW + 30, scan: 0, cpu: 12 };
     push([machine({ status })]);
     await pollUntil(() => archive.query({ from: NOW + 30, to: NOW + 30, step: 30 }).length === 1, "the live sample");
     clock.ms = (NOW + 60) * 1000;
     await pollUntil(
-      () => archive.query({ from: NOW + 30, to: NOW + 30, step: 30 })[0]?.points[0]?.[1] === 12.25,
+      () => archive.query({ from: NOW + 30, to: NOW + 30, step: 30 })[0]?.points[0]?.[1] === 12.3,
       "the pulled sample replacing it",
     );
     // Steady rounds ask raw only, from the watermark, never the whole history again.
@@ -245,10 +263,17 @@ describe("metrics collection", () => {
     expect(caughtUp.some((request) => request.step === 3600)).toBe(false);
     expect(caughtUp.every((request) => request.step !== 30 || request.from >= later - RAW_KEEP_S)).toBe(true);
     const gap = { from: NOW, to: later - 3 * 3600, step: 300 } as const;
-    expect(sorted(archive.query(gap))).toEqual(archived(sorted(daemon.query(gap))));
-    expect(sorted(archive.query({ ...gap, step: 3600 }))).toEqual(
-      archived(sorted(daemon.query({ ...gap, step: 3600 }))),
-    );
+    expect(sorted(archive.query(gap))).toEqual(archived(rounded(sorted(daemon.query(gap)))));
+    // No hourly pull: the archive averaged the daemon's one-decimal 5-min rows itself, so it is near, not equal.
+    const hourly = sorted(archive.query({ ...gap, step: 3600 }));
+    const expected = archived(sorted(daemon.query({ ...gap, step: 3600 })));
+    expect(hourly.map((s) => s.metric)).toEqual(expected.map((s) => s.metric));
+    for (const [i, series] of hourly.entries()) {
+      expect(series.points.map(([ts]) => ts)).toEqual(expected[i]?.points.map(([ts]) => ts) ?? []);
+      for (const [j, [, value]] of series.points.entries()) {
+        expect(Math.abs(value - (expected[i]?.points[j]?.[1] ?? Number.NaN))).toBeLessThan(0.11);
+      }
+    }
   });
 
   test("a machine without the metrics op, or offline, or the seat itself, is never asked", async () => {
@@ -265,6 +290,74 @@ describe("metrics collection", () => {
     // A negative assertion: the other machines' non-requests cannot be polled.
     await Bun.sleep(50);
     expect(new Set(asked)).toEqual(new Set(["dev-a"]));
+  });
+
+  test("a page that half landed writes nothing, so the next round fetches all of it", async () => {
+    const daemon = MetricsStore.memory();
+    daemonHistory(daemon, NOW - 3600 + 37, NOW, 30);
+    const fleetOf = fleet(daemon, 4_000);
+    // cpu_pct is asked first and lands; the quota series then times out.
+    fleetOf.fail = (request) => request.step === 30 && request.names?.[0] === "quota_5h_pct";
+    const { archive } = start(daemon, fleetOf.source, { ms: NOW * 1000 }, 50);
+    await pollUntil(() => fleetOf.requests.some((request) => request.names?.[0] === "quota_5h_pct"), "the failure");
+    // The marks hold where no page was whole: neither series is marked, nor any point written.
+    expect(archive.pullFrom("dev-a", 30, 900)).toBeNull();
+    expect(archive.query({ from: 0, to: NOW, step: 30 })).toEqual([]);
+
+    fleetOf.fail = () => false;
+    await pollUntil(
+      () => JSON.stringify(tier(archive, 30)) === JSON.stringify(archived(rounded(tier(daemon, 30)))),
+      "both series complete",
+    );
+  });
+
+  test("a reply too large even for one metric is halved by the second until it fits", async () => {
+    const daemon = MetricsStore.memory();
+    daemonHistory(daemon, NOW - 600 + 7, NOW, 30);
+    const { requests, source } = fleet(daemon, 400);
+    const { archive } = start(daemon, source, { ms: NOW * 1000 });
+    await pollUntil(
+      () => JSON.stringify(tier(archive, 30)) === JSON.stringify(archived(rounded(tier(daemon, 30)))),
+      "the raw tier imported in halves",
+    );
+    const named = requests.filter((request) => request.step === 30 && request.names !== undefined);
+    expect(named.some((request) => request.to - request.from < 600 - 8)).toBe(true);
+  });
+
+  test("a point outside the requested range is dropped, and never moves a watermark into the future", async () => {
+    const daemon = MetricsStore.memory();
+    daemonHistory(daemon, NOW - 3600 + 37, NOW, 30);
+    const fleetOf = fleet(daemon, 1_000_000);
+    const far = NOW + 10 * DAY;
+    fleetOf.tamper = (series) => series.map((s) => ({ ...s, points: [...s.points, [far, 1], [NOW - 40 * DAY, 1]] }));
+    const { archive } = start(daemon, fleetOf.source, { ms: NOW * 1000 });
+    // The daemon's last tick is at NOW - 23; the mark sits there, not at the planted points.
+    await pollUntil(
+      () => archive.pullFrom("dev-a", 30, 900) === NOW - 23,
+      "the raw watermark at the real newest point",
+    );
+    expect(archive.query({ from: far, to: far, step: 30 })).toEqual([]);
+    expect(archive.query({ from: 0, to: NOW - 30 * DAY, step: 30 })).toEqual([]);
+  });
+
+  test("a machine whose store answers empty is not caught up again each round", async () => {
+    const daemon = MetricsStore.memory();
+    const { requests, source } = fleet(daemon, 1_000_000);
+    start(daemon, source, { ms: NOW * 1000 }, 50);
+    await pollUntil(() => requests.some((request) => request.step === 30), "the first round's raw pull");
+    const after = requests.length;
+    await pollUntil(() => requests.length >= after + 3, "later rounds");
+    expect(requests.slice(after).every((request) => request.step === 30)).toBe(true);
+  });
+
+  test("a status stamped far ahead of this clock is not kept, nor does it silence the machine after the clock is fixed", async () => {
+    const daemon = MetricsStore.memory();
+    const { source, push } = fleet(daemon, 1_000_000, []);
+    const { archive } = start(daemon, source, { ms: NOW * 1000 });
+    push([machine({ capabilities: [], status: { at: NOW + 2 * 3600, scan: 0, cpu: 10 } })]);
+    push([machine({ capabilities: [], status: { at: NOW, scan: 0, cpu: 20 } })]);
+    await pollUntil(() => archive.query({ from: NOW, to: NOW, step: 30 }).length === 1, "the corrected status");
+    expect(archive.query({ from: NOW + 3600, to: NOW + 3 * 3600, step: 30 })).toEqual([]);
   });
 });
 

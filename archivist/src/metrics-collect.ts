@@ -11,8 +11,7 @@ import {
   type MetricsStep,
   type RelayState,
 } from "@seance/shared";
-import { M5_KEEP_S, RAW_KEEP_S } from "../../daemon/src/metrics-store.ts";
-import { quotaSamples, type Sample } from "../../daemon/src/metrics-tiers.ts";
+import { M5_KEEP_S, quotaSamples, RAW_KEEP_S, type Sample } from "../../daemon/src/metrics-tiers.ts";
 import { OBSERVER_LABEL, type MetricsArchive } from "./metrics-archive.ts";
 
 /**
@@ -42,11 +41,18 @@ export interface MetricsTimings {
    * costs at most this much re-reading per round.
    */
   readonly lateS: number;
-  /** A 5-min or hourly bucket is pulled only once it closed this long ago: until then the daemon may still re-roll it. */
+  /**
+   * A 5-min or hourly bucket is pulled only once it closed this long ago: until then the daemon may still
+   * re-roll it, and a quota sample stamped up to `lateS` back re-rolls it. A pulled row is flagged and never
+   * re-averaged here, so a bucket pulled earlier would freeze without that late sample.
+   */
   readonly settleS: number;
 }
 
-export const METRICS_TIMINGS: MetricsTimings = { pullMs: 5 * 60_000, lateS: 15 * 60, settleS: 2 * 60 };
+export const METRICS_TIMINGS: MetricsTimings = { pullMs: 5 * 60_000, lateS: 15 * 60, settleS: 15 * 60 };
+
+/** How far ahead of this clock a daemon's status may be stamped and still be kept: past it the daemon's clock is wrong. */
+const FUTURE_SKEW_S = 300;
 
 /**
  * No daemon holds history before this: its tiers were recreated on 2026-10-15
@@ -153,6 +159,8 @@ export function startMetricsCollector(opts: MetricsCollectorOpts): MetricsCollec
       (machine) =>
         machine.deviceId !== selfId &&
         machine.status !== undefined &&
+        // Never remembered either: a clock that ran ahead and stepped back would otherwise be silent until real time caught up.
+        machine.status.at <= nowS() + FUTURE_SKEW_S &&
         machine.status.at > (lastAt.get(machine.deviceId) ?? Number.NEGATIVE_INFINITY),
     );
     if (fresh.length === 0) return;
@@ -188,15 +196,19 @@ export function startMetricsCollector(opts: MetricsCollectorOpts): MetricsCollec
       }),
     );
 
-  /** One range at one tier; false once anything in it failed, so the caller stops and the marks hold. */
+  /**
+   * One range at one tier, its series relabelled; null once anything in it failed, so the caller writes nothing
+   * of the page and the marks hold. Points outside `[from, to]` are dropped: a mark is the newest point written,
+   * so one far past the request would stop every later pull of that machine.
+   */
   const fetchRange = async (
     machine: Machine,
     step: MetricsStep,
     from: number,
     to: number,
     names?: readonly string[],
-  ): Promise<boolean> => {
-    if (stopped) return false;
+  ): Promise<MetricsSeries[] | null> => {
+    if (stopped) return null;
     const request: MetricsRequest = names === undefined ? { from, to, step } : { from, to, step, names };
     let reply: MetricsReply | null;
     try {
@@ -204,34 +216,43 @@ export function startMetricsCollector(opts: MetricsCollectorOpts): MetricsCollec
     } catch (err) {
       return failed(machine, err instanceof Error ? err.message : String(err));
     }
-    if (stopped) return false;
+    if (stopped) return null;
     if (reply === null) return failed(machine, "a reply this build cannot read");
     if ("series" in reply) {
-      const series = await relabel(machine.deviceId, reply.series);
-      if (stopped) return false;
-      archive.writePulled(machine.deviceId, step, series, nowS());
-      return true;
+      const inRange = reply.series.map(({ metric, labels, points }) => ({
+        metric,
+        labels,
+        points: points.filter(([ts]) => ts >= from && ts <= to),
+      }));
+      const series = await relabel(machine.deviceId, inRange);
+      return stopped ? null : series;
     }
     if (reply.code !== "too_large") return failed(machine, reply.code);
     if (names === undefined) {
+      const pieces: MetricsSeries[] = [];
       for (const name of Object.values(METRIC_NAMES)) {
         // oxlint-disable-next-line no-await-in-loop -- one request at a time, in order, by design
-        if (!(await fetchRange(machine, step, from, to, [name]))) return false;
+        const piece = await fetchRange(machine, step, from, to, [name]);
+        if (piece === null) return null;
+        pieces.push(...piece);
       }
-      return true;
+      return pieces;
     }
     if (to <= from) return failed(machine, "one point too large for an envelope");
     // Halved by the second, as pages are: a raw sample need not sit on a step boundary.
     const mid = from + Math.floor((to - from) / 2);
-    return (await fetchRange(machine, step, from, mid, names)) && fetchRange(machine, step, mid + 1, to, names);
+    const first = await fetchRange(machine, step, from, mid, names);
+    if (first === null) return null;
+    const second = await fetchRange(machine, step, mid + 1, to, names);
+    return second === null ? null : [...first, ...second];
   };
 
-  const failed = (machine: Machine, why: string): false => {
+  const failed = (machine: Machine, why: string): null => {
     if (!stopped && !failing.has(machine.deviceId)) {
       failing.add(machine.deviceId);
       log.warn(`metrics: pull from ${machine.deviceId} failed: ${why}; retrying each round`);
     }
-    return false;
+    return null;
   };
 
   /**
@@ -243,31 +264,49 @@ export function startMetricsCollector(opts: MetricsCollectorOpts): MetricsCollec
     while (start <= to) {
       const end = Math.min(to, start + (METRICS_MAX_POINTS - 1) * step);
       // oxlint-disable-next-line no-await-in-loop -- pages in order: a failed one stops the rest, so marks hold
-      if (!(await fetchRange(machine, step, start, end))) return false;
+      const page = await fetchRange(machine, step, start, end);
+      if (page === null || stopped) return false;
+      // One write a page, marks included: a page that half landed would leave its series' marks apart, and
+      // the `lateS` cap would then skip what the lagging ones missed for good. Also one re-roll, not one a piece.
+      archive.writePulled(machine.deviceId, step, page, nowS());
       start = end + 1;
     }
     return true;
   };
 
+  /**
+   * Where each machine's last whole pull of a tier reached. Marks move only with points, so a machine that
+   * answers empty (a store that fell back to memory) would otherwise be caught up again every round.
+   * Per process: a restart pulls once more.
+   */
+  const reached = new Map<string, number>();
+  const startOf = (id: string, step: MetricsStep): number =>
+    Math.max(
+      archive.pullFrom(id, step, timings.lateS) ?? Number.NEGATIVE_INFINITY,
+      (reached.get(`${id}:${step}`) ?? Number.NEGATIVE_INFINITY) - timings.lateS,
+    );
+
   const pullMachine = async (machine: Machine): Promise<void> => {
     const id = machine.deviceId;
     const at = nowS();
     const closed = (step: MetricsStep): number => Math.floor((at - timings.settleS) / step) * step - step;
-    const rawFrom = archive.pullFrom(id, 30, timings.lateS) ?? Number.NEGATIVE_INFINITY;
+    const rawFrom = startOf(id, 30);
     const plan: [MetricsStep, number, number][] = [];
     if (rawFrom < at - RAW_KEEP_S + CATCH_UP_MARGIN_S) {
       // Raw cannot reach back to where this archive's coverage of the machine ends: the coarser tiers fill the gap.
-      const m5From = Math.max(rawFrom, archive.pullFrom(id, 300, timings.lateS) ?? Number.NEGATIVE_INFINITY);
+      const m5From = Math.max(rawFrom, startOf(id, 300));
       if (m5From < at - M5_KEEP_S + CATCH_UP_MARGIN_S) {
-        const h1From = Math.max(m5From, archive.pullFrom(id, 3600, timings.lateS) ?? Number.NEGATIVE_INFINITY);
+        const h1From = Math.max(m5From, startOf(id, 3600));
         plan.push([3600, Math.max(h1From, historyStartS), closed(3600)]);
       }
       plan.push([300, Math.max(m5From, at - M5_KEEP_S), closed(300)]);
     }
     plan.push([30, Math.max(rawFrom, at - RAW_KEEP_S), at]);
     for (const [step, from, to] of plan) {
+      if (from > to) continue;
       // oxlint-disable-next-line no-await-in-loop -- coarse to fine, one machine's requests one at a time
-      if (from <= to && !(await pullTier(machine, step, from, to))) return;
+      if (!(await pullTier(machine, step, from, to))) return;
+      reached.set(`${id}:${step}`, to);
     }
     if (failing.delete(id)) log.info(`metrics: pull from ${id} recovered`);
   };

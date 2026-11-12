@@ -10776,7 +10776,9 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
     (`accountStoreKey`, A15), never the raw id the daemon labels with; `exclave` and `model` are
     kept as the daemon writes them.
   - **Live.** Each `Machine.status` the app leg holds (already bound to the blob it indexes) with
-    an `at` newer than the last ingested from that machine becomes raw samples the way the daemon
+    an `at` newer than the last ingested from that machine (and no more than 5 minutes ahead of
+    the archivist's clock: a daemon with a wrong clock is not kept, and is not remembered, so
+    fixing it does not leave it silent until real time catches up) becomes raw samples the way the daemon
     wrote its own: the six gauges at `at`, `sessions` per exclave, and each quota observation at
     its own stamp through the daemon's `quotaSamples`. A live sample never replaces a row.
   - **Pulled.** Every connected machine advertising `CAPABILITIES.metrics` (never the seat) is
@@ -10799,17 +10801,32 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
     pulled too, from the later of its own and raw's mark, at most the daemon's 30 d back; and when
     that start is older than 30 d, the hourly tier, from `METRICS_HISTORY_START_S` (2026-10-15, the
     daemon tiers' recreation) on a first start. Rolled tiers are pulled only to the last bucket
-    closed 2 minutes ago, so a bucket the daemon may still re-roll is never fixed. What a daemon
-    pruned or rolled past in between is lost (A20).
+    closed 15 minutes ago (`settleS` = `lateS`: a quota sample stamped that far back re-rolls
+    its bucket, and a flagged row is never re-averaged here), so a bucket the daemon may still
+    re-roll is never fixed. What a daemon
+    pruned or rolled past in between is lost (A20). A machine whose store answers empty keeps its
+    marks where they were, so the last whole pull's end (in memory, less `lateS`) floors the
+    next start: it is not caught up again every round.
   - **Paging.** Contiguous pages of at most `METRICS_MAX_POINTS` steps, oldest first, each
     starting a second past the last (a raw sample sits at its tick's second). A reply too large
     for an envelope (`too_large`) is asked again one `METRIC_NAMES` name at a time, then halved by
-    the second; a name this build does not know is not split out. The first failure ends that
-    machine's round with its marks where the last page left them; it is warned once per streak
-    and its recovery logged. The relay's `store-list` floors do not apply: the op is an envelope
+    the second; a name this build does not know is not split out. A page is written whole, its
+    pieces together and its marks with them, in one transaction (one re-roll a page): marks per
+    series moved piece by piece would let the `lateS` cap skip what a failed piece's series
+    missed. Points outside the page's requested range are dropped before the write, and a mark
+    is the newest in-range point, never the last one a reply lists. The first failure ends that
+    machine's round with its marks where the last whole page left them; it is warned once per
+    streak and its recovery logged. The relay's `store-list` floors do not apply: the op is an envelope
     to a daemon, which the relay neither reads nor rate-limits.
 
 ## Accepted trade-offs
+
+- Each archivist pull is one audit line on a daemon (`origin=relay op=metrics`, like any app
+  request: the relay is blind and the archivist is an app-role client, so nothing tells its
+  requests apart). That is about 300 a day a machine in steady state and a few hundred at a first
+  start or catch-up, a constant background to the "something enumerated" trail. Accepted rather
+  than exempting the op from the audit or the archivist from it, which would hide a stolen key
+  reading the same op; `METRICS_TIMINGS.pullMs` is the dial.
 
 - A task with `requires` is invisible to an app or CLI older than traits (its leader-side record is
   refused by an older leader, and an older app drops what it cannot read), as with `attachments`;

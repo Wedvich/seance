@@ -117,8 +117,9 @@ export class MetricsArchive {
     this.#db.transaction(() => {
       this.#tiers.writePulled(step, samples, now);
       for (const { metric, labels, points } of series) {
-        const newest = points.at(-1)?.[0];
-        if (newest === undefined || !Number.isInteger(newest)) continue;
+        // Not `at(-1)`: a reply's order is the daemon's word, and the mark is the newest point.
+        const newest = points.reduce((max, [ts]) => (Number.isInteger(ts) ? Math.max(max, ts) : max), -Infinity);
+        if (newest === -Infinity) continue;
         const id = this.#tiers.seriesIdOf(metric, labels);
         if (id !== null) this.#mark.run(machine, step, id, newest);
       }

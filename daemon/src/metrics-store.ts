@@ -5,7 +5,9 @@ import { METRICS_STEPS, type MetricsRequest, type MetricsSeries } from "@seance/
 import {
   bucketAfter,
   labelKey,
+  M5_KEEP_S,
   parseLabels,
+  RAW_KEEP_S,
   rollupSql,
   TIERS,
   tierSchema,
@@ -15,7 +17,7 @@ import {
 } from "./metrics-tiers.ts";
 import { stateDir } from "./paths.ts";
 
-export type { Sample } from "./metrics-tiers.ts";
+export { M5_KEEP_S, RAW_KEEP_S, type Sample } from "./metrics-tiers.ts";
 
 /**
  * The daemon's local metrics history (DESIGN.md, "Telemetry"), on the tiered
@@ -24,10 +26,6 @@ export type { Sample } from "./metrics-tiers.ts";
  * averages 30d, hourly averages forever: one row per series per hour is about
  * 5 MB a year at 16 series.
  */
-const HOUR_S = 3_600;
-export const RAW_KEEP_S = 48 * HOUR_S;
-export const M5_KEEP_S = 30 * 24 * HOUR_S;
-
 const SCHEMA = tierSchema(false);
 
 /**
