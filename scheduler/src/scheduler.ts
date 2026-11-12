@@ -168,7 +168,9 @@ export type RunNowResult =
 /**
  * `pass`: the old task and its successor, or why not. `ok` also answers a task that already carries
  * `successor` (a repeat pass, or a retry after a timeout), with that successor. `unrecorded`: the
- * term ended before the commit was written. The codes are `SCHEDULER_ERROR_CODES`' (`not_found` is
+ * term ended before the commit was written. `pass_failed` may follow a create that landed unseen: the
+ * create is re-sent once and then read back, and a successor it left behind waits `blocked` and fails
+ * `pass_abandoned` once the task ends. The codes are `SCHEDULER_ERROR_CODES`' (`not_found` is
  * `task_not_found` on the wire).
  */
 export type PassResult =
@@ -1214,10 +1216,12 @@ export class Scheduler {
     // The pushes and reads above took time: the task must still be the one that was checked.
     const current = this.task(taskId);
     const at = current?.assignment;
+    // Another pass named a successor meanwhile (a refresh pulled another term's write into this view): the task
+    // is passed, which is what was asked, and D15 answers it `ok` with that one. Nothing of ours is created yet.
+    if (current?.successor !== undefined) return this.#passed(current, current.successor);
     if (
       current === undefined ||
       (current.state !== "running" && !(session !== undefined && current.state === "needs-input")) ||
-      current.successor !== undefined ||
       at === undefined ||
       at.deviceId !== assignment.deviceId ||
       this.#stopping.has(taskId)
@@ -1240,11 +1244,7 @@ export class Scheduler {
       ...(current.prUrl === undefined ? {} : { prUrl: current.prUrl }),
       ...(current.prs === undefined ? {} : { prs: current.prs }),
     };
-    const made = await create(successor);
-    if (!made.ok) return { ok: false, code: "pass_failed" };
-    // Held now, not at the store's nudge: admission keeps it `blocked` from this pass on. A failed read is not a
-    // failed pass: it exists, the commit below names it, and a retry would only leave this one an orphan.
-    await this.refresh(successor.id).catch(this.#onError);
+    if (!(await this.#createSuccessor(create, successor))) return { ok: false, code: "pass_failed" };
 
     // Entered before the commit: no pass may see a task carrying `successor` that no entry covers.
     this.#passing.set(taskId, { deadline: this.#now() + PASS_CLOSE_GRACE_MS });
@@ -1285,6 +1285,37 @@ export class Scheduler {
     }
     await this.#settlePassed(taskId);
     return this.#passed(this.task(taskId) ?? committed, successor.id, successor);
+  }
+
+  /**
+   * The successor's create, and whether it exists afterwards. A refused create is final. One nothing answered
+   * may have landed, so the identical task (same id) is sent once more, which `createTask` reads as landed if the
+   * first did; if that is unanswered too, the key is read back, and only a record seen there counts. A read-back
+   * is one snapshot, so a create still in flight can land after it: that successor then waits `blocked` and
+   * fails `pass_abandoned` once the task ends, and a retry makes a new id. Accepted, and recorded in DESIGN.md.
+   */
+  async #createSuccessor(create: (task: Task) => Promise<TaskCreateResult>, successor: Task): Promise<boolean> {
+    let made = await create(successor);
+    const doubted = !made.ok && made.unconfirmed === true;
+    if (!made.ok && !doubted) return false;
+    if (doubted) {
+      this.#log(`pass create unconfirmed task=${quote(successor.id)}`);
+      made = await create(successor);
+    }
+    if (!made.ok) {
+      try {
+        await this.refresh(successor.id);
+      } catch (err) {
+        // Not `.catch(this.#onError)`: a plain error there may end the term, and this one only means "unknown".
+        if (err instanceof StoreRevoked) this.#onError(err);
+        return false;
+      }
+      return this.task(successor.id) !== undefined;
+    }
+    // Held now, not at the store's nudge: admission keeps it `blocked` from this pass on. A failed read is not a
+    // failed pass: it exists, the commit names it, and a retry would only leave this one an orphan.
+    await this.refresh(successor.id).catch(this.#onError);
+    return true;
   }
 
   /** `pass-close`: the daemon holding a session-passed task may close it at its turn's end. Best effort; the deadline backs it. */
