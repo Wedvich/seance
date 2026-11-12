@@ -234,7 +234,8 @@ green:
   including running it on other daemons, is the same kind of change. A brokered enqueue is a create
   at `expect: 0` of a task the daemon sealed itself from a parsed spec, with the daemon's own
   `createdAt`, no lineage or base (a continue spec's `continues` is carried, and only while the
-  leader advertises `continueTask`), and a client of `mcp` or `cli` only, audited as `claimed_client`
+  leader advertises `continueTask`; its `requires` is carried only while the leader advertises
+  `traits` and the broker's own daemon does — an older one would drop it and queue the task unrestricted), and a client of `mcp` or `cli` only, audited as `claimed_client`
   (the peer's unverified word); a `landedEarlier` on it is the relay's answer for a peer-chosen id:
   it may stand for a tombstone or another client's task, never an overwrite. The socket's third frame
   kind, `session-event` (`session-events.ts`, DESIGN.md "Session events"), is ingest-only and
