@@ -7239,10 +7239,13 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   task another pass has meanwhile named a successor for answers `ok` with that one. Step 4's create is re-sent
   once, identically, when its reply is lost (a `landedEarlier` answer counts as created), and read back when the
   re-send is lost too; a refused create, or one neither answered nor seen, answers `pass_failed`: one that landed
-  unseen waits `blocked` and fails `pass_abandoned` once the task ends, and a retry makes a new one. A failed
+  unseen waits `blocked` and ends with the task (`done` by `merged` if the task merges, `pass_abandoned`
+  otherwise), and a retry makes a new one. A failed
   read-back of the created successor (the leader's `refresh`) is reported and the pass goes on to step 5, so a
   retry never leaves a second successor beside an orphan; step 5 declining because another pass named a
-  successor first answers `ok` with that one; step 5
+  successor first answers `conflict` (across a term handover the relay's term fence refuses the old term's
+  commit before that check, so the answer is the same), and a retry answers `ok` with the named successor
+  (D15); step 5
   failing (a conflict after retries, `StoreRevoked`) leaves a successor its predecessor never names,
   which admission holds `blocked` and fails `pass_abandoned` once the predecessor finishes any other
   way, with no close armed; step 6 failing answers `ok` with the old task still `running` and
@@ -7258,10 +7261,7 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
 - **The push (O2, Q7).** `pushTaskBranch(site, { expect?, hasPr? })` in `daemon/src/push-branch.ts` serves the
   relay handler, the leader in process and the session's frame. The site is the noted worktree of
   this machine's own launch ledger, never a path from the wire, and a `here` launch has none.
-  In order: 0. A scheduler-sealed request is not started past `PUSH_START_DEADLINE_MS` (30 s) after it began: it is
-  `push_failed` with nothing pushed. That keeps the push's landing inside the leader's window in the common
-  case, so a request that sat queued is not run after the leader has given up on it (not a guarantee: a
-  push started just inside the deadline still has its own 45 s). The session's own frame sets no deadline.
+  In order:
   1. The worktree must be a linked worktree of the noted clone, else `not_launched`.
   2. The local branch `<b>` is the one that worktree has checked out (a null one is `detached_head`),
      held to `isBranchName`.
@@ -7304,7 +7304,13 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
      same, and git answers `=` (up to date, `pushed: false`) or rejects the rewritten branch.
   8. A repo-local `remote.*.pushurl` or `url.*.pushinsteadof` is `push_failed`, beside the family
      `networkGit` already refuses: a push must reach the URL the successor fetches from.
-  9. `networkGit(path, ["push", "--porcelain", "--no-verify", "--no-follow-tags",
+  9. Last check, immediately before the push: a scheduler-sealed request is not started more than
+     `PUSH_START_DEADLINE_MS` (30 s) after the daemon began handling it (the clock starts when the push
+     routine is entered, so it covers the fetch and `ls-remote` of item 4, not time in relay transit or
+     before the handler ran): it is `push_failed` with nothing pushed. That keeps the push's landing inside
+     the leader's window when git is slow, so a leader that has given up is not followed by a late push (not a
+     guarantee: a push started just inside the deadline still has its own 45 s). The session's own frame sets
+     no deadline. Then `networkGit(path, ["push", "--porcelain", "--no-verify", "--no-follow-tags",
      "--no-recurse-submodules", "--no-signed", "origin", "<tip sha>:refs/heads/<r>"], 45_000)`
      (the sha `HEAD` resolved to after the clean check, so a commit the live session makes meanwhile
      cannot leave origin holding something the successor's prompt does not name):
@@ -7376,8 +7382,12 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   be checked out in an older worktree; (3) rebuild state from `git log`, `git diff origin/HEAD...` and
   `gh pr view <url>` for each PR; (4) push with `git push origin HEAD:<r>`, keep the existing PR and
   never open a second for the same work; and, when there is a PR, (5) not call `hand_off_task` for it (an
-  earlier session opened it and the successor's launch notes none, so the tool would answer `prless`): push,
-  end the turn and leave the PR open, the scheduler watching it. An `until: "reported"` task's report
+  earlier session opened it and the successor's launch notes none, so the tool would answer `prless`): keep
+  the PR open and carry it through itself, as the task asks, since no hand-off closes the session after the
+  merge. Without `until` the scheduler's PR reading settles the task `done` (`merged`) when the PR merges, and
+  the pane is left running as for any merge settle (`leftRunning`); under `until: "reported"` the line says a
+  merge alone does not settle the task, which only the session's report does, so a successor
+  told to leave the PR and go idle would never settle. An `until: "reported"` task's report
   instruction (`REPORT_DONE_INSTRUCTION`) is taken off the old prompt and added after everything, the record
   and the Linear key included, and is never cut, so the successor is still told how to report done. Chained passes on one clone are safe: each worktree keeps
   its own local branch tracking `origin/<r>` and nothing ever checks `<r>` out locally.
@@ -7442,7 +7452,7 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   | `detached_head`          | the worktree is on no branch                                          |
   | `default_branch`         | the local or the remote branch is the repo's default branch           |
   | `push_rejected`          | non-fast-forward or a protected ref: never forced                     |
-  | `push_failed`            | git failed, timed out or refused repo config                          |
+  | `push_failed`            | git failed, timed out, refused repo config or started late            |
   | `not_launched`           | the old machine's ledger holds no worktree launch of the task         |
   | `pass_failed`            | the successor's create was refused or went unanswered                 |
   | `conflict`, `unrecorded` | as for `cancel` (`unrecorded` is wire `internal_error`)               |

@@ -1449,7 +1449,7 @@ of M4 has landed.
       `dirty_worktree`, `detached_head`, `default_branch`, `push_rejected`, `push_failed`,
       `not_launched`, `pass_failed` (the successor's create was refused, or went unanswered and was not
       seen), `conflict` and `internal_error` (the library's `unrecorded`, as for `cancel`); a `push-branch`
-      that gets no answer is `push_failed`, and a push is not started past 30 s after its request began
+      that gets no answer is `push_failed`, and a push is not started past 30 s after the daemon began it
       (`push_failed`, nothing pushed). A refusal is the request audit line's outcome, as for `cancel`. A task that
       already carries `successor` is not refused: it answers `ok` with it. A `needs-input` task is
       refused on the outside paths in v1 (Q2): the person can answer or cancel first, and widening is
