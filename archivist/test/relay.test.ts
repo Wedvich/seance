@@ -6,21 +6,27 @@ import { join } from "node:path";
 import {
   accountStoreKey,
   APP_ID,
+  CAPABILITIES,
   DAEMON_ROLES,
   importAccountKey,
   importPsk,
+  isMetricsRequest,
   SCHEDULER_ID,
   seal,
   sealTaskRecord,
   toBase64,
   type Envelope,
   type MachineInfo,
+  type Plain,
   type RegistryView,
   type RelayClient,
   type Task,
 } from "@seance/shared";
 import { appRelayClient } from "../../daemon/src/app-relay.ts";
-import { loadOrInitState } from "../../daemon/src/state.ts";
+import { sealMachineInfo } from "../../daemon/src/machine-info.ts";
+import { MetricsStore } from "../../daemon/src/metrics-store.ts";
+import { RelayClient as DaemonClient } from "../../daemon/src/relay-client.ts";
+import { identityOfState, loadOrInitState } from "../../daemon/src/state.ts";
 import { pollUntil } from "../../daemon/test/fixtures.ts";
 import {
   connectApp,
@@ -32,7 +38,7 @@ import {
   type Client,
   type TestRelay,
 } from "../../relay/test/harness.ts";
-import { archivePathIn } from "../src/paths.ts";
+import { archivePathIn, metricsPathIn } from "../src/paths.ts";
 import { startArchivist } from "../src/run.ts";
 
 /**
@@ -350,5 +356,108 @@ describe("collection against the real relay", () => {
     expect(query("SELECT name, connected, in_registry FROM machines")).toEqual([
       { name: "leader-box", connected: 0, in_registry: 1 },
     ]);
+  });
+});
+
+describe("metrics against the real relay", () => {
+  const METRICS_ACCOUNT = "1a1a1a1a-2b2b-3c3c-4d4d-5e5e5e5e5e5e:6f6f6f6f-7a7a-8b8b-9c9c-0d0d0d0d0d0d";
+  let store: MetricsStore;
+  let daemon: DaemonClient;
+  let daemonId: string;
+  let archivist: Awaited<ReturnType<typeof startArchivist>> | undefined;
+  const nowS = Math.floor(Date.now() / 1000);
+  const scannedAt = Date.now();
+
+  const points = (sql: string, ...params: string[]): { ts: number; value: number; labels: string }[] => {
+    const db = new Database(metricsPathIn(seatStateDir), { readonly: true });
+    try {
+      return db
+        .query<{ ts: number; value: number; labels: string }, string[]>(
+          `SELECT r.ts, r.value, s.labels FROM raw r JOIN series s ON s.id = r.series WHERE ${sql}`,
+        )
+        .all(...params);
+    } finally {
+      db.close();
+    }
+  };
+
+  beforeAll(async () => {
+    const key = await importPsk(PSK);
+    store = MetricsStore.memory();
+    // The daemon's last ten minutes, one tick every 30 s, as its own collectors write them.
+    for (let ts = nowS - 600; ts <= nowS - 30; ts += 30) {
+      store.write(
+        [
+          { metric: "cpu_pct", labels: {}, ts, value: 12.34 },
+          { metric: "quota_5h_pct", labels: { exclave: "default", account: METRICS_ACCOUNT }, ts, value: 40 },
+        ],
+        ts,
+      );
+    }
+    const state = await loadOrInitState(join(base, "metrics-daemon", "state.json"));
+    daemonId = state.deviceId;
+    const info: MachineInfo = {
+      name: "metrics-box",
+      platform: "linux",
+      repos: [],
+      scannedAt,
+      capabilities: [CAPABILITIES.metrics],
+      exclaves: [{ id: "default", accountId: METRICS_ACCOUNT, extraUsageEnabled: null, authOk: true, skills: [] }],
+    };
+    daemon = new DaemonClient({
+      url: relayUrl,
+      bearerToken: TOKEN,
+      identity: await identityOfState(state),
+      key,
+      buildInfo: async () => (await sealMachineInfo(key, daemonId, info)).sealed,
+      // The daemon's metrics op, from its own store: what the archivist pulls.
+      handle: (plain: Plain): Promise<Plain | null> =>
+        Promise.resolve(
+          plain.op === "metrics" && isMetricsRequest(plain.payload)
+            ? {
+                id: crypto.randomUUID(),
+                ts: Date.now(),
+                op: "metrics",
+                re: plain.id,
+                payload: { series: store.query(plain.payload) },
+              }
+            : null,
+        ),
+    });
+    daemon.start();
+    archivist = await startArchivist({
+      configPath: await configAt("seat"),
+      stateDir: seatStateDir,
+      credentialPath,
+      metrics: { pullMs: 200 },
+    });
+  });
+
+  afterAll(() => {
+    archivist?.stop();
+    daemon.stop();
+    store.close();
+  });
+
+  test("a live status and the daemon's pulled history land per observer, the account by its store key", async () => {
+    // A tick the daemon's store has not written yet: only the live frame carries it.
+    await pollUntil(() => daemon.sendStatus({ at: nowS, scan: scannedAt, cpu: 42 }), "the status sent", 10_000);
+    await pollUntil(() => points("r.ts = ?", String(nowS)).length > 0, "the live sample", 10_000);
+    await pollUntil(() => points("r.ts = ?", String(nowS - 600)).length === 2, "the pulled history", 10_000);
+    const observer = { machine: daemonId };
+    expect(points("r.ts = ?", String(nowS)).map((p) => [p.value, JSON.parse(p.labels)])).toEqual([[42, observer]]);
+    const storeKey = await accountStoreKey(await importAccountKey(PSK), METRICS_ACCOUNT);
+    expect(
+      points("r.ts = ?", String(nowS - 600))
+        .map((p) => [p.value, JSON.parse(p.labels)])
+        .toSorted((a, b) => Number(a[0]) - Number(b[0])),
+    ).toEqual([
+      [12.34, observer],
+      [40, { ...observer, exclave: "default", account: storeKey }],
+    ]);
+    for (const name of (await readdir(seatStateDir)).filter((file) => file.startsWith("metrics.sqlite"))) {
+      // oxlint-disable-next-line no-await-in-loop -- the database and its WAL, two small files
+      expect((await readFile(join(seatStateDir, name), "latin1")).includes(METRICS_ACCOUNT)).toBe(false);
+    }
   });
 });

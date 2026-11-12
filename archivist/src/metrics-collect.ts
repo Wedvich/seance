@@ -221,8 +221,9 @@ export function startMetricsCollector(opts: MetricsCollectorOpts): MetricsCollec
       return true;
     }
     if (to <= from) return failed(machine, "one point too large for an envelope");
-    const mid = from + Math.floor((to - from) / step / 2) * step;
-    return (await fetchRange(machine, step, from, mid, names)) && fetchRange(machine, step, mid + step, to, names);
+    // Halved by the second, as pages are: a raw sample need not sit on a step boundary.
+    const mid = from + Math.floor((to - from) / 2);
+    return (await fetchRange(machine, step, from, mid, names)) && fetchRange(machine, step, mid + 1, to, names);
   };
 
   const failed = (machine: Machine, why: string): false => {
@@ -233,13 +234,17 @@ export function startMetricsCollector(opts: MetricsCollectorOpts): MetricsCollec
     return false;
   };
 
-  /** `[from, to]` in pages of at most `METRICS_MAX_POINTS` points, oldest first. */
+  /**
+   * `[from, to]` in contiguous pages of at most `METRICS_MAX_POINTS` steps, oldest first. Each page starts a
+   * second past the last, never a step: a raw sample sits at its tick's second, not on a step boundary.
+   */
   const pullTier = async (machine: Machine, step: MetricsStep, from: number, to: number): Promise<boolean> => {
-    const first = Math.ceil(from / step) * step;
-    for (let start = first; start <= to; start += METRICS_MAX_POINTS * step) {
+    let start = from;
+    while (start <= to) {
       const end = Math.min(to, start + (METRICS_MAX_POINTS - 1) * step);
       // oxlint-disable-next-line no-await-in-loop -- pages in order: a failed one stops the rest, so marks hold
       if (!(await fetchRange(machine, step, start, end))) return false;
+      start = end + 1;
     }
     return true;
   };

@@ -213,7 +213,10 @@ export class TieredMetrics {
     this.#db.transaction(() => {
       for (const sample of samples) {
         const { ts, value } = sample;
-        if (!Number.isFinite(value) || !Number.isInteger(ts) || ts % step !== 0 || ts < horizon) continue;
+        // A raw sample sits at its tick's second; a rolled one only ever at its bucket's start.
+        if (!Number.isFinite(value) || !Number.isInteger(ts) || (step !== 30 && ts % step !== 0) || ts < horizon) {
+          continue;
+        }
         const id = this.seriesIdOf(sample.metric, sample.labels);
         if (id === null) continue;
         insert.run(id, ts, value);

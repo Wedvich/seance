@@ -179,7 +179,8 @@ describe("metrics collection", () => {
     const daemon = MetricsStore.memory();
     daemonHistory(daemon, NOW - 40 * DAY, NOW - 3 * DAY, 3600);
     daemonHistory(daemon, NOW - 3 * DAY + 300, NOW, 300);
-    daemonHistory(daemon, NOW - 3600 + 30, NOW, 30);
+    // Raw ticks off the step's boundary, as a daemon's are: at whatever second its timer fired.
+    daemonHistory(daemon, NOW - 3600 + 37, NOW, 30);
     const { requests, source } = fleet(daemon, 12_000);
     const { archive } = start(daemon, source, { ms: NOW * 1000 });
 
