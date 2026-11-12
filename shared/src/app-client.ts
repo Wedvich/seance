@@ -310,11 +310,12 @@ export interface AttachmentUploaded {
 
 /**
  * A `PUT` that stored nothing: the relay's code, or `unreachable` when no answer
- * came (offline, a CSP block, a dropped connection) and `unreadable` when one came
- * this build can't read. Nothing ties a refused id to a task, so it is never reused.
+ * came (offline, a CSP block, a dropped connection), `unreadable` when one came
+ * this build can't read, and `aborted` when the caller's signal cut it off. Nothing
+ * ties a refused id to a task, so it is never reused.
  */
 export type AttachmentRefusal =
-  | { readonly ok: false; readonly code: UploadRefusalCode | "unreachable" | "unreadable" }
+  | { readonly ok: false; readonly code: UploadRefusalCode | "unreachable" | "unreadable" | "aborted" }
   | {
       readonly ok: false;
       readonly code: "allowance_exhausted";
@@ -322,6 +323,96 @@ export type AttachmentRefusal =
       /** Seconds until the window admits again. */
       readonly retryAfter: number;
     };
+
+export interface UploadOptions {
+  /** Bytes of the sealed object sent so far, of its total; only where `XMLHttpRequest` exists. */
+  readonly onProgress?: (sent: number, total: number) => void;
+  readonly signal?: AbortSignal;
+}
+
+/** The part of `XMLHttpRequest` an upload uses: `shared/` has no DOM lib, and Bun and Raycast no XHR. */
+interface XhrLike {
+  open(method: string, url: string): void;
+  setRequestHeader(name: string, value: string): void;
+  send(body: Uint8Array<ArrayBuffer>): void;
+  abort(): void;
+  readonly status: number;
+  readonly responseText: string;
+  addEventListener(type: "load" | "error" | "timeout" | "abort", listener: () => void): void;
+  readonly upload: {
+    addEventListener(type: "progress", listener: (event: XhrProgress) => void): void;
+  };
+}
+
+interface XhrProgress {
+  readonly loaded: number;
+  readonly total: number;
+  readonly lengthComputable: boolean;
+}
+
+type XhrConstructor = new () => XhrLike;
+
+function isXhrConstructor(value: unknown): value is XhrConstructor {
+  return typeof value === "function";
+}
+
+type PutAnswer = { readonly status: number; readonly body: unknown } | "unreachable" | "aborted";
+
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+/** XHR rather than `fetch` for its upload progress, which `fetch` doesn't report. */
+function putByXhr(
+  Xhr: XhrConstructor,
+  url: string,
+  headers: Readonly<Record<string, string>>,
+  object: Uint8Array<ArrayBuffer>,
+  opts: UploadOptions,
+): Promise<PutAnswer> {
+  const { onProgress, signal } = opts;
+  return new Promise((resolve) => {
+    const xhr = new Xhr();
+    const onAbort = (): void => xhr.abort();
+    const settle = (answer: PutAnswer): void => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve(answer);
+    };
+    xhr.open("PUT", url);
+    for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value);
+    xhr.addEventListener("load", () => settle({ status: xhr.status, body: parseJson(xhr.responseText) }));
+    xhr.addEventListener("error", () => settle("unreachable"));
+    xhr.addEventListener("timeout", () => settle("unreachable"));
+    xhr.addEventListener("abort", () => settle("aborted"));
+    // A listener on `upload` forces a preflight; the Authorization header forces one anyway.
+    if (onProgress !== undefined) {
+      xhr.upload.addEventListener("progress", (event) =>
+        onProgress(event.loaded, event.lengthComputable ? event.total : object.length),
+      );
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    xhr.send(object);
+  });
+}
+
+async function putByFetch(
+  url: string,
+  headers: Readonly<Record<string, string>>,
+  object: Uint8Array<ArrayBuffer>,
+  signal: AbortSignal | undefined,
+): Promise<PutAnswer> {
+  let res: Response;
+  try {
+    res = await fetch(url, { method: "PUT", headers, body: object, ...(signal === undefined ? {} : { signal }) });
+  } catch {
+    return signal?.aborted === true ? "aborted" : "unreachable";
+  }
+  return { status: res.status, body: await res.json().catch(() => null) };
+}
 
 /** A registry entry whose `info` decrypted. Entries that don't are counted, not shown. */
 export interface Machine {
@@ -1969,24 +2060,29 @@ export class RelayClient {
    * Seals `bytes` under a freshly minted id and `PUT`s the object to the relay
    * (DESIGN.md, "Attachments"). The token rides the `Authorization` header, never
    * the URL. A retry is a new call, so a new id: the relay's uploads are create-only.
+   * Where `XMLHttpRequest` exists (a browser) it carries the `PUT`, for `onProgress`.
    */
-  async uploadAttachment(bytes: Uint8Array<ArrayBuffer>): Promise<AttachmentUploaded | AttachmentRefusal> {
+  async uploadAttachment(
+    bytes: Uint8Array<ArrayBuffer>,
+    opts: UploadOptions = {},
+  ): Promise<AttachmentUploaded | AttachmentRefusal> {
+    // A call, not a read: the signal can flip across the awaits, which narrowing can't see.
+    const aborted = (): boolean => opts.signal?.aborted === true;
+    if (aborted()) return { ok: false, code: "aborted" };
     const id = mintAttachmentId();
     const object = await sealAttachment(this.#key, id, bytes);
     const hash = await attachmentHash(object);
-    let res: Response;
-    try {
-      res = await fetch(attachmentUrl(this.#url, id), {
-        method: "PUT",
-        headers: { authorization: `Bearer ${this.#token}`, "content-type": "application/octet-stream" },
-        body: object,
-      });
-    } catch {
-      return { ok: false, code: "unreachable" };
-    }
-    const body: unknown = await res.json().catch(() => null);
+    if (aborted()) return { ok: false, code: "aborted" };
+    const url = attachmentUrl(this.#url, id);
+    const headers = { authorization: `Bearer ${this.#token}`, "content-type": "application/octet-stream" };
+    const Xhr: unknown = Reflect.get(globalThis, "XMLHttpRequest");
+    const answer = isXhrConstructor(Xhr)
+      ? await putByXhr(Xhr, url, headers, object, opts)
+      : await putByFetch(url, headers, object, opts.signal);
+    if (answer === "unreachable" || answer === "aborted") return { ok: false, code: answer };
+    const { status, body } = answer;
     const code = isRecord(body) ? body["code"] : undefined;
-    if (res.status === 201 && code === "stored") return { ok: true, id, hash };
+    if (status === 201 && code === "stored") return { ok: true, id, hash };
     if (code === "allowance_exhausted" && isRecord(body)) {
       const { window, retryAfter } = body;
       if ((window === "hour" || window === "month") && typeof retryAfter === "number" && retryAfter > 0) {
