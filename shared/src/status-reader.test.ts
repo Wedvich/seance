@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   exclaveAuth,
+  exclaveTraitHealth,
   isQuotaTrimmed,
   isStatusStale,
   lastHeardAt,
@@ -8,6 +9,7 @@ import {
   STATUS_CLOCK_SKEW_MS,
   STATUS_STALE_MS,
 } from "./status-reader.ts";
+import type { Machine } from "./app-client.ts";
 import { CAPABILITIES, type MachineStatus, type QuotaObservation } from "./types.ts";
 
 const NOW_MS = 1_760_000_000_000;
@@ -154,5 +156,38 @@ describe("exclaveAuth", () => {
     const m = machine({ ae: [[1, NOW_S + 3600]] });
     expect(exclaveAuth(m, 1, NOW_MS)).toEqual({ state: "expiring", expiresAt: NOW_MS + 3_600_000 });
     expect(exclaveAuth(m, 0, NOW_MS)).toEqual({ state: "ok" });
+  });
+});
+
+describe("exclaveTraitHealth", () => {
+  const exclaves = [
+    { id: "default", authOk: true, traits: ["atlas", "az"] },
+    { id: "work", authOk: true, traits: ["az"] },
+    { id: "bare", authOk: true },
+  ] as unknown as Machine["exclaves"];
+  const machine = (over: Partial<MachineStatus>, extra: { connected?: boolean } = {}) => ({
+    connected: extra.connected ?? true,
+    exclaves,
+    status: { ...status, ...over },
+  });
+
+  test("null for an exclave that does not carry the trait, or has no traits at all", () => {
+    expect(exclaveTraitHealth(machine({ tf: [[1, 0]] }), 1, "atlas", NOW_MS)).toBeNull();
+    expect(exclaveTraitHealth(machine({}), 2, "atlas", NOW_MS)).toBeNull();
+    expect(exclaveTraitHealth(machine({}), 7, "atlas", NOW_MS)).toBeNull();
+  });
+
+  test("unknown on a disconnected machine and on a stale status, however the lists read", () => {
+    expect(exclaveTraitHealth(machine({ tf: [[0, 0]] }, { connected: false }), 0, "atlas", NOW_MS)).toBe("unknown");
+    expect(exclaveTraitHealth(machine({ tf: [[0, 0]] }), 0, "atlas", NOW_MS + STATUS_STALE_MS + 1000)).toBe("unknown");
+    expect(exclaveTraitHealth({ connected: true, exclaves }, 0, "atlas", NOW_MS)).toBe("unknown");
+  });
+
+  test("failing from tf, unknown from tu, healthy otherwise — by the trait's index in that exclave", () => {
+    const m = machine({ tf: [[0, 1]], tu: [[1, 0]] });
+    expect(exclaveTraitHealth(m, 0, "az", NOW_MS)).toBe("failing");
+    expect(exclaveTraitHealth(m, 0, "atlas", NOW_MS)).toBe("healthy");
+    expect(exclaveTraitHealth(m, 1, "az", NOW_MS)).toBe("unknown");
+    expect(exclaveTraitHealth(machine({}), 1, "az", NOW_MS)).toBe("healthy");
   });
 });
