@@ -55,6 +55,11 @@ async function dispatch(command: Command): Promise<number> {
     case "update": {
       const { updateArchivist } = await import("./self-update.ts");
       const result = await updateArchivist(command);
+      if (result === null) {
+        // The running update repeats for a request made since it began, so the unit has nothing to add.
+        console.error("another update is running (update.lock in the state dir)");
+        return command.requested ? 0 : 1;
+      }
       const detail = result.detail === undefined ? "" : ` — ${result.detail}`;
       if (result.outcome === "ok") console.log(`updated${detail}; restarted`);
       else if (result.outcome === "current") console.log("already current — nothing to do");

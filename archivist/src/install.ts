@@ -7,7 +7,7 @@
 
 import { existsSync } from "node:fs";
 import { rm, stat } from "node:fs/promises";
-import { delimiter, join } from "node:path";
+import { delimiter, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { exec } from "../../daemon/src/exec.ts";
 import { pskBlobPathIn } from "../../daemon/src/paths.ts";
@@ -32,13 +32,29 @@ const SYSTEM_UNIT_DIR = "/etc/systemd/system";
 const MAIN_PATH = fileURLToPath(new URL("./main.ts", import.meta.url));
 
 /**
- * The sudo form every refusal names, as `SUDO_SEANCED` is the daemon's: bun by
- * full path, because sudo searches secure_path for the command. PATH is
- * deliberately not preserved: the sudo caller is usually the daemon's user, and
- * their PATH is theirs to write — the unit records only the `--path` it is
- * given. The archivist has no `link`, so main.ts is named by its own path.
+ * The sudo form every refusal names, as `SUDO_SEANCED` is the daemon's but with the
+ * archivist's own bun by absolute path: `$(command -v bun)` would expand in the
+ * invoking shell, whose user is usually the daemon's, and run a binary its
+ * sessions can replace as root. `~archivist` is the account `--user` names (the
+ * README's); swap in another's home. The archivist has no `link`, so main.ts is
+ * named by its own path, and PATH is not preserved: the unit records only the
+ * `--path` it is given.
  */
-export const SUDO_ARCHIVIST = `sudo "$(command -v bun)" "${MAIN_PATH}"`;
+export const SUDO_ARCHIVIST = `sudo ~archivist/.bun/bin/bun "${MAIN_PATH}"`;
+
+export const SUDO_ARCHIVIST_NOTE =
+  "(the archivist's own bun by absolute path, never one found on your PATH, since root runs it; " +
+  "substitute its home for ~archivist if the account is named otherwise)";
+
+/** A relative entry would be checked against root's cwd here and searched from the unit's own. */
+export function relativePathRefusal(pathEnv: string): string | null {
+  const relative = pathEnv.split(delimiter).filter((entry) => !isAbsolute(entry));
+  if (relative.length === 0) return null;
+  return (
+    "--path entries must be absolute and none empty — the unit has no working directory to resolve them " +
+    `against (got ${relative.map((entry) => JSON.stringify(entry)).join(", ")})`
+  );
+}
 
 /** bun runs the service; git is what `update` fast-forwards with. No tmux or claude: it spawns nothing. */
 const ARCHIVIST_BINARIES = ["bun", "git"] as const;
@@ -122,7 +138,7 @@ function assertSystemd(action: string): void {
       "this system is not running systemd — the archivist's key comes only from a system unit's LoadCredentialEncrypted=",
     );
   }
-  requireRoot(process.getuid?.(), action, SUDO_ARCHIVIST);
+  requireRoot(process.getuid?.(), action, SUDO_ARCHIVIST, SUDO_ARCHIVIST_NOTE);
 }
 
 async function systemctl(args: readonly string[]): Promise<void> {
@@ -147,6 +163,8 @@ export async function installArchivistSystem(opts: ArchivistInstallOptions): Pro
     );
   }
   assertUnitFlag("--path", opts.pathEnv);
+  const relative = relativePathRefusal(opts.pathEnv);
+  if (relative !== null) throw new Error(relative);
   if (opts.user === undefined || opts.user === "") {
     throw new Error(
       "pass `--user <name>` — the archivist's own unprivileged account, never root and never the daemon's",

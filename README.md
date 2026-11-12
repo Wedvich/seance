@@ -430,18 +430,33 @@ a missing config, a blob that is missing or doesn't decrypt, and any code the un
 would run that someone else could rewrite: the checkout's whole tree and the
 directories above it, the resolved `bun` and `git`, and every `--path` entry must
 belong to root or `archivist` and be writable by neither anyone else nor a group other
-than root's or `archivist`'s. That is what keeps the daemon's user, whose sessions run
-arbitrary code, from swapping a binary the key is delivered to. A group-writable
-`/usr/local/bin` (Debian's `root:staff`) is refused for that reason: put bun in
-`~archivist/.bun/bin`, as above. It writes `seance-archivist.service` and two update units (docs/platform-notes.md,
+than root's or `archivist`'s. `--path` entries must be absolute. The check walks each
+path component as the unit will resolve it, by `lstat` and never following a link
+unchecked: a symlink, and the directory holding it, are checked before its target, so a
+link in a directory the daemon's user can write is refused however safe its target
+(a link out of the checkout is followed the same way, one inside it is not walked). That
+is what keeps the daemon's user, whose sessions run arbitrary code, from swapping a
+binary the key is delivered to. A group-writable `/usr/local/bin` (`root:staff` on
+Debian before trixie, or wherever `/etc/staff-group-for-usr-local` exists) is refused for
+that reason: put bun in `~archivist/.bun/bin`, as above. Two things it cannot see:
+a POSIX ACL (`setfacl`) granting someone write, and a shared primary group such as
+`users` that the daemon's user also belongs to (the archivist's own group is trusted, so
+give the account a group of its own, as `adduser` does by default). It writes `seance-archivist.service` and two update units (docs/platform-notes.md,
 "The archivist's units") and starts the service. `uninstall --system` removes them and
 leaves the state dir.
 
 Install and uninstall run the archivist's own checkout and bun as root, so what the
 update unit pulls from origin runs as root the next time you run either. That is the
-trade for a service account that updates itself; before running `install --system` or
-`uninstall --system`, look at what changed (`git -C ~archivist/seance log -p
-ORIG_HEAD..`), or run it from a checkout you cloned and own as root.
+trade for a service account that updates itself. Before running `install --system`,
+read what changed since the last sha you vetted, as `archivist` and not as root (git as
+root refuses the archivist's repo as unsafe, and honouring its `.git/config` would run
+whatever pager or diff driver that account configured, as root):
+`su - archivist -c 'git --no-pager -C ~/seance log -p <vetted-sha>..HEAD'`. Removing the
+units needs none of the archivist's code: `systemctl disable --now seance-archivist
+seance-archivist-update.path; systemctl stop seance-archivist-update.service`, delete the
+three files in `/etc/systemd/system`, and `systemctl daemon-reload`, which is all
+`uninstall --system` does. The sudo form the refusals print names the archivist's own bun
+by absolute path for the same reason: never one found on your PATH, which root would run.
 
 **Give it the seat.** The relay closes an archivist's register until the `ARCHIVIST`
 Worker secret names its device id, one id, never a list. The service mints its id on
@@ -464,9 +479,15 @@ once. The archivist redials with backoff, up to a minute apart, and `status` the
 **Updating** needs nothing: the archivist follows the fleet's update announce like a
 daemon, and also checks when it takes its seat. To update by hand, run
 `… main.ts update` as `archivist`. The update remembers which sha it last restarted the
-service onto (`served-sha` in the state dir), so a checkout ahead of that, from a hand
-`git pull` or an install that failed after a fast-forward, is installed again and
-restarted onto by the next `update`. A change to the units themselves lands only when
+service onto (`served-sha` in the state dir, written only after an install succeeded),
+so a checkout ahead of that, from a hand `git pull` or an install that failed after a
+fast-forward, is installed again and restarted onto by the next `update`. With no
+`served-sha` yet (the first run after an upgrade) the checkout is installed and the
+service restarted once, since what it runs is unknown. One update runs at a time
+(`update.lock` in the state dir): a hand `update` while the update unit works is refused,
+and the unit exits quietly when a hand one holds the lock; the running one repeats for a
+request that arrived meanwhile. A request landing in the instants after that last check
+is picked up by the next register's check (at most 30 minutes) or announce. A change to the units themselves lands only when
 root re-runs `install --system`; `update` prints a warning, and the update unit's journal
 carries it, when the installed units differ from what the checkout would write.
 

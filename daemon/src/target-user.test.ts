@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import {
@@ -218,13 +218,10 @@ describe("write trust", () => {
     expect(writeRisk({ ...tmp, mode: 0o777 }, trust, true)).toBe("writable by anyone");
   });
 
-  test("untrustedChain walks the realpath and every ancestor", async () => {
+  test("untrustedChain checks every component and ancestor", async () => {
     const dir = await fixtureDir();
     const bin = join(dir, "bin");
     await mkdir(bin);
-    await writeFile(join(bin, "bun"), "#!/bin/sh\n", { mode: 0o755 });
-    const uid = process.getuid?.() ?? 0;
-    const gid = process.getgid?.() ?? 0;
     const mine = { uids: [0, uid], gids: [0, gid] };
     // The sandbox's own tmpdir ancestors are root's or sticky, so nothing in the chain is flagged.
     expect(await untrustedChain(join(bin, "bun"), mine)).toEqual([]);
@@ -232,6 +229,45 @@ describe("write trust", () => {
     expect((await untrustedChain(join(bin, "bun"), mine)).join("\n")).toContain(`${bin} (writable by anyone)`);
     expect((await untrustedChain(join(bin, "bun"), { uids: [0], gids: [0] })).length).toBeGreaterThan(0);
     expect(await untrustedChain(join(dir, "missing"), mine)).toEqual([]);
+  });
+
+  const uid = process.getuid?.() ?? 0;
+  const gid = process.getgid?.() ?? 0;
+  const mine = { uids: [0, uid], gids: [0, gid] };
+
+  test("untrustedChain refuses a symlink held in a directory others can write, though its target is safe", async () => {
+    const dir = await fixtureDir();
+    const safe = join(dir, "safe");
+    const open = join(dir, "open");
+    await mkdir(safe);
+    await mkdir(open);
+    await writeFile(join(safe, "git"), "x", { mode: 0o755 });
+    await symlink(safe, join(open, "tools"));
+    expect(await untrustedChain(join(open, "tools", "git"), mine)).toEqual([]);
+    await chmod(open, 0o777);
+    const found = (await untrustedChain(join(open, "tools", "git"), mine)).join("\n");
+    // The directory holding the link is what lets someone repoint it later; resolving the link first would never look at it.
+    expect(found).toContain(`${open} (writable by anyone)`);
+  });
+
+  test("untrustedChain checks a link's owner and follows a relative one through its own directory", async () => {
+    const dir = await fixtureDir();
+    await mkdir(join(dir, "real"));
+    await writeFile(join(dir, "real", "bun"), "x", { mode: 0o755 });
+    await symlink("real", join(dir, "alias"));
+    await symlink("../alias/bun", join(dir, "real", "again"));
+    expect(await untrustedChain(join(dir, "real", "again"), mine)).toEqual([]);
+    const found = (await untrustedChain(join(dir, "alias", "bun"), { uids: [0], gids: [0] })).join("\n");
+    expect(found).toContain(`${join(dir, "alias")} (symlink owned by uid ${uid})`);
+  });
+
+  test("untrustedChain refuses a symlink loop and a dangling link without throwing", async () => {
+    const dir = await fixtureDir();
+    await symlink(join(dir, "b"), join(dir, "a"));
+    await symlink(join(dir, "a"), join(dir, "b"));
+    expect((await untrustedChain(join(dir, "a", "x"), mine)).join("\n")).toContain("too many symbolic links");
+    await symlink(join(dir, "gone"), join(dir, "dangling"));
+    expect(await untrustedChain(join(dir, "dangling", "bun"), mine)).toEqual([]);
   });
 
   test("untrustedTree reports a writable entry and stops at the limit", async () => {
@@ -242,11 +278,41 @@ describe("write trust", () => {
       // After the write: the umask would strip these bits from the create mode.
       await chmod(join(dir, "src", name), 0o666);
     }
-    const uid = process.getuid?.() ?? 0;
-    const gid = process.getgid?.() ?? 0;
     const found = await untrustedTree(dir, { uids: [uid], gids: [gid] }, 2);
     expect(found).toHaveLength(2);
     expect(found[0]).toContain("writable by anyone");
     expect(await untrustedTree(dir, { uids: [uid + 1], gids: [gid] }, 10)).toHaveLength(4);
+  });
+
+  test("untrustedTree never follows a symlink: a cycle ends, and a link inside the tree is not listed twice", async () => {
+    const dir = await fixtureDir();
+    await mkdir(join(dir, "a"));
+    await writeFile(join(dir, "a", "f"), "x");
+    await chmod(join(dir, "a", "f"), 0o666);
+    await symlink("..", join(dir, "a", "up"));
+    await symlink("a", join(dir, "alias"));
+    const found = await untrustedTree(dir, mine, 10);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toBe(`${join(dir, "a", "f")} (writable by anyone)`);
+  });
+
+  test("untrustedTree checks where a link out of the tree leads, and skips one that is dangling", async () => {
+    const dir = await fixtureDir();
+    const root = join(dir, "checkout");
+    const elsewhere = join(dir, "elsewhere");
+    await mkdir(root);
+    await mkdir(elsewhere);
+    await chmod(elsewhere, 0o777);
+    await symlink(elsewhere, join(root, "out"));
+    await symlink(join(dir, "gone"), join(root, "dangling"));
+    const found = (await untrustedTree(root, mine)).join("\n");
+    expect(found).toContain(`${elsewhere} (writable by anyone)`);
+    expect(found).not.toContain("dangling");
+  });
+
+  test("untrustedTree reports another owner's symlink", async () => {
+    const dir = await fixtureDir();
+    await symlink("x", join(dir, "link"));
+    expect((await untrustedTree(dir, { uids: [uid + 1], gids: [gid] })).join("\n")).toContain("symlink owned by uid");
   });
 });

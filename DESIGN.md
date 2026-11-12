@@ -10853,14 +10853,26 @@ move-the-seat runbook, the schema and example queries are the README's step 9).
   and root alone do not control (`untrustedCode`: the checkout's tree and ancestors, the resolved
   bun and git, every PATH entry — owned by root or the target uid, not world-writable, not
   group-writable by a group but root's or the target's; `writeRisk` in `target-user.ts`; a
-  `root:staff` 2775 `/usr/local/bin` fails on purpose, since membership is not checked), a config `loadArchivistConfig`
+  `root:staff` 2775 `/usr/local/bin`, Debian before trixie, fails on purpose, since membership is not
+  checked). The walk is by `lstat`, never `realpath` and never a recursive `readdir` (both follow
+  links: a cycle crashes it and a link out lists another's files): `untrustedChain` checks every
+  component as given, a symlink as a link (its owner) and the directory holding it before it
+  resolves the link, so a link in a directory the daemon's user can write is refused whatever it points
+  at, with a link-count bound; `untrustedTree` never descends a link, checks the chain of one that leaves
+  the checkout, skips what vanishes mid-walk (the update unit runs `bun install` as the same user) and is
+  bounded in entries. `--path` entries must be absolute. Two gaps are accepted and documented rather
+  than closed: mode bits only, so a POSIX ACL granting the daemon's user write is not seen, and the
+  target's own gid is trusted, which assumes a per-user group (a shared `users` group the daemon's user
+  is in would pass). The refusal's sudo form names the archivist's own bun by absolute path
+  (`~archivist/.bun/bin/bun`), never `$(command -v bun)`, which would run the daemon user's bun as
+  root. A config `loadArchivistConfig`
   refuses, and a blob that is missing or that `blobLoadable` cannot decrypt — unlike the
   daemon, the archivist has no keyless mode, so a unit without its key would fail and restart
   every five seconds. Then `daemon-reload`, `enable --now` of the path unit and the service, and
   a restart when the service's definition (or, for the path unit, its watch) changed, since
   `enable --now` leaves a running unit on its old one. The daemon's `install --system` refuses the
   user an installed `seance-archivist.service` runs as (`archivistUserRefusal`), the other half of
-  A27a. `uninstall --system` disables, stops and removes the three, leaving the state
+  A27a, and so does a user-scope `seanced install` for the invoking user. `uninstall --system` disables, stops and removes the three, leaving the state
   dir.
 - **The key's blob is the archivist's own** (A27b, settled). Sealed under the same credential
   id, `seance-psk`: the id is embedded in the blob and the archivist reads
@@ -10883,11 +10895,21 @@ move-the-seat runbook, the schema and example queries are the README's step 9).
   request's origin, and restarts the service with `signalRestartUnit`. That is the daemon's
   system-unit restart, now parameterised by unit: SIGTERM to the `MainPID` as the same user,
   `Restart=always` relaunching it. The oneshot cannot know what the service runs, so `served-sha`
-  in the state dir stands for it: written after each restart the update made and, the first time,
-  with the HEAD it found. A checkout ahead of it (an install that failed after a fast-forward, or
+  in the state dir stands for it: written only after a restart the update made, which follows a
+  successful install, so it never names a sha whose install failed. With none, what the service
+  runs is unknown, so the checkout is installed and the service restarted onto it once (a seed from
+  HEAD would hide a failed install and a hand pull). A checkout ahead of it (an install that failed after a fast-forward, or
   a hand `git pull`) is installed again and restarted onto, the daemon's `servingSha` path. A
   request landing while the oneshot runs merges into the running job and nothing re-fires it, so
-  the oneshot runs again while the request file changed during a run (at most three). No unit is
+  the oneshot runs again while the request file changed during a run (at most three; the stamp is
+  mtime and ctime at full resolution plus the text, taken before anything slow runs). One update at
+  a time holds `update.lock` in the state dir (created `wx`, a dead or 20-minute-old holder's taken
+  over): a hand `update` and the oneshot would otherwise run two git and `bun install` pipelines in
+  one checkout, and a hand update's restart can start the oneshot. The loser exits (the unit
+  quietly, a hand run with a message); the holder's request loop covers what arrived since. A
+  residual window stays: a request landing between the last stamp and the process exiting merges
+  into the finishing job and is lost, until the next register's check (at most 30 minutes) or
+  announce; closing it would need a hook after the unit has ended. No unit is
   ever rewritten by the service or the update (neither is root); the update warns when the
   installed units differ from what the checkout would write (a change a pull brings in is seen
   on the next run, since the running code is the old), and the change lands when root re-runs

@@ -185,7 +185,8 @@ update unit. The update restarts the service the way `seanced`'s does under a sy
 unit: it SIGTERMs the service's `MainPID`, which it may as the same user, and
 `Restart=always` brings it back on the new code.
 
-Neither process rewrites a unit file, since neither is root. A change to the units
+One update runs at a time (`update.lock` in the state dir), so a hand `update` and this unit
+never overlap. Neither process rewrites a unit file, since neither is root. A change to the units
 themselves (a new directive, a moved checkout, another PATH) lands only when root re-runs
 `install --system`, which rewrites all three and restarts the service if its definition
 changed. `uninstall --system` stops and removes the three, leaving the state dir: both

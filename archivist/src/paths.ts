@@ -42,6 +42,11 @@ export function servedShaPathIn(stateDirectory: string): string {
   return join(stateDirectory, "served-sha");
 }
 
+/** Held while an `update` runs, so a hand one and the update unit's never overlap. */
+export function updateLockPathIn(stateDirectory: string): string {
+  return join(stateDirectory, "update.lock");
+}
+
 /** The per-state-dir files, taking the directory so tests and `status` can name one that isn't the default. */
 export function statePathIn(stateDirectory: string): string {
   return join(stateDirectory, "state.json");

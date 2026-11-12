@@ -10,9 +10,10 @@ import { daemonSink } from "../../daemon/src/audit.ts";
 import { checkoutRoot, readSource, trimRoot } from "../../daemon/src/selfsource.ts";
 import { signalRestartUnit } from "../../daemon/src/systemd.ts";
 import { defaultUpdateEffects, updateNow, type ManualUpdate } from "../../daemon/src/update.ts";
-import { archivistStateDir, servedShaPathIn, updateRequestPathIn } from "./paths.ts";
+import { archivistStateDir, servedShaPathIn, updateLockPathIn, updateRequestPathIn } from "./paths.ts";
 import { ARCHIVIST_UNIT, expectedArchivistUnits } from "./units.ts";
 import { rootRefusal } from "./unprivileged.ts";
+import { withUpdateLock } from "./update-lock.ts";
 import { readRequestOrigin, runWhileRequested } from "./update-request.ts";
 
 const SYSTEM_UNIT_DIR = "/etc/systemd/system";
@@ -26,6 +27,8 @@ const RESTART_WORDING = {
 } as const;
 
 const SHA = /^[0-9a-f]{40}$/u;
+/** Never equal to a HEAD, so a run with no `served-sha` restarts onto the checkout; it reads in the audit detail. */
+const UNRECORDED = "no recorded sha";
 
 /**
  * The installed units that differ from what this checkout's generators would
@@ -60,15 +63,19 @@ export async function unitDrift(
  * same refusals as a daemon's: a dirty, re-branched or diverged checkout is left alone.
  *
  * The running archivist cannot read its own HEAD without running git, which it
- * never does, so `served-sha` in the state dir stands for it: written after each
- * restart this command made (and, the first time, with the HEAD it found, taken
- * to be what the install started). A checkout ahead of it — a failed install
- * after a fast-forward, or a hand `git pull` — is installed again and restarted onto.
+ * never does, so `served-sha` in the state dir stands for it: written only after
+ * a restart this command made, which follows a successful install, so it never
+ * names a sha whose install failed. With none (a first run, or one deleted) what
+ * the service runs is unknown, so the checkout is installed again and the service
+ * restarted onto it once, rather than assuming HEAD. A checkout ahead of it — a
+ * failed install after a fast-forward, or a hand `git pull` — likewise.
  *
  * A request that lands while this runs is merged into the running job by systemd, so the
- * run repeats while the request file changes (`runWhileRequested`).
+ * run repeats while the request file changes (`runWhileRequested`); the stamp it compares
+ * is taken before anything else here runs. One update at a time holds `update.lock`:
+ * null when another does, which has that loop for any request made since.
  */
-export async function updateArchivist(opts: { readonly requested: boolean }): Promise<ManualUpdate> {
+export async function updateArchivist(opts: { readonly requested: boolean }): Promise<ManualUpdate | null> {
   // Root would leave root-owned files in the checkout and its node_modules.
   const refusal = rootRefusal(process.getuid?.(), process.getgid?.());
   if (refusal !== null) throw new Error(refusal);
@@ -76,14 +83,6 @@ export async function updateArchivist(opts: { readonly requested: boolean }): Pr
   const stateDir = archivistStateDir();
   const requestPath = updateRequestPathIn(stateDir);
   const servedPath = servedShaPathIn(stateDir);
-
-  const drift = await unitDrift();
-  if (drift.length > 0) {
-    console.error(
-      `warning: the installed units differ from this checkout's (${drift.join(", ")}) — re-run ` +
-        '`install --system` as root to apply them (README, "Optional: the archivist")',
-    );
-  }
 
   const recordServed = async (): Promise<void> => {
     const sha = (await readSource(root))?.sha;
@@ -93,21 +92,29 @@ export async function updateArchivist(opts: { readonly requested: boolean }): Pr
     const text = (await readFile(servedPath, "utf8").catch(() => "")).trim();
     return SHA.test(text) ? text : null;
   };
-  if ((await readServed()) === null) await recordServed();
 
-  return runWhileRequested(requestPath, async () =>
-    updateNow({
-      root,
-      sink: daemonSink,
-      servingSha: await readServed(),
-      effects: {
-        install: defaultUpdateEffects().install,
-        restart: async () => {
-          await signalRestartUnit(ARCHIVIST_UNIT, RESTART_WORDING);
-          await recordServed();
+  return withUpdateLock(updateLockPathIn(stateDir), () =>
+    runWhileRequested(requestPath, async () => {
+      const drift = await unitDrift();
+      if (drift.length > 0) {
+        console.error(
+          `warning: the installed units differ from this checkout's (${drift.join(", ")}) — re-run ` +
+            '`install --system` as root to apply them (README, "Optional: the archivist")',
+        );
+      }
+      return updateNow({
+        root,
+        sink: daemonSink,
+        servingSha: (await readServed()) ?? UNRECORDED,
+        effects: {
+          install: defaultUpdateEffects().install,
+          restart: async () => {
+            await signalRestartUnit(ARCHIVIST_UNIT, RESTART_WORDING);
+            await recordServed();
+          },
         },
-      },
-      origin: opts.requested ? await readRequestOrigin(requestPath) : "cli",
+        origin: opts.requested ? await readRequestOrigin(requestPath) : "cli",
+      });
     }),
   );
 }

@@ -3,7 +3,14 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { requireRoot } from "../../daemon/src/target-user.ts";
-import { checkoutRefusal, daemonUserRefusal, SUDO_ARCHIVIST, untrustedCode } from "./install.ts";
+import {
+  checkoutRefusal,
+  daemonUserRefusal,
+  relativePathRefusal,
+  SUDO_ARCHIVIST,
+  SUDO_ARCHIVIST_NOTE,
+  untrustedCode,
+} from "./install.ts";
 
 const SEANCED_UNIT = '[Service]\nUser=martin\nExecStart="/usr/bin/bun" "/home/martin/seance/daemon/src/main.ts"\n';
 
@@ -27,11 +34,24 @@ describe("install --system refusals", () => {
     expect(checkoutRefusal("/home/archivist/seance", 1001, user)).toBeNull();
   });
 
-  test("not root names the archivist's own sudo form", () => {
-    expect(SUDO_ARCHIVIST).toMatch(/^sudo "\$\(command -v bun\)" ".*\/archivist\/src\/main\.ts"$/u);
-    expect(() => requireRoot(1000, "install --system", SUDO_ARCHIVIST)).toThrow(
-      `\`${SUDO_ARCHIVIST} install --system\``,
-    );
+  test("not root names the archivist's own bun by absolute path, never one from the caller's PATH", () => {
+    expect(SUDO_ARCHIVIST).toMatch(/^sudo ~archivist\/\.bun\/bin\/bun ".*\/archivist\/src\/main\.ts"$/u);
+    expect(SUDO_ARCHIVIST).not.toContain("command -v");
+    let message = "";
+    try {
+      requireRoot(1000, "install --system", SUDO_ARCHIVIST, SUDO_ARCHIVIST_NOTE);
+    } catch (err) {
+      message = String(err);
+    }
+    expect(message).toContain(`\`${SUDO_ARCHIVIST} install --system\``);
+    expect(message).not.toContain("--preserve-env");
+  });
+
+  test("a relative or empty --path entry is refused, absolute ones pass", () => {
+    expect(relativePathRefusal("/home/archivist/.bun/bin:/usr/bin")).toBeNull();
+    expect(relativePathRefusal("bin:/usr/bin")).toMatch(/must be absolute.*"bin"/u);
+    expect(relativePathRefusal("/usr/bin:")).toMatch(/must be absolute/u);
+    expect(relativePathRefusal(".")).toMatch(/must be absolute/u);
   });
 });
 

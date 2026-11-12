@@ -34,14 +34,20 @@ export const ARCHIVIST_UNIT_NAME = "seance-archivist.service";
  * sessions, so `install --system` refuses the user an installed archivist unit
  * runs as. Pure over the unit text read, null when there is none.
  */
-export function archivistUserRefusal(target: string, archivistUnit: string | null): string | null {
+export function archivistUserRefusal(
+  target: string,
+  archivistUnit: string | null,
+  remedy = "pass `--user <name>` naming another account",
+): string | null {
   if (archivistUnit === null || unitUser(archivistUnit) !== target) return null;
   return (
     `${target} is the user /etc/systemd/system/${ARCHIVIST_UNIT_NAME} runs the archivist as — sessions run as the ` +
-    "daemon's user and must not be able to read or change archive.sqlite (docs/archivist.md, A27a); pass " +
-    "`--user <name>` naming another account"
+    `daemon's user and must not be able to read or change archive.sqlite (docs/archivist.md, A27a); ${remedy}`
   );
 }
+
+/** A user-scope `seanced install` is the same daemon as a system one, by another route, so it is held to the same line. */
+const USER_SCOPE_REMEDY = "run `seanced install` as another account";
 
 /** Windows scheduled task that boots the distro at logon and pins the VM against its idle timeout. */
 export const PIN_TASK_NAME = "SeanceWslPin";
@@ -387,6 +393,14 @@ export function conflictingScopeMessage(installing: UnitScope, existing: string)
 export async function installService(): Promise<InstallResult> {
   await assertSystemdRunning();
   if (installedUnits().system) throw new Error(conflictingScopeMessage("user", systemUnitPath()));
+  const archivistRefusal = archivistUserRefusal(
+    userInfo().username,
+    await Bun.file(join("/etc/systemd/system", ARCHIVIST_UNIT_NAME))
+      .text()
+      .catch(() => null),
+    USER_SCOPE_REMEDY,
+  );
+  if (archivistRefusal !== null) throw new Error(archivistRefusal);
   const notes: string[] = [];
   const target = unitPath();
   await mkdir(dirname(target), { recursive: true });

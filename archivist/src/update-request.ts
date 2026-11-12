@@ -76,13 +76,18 @@ export async function readRequestOrigin(path: string): Promise<RequestOrigin> {
  * job already running and nothing re-fires it. At most `max` runs; the last result is returned.
  */
 export async function runWhileRequested<T>(path: string, run: () => Promise<T>, max = 3): Promise<T> {
+  // mtime and ctime at full resolution, not ms. File times still tick coarsely (about 4 ms), so a rewrite of
+  // the same text within one tick reads as the write it follows, which is a duplicate of it.
   const stamp = async (): Promise<string> => {
-    const info = await stat(path).catch(() => null);
+    const info = await stat(path, { bigint: true }).catch(() => null);
     const text = await readFile(path, "utf8").catch(() => "");
-    return `${info?.mtimeMs ?? ""}:${text}`;
+    return `${info?.mtimeNs ?? ""}:${info?.ctimeNs ?? ""}:${text}`;
   };
   for (let runs = 1; ; runs++) {
-    // Taken before the run: a write during it differs from this stamp.
+    // Taken before the run, and `run` does nothing slow ahead of its fetch: a write
+    // during it differs from this stamp. A write in the instants between the last
+    // stamp and the process exiting is the one window left, covered by the next
+    // register's check (at most 30 minutes) or announce.
     // oxlint-disable-next-line no-await-in-loop -- each run follows the last
     const before = await stamp();
     // oxlint-disable-next-line no-await-in-loop -- ditto

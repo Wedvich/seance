@@ -395,6 +395,10 @@ describe("archivistUserRefusal", () => {
     expect(archivistUserRefusal("archivist", unit)).toMatch(/runs the archivist as .*A27a/u);
   });
 
+  test("a caller's own remedy replaces the --user advice", () => {
+    expect(archivistUserRefusal("archivist", unit, "run it as another account")).toMatch(/A27a\); run it as another/u);
+  });
+
   test("another user, or no archivist unit, passes", () => {
     expect(archivistUserRefusal("martin", unit)).toBeNull();
     expect(archivistUserRefusal("archivist", null)).toBeNull();

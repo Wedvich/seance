@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createUpdateRequester, readRequestOrigin, runWhileRequested } from "./update-request.ts";
@@ -100,6 +100,19 @@ describe("runWhileRequested", () => {
       if (results.length <= 2) await Bun.write(path, `announce ${results.length}\n`);
     });
     expect(results).toEqual([0, 1, 2]);
+  });
+
+  test("a rewrite of the same text still counts as a request", async () => {
+    const path = fresh();
+    await Bun.write(path, "register\n");
+    // File times tick coarsely (about 4 ms), so age the first write rather than sleeping.
+    await utimes(path, new Date(Date.now() - 5000), new Date(Date.now() - 5000));
+    let runs = 0;
+    await runWhileRequested(path, async () => {
+      runs++;
+      if (runs === 1) await writeFile(path, "register\n");
+    });
+    expect(runs).toBe(2);
   });
 
   test("stops at max runs however often it is written", async () => {
