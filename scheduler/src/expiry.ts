@@ -46,6 +46,9 @@ export function expiry(
   if (task.state === "lost") {
     const since = task.absentSince ?? task.createdAt;
     if (now - since <= config.lostExpiryMs) return null;
+    // A pass committed before its machine went: the work lives on in the successor, and the old session, which
+    // cannot be closed from here, may still run there. `superseded` says so, where `lost_expired` would fail it.
+    if (task.successor !== undefined) return advance(task, "superseded", { leftRunning: true });
     // Without `absentSince` the clock is `createdAt`, which says when the task was made, not when its machine went away.
     const why =
       task.absentSince === undefined

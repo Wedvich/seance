@@ -5,6 +5,9 @@ import type {
   FleetQuotaEntry,
   Machine,
   PauseHold,
+  PrState,
+  PushBranchRequest,
+  PushBranchResponse,
   RecordUnreadable,
   SessionsResponse,
   SpawnRequest,
@@ -158,6 +161,24 @@ export type TaskSessionsReply =
   | ErrorResponse
   | NoAnswer;
 
+/**
+ * The head of a task's pull request as the leader's own `gh` read it (`daemon/src/pr-status.ts`),
+ * for a pass's cross-check before anything is pushed. `skipped`: not a GitHub URL, so there is
+ * nothing to compare. `unreadable`: it could not be read. The head is already held to `isBranchName`.
+ */
+export type PrHeadReading =
+  | {
+      readonly kind: "read";
+      readonly head: string;
+      readonly crossRepository: boolean;
+      readonly state: PrState;
+    }
+  | { readonly kind: "skipped" }
+  | { readonly kind: "unreadable" };
+
+/** A successor's create through the leader's app-role leg: it landed (or had already), or why not. */
+export type TaskCreateResult = { readonly ok: true } | { readonly ok: false; readonly code: string };
+
 export interface Fleet {
   /**
    * The registry as last pushed, each machine with the newest status the host
@@ -174,4 +195,9 @@ export interface Fleet {
   spawn(deviceId: string, request: TaskSpawnRequest): Promise<TaskSpawnReply>;
   sessions(deviceId: string): Promise<TaskSessionsReply>;
   despawn(deviceId: string, request: DespawnRequest): Promise<DespawnResponse | ErrorResponse | NoAnswer>;
+  /**
+   * Asks the machine holding a task to push its worktree branch (`push-branch`). Absent where the host
+   * cannot, which a pass answers `successor_unsupported`.
+   */
+  pushBranch?(deviceId: string, request: PushBranchRequest): Promise<PushBranchResponse | ErrorResponse | NoAnswer>;
 }

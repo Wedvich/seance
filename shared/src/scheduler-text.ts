@@ -45,6 +45,24 @@ const SCHEDULER_ERROR_TEXT: Record<SchedulerErrorCode, string> = {
   subscriptions_full: "the scheduler already holds as many push subscriptions as it keeps; remove one first",
   settings_unavailable:
     "the scheduler cannot use its settings record, so push is off there (another key, or a newer version wrote it)",
+  not_running: "the task has no live session to pass on — it is waiting, lost or waiting for a merge",
+  needs_input: "the task is waiting for you; answer it or cancel it first",
+  here: "the task runs in place, so it has no branch of its own to pass on",
+  offline: "the machine running the task is not connected; nothing changed",
+  successor_unsupported: "the leader or the task's machine predates passing to a successor (needs seanced update)",
+  account_unknown: "the task's account is unknown, so a successor cannot say whose work it continues",
+  pr_unreadable: "the scheduler could not read the task's pull request; nothing was pushed",
+  pr_not_open: "the task's pull request is already merged or closed; there is nothing to pass on",
+  branch_mismatch:
+    "the branch the task pushes to is not its pull request's branch, or the pull request is from a fork; nothing was pushed",
+  dirty_worktree: "the task's worktree holds uncommitted or untracked changes; commit them first, nothing was pushed",
+  detached_head: "the task's worktree is on no branch; nothing was pushed",
+  default_branch: "the task's branch is the repo's default branch, which is never pushed to; nothing was pushed",
+  push_rejected: "the remote refused the push (not a fast-forward, or a protected branch); nothing was forced",
+  push_failed:
+    "the push failed, timed out or was refused by the repo's config, or the machine did not answer; passing again pushes nothing new if it did land",
+  not_launched: "the task's machine holds no worktree launch of it, so it has no branch to push",
+  pass_failed: "the successor could not be created; nothing else was written",
 };
 
 /** A refusal's line; a code this build does not know is named rather than guessed at. */
@@ -117,6 +135,8 @@ export function reasonText(reason: Reason): string {
       return "no clone of this repo there";
     case "continue_elsewhere":
       return "the session it continues ran elsewhere";
+    case "predecessor_account":
+      return "the account whose usage ran out is not where the work goes on";
     case "continue_unsupported":
       return "its daemon can't continue a session yet (needs seanced update)";
     case "attachments_unsupported":
@@ -170,6 +190,7 @@ const TASK_FAILURE_TEXT: Record<TaskFailureCode, string> = {
   session_closed: "its window was closed before its session ended and it reported no pull request",
   continue_expired: "the continuation was not placed in time, so the scheduler stopped waiting for it",
   pin_expired: `the machine or account it is pinned to did not take it within ${Math.round(STORE_TOMBSTONE_MS / DAY_MS)} days, so the scheduler stopped waiting for it`,
+  pass_abandoned: "the task it continues finished without passing to it, so it would run beside work that moved on",
   queue_expired: `it sat in the queue over ${Math.round(STORE_TOMBSTONE_MS / DAY_MS)} days, too long to start safely`,
 };
 

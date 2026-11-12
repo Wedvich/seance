@@ -334,6 +334,10 @@ export function taskHeadline(task: Task, machines: readonly Machine[], now: numb
         : `It didn't take${place}.`;
     case "cancelled":
       return task.leftRunning === true ? `Cancelled — its session may still be running${place}.` : "Cancelled.";
+    case "superseded":
+      return task.leftRunning === true
+        ? `Passed to a successor — its session may still be running${place}.`
+        : "Passed to a successor.";
   }
 }
 
@@ -467,5 +471,9 @@ export function queuedBody(task: Task): string {
       );
     case "cancelled":
       return task.leftRunning === true ? LEFT_RUNNING : "Nothing is running.";
+    case "superseded": {
+      const passed = `Its work went to task ${task.successor ?? "unknown"}, which continues it.`;
+      return task.leftRunning === true ? `${passed} ${LEFT_RUNNING}` : passed;
+    }
   }
 }

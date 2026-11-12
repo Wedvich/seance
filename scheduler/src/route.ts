@@ -293,7 +293,8 @@ function judgeAccount(
   // Spent credits can't take the spill. Unknown credits (a daemon that predates `c`) still may: refusing them would
   // stop every spill until the fleet upgrades.
   const spent = creditsSpent(observation, pass.now);
-  if (exclave.extraUsageEnabled === true && !spent) {
+  // A successor is on the account because the old one ran out: it waits for headroom, it never bills credits for it.
+  if (exclave.extraUsageEnabled === true && !spent && pass.task.spec.succeeds === undefined) {
     // Past the line is a forecast: the estimate is a fixed guess, and credits bill only once a window is full.
     const full = fullWindow(windows, added, pass.now, pass.config);
     return { quota, spill: full === null ? over : { ...full, spending: true }, pressure };

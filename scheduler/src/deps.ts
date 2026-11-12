@@ -1,6 +1,7 @@
 import {
   DEP_MISSING_GRACE_MS,
   STORE_TOMBSTONE_MS,
+  SUCCESSOR_CHAIN_MAX,
   TASK_FAILURE_LIMITS,
   type DepAfter,
   type TaskFailureCode,
@@ -15,6 +16,8 @@ import { FINISHED, type Task } from "./task.ts";
 
 export type Admission =
   | { readonly state: "blocked" | "ready" }
+  /** A successor whose predecessor's PR merged while it waited: nothing to continue, and nothing was placed. */
+  | { readonly state: "done"; readonly doneBy: "merged" }
   | {
       readonly state: "failed";
       readonly failure: { readonly code: TaskFailureCode; readonly message: string };
@@ -57,16 +60,40 @@ export function isExpired(task: Task, now: number): boolean {
 }
 
 /**
+ * `pred` followed through `superseded → successor` links, at most `SUCCESSOR_CHAIN_MAX` hops: the task
+ * holding the work now. Null when the chain cannot be read to its end (a link pruned, unreadable or
+ * missing, or one too long or looping): the dependent waits, never fails on a state it cannot see.
+ */
+function holder(pred: Task, byId: ReadonlyMap<string, Task>): Task | null {
+  let current = pred;
+  for (let hops = 0; current.state === "superseded"; hops++) {
+    const next = current.successor === undefined ? undefined : byId.get(current.successor);
+    if (next === undefined || hops >= SUCCESSOR_CHAIN_MAX) return null;
+    current = next;
+  }
+  return current;
+}
+
+/**
  * Where each `queued` or `blocked` task moves now, only where that is a move.
  * A failure cascades within the one call — a dependent of a task failed here
  * fails here too — so a chain settles in one pass, not one link per pass. An
  * id held only as an unreadable record (`unreadable`) is in the store, so its
  * dependents wait rather than fail `dependency_missing`.
+ *
+ * A task carrying `spec.succeeds` is judged against its predecessor alone
+ * (DESIGN.md, "Passing to a successor"): the predecessor `superseded` naming it
+ * releases it, an unfinished one keeps it `blocked`, and any other end fails it
+ * `pass_abandoned`, so two sessions never work one remote branch. A merged
+ * predecessor settles it `done`. A dependent of a `superseded` task waits on
+ * the end of its chain instead. `stalled` is told once per task whose chain
+ * could not be read (too long, looping, or a link missing).
  */
 export function admission(
   tasks: readonly Task[],
   unreadable: ReadonlySet<string>,
   now: number,
+  stalled?: (taskId: string) => void,
 ): ReadonlyMap<string, Admission> {
   const byId = new Map(tasks.map((t) => [t.id, t]));
   const waiting = tasks.filter((t) => t.state === "queued" || t.state === "blocked");
@@ -90,11 +117,34 @@ export function admission(
     }
   }
 
+  const abandoned = (task: Task, why: string): Judgement =>
+    failure("pass_abandoned", `the task it continues ${why}, so it would run beside work that moved on`);
+
+  const judgeSuccessor = (task: Task, from: NonNullable<Task["spec"]["succeeds"]>): Judgement => {
+    const pred = byId.get(from.task);
+    if (pred === undefined) {
+      if (unreadable.has(from.task) || now - task.createdAt < DEP_MISSING_GRACE_MS) return { state: "blocked" };
+      return abandoned(task, `(${from.task}) is not in the queue`);
+    }
+    if (failed.has(pred.id)) return abandoned(task, `(${pred.id}) failed`);
+    if (pred.state === "superseded") {
+      return pred.successor === task.id ? { state: "ready" } : abandoned(task, `(${pred.id}) passed to another task`);
+    }
+    if (pred.state === "done" && pred.doneBy === "merged") return { state: "done", doneBy: "merged" };
+    if (FINISHED.includes(pred.state)) return abandoned(task, `(${pred.id}) ended ${pred.state}`);
+    return { state: "blocked" };
+  };
+
   const judge = (task: Task): Judgement => {
+    if (task.spec.succeeds !== undefined) return judgeSuccessor(task, task.spec.succeeds);
     let blocked = false;
     for (const dep of task.spec.deps ?? []) {
-      const pred = byId.get(dep.task);
-      if (pred === undefined) {
+      const direct = byId.get(dep.task);
+      const pred = direct === undefined ? undefined : holder(direct, byId);
+      if (direct !== undefined && pred === null) {
+        stalled?.(task.id);
+        blocked = true;
+      } else if (direct === undefined || pred === undefined || pred === null) {
         if (unreadable.has(dep.task) || now - task.createdAt < DEP_MISSING_GRACE_MS) blocked = true;
         else return failure("dependency_missing", `its dependency ${dep.task} is not in the queue`);
       } else if (failed.has(pred.id) || pred.state === "failed" || pred.state === "cancelled") {
@@ -135,11 +185,31 @@ function failure(code: TaskFailureCode, message: string): Judgement {
   return { state: "failed", failure: { code, message } };
 }
 
-/** Every id an unfinished task names: pruning must keep each, or its dependent fails `dependency_missing`. */
+/**
+ * Every id an unfinished task names: pruning must keep each, or its dependent fails `dependency_missing`.
+ * That includes the links of a `superseded → successor` chain a dependent follows, and the predecessor a
+ * waiting successor reads (`succeeds.task`, which is no dep).
+ */
 export function named(tasks: readonly Task[]): ReadonlySet<string> {
-  return new Set(
-    tasks.filter((t) => !FINISHED.includes(t.state)).flatMap((t) => (t.spec.deps ?? []).map((d) => d.task)),
-  );
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const kept = new Set<string>();
+  for (const task of tasks) {
+    if (FINISHED.includes(task.state)) continue;
+    if (task.spec.succeeds !== undefined) kept.add(task.spec.succeeds.task);
+    for (const dep of task.spec.deps ?? []) {
+      kept.add(dep.task);
+      let link = byId.get(dep.task);
+      for (
+        let hops = 0;
+        link?.state === "superseded" && link.successor !== undefined && hops < SUCCESSOR_CHAIN_MAX;
+        hops++
+      ) {
+        kept.add(link.successor);
+        link = byId.get(link.successor);
+      }
+    }
+  }
+  return kept;
 }
 
 /**
@@ -161,7 +231,11 @@ function cycles(tasks: readonly Task[]): ReadonlyMap<string, readonly string[]> 
   const edgesOf = (id: string): readonly string[] => {
     const task = byId.get(id);
     if (task === undefined || FINISHED.includes(task.state)) return [];
-    return (task.spec.deps ?? []).map((d) => d.task);
+    // A successor waits on its predecessor as a dep does: a loop of them would wait for ever.
+    return [
+      ...(task.spec.succeeds === undefined ? [] : [task.spec.succeeds.task]),
+      ...(task.spec.deps ?? []).map((d) => d.task),
+    ];
   };
 
   const visit = (id: string): void => {

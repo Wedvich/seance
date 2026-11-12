@@ -8,6 +8,7 @@ import {
   TASK_PRS_MAX,
   TASK_PRS_MAX_LENGTH,
   taskPrs,
+  readsPrWhileWaiting,
   wantsPrReading,
   type BranchState,
   type PrStatus,
@@ -170,6 +171,9 @@ export function ended(task: Task, entry: Progress | undefined, fields: TaskField
   const merged = seen?.merged === true && hasWork(known);
   if (merged && !settlesOnReport(known)) return advance(known, "done", { doneBy: "merged" });
   const open = merged ? mergedOpen(known) : known;
+  // A pass whose close landed (`Task.successor`): whatever else the end would have made of the task, its
+  // work lives on in the successor, which holds the PR. A merge and the session's own report won above.
+  if (open.successor !== undefined) return advance(open, "superseded");
   if (open.prUrl !== undefined) return advance(open, "awaiting-merge");
   const exit = seen?.exit;
   if (exit !== undefined && exit !== 0) {
@@ -250,8 +254,11 @@ export function prChange(task: Task, prUrl: string, status: PrStatus): Task | nu
   if (prUrl !== task.prUrl) return flipped ? { ...task, ...relisted } : null;
   // The whole reading: the alert and the chip read its head, required checks and merge state.
   const pr: PrStatus = status;
-  // A finished task's one reading is for its chip alone: nothing is left for a merge to settle.
-  if (!isPrReadable(task.state)) return { ...task, ...relisted, pr: prChipFields(pr) };
+  // A finished task's one reading is for its chip alone: nothing is left for a merge to settle. A waiting
+  // successor is the exception: its PR is the one it will continue, and a merge makes it `done` unplaced.
+  if (!isPrReadable(task.state) && !readsPrWhileWaiting(task)) {
+    return { ...task, ...relisted, pr: prChipFields(pr) };
+  }
   const landed = status.state === "merged" && status.stacked !== true;
   const settles = landed && !settlesOnReport(task);
   const marks = landed && settlesOnReport(task) && task.merged !== true;

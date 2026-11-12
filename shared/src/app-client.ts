@@ -59,6 +59,7 @@ import {
   type Task,
   type TaskRecord,
   type TaskRef,
+  type PassReply,
   type TaskReply,
   type UndeliverableCode,
   type UpdateReport,
@@ -85,6 +86,7 @@ import {
   pushServiceVendor,
   parseStoreChanged,
   parseStoreReply,
+  parsePassReply,
   parseTaskReply,
 } from "./parse.ts";
 import {
@@ -1865,6 +1867,17 @@ export class RelayClient {
   runNow(taskId: string): Promise<TaskReply | null> {
     const ref: TaskRef = { taskId };
     return this.#schedule("run-now", ref, parseTaskReply);
+  }
+
+  /**
+   * Passes a running task to a successor: its machine pushes the branch, a new task is created to
+   * continue from it, and the old session is ended. The reply names the successor. Only to a leader
+   * advertising `CAPABILITIES.successor` (`passOffer` checks it): an older one answers an unknown op
+   * `invalid_request`. A client that gives up early may call again: one pass per task at a time.
+   */
+  pass(taskId: string): Promise<PassReply | null> {
+    const ref: TaskRef = { taskId };
+    return this.#schedule("pass", ref, parsePassReply);
   }
 
   pause(request: PauseRequest): Promise<PauseReply | null> {

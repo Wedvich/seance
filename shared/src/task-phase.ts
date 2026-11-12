@@ -27,6 +27,7 @@ export const TASK_PHASES = {
   done: "finished",
   failed: "finished",
   cancelled: "finished",
+  superseded: "finished",
 } as const satisfies Record<TaskState, TaskPhase>;
 
 export function statesIn(phase: TaskPhase): readonly TaskState[] {
@@ -61,7 +62,20 @@ export function isPrReadable(state: TaskState): boolean {
  * reading is final. The poller bounds a finished task to one read per term;
  * it and `prChange` both ask this, so what is polled is what can be applied.
  */
-export function wantsPrReading(task: Pick<Task, "state" | "prUrl" | "pr">): boolean {
+export function wantsPrReading(task: Pick<Task, "state" | "prUrl" | "pr" | "spec">): boolean {
   if (task.prUrl === undefined) return false;
-  return isPrReadable(task.state) || (TASK_PHASES[task.state] === "finished" && task.pr?.state !== "merged");
+  return (
+    isPrReadable(task.state) ||
+    readsPrWhileWaiting(task) ||
+    (TASK_PHASES[task.state] === "finished" && task.pr?.state !== "merged")
+  );
+}
+
+/**
+ * A successor waiting for its predecessor holds the PR it will continue: a merge landing meanwhile
+ * settles it `done` without a spawn (a session started to fetch a deleted branch would be waste).
+ * `reserved` is not read (a spawn is out), and a plain waiting task has no PR to read.
+ */
+export function readsPrWhileWaiting(task: Pick<Task, "state" | "prUrl" | "spec">): boolean {
+  return TASK_PHASES[task.state] === "waiting" && task.spec.succeeds !== undefined && task.prUrl !== undefined;
 }
