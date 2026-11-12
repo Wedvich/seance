@@ -706,9 +706,11 @@ const PASS_CHECK: Readonly<Record<EnqueueSurface, string>> = {
  * `pass_task` / `seanced pass`: the Queue screen's "Pass to successor" — one `pass` for a running
  * task, which pushes its branch, ends the session and queues the task that carries on (DESIGN.md
  * "Passing to a successor"). The queue is read once first and the shared `passOffer` rule applied,
- * so a task the leader would refuse is refused here with the same words. Sent once, never retried:
- * a lost answer may follow a push and a created successor. Never logs; the leader's own `op=pass`
- * audit line, and the broker's where it carried it, are the record.
+ * so a task the leader would refuse is refused here with the same words. A task the read shows
+ * already passed is answered with its successor and nothing is sent (the leader answers it `ok` too).
+ * Sent once, never retried: a lost answer may follow a push and a created successor, and passing
+ * again is safe. Never logs; the leader's own `op=pass` audit line, and the broker's where it
+ * carried it, are the record.
  */
 export async function passAuto(lease: SchedulerLease, taskId: string, surface: EnqueueSurface): Promise<AutoEnqueued> {
   const label = surface === "mcp" ? "pass_task" : "pass";
@@ -741,9 +743,13 @@ export async function passAuto(lease: SchedulerLease, taskId: string, surface: E
       `${label} refused: task ${taskId} is not in the leader's list (pruned, or past the ${QUEUE_MAX_TASKS} most relevant)`,
     );
   }
+  // Before `passOffer`, which refuses it: after a lost answer a retry gets the successor's id, not a refusal.
+  if (task.successor !== undefined) {
+    return done(`task ${taskId} was already passed to successor ${task.successor}; nothing was sent`);
+  }
   const offer = passOffer(task, lease.machines, true);
   if (!offer.ok) return failed(`${label} refused: ${offer.reason}`);
-  const mayHave = `the pass may have landed anyway — ${PASS_CHECK[surface]}`;
+  const mayHave = `the pass may have landed anyway — ${PASS_CHECK[surface]}, or pass it again: a task already passed answers with its successor`;
   let reply: Awaited<ReturnType<SchedulerLeg["pass"]>>;
   try {
     reply = await lease.scheduler.pass(taskId);
