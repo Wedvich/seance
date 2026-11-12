@@ -39,6 +39,7 @@ import { procOomProbe } from "./oom-kill.ts";
 import type { PrPollerOpts } from "./pr-status.ts";
 import { RelayClient } from "./relay-client.ts";
 import { createAuthHealth, type AuthHealthDeps } from "./auth-health.ts";
+import { createTraitProbes, hasProbe, type TraitProbesDeps } from "./trait-probes.ts";
 import { startCapabilities } from "./run-capabilities.ts";
 import { startStatusLoop } from "./run-collectors.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
@@ -109,6 +110,12 @@ export interface RunOpts {
    * child by surprise; main.ts passes `{}`. `keychain` defaults to the config's `authHealth.keychain`.
    */
   readonly authHealth?: Partial<Omit<AuthHealthDeps, "scan" | "home">>;
+  /**
+   * Seams only — probes run whenever `config.traits` declares one (`trait-probes.ts`), unlike the
+   * opt-in children above: a probe exists only because this machine's own config file named it, and a
+   * test writes its own config. The supervisor sets `via` on a reload.
+   */
+  readonly traitProbes?: Partial<Pick<TraitProbesDeps, "audit" | "checkIntervalMs" | "now" | "via">>;
   /**
    * Tests seed one store across terms and shorten the tick; absent, the leader
    * runs on the relay store.
@@ -280,6 +287,16 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
           scan: () => exclaveScan,
           home,
         });
+  const traitProbes = hasProbe(config.traits)
+    ? createTraitProbes({
+        // Late-bound, as auth health's: the status loop is built after this.
+        onChange: () => status.refresh(),
+        ...opts.traitProbes,
+        allTraits: config.traits ?? {},
+        scan: () => exclaveScan,
+        home,
+      })
+    : null;
   const candidates = new WeakMap<Envelope, Registered>();
   let lastSizeReport: string | null = null;
   const instance = crypto.randomUUID();
@@ -453,6 +470,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       httpFetch,
       draining: () => endedTasks.draining,
       ...(authHealth === null ? {} : { auth: () => authHealth.view() }),
+      ...(traitProbes === null ? {} : { traits: (scan) => traitProbes.statusLists(scan) }),
       ...(opts.probe === undefined ? {} : { probe: opts.probe }),
     },
     {
@@ -616,6 +634,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     repos: () => state.repos,
     exclaveScan: () => exclaveScan,
     authHealth,
+    traitProbes,
     usageRefresh:
       opts.usageRefresh === undefined
         ? null

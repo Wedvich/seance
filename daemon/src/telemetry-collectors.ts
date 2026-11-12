@@ -79,6 +79,7 @@ export const TELEMETRY_COLLECTORS: readonly TelemetryCollector[] = [
   quotaCollector,
   drainCollector,
   authCollector,
+  traitCollector,
 ];
 
 function cpuCollector(sources: CollectorSources): Collect {
@@ -170,6 +171,26 @@ function authCollector(sources: CollectorSources): Collect {
         ...(keptAx.length === 0 ? {} : { ax: keptAx }),
         ...(keptAe.length === 0 ? {} : { ae: keptAe }),
         ...(keptAu.length === 0 ? {} : { au: keptAu }),
+      },
+      samples: [],
+    });
+  };
+}
+
+/**
+ * `tf` and `tu` from the trait probes, indexed through the registered blob's exclave list as `ax` is: a
+ * trait index points into that exclave's advertised traits, so a fresh scan would misindex it. No metric:
+ * routing reads the lists live. The source (`sources.traits`, not `probe`, which is the host probe) already
+ * bounds them to `STATUS_MAX_TRAIT_PAIRS` together.
+ */
+function traitCollector(sources: CollectorSources): Collect {
+  return (tick) => {
+    const lists = sources.traits?.(tick.registered.exclaves);
+    if (lists === undefined) return Promise.resolve(NO_CONTRIBUTION);
+    return Promise.resolve({
+      fields: {
+        ...(lists.tf.length === 0 ? {} : { tf: lists.tf }),
+        ...(lists.tu.length === 0 ? {} : { tu: lists.tu }),
       },
       samples: [],
     });
