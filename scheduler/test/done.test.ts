@@ -324,9 +324,15 @@ describe("a session's exit status", () => {
   // deadline or the disconnect, releasing the `after: "merged"` dependent.
   describe("a PR whose event was lost, on a machine gone before the exit could be read", () => {
     const capable = [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.exitStatus];
-    const config = { ...DEFAULT_CONFIG, lostAfterMs: 1_000 };
+    // Each variant leaves the other path out of reach: the deadline passes while the machine is not yet
+    // lost, and the machine is lost long before the deadline.
+    const configs = {
+      deadline: { ...DEFAULT_CONFIG, lostAfterMs: DEFAULT_CONFIG.endingTimeoutMs * 10 },
+      disconnect: { ...DEFAULT_CONFIG, endingTimeoutMs: DEFAULT_CONFIG.lostAfterMs * 10, lostAfterMs: 1_000 },
+    } as const;
 
     async function scenario(gone: "deadline" | "disconnect", carried: string | undefined) {
+      const config = configs[gone];
       // `b` is where the dependent would go once released.
       const fleet = new FakeFleet([machine("a", { capabilities: capable }), machine("b", { capabilities: capable })]);
       const { clock, scheduler, put } = setup(fleet, config);
