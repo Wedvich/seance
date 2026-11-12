@@ -324,7 +324,7 @@ describe("deriveQueue", () => {
     expect(body).not.toContain("Mac");
   });
 
-  test("a row's title is the task's, else its prompt's first line cut to 80, else its window (unless it is the daemon's `session` fallback), else its repo", () => {
+  test("a row's title is the task's, else its window (unless it is the daemon's `session` fallback), else its prompt's first line cut to 80, else its repo", () => {
     const rows = deriveQueue(
       state(
         ok([
@@ -337,6 +337,18 @@ describe("deriveQueue", () => {
           task("g", { state: "done", doneBy: "session", assignment: { ...placedAt, window: "session" } }),
           task("h", { state: "done", doneBy: "session", assignment: { ...placedAt, window: "session-12" } }),
           task("i", { state: "done", doneBy: "session", assignment: { ...placedAt, window: "session-notes" } }),
+          task("j", {
+            state: "done",
+            doneBy: "session",
+            spec: { repo: ORIGIN, mode: "worktree", prompt: "Can you fix the flaky test?" },
+            assignment: { ...placedAt, window: "can-you-fix-the-flaky-test" },
+          }),
+          task("k", {
+            state: "done",
+            doneBy: "session",
+            spec: { repo: ORIGIN, mode: "worktree", prompt: "Take notes" },
+            assignment: { ...placedAt, window: "session-3" },
+          }),
         ]),
       ),
       NOW,
@@ -351,6 +363,8 @@ describe("deriveQueue", () => {
       ["g", "acme/app"],
       ["h", "acme/app"],
       ["i", "session-notes"],
+      ["j", "can-you-fix-the-flaky-test"],
+      ["k", "Take notes"],
     ]);
   });
 
