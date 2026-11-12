@@ -2970,8 +2970,9 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   `requires` order (`traitFilter`, `scheduler/src/traits.ts`; a trait in `TASK_SPEC_LIMITS.requires`
   worst case is one reason per trait, which the record-size fixtures carry). The exclave is the unit:
   every trait must sit on one exclave, not spread across a machine's. A candidate with no exclave
-  (`exclave: null`, an older daemon) lacks every trait and is `trait_absent`; `traitsHolding` ignores such
-  candidates when deciding which traits hold a task. Mixed with the other filters the reasons
+  (`exclave: null`: its blob lists none, so it is `exclaves_unknown`) is never judged and carries no
+  `trait_absent`, and `traitsHolding` ignores it when deciding which traits hold a task; an older
+  daemon's exclaves are judged, and lack every trait as they declare none. Mixed with the other filters the reasons
   stack as they do for any rejected candidate, so a pinned-elsewhere candidate carries both.
   - **Declaring.** Only in the machine's own `config.json`: `"traits": {"<name>": {"exclaves"?: [...]}}`.
     `exclaves` narrows a trait to those exclave names (default: all of the box's). `probe` and `keepFree`
@@ -2980,7 +2981,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
     key fails the config load. `withTraits` (`daemon/src/traits.ts`) stamps the sorted names onto each
     `ExclaveInfo` in `buildInfo`; `CAPABILITIES.traits` is advertised by every daemon of this build.
   - **Holds, not rejections.** A trait no candidate carries holds the task like any unplaceable
-    one; the leader logs `held on trait <name>` once per trait per term (`onTraitHeld`; a new term
+    one; the leader logs `scheduler: task held by trait: task=<id> trait=<name>` once per trait per term (`onTraitHeld`; a new term
     logs it again, the memo being per term, which is accepted). `trait_unhealthy` is reserved for
     probes (PR 2).
   - **Submit-time checks, one per client.** Each client writes `requires` only to a verified leader
@@ -9930,7 +9931,7 @@ are tmux-rename's, except where they say mods.
 
 - A task with `requires` is invisible to an app or CLI older than traits (its leader-side record is
   refused by an older leader, and an older app drops what it cannot read), as with `attachments`;
-  and the leader's "held on trait" line repeats after a leader change, its memo being per term.
+  and the leader's "task held by trait" line repeats after a leader change, its memo being per term.
 
 - `/spawn` and the daemon duplicate git/tmux logic — drift risk, owned, and on
   its way out: `seanced spawn --now` audits like the relay path, so the slash
