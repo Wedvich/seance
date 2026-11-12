@@ -125,7 +125,7 @@ green:
   memoized because `Bun.build` runs once per process, and every caller must `dispose()` — `bun test`
   fires no exit hooks, so an undisposed instance leaves its workerd running past the test process.
   (An older note here said the opposite, that disposing mid-process hangs the next boot. That scar
-  is real but sharding routes around it: the relay, pwa and e2e boots now sit in three separate
+  is real but sharding routes around it: the relay, pwa, e2e and archivist boots now sit in four separate
   processes, never one. Put them back together — a bare `bun test` over the whole tree — and the
   rate-limit suite still fails, because booting workerd within ~100ms of a previous instance being
   disposed makes Bun's `child_process` fail to wire up the new one's stdio (`Failed to connect`,

@@ -10633,7 +10633,10 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   and `bearerToken` only, checked by the daemon's own `runnableProblems`; a `psk` key is refused.
   `~/.local/state/seance-archivist/` (0700, re-`chmod`ed at every start since `mkdir` honours the
   umask and skips an existing dir) holds `state.json` — the identity seed, minted by the daemon's
-  `loadOrInitState`, never leaving the file — and `runtime.json` for `status`. Never the daemon's
+  `loadOrInitState` only when the file is absent, never leaving the file — and `runtime.json` for
+  `status`. Unlike the daemon, an unreadable, malformed or seed-mismatched `state.json` refuses
+  start (`loadSeatState`) rather than being replaced: the id must equal the relay's `ARCHIVIST`,
+  so a re-mint would be a squatter refused 4403 forever, and an overwrite destroys the seed. Never the daemon's
   `seance` dirs: on a shared box it is a different Unix user (docs/archivist.md, A27a), and even
   as the same user it must not read or mint the daemon's identity.
 - **The key, from the unit only.** `readCredentialPsk` at `$CREDENTIALS_DIRECTORY/seance-psk`;
@@ -10653,14 +10656,17 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   Every op that reaches it is dropped with a warning and no reply. No `status`, no store frame.
 - **The read leg.** A second, app-role socket from `appRelayClient` with the PSK's key, as the
   leader's own app leg reads (A7). Nothing reads through it yet (items 3 and 4). A 4401 on it is
-  permanent for that client, so the seat leg's accepted register — proof the token works now —
-  redials it.
+  permanent for that client, so the seat leg's `/daemon` upgrade succeeding — proof the token works
+  now — redials it. The seat leg's `onConnect` fires when the register has left, not when it is
+  accepted (the relay sends no ack), so `runtime.json` and `status` can say "connected" for a seat
+  the relay is refusing 4403; the log's `register role-refused` line is the diagnosis.
 - **Held by a test, not a habit.** `archivist/test/layering.test.ts` walks the transitive import
   closure from every file in `archivist/src`, counting type-only imports, and fails on any daemon
   module that spawns, drives tmux, dispatches ops, brokers, leads or writes the queue or store,
   on `daemon/src/config.ts`, `run.ts`, `cli.ts` and `mcp.ts`, on any path into `scheduler/`, and
-  on `@seance/scheduler` or `@seance/daemon`. A second scan forbids every write method either
-  client offers, and `execPath`, in the archivist's own source. Transitive because an allowed
+  on `@seance/scheduler`, `@seance/daemon` and `child_process`, and on `Bun.spawn`/`Bun.$` anywhere
+  in the closure. A second scan forbids every write method either
+  client offers (dotted, bracketed or destructured), and `execPath`, in the archivist's own source. Transitive because an allowed
   module that later grows an edge to a forbidden one must fail here, not in review.
 
 ## Accepted trade-offs
