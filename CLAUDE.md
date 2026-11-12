@@ -67,6 +67,16 @@ green:
   machine and reports a timeout instead of the thing that never happened. Poll instead (`pollUntil`
   in `daemon/test/fixtures.ts`). Before a _negative_ assertion ("nothing happened") a sleep is
   legitimate — a non-event can't be polled — so leave those alone.
+- An e2e test ends every task it queued through `cancelTask` (`e2e/harness.ts`), never a bare
+  `client.cancel(...).catch(() => null)`, and never by killing its window alone. A file's tests share
+  one account under the leader's per-account cap (4), so a task left running starves later tests, and
+  a killed window frees its slot only at the 120s sweep. The leader refuses a task it still holds
+  `reserved` with `dispatching` — a reply, not a throw — including just after the store shows it
+  `running`, since the leader takes the write's ack after the store has it. `cancelTask` asks again on
+  that, and a suite that queues tasks asserts `takeLeakedTasks()` empty in `afterEach` (as
+  `auto.test.ts` and `leader.test.ts` do), so the test that leaked fails, not a later one. Before any other
+  leader op on a task you just saw `running` in the store, wait for the leader's own view
+  (`client.queue()`), as the mark-done test does.
 - Never let a test's first exec of a freshly written executable land inside a timed window. macOS
   scans every never-executed file on first exec, one at a time machine-wide, so concurrent shards
   queue behind each other's stubs; GitHub's macOS runners measurably skip the scan, which is how
