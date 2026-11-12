@@ -5046,8 +5046,8 @@ of this section built.
 - **`plan` is the one opt-in exception** (added 2026-08-29). The bullet above
   rejects a _default_ mode flag, not a caller-chosen one: `SpawnRequest.plan`
   is an optional boolean that, when true, emits `--permission-mode plan` (plus
-  the bypass allowance below) and nothing else changes. Absent or false, the command string is byte-identical
-  to what every client sent before, so the ambient default stands. It exists
+  the bypass allowance below) and nothing else changes. Absent or false, the
+  command string is byte-identical to what every client sent before, so the ambient default stands. It exists
   for the MCP tool, where the calling model can read "plan the implementation
   of X" out of a request and set it — a surface with no human picking flags is
   exactly where the intent is legible and a picker is not. Deliberately binary:

@@ -484,11 +484,13 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
       await rm(userSettings, { force: true });
       expect(await argvOf({ title: "Plan Missing", plan: true })).not.toContain(BYPASS);
 
+      await Bun.write(userSettings, JSON.stringify({ permissions: { defaultMode: "acceptEdits" } }));
       await Bun.write(
         join(repoSettingsDir, "settings.json"),
         JSON.stringify({ permissions: { defaultMode: "bypassPermissions" } }),
       );
       expect(await argvOf({ title: "Plan Repo", plan: true })).not.toContain(BYPASS);
+      await rm(userSettings, { force: true });
       await rm(repoSettingsDir, { recursive: true, force: true });
 
       await Bun.write(
@@ -1026,6 +1028,33 @@ describe("spawnSession continuing a failed task's session", () => {
     const refused = await continuing(wt, { title: "Cont Gone" }).catch((err: unknown) => err);
     expect(refused).toMatchObject({ code: "not_continuable", message: expect.stringContaining("is gone") });
     expect(await tmuxOk(["list-windows", "-t", "main", "-F", "#{window_name}"])).not.toContain("Cont Gone");
+  });
+
+  test("a plan continuation allows bypass under the same user-settings rule as a fresh spawn", async () => {
+    const wt = await makeWorktree();
+    const userSettings = join(home, ".claude", "settings.json");
+    try {
+      await Bun.write(userSettings, JSON.stringify({ permissions: { defaultMode: "bypassPermissions" } }));
+      await rm(stub.argvFile, { force: true });
+      const planned = await continuing(wt, { title: "Cont Plan", plan: true });
+      try {
+        const argv = await stub.argv();
+        expect(argv[argv.indexOf("--permission-mode") + 1]).toBe("plan");
+        expect(argv).toContain("--allow-dangerously-skip-permissions");
+      } finally {
+        await killWindow(planned.window);
+      }
+      await rm(stub.argvFile, { force: true });
+      const plain = await continuing(wt, { title: "Cont Plain" });
+      try {
+        expect(await stub.argv()).not.toContain("--allow-dangerously-skip-permissions");
+      } finally {
+        await killWindow(plain.window);
+      }
+    } finally {
+      await rm(userSettings, { force: true });
+      await dropWorktree(wt);
+    }
   });
 
   test("refuses while the continued task's own session still runs, and while any session is open in the worktree", async () => {

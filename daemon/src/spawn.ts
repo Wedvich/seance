@@ -256,6 +256,8 @@ function attachmentsBlock(attachments: SessionAttachments | undefined): string {
 /**
  * Whether the exclave's user settings.json defaults to `bypassPermissions`. Read per spawn, uncached;
  * anything unreadable or misshapen answers false — the flag fails closed, the spawn never fails on it.
+ * Managed/policy settings are not read: claude itself refuses bypass when policy disables it, so the flag
+ * cannot override one. A settings.json that is a FIFO or huge is the machine owner's own doing.
  * User settings only: a repo's `.claude/settings.json` is whoever committed it, so it unlocks nothing.
  */
 async function userDefaultsToBypass(home: string, exclave: string): Promise<boolean> {
