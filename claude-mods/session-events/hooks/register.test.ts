@@ -277,6 +277,16 @@ describe("reports", () => {
     expect(sent).toEqual([]);
   });
 
+  test("a dialog whose tool name is not a string reports permission with no tool", async ($, on) => {
+    const sent = record(on);
+    on("tool.check", (_$, e) => ({ decision: e.approver === undefined ? "allow" : "ask" }));
+    // Parsed, so it is untyped: what a malformed engine event would carry.
+    const tool = JSON.parse("7");
+    await $.tool.check({ tool, input: {}, tool_use_id: "ask-1", approver: "person" });
+    await settled(sent, 1);
+    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input", reason: "permission" }]);
+  });
+
   test("a denied call says nothing", async ($, on) => {
     const sent = record(on);
     tools($, on, { verdict: "deny" });

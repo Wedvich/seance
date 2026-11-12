@@ -44,6 +44,7 @@ import {
   TASK_PRS_MAX,
   TASK_PRS_MAX_LENGTH,
   TASK_SPEC_LIMITS,
+  TOOL_NAME_MAX_LENGTH,
   type AccountRecord,
   type AttachmentRef,
   type BatchMembership,
@@ -610,7 +611,7 @@ export function isRemoteSessionId(value: unknown): value is string {
   return typeof value === "string" && REMOTE_SESSION_ID.test(value);
 }
 
-const TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/u;
+const TOOL_NAME = new RegExp(`^[A-Za-z0-9_-]{1,${TOOL_NAME_MAX_LENGTH}}$`, "u");
 
 /** A tool name as Claude Code mints one; nothing that could carry a command line passes. */
 export function isToolName(value: unknown): value is string {
@@ -1208,8 +1209,8 @@ export function parseTask(value: unknown): Task | null {
     // Dropped, never fatal, like `pr`: a link is display-only.
     ...(isRemoteSessionId(remoteSession) ? { remoteSession } : {}),
     // Dropped, never fatal, like `remoteSession`: display-only. Only on the states a wait lives in
-    // (`inputClock` keeps it into `lost`): a stale one an older leader left elsewhere goes, and the
-    // store bound need not fit it beside a `failure`.
+    // (`inputClock` keeps it into `lost`): elsewhere it could only be a bug's, and the store bound
+    // need not fit one beside a `failure`.
     ...(waiting && isNeedsInputReason(inputReason) ? { inputReason } : {}),
     ...(waiting && inputReason === "permission" && isToolName(inputTool) ? { inputTool } : {}),
   };

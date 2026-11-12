@@ -7192,7 +7192,11 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   120 s (the incident behind this), so the push's 2-minute debounce would hide exactly the waits
   that matter and 30 s leaves ~90 s to answer; an auto-mode call past 30 s still reaches Needs you,
   worded as a maybe. Shown at once: a question (`inputReason`, cannot flicker), an alerted or
-  escalated stay, and one with no `needsInputSince` (an older leader's). The followed task's
+  escalated stay, one with no `needsInputSince` (an older leader's), and one stamped more than 5 s
+  ahead of the leader's clock (another leader's, since a handover keeps the record: waiting out that
+  gap would hide a prompt Claude Code auto-denies in 120 s). The rule is `pwa/src/input-debounce.ts`,
+  shared by the Queue screen, the "After" sheet (same headline as the screen) and the store's
+  timer. The followed task's
   verdict is not debounced: a person who opened it is looking on purpose, and it shows the record
   with the same wording. Wording: "It's asking a question on …", "It may be waiting for permission
   to use Bash on …", "It's waiting for input on …"; an escalated row's body "May be waiting for
@@ -8358,11 +8362,14 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   and prompt text is never logged. `isToolName` (`[A-Za-z0-9_-]{1,64}`, the Claude API's own
   tool-name alphabet, so every real name passes) holds it at ingest, at `parseSessionEvent` and
   at `parseTask`; a bad one is dropped, never the frame, event or record. `parseTask` keeps them only
-  on a `needs-input` or `lost` task, so a stale pair an older leader left on a later state goes,
-  and the store bound need not fit one beside a `failure`. The event's reason and
+  on a `needs-input` or `lost` task (where a wait lives; `inputClock` carries it into `lost`):
+  elsewhere a pair could only be a bug's, and the store bound need not fit one beside a `failure`. The event's reason and
   tool are written onto `Task.inputReason`/`inputTool` through `sessionChange` (the task's own
   machine only, like `remoteSession`; a changed one is a write even when the state stands) and
-  cleared by `inputClock`. Display-only: they bind, route, move and settle nothing and alert
+  cleared by `inputClock`. Each changed reason or tool is one term-fenced store write plus the
+  `queue-changed` nudge, where a standing state was none before: parallel permission dialogs
+  opening and closing can flip it, bounded by the daemon's coalescing window, and accepted for a
+  field the person reads. Display-only: they bind, route, move and settle nothing and alert
   nothing (`permission` lifts no debounce; `questionAlert` reads the event, not the record).
   `seanced mcp`'s `get_queue` carries `inputReason` and never `inputTool`: a tool name is chosen
   by whatever MCP server a repo brings, and `[A-Za-z0-9_-]{1,64}` admits words, so it would be a

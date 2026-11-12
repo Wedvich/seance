@@ -13,15 +13,8 @@ import {
   type RelayState,
   type Task,
 } from "@seance/shared";
-import {
-  armTap,
-  deriveAfterSheet,
-  deriveQueue,
-  disarmRow,
-  NEEDS_INPUT_SCREEN_MS,
-  nextReveal,
-  primaryAction,
-} from "../src/queue-view.ts";
+import { armTap, deriveAfterSheet, deriveQueue, disarmRow, primaryAction } from "../src/queue-view.ts";
+import { NEEDS_INPUT_SCREEN_MS, nextReveal } from "../src/input-debounce.ts";
 import { DEFAULT_FORM, RESCAN_IDLE, type QueueState } from "../src/state.ts";
 import { CAPABILITIES, reasonText } from "@seance/shared";
 import { deriveView, failedBody, type AppState } from "../src/view.ts";
@@ -1196,20 +1189,30 @@ describe("the screen debounce on needs-input", () => {
     expect(body({})).toBe("Waiting for input since 31m ago");
   });
 
+  test("a stamp well ahead of the leader's clock (another leader's) shows at once; a hair ahead still settles", () => {
+    expect(titles(view(waiting({ needsInputSince: NOW + 10 * 60_000 })))).toEqual(["Needs you"]);
+    expect(titles(view(waiting({ needsInputSince: NOW + 1_000 })))).toEqual(["Running"]);
+  });
+
+  test("the escalated body ages a leader-clock stamp against the device's", () => {
+    const skew = HOUR;
+    const t = waiting({ escalated: true, needsInputSince: NOW + skew - 31 * 60_000 }, skew);
+    expect(view(t, skew).sections[0]?.rows[0]?.body).toBe("Waiting for input since 31m ago");
+  });
+
+  test("the After sheet headlines a settling task as the Queue screen does", () => {
+    const sheet = deriveAfterSheet(state(ok([waiting({ inputReason: "permission", inputTool: "Bash" })])), NOW);
+    expect(sheet.options[0]?.headline).toMatch(/^It's running/u);
+  });
+
   test("nextReveal names the earliest device-clock crossing, and null when nothing settles", () => {
     const skew = 5_000;
     const a = waiting({ needsInputSince: NOW + skew - 20_000 }, skew);
     const b = { ...waiting({ needsInputSince: NOW + skew - 5_000 }, skew), id: "b" };
-    const spy = Date.now;
-    Date.now = () => NOW;
-    try {
-      expect(nextReveal([b, a], skew)).toBe(NOW + skew - 20_000 + NEEDS_INPUT_SCREEN_MS - skew);
-      expect(
-        nextReveal([waiting({ inputReason: "question" }, skew), task("r", { state: "running" })], skew),
-      ).toBeNull();
-      expect(nextReveal([], 0)).toBeNull();
-    } finally {
-      Date.now = spy;
-    }
+    expect(nextReveal([b, a], NOW, skew)).toBe(NOW + skew - 20_000 + NEEDS_INPUT_SCREEN_MS - skew);
+    expect(
+      nextReveal([waiting({ inputReason: "question" }, skew), task("r", { state: "running" })], NOW, skew),
+    ).toBeNull();
+    expect(nextReveal([], NOW, 0)).toBeNull();
   });
 });

@@ -3111,6 +3111,11 @@ describe("the screen debounce's reveal", () => {
     const after = store.getState().queueView;
     expect(after).not.toBe(before);
     expect(after).toEqual(before);
+    // The point of waking them: at that time the task is under Needs you, and a moment before it is not.
+    const titlesAt = (now: number): string[] =>
+      deriveQueue(store.getState(), now).sections.map((section) => section.title);
+    expect(titlesAt(Date.now() + delay - 1_000)).toEqual(["Running"]);
+    expect(titlesAt(Date.now() + delay)).toEqual(["Needs you"]);
   });
 
   test("a newer reply re-arms it rather than stacking a second", async () => {

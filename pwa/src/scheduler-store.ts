@@ -23,7 +23,7 @@ import {
   taskRequest,
   type RelayClient,
 } from "@seance/shared";
-import { nextReveal } from "./queue-view.ts";
+import { nextReveal } from "./input-debounce.ts";
 import type { FollowEnd, PreviewState, QueueState, TaskAction } from "./state.ts";
 import { taskTitle } from "./task-title.ts";
 import type { AppState } from "./view.ts";
@@ -248,7 +248,7 @@ export class SchedulerStore {
     this.#revealTimer = null;
     const view = this.#state.queueView;
     if (view?.kind !== "ok") return;
-    const at = nextReveal(view.tasks, view.skew);
+    const at = nextReveal(view.tasks, Date.now(), view.skew);
     if (at === null) return;
     // A little past, so a timer that fires early still finds the threshold crossed.
     this.#revealTimer = setTimeout(

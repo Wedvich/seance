@@ -26,6 +26,7 @@ import {
   waitingText,
   type StartNowItem,
 } from "./decision-view.ts";
+import { settlingInput } from "./input-debounce.ts";
 import { accountDisplayName, formatUntil } from "./machines-view.ts";
 import { AUTONOMY_LABELS } from "./state.ts";
 import { taskTitle } from "./task-title.ts";
@@ -216,7 +217,13 @@ function dotOf(task: Task): QueueDot | null {
 }
 
 /** `idleSince`, on this device's clock, is set only for a task the leader released idle. */
-function bodyOf(task: Task, machines: readonly Machine[], now: number, idleSince?: number): string | null {
+function bodyOf(
+  task: Task,
+  machines: readonly Machine[],
+  now: number,
+  skew: number,
+  idleSince?: number,
+): string | null {
   // The leader's `lost` is the sleep itself: waking settles it, and giving up is all the phone can do.
   if (task.state === "lost" && machineAsleep(task, machines)) {
     return "Settles when its machine wakes; cancel or mark done to give up on it";
@@ -235,7 +242,9 @@ function bodyOf(task: Task, machines: readonly Machine[], now: number, idleSince
   if (task.state === "needs-input" && task.escalated === true) {
     const wait = inputWait(task);
     const clause = `${wait.slice(0, 1).toUpperCase()}${wait.slice(1)}`;
-    return task.needsInputSince === undefined ? clause : `${clause} since ${formatSeen(task.needsInputSince, now)}`;
+    return task.needsInputSince === undefined
+      ? clause
+      : `${clause} since ${formatSeen(task.needsInputSince - skew, now)}`;
   }
   if (idleSince !== undefined) return `Idle at its prompt since ${formatSeen(idleSince, now)} — its slot is free`;
   return null;
@@ -339,7 +348,7 @@ function rowOf(
     id: task.id,
     title: taskTitle(task),
     headline: taskHeadline(task, state.relay.machines, now),
-    body: bodyOf(task, state.relay.machines, now, idleSince === undefined ? undefined : idleSince - skew),
+    body: bodyOf(task, state.relay.machines, now, skew, idleSince === undefined ? undefined : idleSince - skew),
     dot: dotOf(task),
     age: formatSeen(task.createdAt, now),
     canCancel: actionable,
@@ -362,42 +371,6 @@ function rowOf(
     answer: task.state === "needs-input" ? session : null,
     autonomy: autonomy === DEFAULT_AUTONOMY ? null : AUTONOMY_LABELS[autonomy],
   };
-}
-
-/**
- * How long a needs-input stay must stand before the screen puts the task under Needs you. Auto
- * mode's classifier asks settle in seconds and most approved calls run under half a minute, so
- * they never show; Claude Code auto-denies an unanswered prompt after 120 s, so a 2-minute
- * debounce (the push's `needsInputAlertMs`) would hide exactly the waits that matter, and 30 s
- * leaves ~90 s to answer. A long approved call still reaches Needs you, worded "may be waiting".
- * DESIGN.md, "The Queue screen".
- */
-export const NEEDS_INPUT_SCREEN_MS = 30_000;
-
-/**
- * A needs-input stay too young to call: not a question (cannot flicker), not already pushed
- * (`inputAlerted`, `escalated`), and with a clock to measure on (an older leader's record has none).
- */
-export function settlingInput(task: Task, leaderNow: number): boolean {
-  return (
-    task.state === "needs-input" &&
-    task.needsInputSince !== undefined &&
-    task.inputReason !== "question" &&
-    task.inputAlerted !== true &&
-    task.escalated !== true &&
-    leaderNow - task.needsInputSince < NEEDS_INPUT_SCREEN_MS
-  );
-}
-
-/**
- * The device-clock time the first settling task crosses the threshold, or null when none does:
- * the store re-renders then, since nothing else would.
- */
-export function nextReveal(tasks: readonly Task[], skew: number): number | null {
-  const at = tasks
-    .filter((t) => settlingInput(t, Date.now() + skew))
-    .map((t) => (t.needsInputSince ?? 0) + NEEDS_INPUT_SCREEN_MS - skew);
-  return at.length === 0 ? null : Math.min(...at);
 }
 
 /** A settling task is shown as running, whole: every reader downstream (section, headline, dot, Answer) sees one. */
@@ -542,7 +515,9 @@ export interface AfterSheetView {
  */
 export function deriveAfterSheet(state: AppState, now: number): AfterSheetView {
   const view = state.queueView;
-  const tasks = view?.kind === "ok" ? view.tasks : [];
+  const tasks = (view?.kind === "ok" ? view.tasks : []).map((task) =>
+    asRunning(task, now + (view?.kind === "ok" ? view.skew : 0)),
+  );
   const held = new Map(state.form.after.map((dep) => [dep.task, dep.after]));
   const listed = tasks
     .filter((task) => task.state !== "failed" && task.state !== "cancelled")
