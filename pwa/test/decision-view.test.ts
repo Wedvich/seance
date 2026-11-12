@@ -512,10 +512,14 @@ describe("waitingText and pinLine", () => {
     expect(waitingText({ ...waiting(candidates), decision: { at: NOW, chosen, candidates } })).toBeNull();
   });
 
-  test("a trait_absent clause is left out, a place with nothing else wrong with it with it, and another reason stays", () => {
+  test("a place lacking a required trait is left out whole, as a pin mismatch is, and the others stay", () => {
     const lacks: Reason = { code: "trait_absent", trait: "atlas" };
-    const task = waiting([rejected("a", "OnlyTraits", [lacks]), rejected("b", "Both", [lacks, over])]);
-    expect(waitingText(task)).toBe(`Both · work: ${reasonText(over)}`);
+    const task = waiting([
+      rejected("a", "OnlyTraits", [lacks]),
+      rejected("b", "Both", [lacks, over]),
+      rejected("c", "Carries", [over]),
+    ]);
+    expect(waitingText(task)).toBe(`Carries · work: ${reasonText(over)}`);
     expect(waitingText(waiting([rejected("a", "OnlyTraits", [lacks])]))).toBeNull();
   });
 

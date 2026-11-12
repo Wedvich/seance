@@ -344,22 +344,21 @@ const WAITING_LIMIT = 3;
  * Why a ready task is still waiting, from its decision: each place that took it
  * out and the reasons, the clause `reasonText` words. Places the pin or the
  * avoid list rules out (`pin_mismatch`, `avoided`) are left out whole — the pin is the ask, not news —
- * and so is every `trait_absent` clause (a place whose only fault is a missing trait drops out with it): what
- * the task requires is the ask, and `requiresLine` says which machines have it. Null with no decision yet, or one that chose a place.
+ * and so is a place that lacks a required trait (`trait_absent`), whatever else is wrong with it: what the
+ * task requires is the ask, and `requiresLine` says which machines have it. Null with no decision yet, or one that chose a place.
  */
 export function waitingText(task: Task): string | null {
   const { decision } = task;
   if (task.state !== "ready" || decision === undefined || decision.chosen !== null) return null;
   const places = decision.candidates
-    // A place the pin or the avoid list rules out is moot whatever else is wrong with it (an offline machine
-    // the task was never going to use is not news).
-    .filter((candidate) => !candidate.rejected.some((r) => r.code === "pin_mismatch" || r.code === "avoided"))
-    .map((candidate) => ({
-      where: where(candidate),
-      why: candidate.rejected.filter((r) => r.code !== "trait_absent").map(reasonText),
-    }))
-    .filter((place) => place.why.length > 0)
-    .map((place) => `${place.where}: ${place.why.join(", ")}`);
+    // A place the pin, the avoid list or a missing trait rules out is moot whatever else is wrong with it (an
+    // offline machine the task was never going to use is not news, and waking it would not help).
+    .filter(
+      (candidate) =>
+        !candidate.rejected.some((r) => r.code === "pin_mismatch" || r.code === "avoided" || r.code === "trait_absent"),
+    )
+    .filter((candidate) => candidate.rejected.length > 0)
+    .map((candidate) => `${where(candidate)}: ${candidate.rejected.map(reasonText).join(", ")}`);
   if (places.length === 0) return null;
   const more = places.length - WAITING_LIMIT;
   return `${places.slice(0, WAITING_LIMIT).join("; ")}${more > 0 ? `; +${more} more` : ""}`;

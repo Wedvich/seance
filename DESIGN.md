@@ -3013,8 +3013,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
     `traits`. CLI: repeatable `seanced spawn --requires <name>`, refused with `--now` ("--requires needs
     the scheduler: --now spawns directly and skips routing"). PWA: a REQUIRES tile and sheet on the form,
     listing the traits the fleet declares with the machines that hold each, and a "Needs atlas (on
-    MacBook)" line on the Queue screen and verdict, which leave `trait_absent` clauses out of the waiting
-    text as they do pin mismatches. Not in Raycast. Route preview carries `requires` (no change: the
+    MacBook)" line on the Queue screen and verdict, which leave a place lacking a required trait out of the
+    waiting text whole, as they do a pin mismatch (waking it would not help). Not in Raycast. Route preview carries `requires` (no change: the
     request is the spec).
   - **Mixed versions.** An old PWA or CLI hides or cannot write a `requires` task, as with `attachments`
     (an old app drops the unreadable record from its list). An old keyless peer talking to a new broker
