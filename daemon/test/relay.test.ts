@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   APP_ID,
+  CLOSE_ROLE_REFUSED,
   generateIdentitySeed,
   identityFromSeed,
   importPsk,
@@ -15,6 +16,7 @@ import {
   parseMetricsReply,
   parseSessionEvent,
   parseSessionPass,
+  REGISTER_REFUSALS,
   SCHEDULER_ID,
   seal,
   STATUS_MAX_CT_LENGTH,
@@ -1054,6 +1056,38 @@ describe("daemon ↔ relay integration", () => {
       }
       expect(seen).toEqual([["scheduler"], undefined, ["scheduler"]]);
     } finally {
+      daemon.stop();
+      relay.stop();
+    }
+  });
+
+  // The relay closes a register whose role it will not honour 4403 (an archivist off its
+  // `ARCHIVIST`). That is a refusal like `register unverified` — backoff keeps growing — but
+  // never the old-relay case: the relay read the v2 signature, so v1 would buy nothing.
+  test("a role-refused register keeps backing off and stays v2", async () => {
+    const relay = startTestRelay(TOKEN);
+    relay.refuseRegisters = true;
+    relay.refuseWith = { code: CLOSE_ROLE_REFUSED, reason: REGISTER_REFUSALS.roleRefused };
+    const lines: string[] = [];
+    const realLog = console.log;
+    console.log = (...args: unknown[]): void => {
+      lines.push(args.map(String).join(" "));
+    };
+    const daemon = await startTestDaemon(relay.url, { maxBackoffMs: 400 });
+    try {
+      await relay.registers.next();
+      await Bun.sleep(1_000);
+      // As the unverified case above: on the order of ten attempts, where a reset on every open gives ~50.
+      expect(relay.connectionCount()).toBeLessThanOrEqual(25);
+      expect(lines.some((line) => line.includes('relay socket closed code=4403 reason="register role-refused"'))).toBe(
+        true,
+      );
+      const roles: (readonly string[] | undefined)[] = [];
+      while (relay.registers.size > 0) roles.push((await relay.registers.next()).roles);
+      expect(roles.length).toBeGreaterThan(0);
+      expect(roles.every((claim) => claim?.length === 1 && claim[0] === "scheduler")).toBe(true);
+    } finally {
+      console.log = realLog;
       daemon.stop();
       relay.stop();
     }

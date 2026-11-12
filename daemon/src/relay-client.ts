@@ -1,6 +1,7 @@
 import {
   APP_ID,
   AT_REST_OPS,
+  CLOSE_ROLE_REFUSED,
   DAEMON_ROLES,
   ENVELOPE_MAX_CT_LENGTH,
   HEARTBEAT_INTERVAL_MS,
@@ -23,6 +24,7 @@ import {
   signRegister,
   type BranchState,
   type DaemonFrame,
+  type DaemonRole,
   type Envelope,
   type ErrorResponse,
   type Identity,
@@ -45,6 +47,13 @@ export interface RelayClientOpts {
   /** Signs every register; `identity.deviceId` is this machine's wire address. */
   readonly identity: Identity;
   readonly key: CryptoKey;
+  /**
+   * The role every register claims, signed in v2. Default `scheduler`: every
+   * daemon may lead. Any other (the archivist's leg) never signs v1 — a
+   * roleless register would admit it as an ordinary machine — and never
+   * proves a `lead`, which the relay sends only to a scheduler candidate.
+   */
+  readonly role?: DaemonRole;
   /** Fresh encrypted machine-info blob — called on every register. */
   readonly buildInfo: () => Promise<Envelope>;
   /**
@@ -109,6 +118,7 @@ export class RelayClient {
     >
   > &
     RelayClientOpts;
+  readonly #role: DaemonRole;
   readonly #guard = new ReplayGuard();
   /** Store requests awaiting their reply, by id; each is bound to the socket it left on. */
   readonly #storePending = new Map<
@@ -152,6 +162,7 @@ export class RelayClient {
   #reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(opts: RelayClientOpts) {
+    this.#role = opts.role ?? DAEMON_ROLES.scheduler;
     this.#opts = {
       pingIntervalMs: HEARTBEAT_INTERVAL_MS,
       pongTimeoutMs: HEARTBEAT_PONG_TIMEOUT_MS,
@@ -402,7 +413,7 @@ export class RelayClient {
     const ts = Date.now();
     // Every daemon may lead: the relay nominates among those that say so. A
     // resigned one still signs v2, over no roles — explicit, not merely absent.
-    const roles = this.#signV1 ? undefined : this.#resigned ? [] : [DAEMON_ROLES.scheduler];
+    const roles = this.#signV1 ? undefined : this.#resigned ? [] : [this.#role];
     const frame: DaemonFrame = {
       t: "register",
       deviceId: identity.deviceId,
@@ -478,10 +489,13 @@ export class RelayClient {
     // it growing, so a daemon the relay will not admit (a clock a minute off, a
     // relay without the algorithm) redials at the capped rate rather than once
     // per base interval, and the reason is logged because the close is the only
-    // word the relay sends about it.
-    const refused = reason === REGISTER_REFUSALS.unverified;
+    // word the relay sends about it. A role refusal (an archivist off the
+    // relay's `ARCHIVIST`) is one too, by code or by reason, but never a cue to
+    // try v1: the relay that refused the role read the v2 signature.
+    const unverified = reason === REGISTER_REFUSALS.unverified;
+    const refused = unverified || code === CLOSE_ROLE_REFUSED || reason === REGISTER_REFUSALS.roleRefused;
     if (refused) this.#opts.onRefused?.();
-    this.#signV1 = refused ? !this.#signV1 : false;
+    this.#signV1 = unverified && this.#role === DAEMON_ROLES.scheduler ? !this.#signV1 : false;
     if (this.#opened && !refused) this.#attempt = 0;
     const capped = Math.min(this.#opts.maxBackoffMs, this.#opts.baseBackoffMs * 2 ** this.#attempt);
     const delay = Math.random() * capped; // full jitter
@@ -531,6 +545,10 @@ export class RelayClient {
     // Plaintext relay assertions, acted on by `leader.ts`; the term it runs
     // under is what the relay fences every scheduler send on.
     if (frame.t === "lead") {
+      if (this.#role !== DAEMON_ROLES.scheduler) {
+        log.warn(`dropped lead frame: this client claims ${this.#role}, not ${DAEMON_ROLES.scheduler}`);
+        return;
+      }
       if (!isTerm(frame.term)) {
         log.warn("dropped lead frame without a term");
         return;
