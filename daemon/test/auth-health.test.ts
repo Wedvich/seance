@@ -563,6 +563,27 @@ describe("cadence", () => {
     await h.stop();
   });
 
+  test("a check that lands mid-read does not queue the same exclave again", async () => {
+    const log = join(base, "slow.log");
+    await rm(log, { force: true });
+    // The read (150 ms) spans several checks: each would find no entry yet and queue the exclave anew.
+    const h = health([await exclave("midread", creds())], { bunBin: stubs.slow, checkIntervalMs: 20, minRereadMs: 0 });
+    h.start();
+    await pollUntil(
+      async () =>
+        (
+          await Bun.file(log)
+            .text()
+            .catch(() => "")
+        ).includes("end"),
+      "first read",
+    );
+    // Negative assertion: a non-event cannot be polled.
+    await Bun.sleep(300);
+    await h.stop();
+    expect((await Bun.file(log).text()).match(/^start /gmu)?.length).toBe(1);
+  });
+
   test("one child at a time across instances: a reload's two daemons never read at once", async () => {
     const log = join(base, "slow.log");
     await rm(log, { force: true });
