@@ -239,8 +239,7 @@ describe("continuationSpec", () => {
         title: "fix it",
         model: "opus",
         effort: "high",
-        plan: true,
-        autonomy: "steer",
+        autonomy: "auto",
         until: "reported",
         linear: { issue: "ENG-1" },
         skill: "ship",
@@ -270,14 +269,22 @@ describe("continuationSpec", () => {
       title: "fix it",
       model: "opus",
       effort: "high",
-      plan: true,
-      autonomy: "steer",
+      autonomy: "auto",
       until: "reported",
       linear: { issue: "ENG-1" },
       continues: { task: "t-old", at },
     });
     // The result is a spec a leader's parser keeps whole.
     expect(parseTaskSpec(spec)).toEqual(spec);
+  });
+
+  test("a steer task continues at checkpoint, out of plan mode, however it asked for steer", () => {
+    for (const fields of [{ plan: true, autonomy: "steer" }, { plan: true }] as const) {
+      const spec = continuationSpec(failed({}, fields), at);
+      expect(spec.autonomy).toBe("checkpoint");
+      expect(spec).not.toHaveProperty("plan");
+      expect(parseTaskSpec(spec)).toEqual(spec);
+    }
   });
 
   test("the old prompt is not carried; a note is, trimmed, and a blank one is left out", () => {

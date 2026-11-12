@@ -964,7 +964,7 @@ export function buildMcpServer(
     "continue_task",
     {
       title: "Continue a failed or cancelled scheduler task",
-      description: `Resume a task whose session ended in failure, or that was cancelled after it started (get_queue marks one \`continuable\`): the same conversation, in the same worktree on the same machine, as a new task the scheduler dispatches there, at the task's own autonomy level. Continue moves to the newest continuation that ran in a chain, and is withheld while one still waits in the queue (cancel that one to continue again); the old task stays as it was, and so do the tasks that wait on it. The new task waits in the queue like any other, and fails if the worktree is gone (reaped), a session is open in it, or a later task ran in the worktree, or the machine no longer holds the launch record (kept a week, at most 128 launches). \`prompt\` is an optional note the resumed session is told, within the ${TASK_REQUEST_LIMITS.prompt}-character prompt bound. Answers with the new task id; get_queue shows where it lands. ${AUTO_LIMITS}`,
+      description: `Resume a task whose session ended in failure, or that was cancelled after it started (get_queue marks one \`continuable\`): the same conversation, in the same worktree on the same machine, as a new task the scheduler dispatches there, at the task's own autonomy level (a steer task's at checkpoint, out of plan mode). Continue moves to the newest continuation that ran in a chain, and is withheld while one still waits in the queue (cancel that one to continue again); the old task stays as it was, and so do the tasks that wait on it. The new task waits in the queue like any other, and fails if the worktree is gone (reaped), a session is open in it, or a later task ran in the worktree, or the machine no longer holds the launch record (kept a week, at most 128 launches). \`prompt\` is an optional note the resumed session is told, within the ${TASK_REQUEST_LIMITS.prompt}-character prompt bound. Answers with the new task id; get_queue shows where it lands. ${AUTO_LIMITS}`,
       inputSchema: z.object({
         taskId: z.string().describe("The failed or cancelled task's id from get_queue"),
         prompt: z.string().optional().describe("Optional: a note for the resumed session, from the user"),
@@ -1215,10 +1215,9 @@ export function buildMcpServer(
           repo: member.repo,
           ...requestFields({
             ...member,
-            // A member's own `plan` is its choice too: the batch's level fills in only where it agrees with it,
-            // so a member's `plan: false` still takes the batch's `auto`, and never becomes a contradiction.
-            autonomy:
-              member.autonomy ?? (withAutonomy({ autonomy, plan: member.plan }) === null ? undefined : autonomy),
+            // A member's `plan: true` is its own level (steer); anything else takes the batch's, so a batch `steer`
+            // beside a member's `plan: false` is refused as a contradiction, as spawn_session refuses it, never dropped.
+            autonomy: member.autonomy ?? (member.plan === true ? undefined : autonomy),
             prompt: reported.prompt,
           }),
           ...authoredFields(deps, member.until, member.linear),

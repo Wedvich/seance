@@ -5118,8 +5118,12 @@ of this section built.
     `steer`, are refused, by the parser, `isSpawnRequest` and the MCP's `specError`,
     never resolved.
   - **Where it is set.** Per task: `spawn_session`'s `autonomy`, `queue_batch`'s per
-    member, and the batch's own, which fills only members that give no level and no
-    `plan` it contradicts (a member's `plan: false` still takes the batch's `auto`). A continuation keeps its task's level (`continuationSpec`). The
+    member, and the batch's own, which fills every member that gives no level and not
+    `plan: true` (a member's `plan: false` still takes the batch's `auto`, and beside its `steer` is
+    refused, as `spawn_session` refuses it). A continuation keeps its task's level
+    (`continuationSpec`), except that a `steer` task continues at `checkpoint` out of plan mode:
+    the conversation it resumes holds the plan the user approved, and a session that stopped
+    mid-build would otherwise stall on a second approval. The
     audit line names it only when the request does. Not yet in the PWA, the CLI or
     Raycast; a fleet default in `settings:main` waits until per-task proves tedious.
 - **Task ids** (added 2026-10-16, scheduler M2). `SpawnRequest.taskId` is the

@@ -1847,7 +1847,7 @@ describe("queue_batch", () => {
     expect(fake.requests).toEqual([]);
   });
 
-  test("the batch's autonomy fills only members that chose no level and no plan it contradicts", async () => {
+  test("the batch's autonomy fills every member that chose no level and no plan mode", async () => {
     const fake = leaderRelay([], reportingMachines());
     const { error } = await callTool(fake, "queue_batch", {
       autonomy: "auto",
@@ -1862,6 +1862,17 @@ describe("queue_batch", () => {
       // An agent filling every boolean with false still gets the batch's level.
       ["auto", false],
     ]);
+  });
+
+  test("a batch's steer beside a member's plan: false is refused, never dropped to checkpoint", async () => {
+    const fake = leaderRelay([], reportingMachines());
+    const { error, text } = await callTool(fake, "queue_batch", {
+      autonomy: "steer",
+      tasks: [member(), member({ plan: false })],
+    });
+    expect(error).toBe(true);
+    expect(text).toContain("contradicts autonomy: steer");
+    expect(fake.creates).toEqual([]);
   });
 
   test("a caller still sending an order or a limit is refused, not given a plain group; auto or none is fine", async () => {

@@ -1,4 +1,5 @@
 import type { Machine } from "./app-client.ts";
+import { autonomyOf } from "./autonomy.ts";
 import { CAPABILITIES, type Target, type Task, type TaskFailureCode, type TaskSpec } from "./types.ts";
 
 export type ContinueOffer =
@@ -140,10 +141,15 @@ export function continueOffer(task: Task, machines: readonly Machine[], tasks: r
  * (model, effort, plan, autonomy, title) and what settles it (`until`, `linear`), and
  * nothing that places or orders it: the target is exact, and the old task's
  * dependents stay failed. The caller stamps `client`.
+ *
+ * A `steer` task continues at `checkpoint`, without plan mode: the resumed conversation holds
+ * whatever plan the user approved, and a session that stopped mid-build would otherwise stall
+ * on a second approval.
  */
 export function continuationSpec(task: Task, at: Target, prompt?: string): TaskSpec {
   const { spec } = task;
   const note = prompt?.trim();
+  const steered = autonomyOf(spec) === "steer";
   return {
     repo: spec.repo,
     mode: "continue",
@@ -151,8 +157,12 @@ export function continuationSpec(task: Task, at: Target, prompt?: string): TaskS
     ...(spec.title === undefined ? {} : { title: spec.title }),
     ...(spec.model === undefined ? {} : { model: spec.model }),
     ...(spec.effort === undefined ? {} : { effort: spec.effort }),
-    ...(spec.plan === undefined ? {} : { plan: spec.plan }),
-    ...(spec.autonomy === undefined ? {} : { autonomy: spec.autonomy }),
+    ...(steered
+      ? { autonomy: "checkpoint" }
+      : {
+          ...(spec.plan === undefined ? {} : { plan: spec.plan }),
+          ...(spec.autonomy === undefined ? {} : { autonomy: spec.autonomy }),
+        }),
     ...(spec.until === undefined ? {} : { until: spec.until }),
     ...(spec.linear === undefined ? {} : { linear: spec.linear }),
     continues: { task: task.id, at },

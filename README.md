@@ -509,7 +509,7 @@ also needs a scheduler leader on a build that routes on them. `autonomy` (`steer
 the default, or `auto`) says how much the session decides on its own: `steer` is plan mode and
 waits for approval, `auto` decides reversible choices itself and records them for review
 (DESIGN.md, "Autonomy level"); `queue_batch` takes one for the whole batch, and a continuation
-keeps its task's. The queue is the relay's, so a task waiting for capacity
+keeps its task's (a `steer` task's continues at `checkpoint`). The queue is the relay's, so a task waiting for capacity
 survives leadership moving — every relay deploy and daemon self-update — and so does one
 queued while no scheduler leads: the next leader runs it.
 On a box where only the daemon can read the key (below), a spawn goes through the daemon.
