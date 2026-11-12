@@ -556,9 +556,13 @@ of M4 has landed.
     direction, settling from the machine's last `progress` entry read, proved unnecessary: every
     read that answers for a live session already absorbs its `progress.prUrl` into the record
     (`settlePlaced` → `progressed`), so no read the leader keeps could hold a PR it lacks. The hole
-    was the daemon's: a PR rode only the one forwarded event that carried it, and when that one was
-    lost (a relay hiccup, a failover) the PR-less `ended` was deferred for the exit and the machine
-    went before any read. _As built:_ the daemon's `ended` now carries the PR its pane's own launch
+    was narrower than "the PR rode one event": the claude mod already re-sends its last seen PR on
+    `ended` (`lastPrUrl`, `claude-mods/session-events/hooks/register.ts`), so the daemon's `ended`
+    lacked the PR only when the event that carried it was lost (a relay hiccup, a failover) and the
+    mod's `ended` carried none (its tracker is per hooks-worker process, so a respawned worker
+    holds no `lastPrUrl`). An `ended` the hook never sent at all reaches the leader only as the
+    pane-gone backstop, which carries no PR and which this fix does not touch. The PR-less `ended`
+    was then deferred for the exit and the machine went before any read. _As built:_ the daemon's `ended` now carries the PR its pane's own launch
     noted (`EndedTasks.notedPr`; the session's own report, never a continuation's `continuedPr`), so
     the leader settles `awaiting-merge` on the event, never deferring. No wire or leader change: an
     older leader already settles an `ended` carrying a PR that way, a PR it holds is no write, and a

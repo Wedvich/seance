@@ -9481,8 +9481,9 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   window leaves at once. A burst after it folds into one trailing send, carrying the
   newest state and a PR URL seen earlier in the window. An `ended` with no PR of its own
   carries the one its pane's own launch noted in the ledger (`EndedTasks.notedPr`, the session's
-  own report, never a continuation's inherited `continuedPr`), since the event that carried it may
-  have been lost (2026-11-12). The daemon seals the event
+  own report, never a continuation's inherited `continuedPr`), for when the event that carried it
+  was lost and the mod's own `ended` carried none (its `lastPrUrl` is per hooks-worker process)
+  (2026-11-12). The daemon seals the event
   to `"scheduler"` (`sendToScheduler`). With no leader the relay drops it. On the
   leader's own machine nothing crosses the relay: `run-capabilities.ts` hands the event to
   `Leader.onSession` in process, while a term runs (Scheduler, "The leader", "Session

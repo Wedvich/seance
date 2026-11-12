@@ -880,8 +880,9 @@ describe("an ended event carries the PR its own launch noted", () => {
     return { ledger, forwarded, events, send };
   }
 
-  // The one event that carried the PR may be lost on its way to the leader (a relay hiccup, a failover); the
-  // leader would then defer the PR-less `ended` for the exit and, with the machine gone, settle it `done`.
+  // The event that carried the PR may be lost on its way to the leader (a relay hiccup, a failover) and the
+  // mod's `ended` carry none (a respawned hooks worker has no `lastPrUrl`); the leader would then defer the
+  // PR-less `ended` for the exit and, with the machine gone, settle it `done`.
   test("a PR whose own event was lost rides the PR-less ended that follows", async () => {
     const { ledger, forwarded, events, send } = setup();
     try {
