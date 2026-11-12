@@ -385,7 +385,7 @@ concurrency caps (shown only while the scheduler's leader supports it).
 
 A running task's card menu has **Pass to successor**: it pushes the task's branch, ends its
 session and queues a new task that picks the work up (two taps; shown only while the scheduler's
-leader and the task's machine support it). `seanced pass` and MCP `pass_task` do the same.
+leader and the task's machine support it). `seanced pass` and MCP `pass_task` do the same. An `auto` task whose account runs out of usage is passed automatically; any other task gets a notification whose tap opens its card.
 
 **Attach** files to the task from the prompt card — the **ATTACH** picker, a pasted
 screenshot, or a drop on desktop — or share them into Séance from Android's share sheet

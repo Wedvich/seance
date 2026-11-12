@@ -1191,7 +1191,7 @@ of M4 has landed.
     nudge to proceed or ask it properly. First check that an engine hook can continue a turn.
 
 - **Successor** — _Decided_ by the owner, 2026-11-12 (O1–O3 below); the outside path (2a) and the
-  session's own (2b) are built (2026-11-12), the automatic trigger is not. A task
+  session's own (2b) and the automatic trigger (3) are built (2026-11-12). A task
   running on an account that runs out of usage passes its work to a **successor**: a new task, free
   to land on another account, that starts from the old task's pushed branch and a written record of
   where it stood. Quota failover is the reason: a task that is half done when its account's 5-hour
@@ -1214,7 +1214,41 @@ of M4 has landed.
        successor's prompt. The daemon closes the session at the end of that turn, once the leader
        has confirmed the successor. It has its own capability, `successorSelf`, so a session never
        pushes against a 2a leader that would drop its event (D13).
-  3. **Automatic trigger** — spec only, below; built in a follow-up session once 2b has merged.
+  3. **Automatic trigger** — **Done** (2026-11-12), as specced below. What the build decided:
+     - **"Newest fresh reading"** is routing's own fold (`newestQuotaByAccount`, the fleet record
+       included, so the trigger, the Machines screen and routing read one number), taken only while
+       the machine that observed it is connected and its status is not `isStatusStale`. A reading only
+       the fleet record carries, or a sleeping machine's, never moves a task. A reading inside a fresh
+       status can itself be minutes old; _Settled defaults_ 7 (no age cap) stands.
+     - **"Full"** is `fullWindow`'s rule at zero projected usage, so a projection can never count; a
+       window inside `resetGraceMs` of its reset reads empty, as routing treats it. It holds whether
+       or not the exclave is spilling into credits: an auto task is moved off credits too (the log
+       line carries `spending=1` for those, so the measure can tell). The trigger passes only when
+       another account could take the successor (an exclave on a connected machine, on another
+       account, with the repo, the traits and no avoided machine; headroom is not asked, the successor
+       waits on `quota_over_line`); otherwise it alerts like any other level, rather than strand the
+       successor `ready` under `predecessor_account`.
+     - **The dedupe** is `Task.quotaExhausted`, keyed on account id, window label and reset (within
+       `resetGraceMs`; with no reset, one span of the window), written before the pass or the alert so a
+       new leader repeats neither. It is dropped, never fatal, when malformed, and on finishing.
+     - **"Retried once per reset"** is one retry after `quotaPassRetryMs` (5 min, _Settled defaults_ 22)
+       within the same window, for a refusal that can pass (`push_failed`, `pr_unreadable`,
+       `successor_unsupported`, ...). The retry's own refusal raises one reason-less `quota-exhausted`
+       alert, so an auto task never sits at 100% silently. Every attempt is stamped before `pass` is
+       called, so a takeover mid-pass never attempts twice.
+     - **Not offered, not touched.** A `here` task is skipped entirely: it cannot be passed, and an alert
+       offering a pass would be refused. A task whose machine is offline or cannot push for a successor
+       (`passOffer`) is left alone and looked at each tick, so it acts once the machine qualifies.
+       `needs_input` and `not_running` refusals write nothing (a stamp written ahead is cleared), so the
+       task is looked at again once it is back in `running`; `conflict`, `finished` and `not_found` leave
+       the stamp.
+     - **Capability.** The daemon advertises `successorAuto`; nothing gates on it yet, it marks the
+       leader's version in `status`. An older leader holds a `quota` successor unreadable
+       (`parseSucceeds`), the intended gate.
+     - **Session-pass refusals.** A session's own pass the leader refuses with a code other than `conflict`,
+       `finished` or `not_found` raises a `pass-refused` alert, once per task per term (in memory: a new
+       leader may alert once more).
+     - _The spec this was built from:_
      - **Trigger.** The leader evaluates it every tick from what it already holds: `quotaOf`'s
        windows, `creditsSpent` and the spill notion (`Candidate.spill.spending`). An account is
        **exhausted** by its newest fresh reading (not `isStatusStale`) when (a) a window the task is
@@ -1279,7 +1313,7 @@ of M4 has landed.
       pushed. A dirty tree refuses `dirty_worktree`; the
       daemon makes no WIP commits. This is the daemon's first write to GitHub, so a threat-model
       change (D12). _Rejected:_ daemon WIP commits; never pushing; always pushing to `<b>`.
-    - **O3. The automatic trigger is specced now and built later** (stage 3).
+    - **O3. The automatic trigger was specced first and built after** (stage 3, built).
   - _Decided_ (the plan's, recorded 2026-11-12; DESIGN.md has the wire detail):
     - **D1. Ordering is leader-driven and the same for every trigger.** Guard against a second pass
       (D15), validate, read the PR's head and state (D14a), push (outside path: the leader asks the old machine
@@ -1349,7 +1383,8 @@ of M4 has landed.
       `autonomy: "checkpoint"` with `plan` dropped, since the plan was approved. It drops `pin` (an
       account pin is the old account by definition), `deps`, `batch`, `lineage`, `base`, `continues`
       and `attachments`. `succeeds: { task, account, at, trigger }` links back, `trigger` being
-      `"session"` or `"manual"` until stage 3 adds `"quota"`. The task also carries the old
+      `"session"`, `"manual"` or `"quota"` (the last written by the leader alone, with `since`, the
+      reading's time in ms). The task also carries the old
       `prUrl` and `prs`, so the PR chip and poller follow.
     - **D8. A forward-compat gate.** `SUCCESSOR_DEP_SENTINEL`, an empty-task-id dep, is appended by
       the one task sealer whenever `succeeds` is present, as `ATTACHMENTS_DEP_SENTINEL` and
@@ -1437,6 +1472,9 @@ of M4 has landed.
       leaves the leader's comparison to refuse after the push, at worst leaving a stray remote
       branch.
   - _Later:_
+    - an inline Pass button on a card whose account is exhausted (today the alert's tap opens the card,
+      where Pass to successor is offered);
+    - an out-of-usage note for a `here` task, if wanted (it is skipped: it cannot be passed);
     - a note on the outside path (the `pass` op takes a `TaskRef` only, so an outside pass always
       uses the fallback prompt);
     - attachments carried to a successor (the fallback prompt says the old task had some and that
@@ -1446,21 +1484,21 @@ of M4 has landed.
     - a `seanced doctor` line for push credentials: a remote whose SSH key lives only in a login
       session's agent fails under launchd or systemd as `push_failed` (ssh has no terminal to prompt on);
     - the self path telling the session why the leader refused after the push (today: "not
-      confirmed" plus the leader's warn line), and an alert or a Queue-screen mark for a session pass
-      the leader refused, since the task stays `running` and idle until someone looks (a new alert kind
-      spans the wire type, the push sender, the service worker's fixed texts and the PWA);
+      confirmed" plus the leader's warn line) and a Queue-screen mark for a session pass the leader
+      refused (the push alert, `pass-refused`, is built);
     - stacking, once it lands: a successor on a `baseBranch` instead of a reset to the remote branch.
   - _Deferred:_ moving a `needs-input` task on any path (Q2); a forecast-only spill for a successor
     (Q3).
   - _Rejected for now:_ automatic continue of the old session: it cannot cross accounts.
   - _Measure_, all from audit and leader log lines, no new storage:
     - **Passes per week by trigger**: the leader's `audit pass task=… successor=… trigger=<t>`
-      lines, counted by week and `trigger` (`manual`, `session`, later `quota`).
+      lines, counted by week and `trigger` (`manual`, `session`, `quota`), and `audit pass refused …
+      trigger=quota outcome=<code>` for the automatic ones that did not go through.
     - **Time from limit to successor running**: stage 3 stamps `succeeds.since` (the reading's
-      time); the leader logs `successor placed after=<ms>` at the successor's confirmed spawn,
-      counted from `since`, or from the successor's `createdAt` for a manual or session pass, which
-      has no limit time, so for those it is the pass to the start. Read as a median and p90 by
-      trigger.
+      time); the leader logs `successor placed after=<ms> from=since|created` at the successor's
+      confirmed spawn, counted from `since` for a quota pass, or from the successor's `createdAt` for a
+      manual or session pass, which has no limit time, so for those it is the pass to the start. Read as
+      a median and p90 by trigger.
     - **Successors that end merged**: the leader logs `successor settled state=<s> doneBy=<d>` when
       a task carrying `succeeds` finishes; read as the share of settled successors with
       `state=done doneBy=merged`, against `pass_abandoned`, `failed` and `cancelled`.
@@ -1632,6 +1670,13 @@ same PR, with the reason.
     there also fails tasks held only by quota or caps; decided separately. Rejected: hand cancel only,
     ranking long-waiting pins below finished tasks, a shorter account-pin bound, a leader-written `readyAt`.
     DESIGN.md "Expiry" has the record.
+
+22. **An automatic quota pass refused for a reason that can pass is retried once, 5 min later**
+    (`quotaPassRetryMs`, owner, 2026-11-12). The retry waits so it does not fire on the next 30 s tick
+    into the same failure (a push that failed, a PR that could not be read); a SSH-agent or network
+    blip passes in that time, a missing credential does not. One retry per window reset, then the
+    leader alerts and stops: a task that cannot be passed needs a person. DESIGN.md "The automatic
+    trigger" has the record.
 
 ## Risks / unknowns
 

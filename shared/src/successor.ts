@@ -70,6 +70,7 @@ export function successorSpec(
   account: string,
   trigger: SuccessorTrigger,
   prompt?: string,
+  since?: number,
 ): TaskSpec {
   const { spec, assignment } = task;
   const steered = autonomyOf(spec) === "steer";
@@ -96,6 +97,7 @@ export function successorSpec(
       account,
       at: { deviceId: assignment.deviceId, exclave: assignment.exclave, clone: assignment.clone },
       trigger,
+      ...(trigger === "quota" && since !== undefined ? { since } : {}),
     },
   };
 }

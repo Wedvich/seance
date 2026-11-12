@@ -4,8 +4,8 @@
  *
  * A push always shows a notification, even for a payload it cannot read: Chrome shows its own
  * "updated in the background" one otherwise, and WebKit revokes a subscription after a few
- * silent pushes. The text is fixed per kind, a spill's window label shown only as one of the known
- * `5h`/`7d` and a login alert's state only as one of two fixed texts; the payload carries ids and state, never a title or a prompt, and this worker holds no
+ * silent pushes. The text is fixed per kind, a spill's or a quota-exhausted's window label shown only as one of
+ * the known `5h`/`7d`, a quota-exhausted's reason and a login alert's state only as one of a few fixed texts; the payload carries ids and state, never a title or a prompt, and this worker holds no
  * PSK to open anything more.
  */
 
@@ -32,6 +32,14 @@
       conflict: "A task's pull request has merge conflicts.",
       behind: "A task's pull request is behind its base branch.",
       unarmed: "A task's pull request is ready, but nothing will merge it.",
+    }),
+  );
+
+  /** What an out-of-usage task says per reason an automatic pass did not run: fixed, null-prototype for the same reason. */
+  const QUOTA_REASON_TEXT = Object.freeze(
+    Object.assign(Object.create(null), {
+      dirty: "A task ran out of usage, but its worktree has uncommitted changes. Tap to pass it on by hand.",
+      branch: "A task ran out of usage, but its branch does not match its PR. Tap to pass it on by hand.",
     }),
   );
 
@@ -97,6 +105,20 @@
     if (alert.kind === "pr-blocked") {
       const body = PR_BLOCKED_TEXT[alert.reason] ?? "A task's pull request is blocked.";
       return { body, tag: `pr-blocked:${alert.taskId}`, url };
+    }
+    if (alert.kind === "quota-exhausted") {
+      const window = windowShown(alert.window);
+      const body =
+        (alert.reason === undefined ? undefined : QUOTA_REASON_TEXT[alert.reason]) ??
+        `A task's usage window is full${window === "" ? "" : ` (${window})`}. Tap to pass it on.`;
+      return { body, tag: `quota-exhausted:${alert.taskId}`, url };
+    }
+    if (alert.kind === "pass-refused") {
+      return {
+        body: "A task's session could not pass its work on. Tap to see it.",
+        tag: `pass-refused:${alert.taskId}`,
+        url,
+      };
     }
     return null;
   }

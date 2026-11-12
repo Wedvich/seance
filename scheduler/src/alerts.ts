@@ -4,6 +4,7 @@ import {
   type FleetQuotaEntry,
   type Machine,
   type PrBlockedReason,
+  type QuotaAlertReason,
   type SpillStamp,
 } from "@seance/shared";
 import { SPAN_MS, windowResetOf, type Decision } from "./route.ts";
@@ -44,6 +45,22 @@ export type SchedulerAlert =
       readonly reason: PrBlockedReason;
       /** The head the alert was raised for: the dedupe key with `reason`, never pushed. */
       readonly head: string;
+      readonly message: string;
+    }
+  | {
+      readonly kind: "quota-exhausted";
+      readonly taskId: string;
+      /** The window's label; the push carries it and the service worker shows only `5h` or `7d`. */
+      readonly window: string;
+      /** Why an automatic pass did not run; absent when the task was never to be passed on its own, or the pass kept failing. */
+      readonly reason?: QuotaAlertReason;
+      readonly message: string;
+    }
+  | {
+      readonly kind: "pass-refused";
+      readonly taskId: string;
+      /** The refusal's code, for the log only: the push carries none. */
+      readonly code: string;
       readonly message: string;
     };
 

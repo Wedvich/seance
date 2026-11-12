@@ -1193,6 +1193,24 @@ describe("passing a running task to a successor", () => {
     expect(rowOf([old], "old", CAN)?.passedTo).toBe("Passed to task next");
   });
 
+  test("a successor of a quota pass says its predecessor's usage ran out", () => {
+    const old = task("old", {
+      state: "superseded",
+      successor: "next",
+      spec: { repo: ORIGIN, mode: "worktree", title: "Old work" },
+      assignment: placedAt,
+    });
+    const next = task("next", {
+      state: "blocked",
+      spec: {
+        repo: ORIGIN,
+        mode: "worktree",
+        succeeds: { task: "old", account: "acct", at: placedAt, trigger: "quota", since: 5 },
+      },
+    });
+    expect(rowOf([old, next], "next", CAN)?.carriesOn).toBe("Carries on Old work after its usage ran out");
+  });
+
   test("a pass always asks twice, and its arm is disarmed with the row's menu", () => {
     const row = { id: "a", cancelEndsSession: false, markDoneEndsSession: false };
     const first = armTap(row, "pass", null);

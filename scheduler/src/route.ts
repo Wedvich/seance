@@ -415,6 +415,11 @@ function placementFilter(task: Task, machine: Machine, exclave: ExclaveInfo): Re
   if (pin?.account !== undefined && pin.account !== exclave.accountId)
     reasons.push({ code: "pin_mismatch", field: "account" });
   if (avoid?.includes(machine.deviceId) === true) reasons.push({ code: "avoided" });
+  // The successor of a task whose account ran out never lands on that account, whatever its headroom reads.
+  const { succeeds } = task.spec;
+  if (succeeds?.trigger === "quota" && succeeds.account === exclave.accountId) {
+    reasons.push({ code: "predecessor_account" });
+  }
   return reasons;
 }
 
@@ -495,6 +500,81 @@ export function windowResetOf(
 ): number | undefined {
   const account = accountQuota(accountId, machines, newestQuotaByAccount(machines, fleetQuota));
   return account.known ? account.windows.find((w) => w.label === window)?.resetsAt : undefined;
+}
+
+/** What an exhausted account reads, for the leader's automatic trigger. */
+export interface Exhaustion {
+  readonly accountId: string;
+  /** The window's label, as `Candidate.spill` carries it. */
+  readonly window: string;
+  /** The window's reset, ms; 0 when the reading gave none. */
+  readonly reset: number;
+  /** The deciding reading's time, ms, never after `now`. */
+  readonly since: number;
+  /** The exclave is billing credits now (extra usage on, none spent to the cap). */
+  readonly spending: boolean;
+}
+
+/**
+ * Whether the account `task` runs on has run out: a window the task is judged on reads full
+ * (`fullWindow` at zero projected usage, so a forecast never counts), whether or not the exclave
+ * spills into credits. Decided from routing's own fold (`newestQuotaByAccount`, the fleet record
+ * included), and only while the reading's newest status is a connected machine's and not stale: a
+ * record's reading, or a sleeping machine's, never moves a task. Null when unknown, trimmed or fresh.
+ */
+export function exhaustion(
+  task: Task,
+  machines: readonly Machine[],
+  now: number,
+  config: SchedulerConfig,
+  fleetQuota: readonly FleetQuotaEntry[] = [],
+): Exhaustion | null {
+  const { assignment } = task;
+  if (assignment === undefined) return null;
+  const exclave = machines
+    .find((m) => m.deviceId === assignment.deviceId)
+    ?.exclaves?.find((x) => x.id === assignment.exclave);
+  const accountId = exclave?.accountId;
+  if (exclave === undefined || accountId === undefined || accountId === null) return null;
+  const account = accountQuota(accountId, machines, newestQuotaByAccount(machines, fleetQuota));
+  if (!account.known) return null;
+  const observer = machines.find((m) => m.deviceId === account.newest.deviceId);
+  const status = observer === undefined ? undefined : liveStatus(observer);
+  if (status === undefined || isStatusStale(status, now)) return null;
+  const windows = account.windows.filter((w) => appliesTo(w, task.spec.model ?? DEFAULT_MODEL));
+  const full = fullWindow(windows, () => 0, now, config);
+  if (full === null) return null;
+  const { observation } = account.newest;
+  const resetsAt = windows.find((w) => w.label === full.window)?.resetsAt;
+  return {
+    accountId,
+    window: full.window,
+    reset: resetsAt === undefined ? 0 : resetsAt * 1000,
+    since: Math.min(observation.at * 1000, now),
+    spending: exclave.extraUsageEnabled === true && !creditsSpent(observation, now),
+  };
+}
+
+/**
+ * Whether a successor of `task` could be placed off `accountId`: a connected machine's exclave on
+ * another account, with the task's repo, its required traits and no avoided machine. Headroom is not
+ * asked: the successor waits for it. Without one, a pass would strand the successor `ready`.
+ */
+export function successorHasRoom(task: Task, machines: readonly Machine[], accountId: string, now: number): boolean {
+  const { pin: _pin, ...spec } = task.spec;
+  const successor = { ...task, spec };
+  return machines.some(
+    (machine) =>
+      machine.connected &&
+      (machine.exclaves ?? []).some(
+        (exclave, index) =>
+          exclave.accountId !== null &&
+          exclave.accountId !== accountId &&
+          machine.repos.some((r) => r.exclave === exclave.id && r.origin === spec.repo) &&
+          placementFilter(successor, machine, exclave).length === 0 &&
+          traitFilter(successor, machine, exclave, index, now).length === 0,
+      ),
+  );
 }
 
 /** `seatTier` is daemon-reported, so only the table's own keys answer — never one off its prototype. */

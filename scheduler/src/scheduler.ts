@@ -2,8 +2,10 @@ import {
   CAPABILITIES,
   continuationUnderway,
   DECISION_MAX_CANDIDATES,
+  autonomyOf,
   PASS_CLOSE_GRACE_MS,
   parseSpillStamp,
+  passOffer,
   queuedTask,
   quote,
   successorPrompt,
@@ -13,6 +15,7 @@ import {
   type IdleTaskRef,
   type PrAlertStamp,
   type PassResponse,
+  type QuotaAlertReason,
   type PrStatus,
   type PauseHold,
   type PauseRequest,
@@ -53,7 +56,8 @@ import {
 } from "./ports.ts";
 import { codeUnitOrder } from "./order.ts";
 import { prunable, unprunable } from "./prune.ts";
-import { accountResetAt, route, type Decision } from "./route.ts";
+import { quotaDue, stampQuota } from "./quota-trigger.ts";
+import { accountResetAt, exhaustion, route, successorHasRoom, type Decision, type Exhaustion } from "./route.ts";
 import {
   answerable,
   asSeen,
@@ -315,6 +319,10 @@ export class Scheduler {
   readonly #stopping = new Map<string, number>();
   /** Task id → its pass, still out (`pass`): a second pass of the task waits for it and answers its result. */
   readonly #passInFlight = new Map<string, Promise<PassResult>>();
+  /** Task id → its automatic quota pass (`#autoPass`), detached from the tick that began it: `drain` waits for it. */
+  readonly #autoPasses = new Map<string, Promise<void>>();
+  /** Tasks whose session's own refused pass was alerted this term (`pass-refused`): once each, in memory, since a refusal is rare. */
+  readonly #passRefusedAlerted = new Set<string>();
   /**
    * Task id → when the leader closes its session itself, for a task carrying `successor` whose close has
    * not landed. Entered before the commit write (so no pass sees a task carrying `successor` that no
@@ -680,6 +688,7 @@ export class Scheduler {
     for (;;) {
       const out = [
         ...this.#dispatches.values(),
+        ...this.#autoPasses.values(),
         ...this.#checks.values(),
         ...(this.#ticking === null ? [] : [this.#ticking]),
       ];
@@ -1049,16 +1058,26 @@ export class Scheduler {
    * calling the tool is waiting on nobody; the record becomes the successor's prompt; and the close is the
    * daemon's, at the session's turn end, armed by `pass-close` once the commit is written. Only the
    * task's own machine may ask.
+   *
+   * `since` is the reading's time (ms) of a `quota` pass, written into the successor's `succeeds`.
    */
-  pass(taskId: string, trigger: SuccessorTrigger = "manual", session?: SessionPassInput): Promise<PassResult> {
+  pass(
+    taskId: string,
+    trigger: SuccessorTrigger = "manual",
+    session?: SessionPassInput,
+    since?: number,
+  ): Promise<PassResult> {
     const joined = this.#passInFlight.get(taskId);
     if (joined !== undefined) {
       this.#log(`pass joined task=${quote(taskId)}`);
       return joined;
     }
-    const run = this.#runPass(taskId, session === undefined ? trigger : "session", session).finally(() =>
-      this.#passInFlight.delete(taskId),
-    );
+    const run = this.#runPass(taskId, session === undefined ? trigger : "session", session, since)
+      .then((result) => {
+        this.#alertSessionRefusal(taskId, session, result);
+        return result;
+      })
+      .finally(() => this.#passInFlight.delete(taskId));
     this.#passInFlight.set(taskId, run);
     return run;
   }
@@ -1067,7 +1086,30 @@ export class Scheduler {
     return { ok: true, task, successorId, successor: this.task(successorId) ?? created ?? null };
   }
 
-  async #runPass(taskId: string, trigger: SuccessorTrigger, session?: SessionPassInput): Promise<PassResult> {
+  /**
+   * A session's own pass the leader refused leaves the session running with only a warn in the daemon's log:
+   * a refusal that is not a race (`conflict`, `finished`, `not_found`) is pushed once per task and term.
+   * The push names the task only, never the code, the record or the branch.
+   */
+  #alertSessionRefusal(taskId: string, session: SessionPassInput | undefined, result: PassResult): void {
+    if (session === undefined || result.ok) return;
+    if (result.code === "conflict" || result.code === "finished" || result.code === "not_found") return;
+    if (this.#passRefusedAlerted.has(taskId)) return;
+    this.#passRefusedAlerted.add(taskId);
+    this.#alert({
+      kind: "pass-refused",
+      taskId,
+      code: result.code,
+      message: `pass refused: task=${quote(taskId)} outcome=${result.code}`,
+    });
+  }
+
+  async #runPass(
+    taskId: string,
+    trigger: SuccessorTrigger,
+    session?: SessionPassInput,
+    since?: number,
+  ): Promise<PassResult> {
     const task = this.task(taskId);
     if (task === undefined) return { ok: false, code: "not_found" };
     if (task.successor !== undefined) return this.#passed(task, task.successor);
@@ -1153,7 +1195,7 @@ export class Scheduler {
     });
     if (built.recordCut) this.#log(`pass record cut task=${quote(taskId)}`);
     const spec: TaskSpec = {
-      ...successorSpec({ ...current, assignment: at }, account, trigger, built.prompt),
+      ...successorSpec({ ...current, assignment: at }, account, trigger, built.prompt, since),
       client: SCHEDULER_CLIENT,
     };
     const successor: Task = {
@@ -1346,6 +1388,7 @@ export class Scheduler {
     await this.#alertInput();
     await this.#escalate();
     await this.#closePasses();
+    await this.#triggerQuota();
     // A check ticks again once its answer is settled, so a predecessor it settled releases or fails its dependents then.
     await this.#admit();
     // Again: a task admission just released may already be past its bound, and must not launch.
@@ -1392,6 +1435,105 @@ export class Scheduler {
       // oxlint-disable-next-line no-await-in-loop -- one CAS'd write at a time
       const written = await this.#update(task.id, (current) => (lean(current) === current ? null : current));
       if (written === null) this.#leanFailed.add(task.id);
+    }
+  }
+
+  /**
+   * The automatic quota trigger (docs/scheduler.md, Successor, stage 3): a running task whose account has run
+   * out (`exhaustion`: a judged window reads full, never a forecast) is passed on when it is `auto` and
+   * another account could take its successor, and otherwise alerted, once per window (`quotaDue`). A pass
+   * that cannot be offered (the task's machine is offline or too old) is left alone and looked at again each
+   * tick. The pass is detached (`#autoPasses`): it reads the PR head and waits on a push.
+   */
+  async #triggerQuota(): Promise<void> {
+    const now = this.#now();
+    const machines = this.#fleet.machines();
+    const fleetQuota = this.#fleetQuota();
+    const config = this.#config;
+    const alerted: { readonly task: Task; readonly ex: Exhaustion }[] = [];
+    for (const task of this.tasks()) {
+      if (task.state !== "running") continue;
+      if (this.#passInFlight.has(task.id) || this.#passing.has(task.id) || this.#stopping.has(task.id)) continue;
+      if (this.#autoPasses.has(task.id)) continue;
+      const ex = exhaustion(task, machines, now, config, fleetQuota);
+      const due = quotaDue(task, ex, now, config);
+      if (ex === null || due === null || !passOffer(task, machines, true).ok) continue;
+      // An auto task with no other account to land on would strand its successor `ready`: it alerts like the rest.
+      if (autonomyOf(task.spec) === "auto" && successorHasRoom(task, machines, ex.accountId, now)) {
+        const run = this.#autoPass(task.id, ex, now, due === "retry")
+          .catch(this.#onError)
+          .finally(() => this.#autoPasses.delete(task.id));
+        this.#autoPasses.set(task.id, run);
+        continue;
+      }
+      if (due === "act") alerted.push({ task, ex });
+    }
+    await Promise.all(
+      alerted.map(async ({ task, ex }) => {
+        // Written before the alert, as `#alertInput` does, so a new leader reading the stamp never repeats it.
+        const next = await this.#update(task.id, (c) =>
+          quotaDue(c, ex, now, config) === null ? null : stampQuota(c, ex, now, false),
+        );
+        if (next?.quotaExhausted?.at === now) this.#alertQuota(task.id, ex);
+      }),
+    );
+  }
+
+  #alertQuota(taskId: string, ex: Exhaustion, reason?: QuotaAlertReason, outcome?: string): void {
+    const why = reason === undefined ? "" : ` reason=${reason}`;
+    const out = outcome === undefined ? "" : ` outcome=${outcome}`;
+    this.#alert({
+      kind: "quota-exhausted",
+      taskId,
+      window: ex.window,
+      ...(reason === undefined ? {} : { reason }),
+      message: `quota exhausted: task=${quote(taskId)} window=${quote(ex.window)} spending=${ex.spending ? 1 : 0}${why}${out}`,
+    });
+  }
+
+  /**
+   * One automatic pass. Write-ahead: the window is stamped before `pass` is called, so a takeover mid-pass
+   * never attempts again in the same window, and every outcome consumes the retry but the first refusal that
+   * can pass, which re-stamps once with `retry`. Dirty and mismatched branches are a person's to fix: alerted
+   * with the reason. A `needs_input` or `not_running` refusal clears the stamp, so the task is looked at again
+   * once it is back in `running`; a lost race (`conflict`, `finished`, `not_found`) leaves it.
+   */
+  async #autoPass(id: string, ex: Exhaustion, now: number, isRetry: boolean): Promise<void> {
+    const config = this.#config;
+    const written = await this.#update(id, (c) =>
+      quotaDue(c, ex, now, config) === null ? null : stampQuota(c, ex, now, false),
+    );
+    if (written?.quotaExhausted?.at !== now) return;
+    const result = await this.pass(id, "quota", undefined, ex.since);
+    if (result.ok) {
+      // The successor waits on the old task's `superseded`, which the pass has written: place it now, not in 30 s.
+      await this.tick();
+      return;
+    }
+    switch (result.code) {
+      case "dirty_worktree":
+        this.#alertQuota(id, ex, "dirty", result.code);
+        break;
+      case "branch_mismatch":
+        this.#alertQuota(id, ex, "branch", result.code);
+        break;
+      case "needs_input":
+      case "not_running":
+        await this.#update(id, (c) => {
+          if (c.quotaExhausted?.at !== now) return null;
+          const { quotaExhausted: _stamp, ...rest } = c;
+          return rest;
+        });
+        break;
+      case "conflict":
+      case "finished":
+      case "not_found":
+        break;
+      default:
+        this.#log(`audit pass refused task=${quote(id)} trigger=quota outcome=${result.code}`);
+        if (isRetry) this.#alertQuota(id, ex, undefined, result.code);
+        else
+          await this.#update(id, (c) => (c.quotaExhausted?.at === now ? stampQuota(c, ex, this.#now(), true) : null));
     }
   }
 
@@ -1864,7 +2006,12 @@ export class Scheduler {
     if (after.spec.succeeds === undefined) return;
     // A successor may land straight in `needs-input`: its first event is that one.
     if (before.state === "reserved" && (after.state === "running" || after.state === "needs-input")) {
-      this.#log(`successor placed task=${quote(after.id)} after=${Math.max(0, this.#now() - after.createdAt)}`);
+      // A quota pass counts from the reading that said the account was out; any other from the successor's creation.
+      const since = after.spec.succeeds.since;
+      const from = since === undefined ? "created" : "since";
+      this.#log(
+        `successor placed task=${quote(after.id)} after=${Math.max(0, this.#now() - (since ?? after.createdAt))} from=${from}`,
+      );
       return;
     }
     if (FINISHED.includes(before.state) || !FINISHED.includes(after.state)) return;

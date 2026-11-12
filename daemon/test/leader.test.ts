@@ -1756,6 +1756,19 @@ describe("leader push", () => {
     expect(parsePushAlert(JSON.parse(JSON.stringify(push)))).toEqual(push);
   });
 
+  test("the quota-exhausted and pass-refused alerts map to payloads of ids and state, never the message or the code", () => {
+    const exhausted = { kind: "quota-exhausted", taskId: "t-1", window: "5h", message: "m account=x" } as const;
+    const bare = alertToPush(exhausted, 5);
+    expect(bare).toEqual({ v: 1, kind: "quota-exhausted", at: 5, taskId: "t-1", window: "5h" });
+    const dirty = alertToPush({ ...exhausted, reason: "dirty" }, 5);
+    expect(dirty).toEqual({ v: 1, kind: "quota-exhausted", at: 5, taskId: "t-1", window: "5h", reason: "dirty" });
+    const refused = alertToPush({ kind: "pass-refused", taskId: "t-1", code: "push_failed", message: "m" }, 6);
+    expect(refused).toEqual({ v: 1, kind: "pass-refused", at: 6, taskId: "t-1" });
+    for (const push of [bare, dirty, refused]) {
+      expect(parsePushAlert(JSON.parse(JSON.stringify(push)))).toEqual(push);
+    }
+  });
+
   test("a blocked PR read by the poller is alerted once, logged by ids and reason, and pushed", async () => {
     const relay = startTestRelay(TOKEN);
     relay.schedulerTerm = 1;

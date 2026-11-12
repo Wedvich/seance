@@ -117,6 +117,7 @@ export function advance(task: Task, to: TaskState, fields: TaskFields = {}): Tas
     pr,
     remoteSession,
     prAlert,
+    quotaExhausted,
     continuedBy,
     successor,
     ...rest
@@ -132,6 +133,8 @@ export function advance(task: Task, to: TaskState, fields: TaskFields = {}): Tas
     ...(pr !== undefined && (TASK_PHASES[to] !== "finished" || pr.state === "merged") ? { pr } : {}),
     // The dedupe stamp of an alert about a PR still waiting to merge: nothing is left to repeat once finished.
     ...(prAlert !== undefined && TASK_PHASES[to] !== "finished" ? { prAlert } : {}),
+    // The per-window dedupe of the automatic quota trigger: only a running task is looked at, so a finished one keeps none.
+    ...(quotaExhausted !== undefined && TASK_PHASES[to] !== "finished" ? { quotaExhausted } : {}),
     // Only an `awaiting-merge` task is offered from, and a finished record stays lean.
     ...(continuedBy !== undefined && TASK_PHASES[to] !== "finished" ? { continuedBy } : {}),
     // The link of a pass whose close has not landed: any other way out (a merge, a report, a cancel) wins
