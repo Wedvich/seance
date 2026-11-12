@@ -2913,7 +2913,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   `inputAlerted` in the write that applies it, and once that write lands raises the first alert
   with `question: true`, so a real choice reaches the phone at once. It counts only where
   `sessionChange` accepts the machine, or for a needs-input stay its own machine re-reports
-  (`questionAlert`). A stay already alerted or escalated gets nothing more, and the 30-minute
+  (`questionAlert`). A stay already alerted, escalated or past the escalation mark (one push, as `inputAlert`) gets nothing more, and the 30-minute
   escalation is unchanged. No record field says it was a question: the stamp is the one every
   leader already reads, so an older leader taking over stays quiet for the stay and still
   escalates it.

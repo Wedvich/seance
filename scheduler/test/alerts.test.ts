@@ -468,6 +468,44 @@ describe("needs-input question alert", () => {
     expect(alerts).toEqual([]);
   });
 
+  test("a question in a stay already past the escalation mark alerts nothing; the escalation is the one push", async () => {
+    const { alerts, clock, fleet, from, id, scheduler } = await running();
+    await scheduler.onSession(id, "needs-input", from);
+    clock.now = NOW + 31 * MINUTE;
+    await scheduler.onSession(id, "needs-input", { ...from, reason: "question" });
+    expect(alerts).toEqual([]);
+    await pass(scheduler, fleet, clock.now);
+    expect(alerts).toMatchObject([{ kind: "needs-input", escalated: true }]);
+    expect(alerts[0]).not.toHaveProperty("question");
+  });
+
+  test("a version conflict applies the question again to what the store holds: a stay another write alerted alerts nothing", async () => {
+    const { alerts, from, id, scheduler, store } = await running();
+    await scheduler.onSession(id, "needs-input", from);
+    const entry = await stored(store, id);
+    // Out of band, so the leader's held version is stale and its first write conflicts.
+    await store.put(id, entry.version, { ...entry.body, inputAlerted: true });
+    await scheduler.onSession(id, "needs-input", { ...from, reason: "question" });
+    expect(alerts).toEqual([]);
+  });
+
+  test("a question as the first event on a reserved task resolves the reservation and alerts once", async () => {
+    const { alerts, from, id, scheduler, store } = await running();
+    // Put the running task back to its reservation: the spawn landed, the reply was lost.
+    const entry = await stored(store, id);
+    const { assignment, ...rest } = entry.body;
+    await store.put(id, entry.version, {
+      ...rest,
+      state: "reserved",
+      reservation: { deviceId: "a", exclave: assignment?.exclave ?? "main", clone: "app", expiresAt: NOW + 120_000 },
+      reservedAt: NOW,
+    });
+    await scheduler.load();
+    await scheduler.onSession(id, "needs-input", { ...from, reason: "question" });
+    expect(alerts).toMatchObject([{ kind: "needs-input", taskId: id, question: true }]);
+    expect((await stored(store, id)).body).toMatchObject({ state: "needs-input", inputAlerted: true });
+  });
+
   test("a question write that fails alerts nothing; the 2-minute pass is still there for the stay", async () => {
     const { alerts, clock, fleet, from, id, scheduler, store } = await running();
     await scheduler.onSession(id, "needs-input", from);

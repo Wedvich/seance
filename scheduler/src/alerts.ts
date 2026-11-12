@@ -76,11 +76,20 @@ export function inputAlert(task: Task, now: number, afterMs: number, escalateAft
  * again). The escalation is untouched. `moved` is what `sessionChange` made of
  * the event, non-null only where it accepted the machine; a null one counts
  * only for a needs-input stay its own machine (`deviceId`) re-reports, so no
- * other machine's claim alerts a task. Null when nothing is due.
+ * other machine's claim alerts a task. A stay already past `escalateAfterMs`
+ * is not due either: its escalation is, and that alert is the one, as in
+ * `inputAlert`. Null when nothing is due.
  */
-export function questionAlert(task: Task, moved: Task | null, deviceId: string): Task | null {
+export function questionAlert(
+  task: Task,
+  moved: Task | null,
+  deviceId: string,
+  now: number,
+  escalateAfterMs: number,
+): Task | null {
   const heard = moved ?? (task.assignment?.deviceId === deviceId ? task : null);
   if (heard?.state !== "needs-input" || heard.inputAlerted === true || heard.escalated === true) return null;
+  if (heard.needsInputSince !== undefined && now - heard.needsInputSince >= escalateAfterMs) return null;
   return { ...heard, inputAlerted: true };
 }
 

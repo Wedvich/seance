@@ -597,7 +597,7 @@ export class Scheduler {
       // Reset on every run: a version conflict applies the change again to what the store holds.
       asked = false;
       if (state !== "needs-input" || from?.reason !== "question") return moved;
-      const alerted = questionAlert(task, moved, from.deviceId);
+      const alerted = questionAlert(task, moved, from.deviceId, this.#now(), this.#config.needsInputEscalateMs);
       asked = alerted !== null;
       return alerted ?? moved;
     });
