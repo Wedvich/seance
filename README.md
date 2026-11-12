@@ -192,6 +192,14 @@ Edit `~/.config/seance/config.json`:
   that it reads without a prompt. Until then a Mac's exclaves read as unknown and nothing is read,
   a `.credentials.json` in the config dir included: Claude Code keeps a Mac's login in the keychain.
 
+- `traits` — optional: what this box's exclaves can do that others cannot, as names you choose:
+  `{ "atlas": {}, "gpu": { "exclaves": ["work"] } }`. A trait with no `exclaves` is carried by
+  every exclave on the box; with them, only by those. A task that requires a trait
+  (`seanced spawn --requires atlas`, the `requires` field in MCP, or the Requires tile in the app)
+  is placed only on an exclave that carries all of them, and waits otherwise. Only this file
+  declares a trait: nothing on the wire can. The spec's `probe` and `keepFree` keys are refused
+  until they are built. Names are lowercase letters, digits and `-`; a mistake fails the load.
+
 Optional: `~/.exclaves` lists extra Claude Code accounts on the box, one name per line.
 Each name is a tree at `~/<name>` whose sessions use the config dir `~/.claude-<name>`;
 `default` (`~`, `~/.claude`) is implied and never listed. A clone's location decides which
@@ -435,6 +443,8 @@ seanced spawn --machine here seance -p "fix the flaky spawn test"
 #   pinned to this machine: it waits for a slot here rather than going elsewhere
 seanced spawn --account work --not here seance -p "rerun the slow suite"
 #   pinned to an account (alias, email or id) and kept off this machine
+seanced spawn --requires atlas seance -p "regenerate the atlas index"
+#   runs only where an exclave declares the trait atlas (repeat --requires for more, up to four)
 seanced spawn --autonomy steer seance -p "plan the queue rewrite"
 #   starts in plan mode and waits for approval; auto decides reversible choices itself
 seanced spawn --now seance -t "flaky test" -p "fix the flaky spawn test"
