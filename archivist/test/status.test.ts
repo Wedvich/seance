@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { toBase64 } from "@seance/shared";
@@ -54,6 +54,16 @@ describe("seance-archivist status", () => {
     expect(text).not.toContain(PSK);
     expect(state.identitySeed).toBeString();
     expect(text).not.toContain(state.identitySeed ?? "");
+  });
+
+  test("an unreadable state is said to be unreadable, not 'never run'", async () => {
+    const stateDir = join(base, "damaged");
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(join(stateDir, "state.json"), "{ truncated");
+    const text = (await statusLines({ configPath, stateDir, credentialPath: null })).join("\n");
+    expect(text).toContain("is not valid JSON");
+    expect(text).not.toContain("none yet");
+    expect(text).toContain("running: unknown");
   });
 
   test("a missing config is reported, not thrown", async () => {

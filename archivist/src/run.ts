@@ -6,10 +6,11 @@ import { bearerTokenWarnings, pskFingerprint, runnableProblems } from "../../dae
 import { CRED_NAME, credentialPskPath, readCredentialPsk } from "../../daemon/src/credential.ts";
 import { log } from "../../daemon/src/log.ts";
 import { RelayClient } from "../../daemon/src/relay-client.ts";
-import { identityOfState, loadOrInitState, writeRuntime } from "../../daemon/src/state.ts";
+import { identityOfState, writeRuntime } from "../../daemon/src/state.ts";
 import { loadArchivistConfig } from "./config.ts";
 import { sealArchivistInfo } from "./info.ts";
 import { archivistConfigPath, archivistStateDir, runtimePathIn, statePathIn } from "./paths.ts";
+import { loadSeatState } from "./state.ts";
 import { rootRefusal } from "./unprivileged.ts";
 
 export interface ArchivistOpts {
@@ -63,17 +64,20 @@ export async function startArchivist(opts: ArchivistOpts = {}): Promise<Archivis
   await mkdir(stateDir, { recursive: true, mode: STATE_DIR_MODE });
   // mkdir's mode is masked by the umask and ignored for a directory already there.
   await chmod(stateDir, STATE_DIR_MODE);
-  const state = await loadOrInitState(statePathIn(stateDir));
+  const state = await loadSeatState(statePathIn(stateDir));
   const identity = await identityOfState(state);
   const key = await importPsk(psk);
 
   const startedAt = Date.now();
   let connectedSince: number | null = null;
+  // Chained: the refusal loop flaps connected/disconnected back to back, and unordered renames could leave a stale value.
+  let runtimeWrites: Promise<void> = Promise.resolve();
   const updateRuntime = (connected: boolean): void => {
     connectedSince = connected ? (connectedSince ?? Date.now()) : null;
-    writeRuntime({ pid: process.pid, startedAt, connected, connectedSince }, runtimePathIn(stateDir)).catch(
-      (err: unknown) => log.warn(`could not write runtime: ${String(err)}`),
-    );
+    const runtime = { pid: process.pid, startedAt, connected, connectedSince };
+    runtimeWrites = runtimeWrites
+      .then(() => writeRuntime(runtime, runtimePathIn(stateDir)))
+      .catch((err: unknown) => log.warn(`could not write runtime: ${String(err)}`));
   };
 
   const appLeg = appRelayClient(config, key, (line) => log.info(`app leg: ${line}`));
@@ -100,7 +104,8 @@ export async function startArchivist(opts: ArchivistOpts = {}): Promise<Archivis
     },
     onConnect: () => {
       updateRuntime(true);
-      // A 401 on the app leg is permanent for that client; the seat's register being accepted says the token works now.
+      // A 401 on the app leg is permanent for that client; the /daemon upgrade succeeding says the token works now.
+      // Fires once the register has left, not when it is accepted (there is no ack): a refused seat gets here too.
       if (appLeg.getState().status === "rejected") appLeg.reconnect();
     },
     onDisconnect: () => updateRuntime(false),
