@@ -147,6 +147,56 @@ Two verified LXC sharp edges (Debian 13 guest, systemd 257):
   and reports it as the one a system unit is expected to deliver, rather than as a
   missing TPM.
 
+### A second service: the archivist
+
+The archivist (docs/archivist.md) holds the PSK too, and takes it only one way: its own
+system unit, `seance-archivist.service`, loads it with `LoadCredentialEncrypted=`. There is
+no keychain, no `psk` in its config, no direct unseal and no keyless mode, on any systemd
+version — PID 1 unseals a system unit's credential on 250+ as well, so the ≥ 256 split above
+does not arise. It runs as a Unix user of its own, never the daemon's, and its blob is its
+own file in that user's state dir:
+
+```ini
+LoadCredentialEncrypted=seance-psk:/home/archivist/.local/state/seance-archivist/psk.cred
+```
+
+The credential id is `seance-psk` here too, since the archivist reads
+`$CREDENTIALS_DIRECTORY/seance-psk` with the daemon's own code. Two units loading
+credentials under the same id don't collide: each gets its own service-private tmpfs. So
+seal it with `--name=seance-psk`, as root, into the archivist's state dir, owned by the
+archivist's user:
+
+```sh
+sudo install -d -m 700 -o archivist -g archivist ~archivist/.local/state/seance-archivist
+op item get Séance --fields password --reveal --account my |
+  sudo systemd-creds encrypt --with-key=tpm2 --tpm2-pcrs= --name=seance-psk - - \
+  > /tmp/archivist-psk.cred.new
+# both digests must match — compares without printing the key
+op item get Séance --fields password --reveal --account my | tr -d '\n' | sha256sum
+sudo systemd-creds decrypt --name=seance-psk /tmp/archivist-psk.cred.new - | tr -d '\n' | sha256sum
+sudo install -m 600 -o archivist -g archivist /tmp/archivist-psk.cred.new \
+  ~archivist/.local/state/seance-archivist/psk.cred && rm /tmp/archivist-psk.cred.new
+```
+
+Without a password manager on the box, `read -rs PSK` and then `printf %s "$PSK" |` in
+place of the `op` pipe keep it off argv and history the same way (`printf` is a shell
+builtin); `unset PSK` after.
+
+On a box that already runs a `seanced` system unit, copying that blob works as well: a
+TPM-sealed blob is bound to the TPM, not to its path, so
+`sudo install -m 600 -o archivist -g archivist ~you/.local/state/seance/psk.cred ~archivist/.local/state/seance-archivist/psk.cred`
+gives the archivist a copy that decrypts. What the unit never does is point at the daemon's
+file. That file is the daemon's user's to replace or delete, and the archivist's user exists
+so that the daemon's user cannot change what the archivist runs with (docs/archivist.md,
+A27a). Each service also re-seals on its own schedule this way.
+
+Order matters, unlike the daemon's: `install --system` refuses until the blob is there and
+decrypts as root, because a unit with no key could only fail at start and restart every five
+seconds. Moving the archivist to another box means sealing there, as for any machine. As
+with the daemon, nothing outside the unit can read the key: `seance-archivist status` in a
+shell reports it as not delivered, and the unit's journal (`journalctl -u
+seance-archivist`) carries the fingerprint.
+
 ### MCP on a credential-delivered box
 
 Claude Code launches `seanced mcp` outside the daemon's unit, where no credential is

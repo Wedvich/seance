@@ -313,10 +313,15 @@ Séance's noise is cover for a real intruder.
    dir is its own (`~/.local/state/seance-archivist`, 0700), never a daemon's. What a thief of
    it gains is what a thief of any daemon's key gains — every envelope and record the fleet
    seals — and nothing more: what it can _do_ is bounded by what it loads, not by what it holds
-   the key to. `archivist/test/layering.test.ts` walks its whole import closure, type-only
-   imports counted, and fails on any module that spawns, drives tmux, dispatches ops, brokers,
-   leads, or writes the queue or the store, and its own code may call no write method of either
-   client — it never enqueues, cancels, writes the store, replies to an op or sends a `status`.
+   the key to. `archivist/test/layering.test.ts` walks the `run` process's whole import closure,
+   type-only imports counted, and fails on any module that spawns, drives tmux, dispatches ops,
+   brokers, leads, or writes the queue or the store, and its own code may call no write method of
+   either client — it never enqueues, cancels, writes the store, replies to an op or sends a
+   `status`. Even its own update is not run by the process that holds the key (added 2026-11-12,
+   item 5): on the fleet's announce it writes one request file, and a separate unit, with the same
+   user and no credential, runs git and `bun install`. `install`, `uninstall` and `update` load
+   the daemon's exec path only through `import()` in their own command branches, never into
+   `run`'s closure, and their processes are never delivered the key.
    That is what separates it from the standalone scheduler box rejected in docs/scheduler.md
    (the PSK holder that acts on its own). Its seat on the relay is the `ARCHIVIST` id alone
    (item 3 below), so a stolen bearer token plus a minted identity squats nothing. Letting it
@@ -10633,7 +10638,8 @@ is built). Build order item 2 is the workspace and its two relay legs; item 3 (2
 that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archivist's seat").
 
 - **A workspace of its own, reusing the daemon by import.** `archivist/`, command
-  `seance-archivist` with `run` and `status`. It imports the daemon's relay client, app-leg
+  `seance-archivist` with `run` and `status` (and, at item 5, `install --system`,
+  `uninstall --system` and `update`, below). It imports the daemon's relay client, app-leg
   factory, state, credential, paths, log and the relay-side config checks by relative path, as
   `e2e/` does, and copies none. Where a module it needs sat beside one it must not load, the
   module moved: `runnableProblems`, `bearerTokenWarnings` and `pskFingerprint` from `config.ts`
@@ -10666,7 +10672,9 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   `scannedAt`, no exclaves — a shape `parseMachineInfo` refuses: a client that predates the
   seat flag counts the entry `skewed` ("update", true of that client), never a `Machine` and
   never `ignored` (which would send someone to rotate a correct key); one with the flag skips it.
-  Every op that reaches it is dropped with a warning and no reply. No `status`, no store frame.
+  Every op that reaches it is dropped with a warning and no reply, except the fleet's
+  `update-available` broadcast, which writes an update request and is answered by nothing
+  (item 5, below). No `status`, no store frame.
 - **The read leg.** A second, app-role socket from `appRelayClient` with the PSK's key and the
   account key derived from it, as the leader's own app leg reads (A7); `archivist/src/collect.ts`
   reads the store through it, and `archivist/src/metrics-collect.ts` the registry's `status`
@@ -10818,6 +10826,69 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
     machine's round with its marks where the last whole page left them; it is warned once per
     streak and its recovery logged. The relay's `store-list` floors do not apply: the op is an envelope
     to a daemon, which the relay neither reads nor rate-limits.
+
+Item 5 (2026-11-12): installing, updating and the docs (docs/archivist.md, A25–A30; setup, the
+move-the-seat runbook, the schema and example queries are the README's step 9).
+
+- **Three system units, written by `install --system`** (`archivist/src/units.ts`,
+  `install.ts`). `seance-archivist.service` runs `run` with `User=` the archivist's account,
+  `LoadCredentialEncrypted=seance-psk:<state dir>/psk.cred` (`CRED_NAME`, imported),
+  `Restart=always`, `RestartSec=5`, `WantedBy=multi-user.target`, and journald for its log (no
+  `append:` file for root to create under the wrong owner). `seance-archivist-update.path`
+  watches `<state dir>/update-requested` with `PathChanged=` and starts
+  `seance-archivist-update.service`, a oneshot with the same `User=`, no credential,
+  `update --requested`, `TimeoutStartSec=15min`. All three come from one set of values through
+  the daemon's `unitEscape` and `assertUnitFlag`, so they cannot disagree on user, checkout or
+  PATH. The target user is resolved as the daemon's `install --system` resolves it
+  (`daemon/src/target-user.ts`: `requireRoot`, `lookupUser`, `asTargetArgv`, `reachablePath`,
+  `missingUnitBinaries` over bun and git, `whichIn`), never from root's environment, and never
+  `process.execPath`; it never invokes `sudo`. `--user` is required (the sudo caller is usually
+  the daemon's user). Refused before anything is written: root or uid/gid 0, the user
+  `/etc/systemd/system/seanced.service` names (`unitUser`, now exported) or one with a
+  `seanced` user unit (A27a), a checkout not owned by the target uid (`update` fast-forwards it
+  as that user, and the unit runs its code with the key), a config `loadArchivistConfig`
+  refuses, and a blob that is missing or that `blobLoadable` cannot decrypt — unlike the
+  daemon, the archivist has no keyless mode, so a unit without its key would fail and restart
+  every five seconds. Then `daemon-reload`, `enable --now` of the path unit and the service, and
+  a restart when the service's definition changed, since `enable --now` leaves a running unit on
+  its old one. `uninstall --system` disables, stops and removes the three, leaving the state
+  dir.
+- **The key's blob is the archivist's own** (A27b, settled). Sealed under the same credential
+  id, `seance-psk`: the id is embedded in the blob and the archivist reads
+  `$CREDENTIALS_DIRECTORY/seance-psk` with the daemon's code, and two units' credentials never
+  collide (each gets a private tmpfs). A copy of the box's `seanced` blob decrypts too (a TPM
+  blob is bound to the TPM, not its path), so copying it is a documented way to make one
+  (docs/psk.md). Rejected: the unit pointing at the daemon's file — the daemon's user owns it
+  and could swap or delete what the archivist runs with, which A27a's separate user exists to
+  prevent — and a name of its own, which would need a credential-name parameter through the
+  daemon's reader for nothing.
+- **Updating without exec in the key's process** (A26). The `run` process takes the
+  `update-available` broadcast the relay fans to every `/daemon` socket (the seat's included,
+  through `RelayClient`'s broadcast allowlist; no wire change) and, for a sha it has not asked
+  about, writes `update-requested` (0600, `archivist/src/update-request.ts`). It also writes one
+  when it takes its seat, at most every 30 minutes, to catch an announce it slept through. systemd
+  starts the update unit, which runs the daemon's own `updateNow` (fetch, ff-only on the default
+  branch, `bun install --frozen-lockfile`) against the archivist's checkout, audited under the
+  request's origin, and restarts the service with `signalRestartUnit`. That is the daemon's
+  system-unit restart, now parameterised by unit: SIGTERM to the `MainPID` as the same user,
+  `Restart=always` relaunching it. `servingSha` is null: the oneshot cannot know what the service
+  runs, so a current checkout reports `current` and restarts nothing; a hand `git pull` needs a
+  `systemctl restart`. No unit is ever rewritten by the service or the update (neither is root);
+  a unit change lands when root re-runs `install --system`. Rejected: the daemon's in-process
+  `Updater` in `run` — it execs git and `bun install` from origin in the process holding the
+  key, which Threat model item 2 and the layering test forbid — and a timer polling origin,
+  which would update on a push the fleet has not announced.
+- **Two closures in the layering test.** `run`'s closure is held as before, with
+  `install.ts`, `self-update.ts` and `units.ts` excluded by name. Those three are reachable only
+  through `main.ts`'s `import()` in their own command branches, never a static import (checked
+  per specifier). Their own closure may load `daemon/src/exec.ts` and `tpmcreds.ts` (and, as
+  type-only imports through `audit.ts`, `backend.ts` and `broker-protocol.ts`), and nothing else
+  the service closure forbids. Its only spawner is `exec.ts`.
+- **What moved in the daemon to allow it.** `isUpdateAvailable` from `handlers.ts` (an op
+  dispatcher) to `daemon/src/update-notice.ts`; `requireRoot` and `missingUnitBinaries` take the
+  sudo form and the binaries; `systemMainPid`, `signalRestartUnit`, `scopeArgv`, `unitEscape`
+  and `unitUser` take or name a unit; `updateNow` takes an audit origin. The daemon's own
+  behaviour is unchanged.
 
 ## Accepted trade-offs
 
