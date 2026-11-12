@@ -1,0 +1,353 @@
+import {
+  accountStoreKey,
+  STORE_PREFIXES,
+  TASK_PHASES,
+  type AccountListing,
+  type AccountLookup,
+  type Machine,
+  type QueueChanged,
+  type RelayState,
+  type StoreRefusal,
+  type Task,
+  type TaskListing,
+  type TaskLookup,
+  type TaskRecord,
+} from "@seance/shared";
+import { taskRow, type Archive, type Fleet } from "./archive.ts";
+
+/**
+ * The read slice of the shared app-role client the collector uses — reads and
+ * listeners only, so nothing here can write the store or send an op. Every
+ * record arrives already opened by the client's own readers (`openTaskRecord`
+ * then `bindTaskRecord`; `openAccountRecord`), and what they could not read is
+ * reported, never handed over (A13).
+ */
+export interface ArchiveSource {
+  readonly getState: () => RelayState;
+  readonly subscribe: (listener: () => void) => () => void;
+  readonly listTasks: () => Promise<TaskListing | StoreRefusal | null>;
+  readonly getTask: (taskId: string) => Promise<TaskLookup | StoreRefusal | null>;
+  readonly listAccounts: () => Promise<AccountListing | StoreRefusal | null>;
+  readonly getAccountRecord: (key: string) => Promise<AccountLookup | StoreRefusal | null>;
+  readonly onQueueChanged: (listener: (change: QueueChanged) => void) => () => void;
+  readonly onStoreChanged: (listener: (key: string, version: number) => void) => () => void;
+}
+
+export interface CollectTimings {
+  /**
+   * Least time between two listings of one prefix. The relay lets a socket list
+   * a prefix 4 times a minute (`MAX_LISTS_PER_WINDOW`) and every socket shares a
+   * bucket of one per 8 s, so 20 s leaves room for the PWA and the CLIs.
+   */
+  readonly listGapMs: number;
+  /** The catch-up listing when no nudge came: a missed `queue-changed` costs at most this. */
+  readonly pollMs: number;
+  /** After a refused or failed read. */
+  readonly retryMs: number;
+}
+
+export const COLLECT_TIMINGS: CollectTimings = { listGapMs: 20_000, pollMs: 10 * 60_000, retryMs: 60_000 };
+
+export interface CollectorOpts {
+  readonly source: ArchiveSource;
+  readonly archive: Archive;
+  /** HMAC key `account:` records are filed under: the only way an account id enters the archive (A15). */
+  readonly accountKey: CryptoKey;
+  /** The seat's own id: never a machine (A9), whatever a registry says. */
+  readonly selfId: string;
+  readonly log: { readonly info: (line: string) => void; readonly warn: (line: string) => void };
+  readonly timings?: Partial<CollectTimings>;
+}
+
+export interface Collector {
+  readonly stop: () => void;
+}
+
+/**
+ * Runs `read` at most once per `gapMs`, coalescing kicks that land while one
+ * runs or waits; a read that reports failure is tried again after `retryMs`.
+ */
+class Paced {
+  readonly #gapMs: number;
+  readonly #retryMs: number;
+  readonly #read: () => Promise<boolean>;
+  #last = Number.NEGATIVE_INFINITY;
+  #running = false;
+  #again = false;
+  #timer: ReturnType<typeof setTimeout> | null = null;
+  #stopped = false;
+
+  constructor(gapMs: number, retryMs: number, read: () => Promise<boolean>) {
+    this.#gapMs = gapMs;
+    this.#retryMs = retryMs;
+    this.#read = read;
+  }
+
+  kick(): void {
+    if (this.#stopped) return;
+    if (this.#running) {
+      this.#again = true;
+      return;
+    }
+    if (this.#timer !== null) return;
+    const wait = this.#last + this.#gapMs - Date.now();
+    if (wait > 0) {
+      this.#arm(wait);
+      return;
+    }
+    this.#running = true;
+    this.#last = Date.now();
+    void this.#read().then((ok) => {
+      this.#running = false;
+      if (!ok) this.#arm(this.#retryMs);
+      else if (this.#again) {
+        this.#again = false;
+        this.kick();
+      }
+    });
+  }
+
+  #arm(ms: number): void {
+    if (this.#stopped || this.#timer !== null) return;
+    this.#timer = setTimeout(() => {
+      this.#timer = null;
+      this.kick();
+    }, ms);
+  }
+
+  stop(): void {
+    this.#stopped = true;
+    if (this.#timer !== null) clearTimeout(this.#timer);
+    this.#timer = null;
+  }
+}
+
+/** The registry as the archive records it: decrypted machines only, never the seat, and only a verified leader. */
+export function fleetOf(state: RelayState, selfId: string): Fleet {
+  const machines = state.machines
+    .filter((machine) => machine.deviceId !== selfId)
+    .map((machine) => ({
+      deviceId: machine.deviceId,
+      name: machine.name,
+      platform: machine.platform,
+      build: machine.source?.sha ?? null,
+      connected: machine.connected,
+    }));
+  const { scheduler } = state;
+  return {
+    machines,
+    leader: scheduler.kind === "ready" ? { deviceId: scheduler.deviceId, term: scheduler.term } : null,
+  };
+}
+
+/**
+ * The archivist's collection over its app leg (docs/archivist.md, A13–A16,
+ * A18): finished tasks and account aliases from the store, fleet events from
+ * the registry. Read-only on the wire: it lists and gets, and writes only
+ * `archive.sqlite`. A record it cannot read is counted and skipped; one that
+ * leaves the store leaves its row as it was.
+ */
+export function startCollector(opts: CollectorOpts): Collector {
+  const { source, archive, accountKey, selfId, log } = opts;
+  const timings = { ...COLLECT_TIMINGS, ...opts.timings };
+  let stopped = false;
+  const accountKeys = new Map<string, Promise<string>>();
+  const noted = new Set<string>();
+
+  const keyOf = (accountId: string): Promise<string> => {
+    let key = accountKeys.get(accountId);
+    if (key === undefined) {
+      key = accountStoreKey(accountKey, accountId);
+      accountKeys.set(accountId, key);
+    }
+    return key;
+  };
+
+  const machineOf = (deviceId: string): Machine | undefined =>
+    source.getState().machines.find((machine) => machine.deviceId === deviceId);
+
+  /** Where it ran, else where it was pinned: resolved now, so the account that exclave holds when archived. */
+  const accountOf = async (task: Task): Promise<string | null> => {
+    const placed = task.assignment;
+    const accountId =
+      (placed === undefined
+        ? undefined
+        : machineOf(placed.deviceId)?.exclaves?.find((exclave) => exclave.id === placed.exclave)?.accountId) ??
+      task.spec.pin?.account;
+    return accountId === undefined || accountId === null ? null : keyOf(accountId);
+  };
+
+  const archiveTask = async ({ task, version }: TaskRecord): Promise<boolean> => {
+    if (TASK_PHASES[task.state] !== "finished") return false;
+    const held = archive.taskVersion(task.id);
+    if (held !== null && held >= version) return false;
+    const deviceId = task.assignment?.deviceId;
+    const machine =
+      deviceId === undefined ? null : (machineOf(deviceId)?.name ?? archive.machineName(deviceId) ?? null);
+    const account = await accountOf(task);
+    const row = taskRow(task, version, { machine, account });
+    // Checked after the await: a stop in between closes the database.
+    if (stopped || row === null) return false;
+    return archive.upsertTask(row, Date.now());
+  };
+
+  /** One read, its failure logged; false asks the pacer to retry. Never throws. */
+  const guarded = async (what: string, read: () => Promise<boolean>): Promise<boolean> => {
+    try {
+      return await read();
+    } catch (err) {
+      if (!stopped) log.warn(`${what}: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
+  };
+
+  const refusal = (what: string, answer: StoreRefusal | null): false => {
+    log.warn(answer === null ? `${what}: a reply this build cannot read` : `${what} refused: ${answer.code}`);
+    return false;
+  };
+
+  const tasks = new Paced(timings.listGapMs, timings.retryMs, () =>
+    guarded("task listing", async () => {
+      const answer = await source.listTasks();
+      if (answer === null || !answer.ok) return refusal("task listing", answer);
+      let archived = 0;
+      for (const record of answer.tasks) {
+        // oxlint-disable-next-line no-await-in-loop -- sequential: each may HMAC an account, and order is the listing's
+        if (await archiveTask(record)) archived += 1;
+      }
+      if (archived > 0 || answer.unreadable.length > 0) {
+        log.info(`tasks: archived ${archived}, skipped ${answer.unreadable.length} unreadable`);
+      }
+      return true;
+    }),
+  );
+
+  const accounts = new Paced(timings.listGapMs, timings.retryMs, () =>
+    guarded("account listing", async () => {
+      const answer = await source.listAccounts();
+      if (answer === null || !answer.ok) return refusal("account listing", answer);
+      if (stopped) return true;
+      const now = Date.now();
+      for (const { key, record } of answer.accounts) archive.upsertAccount(key, record.alias, record.version, now);
+      if (answer.unreadable.length > 0) log.info(`accounts: skipped ${answer.unreadable.length} unreadable`);
+      return true;
+    }),
+  );
+
+  // Gets for named tasks run one at a time, after any before them: a burst of nudges is not a burst of reads.
+  let gets: Promise<void> = Promise.resolve();
+  const readNamed = async (ids: readonly string[]): Promise<void> => {
+    const ok = await guarded("task read", async () => {
+      let archived = 0;
+      for (const id of ids) {
+        if (stopped) return true;
+        // oxlint-disable-next-line no-await-in-loop -- one store-get at a time, by design
+        const answer = await source.getTask(id);
+        if (answer === null || !answer.ok) return refusal("task read", answer);
+        const found = answer.task;
+        // Null: gone from the store (pruned, or never there) — its row, if any, stays as it was.
+        if (found === null) continue;
+        if ("reason" in found) {
+          log.info(`tasks: skipped 1 unreadable (${found.reason})`);
+          continue;
+        }
+        // oxlint-disable-next-line no-await-in-loop -- as above
+        if (await archiveTask(found)) archived += 1;
+      }
+      if (archived > 0) log.info(`tasks: archived ${archived}`);
+      return true;
+    });
+    // A failed get falls back to the paced listing, which covers the same records.
+    if (!ok) tasks.kick();
+  };
+  const getTasks = (ids: readonly string[]): void => {
+    gets = gets.then(() => readNamed(ids));
+  };
+
+  const onQueueChanged = (change: QueueChanged): void => {
+    if (stopped) return;
+    if (change.tasks === undefined) tasks.kick();
+    else if (change.tasks.length > 0) getTasks(change.tasks);
+  };
+
+  const onStoreChanged = (key: string): void => {
+    // Relay plaintext: only a hint to re-read through the record's own reader, which re-checks the key.
+    if (stopped || !key.startsWith(STORE_PREFIXES.account.prefix)) return;
+    void guarded("account read", async () => {
+      const answer = await source.getAccountRecord(key);
+      if (answer === null || !answer.ok) return refusal("account read", answer);
+      const { entry } = answer;
+      if (entry === null || stopped) return true;
+      if ("reason" in entry) {
+        log.info(`accounts: skipped 1 unreadable (${entry.reason})`);
+        return true;
+      }
+      archive.upsertAccount(answer.key, entry.alias, entry.version, Date.now());
+      return true;
+    });
+  };
+
+  let ready = false;
+  let lastMachines: RelayState["machines"] | null = null;
+  let lastScheduler: RelayState["scheduler"] | null = null;
+  const onState = (): void => {
+    if (stopped) return;
+    const state = source.getState();
+    // Before the registry settles an empty list means "no push yet", never "every machine left".
+    const nowReady = state.status === "open" && state.registrySettled;
+    if (!nowReady) {
+      ready = false;
+      return;
+    }
+    if (!ready) {
+      ready = true;
+      // Each (re)open catches up on what changed while the leg was down.
+      tasks.kick();
+      accounts.kick();
+    }
+    if (state.machines === lastMachines && state.scheduler === lastScheduler) return;
+    lastMachines = state.machines;
+    lastScheduler = state.scheduler;
+    const events = archive.applyFleet(fleetOf(state, selfId), Date.now());
+    if (events > 0) log.info(`fleet: ${events} event${events === 1 ? "" : "s"}`);
+    noteAccounts(state.machines).catch((err: unknown) => log.warn(`account note: ${String(err)}`));
+  };
+
+  /** Accounts signed in somewhere, kept by key so a removed one's rows still name a key (A24). */
+  const noteAccounts = async (machines: readonly Machine[]): Promise<void> => {
+    const ids = machines
+      .filter((machine) => machine.deviceId !== selfId)
+      .flatMap((machine) => (machine.exclaves ?? []).map((exclave) => exclave.accountId))
+      .filter((accountId): accountId is string => accountId !== null);
+    const keys = await Promise.all(ids.map(keyOf));
+    if (stopped) return;
+    const now = Date.now();
+    for (const key of keys) {
+      if (noted.has(key)) continue;
+      noted.add(key);
+      archive.noteAccount(key, now);
+    }
+  };
+
+  const unsubscribers = [
+    source.subscribe(onState),
+    source.onQueueChanged(onQueueChanged),
+    source.onStoreChanged(onStoreChanged),
+  ];
+  const poll = setInterval(() => {
+    if (!ready) return;
+    tasks.kick();
+    accounts.kick();
+  }, timings.pollMs);
+  onState();
+
+  return {
+    stop: (): void => {
+      stopped = true;
+      clearInterval(poll);
+      for (const unsubscribe of unsubscribers) unsubscribe();
+      tasks.stop();
+      accounts.stop();
+    },
+  };
+}

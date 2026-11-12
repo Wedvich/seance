@@ -1,15 +1,17 @@
 import { chmod, mkdir } from "node:fs/promises";
 import { hostname } from "node:os";
-import { DAEMON_ROLES, importPsk, quote, type Plain, type RelayStatus } from "@seance/shared";
+import { DAEMON_ROLES, importAccountKey, importPsk, quote, type Plain, type RelayStatus } from "@seance/shared";
 import { appRelayClient } from "../../daemon/src/app-relay.ts";
 import { bearerTokenWarnings, pskFingerprint, runnableProblems } from "../../daemon/src/config-checks.ts";
 import { CRED_NAME, credentialPskPath, readCredentialPsk } from "../../daemon/src/credential.ts";
 import { log } from "../../daemon/src/log.ts";
 import { RelayClient } from "../../daemon/src/relay-client.ts";
 import { identityOfState, writeRuntime } from "../../daemon/src/state.ts";
+import { Archive } from "./archive.ts";
+import { startCollector, type CollectTimings } from "./collect.ts";
 import { loadArchivistConfig } from "./config.ts";
 import { sealArchivistInfo } from "./info.ts";
-import { archivistConfigPath, archivistStateDir, runtimePathIn, statePathIn } from "./paths.ts";
+import { archivePathIn, archivistConfigPath, archivistStateDir, runtimePathIn, statePathIn } from "./paths.ts";
 import { loadSeatState } from "./state.ts";
 import { rootRefusal } from "./unprivileged.ts";
 
@@ -23,6 +25,8 @@ export interface ArchivistOpts {
   readonly gid?: number;
   readonly baseBackoffMs?: number;
   readonly maxBackoffMs?: number;
+  /** The collector's pacing; tests shorten it. */
+  readonly collect?: Partial<CollectTimings>;
 }
 
 export interface Archivist {
@@ -30,7 +34,7 @@ export interface Archivist {
   readonly stop: () => void;
 }
 
-/** Owner-only: it holds the identity seed now and the plaintext history later (docs/archivist.md, A12). */
+/** Owner-only: it holds the identity seed and the plaintext history (docs/archivist.md, A12). */
 const STATE_DIR_MODE = 0o700;
 
 /**
@@ -38,8 +42,9 @@ const STATE_DIR_MODE = 0o700;
  * holds the seat — a v2 register claiming `archivist`, which the relay accepts
  * only from the `ARCHIVIST` id — and an app-role socket for reading, as the
  * leader's own app leg reads. It advertises no repos and no exclaves, answers
- * no op, never enqueues and never writes the store; what it may import is held
- * by archivist/test/layering.test.ts.
+ * no op, never enqueues and never writes the store; it writes only
+ * `archive.sqlite` (`collect.ts`). What it may import is held by
+ * archivist/test/layering.test.ts.
  */
 export async function startArchivist(opts: ArchivistOpts = {}): Promise<Archivist> {
   // First, before any file is read or written: a root run must leave nothing behind it owns.
@@ -66,7 +71,8 @@ export async function startArchivist(opts: ArchivistOpts = {}): Promise<Archivis
   await chmod(stateDir, STATE_DIR_MODE);
   const state = await loadSeatState(statePathIn(stateDir));
   const identity = await identityOfState(state);
-  const key = await importPsk(psk);
+  const [key, accountKey] = await Promise.all([importPsk(psk), importAccountKey(psk)]);
+  const archive = await Archive.open(archivePathIn(stateDir));
 
   const startedAt = Date.now();
   let connectedSince: number | null = null;
@@ -80,7 +86,7 @@ export async function startArchivist(opts: ArchivistOpts = {}): Promise<Archivis
       .catch((err: unknown) => log.warn(`could not write runtime: ${String(err)}`));
   };
 
-  const appLeg = appRelayClient(config, key, (line) => log.info(`app leg: ${line}`));
+  const appLeg = appRelayClient(config, { key, accountKey }, (line) => log.info(`app leg: ${line}`));
   let appStatus: RelayStatus = appLeg.getState().status;
   const unsubscribe = appLeg.subscribe(() => {
     const { status, rejection } = appLeg.getState();
@@ -113,6 +119,15 @@ export async function startArchivist(opts: ArchivistOpts = {}): Promise<Archivis
     ...(opts.maxBackoffMs === undefined ? {} : { maxBackoffMs: opts.maxBackoffMs }),
   });
 
+  const collector = startCollector({
+    source: appLeg,
+    archive,
+    accountKey,
+    selfId: identity.deviceId,
+    log,
+    ...(opts.collect === undefined ? {} : { timings: opts.collect }),
+  });
+
   log.info(
     `seance-archivist ${quote(config.name)} on ${hostname()}: deviceId ${identity.deviceId}, ` +
       `psk ${await pskFingerprint(psk)} (credential), relay ${config.relayUrl}`,
@@ -125,8 +140,11 @@ export async function startArchivist(opts: ArchivistOpts = {}): Promise<Archivis
     deviceId: identity.deviceId,
     stop: (): void => {
       unsubscribe();
+      collector.stop();
       seat.stop();
       appLeg.stop();
+      // After the collector: a reply landing past this point is dropped there, never written.
+      archive.close();
     },
   };
 }
