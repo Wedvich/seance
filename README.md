@@ -277,7 +277,9 @@ permission prompt reports nothing, and the task then waits for **Mark done**. Th
 same goes for `hand_off_task` (`mcp__seance__hand_off_task`), which a session calls
 last, once its PR is open and set to merge: the session closes when that turn ends,
 and the task waits for the merge as **Awaiting merge** instead of the session
-watching CI.
+watching CI. If that PR gets stuck (a required check fails, a conflict, the branch falls
+behind, or nothing is set to merge it), you are alerted and **Continue** resumes the
+session to fix it; the resumed session may hand the PR off again.
 
 ### 7. Optional: spawn from Raycast (macOS)
 
@@ -434,7 +436,7 @@ seanced spawn --now seance --here   # run in the checkout as it stands, no workt
 seanced spawn --start seance -p "fix the flaky spawn test"
 #   queued, then started as soon as the scheduler admits it, past its concurrency cap (the app's Start now)
 seanced start 3f2a…           # start a task already waiting in the queue now, past the concurrency cap
-seanced continue 3f2a…        # resume a failed (e.g. OOM-killed) or cancelled task's conversation in its worktree, as a new task (--prompt <text> to add a note)
+seanced continue 3f2a…        # resume a failed (e.g. OOM-killed), cancelled or blocked-awaiting-merge task's conversation in its worktree, as a new task (--prompt <text> to add a note)
 seanced sessions              # running claude windows: id, window, repo, path
 seanced despawn %12           # end one by id: asks claude to exit, kills the pane after ~5s (--force: now)
 seanced reap --dry-run        # what clean-up would remove: worktrees, branches, dead windows, fetched attachments
@@ -501,7 +503,7 @@ versus the one on disk, which is how you spot a `git pull` that still needs a
 
 With `seanced mcp install` done (step 6), a local Claude Code can list machines,
 query running sessions, and spawn and end sessions on other machines through the relay:
-`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`, `start_task` (start a queued task now, past the concurrency cap — the app's Start now; `spawn_session`'s `start` does the same for a new one), `continue_task` (resume a failed or cancelled task's session in its worktree, as a new task), `queue_batch` (several tasks queued as one group, ordered only by the dependencies between them) and, for a session settling its own task, `report_task_done`, or handing its open PR to the scheduler and closing, `hand_off_task`. The server reads the daemon's own
+`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`, `start_task` (start a queued task now, past the concurrency cap — the app's Start now; `spawn_session`'s `start` does the same for a new one), `continue_task` (resume a failed or cancelled task's, or a blocked awaiting-merge task's, session in its worktree, as a new task), `queue_batch` (several tasks queued as one group, ordered only by the dependencies between them) and, for a session settling its own task, `report_task_done`, or handing its open PR to the scheduler and closing, `hand_off_task`. The server reads the daemon's own
 config and speaks to the relay exactly like the phone does.
 
 `spawn_session` always queues the task in the relay, as the app's **auto** does: it answers

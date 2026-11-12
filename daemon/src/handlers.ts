@@ -106,10 +106,15 @@ export interface TaskLaunches {
         readonly session: string;
         readonly exit?: number;
         readonly vanished?: true;
+        readonly handedOff?: true;
+        readonly continuedPr?: string;
       }
     | { readonly refused: string };
-  /** The daemon is about to close this task's pane itself; never judged vanished. */
-  readonly closing: (taskId: string) => Promise<void>;
+  /**
+   * The daemon is about to close this task's pane itself; never judged vanished. `cancelled`: the scheduler
+   * ends it by hand, so a continuation of it inherits no PR.
+   */
+  readonly closing: (taskId: string, cancelled?: boolean) => Promise<void>;
   /** Resolves once no launch is in flight. */
   readonly settled: () => Promise<void>;
   /**
@@ -312,6 +317,8 @@ async function continuationSite(
     session: site.session,
     ...(site.exit === undefined ? {} : { exit: site.exit }),
     ...(site.vanished === true ? { vanished: true as const } : {}),
+    ...(site.handedOff === true ? { handedOff: true as const } : {}),
+    ...(site.continuedPr === undefined ? {} : { continuedPr: site.continuedPr }),
   };
 }
 
@@ -420,6 +427,7 @@ async function handleSpawn(
               repo: entry.path,
               worktree: outcome.path,
               ...(outcome.session === undefined ? {} : { session: outcome.session }),
+              ...(continuation?.continuedPr === undefined ? {} : { continuedPr: continuation.continuedPr }),
             },
           }),
       ...(outcome.server === undefined ? {} : { server: outcome.server }),
@@ -463,7 +471,17 @@ async function handleSpawn(
   }
 }
 
-async function handleDespawn(ctx: HandlerContext, audit: DespawnAudit, payload: unknown): Promise<DespawnResponse> {
+/**
+ * `scheduler`: sealed from the scheduler, or its own process. Such a despawn that names itself the scheduler's
+ * is its cancel or mark-done (`#endSession` is its only despawn), which the ledger notes `cancelled`; any
+ * other sender's claim of it only costs the continuation of that task its PR, the safe way round.
+ */
+async function handleDespawn(
+  ctx: HandlerContext,
+  audit: DespawnAudit,
+  payload: unknown,
+  scheduler: boolean,
+): Promise<DespawnResponse> {
   if (!isDespawnRequest(payload)) {
     await audit.rejected("malformed request");
     return { ok: false, code: "internal_error", message: "malformed despawn request" };
@@ -475,10 +493,11 @@ async function handleDespawn(ctx: HandlerContext, audit: DespawnAudit, payload: 
   }
   let result: DespawnResult;
   const tasks = ctx.tasks;
+  const byScheduler = scheduler && payload.client === SCHEDULER_CLIENT;
   try {
     result = await ctx.backend.despawn(payload.id, {
       force: payload.force === true,
-      ...(tasks === undefined ? {} : { closing: (id: string) => tasks.closing(id) }),
+      ...(tasks === undefined ? {} : { closing: (id: string) => tasks.closing(id, byScheduler) }),
     });
   } catch (err) {
     if (err instanceof DespawnFailure) {
@@ -642,7 +661,7 @@ export function createLocalOps(ctx: HandlerContext, origin: SpawnOrigin): LocalO
         replied.resolve(),
       );
     },
-    despawn: (payload) => run("despawn", crypto.randomUUID(), () => handleDespawn(ctx, despawnTrail, payload)),
+    despawn: (payload) => run("despawn", crypto.randomUUID(), () => handleDespawn(ctx, despawnTrail, payload, true)),
   };
 }
 
@@ -689,7 +708,7 @@ export function createHandler(
         case "spawn":
           return { payload: await handleSpawn(ctx, audit, plain.payload, from === SCHEDULER_ID, replied) };
         case "despawn":
-          return { payload: await handleDespawn(ctx, despawnTrail, plain.payload) };
+          return { payload: await handleDespawn(ctx, despawnTrail, plain.payload, from === SCHEDULER_ID) };
         case "metrics":
           return { payload: handleMetrics(ctx, plain.payload) };
         case "rescan": {

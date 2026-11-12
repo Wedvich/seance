@@ -999,6 +999,63 @@ describe("continuing a failed task", () => {
   });
 });
 
+describe("continuing an awaiting-merge task whose PR is blocked", () => {
+  const HANDOFF = [CAPABILITIES.continueTask, CAPABILITIES.continueSession, CAPABILITIES.continueHandoff];
+  const blocked = task("w", {
+    state: "awaiting-merge",
+    spec: { repo: ORIGIN, mode: "worktree", title: "Fix the thing" },
+    assignment: placedAt,
+    prUrl: "https://github.com/acme/app/pull/7",
+    pr: { state: "open", required: "failing", failing: ["test"], merge: "blocked", at: NOW },
+  });
+  const rowOf = (t: Task, capabilities: readonly string[]) =>
+    deriveQueue(state(ok([t]), {}, { machines: [machine({ capabilities })] }), NOW)
+      .sections.flatMap((section) => section.rows)
+      .find((row) => row.id === t.id);
+
+  test("Continue is the card's primary act when the leader and machine advertise continueHandoff", () => {
+    expect(rowOf(blocked, HANDOFF)).toMatchObject({ canContinue: true, inline: "continue", inlinePrimary: true });
+  });
+
+  test("an older leader or machine, a clean PR, or an until-reported task offers nothing", () => {
+    const plain = [CAPABILITIES.continueTask, CAPABILITIES.continueSession];
+    expect(rowOf(blocked, plain)).toMatchObject({ canContinue: false, inlinePrimary: false });
+    const clean = { ...blocked, pr: { state: "open" as const, merge: "clean" as const, at: NOW } };
+    expect(rowOf(clean, HANDOFF)).toMatchObject({ canContinue: false, inlinePrimary: false });
+    const reported = { ...blocked, spec: { ...blocked.spec, until: "reported" as const } };
+    expect(rowOf(reported, HANDOFF)).toMatchObject({ canContinue: false, inlinePrimary: false });
+  });
+
+  test("the blocked task's card names a continuation waiting on its newest landed link", () => {
+    const landed = task("c1", {
+      state: "running",
+      assignment: placedAt,
+      spec: { repo: ORIGIN, mode: "continue", continues: { task: "w", at: placedAt } },
+    });
+    const waiting = task("c2", {
+      state: "queued",
+      spec: { repo: ORIGIN, mode: "continue", title: "Unblock PR #7", continues: { task: "c1", at: placedAt } },
+    });
+    const pointed = { ...blocked, continuedBy: { task: "c1", createdAt: NOW } };
+    const row = deriveQueue(
+      state(ok([pointed, landed, waiting]), {}, { machines: [machine({ capabilities: HANDOFF })] }),
+      NOW,
+    )
+      .sections.flatMap((section) => section.rows)
+      .find((r) => r.id === "w");
+    expect(row?.continuing).toEqual({ id: "c2", text: "Continuing as Unblock PR #7 · waiting" });
+  });
+
+  test("a failed task's Continue stays the quiet one", () => {
+    const failed = task("f", {
+      state: "failed",
+      failure: { code: "session_failed", message: "exit 137" },
+      assignment: placedAt,
+    });
+    expect(rowOf(failed, HANDOFF)).toMatchObject({ canContinue: true, inline: "continue", inlinePrimary: false });
+  });
+});
+
 describe("the card's inline action", () => {
   const inline = (t: Task, capabilities: readonly string[] = []) =>
     deriveQueue(state(ok([t]), {}, { machines: [machine({ capabilities })] }), NOW)

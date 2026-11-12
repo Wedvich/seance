@@ -447,6 +447,71 @@ describe("LaunchLedger progress notes", () => {
   });
 });
 
+describe("LaunchLedger hand-off notes", () => {
+  const PR = "https://github.com/a/b/pull/1";
+
+  test("handedOff and continuedPr survive a reopen and later patches, stay out of progress, and a relaunch starts without them", async () => {
+    const ledger = await LaunchLedger.open(path, () => 9);
+    await ledger.record("t1");
+    await ledger.startNote("t1", { repo: "/r", path: "/r/.claude/worktrees/a", continuedPr: PR });
+    expect(await ledger.note("t1", { handedOff: true })).toBe(true);
+    await ledger.note("t1", { branch: "worktree-a" });
+    expect(ledger.notes()[0]).toMatchObject({ handedOff: true, continuedPr: PR });
+    expect(ledger.progress()).toEqual([{ taskId: "t1", at: 9, branch: "worktree-a" }]);
+    expect(ledger.progress()[0]).not.toHaveProperty("handedOff");
+    expect(ledger.progress()[0]).not.toHaveProperty("continuedPr");
+
+    const reopened = await LaunchLedger.open(path, () => 10);
+    expect(reopened.notes()[0]).toMatchObject({ handedOff: true, continuedPr: PR });
+    // A second identical note changes nothing.
+    expect(await reopened.apply("t1", { handedOff: true })).toBe("same");
+
+    await reopened.startNote("t1", { repo: "/r", path: "/r/.claude/worktrees/b" });
+    expect(reopened.notes()[0]).not.toHaveProperty("handedOff");
+    expect(reopened.notes()[0]).not.toHaveProperty("continuedPr");
+  });
+
+  test("cancelled survives a reopen and later patches, stays out of progress, and a relaunch starts without it", async () => {
+    const ledger = await LaunchLedger.open(path, () => 9);
+    await ledger.record("t1");
+    await ledger.startNote("t1", { repo: "/r", path: "/r/.claude/worktrees/a" });
+    expect(await ledger.note("t1", { closedHere: true, cancelled: true })).toBe(true);
+    await ledger.note("t1", { branch: "worktree-a" });
+    expect(ledger.notes()[0]).toMatchObject({ closedHere: true, cancelled: true });
+    expect(ledger.progress()[0]).not.toHaveProperty("cancelled");
+    const reopened = await LaunchLedger.open(path, () => 10);
+    expect(reopened.notes()[0]).toMatchObject({ closedHere: true, cancelled: true });
+    expect(await reopened.apply("t1", { cancelled: true })).toBe("same");
+    await reopened.startNote("t1", { repo: "/r", path: "/r/.claude/worktrees/b" });
+    expect(reopened.notes()[0]).not.toHaveProperty("cancelled");
+  });
+
+  test("a continuedPr that is not an https URL as written, or a handedOff that is not true, is dropped on read", async () => {
+    const ledger = await LaunchLedger.open(path, () => 9);
+    for (const id of ["t1", "t2", "t3"]) await ledger.record(id);
+    for (const id of ["t1", "t2", "t3"])
+      await ledger.startNote(id, { repo: "/r", path: `/r/.claude/worktrees/${id}`, continuedPr: PR });
+    const file = JSON.parse(await readFile(path, "utf8"));
+    file.progress[0].continuedPr = "http://github.com/a/b/pull/1";
+    file.progress[1].continuedPr = 7;
+    file.progress[2].handedOff = "yes";
+    await writeFile(path, JSON.stringify(file));
+    const reopened = await LaunchLedger.open(path, () => 10);
+    expect(reopened.notes()[0]).not.toHaveProperty("continuedPr");
+    expect(reopened.notes()[1]).not.toHaveProperty("continuedPr");
+    expect(reopened.notes()[2]).not.toHaveProperty("handedOff");
+    expect(reopened.notes()[2]).toMatchObject({ continuedPr: PR });
+  });
+
+  test("a handed-off launch with nothing else to say is not unaccounted for", async () => {
+    const ledger = await LaunchLedger.open(path, () => 9);
+    await ledger.record("t1");
+    await ledger.startNote("t1", undefined, undefined, 4242);
+    await ledger.note("t1", { handedOff: true });
+    expect(ledger.progress()).toEqual([]);
+  });
+});
+
 describe("LaunchLedger OOM samples", () => {
   const unit = { cgroup: "/system.slice/seanced.service", kills: 42, at: 5, paneId: "%1", windowId: "@1" };
 

@@ -878,6 +878,37 @@ describe("despawn is audited and answers with the list it left", () => {
     expect(seen).toBeUndefined();
   });
 
+  test("only a despawn sealed from the scheduler and naming itself the scheduler's is noted cancelled", async () => {
+    const ledger = LaunchLedger.memory();
+    // The pane id names the task: `%1` is `t-1`.
+    const backend: SessionBackend = {
+      spawn: () => Promise.reject(new Error("unused")),
+      sessions: () => Promise.resolve([]),
+      doctor: () => Promise.resolve([]),
+      despawn: async (id, opts) => {
+        await opts.closing?.(`t-${id.slice(1)}`);
+        return { window: "w", outcome: "killed" };
+      },
+    };
+    const handle = createHandler({ ...ctx, backend, tasks: new EndedTasks(ledger) });
+    const cases: readonly [string, string | undefined, object, boolean][] = [
+      ["the scheduler's own", SCHEDULER_ID, { client: SCHEDULER_CLIENT }, true],
+      ["the scheduler, with no client named", SCHEDULER_ID, {}, false],
+      ["an app that claims to be the scheduler", "app", { client: SCHEDULER_CLIENT }, false],
+      ["an app", "app", { client: "pwa" }, false],
+    ];
+    for (const [i, [name, from, extra, cancelled]] of cases.entries()) {
+      // oxlint-disable-next-line no-await-in-loop -- each case is its own launch
+      await ledger.record(`t-${i + 1}`);
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      const reply = await handle(request("despawn", { id: `%${i + 1}`, ...extra }), from);
+      expect(reply?.payload, name).toMatchObject({ ok: true });
+      const note = ledger.notes().find((n) => n.taskId === `t-${i + 1}`);
+      expect(note?.closedHere, name).toBe(true);
+      expect(note?.cancelled === true, name).toBe(cancelled);
+    }
+  });
+
   test("a backend that can't despawn answers with a code instead of dropping the request", async () => {
     const startOnly: SessionBackend = {
       spawn: () => Promise.reject(new Error("not under test")),
@@ -1013,6 +1044,8 @@ describe("a scheduler spawn that continues a failed task", () => {
     readonly repo?: string;
     readonly path?: string;
     readonly exit?: number;
+    readonly prUrl?: string;
+    readonly handedOff?: true;
     /** `null`: noted by a daemon predating session ids. */
     readonly session?: string | null;
   }
@@ -1030,6 +1063,8 @@ describe("a scheduler spawn that continues a failed task", () => {
         path: where.path ?? site,
         ...(session === null ? {} : { session }),
         ...(where.exit === undefined ? {} : { exit: where.exit }),
+        ...(where.prUrl === undefined ? {} : { prUrl: where.prUrl }),
+        ...(where.handedOff === undefined ? {} : { handedOff: true as const }),
       });
     const calls: { readonly request: SpawnRequest; readonly continuation: Continuation | undefined }[] = [];
     const backend: SessionBackend = {
@@ -1080,6 +1115,20 @@ describe("a scheduler spawn that continues a failed task", () => {
         continuation: { path: site, session: SESSION, exit: 137 },
       },
     ]);
+  });
+
+  test("the continued launch's PR and hand-off reach the backend and the new task's note, never from the request", async () => {
+    const pr = "https://github.com/a/b/pull/1";
+    const { ledger, calls, handlerCtx } = await rig({ prUrl: pr, handedOff: true });
+    const reply = await createHandler(handlerCtx)(
+      continuation({ continuedPr: "https://github.com/evil/x/pull/9", handedOff: false }),
+      SCHEDULER_ID,
+    );
+    expect(reply?.payload).toMatchObject({ ok: true });
+    expect(calls[0]?.continuation).toEqual({ path: site, session: SESSION, handedOff: true, continuedPr: pr });
+    expect(ledger.notes()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ taskId: NEW, path: site, continuedPr: pr })]),
+    );
   });
 
   test("the leader's own machine continues in process, under its own origin", async () => {

@@ -86,6 +86,10 @@ export interface Continuation {
   readonly exit?: number;
   /** The earlier window was closed from outside (`TaskProgress.vanished`); worded in the preamble. */
   readonly vanished?: true;
+  /** This daemon closed the earlier session for its hand-off, cleanly (exit 0 or none): the preamble says so. */
+  readonly handedOff?: true;
+  /** The PR URL the earlier launch had, from this ledger: noted on the new launch, never shown to the session. */
+  readonly continuedPr?: string;
 }
 
 /** One fetched attachment, for the seed: `name` is display text only, never part of `path`. */

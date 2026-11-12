@@ -138,13 +138,28 @@ const RESUME_NEVER_ASKS = [
 ] as const;
 
 /**
+ * A session this daemon closed for its hand-off (`handedOff`, from the old task's ledger note) ended
+ * cleanly at the end of its turn, so the first wording says nothing was interrupted.
+ *
  * Never asserts that the dead session's background work is gone: only claude itself
  * was stopped, and a surviving child is not something the pane checks can see. The
  * wording comes from the old task's own ledger note `exit`, never from a frame: nonzero
  * is a death, anything else (zero, or none noted) a cancel.
  */
-export function continuePreamble(path: string, exit: number | undefined, vanished?: boolean): string {
+export function continuePreamble(
+  path: string,
+  exit: number | undefined,
+  vanished?: boolean,
+  handedOff?: boolean,
+): string {
   const prefix = `This session was resumed by séance in the same git worktree at ${path}, after the previous session `;
+  if (handedOff === true && (exit === undefined || exit === 0)) {
+    return (
+      prefix +
+      `ended by handing its pull request off to séance (hand_off_task), which closed it at the end of its turn. ` +
+      `Nothing it started was interrupted: read the note below for why it was resumed, then carry on from there.`
+    );
+  }
   if (exit === undefined && vanished === true) {
     return (
       prefix +
@@ -216,14 +231,14 @@ function prepareHere(repo: RepoEntry, session: string | undefined): Prepared {
 
 /** `path` is the ledger's worktree, already canonical and checked (`spawnContinued`); `session` the id it noted there. */
 function prepareContinue(continuation: Continuation): Prepared {
-  const { path, session, exit, vanished } = continuation;
+  const { path, session, exit, vanished, handedOff } = continuation;
   return {
     launchDir: path,
     resultPath: path,
     worktreeFlag: [],
     session: { id: session, resume: true },
     env: RESUME_NEVER_ASKS,
-    preamble: continuePreamble(path, exit, vanished),
+    preamble: continuePreamble(path, exit, vanished, handedOff),
   };
 }
 

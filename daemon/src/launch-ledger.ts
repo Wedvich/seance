@@ -68,6 +68,8 @@ export interface LaunchSite {
   readonly worktree: string;
   /** The Claude session id this daemon chose for the launch (`--session-id`), or a continuation resumed. */
   readonly session?: string;
+  /** The PR URL of the launch a continuation continued, from this ledger: noted on the new launch (`TaskNote.continuedPr`). */
+  readonly continuedPr?: string;
 }
 
 /** What `crypto.randomUUID` makes, the only shape `--resume` is ever handed. */
@@ -108,6 +110,24 @@ export interface TaskNote {
   readonly server?: number;
   /** This daemon closed the pane itself (despawn, reap, harvest): never judged `vanished`. Sticky; internal. */
   readonly closedHere?: true;
+  /**
+   * This daemon closed the pane for a hand-off (`hand_off_task`): the continuation of it is worded as a
+   * handed-off session, not an interrupted one. Sticky; internal, never in `TaskProgress`.
+   */
+  readonly handedOff?: true;
+  /**
+   * The scheduler ended the session by hand (cancel, mark done): `closedHere` as well. Its PR is no scheduler
+   * watch's, so a continuation of it inherits none (`EndedTasks.continuation`). Sticky; internal, never in
+   * `TaskProgress`.
+   */
+  readonly cancelled?: true;
+  /**
+   * The PR URL of the launch this one continued (its `prUrl`, else its own `continuedPr`), copied from this
+   * ledger when the continuation landed, so a hand-off checks only its own note and the chain inherits it link
+   * by link. Internal, never in `TaskProgress`: as `prUrl` it would settle the continuation `awaiting-merge`
+   * on its predecessor's PR, and as progress the leader would read it.
+   */
+  readonly continuedPr?: string;
   /**
    * The pane went from tmux with no exit status and no close of this daemon's own (`exit-status.ts`):
    * `TaskProgress.vanished`, carried only while `exit` is absent. Sticky.
@@ -195,6 +215,9 @@ function parseNote(raw: unknown, ids: ReadonlySet<string>): NotedTask | null {
     oomKill,
     server,
     closedHere,
+    handedOff,
+    cancelled,
+    continuedPr,
     vanished,
   } = raw;
   if (typeof taskId !== "string" || !ids.has(taskId) || typeof at !== "number" || !Number.isFinite(at)) return null;
@@ -203,6 +226,7 @@ function parseNote(raw: unknown, ids: ReadonlySet<string>): NotedTask | null {
   const branchText = boundedText(branch, BRANCH_MAX_LENGTH);
   const tipText = typeof tip === "string" && TIP_PATTERN.test(tip) ? tip : undefined;
   const url = typeof prUrl === "string" && httpsUrl(prUrl) === prUrl ? prUrl : undefined;
+  const inherited = typeof continuedPr === "string" && httpsUrl(continuedPr) === continuedPr ? continuedPr : undefined;
   return {
     taskId,
     at,
@@ -222,6 +246,9 @@ function parseNote(raw: unknown, ids: ReadonlySet<string>): NotedTask | null {
     ...(typeof oomKill === "boolean" ? { oomKill } : {}),
     ...(isServerPid(server) ? { server } : {}),
     ...(closedHere === true ? { closedHere: true as const } : {}),
+    ...(handedOff === true ? { handedOff: true as const } : {}),
+    ...(cancelled === true ? { cancelled: true as const } : {}),
+    ...(inherited === undefined ? {} : { continuedPr: inherited }),
     ...(vanished === true ? { vanished: true as const } : {}),
   };
 }
@@ -327,6 +354,11 @@ function mergeNote(taskId: string, base: NotedTask | undefined, patch: TaskNote)
         ? { server: base.server }
         : {}),
     ...(patch.closedHere === true || base?.closedHere === true ? { closedHere: true as const } : {}),
+    ...(patch.handedOff === true || base?.handedOff === true ? { handedOff: true as const } : {}),
+    ...(patch.cancelled === true || base?.cancelled === true ? { cancelled: true as const } : {}),
+    ...((patch.continuedPr ?? base?.continuedPr) === undefined
+      ? {}
+      : { continuedPr: patch.continuedPr ?? base?.continuedPr }),
     ...(patch.vanished === true || base?.vanished === true ? { vanished: true as const } : {}),
   };
 }
@@ -361,13 +393,16 @@ function sameProgress(a: NotedTask, b: NotedTask): boolean {
   );
 }
 
-/** `server`, `closedHere` and `session` write but are no progress: they never move `at`. */
+/** `server`, `closedHere`, `handedOff`, `cancelled`, `continuedPr` and `session` write but are no progress: they never move `at`. */
 function sameNote(a: NotedTask, b: NotedTask): boolean {
   return (
     sameProgress(a, b) &&
     sameSample(a.oom, b.oom) &&
     a.server === b.server &&
     a.closedHere === b.closedHere &&
+    a.handedOff === b.handedOff &&
+    a.cancelled === b.cancelled &&
+    a.continuedPr === b.continuedPr &&
     a.session === b.session
   );
 }
@@ -620,12 +655,18 @@ export class LaunchLedger {
    * left. Sticky `ahead`/`pushed`/`merged` and the PR URL describe a worktree
    * that no longer is this task's; carried over, they could settle it merged.
    * `prUrl` is one the new session reported while its spawn was still in
-   * flight, which the mod sends once: it belongs to the new launch.
+   * flight, which the mod sends once: it belongs to the new launch, and so does the PR URL a
+   * continuation inherits (`site.continuedPr`).
    * Best-effort like `note`.
    */
   async startNote(
     taskId: string,
-    site?: { readonly repo: string; readonly path: string; readonly session?: string },
+    site?: {
+      readonly repo: string;
+      readonly path: string;
+      readonly session?: string;
+      readonly continuedPr?: string;
+    },
     prUrl?: string,
     server?: number,
   ): Promise<void> {
@@ -643,6 +684,7 @@ export class LaunchLedger {
         at,
         ...(site === undefined ? {} : { siteAt: at, repo: site.repo, path: site.path }),
         ...(isSessionId(site?.session) ? { session: site.session } : {}),
+        ...(site?.continuedPr === undefined ? {} : { continuedPr: site.continuedPr }),
         ...(prUrl === undefined ? {} : { prUrl }),
         ...(server === undefined ? {} : { server }),
       });

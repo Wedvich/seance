@@ -75,6 +75,7 @@ import {
   type PauseRecord,
   type PauseReply,
   type PauseRequest,
+  type ContinuedBy,
   type PrAlertStamp,
   type PrStatus,
   type Placement,
@@ -1184,6 +1185,16 @@ export function parsePrAlertStamp(value: unknown): PrAlertStamp | null {
   return { reason: known, head, at };
 }
 
+/** The leader's pointer to a task's newest landed continuation, built field by field; null when malformed. */
+export function parseContinuedBy(value: unknown): ContinuedBy | null {
+  if (!isRecord(value) || !Object.keys(value).every((key) => key === "task" || key === "createdAt" || key === "live")) {
+    return null;
+  }
+  const { task, createdAt, live } = value;
+  if (!isTaskId(task) || !isFiniteNumber(createdAt) || (live !== undefined && live !== true)) return null;
+  return { task, createdAt, ...(live === true ? { live } : {}) };
+}
+
 /**
  * A task as `queue`, `cancel` and `mark-done` carry it, and as its
  * record holds it at rest. A state this build does not know nulls the task: it
@@ -1238,6 +1249,8 @@ export function parseTask(value: unknown): Task | null {
     value["prs"] === undefined || progress.prUrl === undefined ? null : parseTaskPrs(value["prs"], progress.prUrl);
   // Apart from `progress`, like `pr`: a lost stamp costs one repeated alert, a fatal parse would hide the task.
   const prAlert = value["prAlert"] === undefined ? null : parsePrAlertStamp(value["prAlert"]);
+  // Apart from `progress` too: the leader rewrites it on its next pass, so a lost one costs a pass.
+  const continuedBy = value["continuedBy"] === undefined ? null : parseContinuedBy(value["continuedBy"]);
   const { remoteSession, inputReason, inputTool } = value;
   const waiting = known === "needs-input" || known === "lost";
   return {
@@ -1256,6 +1269,7 @@ export function parseTask(value: unknown): Task | null {
     ...(pr === null ? {} : { pr }),
     ...(prs === null ? {} : { prs }),
     ...(prAlert === null ? {} : { prAlert }),
+    ...(continuedBy === null ? {} : { continuedBy }),
     // Dropped, never fatal, like `pr`: a link is display-only.
     ...(isRemoteSessionId(remoteSession) ? { remoteSession } : {}),
     // Dropped, never fatal, like `remoteSession`: display-only. Only on the states a wait lives in

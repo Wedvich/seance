@@ -246,7 +246,11 @@ green:
   never when ingest is stopped), bound to the pane like the `done` report (including on a
   host with no peer pid) and never to an id from the frame — and a hand-off, which only
   `hand_off_task` sends (`seanced session-event` drops one unsent), carries no state, and is taken
-  only for the pane's own task when its launch ledger holds a launch and a PR URL of it (`untasked`,
+  only for the pane's own task when its launch ledger holds a launch and a PR URL of it — one its
+  session reported, or, for a continuation, the one that ledger noted on it at launch from the launch
+  it continues (`continuedPr`, from any launch but one the scheduler cancelled: a despawn sealed from the scheduler naming
+  `client: "scheduler"`, noted `cancelled`), never
+  from a frame — (`untasked`,
   `unrecorded`, `prless` otherwise): the daemon marks the pane in memory and, at that pane's next
   `idle` carrying `turnEnded` (its turn's end, never a respawn's idle), closes it through the graceful despawn after re-reading that it still carries that task,
   audited `origin=handoff` (`handoff.ts`), never a pane or task a frame names.

@@ -1,11 +1,31 @@
 import type { Machine } from "./app-client.ts";
 import { autonomyOf } from "./autonomy.ts";
+import { blockedBrief, taskPrBlock } from "./pr-blocked.ts";
 import { TASK_PHASES } from "./task-phase.ts";
-import { CAPABILITIES, type Target, type Task, type TaskFailureCode, type TaskSpec } from "./types.ts";
+import {
+  CAPABILITIES,
+  LAUNCH_LEDGER_MAX_AGE_MS,
+  type Target,
+  type Task,
+  type TaskFailureCode,
+  type TaskSpec,
+} from "./types.ts";
 
+/**
+ * `resumes` is the id of the session's task when it is not `task` itself (an `awaiting-merge` task's chain
+ * moved on: a later continuation holds the session), and `brief` the fixed text a blocked PR's continuation
+ * opens with. Both absent: the offer resumes `task` and adds nothing. An id, not a `Task`: the caller's list
+ * may not hold it.
+ */
 export type ContinueOffer =
-  | { readonly ok: true; readonly at: Target }
+  | { readonly ok: true; readonly at: Target; readonly resumes?: string; readonly brief?: string }
   | { readonly ok: false; readonly reason: string };
+
+/** What only the caller knows: its best leader-clock now, and whether the verified leader advertises `continueHandoff`. */
+export interface OfferContext {
+  readonly now: number;
+  readonly leaderHandoff: boolean;
+}
 
 /**
  * Failure codes of a continuation that ran in the worktree: it landed, so a session may
@@ -64,6 +84,33 @@ export function waitingContinuation(task: Task, tasks: readonly Task[]): Task | 
 }
 
 /**
+ * The newest continuation of `task`'s chain that landed (`tookOver`), among `tasks`: walk down from `task`,
+ * at each link taking the landed continuation created last (the greater id on a tie). Undefined when none
+ * landed. The leader's pointer (`Task.continuedBy`) is this, so one definition of "landed" serves it and the offer.
+ */
+export function newestLanded(task: Task, tasks: readonly Task[]): Task | undefined {
+  let found: Task | undefined;
+  let current = task;
+  for (let step = 0; step < tasks.length; step++) {
+    let next: Task | undefined;
+    for (const other of tasks) {
+      if (other.spec.continues?.task !== current.id || !tookOver(other)) continue;
+      if (
+        next === undefined ||
+        other.createdAt > next.createdAt ||
+        (other.createdAt === next.createdAt && other.id > next.id)
+      ) {
+        next = other;
+      }
+    }
+    if (next === undefined) return found;
+    found = next;
+    current = next;
+  }
+  return found;
+}
+
+/**
  * Whether any continuation of `task`, however deep its chain (a later one continues the previous,
  * not the original), is waiting, dispatching or placed among `tasks`. Bounded by the list's length,
  * so a cycle ends the walk.
@@ -102,8 +149,19 @@ function sessionResumable(task: Task): boolean {
  * the worktree, so a second would only be refused by the daemon. One still waiting withholds
  * it too, until it lands or ends unplaced. Imports nothing that logs, since `seanced mcp`
  * reaches it.
+ *
+ * A third case: an `awaiting-merge` task whose PR is blocked (`taskPrBlock`), not under `until: "reported"`,
+ * and only with a `context`, since it needs the leader's clock and whether the verified leader advertises
+ * `continueHandoff`. Which session to resume comes from the leader's pointer (`Task.continuedBy`), never from
+ * `tasks`, which is bounded and may leave the chain's newest out: the offer then names it (`resumes`) and
+ * carries the fixed text the continuation opens with (`brief`). The chain shares its first machine.
  */
-export function continueOffer(task: Task, machines: readonly Machine[], tasks: readonly Task[]): ContinueOffer {
+export function continueOffer(
+  task: Task,
+  machines: readonly Machine[],
+  tasks: readonly Task[],
+  context?: OfferContext,
+): ContinueOffer {
   if (task.state === "cancelled") {
     if (task.assignment === undefined) {
       return { ok: false, reason: "a task cancelled before it started has no session to continue" };
@@ -114,6 +172,8 @@ export function continueOffer(task: Task, machines: readonly Machine[], tasks: r
         reason: "its session had already finished before it was cancelled; use Follow up instead",
       };
     }
+  } else if (task.state === "awaiting-merge") {
+    return blockedOffer(task, machines, tasks, context);
   } else if (task.state !== "failed" || !RESUMABLE_FAILURES.has(task.failure?.code ?? "")) {
     return {
       ok: false,
@@ -137,6 +197,24 @@ export function continueOffer(task: Task, machines: readonly Machine[], tasks: r
   if (waiting !== undefined) {
     return { ok: false, reason: `already continuing as task ${waiting.id}, which is still waiting in the queue` };
   }
+  const placed = placement(task, machines);
+  if (!placed.ok) return placed;
+  if (task.state === "cancelled" && !placed.machine.capabilities?.includes(CAPABILITIES.continueCancelled)) {
+    return {
+      ok: false,
+      reason: "the machine it ran on can't continue a cancelled session yet (needs seanced update)",
+    };
+  }
+  return { ok: true, at: placed.at };
+}
+
+/** Where the task ran, when that machine can continue a session at all. */
+function placement(
+  task: Task,
+  machines: readonly Machine[],
+):
+  | { readonly ok: true; readonly at: Target; readonly machine: Machine }
+  | { readonly ok: false; readonly reason: string } {
   if (task.spec.mode === "here") {
     return { ok: false, reason: "a task run in place has no worktree of its own to continue" };
   }
@@ -149,13 +227,60 @@ export function continueOffer(task: Task, machines: readonly Machine[], tasks: r
   if (caps?.includes(CAPABILITIES.continueTask) !== true || !caps.includes(CAPABILITIES.continueSession)) {
     return { ok: false, reason: "the machine it ran on can't continue a session yet (needs seanced update)" };
   }
-  if (task.state === "cancelled" && machine.capabilities?.includes(CAPABILITIES.continueCancelled) !== true) {
+  return {
+    ok: true,
+    at: { deviceId: assignment.deviceId, exclave: assignment.exclave, clone: assignment.clone },
+    machine,
+  };
+}
+
+/**
+ * The offer for an `awaiting-merge` task. No list walk when the leader's pointer is absent: the leader gate
+ * guarantees one that writes it, and a walk over a bounded list is what the pointer replaced.
+ */
+function blockedOffer(
+  task: Task,
+  machines: readonly Machine[],
+  tasks: readonly Task[],
+  context: OfferContext | undefined,
+): ContinueOffer {
+  if (task.spec.until === "reported") {
+    return { ok: false, reason: "it waits on its session's own done report, not on a merge" };
+  }
+  const reason = taskPrBlock(task);
+  if (reason === null) return { ok: false, reason: "its pull request is not blocked; it is waiting to merge" };
+  if (context === undefined || !context.leaderHandoff) {
     return {
       ok: false,
-      reason: "the machine it ran on can't continue a cancelled session yet (needs seanced update)",
+      reason: "the scheduler's leader can't continue a task waiting to merge yet (needs seanced update)",
     };
   }
-  return { ok: true, at: { deviceId: assignment.deviceId, exclave: assignment.exclave, clone: assignment.clone } };
+  if (task.continuedBy?.live === true || continuationUnderway(task, tasks)) {
+    return { ok: false, reason: "a continuation of it is still waiting or running" };
+  }
+  const resumes = task.continuedBy?.task ?? task.id;
+  const since = task.continuedBy?.createdAt ?? task.createdAt;
+  // The ledger evicts by launch time, `createdAt` is never later than the launch: this stops early, never late.
+  if (context.now - since > LAUNCH_LEDGER_MAX_AGE_MS) {
+    return {
+      ok: false,
+      reason: "its session is older than its machine's launch ledger keeps (a week); resume it by hand",
+    };
+  }
+  const placed = placement(task, machines);
+  if (!placed.ok) return placed;
+  if (placed.machine.capabilities?.includes(CAPABILITIES.continueHandoff) !== true) {
+    return {
+      ok: false,
+      reason: "the machine it ran on can't continue a handed-off session yet (needs seanced update)",
+    };
+  }
+  return {
+    ok: true,
+    at: placed.at,
+    ...(resumes === task.id ? {} : { resumes }),
+    brief: blockedBrief(task, reason),
+  };
 }
 
 /**
@@ -164,11 +289,14 @@ export function continueOffer(task: Task, machines: readonly Machine[], tasks: r
  * nothing that places or orders it: the target is exact, and the old task's
  * dependents stay failed. The caller stamps `client`.
  *
+ * `continues` names the session it resumes: the task itself, or, for a chain's later continuation, the
+ * newest one that landed, while the spec is still copied from `task`, the one the user tapped.
+ *
  * A `steer` task continues at `checkpoint`, without plan mode: the resumed conversation holds
  * whatever plan the user approved, and a session that stopped mid-build would otherwise stall
  * on a second approval.
  */
-export function continuationSpec(task: Task, at: Target, prompt?: string): TaskSpec {
+export function continuationSpec(task: Task, at: Target, prompt?: string, continues: string = task.id): TaskSpec {
   const { spec } = task;
   const note = prompt?.trim();
   const steered = autonomyOf(spec) === "steer";
@@ -187,6 +315,24 @@ export function continuationSpec(task: Task, at: Target, prompt?: string): TaskS
         }),
     ...(spec.until === undefined ? {} : { until: spec.until }),
     ...(spec.linear === undefined ? {} : { linear: spec.linear }),
-    continues: { task: task.id, at },
+    continues: { task: continues, at },
   };
+}
+
+/**
+ * What every client writes for an accepted offer: the continuation's spec with the blocked PR's brief ahead of
+ * the user's own note (a blank line between), resuming the session the offer names. One place, so no client
+ * can skip the brief.
+ */
+export function offeredSpec(task: Task, offer: Extract<ContinueOffer, { ok: true }>, prompt?: string): TaskSpec {
+  const joined = [offer.brief, prompt?.trim()].filter((part) => part !== undefined && part !== "").join("\n\n");
+  const spec = continuationSpec(task, offer.at, joined, offer.resumes ?? task.id);
+  // An untitled task would otherwise be named by its prompt's first line, the brief's: on its card and as its window.
+  return offer.brief === undefined || spec.title !== undefined ? spec : { ...spec, title: blockedTitle(task) };
+}
+
+/** `Unblock PR #7`: the number is the last path segment of the PR URL, kept only when it is digits. */
+function blockedTitle(task: Task): string {
+  const number = task.prUrl?.split("/").at(-1);
+  return number !== undefined && /^[0-9]+$/u.test(number) ? `Unblock PR #${number}` : "Unblock PR";
 }

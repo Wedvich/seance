@@ -2672,10 +2672,15 @@ describe("continue_task", () => {
 
   /** The leader (device-1) and the machine the task ran on (device-2), each advertising `continueTask` unless held back. */
   function continuingMachines(
-    advertising: { readonly leader?: boolean; readonly box?: boolean; readonly cancelled?: boolean } = {},
+    advertising: {
+      readonly leader?: boolean;
+      readonly box?: boolean;
+      readonly cancelled?: boolean;
+      readonly leaderHandoff?: boolean;
+    } = {},
   ): Machine[] {
     const [leader, box] = autoMachines();
-    const advertise = (m: Machine | undefined, on: boolean | undefined, cancelled = false): Machine =>
+    const advertise = (m: Machine | undefined, on: boolean | undefined, cancelled = false, handoff = true): Machine =>
       machine({
         ...m,
         ...(on === false
@@ -2684,11 +2689,15 @@ describe("continue_task", () => {
               capabilities: [
                 CAPABILITIES.continueTask,
                 CAPABILITIES.continueSession,
+                ...(handoff ? [CAPABILITIES.continueHandoff] : []),
                 ...(cancelled ? [CAPABILITIES.continueCancelled] : []),
               ],
             }),
       });
-    return [advertise(leader, advertising.leader), advertise(box, advertising.box, advertising.cancelled)];
+    return [
+      advertise(leader, advertising.leader, false, advertising.leaderHandoff),
+      advertise(box, advertising.box, advertising.cancelled),
+    ];
   }
 
   async function callContinue(
@@ -2753,6 +2762,54 @@ describe("continue_task", () => {
     expect(toolText(none)).toContain("no verified scheduler is leading");
     expect(fake.creates).toEqual([]);
     lazy.stop();
+  });
+
+  describe("an awaiting-merge task whose PR is blocked", () => {
+    const stuckTask = (over: Partial<Task> = {}): Task =>
+      task({
+        ...failedTask,
+        state: "awaiting-merge",
+        failure: undefined,
+        prUrl: "https://github.com/acme/app/pull/7",
+        pr: { state: "open", required: "failing", failing: ["test (ubuntu)"], merge: "blocked", at: 1 },
+        ...over,
+      });
+
+    test("queues a continuation of the session with the fixed brief, then the caller's note", async () => {
+      const { text, error, fake } = await callContinue([stuckTask()], continuingMachines(), {
+        taskId: "t-1",
+        prompt: "mind the lockfile",
+      });
+      expect(error).toBe(false);
+      const created = fake.creates[0];
+      expect(created?.spec).toMatchObject({ mode: "continue", continues: { task: "t-1", at: AT }, client: "mcp" });
+      expect(created?.spec.prompt).toContain("https://github.com/acme/app/pull/7");
+      expect(created?.spec.prompt).toContain("test (ubuntu)");
+      expect(created?.spec.prompt).toEndWith("mind the lockfile");
+      expect(text).toStartWith("continuing task t-1\n");
+    });
+
+    test("resumes the session the leader's pointer names", async () => {
+      const { error, fake } = await callContinue(
+        [stuckTask({ continuedBy: { task: "t-9", createdAt: 5_000 } })],
+        continuingMachines(),
+      );
+      expect(error).toBe(false);
+      expect(fake.creates[0]?.spec).toMatchObject({ continues: { task: "t-9", at: AT } });
+    });
+
+    test("is refused, writing nothing, for a leader that lacks continueHandoff, a clean PR, until: reported, or a live pointer", async () => {
+      const attempts = [
+        await callContinue([stuckTask()], continuingMachines({ leaderHandoff: false })),
+        await callContinue([stuckTask({ pr: { state: "open", merge: "clean", at: 1 } })]),
+        await callContinue([stuckTask({ spec: { ...failedTask.spec, until: "reported" } })]),
+        await callContinue([stuckTask({ continuedBy: { task: "t-9", createdAt: 5_000, live: true } })]),
+      ];
+      for (const attempt of attempts) {
+        expect(attempt.error).toBe(true);
+        expect(attempt.fake.creates).toEqual([]);
+      }
+    });
   });
 
   test("refuses a task the leader does not list, a task that is not a failed session, and a here run", async () => {

@@ -1,7 +1,7 @@
 import {
   CAPABILITIES,
   withAutonomy,
-  continuationSpec,
+  offeredSpec,
   continueOffer,
   failureReasonText,
   httpsUrl,
@@ -489,9 +489,10 @@ export function continueGateError(availability: SchedulerAvailability, advertise
 }
 
 /**
- * Queues a task that resumes a failed or cancelled task's session (DESIGN.md, Daemon, "Continuing a
- * session"): the same gates as the app's Continue button — the leader and the machine it ran on
- * advertise `continueTask` (and `continueCancelled` for a cancelled task), the task is a failed or cancelled session in a worktree — then a create
+ * Queues a task that resumes a failed, cancelled or blocked `awaiting-merge` task's session (DESIGN.md,
+ * Daemon, "Continuing a session"): the same gates as the app's Continue button — the leader and the machine it
+ * ran on advertise `continueTask` (and `continueCancelled` for a cancelled task, `continueHandoff` for an
+ * `awaiting-merge` one), the task is a failed or cancelled session in a worktree, or a waiting one whose PR is blocked — then a create
  * like `spawn_session`'s. `label` names the caller in refusals. Never logs, as `enqueueAuto`.
  */
 export async function continueAuto(
@@ -524,9 +525,12 @@ export async function continueAuto(
       `${label} refused: task ${taskId} is not in the leader's list (pruned, or past the ${QUEUE_MAX_TASKS} most relevant)`,
     );
   }
-  const offer = continueOffer(task, lease.machines, reply.tasks);
+  const offer = continueOffer(task, lease.machines, reply.tasks, {
+    now: reply.at,
+    leaderHandoff: leaderAdvertises(lease, CAPABILITIES.continueHandoff),
+  });
   if (!offer.ok) return failed(`${label} refused: ${offer.reason}`);
-  const spec = continuationSpec(task, offer.at, prompt);
+  const spec = offeredSpec(task, offer, prompt);
   const invalid = specError(spec, surface);
   if (invalid !== null) return failed(`${label} refused: ${invalid}`);
   const enqueued = await enqueueAuto(lease.scheduler, spec, audit, surface);

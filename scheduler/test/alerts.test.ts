@@ -942,6 +942,52 @@ describe("pr-blocked", () => {
       expect(alerts).toHaveLength(1);
     });
 
+    test("(f) a landed continuation clears the stamp and holds the alert while it runs; it ends with no new head and the next reading alerts once", async () => {
+      const { alerts, clock, fleet, scheduler, store } = setup();
+      await seed(store, { prAlert: { reason: "conflict", head: H1, at: NOW } });
+      const continuation: Task = {
+        id: "c",
+        state: "running",
+        createdAt: NOW + 1,
+        assignment: ON_A,
+        spec: spec({
+          mode: "continue",
+          continues: { task: "t", at: { deviceId: "a", exclave: "main", clone: "app" } },
+        }),
+      };
+      expect((await store.put("c", 0, continuation)).ok).toBe(true);
+      await scheduler.load();
+      await pass(scheduler, fleet, clock.now);
+      const marked = (await stored(store, "t")).body;
+      expect(marked.continuedBy).toEqual({ task: "c", createdAt: NOW + 1, live: true });
+      expect(marked).not.toHaveProperty("prAlert");
+
+      await scheduler.onPrStatus("t", PR, conflict());
+      expect(alerts).toEqual([]);
+
+      const running = await stored(store, "c");
+      expect((await store.put("c", running.version, { ...continuation, state: "done", doneBy: "session" })).ok).toBe(
+        true,
+      );
+      await scheduler.refresh("c");
+      await pass(scheduler, fleet, clock.now);
+      expect((await stored(store, "t")).body.continuedBy).toEqual({ task: "c", createdAt: NOW + 1 });
+
+      await scheduler.onPrStatus("t", PR, conflict(H1, NOW + 2_000));
+      await scheduler.onPrStatus("t", PR, conflict(H1, NOW + 3_000));
+      expect(alerts).toHaveLength(1);
+    });
+
+    test("(g) a pass with no change to the chain writes nothing to the task", async () => {
+      const { clock, fleet, scheduler, store } = setup();
+      await seed(store, { prAlert: { reason: "conflict", head: H1, at: NOW } });
+      await scheduler.load();
+      const before = (await stored(store, "t")).version;
+      await pass(scheduler, fleet, clock.now);
+      await pass(scheduler, fleet, clock.now);
+      expect(await stored(store, "t")).toMatchObject({ version: before, body: { prAlert: { head: H1 } } });
+    });
+
     test("(e) a write that conflicts and retries still alerts exactly once", async () => {
       const { alerts, scheduler, store } = setup();
       await seed(store);

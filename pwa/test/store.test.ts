@@ -2654,6 +2654,60 @@ describe("the queue screen", () => {
       expect(client.creates).toEqual([]);
     });
 
+    describe("an awaiting-merge task whose PR is blocked", () => {
+      const prUrl = "https://github.com/acme/app/pull/7";
+      const stuck = (): Task => ({
+        id: "w-1",
+        spec: { repo: ORIGIN, mode: "worktree", prompt: "fix it", title: "fix-it", model: "opus" },
+        state: "awaiting-merge",
+        assignment: { ...at, window: "fix-it" },
+        createdAt: Date.now() - 1_000,
+        prUrl,
+        pr: { state: "open", required: "failing", failing: ["test (ubuntu)"], merge: "blocked", at: Date.now() },
+      });
+      const caps = [CAPABILITIES.continueTask, CAPABILITIES.continueSession, CAPABILITIES.continueHandoff];
+
+      async function withStuck(client: ScriptedClient, task: Task): Promise<Store> {
+        client.onQueue = async () => ({ tasks: [task], holds: [], at: 1 });
+        const store = new Store(client);
+        store.openQueue();
+        await until(() => store.getState().queueView?.kind === "ok", "the queue read");
+        return store;
+      }
+
+      test("writes a continue task resuming the leader's pointer, with the fixed brief as its prompt", async () => {
+        const client = new ScriptedClient({ machines: [autoMachine("dev-a", { capabilities: caps })] });
+        const store = await withStuck(client, {
+          ...stuck(),
+          continuedBy: { task: "c-0", createdAt: Date.now() - 500 },
+        });
+        await store.continueTask("w-1");
+        expect(store.getState().queueNotice).toBeNull();
+        expect(client.creates).toHaveLength(1);
+        const spec = client.creates[0]?.spec;
+        expect(spec).toMatchObject({ mode: "continue", model: "opus", continues: { task: "c-0", at }, client: "pwa" });
+        expect(spec?.prompt).toContain(prUrl);
+        expect(spec?.prompt).toContain("test (ubuntu)");
+      });
+
+      test("without a pointer it resumes the task itself", async () => {
+        const client = new ScriptedClient({ machines: [autoMachine("dev-a", { capabilities: caps })] });
+        const store = await withStuck(client, stuck());
+        await store.continueTask("w-1");
+        expect(client.creates[0]?.spec).toMatchObject({ continues: { task: "w-1", at } });
+      });
+
+      test("a leader that does not advertise continueHandoff is never asked", async () => {
+        const client = new ScriptedClient({
+          machines: [autoMachine("dev-a", { capabilities: [CAPABILITIES.continueTask, CAPABILITIES.continueSession] })],
+        });
+        const store = await withStuck(client, stuck());
+        await store.continueTask("w-1");
+        expect(client.creates).toEqual([]);
+        expect(store.getState().queueNotice).not.toBeNull();
+      });
+    });
+
     test("a second tap while the first continuation waits writes nothing and names the first", async () => {
       const client = capable();
       const store = await withFailed(client);

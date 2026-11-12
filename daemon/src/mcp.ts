@@ -4,12 +4,14 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
 import {
   accountNameIn,
+  CAPABILITIES,
   AUTONOMY_LEVELS,
   autonomyOf,
   DEFAULT_AUTONOMY,
   withAutonomy,
   type AutonomyLevel,
   continueOffer,
+  type OfferContext,
   DEP_AFTER,
   knownAccounts,
   taskPrBlock,
@@ -51,6 +53,7 @@ import { cliSink, type AuditSink } from "./audit.ts";
 import {
   continueAuto,
   enqueueAuto,
+  advertises,
   leaderTakesReported,
   MCP_PLACEMENT_NAMES,
   pinAccountGateError,
@@ -700,6 +703,7 @@ function describeTask(
   machines: readonly Machine[],
   names: AccountNames,
   tasks: readonly Task[],
+  offer: OfferContext,
 ): Record<string, unknown> {
   const placement = placementOf(task, machines);
   const pin = describePin(task, machines, names);
@@ -735,7 +739,7 @@ function describeTask(
     ...(spec.linear === undefined ? {} : { linear: spec.linear }),
     ...(spec.continues === undefined ? {} : { continues: spec.continues.task }),
     // The same offer the app's Continue button follows; `continue_task` still re-checks the leader.
-    ...(continueOffer(task, machines, tasks).ok ? { continuable: true } : {}),
+    ...(continueOffer(task, machines, tasks, offer).ok ? { continuable: true } : {}),
     // Never `prBlocked` on the task: an `until: "reported"` task does not wait on its merge.
     ...(blocked === null ? {} : { prBlocked: blocked }),
   };
@@ -912,7 +916,11 @@ export function buildMcpServer(
         ];
         // Only a pin or a hold names an account here: no listing for a queue that names none.
         const names = await accountNames(lease, named, named);
-        const tasks = reply.tasks.map((task) => describeTask(task, lease.machines, names, reply.tasks));
+        const offer = {
+          now: reply.at,
+          leaderHandoff: advertises(lease.machines, lease.scheduler.availability(), CAPABILITIES.continueHandoff),
+        };
+        const tasks = reply.tasks.map((task) => describeTask(task, lease.machines, names, reply.tasks, offer));
         const holds = (reply.holds ?? []).map((hold) => describeHold(hold, names));
         return textResult(JSON.stringify({ at: new Date(reply.at).toISOString(), holds, tasks }, null, 2));
       }),
@@ -976,10 +984,10 @@ export function buildMcpServer(
   server.registerTool(
     "continue_task",
     {
-      title: "Continue a failed or cancelled scheduler task",
-      description: `Resume a task whose session ended in failure, or that was cancelled after it started (get_queue marks one \`continuable\`): the same conversation, in the same worktree on the same machine, as a new task the scheduler dispatches there, at the task's own autonomy level (a steer task's at checkpoint, out of plan mode). Continue moves to the newest continuation that ran in a chain, and is withheld while one still waits in the queue (cancel that one to continue again); the old task stays as it was, and so do the tasks that wait on it. The new task waits in the queue like any other, and fails if the worktree is gone (reaped), a session is open in it, or a later task ran in the worktree, or the machine no longer holds the launch record (kept a week, at most 128 launches). \`prompt\` is an optional note the resumed session is told, within the ${TASK_REQUEST_LIMITS.prompt}-character prompt bound. Answers with the new task id; get_queue shows where it lands. ${AUTO_LIMITS}`,
+      title: "Continue a failed, cancelled or blocked scheduler task",
+      description: `Resume a task whose session ended in failure, or that was cancelled after it started (get_queue marks one \`continuable\`), or an awaiting-merge task whose PR is blocked (\`prBlocked\` in get_queue): the resumed session (the newest of its chain) is told the PR, the reason and the failing required checks, fixes and pushes, then hands the PR back, and the task keeps waiting for the merge. The same conversation, in the same worktree on the same machine, as a new task the scheduler dispatches there, at the task's own autonomy level (a steer task's at checkpoint, out of plan mode). Continue moves to the newest continuation that ran in a chain, and is withheld while one still waits in the queue (cancel that one to continue again); the old task stays as it was, and so do the tasks that wait on it. The new task waits in the queue like any other, and fails if the worktree is gone (reaped), a session is open in it, or a later task ran in the worktree, or the machine no longer holds the launch record (kept a week, at most 128 launches). \`prompt\` is an optional note the resumed session is told, within the ${TASK_REQUEST_LIMITS.prompt}-character prompt bound. Answers with the new task id; get_queue shows where it lands. ${AUTO_LIMITS}`,
       inputSchema: z.strictObject({
-        taskId: z.string().describe("The failed or cancelled task's id from get_queue"),
+        taskId: z.string().describe("The failed, cancelled or blocked awaiting-merge task's id from get_queue"),
         prompt: z.string().optional().describe("Optional: a note for the resumed session, from the user"),
       }),
       annotations: { readOnlyHint: false },
@@ -1363,7 +1371,7 @@ export function buildMcpServer(
     {
       title: "Hand this session's PR to the scheduler and close the session",
       description:
-        "Close this session once the current turn ends, leaving its open pull request to the scheduler: the task then waits for the merge (awaiting merge) instead of this session watching CI. Call it only after the PR is open and whatever merges it is in place (auto-merge armed behind a required check, or a reviewer requested), as the last tool call of the run, then end the turn with your final summary. Refused, with the reason, outside a scheduler task or when this machine's daemon saw no `gh pr create` from this session; keep watching the PR yourself then. Not for a task told to call `report_task_done` when finished: report it instead, since after a hand-off no session is left to report and the task waits until it expires. The worktree is kept, so the task can be continued later.",
+        "Close this session once the current turn ends, leaving its open pull request to the scheduler: the task then waits for the merge (awaiting merge) instead of this session watching CI. Call it only after the PR is open and whatever merges it is in place (auto-merge armed behind a required check, or a reviewer requested), as the last tool call of the run, then end the turn with your final summary. The one exception: a session that séance continued to unblock its pull request (its prompt says so and tells you to call this) calls it whatever the PR's state, armed or not, once its fix is pushed or there is nothing to push. Refused, with the reason, outside a scheduler task or when this machine's daemon saw no `gh pr create` from this session or the session it continues; keep watching the PR yourself then. Not for a task told to call `report_task_done` when finished: report it instead, since after a hand-off no session is left to report and the task waits until it expires. A continuation of a blocked task ends `done` instead: the task it continued keeps waiting for the merge. The worktree is kept, so the task can be continued later.",
       inputSchema: NO_INPUT,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     },

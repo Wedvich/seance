@@ -8,7 +8,7 @@ import type {
   TaskReply,
 } from "@seance/shared";
 import {
-  continuationSpec,
+  offeredSpec,
   continueOffer,
   failureReasonText,
   isSettled,
@@ -30,6 +30,7 @@ import type { AppState } from "./view.ts";
 import {
   deriveAutoAvailability,
   deriveContinueAvailability,
+  deriveContinueHandoffAvailability,
   deriveRunNowAvailability,
   previewAsked,
   resolveRepo,
@@ -860,8 +861,9 @@ export class SchedulerStore {
   }
 
   /**
-   * Writes a new task that picks up a failed or cancelled one's session where it stopped, through the same
-   * `createTask` an enqueue uses: the leader dispatches it to the machine the old one ran on.
+   * Writes a new task that picks up a failed or cancelled one's session where it stopped (or a blocked
+   * `awaiting-merge` task's, the newest of its chain), through the same `createTask` an enqueue uses: the
+   * leader dispatches it to the machine the old one ran on.
    */
   continueTask(taskId: string): Promise<void> {
     return this.#actOnTask({ taskId, op: "continue" });
@@ -869,13 +871,17 @@ export class SchedulerStore {
 
   async #continue(taskId: string): Promise<string | null> {
     const view = this.#state.queueView;
-    const failed = view?.kind === "ok" ? view.tasks.find((t) => t.id === taskId) : undefined;
-    if (failed === undefined) return "That task is no longer listed.";
+    const listed = view?.kind === "ok" ? view.tasks.find((t) => t.id === taskId) : undefined;
+    if (listed === undefined) return "That task is no longer listed.";
     // The button was gated on this when drawn; the leader may have changed or gone since the tap.
     if (!deriveContinueAvailability(this.#state.relay)) return CONTINUE_UNAVAILABLE;
-    const offer = continueOffer(failed, this.#state.relay.machines, view?.kind === "ok" ? view.tasks : []);
+    const context = {
+      now: Date.now() + (view?.kind === "ok" ? view.skew : 0),
+      leaderHandoff: deriveContinueHandoffAvailability(this.#state.relay),
+    };
+    const offer = continueOffer(listed, this.#state.relay.machines, view?.kind === "ok" ? view.tasks : [], context);
     if (!offer.ok) return sentence(offer.reason);
-    const task = queuedTask({ ...continuationSpec(failed, offer.at), client: "pwa" }, Date.now());
+    const task = queuedTask({ ...offeredSpec(listed, offer), client: "pwa" }, Date.now());
     const reply = await this.#client.createTask(task);
     if (reply === null) return `${STORE_UNREADABLE} ${MAY_HAVE_LANDED}`;
     if (!reply.ok) return sentence(storeErrorText(reply.code));

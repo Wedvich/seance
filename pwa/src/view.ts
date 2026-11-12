@@ -359,6 +359,15 @@ export function deriveContinueAvailability(relay: RelayState): boolean {
   return verifiedLeaderAdvertises(relay, CAPABILITIES.continueTask);
 }
 
+/**
+ * Continue on an `awaiting-merge` task is offered only to a verified leader that advertises `continueHandoff`:
+ * an older one never writes `Task.continuedBy`, so a second Continue would resume a session a continuation
+ * already owns.
+ */
+export function deriveContinueHandoffAvailability(relay: RelayState): boolean {
+  return verifiedLeaderAdvertises(relay, CAPABILITIES.continueHandoff);
+}
+
 /** Whether the verified leader answers `run-now`; an older one refuses it as an op it does not know. */
 export function deriveRunNowAvailability(relay: RelayState): boolean {
   return verifiedLeaderAdvertises(relay, CAPABILITIES.runNow);
