@@ -2,12 +2,22 @@ import { Database } from "bun:sqlite";
 import { writeFile } from "node:fs/promises";
 import {
   METRICS_STEPS,
+  type ArchiveMetricsRequest,
   type ArchiveTableStatus,
   type MetricsRequest,
   type MetricsSeries,
   type MetricsStep,
 } from "@seance/shared";
-import { TIERS, tierSchema, TieredMetrics, type Retention, type Sample } from "../../daemon/src/metrics-tiers.ts";
+import {
+  labelKey,
+  matchesLabels,
+  parseLabels,
+  TIERS,
+  tierSchema,
+  TieredMetrics,
+  type Retention,
+  type Sample,
+} from "../../daemon/src/metrics-tiers.ts";
 
 const HOUR_S = 3_600;
 
@@ -23,6 +33,24 @@ export const ARCHIVE_RETENTION: Retention = { rawKeepS: 48 * HOUR_S, m5KeepS: 36
  * adds it; the id, not the name, since a rename must not split a series.
  */
 export const OBSERVER_LABEL = "machine";
+
+/** Labels an account's merged series drops (A33): who observed it, and through which exclave. */
+const MERGED_AWAY: ReadonlySet<string> = new Set([OBSERVER_LABEL, "exclave"]);
+
+/** The tier the archive's steps past `METRICS_STEPS` (6 h, 1 d) are computed from. */
+const COARSE_FROM: MetricsStep = 3600;
+
+interface TierRow {
+  readonly series: number;
+  readonly ts: number;
+  readonly value: number;
+}
+
+interface PickedSeries {
+  readonly id: number;
+  readonly metric: string;
+  readonly labels: Readonly<Record<string, string>>;
+}
 
 /**
  * Entry `n` takes the file from `PRAGMA user_version` n to n + 1, in the
@@ -60,6 +88,7 @@ export class MetricsArchive {
   readonly #tiers: TieredMetrics;
   readonly #mark;
   readonly #marks;
+  readonly #allSeries;
 
   private constructor(db: Database) {
     this.#db = db;
@@ -87,6 +116,9 @@ export class MetricsArchive {
       );
       this.#marks = db.query<{ lo: number | null; hi: number | null }, [string, number]>(
         "SELECT min(ts) AS lo, max(ts) AS hi FROM pull_marks WHERE machine = ? AND step = ?",
+      );
+      this.#allSeries = db.query<{ id: number; metric: string; labels: string }, []>(
+        "SELECT id, metric, labels FROM series",
       );
     } catch (err) {
       db.close();
@@ -187,7 +219,105 @@ export class MetricsArchive {
     return this.#tiers.query(request);
   }
 
+  /**
+   * `archive-metrics` (A31–A33); bounds on the range are the parser's. The
+   * series are picked from the `series` table by label first, so a tier is
+   * read only for those ids. A machine gets its own observed series as stored,
+   * at the step's tier, or for 6 h and 1 d the average of its hourly rows per
+   * bucket (each tier is the average of the one below). An account gets every
+   * series labelled with it, from any observer and exclave, merged per bucket:
+   * the newest observation in it wins, and rows at the same instant (always so
+   * on a rolled tier, every row at its bucket's start) take the larger value,
+   * since within a window usage only rises; `machine` and `exclave` are dropped.
+   */
+  queryArchive(request: ArchiveMetricsRequest): readonly MetricsSeries[] {
+    const target: Readonly<Record<string, string>> =
+      "machine" in request ? { [OBSERVER_LABEL]: request.machine } : { account: request.account };
+    const names = request.names === undefined ? null : new Set(request.names);
+    const picked: PickedSeries[] = [];
+    for (const row of this.#allSeries.all()) {
+      if (names !== null && !names.has(row.metric)) continue;
+      const labels = parseLabels(row.labels);
+      if (!matchesLabels(labels, target)) continue;
+      if (request.labels !== undefined && !matchesLabels(labels, request.labels)) continue;
+      picked.push({ id: row.id, metric: row.metric, labels });
+    }
+    if (picked.length === 0) return [];
+    const native = METRICS_STEPS.find((step) => step === request.step);
+    const tier = TIERS[native ?? COARSE_FROM];
+    const ids = JSON.stringify(picked.map((series) => series.id));
+    const inRange = `ts >= ?1 AND ts <= ?2 AND series IN (SELECT value FROM json_each(?3))`;
+    const bucketOf = `(ts / CAST(?4 AS INTEGER)) * CAST(?4 AS INTEGER)`;
+    const byId = new Map(picked.map((series) => [series.id, series]));
+    if ("account" in request) {
+      // SQLite's bare column beside max(): `value` is the row holding each series' newest `ts` in the bucket.
+      const rows = this.#db
+        .query<TierRow & { readonly bucket: number }, [number, number, string, number]>(
+          `SELECT series, ${bucketOf} AS bucket, max(ts) AS ts, value FROM ${tier}
+           WHERE ${inRange} GROUP BY series, bucket`,
+        )
+        .all(request.from, request.to, ids, request.step);
+      return mergeAccount(rows, byId);
+    }
+    const rows =
+      native === undefined
+        ? this.#db
+            .query<TierRow, [number, number, string, number]>(
+              `SELECT series, ${bucketOf} AS ts, avg(value) AS value FROM ${tier}
+               WHERE ${inRange} GROUP BY series, ts / CAST(?4 AS INTEGER) ORDER BY series, ts`,
+            )
+            .all(request.from, request.to, ids, request.step)
+        : this.#db
+            .query<TierRow, [number, number, string]>(
+              `SELECT series, ts, value FROM ${tier} WHERE ${inRange} ORDER BY series, ts`,
+            )
+            .all(request.from, request.to, ids);
+    const out = new Map<number, [number, number][]>();
+    for (const row of rows) {
+      const points = out.get(row.series) ?? [];
+      points.push([row.ts, row.value]);
+      out.set(row.series, points);
+    }
+    return [...out].flatMap(([id, points]) => {
+      const series = byId.get(id);
+      return series === undefined ? [] : [{ metric: series.metric, labels: series.labels, points }];
+    });
+  }
+
   close(): void {
     this.#db.close();
   }
+}
+
+/** A33's merge: one series per metric and remaining labels, per bucket the newest row, the larger at a tie. */
+function mergeAccount(
+  rows: readonly (TierRow & { readonly bucket: number })[],
+  byId: ReadonlyMap<number, PickedSeries>,
+): readonly MetricsSeries[] {
+  const groups = new Map<
+    string,
+    { readonly metric: string; readonly labels: Readonly<Record<string, string>>; readonly buckets: Map<number, TierRow> }
+  >();
+  for (const row of rows) {
+    const series = byId.get(row.series);
+    if (series === undefined) continue;
+    const labels = Object.fromEntries(Object.entries(series.labels).filter(([name]) => !MERGED_AWAY.has(name)));
+    const key = `${series.metric}\u0000${labelKey(labels)}`;
+    let group = groups.get(key);
+    if (group === undefined) {
+      group = { metric: series.metric, labels, buckets: new Map() };
+      groups.set(key, group);
+    }
+    const held = group.buckets.get(row.bucket);
+    if (held === undefined || row.ts > held.ts || (row.ts === held.ts && row.value > held.value)) {
+      group.buckets.set(row.bucket, row);
+    }
+  }
+  return [...groups.values()].map(({ metric, labels, buckets }) => ({
+    metric,
+    labels,
+    points: [...buckets]
+      .toSorted(([a], [b]) => a - b)
+      .map(([bucket, row]): [number, number] => [bucket, row.value]),
+  }));
 }

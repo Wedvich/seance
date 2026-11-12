@@ -182,3 +182,119 @@ describe("countSamples", () => {
     archive.close();
   });
 });
+
+describe("queryArchive", () => {
+  const DAY0 = NOW - (NOW % 86_400);
+  const KEY = `account:${"ab".repeat(32)}`;
+  const OTHER = `account:${"cd".repeat(32)}`;
+
+  function quota(
+    machine: string,
+    exclave: string,
+    account: string,
+    points: readonly (readonly [number, number])[],
+  ): MetricsSeries {
+    return { metric: "quota_5h_pct", labels: { machine, exclave, account }, points };
+  }
+
+  test("a machine gets only the series it observed, filtered by names and labels as metrics is", () => {
+    const archive = MetricsArchive.memory();
+    archive.writePulled("dev-a", 30, [series([[NOW, 1]], { machine: "dev-a" })], NOW);
+    archive.writePulled(
+      "dev-b",
+      30,
+      [series([[NOW, 2]], { machine: "dev-b" }), quota("dev-b", "default", KEY, [[NOW, 9]])],
+      NOW,
+    );
+    expect(archive.queryArchive({ from: NOW, to: NOW, step: 30, machine: "dev-b", names: ["cpu_pct"] })).toEqual([
+      series([[NOW, 2]], { machine: "dev-b" }),
+    ]);
+    expect(archive.queryArchive({ from: NOW, to: NOW, step: 30, machine: "dev-b" })).toHaveLength(2);
+    expect(
+      archive.queryArchive({ from: NOW, to: NOW, step: 30, machine: "dev-b", labels: { exclave: "default" } }),
+    ).toEqual([quota("dev-b", "default", KEY, [[NOW, 9]])]);
+    expect(archive.queryArchive({ from: NOW, to: NOW, step: 30, machine: "dev-c" })).toEqual([]);
+    archive.close();
+  });
+
+  test("6 h and 1 d are the average of the hourly rows in each bucket", () => {
+    const archive = MetricsArchive.memory();
+    const hours = Array.from({ length: 12 }, (_, i) => [DAY0 + i * 3600, i] as const);
+    archive.writePulled("dev-a", 3600, [series(hours)], NOW);
+    const to = DAY0 + 11 * 3600;
+    expect(archive.queryArchive({ from: DAY0, to, step: 21_600, machine: "dev-a" })).toEqual([
+      series([
+        [DAY0, 2.5],
+        [DAY0 + 21_600, 8.5],
+      ]),
+    ]);
+    expect(archive.queryArchive({ from: DAY0, to, step: 86_400, machine: "dev-a" })).toEqual([series([[DAY0, 5.5]])]);
+    archive.close();
+  });
+
+  test("an account merges every observer: per bucket the newest reading, the larger at a tie", () => {
+    const archive = MetricsArchive.memory();
+    const at = (machine: string, exclave: string, account: string, ts: number, value: number) => ({
+      metric: "quota_5h_pct",
+      labels: { machine, exclave, account },
+      ts,
+      value,
+    });
+    archive.ingest(
+      [
+        at("dev-a", "default", KEY, NOW + 10, 20),
+        at("dev-b", "work", KEY, NOW + 20, 15),
+        at("dev-a", "default", KEY, NOW + 40, 22),
+        at("dev-a", "other", OTHER, NOW + 40, 99),
+      ],
+      NOW + 60,
+    );
+    expect(archive.queryArchive({ from: NOW, to: NOW + 59, step: 30, account: KEY })).toEqual([
+      {
+        metric: "quota_5h_pct",
+        labels: { account: KEY },
+        points: [
+          [NOW, 15],
+          [NOW + 30, 22],
+        ],
+      },
+    ]);
+
+    // A day before the live rows above, whose own hourly roll-up would join the day's buckets.
+    const day = DAY0 - 86_400;
+    // On a rolled tier every row sits at its bucket's start: the larger wins.
+    archive.writePulled("dev-a", 3600, [quota("dev-a", "default", KEY, [[day, 30]])], NOW);
+    archive.writePulled("dev-b", 3600, [quota("dev-b", "work", KEY, [[day, 35]])], NOW);
+    expect(archive.queryArchive({ from: day, to: day, step: 3600, account: KEY })[0]?.points).toEqual([[day, 35]]);
+
+    // At a day, the newest hourly row in it, whichever machine read it.
+    archive.writePulled("dev-a", 3600, [quota("dev-a", "default", KEY, [[day + 3600, 40]])], NOW);
+    archive.writePulled("dev-b", 3600, [quota("dev-b", "work", KEY, [[day + 3 * 3600, 5]])], NOW);
+    expect(archive.queryArchive({ from: day, to: day + 23 * 3600, step: 86_400, account: KEY })).toEqual([
+      { metric: "quota_5h_pct", labels: { account: KEY }, points: [[day, 5]] },
+    ]);
+    archive.close();
+  });
+
+  test("an account's per-model windows stay one series per model", () => {
+    const archive = MetricsArchive.memory();
+    const at = (machine: string, model: string, ts: number, value: number) => ({
+      metric: "quota_7d_model_pct",
+      labels: { machine, exclave: "default", account: KEY, model },
+      ts,
+      value,
+    });
+    archive.ingest(
+      [at("dev-a", "Opus", NOW, 1), at("dev-b", "Opus", NOW + 5, 2), at("dev-b", "Sonnet", NOW + 5, 3)],
+      NOW + 30,
+    );
+    const merged = archive.queryArchive({ from: NOW, to: NOW + 29, step: 30, account: KEY });
+    expect(merged.map((s) => s.labels["model"]).toSorted()).toEqual(["Opus", "Sonnet"]);
+    expect(merged.find((s) => s.labels["model"] === "Opus")).toEqual({
+      metric: "quota_7d_model_pct",
+      labels: { account: KEY, model: "Opus" },
+      points: [[NOW, 2]],
+    });
+    archive.close();
+  });
+});

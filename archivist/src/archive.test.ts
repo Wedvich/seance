@@ -3,8 +3,16 @@ import { Database } from "bun:sqlite";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Task } from "@seance/shared";
-import { Archive, ARCHIVE_SCHEMA_VERSION, archivedTask, taskRow, type Fleet, type FleetMachine } from "./archive.ts";
+import type { ArchiveTasksRequest, Task } from "@seance/shared";
+import {
+  Archive,
+  ARCHIVE_SCHEMA_VERSION,
+  archivedTask,
+  taskRow,
+  type Fleet,
+  type FleetMachine,
+  type TaskContext,
+} from "./archive.ts";
 
 const RAW_ACCOUNT = "11111111-2222-3333-4444-555555555555:66666666-7777-8888-9999-000000000000";
 
@@ -321,5 +329,97 @@ describe("counts", () => {
       tasks: { rows: 2, oldest: 3_000 },
       events: { rows: 2, oldest: 7_000 },
     });
+  });
+});
+
+describe("queryTasks", () => {
+  const KEY = "account:def";
+
+  function put(id: string, archivedAt: number, over: Partial<Task> = {}, ctx: TaskContext = context): void {
+    const row = taskRow(task({ id, createdAt: 1_000, ...over }), 1, ctx);
+    if (row === null) throw new Error("finished task refused");
+    archive.upsertTask(row, archivedAt);
+  }
+
+  function titled(title?: string): Partial<Task> {
+    return { spec: { repo: "seance", mode: "worktree", ...(title === undefined ? {} : { title }) } };
+  }
+
+  const ids = (request: ArchiveTasksRequest, limit = 50): string[] =>
+    archive.queryTasks(request, limit).rows.map((row) => row.id);
+
+  test("newest first by first archive time, then created, then id; the machine's last known name and the alias", () => {
+    put("t-a", 100);
+    put("t-b", 300);
+    put("t-c", 200, { createdAt: 900 });
+    put("t-d", 200, { createdAt: 950 });
+    put("t-e", 200, { createdAt: 950 });
+    expect(ids({})).toEqual(["t-b", "t-e", "t-d", "t-c", "t-a"]);
+    archive.applyFleet(
+      {
+        machines: [{ deviceId: "dev-a", name: "alpha-renamed", platform: "linux", build: null, connected: true }],
+        leader: null,
+      },
+      400,
+    );
+    archive.upsertAccount(context.account, "work", 1, 400);
+    expect(archive.queryTasks({}, 1).rows).toEqual([
+      expect.objectContaining({
+        id: "t-b",
+        endedAt: 300,
+        createdAt: 1_000,
+        machine: "alpha-renamed",
+        account: context.account,
+        alias: "work",
+      }),
+    ]);
+  });
+
+  test("a keyset page continues exactly where the last ended, and total ignores the cursor", () => {
+    for (const [i, at] of [100, 200, 200, 300, 400].entries()) put(`t-${i}`, at);
+    const first = archive.queryTasks({}, 2);
+    expect(first.total).toBe(5);
+    const last = first.rows.at(-1);
+    if (last === undefined) throw new Error("empty page");
+    const second = archive.queryTasks(
+      { before: { endedAt: last.endedAt, createdAt: last.createdAt, id: last.id } },
+      10,
+    );
+    expect(second.total).toBe(5);
+    expect([...first.rows, ...second.rows].map((row) => row.id)).toEqual(["t-4", "t-3", "t-2", "t-1", "t-0"]);
+  });
+
+  test("each filter narrows, and they combine", () => {
+    put("t-1", 100, titled("Fix the relay"));
+    put("t-2", 200, { state: "failed", spec: { repo: "other", mode: "worktree", title: "Ship it" } });
+    put(
+      "t-3",
+      300,
+      { state: "cancelled", assignment: { deviceId: "dev-b", exclave: "default", clone: "x" } },
+      { machine: "beta", account: KEY },
+    );
+    expect(ids({ repo: "other" })).toEqual(["t-2"]);
+    expect(ids({ outcome: "cancelled" })).toEqual(["t-3"]);
+    expect(ids({ machine: "dev-b" })).toEqual(["t-3"]);
+    expect(ids({ account: KEY })).toEqual(["t-3"]);
+    expect(ids({ since: 200 })).toEqual(["t-3", "t-2"]);
+    expect(ids({ until: 200 })).toEqual(["t-1"]);
+    expect(ids({ since: 100, until: 300 })).toEqual(["t-2", "t-1"]);
+    expect(ids({ title: "RELAY" })).toEqual(["t-1"]);
+    expect(ids({ repo: "seance", outcome: "failed" })).toEqual([]);
+    expect(archive.queryTasks({ repo: "seance" }, 50).total).toBe(2);
+  });
+
+  test("a title search is a substring: % and _ and the escape match only themselves", () => {
+    put("t-1", 100, titled("50% off"));
+    put("t-2", 200, titled("500 off"));
+    put("t-3", 300, titled("a_b"));
+    put("t-4", 400, titled("axb"));
+    put("t-5", 500, titled("back\\slash"));
+    put("t-6", 600, titled());
+    expect(ids({ title: "0%" })).toEqual(["t-1"]);
+    expect(ids({ title: "a_b" })).toEqual(["t-3"]);
+    expect(ids({ title: "\\" })).toEqual(["t-5"]);
+    expect(ids({ title: "o" })).toEqual(["t-2", "t-1"]);
   });
 });
