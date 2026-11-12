@@ -42,6 +42,9 @@
     }
     if (typeof alert.taskId !== "string" || !TASK_ID.test(alert.taskId)) return null;
     const url = `/?task=${encodeURIComponent(alert.taskId)}`;
+    if (alert.kind === "needs-input" && alert.question === true && alert.escalated !== true) {
+      return { body: "A task is asking you a question.", tag: `needs-input:${alert.taskId}`, url };
+    }
     if (alert.kind === "needs-input") {
       const body =
         alert.escalated === true ? "A task is still waiting for input (30 min)." : "A task is waiting for input.";

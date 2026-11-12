@@ -83,6 +83,7 @@ describe("push-sw.js", () => {
     const alerts: readonly PushAlert[] = [
       { v: 1, kind: "needs-input", at: 5, taskId: TASK, since: 1, escalated: false },
       { v: 1, kind: "needs-input", at: 5, taskId: TASK, since: 1, escalated: true },
+      { v: 1, kind: "needs-input", at: 5, taskId: TASK, since: 1, escalated: false, question: true },
       { v: 1, kind: "spill", at: 5, taskId: TASK, window: "7d", projectedPct: 94.6 },
       { v: 1, kind: "spill", at: 5, taskId: TASK, window: "5h", projectedPct: 104.6, spending: true },
       { v: 1, kind: "disk", at: 5, deviceId: "dev-1", diskPct: 93 },
@@ -103,6 +104,15 @@ describe("push-sw.js", () => {
         title: "Séance",
         options: {
           body: "A task is still waiting for input (30 min).",
+          tag: `needs-input:${TASK}`,
+          renotify: true,
+          data: { url: `/?task=${TASK}` },
+        },
+      },
+      {
+        title: "Séance",
+        options: {
+          body: "A task is asking you a question.",
           tag: `needs-input:${TASK}`,
           renotify: true,
           data: { url: `/?task=${TASK}` },
