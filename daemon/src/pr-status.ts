@@ -377,6 +377,8 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
   async function poll(): Promise<"ok" | Failure | null> {
     const wanted = targets(deps.tasks(), unreadable, readThisTerm);
     if (wanted.length === 0) return null;
+    // A finished task's read is spent only once every chunk answered: its PRs may sit in several.
+    const spent = new Set<string>();
     for (let from = 0; from < wanted.length; from += CHUNK) {
       const chunk = wanted.slice(from, from + CHUNK);
       // oxlint-disable-next-line no-await-in-loop -- chunks run one after another, never overlapping
@@ -393,7 +395,7 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
         if (read === undefined) return;
         // Any answer spends a finished task's read, an unusable one too: else it is asked every poll.
         // Only a task finished when targeted: one read while placed still owes its finished read.
-        for (const task of target.tasks) if (task.finished) readThisTerm.add(task.id);
+        for (const task of target.tasks) if (task.finished) spent.add(task.id);
         if (read.kind === "none") {
           const url = target.tasks[0]?.prUrl;
           if (read.error !== null && url !== undefined && !unreadable.has(url)) {
@@ -414,6 +416,7 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
       await Promise.all(writes);
       if (stopped) return null;
     }
+    for (const id of spent) readThisTerm.add(id);
     return "ok";
   }
 
