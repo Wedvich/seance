@@ -13,7 +13,7 @@ import { cpSync, existsSync, rmSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { TaskState } from "@seance/shared";
+import { TASK_PHASES } from "@seance/shared";
 import { chromium, type Browser, type CDPSession, type Page } from "playwright-core";
 import { pollUntil } from "../daemon/test/fixtures.ts";
 import { PSK, startApp, TOKEN, wsUrl } from "./harness.ts";
@@ -33,7 +33,6 @@ type Scenario = (typeof SCENARIOS)[number];
 const USAGE = "usage: bun run perf [A|B|C|D|all] [--runs N] [--duration S] [--cpu X] [--daemons N]";
 // LeaderBox first: the suite nominates it (`secondLeaders`), and D needs a second leader to stop.
 const SECOND_DAEMONS = ["LeaderBox", "PerfB", "PerfC", "PerfD", "PerfE"] as const;
-const FINISHED = new Set<TaskState>(["lost", "done", "failed", "cancelled"]);
 
 interface Options {
   readonly scenarios: readonly Scenario[];
@@ -652,7 +651,7 @@ async function main(opts: Options): Promise<void> {
       async () => {
         const queue = await watcher.client.queue().catch(() => null);
         if (queue === null || !("tasks" in queue)) return false;
-        const open = queue.tasks.filter((t) => !FINISHED.has(t.state));
+        const open = queue.tasks.filter((t) => TASK_PHASES[t.state] !== "finished");
         if (open.length === 0) return true;
         await Promise.all(open.map((t) => watcher.client.cancel(t.id).catch(() => null)));
         await Bun.sleep(300);
