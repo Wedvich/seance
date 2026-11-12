@@ -1433,6 +1433,20 @@ describe("a session's own pass", () => {
     }
   });
 
+  test("a continuation's inherited PR counts as one for the push too", async () => {
+    const { launch, ledger, pushes, send, events } = setup({
+      push: { ok: false, code: "no_upstream", message: "m" },
+    });
+    try {
+      await launch();
+      await ledger.note("t1", { continuedPr: PR });
+      expect(await send("%1", { pass: true, record: RECORD })).toEqual({ ok: false, code: "no_upstream" });
+      expect(pushes).toEqual([{ taskId: "t1", hasPr: true }]);
+    } finally {
+      events.stop();
+    }
+  });
+
   test("is refused, with nothing pushed or sent, from a task-less pane, an unrecorded or in-place task", async () => {
     const { ledger, passes, pushes, send, events } = setup();
     try {
