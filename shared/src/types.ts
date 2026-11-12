@@ -705,6 +705,7 @@ export type OpName =
   | "metrics"
   | "push-branch"
   | "pass-close"
+  | "archive-status"
   | AtRestOp
   | EventOp
   | SchedulerOp;
@@ -759,6 +760,8 @@ export const OP_TIMEOUT_MS = {
   spawn: 210_000,
   despawn: 20_000,
   metrics: 15_000,
+  // Answered from a cached count and two stat calls, never a scan.
+  "archive-status": 10_000,
   queue: 10_000,
   "route-preview": 10_000,
   cancel: 25_000,
@@ -989,6 +992,22 @@ export interface UpdateReport {
 export interface UpdateAvailable {
   readonly sha: string;
   readonly commitTs: number;
+}
+
+/**
+ * The archivist's registry blob. Sealed under op `machine-info` like a
+ * daemon's, but deliberately not a `MachineInfo`: no `repos`, no `scannedAt`,
+ * no exclaves, so `parseMachineInfo` refuses it. A client built before the
+ * relay flagged the seat opens the blob, fails that parse and counts the entry
+ * `skewed` — "update" — rather than a machine to spawn on. A client with the
+ * flag reads it as `ArchivistInfo` (the Machines screen's card). `name`,
+ * `platform` and `source` are display only.
+ */
+export interface ArchivistInfo {
+  readonly archivist: true;
+  readonly name: string;
+  readonly platform: string;
+  readonly source?: SourceInfo;
 }
 
 /**
@@ -1369,6 +1388,49 @@ export interface MetricsError {
 }
 
 export type MetricsReply = MetricsResponse | MetricsError;
+
+/** Nothing to ask: the archivist answers with what it holds. Unknown keys are ignored. */
+export type ArchiveStatusRequest = Record<string, never>;
+
+export const ARCHIVE_INGEST_SOURCES = ["store", "registry", "status", "pull"] as const;
+
+export type ArchiveIngestSource = (typeof ARCHIVE_INGEST_SOURCES)[number];
+
+export interface ArchiveTableStatus {
+  readonly rows: number;
+  /** Ms epoch of the oldest row; null when the table is empty. */
+  readonly oldest: number | null;
+}
+
+/** Counts, sizes and timestamps only: no id, name, prompt or account crosses in it. */
+export interface ArchiveStatusResponse {
+  readonly ok: true;
+  /** Ms; the seat socket's latest accepted register in this process. */
+  readonly onlineSince: number | null;
+  /** Ms, per source, this process only: null until the first success after start. */
+  readonly lastIngest: Readonly<Record<ArchiveIngestSource, number | null>>;
+  /** The tables are null until the first background count pass finishes (the reply never scans). */
+  readonly tasks: ArchiveTableStatus | null;
+  /** Raw, 5-min and hourly tiers summed. */
+  readonly samples: ArchiveTableStatus | null;
+  readonly events: ArchiveTableStatus | null;
+  /** Bytes, each file plus its `-wal`. */
+  readonly database: { readonly archiveBytes: number; readonly metricsBytes: number };
+  /** Ms the counts were taken; null with them. */
+  readonly countedAt: number | null;
+}
+
+export const ARCHIVE_STATUS_ERROR_CODES = ["invalid_request", ...TRANSPORT_ERROR_CODES] as const;
+
+export type ArchiveStatusErrorCode = (typeof ARCHIVE_STATUS_ERROR_CODES)[number];
+
+export interface ArchiveStatusError {
+  readonly ok: false;
+  readonly code: ArchiveStatusErrorCode;
+  readonly message: string;
+}
+
+export type ArchiveStatusReply = ArchiveStatusResponse | ArchiveStatusError;
 
 /**
  * The series the daemon's store keeps, one per `MachineStatus` field plus the

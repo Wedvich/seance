@@ -5,6 +5,8 @@ import { isPromptBasis } from "./amend.ts";
 import {
   ACCOUNT_ALIAS_MAX_LENGTH,
   ATTACHMENT_HASH_PATTERN,
+  ARCHIVE_INGEST_SOURCES,
+  ARCHIVE_STATUS_ERROR_CODES,
   ATTACHMENT_ID_PATTERN,
   ATTACHMENT_LIMITS,
   ATTACHMENTS_DEP_SENTINEL,
@@ -59,6 +61,12 @@ import {
   TASK_SPEC_LIMITS,
   TOOL_NAME_MAX_LENGTH,
   type AccountRecord,
+  type ArchiveIngestSource,
+  type ArchiveStatusRequest,
+  type ArchiveStatusReply,
+  type ArchiveStatusResponse,
+  type ArchiveTableStatus,
+  type ArchivistInfo,
   type AttachmentRef,
   type BatchMembership,
   type FleetQuotaEntry,
@@ -628,6 +636,80 @@ export function parseMetricsReply(value: unknown): MetricsReply | null {
   const code = METRICS_ERROR_CODES.find((c) => c === value["code"]);
   if (code === undefined || typeof value["message"] !== "string") return null;
   return { ok: false, code, message: value["message"] };
+}
+
+/** Any record: the request carries nothing, and a later one may add a field. */
+export function parseArchiveStatusRequest(value: unknown): ArchiveStatusRequest | null {
+  return isRecord(value) ? {} : null;
+}
+
+function isFiniteOrNull(value: unknown): value is number | null {
+  return value === null || (typeof value === "number" && Number.isFinite(value));
+}
+
+function parseArchiveTable(value: unknown): ArchiveTableStatus | null | undefined {
+  if (value === null) return null;
+  if (!isRecord(value) || !isUint(value["rows"]) || !isFiniteOrNull(value["oldest"])) return undefined;
+  return { rows: value["rows"], oldest: value["oldest"] };
+}
+
+function isFiniteNonNegative(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+/** The card's numbers: an archivist a version ahead must cost the rows, not the app. */
+export function parseArchiveStatusResponse(value: unknown): ArchiveStatusResponse | null {
+  if (!isRecord(value)) return null;
+  const { onlineSince, lastIngest, database, countedAt } = value;
+  if (!isFiniteOrNull(onlineSince) || !isFiniteOrNull(countedAt) || !isRecord(lastIngest) || !isRecord(database)) {
+    return null;
+  }
+  const ingest: Partial<Record<ArchiveIngestSource, number | null>> = {};
+  for (const source of ARCHIVE_INGEST_SOURCES) {
+    const at = lastIngest[source] ?? null;
+    if (!isFiniteOrNull(at)) return null;
+    ingest[source] = at;
+  }
+  const tasks = parseArchiveTable(value["tasks"]);
+  const samples = parseArchiveTable(value["samples"]);
+  const events = parseArchiveTable(value["events"]);
+  if (tasks === undefined || samples === undefined || events === undefined) return null;
+  const { archiveBytes, metricsBytes } = database;
+  if (!isFiniteNonNegative(archiveBytes) || !isFiniteNonNegative(metricsBytes)) return null;
+  return {
+    ok: true,
+    onlineSince,
+    lastIngest: {
+      store: ingest.store ?? null,
+      registry: ingest.registry ?? null,
+      status: ingest.status ?? null,
+      pull: ingest.pull ?? null,
+    },
+    tasks,
+    samples,
+    events,
+    database: { archiveBytes, metricsBytes },
+    countedAt,
+  };
+}
+
+export function parseArchiveStatusReply(value: unknown): ArchiveStatusReply | null {
+  if (!isRecord(value) || value["ok"] !== false) return parseArchiveStatusResponse(value);
+  const code = ARCHIVE_STATUS_ERROR_CODES.find((c) => c === value["code"]);
+  if (code === undefined || typeof value["message"] !== "string") return null;
+  return { ok: false, code, message: value["message"] };
+}
+
+/**
+ * The archivist's register blob. An invalid `source` drops the build line, not
+ * the blob, so the card still shows.
+ */
+export function parseArchivistInfo(value: unknown): ArchivistInfo | null {
+  if (!isRecord(value) || value["archivist"] !== true) return null;
+  const { name, platform } = value;
+  if (typeof name !== "string" || typeof platform !== "string") return null;
+  const source = parseSourceInfo(value["source"]);
+  return { archivist: true, name, platform, ...(source === null ? {} : { source }) };
 }
 
 /**

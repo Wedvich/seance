@@ -27,6 +27,9 @@ import {
   parseDiscardReply,
   parseDiscardRequest,
   parseExclaveList,
+  parseArchiveStatusReply,
+  parseArchiveStatusRequest,
+  parseArchivistInfo,
   parseMachineInfo,
   parseMachineStatus,
   parseMetricsReply,
@@ -60,6 +63,7 @@ import { REPLAY_WINDOW_MS } from "./crypto.ts";
 import { taskRecordAtRest } from "./task-record.ts";
 import {
   ACCOUNT_ALIAS_MAX_LENGTH,
+  ARCHIVE_STATUS_ERROR_CODES,
   BRANCH_MAX_LENGTH,
   CANDIDATE_MAX_REASONS,
   EXIT_STATUS_MAX,
@@ -2792,5 +2796,56 @@ describe("parseAmendRequest", () => {
   test("refuses an amendment of nothing", () => {
     expect(parseAmendRequest({ taskId: "t-1" })).toBeNull();
     expect(parseAmendRequest({ taskId: "t-1", other: "x" })).toBeNull();
+  });
+});
+
+describe("archive-status", () => {
+  const good = {
+    ok: true,
+    onlineSince: 5,
+    lastIngest: { store: 1, registry: null, status: 3, pull: 4 },
+    tasks: { rows: 2, oldest: 10 },
+    samples: { rows: 0, oldest: null },
+    events: null,
+    database: { archiveBytes: 100, metricsBytes: 200 },
+    countedAt: 9,
+  };
+
+  test("a good reply parses, including a table still unread", () => {
+    expect(parseArchiveStatusReply(good)).toEqual(good);
+  });
+
+  test("each error code parses, an unknown one is unreadable", () => {
+    for (const code of ARCHIVE_STATUS_ERROR_CODES) {
+      expect(parseArchiveStatusReply({ ok: false, code, message: "m" })).toEqual({ ok: false, code, message: "m" });
+    }
+    expect(parseArchiveStatusReply({ ok: false, code: "nope", message: "m" })).toBeNull();
+    expect(parseArchiveStatusReply(null)).toBeNull();
+  });
+
+  test("a missing source counts as null and an extra one is ignored", () => {
+    const parsed = parseArchiveStatusReply({ ...good, lastIngest: { store: 1, later: 7 } });
+    expect(parsed).toEqual({ ...good, lastIngest: { store: 1, registry: null, status: null, pull: null } });
+  });
+
+  test("a negative row count, a bad size or a non-record is unreadable", () => {
+    expect(parseArchiveStatusReply({ ...good, tasks: { rows: -1, oldest: null } })).toBeNull();
+    expect(parseArchiveStatusReply({ ...good, database: { archiveBytes: -1, metricsBytes: 0 } })).toBeNull();
+    expect(parseArchiveStatusReply({ ...good, lastIngest: "x" })).toBeNull();
+  });
+
+  test("the request is any record", () => {
+    expect(parseArchiveStatusRequest({ later: 1 })).toEqual({});
+    expect(parseArchiveStatusRequest([])).toBeNull();
+    expect(parseArchiveStatusRequest(null)).toBeNull();
+  });
+
+  test("the archivist's blob keeps the card when its source is bad, and refuses archivist: false", () => {
+    const source = { sha: "a".repeat(40), commitTs: 1_700_000_000_000, branch: null };
+    const base = { archivist: true, name: "n", platform: "linux" };
+    expect(parseArchivistInfo(base)).toEqual(base);
+    expect(parseArchivistInfo({ ...base, source })).toEqual({ ...base, source });
+    expect(parseArchivistInfo({ ...base, source: { sha: "x" } })).toEqual(base);
+    expect(parseArchivistInfo({ ...base, archivist: false })).toBeNull();
   });
 });
