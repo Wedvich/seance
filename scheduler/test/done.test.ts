@@ -318,6 +318,55 @@ describe("a session's exit status", () => {
     expect(scheduler.task("t")).toMatchObject({ state: "done", doneBy: "session" });
   });
 
+  // The PR's one event never reached the leader, and the machine is gone before any `sessions` read could
+  // carry it in `progress`. The daemon's `ended` carries the PR its own launch noted (`EndedTasks.notedPr`);
+  // what an older daemon sent, a PR-less `ended`, is the contrast: deferred, then settled `done` by the
+  // deadline or the disconnect, releasing the `after: "merged"` dependent.
+  describe("a PR whose event was lost, on a machine gone before the exit could be read", () => {
+    const capable = [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.exitStatus];
+    // Each variant leaves the other path out of reach: the deadline passes while the machine is not yet
+    // lost, and the machine is lost long before the deadline.
+    const configs = {
+      deadline: { ...DEFAULT_CONFIG, lostAfterMs: DEFAULT_CONFIG.endingTimeoutMs * 10 },
+      disconnect: { ...DEFAULT_CONFIG, endingTimeoutMs: DEFAULT_CONFIG.lostAfterMs * 10, lostAfterMs: 1_000 },
+    } as const;
+
+    async function scenario(gone: "deadline" | "disconnect", carried: string | undefined) {
+      const config = configs[gone];
+      // `b` is where the dependent would go once released.
+      const fleet = new FakeFleet([machine("a", { capabilities: capable }), machine("b", { capabilities: capable })]);
+      const { clock, scheduler, put } = setup(fleet, config);
+      await put("t", { assignment: ON_A });
+      await put("dep", { state: "queued", spec: spec({ deps: [{ task: "t", after: "merged" }] }) });
+      await scheduler.load();
+      // Gone as the session ends: every `sessions` asked of it fails.
+      fleet.fleet = [{ ...fleet.fleet[0]!, connected: false }, fleet.fleet[1]!];
+      await scheduler.onSession("t", "ended", FROM_A, carried);
+      await scheduler.drain();
+      clock.now += gone === "deadline" ? config.endingTimeoutMs : config.lostAfterMs;
+      fleet.beat(clock.now);
+      await pass(scheduler);
+      await pass(scheduler);
+      return { fleet, scheduler };
+    }
+
+    for (const gone of ["deadline", "disconnect"] as const) {
+      test(`past the ${gone}, an ended carrying the noted PR settled on the event awaiting-merge, and the dependent waits`, async () => {
+        const { fleet, scheduler } = await scenario(gone, PR);
+        expect(scheduler.task("t")).toMatchObject({ state: "awaiting-merge", prUrl: PR });
+        expect(fleet.sessionCalls.filter((id) => id === "a")).toEqual([]);
+        expect(scheduler.task("dep")?.state).toBe("blocked");
+        expect(fleet.spawns).toEqual([]);
+      });
+
+      test(`past the ${gone}, a PR-less ended (an older daemon's) settles done and releases the dependent`, async () => {
+        const { fleet, scheduler } = await scenario(gone, undefined);
+        expect(scheduler.task("t")).toMatchObject({ state: "done", doneBy: "session" });
+        expect(fleet.spawns.map((s) => s.request.taskId)).toEqual(["dep"]);
+      });
+    }
+  });
+
   test("an end from a machine the task is not on defers nothing: it is not asked about, nor settled", async () => {
     const fleet = new FakeFleet([
       machine("a", { capabilities: [CAPABILITIES.metrics, CAPABILITIES.taskId, CAPABILITIES.exitStatus] }),
@@ -1155,6 +1204,31 @@ describe("a task that opened several PRs", () => {
   const pull = (n: number): string => `https://github.com/acme/app/pull/${n}`;
   const version = async (store: MemoryQueueStore, id: string): Promise<number | undefined> =>
     (await store.get(id))?.version;
+
+  test("an ended carrying the daemon's noted PR settles on the right primary: a held one moves nothing, a lost one is appended", async () => {
+    const { scheduler, put } = setup();
+    // Fell back to #5 after #6 closed; the daemon's ledger still holds #6, its session's newest report.
+    await put("fell", {
+      assignment: ON_A,
+      prUrl: pull(5),
+      prs: [{ url: pull(5) }, { url: pull(6), closed: true }],
+    });
+    // #6's own event never arrived: the leader holds #5 alone.
+    await put("lost", { assignment: { ...ON_A, pane: "%2" }, prUrl: pull(5) });
+    await scheduler.load();
+    await scheduler.onSession("fell", "ended", FROM_A, pull(6));
+    await scheduler.onSession("lost", "ended", { deviceId: "a", pane: "%2" }, pull(6));
+    expect(scheduler.task("fell")).toMatchObject({
+      state: "awaiting-merge",
+      prUrl: pull(5),
+      prs: [{ url: pull(5) }, { url: pull(6), closed: true }],
+    });
+    expect(scheduler.task("lost")).toMatchObject({
+      state: "awaiting-merge",
+      prUrl: pull(6),
+      prs: [{ url: pull(5) }, { url: pull(6) }],
+    });
+  });
 
   test("folding the newer PR into the older one leaves the task on the older: re-reports don't move it back, and its merge settles", async () => {
     const { scheduler, put, store } = setup();

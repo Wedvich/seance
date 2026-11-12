@@ -6243,7 +6243,11 @@ of this section built.
   Each close is audited (`origin=harvest`), after a re-read of the pane that it is still dead and
   still the same window and task, since pane ids restart with the tmux server. A pane dead before its title went up is `spawnSession`'s, as before, and so
   is a window whose spawn is still polling for registration (`whileRegistering`), which harvest
-  skips so it cannot steal the `claude_died` capture. Reap skips every harvestable dead task pane
+  skips so it cannot steal the `claude_died` capture. A spawn whose registration timed out (a
+  claude parked on a dialog) is armed all the same (`armTask`), so a pane that dies still untitled
+  keeps its status in the hook's server option: harvest notes it from there (it closes only titled
+  panes) and reap's close of the pane, noted `closing` first, keeps it (pinned 2026-11-12; once listed
+  as a gap, closed by the hook of 2026-10-27). Reap skips every harvestable dead task pane
   (`harvestable`), since closing it first would lose the status or read as `vanished`, and the daemon's reap timer, when
   enabled (`REAP_DEFAULTS.intervalHours` is 0, so it is not by default), runs `harvestExits`
   before it; with the defaults a dead task pane closes on the next `sessions` read, which the
@@ -6266,7 +6270,9 @@ of this section built.
   (`lostAfterMs`, 15 min, is longer, so the `lost` path's own settle is not reached at the
   defaults; kept for a config that sets it shorter, where it too settles instead of marking
   `lost`, which would fail dependents at `lost_expired` for a session that is over). An end
-  with a PR known settles on the event as before; the status counts only when neither a PR nor a
+  with a PR known settles on the event as before, and the daemon's `ended` carries the PR its pane's own
+  launch noted (`EndedTasks.notedPr`; 2026-11-12), so a PR whose one event was lost does not leave
+  the end to these PR-blind settles, which would release `after: "merged"` dependents; the status counts only when neither a PR nor a
   believed merge does (merged → `done` by `merged`, PR → `awaiting-merge`). A signal death (an OOM
   SIGKILL, a segfault) leaves `pane_dead_status` empty and `pane_dead_signal` set (tmux 3.3 and
   later; a number on Linux, a name on macOS, resolved through `os.constants.signals`), read as `128 + signal`, the shell's convention and inside 0–255, so it fails like any
@@ -9473,7 +9479,11 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
 - **Forwarded only for task sessions, at most one per session per 5 s.** An event
   for a pane with no task id goes nowhere; like every bound event, it still pokes the refresh. The first event in a
   window leaves at once. A burst after it folds into one trailing send, carrying the
-  newest state and a PR URL seen earlier in the window. The daemon seals the event
+  newest state and a PR URL seen earlier in the window. An `ended` with no PR of its own
+  carries the one its pane's own launch noted in the ledger (`EndedTasks.notedPr`, the session's
+  own report, never a continuation's inherited `continuedPr`), for when the event that carried it
+  was lost and the mod's own `ended` carried none (its `lastPrUrl` is per hooks-worker process)
+  (2026-11-12). The daemon seals the event
   to `"scheduler"` (`sendToScheduler`). With no leader the relay drops it. On the
   leader's own machine nothing crosses the relay: `run-capabilities.ts` hands the event to
   `Leader.onSession` in process, while a term runs (Scheduler, "The leader", "Session

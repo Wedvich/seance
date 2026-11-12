@@ -549,14 +549,30 @@ of M4 has landed.
   No capability: an older leader reads it as `done`, as before. DESIGN.md, _Daemon_, "Window closed from
   outside", records the tmux behaviour verified, why no global hook, and the residuals.
 
-  _Open gaps (follow-up, not yet planned):_
+  _Gaps found 2026-10-22, closed (follow-up, 2026-11-12):_
   - The deadline and disconnect settles call `ended(task, undefined)`, so a PR the daemon noted
-    in the ledger (`progress.prUrl`) but the leader never recorded settles `done` by `session`,
-    not `awaiting-merge`, and releases `after: "merged"` dependents early. Same blindness the
-    event path had before; narrower now. Fix direction: settle from the machine's last
-    `progress` entry where one was read.
-  - A spawn that times out before claude registers and then dies untitled gets no status
-    (harvest takes only titled panes; reap closes it), so its task settles `done` as before.
+    in the ledger (`progress.prUrl`) but the leader never recorded settled `done` by `session`,
+    not `awaiting-merge`, and released `after: "merged"` dependents early. The recorded fix
+    direction, settling from the machine's last `progress` entry read, proved unnecessary: every
+    read that answers for a live session already absorbs its `progress.prUrl` into the record
+    (`settlePlaced` → `progressed`), so no read the leader keeps could hold a PR it lacks. The hole
+    was narrower than "the PR rode one event": the claude mod already re-sends its last seen PR on
+    `ended` (`lastPrUrl`, `claude-mods/session-events/hooks/register.ts`), so the daemon's `ended`
+    lacked the PR only when the event that carried it was lost (a relay hiccup, a failover) and the
+    mod's `ended` carried none (its tracker is per hooks-worker process, so a respawned worker
+    holds no `lastPrUrl`). An `ended` the hook never sent at all reaches the leader only as the
+    pane-gone backstop, which carries no PR and which this fix does not touch. The PR-less `ended`
+    was then deferred for the exit and the machine went before any read. _As built:_ the daemon's `ended` now carries the PR its pane's own launch
+    noted (`EndedTasks.notedPr`; the session's own report, never a continuation's `continuedPr`), so
+    the leader settles `awaiting-merge` on the event, never deferring. No wire or leader change: an
+    older leader already settles an `ended` carrying a PR that way, a PR it holds is no write, and a
+    task that fell back to an older of several PRs keeps it (`reportedPr`). An older daemon's machine
+    keeps the gap until it updates.
+  - A spawn that times out before claude registers and then dies untitled got no status (harvest
+    takes only titled panes; reap closes it). Found already closed: the `pane-died` hook of
+    2026-10-27 is set by `armTask`, which runs after a timed-out registration too, so the death is
+    recorded server-side and harvest notes it from there; reap's close (`closing` first) keeps it.
+    A test pins it (`daemon/test/spawn.test.ts`).
 
 - **Continue a failed task (new, 2026-10-26; widened 2026-10-27).** A task that failed `session_failed` (an OOM
   kill) leaves its worktree and its conversation on disk, and the only remedy was a new task from
@@ -1623,6 +1639,19 @@ same PR, with the reason.
   CPU load and as a full suite. The test's timeout messages now carry the route decision and the
   remote daemon's log, so the next occurrence names the mechanism. If it was a route rejection that
   cleared on its own, a placement that waits on the 30s tick is a product gap, not only a test one.
+  _Follow-up (2026-11-12):_ no such wait found in code. Admission and routing run in one pass
+  (`scheduler.ts`, the admit then route), and every routing input the relay delivers starts a pass
+  when it changes: a new `machines` array from `#rebuildMachines` (`sameMachine` compares status,
+  exclaves, capabilities, `connected` and the info fields, so a register, each status beat, a
+  connect or a disconnect), a `fleetQuota` change, a `task:` `store-changed` (`daemon/src/leader.ts`).
+  Exclaves arrive in the register blob, not the status, and the relay holds a status behind a
+  pending register (`relay/src/hub.ts`), so neither can land unticked. Only time-driven inputs (a
+  slot freed by an idle task, a `until: reset` hold lifting, a quota window resetting) wait for the
+  30s timer, and none applies to that test. Unproven alternative: a term change after the admit
+  (its writes then throw `StoreRevoked`, cutting the pass before the reserve) — the CI job log holds
+  only the failure, not the daemon's lines, so it can't be checked there. That run's test also died
+  at bun's 15s timeout before its 20s poll could report; #400's 90s budget lets the next one print
+  the decision. Still open.
 - **Reversibility is only as real as the adapter boundary.** If daemon code starts reaching into
   `scheduler/` internals, or the library grows an import from `daemon/`, the move to a fixed
   box becomes the rewrite this design exists to avoid. Enforced the way `raycast/` enforces

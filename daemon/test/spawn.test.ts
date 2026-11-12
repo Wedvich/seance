@@ -667,6 +667,53 @@ describe("spawnSession (real tmux, real git, stub claude)", () => {
     return { pane: (await waitForSession(outcome.window))?.id ?? "", outcome };
   }
 
+  // docs/scheduler.md once listed this as an open gap (harvest takes only titled panes, reap closes the
+  // pane): `armTask` runs after a registration that timed out too, so the hook records the death and harvest
+  // notes it from the recorded option, titled or not.
+  test("a task spawn that timed out before registering and then died untitled has its exit noted; the daemon's close keeps it", async () => {
+    process.env["SEANCE_CLAUDE_BIN"] = stub.stuck;
+    const tasks = new EndedTasks(LaunchLedger.memory(), Date.now, tmuxHarvestPanes(reapAudit("harvest", () => {})));
+    try {
+      const settle = await tasks.launch("task-untitled");
+      const outcome = await spawnSession(
+        { repo: "myrepo", mode: "here", title: "Task Untitled", taskId: "task-untitled" },
+        repos,
+        STUCK_WAIT,
+      );
+      await settle(true, outcome.server === undefined ? {} : { server: outcome.server });
+      expect(outcome.registered).toBe(false);
+      if (outcome.handle === undefined) throw new Error("a timed-out spawn still names its window");
+      const [pane = "", pid = ""] = (
+        await tmuxOk(["display-message", "-p", "-t", outcome.handle, `#{pane_id}${FIELD_SEP}#{pane_pid}`])
+      )
+        .trim()
+        .split(FIELD_SEP);
+      process.kill(Number(pid), "SIGTERM");
+      await pollUntil(async () => (await paneInfo(pane))?.dead === true, `pane ${pane} dead`);
+
+      // `pane_dead` does not say the pane-died hook has run: wait for the status it records.
+      const option = "@seance-exit-task-untitled";
+      await pollUntil(
+        async () => (await tmux(["show-options", "-g", "-v", option])).exitCode === 0,
+        `${option} recorded`,
+      );
+      // Reap closes an untitled dead pane (harvest leaves it), noting its close first; here the pane is
+      // gone before harvest has run at all, so only the hook's record can explain its exit.
+      await tasks.closing("task-untitled");
+      await tmuxOk(["kill-pane", "-t", pane]);
+      await pollUntil(async () => {
+        await tasks.harvestExits();
+        return tasks.progress().some((p) => p.exit !== undefined);
+      }, "harvest noted the recorded exit");
+      const [entry] = tasks.progress();
+      expect(entry).toMatchObject({ taskId: "task-untitled", exit: 143 });
+      expect(entry?.vanished).toBeUndefined();
+    } finally {
+      process.env["SEANCE_CLAUDE_BIN"] = stub.ok;
+      await killWindow("Task Untitled");
+    }
+  });
+
   test("a task window keeps remain-on-exit on, hooks only its own pane, and leaves the global hooks alone; a non-task window gets off", async () => {
     process.env["SEANCE_CLAUDE_BIN"] = stub.repl;
     const tasks = new EndedTasks(LaunchLedger.memory(), Date.now, tmuxHarvestPanes(reapAudit("harvest", () => {})));
