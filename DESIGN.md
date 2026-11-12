@@ -944,11 +944,12 @@ nothing checked it. The last is the gap they leave.
   session's own path, its `pass` frame, `pass-close` and the `successor` origin, is not built and its
   bullets below stay design; Scheduler, "Passing to a successor"):
   - The daemon's one write to a forge is `pushTaskBranch` (`daemon/src/push-branch.ts`): a `git push`
-    through `networkGit`, never forced, of `refs/heads/<b>:refs/heads/<r>` to `origin` only. `<b>` is the
+    through `networkGit`, never forced, of `<tip sha>:refs/heads/<r>` to `origin` only, `<tip>` that of `<b>`. `<b>` is the
     branch its own launch ledger's worktree has checked out; `<r>` is, in order: that branch's
     configured upstream on `origin` (an upstream on any other remote counts as none); with no upstream
     and a scheduler-sealed `push-branch`'s `expect`, that `expect`, only when origin's tip of it is an
-    ancestor of the local tip (else nothing is pushed, `branch_mismatch`); with neither, `<b>`, except
+    ancestor of the local tip and of no default branch's tip (else nothing is pushed, `branch_mismatch`; the
+    default branch itself is `default_branch`); with neither, `<b>`, except
     that the session's own `pass` frame for a task whose ledger holds a PR is refused `no_upstream`.
     Never a path, never a branch from a session frame; only on a clean tree and never to the default branch; refusing repo-local
     `remote.*.pushurl` and `url.*.pushinsteadof`; only on a `push-branch` sealed `from` the scheduler (or
@@ -7023,8 +7024,17 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
      `expect`. **No upstream, `expect` given** (a rate-limited session cannot set one): the daemon
      validates `expect` with the same ref-format rule, fetches it into `refs/remotes/origin/<expect>`
      through `networkGit` (15 s), and if that remote tip is an ancestor of the local tip
-     (`merge-base --is-ancestor`) takes `<r> = expect`: the PR head is this worktree's own line of
-     work. Otherwise (fetch failed, not an ancestor) `branch_mismatch`. **No upstream, no `expect`**:
+     (`merge-base --is-ancestor`) and of no default branch's tip takes `<r> = expect`: the PR head is
+     this worktree's own line of work. Otherwise (not an ancestor, already in the default branch, or
+     origin has no such branch) `branch_mismatch`; a fetch that failed for any other reason (auth,
+     network: `git ls-remote --exit-code` says whether the branch is absent, answer 2) is
+     `push_failed`, which the surfaces do not advise setting an upstream for. An `expect` that is the
+     default branch is `default_branch`, before the fetch. _Decided_ (review of 2a): the gate stays the
+     ancestry the owner approved, plus "not already merged", because an open PR's head always has a
+     commit the default lacks, so a `develop` or release branch the worktree was cut past is refused
+     while the task's own branch passes. A branch ahead of the default that the worktree was cut from
+     (a release branch) is still adopted: the session could have pushed it itself. **No upstream, no
+     `expect`**:
      pushes to `<b>` when the task has no PR; when the caller says it holds one (`hasPr`, the self
      path, from the PR URL its ledger noted: it has no `expect`, and the leader would refuse another
      branch after the push) it is `no_upstream`, nothing pushed, and the session is told to run
@@ -7035,13 +7045,19 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
      branch-state's `repoBase` does; with none, `main` and `master`) is `default_branch`.
   6. Uncommitted or untracked changes are `dirty_worktree` (`pendingChanges`; unreadable is
      `push_failed`).
-  7. HEAD already equal to `refs/remotes/origin/<r>` answers `pushed: false` with no network call.
+  7. HEAD already equal to `refs/remotes/origin/<r>` is not taken as proof: the tracking ref is as old
+     as the last fetch, and origin's branch may have been rewritten since. The push is made all the
+     same, and git answers `=` (up to date, `pushed: false`) or rejects the rewritten branch.
   8. A repo-local `remote.*.pushurl` or `url.*.pushinsteadof` is `push_failed`, beside the family
      `networkGit` already refuses: a push must reach the URL the successor fetches from.
   9. `networkGit(path, ["push", "--porcelain", "--no-verify", "--no-follow-tags",
-     "--no-recurse-submodules", "--no-signed", "origin", "refs/heads/<b>:refs/heads/<r>"], 45_000)`:
+     "--no-recurse-submodules", "--no-signed", "origin", "<tip sha>:refs/heads/<r>"], 45_000)`
+     (the sha `HEAD` resolved to after the clean check, so a commit the live session makes meanwhile
+     cannot leave origin holding something the successor's prompt does not name):
      never forced, no pre-push hook (`core.hooksPath=/dev/null`), a `!` flag in the porcelain
-     output is `push_rejected`, any other failure, a timeout or a refusal `push_failed`. git's stderr
+     output is `push_rejected` whatever the exit code, any other failure, a timeout or a refusal
+     `push_failed`; success is exit 0 **and** exactly one ref line (`=` up to date, any other flag
+     pushed), never exit 0 alone. git's stderr
      can carry a credentialed URL, so a reply and an audit line hold fixed text and the exit code,
      never the stderr.
      Audit: `audit push task=<id> repo=<name> outcome=<code|pushed|unchanged> tip=<7 hex>`, never either

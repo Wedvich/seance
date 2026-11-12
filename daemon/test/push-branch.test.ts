@@ -113,6 +113,27 @@ describe("a branch with no upstream and no PR", () => {
     expect(await originTip("pr/head-diverged")).toBe(before);
   });
 
+  test("is refused when the PR's head is the default branch", async () => {
+    const path = await worktree("task/head-is-main");
+    await commit(path);
+    const before = await originTip("main");
+    expect(await pushTaskBranch(site(path), { expect: "main" })).toMatchObject({ ok: false, code: "default_branch" });
+    expect(await originTip("main")).toBe(before);
+  });
+
+  test("is refused when the PR's head is a branch the default already holds", async () => {
+    // A `develop` the worktree was cut past: its tip is in the local history, but it is no one task's work.
+    await git(fixture.repoPath, "push", "-q", "origin", "origin/main:refs/heads/rel/merged");
+    const path = await worktree("task/past-develop");
+    await commit(path);
+    const before = await originTip("rel/merged");
+    expect(await pushTaskBranch(site(path), { expect: "rel/merged" })).toMatchObject({
+      ok: false,
+      code: "branch_mismatch",
+    });
+    expect(await originTip("rel/merged")).toBe(before);
+  });
+
   test("is refused when the PR's head is no branch on origin", async () => {
     const path = await worktree("task/no-such-head");
     await commit(path);
@@ -151,12 +172,41 @@ describe("a branch with an upstream", () => {
     });
   });
 
-  test("is refused when it tracks a branch of another remote", async () => {
+  test("another remote's upstream counts as none: the branch is pushed under its own name", async () => {
     const path = await worktree("task/foreign-remote");
-    await commit(path);
+    const tip = await commit(path);
     await git(path, "config", "branch.task/foreign-remote.remote", ".");
     await git(path, "config", "branch.task/foreign-remote.merge", "refs/heads/main");
-    expect(await pushTaskBranch(site(path))).toMatchObject({ ok: false, code: "branch_mismatch" });
+    expect(await pushTaskBranch(site(path))).toEqual({
+      ok: true,
+      remoteBranch: "task/foreign-remote",
+      tip,
+      pushed: true,
+    });
+  });
+
+  test("another remote's upstream still lets the PR's head be adopted", async () => {
+    await fixture.pushBranch("pr/fork-tracked");
+    const path = await worktree("task/fork-tracked", "origin/pr/fork-tracked");
+    const tip = await commit(path);
+    await git(path, "config", "branch.task/fork-tracked.remote", "fork");
+    await git(path, "config", "branch.task/fork-tracked.merge", "refs/heads/feature");
+    expect(await pushTaskBranch(site(path), { expect: "pr/fork-tracked" })).toEqual({
+      ok: true,
+      remoteBranch: "pr/fork-tracked",
+      tip,
+      pushed: true,
+    });
+    expect(await originTip("pr/fork-tracked")).toBe(tip);
+  });
+
+  test("an upstream on origin that is no branch is a failure, not a mismatch", async () => {
+    const path = await worktree("task/bad-merge");
+    await commit(path);
+    await git(path, "config", "branch.task/bad-merge.remote", "origin");
+    await git(path, "config", "branch.task/bad-merge.merge", "refs/tags/v1");
+    expect(await pushTaskBranch(site(path))).toMatchObject({ ok: false, code: "push_failed" });
+    expect(await originTip("task/bad-merge")).toBeNull();
   });
 
   test("is refused when it would update the repo's default branch", async () => {
@@ -194,6 +244,34 @@ describe("what stops a push", () => {
     const reply = await pushTaskBranch(site(path));
     expect(reply).toMatchObject({ ok: false, code: "push_rejected" });
     expect(await originTip("task/taken")).toBe(before);
+  });
+
+  test("a tracking ref the last fetch left behind is not taken for what origin holds", async () => {
+    await fixture.pushBranch("pr/rewritten");
+    const path = await worktree("task/stale-tracking", "origin/pr/rewritten");
+    await git(path, "branch", "--set-upstream-to=origin/pr/rewritten");
+    // origin's branch is rewritten from elsewhere; this clone's origin/pr/rewritten still equals HEAD.
+    const other = await worktree("task/rewriter");
+    await commit(other);
+    await git(other, "push", "-q", "-f", "origin", "HEAD:refs/heads/pr/rewritten");
+    const before = await originTip("pr/rewritten");
+    expect(await pushTaskBranch(site(path))).toMatchObject({ ok: false, code: "push_rejected" });
+    expect(await originTip("pr/rewritten")).toBe(before);
+  });
+
+  test("a fetch that fails for another reason than a missing branch is a failure, not a mismatch", async () => {
+    const path = await worktree("task/offline");
+    await commit(path);
+    const url = await git(path, "config", "remote.origin.url");
+    await git(path, "config", "remote.origin.url", join(base, "gone.git"));
+    try {
+      expect(await pushTaskBranch(site(path), { expect: "pr/anything" })).toMatchObject({
+        ok: false,
+        code: "push_failed",
+      });
+    } finally {
+      await git(path, "config", "remote.origin.url", url);
+    }
   });
 
   test("a repo-local pushurl, which would send it somewhere other than origin", async () => {

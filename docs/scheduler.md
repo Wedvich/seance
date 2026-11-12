@@ -1230,12 +1230,14 @@ of M4 has landed.
       _Rejected:_ a state file committed on the branch; switching the successor's worktree to `<r>`.
     - **O2. The daemon pushes, on a clean tree only.** The old task's daemon pushes the worktree's
       local branch `<b>` to its **remote branch** `<r>` on `origin`: argv only, never forced, only
-      `refs/heads/<b>:refs/heads/<r>`. `<r>` is the branch's configured upstream when
+      `<b>`'s tip sha to `refs/heads/<r>`. `<r>` is the branch's configured upstream when
       `branch.<b>.remote` is exactly `origin` (daemon worktrees sit on `worktree-<name>` while
       sessions push `HEAD:martin/…`, so `<b>` alone would leave a stray branch beside the PR's),
       else, for a branch with no upstream (an upstream on another remote counts as none): the PR head
-      the leader read, when origin's tip of it is an ancestor of the local tip (else `branch_mismatch`,
-      nothing pushed), or, with no PR head, `<b>` (Q7 below). A dirty tree refuses `dirty_worktree`; the
+      the leader read, when origin's tip of it is an ancestor of the local tip and of no default
+      branch's tip (else `branch_mismatch`, nothing pushed; the default branch itself is
+      `default_branch`, and a fetch that fails for a reason other than a missing branch is
+      `push_failed`), or, with no PR head, `<b>` (Q7 below). A dirty tree refuses `dirty_worktree`; the
       daemon makes no WIP commits. This is the daemon's first write to GitHub, so a threat-model
       change (D12). _Rejected:_ daemon WIP commits; never pushing; always pushing to `<b>`.
     - **O3. The automatic trigger is specced now and built later** (stage 3).
