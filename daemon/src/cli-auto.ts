@@ -15,7 +15,7 @@ import {
   startGateError,
   startQueuedAuto,
   traitsGateError,
-  traitsRefusal,
+  requiresCheck,
   type AutoEnqueued,
   type AutoSpec,
   type PlacementInput,
@@ -180,7 +180,7 @@ export async function spawnAuto(
     const resolvedSpec: AutoSpec = { ...spec, repo: resolved.origin, ...placed.fields };
     const longOrigin = specError(resolvedSpec, "cli");
     if (longOrigin !== null) return failed(`spawn refused: ${longOrigin}`);
-    const refused = args.requires === undefined ? null : traitsRefusal(resolvedSpec, leg.machines);
+    const refused = args.requires === undefined ? null : requiresCheck(resolvedSpec, leg.machines);
     if (refused !== null) {
       await traitRefusalAudit(audit, "cli")(refused.kind, args.requires?.length ?? 0, refused.count);
       return failed(`spawn refused: --requires: ${refused.text}`);

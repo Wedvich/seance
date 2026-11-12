@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { TASK_REQUEST_LIMITS, TASK_SPEC_LIMITS } from "@seance/shared";
 import { machine } from "../test/fake-app-relay.ts";
-import { specError, traitsRefusal, usesReported, type AutoSpec } from "./auto.ts";
+import { specError, requiresCheck, usesReported, type AutoSpec } from "./auto.ts";
 
 const BASE: AutoSpec = { repo: "github.com/m/seance", mode: "worktree" };
 const ID = "3f1c2b7e-9d4a-4c1e-8a55-0b6f2d9e7a10";
@@ -66,7 +66,7 @@ describe("specError, requires", () => {
   });
 });
 
-describe("traitsRefusal", () => {
+describe("requiresCheck", () => {
   const exclave = (id: string, traits: readonly string[], accountId = `org:${id}`) => ({
     id,
     accountId,
@@ -82,7 +82,7 @@ describe("traitsRefusal", () => {
   ];
 
   test("a name no machine declares is unknown, counted, and listed with the names that exist", () => {
-    const refusal = traitsRefusal({ requires: ["atlas", "nope", "nada"] }, fleet);
+    const refusal = requiresCheck({ requires: ["atlas", "nope", "nada"] }, fleet);
     expect(refusal).toEqual({
       kind: "unknown_trait",
       text: "no machine declares the traits nope, nada — known: atlas, az, gpu",
@@ -91,27 +91,27 @@ describe("traitsRefusal", () => {
   });
 
   test("a typo is reported before reachability, even where the pin would also have refused it", () => {
-    expect(traitsRefusal({ requires: ["nope"], pin: { deviceId: "d-3" } }, fleet)?.kind).toBe("unknown_trait");
+    expect(requiresCheck({ requires: ["nope"], pin: { deviceId: "d-3" } }, fleet)?.kind).toBe("unknown_trait");
   });
 
   test("(a) a pin to a machine whose exclaves each carry one of the traits, (b) the avoid of the only holder", () => {
-    expect(traitsRefusal({ requires: ["atlas", "az"], pin: { deviceId: "d-1" } }, fleet)?.kind).toBe(
+    expect(requiresCheck({ requires: ["atlas", "az"], pin: { deviceId: "d-1" } }, fleet)?.kind).toBe(
       "unreachable_trait",
     );
-    expect(traitsRefusal({ requires: ["gpu"], avoid: ["d-3"] }, fleet)).toMatchObject({
+    expect(requiresCheck({ requires: ["gpu"], avoid: ["d-3"] }, fleet)).toMatchObject({
       kind: "unreachable_trait",
       count: 1,
     });
-    expect(traitsRefusal({ requires: ["atlas"], pin: { account: "org:wsl" }, avoid: ["d-2"] }, fleet)?.kind).toBe(
+    expect(requiresCheck({ requires: ["atlas"], pin: { account: "org:wsl" }, avoid: ["d-2"] }, fleet)?.kind).toBe(
       "unreachable_trait",
     );
   });
 
   test("(c) the same specs without the restriction place, and a spec requiring nothing is never checked", () => {
-    expect(traitsRefusal({ requires: ["atlas", "az"] }, fleet)).toBeNull();
-    expect(traitsRefusal({ requires: ["gpu"] }, fleet)).toBeNull();
-    expect(traitsRefusal({ requires: ["atlas"], pin: { account: "org:wsl" } }, fleet)).toBeNull();
-    expect(traitsRefusal({ pin: { deviceId: "d-3" }, avoid: ["d-3"] }, [])).toBeNull();
+    expect(requiresCheck({ requires: ["atlas", "az"] }, fleet)).toBeNull();
+    expect(requiresCheck({ requires: ["gpu"] }, fleet)).toBeNull();
+    expect(requiresCheck({ requires: ["atlas"], pin: { account: "org:wsl" } }, fleet)).toBeNull();
+    expect(requiresCheck({ pin: { deviceId: "d-3" }, avoid: ["d-3"] }, [])).toBeNull();
   });
 });
 

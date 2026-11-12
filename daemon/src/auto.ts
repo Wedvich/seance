@@ -31,7 +31,7 @@ import {
   type TaskSpec,
   lastHeardAt,
 } from "@seance/shared";
-import { enqueueAudit, type AuditSink, type EnqueueSurface, type TraitRefusal } from "./audit.ts";
+import { enqueueAudit, type AuditSink, type EnqueueSurface, type TraitRefusalKind } from "./audit.ts";
 import { DaemonFault, type SchedulerLeg } from "./fleet.ts";
 import { originQuery } from "./scan.ts";
 
@@ -576,7 +576,7 @@ export function pinAccountGateError(lease: SchedulerLease, fields: string): stri
  */
 export function traitsGateError(lease: SchedulerLease, field: string, label = "spawn"): string | null {
   // First: a stripped registry from an older daemon would otherwise read as "no machine declares any traits".
-  if (lease.scheduler.requiresRefusal !== undefined) return `${label} refused: ${lease.scheduler.requiresRefusal}`;
+  if (lease.scheduler.staleDaemonRequires !== undefined) return `${label} refused: ${lease.scheduler.staleDaemonRequires}`;
   if (leaderAdvertises(lease, CAPABILITIES.traits)) return null;
   return lease.scheduler.availability().kind === "ready"
     ? `${label} refused: the scheduler's leader does not route on ${field} yet — its daemon needs \`seanced update\``
@@ -584,8 +584,8 @@ export function traitsGateError(lease: SchedulerLease, field: string, label = "s
 }
 
 /** A refused `requires`: the line to show, and what to count in its audit line. */
-export interface TraitsRefusal {
-  readonly kind: TraitRefusal;
+export interface RequiresCheckRefusal {
+  readonly kind: TraitRefusalKind;
   readonly text: string;
   /** Unknown names, or for `unreachable_trait` the required traits no reachable exclave carries. */
   readonly count: number;
@@ -598,10 +598,10 @@ export interface TraitsRefusal {
  * `pin_expired` (or forever, unpinned). One check for MCP, the CLI and `seanced continue`'s neighbours;
  * `spec` is the whole spec with its pin and avoid already resolved to ids, not just `requires`.
  */
-export function traitsRefusal(
+export function requiresCheck(
   spec: Pick<TaskSpec, "requires" | "pin" | "avoid">,
   machines: readonly Machine[],
-): TraitsRefusal | null {
+): RequiresCheckRefusal | null {
   const requires = spec.requires ?? [];
   const unknown = unknownTraits(requires, machines);
   if (unknown.length > 0) {

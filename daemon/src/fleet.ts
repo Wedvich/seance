@@ -61,7 +61,7 @@ export interface SchedulerLeg {
    * carrying `requires` is refused with. That daemon parses the spec with a parser that drops `requires`,
    * so the task would queue unrestricted, and its stripped registry view would make every trait read unknown.
    */
-  readonly requiresRefusal?: string;
+  readonly staleDaemonRequires?: string;
   readonly enqueue: (task: Task) => Promise<TaskCreated | StoreRefusal | null>;
   readonly availability: () => SchedulerAvailability;
   readonly queue: () => Promise<QueueReply | null>;
@@ -173,7 +173,7 @@ function brokerFailure(err: BrokerError): RequestFailure {
 export function brokerScheduler(
   availability: SchedulerAvailability,
   opts: BrokerCallOpts = {},
-  requiresRefusal?: string,
+  staleDaemonRequires?: string,
 ): SchedulerLeg {
   /** `read` answers undefined for data that is not a reply to this op. */
   const send = async <T>(request: SchedulerCall, read: (data: unknown) => T | undefined): Promise<T> => {
@@ -189,11 +189,11 @@ export function brokerScheduler(
   };
   return {
     availability: () => availability,
-    ...(requiresRefusal === undefined ? {} : { requiresRefusal }),
+    ...(staleDaemonRequires === undefined ? {} : { staleDaemonRequires }),
     enqueue: (task) => {
       // The gates refuse first; this keeps a caller that skipped them from sending a `requires` the daemon would drop.
-      if (task.spec.requires !== undefined && requiresRefusal !== undefined) {
-        return Promise.reject(new RequestFailure("refused", requiresRefusal, "daemon"));
+      if (task.spec.requires !== undefined && staleDaemonRequires !== undefined) {
+        return Promise.reject(new RequestFailure("refused", staleDaemonRequires, "daemon"));
       }
       return send({ schedulerOp: "enqueue", taskId: task.id, spec: task.spec }, parseTaskCreated);
     },
@@ -241,7 +241,7 @@ export function brokerFleet(opts: BrokerCallOpts = {}, self: () => Promise<strin
   return {
     open: async (): Promise<FleetLease> => {
       const state = await brokerFleetState(opts);
-      const stale = await traitsRefusalOf(state.machines, selfOnce);
+      const stale = await staleDaemonOf(state.machines, selfOnce);
       return {
         machines: state.machines,
         request: <T>(deviceId: string, op: BrokerOp, payload: unknown): Promise<T | ErrorResponse> =>
@@ -270,7 +270,7 @@ export async function ownDeviceId(): Promise<string | null> {
  * closed because sending `requires` to a daemon that drops it is the failure. A registry where every machine
  * advertises traits needs no lookup of who "self" is.
  */
-async function traitsRefusalOf(
+async function staleDaemonOf(
   machines: readonly Machine[],
   self: () => Promise<string | null>,
 ): Promise<string | undefined> {

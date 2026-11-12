@@ -385,11 +385,11 @@ export function enqueueAudit(sink: AuditSink, origin: EnqueueOrigin, claimedClie
   };
 }
 
-/** Why an enqueue was refused before it was written, for the trait checks (`traitsRefusal`). */
-export type TraitRefusal = "unknown_trait" | "unreachable_trait";
+/** Why an enqueue was refused before it was written, for the trait checks (`requiresCheck`). */
+export type TraitRefusalKind = "unknown_trait" | "unreachable_trait";
 
 /**
- * An enqueue refused locally for what it requires (`traitsRefusal`): one line per refusal, under the
+ * An enqueue refused locally for what it requires (`requiresCheck`): one line per refusal, under the
  * surface's own origin, the same shape as `enqueueAudit`'s so the measurement reads both. Counts
  * only — `requires` is how many traits it asked for, `count` how many were unknown (or, for
  * `unreachable_trait`, missing from every place it could go). The names are user-typed free text
@@ -398,7 +398,7 @@ export type TraitRefusal = "unknown_trait" | "unreachable_trait";
 export function traitRefusalAudit(
   sink: AuditSink,
   surface: EnqueueSurface,
-): (refusal: TraitRefusal, requested: number, count: number) => Promise<void> {
+): (refusal: TraitRefusalKind, requested: number, count: number) => Promise<void> {
   return async (refusal, requested, count) => {
     const counted = refusal === "unknown_trait" ? "unknown" : "missing";
     await sink(

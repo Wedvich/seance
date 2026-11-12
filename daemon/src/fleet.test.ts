@@ -309,7 +309,7 @@ describe("brokerFleet", () => {
         const scheduler = lease.scheduler;
         if (scheduler === null) throw new Error("expected a scheduler leg");
         const refused = "this machine's daemon is older than this seanced: restart or update it (seanced update)";
-        expect(scheduler.requiresRefusal).toBe(refused);
+        expect(scheduler.staleDaemonRequires).toBe(refused);
         expect(await rejection(scheduler.enqueue(REQUIRING))).toMatchObject({ message: refused });
         // A spec that requires nothing still goes through an old daemon.
         expect(await scheduler.enqueue(TASK)).toEqual({ ok: true, landedEarlier: false });
@@ -323,7 +323,7 @@ describe("brokerFleet", () => {
       const current = await daemonOf(NEW);
       try {
         const lease = await brokerFleet({ path: current.path }, self).open();
-        expect(lease.scheduler?.requiresRefusal).toBeUndefined();
+        expect(lease.scheduler?.staleDaemonRequires).toBeUndefined();
         expect(await lease.scheduler?.enqueue(REQUIRING)).toEqual({ ok: true, landedEarlier: false });
       } finally {
         await current.stop();
@@ -332,7 +332,7 @@ describe("brokerFleet", () => {
       try {
         const lease = await brokerFleet({ path: unknown.path }, () => Promise.resolve(null)).open();
         // Not "older": nothing says the daemon is, only that this box is not in the registry.
-        expect(lease.scheduler?.requiresRefusal).toBe(UNCONFIRMED_DAEMON_TRAITS);
+        expect(lease.scheduler?.staleDaemonRequires).toBe(UNCONFIRMED_DAEMON_TRAITS);
       } finally {
         await unknown.stop();
       }
