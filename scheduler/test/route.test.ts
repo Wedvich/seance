@@ -1212,8 +1212,9 @@ describe("trait_absent — a required trait is an exclave's own, and every one i
         ...(traits === undefined ? {} : { exclaves: [exclave("main", `org:${id}`, { traits })] }),
       });
 
-    test("(a) a place only traits stop: each trait that place lacks holds the task", () => {
-      expect(hold([plain(), atlas()], ["atlas", "az"])).toEqual(["atlas", "az"]);
+    test("(a) a place only one trait stops: that trait holds the task", () => {
+      // atlas is on a/main, so only az holds, though `plain` lacks both.
+      expect(hold([plain(), atlas()], ["atlas", "az"])).toEqual(["az"]);
       // gpu is on every exclave of `a`, so only az holds.
       expect(hold([atlas()], ["gpu", "az"])).toEqual(["az"]);
     });

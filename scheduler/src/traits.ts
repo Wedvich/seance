@@ -26,8 +26,9 @@ function missingTrait(reason: Reason): string | null {
 /**
  * The required traits that hold an unplaced task, for the held-by-trait log line: not every trait
  * of a task that waits for quota. `trait` holds when nothing was chosen and either
- * - (a) some candidate is rejected only for traits and lacks it: traits alone stop an otherwise
- *   free place; or
+ * - (a) some candidate is rejected only for traits and lacks nothing but it: that one trait alone
+ *   stops an otherwise free place (a place lacking several holds none of them singly: another
+ *   exclave may carry the rest); or
  * - (b) every candidate that was judged lacks it: no machine has it. A machine whose blob lists
  *   no exclaves is rejected `exclaves_unknown` and never judged (`exclave: null`), so it is
  *   ignored here — it neither counts for nor against the trait.
@@ -41,9 +42,11 @@ export function traitsHolding(decision: Decision, requires: readonly string[]): 
   const traitOnly = decision.candidates.filter(
     (c) => c.rejected.length > 0 && c.rejected.every((reason) => missingTrait(reason) !== null),
   );
+  const onlyLacks = (rejected: readonly Reason[], trait: string): boolean =>
+    rejected.every((reason) => missingTrait(reason) === trait);
   return requires.filter(
     (trait) =>
-      traitOnly.some((c) => lacks(c.rejected, trait)) ||
+      traitOnly.some((c) => onlyLacks(c.rejected, trait)) ||
       (judged.length > 0 && judged.every((c) => lacks(c.rejected, trait))),
   );
 }
