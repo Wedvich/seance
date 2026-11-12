@@ -990,8 +990,8 @@ of M4 has landed.
     window still to run; 80% at the halfway point); ties go by deviceId. A weight of 4 was
     rejected: another machine carrying four tasks is normal load, and the Mac would take work then,
     so it would not replace `avoid`. `avoid` stays for "never here".
-    Advertised as `ExclaveInfo.keepFree` (names). An older leader ignores the extra component
-    (`parseScore` ignores extra keys). Rejected: a filter (a busy fleet would then refuse work the
+    Advertised as `ExclaveInfo.keepFree` (names). An older leader drops `ExclaveInfo.keepFree`
+    (`parseExclaveInfo`) and places as before; an older reader's `parseScore` drops the component. Rejected: a filter (a busy fleet would then refuse work the
     Mac could take), and a per-task "prefer not" list (that is `avoid` again).
   - _PRs:_ (1) core — **built** (#406; DESIGN.md "Traits filter"); config, `ExclaveInfo.traits`, `TaskSpec.requires` with the sentinel, the
     filter and both reasons (`trait_unhealthy` parsed and worded, emitted by PR 2), MCP/CLI/PWA authoring, `get_queue`/PWA text, `CAPABILITIES.traits`;
