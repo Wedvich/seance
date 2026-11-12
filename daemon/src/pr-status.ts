@@ -119,7 +119,6 @@ type Read =
       readonly state: PrState;
       readonly checks?: PrChecks;
       readonly stacked?: true;
-      readonly wide?: WideFields;
     }
   | { readonly kind: "none"; readonly error: string | null };
 
@@ -240,7 +239,14 @@ const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F-\u009F]/gu;
 /** A name a repo owns, as it may enter a sealed record and a session prompt: no control characters, bounded. */
 function cleanName(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
-  const name = value.replaceAll(CONTROL_CHARACTERS, "").trim().slice(0, PR_FAILING_LIMITS.length);
+  const clean = value.replaceAll(CONTROL_CHARACTERS, "").trim();
+  // Cut on code points, then re-check the unit count the parser bounds: a cut between a surrogate pair would leave half of one.
+  let name = "";
+  for (const point of clean) {
+    if (name.length + point.length > PR_FAILING_LIMITS.length) break;
+    name += point;
+  }
+  name = name.trim();
   return name === "" ? undefined : name;
 }
 
@@ -382,7 +388,17 @@ function errorType(errors: unknown, index: number): string {
   return "UNKNOWN";
 }
 
-type Chunk = { readonly kind: Failure } | { readonly kind: "ok"; readonly reads: readonly Read[] };
+/** A chunk whose open PRs still owe their blocked-state read, with the merge readings and time they were written at. */
+interface Owing {
+  readonly chunk: readonly Target[];
+  readonly reads: readonly Read[];
+  readonly wide: readonly Wide[];
+  readonly at: number;
+}
+
+type Chunk =
+  | { readonly kind: Failure }
+  | { readonly kind: "ok"; readonly reads: readonly Read[]; readonly wide: readonly Wide[] };
 
 type Answer =
   | { readonly kind: Failure }
@@ -447,8 +463,8 @@ async function landedOnDefault(deps: PrPollerDeps, landings: readonly Landing[])
 
 /**
  * The blocked-state fields of `wide`, by alias index, in runs of `BLOCKED_CHUNK`. Never a failure of
- * the poll: a run that fails, or an alias it does not answer, adds nothing for the PRs it covered, and
- * `onFailure` is told so the poller can say so once.
+ * the poll: a run that fails adds nothing for the PRs it covered, and `onFailure` is told so the poller
+ * can say so once; an alias a good run answers `null` adds nothing for its PR, silently.
  */
 async function readBlocked(
   deps: PrPollerDeps,
@@ -474,14 +490,14 @@ async function readBlocked(
 }
 
 /**
- * One `gh` run over `prs`, a second over the blocked state of the open ones in `wideIndices`
- * (`readBlocked`), and a third over its stacked merges (`landedOnDefault`) when there are any.
+ * One `gh` run over `prs`, and a second over its stacked merges (`landedOnDefault`) when there are any.
+ * The blocked-state read (`readBlocked`) is the caller's, after every chunk's merge reading is written:
+ * its latency must not hold a merge back. `wide` names the open PRs of `wideIndices` that await it.
  */
 async function readChunk(
   deps: PrPollerDeps,
   prs: readonly GithubPr[],
   wideIndices: ReadonlySet<number>,
-  onBlockedFailure: () => void,
 ): Promise<Chunk> {
   const answer = await ask(deps, queryText(prs.length), prVariables(prs));
   if (answer.kind !== "ok") return answer;
@@ -518,17 +534,15 @@ async function readChunk(
       wide.push({ index: i, pr });
     }
   });
-  const blocked = await readBlocked(deps, wide, onBlockedFailure);
   const landed = await landedOnDefault(deps, landings);
   return {
     kind: "ok",
     reads: reads.map((read, i) => {
-      if (read.kind !== "status") return read;
-      const fields = blocked.get(i);
-      if (!landed.has(i)) return fields === undefined ? read : Object.assign({}, read, { wide: fields });
+      if (read.kind !== "status" || !landed.has(i)) return read;
       const { stacked: _stacked, ...rest } = read;
-      return fields === undefined ? rest : Object.assign(rest, { wide: fields });
+      return rest;
     }),
+    wide,
   };
 }
 
@@ -596,12 +610,28 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
     else deps.log.warn(`pr-status: ${REMEDY[next]}; PR status paused (${next})`);
   };
 
+  /** The writes for one PR's reading, one per task read on it; `fields` is its blocked state, where read. */
+  const write = (target: Target, read: Read, at: number, fields: WideFields | undefined): Promise<void>[] => {
+    if (read.kind !== "status") return [];
+    const base: PrStatus = {
+      state: read.state,
+      ...(read.checks === undefined ? {} : { checks: read.checks }),
+      ...(read.stacked === undefined ? {} : { stacked: read.stacked }),
+      at,
+    };
+    const wide: PrStatus = fields === undefined ? base : { ...base, ...fields };
+    return target.tasks.map((task) => deps.onStatus(task.id, task.prUrl, task.wide ? wide : base));
+  };
+
   /** The class the poll ended in, or null when there was nothing to poll. */
   async function poll(): Promise<"ok" | Failure | null> {
     const wanted = targets(deps.tasks(), unreadable, readThisTerm);
     if (wanted.length === 0) return null;
     // A finished task's read is spent only once every chunk answered: its PRs may sit in several.
     const spent = new Set<string>();
+    // Open PRs owed a blocked-state read: it runs once every chunk's merge reading is written, so a slow
+    // or stalled one delays only the chip fields it adds, never a merge (or the dependents it releases).
+    const owing: Owing[] = [];
     for (let from = 0; from < wanted.length; from += CHUNK) {
       const chunk = wanted.slice(from, from + CHUNK);
       // oxlint-disable-next-line no-await-in-loop -- chunks run one after another, never overlapping
@@ -609,11 +639,12 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
         deps,
         chunk.map((target) => target.pr),
         new Set(chunk.flatMap((target, i) => (target.tasks.some((task) => task.wide) ? [i] : []))),
-        blockedFailure,
       );
       if (stopped) return null;
       if (answer.kind !== "ok") return answer.kind;
       const at = deps.now();
+      const waiting = new Set(answer.wide.map(({ index }) => index));
+      if (waiting.size > 0) owing.push({ chunk, reads: answer.reads, wide: answer.wide, at });
       const writes: Promise<void>[] = [];
       chunk.forEach((target, i) => {
         const read = answer.reads[i];
@@ -629,20 +660,26 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
           }
           return;
         }
-        const base: PrStatus = {
-          state: read.state,
-          ...(read.checks === undefined ? {} : { checks: read.checks }),
-          ...(read.stacked === undefined ? {} : { stacked: read.stacked }),
-          at,
-        };
-        const wide: PrStatus = read.wide === undefined ? base : { ...base, ...read.wide };
-        for (const task of target.tasks) writes.push(deps.onStatus(task.id, task.prUrl, task.wide ? wide : base));
+        if (!waiting.has(i)) writes.push(...write(target, read, at, undefined));
       });
       // oxlint-disable-next-line no-await-in-loop -- as above
       await Promise.all(writes);
       if (stopped) return null;
     }
     for (const id of spent) readThisTerm.add(id);
+    for (const { chunk, reads, wide, at } of owing) {
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      const fields = await readBlocked(deps, wide, blockedFailure);
+      if (stopped) return null;
+      const writes = wide.flatMap(({ index }) => {
+        const target = chunk[index];
+        const read = reads[index];
+        return target === undefined || read === undefined ? [] : write(target, read, at, fields.get(index));
+      });
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      await Promise.all(writes);
+      if (stopped) return null;
+    }
     return "ok";
   }
 

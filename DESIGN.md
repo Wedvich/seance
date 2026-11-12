@@ -3879,11 +3879,14 @@ for the lot with its own `gh`.
   merge query a slow or failing one would fail the whole chunk and back the poller off, which stops
   merge detection fleet-wide. So the merge query stays byte-identical, and the second runs only for
   the open primary PR (`url === task.prUrl`) of an `awaiting-merge` task not under `until:
-  "reported"` (`taskPrBlock`, below), in runs of `BLOCKED_CHUNK` (10) after the merge read of the
-  chunk. A run that fails, times out or leaves an alias `null` drops those PRs' wide fields and
-  nothing else: the poll does not fail, does not back off, and warns once per term ("the
-  blocked-state read did not answer"); the chip keeps its state and checks, and no alert is raised
-  on a reading that lacks them. Owner, repo and number are variables as in the first query.
+  "reported"` (`taskPrBlock`, below), in runs of `BLOCKED_CHUNK` (10), and only once every
+  chunk's merge readings are written, so that a slow or stalled run delays the chip fields of the
+  open PRs it covers and nothing else: no merge, and no dependent a merge releases, waits for it. A
+  run that fails (a timeout, a non-zero exit, no usable data) drops the wide fields of the PRs it
+  covered and nothing else: the poll does not fail, does not back off, and warns once per term (the
+  poller's lifetime: "the blocked-state read did not answer"); an alias a run answers `null` (a
+  PR the forge will not describe) drops its own PR's fields silently, with no warning. The chip
+  keeps its state and checks, and no alert is raised on a reading that lacks them. Owner, repo and number are variables as in the first query.
   - **Fields.** `PrStatus` gains, all optional so an older reader ignores them and a reading
     without a wide read is today's: `head` (the commit oid, 40 or 64 hex), `required` (`pending`,
     `passing` or `failing` over the head's required contexts alone: an optional check failing

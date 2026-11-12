@@ -305,6 +305,8 @@ export interface GhRun {
   readonly argvs: () => Promise<readonly (readonly string[])[]>;
   /** What the next calls print and exit with, after waiting `delaySeconds`, until set again. Data files only: the script is never rewritten. */
   readonly setReply: (stdout: string, code: number, delaySeconds?: number) => Promise<void>;
+  /** The same for the calls whose query selects `isRequired` (the blocked-state read); those answer `setReply`'s until this is set. */
+  readonly setBlockedReply: (stdout: string, code: number, delaySeconds?: number) => Promise<void>;
 }
 
 export interface GhStub {
@@ -325,7 +327,7 @@ export async function makeGhStub(base: string): Promise<GhStub> {
   const dir = join(base, "gh-stub");
   await mkdir(dir, { recursive: true });
   const path = join(dir, "gh");
-  // reply: first line the exit code, second the delay in seconds, the rest stdout; replaced by
+  // reply (and reply.blocked, for a call selecting isRequired): first line the exit code, second the delay in seconds, the rest stdout; replaced by
   // rename, so a poll running while a test changes the reply sees the old one or the new, never a mix.
   await Bun.write(
     path,
@@ -338,7 +340,9 @@ export async function makeGhStub(base: string): Promise<GhStub> {
       'printf \'%s\\0\' "$@" > "$run/argv"',
       "{ printf '%s\\0' \"$@\"; printf '\\n'; } >> \"$run/argv.log\"",
       'printf x >> "$run/count"',
-      'exec 3< "$run/reply"',
+      'reply="$run/reply"',
+      'case "$*" in *isRequired*) [ -f "$run/reply.blocked" ] && reply="$run/reply.blocked" ;; esac',
+      'exec 3< "$reply"',
       "IFS= read -r code <&3",
       "IFS= read -r delay <&3",
       'if [ "$delay" != 0 ]; then printf x >> "$run/delayed"; sleep "$delay"; fi',
@@ -356,6 +360,10 @@ export async function makeGhStub(base: string): Promise<GhStub> {
     const setReply = async (stdout: string, code: number, delaySeconds = 0): Promise<void> => {
       await Bun.write(file("reply.next"), `${code}\n${delaySeconds}\n${stdout}`);
       await rename(file("reply.next"), file("reply"));
+    };
+    const setBlockedReply = async (stdout: string, code: number, delaySeconds = 0): Promise<void> => {
+      await Bun.write(file("reply.blocked.next"), `${code}\n${delaySeconds}\n${stdout}`);
+      await rename(file("reply.blocked.next"), file("reply.blocked"));
     };
     await setReply("{}", 0);
     process.env["SEANCE_GH_STUB_RUN"] = runDir;
@@ -407,6 +415,7 @@ export async function makeGhStub(base: string): Promise<GhStub> {
       argv,
       argvs,
       setReply,
+      setBlockedReply,
     };
   };
   return { path, fresh };

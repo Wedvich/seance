@@ -689,6 +689,11 @@ describe("the blocked-state read", () => {
     expect(cut?.failing).toEqual(["x".repeat(100), "badname"]);
   });
 
+  test("(e) a name cut inside an astral character drops the whole character, never half of it", async () => {
+    const status = await read({ contexts: [run(`${"x".repeat(99)}\u{1F680}tail`, "FAILURE")] });
+    expect(status?.failing).toEqual(["x".repeat(99)]);
+  });
+
   test("(f) mergeStateStatus is lowercased; a value this build does not know is left out", async () => {
     expect((await read({ mergeStateStatus: "DIRTY" }))?.merge).toBe("dirty");
     gh = await stub.fresh();
@@ -787,10 +792,46 @@ describe("the blocked-state read", () => {
     const { seen, logs } = start([waiting(1), waiting(2)]);
     // Several polls at the plain interval: a backoff would double it each time.
     await pollUntil(() => seen.filter((s) => s.id === "t1").length >= 4, "four polls");
-    expect(seen[0]).toEqual({ id: "t1", url: prUrl(1), status: { state: "open", at: 1234 } });
-    expect(seen[1]).toEqual({ id: "t2", url: prUrl(2), status: { state: "merged", at: 1234 } });
+    expect(seen.find((s) => s.id === "t1")).toEqual({ id: "t1", url: prUrl(1), status: { state: "open", at: 1234 } });
+    expect(seen.find((s) => s.id === "t2")).toEqual({ id: "t2", url: prUrl(2), status: { state: "merged", at: 1234 } });
     expect(logs.warn).toEqual([]);
     expect(logs.info).toEqual([]);
+  });
+
+  const blockedRunFails = async (stdout: string, code: number): Promise<void> => {
+    await gh.setReply(reply({ state: "OPEN", oid: HEAD }, { state: "MERGED" }), 0);
+    await gh.setBlockedReply(stdout, code);
+    const { seen, logs } = start([waiting(1), waiting(2)]);
+    await pollUntil(() => seen.filter((s) => s.id === "t1").length >= 3, "three polls");
+    // The merge is written ahead of the open PR, whose blocked read it does not wait on.
+    expect(seen.slice(0, 2).map((s) => [s.id, s.status])).toEqual([
+      ["t2", { state: "merged", at: 1234 }],
+      ["t1", { state: "open", at: 1234 }],
+    ]);
+    expect(seen.every((s) => s.status.head === undefined)).toBe(true);
+    // A poll that ended in a failure class would warn `PR status paused` and back the next one off.
+    expect(logs.warn).toHaveLength(1);
+    expect(logs.warn[0]).toContain("blocked-state read");
+    expect(logs.info).toEqual([]);
+  };
+
+  test("(n) a blocked run that prints garbage still delivers the merge reading, warns once however many polls, and is no failure of the poll", async () => {
+    await blockedRunFails("not json", 0);
+  });
+
+  test("(n) a blocked run GitHub refuses (exit 1, errors and no data) does the same", async () => {
+    await blockedRunFails(JSON.stringify({ errors: [{ type: "TIMEOUT", message: "slow" }] }), 1);
+  });
+
+  test("(o) a slow blocked read holds back only its own fields: a merge is written before it answers", async () => {
+    await gh.setReply(reply({ state: "OPEN", oid: HEAD }, { state: "MERGED" }), 0);
+    await gh.setBlockedReply(reply({ state: "OPEN", oid: HEAD }), 0, 1);
+    const { seen, stop } = start([waiting(1), waiting(2)], { intervalMs: 60_000 });
+    await pollUntil(() => seen.length > 0, "the first reading");
+    expect(seen.map((s) => s.id)).toEqual(["t2"]);
+    await pollUntil(() => seen.length >= 2, "the blocked reading", 5_000);
+    stop();
+    expect(seen[1]).toMatchObject({ id: "t1", status: { state: "open", head: HEAD } });
   });
 
   test("(m) twelve awaiting-merge open PRs take one merge run and two blocked runs", async () => {

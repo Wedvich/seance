@@ -16,7 +16,15 @@ import {
   type SpillStamp,
 } from "@seance/shared";
 import { isDeepStrictEqual } from "node:util";
-import { escalation, inputAlert, inputClock, prBlockedAlert, questionAlert, SpillAlerts, type SchedulerAlert } from "./alerts.ts";
+import {
+  escalation,
+  inputAlert,
+  inputClock,
+  prBlockedAlert,
+  questionAlert,
+  SpillAlerts,
+  type SchedulerAlert,
+} from "./alerts.ts";
 import { dispatchOrder } from "./batch.ts";
 import { DEFAULT_CONFIG, type SchedulerConfig } from "./config.ts";
 import { admission, named } from "./deps.ts";
