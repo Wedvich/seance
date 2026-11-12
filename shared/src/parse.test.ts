@@ -1644,8 +1644,9 @@ describe("store", () => {
     test("with all the leader adds at every bound and ten candidates, a record still carrying it fits", async () => {
       // Unfinished: the write that finishes a task drops the manifest (`lean`), so no failure or end beside it.
       const { failure: _failure, endedAt: _endedAt, leftRunning: _leftRunning, ...running } = written;
-      // Ten penalised candidates would seal 44 bytes past the cap: the leader trims such a record to its winner
-      // (`trimmed`), and a fleet where every exclave is kept free is not the bound this fixture measures.
+      // Each penalised candidate adds about 18 bytes of `ct` against a margin of 132 here, so from about eight of
+      // ten penalised the record overflows (all ten: 44 past the cap). The leader trims such a record to its
+      // winner (`trimmed`); this fixture measures the unpenalised bound.
       const unpenalised: Candidate = { ...candidate, score: { components, sticky: 0, total: 1.987654321 } };
       const decided: Task = {
         ...attached({ ...running, state: "running" }, ATTACHMENT_LIMITS.prompt),

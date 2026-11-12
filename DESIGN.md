@@ -3102,8 +3102,12 @@ it through the store: an app's `store-put` create, read by the leader on `store-
     take work, so it would not replace `avoid`. Stickiness (−2) cannot outweigh it alone. Rollout: an
     older leader ignores the advertisement and places as before; an older daemon refuses `keepFree` in
     config, so update the machine before setting it. Record size: a worst-case 8-candidate record with `keepFree: 1` on every candidate
-    measured 40,708 `ct` against `STORE_MAX_CT_LENGTH`'s 40,960 (40,568 without); ten such candidates would not fit, and the leader's `too_large` retry cuts
-    the decision to its winner. Surfaces: the PWA's decision text says "kept free" for a penalised
+    measured 40,708 `ct` against `STORE_MAX_CT_LENGTH`'s 40,960 (40,568 without); the weight moves only `total`
+    (a total of ten or more adds a character per candidate: 40,716). Each penalised candidate adds about 18 bytes, so the
+    attachment record below, which measures 40,828 with ten unpenalised candidates (132 under), measures 41,004
+    with all ten penalised and overflows from about eight; the leader's `too_large` retry cuts such a
+    decision to its winner, and the cut candidates include the kept-free one the PWA would have
+    explained. Surfaces: the PWA's decision text says "kept free" for a penalised
     candidate, and `list_machines` gives each exclave `keepFree: [names]`; `decisionText` shows totals
     only. Measuring `avoid`'s share: docs/scheduler.md, "What to measure".
   - **Surfaces.** MCP: `requires` on `spawn_session` and each `queue_batch` member; `get_queue` gives each
@@ -4544,7 +4548,7 @@ as follows, without reopening the decision.
   27,932 bytes, 740 under the cap (`requires` at its bound added 240). A name bound of 128 measured 28,436, too close to keep.
   Three-byte text fits less, as it already does for the prompt (the sealer's length check
   refuses it, `STORE_CREATE_MAX_CT_LENGTH`). With the leader's writes on top at every
-  bound and ten candidates, an unfinished record carrying the manifest seals to 40,828
+  bound and ten unpenalised candidates (see "Keep free"), an unfinished record carrying the manifest seals to 40,828
   bytes against `STORE_MAX_CT_LENGTH`'s 40,960 (task 2, `parse.test.ts`). A `failure` at
   its bound would push it over, but only a `failed` record carries one, and the write
   that finishes a task drops the manifest (`lean`, below); past the cap, the leader's
