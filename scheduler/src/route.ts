@@ -2,6 +2,7 @@ import {
   CAPABILITIES,
   DEFAULT_MODEL,
   effectivePct,
+  exclaveAuth,
   isQuotaTrimmed,
   isSkillName,
   isStatusStale,
@@ -132,7 +133,9 @@ export function route(input: RouteInput): Decision {
       candidates.push({ deviceId: machine.deviceId, machine: machine.name, exclave: null, rejected: machineReasons });
       continue;
     }
-    for (const exclave of machine.exclaves) candidates.push(judge(pass, machine, machineReasons, exclave));
+    machine.exclaves.forEach((exclave, index) => {
+      candidates.push(judge(pass, machine, machineReasons, exclave, index));
+    });
   }
 
   const scored = candidates
@@ -153,7 +156,13 @@ export function route(input: RouteInput): Decision {
 }
 
 /** One (machine, exclave): rejected with every reason that applies, else scored. */
-function judge(pass: Pass, machine: Machine, machineReasons: readonly Reason[], exclave: ExclaveInfo): Candidate {
+function judge(
+  pass: Pass,
+  machine: Machine,
+  machineReasons: readonly Reason[],
+  exclave: ExclaveInfo,
+  index: number,
+): Candidate {
   const { task, config, inFlight } = pass;
   const { skills } = pass;
   const clones = machine.repos.filter((r) => r.exclave === exclave.id && r.origin === task.spec.repo);
@@ -175,7 +184,10 @@ function judge(pass: Pass, machine: Machine, machineReasons: readonly Reason[], 
   if (clone === undefined) rejected.push({ code: "repo_absent" });
   const missing = lacking(clone);
   if (missing !== undefined) rejected.push({ code: "skill_absent", skill: missing });
+  // One code per exclave: signed out says everything an expired login would. Only `expired` filters —
+  // `expiring` and `unknown` (an older daemon, an unreadable store) still route.
   if (!exclave.authOk || exclave.accountId === null) rejected.push({ code: "auth_missing" });
+  else if (exclaveAuth(machine, index, pass.now).state === "expired") rejected.push({ code: "auth_expired" });
   const seat = seatOf(config, exclave.seatTier);
   const gated = gatedModel(task.spec.model ?? DEFAULT_MODEL, config);
   if (gated !== null && !seat.includes.includes(gated)) rejected.push({ code: "model_not_included", model: gated });
