@@ -6,6 +6,7 @@ import {
   reasonText,
   sessionExit,
   taskFailureText,
+  traitHealthByMachine,
   type Candidate,
   type Decision,
   type Machine,
@@ -69,6 +70,7 @@ function scoreText(score: Score): string {
     `load ${Math.round(c.machinePressure * 100)}%`,
     `queue ${c.queuePressure}`,
   ];
+  if ((c.keepFree ?? 0) > 0) parts.push("kept free");
   if (c.dependencyDistance > 0) parts.push(`distance ${n(c.dependencyDistance)}`);
   if (score.sticky > 0) parts.push(`continuation −${n(score.sticky)}`);
   return `score ${n(score.total)} (${parts.join(" · ")})`;
@@ -348,18 +350,25 @@ const WAITING_LIMIT = 3;
  * Why a ready task is still waiting, from its decision: each place that took it
  * out and the reasons, the clause `reasonText` words. Places the pin or the
  * avoid list rules out (`pin_mismatch`, `avoided`) are left out whole — the pin is the ask, not news —
- * and so is a place that lacks a required trait (`trait_absent`), whatever else is wrong with it: what the
- * task requires is the ask, and `requiresLine` says which machines have it. Null with no decision yet, or one that chose a place.
+ * and so is a place that lacks a required trait (`trait_absent`) or whose probe for it fails (`trait_unhealthy`),
+ * whatever else is wrong with it: what the task requires is the ask, and `requiresLine` says which machines have
+ * it and whose probe is failing. Null with no decision yet, or one that chose a place.
  */
 export function waitingText(task: Task): string | null {
   const { decision } = task;
   if (task.state !== "ready" || decision === undefined || decision.chosen !== null) return null;
   const places = decision.candidates
-    // A place the pin, the avoid list or a missing trait rules out is moot whatever else is wrong with it (an
+    // A place the pin, the avoid list or a required trait rules out is moot whatever else is wrong with it (an
     // offline machine the task was never going to use is not news, and waking it would not help).
     .filter(
       (candidate) =>
-        !candidate.rejected.some((r) => r.code === "pin_mismatch" || r.code === "avoided" || r.code === "trait_absent"),
+        !candidate.rejected.some(
+          (r) =>
+            r.code === "pin_mismatch" ||
+            r.code === "avoided" ||
+            r.code === "trait_absent" ||
+            r.code === "trait_unhealthy",
+        ),
     )
     .filter((candidate) => candidate.rejected.length > 0)
     .map((candidate) => `${where(candidate)}: ${candidate.rejected.map(reasonText).join(", ")}`);
@@ -382,11 +391,20 @@ export function avoidLine(task: Task, machines: readonly Machine[]): string | nu
   return `Avoids ${labels.join(", ")}${more > 0 ? `, +${more} more` : ""}`;
 }
 
+/** Names capped like `waitingText`: the first few, then ", +N more". */
+function cappedNames(names: readonly string[]): string {
+  const more = names.length - WAITING_LIMIT;
+  return `${names.slice(0, WAITING_LIMIT).join(", ")}${more > 0 ? `, +${more} more` : ""}`;
+}
+
 /**
  * What a task requires, one clause per trait: "Needs atlas (on MacBook, Thad)" with the machines that declare it
- * (capped like `waitingText`), or "Needs atlas — no machine has it" when none does. Null for a task requiring nothing.
+ * (capped like `waitingText`), or "Needs atlas — no machine has it" when none does. A machine whose probe for the
+ * trait is failing (on every exclave that carries it: `traitHealthByMachine`, the one rule routing shares) is
+ * named apart — "Needs atlas (MacBook's probe is failing)", "(on Thad; MacBook's probe is failing)", or "probe
+ * failing on A, B" for several. Null for a task requiring nothing.
  */
-export function requiresLine(task: Task, machines: readonly Machine[]): string | null {
+export function requiresLine(task: Task, machines: readonly Machine[], now: number): string | null {
   const { requires } = task.spec;
   if (requires === undefined || requires.length === 0) return null;
   const fleet = fleetTraits(machines);
@@ -394,8 +412,12 @@ export function requiresLine(task: Task, machines: readonly Machine[]): string |
     .map((trait) => {
       const holders = fleet.get(trait) ?? [];
       if (holders.length === 0) return `Needs ${trait} — no machine has it`;
-      const more = holders.length - WAITING_LIMIT;
-      return `Needs ${trait} (on ${holders.slice(0, WAITING_LIMIT).join(", ")}${more > 0 ? `, +${more} more` : ""})`;
+      const { failing } = traitHealthByMachine(machines, trait, now);
+      if (failing.length === 0) return `Needs ${trait} (on ${cappedNames(holders)})`;
+      const probe =
+        failing.length === 1 ? `${failing[0]}'s probe is failing` : `probe failing on ${cappedNames(failing)}`;
+      const healthy = holders.filter((name) => !failing.includes(name));
+      return `Needs ${trait} (${healthy.length === 0 ? "" : `on ${cappedNames(healthy)}; `}${probe})`;
     })
     .join(" · ");
 }

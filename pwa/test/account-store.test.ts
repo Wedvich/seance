@@ -19,7 +19,7 @@ import type { ServerWebSocket } from "bun";
 import { LIST_RETRY_MS } from "../src/account-store.ts";
 import { Store } from "../src/store.ts";
 import { pollUntil } from "./poll.ts";
-import { installBrowserGlobals, setVisibility } from "./stubs.ts";
+import { fakeHistory, installBrowserGlobals, setVisibility } from "./stubs.ts";
 
 installBrowserGlobals();
 
@@ -48,6 +48,10 @@ interface Double {
   refuseLists: number;
   /** While set, a `store-list` is answered from the records as they were asked, once it resolves: a reply that lands late. */
   listGate: Promise<void> | null;
+  /** Replies to the next `store-get` this way instead of from `records`. */
+  refuseGets: number;
+  /** While set, a `store-put` is answered once it resolves: a write in flight. */
+  putGate: Promise<void> | null;
   /** A write is not announced to the other sockets: a nudge lost to a drop. */
   muted: boolean;
   readonly stop: () => Promise<void>;
@@ -100,6 +104,11 @@ function startDouble(): Double {
             return;
           }
           case "store-get":
+            if (double.refuseGets > 0) {
+              double.refuseGets -= 1;
+              ws.send(JSON.stringify({ t: "store-refused", re, code: "rate_limited" }));
+              return;
+            }
             ws.send(JSON.stringify({ t: "store-record", re, record: at ?? null }));
             return;
           case "store-put": {
@@ -108,13 +117,17 @@ function startDouble(): Double {
               ws.send(JSON.stringify({ t: "store-refused", re, code: "invalid_request" }));
               return;
             }
+            const answer = (text: string): void => {
+              if (double.putGate === null) ws.send(text);
+              else void double.putGate.then(() => ws.send(text));
+            };
             if ((at?.version ?? 0) !== frame["expect"]) {
-              ws.send(JSON.stringify({ t: "store-refused", re, code: "version_conflict" }));
+              answer(JSON.stringify({ t: "store-refused", re, code: "version_conflict" }));
               return;
             }
             const version = (at?.version ?? 0) + 1;
             records.set(frame["key"], { key: frame["key"], version, env });
-            ws.send(JSON.stringify({ t: "store-written", re, version }));
+            answer(JSON.stringify({ t: "store-written", re, version }));
             if (double.muted) return;
             for (const other of sockets) {
               if (other !== ws) other.send(JSON.stringify({ t: "store-changed", key: frame["key"], version }));
@@ -135,6 +148,8 @@ function startDouble(): Double {
     sockets,
     refuseLists: 0,
     listGate: null,
+    refuseGets: 0,
+    putGate: null,
     muted: false,
     stop: () => server.stop(true),
   };
@@ -274,7 +289,7 @@ describe("account aliases in the store", () => {
     await b.renameAccount(ACCOUNT, "from-b");
 
     await a.renameAccount(ACCOUNT, "from-a");
-    expect(a.getState().accounts.notice).toStartWith("Renamed elsewhere");
+    expect(a.getState().accounts.notice).toBe("Renamed elsewhere to “from-b” — save again to replace it");
     expect(a.getState().accounts.aliases).toEqual({ [ACCOUNT]: "from-b" });
     expect(a.getState().accounts.saving).toBeNull();
 
@@ -282,6 +297,41 @@ describe("account aliases in the store", () => {
     expect(a.getState().accounts.notice).toBeNull();
     expect(a.getState().accounts.aliases).toEqual({ [ACCOUNT]: "from-a" });
     expect(double.records.get(await accountStoreKey(accountKey, ACCOUNT))?.version).toBe(2);
+  });
+
+  test("a lost race whose re-read finds an unreadable record, or gets no answer, does not claim a clear or a name", async () => {
+    const double = startDouble();
+    const a = await openStore(double);
+    await pollUntil(() => lists(double) === 1, "the listing");
+    const storeKey = await planted(double, ACCOUNT, "work", 1, undefined, 3);
+
+    await a.renameAccount(ACCOUNT, "home");
+    expect(a.getState().accounts.notice).toBe(
+      "Renamed elsewhere — the latest name can't be read; save again to replace it",
+    );
+
+    // The key moves on again and the re-read is refused: the held version is stale, and the text says so.
+    const held = double.records.get(storeKey);
+    if (held === undefined) throw new Error("the record was not planted");
+    double.records.set(storeKey, { ...held, version: 9 });
+    double.refuseGets = 1;
+    await a.renameAccount(ACCOUNT, "home");
+    expect(a.getState().accounts.notice).toBe("Renamed elsewhere — couldn't read the latest name, try again");
+  });
+
+  test("a rename that lost to a clear says the name was cleared", async () => {
+    const double = startDouble();
+    await planted(double, ACCOUNT, "work");
+    const a = await openStore(double);
+    const b = await openStore(double);
+    await pollUntil(() => a.getState().accounts.aliases[ACCOUNT] === "work", "a's listing to land");
+    await pollUntil(() => b.getState().accounts.aliases[ACCOUNT] === "work", "b's listing to land");
+    double.muted = true;
+    await b.renameAccount(ACCOUNT, "  ");
+
+    await a.renameAccount(ACCOUNT, "home");
+    expect(a.getState().accounts.notice).toBe("Renamed elsewhere and cleared — save again to replace it");
+    expect(a.getState().accounts.aliases).toEqual({});
   });
 
   test("a version-1 blob put back reads unreadable: the alias is gone, and the next rename overwrites at the relay's version", async () => {
@@ -310,7 +360,7 @@ describe("account aliases in the store", () => {
     await store.renameAccount(ACCOUNT, "x".repeat(65));
     expect(store.getState().accounts.notice).toBe("Names are at most 64 characters");
     expect(double.received.some((frame) => frame["t"] === "store-put")).toBe(false);
-    store.dismissAccountNotice();
+    store.openAccountRename(ACCOUNT);
     expect(store.getState().accounts.notice).toBeNull();
   });
 
@@ -536,5 +586,152 @@ describe("account aliases in the store", () => {
     expect(store.getState().accounts.aliases).toEqual({});
     expect(store.getState().accounts.notice).toBeNull();
     expect(double.received).toEqual([]);
+  });
+});
+
+describe("the rename dialog", () => {
+  let fake: ReturnType<typeof fakeHistory>;
+
+  afterEach(() => fake.restore());
+
+  test("is a layer: back closes it and takes its notice along, leaving the screen under it", async () => {
+    fake = fakeHistory();
+    const double = startDouble();
+    const store = await openStore(double);
+    await pollUntil(() => lists(double) === 1, "the listing");
+    store.openMachines();
+    store.openAccountRename(ACCOUNT);
+    expect(store.getState().accounts.renaming).toBe(ACCOUNT);
+    expect(fake.entries()).toMatchObject([null, { depth: 1 }, { depth: 2 }]);
+
+    await store.renameAccount(ACCOUNT, "x".repeat(65));
+    expect(store.getState().accounts.notice).not.toBeNull();
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState().accounts).toMatchObject({ renaming: null, notice: null });
+    expect(store.getState().machines).toBe(true);
+  });
+
+  test("closes when its name lands, and stays open on a refusal", async () => {
+    fake = fakeHistory();
+    const double = startDouble();
+    const store = await openStore(double);
+    await pollUntil(() => lists(double) === 1, "the listing");
+    store.openAccountRename(ACCOUNT);
+
+    expect(await store.renameAccount(ACCOUNT, "x".repeat(65))).toBe(false);
+    fake.settle(store);
+    expect(store.getState().accounts.renaming).toBe(ACCOUNT);
+
+    expect(await store.renameAccount(ACCOUNT, "home")).toBe(true);
+    fake.settle(store);
+    expect(store.getState().accounts.renaming).toBeNull();
+    expect(fake.index()).toBe(0);
+  });
+
+  test("shows nothing of another account's failure", async () => {
+    fake = fakeHistory();
+    const double = startDouble();
+    const store = await openStore(double);
+    await pollUntil(() => lists(double) === 1, "the listing");
+    store.openAccountRename(OTHER);
+
+    await store.renameAccount(ACCOUNT, "x".repeat(65));
+    expect(store.getState().accounts.notice).toBeNull();
+    expect(store.getState().accounts.renaming).toBe(OTHER);
+  });
+
+  /** Holds every put's answer until `release`. */
+  function gatePuts(double: Double): () => void {
+    let release: () => void = () => {};
+    double.putGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return release;
+  }
+
+  const puts = (double: Double): number => double.received.filter((frame) => frame["t"] === "store-put").length;
+
+  test("closing twice pops one entry, and a save landing after Cancel pops none", async () => {
+    fake = fakeHistory();
+    const double = startDouble();
+    const store = await openStore(double);
+    await pollUntil(() => lists(double) === 1, "the listing");
+    store.openMachines();
+    store.openAccountRename(ACCOUNT);
+    store.closeAccountRename();
+    store.closeAccountRename();
+    fake.settle(store);
+    expect(fake.index()).toBe(1);
+    expect(store.getState()).toMatchObject({ machines: true, accounts: { renaming: null } });
+
+    const release = gatePuts(double);
+    store.openAccountRename(ACCOUNT);
+    const saving = store.renameAccount(ACCOUNT, "home");
+    await pollUntil(() => puts(double) === 1, "the put");
+    store.closeAccountRename();
+    release();
+    expect(await saving).toBe(true);
+    fake.settle(store);
+    expect(fake.index()).toBe(1);
+    expect(store.getState().machines).toBe(true);
+  });
+
+  test("refuses a second account's save while one is in flight, and sends nothing", async () => {
+    fake = fakeHistory();
+    const double = startDouble();
+    const store = await openStore(double);
+    await pollUntil(() => lists(double) === 1, "the listing");
+    const release = gatePuts(double);
+    const first = store.renameAccount(ACCOUNT, "home");
+    await pollUntil(() => puts(double) === 1, "the put");
+    store.openAccountRename(OTHER);
+
+    expect(await store.renameAccount(OTHER, "work")).toBe(false);
+    expect(puts(double)).toBe(1);
+    expect(store.getState().accounts.saving).toBe(ACCOUNT);
+    release();
+    expect(await first).toBe(true);
+    expect(store.getState().accounts.renaming).toBe(OTHER);
+  });
+
+  test("an earlier account's failure that lands later stays out of the dialog now open", async () => {
+    fake = fakeHistory();
+    const double = startDouble();
+    await planted(double, ACCOUNT, "work");
+    const store = await openStore(double);
+    await pollUntil(() => store.getState().accounts.aliases[ACCOUNT] === "work", "the listing");
+    double.muted = true;
+    await planted(double, ACCOUNT, "elsewhere", 2);
+    const release = gatePuts(double);
+    const failing = store.renameAccount(ACCOUNT, "home");
+    await pollUntil(() => puts(double) === 1, "the put");
+    store.openAccountRename(OTHER);
+    release();
+
+    expect(await failing).toBe(false);
+    expect(store.getState().accounts.notice).toBeNull();
+    expect(store.getState().accounts.renaming).toBe(OTHER);
+  });
+
+  test("a dialog reopened for the same account closes when the earlier save lands", async () => {
+    fake = fakeHistory();
+    const double = startDouble();
+    const store = await openStore(double);
+    await pollUntil(() => lists(double) === 1, "the listing");
+    store.openMachines();
+    store.openAccountRename(ACCOUNT);
+    const release = gatePuts(double);
+    const saving = store.renameAccount(ACCOUNT, "home");
+    await pollUntil(() => puts(double) === 1, "the put");
+    store.closeAccountRename();
+    fake.settle(store);
+    store.openAccountRename(ACCOUNT);
+    release();
+
+    expect(await saving).toBe(true);
+    fake.settle(store);
+    expect(store.getState()).toMatchObject({ machines: true, accounts: { renaming: null } });
+    expect(fake.index()).toBe(1);
   });
 });

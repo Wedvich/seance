@@ -73,8 +73,14 @@ export async function startSupervisor(opts: SuperviseOpts = {}): Promise<Supervi
   } = opts;
 
   // Null only when nothing holds a psk, which `start` then refuses on its own.
-  const startWith = (cfg: Config, psk: ResolvedPsk | null): Promise<DaemonHandle> =>
-    start({ config: cfg, ...(psk !== null ? { resolvedPsk: psk } : {}), ...runOpts });
+  // A swap (and its rollback) arms the trait probes `via: "reload"`, so the audit log tells a reload from a process start.
+  const startWith = (cfg: Config, psk: ResolvedPsk | null, reloaded = false): Promise<DaemonHandle> =>
+    start({
+      config: cfg,
+      ...(psk !== null ? { resolvedPsk: psk } : {}),
+      ...runOpts,
+      ...(reloaded ? { traitProbes: { ...runOpts.traitProbes, via: "reload" } } : {}),
+    });
 
   let config = await loadConfig(path);
   let resolved = await loadPsk(config);
@@ -89,7 +95,7 @@ export async function startSupervisor(opts: SuperviseOpts = {}): Promise<Supervi
   const swap = async (next: Runnable): Promise<SwapResult> => {
     daemon.stop();
     try {
-      daemon = await startWith(next.config, next.resolved);
+      daemon = await startWith(next.config, next.resolved, true);
       config = next.config;
       resolved = next.resolved;
       live = true;
@@ -102,7 +108,7 @@ export async function startSupervisor(opts: SuperviseOpts = {}): Promise<Supervi
       // be half-rotated.
       log.error(`config reload failed: ${err instanceof Error ? err.message : String(err)} — rolling back`);
       try {
-        daemon = await startWith(config, resolved);
+        daemon = await startWith(config, resolved, true);
         live = true;
         return "rolled-back";
       } catch (rollbackErr) {

@@ -67,7 +67,7 @@ import {
 } from "./settle.ts";
 export { sourceOf } from "./settle.ts";
 import { advance, FINISHED, forgetPrompt, PLACED, type Reservation, type Task, type TaskSpec } from "./task.ts";
-import { traitsHolding } from "./traits.ts";
+import { traitsHolding, type TraitHold } from "./traits.ts";
 
 export type { SessionSource } from "./settle.ts";
 export type { PauseResult } from "./pause.ts";
@@ -109,9 +109,11 @@ export interface SchedulerOptions {
   readonly onIdleChange?: (taskId: string) => void;
   /**
    * A required trait first holds a task unplaced (`traitsHolding`), once per task and trait in this
-   * scheduler's memory: a new term tells again. The host logs it ("What to measure"); a throw goes to `onError`.
+   * scheduler's memory: a new term tells again, and a trait that changes why it holds does not. `why` is
+   * `absent` (no machine carries the trait) or `unhealthy` (the ones that do have a failing probe). The
+   * host logs it ("What to measure"); a throw goes to `onError`.
    */
-  readonly onTraitHeld?: (taskId: string, trait: string) => void;
+  readonly onTraitHeld?: (taskId: string, trait: string, why: TraitHold["why"]) => void;
   /**
    * Creates a task record at `expect: 0` through the leader's app-role leg: what `pass` makes its
    * successor with, since the daemon leg may not create under `task:`. Absent, `pass` answers
@@ -232,7 +234,7 @@ export class Scheduler {
   readonly #onError: (err: unknown) => void;
   readonly #onAlert: (alert: SchedulerAlert) => void;
   readonly #onIdleChange: (taskId: string) => void;
-  readonly #onTraitHeld: (taskId: string, trait: string) => void;
+  readonly #onTraitHeld: (taskId: string, trait: string, why: TraitHold["why"]) => void;
   readonly #create: SchedulerOptions["create"];
   readonly #prHead: SchedulerOptions["prHead"];
   readonly #log: (line: string) => void;
@@ -1315,12 +1317,12 @@ export class Scheduler {
   #tellTraitHeld(task: Task, decision: Decision): void {
     const requires = task.spec.requires ?? [];
     if (requires.length === 0) return;
-    for (const trait of traitsHolding(decision, requires)) {
+    for (const { trait, why } of traitsHolding(decision, requires)) {
       const told = this.#traitHeld.get(task.id) ?? new Set<string>();
       if (told.has(trait)) continue;
       this.#traitHeld.set(task.id, told.add(trait));
       try {
-        this.#onTraitHeld(task.id, trait);
+        this.#onTraitHeld(task.id, trait, why);
       } catch (err) {
         this.#onError(err);
       }

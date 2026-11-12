@@ -78,7 +78,7 @@ function state(
     startNowRefusal: null,
     pausing: false,
     discarding: false,
-    accounts: { aliases: {}, nameable: true, saving: null, notice: null },
+    accounts: { aliases: {}, nameable: true, saving: null, renaming: null, notice: null },
     attachments: [],
     attachNotice: null,
     heldDropped: [],
@@ -622,7 +622,15 @@ describe("deriveQueue", () => {
     const view = deriveQueue(
       state(
         ok([], [{ account: "org:acct-1234567890", until: "resume", at: NOW }]),
-        { accounts: { aliases: { "org:acct-1234567890": "Acme" }, nameable: true, saving: null, notice: null } },
+        {
+          accounts: {
+            aliases: { "org:acct-1234567890": "Acme" },
+            nameable: true,
+            saving: null,
+            renaming: null,
+            notice: null,
+          },
+        },
         { machines: [machine({ exclaves: [exclave] })] },
       ),
       NOW,
@@ -802,7 +810,7 @@ describe("authoring on a row", () => {
     const machines = [machine({ exclaves: [exclave] }), machine({ deviceId: "dev-b", name: "WSL" })];
     const placed = (fields: Partial<Task["spec"]>, taskState: Task["state"] = "ready"): string | null | undefined => {
       const t = task("t", { state: taskState, spec: { repo: ORIGIN, mode: "worktree", ...fields } });
-      const accounts = { aliases: { [account]: "Acme" }, nameable: true, saving: null, notice: null };
+      const accounts = { aliases: { [account]: "Acme" }, nameable: true, saving: null, renaming: null, notice: null };
       return deriveQueue(state(ok([t]), { accounts }, { machines }), NOW).sections[0]?.rows[0]?.placement;
     };
     expect(placed({ pin: { deviceId: "dev-b" } })).toBe("Pinned to WSL");
@@ -848,7 +856,7 @@ describe("authoring on a row", () => {
       deriveQueue(
         state(
           ok([pinned]),
-          { accounts: { aliases, nameable: true, saving: null, notice: null } },
+          { accounts: { aliases, nameable: true, saving: null, renaming: null, notice: null } },
           { machines: [machine({ exclaves: [exclave] })] },
         ),
         NOW,

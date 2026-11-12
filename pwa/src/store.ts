@@ -226,7 +226,7 @@ export class Store {
       startNowRefusal: null,
       pausing: false,
       discarding: false,
-      accounts: { aliases: {}, nameable: client.accountsNamed, saving: null, notice: null },
+      accounts: { aliases: {}, nameable: client.accountsNamed, saving: null, renaming: null, notice: null },
       attachments: [],
       attachNotice: null,
       heldDropped: [],
@@ -613,6 +613,8 @@ export class Store {
    */
   setWide(wide: boolean): void {
     if (wide === this.#state.wide) return;
+    // The dialog is drawn only by the Machines screen, which the other layout may not show.
+    this.closeAccountRename();
     this.#patch({ wide });
     if (wide) void this.refreshQueue();
   }
@@ -747,6 +749,7 @@ export class Store {
   onPopState(): void {
     // Any traversal leaves the entry that was current, held or not.
     this.#held = false;
+    this.#renameClosing = false;
     const entry = layerEntry(history.state);
     const depth = entry !== null && entry.owner === this.#owner ? entry.depth : 0;
     while (this.#openLayers() > depth) this.#closeTopLayer();
@@ -754,9 +757,14 @@ export class Store {
   }
 
   #openLayers(): number {
-    const { sheet, settings, machines, queue, verdict } = this.#state;
+    const { sheet, settings, machines, queue, verdict, accounts } = this.#state;
     return (
-      (sheet === null ? 0 : 1) + (settings ? 1 : 0) + (machines ? 1 : 0) + (queue ? 1 : 0) + (verdict === null ? 0 : 1)
+      (sheet === null ? 0 : 1) +
+      (settings ? 1 : 0) +
+      (machines ? 1 : 0) +
+      (queue ? 1 : 0) +
+      (verdict === null ? 0 : 1) +
+      (accounts.renaming === null ? 0 : 1)
     );
   }
 
@@ -788,6 +796,11 @@ export class Store {
   }
 
   #closeTopLayer(): void {
+    // Opened from the Machines screen, over it, so it closes first. The notice goes with it.
+    if (this.#state.accounts.renaming !== null) {
+      this.#patch({ accounts: { ...this.#state.accounts, renaming: null, notice: null } });
+      return;
+    }
     const sheet = this.#state.sheet;
     if (sheet !== null) {
       // Cleared on the way out, not on the next open: a failure that landed while
@@ -814,13 +827,28 @@ export class Store {
     if (this.#state.verdict !== null) this.#patch({ verdict: null });
   }
 
-  /** Names a Claude account (blank clears it); every client shows it. True when the name landed. */
-  renameAccount(accountId: string, text: string): Promise<boolean> {
-    return this.#accounts.rename(accountId, text);
+  /** Set from asking for the rename layer's back until the traversal lands, so a second ask pops nothing more. */
+  #renameClosing = false;
+
+  /** The one way the app closes the rename dialog; a no-op while closed or already closing. */
+  closeAccountRename(): void {
+    if (this.#state.accounts.renaming === null || this.#renameClosing) return;
+    this.#renameClosing = true;
+    history.back();
   }
 
-  dismissAccountNotice(): void {
-    this.#accounts.dismissNotice();
+  /** The rename dialog for an account: a layer like the sheets, so back closes it. */
+  openAccountRename(accountId: string): void {
+    const { accounts } = this.#state;
+    if (accounts.renaming === null) this.#pushLayer();
+    this.#patch({ accounts: { ...accounts, renaming: accountId, notice: null } });
+  }
+
+  /** Names a Claude account (blank clears it); every client shows it. True when the name landed, which closes its dialog. */
+  async renameAccount(accountId: string, text: string): Promise<boolean> {
+    const landed = await this.#accounts.rename(accountId, text);
+    if (landed && this.#state.accounts.renaming === accountId) this.closeAccountRename();
+    return landed;
   }
 
   #showVerdict(verdict: Verdict): void {

@@ -99,6 +99,42 @@ describe("deriveMachines", () => {
     });
   });
 
+  describe("exclave trait probes", () => {
+    const probed = (status: Partial<MachineStatus>, connected = true): Machine =>
+      machine({
+        connected,
+        exclaves: [
+          { ...exclave("default", ACCOUNT), traits: ["atlas", "az"] },
+          { ...exclave("work", "org-2:acct-bbbbbbbb-2222"), traits: ["az"] },
+          exclave("plain", ACCOUNT),
+        ],
+        status: { at: S - 10, scan: 1, ...status },
+      });
+    const rows = (m: Machine) => deriveMachines([m], NOW, NO_LEADER).cards[0]?.exclaves.map((row) => row.probes);
+
+    test("a failing probe names its traits per exclave, singular or plural; unchecked and healthy say nothing", () => {
+      expect(
+        rows(
+          probed({
+            tf: [
+              [0, 0],
+              [0, 1],
+              [1, 0],
+            ],
+            tu: [],
+          }),
+        ),
+      ).toEqual([{ text: "atlas, az probes failing", level: "err" }, { text: "az probe failing", level: "err" }, null]);
+      expect(rows(probed({ tu: [[0, 0]] }))).toEqual([null, null, null]);
+      expect(rows(probed({}))).toEqual([null, null, null]);
+    });
+
+    test("an asleep machine and a stale status say nothing: the reading is not current", () => {
+      expect(rows(probed({ tf: [[0, 0]] }, false))).toEqual([null, null, null]);
+      expect(rows({ ...probed({}), status: { at: S - 3600, scan: 1, tf: [[0, 0]] } })).toEqual([null, null, null]);
+    });
+  });
+
   // The scheduler's floor is free space, not percent: a small LXC root can be out of routing at 80%.
   test("disk reads red under the scheduler's free-space floor whatever its percent, and is absent with no reading", () => {
     const gauges = (status: MachineStatus): [string, string][] =>
@@ -200,7 +236,7 @@ describe("deriveMachines", () => {
     expect(cards[0]?.exclaves[0]?.account).toBe("me@example.com");
   });
 
-  test("an alias leads the card, the exclave row and the display name; clearing falls back to email, then short id", () => {
+  test("an alias titles the card, its exclaves lead the meta line; the exclave row and display name take it too", () => {
     const named = machine({
       deviceId: "a",
       name: "a",
@@ -211,9 +247,13 @@ describe("deriveMachines", () => {
     });
     const aliases = { [ACCOUNT]: "personal", "org-2:acct-bbbbbbbb-2222": "client" };
     const { cards, accounts } = deriveMachines([named], NOW, NO_LEADER, aliases);
-    expect(accounts.map((account) => [account.alias, account.detail])).toEqual([
-      ["personal", "personal · on a"],
-      ["client", "client · on a"],
+    expect(accounts.map((account) => [account.alias, account.title, account.detail])).toEqual([
+      ["personal", "personal", "default · me@example.com · on a"],
+      ["client", "client", "work · acct acct-bbb · on a"],
+    ]);
+    expect(accounts.map((account) => [account.exclaves, account.plainName])).toEqual([
+      ["default", "me@example.com"],
+      ["work", "acct acct-bbb"],
     ]);
     expect(cards[0]?.exclaves.map((row) => row.account)).toEqual(["personal", "client"]);
     expect(accountDisplayName(knownAccounts([named]), ACCOUNT, aliases)).toBe("personal");
@@ -222,12 +262,43 @@ describe("deriveMachines", () => {
     ).toBe("ghost");
 
     const cleared = deriveMachines([named], NOW, NO_LEADER, {});
-    expect(cleared.accounts.map((account) => [account.alias, account.detail])).toEqual([
-      [null, "me@example.com · on a"],
-      [null, "acct acct-bbb · on a"],
+    expect(cleared.accounts.map((account) => [account.alias, account.title, account.detail])).toEqual([
+      [null, "default", "me@example.com · on a"],
+      [null, "work", "acct acct-bbb · on a"],
     ]);
     expect(accountDisplayName(knownAccounts([named]), ACCOUNT)).toBe("me@example.com");
     expect(accountDisplayName(knownAccounts([named]), "org-2:acct-bbbbbbbb-2222")).toBe("acct acct-bbb");
+  });
+
+  test("two accounts under one alias are told apart by their exclave ids in the title", () => {
+    const both = machine({
+      deviceId: "a",
+      name: "a",
+      exclaves: [exclave("default", ACCOUNT), exclave("work", "org-2:acct-bbbbbbbb-2222")],
+    });
+    const same = { [ACCOUNT]: "Martin", "org-2:acct-bbbbbbbb-2222": "Martin" };
+    expect(deriveMachines([both], NOW, NO_LEADER, same).accounts.map((account) => account.title)).toEqual([
+      "Martin (default)",
+      "Martin (work)",
+    ]);
+    const one = { [ACCOUNT]: "Martin", "org-2:acct-bbbbbbbb-2222": "Other" };
+    expect(deriveMachines([both], NOW, NO_LEADER, one).accounts.map((account) => account.title)).toEqual([
+      "Martin",
+      "Other",
+    ]);
+  });
+
+  test("same-named accounts on the same exclave id on different machines still read apart", () => {
+    const first = machine({ deviceId: "a", name: "a", exclaves: [exclave("default", ACCOUNT)] });
+    const second = machine({ deviceId: "b", name: "b", exclaves: [exclave("default", "org-2:acct-bbbbbbbb-2222")] });
+    const same = { [ACCOUNT]: "Martin", "org-2:acct-bbbbbbbb-2222": "Martin" };
+    expect(deriveMachines([first, second], NOW, NO_LEADER, same).accounts.map((account) => account.title)).toEqual([
+      "Martin (default on a)",
+      "Martin (default on b)",
+    ]);
+    const clash = { [ACCOUNT]: "default" };
+    const titles = deriveMachines([first, second], NOW, NO_LEADER, clash).accounts.map((account) => account.title);
+    expect(new Set(titles).size).toBe(2);
   });
 
   test("one email on two orgs reads with each org on the card, the exclave row and a hold; an alias still leads", () => {
@@ -252,6 +323,13 @@ describe("deriveMachines", () => {
     ]);
     expect(accountDisplayName(knownAccounts([both]), team)).toBe("me@example.com (org 9f8e7d6c)");
     expect(accountDisplayName(knownAccounts([both]), team, { [team]: "work" })).toBe("work");
+
+    // The tag stays with the email: an alias title never carries one, and its unaliased twin keeps its own.
+    const aliased = deriveMachines([both], NOW, NO_LEADER, { [team]: "work" }).accounts;
+    expect(aliased.map((account) => [account.title, account.detail])).toEqual([
+      ["default", "me@example.com (org 1a2b3c4d) · on a"],
+      ["work", "work · me@example.com (org 9f8e7d6c) · on a"],
+    ]);
   });
 
   test("one account has one label on every machine, whether or not that machine reports its email", () => {

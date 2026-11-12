@@ -24,6 +24,8 @@ export interface SchedulerConfig {
     readonly machinePressure: number;
     readonly dependencyDistance: number;
     readonly queuePressure: number;
+    /** Applied to the flat 0/1 `keepFree` component: an exclave kept free for a trait this task does not require. */
+    readonly keepFree: number;
   };
   /** Subtracted from the lineage owner's total — the only thing stickiness does. */
   readonly stickyBonus: number;
@@ -151,8 +153,11 @@ export interface SchedulerConfig {
 export const DEFAULT_CONFIG: SchedulerConfig = {
   // Account pressure is the convex `(u/(1-u))²` cost (1 at 50%, 16 at 80%); the other
   // three are fractions or small counts, so the weights put one busy machine, or the
-  // farthest base, on the scale of an account near 70% (docs/scheduler.md).
-  weights: { accountPressure: 1, machinePressure: 4, dependencyDistance: 4, queuePressure: 1 },
+  // farthest base, on the scale of an account near 70% (docs/scheduler.md). keepFree is a
+  // flat 1: at 8 it is worth `globalMax` in-flight tasks on a competitor (queuePressure), two fully loaded
+  // machines, or an account near 74% at the start of a window (less of it counts later, scaled by the window
+  // left), so a kept-free machine fills last, never not at all. Ties go by deviceId.
+  weights: { accountPressure: 1, machinePressure: 4, dependencyDistance: 4, queuePressure: 1, keepFree: 8 },
   stickyBonus: 2,
   quotaLinePct: 90,
   resetGraceMs: 15 * 60_000,

@@ -11,7 +11,8 @@ import {
 } from "../queue-view.ts";
 import { centeredScrollTop } from "../scroll.ts";
 import type { ConnectionState } from "../view.ts";
-import { Menu, MenuDivider, MenuItem, useMenu, type MenuHandle } from "./menu.tsx";
+import { StrokeIcon } from "./icons.tsx";
+import { Menu, MenuDivider, MenuItem, MoreTrigger, useMenu, type MenuHandle } from "./menu.tsx";
 import { RelaySettings } from "./relay-dot.tsx";
 
 /** A first tap on a cancel that ends a session arms it this long; no confirm dialog for a thing this quick to take back. */
@@ -366,21 +367,7 @@ function QueueCard(props: {
         </div>
         {hasMenu && (
           <>
-            <button
-              ref={menu.anchor}
-              type="button"
-              className="queue-more"
-              popovertarget={menu.id}
-              aria-haspopup="menu"
-              aria-expanded={menu.open}
-              aria-label={`More actions for ${row.title}`}
-            >
-              <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true">
-                <circle cx="5" cy="12" r="1.8" />
-                <circle cx="12" cy="12" r="1.8" />
-                <circle cx="19" cy="12" r="1.8" />
-              </svg>
-            </button>
+            <MoreTrigger menu={handle} label={`More actions for ${row.title}`} />
             <Menu menu={handle} label={`Actions for ${row.title}`}>
               {row.canFollowUp && (
                 <MenuItem label="Follow up" icon={<FollowUpIcon />} onClick={() => props.onFollowUp(row.id)} />
@@ -534,26 +521,6 @@ function CrossIcon(): JSX.Element {
       <path d="M6 6l12 12" />
       <path d="M18 6 6 18" />
     </MenuGlyph>
-  );
-}
-
-/** Same stroke vocabulary as the header's icons; colour comes from the parent's `currentColor`. */
-function StrokeIcon(props: { size: number; className?: string; children: ComponentChildren }): JSX.Element {
-  return (
-    <svg
-      className={props.className}
-      viewBox="0 0 24 24"
-      width={props.size}
-      height={props.size}
-      fill="none"
-      stroke="currentColor"
-      stroke-width="1.8"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true"
-    >
-      {props.children}
-    </svg>
   );
 }
 

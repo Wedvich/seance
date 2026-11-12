@@ -6,6 +6,8 @@ import type { Fetch } from "./seams.ts";
 import { fitStatus } from "./status.ts";
 import { createTelemetry, type HostProbe, type Registered } from "./telemetry.ts";
 import type { AuthView } from "./auth-health.ts";
+import type { ExclaveScan } from "./exclaves.ts";
+import type { TraitLists } from "./trait-probes.ts";
 
 /**
  * What the collector registry reads from the daemon: every dependency a `status`
@@ -26,6 +28,8 @@ export interface CollectorDeps {
   readonly draining?: () => boolean;
   /** Auth health's view: the status's `ax`/`ae`/`au`. */
   readonly auth?: () => ReadonlyMap<string, AuthView>;
+  /** Trait probes' pairs for the registered scan: the status's `tf`/`tu`. */
+  readonly traits?: (scan: ExclaveScan) => TraitLists;
 }
 
 export interface StatusLoopDeps {
@@ -80,6 +84,7 @@ export function startStatusLoop(metrics: MetricsStore, collectors: CollectorDeps
     ...(collectors.probe === undefined ? {} : { probe: collectors.probe }),
     ...(collectors.draining === undefined ? {} : { draining: collectors.draining }),
     ...(collectors.auth === undefined ? {} : { auth: collectors.auth }),
+    ...(collectors.traits === undefined ? {} : { traits: collectors.traits }),
   });
   // Never past the next beat: a beat shorter than the relay's floor (tests only) is the floor that holds.
   // A twentieth over it, since the relay times the frames by their arrival, not by our send. It assumes

@@ -68,6 +68,52 @@ export function exclaveAuth(
   return { state: "ok" };
 }
 
+/** One trait probe as a reader sees it. */
+export type TraitHealth = "healthy" | "failing" | "unknown";
+
+/**
+ * The one rule for a trait's probe on one exclave — routing, the PWA and MCP read it here.
+ * Null when the exclave does not carry `trait`. `unknown` (which routes) when there is no
+ * live fresh status, and for a pair in `tu`; `failing` only for a pair in `tf`. No capability
+ * check: a daemon without probes never lists a pair, and an absent `tf` reads healthy.
+ * The trait index is the position in the exclave's advertised `ExclaveInfo.traits`.
+ */
+export function exclaveTraitHealth(
+  machine: Pick<Machine, "connected" | "status" | "exclaves">,
+  index: number,
+  trait: string,
+  nowMs: number,
+): TraitHealth | null {
+  const traitIndex = machine.exclaves?.[index]?.traits?.indexOf(trait) ?? -1;
+  if (traitIndex === -1) return null;
+  const status = liveStatus(machine);
+  if (status === undefined || isStatusStale(status, nowMs)) return "unknown";
+  if (hasPair(status.tf, index, traitIndex)) return "failing";
+  return hasPair(status.tu, index, traitIndex) ? "unknown" : "healthy";
+}
+
+/**
+ * True only for a probe the daemon itself reports not yet read (a pair in the live fresh
+ * status's `tu`). Unlike `exclaveTraitHealth`'s `unknown`, a trait with no probe, or a
+ * machine whose status is absent or stale, is not a probe awaiting a reading.
+ */
+export function exclaveTraitUnchecked(
+  machine: Pick<Machine, "connected" | "status" | "exclaves">,
+  index: number,
+  trait: string,
+  nowMs: number,
+): boolean {
+  const traitIndex = machine.exclaves?.[index]?.traits?.indexOf(trait) ?? -1;
+  if (traitIndex === -1) return false;
+  const status = liveStatus(machine);
+  if (status === undefined || isStatusStale(status, nowMs)) return false;
+  return hasPair(status.tu, index, traitIndex);
+}
+
+function hasPair(pairs: MachineStatus["tf"], index: number, traitIndex: number): boolean {
+  return pairs?.some(([x, t]) => x === index && t === traitIndex) === true;
+}
+
 /**
  * When the machine was last heard from: the later of `lastSeen` and the kept
  * `status.at`. While the relay still lists a slept socket, `lastSeen` is the

@@ -22,6 +22,7 @@ import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { LazyRelay } from "../daemon/src/app-relay.ts";
 import { autoFleet, spawnAuto } from "../daemon/src/cli-auto.ts";
+import { TRAIT_PROBE_DEFAULTS } from "../daemon/src/config.ts";
 import { brokerFleet, relayFleet, selectFleet } from "../daemon/src/fleet.ts";
 import { buildMcpServer } from "../daemon/src/mcp.ts";
 import { identityOfState, readState } from "../daemon/src/state.ts";
@@ -557,6 +558,169 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       await Promise.all(ids.map((id) => app.client.cancel(id).catch(() => null)));
       await Promise.all(windows.map((window) => killWindow(window).catch(() => {})));
       raw.close();
+      await client.close();
+      lazy.stop();
+      app.stop();
+      await second.stop();
+    }
+  }, 90_000);
+
+  // M4's trait probes, end to end: the second daemon's config names a probe that exits 1, so the daemon
+  // reports it failing (`tf`) and the real leader turns the machine down with `trait_unhealthy`, the task
+  // waiting instead of landing on a machine whose trait cannot be trusted.
+  test("a task requiring a trait whose probe fails is rejected trait_unhealthy and held, and MCP names the machine", async () => {
+    const second = await stack.startSecondDaemon({
+      name: "TraitBox2",
+      exclaves: [{ id: "default", observedAtMs: Date.now() - 10 * 60_000, fiveHourPct: 20 }],
+      traits: { atlas: { probe: { argv: ["false"], ...TRAIT_PROBE_DEFAULTS } } },
+    });
+    const app = startApp(stack, {}, { accounts: true });
+    const lazy = new LazyRelay({
+      create: () =>
+        new RelayClient({
+          url: wsUrl(stack.relay, "/app"),
+          token: TOKEN,
+          key: stack.appKey,
+          accountKey: stack.accountKey,
+          createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
+        }),
+    });
+    const client = new Client(
+      { name: "e2e-probes", version: "0.0.0" },
+      { versionNegotiation: { mode: { pin: "2026-07-28" } } },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    serveStdio(() => buildMcpServer(relayFleet(lazy), null), { transport: serverTransport });
+    await client.connect(clientTransport);
+    const ids: string[] = [];
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      // The probe runs at boot and its verdict rides the next status: exclave 0, trait 0.
+      await app.waitForApp(
+        (state) =>
+          state.relay.scheduler.kind === "ready" &&
+          state.relay.machines.some(
+            (m) =>
+              m.deviceId === second.deviceId &&
+              m.connected &&
+              m.repos.length > 0 &&
+              m.status?.tf?.some(([exclave, trait]) => exclave === 0 && trait === 0) === true,
+          ),
+        "the second machine reporting its atlas probe failing",
+      );
+
+      const result = await client.callTool({
+        name: "spawn_session",
+        arguments: { machine: "auto", repo: "myrepo", prompt: "probe", requires: ["atlas"] },
+      });
+      const text = (result.content as { text: string }[]).map((entry) => entry.text).join("\n");
+      expect(result.isError).not.toBe(true);
+      const id = /^task (\S+):/u.exec(text)?.[1];
+      if (id === undefined) throw new Error(`no task id in: ${text}`);
+      ids.push(id);
+
+      // A held task's decision is the leader's to keep, never the store's (it is written with a reservation),
+      // so it is read the way an operator would: get_queue, whose text says why each machine was turned down.
+      type Row = { id: string; state: string; decision?: string; requires?: { trait: string; failing?: string[] }[] };
+      const row = async (): Promise<Row | undefined> => {
+        const queue = await client.callTool({ name: "get_queue", arguments: {} });
+        const { tasks }: { tasks: Row[] } = JSON.parse(
+          (queue.content as { text: string }[]).map((entry) => entry.text).join("\n"),
+        );
+        return tasks.find((t) => t.id === id);
+      };
+      await pollUntil(
+        async () => (await row())?.decision?.includes("its atlas trait's probe is failing") === true,
+        "the held task's decision to name the failing probe",
+        20_000,
+      );
+      const held = await row();
+      expect(held?.state).not.toBe("running");
+      expect(held?.requires?.[0]?.failing).toEqual(["TraitBox2"]);
+      expect((await stack.queue().get(id))?.body?.assignment).toBeUndefined();
+    } finally {
+      await Promise.all(ids.map((id) => app.client.cancel(id).catch(() => null)));
+      await client.close();
+      lazy.stop();
+      app.stop();
+      await second.stop();
+    }
+  }, 90_000);
+
+  // M4's keepFree, end to end: the second daemon's config marks its trait keepFree, so its register carries
+  // `ExclaveInfo.keepFree`, and the real leader scores that machine's candidate 8 higher for a task that
+  // does not require the trait: the other machine wins, though the kept-free one is not filtered.
+  test("a task not requiring a keepFree trait lands on the other machine, and the kept-free candidate carries the penalty", async () => {
+    const second = await stack.startSecondDaemon({
+      name: "KeptFreeBox",
+      exclaves: [{ id: "default", observedAtMs: Date.now() - 10 * 60_000, fiveHourPct: 1 }],
+      traits: { atlas: { keepFree: true } },
+    });
+    const app = startApp(stack, {}, { accounts: true });
+    const lazy = new LazyRelay({
+      create: () =>
+        new RelayClient({
+          url: wsUrl(stack.relay, "/app"),
+          token: TOKEN,
+          key: stack.appKey,
+          accountKey: stack.accountKey,
+          createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
+        }),
+    });
+    const client = new Client(
+      { name: "e2e-keep-free", version: "0.0.0" },
+      { versionNegotiation: { mode: { pin: "2026-07-28" } } },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    serveStdio(() => buildMcpServer(relayFleet(lazy), null), { transport: serverTransport });
+    await client.connect(clientTransport);
+    const ids: string[] = [];
+    const windows: string[] = [];
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      await app.waitForApp(
+        (state) =>
+          state.relay.scheduler.kind === "ready" &&
+          state.relay.machines.some(
+            (m) =>
+              m.deviceId === second.deviceId &&
+              m.connected &&
+              m.repos.length > 0 &&
+              m.exclaves?.some((x) => x.keepFree?.includes("atlas") === true) === true &&
+              m.status !== undefined,
+          ),
+        "the second machine live, advertising atlas as keepFree",
+      );
+      const listing = await client.callTool({ name: "list_machines", arguments: {} });
+      expect(exclavesOf(listing, second.deviceId)).toContainEqual(expect.objectContaining({ keepFree: ["atlas"] }));
+      expect(exclavesOf(listing, stack.deviceId)).not.toContainEqual(
+        expect.objectContaining({ keepFree: expect.anything() }),
+      );
+
+      const result = await client.callTool({
+        name: "spawn_session",
+        arguments: { machine: "auto", repo: "myrepo", prompt: "keep free" },
+      });
+      const text = (result.content as { text: string }[]).map((entry) => entry.text).join("\n");
+      expect(result.isError).not.toBe(true);
+      const id = /^task (\S+):/u.exec(text)?.[1];
+      if (id === undefined) throw new Error(`no task id in: ${text}`);
+      ids.push(id);
+      await pollUntil(async () => (await stack.queue().get(id))?.body?.state === "running", "the task to run", 20_000);
+      const body = (await stack.queue().get(id))?.body;
+      const window = body?.assignment?.window;
+      if (window !== undefined) windows.push(window);
+      expect(body?.assignment?.deviceId).toBe(stack.deviceId);
+      const candidates = body?.decision?.candidates ?? [];
+      const penalised = candidates.find((c) => c.deviceId === second.deviceId)?.score;
+      expect(penalised?.components.keepFree).toBe(1);
+      const winner = candidates.find((c) => c.deviceId === stack.deviceId)?.score;
+      expect(winner?.components).not.toHaveProperty("keepFree");
+    } finally {
+      await Promise.all(ids.map((id) => app.client.cancel(id).catch(() => null)));
+      await Promise.all(windows.map((window) => killWindow(window).catch(() => {})));
       await client.close();
       lazy.stop();
       app.stop();

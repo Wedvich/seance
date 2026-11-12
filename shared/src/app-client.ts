@@ -129,8 +129,8 @@ export type SchedulerEventHandler = (plain: Plain, from: string) => void;
  * declined delivery is not — the request certainly did not land. "unsupported"
  * never left the app: the machine's register blob doesn't advertise the op.
  * "disconnected" never left either — there was no socket to send it on — where
- * "dropped" was sent and the socket closed before an answer came, so like
- * "timeout" it may have landed.
+ * "dropped" was sent and then lost before an answer came — the relay socket
+ * closed, or the target left the relay — so like "timeout" it may have landed.
  */
 export type FailureReason =
   | UndeliverableCode
@@ -188,10 +188,11 @@ export function failureReasonText(failure: RequestFailure): string {
     case "disconnected":
       return "lost the relay connection before the request went out";
     case "dropped":
-      // The daemon's own words: its failure was not the relay connection, and naming that would misdirect the reader.
-      return failure.target === "daemon"
-        ? `${failure.message} — the request may have landed anyway`
-        : "lost the relay connection after the request went out — it may have landed anyway";
+      // The relay connection is the one loss with a fixed line. A daemon's failure and a target
+      // that left the relay mid-request keep their own words: "relay connection" would misdirect.
+      return failure.target === "relay"
+        ? "lost the relay connection after the request went out — it may have landed anyway"
+        : `${failure.message} — the request may have landed anyway`;
     case "no_leader":
       return "no scheduler is leading — no connected daemon can take auto right now";
     case "leader_unverified":
@@ -464,6 +465,8 @@ export interface Machine {
   readonly source?: SourceInfo;
   /** Its last self-update attempt that did something other than find itself current. */
   readonly lastUpdate?: UpdateReport;
+  /** `MachineInfo.instance`: which daemon run registered it. */
+  readonly instance?: string;
 }
 
 /**
@@ -592,10 +595,53 @@ const INITIAL_STATE: RelayState = {
   scheduler: NO_SCHEDULER,
 };
 
+/**
+ * Ops that change nothing on their target. One stranded by its target leaving the relay is sent
+ * again once the target is back, inside the op's own deadline; any other op fails `dropped` then,
+ * since it may have landed and only its caller can say whether to ask again.
+ */
+const RESENDABLE_OPS: ReadonlySet<RequestOp> = new Set<RequestOp>(["sessions", "metrics", "queue", "route-preview"]);
+
+/**
+ * How long a request whose target left the relay still waits for its answer. A reply sent just
+ * before the target left may be on its way — for a scheduler-addressed one, over the leader's
+ * daemon socket rather than this one — and catching it is the difference between an answer and
+ * "may have landed".
+ */
+export const STRANDED_GRACE_MS = 1_000;
+
+/**
+ * How long a non-read request waits for the daemon run that took it to reconnect — the daemon's
+ * own redial backoff caps at 60 s. Coming back as another run fails it at once; staying away past
+ * this fails it too. Only for a machine whose blob names its run (`MachineInfo.instance`); one
+ * that does not gets `STRANDED_GRACE_MS`, since its return cannot be told from a restart.
+ */
+export const STRANDED_AWAY_MS = 60_000;
+
+/**
+ * Who a request was delivered to, as this client saw it when sending: the machine, or for the
+ * scheduler address the leader by its term — a restarted leader is renominated under a new term
+ * even when its new socket registers before the old one's close is seen. Null when this client
+ * saw nobody to deliver to; the relay answers that itself, and otherwise the deadline decides.
+ */
+type Route =
+  | { readonly kind: "machine"; readonly deviceId: string }
+  | { readonly kind: "leader"; readonly term: number };
+
 interface Pending {
-  readonly iv: string;
+  iv: string;
   readonly settle: (result: { ok: true; payload: unknown } | { ok: false; error: RequestFailure }) => void;
   readonly timer: ReturnType<typeof setTimeout>;
+  readonly op: RequestOp;
+  readonly to: string;
+  readonly payload: unknown;
+  route: Route | null;
+  /** The machine's `instance` when this was last sent: the run that owes the answer. Null for the leader or an older daemon. */
+  instance: string | null;
+  /** Running from the push that showed `route` gone until the request is called stranded. */
+  grace: ReturnType<typeof setTimeout> | null;
+  /** Stranded and resendable: sent again by the first push that shows the target back. */
+  awaitingReturn: boolean;
 }
 
 interface StorePending {
@@ -752,7 +798,8 @@ function sameMachine(a: Machine, b: Machine): boolean {
     a.capabilities === b.capabilities &&
     a.exclaves === b.exclaves &&
     a.source === b.source &&
-    a.lastUpdate === b.lastUpdate
+    a.lastUpdate === b.lastUpdate &&
+    a.instance === b.instance
   );
 }
 
@@ -887,6 +934,8 @@ export class RelayClient {
   readonly #pingIntervalMs: number;
   readonly #pongTimeoutMs: number;
   readonly #resumeProbeMs: number;
+  readonly #strandedGraceMs: number;
+  readonly #strandedAwayMs: number;
   readonly #fleetQuotaRefreshMs: number | null;
   readonly #log: (line: string) => void;
   /** Set only on a scheduler leader's leg: requests go `from: SCHEDULER_ID` under this term. */
@@ -915,6 +964,10 @@ export class RelayClient {
     readonly pongTimeoutMs?: number;
     /** Override for RESUME_PROBE_MS; tests use it to avoid a real 1.5s wait. */
     readonly resumeProbeMs?: number;
+    /** Override for STRANDED_GRACE_MS; tests use it to avoid a real 1s wait. */
+    readonly strandedGraceMs?: number;
+    /** Override for STRANDED_AWAY_MS. */
+    readonly strandedAwayMs?: number;
     /**
      * Read the fleet quota record (`refreshFleetQuota`) on every open and then
      * this often while the socket stays up (`FLEET_QUOTA_INTERVAL_MS` in
@@ -955,6 +1008,8 @@ export class RelayClient {
     this.#pingIntervalMs = opts.pingIntervalMs ?? HEARTBEAT_INTERVAL_MS;
     this.#pongTimeoutMs = opts.pongTimeoutMs ?? HEARTBEAT_PONG_TIMEOUT_MS;
     this.#resumeProbeMs = opts.resumeProbeMs ?? RESUME_PROBE_MS;
+    this.#strandedGraceMs = opts.strandedGraceMs ?? STRANDED_GRACE_MS;
+    this.#strandedAwayMs = opts.strandedAwayMs ?? STRANDED_AWAY_MS;
     this.#fleetQuotaRefreshMs = opts.fleetQuotaRefreshMs ?? null;
     this.#log = opts.log ?? ((line) => console.log(line));
     this.#term = opts.scheduler?.term ?? null;
@@ -1058,7 +1113,7 @@ export class RelayClient {
     this.#patch({ settling: false, registrySettled: false });
     this.#socket?.close();
     this.#socket = null;
-    this.#failAllPending(new RequestFailure("dropped", "client stopped"));
+    this.#failAllPending(new RequestFailure("dropped", "client stopped", "relay"));
   }
 
   /** Reconnects now, skipping any pending backoff. */
@@ -1142,6 +1197,8 @@ export class RelayClient {
    * One op to one machine. `T` is the op's own reply; any op can instead answer
    * with an `ErrorResponse` (a crashed handler, an oversized reply), so callers
    * check before reading fields. Throws `RequestFailure` when nothing answered.
+   * A request whose target leaves the relay before answering does not wait out
+   * its deadline: `#noteDepartures` resends it or fails it `dropped`.
    */
   async request<T>(deviceId: string, op: RequestOp, payload: unknown): Promise<T | ErrorResponse> {
     // A resume probe is deciding whether this socket lives: sending now could strand the request
@@ -1153,10 +1210,7 @@ export class RelayClient {
       throw new RequestFailure("disconnected", "no socket to the relay");
     }
     const id = crypto.randomUUID();
-    const plain: Plain = { id, ts: Date.now(), op, payload };
-    const term = this.#term;
-    const env = await seal(this.#key, { to: deviceId, from: term === null ? APP_ID : SCHEDULER_ID }, plain);
-    const frame: AppFrame = { t: "msg", env, ...(term === null ? {} : { term }) };
+    const frame = await this.#sealRequest(id, deviceId, op, payload);
     // Sealing is async, so the socket can die in the gap. Without this the request
     // would sit in #pending until its own timeout — 90s for a spawn.
     if (this.#socket !== socket || socket.readyState !== WebSocket.OPEN) {
@@ -1167,7 +1221,8 @@ export class RelayClient {
       const limit = this.#timeoutFor(op);
       const sentAt = Date.now();
       const timer = setTimeout(() => {
-        this.#wireLog("timeout", `iv=${quote(env.iv)} id=${quote(id)} op=${quote(op)} after=${limit}ms`);
+        const iv = this.#pending.get(id)?.iv ?? frame.env.iv;
+        this.#wireLog("timeout", `iv=${quote(iv)} id=${quote(id)} op=${quote(op)} after=${limit}ms`);
         this.#discard(id);
         // Blame the machine only when the uplink demonstrably worked while the
         // request was out: same socket, and at least one frame (a pong counts)
@@ -1181,22 +1236,161 @@ export class RelayClient {
       }, limit);
 
       this.#pending.set(id, {
-        iv: env.iv,
+        iv: frame.env.iv,
         timer,
+        op,
+        to: deviceId,
+        // Kept only where a resend can use it: a spawn's prompt need not outlive its sealing.
+        payload: RESENDABLE_OPS.has(op) ? payload : null,
+        route: this.#routeOf(deviceId),
+        instance: this.#instanceOf(deviceId),
+        grace: null,
+        awaitingReturn: false,
         settle: (result) => {
           this.#discard(id);
           if (result.ok) resolve(result.payload as T | ErrorResponse);
           else reject(result.error);
         },
       });
-      this.#idByIv.set(env.iv, id);
-      socket.send(JSON.stringify(frame));
-      // A probe: its pong (answered at the edge) is the uplink evidence the blame
-      // check above needs, without waiting for the next 30s heartbeat beat. A
-      // healthy socket produces it within an RTT; a dead one produces nothing.
-      this.#ping(socket);
-      this.#wireLog("send", `iv=${quote(env.iv)} id=${quote(id)} op=${quote(op)} to=${quote(deviceId)}`);
+      this.#transmit(socket, id, frame, op, deviceId);
     });
+  }
+
+  async #sealRequest(
+    id: string,
+    deviceId: string,
+    op: RequestOp,
+    payload: unknown,
+  ): Promise<Extract<AppFrame, { t: "msg" }>> {
+    const plain: Plain = { id, ts: Date.now(), op, payload };
+    const term = this.#term;
+    const env = await seal(this.#key, { to: deviceId, from: term === null ? APP_ID : SCHEDULER_ID }, plain);
+    return { t: "msg", env, ...(term === null ? {} : { term }) };
+  }
+
+  #transmit(socket: WebSocket, id: string, frame: Extract<AppFrame, { t: "msg" }>, op: RequestOp, to: string): void {
+    this.#idByIv.set(frame.env.iv, id);
+    socket.send(JSON.stringify(frame));
+    // A probe: its pong (answered at the edge) is the uplink evidence the timeout's
+    // blame check needs, without waiting for the next 30s heartbeat beat. A
+    // healthy socket produces it within an RTT; a dead one produces nothing.
+    this.#ping(socket);
+    this.#wireLog("send", `iv=${quote(frame.env.iv)} id=${quote(id)} op=${quote(op)} to=${quote(to)}`);
+  }
+
+  /** Where the relay would deliver to `to` now, as this client sees it (`Route`). */
+  #routeOf(to: string): Route | null {
+    if (to === SCHEDULER_ID) return this.#leader === null ? null : { kind: "leader", term: this.#leader.term };
+    const live = this.#entries.some((entry) => entry.deviceId === to && entry.connected);
+    return live ? { kind: "machine", deviceId: to } : null;
+  }
+
+  #instanceOf(deviceId: string): string | null {
+    return this.#state.machines.find((machine) => machine.deviceId === deviceId)?.instance ?? null;
+  }
+
+  /** Whether a push's view no longer holds the socket `route` names: the machine is gone, or the term moved on. */
+  static #departed(route: Route, entries: readonly RegistryView[], leader: SchedulerLeader | null): boolean {
+    if (route.kind === "leader") return leader?.term !== route.term;
+    return !entries.some((entry) => entry.deviceId === route.deviceId && entry.connected);
+  }
+
+  /**
+   * Run against each push's own view, before anything is awaited: a restart's offline push and
+   * the reconnect's push can arrive back to back, and only the first says the request's socket
+   * went away. Any reply its target sent before leaving gets `#strandedGraceMs` to arrive; a
+   * non-read to a machine that names its run waits `#strandedAwayMs` for that run instead, and
+   * `#noteReturns` settles it when the machine is back.
+   */
+  #noteDepartures(entries: readonly RegistryView[], leader: SchedulerLeader | null): void {
+    for (const [id, pending] of this.#pending) {
+      if (pending.route === null || pending.awaitingReturn) continue;
+      const departed = RelayClient.#departed(pending.route, entries, leader);
+      // Back inside the grace, from a machine that cannot say which run it is: read as a reconnect.
+      if (!departed && pending.grace !== null && pending.instance === null) {
+        clearTimeout(pending.grace);
+        pending.grace = null;
+      }
+      if (!departed || pending.grace !== null) continue;
+      const wait = RelayClient.#awaitsSameRun(pending) ? this.#strandedAwayMs : this.#strandedGraceMs;
+      pending.grace = setTimeout(() => this.#strand(id), wait);
+    }
+  }
+
+  /** A non-read sent to a machine that named its run: only that run's return, or a deadline, settles it. */
+  static #awaitsSameRun(pending: Pending): boolean {
+    return pending.instance !== null && !RESENDABLE_OPS.has(pending.op);
+  }
+
+  /**
+   * After a rebuild, on decrypted blobs: a request's machine connected under another run than the
+   * one that took it is stranded now — that run is gone, and the new one never saw the request.
+   * This also catches a restart whose new socket registered before the old one's close was seen,
+   * which no offline push reports. The same run back clears the wait: it still owes the answer.
+   */
+  #noteReturns(): void {
+    for (const [id, pending] of [...this.#pending]) {
+      if (pending.route?.kind !== "machine" || pending.instance === null || pending.awaitingReturn) continue;
+      const deviceId = pending.route.deviceId;
+      const machine = this.#state.machines.find((entry) => entry.deviceId === deviceId && entry.connected);
+      if (machine === undefined) continue;
+      if (machine.instance !== pending.instance) {
+        if (pending.grace !== null) clearTimeout(pending.grace);
+        this.#strand(id, "restarted");
+        continue;
+      }
+      if (pending.grace !== null && RelayClient.#awaitsSameRun(pending)) {
+        clearTimeout(pending.grace);
+        pending.grace = null;
+      }
+    }
+  }
+
+  /** `restarted`: the machine is back under another run, rather than gone past its wait. */
+  #strand(id: string, why: "left" | "restarted" = "left"): void {
+    const pending = this.#pending.get(id);
+    if (pending === undefined) return;
+    pending.grace = null;
+    const { op, to, iv } = pending;
+    this.#wireLog("stranded", `iv=${quote(iv)} id=${quote(id)} op=${quote(op)} to=${quote(to)} why=${why}`);
+    if (RESENDABLE_OPS.has(op)) {
+      pending.awaitingReturn = true;
+      void this.#resendReturned();
+      return;
+    }
+    const who = to === SCHEDULER_ID ? "the scheduler's leader" : "the machine";
+    const what = why === "restarted" ? "restarted" : "left the relay";
+    pending.settle({ ok: false, error: new RequestFailure("dropped", `${who} ${what} before answering ${op}`) });
+  }
+
+  /**
+   * Sends each stranded read-only request again once its target is back: the same `id`, freshly
+   * sealed — a new IV, and a `ts` inside the replay window — so the target's guard sees a new
+   * message. Its first deadline still bounds it.
+   */
+  async #resendReturned(): Promise<void> {
+    const socket = this.#socket;
+    if (socket === null || socket.readyState !== WebSocket.OPEN) return;
+    for (const [id, pending] of [...this.#pending]) {
+      if (!pending.awaitingReturn) continue;
+      const route = this.#routeOf(pending.to);
+      if (route === null || (pending.to === SCHEDULER_ID && schedulerRefusal(this.#state.scheduler) !== null)) continue;
+      pending.awaitingReturn = false;
+      pending.route = route;
+      // The run it goes to now owes the answer; left at the old one, every later push would read a restart and resend.
+      pending.instance = this.#instanceOf(pending.to);
+      // oxlint-disable-next-line no-await-in-loop -- one seal per stranded request, rare and few
+      const frame = await this.#sealRequest(id, pending.to, pending.op, pending.payload);
+      if (this.#pending.get(id) !== pending) continue;
+      if (this.#socket !== socket || socket.readyState !== WebSocket.OPEN) {
+        // Left for the next socket's first push, or it would sit unsent until its deadline.
+        pending.awaitingReturn = true;
+        return;
+      }
+      this.#idByIv.delete(pending.iv);
+      pending.iv = frame.env.iv;
+      this.#transmit(socket, id, frame, pending.op, pending.to);
+    }
   }
 
   /**
@@ -1218,15 +1412,14 @@ export class RelayClient {
     const pending = this.#pending.get(id);
     if (pending === undefined) return;
     clearTimeout(pending.timer);
+    if (pending.grace !== null) clearTimeout(pending.grace);
     this.#pending.delete(id);
     this.#idByIv.delete(pending.iv);
   }
 
   #failAllPending(error: RequestFailure): void {
     for (const [id, pending] of [...this.#pending]) {
-      clearTimeout(pending.timer);
-      this.#pending.delete(id);
-      this.#idByIv.delete(pending.iv);
+      this.#discard(id);
       pending.settle({ ok: false, error });
     }
     for (const [id, pending] of [...this.#storePending]) {
@@ -1288,7 +1481,7 @@ export class RelayClient {
       if (this.#socket !== socket) return;
       this.#socket = null;
       this.#teardownHeartbeat();
-      this.#failAllPending(new RequestFailure("dropped", "the relay socket closed"));
+      this.#failAllPending(new RequestFailure("dropped", "the relay socket closed", "relay"));
       this.#onClose(event.code);
     });
   }
@@ -1571,6 +1764,7 @@ export class RelayClient {
   }
 
   async #onRegistry(entries: readonly RegistryView[], skipped: number, leader: SchedulerLeader | null): Promise<void> {
+    this.#noteDepartures(entries, leader);
     this.#clearRegistrySettle();
     this.#entries = entries;
     this.#leader = leader;
@@ -1601,6 +1795,9 @@ export class RelayClient {
     // Settled in the same patch as the machines it vouches for, so a subscriber
     // never observes an authoritative flag beside a stale list.
     this.#rebuildMachines({ registrySettled: true });
+    this.#noteReturns();
+    // After the rebuild: a stranded scheduler request waits for a verified leader, not just a nominee.
+    await this.#resendReturned();
   }
 
   /**
@@ -1760,6 +1957,7 @@ export class RelayClient {
         ...(info.exclaves !== undefined ? { exclaves: info.exclaves } : {}),
         ...(info.source !== undefined && info.source !== null ? { source: info.source } : {}),
         ...(info.lastUpdate !== undefined && info.lastUpdate !== null ? { lastUpdate: info.lastUpdate } : {}),
+        ...(info.instance !== undefined ? { instance: info.instance } : {}),
       };
       const prior = priorById.get(entry.deviceId);
       if (prior !== undefined && sameMachine(prior, built)) {

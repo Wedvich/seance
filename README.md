@@ -197,8 +197,25 @@ Edit `~/.config/seance/config.json`:
   every exclave on the box; with them, only by those. A task that requires a trait
   (`seanced spawn --requires atlas`, the `requires` field in MCP, or the Requires tile in the app)
   is placed only on an exclave that carries all of them, and waits otherwise. Only this file
-  declares a trait: nothing on the wire can. The spec's `probe` and `keepFree` keys are refused
-  until they are built. Names are lowercase letters, digits and `-`; a mistake fails the load.
+  declares a trait: nothing on the wire can. Names are lowercase letters, digits and `-`; a mistake
+  fails the load. A trait may also name a health check:
+  `"atlas": { "probe": { "argv": ["/usr/local/bin/az", "account", "show"], "everyMinutes": 30, "timeoutSeconds": 10 } }`.
+  The daemon runs the argv (no shell; stdout and stderr are discarded) at start and then every
+  `everyMinutes` (5 to 1440), one probe at a time, with the environment a session gets. Exit 0 is
+  healthy, any other exit is failing: a task requiring the trait is not placed on that exclave and
+  waits, and `get_queue` and the app say so; a failing probe is retried every 5 minutes. A probe that
+  times out or cannot start reads as unknown, which still routes. When the probe exits, the daemon
+  kills whatever it left running in its process group, so a probe must not start an agent or any
+  background process it expects to outlive it: wait for it in the probe, or the process is killed
+  with the probe's exit. Prefer an absolute path for
+  `argv[0]`: a bare name resolves through the daemon's own `PATH`, which a launchd or systemd service
+  sets and a shell does not. Test the command as the installed service sees it, not only from your
+  terminal: a CLI that keeps its login in the macOS keychain or a keyring (`az`, `gh`) can pass in a
+  shell and fail in the service. Each probe is audited as `origin=probe` in the daemon log with a
+  word count, a short hash and the program's name, never the arguments. A trait may also say
+  `"keepFree": true`: tasks that don't require it prefer other machines, and it still takes work
+  when nothing better is free (a score penalty, never a filter). Update the machine before setting
+  it: an older daemon refuses the key.
 
 Optional: `~/.exclaves` lists extra Claude Code accounts on the box, one name per line.
 Each name is a tree at `~/<name>` whose sessions use the config dir `~/.claude-<name>`;

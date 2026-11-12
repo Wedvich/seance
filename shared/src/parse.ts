@@ -38,6 +38,7 @@ import {
   REQUIRES_DEP_SENTINEL,
   SKILL_NAME_MAX_LENGTH,
   STATUS_MAX_AUTH_EXPIRED,
+  STATUS_MAX_TRAIT_PAIRS,
   TASK_UNTIL,
   QUEUE_MAX_TASKS,
   ROUTING_ID_MAX_LENGTH,
@@ -336,6 +337,7 @@ export function parseExclaveInfo(value: unknown): ExclaveInfo | null {
   const skills = value["skills"];
   if (!isStringArray(skills)) return null;
   const traits = parseExclaveTraits(value["traits"]);
+  const keepFree = parseExclaveKeepFree(value["keepFree"], traits);
   return {
     id: value["id"],
     accountId,
@@ -345,6 +347,7 @@ export function parseExclaveInfo(value: unknown): ExclaveInfo | null {
     authOk: value["authOk"],
     skills,
     ...(traits === undefined ? {} : { traits }),
+    ...(keepFree === undefined ? {} : { keepFree }),
   };
 }
 
@@ -357,6 +360,17 @@ export function parseExclaveInfo(value: unknown): ExclaveInfo | null {
 function parseExclaveTraits(value: unknown): readonly string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const names = [...new Set(value.filter(isTraitName))].slice(0, TRAIT_LIMITS.perMachine);
+  return names.length === 0 ? undefined : names;
+}
+
+/**
+ * Lenient like `parseExclaveTraits`: a list this build cannot read is read as none (the
+ * kept-free machine then scores as any other: a soft preference lost, never a task misplaced).
+ * Only names also in the parsed `traits` survive, since a keepFree name without the trait means nothing.
+ */
+function parseExclaveKeepFree(value: unknown, traits: readonly string[] | undefined): readonly string[] | undefined {
+  if (!Array.isArray(value) || traits === undefined) return undefined;
+  const names = [...new Set(value.filter((name) => isTraitName(name) && traits.includes(name)))];
   return names.length === 0 ? undefined : names;
 }
 
@@ -396,6 +410,9 @@ export function parseUpdateReport(value: unknown): UpdateReport | null {
   return { at, outcome: known, ...(detail === undefined ? {} : { detail: detail.slice(0, UPDATE_DETAIL_MAX) }) };
 }
 
+/** A daemon mints a UUID; the bound only keeps a skewed blob from carrying a large one around. */
+const MAX_INSTANCE_LENGTH = 64;
+
 /**
  * The decrypted register blob. Inside the PSK boundary, so this is skew
  * tolerance rather than defence: a daemon a version ahead or behind must cost
@@ -417,6 +434,7 @@ export function parseMachineInfo(value: unknown): MachineInfo | null {
   const capabilities = value["capabilities"];
   const source = parseSourceInfo(value["source"]);
   const lastUpdate = parseUpdateReport(value["lastUpdate"]);
+  const instance = value["instance"];
   return {
     name: value["name"],
     platform: value["platform"],
@@ -426,6 +444,7 @@ export function parseMachineInfo(value: unknown): MachineInfo | null {
     ...(isStringArray(capabilities) ? { capabilities } : {}),
     ...(source === null ? {} : { source }),
     ...(lastUpdate === null ? {} : { lastUpdate }),
+    ...(typeof instance === "string" && instance !== "" && instance.length <= MAX_INSTANCE_LENGTH ? { instance } : {}),
   };
 }
 
@@ -479,7 +498,7 @@ function parseQuotaObservation(value: unknown): QuotaObservation | null {
   return reading === null ? null : { x: value["x"], ...reading };
 }
 
-function parseExpiring(value: unknown): readonly [number, number] | null {
+function parseUintPair(value: unknown): readonly [number, number] | null {
   if (!Array.isArray(value) || value.length !== 2) return null;
   const [index, at] = value;
   return isUint(index) && isUint(at) ? [index, at] : null;
@@ -503,12 +522,17 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
   const { tr } = value;
   if (!isOptionalUint(tr)) return null;
   const ax = value["ax"] === undefined ? undefined : parseUintList(value["ax"]);
-  const ae = value["ae"] === undefined ? undefined : parseList(value["ae"], parseExpiring);
+  const ae = value["ae"] === undefined ? undefined : parseList(value["ae"], parseUintPair);
   const au = value["au"] === undefined ? undefined : parseUintList(value["au"]);
   if (ax === null || ae === null || au === null) return null;
   // Disjoint and bounded together: one exclave is in at most one list.
   const authIndices = [...(ax ?? []), ...(ae ?? []).map(([index]) => index), ...(au ?? [])];
   if (authIndices.length > STATUS_MAX_AUTH_EXPIRED || new Set(authIndices).size !== authIndices.length) return null;
+  const tf = value["tf"] === undefined ? undefined : parseList(value["tf"], parseUintPair);
+  const tu = value["tu"] === undefined ? undefined : parseList(value["tu"], parseUintPair);
+  if (tf === null || tu === null) return null;
+  const traitPairs = [...(tf ?? []), ...(tu ?? [])].map(([x, t]) => `${x}:${t}`);
+  if (traitPairs.length > STATUS_MAX_TRAIT_PAIRS || new Set(traitPairs).size !== traitPairs.length) return null;
   const { drn } = value;
   if (drn !== undefined && drn !== true) return null;
   return {
@@ -526,6 +550,8 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
     ...(ax === undefined ? {} : { ax }),
     ...(ae === undefined ? {} : { ae }),
     ...(au === undefined ? {} : { au }),
+    ...(tf === undefined ? {} : { tf }),
+    ...(tu === undefined ? {} : { tu }),
     ...(drn === undefined ? {} : { drn }),
   };
 }
@@ -1072,6 +1098,7 @@ function parseReason(value: unknown): Reason | null {
 function parseScore(value: unknown): Score | null {
   if (!isRecord(value) || !isRecord(value["components"])) return null;
   const { accountPressure, machinePressure, dependencyDistance, queuePressure } = value["components"];
+  const { keepFree } = value["components"];
   const { sticky, total } = value;
   const numbers = [accountPressure, machinePressure, dependencyDistance, queuePressure, sticky, total];
   if (!numbers.every(isFiniteNumber)) return null;
@@ -1081,6 +1108,8 @@ function parseScore(value: unknown): Score | null {
       machinePressure: Number(machinePressure),
       dependencyDistance: Number(dependencyDistance),
       queuePressure: Number(queuePressure),
+      // Display-only, and `total` already carries its effect: an unreadable one is dropped, never the score.
+      ...(isFiniteNumber(keepFree) ? { keepFree: Number(keepFree) } : {}),
     },
     sticky: Number(sticky),
     total: Number(total),

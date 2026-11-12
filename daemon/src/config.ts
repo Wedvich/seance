@@ -1,5 +1,5 @@
 import { watch } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, isAbsolute } from "node:path";
 import { fromBase64, isRecord, isTraitName, TRAIT_LIMITS, TRAIT_NAME_PATTERN } from "@seance/shared";
 import { EXCLAVE_NAME } from "./exclaves.ts";
 import { fingerprint } from "./hash.ts";
@@ -41,10 +41,33 @@ export type TraitsConfig = Readonly<Record<string, TraitScope>>;
 
 export interface TraitScope {
   readonly exclaves?: readonly string[];
+  readonly probe?: TraitProbeConfig;
+  /** Ask the leader to prefer other machines for tasks that don't require this trait: a score penalty, never a filter. Stored only when true. */
+  readonly keepFree?: true;
 }
 
-/** Keys the spec defines for a trait that this build does not act on yet: refused, so no one believes a probe guards routing. */
-const UNBUILT_TRAIT_KEYS: ReadonlySet<string> = new Set(["probe", "keepFree"]);
+/**
+ * A trait's health probe (`trait-probes.ts`): an argv array run as the daemon's user with the
+ * env a session gets, never through a shell. Exit 0 is healthy, any other exit failing, and a
+ * timeout or a spawn failure unknown (which still routes).
+ */
+export interface TraitProbeConfig {
+  readonly argv: readonly string[];
+  readonly everyMinutes: number;
+  readonly timeoutSeconds: number;
+}
+
+export const TRAIT_PROBE_DEFAULTS = { everyMinutes: 30, timeoutSeconds: 10 } as const;
+
+/** Five minutes is the floor (a probe is a command to run, not a poll); the cap keeps a day-long probe inside a 32-bit `setTimeout` and catches a milliseconds typo. */
+export const TRAIT_PROBE_LIMITS = {
+  argvWords: 32,
+  wordLength: 1024,
+  minEveryMinutes: 5,
+  maxEveryMinutes: 1440,
+  minTimeoutSeconds: 1,
+  maxTimeoutSeconds: 30,
+} as const;
 
 /**
  * Strict, as `parseAuthHealth` is: a trait dropped silently would route work away from (or, worse,
@@ -65,16 +88,23 @@ function parseTraits(raw: unknown, path: string): TraitsConfig | undefined {
     const scope = raw[name];
     if (!isRecord(scope)) throw new TypeError(`config at ${path}: "traits.${name}" must be an object`);
     for (const key of Object.keys(scope)) {
-      if (key === "exclaves") continue;
+      if (key === "exclaves" || key === "probe" || key === "keepFree") continue;
       throw new TypeError(
-        UNBUILT_TRAIT_KEYS.has(key)
-          ? `config at ${path}: "traits.${name}.${key}" is not built yet in this seanced`
-          : `config at ${path}: unknown key "traits.${name}.${key}" (the key is "exclaves")`,
+        `config at ${path}: unknown key "traits.${name}.${key}" (the keys are "exclaves", "probe" and "keepFree")`,
       );
     }
+    const probe = parseTraitProbe(scope["probe"], path, name);
+    const keepFreeRaw = scope["keepFree"];
+    if (keepFreeRaw !== undefined && typeof keepFreeRaw !== "boolean") {
+      throw new TypeError(`config at ${path}: "traits.${name}.keepFree" must be true or false`);
+    }
+    const extras = {
+      ...(probe === undefined ? {} : { probe }),
+      ...(keepFreeRaw === true ? { keepFree: true as const } : {}),
+    };
     const exclaves = scope["exclaves"];
     if (exclaves === undefined) {
-      traits[name] = {};
+      traits[name] = extras;
       continue;
     }
     const valid =
@@ -87,9 +117,58 @@ function parseTraits(raw: unknown, path: string): TraitsConfig | undefined {
         `config at ${path}: "traits.${name}.exclaves" must be a non-empty array of distinct exclave names ("default" or one from ~/.exclaves)`,
       );
     }
-    traits[name] = { exclaves: [...exclaves] };
+    traits[name] = { exclaves: [...exclaves], ...extras };
   }
   return traits;
+}
+
+function parseTraitProbe(raw: unknown, path: string, name: string): TraitProbeConfig | undefined {
+  if (raw === undefined) return undefined;
+  const at = `config at ${path}: "traits.${name}.probe`;
+  if (!isRecord(raw)) throw new TypeError(`${at}" must be an object`);
+  for (const key of Object.keys(raw)) {
+    if (key === "argv" || key === "everyMinutes" || key === "timeoutSeconds") continue;
+    throw new TypeError(
+      `config at ${path}: unknown key "traits.${name}.probe.${key}" (the keys are "argv", "everyMinutes" and "timeoutSeconds")`,
+    );
+  }
+  const limits = TRAIT_PROBE_LIMITS;
+  const argv = raw["argv"];
+  const word = (w: unknown): w is string =>
+    typeof w === "string" && w.length > 0 && w.length <= limits.wordLength && !w.includes("\0");
+  if (!Array.isArray(argv) || argv.length === 0 || argv.length > limits.argvWords || !argv.every(word)) {
+    throw new TypeError(
+      `${at}.argv" must be a non-empty array of at most ${limits.argvWords} strings, each 1–${limits.wordLength} characters and free of NUL`,
+    );
+  }
+  const [program = ""] = argv;
+  // A relative path has no cwd contract to resolve against; a bare name resolves through PATH at each run.
+  if (!isAbsolute(program) && program.includes("/")) {
+    throw new TypeError(`${at}.argv[0]" must be an absolute path or a bare program name found on PATH`);
+  }
+  const every = "everyMinutes" in raw ? raw["everyMinutes"] : TRAIT_PROBE_DEFAULTS.everyMinutes;
+  if (
+    typeof every !== "number" ||
+    !Number.isInteger(every) ||
+    every < limits.minEveryMinutes ||
+    every > limits.maxEveryMinutes
+  ) {
+    throw new TypeError(
+      `${at}.everyMinutes" must be a whole number of minutes, ${limits.minEveryMinutes}–${limits.maxEveryMinutes}`,
+    );
+  }
+  const timeout = "timeoutSeconds" in raw ? raw["timeoutSeconds"] : TRAIT_PROBE_DEFAULTS.timeoutSeconds;
+  if (
+    typeof timeout !== "number" ||
+    !Number.isInteger(timeout) ||
+    timeout < limits.minTimeoutSeconds ||
+    timeout > limits.maxTimeoutSeconds
+  ) {
+    throw new TypeError(
+      `${at}.timeoutSeconds" must be a whole number of seconds, ${limits.minTimeoutSeconds}–${limits.maxTimeoutSeconds}`,
+    );
+  }
+  return { argv: [...argv], everyMinutes: every, timeoutSeconds: timeout };
 }
 
 export interface AuthHealthConfig {

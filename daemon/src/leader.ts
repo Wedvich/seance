@@ -591,7 +591,8 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     // The name is the task's own, from its `requires` (parsed through `isTraitName`: [a-z0-9-], 32 at most, so
     // nothing to inject), and the task id is already on its `op=admit` line: it is what "What to measure"
     // counts, how often each trait holds work back. Like the machine and account names an admit line carries.
-    onTraitHeld: (taskId, trait) => log.info(`scheduler: task held by trait: task=${taskId} trait=${trait}`),
+    onTraitHeld: (taskId, trait, why) =>
+      log.info(`scheduler: task held by trait: task=${taskId} trait=${trait} why=${why}`),
     ...(opts.config === undefined ? {} : { config: opts.config }),
   });
 

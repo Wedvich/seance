@@ -187,6 +187,7 @@ reads as one to any EDR:
 | host discovery every 30s: `statfs`, `/proc`, `sysctl` on macOS                                                               | T1082                                                                  |
 | reading every exclave's `.claude.json` and `skills/` dir, and each clone's `.claude/skills/`                                 | T1083, T1087-adjacent (ids only)                                       |
 | reading each exclave's Claude Code credential store, through a short-lived `bun -e` child (macOS: the child's `security -w`) | T1552.001 Credentials In Files (Linux/WSL), T1555.001 Keychain (macOS) |
+| trait probes: an argv the operator wrote in `config.json`, run on a cadence (Daemon, "Trait probes")                         | T1059-adjacent (the operator's own command, no shell)                  |
 | a local activity history (`metrics.sqlite`, hourly tier kept forever)                                                        | T1074.001-adjacent                                                     |
 | tmux pane enumeration                                                                                                        | T1057                                                                  |
 | a local socket client's pid via `getsockopt`, walked up its parents                                                          | T1057                                                                  |
@@ -801,7 +802,9 @@ nothing checked it. The last is the gap they leave.
   `pass` frame and closing that session at its turn's end, once the scheduler confirmed the successor
   (`pass-close`), on the push and despawn lines: the session's own ask, as `handoff` is. A
   `push-branch` from the scheduler audits under `relay` (or `leader` in process), as every other
-  scheduler-sealed request does (settled default 3, "Audit"). `harvest` is the daemon
+  scheduler-sealed request does (settled default 3, "Audit"). `probe` is the daemon's
+  trait probes (Daemon, "Trait probes"): one line when a probe is armed, one per changed result,
+  never an argv word or output. `harvest` is the daemon
   closing a dead task pane once its exit status is noted (Daemon, "Exit status"), on the
   same `closed-pane` line as reap's; it covers both triggers, a `sessions` read and the reap
   timer, and the line does not say which. `handoff` is the daemon closing a session that handed
@@ -910,6 +913,20 @@ nothing checked it. The last is the gap they leave.
   `ExclaveInfo.traits`, and are believed only as that machine's own entry (`from` bound, as every
   `info` blob); no frame, app or other machine sets one. An audit line carries the count of
   names (`requires=<n>`), never a name.
+- **A trait probe runs only what the machine's own `config.json` names.** `traits.<name>.probe.argv`
+  is read from that file alone (`parseTraitProbe`; no frame, app or other machine sets one) and exec'd
+  as an argv array, never a shell string, with the environment a session gets (the daemon's, less
+  `CREDENTIALS_DIRECTORY`, which `exec` always strips) plus `CLAUDE_CONFIG_DIR` for an exclave-scoped
+  trait. Its stdio is ignored, so nothing it prints is read or logged, one probe runs at a time in the
+  whole process, and a run past its timeout is killed by process group, as is a run that exits on its
+  own (below, "Outcomes"). It audits under its own origin, `probe`, with a word count, a 12-hex hash
+  of the argv and `argv[0]`'s basename, never another argv word or any output
+  (`daemon/src/trait-probes.ts`). The basename is the one argv text that reaches a line, so it is
+  verbatim for a bare program name: a secret does not belong in `argv[0]`. What leaves the box is `tf`/`tu` index pairs
+  in the `status`, nothing else. This is not a boundary against a same-uid session: such a session can
+  already write `config.json` and run anything the daemon can, so the invariant is what the daemon
+  does with a probe, not who may declare one. It was chosen over a bare environment because a probe has
+  to judge the context a session runs in, and a keyring-backed CLI fails in a bare one.
 - **A session event is bound by the daemon, never by the event.** On the local
   socket's `session-event` frame, the pane is the one the kernel-reported peer pid
   runs under; the frame's own `pane` decides only on a host that can name no peer
@@ -1195,7 +1212,16 @@ The Durable Object persists a machine registry:
   twelve exclaves' quota) still fits the budget, which `status.test.ts` holds. An exclave in none of
   the three is `ok` only when its daemon advertises `CAPABILITIES.authHealth`, and an older daemon's is
   `unknown`: `exclaveAuth` (`shared/src/status-reader.ts`) is the one reader rule, so routing, the PWA,
-  MCP and the alert step cannot disagree. `drn: true` says the daemon's task-launch
+  MCP and the alert step cannot disagree. `tf` and `tu` (trait probes; Daemon, "Trait probes") are
+  `[exclave index, trait index]` pairs, the trait index into that exclave's advertised `traits` list:
+  the probes failing, and the probes with no reading yet or a run that could not say (timeout, spawn
+  failure). Disjoint, at most `STATUS_MAX_TRAIT_PAIRS` (16) between them, `tf` first, never trimmed (a
+  trimmed failing probe would read as healthy and let a task through); a reader nulls the whole status
+  over a pair repeated within or across the two, or past the cap. The worst case measured, `ae` and
+  `tf` both at 16, is 560 bytes against the 1047 budget. `exclaveTraitHealth` (`status-reader.ts`) is
+  the one reader rule: `failing` only from a live status's `tf`, `unknown` for `tu` and for a stale or
+  disconnected status, `null` where the exclave does not carry the trait, so routing, MCP and the PWA
+  cannot disagree. `drn: true` says the daemon's task-launch
   gate is closed ("Restart waits for task launches"), absent otherwise; never trimmed either, and the
   parser takes `true` alone. Sent every 30s whether or not an app is watching:
   one DO wake per machine per beat (the sweep alarm already wakes it every
@@ -1301,7 +1327,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | ops `sessions` / `spawn`                                            | `sessions`: `pwa/src/store.ts` via `shared/src/app-client.ts`; `spawn`: no PWA sender since M4 PR 2 (older apps, `seanced spawn --now`)                                                                                                                                                                                                                                            | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`; a `mode: "continue"` spawn (the leader's dispatch of a continue task, sealed `from: "scheduler"`) resolves its worktree from the launch ledger first (Daemon, "Continuing a session")                                                                                                                                            |
 | op `rescan`                                                         | `pwa/src/store.ts` via `shared/src/app-client.ts`, from a Machine-sheet row                                                                                                                                                                                                                                                                                                        | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                                                                                                                                                                                                                                                                                                           |
 | op `despawn`                                                        | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                                                 | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                                                                                                                                                                                                                                                                                                                  |
-| `status` (daemon→relay)                                             | `daemon/src/run-collectors.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register (`ax`/`ae`/`au` from `daemon/src/auth-health.ts` through the `auth` collector)                                                                                                                                                                                                 | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest on the socket attachment, kept in the entry on close/sweep until the next register                                                                                                                                                                                                                                                   |
+| `status` (daemon→relay)                                             | `daemon/src/run-collectors.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register (`ax`/`ae`/`au` from `daemon/src/auth-health.ts` through the `auth` collector, `tf`/`tu` from `daemon/src/trait-probes.ts` through the `traits` collector)                                                                                                                     | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest on the socket attachment, kept in the entry on close/sweep until the next register                                                                                                                                                                                                                                                   |
 | `status` (relay→app)                                                | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`                                                                                                                                                                                                                                                                                               | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped                                                                                                                                                                                                                                                                                                  |
 | op `metrics`                                                        | `pwa/src/store.ts` via `shared/src/app-client.ts` `metrics()`, gated and parsed                                                                                                                                                                                                                                                                                                    | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts`; sized at the transport (`#sealReply`, `daemon/src/relay-client.ts`)                                                                                                                                                                                                                                                      |
 | op `session-event` (→`"scheduler"`)                                 | `daemon/src/session-events.ts` via `sendToScheduler()` in `daemon/src/relay-client.ts`; on the leader's own machine, `Leader.onSession` in process                                                                                                                                                                                                                                 | `daemon/src/leader.ts`: opened by the term's leg (`onEvent` in `shared/src/app-client.ts`, under the daemon's one scheduler `ReplayGuard`), validated by `parseSessionEvent`, applied by `Scheduler.onSession`                                                                                                                                                                                          |
@@ -1535,6 +1561,43 @@ requesting socket only.
   PWA still called it may-have-queued. Every surface words the pair through
   `failureReasonText`, and the leader's `Fleet` reads `disconnected` as never
   delivered (Scheduler, "The leader").
+- **A request whose target leaves the relay is settled then, not at its deadline**
+  (`#noteDepartures`, `#noteReturns`, `shared/src/app-client.ts`; 2026-11-12). The
+  relay cannot correlate a sealed reply, so a daemon that restarts after taking a
+  request used to leave the caller waiting out the op's whole deadline — 210 s for
+  a spawn — for an answer the new process never owed it. Each pending request
+  notes the route it went out on (a machine the client's registry showed
+  connected, or the scheduler leader's term) and, for a machine, the daemon run
+  that took it: `MachineInfo.instance`, a UUID each `runDaemon` mints and seals
+  into its register blob. The run is what tells a restart from a reconnect. The
+  same process redialling after a network change (its backoff caps at 60 s) still
+  owes the answer, and failing its spawn as "may have landed" would throw away a
+  real reply. A presence push cannot say which it is; the blob can.
+  - **A read** (`RESENDABLE_OPS`: `sessions`, `metrics`, `queue`, `route-preview`)
+    whose target is shown gone or offline, or whose term moved on, waits a
+    one-second grace (`STRANDED_GRACE_MS`), then waits for the target to come back
+    and goes again under its original id and deadline. A machine back under
+    another run strands it at once. The caller sees only a slower answer.
+  - **Anything else to a machine that names its run** waits for it. The same run
+    back clears the wait and the request keeps its deadline. Note that a reply the
+    daemon finished while disconnected is not queued (`wire unsent`), so the
+    deadline still decides then, as it did before. Another run back fails it
+    `dropped` at once — "the machine restarted before answering". Still away
+    after `STRANDED_AWAY_MS` (60 s) fails it the same way, worded "left the
+    relay". Comparing runs on every rebuild also catches a restart whose new
+    socket registered before the old one's close was seen, which no offline push
+    reports.
+  - **Anything else to an older daemon** (no `instance`) or to the leader gets the
+    one-second grace, which a push showing the machine back cancels, then fails
+    `dropped`. A leader's new socket is a new term even under the same device, so
+    a leader that only reconnected fails a scheduler op this way.
+
+  A failure here is the may-have-landed class with the target named (`target:
+  "machine"`): a spawn the old process launched before it died is as real as one
+  it answered. Re-sending a spawn was rejected for that reason. The daemon has no
+  request-id dedup, and the launch ledger already reports such a task for the
+  leader to reconcile. `wire stranded … why=left|restarted` is the log line.
+
 - **`iv` is also the cross-tier debug join key**, for the same reason it carries
   `undeliverable`: it is the only per-message identifier a blind relay can name.
   All three tiers emit `wire <event> iv=… ` lines through one `quote()` in
@@ -1892,8 +1955,8 @@ an old peer's frames parse as before. Mixed versions:
   leader drops an unknown reason from a decision and keeps the candidate.
 - `TaskSpec.requires` (1 to `TASK_SPEC_LIMITS.requires` = 4 unique trait names), `ExclaveInfo.traits`
   (sorted names an exclave declares, lenient: a bad list costs the field), `CAPABILITIES.traits` and
-  the reasons `trait_absent { trait }` and `trait_unhealthy { trait }` (parsed and worded, emitted by
-  nothing yet; the probes PR sends it). An older leader refuses a record carrying `requires`
+  the reasons `trait_absent { trait }` and `trait_unhealthy { trait }`, and the status's `tf`/`tu` (an
+  older reader ignores them, so an older leader keeps routing to a failing probe). An older leader refuses a record carrying `requires`
   (`REQUIRES_DEP_SENTINEL`, "Traits filter"), an older daemon advertises no traits so never
   receives one, an older app drops the reasons from a decision and keeps the candidate.
 - `session-event` `done`: ingested since 2026-10-23 (Local op socket, "Session events"). A daemon
@@ -2871,7 +2934,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   `RepoEntry.origin`, never the machine-local name), `auth_missing`, `quota_unknown`,
   `quota_over_line`, `model_not_included` (the task's model is a gated one its seat bills
   to credits — "Seats" below), `cap_reached` (global, or `scope: "account"`, "Routing caps" below; the
-  `scope: "batch"` and `batch_order` an older leader sent went with batch strategies, "Batches"), `paused` ("Pause"), `skill_absent` (naming the skill; "Skills filter" below), `trait_absent` (naming the trait; "Traits filter" below; `trait_unhealthy` is parsed and worded but nothing emits it until the probes PR).
+  `scope: "batch"` and `batch_order` an older leader sent went with batch strategies, "Batches"), `paused` ("Pause"), `skill_absent` (naming the skill; "Skills filter" below), `trait_absent` (naming the trait; "Traits filter" below) and `trait_unhealthy` (the exclave carries the trait but its probe reads failing: `tf`; "Traits filter" below; an unknown probe routes).
   `auth_expired` (an exclave whose login `exclaveAuth` reads expired: its index in `ax`, or an `ae` time already
   past, on a daemon advertising `authHealth`; `expiring` and `unknown` still route, and `auth_missing`
   stands in for it on a signed-out exclave; Daemon, "Auth health"). M4's `base_unpushed` is read and
@@ -2895,7 +2958,9 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   task's own model — "Seats" below), multiplied by the share of the window still to run; `machinePressure` is
   `max(cpu, mem)` as a fraction (disk never scores); `dependencyDistance` 0 / 0.25 /
   0.5 from `TaskSpec.base` (absent until M4's stacking fills it); `queuePressure` the
-  in-flight scheduler tasks on the machine. Stickiness subtracts a fixed bonus from the
+  in-flight scheduler tasks on the machine; `keepFree` (2026-11-12) is 1 when the exclave carries a
+  keepFree trait the task does not `require`, else 0 and omitted from the record, weighted 8 and
+  added to the total ("Traits filter", "Keep free"). Stickiness subtracts a fixed bonus from the
   `TaskSpec.lineage` owner's total, never overrides a filter. Projected usage is the
   effective reading plus a fixed estimate for this task and each in-flight one billed to
   the same account, per window span (`taskEstimatePct`: 5% of a 5h window, 1% of a weekly —
@@ -2973,8 +3038,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   (g) a clone without `refs/remotes/origin/HEAD` (no resolvable default branch) advertises no
   project skills.
 
-- **Traits filter** (2026-11-12, docs/scheduler.md M4 _Traits_, PR 1 of 3: core; probes and keep-free
-  follow). A trait is an operator-declared name a machine's exclave carries ("atlas": the box that
+- **Traits filter** (2026-11-12, docs/scheduler.md M4 _Traits_, built in three PRs: core, probes, keep free). A trait is an operator-declared name a machine's exclave carries ("atlas": the box that
   can reach the internal registry). A task's `requires` (1 to 4 unique names, `isTraitName`) puts
   `trait_absent { trait }` on every candidate whose exclave lacks it, once per missing trait, in
   `requires` order (`traitFilter`, `scheduler/src/traits.ts`; a trait in `TASK_SPEC_LIMITS.requires`
@@ -2985,15 +3049,20 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   daemon's exclaves are judged, and lack every trait as they declare none. Mixed with the other filters the reasons
   stack as they do for any rejected candidate, so a pinned-elsewhere candidate carries both.
   - **Declaring.** Only in the machine's own `config.json`: `"traits": {"<name>": {"exclaves"?: [...]}}`.
-    `exclaves` narrows a trait to those exclave names (default: all of the box's). `probe` and `keepFree`
-    are refused by name as "not built yet", so a config written for the later PRs fails loudly on an
-    older daemon rather than being ignored. Strict parse: a bad name, a non-object value or an unknown
-    key fails the config load. `withTraits` (`daemon/src/traits.ts`) stamps the sorted names onto each
+    `exclaves` narrows a trait to those exclave names (default: all of the box's). `probe` is built
+    (Daemon, "Trait probes"); `keepFree` is a boolean, stored only when true (see "Keep free" below). Strict parse: a bad name, a non-object value or an unknown
+    key fails the config load, so a key a later build adds fails loudly on an older daemon rather than being ignored. `withTraits` (`daemon/src/traits.ts`) stamps the sorted names (and the `keepFree` subset) onto each
     `ExclaveInfo` in `buildInfo`; `CAPABILITIES.traits` is advertised by every daemon of this build.
   - **Holds, not rejections.** A trait no candidate carries holds the task like any unplaceable
-    one; the leader logs `scheduler: task held by trait: task=<id> trait=<name>` once per trait per term (`onTraitHeld`; a new term
-    logs it again, the memo being per term, which is accepted). `trait_unhealthy` is reserved for
-    probes (PR 2).
+    one; the leader logs `scheduler: task held by trait: task=<id> trait=<name> why=<absent|unhealthy>` once per trait per term (`onTraitHeld`; a new term
+    logs it again, the memo being per term, which is accepted). `why` is `unhealthy` when some
+    candidate carries the trait but only with a failing probe, else `absent`; the memo is on the trait,
+    so a hold that changes why does not tell again.
+  - **Unhealthy.** `traitFilter` puts `trait_unhealthy { trait }` on a candidate whose exclave carries
+    the trait and reads it `failing` (`exclaveTraitHealth`: a live status's `tf`), after any
+    `trait_absent`, in `requires` order. Unknown routes: a `tu` pair, a stale status and a disconnected
+    machine are no failing reading, since a probe nobody could run must not take a machine out of the
+    fleet. A machine is named failing for a trait only when every exclave carrying it is (`traitHealthByMachine`).
   - **Submit-time checks, one per client.** Each client writes `requires` only to a verified leader
     advertising `CAPABILITIES.traits`; otherwise it refuses, naming `seanced update` (or that no
     verified leader leads). Then, in this order, it refuses a name no machine declares ("no
@@ -3020,13 +3089,55 @@ it through the store: an app's `store-put` create, read by the leader on `store-
     candidate bound moved from nine to eight (a nine-candidate worst-case record measured 41,096
     bytes against `STORE_MAX_CT_LENGTH`'s 40,960), and the leader's `too_large` retry still cuts the
     decision to its winner. A create at every bound is 27,176 bytes against 28,672.
+  - **Keep free** (PR 3 of 3). A trait marked `keepFree` asks the leader to prefer other machines for
+    tasks that don't need it: a score penalty, never a filter, so a busy fleet still places there. The
+    daemon advertises the sorted subset per exclave as `ExclaveInfo.keepFree` (`withTraits`, from local
+    config only; `parseExclaveInfo` keeps only names also in the parsed `traits` and reads an
+    unreadable list as none: a soft preference lost, never a task misplaced). `judge` sets
+    `components.keepFree` to 1 when the exclave carries a keepFree trait outside `task.spec.requires`
+    and adds `weights.keepFree` (8) × it to the total; the lower total still wins, so the penalty
+    _raises_ the machine's total (docs/scheduler.md's "scores lower" meant "is preferred"). Binary: three
+    kept-free traits are not three times as avoided, which would be a filter by another route. A task
+    requiring one kept-free trait still pays for another the exclave carries and the task does not
+    require. The component is omitted at 0, so every record without a penalty is byte-identical to
+    before; `parseScore` reads an optional `keepFree`, which an older reader drops with the rest of the
+    unknown keys, so records stay readable both ways. An unreadable one (not a finite number) is
+    dropped, not a reason to null the score: a deliberate departure from every other component, where
+    one bad candidate voids the decision and so the record, because `total` already carries the
+    penalty and a later build that changes the component's shape (a count, a list of names) must not
+    leave a leader of this build holding its records unreadable. Weight 8 is the global cap's worth
+    (`globalMax`): a kept-free idle machine loses to one carrying up to 7 in-flight scheduler tasks
+    (`queuePressure` is 1 each), and at 8 the cap refuses every candidate anyway; other load on the
+    competitor shifts that, and an exact tie goes to the lower deviceId. It is also two fully loaded machines' (`machinePressure` weighs 4),
+    and it beats a competitor's account pressure up to about 74% projected at the start of a window
+    (`(u/(1-u))²` is 8 at 0.74), a little more later in it, since that cost is scaled by the share of
+    the window still to run (80% at the halfway point). Weight 4 was considered and
+    rejected: another machine carrying four tasks is normal load, and the kept-free one would then
+    take work, so it would not replace `avoid`. Stickiness (−2) cannot outweigh it alone. Rollout: an
+    older leader ignores the advertisement and places as before; an older daemon refuses `keepFree` in
+    config, so update the machine before setting it. Mixed versions: if leadership moves to a daemon
+    built before this one, it rewrites a task's decision on its next write without
+    `components.keepFree` (its `parseScore` drops the key) while `total` keeps the penalty, so the PWA
+    loses "kept free" for that candidate and the components no longer sum to the total; nothing is
+    misplaced. Record size: a worst-case 8-candidate record with `keepFree: 1` on every candidate
+    measured 40,708 `ct` against `STORE_MAX_CT_LENGTH`'s 40,960 (40,568 without); the weight moves only `total`
+    (a total of ten or more adds a character per candidate: 40,716). Each penalised candidate adds about 18 bytes, so the
+    attachment record below, which measures 40,828 with ten unpenalised candidates (132 under), measures 41,004
+    with all ten penalised and overflows from about eight; the leader's `too_large` retry cuts such a
+    decision to its winner, and the cut candidates include the kept-free one the PWA would have
+    explained. Surfaces: the PWA's decision text says "kept free" for a penalised
+    candidate, and `list_machines` gives each exclave `keepFree: [names]`; `decisionText` shows totals
+    only. Measuring `avoid`'s share: docs/scheduler.md, "What to measure".
   - **Surfaces.** MCP: `requires` on `spawn_session` and each `queue_batch` member; `get_queue` gives each
-    task with `requires` a `requires: [{ trait, machines }]` and `list_machines` each exclave's
-    `traits`. CLI: repeatable `seanced spawn --requires <name>`, refused with `--now` ("--requires needs
+    task with `requires` a `requires: [{ trait, machines, failing? }]` (`failing`: the machines whose probe
+    fails on every exclave carrying the trait) and `list_machines` each exclave's
+    `traits`, `traitsFailing` and `traitsUnchecked`. CLI: repeatable `seanced spawn --requires <name>`, refused with `--now` ("--requires needs
     the scheduler: --now spawns directly and skips routing"). PWA: a REQUIRES tile and sheet on the form,
     listing the traits the fleet declares with the machines that hold each, and a "Needs atlas (on
-    MacBook)" line on the Queue screen and verdict, which leave a place lacking a required trait out of the
-    waiting text whole, as they do a pin mismatch (waking it would not help). Not in Raycast. Route preview carries `requires` (no change: the
+    MacBook)" line on the Queue screen and verdict, which leave a place lacking a required trait or with its probe failing out of the
+    waiting text whole, as they do a pin mismatch (waking it would not help). The line names a failing
+    machine apart ("Needs atlas (MacBook's probe is failing)", "(on Thad; MacBook's probe is failing)",
+    "(probe failing on A, B)"), and the Machines screen's exclave row says "atlas probe failing". Not in Raycast. Route preview carries `requires` (no change: the
     request is the spec).
   - **Mixed versions.** An old PWA or CLI hides or cannot write a `requires` task, as with `attachments`
     (an old app drops the unreadable record from its list). An old keyless peer talking to a new broker
@@ -3903,7 +4014,7 @@ error.
   IndexedDB entry, `psk-base`, in the same transaction as the AES key, and `main.tsx` derives the
   account key from it at launch. A later PSK-derived key then needs no second re-entry on every
   install. An install saved before this has no `psk-base`: it works unchanged, shows no alias, and
-  the accounts section says to re-enter the PSK in Settings to name accounts (saving it there
+  the account menu's Rename says to re-enter the PSK in Settings (saving it there
   stores both). Rejected: forcing a re-setup, which would lock every install out until the PSK
   is typed, for a display-only feature; persisting the PSK's base64 to migrate silently, which
   defeats the non-extractable key.
@@ -3922,9 +4033,16 @@ error.
   an account it no longer names, or not at all. Both are bounded to the owner's own accounts — the
   registry check means no record names an account no machine of this fleet reports — and the
   echoed id and email are what the person checks.
-- **PWA.** The account card's "Rename" opens an inline field (at most 64 characters, trimmed; empty
-  clears). Names show on the account cards, a machine card's exclave rows and the Queue screen's
-  pause holds: alias, else email, else `acct` and the first eight characters of the account half.
+- **PWA.** "Rename" in the account card's ⋯ menu opens a dialog (a bottom sheet on a phone, centred
+  on a desk; at most 64 characters, trimmed; empty clears) that stays open on a refusal with the
+  reason under the field, closes when the name lands, and is a history layer like the sheets (back closes
+  it; the one close is idempotent, so a save landing after Cancel pops nothing more, and a layout change
+  closes it); it keeps its draft while its account is briefly unreported, Save waits while another
+  account's rename is saving, and a failure for another account never shows in it; without the account key the item is `aria-disabled` (still reachable, not activatable) and its
+  sub-line says to re-enter the PSK. Cards whose titles would repeat gain the exclave ids, then the machines, then the account id (`<alias> (<exclaves>)`). An alias is the account card's title, and the exclave ids it replaces lead the meta line
+  (`<exclaves> · <email> · on <machines>`); an unnamed card is titled by its exclave ids. Names show
+  on a machine card's exclave rows and the Queue screen's pause holds as alias, else email, else
+  `acct` and the first eight characters of the account half.
   One person on a personal plan and a Team org has one email and one account half under two org
   halves, so where another account the registry reports would read the same, the email or short id
   gains `(org <first eight of the org half>)` (the whole org half where that still collides, the
@@ -4460,7 +4578,7 @@ as follows, without reopening the decision.
   27,932 bytes, 740 under the cap (`requires` at its bound added 240). A name bound of 128 measured 28,436, too close to keep.
   Three-byte text fits less, as it already does for the prompt (the sealer's length check
   refuses it, `STORE_CREATE_MAX_CT_LENGTH`). With the leader's writes on top at every
-  bound and ten candidates, an unfinished record carrying the manifest seals to 40,828
+  bound and ten unpenalised candidates (see "Keep free"), an unfinished record carrying the manifest seals to 40,828
   bytes against `STORE_MAX_CT_LENGTH`'s 40,960 (task 2, `parse.test.ts`). A `failure` at
   its bound would push it over, but only a `failed` record carries one, and the write
   that finishes a task drops the manifest (`lean`, below); past the cap, the leader's
@@ -6153,10 +6271,74 @@ of this section built.
 - **Traits** (`daemon/src/traits.ts`, `config.ts`, 2026-11-12, scheduler M4 PR 1): `config.json`'s
   `traits` map declares what this box's exclaves carry (Scheduler, "Traits filter"). `parseTraits` is
   strict: names pass `isTraitName` (`TRAIT_LIMITS`), values are objects holding only `exclaves` (a
-  non-empty list of distinct exclave names; one matching no exclave never applies — config parse cannot see the scan, so `buildInfo` logs a warning naming the trait and the unknown ids once per exclave-set change, `unmatchedTraitExclaves`), at most
-  `TRAIT_LIMITS.perMachine` traits, and `probe` and `keepFree` are refused by name as "not built yet". `withTraits` stamps the sorted names onto each exclave in the
+  non-empty list of distinct exclave names; one matching no exclave never applies — config parse cannot see the scan, so `buildInfo` logs a warning naming the trait and the unknown ids once per exclave-set change, `unmatchedTraitExclaves`), `probe` (see "Trait probes") and `keepFree` (true or false; false is stored as absent), at most
+  `TRAIT_LIMITS.perMachine` traits. `withTraits` stamps the sorted names, and the sorted subset marked `keepFree` (absent when empty), onto each exclave in the
   register blob; the daemon advertises `CAPABILITIES.traits`. Nothing about a trait is read from the
   wire, the PWA or another machine, and nothing here calls `log.ts` from the MCP path.
+
+- **Trait probes** (`daemon/src/trait-probes.ts`, 2026-11-12, scheduler M4 PR 2): whether a declared
+  trait is working right now. `traits.<name>.probe` is `{ argv, everyMinutes?, timeoutSeconds? }`;
+  `parseTraitProbe` bounds it (argv a non-empty list of at most 32 words of 1 to 1024 characters, none
+  holding a NUL, the first absolute or a bare name; `everyMinutes` an integer 5 to 1440, default 30;
+  `timeoutSeconds` an integer 1 to 30, default 10; any other key refused). A trait without `probe`
+  is never run and never appears in `tf`/`tu`. Threat-model invariants: "A trait probe runs only what
+  the machine's own `config.json` names".
+  - **Units.** One per trait, machine-wide, or one per listed exclave present in the scan for a trait
+    with `exclaves` (`trait` and `trait/exclaveId` keys). An exclave-scoped unit runs with
+    `CLAUDE_CONFIG_DIR` set to that exclave's config dir (unset for `default`), so a CLI that reads
+    Claude's own settings judges that exclave. An exclave that appears after boot arms on the next
+    `check`, within 60 s of the scan that found it; until then its pairs read `pending`, so `tu`.
+  - **One at a time.** A module-level promise chain, `lane`, serialises every run in the process, even
+    across the instances a config reload makes: a probe may spawn a heavyweight CLI, and a box of
+    several must not run them together.
+  - **Cadence.** Every unit runs once at start (the daemon's boot, a reload's new instance), then is due
+    again when the last run's start is `everyMinutes` old, or 5 minutes (`PROBE_FLOOR_MS`) while it is
+    failing or unknown: a transient failure must not hold work for `everyMinutes` (30 by default),
+    and the floor stops a failing probe from being hammered. A `check` timer (60 s) finds the due
+    units; each run is deferred to the lane. `everyMinutes` is capped at 1440 because a healthy reading
+    older than a day is a guess, and so that a typo (milliseconds for minutes) is refused at load rather
+    than silently parking a probe for weeks. The cap does not bound an unknown or failing reading,
+    which always reruns at the floor.
+  - **Outcomes.** Exit 0 is healthy; any other exit is `failing`; a timeout, a spawn failure and a
+    program that does not resolve (`not_found`) are `unknown` (the daemon cannot say), which still
+    routes, as unread auth does. The program is resolved on each run: a bare name through
+    `Bun.which` over the daemon's PATH with the home directory as cwd, a path as given. A resolved
+    path is never kept (CLAUDE.md, `process.execPath`). `exec` runs it as an argv array with
+    `killGroup`, `killAfterMs` 1 s, stdout and stderr both discarded (`discardStdout`, `discardStderr`:
+    ignored at the file descriptor, never piped, so a flood costs no memory) and a hard deadline of the
+    timeout plus 2 s past which the run is abandoned, so a probe that ignores SIGKILL cannot hold the
+    lane. `stop()` kills the running group with SIGKILL, only while its pid is unreaped.
+    _Decided: a probe that exits on its own also has its group SIGKILLed_ (`exec`'s `sweepGroup`, the
+    moment the leader's exit is observed), _because a probe repeats every 5 minutes while it fails, and
+    a CLI that forks a helper or a backgrounded `cmd &` would leave one more orphan on each run._ It is
+    the one signal `exec` sends after the reap, so it takes the risk `killAfterMs` avoids (a group id
+    reused in the gap between the reap and the callback; the id stays reserved while any member lives,
+    which is when there is something to sweep). The consequence: a probe cannot leave anything running
+    on purpose. One that starts an agent, a daemon or any background process has it killed as soon as
+    the probe's own process exits, so it must wait for the work it starts, or `setsid` it out of the group
+    (which the daemon then no longer tracks: such a process is the operator's to bound).
+  - **Reporting.** `statusLists` turns the states into `tf`/`tu` through `exclaveTraitNames`, the same
+    function `withTraits` stamps the register blob with, so a pair's trait index is the position in the
+    list the leader reads. A change of any state fires `onChange` once per quiet drain, which asks the
+    status loop for a send; the 30 s beat carries the rest. Pairs past `STATUS_MAX_TRAIT_PAIRS` are
+    dropped, failing first, with one warning.
+  - **Environment.** The daemon's own, as `exec` takes it, not a bare one. A probe judges whether a
+    session could use the trait, and a keyring-backed CLI fails in a bare environment, so a bare run
+    would report failing for a trait a session reaches fine. Nothing was added to a service's PATH: a daemon under launchd or systemd has
+    the unit's, so a probe naming a bare program should be tested from the service, and an absolute
+    argv[0] sidesteps it (README).
+  - **Audit.** `audit probe origin=probe op=armed trait=<t>[ exclave=<id>] every=<n>m timeout=<n>s
+    argv=<count> argvSha=<12 hex> argv0="<basename>" via=start|reload` when a unit arms, and
+    `op=result trait=<t>[ exclave=<id>] state=healthy|failing exit=<n>|unknown why=<w>` when a result
+    differs from the line last written for that unit. `via=reload` is a config reload's swap or
+    its rollback (`supervise.ts`): the operator rewrote the command and the log says so.
+  - **Gating.** On when `config.traits` names at least one probe (`hasProbe`), nothing else: no wire
+    capability gates it (an older reader ignores `tf`/`tu`), and `RunOpts.traitProbes` carries test
+    seams only. It is a daemon capability in `run-capabilities.ts` (start at boot, `stop` kills a
+    probe in flight), beside auth health.
+  - **Not handled.** A probe that succeeds while the trait is broken, and a trait that breaks mid-run:
+    the next run finds it, up to `everyMinutes` later. A task already placed is not stopped when its
+    trait's probe turns failing; only placement reads it.
 
 - **Session detection**: list all tmux panes across all sessions, dedup by
   window id (grouped sessions repeat windows), count a window as a session by
@@ -7990,9 +8172,10 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
 - **Machines show load, accounts show quota.** A machine card carries CPU and memory bars and
   its exclaves (account, running sessions, and a line when the login needs /login or expires within 3
   days: `exclaveAuth`, error or warning colour, nothing for ok or unknown), while connected; quota is a property of an account, not of any
-  machine, so it sits on account cards: one per `accountId` across the fleet, named by its
-  alias if any client set one (_Scheduler_, "Account records"), else the
-  email any of its exclaves reports (the short account id from a daemon that predates it), newest
+  machine, so it sits on account cards: one per `accountId` across the fleet, titled by its
+  alias if any client set one (_Scheduler_, "Account records"), else its exclave ids, and named
+  in its meta line by the email any of its exclaves reports (the short account id from a daemon
+  that predates it), newest
   observation wins, since every daemon hosting one of its exclaves reports it, each window
   it lacks filled from the next newest that has one (`mergeQuota`) — per-model caps reach
   the cache only through `/usage`, so a machine whose newer cache never saw one must not
@@ -8016,7 +8199,10 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   "reset", however full the reading was — a cache reading can be hours old, and its
   percentage describes a window that no longer exists. Both rules are one shared copy,
   `newestQuotaByAccount` and `effectivePct` in `shared/src/quota.ts`, so M2's scheduler
-  filter and score read quota exactly as the cards do. Charts follow the split — History on a machine asks
+  filter and score read quota exactly as the cards do. Charts follow the split — the History switch in
+  a card's ⋯ menu (it leaves the menu open, so it can be flipped back, and the menu holds through
+  the layout shift a chart opening or closing causes, then re-pins to its trigger; a machine card with no
+  chart to offer has no menu) on a machine asks
   that daemon for `cpu_pct`/`mem_pct`/`disk_pct`; on an account it asks one online host of the account
   (the newest observer when it serves `metrics`) for the quota series and folds its exclaves'
   copies into one line per window. One chart at a time, its window fixed when asked, a reply
@@ -8978,6 +9164,21 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
   Local ops need no key. It also narrows the threat-model addendum above: for
   local work the MCP process never holds the PSK, and on a credential-delivered
   box it never holds it at all.
+- **A call safe to repeat rides out a daemon restart** (`exchange`'s `restartGraceMs`,
+  `daemon/src/local-client.ts`; 2026-11-12). A restart closes the socket under an in-flight call,
+  and the path is gone (`stop(true)` unlinks it) or refusing (a self-update's `process.exit`, a
+  crash) until the service manager brings the daemon back: systemd's `RestartSec=5`, or launchd's
+  10 s `ThrottleInterval` for a job that ran under 10 s. A read — `sessions` here, and the broker's
+  `machines`, `fleet`, `request` of `sessions`, `queue` and `accounts` — and a brokered `enqueue`
+  (a second create of the same task id reads `landedEarlier`) are sent again, same frame, every
+  250 ms for up to `RESTART_GRACE_MS` (20 s) from the loss. A socket path that is not there at all
+  on the first try is a daemon not running, said at once: the grace starts only on a lost
+  connection or a refusing socket. A connection taken and dropped twice in a row is a daemon
+  refusing the frame — one older than the broker — not a restart, and is reported as before. A grace
+  spent after a try was cut off fails as that lost call (`LocalConnectionLost`), never as a daemon not
+  running: the cut-off try may have run.
+  `spawn`, `despawn`, `cancel`, `run-now` and the session-event frames are sent once: a lost one may
+  have run.
 - **The listener never fails the daemon.** An unbindable socket — a run directory
   owned by someone else, a path past the ~104-byte `sun_path` limit — logs and is
   skipped, matching `ensureAuditLog`'s posture: a degraded local surface is not a
@@ -9075,7 +9276,8 @@ app-role relay client with the key it imported at start.
   codes, and a `RequestFailure` crosses with its reason so the MCP side renders it
   exactly as the direct path does — a relay timeout still reads "may have landed
   anyway". Losing the daemon mid-request, or its deadline passing, on a spawn or
-  despawn says the same; nothing is retried, on either path. Two stop codes keep
+  despawn says the same, and neither is retried on either path. A frame safe to repeat — the reads
+  and `enqueue` — rides out a daemon restart instead ("Local op socket", "A call safe to repeat"). Two stop codes keep
   the certainty apart: `shutting_down` is a refusal before anything was sent, so
   the request certainly did not happen; `stopped_in_flight` means it was already
   out and reads as possibly landed. The latter is best effort — the local socket
@@ -9998,6 +10200,8 @@ are tmux-rename's, except where they say mods.
 - A task with `requires` is invisible to an app or CLI older than traits (its leader-side record is
   refused by an older leader, and an older app drops what it cannot read), as with `attachments`;
   and the leader's "task held by trait" line repeats after a leader change, its memo being per term.
+  A leader older than the probes build words the line without `why=`, and routes to a machine whose
+  probe fails (it ignores `tf`).
 
 - `/spawn` and the daemon duplicate git/tmux logic — drift risk, owned, and on
   its way out: `seanced spawn --now` audits like the relay path, so the slash

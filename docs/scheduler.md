@@ -174,7 +174,7 @@ they now live:
 
 - Filters (the per-account cap and `skill_absent` are DESIGN.md "Routing caps" and "Skills
   filter"; the per-batch bound M3 built went 2026-10-26, "Batches"): stacked base unpushed and not on this exclave (M4,
-  _Stacking_); auth expired (M4, _Auth health_); trait absent (built, DESIGN.md "Traits filter") or unhealthy (M4, _Traits_, probes).
+  _Stacking_); auth expired (M4, _Auth health_); trait absent or unhealthy (built, DESIGN.md "Traits filter").
 - Score: `dependencyDistance` gets an input once M4's stacking fills `TaskSpec.base`. The LXC
   pressure view (M4) reaches `machinePressure` folded into the LXC daemon's own `status`, so the
   library reads it as any other pressure.
@@ -409,8 +409,8 @@ of M4 has landed.
 | 2     | Stacking                                                           | authoring surface; #28                                                 | L                        |
 | 2     | Auth health — **Done**                                             | Web Push (built); spiked 2026-11-12                                    | M                        |
 | 2     | Traits: core — **Done** (#406)                                     | auth health's status lists (shape to copy)                             | M–L                      |
-| 2     | Traits: probes (new)                                               | traits core                                                            | M                        |
-| 2     | Traits: keep free (new)                                            | traits core                                                            | S                        |
+| 2     | Traits: probes — **Done** (#409)                                   | traits core                                                            | M                        |
+| 2     | Traits: keep free — **Done** (#414)                                | traits core                                                            | S                        |
 | 2     | Linear                                                             | settings; authoring surface                                            | L                        |
 | 2     | Successor (new) — spec 2026-11-12                                  | account records; fleet quota record; Web Push                          | M–L                      |
 | Later | LXC pressure view (was: Proxmox node view)                         | —                                                                      | S                        |
@@ -935,15 +935,17 @@ of M4 has landed.
     machine says what it is); detecting tools automatically (`which az` says installed, not
     signed in, and an MCP server's login state is not visible from outside).
   - _Decided, health probes:_ a trait may name a probe — an argv array from that file only, never
-    a shell string and never a frame field — run with a bare env (`HOME`, `PATH`, `USER`,
-    `LOGNAME`, plus `CLAUDE_CONFIG_DIR` for an exclave-scoped trait), stdio ignored and never
-    logged, one probe at a time per daemon, every `everyMinutes` (at least 5, default 30) and
-    killed after `timeoutSeconds` (1–30, default 10). Exit 0 is healthy, any other exit is
+    a shell string and never a frame field — run with the session's env (the daemon's, less
+    `CREDENTIALS_DIRECTORY`, plus `CLAUDE_CONFIG_DIR` for an exclave-scoped trait; a bare env was
+    the first draft, and a keyring-backed CLI fails in one, so a probe would say failing for a trait a
+    session reaches), stdio ignored and never logged, one probe at a time per daemon, every
+    `everyMinutes` (at least 5, at most 1440, default 30; a failing or unknown one reruns at the
+    5-minute floor) and killed after `timeoutSeconds` (1–30, default 10), and its process group killed when it exits on its own, so it leaves nothing running. Exit 0 is healthy, any other exit is
     failing, a timeout or spawn error is unknown. Failing is carried in `status` as
     `tf: [[exclaveIndex, traitIndex], …]` (at most 16, never trimmed, like `ax`); unknown routes,
     as for auth. Every probe runs once at daemon start, and a trait not yet probed is carried as
-    unknown (a `tu` list beside `tf`), never as healthy, so a restart does not route to a failing
-    trait for up to `everyMinutes`. Rejected: probes from the wire (remote code execution by definition), probes on
+    unknown (a `tu` list beside `tf`), never as healthy. Unknown routes, so a restart routes to a
+    failing trait only for the seconds before its first run ends, not for `everyMinutes`. Rejected: probes from the wire (remote code execution by definition), probes on
     every routing pass (a slow `az account show` would load the box and stall the leader), and
     a per-probe cadence below 5 minutes.
   - _Decided, where a task says what it requires:_ one spelling per client, as #390 did for
@@ -979,14 +981,21 @@ of M4 has landed.
     enqueue check is what keeps that rare.
   - _Decided, "keep me free":_ a trait may say `keepFree: true` — "prefer not to place tasks here
     that don't need this". Built as a score component, never a filter: a candidate exclave with a
-    `keepFree` trait the task does not require scores lower (`keepFree`, weight 4, beside
-    `machinePressure`), so the Mac fills last instead of never. `avoid` stays for "never here".
-    Advertised as `ExclaveInfo.keepFree` (names). An older leader ignores the extra component
-    (`parseScore` ignores extra keys). Rejected: a filter (a busy fleet would then refuse work the
+    `keepFree` trait the task does not require scores worse (a `keepFree` component of 1, weight 8,
+    beside `machinePressure`: its total rises by 8, and a lower total wins), so the Mac fills last
+    instead of never. Binary: several kept-free traits still cost one. The trade-off, stated honestly:
+    8 is `globalMax`'s worth of `queuePressure` (the Mac loses to a machine carrying up to 7 in-flight
+    tasks), two fully loaded machines (`machinePressure` weighs 4), or a competitor's account near 74%
+    projected at the start of a window, a little more later in it (account pressure is scaled by the
+    window still to run; 80% at the halfway point); ties go by deviceId. A weight of 4 was
+    rejected: another machine carrying four tasks is normal load, and the Mac would take work then,
+    so it would not replace `avoid`. `avoid` stays for "never here".
+    Advertised as `ExclaveInfo.keepFree` (names). An older leader drops `ExclaveInfo.keepFree`
+    (`parseExclaveInfo`) and places as before; an older reader's `parseScore` drops the component. Rejected: a filter (a busy fleet would then refuse work the
     Mac could take), and a per-task "prefer not" list (that is `avoid` again).
   - _PRs:_ (1) core — **built** (#406; DESIGN.md "Traits filter"); config, `ExclaveInfo.traits`, `TaskSpec.requires` with the sentinel, the
     filter and both reasons (`trait_unhealthy` parsed and worded, emitted by PR 2), MCP/CLI/PWA authoring, `get_queue`/PWA text, `CAPABILITIES.traits`;
-    (2) probes — `tf` in status, `trait_unhealthy`; (3) `keepFree`. Each with its DESIGN.md
+    (2) probes — **built** (#409; DESIGN.md "Trait probes"): `tf`/`tu` in status, `trait_unhealthy`; (3) `keepFree` — **built** (#414; DESIGN.md "Traits filter", "Keep free"). Each with its DESIGN.md
     subsection and threat-model entry (probes run operator-configured commands: a new exec
     surface, audited under its own origin `probe`).
 - **Offline machines and the caps** (checked 2026-11-12; already decided, no change) — a task in
@@ -1012,8 +1021,26 @@ of M4 has landed.
     (`trait_absent`/`trait_unhealthy`), and one per client refusal of an unknown trait (logged by
     the client); tasks held, for how long, and by which trait.
   - `avoid`: the leader logs, per admitted task, whether it carries `avoid`, `requires` or a pin
-    (counts only, no ids or names); the share of tasks with `avoid` before traits ship and a
-    month after `keepFree` does says whether the workaround went away.
+    (counts only, no ids or names); the share of tasks with `avoid` before `keepFree` ships and a
+    month after it does says whether the workaround went away. The counts exist only from the traits-core
+    deploy (#406), so "before" is the window between that deploy and the `keepFree` deploy; there is no
+    pre-traits baseline (earlier admit lines carry no counts, and no earlier line records `avoid`; the command skips them, or the
+    months before the deploy would read 100%). Owner,
+    monthly, on every machine that has led the scheduler; not a pass/fail gate:
+
+    ```sh
+    grep -h ' op=admit ' ~/.local/state/seance/seanced.log \
+    | awk '$0 !~ / avoid=[0-9]/ { next }  # admitted before #406: no counts, so neither numerator nor denominator
+           { match($0, /task="[^"]*"/); id=substr($0,RSTART,RLENGTH); if (seen[id]++) next;
+             month=substr($1,1,7); total[month]++; if ($0 ~ / avoid=[1-9]/) avoid[month]++ }
+           END { for (m in total) printf "%s admitted=%d with_avoid=%d share=%.0f%%\n", m, total[m], avoid[m], 100*avoid[m]/total[m] }' \
+    | sort
+    ```
+
+    To count across leaders, feed the logs of all of them into the `grep` (e.g. `ssh <box> cat
+    …/seanced.log`), so a task admitted under two leaders counts once. The "after" share is the month
+    starting a month after the `keepFree` deploy; a falling share means `avoid` was standing in for
+    "keep this machine free".
 
 - **Spawn defaults to the scheduler** — **Done** (owner, 2026-10-25; PRs #309, #310 and #311): every
   spawn is a task, a machine or an account is a pin on it, and a task's pin and `avoid` show on
@@ -1471,7 +1498,8 @@ same PR, with the reason.
    out-of-fleet use becomes routine.
 8. **Score weights and the rest of `SchedulerConfig`** (set with the library, 2026-10-16;
    `scheduler/src/config.ts` is the copy that runs): weights account 1, machine 4,
-   dependency 4, queue 1; sticky bonus 2; per-task estimate 5% of a 5h window and 1% of a
+   dependency 4, queue 1, keepFree 8 (a flat 0/1, added with traits, 2026-11-12: `globalMax`'s
+   worth of in-flight tasks on a competitor, two fully loaded machines); sticky bonus 2; per-task estimate 5% of a 5h window and 1% of a
    weekly (all-models or per-model); global max 8 in-flight tasks; a reservation's TTL 240 s
    (`reservationTtlMs`; 120 s, twice the replay window, until attachments (DESIGN.md, 2026-10-28)
    put a download of up to 120 s before launch: it outlives the leader's 210 s wait for a spawn

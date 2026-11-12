@@ -5,6 +5,7 @@ import {
   type KnownAccount,
   effectivePct,
   exclaveAuth,
+  exclaveTraitHealth,
   lastHeardAt,
   liveStatus,
   METRIC_NAMES,
@@ -51,6 +52,8 @@ export interface ExclaveRow {
   readonly sessions: number | null;
   /** A login that needs attention: lapsed (err) or expiring within `AUTH_EXPIRING_MS` (warn). Null for ok and for unknown: unread says nothing. */
   readonly auth: { readonly text: string; readonly level: "err" | "warn" } | null;
+  /** The traits whose probe reads failing here (`exclaveTraitHealth`); unchecked says nothing, as unread auth does. */
+  readonly probes: { readonly text: string; readonly level: "err" } | null;
 }
 
 export interface MachineCard {
@@ -86,10 +89,15 @@ function aliasOf(aliases: AccountAliases, accountId: string): string | undefined
 
 export interface AccountCard {
   readonly accountId: string;
-  /** The name set for this account from any client, if one is; `detail` leads with it. */
+  /** The name set for this account from any client, if one is; it becomes `title`. */
   readonly alias: string | null;
-  /** The exclave ids that sign in as this account, anywhere in the fleet. */
+  /** The alias, else `exclaves`. */
   readonly title: string;
+  /** The exclave ids that sign in as this account, anywhere in the fleet. */
+  readonly exclaves: string;
+  /** What it reads as without its alias: email, else short id, with any twin tag. */
+  readonly plainName: string;
+  /** Named, `exclaves` leads it, since the title no longer says them. */
   readonly detail: string;
   readonly bars: readonly QuotaBar[];
   readonly observed: string;
@@ -150,6 +158,15 @@ function authNote(machine: Machine, index: number, now: number): ExclaveRow["aut
   const left = auth.expiresAt - now;
   const text = left >= DAY ? `${Math.floor(left / DAY)}d` : `${Math.max(1, Math.floor(left / HOUR))}h`;
   return { text: `login expires in ${text}`, level: "warn" };
+}
+
+/** The exclave's failing probes, by trait: "atlas probe failing", "atlas, az probes failing". */
+function probeNote(machine: Machine, exclave: ExclaveInfo, index: number, now: number): ExclaveRow["probes"] {
+  const failing = (exclave.traits ?? []).filter(
+    (trait) => exclaveTraitHealth(machine, index, trait, now) === "failing",
+  );
+  if (failing.length === 0) return null;
+  return { text: `${failing.join(", ")} ${failing.length === 1 ? "probe" : "probes"} failing`, level: "err" };
 }
 
 /** An account as the cards name it, for a screen that holds only its id (a pause's hold). */
@@ -253,6 +270,7 @@ function machineCard(
       account: accountLabel(exclave, aliases, known),
       sessions: status?.sess?.[index] ?? null,
       auth: authNote(machine, index, now),
+      probes: probeNote(machine, exclave, index, now),
     })),
     charts: servesMetrics(machine),
   };
@@ -365,15 +383,39 @@ function deriveAccounts(
   }
 
   const newest = newestQuotaByAccount(machines, fleetQuota);
+  // Titles tell the cards, and their ⋯ labels, apart: a repeated one gains the exclave ids, then the
+  // machines, and finally the account id, which no other account shares.
+  const tiers = (group: AccountGroup): string[] => {
+    const alias = aliasOf(aliases, group.accountId);
+    const exclaves = [...group.exclaves].join(" · ");
+    const base = alias ?? exclaves;
+    const withExclaves = alias === undefined ? exclaves : `${alias} (${exclaves})`;
+    const onMachines = `${exclaves} on ${[...group.machines].join(", ")}`;
+    const withMachines = alias === undefined ? onMachines : `${alias} (${onMachines})`;
+    return [base, withExclaves, withMachines, `${base} (${group.accountId})`];
+  };
+  const candidates = new Map([...groups.values()].map((group) => [group.accountId, tiers(group)]));
+  const taken = (tier: number, title: string): number =>
+    [...candidates.values()].filter((titles) => titles[tier] === title).length;
+  const titleOf = (accountId: string): string => {
+    const titles = candidates.get(accountId) ?? [];
+    const tier = titles.findIndex((title, at) => taken(at, title) === 1);
+    return titles[tier === -1 ? titles.length - 1 : tier] ?? "";
+  };
   return [...groups.values()].map((group) => {
     const quota = newest.get(group.accountId);
     const observer = machines.find((machine) => machine.deviceId === quota?.deviceId);
     const alias = aliasOf(aliases, group.accountId);
+    const exclaves = [...group.exclaves].join(" · ");
+    const plainName = accountNameIn(known, group.accountId);
+    const where = `${plainName} · on ${[...group.machines].join(", ")}`;
     return {
       accountId: group.accountId,
       alias: alias ?? null,
-      title: [...group.exclaves].join(" · "),
-      detail: `${accountNameIn(known, group.accountId, alias)} · on ${[...group.machines].join(", ")}`,
+      title: titleOf(group.accountId),
+      exclaves,
+      plainName,
+      detail: alias === undefined ? where : `${exclaves} · ${where}`,
       bars: quota === undefined ? [] : quotaBars(quota.observation, now),
       observed: observedLine(quota, observer, now),
       historyFrom: historyHost(group, observer),
