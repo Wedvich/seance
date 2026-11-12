@@ -67,26 +67,37 @@ describe("seanced raycast install/uninstall through the CLI", () => {
     base = await mkdtemp(join(tmpdir(), "seance-raycast-cli-"));
     stubs = join(base, "stubs");
     await mkdir(join(stubs, "bin"), { recursive: true });
+    // Both watchers wait as `sleep & wait`, never on a foreground `sleep`: bash
+    // (macOS /bin/sh) only notes a SIGINT that lands while a foreground child
+    // runs, and drops it when it lands after the child is reaped but before the
+    // handler is restored — the stub then loops until stopChild's SIGKILL, with
+    // cli.pid still there. Untrapped, it ignores that SIGINT outright. A trapped
+    // SIGINT in or around the `wait` builtin is run or kept pending, never lost.
+    // The `sleep` outlives the stub by up to 1s, so it must not hold the pipes
+    // the CLI drains to EOF before returning.
+    const watch = `while : ; do sleep 1 >/dev/null 2>&1 & wait $!; done`;
     const scripts: Readonly<Record<string, string>> = {
       // `ray develop` never exits; it imports, prints its ready line, and then
       // watches until SIGINT — at which point it removes cli.pid and dev.log,
       // leaves the rest imported, and exits 1. All of that is load-bearing.
+      // The trap comes first: the CLI may SIGINT as soon as package.json exists.
       ray: `printf '%s\\n' "$@" >> "$STUB_ROOT/ray-argv"
 [ "$1" = "develop" ] || exit 0
 EXT="$HOME/.config/raycast/extensions/${NAME}"
+trap 'rm -f "$EXT/cli.pid" "$EXT/dev.log"; exit 1' INT
 mkdir -p "$EXT"
 printf '{"name":"${NAME}"}' > "$EXT/package.json"
 printf 'bundle' > "$EXT/spawn.js"
 printf '%s' "$$" > "$EXT/cli.pid"
 : > "$EXT/dev.log"
-trap 'rm -f "$EXT/cli.pid" "$EXT/dev.log"; exit 1' INT
 echo "ready - built extension successfully"
-while : ; do sleep 0.1; done
+${watch}
 `,
       // Builds and prints the marker, but imports nothing.
       "ray-hollow": `[ "$1" = "develop" ] || exit 0
+trap 'exit 1' INT
 echo "ready - built extension successfully"
-while : ; do sleep 0.1; done
+${watch}
 `,
       // Only consulted for its version: @raycast/api's engine floor is the sole
       // thing about node this command cares about.
