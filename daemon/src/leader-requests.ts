@@ -408,15 +408,21 @@ async function answer(asked: Asked, op: SchedulerOp, payload: unknown): Promise<
     case "pass": {
       const ref = parseTaskRef(payload);
       if (ref === null) return schedulerError("invalid_request", "malformed pass request");
-      const result = await scheduler.pass(ref.taskId, "manual");
+      // A request from an app is a person's: the scheduler's own triggers come later and say so themselves.
+      const trigger = "manual";
+      const result = await scheduler.pass(ref.taskId, trigger);
       if (!result.ok) {
         await audit.refused("pass", id, result.code, { taskId: ref.taskId });
         return PASS_REFUSALS[result.code];
       }
-      await audit.passed(id, result.task, result.successorId);
+      await audit.passed(id, result.task, result.successorId, trigger);
       // The successor waits for the old task's `superseded`, which is written by now: place it without a 30 s wait.
       tick();
-      const reply: PassResponse = { task: result.task, successorId: result.successorId, successor: result.successor };
+      const full: PassResponse = { task: result.task, successorId: result.successorId, successor: result.successor };
+      // Two tasks with prompts at their caps seal past the envelope, and the transport would then answer `too_large`
+      // for a pass that has committed. The successor is display-only (the queue push carries it), so it goes first.
+      const reply: PassResponse =
+        Buffer.byteLength(JSON.stringify(full), "utf8") > REPLY_JSON_BUDGET ? { ...full, successor: null } : full;
       return reply;
     }
     case "push-subscribe": {

@@ -761,7 +761,9 @@ const PR_HEAD_QUERY =
 export async function readPrHead(prUrl: string, opts: PrPollerOpts = {}): Promise<PrHeadReading> {
   const pr = parseGithubPr(prUrl);
   if (pr === null) return { kind: "skipped" };
-  const answer = await ask({ ...opts, timeoutMs: opts.timeoutMs ?? PR_HEAD_TIMEOUT_MS }, PR_HEAD_QUERY, [
+  // Never past the pass's budget, whatever timeout the poller was given.
+  const timeoutMs = Math.min(opts.timeoutMs ?? PR_HEAD_TIMEOUT_MS, PR_HEAD_TIMEOUT_MS);
+  const answer = await ask({ ...opts, timeoutMs }, PR_HEAD_QUERY, [
     "-f",
     `o=${pr.owner}`,
     "-f",

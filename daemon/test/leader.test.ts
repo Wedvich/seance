@@ -13,6 +13,9 @@ import {
   MAX_TASKS,
   ROUTING_ID_MAX_LENGTH,
   open,
+  openAtRest,
+  openTaskRecord,
+  parsePassReply,
   parseQueueChanged,
   parseQueueReply,
   QUEUE_MAX_TASKS,
@@ -25,6 +28,7 @@ import {
   SCHEDULER_ID,
   seal,
   sealFleetQuotaRecord,
+  SUCCESSOR_DEP_SENTINEL,
   taskKey,
   toBase64,
   type Candidate,
@@ -2593,6 +2597,146 @@ describe("pass", () => {
       expect.stringContaining(`op=pass id="${ids["done"]}" task="d1" refused code=finished`),
     );
     expect((await store.list()).map((entry) => entry.body?.state).toSorted()).toEqual(["done", "ready"]);
+  });
+
+  describe("of a running task on another machine", () => {
+    const PR_URL = "https://github.com/acme/app/pull/7";
+    const HEAD = "feature/secret-branch";
+    const OLD_PROMPT = "finish the migration, SECRET-PROMPT-TEXT";
+    const TIP = "a".repeat(40);
+
+    /** Answers the leg's next request to `device` as it would, after checking what it asked. */
+    async function answerAs(relay: TestRelay, device: string, op: OpName, payload: unknown): Promise<Plain> {
+      const asked = await nextRequest(relay, 5_000);
+      expect(asked.env).toMatchObject({ to: device, from: SCHEDULER_ID });
+      const request = await open(key, asked.env);
+      expect(request.op).toBe(op);
+      const env = await seal(
+        key,
+        { to: SCHEDULER_ID, from: device },
+        { id: crypto.randomUUID(), ts: Date.now(), op, re: request.id, payload },
+      );
+      relay.sendToApps({ t: "msg", env });
+      return request;
+    }
+
+    async function passScenario(
+      fields: Partial<Task>,
+      despawnAnswer: unknown = { ok: true, window: "w9", outcome: "exited", sessions: [] },
+    ): Promise<{
+      readonly relay: TestRelay;
+      readonly store: MemoryQueueStore;
+      readonly request: Plain;
+      readonly push: Plain;
+      readonly despawn: Plain;
+      readonly response: Plain;
+      readonly lines: string[];
+    }> {
+      const relay = startTestRelay(TOKEN);
+      relay.schedulerTerm = 1;
+      relay.setRegistry([await routableEntry("b", true, {}, [CAPABILITIES.successor])]);
+      const store = new MemoryQueueStore();
+      const assignment = { deviceId: "b", ...target, window: "w9", pane: "%9" };
+      await store.put(
+        "run-b",
+        0,
+        task("run-b", {
+          state: "running",
+          assignment,
+          prUrl: PR_URL,
+          spec: { repo: "github.com/acme/app", mode: "worktree", prompt: OLD_PROMPT },
+          ...fields,
+        }),
+      );
+      const gh = await ghStub.fresh();
+      const pullRequest = { headRefName: HEAD, isCrossRepository: false, state: "OPEN", isDraft: false };
+      await gh.setReply(JSON.stringify({ data: { repository: { pullRequest } } }), 0);
+      const { leader, replies } = leaderOver(relay, store, undefined, { gh: ghStub.path });
+      const asked = await appRequest("pass", { taskId: "run-b" });
+      const result = {} as { push: Plain; despawn: Plain; response: Plain };
+      const lines = await captureLog(async () => {
+        try {
+          leader.lead(1);
+          const session = { id: "%9", window: "w9", repo: "app", path: "/wt/run-b", taskId: "run-b" };
+          await answerAs(relay, "b", "sessions", { sessions: [session], at: Date.now() } satisfies SessionsResponse);
+          await leader.settled();
+          leader.deliver(asked);
+          result.push = await answerAs(relay, "b", "push-branch", {
+            ok: true,
+            remoteBranch: HEAD,
+            tip: TIP,
+            pushed: true,
+          });
+          result.despawn = await answerAs(relay, "b", "despawn", despawnAnswer);
+          result.response = (await replies.next()).response;
+        } finally {
+          leader.stop();
+          relay.stop();
+        }
+      });
+      return { relay, store, request: await open(key, asked), lines, ...result };
+    }
+
+    test("is pushed there on the PR's head, created through the leader's leg, committed, closed and settled superseded", async () => {
+      const { relay, store, request, push, despawn, response, lines } = await passScenario({});
+      // What the machine's daemon is asked: the id and the head the leader read, never a path.
+      expect(push.payload).toEqual({ taskId: "run-b", expect: HEAD });
+      expect(despawn.payload).toEqual({ id: "%9", client: "scheduler" });
+
+      const reply = parsePassReply(response.payload);
+      if (reply === null || "ok" in reply) throw new Error(`not a pass reply: ${JSON.stringify(response.payload)}`);
+      expect(reply.task).toMatchObject({ id: "run-b", state: "superseded", successor: reply.successorId });
+      expect(reply.successor).toMatchObject({
+        id: reply.successorId,
+        state: "queued",
+        prUrl: PR_URL,
+        spec: { client: "scheduler", succeeds: { task: "run-b", account: "org:b", trigger: "manual" } },
+      });
+      expect(reply.successor?.spec.prompt).toContain(`origin/${HEAD}`);
+      expect(reply.successor?.spec.prompt).toContain(OLD_PROMPT);
+      expect(await sealedLength(response)).toBeLessThanOrEqual(ENVELOPE_MAX_CT_LENGTH);
+      expect((await store.get("run-b"))?.body).toMatchObject({ state: "superseded", successor: reply.successorId });
+
+      // The record the leader's leg created: sealed from the app at version 1, with the gate an older leader refuses.
+      const stored = relay.storeRecords().get(taskKey(reply.successorId));
+      if (stored === undefined) throw new Error("the successor was never created at the relay");
+      expect(stored.version).toBe(1);
+      const sealed = (await openAtRest(key, stored.env, "task")).payload as { task: { spec: { deps?: unknown } } };
+      expect(sealed.task.spec.deps).toEqual([SUCCESSOR_DEP_SENTINEL]);
+      const read = await openTaskRecord(
+        key,
+        { key: taskKey(reply.successorId), version: 1, env: stored.env },
+        Date.now(),
+      );
+      expect(read).toMatchObject({ version: 1, task: { id: reply.successorId, state: "queued" } });
+
+      // One line for the request, one for the scheduler; neither names the branch, the PR or the prompt.
+      const id = request.id;
+      expect(lines).toContainEqual(
+        expect.stringContaining(`op=pass id="${id}" task="run-b" successor="${reply.successorId}" trigger=manual ok`),
+      );
+      expect(lines).toContainEqual(
+        expect.stringContaining(`audit pass task="run-b" successor="${reply.successorId}" trigger=manual`),
+      );
+      const text = lines.join("\n");
+      for (const secret of [HEAD, "SECRET-PROMPT-TEXT"]) expect(text).not.toContain(secret);
+    });
+
+    test("a reply past the reply budget drops the successor, not the answer", async () => {
+      // A close that failed leaves the old task running with its prompt and decision beside the successor's.
+      const { response } = await passScenario(
+        {
+          decision: fleetDecision(4, 4, 1),
+          spec: { repo: "github.com/acme/app", mode: "worktree", prompt: `${"€".repeat(8_000)} SECRET-PROMPT-TEXT` },
+        },
+        { ok: false, code: "internal_error", message: "no" },
+      );
+      const reply = parsePassReply(response.payload);
+      if (reply === null || "ok" in reply) throw new Error(`not a pass reply: ${JSON.stringify(response.payload)}`);
+      expect(reply.task).toMatchObject({ id: "run-b", state: "running", successor: reply.successorId });
+      expect(reply.successor).toBeNull();
+      expect(await sealedLength(response)).toBeLessThanOrEqual(ENVELOPE_MAX_CT_LENGTH);
+    });
   });
 
   test("sealed by a daemon is an event, never a request", async () => {

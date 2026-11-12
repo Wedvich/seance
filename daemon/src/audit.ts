@@ -10,6 +10,7 @@ import {
   type FailureReason,
   type SpawnClient,
   type SpawnRequest,
+  type SuccessorTrigger,
   type UpdateOutcome,
 } from "@seance/shared";
 import type { DespawnResult, SpawnOutcome } from "./backend.ts";
@@ -272,7 +273,12 @@ export interface QueueAudit {
   readonly ranNow: (id: string, task: { readonly id: string }) => Promise<void>;
   readonly cancelled: (id: string, task: { readonly id: string; readonly leftRunning?: boolean }) => Promise<void>;
   /** A `pass` that created `successor` for `task`. The branch and the PR stay out: they are the user's own text. */
-  readonly passed: (id: string, task: { readonly id: string }, successorId: string) => Promise<void>;
+  readonly passed: (
+    id: string,
+    task: { readonly id: string },
+    successorId: string,
+    trigger: SuccessorTrigger,
+  ) => Promise<void>;
   /** A `discard` that deleted the unreadable record at `task` and `version`. */
   readonly discarded: (id: string, taskId: string, version: number) => Promise<void>;
   readonly refused: (
@@ -319,8 +325,8 @@ export function queueAudit(sink: AuditSink): QueueAudit {
       emit(
         `op=cancel id=${quote(id)} task=${quote(task.id)} ok${task.leftRunning === true ? " leftRunning=true" : ""}`,
       ),
-    passed: (id, task, successorId) =>
-      emit(`op=pass id=${quote(id)} task=${quote(task.id)} successor=${quote(successorId)} trigger=manual ok`),
+    passed: (id, task, successorId, trigger) =>
+      emit(`op=pass id=${quote(id)} task=${quote(task.id)} successor=${quote(successorId)} trigger=${trigger} ok`),
     discarded: (id, taskId, version) => emit(`op=discard id=${quote(id)} task=${quote(taskId)} version=${version} ok`),
     held: (op, id, account) =>
       emit(`op=${op} id=${quote(id)}${account === undefined ? "" : ` account=${quote(account)}`} ok`),
