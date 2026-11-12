@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { CAPABILITIES, parseTask, type ExclaveInfo, type Machine } from "@seance/shared";
 import { DEFAULT_CONFIG, route, type Candidate, type Decision, type SchedulerConfig, type Task } from "../src/index.ts";
-import { accountResetAt } from "../src/route.ts";
+import { accountResetAt, exhaustion } from "../src/route.ts";
 import { traitsHolding } from "../src/traits.ts";
 import { accountMax, attachment, clone, exclave, machine, NOW, NOW_S, obs, spec, status } from "./fixtures.ts";
 
@@ -1503,5 +1503,107 @@ describe("decision record", () => {
     expect(decision.candidates.map((c) => c.deviceId)).toEqual(["b", "a", "off"]);
     expect(decision.at).toBe(NOW);
     expect(decide([machine("off", { connected: false })]).chosen).toBeNull();
+  });
+});
+
+describe("predecessor_account — a quota successor never lands on the account that ran out", () => {
+  const at = { deviceId: "a", exclave: "main", clone: "app" };
+  const successor = (trigger: "quota" | "manual" | "session"): Task =>
+    task({ spec: spec({ succeeds: { task: "old", account: "org:a", at, trigger } }) });
+
+  test("is emitted for the old account whatever its headroom, and the successor places on the other", () => {
+    const decision = decide([twoAccounts()], { task: successor("quota") });
+    expect(byExclave(decision, "main")?.rejected).toContainEqual({ code: "predecessor_account" });
+    expect(byExclave(decision, "alt")?.rejected).toEqual([]);
+    expect(decision.chosen?.exclave).toBe("alt");
+  });
+
+  test.each(["manual", "session"] as const)("is not emitted for a %s successor", (trigger) => {
+    const decision = decide([twoAccounts()], { task: successor(trigger) });
+    expect(decision.candidates.flatMap(codes)).not.toContain("predecessor_account");
+  });
+});
+
+describe("exhaustion — the leader's reading of a running task's account", () => {
+  const target = { deviceId: "a", exclave: "main", clone: "app" };
+  const running = (fields: Partial<Task> = {}): Task => task({ state: "running", assignment: target, ...fields });
+  const on = (
+    quota: ReturnType<typeof obs>,
+    extra: Partial<ExclaveInfo> = {},
+    fields: Partial<Machine> = {},
+  ): Machine =>
+    machine("a", { exclaves: [exclave("main", "org:a", extra)], status: status({ quota: [quota] }), ...fields });
+  const read = (
+    machines: readonly Machine[],
+    t: Task = running(),
+    fleet: Parameters<typeof exhaustion>[4] = [],
+  ): ReturnType<typeof exhaustion> => exhaustion(t, machines, NOW, DEFAULT_CONFIG, fleet);
+
+  test("a full window with extra usage on and credits left: exhausted, spending", () => {
+    expect(read([on(obs(0, { h: 100 }), { extraUsageEnabled: true })])).toMatchObject({
+      accountId: "org:a",
+      window: "5h",
+      spending: true,
+    });
+  });
+
+  test("a full window with extra usage off: exhausted, not spending", () => {
+    expect(read([on(obs(0, { h: 100 }))])).toMatchObject({ window: "5h", spending: false });
+  });
+
+  test("a full window with credits spent to the cap: exhausted, not spending", () => {
+    expect(read([on(obs(0, { h: 100, c: 100 }), { extraUsageEnabled: true })])).toMatchObject({ spending: false });
+  });
+
+  test("credits at the cap with no window full: the account still has headroom", () => {
+    expect(read([on(obs(0, { h: 50, c: 100 }), { extraUsageEnabled: true })])).toBeNull();
+  });
+
+  test("an over-the-line projection is a forecast and never counts, spill or not", () => {
+    expect(read([on(obs(0, { h: 95 }))])).toBeNull();
+    expect(read([on(obs(0, { h: 95 }), { extraUsageEnabled: true })])).toBeNull();
+  });
+
+  test("is read from routing's own fold: a window only the fleet record carries is seen", () => {
+    const newest = obs(0, { at: NOW_S - 30, h: 40, d: 10 });
+    const entry = { accountId: "org:a", observer: "a", reading: { s: "session" as const, at: NOW_S - 90, d: 100 } };
+    // The status says 7d is at 10%; only the older record says it is full, and routing's merge keeps the newest.
+    expect(read([on(newest)], running(), [entry])).toBeNull();
+    const withoutD = { x: 0, s: "session" as const, at: NOW_S - 30, h: 40 };
+    expect(read([on(withoutD)], running(), [entry])).toMatchObject({ window: "7d" });
+  });
+
+  test("a reading only the fleet record carries, from a machine that is gone, never moves a task", () => {
+    const entry = { accountId: "org:a", observer: "gone", reading: { s: "session" as const, at: NOW_S - 30, h: 100 } };
+    expect(read([on(obs(0, { at: NOW_S - 90, h: 10 }))], running(), [entry])).toBeNull();
+  });
+
+  test("a stale status, or a machine that is not connected, never moves a task", () => {
+    const full = obs(0, { h: 100 });
+    expect(read([on(full, {}, { status: status({ at: NOW_S - 3600, quota: [full] }) })])).toBeNull();
+    expect(read([on(full, {}, { connected: false })])).toBeNull();
+  });
+
+  test("a window inside the reset grace reads empty", () => {
+    expect(read([on(obs(0, { h: 100, hr: NOW_S + 60 }))])).toBeNull();
+  });
+
+  test("a per-model weekly binds only a task on that model", () => {
+    const fable = obs(0, { w: [{ m: "Fable", p: 100, r: NOW_S + 86_400 }] });
+    expect(read([on(fable)], running({ spec: spec({ model: "opus" }) }))).toBeNull();
+    expect(read([on(fable)], running({ spec: spec({ model: "fable" }) }))).toMatchObject({ window: "7d Fable" });
+  });
+
+  test("carries the window's reset in ms (0 when none) and the reading's time in ms", () => {
+    expect(read([on(obs(0, { h: 100, hr: NOW_S + 3600 }))])).toMatchObject({
+      reset: (NOW_S + 3600) * 1000,
+      since: (NOW_S - 60) * 1000,
+    });
+    expect(read([on(obs(0, { h: 100 }))])?.reset).toBe(0);
+  });
+
+  test("nothing for a task that was never placed, or whose exclave is unknown", () => {
+    expect(read([on(obs(0, { h: 100 }))], task())).toBeNull();
+    expect(read([on(obs(0, { h: 100 }))], running({ assignment: { ...target, exclave: "gone" } }))).toBeNull();
   });
 });

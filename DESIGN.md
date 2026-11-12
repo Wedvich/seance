@@ -1972,7 +1972,7 @@ an old peer's frames parse as before. Mixed versions:
   leader's `parseSessionEvent` and an older app's or leader's `parseTask` drop the unknown reason,
   the key and the fields and keep the frame, event or task; an older leader re-writing a record
   drops them, and the PWA then says "waiting for input". No rollout order.
-- **Passing to a successor** (the outside path built 2026-11-12, the session's own not; Scheduler, "Passing to a successor"):
+- **Passing to a successor** (the outside path, the session's own and the automatic trigger built 2026-11-12; Scheduler, "Passing to a successor"):
   - `TaskState` `superseded`: an older reader's `parseTask` returns null for a state it does not
     know, so it holds the record unreadable. That is the intended fail-safe: an older leader's
     admission makes the old task's dependents wait (an unreadable predecessor blocks), where a
@@ -1995,8 +1995,10 @@ an old peer's frames parse as before. Mixed versions:
     attempt: `pass_to_successor` gates on the verified leader advertising `successorSelf`. A new client
     offers the pass, and a new leader pushes, only against a machine or leader advertising the one it
     needs.
-    `CAPABILITIES.successorAuto` (stage 3) gates `trigger: "quota"` and `succeeds.since` the same way,
-    and PR 2's parser refuses `"quota"`, so an early leader never misreads one.
+    `CAPABILITIES.successorAuto` (stage 3) marks the leader's version in `status`; nothing gates on it.
+    PR 2's parser refuses `"quota"`, so an early leader never misreads one: it holds a quota
+    successor's record unreadable, the intended gate. The daemon advertises it from stage 3. The two new `PushAlert` kinds (`quota-exhausted`, `pass-refused`) are unknown to
+    an older `parsePushAlert` and an older service worker, which show the fallback text.
   - Reason `predecessor_account`: dropped by an older reader like any unknown reason, which keeps the
     candidate. Failure code `pass_abandoned` parses as any bounded name; an older PWA words it as a
     spawn refusal with the leader's message, the same residual as `continue_expired`.
@@ -2663,7 +2665,9 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
 - **Alerts are a log line plus a push** (M3 item 5, M4 Web Push). The term's `Scheduler` takes
   `onAlert`, which `startTerm` logs as `warn scheduler: <message>` and hands to the push sender
   (_Web Push_, below): a dispatch that may spill into credits or already spends them, a wait for input (past 2 minutes, and again
-  past 30), an `awaiting-merge` task's PR that is stuck ("PR blocked") and, from the leader's own
+  past 30), an `awaiting-merge` task's PR that is stuck ("PR blocked"), a running task whose account ran
+  out of usage (`quota-exhausted`, _Successor_, "The automatic trigger"), a session's own pass the leader
+  refused (`pass-refused`) and, from the leader's own
   watch, a nearly full disk or an exclave whose login lapsed or is about to (_The library_,
   "Credits spill" and "Needs input"; _Disk alerts_ and _Auth alerts_, below). The line names task,
   account and device ids, never a prompt, title or URL; the push payload names a task or device id
@@ -2823,6 +2827,8 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     the window label and projected percent, `disk` the used percent,
     `pr-blocked` the reason (`checks`, `conflict`, `behind` or `unarmed`) and nothing else: not the
     head, the PR URL or a check name. The parser refuses a reason outside the four.
+    `quota-exhausted` carries the window label (shown only as `5h`/`7d`) and, when the leader alerts
+    instead of passing, `reason` `dirty` or `branch`; `pass-refused` carries the task id alone.
   - **Encryption and signing** are on WebCrypto, with no dependency: RFC 8291 `aes128gcm`
     (ECDH P-256, HKDF-SHA256, one AES-128-GCM record with the 0x02 delimiter), checked against
     the RFC's Appendix A vector byte for byte (`daemon/test/web-push.test.ts`), and RFC 8292
@@ -3168,10 +3174,11 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   Every clone is a candidate for a task carrying `succeeds`, the old one included: the successor
   never checks the remote branch out under its own name, so no local branch is shared between
   worktrees. A candidate on the predecessor's account (`succeeds.account`) is `predecessor_account`
-  only for `trigger: "quota"`, which only stage 3 writes; a manual or session pass relies on the
+  only for `trigger: "quota"`, which only stage 3 writes (built); a manual or session pass relies on the
   quota filter, since a full or over-the-line account is already rejected and a pass is also how
   a long session gives a fresh context to an account with headroom (decided by the orchestrator).
-  PR 2 adds the reason code and its PWA wording, but no PR 2 path emits it. A successor never
+  Stage 3 emits it from `placementFilter`, so an automatic successor never lands back on the
+  exhausted account. A successor never
   spills: in `judgeAccount` the spill branch becomes `quota_over_line` for a task carrying
   `succeeds`, so it holds `ready` with reasons and never spends credits the owner did not choose to
   spend (accepted trade-off, below). Older readers drop `predecessor_account`, as any unknown
@@ -3373,7 +3380,9 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   warned of past the line alerts once more when a dispatch lands on it full. Until then every
   spill alerted as spending credits from 90% projected, which on a standard seat with one task
   in flight was a window reading 41%. A spend that starts mid-task, with no dispatch onto the
-  full window after it, gets no spending alert: the forecast was the warning. Not built: a
+  full window after it, gets no spending alert from this path (a full window of a task not passed
+  raises `quota-exhausted`, which is not pushed when the dispatch's own spending alert covered that window;
+  _Successor_, "The automatic trigger"): the forecast was the warning. Not built: a
   leader watch pushing whenever an extra-usage account reads full, whatever spent it (manual
   sessions too) — it would need its own alert kind and de-dupe. A window is told apart by its
   reset, and two readings of one reset differ by seconds, so a later reset is a new window only
@@ -3903,7 +3912,8 @@ reuses the record helpers.
   `TaskSpec.succeeds { task, account, at, trigger }` rides the sealed record as any spec field, parsed
   by `parseTaskSpec` (and so by `createTask` and every reseal). `account` is the old exclave's
   `accountId`, `at` the old assignment as a `Target` (display and stage 3; nothing routes on its
-  clone), `trigger` `"session"` or `"manual"` until stage 3. It is refused with a `mode` other than
+  clone), `trigger` `"session"`, `"manual"` or `"quota"`, the last with `since`, the reading's time in epoch
+  ms, which no other trigger may carry. It is refused with a `mode` other than
   `worktree`, with `continues` and with `attachments`, and `succeeds.task === id` is `malformed` in
   `bindTaskRecord`, as a self-continuation is. `Task.successor` is the forward link; `parseTask`
   returns null for it on any state but `running`, `needs-input`, `lost` and `superseded`, so
@@ -7158,7 +7168,7 @@ fields carry over), under the same gates.
 - **Moved out of Rejected:** `claude --resume <id>`. It was rejected because the daemon knew no Claude
   session id; `--session-id` on every task spawn gives it one of its own choosing (2026-10-27).
 
-### Passing to a successor — designed 2026-11-12; the outside and the session's own path built 2026-11-12
+### Passing to a successor — designed 2026-11-12; the outside, the session's own and the automatic path built 2026-11-12
 
 A task running on an account that runs out of usage can **pass** its work to a **successor**: a
 new task, free to land on another account, that starts from the old task's pushed branch and a
@@ -7205,7 +7215,7 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   - **O2: the daemon pushes, clean tree only.** The first write to GitHub the daemon makes, a
     threat-model change ("The push", below). Rejected: daemon WIP commits, never pushing, always
     pushing to the local branch's name.
-  - **O3: the automatic trigger is specced now and built later** ("The automatic trigger").
+  - **O3: the automatic trigger was specced first and built after** ("The automatic trigger").
 - **Ordering, the same for every trigger (D1).** Leader-driven: (0) the in-flight guard; (1) validate (a `cancel` or `mark-done` already out for the task is `conflict`);
   (2) read the PR's head and state when the task has a GitHub PR (a merged or closed one is
   `pr_not_open`); (3) push (outside path: the leader asks the old
@@ -7433,20 +7443,39 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   does not offer a `superseded` task either, since only `failed` and `cancelled` qualify: its session
   was ended on purpose and its account is out. `seanced pass <task-id>` is origin `cli`, with no aliases.
   `shared/src/successor.ts` and the MCP tool code import no logging, since `seanced mcp` reaches them.
-- **The automatic trigger (stage 3, designed only).** The leader evaluates, each tick and from data it
-  already holds, whether an account is exhausted: by its newest fresh reading, a window the task is
-  judged on reads 100% and its credits are `spending` (or the exclave cannot spill), or its credits
-  are spent to the cap. A forecast never acts (an over-the-line projection, or a `spill` without
-  `spending`, may at most raise the existing spill alert). For a `running` task (not `needs-input`,
-  `lost` or `reserved`) on that account: an `auto` task is passed by the leader itself, `pass` with
-  `trigger: "quota"` and `succeeds.since` the reading's time, through the same in-flight guard, and its
-  successor avoids the old account (`predecessor_account`); every other level gets a `PushAlert`
-  kind `quota-exhausted { taskId, at, window }` with fixed wording in `push-sw.js`, its `window`
-  shown only as one of the known `5h` and `7d`, as a spill's is, and omitted otherwise, and a tap
-  opening `/?task=<id>`. Each is deduped per task per window reset, persisted on the task as `spillAlert` is.
-  `dirty_worktree` and `branch_mismatch` make the leader alert instead (reason `dirty` or `branch`);
-  any other refusal is logged and retried once per reset. The close is at once, since a session out of
-  usage cannot finish a turn. It needs `CAPABILITIES.successorAuto`.
+- **The automatic trigger (stage 3, built 2026-11-12).** As built: `exhaustion` (`scheduler/src/route.ts`)
+  folds readings through routing's `newestQuotaByAccount` (the fleet record included) and counts one only
+  while the machine that observed the newest reading is connected with a status that is not stale;
+  `fullWindow` at zero projected usage decides "full", so a forecast never acts, and a full window is
+  exhausted whether or not the exclave is spending credits (the owner chose that an auto task is
+  moved off credits too). `quotaDue` (`scheduler/src/quota-trigger.ts`) selects a `running` task not
+  `here`, not yet stamped for this account, window and reset (a stamp without a reset covers a reading
+  that gains one). The leader writes `Task.quotaExhausted` (`quotaExhausted`, parsed leniently: dropped
+  when malformed, unlike `spillAlert`) before it passes or alerts, so a new leader repeats neither; it is
+  dropped on finishing. An `auto` task is passed only when routing would place its successor now: the
+  leader routes the spec `successorSpec` builds (`succeeds.trigger: "quota"`, the old account, the
+  predecessor's slot released, the prompt `successorPrompt` will give it) and needs a chosen candidate, so no
+  filter is restated; otherwise it alerts, as does every other level, and an auto task so alerted is stamped
+  `waiting`: its successor's placement is re-checked every tick of the window and it is passed without a
+  second alert once routing would place it. At most one automatic pass is out per slot (machine, account)
+  its successor would take, the rest judged on a later tick. A task whose machine fails `passOffer` is left for the next tick, a `here`
+  task is never touched, and neither gets an alert. A refusal that can pass (and a pass that throws) is
+  retried once after `quotaPassRetryMs` (5 min), then alerts; a retry that comes due with no pass to run
+  alerts too. A refusal waiting cannot clear alerts at once as reason `refused`; dirty and mismatched
+  branches as `dirty` and `branch`. A `needs_input`, `not_running` or `conflict` outcome clears the stamp
+  while the task is unfinished with no `successor`, so it is looked at again; a `conflict` after the
+  successor's create keeps it and alerts, so no second successor is made. A stamp's `since` survives the
+  retry. A task whose dispatch
+  routing spilled onto the very window that is full has already had the spending spill alert: the
+  `quota-exhausted` one is stamped and logged, not pushed. A session's own pass the leader refuses
+  raises `pass-refused` (once per task per term). The log carries `successor placed after=<ms>
+  from=since|created`. The close is at once, since a session out of usage cannot finish a turn. The
+  automatic pass has no `audit queue origin=` line of its own: its record is the scheduler's `audit pass
+  ... trigger=quota` line, and what it causes audits under its own origins.
+  A forecast (an over-the-line projection, or a `spill` without `spending`) never acts, and may at most
+  raise the existing spill alert. The alerts are `PushAlert` kind `quota-exhausted { taskId, at, window,
+  reason? }` with fixed wording in `push-sw.js`, its `window` shown only as one of the known `5h` and
+  `7d` and omitted otherwise, and a tap opening `/?task=<id>`.
 - **Mixed versions (each checked against the code path).** New PWA, MCP or CLI against an old leader:
   `passOffer` and the leader gate hide the button and refuse the call, and the broker refuses too
   (without the gate an old leader answers an unknown app op `invalid_request`, never a timeout). New

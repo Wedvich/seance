@@ -1055,6 +1055,8 @@ export interface MachineInfo {
  * every attempt. `successorSelf`: as a daemon, ingests the `pass` frame of its local socket
  * and answers `pass-close`; as a leader, ingests `session-pass`. What `pass_to_successor`
  * checks of the verified leader.
+ * `successorAuto`: as a leader, runs the automatic quota trigger and writes `trigger: "quota"`
+ * with `since`. Nothing gates on it yet; it marks the leader's version in `status`.
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -1073,6 +1075,7 @@ export const CAPABILITIES = {
   traits: "traits",
   successor: "successor",
   successorSelf: "successorSelf",
+  successorAuto: "successorAuto",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -2147,8 +2150,8 @@ export const SUCCESSOR_CHAIN_MAX = 8;
 /** How long the leader waits, after a pass's commit point, before it closes the old session itself (the backstop). */
 export const PASS_CLOSE_GRACE_MS = 120_000;
 
-/** What set a pass off. The automatic trigger will add `"quota"` behind a capability of its own; a reader refuses any other value. */
-export const SUCCESSOR_TRIGGERS = ["session", "manual"] as const;
+/** What set a pass off; a reader refuses any other value. `quota` is written only by the leader's automatic trigger (`CAPABILITIES.successorAuto`). */
+export const SUCCESSOR_TRIGGERS = ["session", "manual", "quota"] as const;
 
 export type SuccessorTrigger = (typeof SUCCESSOR_TRIGGERS)[number];
 
@@ -2266,6 +2269,8 @@ export interface TaskSpec extends TaskRequest {
     readonly account: string;
     readonly at: Target;
     readonly trigger: SuccessorTrigger;
+    /** When the reading that set a `quota` pass off was taken (epoch ms): what "limit to successor running" counts from. Only with `trigger: "quota"`. */
+    readonly since?: number;
   };
   /**
    * Which app-role client enqueued it, as `SpawnRequest.client` — audit trail
@@ -2543,6 +2548,23 @@ export interface SpillStamp {
 }
 
 /**
+ * The window an automatic quota pass or alert fired for (`Task.quotaExhausted`); `reset` is ms, 0 when
+ * the reading gave none, `at` when the leader acted (ms, its clock). `since`: the reading's time that
+ * the pass attempts count "time from limit to successor" from, kept across a retry. `retry`: one more
+ * attempt is owed, an auto pass having been refused for a reason that can pass. `waiting`: an auto task
+ * was alerted because routing would not place its successor; the leader looks again each tick.
+ */
+export interface QuotaExhaustedStamp {
+  readonly accountId: string;
+  readonly window: string;
+  readonly reset: number;
+  readonly at: number;
+  readonly since?: number;
+  readonly retry?: true;
+  readonly waiting?: true;
+}
+
+/**
  * One PR a task's session reported (`Task.prs`). `closed`: the leader's poller last read it
  * closed, so it is not the task's primary while a later or earlier one is not; a reopen clears it.
  */
@@ -2671,6 +2693,12 @@ export interface Task {
    * never fatal, when malformed (a lost one costs one repeated alert), and on finishing.
    */
   readonly prAlert?: PrAlertStamp;
+  /**
+   * The leader's per-window dedupe for the automatic quota trigger: written before the pass or alert,
+   * so a new leader does not repeat either. Dropped, never fatal, when malformed (a lost one costs one
+   * repeated alert), and on finishing.
+   */
+  readonly quotaExhausted?: QuotaExhaustedStamp;
   /** The newest landed continuation of an `awaiting-merge` task's chain, the leader's pointer (`ContinuedBy`). */
   readonly continuedBy?: ContinuedBy;
   /**
@@ -3271,6 +3299,14 @@ export interface PushSubscribeRequest extends WebPushSubscription {
 }
 
 /**
+ * Why an automatic pass did not run: the old worktree is dirty, its branch does not match its PR, or the
+ * pass is refused for a reason that waiting does not clear (a default branch, a closed PR, ...).
+ */
+export const QUOTA_ALERT_REASONS = ["dirty", "branch", "refused"] as const;
+
+export type QuotaAlertReason = (typeof QUOTA_ALERT_REASONS)[number];
+
+/**
  * What a push carries (RFC 8291-encrypted to the browser, but minimal anyway): ids and
  * state, never a prompt, title, account id or name. `v` versions it so a service worker
  * that predates a kind shows a generic notification instead of misreading one.
@@ -3286,6 +3322,15 @@ export type PushAlert =
       /** `Candidate.spill`'s: absent, the alert is a forecast, which a worker that predates the field still words as spending. */
       readonly spending?: true;
     }
+  | {
+      readonly v: 1;
+      readonly kind: "quota-exhausted";
+      readonly at: number;
+      readonly taskId: string;
+      readonly window: string;
+      readonly reason?: QuotaAlertReason;
+    }
+  | { readonly v: 1; readonly kind: "pass-refused"; readonly at: number; readonly taskId: string }
   | {
       readonly v: 1;
       readonly kind: "needs-input";

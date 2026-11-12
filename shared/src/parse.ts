@@ -93,6 +93,7 @@ import {
   type PauseRequest,
   type ContinuedBy,
   type PrAlertStamp,
+  type QuotaExhaustedStamp,
   type PrStatus,
   type Placement,
   type QueueChanged,
@@ -116,6 +117,7 @@ import {
   METRICS_MAX_POINTS,
   METRICS_STEPS,
   NEEDS_INPUT_REASONS,
+  QUOTA_ALERT_REASONS,
   QUOTA_SOURCES,
   SCHEDULER_OPS,
   SESSION_STATES,
@@ -1019,7 +1021,10 @@ function parseSucceeds(value: unknown): TaskSpec["succeeds"] | null {
   const at = parseTarget(value["at"]);
   const trigger = SUCCESSOR_TRIGGERS.find((t) => t === value["trigger"]);
   if (!isTaskId(task) || !isAccountId(account) || at === null || trigger === undefined) return null;
-  return { task, account, at, trigger };
+  // Only a quota pass carries it: a reseal must neither drop nor invent the field.
+  const since = value["since"];
+  if (since !== undefined && (trigger !== "quota" || !isFiniteNumber(since) || since < 0)) return null;
+  return { task, account, at, trigger, ...(since === undefined ? {} : { since }) };
 }
 
 function parseContinues(value: unknown): TaskSpec["continues"] | null {
@@ -1341,6 +1346,26 @@ export function parsePrAlertStamp(value: unknown): PrAlertStamp | null {
   return { reason: known, head, at };
 }
 
+/** The stamp of the last automatic quota pass or alert, built field by field; null when malformed. */
+export function parseQuotaExhaustedStamp(value: unknown): QuotaExhaustedStamp | null {
+  const keys = new Set(["accountId", "window", "reset", "at", "since", "retry", "waiting"]);
+  if (!isRecord(value) || !Object.keys(value).every((key) => keys.has(key))) return null;
+  const { accountId, window, reset, at, since, retry, waiting } = value;
+  if (!isAccountId(accountId) || !isName(window, WINDOW_LABEL_MAX_LENGTH)) return null;
+  if (!isFiniteNumber(reset) || reset < 0 || !isFiniteNumber(at) || at < 0) return null;
+  if (since !== undefined && (!isFiniteNumber(since) || since < 0)) return null;
+  if ((retry !== undefined && retry !== true) || (waiting !== undefined && waiting !== true)) return null;
+  return {
+    accountId,
+    window,
+    reset,
+    at,
+    ...(since === undefined ? {} : { since }),
+    ...(retry === undefined ? {} : { retry }),
+    ...(waiting === undefined ? {} : { waiting }),
+  };
+}
+
 /** The leader's pointer to a task's newest landed continuation, built field by field; null when malformed. */
 export function parseContinuedBy(value: unknown): ContinuedBy | null {
   if (!isRecord(value) || !Object.keys(value).every((key) => key === "task" || key === "createdAt" || key === "live")) {
@@ -1411,6 +1436,9 @@ export function parseTask(value: unknown): Task | null {
     value["prs"] === undefined || progress.prUrl === undefined ? null : parseTaskPrs(value["prs"], progress.prUrl);
   // Apart from `progress`, like `pr`: a lost stamp costs one repeated alert, a fatal parse would hide the task.
   const prAlert = value["prAlert"] === undefined ? null : parsePrAlertStamp(value["prAlert"]);
+  // Dropped, never fatal, like `prAlert`: a lost stamp costs one repeated alert.
+  const quotaExhausted =
+    value["quotaExhausted"] === undefined ? null : parseQuotaExhaustedStamp(value["quotaExhausted"]);
   // Apart from `progress` too: the leader rewrites it on its next pass, so a lost one costs a pass.
   const continuedBy = value["continuedBy"] === undefined ? null : parseContinuedBy(value["continuedBy"]);
   const { remoteSession, inputReason, inputTool } = value;
@@ -1432,6 +1460,7 @@ export function parseTask(value: unknown): Task | null {
     ...(pr === null ? {} : { pr }),
     ...(prs === null ? {} : { prs }),
     ...(prAlert === null ? {} : { prAlert }),
+    ...(quotaExhausted === null ? {} : { quotaExhausted }),
     ...(continuedBy === null ? {} : { continuedBy }),
     // Dropped, never fatal, like `pr`: a link is display-only.
     ...(isRemoteSessionId(remoteSession) ? { remoteSession } : {}),
@@ -1679,6 +1708,8 @@ const PUSH_ALERT_KEYS = {
   "needs-input": ["v", "kind", "at", "taskId", "since", "escalated", "question"],
   disk: ["v", "kind", "at", "deviceId", "diskPct", "freeMib"],
   "pr-blocked": ["v", "kind", "at", "taskId", "reason"],
+  "quota-exhausted": ["v", "kind", "at", "taskId", "window", "reason"],
+  "pass-refused": ["v", "kind", "at", "taskId"],
   auth: ["v", "kind", "at", "deviceId", "exclave", "state"],
 } as const;
 
@@ -1726,6 +1757,20 @@ export function parsePushAlert(value: unknown): PushAlert | null {
     const blockedReason = PR_BLOCKED_REASONS.find((r) => r === reason);
     if (!known(PUSH_ALERT_KEYS["pr-blocked"]) || !isTaskId(taskId) || blockedReason === undefined) return null;
     return { v: 1, kind, at, taskId, reason: blockedReason };
+  }
+  if (kind === "quota-exhausted") {
+    const { taskId, window, reason } = value;
+    if (!known(PUSH_ALERT_KEYS["quota-exhausted"]) || !isTaskId(taskId) || !isName(window, WINDOW_LABEL_MAX_LENGTH)) {
+      return null;
+    }
+    const why = QUOTA_ALERT_REASONS.find((r) => r === reason);
+    if (reason !== undefined && why === undefined) return null;
+    return { v: 1, kind, at, taskId, window, ...(why === undefined ? {} : { reason: why }) };
+  }
+  if (kind === "pass-refused") {
+    const { taskId } = value;
+    if (!known(PUSH_ALERT_KEYS["pass-refused"]) || !isTaskId(taskId)) return null;
+    return { v: 1, kind, at, taskId };
   }
   if (kind === "auth") {
     const { deviceId, exclave, state } = value;

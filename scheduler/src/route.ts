@@ -267,7 +267,7 @@ function accountInFlight(pass: Pick<Pass, "inFlight" | "accountAt">, accountId: 
   }).length;
 }
 
-function accountOfPlacement(machines: readonly Machine[], placement: Placement): string | null {
+export function accountOfPlacement(machines: readonly Machine[], placement: Placement): string | null {
   return (
     machines.find((m) => m.deviceId === placement.deviceId)?.exclaves?.find((x) => x.id === placement.exclave)
       ?.accountId ?? null
@@ -415,6 +415,11 @@ function placementFilter(task: Task, machine: Machine, exclave: ExclaveInfo): Re
   if (pin?.account !== undefined && pin.account !== exclave.accountId)
     reasons.push({ code: "pin_mismatch", field: "account" });
   if (avoid?.includes(machine.deviceId) === true) reasons.push({ code: "avoided" });
+  // The successor of a task whose account ran out never lands on that account, whatever its headroom reads.
+  const { succeeds } = task.spec;
+  if (succeeds?.trigger === "quota" && succeeds.account === exclave.accountId) {
+    reasons.push({ code: "predecessor_account" });
+  }
   return reasons;
 }
 
@@ -495,6 +500,60 @@ export function windowResetOf(
 ): number | undefined {
   const account = accountQuota(accountId, machines, newestQuotaByAccount(machines, fleetQuota));
   return account.known ? account.windows.find((w) => w.label === window)?.resetsAt : undefined;
+}
+
+/** What an exhausted account reads, for the leader's automatic trigger. */
+export interface Exhaustion {
+  readonly accountId: string;
+  /** The window's label, as `Candidate.spill` carries it. */
+  readonly window: string;
+  /** The window's reset, ms; 0 when the reading gave none. */
+  readonly reset: number;
+  /** The deciding reading's time, ms, never after `now`. */
+  readonly since: number;
+  /** The exclave is billing credits now (extra usage on, none spent to the cap). */
+  readonly spending: boolean;
+}
+
+/**
+ * Whether the account `task` runs on has run out: a window the task is judged on reads full
+ * (`fullWindow` at zero projected usage, so a forecast never counts), whether or not the exclave
+ * spills into credits. Decided from routing's own fold (`newestQuotaByAccount`, the fleet record
+ * included), and only while the machine that observed the newest reading is connected and not stale:
+ * a reading whose observer is gone or asleep never moves a task (older windows merged in by
+ * `mergeQuota` are not checked against their own observers). Null when unknown, trimmed or fresh.
+ */
+export function exhaustion(
+  task: Task,
+  machines: readonly Machine[],
+  now: number,
+  config: SchedulerConfig,
+  fleetQuota: readonly FleetQuotaEntry[] = [],
+): Exhaustion | null {
+  const { assignment } = task;
+  if (assignment === undefined) return null;
+  const exclave = machines
+    .find((m) => m.deviceId === assignment.deviceId)
+    ?.exclaves?.find((x) => x.id === assignment.exclave);
+  const accountId = exclave?.accountId;
+  if (exclave === undefined || accountId === undefined || accountId === null) return null;
+  const account = accountQuota(accountId, machines, newestQuotaByAccount(machines, fleetQuota));
+  if (!account.known) return null;
+  const observer = machines.find((m) => m.deviceId === account.newest.deviceId);
+  const status = observer === undefined ? undefined : liveStatus(observer);
+  if (status === undefined || isStatusStale(status, now)) return null;
+  const windows = account.windows.filter((w) => appliesTo(w, task.spec.model ?? DEFAULT_MODEL));
+  const full = fullWindow(windows, () => 0, now, config);
+  if (full === null) return null;
+  const { observation } = account.newest;
+  const resetsAt = windows.find((w) => w.label === full.window)?.resetsAt;
+  return {
+    accountId,
+    window: full.window,
+    reset: resetsAt === undefined ? 0 : resetsAt * 1000,
+    since: Math.min(observation.at * 1000, now),
+    spending: exclave.extraUsageEnabled === true && !creditsSpent(observation, now),
+  };
 }
 
 /** `seatTier` is daemon-reported, so only the table's own keys answer — never one off its prototype. */

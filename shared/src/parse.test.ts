@@ -10,6 +10,7 @@ import {
   parseFleetQuotaRecord,
   parseContinuedBy,
   parsePrAlertStamp,
+  parseQuotaExhaustedStamp,
   parsePushAlert,
   parsePushSubscribeReply,
   parsePushSubscribeRequest,
@@ -1008,6 +1009,34 @@ describe("tasks and their records", () => {
       const parsed = parseTask({ ...stamped, prAlert: bad });
       expect(parsed).toEqual(bare);
       expect(parsePrAlertStamp(bad)).toBeNull();
+    }
+  });
+
+  test("a task's quotaExhausted survives a parse, and a malformed stamp is dropped while the task stays readable", () => {
+    const stamp = { accountId: "org:a", window: "7d sonnet", reset: 0, at: 9 };
+    const stamped: Task = { ...task, state: "running", quotaExhausted: stamp };
+    expect(parseTask(stamped)).toEqual(stamped);
+    const retrying: Task = { ...stamped, quotaExhausted: { ...stamp, since: 3, retry: true } };
+    expect(parseTask(retrying)).toEqual(retrying);
+    const waiting: Task = { ...stamped, quotaExhausted: { ...stamp, waiting: true } };
+    expect(parseTask(waiting)).toEqual(waiting);
+    const { quotaExhausted: _stamp, ...bare } = stamped;
+    for (const bad of [
+      { ...stamp, extra: 1 },
+      { ...stamp, retry: false },
+      { ...stamp, waiting: false },
+      { ...stamp, since: -1 },
+      { ...stamp, window: "" },
+      { ...stamp, window: "w".repeat(65) },
+      { ...stamp, accountId: "" },
+      { ...stamp, reset: -1 },
+      { ...stamp, at: Number.NaN },
+      { ...stamp, at: "now" },
+      "5h",
+      null,
+    ]) {
+      expect(parseTask({ ...stamped, quotaExhausted: bad })).toEqual(bare);
+      expect(parseQuotaExhaustedStamp(bad)).toBeNull();
     }
   });
 
@@ -2599,6 +2628,33 @@ describe("parsePushAlert", () => {
       { ...blocked, head: "0".repeat(40) },
       { ...blocked, prUrl: "https://github.com/a/b/pull/1" },
       { ...blocked, taskId: "../x" },
+    ]) {
+      expect(parsePushAlert(bad)).toBeNull();
+    }
+  });
+
+  test("accepts quota-exhausted and pass-refused, and refuses an unknown reason, a key it does not name and a bad id", () => {
+    const quota = { v: 1, kind: "quota-exhausted", at: 5, taskId: "t-1", window: "5h" } as const;
+    for (const alert of [
+      quota,
+      { ...quota, reason: "dirty" as const },
+      { ...quota, reason: "branch" as const },
+      { ...quota, window: "7d sonnet" },
+    ]) {
+      expect(parsePushAlert(alert)).toEqual(alert);
+    }
+    const refused = { v: 1, kind: "pass-refused", at: 5, taskId: "t-1" } as const;
+    expect(parsePushAlert(refused)).toEqual(refused);
+    for (const bad of [
+      { ...quota, reason: "slow" },
+      { ...quota, window: "" },
+      { ...quota, window: "w".repeat(65) },
+      { ...quota, taskId: "../x" },
+      { ...quota, accountId: "org:a" },
+      { ...quota, projectedPct: 91 },
+      { ...refused, taskId: "../x" },
+      { ...refused, code: "push_failed" },
+      { ...refused, window: "5h" },
     ]) {
       expect(parsePushAlert(bad)).toBeNull();
     }

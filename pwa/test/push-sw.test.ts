@@ -194,6 +194,59 @@ describe("push-sw.js", () => {
     }
   });
 
+  test("a quota-exhausted alert shows fixed text, the window only as 5h or 7d, and one of two texts by reason", async () => {
+    const worker = boot();
+    const quota = (fields: Record<string, unknown>): string =>
+      JSON.stringify({ v: 1, kind: "quota-exhausted", at: 1, taskId: TASK, window: "5h", ...fields });
+    await worker.push(quota({}));
+    await worker.push(quota({ window: "7d" }));
+    await worker.push(quota({ window: "7d sonnet" }));
+    await worker.push(quota({ window: "<b>x</b>" }));
+    await worker.push(quota({ window: 7 }));
+    await worker.push(quota({ reason: "dirty" }));
+    await worker.push(quota({ reason: "branch" }));
+    await worker.push(quota({ reason: "<b>x</b>" }));
+    await worker.push(quota({ reason: "__proto__" }));
+    await worker.push(quota({ reason: "constructor" }));
+    expect(worker.shown.map((note) => note.options.body)).toEqual([
+      "A task's usage window is full (5h). Tap to pass it on.",
+      "A task's usage window is full (7d). Tap to pass it on.",
+      "A task's usage window is full (7d). Tap to pass it on.",
+      "A task's usage window is full. Tap to pass it on.",
+      "A task's usage window is full. Tap to pass it on.",
+      "A task ran out of usage, but its worktree has uncommitted changes. Tap to pass it on by hand.",
+      "A task ran out of usage, but its branch does not match its PR. Tap to pass it on by hand.",
+      "A task's usage window is full (5h). Tap to pass it on.",
+      "A task's usage window is full (5h). Tap to pass it on.",
+      "A task's usage window is full (5h). Tap to pass it on.",
+    ]);
+    for (const note of worker.shown) {
+      expect(note.options).toMatchObject({
+        tag: `quota-exhausted:${TASK}`,
+        renotify: true,
+        data: { url: `/?task=${TASK}` },
+      });
+    }
+    await worker.push(quota({ taskId: "../x" }));
+    expect(worker.shown.at(-1)?.options).toEqual({
+      body: "Something needs your attention.",
+      tag: "seance",
+      renotify: true,
+    });
+  });
+
+  test("a pass-refused alert shows one fixed text and opens its task", async () => {
+    const worker = boot();
+    await worker.push(JSON.stringify({ v: 1, kind: "pass-refused", at: 1, taskId: TASK, code: "never shown" }));
+    expect(worker.shown).toHaveLength(1);
+    expect(worker.shown[0]?.options).toEqual({
+      body: "A task's session could not pass its work on. Tap to see it.",
+      tag: `pass-refused:${TASK}`,
+      renotify: true,
+      data: { url: `/?task=${TASK}` },
+    });
+  });
+
   test("a login alert with an id isTaskId refuses, or a state it does not know, shows only the fallback and nothing the payload says", async () => {
     const worker = boot();
     const auth = (fields: Record<string, unknown>): string =>

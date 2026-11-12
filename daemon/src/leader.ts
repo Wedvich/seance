@@ -276,13 +276,34 @@ function watched(inner: QueueStore, changed: (id: string | null) => void): Queue
  * scheduler-free.
  */
 export function alertToPush(alert: SchedulerAlert, at: number): PushAlert {
-  if (alert.kind === "spill") {
-    const { taskId, window, projectedPct, spending } = alert;
-    return { v: 1, kind: "spill", at, taskId, window, projectedPct, ...(spending === undefined ? {} : { spending }) };
+  switch (alert.kind) {
+    case "spill": {
+      const { taskId, window, projectedPct, spending } = alert;
+      return { v: 1, kind: "spill", at, taskId, window, projectedPct, ...(spending === undefined ? {} : { spending }) };
+    }
+    case "pr-blocked":
+      return { v: 1, kind: "pr-blocked", at, taskId: alert.taskId, reason: alert.reason };
+    case "quota-exhausted": {
+      const { taskId, window, reason } = alert;
+      return { v: 1, kind: "quota-exhausted", at, taskId, window, ...(reason === undefined ? {} : { reason }) };
+    }
+    case "pass-refused":
+      return { v: 1, kind: "pass-refused", at, taskId: alert.taskId };
+    case "needs-input": {
+      const { taskId, since, escalated, question } = alert;
+      return {
+        v: 1,
+        kind: "needs-input",
+        at,
+        taskId,
+        since,
+        escalated,
+        ...(question === undefined ? {} : { question }),
+      };
+    }
+    default:
+      return alert satisfies never;
   }
-  if (alert.kind === "pr-blocked") return { v: 1, kind: "pr-blocked", at, taskId: alert.taskId, reason: alert.reason };
-  const { taskId, since, escalated, question } = alert;
-  return { v: 1, kind: "needs-input", at, taskId, since, escalated, ...(question === undefined ? {} : { question }) };
 }
 
 /** Where admission leaves a `queued` task (`admission` in the library). */

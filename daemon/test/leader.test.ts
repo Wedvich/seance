@@ -1756,6 +1756,19 @@ describe("leader push", () => {
     expect(parsePushAlert(JSON.parse(JSON.stringify(push)))).toEqual(push);
   });
 
+  test("the quota-exhausted and pass-refused alerts map to payloads of ids and state, never the message or the code", () => {
+    const exhausted = { kind: "quota-exhausted", taskId: "t-1", window: "5h", message: "m account=x" } as const;
+    const bare = alertToPush(exhausted, 5);
+    expect(bare).toEqual({ v: 1, kind: "quota-exhausted", at: 5, taskId: "t-1", window: "5h" });
+    const dirty = alertToPush({ ...exhausted, reason: "dirty" }, 5);
+    expect(dirty).toEqual({ v: 1, kind: "quota-exhausted", at: 5, taskId: "t-1", window: "5h", reason: "dirty" });
+    const refused = alertToPush({ kind: "pass-refused", taskId: "t-1", code: "push_failed", message: "m" }, 6);
+    expect(refused).toEqual({ v: 1, kind: "pass-refused", at: 6, taskId: "t-1" });
+    for (const push of [bare, dirty, refused]) {
+      expect(parsePushAlert(JSON.parse(JSON.stringify(push)))).toEqual(push);
+    }
+  });
+
   test("a blocked PR read by the poller is alerted once, logged by ids and reason, and pushed", async () => {
     const relay = startTestRelay(TOKEN);
     relay.schedulerTerm = 1;
@@ -2385,7 +2398,8 @@ describe("leader in the daemon", () => {
           await daemon.leader.settled();
           await send("b", valid);
           await Bun.sleep(20);
-          return count("scheduler: session-pass") >= 1;
+          // Its answer, not the "no running term" drop an early send gets, which names the same prefix.
+          return count("outcome=not_found") >= 1;
         }, "the leader to handle a valid pass");
       } finally {
         console.log = capture;
@@ -2396,7 +2410,7 @@ describe("leader in the daemon", () => {
     const dropped = lines.filter((line) => line.includes('dropped op="session-pass"'));
     expect(dropped).toHaveLength(3);
     expect(dropped.filter((line) => line.includes(`from="${APP_ID}"`))).toHaveLength(1);
-    const handled = lines.filter((line) => line.includes("scheduler: session-pass"));
+    const handled = lines.filter((line) => line.includes("scheduler: session-pass") && line.includes("outcome="));
     // A task the queue does not hold: the leader's own pass refused it, and said who sent it.
     expect(handled.length).toBeGreaterThan(0);
     for (const line of handled) expect(line).toContain('task="t-gone" from="b" outcome=not_found');

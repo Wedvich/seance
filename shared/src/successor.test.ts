@@ -147,6 +147,14 @@ describe("successorSpec", () => {
     });
   });
 
+  test("since is written only for a quota pass", () => {
+    const of = (trigger: "quota" | "manual", since?: number): TaskSpec =>
+      successorSpec({ ...running({}), assignment }, "org:a", trigger, undefined, since);
+    expect(of("quota", 7).succeeds).toMatchObject({ trigger: "quota", since: 7 });
+    expect(of("quota").succeeds).not.toHaveProperty("since");
+    expect(of("manual", 7).succeeds).not.toHaveProperty("since");
+  });
+
   test("a steered task's successor runs at checkpoint with no plan; auto and checkpoint stay", () => {
     const of = (spec: Partial<TaskSpec>): TaskSpec =>
       successorSpec({ ...running({}, spec), assignment }, "org:a", "manual");
@@ -255,12 +263,27 @@ describe("a successor's record", () => {
           { id: "0b6f0c9e-1a2b-4c3d-8e9f-001122334455", name: "a", type: "image/png", size: 1, hash: "A".repeat(43) },
         ],
       },
-      { ...successorTask().spec, succeeds: { ...succeeds, trigger: "quota" } },
+      { ...successorTask().spec, succeeds: { ...succeeds, trigger: "later" } },
+      // `since` is a quota pass's alone, and a time.
+      { ...successorTask().spec, succeeds: { ...succeeds, since: 5 } },
+      { ...successorTask().spec, succeeds: { ...succeeds, trigger: "session", since: 5 } },
+      { ...successorTask().spec, succeeds: { ...succeeds, trigger: "quota", since: -1 } },
+      { ...successorTask().spec, succeeds: { ...succeeds, trigger: "quota", since: Number.NaN } },
+      { ...successorTask().spec, succeeds: { ...succeeds, trigger: "quota", since: "5" } },
       { ...successorTask().spec, succeeds: { ...succeeds, task: "not a task id!" } },
       { ...successorTask().spec, succeeds: { ...succeeds, at: { deviceId: "dev-a" } } },
     ]) {
       expect(parseTaskSpec(spec)).toBeNull();
     }
+  });
+
+  test("a quota pass round-trips with or without its since, and nothing is invented on a reseal", () => {
+    for (const since of [{ since: 1_800_000_000_000 }, {}]) {
+      const spec = successorTask({ succeeds: { ...succeeds, trigger: "quota", ...since } }).spec;
+      expect(parseTaskSpec(spec)).toEqual(spec);
+    }
+    const manual = successorTask().spec;
+    expect(parseTaskSpec(manual)?.succeeds).not.toHaveProperty("since");
   });
 
   test("the dep sentinel is dropped beside succeeds, and refused without it", () => {
@@ -315,7 +338,11 @@ describe("a successor's record", () => {
 
   test("a successor at the largest prompt still seals under the create bound", async () => {
     const task = successorTask(
-      { prompt: "€".repeat(SUCCESSOR_PROMPT_BYTES / 3 - 1), title: "t".repeat(100) },
+      {
+        prompt: "€".repeat(SUCCESSOR_PROMPT_BYTES / 3 - 1),
+        title: "t".repeat(100),
+        succeeds: { ...succeeds, trigger: "quota", since: Number.MAX_SAFE_INTEGER },
+      },
       {
         prUrl: PR,
       },

@@ -148,6 +148,12 @@ export interface SchedulerConfig {
    * have room until it fires.
    */
   readonly pruneAt: number;
+  /**
+   * How long after an automatic quota pass was refused for a reason that can pass (a push that failed,
+   * a PR that could not be read) the leader tries once more within the same window reset. Without
+   * it the retry would fire on the next tick, into the same failure.
+   */
+  readonly quotaPassRetryMs: number;
 }
 
 export const DEFAULT_CONFIG: SchedulerConfig = {
@@ -192,4 +198,6 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   endingTimeoutMs: 300_000,
   keepFinished: 50,
   pruneAt: 96,
+  // docs/scheduler.md, Settled defaults 22.
+  quotaPassRetryMs: 5 * 60_000,
 };
