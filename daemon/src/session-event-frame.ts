@@ -23,8 +23,28 @@ export const SESSION_EVENT_REPLY_CODES = [
   "stopping",
   /** A hand-off from a task whose launch here noted no PR URL: there is no PR to hand over. */
   "prless",
+  // The codes below are a pass's alone (`pass_to_successor`): the push `push-branch` makes for it, refused or failed.
+  /** A pass from a task run in place: it has no worktree branch of its own. */
+  "here",
+  "dirty_worktree",
+  "detached_head",
+  "default_branch",
+  /** The branch has no upstream and the task has a PR: the session pushes to the PR's branch itself and asks again. */
+  "no_upstream",
+  "push_rejected",
+  "push_failed",
+  /** Pushed, but this daemon could not hand the pass to the scheduler (no relay connection and no leader here). */
+  "unsent",
 ] as const;
 
+/** What a pass reports back: the branch and commit now on `origin`, and whether the push changed anything. */
+export interface PassAck {
+  readonly taskId: string;
+  readonly remoteBranch: string;
+  readonly tip: string;
+  readonly pushed: boolean;
+}
+
 export type SessionEventReply =
-  | { readonly ok: true }
+  | { readonly ok: true; readonly pass?: PassAck }
   | { readonly ok: false; readonly code: (typeof SESSION_EVENT_REPLY_CODES)[number] };

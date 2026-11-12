@@ -32,6 +32,7 @@ import {
   type RelayToDaemonFrame,
   type SchedulerError,
   type SessionEvent,
+  type SessionPass,
   type StoreReplyFrame,
   type StoreRequestFrame,
 } from "@seance/shared";
@@ -267,7 +268,15 @@ export class RelayClient {
     return this.#toScheduler("branch-state", state);
   }
 
-  async #toScheduler(op: "session-event" | "branch-state", payload: SessionEvent | BranchState): Promise<boolean> {
+  /** Fire-and-forget like `sendToScheduler`, for the `session-pass` op; false when it was not sent. */
+  sendSessionPass(pass: SessionPass): Promise<boolean> {
+    return this.#toScheduler("session-pass", pass);
+  }
+
+  async #toScheduler(
+    op: "session-event" | "branch-state" | "session-pass",
+    payload: SessionEvent | BranchState | SessionPass,
+  ): Promise<boolean> {
     if (!this.connected || !this.#registered) return false;
     const plain: Plain = { id: crypto.randomUUID(), ts: Date.now(), op, payload };
     const sealed = await seal(this.#opts.key, { to: SCHEDULER_ID, from: this.#opts.identity.deviceId }, plain);

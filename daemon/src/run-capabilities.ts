@@ -1,6 +1,6 @@
 import type { RepoEntry } from "@seance/shared";
 import { attachmentsRoot } from "./attachments.ts";
-import { daemonSink, reapAudit } from "./audit.ts";
+import { daemonSink, pushAudit, reapAudit } from "./audit.ts";
 import type { SessionBackend } from "./backend.ts";
 import { createBranchStates, type BranchStateDeps } from "./branch-state.ts";
 import { brokerRelay, createBroker } from "./broker.ts";
@@ -8,7 +8,8 @@ import { REAP_DEFAULTS, type Config, type ResolvedPsk } from "./config.ts";
 import type { AuthHealth } from "./auth-health.ts";
 import type { ExclaveScan } from "./exclaves.ts";
 import { platformFsmonitor } from "./fsmonitor.ts";
-import { createHandOff } from "./handoff.ts";
+import { pushForTask } from "./handlers.ts";
+import { createHandOff, createPassClose } from "./handoff.ts";
 import { sourceOf, type Leader } from "./leader.ts";
 import type { LocalSocketOpts } from "./local-socket.ts";
 import { log } from "./log.ts";
@@ -16,7 +17,13 @@ import { pruneLogPath } from "./paths.ts";
 import { peerPidSupported } from "./peer.ts";
 import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts";
 import type { RelayClient } from "./relay-client.ts";
-import { createSessionEvents, listPanePids, peerBindingProblem, type EndedTasks } from "./session-events.ts";
+import {
+  createSessionEvents,
+  listPanePids,
+  peerBindingProblem,
+  type EndedTasks,
+  type SessionEvents,
+} from "./session-events.ts";
 import type { Fetch } from "./seams.ts";
 import type { TraitProbes } from "./trait-probes.ts";
 import type { UsageRefresh } from "./usage-refresh.ts";
@@ -66,6 +73,8 @@ export type LocalSurfaces = Pick<LocalSocketOpts, "broker" | "sessionEvents">;
 export interface Started {
   readonly stop: () => void;
   readonly local?: LocalSurfaces;
+  /** The leader's `pass-close`, once session events run: the handler context reads it late (`run.ts`). */
+  readonly armPassClose?: SessionEvents["armPassClose"];
 }
 
 /** One optional subsystem `startDaemon` wires once the relay client exists. */
@@ -132,10 +141,39 @@ const sessionEvents: DaemonCapability = (ctx) => {
             sink: daemonSink,
           }),
         }),
+    // A session's own pass (`pass_to_successor`). Absent without a despawn, like the hand-off: the pass could then never close.
+    ...(despawn === undefined
+      ? {}
+      : {
+          pass: {
+            // The same push the scheduler's `push-branch` makes, asked by the session and audited `origin=successor`.
+            push: (taskId, options) =>
+              pushForTask(
+                { tasks: ctx.endedTasks, getRepos: ctx.repos },
+                pushAudit("successor", daemonSink),
+                taskId,
+                options,
+              ),
+            // In process when this machine leads, else sealed to the scheduler; false when neither could take it.
+            send: async (pass) => {
+              if (ctx.leader.term() !== null) {
+                ctx.leader.onSessionPass(pass, ctx.deviceId);
+                return true;
+              }
+              return ctx.client.sendSessionPass(pass);
+            },
+            close: createPassClose({
+              despawn,
+              panes: listPanePids,
+              closing: (taskId) => ctx.endedTasks.closing(taskId),
+              sink: daemonSink,
+            }),
+          },
+        }),
     // Activity is when a reading matters; the refresh spawns only if it is stale.
     onActivity: (exclave) => ctx.usageRefresh?.poke(exclave),
   });
-  return { stop: events.stop, local: { sessionEvents: events.handle } };
+  return { stop: events.stop, local: { sessionEvents: events.handle }, armPassClose: events.armPassClose };
 };
 
 /** Auth health's timer: the first walk runs at once, then every minute. Its `stop` waits for a read in flight. */
@@ -254,6 +292,7 @@ export const DAEMON_CAPABILITIES: readonly DaemonCapability[] = [
 ];
 
 export interface StartedCapabilities {
+  readonly armPassClose?: SessionEvents["armPassClose"];
   readonly local: LocalSurfaces;
   readonly stop: () => void;
 }
@@ -270,12 +309,14 @@ export function startEach<C>(ctx: C, capabilities: readonly ((ctx: C) => Started
   };
   try {
     let local: LocalSurfaces = {};
+    let armPassClose: Started["armPassClose"];
     for (const capability of capabilities) {
       const entry = capability(ctx);
       started.push(entry);
       local = mergeSurfaces(local, entry);
+      armPassClose ??= entry.armPassClose;
     }
-    return { local, stop };
+    return { local, stop, ...(armPassClose === undefined ? {} : { armPassClose }) };
   } catch (err) {
     // Already-started ones hold timers and sockets nothing else will stop.
     stop();

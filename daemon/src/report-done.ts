@@ -1,18 +1,19 @@
-import { isRecord } from "@seance/shared";
+import { isBranchName, isRecord, isTaskId } from "@seance/shared";
 import { exchange, LocalUnavailable } from "./local-client.ts";
 import { socketPath } from "./paths.ts";
 import {
   SESSION_EVENT_KIND,
   SESSION_EVENT_REPLY_CODES,
   SESSION_EVENT_VERSION,
+  type PassAck,
   type SessionEventReply,
 } from "./session-event-frame.ts";
 
 /**
  * A session's own `done` report (#21), as `seanced mcp`'s `report_task_done`
- * tool sends it, and its hand-off (`hand_off_task`): the same `session-event`
- * frame the mod's CLI sends, so the daemon binds it by the sender's pid and a
- * session settles or closes only its own task. The MCP server is a child of the
+ * tool sends it, its hand-off (`hand_off_task`) and its pass (`pass_to_successor`): the same
+ * `session-event` frame the mod's CLI sends, so the daemon binds it by the sender's pid and a
+ * session settles, closes or passes only its own task. The MCP server is a child of the
  * session's `claude`, itself in the pane, so the parent walk lands on that pane.
  *
  * Imports nothing that logs: this runs inside `seanced mcp`, whose stdout is the
@@ -22,9 +23,14 @@ import {
 /** The ingest does a pane lookup, a parent walk and a ledger write before it answers. */
 const REPORT_TIMEOUT_MS = 5_000;
 
+/** A pass pushes the branch before it answers: under the leader's own 90 s `push-branch` window, with room for a slow network. */
+const PASS_TIMEOUT_MS = 60_000;
+
 export interface ReportDoneResult {
   readonly ok: boolean;
   readonly text: string;
+  /** A pass's answer: what the daemon pushed. */
+  readonly pass?: PassAck;
 }
 
 export interface ReportDoneOpts {
@@ -34,7 +40,20 @@ export interface ReportDoneOpts {
   readonly pane?: string;
 }
 
-type Refusals = Record<(typeof SESSION_EVENT_REPLY_CODES)[number], string>;
+type ReplyCode = (typeof SESSION_EVENT_REPLY_CODES)[number];
+
+/** The codes only a pass is answered: a `done` report or a hand-off never meets one. */
+type PassOnlyCode =
+  | "here"
+  | "dirty_worktree"
+  | "detached_head"
+  | "default_branch"
+  | "no_upstream"
+  | "push_rejected"
+  | "push_failed"
+  | "unsent";
+
+type Refusals = Record<Exclude<ReplyCode, PassOnlyCode>, string>;
 
 const COMMON = {
   unbound: "this session is not in a tmux pane this machine's daemon can see",
@@ -71,18 +90,56 @@ const HANDOFF_REFUSED = {
     KEEP_WATCHING,
 } as const satisfies Refusals;
 
+const PASS_REFUSED = {
+  unbound: COMMON.unbound,
+  unsupported: COMMON.unsupported,
+  invalid: "this machine's daemon predates passing; restart seanced (`seanced update`)",
+  untasked: "this session runs no scheduler task, so there is nothing to pass",
+  unrecorded: "this machine's daemon holds no launch of this session's task, so nothing was pushed or passed",
+  // Never answered to a pass, which writes no note; listed so every code has words.
+  unwritten: "this machine's daemon could not save the pass",
+  stopping: "this machine's daemon is stopping, so nothing was pushed or passed",
+  prless: "this machine's daemon noted no pull request for this session's task",
+  here: "this task runs in place and has no branch of its own to pass; nothing was pushed",
+  dirty_worktree: "commit or stash your changes first; nothing was pushed",
+  detached_head: "this worktree is on no branch; check one out with your commits, then call again; nothing was pushed",
+  default_branch:
+    "this worktree is on the repo's default branch, which a pass never pushes; move your commits to a task branch, then call again; nothing was pushed",
+  no_upstream:
+    "this task has a PR and this branch has no upstream; push to the PR's branch with `git push -u origin HEAD:<pr branch>` and call again; nothing was pushed",
+  push_rejected:
+    "origin rejected the push (not a fast-forward, or a protected branch); fetch and reconcile it yourself, then call again; nothing was forced",
+  push_failed:
+    "the push did not complete (network, credentials or repo configuration); try again, and tell the owner if it keeps failing",
+  unsent:
+    "the branch is pushed, but this machine's daemon could not hand the pass to the scheduler (no relay connection); call again once it is back",
+} as const satisfies Record<ReplyCode, string>;
+
+function parseAck(raw: unknown): PassAck | undefined {
+  if (!isRecord(raw)) return undefined;
+  const { taskId, remoteBranch, tip, pushed } = raw;
+  if (!isTaskId(taskId) || !isBranchName(remoteBranch) || typeof tip !== "string" || typeof pushed !== "boolean") {
+    return undefined;
+  }
+  return { taskId, remoteBranch, tip, pushed };
+}
+
 function parseReply(raw: unknown): SessionEventReply | null {
   if (!isRecord(raw)) return null;
-  if (raw["ok"] === true) return { ok: true };
+  if (raw["ok"] === true) {
+    const pass = parseAck(raw["pass"]);
+    return pass === undefined ? { ok: true } : { ok: true, pass };
+  }
   const code = SESSION_EVENT_REPLY_CODES.find((c) => c === raw["code"]);
   return raw["ok"] === false && code !== undefined ? { ok: false, code } : null;
 }
 
 async function send(
-  fields: { readonly state: "done" } | { readonly handoff: true },
+  fields: { readonly state: "done" } | { readonly handoff: true } | { readonly pass: true; readonly record: string },
   opts: ReportDoneOpts,
-  refused: Refusals,
+  refused: Readonly<Partial<Record<ReplyCode, string>>>,
   sent: string,
+  timeoutMs: number = REPORT_TIMEOUT_MS,
 ): Promise<ReportDoneResult> {
   const pane = opts.pane ?? process.env["TMUX_PANE"];
   const frame = {
@@ -95,7 +152,7 @@ async function send(
   try {
     raw = await exchange(frame, {
       path: opts.path ?? socketPath(),
-      timeoutMs: REPORT_TIMEOUT_MS,
+      timeoutMs,
       timeoutText: "the daemon did not answer in time",
     });
   } catch (err) {
@@ -104,8 +161,8 @@ async function send(
   }
   const reply = parseReply(raw);
   if (reply === null) return { ok: false, text: "the daemon's answer was not a session-event reply" };
-  if (reply.ok) return { ok: true, text: sent };
-  return { ok: false, text: refused[reply.code] };
+  if (reply.ok) return { ok: true, text: sent, ...(reply.pass === undefined ? {} : { pass: reply.pass }) };
+  return { ok: false, text: refused[reply.code] ?? `the daemon refused with an unexpected code (${reply.code})` };
 }
 
 export function reportDone(opts: ReportDoneOpts = {}): Promise<ReportDoneResult> {
@@ -123,5 +180,19 @@ export function handOff(opts: ReportDoneOpts = {}): Promise<ReportDoneResult> {
     opts,
     HANDOFF_REFUSED,
     "handed off — this session closes once this turn ends; the scheduler now watches the PR (awaiting merge), and its worktree is kept. End the turn now with your final summary.",
+  );
+}
+
+/**
+ * `pass_to_successor`: the daemon pushes this worktree's branch and reports the pass to the scheduler.
+ * The text says only that it was taken; whether the leader committed it is the caller's to find out.
+ */
+export function passToSuccessor(record: string, opts: ReportDoneOpts = {}): Promise<ReportDoneResult> {
+  return send(
+    { pass: true, record },
+    opts,
+    PASS_REFUSED,
+    "pushed, and the pass was sent to the scheduler",
+    PASS_TIMEOUT_MS,
   );
 }

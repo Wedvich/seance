@@ -1,4 +1,4 @@
-import { despawnAudit, type AuditSink } from "./audit.ts";
+import { despawnAudit, type AuditSink, type SpawnOrigin } from "./audit.ts";
 import { DespawnFailure, type SessionBackend } from "./backend.ts";
 import { log } from "./log.ts";
 import type { BoundPane } from "./session-events.ts";
@@ -20,15 +20,24 @@ export interface HandOffDeps {
   readonly sink: AuditSink;
 }
 
-export function createHandOff(deps: HandOffDeps): (pane: string, taskId: string) => Promise<void> {
-  const audit = despawnAudit("handoff", deps.sink);
+/**
+ * The close at a turn's end, for the origin that asked: a hand-off's own, or a session's pass
+ * (`successor`, once the leader confirmed its commit point). `gone` is the audited reason when the
+ * pane no longer runs the task.
+ */
+export function createTurnEndClose(
+  origin: Extract<SpawnOrigin, "handoff" | "successor">,
+  deps: HandOffDeps,
+  gone: string,
+): (pane: string, taskId: string) => Promise<void> {
+  const audit = despawnAudit(origin, deps.sink);
   return async (pane, taskId) => {
     try {
       await audit.request({ id: pane });
       // Re-read: between the idle and now the session may have ended and tmux reused the id.
       const live = (await deps.panes()).find((p) => p.id === pane && !p.dead);
       if (live?.taskId !== taskId) {
-        await audit.rejected("the pane no longer runs the task that handed off");
+        await audit.rejected(gone);
         return;
       }
       await audit.ok(await deps.despawn(pane, { force: false, closing: deps.closing }));
@@ -37,8 +46,17 @@ export function createHandOff(deps: HandOffDeps): (pane: string, taskId: string)
         await audit.failed(err.code).catch(() => {});
         return;
       }
-      log.error(`hand-off despawn crashed: ${String(err)}`);
+      log.error(`${origin} despawn crashed: ${String(err)}`);
       await audit.failed("internal_error").catch(() => {});
     }
   };
+}
+
+export function createHandOff(deps: HandOffDeps): (pane: string, taskId: string) => Promise<void> {
+  return createTurnEndClose("handoff", deps, "the pane no longer runs the task that handed off");
+}
+
+/** A session's own pass closes the same way: its daemon, at the turn's end, under origin `successor`. */
+export function createPassClose(deps: HandOffDeps): (pane: string, taskId: string) => Promise<void> {
+  return createTurnEndClose("successor", deps, "the pane no longer runs the task that was passed");
 }

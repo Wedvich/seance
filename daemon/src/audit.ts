@@ -29,9 +29,11 @@ import { logPath } from "./paths.ts";
  * the `client` tag beside it is the rest of the answer. `leader` is this
  * daemon's own scheduler loop dispatching to this machine, which it reaches in
  * process rather than through the relay (`leader.ts`). `handoff` is a session
- * closing itself through `hand_off_task` (`handoff.ts`): despawn only.
+ * closing itself through `hand_off_task` (`handoff.ts`): despawn only. `successor` is a session passing
+ * its own task through `pass_to_successor`: the push it asked for and, once the leader confirms, the
+ * close at its turn's end (`handoff.ts`), never anything else.
  */
-export type SpawnOrigin = "relay" | "cli" | "local" | "leader" | "handoff";
+export type SpawnOrigin = "relay" | "cli" | "local" | "leader" | "handoff" | "successor";
 
 export type AuditSink = (line: string) => void | Promise<void>;
 
@@ -265,6 +267,16 @@ export function pushAudit(origin: SpawnOrigin, sink: AuditSink): PushAudit {
       const tipNote = tip === undefined ? "" : ` tip=${tip.slice(0, 7)}`;
       await sink(`audit push origin=${origin} task=${quote(taskId)} repo=${quote(repo)} outcome=${outcome}${tipNote}`);
     },
+  };
+}
+
+/** A `pass-close` the scheduler sent: whether it armed a pane's close at its turn end. Names the task, never a pane. */
+export function passCloseAudit(
+  origin: SpawnOrigin,
+  sink: AuditSink,
+): (taskId: string, outcome: string) => Promise<void> {
+  return async (taskId, outcome) => {
+    await sink(`audit pass-close origin=${origin} task=${quote(taskId)} outcome=${outcome}`);
   };
 }
 

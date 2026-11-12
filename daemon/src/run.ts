@@ -326,6 +326,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         CAPABILITIES.attachments,
         CAPABILITIES.traits,
         CAPABILITIES.successor,
+        CAPABILITIES.successorSelf,
         ...(authHealth === null ? [] : [CAPABILITIES.authHealth]),
       ],
     };
@@ -437,7 +438,12 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   // socket share the backend, the repo set and the audit sink, and differ only
   // in the origin they are tagged with — which is what keeps "every spawn path
   // audits through one formatter" true as surfaces are added.
+  // Read late: session events start after the handler context, and a `pass-close` can only arrive once they run.
+  const passClose: { arm?: NonNullable<HandlerContext["armPassClose"]> } = {};
   const handlerCtx: HandlerContext = {
+    armPassClose: (taskId) =>
+      passClose.arm?.(taskId) ??
+      Promise.resolve({ ok: false, code: "unsupported", message: "this daemon runs no session-event ingest" }),
     backend: opts.backend ?? createBackend(config, { home }),
     getRepos: () => state.repos,
     rescan,
@@ -661,6 +667,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     ...(opts.reapCheckIntervalMs === undefined ? {} : { reapCheckIntervalMs: opts.reapCheckIntervalMs }),
     ...(opts.branchState === undefined ? {} : { branchState: opts.branchState }),
   });
+
+  passClose.arm = capabilities.armPassClose;
 
   // After the relay leg, because the local surface is the optional one: it never
   // throws, and a box that cannot bind it still serves every phone.

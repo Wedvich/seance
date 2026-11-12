@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { DespawnFailure, type DespawnResult } from "./backend.ts";
-import { createHandOff } from "./handoff.ts";
+import { createHandOff, createPassClose } from "./handoff.ts";
 import type { BoundPane } from "./session-events.ts";
 
 const pane = (taskId: string | null, dead = false): BoundPane => ({ id: "%1", pid: 10, dead, taskId, path: "/w" });
@@ -53,5 +53,47 @@ describe("createHandOff", () => {
     );
     await handOff("%1", "t1");
     expect(lines.at(-1)).toBe("audit despawn origin=handoff failed code=session_not_found");
+  });
+});
+
+describe("createPassClose", () => {
+  const passClose = (panes: readonly BoundPane[], despawn?: () => Promise<DespawnResult>) => {
+    const lines: string[] = [];
+    const despawned: string[] = [];
+    const close = createPassClose({
+      despawn: (id) => {
+        despawned.push(id);
+        return despawn === undefined ? Promise.resolve({ window: "fix-it", outcome: "exited" }) : despawn();
+      },
+      panes: () => Promise.resolve(panes),
+      closing: () => Promise.resolve(),
+      sink: (line) => void lines.push(line),
+    });
+    return { close, lines, despawned };
+  };
+
+  test("despawns the pane gracefully under origin=successor, never the hand-off's", async () => {
+    const { close, lines, despawned } = passClose([pane("t1")]);
+    await close("%1", "t1");
+    expect(despawned).toEqual(["%1"]);
+    expect(lines).toEqual([
+      'audit despawn origin=successor target="%1"',
+      'audit despawn origin=successor ok window="fix-it" outcome=exited',
+    ]);
+  });
+
+  test("a pane that no longer runs the task is left alone and the refusal audited", async () => {
+    const { close, lines, despawned } = passClose([pane("t2")]);
+    await close("%1", "t1");
+    expect(despawned).toEqual([]);
+    expect(lines.at(-1)).toContain("rejected the pane no longer runs the task that was passed");
+  });
+
+  test("a despawn failure is audited with its code and never thrown", async () => {
+    const { close, lines } = passClose([pane("t1")], () =>
+      Promise.reject(new DespawnFailure("session_not_found", "gone")),
+    );
+    await close("%1", "t1");
+    expect(lines.at(-1)).toBe("audit despawn origin=successor failed code=session_not_found");
   });
 });

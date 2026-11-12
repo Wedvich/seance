@@ -14,6 +14,7 @@ import {
   isRecord,
   OP_TIMEOUT_MS,
   parseInterrupted,
+  parsePassCloseResponse,
   parsePushBranchResponse,
   parseTaskProgressList,
   quote,
@@ -141,7 +142,7 @@ const NEVER_DELIVERED: ReadonlySet<FailureReason> = new Set(["offline", "unknown
 export function termFleet(o: TermFleetOpts): Fleet {
   const remote = async <T>(
     deviceId: string,
-    op: "spawn" | "sessions" | "despawn" | "push-branch",
+    op: "spawn" | "sessions" | "despawn" | "push-branch" | "pass-close",
     payload: unknown,
   ) => {
     try {
@@ -154,6 +155,11 @@ export function termFleet(o: TermFleetOpts): Fleet {
   };
   const ended = unreachable("the scheduler term has ended");
   const malformedPush: ErrorResponse = { ok: false, code: "internal_error", message: "malformed push-branch reply" };
+  const malformedPassClose: ErrorResponse = {
+    ok: false,
+    code: "internal_error",
+    message: "malformed pass-close reply",
+  };
   return {
     machines: () => o.relay.getState().machines,
     fleetQuota: () => o.relay.getState().fleetQuota,
@@ -180,6 +186,13 @@ export function termFleet(o: TermFleetOpts): Fleet {
       // parsed: `remoteBranch` is named in a prompt and compared to a PR head.
       if (isNoAnswer(reply)) return reply;
       return parsePushBranchResponse(reply) ?? malformedPush;
+    },
+    passClose: async (deviceId, request) => {
+      if (!o.live()) return ended;
+      if (deviceId === o.selfDeviceId) return o.local.passClose(request);
+      const reply: unknown = await remote<unknown>(deviceId, "pass-close", request);
+      if (isNoAnswer(reply)) return reply;
+      return parsePassCloseResponse(reply) ?? malformedPassClose;
     },
   };
 }

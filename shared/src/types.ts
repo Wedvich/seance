@@ -667,10 +667,10 @@ export type AtRestOp = (typeof AT_REST_OPS)[keyof typeof AT_REST_OPS];
 
 /**
  * Fire-and-forget ops — nothing correlates a reply: `update-available` a
- * broadcast, `session-event` and `branch-state` reports to the scheduler, and
+ * broadcast, `session-event`, `session-pass` and `branch-state` reports to the scheduler, and
  * `queue-changed` the scheduler's nudge to every app.
  */
-export type EventOp = "update-available" | "session-event" | "branch-state" | "queue-changed";
+export type EventOp = "update-available" | "session-event" | "session-pass" | "branch-state" | "queue-changed";
 
 export type OpName =
   | "sessions"
