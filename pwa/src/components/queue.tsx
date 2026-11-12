@@ -341,6 +341,11 @@ function QueueCard(props: {
           </h3>
           <p className="fleet-meta">
             {row.headline} · {row.age}
+            {row.autonomy !== null && (
+              <span className="fleet-badge queue-autonomy" title={`Autonomy: ${row.autonomy}`}>
+                {row.autonomy}
+              </span>
+            )}
           </p>
         </div>
         {hasMenu && (
@@ -408,7 +413,7 @@ function QueueCard(props: {
       {row.placement !== null && <p className="fleet-card-body">{row.placement}</p>}
       {row.batch !== null && <p className="fleet-card-body">{row.batch}</p>}
       {row.body !== null && <p className="fleet-card-body">{row.body}</p>}
-      {(row.pr !== null || inline !== null) && (
+      {(row.pr !== null || inline !== null || row.answer !== null) && (
         <div className="queue-actions">
           {row.pr !== null && (
             <a
@@ -428,6 +433,11 @@ function QueueCard(props: {
             <button type="button" className="quiet" disabled={disabled} onClick={() => run[inline](row.id)}>
               {INLINE_LABEL[inline]}
             </button>
+          )}
+          {row.answer !== null && (
+            <a className="primary" href={row.answer} target="_blank" rel="noopener noreferrer">
+              Answer in Claude
+            </a>
           )}
         </div>
       )}

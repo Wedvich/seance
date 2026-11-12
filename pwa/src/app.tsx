@@ -60,6 +60,7 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
         actions={actions}
         view={view}
         form={state.form}
+        autonomy={state.autonomy}
         promptUndo={state.promptUndo}
         sheet={state.sheet}
         machines={state.relay.machines}
@@ -257,6 +258,7 @@ function useSpawnActions(store: Store): SpawnActions {
       rescan: (deviceId) => void store.rescan(deviceId),
       setModel: (model) => store.setModel(model),
       setEffort: (effort) => store.setEffort(effort),
+      setAutonomy: (autonomy) => store.setAutonomy(autonomy),
       addAfter: (taskId, after) => store.addAfter(taskId, after),
       removeAfter: (taskId) => store.removeAfter(taskId),
       setUntil: (until) => store.setUntil(until),

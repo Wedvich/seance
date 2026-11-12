@@ -9,8 +9,9 @@ import {
   taskFailureText,
   type TaskUntil,
 } from "@seance/shared";
-import type { Capability, KnownAccount, Machine, RelayState, Task } from "@seance/shared";
+import type { AutonomyLevel, Capability, KnownAccount, Machine, RelayState, Task } from "@seance/shared";
 import {
+  AUTONOMY_LABELS,
   EFFORT_LABELS,
   HELD_MAX,
   MODEL_LABELS,
@@ -147,6 +148,7 @@ export interface ViewModel {
   readonly repoTile: Tile;
   readonly modelTile: Tile;
   readonly effortTile: Tile;
+  readonly autonomyTile: Tile;
   /** The authoring tile: the tasks this one waits on. */
   readonly afterTile: Tile;
   /**
@@ -184,6 +186,12 @@ export interface ViewModel {
 export interface AppState {
   readonly relay: RelayState;
   readonly form: PersistedForm;
+  /**
+   * The next task's autonomy level. Not in `form`, so never persisted: every load and every
+   * queued task starts back at `DEFAULT_AUTONOMY`, and a level picked once can't ride along
+   * unnoticed on later tasks.
+   */
+  readonly autonomy: AutonomyLevel;
   /**
    * Text a CLEAR took away, offered back for six seconds. Deliberately outside
    * `form`: a draft you already discarded shouldn't survive a reload.
@@ -799,6 +807,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
       mono: false,
       dot: null,
     },
+    autonomyTile: { label: "AUTONOMY", value: AUTONOMY_LABELS[state.autonomy], mono: false, dot: null },
     afterTile: { label: "AFTER", value: afterValue(form.after), mono: false, dot: null },
     reportedAvailable: deriveReportedOffered(relay),
     held: state.held.map((entry) => heldRow(entry, relay)),

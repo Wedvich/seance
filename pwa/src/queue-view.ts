@@ -1,4 +1,6 @@
 import {
+  autonomyOf,
+  DEFAULT_AUTONOMY,
   PR_STATUS_STALE_MS,
   QUEUE_MAX_TASKS,
   TASK_PHASES,
@@ -24,6 +26,7 @@ import {
   type StartNowItem,
 } from "./decision-view.ts";
 import { accountDisplayName, formatUntil } from "./machines-view.ts";
+import { AUTONOMY_LABELS } from "./state.ts";
 import { taskTitle } from "./task-title.ts";
 import {
   deriveContinueAvailability,
@@ -135,6 +138,10 @@ export interface QueueRow {
   } | null;
   /** Its session's claude.ai page, which the title links to; null until its machine reported a Remote Control id. */
   readonly session: string | null;
+  /** The card's "Answer in Claude": `session` while the task waits for input there, else null. */
+  readonly answer: string | null;
+  /** Its autonomy level for the meta line's chip; null at `checkpoint`, the default, as `describeTask` leaves it out. */
+  readonly autonomy: string | null;
 }
 
 export interface QueueSection {
@@ -325,6 +332,8 @@ function rowOf(
   const waiting = task.state === "queued" || task.state === "blocked" || task.state === "ready";
   const item = decisionStartNowItem(task.decision ?? null);
   const startNow = waiting ? { ...item, enabled: item.enabled && deriveRunNowAvailability(state.relay) } : null;
+  const session = sessionOf(task);
+  const autonomy = autonomyOf(task.spec);
   return {
     id: task.id,
     title: taskTitle(task),
@@ -347,7 +356,10 @@ function rowOf(
     batch: batchLine(task),
     busy: state.taskAction?.taskId === task.id,
     pr: prOf(task, now, skew),
-    session: sessionOf(task),
+    session,
+    // `needs-input` only: a `lost` task keeps `needsInputSince` too, but its machine is not there to take an answer.
+    answer: task.state === "needs-input" ? session : null,
+    autonomy: autonomy === DEFAULT_AUTONOMY ? null : AUTONOMY_LABELS[autonomy],
   };
 }
 

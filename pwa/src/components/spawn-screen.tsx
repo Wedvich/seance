@@ -1,9 +1,18 @@
 import type { JSX, TargetedKeyboardEvent } from "preact";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
-import { TASK_SPEC_LIMITS, type DepAfter, type Machine, type TaskUntil } from "@seance/shared";
+import {
+  AUTONOMY_LEVELS,
+  TASK_SPEC_LIMITS,
+  type AutonomyLevel,
+  type DepAfter,
+  type Machine,
+  type TaskUntil,
+} from "@seance/shared";
 import { describeDecision, startNowItem } from "../decision-view.ts";
 import type { AfterSheetView } from "../queue-view.ts";
 import {
+  AUTONOMY_HINTS,
+  AUTONOMY_LABELS,
   EFFORTS,
   EFFORT_LABELS,
   MODELS,
@@ -31,6 +40,7 @@ const SHEET_TITLES: Record<SheetKind, string> = {
   repo: "Which repo?",
   model: "Which model?",
   effort: "How much effort?",
+  autonomy: "How much should it decide?",
   after: "Wait for which tasks?",
 };
 
@@ -63,6 +73,7 @@ export interface SpawnActions {
   readonly rescan: (deviceId: string) => void;
   readonly setModel: (model: Model) => void;
   readonly setEffort: (effort: Effort) => void;
+  readonly setAutonomy: (autonomy: AutonomyLevel) => void;
   readonly addAfter: (taskId: string, after: DepAfter) => void;
   readonly removeAfter: (taskId: string) => void;
   readonly setUntil: (until: TaskUntil) => void;
@@ -283,13 +294,24 @@ function ActiveSheet(props: {
   kind: SheetKind;
   model: Model;
   effort: Effort;
+  autonomy: AutonomyLevel;
   /** Derived while the After sheet is open, so the list is not rebuilt on every keystroke. */
   afterSheet: AfterSheetView | null;
   /** True while the exit animation plays; the sheet is already popped from state. */
   closing: boolean;
   onExited: () => void;
 }): JSX.Element {
-  const { actions, view, kind, model: selectedModel, effort: selectedEffort, afterSheet, closing, onExited } = props;
+  const {
+    actions,
+    view,
+    kind,
+    model: selectedModel,
+    effort: selectedEffort,
+    autonomy: selectedAutonomy,
+    afterSheet,
+    closing,
+    onExited,
+  } = props;
   const close = actions.dismissLayer;
 
   if (kind === "after" && afterSheet !== null) {
@@ -386,6 +408,22 @@ function ActiveSheet(props: {
             label={MODEL_LABELS[model]}
             selected={model === selectedModel}
             onClick={() => actions.setModel(model)}
+          />
+        ))}
+      </Sheet>
+    );
+  }
+
+  if (kind === "autonomy") {
+    return (
+      <Sheet title={SHEET_TITLES.autonomy} closing={closing} onExited={onExited} onClose={close}>
+        {AUTONOMY_LEVELS.map((level) => (
+          <SheetItem
+            key={level}
+            label={AUTONOMY_LABELS[level]}
+            sub={AUTONOMY_HINTS[level]}
+            selected={level === selectedAutonomy}
+            onClick={() => actions.setAutonomy(level)}
           />
         ))}
       </Sheet>
@@ -622,6 +660,7 @@ export function SpawnScreen(props: {
   actions: SpawnActions;
   view: ViewModel;
   form: PersistedForm;
+  autonomy: AutonomyLevel;
   /** Text a CLEAR stashed; non-null for as long as UNDO is on offer. */
   promptUndo: string | null;
   sheet: SheetKind | null;
@@ -633,7 +672,7 @@ export function SpawnScreen(props: {
   /** Desktop layout: the queue is a column of its own and the settings pill sits in its header. */
   columns: boolean;
 }): JSX.Element {
-  const { actions, view, form, promptUndo, sheet, machines, now, preview, afterSheet, columns } = props;
+  const { actions, view, form, autonomy, promptUndo, sheet, machines, now, preview, afterSheet, columns } = props;
   const [dropping, setDropping] = useState(false);
   const attachOffered = view.attachments.offered;
   const offline = view.machine !== null && !view.machine.connected;
@@ -966,6 +1005,7 @@ export function SpawnScreen(props: {
           <TileButton tile={view.repoTile} onClick={() => actions.openSheet("repo")} />
           <TileButton tile={view.modelTile} onClick={() => actions.openSheet("model")} />
           <TileButton tile={view.effortTile} onClick={() => actions.openSheet("effort")} />
+          <TileButton tile={view.autonomyTile} onClick={() => actions.openSheet("autonomy")} />
           <TileButton tile={view.afterTile} onClick={() => actions.openSheet("after")} />
         </div>
 
@@ -1022,6 +1062,7 @@ export function SpawnScreen(props: {
           kind={renderedSheet}
           model={form.model}
           effort={form.effort}
+          autonomy={autonomy}
           afterSheet={lastAfterSheet.current}
           closing={sheetClosing}
           onExited={unmountSheet}

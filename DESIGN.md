@@ -5155,8 +5155,12 @@ of this section built.
     (`continuationSpec`), except that a `steer` task continues at `checkpoint` out of plan mode:
     the conversation it resumes holds the plan the user approved, and a session that stopped
     mid-build would otherwise stall on a second approval. The
-    audit line names it only when the request does. Not yet in the PWA, the CLI or
-    Raycast; a fleet default in `settings:main` waits until per-task proves tedious.
+    audit line names it only when the request does. The PWA's form sets it per task
+    (`AppState.autonomy`, outside the persisted form, so every load and every queued task
+    starts back at `checkpoint` and a level picked once never rides along unseen), writes it
+    only off the default and through `withAutonomy`, and shows it on the Queue card by
+    `autonomyOf`; a `needs-input` card with a session link carries "Answer in Claude". Not yet
+    in the CLI or Raycast; a fleet default in `settings:main` waits until per-task proves tedious.
 - **Task ids** (added 2026-10-16, scheduler M2). `SpawnRequest.taskId` is the
   scheduler's dispatch idempotency key: a spawn naming a task some live pane
   already carries is refused `task_running` with that pane's id, before the repo

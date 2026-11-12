@@ -948,14 +948,16 @@ of M4 has landed.
 
 - **Autonomy level** — **Wire, daemon and MCP done** (2026-11-11). A task says how much its session
   decides on its own: `steer`, `checkpoint` (the default) or `auto`. The record is DESIGN.md's
-  "Autonomy level". Follow-ups, not built:
-  - The PWA: a three-way control on the form, the level on the Queue card, and "Answer in
-    Claude" (the claude.ai link) made prominent on a `needs-input` card.
-  - `seanced spawn --autonomy`, then Raycast.
-  - A `question` reason on the session event, so an AskUserQuestion skips the 2-minute
+  "Autonomy level". Follow-ups:
+  - **Done** (2026-11-12): the PWA. A three-way AUTONOMY sheet on the form (starts at `checkpoint`
+    on every load and after every queued task, never remembered), the level as a chip on the Queue
+    card off the default, and "Answer in Claude" (the claude.ai link) as the primary button on a
+    `needs-input` card.
+  - _Not built:_ `seanced spawn --autonomy`, then Raycast.
+  - _Not built:_ a `question` reason on the session event, so an AskUserQuestion skips the 2-minute
     `needs-input` debounce (which exists for auto mode's flicker; a question cannot flicker).
     A frame change.
-  - Only if a re-cut of the transcripts shows that confirmations survive the preamble: a mod that,
+  - _Not built,_ and only if a re-cut of the transcripts shows that confirmations survive the preamble: a mod that,
     at `checkpoint` or `auto`, answers a turn ending on a plain-text "shall I proceed?" with one
     nudge to proceed or ask it properly. First check that an engine hook can continue a turn.
 

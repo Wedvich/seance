@@ -1,5 +1,6 @@
 import type {
   AttachmentRef,
+  AutonomyLevel,
   DepAfter,
   MetricsErrorCode,
   MetricsReply,
@@ -15,6 +16,7 @@ import type {
 } from "@seance/shared";
 import {
   ATTACHMENT_LIMITS,
+  DEFAULT_AUTONOMY,
   failureReasonText,
   queuedTask,
   RequestFailure,
@@ -24,10 +26,12 @@ import {
   TASK_REQUEST_LIMITS,
   TASK_SPEC_LIMITS,
   taskRequest,
+  withAutonomy,
   withReportInstruction,
   type RelayClient,
 } from "@seance/shared";
 import {
+  AUTONOMY_LABELS,
   DEFAULT_FORM,
   DEFAULT_HISTORY_RANGE,
   HELD_MAX,
@@ -181,6 +185,7 @@ export class Store {
     this.#state = {
       relay: client.getState(),
       form,
+      autonomy: DEFAULT_AUTONOMY,
       promptUndo: null,
       sheet: null,
       settings: false,
@@ -485,6 +490,11 @@ export class Store {
 
   setEffort(effort: Effort): void {
     this.#patch({ form: { ...this.#state.form, effort } });
+    this.dismissLayer();
+  }
+
+  setAutonomy(autonomy: AutonomyLevel): void {
+    this.#patch({ autonomy });
     this.dismissLayer();
   }
 
@@ -830,6 +840,13 @@ export class Store {
       refusal(`${holding ? ATTACHMENTS_NOT_HELD : ATTACHMENTS_UNAVAILABLE}.`);
       return;
     }
+    const { autonomy } = this.#state;
+    const level = withAutonomy<Pick<TaskSpec, "autonomy" | "plan">>(autonomy === DEFAULT_AUTONOMY ? {} : { autonomy });
+    // The form has no `plan` of its own, so the level can't contradict it; refused rather than dropped if it ever does.
+    if (level === null) {
+      refusal(`${AUTONOMY_LABELS[autonomy]} can't be sent with this task's plan mode.`);
+      return;
+    }
     const request = taskRequest(form, repo.origin, true);
     // Appended here so the length below is the one the leader reads; it never rewrites a prompt.
     const prompt = reported && request.prompt !== undefined ? withReportInstruction(request.prompt) : request.prompt;
@@ -853,6 +870,8 @@ export class Store {
     };
     const spec: TaskSpec = {
       ...request,
+      // Only off the default: a `checkpoint` task's record stays what it was before levels existed.
+      ...level,
       ...(prompt === undefined ? {} : { prompt }),
       ...(form.machine === null && form.account === null ? {} : { pin }),
       client: "pwa" satisfies SpawnClient,
@@ -895,6 +914,7 @@ export class Store {
         after: [],
         until: "merged",
       },
+      autonomy: DEFAULT_AUTONOMY,
       promptUndo: null,
       attachments: this.#state.attachments.filter((f) => f.stored === null || !sent.has(f.stored.id)),
       attachNotice: null,

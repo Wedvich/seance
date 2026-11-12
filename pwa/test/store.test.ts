@@ -30,6 +30,7 @@ import {
   type ResumeRequest,
   type RoutePreviewReply,
   type StoreRefusal,
+  type AutonomyLevel,
   type Task,
   type TaskCreated,
   type TaskLookup,
@@ -659,6 +660,70 @@ function followEnd(store: Store): unknown {
   const verdict = store.getState().verdict;
   return verdict?.kind === "queued" ? verdict.follow : undefined;
 }
+
+describe("the autonomy level", () => {
+  let timers: ReturnType<typeof captureTimers>;
+
+  beforeEach(() => {
+    timers = captureTimers();
+  });
+
+  afterEach(() => timers.restore());
+
+  async function queuedAt(level: AutonomyLevel | null): Promise<{ store: Store; task: Task }> {
+    const client = new ScriptedClient();
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    if (level !== null) store.setAutonomy(level);
+    await store.spawn();
+    return { store, task: firstCreate(client) };
+  }
+
+  test("checkpoint, the default, writes neither field: the record is what it was before levels", async () => {
+    for (const level of [null, "checkpoint"] as const) {
+      // oxlint-disable-next-line no-await-in-loop -- one store per level, in turn
+      const { task } = await queuedAt(level);
+      expect(task.spec).not.toHaveProperty("autonomy");
+      expect(task.spec).not.toHaveProperty("plan");
+    }
+  });
+
+  test("steer travels with plan: true, so an older leader still dispatches plan mode", async () => {
+    const { task } = await queuedAt("steer");
+    expect(task.spec).toMatchObject({ autonomy: "steer", plan: true });
+  });
+
+  test("auto is written alone", async () => {
+    const { task } = await queuedAt("auto");
+    expect(task.spec.autonomy).toBe("auto");
+    expect(task.spec).not.toHaveProperty("plan");
+  });
+
+  test("is never on the persisted form, and goes back to checkpoint once a task is queued", async () => {
+    const { store } = await queuedAt("auto");
+    expect(store.getState().autonomy).toBe("checkpoint");
+    expect(store.getState().form).not.toHaveProperty("autonomy");
+  });
+
+  test("goes back to checkpoint when a task is held too", async () => {
+    const client = new ScriptedClient({ status: "retrying", registrySettled: false });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    store.attach();
+    store.setAutonomy("steer");
+    await store.spawn();
+    expect(store.getState().held[0]?.task.spec).toMatchObject({ autonomy: "steer", plan: true });
+    expect(store.getState().autonomy).toBe("checkpoint");
+  });
+
+  test("a refused submit keeps the level for the next try", async () => {
+    const client = new ScriptedClient();
+    client.onCreate = async () => ({ ok: false, code: "store_full", message: "full" });
+    const store = new Store(client, { ...DEFAULT_FORM, prompt: "fix it" });
+    store.setAutonomy("auto");
+    await store.spawn();
+    expect(store.getState().verdict?.kind).toBe("unqueued");
+    expect(store.getState().autonomy).toBe("auto");
+  });
+});
 
 describe("holding a task while the relay is down", () => {
   let timers: ReturnType<typeof captureTimers>;

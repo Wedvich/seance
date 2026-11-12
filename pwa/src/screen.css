@@ -668,6 +668,11 @@
   gap: 10px;
 }
 
+/* An odd tile count would leave a hole beside the last one. */
+.grid > :last-child:nth-child(odd) {
+  grid-column: 1 / -1;
+}
+
 .tile {
   display: flex;
   flex-direction: column;
@@ -2686,6 +2691,26 @@
 
 .queue-actions .quiet:disabled {
   opacity: 0.5;
+}
+
+/* The shared primary is the form's full-width button; on a card it sizes to its label like the quiet one. */
+.queue-actions .primary {
+  width: auto;
+  padding: 8px 14px;
+  border-radius: 10px;
+  font-size: 0.875rem;
+  text-decoration: none;
+}
+
+/* Inline in the mono meta line, after the age; back to the body face for `.fleet-badge`'s reason.
+   `.fleet-badge` is styled as a flex item, so here it needs its own box: an inline span's padding
+   and border overlap the line above when the pill wraps onto a line by itself. */
+.queue-autonomy {
+  display: inline-block;
+  margin-left: 6px;
+  font-family: var(--sans);
+  white-space: nowrap;
+  vertical-align: baseline;
 }
 
 /* The card's ⋯: every action it allows (menu.tsx). Pulled into the card's padding so the dots sit
