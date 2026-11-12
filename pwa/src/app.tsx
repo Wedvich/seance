@@ -75,6 +75,7 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
       view={deriveQueue(state, now)}
       relayState={view.relayState}
       notice={state.queueNotice}
+      onDismissNotice={() => store.dismissQueueNotice()}
       pausing={state.pausing}
       discarding={state.discarding}
       focusedTask={state.focusedTask}

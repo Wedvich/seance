@@ -826,6 +826,86 @@
   flex: none;
 }
 
+/* ---- toast (toast.tsx) ---- */
+
+/* In flow above the footer: the list shrinks to end above it, so no card sits out of reach under it. */
+.toast {
+  flex: none;
+  margin: 0 var(--gutter) var(--gap);
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 12px 8px 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--sur3);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.3);
+  animation: toast-in 0.2s ease-out;
+}
+
+/* Tinted: in the light theme --sur3 is the cards' own white, and the shadow alone loses it among them. */
+.toast-err {
+  border-color: color-mix(in srgb, var(--err) 35%, var(--line));
+  background: color-mix(in srgb, var(--err) 8%, var(--sur3));
+}
+
+/* Stretched, so the accent runs the toast's full height beside a wrapped sentence. */
+.toast .banner-rule {
+  align-self: stretch;
+}
+
+.toast-err .banner-rule {
+  background: var(--err);
+}
+
+.toast-text {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  align-self: center;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.toast-close {
+  flex: none;
+  display: grid;
+  place-items: center;
+  position: relative;
+  width: 32px;
+  height: 32px;
+  margin: -6px 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg2);
+  cursor: pointer;
+}
+
+/* A finger-sized target around the small glyph, kept inside the toast's own box. */
+.toast-close::before {
+  content: "";
+  position: absolute;
+  inset: -6px;
+}
+
+@media (hover: hover) {
+  .toast-close:hover {
+    color: var(--fg);
+  }
+}
+
+.toast-close:active {
+  color: var(--fg);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
 /* ---- target grid ---- */
 
 .grid {

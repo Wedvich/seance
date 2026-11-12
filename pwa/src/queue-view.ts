@@ -123,7 +123,7 @@ export interface QueueRow {
   readonly canPass: boolean;
   /** Continue is the card's primary action: a blocked PR is what the person was alerted to fix. */
   readonly inlinePrimary: boolean;
-  /** A waiting task's Start now menu item: always shown, greyed (`enabled`) by the split button's rules; null once it is no longer waiting. */
+  /** A waiting task's Start now menu item: always shown, greyed (`enabled`) by the split button's rules and until it is `ready`; null once it is no longer waiting. */
   readonly startNow: StartNowItem | null;
   /** `primaryAction` of the flags above: the card's one inline button. */
   readonly inline: QueueInlineAction | null;
@@ -240,6 +240,16 @@ function dotOf(task: Task): QueueDot | null {
   if (phase === "placed") return "ok";
   if (phase === "waiting" || phase === "dispatching") return "auto";
   return null;
+}
+
+/**
+ * `run-now` takes only a `ready` task and answers anything earlier `not_waiting`, so Start now
+ * greys until then rather than offering a tap that is always refused. Shown still: it says why.
+ */
+function startNowFor(task: Task): StartNowItem {
+  if (task.state === "blocked") return { sub: "Waiting on the tasks it depends on", enabled: false };
+  if (task.state === "queued") return { sub: "Waiting for the scheduler", enabled: false };
+  return decisionStartNowItem(task.decision ?? null);
 }
 
 /** `idleSince`, on this device's clock, is set only for a task the leader released idle. */
@@ -409,7 +419,7 @@ function rowOf(
     continueOffer(task, state.relay.machines, tasks, context).ok && deriveContinueAvailability(state.relay);
   const canPass = passOffer(task, state.relay.machines, derivePassAvailability(state.relay)).ok;
   const waiting = task.state === "queued" || task.state === "blocked" || task.state === "ready";
-  const item = decisionStartNowItem(task.decision ?? null);
+  const item = startNowFor(task);
   const startNow = waiting ? { ...item, enabled: item.enabled && deriveRunNowAvailability(state.relay) } : null;
   const session = sessionOf(task);
   const autonomy = autonomyOf(task.spec);
