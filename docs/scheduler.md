@@ -1609,6 +1609,17 @@ same PR, with the reason.
   such a machine as ineligible for `auto` (it can't know which account a spawn would bill,
   and can't dedupe a re-dispatch), while `seanced spawn --now`, the only direct path left, keeps working. Self-update makes
   this a short window.
+- **An admitted task the leader never placed** (open, seen once, 2026-11-12). On ubuntu CI (run
+  43224839001, attempt 1) `e2e/mcp.test.ts`'s pinned task logged `op=admit` and then nothing for
+  20s: no reservation, no spawn, no store timeout, no refused write, the daemon's socket up
+  throughout. The likeliest reading is a route that chose no machine on the admitting pass, then no
+  registry change, nudge or 30s tick inside the test's wait. In the same suite the broker's app-role
+  connect failed `relay_unavailable` twice (10s each) while the daemon's own socket still answered
+  store reads, so the remote machine never listed. One cause in the shared client's registry
+  settling would explain both, but nothing proves it. Not reproduced locally: 12 runs, idle, under
+  CPU load and as a full suite. The test's timeout messages now carry the route decision and the
+  remote daemon's log, so the next occurrence names the mechanism. If it was a route rejection that
+  cleared on its own, a placement that waits on the 30s tick is a product gap, not only a test one.
 - **Reversibility is only as real as the adapter boundary.** If daemon code starts reaching into
   `scheduler/` internals, or the library grows an import from `daemon/`, the move to a fixed
   box becomes the rewrite this design exists to avoid. Enforced the way `raycast/` enforces
