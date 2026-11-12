@@ -62,9 +62,12 @@ describe("pass-close", () => {
 
   test("a malformed request is invalid_request, with nothing armed", async () => {
     for (const payload of [{}, { taskId: 7 }, { taskId: "has space" }, null, "t-1"]) {
+      lines.length = 0;
       // oxlint-disable-next-line no-await-in-loop -- each case is its own reply
       const reply = await createHandler(ctx(ok))(request(payload), SCHEDULER_ID);
       expect(reply?.payload).toMatchObject({ ok: false, code: "invalid_request" });
+      // Audited with no task: nothing in it parsed.
+      expect(logged()).toContain("audit pass-close origin=relay task=- outcome=invalid_request");
     }
     expect(armed).toEqual([]);
   });

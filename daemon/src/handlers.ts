@@ -550,7 +550,10 @@ async function handlePushBranch(
 ): Promise<PushBranchResponse> {
   if (!scheduler) return { ok: false, code: "invalid_request", message: "only the scheduler pushes a task's branch" };
   const request = parsePushBranchRequest(payload);
-  if (request === null) return { ok: false, code: "invalid_request", message: "malformed push-branch request" };
+  if (request === null) {
+    await audit.malformed();
+    return { ok: false, code: "invalid_request", message: "malformed push-branch request" };
+  }
   return pushForTask(ctx, audit, request.taskId, {
     ...(request.expect === undefined ? {} : { expect: request.expect }),
     startDeadlineMs: PUSH_START_DEADLINE_MS,
@@ -599,7 +602,10 @@ async function handlePassClose(
 ): Promise<PassCloseResponse> {
   if (!scheduler) return { ok: false, code: "invalid_request", message: "only the scheduler arms a pass's close" };
   const request = parsePassCloseRequest(payload);
-  if (request === null) return { ok: false, code: "invalid_request", message: "malformed pass-close request" };
+  if (request === null) {
+    await audit(null, "invalid_request");
+    return { ok: false, code: "invalid_request", message: "malformed pass-close request" };
+  }
   if (ctx.armPassClose === undefined) {
     return { ok: false, code: "unsupported", message: "this daemon runs no session-event ingest" };
   }

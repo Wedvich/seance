@@ -251,15 +251,20 @@ export function despawnAudit(origin: SpawnOrigin, sink: AuditSink): DespawnAudit
 /**
  * A `push-branch`: which task's worktree, in which repo, and what came of it — a code, `pushed` or `unchanged`
  * (origin already held the tip) — with the first seven characters of the tip. Never the branch, its remote name or a
- * URL: they are the user's own text (DESIGN.md, "Passing to a successor").
+ * URL: they are the user's own text (DESIGN.md, "Passing to a successor"). `malformed`: a scheduler-sealed request
+ * that did not parse, so it names no task.
  */
 export interface PushAudit {
+  readonly malformed: () => Promise<void>;
   readonly refused: (taskId: string, outcome: string) => Promise<void>;
   readonly done: (taskId: string, repo: string, outcome: string, tip: string | undefined) => Promise<void>;
 }
 
 export function pushAudit(origin: SpawnOrigin, sink: AuditSink): PushAudit {
   return {
+    malformed: async () => {
+      await sink(`audit push origin=${origin} task=- outcome=invalid_request`);
+    },
     refused: async (taskId, outcome) => {
       await sink(`audit push origin=${origin} task=${quote(taskId)} outcome=${outcome}`);
     },
@@ -270,13 +275,16 @@ export function pushAudit(origin: SpawnOrigin, sink: AuditSink): PushAudit {
   };
 }
 
-/** A `pass-close` the scheduler sent: whether it armed a pane's close at its turn end. Names the task, never a pane. */
+/**
+ * A `pass-close` the scheduler sent: whether it armed a pane's close at its turn end. Names the task, never a pane;
+ * `null` for one that did not parse (`task=-`).
+ */
 export function passCloseAudit(
   origin: SpawnOrigin,
   sink: AuditSink,
-): (taskId: string, outcome: string) => Promise<void> {
+): (taskId: string | null, outcome: string) => Promise<void> {
   return async (taskId, outcome) => {
-    await sink(`audit pass-close origin=${origin} task=${quote(taskId)} outcome=${outcome}`);
+    await sink(`audit pass-close origin=${origin} task=${taskId === null ? "-" : quote(taskId)} outcome=${outcome}`);
   };
 }
 
