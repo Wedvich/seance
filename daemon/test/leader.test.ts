@@ -1111,8 +1111,8 @@ describe("leader settings", () => {
 
 describe("leader push", () => {
   test("a question's alert pushes `question: true`; a plain wait pushes no such key", () => {
-    const base = { kind: "needs-input", taskId: "t-1", since: 3, escalated: false, message: "m" } as const;
-    expect(alertToPush({ ...base, question: true }, 5)).toEqual({
+    const waiting = { kind: "needs-input", taskId: "t-1", since: 3, escalated: false, message: "m" } as const;
+    expect(alertToPush({ ...waiting, question: true }, 5)).toEqual({
       v: 1,
       kind: "needs-input",
       at: 5,
@@ -1121,7 +1121,7 @@ describe("leader push", () => {
       escalated: false,
       question: true,
     });
-    expect(alertToPush(base, 5)).toEqual({
+    expect(alertToPush(waiting, 5)).toEqual({
       v: 1,
       kind: "needs-input",
       at: 5,
