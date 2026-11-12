@@ -2074,11 +2074,13 @@ describe("traits in the tools' answers", () => {
 
 describe("keepFree in list_machines", () => {
   test("an exclave advertising keepFree names them; one without shows no field", async () => {
+    // oxlint-disable no-map-spread -- a fixture, built once per test
     const machines = traitMachines().map((m) =>
       m.deviceId === "device-wsl"
         ? { ...m, exclaves: (m.exclaves ?? []).map((e) => ({ ...e, keepFree: ["atlas"] })) }
         : m,
     );
+    // oxlint-enable no-map-spread
     const fake = leaderRelay([], machines);
     fake.setState({ scheduler: { kind: "ready", deviceId: "device-thad", term: 3 } });
     const lazy = new LazyRelay({ create: () => fake });

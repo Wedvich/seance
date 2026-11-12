@@ -1156,8 +1156,8 @@ describe("keepFree — a score penalty for placing here what does not need this 
       status: status({ quota: [obs(0), obs(1)] }),
     });
     const decision = decide([m]);
-    const keepFree = (exclave: string): number | undefined =>
-      decision.candidates.find((c) => c.exclave === exclave)?.score?.components.keepFree;
+    const keepFree = (id: string): number | undefined =>
+      decision.candidates.find((c) => c.exclave === id)?.score?.components.keepFree;
     expect([keepFree("main"), keepFree("alt")]).toEqual([1, undefined]);
     expect(decision.chosen?.exclave).toBe("alt");
   });
