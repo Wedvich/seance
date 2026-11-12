@@ -317,9 +317,11 @@ Séance's noise is cover for a real intruder.
    type-only imports counted, and fails on any module that spawns, drives tmux, dispatches ops,
    brokers, leads, or writes the queue or the store, and its own code may call no write method of
    either client — it never enqueues, cancels, writes the store, sends a request or a
-   `status`; it answers exactly one op, `archive-status`, only when sealed `from: "app"` to its
-   own device id and past the seat leg's replay guard, with counts, sizes and timestamps only
-   (added 2026-11-12, item 6). Even its own update is not run by the process that holds the key (added 2026-11-12,
+   `status`; it answers exactly three ops, `archive-status`, `archive-metrics` and
+   `archive-tasks`, only when sealed `from: "app"` to its own device id and past the seat leg's
+   replay guard, each through its own parser into a fresh value, with counts, sizes and
+   timestamps (added 2026-11-12, item 6), metric points, and task records stripped of prompt,
+   attachments and raw account ids, which the archive never stored (added 2026-11-12, item 7). Even its own update is not run by the process that holds the key (added 2026-11-12,
    item 5): on the fleet's announce it writes one request file, and a separate unit, with the same
    user and no credential, runs git and `bun install`. `install`, `uninstall` and `update` load
    the daemon's exec path only through `import()` in their own command branches, never into
@@ -620,7 +622,9 @@ Séance's noise is cover for a real intruder.
    than the one on `ARCHIVIST` (`register role-refused`) and writes nothing, so it cannot take the
    seat or hide an entry of its own as one. A seed copied out of the seat's `state.json` registers
    as the seat, which today buys nothing: the relay answers no op for it and apps make no
-   `Machine` of it (an app does ask the archivist itself one op, `archive-status`, below). Remedy as for a leader's seed: a new identity, its id on `ARCHIVIST`.
+   `Machine` of it (an app does ask the archivist itself three read ops, `archive-status`,
+   `archive-metrics` and `archive-tasks`, below; they are sealed under the PSK, so a seed without
+   it can take them only to leave them unanswered). Remedy as for a leader's seed: a new identity, its id on `ARCHIVIST`.
 4. **Relay compromise** (T1557 — the relay _is_ the AiTM position). Handled:
    AAD binding makes re-addressing fail closed. Residual is availability and
    traffic analysis, both accepted — the accepted kind is a relay that stops
@@ -1383,6 +1387,8 @@ Who owns each frame in code — the place to change when a frame changes:
 | `status` (relay→app)                                                | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`                                                                                                                                                                                                                                                                                               | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped                                                                                                                                                                                                                                                                                                  |
 | op `metrics`                                                        | `pwa/src/store.ts` and `archivist/src/metrics-collect.ts` via `shared/src/app-client.ts` `metrics()`, gated and parsed                                                                                                                                                                                                                                                             | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts` (tiers in `metrics-tiers.ts`); sized at the transport (`#sealReply`, `daemon/src/relay-client.ts`)                                                                                                                                                                                                                        |
 | op `archive-status`                                                 | `pwa/src/archivist-store.ts` via `shared/src/app-client.ts` `archiveStatus()`                                                                                                                                                                                                                                                                                                      | `archivist/src/health.ts` via the seat's `handle` in `archivist/src/run.ts` (sealed `from: "app"` only)                                                                                                                                                                                                                                                                                                 |
+| op `archive-metrics`                                                | `shared/src/app-client.ts` `archiveMetrics()` (no caller yet; the PWA's charts are item 8)                                                                                                                                                                                                                                                                                         | `archivist/src/query.ts` → `queryArchive` in `archivist/src/metrics-archive.ts`, via the seat's `handle` (sealed `from: "app"` only, `parseArchiveMetricsRequest`)                                                                                                                                                                                                                                      |
+| op `archive-tasks`                                                  | `shared/src/app-client.ts` `archiveTasks()` (no caller yet; the PWA's task history is item 9)                                                                                                                                                                                                                                                                                      | `archivist/src/query.ts` → `queryTasks` in `archivist/src/archive.ts`, via the seat's `handle` (sealed `from: "app"` only, `parseArchiveTasksRequest`)                                                                                                                                                                                                                                                  |
 | op `session-event` (→`"scheduler"`)                                 | `daemon/src/session-events.ts` via `sendToScheduler()` in `daemon/src/relay-client.ts`; on the leader's own machine, `Leader.onSession` in process                                                                                                                                                                                                                                 | `daemon/src/leader.ts`: opened by the term's leg (`onEvent` in `shared/src/app-client.ts`, under the daemon's one scheduler `ReplayGuard`), validated by `parseSessionEvent`, applied by `Scheduler.onSession`                                                                                                                                                                                          |
 | `store-list` / `store-get` / `store-put` / `store-delete`           | apps via `shared/src/app-client.ts` (list/get/create); the leader's daemon socket via `daemon/src/queue-store.ts` and `daemon/src/settings-store.ts`, with `term` on writes; the fleet broker's enqueue (`daemon/src/broker.ts`)                                                                                                                                                   | parsed and bounded in `relay/src/wire.ts`, rules in `relay/src/store.ts`, dispatched by `relay/src/hub.ts` `#onStoreFrame`                                                                                                                                                                                                                                                                              |
 | `store-listed` / `store-record` / `store-written` / `store-refused` | `relay/src/hub.ts` `#onStoreFrame`, answering from `relay/src/store.ts`                                                                                                                                                                                                                                                                                                            | `parseStoreReply` in `shared/src/parse.ts`; correlated on `re` by the app-client, which settles a reply it cannot read as `null` at once, and by the queue and settings stores                                                                                                                                                                                                                          |
@@ -1628,7 +1634,8 @@ requesting socket only.
   same process redialling after a network change (its backoff caps at 60 s) still
   owes the answer, and failing its spawn as "may have landed" would throw away a
   real reply. A presence push cannot say which it is; the blob can.
-  - **A read** (`RESENDABLE_OPS`: `sessions`, `metrics`, `queue`, `route-preview`)
+  - **A read** (`RESENDABLE_OPS`: `sessions`, `metrics`, `archive-status`,
+    `archive-metrics`, `archive-tasks`, `queue`, `route-preview`)
     whose target is shown gone or offline, or whose term moved on, waits a
     one-second grace (`STRANDED_GRACE_MS`), then waits for the target to come back
     and goes again under its original id and deadline. A machine back under
@@ -1671,7 +1678,8 @@ requesting socket only.
   opened but was not shaped like a `MachineInfo`, names its sender instead.
   Payloads are never logged, on any tier.
 - **`OP_TIMEOUT_MS`** lives in `shared/` (sessions 10s, rescan 15s, spawn
-  210s, despawn 20s, metrics 15s) because the right values derive from daemon internals — an attachment
+  210s, despawn 20s, metrics 15s; the archivist's `archive-status` 10s, `archive-metrics` 15s,
+  `archive-tasks` 10s) because the right values derive from daemon internals — an attachment
   download's 120s deadline plus `exec.ts`'s 60s command timeout and `spawn.ts`'s 3s pane-death check — and would silently
   drift if kept in PWA code. It is a backstop; the daemon returns a structured
   error on its own.
@@ -10702,6 +10710,35 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   restart, since the run process has no git; it first appears one update after this lands, with
   no fallback. There is no capability gate: an archivist that predates the op never answers, and
   the app's 10 s timeout leaves a card without rows. No `status`, no store frame.
+- **The query ops** (item 7, A31–A34). `archive-metrics` and `archive-tasks` pass the same gate
+  as `archive-status` (`answerApp` in `archivist/src/answer.ts`: sealed `from: "app"`, no `re`,
+  the op's own parser, `invalid_request` on a malformed one, `internal_error` naming only the op
+  on a throw), and the app sends both through `RelayClient` (`archiveMetrics()`,
+  `archiveTasks()`), resendable reads like `archive-status`, with no capability gate for the
+  same reason. Nothing of a request is logged: a task query may carry title text.
+  - `archive-metrics` is `MetricsRequest` naming exactly one of `machine` (a device id, the
+    series' observer label) or `account` (its `account:` store key), with two more steps, 6 h and
+    1 d (`ARCHIVE_METRICS_STEPS`), under the same `METRICS_MAX_POINTS` cap, so a year is
+    reachable at 1 d. The reply is a `MetricsReply`. A machine gets its own observed series as
+    stored at the step's tier, and at 6 h or 1 d the average of its hourly rows per bucket. An
+    account gets every series labelled with it, from any observer and exclave, merged at query
+    time (A33): per bucket the newest observation wins, and rows at the same instant (every row
+    of a rolled tier sits at its bucket's start) take the larger value, since within a window
+    usage only rises; the merged series drop `machine` and `exclave`. Series are picked by label
+    in the `series` table first, so a tier is read only for those ids, bound as one JSON array.
+  - `archive-tasks` is a page, newest first by end time, filtered by `repo`, `outcome` (`done`,
+    `failed`, `cancelled`), `machine`, `account`, `since`/`until` and a `title` substring
+    (`LIKE` with `%`, `_` and `\` escaped); every filter is a bound parameter. The archive has no
+    finish time, so end time is `first_archived_at`, the first time the archivist saw the task
+    finished; ties go to `created_at`, then id, all descending, and `before` is a keyset cursor
+    on those three. `limit` is 1–50 (`ARCHIVE_TASKS_PAGE` 20 by default), and a page is also
+    filled only to `REPLY_JSON_BUDGET`, keeping at least one row; `next` points past the last row
+    it consumed whenever one is left, so a page cut by size loses nothing, and `total` counts
+    every match. Each row carries the task record, its end time, the machine's last-known name
+    and the account's alias. The record is parsed and passed through `archivedTask` again on the
+    way out, so even a row an older build or a hand edit stored whole sends no prompt, no
+    attachment manifest and no raw account id; a record that no longer parses is skipped, counted
+    in one warning, and still consumed.
 - **The read leg.** A second, app-role socket from `appRelayClient` with the PSK's key and the
   account key derived from it, as the leader's own app leg reads (A7); `archivist/src/collect.ts`
   reads the store through it, and `archivist/src/metrics-collect.ts` the registry's `status`
