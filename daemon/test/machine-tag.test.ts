@@ -76,6 +76,8 @@ describe("machine tag on the tmux server", () => {
   test("the republish never starts a server of its own", async () => {
     await started();
     await tmux(["kill-server"]);
+    // The server exits after kill-server returns; the negative below starts from it gone.
+    await pollUntil(async () => !(await serverUp()), "the tmux server gone");
     await Bun.sleep(REPUBLISH_MS * 5);
     expect(await serverUp()).toBe(false);
   });

@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { beforeAll, describe, expect, jest, spyOn, test } from "bun:test";
 import {
   APP_ID,
   AT_REST_OPS,
@@ -14,6 +14,8 @@ import {
   sealTaskRecord,
   SCHEDULER_ID,
   seal,
+  STORE_LIST_TIMEOUT_MS,
+  STORE_TIMEOUT_MS,
   STORE_MAX_CT_LENGTH,
   toBase64,
   type AtRestOp,
@@ -59,8 +61,6 @@ interface RigOpts {
   /** The term the adapter writes under; the relay's is 2. */
   readonly term?: number;
   readonly storeTimeoutMs?: number;
-  /** Defaults to `storeTimeoutMs`: production's longer list deadline would make a held list wait it out. */
-  readonly storeListTimeoutMs?: number;
   readonly onStoreChanged?: (key: string, version: number) => void;
 }
 
@@ -80,8 +80,7 @@ async function withRig(body: (rig: Rig) => Promise<void>, opts: RigOpts = {}): P
         { id: crypto.randomUUID(), ts: Date.now(), op: "machine-info", payload: {} },
       ),
     handle: () => Promise.resolve(null),
-    storeTimeoutMs: opts.storeTimeoutMs ?? 300,
-    storeListTimeoutMs: opts.storeListTimeoutMs ?? opts.storeTimeoutMs ?? 300,
+    ...(opts.storeTimeoutMs === undefined ? {} : { storeTimeoutMs: opts.storeTimeoutMs }),
     ...(opts.onStoreChanged === undefined ? {} : { onStoreChanged: opts.onStoreChanged }),
   });
   client.start();
@@ -100,6 +99,29 @@ async function drain(relay: TestRelay): Promise<StoreRequestFrame[]> {
   const frames: StoreRequestFrame[] = [];
   while (relay.storeFrames.size > 0) frames.push(await relay.storeFrames.next());
   return frames;
+}
+
+/**
+ * Runs `call` against a relay that never answers and times it out on a fake clock. A real short
+ * deadline would race every answered request on a slow runner; production's leaves a held one
+ * waiting it out.
+ */
+async function unanswered<T>(relay: TestRelay, call: () => Promise<T>, limitMs = STORE_TIMEOUT_MS): Promise<T> {
+  await drain(relay);
+  relay.holdStoreReplies = true;
+  // Armed on the real clock, so its own deadline still runs.
+  const arrived = relay.storeFrames.next();
+  jest.useFakeTimers();
+  try {
+    const pending = call();
+    pending.catch(() => {});
+    await arrived;
+    jest.advanceTimersByTime(limitMs);
+    return await pending;
+  } finally {
+    jest.useRealTimers();
+    relay.holdStoreReplies = false;
+  }
 }
 
 const taskEnv = (record: TaskRecord, from = SCHEDULER_ID, k = key): Promise<Envelope> =>
@@ -328,9 +350,7 @@ describe("write mapping", () => {
 
   test("no answer in time, a wrong version, an unreadable reply and a reply of the wrong kind are all indeterminate", async () => {
     await withRig(async ({ relay, store }) => {
-      relay.holdStoreReplies = true;
-      expect(await store.put("a", 0, task("a"))).toEqual({ ok: false, code: "indeterminate" });
-      relay.holdStoreReplies = false;
+      expect(await unanswered(relay, () => store.put("a", 0, task("a")))).toEqual({ ok: false, code: "indeterminate" });
 
       relay.replyNextStore((frame) => ({ t: "store-written", re: frame.id, version: 99 }));
       expect(await store.put("b", 0, task("b"))).toEqual({ ok: false, code: "indeterminate" });
@@ -360,48 +380,46 @@ describe("write mapping", () => {
   });
 
   test("a send that throws leaves nothing pending, reads as no socket and redials so the relay hears the daemon again", async () => {
-    await withRig(async ({ relay, client, store }) => {
-      const real = WebSocket.prototype.send;
-      const refuse = spyOn(WebSocket.prototype, "send").mockImplementation(function (
-        this: WebSocket,
-        data: Parameters<typeof real>[0],
-      ) {
-        if (typeof data === "string" && data.includes('"t":"store-')) throw new Error("socket is closing");
-        return real.call(this, data);
-      });
-      const warn = spyOn(log, "warn");
-      try {
-        const frame = { t: "store-get", id: crypto.randomUUID(), key: "task:a" } as const;
-        const failure = await client.store(frame).catch((err: unknown) => err);
-        expect(failure).toBeInstanceOf(RequestFailure);
-        expect(failure).toMatchObject({ reason: "disconnected" });
-        await expect(store.put("a", 0, task("a"))).rejects.toBeInstanceOf(StoreRevoked);
-        // The socket was left open by the failed send; without a close nothing would register again.
-        await relay.registers.next();
-        // A non-event cannot be polled for: wait past the 300ms deadline a leaked timer would fire at.
-        await Bun.sleep(400);
-        expect(warn.mock.calls.filter(([line]) => String(line).includes("store timeout"))).toEqual([]);
-      } finally {
-        refuse.mockRestore();
-        warn.mockRestore();
-      }
-    });
+    await withRig(
+      async ({ relay, client, store }) => {
+        const real = WebSocket.prototype.send;
+        const refuse = spyOn(WebSocket.prototype, "send").mockImplementation(function (
+          this: WebSocket,
+          data: Parameters<typeof real>[0],
+        ) {
+          if (typeof data === "string" && data.includes('"t":"store-')) throw new Error("socket is closing");
+          return real.call(this, data);
+        });
+        const warn = spyOn(log, "warn");
+        try {
+          const frame = { t: "store-get", id: crypto.randomUUID(), key: "task:a" } as const;
+          const failure = await client.store(frame).catch((err: unknown) => err);
+          expect(failure).toBeInstanceOf(RequestFailure);
+          expect(failure).toMatchObject({ reason: "disconnected" });
+          await expect(store.put("a", 0, task("a"))).rejects.toBeInstanceOf(StoreRevoked);
+          // The socket was left open by the failed send; without a close nothing would register again.
+          await relay.registers.next();
+          // A non-event cannot be polled for: wait past the 300ms deadline a leaked timer would fire at.
+          await Bun.sleep(400);
+          expect(warn.mock.calls.filter(([line]) => String(line).includes("store timeout"))).toEqual([]);
+        } finally {
+          refuse.mockRestore();
+          warn.mockRestore();
+        }
+      },
+      { storeTimeoutMs: 300 },
+    );
   });
 
   test.skipIf(bunFragmentedFrameBroken)(
     "a list waits out its own, longer deadline while a single read gives up at the short one",
     async () => {
-      await withRig(
-        async ({ relay, store }) => {
-          relay.holdStoreReplies = true;
-          await expect(store.get("a")).rejects.toThrow("timed out after 200ms");
-          const list = Date.now();
-          await expect(store.list()).rejects.toThrow("timed out after 1000ms");
-          // A timer cannot fire early, so a lower bound is not a race.
-          expect(Date.now() - list).toBeGreaterThanOrEqual(950);
-        },
-        { storeTimeoutMs: 200, storeListTimeoutMs: 1_000 },
-      );
+      await withRig(async ({ relay, store }) => {
+        await expect(unanswered(relay, () => store.get("a"))).rejects.toThrow(`timed out after ${STORE_TIMEOUT_MS}ms`);
+        await expect(unanswered(relay, () => store.list(), STORE_LIST_TIMEOUT_MS)).rejects.toThrow(
+          `timed out after ${STORE_LIST_TIMEOUT_MS}ms`,
+        );
+      });
     },
   );
 
@@ -441,11 +459,9 @@ describe("read mapping", () => {
         relay.replyNextStore((frame) => ({ t: "store-listed", re: frame.id, records: [], next: "task:z" }));
         await expect(store.list()).rejects.toThrow();
 
-        relay.holdStoreReplies = true;
-        await expect(store.list()).rejects.toThrow("timed out");
-        await expect(store.get("a")).rejects.toThrow("timed out");
-        await expect(store.getPause()).rejects.toThrow("timed out");
-        relay.holdStoreReplies = false;
+        await expect(unanswered(relay, () => store.list(), STORE_LIST_TIMEOUT_MS)).rejects.toThrow("timed out");
+        await expect(unanswered(relay, () => store.get("a"))).rejects.toThrow("timed out");
+        await expect(unanswered(relay, () => store.getPause())).rejects.toThrow("timed out");
 
         const env = await taskEnv({ version: 1, task: task("other") });
         relay.replyNextStore((frame) => ({
@@ -518,26 +534,23 @@ describe("pause", () => {
 
 describe("size", () => {
   test("a full prefix of full-size records arrives whole, as one frame", async () => {
-    await withRig(
-      async ({ relay, store }) => {
-        const env: Envelope = {
-          v: 1,
-          to: SCHEDULER_ID,
-          from: SCHEDULER_ID,
-          iv: "AAAAAAAAAAAAAAAA",
-          ct: "A".repeat(STORE_MAX_CT_LENGTH),
-        };
-        relay.replyNextStore((frame) => ({
-          t: "store-listed",
-          re: frame.id,
-          records: Array.from({ length: 128 }, (_, i) => ({ key: `task:size-${i}`, version: 2, env })),
-        }));
-        const listed = await store.list();
-        expect(listed).toHaveLength(128);
-        expect(listed.every((e) => e.reason === "unopenable")).toBe(true);
-      },
-      { storeTimeoutMs: 10_000 },
-    );
+    await withRig(async ({ relay, store }) => {
+      const env: Envelope = {
+        v: 1,
+        to: SCHEDULER_ID,
+        from: SCHEDULER_ID,
+        iv: "AAAAAAAAAAAAAAAA",
+        ct: "A".repeat(STORE_MAX_CT_LENGTH),
+      };
+      relay.replyNextStore((frame) => ({
+        t: "store-listed",
+        re: frame.id,
+        records: Array.from({ length: 128 }, (_, i) => ({ key: `task:size-${i}`, version: 2, env })),
+      }));
+      const listed = await store.list();
+      expect(listed).toHaveLength(128);
+      expect(listed.every((e) => e.reason === "unopenable")).toBe(true);
+    });
   });
 });
 

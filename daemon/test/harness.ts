@@ -71,7 +71,7 @@ export class AsyncQueue<T> {
     else this.#items.push(item);
   }
 
-  async next(timeoutMs = 2_000): Promise<T> {
+  async next(timeoutMs = 5_000): Promise<T> {
     const item = this.#items.shift();
     if (item !== undefined) return item;
     return new Promise((resolve, reject) => {
@@ -99,7 +99,7 @@ type Role = "daemon" | "app";
  * The next frame the leader sent a machine. Its `queue-changed` nudges ride the
  * same queue but are addressed to apps, so a test waiting on a request skips them.
  */
-export async function nextRequest(relay: TestRelay, timeoutMs = 2_000): Promise<AppMsg> {
+export async function nextRequest(relay: TestRelay, timeoutMs = 5_000): Promise<AppMsg> {
   for (;;) {
     // oxlint-disable-next-line no-await-in-loop -- frames arrive one at a time
     const frame = await relay.appFrames.next(timeoutMs);

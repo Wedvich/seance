@@ -1,6 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
 import type { MachineStatus } from "@seance/shared";
-import { pollUntil } from "../test/fixtures.ts";
 import type { Config } from "./config.ts";
 import { MetricsStore } from "./metrics-store.ts";
 import { startStatusLoop, type StatusLoop } from "./run-collectors.ts";
@@ -37,10 +36,36 @@ interface Sent {
 
 let running: StatusLoop | null = null;
 
+/** On a 500 ms slot, so a phase into the interval is an offset from it. */
+const BASE_MS = 1_760_000_000_000;
+
+// Every wait here is the loop's own timer against the floor or a slot: on a real clock each one
+// raced the sample's async chain and a loaded runner. On this one a timer fires only when advanced.
+beforeEach(() => {
+  jest.useFakeTimers();
+  jest.setSystemTime(BASE_MS);
+});
+
 afterEach(() => {
   running?.stop();
   running = null;
+  jest.useRealTimers();
 });
+
+/** Lets a sample's promise chain land; no timer fires meanwhile, the clock being fake. */
+async function settle(): Promise<void> {
+  for (let round = 0; round < 20; round += 1) {
+    // oxlint-disable-next-line no-await-in-loop -- each round is one turn of the event loop
+    await new Promise((resolve) => {
+      setImmediate(resolve);
+    });
+  }
+}
+
+async function advance(ms: number): Promise<void> {
+  jest.advanceTimersByTime(ms);
+  await settle();
+}
 
 interface Holds {
   /** The first `sessions` read (so the first tick) waits for it. */
@@ -101,20 +126,22 @@ describe("startStatusLoop refresh", () => {
     let draining = false;
     const { loop, sent } = start(() => draining);
     loop.sampleNow();
-    await pollUntil(() => sent.length === 1, "the first status");
+    await settle();
+    expect(sent).toHaveLength(1);
     expect(sent[0]?.status).not.toHaveProperty("drn");
 
     draining = true;
     loop.refresh();
     loop.refresh();
-    await Bun.sleep(100); // a non-event can't be polled
+    await advance(FLOOR_MS - 1);
     expect(sent).toHaveLength(1);
 
-    await pollUntil(() => sent.length === 2, "the refreshed status");
+    await advance(1);
+    expect(sent).toHaveLength(2);
     const [first, second] = sent;
     expect(second?.status.drn).toBe(true);
-    expect((second?.atMs ?? 0) - (first?.atMs ?? 0)).toBeGreaterThanOrEqual(FLOOR_MS);
-    await Bun.sleep(FLOOR_MS * 2); // coalesced: no second refresh follows
+    expect((second?.atMs ?? 0) - (first?.atMs ?? 0)).toBe(FLOOR_MS);
+    await advance(FLOOR_MS * 2); // coalesced: no second refresh follows
     expect(sent).toHaveLength(2);
   });
 
@@ -122,25 +149,28 @@ describe("startStatusLoop refresh", () => {
     let draining = true;
     const { loop, sent } = start(() => draining);
     loop.refresh();
-    await pollUntil(() => sent.length === 1, "a refresh with nothing sent before it");
+    await settle();
+    expect(sent).toHaveLength(1);
     expect(sent[0]?.status.drn).toBe(true);
 
-    await Bun.sleep(FLOOR_MS * 1.5);
+    await advance(FLOOR_MS * 1.5);
     draining = false;
     const asked = Date.now();
     loop.refresh();
-    await pollUntil(() => sent.length === 2, "the refresh past the floor");
+    await settle();
+    expect(sent).toHaveLength(2);
     expect(sent[1]?.status).not.toHaveProperty("drn");
-    expect((sent[1]?.atMs ?? Infinity) - asked).toBeLessThan(FLOOR_MS);
+    expect(sent[1]?.atMs).toBe(asked);
   });
 
   test("stop drops a pending refresh", async () => {
     const { loop, sent } = start(() => true);
     loop.sampleNow();
-    await pollUntil(() => sent.length === 1, "the first status");
+    await settle();
+    expect(sent).toHaveLength(1);
     loop.refresh();
     loop.stop();
-    await Bun.sleep(FLOOR_MS * 2); // a non-event can't be polled
+    await advance(FLOOR_MS * 2);
     expect(sent).toHaveLength(1);
   });
 
@@ -151,12 +181,14 @@ describe("startStatusLoop refresh", () => {
       const release = Promise.withResolvers<void>();
       const { loop, sent } = start(() => draining, { [held]: release.promise });
       loop.sampleNow();
-      await Bun.sleep(50); // a non-event can't be polled: the held sample has to still be in flight
+      await settle();
+      expect(sent).toHaveLength(0);
       draining = true;
       loop.refresh();
       release.resolve();
+      await settle();
+      await advance(FLOOR_MS);
 
-      await pollUntil(() => sent.some((one) => one.status.drn === true), "a status carrying the gate");
       // The relay drops what lands within its floor of an accepted status, so what it keeps is what counts.
       const kept: Sent[] = [];
       for (const one of sent) {
@@ -173,53 +205,65 @@ describe("startStatusLoop refresh", () => {
     let draining = false;
     const { loop, sent } = start(() => draining);
     loop.sampleNow();
-    await pollUntil(() => sent.length === 1, "the first status");
+    await settle();
+    expect(sent).toHaveLength(1);
     loop.refresh(); // a timer armed against the first send
-    await Bun.sleep(FLOOR_MS * 0.6); // a non-event can't be polled
+    await advance(FLOOR_MS * 0.6);
     loop.sampleNow(); // a register's sample: accepted meanwhile, since a register clears the relay's floor
-    await pollUntil(() => sent.length === 2, "the register's status");
+    await settle();
+    expect(sent).toHaveLength(2);
     draining = true;
 
-    await pollUntil(() => sent.length === 3, "the refreshed status");
+    await advance(FLOOR_MS * 0.4); // the first send's floor: the timer re-arms against the second's
+    expect(sent).toHaveLength(2);
+    await advance(FLOOR_MS * 0.6);
+    expect(sent).toHaveLength(3);
     expect(sent[2]?.status.drn).toBe(true);
-    expect((sent[2]?.atMs ?? 0) - (sent[1]?.atMs ?? 0)).toBeGreaterThanOrEqual(FLOOR_MS);
+    expect((sent[2]?.atMs ?? 0) - (sent[1]?.atMs ?? 0)).toBe(FLOOR_MS);
   });
 });
 
 describe("startStatusLoop beat", () => {
   const INTERVAL_MS = 500;
-  const onSlot = (atMs: number): boolean => atMs % INTERVAL_MS < INTERVAL_MS / 2;
-
-  /** Waits for the wall clock to reach `fromMs` into the interval: a time condition, not an event. */
-  async function untilPhase(fromMs: number): Promise<void> {
-    while (Date.now() % INTERVAL_MS < fromMs || Date.now() % INTERVAL_MS >= fromMs + 50) await Bun.sleep(5);
-  }
+  const onSlot = (atMs: number): boolean => atMs % INTERVAL_MS === 0;
 
   test("beats on wall-clock slots, and a register between them does not move the next", async () => {
     const { loop, sent } = start(() => false, {}, { intervalMs: INTERVAL_MS, floorMs: 50 });
+    jest.setSystemTime(BASE_MS + 100);
     loop.sampleNow();
-    await pollUntil(() => sent.length === 2, "the first beat");
+    await settle();
+    // A full interval before the first beat, then the slot.
+    await advance(INTERVAL_MS * 2 - 100);
+    expect(sent).toHaveLength(2);
     expect(onSlot(sent[1]?.atMs ?? 1)).toBe(true);
 
-    await untilPhase(INTERVAL_MS / 2);
+    await advance(INTERVAL_MS / 2);
     loop.sampleNow();
-    await pollUntil(() => sent.length === 4, "the register's status and the beat after it");
+    await settle();
+    await advance(INTERVAL_MS / 2);
+    expect(sent).toHaveLength(4);
     expect(onSlot(sent[2]?.atMs ?? 0)).toBe(false);
     expect(onSlot(sent[3]?.atMs ?? 1)).toBe(true);
-    expect((sent[3]?.atMs ?? 0) - (sent[2]?.atMs ?? 0)).toBeLessThan(INTERVAL_MS);
+    expect((sent[3]?.atMs ?? 0) - (sent[2]?.atMs ?? 0)).toBe(INTERVAL_MS / 2);
   });
 
   test("skips a slot within the relay's floor of a register's status, keeping the next", async () => {
     const floorMs = 200;
     const { loop, sent } = start(() => false, {}, { intervalMs: INTERVAL_MS, floorMs });
+    jest.setSystemTime(BASE_MS + 100);
     loop.sampleNow();
-    await pollUntil(() => sent.length === 2, "the first beat");
+    await settle();
+    await advance(INTERVAL_MS * 2 - 100);
+    expect(sent).toHaveLength(2);
 
-    await untilPhase(INTERVAL_MS - 150);
+    await advance(INTERVAL_MS - 150);
     loop.sampleNow();
-    await pollUntil(() => sent.length === 4, "the register's status and the beat after it");
-    const gap = (sent[3]?.atMs ?? 0) - (sent[2]?.atMs ?? 0);
-    expect(gap).toBeGreaterThan(INTERVAL_MS - 150);
+    await settle();
+    await advance(150); // the slot inside the floor
+    expect(sent).toHaveLength(3);
+    await advance(INTERVAL_MS);
+    expect(sent).toHaveLength(4);
+    expect((sent[3]?.atMs ?? 0) - (sent[2]?.atMs ?? 0)).toBe(INTERVAL_MS + 150);
     expect(onSlot(sent[3]?.atMs ?? 1)).toBe(true);
   });
 });

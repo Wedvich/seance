@@ -474,10 +474,13 @@ export function createAuthHealth(deps: AuthHealthDeps): AuthHealth {
       for (const exclave of present) {
         const entry = entries.get(exclave.id);
         if (entry !== undefined) noteChange(exclave.id, entry);
-        // A check landing mid-read would find no entry (or the old one) and read the exclave twice over.
-        if (inFlight === exclave.id) continue;
+        const readAt = entry?.readAt;
         // oxlint-disable-next-line no-await-in-loop -- a stat each
-        if (await isDue(exclave, entry)) enqueue(exclave.id);
+        const due = await isDue(exclave, entry);
+        // Judged after the stat, which a read may overtake: a check landing mid-read, or on one that landed
+        // meanwhile, would find no entry (or the old one) and read the exclave twice over.
+        const overtaken = inFlight === exclave.id || entries.get(exclave.id)?.readAt !== readAt;
+        if (due && !overtaken) enqueue(exclave.id);
       }
     } finally {
       checking = false;

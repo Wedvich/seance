@@ -31,7 +31,7 @@ import {
   type Task,
   type UnreadableRecord,
 } from "@seance/shared";
-import { afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { afterEach, beforeAll, describe, expect, jest, test } from "bun:test";
 import type { ServerWebSocket } from "bun";
 import { pollUntil } from "./poll.ts";
 
@@ -60,6 +60,8 @@ interface StoreDouble {
   readonly received: Frame[];
   readonly sockets: Set<ServerWebSocket<unknown>>;
   answer: ((frame: Frame) => unknown) | null;
+  /** Resolves when the next frame arrives: an event, so it still fires while timers are fake. */
+  readonly nextFrame: () => Promise<Frame>;
   readonly stop: () => Promise<void>;
 }
 
@@ -96,6 +98,7 @@ function startDouble(): StoreDouble {
   const records = new Map<string, StoreRecord>();
   const received: Frame[] = [];
   const sockets = new Set<ServerWebSocket<unknown>>();
+  const waiters: ((frame: Frame) => void)[] = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -114,6 +117,7 @@ function startDouble(): StoreDouble {
         const frame: unknown = JSON.parse(String(message));
         if (!isRecord(frame)) return;
         received.push(frame);
+        for (const waiter of waiters.splice(0)) waiter(frame);
         const reply = double.answer === null ? memoryAnswer(records, frame) : double.answer(frame);
         if (reply === "silent") return;
         if (reply === "close") {
@@ -131,13 +135,50 @@ function startDouble(): StoreDouble {
     received,
     sockets,
     answer: null,
+    nextFrame: () =>
+      new Promise((resolve) => {
+        waiters.push(resolve);
+      }),
     stop: () => server.stop(true),
   };
   doubles.push(double);
   return double;
 }
 
-async function connect(double: StoreDouble, storeTimeoutMs = 5_000, withAccountKey = false): Promise<RelayClient> {
+/**
+ * The store timeout every client here is built with. Long on purpose: a request the double answers
+ * races it on the real clock, and a short one fails that race on a loaded runner. A request nobody
+ * answers is timed out on a fake clock instead (`unanswered`).
+ */
+const STORE_TIMEOUT_MS = 5_000;
+
+/**
+ * Sends `call`'s store request to a double that stays silent and times it out on a fake clock:
+ * the reply's absence is certain, so only the timer decides, and advancing it races nothing.
+ * Faked only once the client has its socket — the reply path is real I/O either way.
+ */
+async function unanswered<T>(double: StoreDouble, call: () => Promise<T>): Promise<T> {
+  double.answer = () => "silent";
+  const arrived = double.nextFrame();
+  jest.useFakeTimers();
+  try {
+    const pending = call();
+    // Read below; until then a rejection must not count as unhandled.
+    pending.catch(() => {});
+    // The client arms its timer before the send, so it exists once the frame is here.
+    await arrived;
+    jest.advanceTimersByTime(STORE_TIMEOUT_MS);
+    return await pending;
+  } finally {
+    jest.useRealTimers();
+  }
+}
+
+async function connect(
+  double: StoreDouble,
+  storeTimeoutMs = STORE_TIMEOUT_MS,
+  withAccountKey = false,
+): Promise<RelayClient> {
   const client = new RelayClient({
     url: double.url,
     token: TOKEN,
@@ -349,7 +390,7 @@ async function storedAccount(
 describe("account records", () => {
   test("a rename is a compare-and-set: create at 0, overwrite at the held version, a stale expect conflicts", async () => {
     const double = startDouble();
-    const client = await connect(double, 5_000, true);
+    const client = await connect(double, STORE_TIMEOUT_MS, true);
     const at = await client.accountStoreKey(ACCOUNT_ID);
 
     const created = await client.putAccountAlias(ACCOUNT_ID, "work", 0);
@@ -374,21 +415,21 @@ describe("account records", () => {
 
   test("a put answered with a version other than expect + 1 is no answer", async () => {
     const double = startDouble();
-    const client = await connect(double, 5_000, true);
+    const client = await connect(double, STORE_TIMEOUT_MS, true);
     double.answer = (frame) => ({ t: "store-written", re: frame["id"], version: 5 });
     expect(await client.putAccountAlias(ACCOUNT_ID, "work", 0)).toBeNull();
   });
 
   test("refuses locally, sending nothing, an alias past the bound", async () => {
     const double = startDouble();
-    const client = await connect(double, 5_000, true);
+    const client = await connect(double, STORE_TIMEOUT_MS, true);
     expect(await client.putAccountAlias(ACCOUNT_ID, "x".repeat(65), 0)).toEqual({ ok: false, code: "invalid_request" });
     expect(double.received).toEqual([]);
   });
 
   test("a get for a key outside account: sends nothing; an absent key reads as version 0", async () => {
     const double = startDouble();
-    const client = await connect(double, 5_000, true);
+    const client = await connect(double, STORE_TIMEOUT_MS, true);
     expect(await client.getAccountRecord(taskKey(crypto.randomUUID()))).toBeNull();
     expect(await client.getAccountRecord("account:not a key")).toBeNull();
     expect(double.received).toEqual([]);
@@ -398,7 +439,7 @@ describe("account records", () => {
 
   test("a get answered with another key's record is no answer", async () => {
     const double = startDouble();
-    const client = await connect(double, 5_000, true);
+    const client = await connect(double, STORE_TIMEOUT_MS, true);
     const other = await storedAccount("org-uuid:other", "home", 1);
     double.answer = (frame) => ({ t: "store-record", re: frame["id"], record: other });
     expect(await client.getAccountRecord(await client.accountStoreKey(ACCOUNT_ID))).toBeNull();
@@ -406,7 +447,7 @@ describe("account records", () => {
 
   test("an unreadable record comes back with its reason and the relay's version, for a rename to overwrite", async () => {
     const double = startDouble();
-    const client = await connect(double, 5_000, true);
+    const client = await connect(double, STORE_TIMEOUT_MS, true);
     const at = await client.accountStoreKey(ACCOUNT_ID);
     // An authentic version-1 blob put back by overwrite: the relay now holds it at 2.
     double.records.set(at, { ...(await storedAccount(ACCOUNT_ID, "old", 1)), version: 2 });
@@ -425,7 +466,7 @@ describe("account records", () => {
 
   test("a listing reports a record under the wrong key as unreadable, the rest still read", async () => {
     const double = startDouble();
-    const client = await connect(double, 5_000, true);
+    const client = await connect(double, STORE_TIMEOUT_MS, true);
     const good = await storedAccount(ACCOUNT_ID, "work", 1);
     const planted = await storedAccount(ACCOUNT_ID, "forged", 1, `account:${"0".repeat(64)}`);
     for (const record of [good, planted]) double.records.set(record.key, record);
@@ -447,7 +488,7 @@ describe("account records", () => {
     expect(await failure(bare.accountStoreKey(ACCOUNT_ID))).toBe("unsupported");
     expect(double.received).toEqual([]);
 
-    const client = await connect(double, 5_000, true);
+    const client = await connect(double, STORE_TIMEOUT_MS, true);
     expect(client.accountsNamed).toBe(true);
     double.answer = (frame) => ({ t: "store-refused", re: frame["id"], code: "store_full" });
     expect(await client.putAccountAlias(ACCOUNT_ID, "work", 0)).toEqual({ ok: false, code: "store_full" });
@@ -480,10 +521,9 @@ describe("store transport", () => {
     const idle = new RelayClient({ url: double.url, token: TOKEN, key });
     expect(await failure(idle.listTasks())).toBe("disconnected");
 
-    const client = await connect(double, 50);
-    double.answer = () => "silent";
-    expect(await failure(client.getTask(crypto.randomUUID()))).toBe("timeout");
-    const timedOut = await client.getTask(crypto.randomUUID()).catch((err: unknown) => err);
+    const client = await connect(double);
+    expect(await failure(unanswered(double, () => client.getTask(crypto.randomUUID())))).toBe("timeout");
+    const timedOut = await unanswered(double, () => client.getTask(crypto.randomUUID())).catch((err: unknown) => err);
     if (!(timedOut instanceof RequestFailure)) throw new Error("expected a RequestFailure");
     expect(failureReasonText(timedOut)).toContain("the relay did not answer");
     double.answer = () => "close";
@@ -504,9 +544,8 @@ describe("store transport", () => {
 
   test("a reply after the timeout settles nothing and throws nothing", async () => {
     const double = startDouble();
-    const client = await connect(double, 50);
-    double.answer = () => "silent";
-    expect(await failure(client.getTask(crypto.randomUUID()))).toBe("timeout");
+    const client = await connect(double);
+    expect(await failure(unanswered(double, () => client.getTask(crypto.randomUUID())))).toBe("timeout");
     const [late] = double.received;
     for (const ws of double.sockets) ws.send(JSON.stringify({ t: "store-record", re: late?.["id"], record: null }));
     // The socket orders frames, so once this answers, the late reply has been handled.
@@ -530,7 +569,7 @@ describe("fleet quota record", () => {
     };
   }
 
-  function polling(double: StoreDouble, storeTimeoutMs = 5_000): RelayClient {
+  function polling(double: StoreDouble, storeTimeoutMs = STORE_TIMEOUT_MS): RelayClient {
     const client = new RelayClient({
       url: double.url,
       token: TOKEN,
@@ -617,7 +656,7 @@ describe("fleet quota record", () => {
       url: double.url,
       token: TOKEN,
       key,
-      storeTimeoutMs: 50,
+      storeTimeoutMs: STORE_TIMEOUT_MS,
       fleetQuotaRefreshMs: 60_000,
       createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
       log: (line) => void lines.push(line),
@@ -626,18 +665,16 @@ describe("fleet quota record", () => {
     client.start();
     await pollUntil(() => client.getState().fleetQuota.length === 1, "the read on open");
     expect(lines).toEqual([]);
-    double.answer = () => "silent";
-    await client.refreshFleetQuota();
+    await unanswered(double, () => client.refreshFleetQuota());
     expect(lines.filter((line) => line.includes("timeout"))).toHaveLength(1);
   });
 
   test("a read with no answer resolves at the store timeout and keeps the last copy", async () => {
     const double = startDouble();
     double.records.set(QUOTA_KEY, await quotaRecord(3));
-    const client = polling(double, 50);
+    const client = polling(double);
     await pollUntil(() => client.getState().fleetQuota.length === 1, "the read on open");
-    double.answer = () => "silent";
-    await client.refreshFleetQuota();
+    await unanswered(double, () => client.refreshFleetQuota());
     expect(client.getState().fleetQuota).toEqual([ENTRY]);
   });
 });
@@ -718,10 +755,9 @@ describe("pushSettings", () => {
 
   test("a refusal is its own answer, not an absent record, and nothing answering fails as a store request does", async () => {
     const double = startDouble();
-    const client = await connect(double, 100);
+    const client = await connect(double);
     double.answer = (frame) => ({ t: "store-refused", re: frame["id"], code: "rate_limited" });
     expect(await client.pushSettings()).toEqual({ ok: false, code: "rate_limited" });
-    double.answer = () => "silent";
-    expect(await failure(client.pushSettings())).toBe("timeout");
+    expect(await failure(unanswered(double, () => client.pushSettings()))).toBe("timeout");
   });
 });

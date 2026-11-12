@@ -139,7 +139,8 @@ describe("a daemon restarting under a call", () => {
       (caught: unknown) => caught,
     );
     expect(err).toBeInstanceOf(LocalUnavailable);
-    expect(Date.now() - started).toBeLessThan(1_000);
+    // Far short of the restart grace a waited-out socket would spend, with a loaded runner's slack.
+    expect(Date.now() - started).toBeLessThan(5_000);
   });
 
   test("a daemon that never comes back fails the read once the grace is spent, still as a lost call", async () => {

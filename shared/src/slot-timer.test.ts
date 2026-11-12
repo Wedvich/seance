@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
 import { nextSlotAt, startSlotTimer } from "./slot-timer.ts";
 
 const SLOT_MS = 30_000;
@@ -30,31 +30,40 @@ describe("nextSlotAt", () => {
 });
 
 describe("startSlotTimer", () => {
-  test("two timers started out of phase fire on the same slots", async () => {
-    const intervalMs = 400;
-    const fired: number[][] = [[], []];
-    const stopA = startSlotTimer({ intervalMs, minFirstMs: 0 }, () => fired[0]?.push(Date.now()));
-    await Bun.sleep(150);
-    const stopB = startSlotTimer({ intervalMs, minFirstMs: 0 }, () => fired[1]?.push(Date.now()));
-    await Bun.sleep(intervalMs * 3);
-    stopA();
-    stopB();
-    const slotsOf = (times: readonly number[] | undefined): number[] =>
-      (times ?? []).map((t) => Math.floor(t / intervalMs));
-    const [a, b] = [slotsOf(fired[0]), slotsOf(fired[1])];
-    expect(b.length).toBeGreaterThanOrEqual(2);
-    for (const slot of b) expect(a).toContain(slot);
-    // Each fires within its slot, not a whole phase away.
-    for (const t of [...(fired[0] ?? []), ...(fired[1] ?? [])]) expect(t % intervalMs).toBeLessThan(intervalMs / 2);
+  // Fake, so a slot is an exact time rather than a real timer racing a loaded runner.
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.setSystemTime(BASE_MS);
+  });
+  afterEach(() => {
+    jest.useRealTimers();
   });
 
-  test("nothing fires before the first slot past `minFirstMs`, nor after stop", async () => {
+  test("two timers started out of phase fire on the same slots", () => {
+    const intervalMs = 400;
+    const fired: number[][] = [[], []];
+    jest.setSystemTime(BASE_MS + 30);
+    const stopA = startSlotTimer({ intervalMs, minFirstMs: 0 }, () => fired[0]?.push(Date.now()));
+    jest.advanceTimersByTime(150);
+    const stopB = startSlotTimer({ intervalMs, minFirstMs: 0 }, () => fired[1]?.push(Date.now()));
+    jest.advanceTimersByTime(intervalMs * 3);
+    stopA();
+    stopB();
+    // BASE_MS is on a 400 ms slot too.
+    const slots = [1, 2, 3].map((k) => BASE_MS + k * intervalMs);
+    expect(fired[0]).toEqual(slots);
+    expect(fired[1]).toEqual(slots);
+  });
+
+  test("nothing fires before the first slot past `minFirstMs`, nor after stop", () => {
     let count = 0;
     const stop = startSlotTimer({ intervalMs: 100 }, () => (count += 1));
-    await Bun.sleep(90); // a non-event can't be polled
+    jest.advanceTimersByTime(99);
     expect(count).toBe(0);
+    jest.advanceTimersByTime(1);
+    expect(count).toBe(1);
     stop();
-    await Bun.sleep(250); // a non-event can't be polled
-    expect(count).toBe(0);
+    jest.advanceTimersByTime(250);
+    expect(count).toBe(1);
   });
 });

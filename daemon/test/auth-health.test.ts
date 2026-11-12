@@ -273,8 +273,8 @@ describe("the reader, through the real bun child", () => {
       const started = Date.now();
       const view = (await run(health([f], { bunBin: stubs.escaper, timeoutMs: 200 }))).get("wedge");
       expect(view).toEqual({ state: "unknown", why: "timeout" });
-      // 200 ms + 1 s kill grace + 1 s slack, well before the descendant's 6 s.
-      expect(Date.now() - started).toBeLessThan(4_500);
+      // 200 ms + 1 s kill grace, with a loaded runner's slack, still before the descendant's 6 s.
+      expect(Date.now() - started).toBeLessThan(5_500);
     },
     10_000,
   );

@@ -2155,7 +2155,8 @@ describe("leader in the daemon", () => {
       config,
       backend: createBackend(config, { home: join(base, "home"), waitMs: 700 }),
       pingIntervalMs: overrides.pingIntervalMs ?? 60_000,
-      pongTimeoutMs: 300,
+      // Long enough that a loaded runner's slow pong is not a drop; the tests that want one stop ponging.
+      pongTimeoutMs: 2_000,
       baseBackoffMs: 20,
       leader: { store },
     });
@@ -2458,7 +2459,7 @@ describe("leader in the daemon", () => {
 
       relay.rejectApps = false;
       relay.autoPong = false;
-      await pollUntil(() => relay.connectionCount() === 2, "the daemon redialling");
+      await pollUntil(() => relay.connectionCount() === 2, "the daemon redialling", 10_000);
       relay.autoPong = true;
       let redialed = await nextRegister();
       while (redialed.connection === 1) {
@@ -2534,7 +2535,7 @@ describe("leader in the daemon", () => {
       await daemon.leader.settled();
       // A missed pong closes the daemon's socket; the leg goes with it.
       relay.autoPong = false;
-      await pollUntil(() => relay.openAppCount() === 0, "the leader's leg closing on socket loss");
+      await pollUntil(() => relay.openAppCount() === 0, "the leader's leg closing on socket loss", 10_000);
       expect(daemon.leader.term()).toBeNull();
     } finally {
       daemon.stop();

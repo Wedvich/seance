@@ -62,8 +62,6 @@ async function withRig(body: (rig: Rig) => Promise<void>, opts: RigOpts = {}): P
         { id: crypto.randomUUID(), ts: Date.now(), op: "machine-info", payload: {} },
       ),
     handle: () => Promise.resolve(null),
-    storeTimeoutMs: 300,
-    storeListTimeoutMs: 300,
   });
   client.start();
   try {

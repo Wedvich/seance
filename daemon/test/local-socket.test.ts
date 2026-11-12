@@ -14,6 +14,7 @@ import { tmux } from "../src/tmux.ts";
 import {
   makeClaudeStub,
   makeGitFixture,
+  pollUntil,
   usePrivateTmux,
   type ClaudeStub,
   type GitFixture,
@@ -79,7 +80,7 @@ afterAll(async () => {
 });
 
 /** The socket server frames NDJSON; these send raw bytes to exercise what the client never would. */
-async function raw(payload: string, waitMs = 300): Promise<string> {
+async function dial(payload: string): Promise<{ readonly received: () => string; readonly end: () => void }> {
   let received = "";
   const sock = await Bun.connect<undefined>({
     unix: sockPath,
@@ -107,9 +108,23 @@ async function raw(payload: string, waitMs = 300): Promise<string> {
     }
     buf = buf.subarray(written);
   }
+  return { received: () => received, end: () => void sock.end() };
+}
+
+/** Raw bytes in, the daemon's one reply line out. */
+async function raw(payload: string): Promise<string> {
+  const conn = await dial(payload);
+  await pollUntil(() => conn.received().includes("\n"), "the daemon's reply line");
+  conn.end();
+  return conn.received();
+}
+
+/** For the frames the daemon must not answer: a non-event cannot be polled, so this waits a fixed while. */
+async function rawSilence(payload: string, waitMs = 300): Promise<string> {
+  const conn = await dial(payload);
   await Bun.sleep(waitMs);
-  sock.end();
-  return received;
+  conn.end();
+  return conn.received();
 }
 
 describe("the local op socket", () => {
@@ -232,7 +247,7 @@ describe("the local op socket", () => {
   test("a frame past the cap drops the peer instead of growing the daemon's heap", async () => {
     lines.length = 0;
     // No newline anywhere, so the server can only be buffering it.
-    const reply = await raw("x".repeat(1_200_000), 500);
+    const reply = await rawSilence("x".repeat(1_200_000), 500);
     expect(reply).toBe("");
     // The peer is gone: a further write on that connection cannot be delivered.
     expect(await localSocketReachable(sockPath)).toBe(true);
@@ -241,7 +256,7 @@ describe("the local op socket", () => {
   });
 
   test("a frame that is not JSON is dropped rather than answered", async () => {
-    expect(await raw("not json at all\n")).toBe("");
+    expect(await rawSilence("not json at all\n")).toBe("");
     expect(await localSocketReachable(sockPath)).toBe(true);
   });
 
