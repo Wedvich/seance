@@ -583,8 +583,10 @@ export interface AfterSheetView {
 
 /**
  * The tasks a new one may wait on: any the leader still lists that has not failed
- * or been cancelled, since an edge on those would fail the task at once. An edge
- * the form holds on a task the list no longer shows stays, by id, so it can be removed.
+ * or been cancelled, since an edge on those would fail the task at once, or been
+ * superseded (its successor carries the work and is listed: an edge on the dead one
+ * resolves through the chain, but offering both invites picking the dead one). An edge
+ * the form holds on a task the list no longer shows, or on a superseded one, stays, so it can be removed.
  */
 export function deriveAfterSheet(state: AppState, now: number): AfterSheetView {
   const view = state.queueView;
@@ -593,7 +595,10 @@ export function deriveAfterSheet(state: AppState, now: number): AfterSheetView {
   );
   const held = new Map(state.form.after.map((dep) => [dep.task, dep.after]));
   const listed = tasks
-    .filter((task) => task.state !== "failed" && task.state !== "cancelled")
+    .filter(
+      (task) =>
+        task.state !== "failed" && task.state !== "cancelled" && (task.state !== "superseded" || held.has(task.id)),
+    )
     .map((task) => ({
       id: task.id,
       title: taskTitle(task),

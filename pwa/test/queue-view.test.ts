@@ -1278,6 +1278,24 @@ describe("deriveAfterSheet", () => {
     expect(view.full).toBe(false);
   });
 
+  test("a superseded task is not offered, its successor is, and an edge the form already holds on it stays", () => {
+    const tasks = [
+      task("old", { state: "superseded", successor: "new" }),
+      task("new", { state: "running", assignment: placedAt }),
+    ];
+    const offered = deriveAfterSheet(state(ok(tasks), { form }), NOW);
+    expect(offered.options.map((o) => o.id)).toEqual(["new"]);
+
+    const held = deriveAfterSheet(
+      state(ok(tasks), { form: { ...form, after: [{ task: "old", after: "done" }] } }),
+      NOW,
+    );
+    expect(held.options.map((o) => [o.id, o.when])).toEqual([
+      ["old", "done"],
+      ["new", null],
+    ]);
+  });
+
   test("an edge on a task the list no longer shows stays, by id, so it can be removed; sixteen edges is full", () => {
     const edges = Array.from({ length: 16 }, (_unused, i) => ({ task: `gone-${i}`, after: "opened" as const }));
     const view = deriveAfterSheet(state(ok([task("a")]), { form: { ...form, after: edges } }), NOW);
