@@ -8565,7 +8565,10 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   or a drop — ends it with a note worded as the Queue screen's Start now notice. A note goes on the
   queued verdict when that shows the task, clearing once the task is seen past waiting;
   otherwise on the Queue screen's notice, naming the task (`taskTitle`, its row label), and kept
-  through reads until one asked with the screen open lands, so opening the screen shows it. The
+  through reads until one asked with the screen open lands, so opening the screen shows it. That
+  notice floats as a toast above the screen's footer, so it shows however far the list is scrolled,
+  until its × or ten seconds unheld close it; the screen's holds and unreadable line stay in the list,
+  since each is a standing state with its own button. The
   intent is in memory: a reload leaves the task queued, as a takeover between the route and the
   write would. Rejected: sending `run-now` with the create
   (refused before admission) and a wire flag on the record (above, "Run now lifts both caps").

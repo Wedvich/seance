@@ -1033,6 +1033,11 @@ export class SchedulerStore {
     if (notice !== null) this.#patch({ queueNotice: notice });
   }
 
+  /** The person closed the Queue screen's notice, or its toast timed out. */
+  dismissNotice(): void {
+    if (this.#state.queueNotice !== null) this.#patch({ queueNotice: null });
+  }
+
   /** How many unreadable records the last queue read listed; zero when there is no read to go by. */
   unreadableCount(): number {
     const view = this.#state.queueView;

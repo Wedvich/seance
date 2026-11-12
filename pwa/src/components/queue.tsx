@@ -14,6 +14,7 @@ import type { ConnectionState } from "../view.ts";
 import { StrokeIcon } from "./icons.tsx";
 import { Menu, MenuDivider, MenuItem, MoreTrigger, useMenu, type MenuHandle } from "./menu.tsx";
 import { RelaySettings } from "./relay-dot.tsx";
+import { Toast } from "./toast.tsx";
 
 /** A first tap on a cancel that ends a session arms it this long; no confirm dialog for a thing this quick to take back. */
 const ARM_MS = 4_000;
@@ -31,6 +32,7 @@ export function QueueScreen(props: {
   relayState: ConnectionState;
   /** The last action's refusal or failure, as a sentence. */
   notice: string | null;
+  onDismissNotice: () => void;
   pausing: boolean;
   discarding: boolean;
   /** A notification's task: scrolled to and marked once its row is listed. */
@@ -160,14 +162,6 @@ export function QueueScreen(props: {
       </header>
 
       <div className="fleet" ref={list}>
-        {notice !== null && (
-          <div className="banner card banner-err" role="alert">
-            <span className="banner-rule" />
-            <span className="banner-text">
-              <span className="banner-body">{notice}</span>
-            </span>
-          </div>
-        )}
         {view.holds.map((hold) => (
           <div key={hold.key} className="banner card">
             <span className="banner-rule" />
@@ -247,7 +241,9 @@ export function QueueScreen(props: {
         {view.partial !== null && <p className="fleet-note">{view.partial}</p>}
       </div>
 
-      <footer className="footer">
+      {/* In the footer, so it floats above it in either layout rather than at the top of a list scrolled elsewhere. */}
+      <footer className="footer queue-footer">
+        {notice !== null && <Toast key={notice} text={notice} onDismiss={props.onDismissNotice} />}
         <button
           type="button"
           className="primary queue-pause"

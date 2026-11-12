@@ -2471,6 +2471,21 @@ describe("the queue screen", () => {
     expect(store.getState().queueNotice).toBeNull();
   });
 
+  test("dismissing the notice drops only the notice, and a later read leaves it gone", async () => {
+    const client = new ScriptedClient();
+    const store = await loaded(client);
+    client.onQueue = async () => ({ ok: false, code: "not_ready", message: "taking over" });
+    await store.refreshQueue();
+    expect(store.getState().queueNotice).toContain("taking over");
+
+    store.dismissQueueNotice();
+    expect(store.getState().queueNotice).toBeNull();
+    expect(store.getState().queueView).toMatchObject({ kind: "ok" });
+    client.onQueue = async () => ({ tasks: [waiting], holds: [], at: 5 });
+    await store.refreshQueue();
+    expect(store.getState().queueNotice).toBeNull();
+  });
+
   test("an ask made while a read is out waits for it, then reads once more: reads are single-flight", async () => {
     const client = new ScriptedClient();
     const store = await loaded(client);

@@ -688,6 +688,11 @@ export class Store {
     return this.#queue.discardUnreadable();
   }
 
+  /** See `SchedulerStore.dismissNotice`. */
+  dismissQueueNotice(): void {
+    this.#queue.dismissNotice();
+  }
+
   /**
    * One chart at a time: a new pick replaces whatever is open or still loading.
    * The window ends on the tier's newest bucket, so it never ends mid-bucket.
