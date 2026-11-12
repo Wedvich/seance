@@ -2,7 +2,8 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { unitDrift } from "./self-update.ts";
+import { parseSourceInfo } from "@seance/shared";
+import { recordServedSource, unitDrift } from "./self-update.ts";
 import { ARCHIVIST_UNIT, archivistUnits, UPDATE_PATH_UNIT, UPDATE_UNIT } from "./units.ts";
 
 const OPTS = {
@@ -44,5 +45,29 @@ describe("unitDrift", () => {
   test("a missing service, or one that isn't ours, is no drift to report", async () => {
     expect(await unitDrift(OPTS.mainPath, await installed({}))).toEqual([]);
     expect(await unitDrift(OPTS.mainPath, await installed({ [ARCHIVIST_UNIT]: "[Service]\n" }))).toEqual([]);
+  });
+});
+
+describe("recordServedSource", () => {
+  const source = { sha: "a".repeat(40), commitTs: 1_700_000_000_000, branch: "main" };
+
+  test("writes a file the archivist's own reader parses", async () => {
+    const path = join(await installed({}), "served-source.json");
+    await recordServedSource(path, async () => source);
+    expect(parseSourceInfo(await Bun.file(path).json())).toEqual(source);
+  });
+
+  test("removes an older file when the source cannot be read, so no stale build shows", async () => {
+    const path = join(await installed({ "served-source.json": JSON.stringify(source) }), "served-source.json");
+    await recordServedSource(path, async () => null);
+    expect(await Bun.file(path).exists()).toBe(false);
+  });
+
+  test("a failed write or read never throws, so the restart still happens", async () => {
+    const dir = await installed({});
+    await recordServedSource(join(dir, "missing-dir", "served-source.json"), async () => source);
+    await recordServedSource(join(dir, "served-source.json"), async () => {
+      throw new Error("git hung");
+    });
   });
 });
