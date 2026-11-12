@@ -234,6 +234,24 @@ describe("deriveMachines", () => {
     expect(accountDisplayName(knownAccounts([named]), "org-2:acct-bbbbbbbb-2222")).toBe("acct acct-bbb");
   });
 
+  test("two accounts under one alias are told apart by their exclave ids in the title", () => {
+    const both = machine({
+      deviceId: "a",
+      name: "a",
+      exclaves: [exclave("default", ACCOUNT), exclave("work", "org-2:acct-bbbbbbbb-2222")],
+    });
+    const same = { [ACCOUNT]: "Martin", "org-2:acct-bbbbbbbb-2222": "Martin" };
+    expect(deriveMachines([both], NOW, NO_LEADER, same).accounts.map((account) => account.title)).toEqual([
+      "Martin (default)",
+      "Martin (work)",
+    ]);
+    const one = { [ACCOUNT]: "Martin", "org-2:acct-bbbbbbbb-2222": "Other" };
+    expect(deriveMachines([both], NOW, NO_LEADER, one).accounts.map((account) => account.title)).toEqual([
+      "Martin",
+      "Other",
+    ]);
+  });
+
   test("one email on two orgs reads with each org on the card, the exclave row and a hold; an alias still leads", () => {
     const personal = "1a2b3c4d-personal:acct-same";
     const team = "9f8e7d6c-team:acct-same";

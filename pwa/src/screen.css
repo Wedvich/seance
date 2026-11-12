@@ -960,6 +960,7 @@
 }
 
 .toggle-on .toggle-knob {
+  background: var(--acc-fg);
   transform: translateX(20px);
 }
 
@@ -3029,8 +3030,9 @@
   color: var(--err);
 }
 
-.menu-item:disabled,
-.menu-item[aria-disabled="true"] {
+/* The label and icon dim; a sub-line stays at full `--fg2`, as it may be the only word on why. */
+.menu-item[aria-disabled="true"] .menu-icon,
+.menu-item[aria-disabled="true"] .menu-label {
   opacity: 0.5;
 }
 
@@ -3104,6 +3106,7 @@
 }
 
 .menu-switch-on .menu-switch-knob {
+  background: var(--acc-fg);
   transform: translateX(14px);
 }
 
@@ -3122,6 +3125,12 @@
   font-size: 0.75rem;
   color: var(--fg2);
   overflow-wrap: anywhere;
+}
+
+.rename-label {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--fg2);
 }
 
 .rename-input {

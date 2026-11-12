@@ -21,12 +21,14 @@ export function useMenu<T extends HTMLElement = HTMLButtonElement>(): MenuHandle
   return { id, open, anchor, onToggle: (newState) => setOpen(newState === "open") };
 }
 
-function enabledItems(panel: HTMLElement | null): HTMLElement[] {
+/** An `aria-disabled` item stays in the roving focus: its sub-line may be the only place that says why. */
+function menuItems(panel: HTMLElement | null): HTMLElement[] {
   if (panel === null) return [];
-  return [...panel.querySelectorAll<HTMLElement>('[role="menuitem"], [role="menuitemcheckbox"]')].filter(
-    (item) => !item.matches(':disabled, [aria-disabled="true"]'),
-  );
+  return [...panel.querySelectorAll<HTMLElement>('[role="menuitem"], [role="menuitemcheckbox"]')];
 }
+
+/** Long enough for a layout shift's scroll anchoring to land, which is a frame or two after the render. */
+const LAYOUT_SETTLE_MS = 250;
 
 /** Roving-focus target for a menu key; null for keys that aren't navigation. */
 function nextIndex(key: string, at: number, count: number): number | null {
@@ -38,6 +40,8 @@ function nextIndex(key: string, at: number, count: number): number | null {
 }
 
 const CloseMenu = createContext<() => void>(() => {});
+/** Called by an item that changes the page around the menu without closing it. */
+const HoldMenuOpen = createContext<() => void>(() => {});
 
 /**
  * A short command menu: 1–6 commands. A list to pick from, or anything long
@@ -88,6 +92,18 @@ export function Menu<T extends HTMLElement>(props: {
 
   const close = useCallback((): void => node.current?.hidePopover(), []);
 
+  // A flipped switch can shift the content under the anchor (a chart above it
+  // closing); the scroll that follows is the page moving, not the person.
+  // Scrolls are ignored until it settles, then the menu is pinned to its trigger again.
+  const settling = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const holdOpen = useCallback((): void => {
+    if (settling.current !== null) clearTimeout(settling.current);
+    settling.current = setTimeout(() => {
+      settling.current = null;
+      place(node.current?.offsetHeight ?? null);
+    }, LAYOUT_SETTLE_MS);
+  }, [place]);
+
   // Placed once on open, so it would detach from a scrolled anchor. Closing on
   // scroll is what native Android menus do. Capture catches nested scrollers.
   // A height-only resize is the soft keyboard leaving as the trigger takes
@@ -96,7 +112,9 @@ export function Menu<T extends HTMLElement>(props: {
   useEffect(() => {
     if (!menu.open) return;
     const width = document.documentElement.clientWidth;
-    const dismiss = (): void => close();
+    const dismiss = (): void => {
+      if (settling.current === null) close();
+    };
     const onResize = (): void => {
       if (document.documentElement.clientWidth !== width) return close();
       place(node.current?.offsetHeight ?? null);
@@ -106,6 +124,8 @@ export function Menu<T extends HTMLElement>(props: {
     return () => {
       window.removeEventListener("scroll", dismiss, { capture: true });
       window.removeEventListener("resize", onResize);
+      if (settling.current !== null) clearTimeout(settling.current);
+      settling.current = null;
     };
   }, [menu.open, close, place]);
 
@@ -122,11 +142,11 @@ export function Menu<T extends HTMLElement>(props: {
       focused.matches(":focus-visible");
     if (newState !== "open" || !keyboard) return;
     // preventScroll: a scroll here would trip the close-on-scroll listener.
-    enabledItems(node.current)[0]?.focus({ preventScroll: true });
+    menuItems(node.current)[0]?.focus({ preventScroll: true });
   };
 
   const onKeyDown = (event: KeyboardEvent): void => {
-    const items = enabledItems(node.current);
+    const items = menuItems(node.current);
     if (items.length === 0) return;
     const at = items.findIndex((item) => item === document.activeElement);
     const next = nextIndex(event.key, at, items.length);
@@ -148,7 +168,9 @@ export function Menu<T extends HTMLElement>(props: {
       onToggle={(event) => onToggle(event.newState)}
       onKeyDown={onKeyDown}
     >
-      <CloseMenu.Provider value={close}>{props.children}</CloseMenu.Provider>
+      <CloseMenu.Provider value={close}>
+        <HoldMenuOpen.Provider value={holdOpen}>{props.children}</HoldMenuOpen.Provider>
+      </CloseMenu.Provider>
     </div>
   );
 }
@@ -210,7 +232,7 @@ export function MenuItem(props: {
     .join(" ");
   const disabled = props.disabled === true;
   const pick = (event: Event): void => {
-    if (!inOpenMenu(event)) return;
+    if (!inOpenMenu(event) || disabled) return;
     if (props.keepOpen !== true) close();
     props.onClick?.();
   };
@@ -218,7 +240,7 @@ export function MenuItem(props: {
     <>
       {props.icon !== undefined && <span className="menu-icon">{props.icon}</span>}
       <span className="menu-text">
-        {props.label}
+        <span className="menu-label">{props.label}</span>
         {props.sub !== undefined && <span className="menu-sub">{props.sub}</span>}
         {props.href !== undefined && props.external === true && <span className="sr-only"> (opens in a new tab)</span>}
       </span>
@@ -243,7 +265,13 @@ export function MenuItem(props: {
     );
   }
   return (
-    <button type="button" className={className} role="menuitem" disabled={disabled} onClick={pick}>
+    <button
+      type="button"
+      className={className}
+      role="menuitem"
+      aria-disabled={disabled ? "true" : undefined}
+      onClick={pick}
+    >
       {body}
     </button>
   );
@@ -261,14 +289,14 @@ export function MenuSwitchItem(props: {
   onToggle: () => void;
 }): JSX.Element {
   const { checked } = props;
+  const holdOpen = useContext(HoldMenuOpen);
+  const toggle = (event: Event): void => {
+    if (!inOpenMenu(event)) return;
+    holdOpen();
+    props.onToggle();
+  };
   return (
-    <button
-      type="button"
-      className="menu-item"
-      role="menuitemcheckbox"
-      aria-checked={checked}
-      onClick={(event) => inOpenMenu(event) && props.onToggle()}
-    >
+    <button type="button" className="menu-item" role="menuitemcheckbox" aria-checked={checked} onClick={toggle}>
       {props.icon !== undefined && <span className="menu-icon">{props.icon}</span>}
       <span className="menu-text">{props.label}</span>
       <span className={checked ? "menu-switch menu-switch-on" : "menu-switch"} aria-hidden="true">

@@ -27,10 +27,14 @@ function refusalText(code: string): string {
   }
 }
 
-function conflictText(latest: string | null | undefined): string {
-  if (latest === undefined) return "Renamed elsewhere — save again to replace it";
-  if (latest === null) return "Renamed elsewhere and cleared — save again to replace it";
-  return `Renamed elsewhere to “${latest}” — save again to replace it`;
+/** What a re-read after a lost race found at the key. */
+type Latest = { readonly named: string } | "cleared" | "unreadable" | "unanswered";
+
+function conflictText(latest: Latest): string {
+  if (latest === "unanswered") return "Renamed elsewhere — couldn't read the latest name, try again";
+  if (latest === "unreadable") return "Renamed elsewhere — the latest name can't be read; save again to replace it";
+  if (latest === "cleared") return "Renamed elsewhere and cleared — save again to replace it";
+  return `Renamed elsewhere to “${latest.named}” — save again to replace it`;
 }
 
 /**
@@ -221,7 +225,7 @@ export class AccountStore {
   async rename(accountId: string, text: string): Promise<boolean> {
     if (this.#accounts.saving !== null || !this.#client.accountsNamed) return false;
     if (accountRecord(accountId, text, 1) === null) {
-      this.#set({ notice: TOO_LONG });
+      this.#notify(accountId, TOO_LONG);
       return false;
     }
     this.#set({ saving: accountId, notice: null });
@@ -232,28 +236,36 @@ export class AccountStore {
       if (!this.#listed) await this.#refresh(key);
       const written = await this.#client.putAccountAlias(accountId, text, this.#versions.get(key) ?? 0);
       if (written === null) {
-        this.#set({ notice: "The relay's answer was unreadable — reopen to see whether it landed" });
+        this.#notify(accountId, "The relay's answer was unreadable — reopen to see whether it landed");
       } else if (written.ok) {
         this.#take(key, written.record.version, written.record);
         landed = true;
       } else if (written.code === "version_conflict") {
         // The form covers the card, so the notice itself names what landed; undefined: the re-read got no answer.
         const reread = await this.#refresh(key);
-        this.#set({ notice: conflictText(reread ? this.#heldAlias(accountId) : undefined) });
+        this.#notify(accountId, conflictText(this.#latest(key, accountId, reread)));
       } else {
-        this.#set({ notice: refusalText(written.code) });
+        this.#notify(accountId, refusalText(written.code));
       }
     } catch (err) {
-      this.#set({
-        notice: err instanceof RequestFailure ? sentence(failureReasonText(err)) : "The rename failed",
-      });
+      this.#notify(accountId, err instanceof RequestFailure ? sentence(failureReasonText(err)) : "The rename failed");
     } finally {
       this.#set({ saving: null });
     }
     return landed;
   }
 
-  dismissNotice(): void {
-    if (this.#accounts.notice !== null) this.#set({ notice: null });
+  #latest(key: string, accountId: string, answered: boolean): Latest {
+    if (!answered) return "unanswered";
+    if (!this.#accountByKey.has(key)) return "unreadable";
+    const alias = this.#heldAlias(accountId);
+    return alias === null ? "cleared" : { named: alias };
+  }
+
+  /** A failure belongs to the dialog that asked: another account's open dialog must not show it. */
+  #notify(accountId: string, notice: string): void {
+    const { renaming } = this.#accounts;
+    if (renaming !== null && renaming !== accountId) return;
+    this.#set({ notice });
   }
 }

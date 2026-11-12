@@ -127,8 +127,9 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
       onDismiss={onDismiss}
       onShowHistory={(target, range) => void store.showHistory(target, range)}
       onHideHistory={() => store.hideHistory()}
+      onOpenRename={(accountId) => store.openAccountRename(accountId)}
+      onCloseRename={() => store.dismissLayer()}
       onRename={(accountId, text) => store.renameAccount(accountId, text)}
-      onDismissAccountNotice={() => store.dismissAccountNotice()}
     />
   );
 

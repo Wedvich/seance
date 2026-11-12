@@ -370,6 +370,12 @@ function deriveAccounts(
   }
 
   const newest = newestQuotaByAccount(machines, fleetQuota);
+  // An alias is per account and may repeat: the exclave ids then tell the cards, and their ⋯ labels, apart.
+  const uses = new Map<string, number>();
+  for (const group of groups.values()) {
+    const alias = aliasOf(aliases, group.accountId);
+    if (alias !== undefined) uses.set(alias, (uses.get(alias) ?? 0) + 1);
+  }
   return [...groups.values()].map((group) => {
     const quota = newest.get(group.accountId);
     const observer = machines.find((machine) => machine.deviceId === quota?.deviceId);
@@ -380,7 +386,7 @@ function deriveAccounts(
     return {
       accountId: group.accountId,
       alias: alias ?? null,
-      title: alias ?? exclaves,
+      title: alias === undefined ? exclaves : (uses.get(alias) ?? 0) > 1 ? `${alias} (${exclaves})` : alias,
       exclaves,
       plainName,
       detail: alias === undefined ? where : `${exclaves} · ${where}`,

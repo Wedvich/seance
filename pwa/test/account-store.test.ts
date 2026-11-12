@@ -19,7 +19,7 @@ import type { ServerWebSocket } from "bun";
 import { LIST_RETRY_MS } from "../src/account-store.ts";
 import { Store } from "../src/store.ts";
 import { pollUntil } from "./poll.ts";
-import { installBrowserGlobals, setVisibility } from "./stubs.ts";
+import { fakeHistory, installBrowserGlobals, setVisibility } from "./stubs.ts";
 
 installBrowserGlobals();
 
@@ -48,6 +48,8 @@ interface Double {
   refuseLists: number;
   /** While set, a `store-list` is answered from the records as they were asked, once it resolves: a reply that lands late. */
   listGate: Promise<void> | null;
+  /** Replies to the next `store-get` this way instead of from `records`. */
+  refuseGets: number;
   /** A write is not announced to the other sockets: a nudge lost to a drop. */
   muted: boolean;
   readonly stop: () => Promise<void>;
@@ -100,6 +102,11 @@ function startDouble(): Double {
             return;
           }
           case "store-get":
+            if (double.refuseGets > 0) {
+              double.refuseGets -= 1;
+              ws.send(JSON.stringify({ t: "store-refused", re, code: "rate_limited" }));
+              return;
+            }
             ws.send(JSON.stringify({ t: "store-record", re, record: at ?? null }));
             return;
           case "store-put": {
@@ -135,6 +142,7 @@ function startDouble(): Double {
     sockets,
     refuseLists: 0,
     listGate: null,
+    refuseGets: 0,
     muted: false,
     stop: () => server.stop(true),
   };
@@ -284,6 +292,26 @@ describe("account aliases in the store", () => {
     expect(double.records.get(await accountStoreKey(accountKey, ACCOUNT))?.version).toBe(2);
   });
 
+  test("a lost race whose re-read finds an unreadable record, or gets no answer, does not claim a clear or a name", async () => {
+    const double = startDouble();
+    const a = await openStore(double);
+    await pollUntil(() => lists(double) === 1, "the listing");
+    const storeKey = await planted(double, ACCOUNT, "work", 1, undefined, 3);
+
+    await a.renameAccount(ACCOUNT, "home");
+    expect(a.getState().accounts.notice).toBe(
+      "Renamed elsewhere — the latest name can't be read; save again to replace it",
+    );
+
+    // The key moves on again and the re-read is refused: the held version is stale, and the text says so.
+    const held = double.records.get(storeKey);
+    if (held === undefined) throw new Error("the record was not planted");
+    double.records.set(storeKey, { ...held, version: 9 });
+    double.refuseGets = 1;
+    await a.renameAccount(ACCOUNT, "home");
+    expect(a.getState().accounts.notice).toBe("Renamed elsewhere — couldn't read the latest name, try again");
+  });
+
   test("a rename that lost to a clear says the name was cleared", async () => {
     const double = startDouble();
     await planted(double, ACCOUNT, "work");
@@ -325,7 +353,7 @@ describe("account aliases in the store", () => {
     await store.renameAccount(ACCOUNT, "x".repeat(65));
     expect(store.getState().accounts.notice).toBe("Names are at most 64 characters");
     expect(double.received.some((frame) => frame["t"] === "store-put")).toBe(false);
-    store.dismissAccountNotice();
+    store.openAccountRename(ACCOUNT);
     expect(store.getState().accounts.notice).toBeNull();
   });
 
@@ -551,5 +579,58 @@ describe("account aliases in the store", () => {
     expect(store.getState().accounts.aliases).toEqual({});
     expect(store.getState().accounts.notice).toBeNull();
     expect(double.received).toEqual([]);
+  });
+});
+
+describe("the rename dialog", () => {
+  let fake: ReturnType<typeof fakeHistory>;
+
+  afterEach(() => fake.restore());
+
+  test("is a layer: back closes it and takes its notice along, leaving the screen under it", async () => {
+    fake = fakeHistory();
+    const double = startDouble();
+    const store = await openStore(double);
+    await pollUntil(() => lists(double) === 1, "the listing");
+    store.openMachines();
+    store.openAccountRename(ACCOUNT);
+    expect(store.getState().accounts.renaming).toBe(ACCOUNT);
+    expect(fake.entries()).toMatchObject([null, { depth: 1 }, { depth: 2 }]);
+
+    await store.renameAccount(ACCOUNT, "x".repeat(65));
+    expect(store.getState().accounts.notice).not.toBeNull();
+    store.dismissLayer();
+    fake.settle(store);
+    expect(store.getState().accounts).toMatchObject({ renaming: null, notice: null });
+    expect(store.getState().machines).toBe(true);
+  });
+
+  test("closes when its name lands, and stays open on a refusal", async () => {
+    fake = fakeHistory();
+    const double = startDouble();
+    const store = await openStore(double);
+    await pollUntil(() => lists(double) === 1, "the listing");
+    store.openAccountRename(ACCOUNT);
+
+    expect(await store.renameAccount(ACCOUNT, "x".repeat(65))).toBe(false);
+    fake.settle(store);
+    expect(store.getState().accounts.renaming).toBe(ACCOUNT);
+
+    expect(await store.renameAccount(ACCOUNT, "home")).toBe(true);
+    fake.settle(store);
+    expect(store.getState().accounts.renaming).toBeNull();
+    expect(fake.index()).toBe(0);
+  });
+
+  test("shows nothing of another account's failure", async () => {
+    fake = fakeHistory();
+    const double = startDouble();
+    const store = await openStore(double);
+    await pollUntil(() => lists(double) === 1, "the listing");
+    store.openAccountRename(OTHER);
+
+    await store.renameAccount(ACCOUNT, "x".repeat(65));
+    expect(store.getState().accounts.notice).toBeNull();
+    expect(store.getState().accounts.renaming).toBe(OTHER);
   });
 });

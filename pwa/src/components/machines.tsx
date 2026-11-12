@@ -42,9 +42,11 @@ export function MachinesScreen(props: {
   onDismiss?: () => void;
   onShowHistory: (target: HistoryTarget, range?: HistoryRange) => void;
   onHideHistory: () => void;
-  /** Resolves once the rename has settled: true when the name landed. */
+  onOpenRename: (accountId: string) => void;
+  /** Closes the dialog the way back does. */
+  onCloseRename: () => void;
+  /** Resolves once the rename has settled: true when the name landed, which closes the dialog. */
   onRename: (accountId: string, text: string) => Promise<boolean>;
-  onDismissAccountNotice: () => void;
 }): JSX.Element {
   const {
     view,
@@ -56,26 +58,17 @@ export function MachinesScreen(props: {
     onDismiss,
     onShowHistory,
     onHideHistory,
+    onOpenRename,
+    onCloseRename,
     onRename,
-    onDismissAccountNotice,
   } = props;
-  /** The account whose rename dialog is open. */
-  const [renaming, setRenaming] = useState<string | null>(null);
+  const { renaming } = accounts;
   const renamed = view.accounts.find((account) => account.accountId === renaming);
-  // The notice belongs to the dialog: one left from an earlier attempt must not greet the next.
-  const openRename = (accountId: string): void => {
-    onDismissAccountNotice();
-    setRenaming(accountId);
-  };
-  const closeRename = (): void => {
-    setRenaming(null);
-    onDismissAccountNotice();
-  };
-  const save = (accountId: string, text: string): void => {
-    void onRename(accountId, text).then((landed) => {
-      if (landed) setRenaming((current) => (current === accountId ? null : current));
-    });
-  };
+  // An account no machine reports any more has nothing to rename; closing for good keeps the dialog from returning with it.
+  const gone = renaming !== null && renamed === undefined;
+  useEffect(() => {
+    if (gone) onCloseRename();
+  }, [gone, onCloseRename]);
   return (
     <>
       <header className="header">
@@ -117,7 +110,7 @@ export function MachinesScreen(props: {
             key={account.accountId}
             account={account}
             nameable={accounts.nameable}
-            onRename={() => openRename(account.accountId)}
+            onRename={() => onOpenRename(account.accountId)}
             history={
               history?.target.kind === "account" && history.target.accountId === account.accountId ? history : null
             }
@@ -130,10 +123,10 @@ export function MachinesScreen(props: {
         <RenameDialog
           key={renamed.accountId}
           account={renamed}
-          saving={accounts.saving !== null}
+          saving={accounts.saving === renamed.accountId}
           notice={accounts.notice}
-          onSave={(text) => save(renamed.accountId, text)}
-          onClose={closeRename}
+          onSave={(text) => void onRename(renamed.accountId, text)}
+          onClose={onCloseRename}
         />
       )}
     </>
@@ -294,7 +287,7 @@ function HistoryItem(props: { history: HistoryView | null; onShow: () => void; o
  */
 function RenameDialog(props: {
   account: AccountCard;
-  /** Some rename is in flight; the store takes one at a time. */
+  /** This account's rename is in flight; the store takes one at a time. */
   saving: boolean;
   notice: string | null;
   onSave: (text: string) => void;
@@ -304,6 +297,7 @@ function RenameDialog(props: {
   const [draft, setDraft] = useState(account.alias ?? "");
   const input = useRef<HTMLInputElement>(null);
   const noticeId = useId();
+  const inputId = useId();
   // An effect, not a layout effect: `Sheet` focuses its panel in one, after its children's.
   // Again after a save: disabling the field dropped its focus.
   useEffect(() => {
@@ -322,11 +316,14 @@ function RenameDialog(props: {
         <p className="rename-account">
           {account.plainName} · {account.exclaves}
         </p>
+        <label className="rename-label" htmlFor={inputId}>
+          Account name
+        </label>
         <input
           ref={input}
+          id={inputId}
           type="text"
           className="rename-input"
-          aria-label="Account name"
           placeholder="Name this account"
           maxLength={ACCOUNT_ALIAS_MAX_LENGTH}
           value={draft}

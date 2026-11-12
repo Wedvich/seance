@@ -3902,8 +3902,10 @@ error.
   echoed id and email are what the person checks.
 - **PWA.** "Rename" in the account card's ⋯ menu opens a dialog (a bottom sheet on a phone, centred
   on a desk; at most 64 characters, trimmed; empty clears) that stays open on a refusal with the
-  reason under the field; without the account key the item is disabled and says to re-enter the
-  PSK. An alias is the account card's title, and the exclave ids it replaces lead the meta line
+  reason under the field, closes when the name lands, and is a history layer like the sheets (back closes
+  it); it closes for good if its account leaves the registry, and a failure for another account never
+  shows in it; without the account key the item is `aria-disabled` (still reachable, not activatable) and its
+  sub-line says to re-enter the PSK. Two accounts under one alias are titled `<alias> (<exclaves>)`. An alias is the account card's title, and the exclave ids it replaces lead the meta line
   (`<exclaves> · <email> · on <machines>`); an unnamed card is titled by its exclave ids. Names show
   on a machine card's exclave rows and the Queue screen's pause holds as alias, else email, else
   `acct` and the first eight characters of the account half.
@@ -7970,7 +7972,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   percentage describes a window that no longer exists. Both rules are one shared copy,
   `newestQuotaByAccount` and `effectivePct` in `shared/src/quota.ts`, so M2's scheduler
   filter and score read quota exactly as the cards do. Charts follow the split — the History switch in
-  a card's ⋯ menu (it leaves the menu open, so it can be flipped back; a machine card with no
+  a card's ⋯ menu (it leaves the menu open, so it can be flipped back, and the menu holds through
+  the layout shift a chart opening or closing causes, then re-pins to its trigger; a machine card with no
   chart to offer has no menu) on a machine asks
   that daemon for `cpu_pct`/`mem_pct`/`disk_pct`; on an account it asks one online host of the account
   (the newest observer when it serves `metrics`) for the quota series and folds its exclaves'
