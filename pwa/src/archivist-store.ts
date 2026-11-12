@@ -6,7 +6,7 @@ export const ARCHIVE_STATUS_REFRESH_MS = 60_000;
 
 /**
  * The Machines screen's archivist counts, apart from `Store`: read when the
- * screen is visible and the archivist is connected, again every minute while
+ * screen is on screen in a visible tab and the archivist is connected, again every minute while
  * it stays so, and dropped when the seat moves to another device or goes
  * offline. Refreshing only while someone looks keeps the archivist from
  * answering for nobody. A failed or unanswered read leaves no counts — the
@@ -34,7 +34,8 @@ export class ArchiveStore {
     const state = this.#getState();
     const archivist = state.relay.archivist;
     const held = state.archiveStatus;
-    const visible = state.machines || state.wide;
+    // A hidden tab reads nothing: `Store.attach`'s show path calls `sync` again on return.
+    const visible = (state.machines || state.wide) && document.visibilityState === "visible";
     if (held !== null && (archivist === null || !archivist.connected || held.deviceId !== archivist.deviceId)) {
       this.#generation += 1;
       this.#lastFetchAt = null;
@@ -45,6 +46,9 @@ export class ArchiveStore {
       return;
     }
     if (this.#timer === null) this.#timer = setTimeout(() => this.#tick(), ARCHIVE_STATUS_REFRESH_MS);
+    // A read on a down socket fails at once and would spend the minute's budget (and the held counts) on nothing;
+    // the reopen's registry push calls `sync` again.
+    if (state.relay.status !== "open") return;
     const stale = this.#lastFetchAt === null || Date.now() - this.#lastFetchAt >= ARCHIVE_STATUS_REFRESH_MS;
     if (this.#inFlight !== this.#generation && stale) void this.#fetch(archivist.deviceId);
   }

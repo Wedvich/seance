@@ -1810,6 +1810,8 @@ export class RelayClient {
 
   #markProvenOffline(deviceId: string): void {
     const entry = this.#entries.find((candidate) => candidate.deviceId === deviceId);
+    // The archivist is no Machine: nothing reads or prunes its mark, and each one would rebuild for nothing.
+    if (entry?.archivist === true) return;
     this.#provenOffline.set(deviceId, entry?.lastSeen ?? 0);
     this.#rebuildMachines();
   }

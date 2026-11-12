@@ -3992,7 +3992,10 @@ describe("attachments", () => {
     const client = capable();
     // Ignores the abort, as a PUT that had already landed does.
     const answers: ((reply: AttachmentUploaded) => void)[] = [];
-    client.onUpload = () => new Promise((resolve) => answers.push(resolve));
+    client.onUpload = () =>
+      new Promise((resolve) => {
+        answers.push(resolve);
+      });
     const store = new Store(client, { ...DEFAULT_FORM, prompt: "go" });
     const detach = store.attach();
     store.addFiles([file("a.txt", "first")]);
@@ -4423,6 +4426,30 @@ describe("the archivist's counts", () => {
       client.emit({ registrySize: 9 });
       expect(client.archiveAsks).toBe(1);
     } finally {
+      detach();
+    }
+  });
+
+  test("are not asked for while the tab is hidden or the socket is down, and are once it is back", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient({ archivist: archivistEntry("arch-1") });
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      setVisibility("hidden");
+      store.openMachines();
+      // Negative assertions: a non-event cannot be polled.
+      await Bun.sleep(20);
+      expect(client.archiveAsks).toBe(0);
+      setVisibility("visible");
+      client.emit({ status: "retrying" });
+      await Bun.sleep(20);
+      expect(client.archiveAsks).toBe(0);
+      client.emit({ status: "open" });
+      await pollUntil(() => store.getState().archiveStatus !== null, "the counts after the socket is back");
+      expect(client.archiveAsks).toBe(1);
+    } finally {
+      setVisibility("visible");
       detach();
     }
   });
