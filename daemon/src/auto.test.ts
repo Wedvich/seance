@@ -87,6 +87,7 @@ describe("requiresCheck", () => {
       kind: "unknown_trait",
       text: "no machine declares the traits nope, nada — known: atlas, az, gpu",
       count: 2,
+      split: false,
     });
   });
 
@@ -95,12 +96,16 @@ describe("requiresCheck", () => {
   });
 
   test("(a) a pin to a machine whose exclaves each carry one of the traits, (b) the avoid of the only holder", () => {
-    expect(requiresCheck({ requires: ["atlas", "az"], pin: { deviceId: "d-1" } }, fleet)?.kind).toBe(
-      "unreachable_trait",
-    );
+    // Each trait is on some exclave of d-1, none has both: a split, not a trait no place carries.
+    expect(requiresCheck({ requires: ["atlas", "az"], pin: { deviceId: "d-1" } }, fleet)).toMatchObject({
+      kind: "unreachable_trait",
+      count: 0,
+      split: true,
+    });
     expect(requiresCheck({ requires: ["gpu"], avoid: ["d-3"] }, fleet)).toMatchObject({
       kind: "unreachable_trait",
       count: 1,
+      split: false,
     });
     expect(requiresCheck({ requires: ["atlas"], pin: { account: "org:wsl" }, avoid: ["d-2"] }, fleet)?.kind).toBe(
       "unreachable_trait",

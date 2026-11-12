@@ -2991,7 +2991,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
     and a spec no reachable exclave could ever satisfy: the traits that no single exclave carries
     together, after the device pin, the account pin and `avoid` have cut the candidates
     (`unreachableTraitsText`: "no exclave this task can reach carries atlas and gpu together — atlas is
-    on Mac; gpu is on WSL (avoided)"). A task without `requires` skips both. A continuation inherits its
+    on Mac; gpu is on WSL (avoided)"; a machine is named `Mac/work` where several of its exclaves
+    carry something required, so a split reads as one). A task without `requires` skips both. A continuation inherits its
     task's `requires` through the capability gate only, with no name check: the traits it carries were
     already accepted once and may since have been undeclared, which then waits like any held task.
     The PWA has no avoid list, so its reachability check cuts by the machine and account pins only; a
@@ -3025,7 +3026,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
     unknown-trait check, so the answer is not "no machine declares" for a fleet the old broker never
     saw. Audit: the admit line gains counts (`avoid=<n> requires=<n> pin=<0|1>`), a refusal writes
     `audit enqueue origin=<surface> client=<surface> refused=<unknown_trait|unreachable_trait>
-    requires=<n> unknown=<n>|missing=<n>`; never a name.
+    requires=<n> unknown=<n>|missing=<n>[ split=1]`, `split=1` when every trait is on some place the task
+    could go but none has them all; never a name.
 
 - **Continue routing** (2026-10-26, Daemon, "Continuing a session"). A task with
   `spec.continues` has exactly one acceptable candidate, the `(deviceId, exclave, clone)` in

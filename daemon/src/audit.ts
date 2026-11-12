@@ -392,17 +392,18 @@ export type TraitRefusalKind = "unknown_trait" | "unreachable_trait";
  * An enqueue refused locally for what it requires (`requiresCheck`): one line per refusal, under the
  * surface's own origin, the same shape as `enqueueAudit`'s so the measurement reads both. Counts
  * only — `requires` is how many traits it asked for, `count` how many were unknown (or, for
- * `unreachable_trait`, missing from every place it could go). The names are user-typed free text
- * and stay out, as a prompt does.
+ * `unreachable_trait`, missing from every place it could go), and `split=1` when each trait is on some
+ * place it could go but none has them all (`missing=0` alone would read as no reason). The names are
+ * user-typed free text and stay out, as a prompt does.
  */
 export function traitRefusalAudit(
   sink: AuditSink,
   surface: EnqueueSurface,
-): (refusal: TraitRefusalKind, requested: number, count: number) => Promise<void> {
-  return async (refusal, requested, count) => {
+): (refusal: TraitRefusalKind, requested: number, count: number, split?: boolean) => Promise<void> {
+  return async (refusal, requested, count, split = false) => {
     const counted = refusal === "unknown_trait" ? "unknown" : "missing";
     await sink(
-      `audit enqueue origin=${surface} client=${surface} refused=${refusal} requires=${requested} ${counted}=${count}`,
+      `audit enqueue origin=${surface} client=${surface} refused=${refusal} requires=${requested} ${counted}=${count}${split ? " split=1" : ""}`,
     );
   };
 }

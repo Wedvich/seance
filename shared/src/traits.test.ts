@@ -157,4 +157,15 @@ describe("unreachableTraitsText", () => {
     );
     expect(unreachableTraitsText({ requires: ["nope"] }, fleet)).toContain("nope is on no machine");
   });
+
+  test("names the exclave where one machine's exclaves each carry only part of what is required", () => {
+    const split = machine("Split", [exclave("x", ["a"]), exclave("y", ["b"])]);
+    expect(unreachableTraitsText({ requires: ["a", "b"] }, [split])).toBe(
+      "no exclave this task can reach carries a and b together — a is on Split/x; b is on Split/y",
+    );
+    // gpu sits on two of MacBook's exclaves, atlas on one: both are named, since both carry something required.
+    expect(unreachableTraitsText({ requires: ["atlas", "gpu", "az"] }, [macbook])).toContain(
+      "gpu is on MacBook/default, MacBook/work",
+    );
+  });
 });

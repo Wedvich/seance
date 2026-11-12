@@ -95,32 +95,30 @@ function nameList(names: readonly string[]): string {
 }
 
 /**
- * Why a task with `requires` could never place, for the refusal: which machines have each
- * trait and what keeps each out of reach (`avoided`, a pin elsewhere or to another account).
+ * Why a task with `requires` could never place, for the refusal: where each trait is and what keeps each
+ * holder out of reach (`avoided`, a pin elsewhere or to another account). A holder is a machine, or
+ * `Machine/exclave` when several of its exclaves carry something required: the exclave is the unit, so
+ * traits split across one machine's exclaves must not read as that machine having them all.
  */
 export function unreachableTraitsText(spec: ReachSpec, machines: readonly Machine[]): string {
   const requires = spec.requires ?? [];
   const avoided = new Set(spec.avoid ?? []);
-  const holders = new Map<string, Machine[]>();
-  for (const machine of machines) {
-    for (const trait of requires) {
-      if (!(machine.exclaves ?? []).some((e) => e.traits?.includes(trait) === true)) continue;
-      holders.set(trait, [...(holders.get(trait) ?? []), machine]);
-    }
-  }
-  const outOfReach = (machine: Machine, trait: string): string | null => {
+  const outOfReach = (machine: Machine, exclave: ExclaveInfo): string | null => {
     if (avoided.has(machine.deviceId)) return "avoided";
     if (spec.pin?.deviceId !== undefined && machine.deviceId !== spec.pin.deviceId) return "pinned elsewhere";
-    const pinned = spec.pin?.account;
-    const onAccount = (machine.exclaves ?? []).some(
-      (e) => e.traits?.includes(trait) === true && e.accountId === pinned,
-    );
-    return pinned !== undefined && !onAccount ? "other account" : null;
+    return spec.pin?.account !== undefined && exclave.accountId !== spec.pin.account ? "other account" : null;
   };
   const where = requires.map((trait) => {
-    const on = (holders.get(trait) ?? []).map((m) => {
-      const why = outOfReach(m, trait);
-      return why === null ? m.name : `${m.name} (${why})`;
+    const on = machines.flatMap((machine) => {
+      // Named by exclave only where more than one of a machine's exclaves carries something required.
+      const relevant = (machine.exclaves ?? []).filter((e) => requires.some((t) => e.traits?.includes(t) === true));
+      return relevant
+        .filter((e) => e.traits?.includes(trait) === true)
+        .map((e) => {
+          const label = relevant.length > 1 ? `${machine.name}/${e.id}` : machine.name;
+          const why = outOfReach(machine, e);
+          return why === null ? label : `${label} (${why})`;
+        });
     });
     return on.length === 0 ? `${trait} is on no machine` : `${trait} is on ${nameList(on)}`;
   });

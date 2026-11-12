@@ -153,9 +153,11 @@ describe("trait audit lines", () => {
   test("a refused enqueue is one line under the surface's origin, with counts only", async () => {
     await traitRefusalAudit(collect, "mcp")("unknown_trait", 2, 1);
     await traitRefusalAudit(collect, "cli")("unreachable_trait", 3, 2);
+    await traitRefusalAudit(collect, "cli")("unreachable_trait", 2, 0, true);
     expect(collected).toEqual([
       "audit enqueue origin=mcp client=mcp refused=unknown_trait requires=2 unknown=1",
       "audit enqueue origin=cli client=cli refused=unreachable_trait requires=3 missing=2",
+      "audit enqueue origin=cli client=cli refused=unreachable_trait requires=2 missing=0 split=1",
     ]);
   });
 });

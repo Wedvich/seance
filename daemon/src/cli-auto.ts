@@ -182,7 +182,7 @@ export async function spawnAuto(
     if (longOrigin !== null) return failed(`spawn refused: ${longOrigin}`);
     const refused = args.requires === undefined ? null : requiresCheck(resolvedSpec, leg.machines);
     if (refused !== null) {
-      await traitRefusalAudit(audit, "cli")(refused.kind, args.requires?.length ?? 0, refused.count);
+      await traitRefusalAudit(audit, "cli")(refused.kind, args.requires?.length ?? 0, refused.count, refused.split);
       return failed(`spawn refused: --requires: ${refused.text}`);
     }
     const id = crypto.randomUUID();

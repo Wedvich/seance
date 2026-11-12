@@ -589,6 +589,8 @@ export interface RequiresCheckRefusal {
   readonly text: string;
   /** Unknown names, or for `unreachable_trait` the required traits no reachable exclave carries. */
   readonly count: number;
+  /** `unreachable_trait` with every trait on some reachable exclave, no one exclave on all: `count` is 0. */
+  readonly split: boolean;
 }
 
 /**
@@ -605,11 +607,16 @@ export function requiresCheck(
   const requires = spec.requires ?? [];
   const unknown = unknownTraits(requires, machines);
   if (unknown.length > 0) {
-    return { kind: "unknown_trait", text: unknownTraitsText(unknown, machines), count: unknown.length };
+    return { kind: "unknown_trait", text: unknownTraitsText(unknown, machines), count: unknown.length, split: false };
   }
   const reach = unreachableTraits(spec, machines);
   if (reach.reachable) return null;
-  return { kind: "unreachable_trait", text: unreachableTraitsText(spec, machines), count: reach.missing.length };
+  return {
+    kind: "unreachable_trait",
+    text: unreachableTraitsText(spec, machines),
+    count: reach.missing.length,
+    split: reach.missing.length === 0,
+  };
 }
 
 /** The submit-time gate for a start: a leader without `runNow` refuses the op as unknown. */

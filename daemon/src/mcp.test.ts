@@ -1917,8 +1917,12 @@ describe("spawn_session requires", () => {
     });
     expect(error).toBe(true);
     expect(text).toContain("no exclave this task can reach carries atlas and az together");
+    // The two exclaves each carry one: named per exclave, not as "Thad" having both.
+    expect(text).toContain("atlas is on Thad/default, WSL (pinned elsewhere); az is on Thad/work, WSL (pinned elsewhere)");
     expect(fake.creates).toEqual([]);
-    expect(audited).toEqual(["audit enqueue origin=mcp client=mcp refused=unreachable_trait requires=2 missing=0"]);
+    expect(audited).toEqual([
+      "audit enqueue origin=mcp client=mcp refused=unreachable_trait requires=2 missing=0 split=1",
+    ]);
   });
 
   test("avoiding the only machine that has the trait is refused; without the avoid it is accepted", async () => {

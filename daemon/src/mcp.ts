@@ -1158,7 +1158,7 @@ export function buildMcpServer(
         const resolvedSpec: AutoSpec = { ...spec, ...resolved.fields };
         const refused = requires === undefined ? null : requiresCheck(resolvedSpec, lease.machines);
         if (refused !== null) {
-          await traitRefusalAudit(audit, "mcp")(refused.kind, requires?.length ?? 0, refused.count);
+          await traitRefusalAudit(audit, "mcp")(refused.kind, requires?.length ?? 0, refused.count, refused.split);
           return errorResult(`spawn refused: ${refused.text}`);
         }
         const longOrigin = specError(resolvedSpec);
@@ -1319,7 +1319,7 @@ export function buildMcpServer(
           const refused = spec.requires === undefined ? null : requiresCheck(spec, lease.machines);
           if (refused !== null) {
             // oxlint-disable-next-line no-await-in-loop -- a refusal ends the loop
-            await traitRefusalAudit(audit, "mcp")(refused.kind, spec.requires?.length ?? 0, refused.count);
+            await traitRefusalAudit(audit, "mcp")(refused.kind, spec.requires?.length ?? 0, refused.count, refused.split);
             return errorResult(`queue_batch refused: task ${i + 1}: ${refused.text}`);
           }
           resolvedPlan.push({ id: member.id, ref: member.ref, spec });
