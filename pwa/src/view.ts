@@ -500,7 +500,8 @@ export function derivePinProblem(
         text: "The scheduler's leader can't pin an account yet — update seanced on its machine",
       };
     }
-    if (gate === "no-leader") {
+    // Held: no leader to ask until it is sent, where `#sendOne` checks it.
+    if (gate === "no-leader" && !canHold(relay)) {
       return {
         label: "Can't pin an account",
         text: "No verified scheduler is leading, so an account pin can't be confirmed; try again once one leads",

@@ -57,6 +57,7 @@ import {
   canHold,
   deriveAttachmentsAvailability,
   deriveAutoAvailability,
+  derivePinAccountAvailability,
   derivePinProblem,
   deriveReportedAvailability,
   resolveRepo,
@@ -907,11 +908,12 @@ export class Store {
   async #sendHeld(): Promise<void> {
     if (this.#sendingHeld) return;
     this.#sendingHeld = true;
-    const tried = this.#triedOnSocket;
     try {
       for (;;) {
         const { relay } = this.#state;
         if (relay.status !== "open" || !relay.registrySettled) return;
+        // Read each turn: a socket that settled while a send was out swapped the set, and this pass serves it too.
+        const tried = this.#triedOnSocket;
         const next = this.#state.held.find((entry) => entry.failure === null && !tried.has(entry.task.id));
         if (next === undefined) return;
         tried.add(next.task.id);
@@ -927,6 +929,14 @@ export class Store {
     const reported = task.spec.until === "reported" || task.spec.deps?.some((dep) => dep.after === "done") === true;
     if (reported && !deriveReportedAvailability(this.#state.relay)) {
       this.#heldFailed(task, `${REPORTED_UNAVAILABLE} Try again once it does, or discard it.`);
+      return;
+    }
+    // Held without a leader to ask, like a done report; the sealer's exclave guard still covers an older leader.
+    if (task.spec.pin?.account !== undefined && derivePinAccountAvailability(this.#state.relay) !== "available") {
+      this.#heldFailed(
+        task,
+        "The scheduler's leader can't pin an account right now. Try again once it can, or discard it.",
+      );
       return;
     }
     this.#patchHeld(task.id, { sending: true });

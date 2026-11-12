@@ -6617,7 +6617,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   place, with a retry and a discard on the form; a failed one is never resent by
   itself. What needs a verified leader is checked at send, not at the tap: a task
   settling on its done report, or with a `done` edge, fails there if the leader
-  doesn't advertise `reportedDone`. A Start now held this way is a plain queue,
+  doesn't advertise `reportedDone`, and so does an account pin when it doesn't advertise
+  `pinAccount`. A Start now held this way is a plain queue,
   since a `run-now` fired whenever the app next reconnects would skip the caps at a
   moment nobody chose. A task with files is never held: files upload at the tap and
   go only to a leader verified to advertise `attachments`, which a dropped socket

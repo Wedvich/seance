@@ -2911,6 +2911,20 @@ describe("pinning a task", () => {
     expect(describeVerdict(verdict, [], {}, 0, null).body).toContain("update seanced");
   });
 
+  test("an account pin with the relay down is held, and checked against the leader when sent", async () => {
+    const client = pinning([]);
+    client.emit({ status: "retrying", registrySettled: false });
+    const store = new Store(client, { ...form, account: "acct-w" });
+    store.attach();
+    await store.spawn();
+    expect(store.getState().held).toHaveLength(1);
+
+    client.emit({ status: "open", registrySettled: true });
+    await until(() => store.getState().held[0]?.failure !== null, "the send-time check");
+    expect(store.getState().held[0]?.failure).toContain("can't pin an account");
+    expect(client.creates).toEqual([]);
+  });
+
   test("an account no machine is signed in to is refused, and the form keeps its pin", async () => {
     const client = pinning();
     const store = new Store(client, { ...form, account: "acct-gone" });
