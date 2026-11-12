@@ -2559,7 +2559,8 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   - **The payload** (`PushAlert`, `v: 1`, at most `PUSH_ALERT_MAX_BYTES` = 1024) is a task id (or
     device id for disk) and state, in a record `parsePushAlert` reads strictly: no account id,
     prompt or title. `needs-input` carries `escalated` (false for the first alert, true for the
-    30-minute one), `spill` the window label and projected percent, `disk` the used percent.
+    30-minute one) and, on a first alert a question raised at once, `question: true`; `spill`
+    the window label and projected percent, `disk` the used percent.
   - **Encryption and signing** are on WebCrypto, with no dependency: RFC 8291 `aes128gcm`
     (ECDH P-256, HKDF-SHA256, one AES-128-GCM record with the 0x02 delimiter), checked against
     the RFC's Appendix A vector byte for byte (`daemon/test/web-push.test.ts`), and RFC 8292
@@ -2907,7 +2908,15 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   stamp and the clock leave together (`inputClock`), so a new wait alerts afresh, and a stay
   that is already past the 30-minute escalation gets only that alert, as the escalation: one
   push per stay at the first threshold crossed, a second only for a wait that outlives the
-  escalation.
+  escalation. **A question skips the debounce** (2026-11-12): a `needs-input` event whose
+  source carries `reason: "question"` (Session events, "The question reason") sets
+  `inputAlerted` in the write that applies it, and once that write lands raises the first alert
+  with `question: true`, so a real choice reaches the phone at once. It counts only where
+  `sessionChange` accepts the machine, or for a needs-input stay its own machine re-reports
+  (`questionAlert`). A stay already alerted or escalated gets nothing more, and the 30-minute
+  escalation is unchanged. No record field says it was a question: the stamp is the one every
+  leader already reads, so an older leader taking over stays quiet for the stay and still
+  escalates it.
 - **Credits spill** (M3 item 5). A reservation on a candidate carrying `spill` is recorded in
   the decision the reservation writes — the PWA's verdict shows it on the chosen line, "may
   spill into credits (5h projected at 93%)", or "would spend credits (5h full)" for `spending`
@@ -5132,9 +5141,12 @@ of this section built.
     a limit the user set) and defers the rest to "every guardrail your CLAUDE.md
     files name". Séance knows no workspace, so it names none.
   - **Every real choice goes through AskUserQuestion.** That is what session
-    events report as `needs-input`, so the 2-minute push fires, and what Remote
+    events report as `needs-input` with `reason: "question"`, so the push fires at
+    once rather than after the 2-minute debounce (Session events, "The question
+    reason", 2026-11-12), and what Remote
     Control shows with its options, so the push's `/?task=<id>` link and the task
-    card's claude.ai link reach the question. The push itself carries no question:
+    card's claude.ai link reach the question. The push says only that it is one
+    ("A task is asking you a question") and carries none of its text:
     the service worker holds no PSK and its text is fixed per kind (PWA, "Web
     Push"), and answering from the PWA through the daemon into the pane would type
     wire text into a session, which Remote Control already does without séance.
@@ -6747,7 +6759,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   the `skipWaiting`/`clientsClaim` update path stay the plugin's) shows every push as a generic
   "Séance" notification, even one it cannot read, because Chrome shows its own otherwise and
   WebKit revokes a subscription after a few silent pushes. The text is fixed per kind ("A task
-  is waiting for input", "… still waiting for input (30 min)", "A task may spill into credits
+  is waiting for input", "… still waiting for input (30 min)", "A task is asking you a question"
+  for a first alert carrying `question: true` (a worker that predates the field words it as any
+  wait), "A task may spill into credits
   (7d projected at 95%)", "A task is spending credits (5h full)", "A machine's disk is nearly
   full"); the spill is worded as spending only for a payload's `spending: true`, anything else
   being the forecast, the weaker claim (a worker that predates the field words both as
@@ -8093,7 +8107,7 @@ local daemon, and the daemon forwards task sessions' states to the leader. This 
 a third frame kind on the op socket, and a widening of what the socket takes in.
 
 - **Its own frame kind, never a `Plain` or an `OpName`.** `{v, kind: "session-event",
-  state?, prUrl?, remoteSession?, pane?, turnEnded?}`, or `{v, kind, handoff: true, pane?}` alone (below), routed on `kind` before the `Plain` check, as
+  state?, prUrl?, remoteSession?, pane?, turnEnded?, reason?}`, or `{v, kind, handoff: true, pane?}` alone (below), routed on `kind` before the `Plain` check, as
   broker frames are. A frame with `rateLimits` and no state, from a mod that predates
   2026-10-20 (below), is still taken as activity; its numbers go unread. It has no `op`, `id` or `ts`, so it cannot arrive from the relay
   and no op rides in as one. A daemon that predates it drops it as malformed. The mod
@@ -8131,7 +8145,9 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   loop it holds (`agentId`; core's check for `AskUserQuestion` settles `ask`/person under
   the same id, so it enters once), until its `tool.call` settles or rejects. **One function
   names the state every report carries**: needs-input while any dialog is outstanding, else
-  idle while `atPrompt`, else busy. A report goes out whenever that changes (and only then,
+  idle while `atPrompt`, else busy. A needs-input carries `reason: "question"` while any
+  outstanding dialog is an `AskUserQuestion` (mod 0.4.0), a permission ask beside it or not; the
+  reason is part of the state, so it opening or closing is a change. A report goes out whenever that changes (and only then,
   bar a PR below), so two overlapping prompts report busy after the second, and a subagent's
   dialog closing after the main turn ended resumes to idle, not busy. A rejection resumes
   the same way when it empties the map. The main loop's own turn events drop its own entries
@@ -8312,6 +8328,24 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   is the one above: a same-uid process on the task's machine can make the title link to
   another claude.ai session the same account owns. Not covered: the spawn verdict (above,
   "Out of scope for v1"), and sessions with no task, whose events go nowhere.
+- **The question reason** (added 2026-11-12, at the owner's request; reverses the earlier
+  rejection in docs/scheduler.md, "Autonomy level"). The autonomy levels send every real choice
+  through AskUserQuestion, and those are the waits a person should hear about first, but the
+  leader's first needs-input alert waits 2 minutes, a debounce that exists for auto mode's
+  per-call flicker (above, "An asked call reads needs-input until it settles"). A question
+  cannot flicker: its dialog is open until the person answers. So the mod adds `reason:
+  "question"` beside `needs-input` while an AskUserQuestion is outstanding (above), and the leader
+  alerts that stay at once (Scheduler, "Needs input"). `NEEDS_INPUT_REASONS` is the closed set,
+  `question` alone. The reason is kept only when it is a known value beside `needs-input`, at
+  ingest (`parseSessionEventFrame`) and at the leader's `parseSessionEvent`, and is otherwise
+  dropped, never the event: an unknown reason costs only the debounce, which is what every
+  version skew degrades to (an older daemon or leader drops the key; an older push worker words
+  the push as any wait). It rides the outbox with its state, so a later state in the 5 s window
+  replaces it. Like `remoteSession` it is the session's claim and travels on `SessionSource`,
+  read only where the event is the task's own machine's. It moves, binds and settles nothing,
+  and starts no command. All it can do is bring its own task's first alert forward, once per
+  stay. A same-uid process that sends it falsely gets a push up to 2 minutes early for a task
+  already in needs-input on its machine, which it could cause anyway by holding a dialog open.
 - **Forwarded only for task sessions, at most one per session per 5 s.** An event
   for a pane with no task id goes nowhere; like every bound event, it still pokes the refresh. The first event in a
   window leaves at once. A burst after it folds into one trailing send, carrying the

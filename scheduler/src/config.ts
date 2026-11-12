@@ -54,7 +54,8 @@ export interface SchedulerConfig {
   readonly globalMax: number;
   /**
    * A task in `needs-input` this long is alerted once (`inputAlert`): well above the seconds an
-   * auto-mode classifier call flickers it, well below the escalation.
+   * auto-mode classifier call flickers it, well below the escalation. A question, which cannot
+   * flicker, skips it (`questionAlert`).
    */
   readonly needsInputAlertMs: number;
   /** A task in `needs-input` this long is escalated once: re-alerted, never killed, its slot kept. */
