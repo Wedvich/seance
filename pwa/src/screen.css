@@ -2855,6 +2855,16 @@
   color: var(--warn);
 }
 
+/* Why the PR is stuck (`QueueRow.pr.blocked`), beside the icons. The chip stays one line at 360px:
+   the label gives way with an ellipsis before the number or the icons do. */
+.queue-pr-blocked {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--err);
+}
+
 .queue-pr-stale .queue-pr-icon,
 .queue-pr-stale .queue-pr-ci {
   color: inherit;

@@ -1031,7 +1031,7 @@ of M4 has landed.
   Turn off on that device is what keeps it off. Follow-up, not built: the list on a browser whose
   card never reads the record (`unsupported`, `denied`).
 
-- **PR hand-off** — _Decided_ by the owner, 2026-11-11; step 1 built. A session that opened its PR
+- **PR hand-off** — _Decided_ by the owner, 2026-11-11; steps 1-3 built, and the chip half of 5. A session that opened its PR
   and armed what merges it hands the PR to the scheduler and exits, rather than staying alive to
   watch CI and merge. A 30-day transcript sample across one fleet found that pattern in over half of
   its sessions, at thousands of sleep and poll calls, with p90 lifetimes of 8 h and 20 h on two
@@ -1040,17 +1040,23 @@ of M4 has landed.
   1. **A session can end itself** — **Done**: `hand_off_task`, DESIGN.md "Session events",
      `handoff`. A workflow calls it last, only for one open PR that is not stacked, on a repo where a
      required check gates auto-merge or a review is required.
-  2. **A wider PR read** (`daemon/src/pr-status.ts`). On the head commit: `oid`, each required check's
+  2. **A wider PR read** (`daemon/src/pr-status.ts`) — **Done** 2026-11-12, as a second query next to
+     the merge query, not selection added to it (DESIGN.md "PR status", "A separate blocked-state
+     read"). On the head commit: `oid`, each required check's
      name and conclusion (`statusCheckRollup.contexts`, `isRequired(pullRequestNumber:)`, first 50,
      only the failing names kept, at most 5 of 100 characters), plus `mergeStateStatus` and whether
      auto-merge is armed. Today's rollup counts optional checks too, so it cannot be the trigger.
-  3. **A `pr-blocked` alert**, with reason `checks`, `conflict` (`DIRTY`) or `behind` (`BEHIND`, which
-     blocks only on a repo whose ruleset requires an up-to-date branch). `behind` is raised on
-     `mergeStateStatus` `BEHIND` and nothing else — not on a base that merely moved — so a repo that
-     turns "require up to date" on later is covered with no change; the read's tests pin that. Raised in `prChange` for an
-     `awaiting-merge` task with no continuation queued or running. Deduped on reason plus head oid,
-     persisted on the task as `spillAlert` is, so a fix that fails again alerts again. Pushed as a new
-     `PushAlert` kind with ids only, fixed wording in `push-sw.js`, and a click opening `/?task=<id>`. A
+  3. **A `pr-blocked` alert** — **Done** 2026-11-12 (DESIGN.md, Scheduler alerts, "PR blocked"). Reason
+     `checks`, `conflict` (`DIRTY`), `behind` (`BEHIND`, which blocks only on a repo whose ruleset
+     requires an up-to-date branch; raised on `mergeStateStatus` `BEHIND` and nothing else — not on a base
+     that merely moved — so a repo that turns "require up to date" on later is covered with no
+     change; the read's tests pin that) or `unarmed` (the required checks pass and nothing will merge
+     it: no auto-merge, no merge queue, no review requested). Raised with the reading's own write
+     for an `awaiting-merge` task, not under `until: "reported"`, with no continuation waiting or
+     placed anywhere in its chain. Deduped on reason plus head oid, persisted on the task as
+     `prAlert` as `spillAlert` is, so a fix that fails again alerts again. Pushed as a new
+     `PushAlert` kind carrying the reason and ids only (the reason is state, which replaces "ids
+     only" for this kind), fixed wording per reason in `push-sw.js`, and a click opening `/?task=<id>`. A
      true one-tap Continue is out of reach: the service worker holds no PSK, and a URL that enqueues on
      open would let any same-origin link start a session.
   4. **Continue from `awaiting-merge`** while the PR is blocked. `continueOffer` allows it (DESIGN.md
@@ -1060,7 +1066,8 @@ of M4 has landed.
      `continuePreamble` wording covers a session that ended by handing off. The original task keeps
      the PR and its `after: "merged"` dependents, and the continuation ends `done` by `session`.
   5. **PWA**: Continue as the primary action on a blocked `awaiting-merge` card, and the chip names the
-     reason.
+     reason. The chip half is **Done** 2026-11-12 (a word beside the CI dot, and in its title; MCP's
+     `get_queue` carries `prBlocked` the same way).
   - _Later:_ a hand-off whose close fails. The session was told `ok`, so it ended its turn and waits
     at its prompt; the failure is audited (`origin=handoff`, the `DespawnFailure` code) but nothing
     retries or tells anyone, and the task sits `running` until someone closes the window. Retry once
@@ -1072,6 +1079,8 @@ of M4 has landed.
     panes one daemon ever ran, a few bytes each, so not worth a sweep until something reads the map.
   - _Built 2026-11-12:_ several PRs per task (`Task.prs`, DESIGN.md "PR status", "Several PRs"):
     the task stands on its newest PR not read closed. _Later:_ one alert per PR.
+  - _Later:_ alert and Continue for `until: "reported"` tasks. They are excluded from the blocked-state
+    read, the chip and the alert for now (they do not wait on the merge).
   - _Later:_ stacked PRs, once Stacking lands. A `reviewDecision` chip, with `CHANGES_REQUESTED` as a
     `pr-blocked` reason. GitHub's native stacks (`gh stack`) merge the whole stack in the same second
     when the top PR merges (seen on #302/#304 and #352–#358), so a child needs a restack only when a

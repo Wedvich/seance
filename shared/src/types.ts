@@ -2162,16 +2162,51 @@ export interface Decision {
   readonly trimmed?: number;
 }
 
+/** `Task.prAlert`: what a `pr-blocked` alert was raised for, and when (ms, the leader's clock). */
+export interface PrAlertStamp {
+  readonly reason: PrBlockedReason;
+  readonly head: string;
+  readonly at: number;
+}
+
 export const PR_STATES = ["open", "draft", "merged", "closed"] as const;
 export type PrState = (typeof PR_STATES)[number];
 
 export const PR_CHECKS = ["pending", "passing", "failing"] as const;
 export type PrChecks = (typeof PR_CHECKS)[number];
 
+/** GitHub's `mergeStateStatus`, lowercased. An enum value outside this list is left out of a reading. */
+export const PR_MERGE_STATES = ["clean", "unstable", "has_hooks", "blocked", "behind", "dirty", "unknown"] as const;
+export type PrMergeState = (typeof PR_MERGE_STATES)[number];
+
+/**
+ * Bounds on `PrStatus.failing`, held by the reader (`daemon/src/pr-status.ts`) and the parser alike: a
+ * reading with one name over them is refused whole, so both read this and nothing else.
+ */
+export const PR_FAILING_LIMITS = { names: 5, length: 100 } as const;
+
+/** Why an `awaiting-merge` task's PR is stuck, first match wins (`prBlocked`, `shared/src/pr-blocked.ts`). */
+export const PR_BLOCKED_REASONS = ["checks", "conflict", "behind", "unarmed"] as const;
+export type PrBlockedReason = (typeof PR_BLOCKED_REASONS)[number];
+
 /** The leader's forge reading of a task's PR. */
 export interface PrStatus {
   readonly state: PrState;
   readonly checks?: PrChecks;
+  /** The head commit's oid. Read only for the primary PR of an `awaiting-merge` task. */
+  readonly head?: string;
+  /**
+   * The rollup of the head's required contexts only (the first 50 contexts). Absent: none is required,
+   * or the separate blocked-state read did not run or failed.
+   */
+  readonly required?: PrChecks;
+  /** The required contexts that failed, `PR_FAILING_LIMITS` bounded and cleaned. Present only with `required: "failing"`. */
+  readonly failing?: readonly string[];
+  readonly merge?: PrMergeState;
+  /** Auto-merge is enabled, or the PR is in the merge queue: something will merge it. */
+  readonly armed?: true;
+  /** At least one review is requested. */
+  readonly reviewRequested?: true;
   /**
    * With `merged`: it landed in a branch other than the repo's default (a
    * stacked PR merged into its parent's branch), so nothing is on the default
@@ -2330,6 +2365,11 @@ export interface Task {
    * A new leader seeds its de-dupe from these, so one window alerts once across terms.
    */
   readonly spillAlert?: SpillStamp;
+  /**
+   * The dedupe stamp of the last `pr-blocked` alert: the reason and head it was raised under. Dropped,
+   * never fatal, when malformed (a lost one costs one repeated alert), and on finishing.
+   */
+  readonly prAlert?: PrAlertStamp;
   /**
    * When it entered `awaiting-merge`, ms, the leader's clock — what merge expiry
    * (`SchedulerConfig.mergeExpiryMs`) ages from. Kept once it leaves. Absent on a
@@ -2886,6 +2926,13 @@ export type PushAlert =
       readonly deviceId: string;
       readonly diskPct?: number;
       readonly freeMib?: number;
+    }
+  | {
+      readonly v: 1;
+      readonly kind: "pr-blocked";
+      readonly at: number;
+      readonly taskId: string;
+      readonly reason: PrBlockedReason;
     };
 
 /** A push payload's plaintext at most, in bytes: well under the 4096-byte record a push service must accept. */

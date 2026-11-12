@@ -1,11 +1,13 @@
 import {
   CAPABILITIES,
+  continuationUnderway,
   DECISION_MAX_CANDIDATES,
   parseSpillStamp,
   quote,
   type BranchState,
   type FleetQuotaEntry,
   type IdleTaskRef,
+  type PrAlertStamp,
   type PrStatus,
   type PauseHold,
   type PauseRequest,
@@ -14,7 +16,7 @@ import {
   type SpillStamp,
 } from "@seance/shared";
 import { isDeepStrictEqual } from "node:util";
-import { escalation, inputAlert, inputClock, questionAlert, SpillAlerts, type SchedulerAlert } from "./alerts.ts";
+import { escalation, inputAlert, inputClock, prBlockedAlert, questionAlert, SpillAlerts, type SchedulerAlert } from "./alerts.ts";
 import { dispatchOrder } from "./batch.ts";
 import { DEFAULT_CONFIG, type SchedulerConfig } from "./config.ts";
 import { admission, named } from "./deps.ts";
@@ -664,7 +666,26 @@ export class Scheduler {
    * as with `onBranchState`.
    */
   async onPrStatus(taskId: string, prUrl: string, status: PrStatus): Promise<void> {
-    await this.#update(taskId, (task) => prChange(task, prUrl, status));
+    let raised: PrAlertStamp | undefined;
+    const next = await this.#update(taskId, (task) => {
+      // The mutator may run again on a conflict: each run starts clean.
+      raised = undefined;
+      const read = prChange(task, prUrl, status) ?? task;
+      // Also when the reading changed nothing: a continuation that ended without pushing alerts at the next poll.
+      const alerted =
+        read.prUrl === prUrl ? prBlockedAlert(read, continuationUnderway(read, this.tasks()), this.#now()) : null;
+      if (alerted !== null) raised = alerted.prAlert;
+      return alerted ?? (read === task ? null : read);
+    });
+    // Once the stamp has landed, as `#alertInput` does, so a new leader never repeats it.
+    if (raised === undefined || next === null || !isDeepStrictEqual(next.prAlert, raised)) return;
+    this.#alert({
+      kind: "pr-blocked",
+      taskId,
+      reason: raised.reason,
+      head: raised.head,
+      message: `pr blocked: task=${quote(taskId)} reason=${raised.reason}`,
+    });
   }
 
   /**

@@ -2851,6 +2851,39 @@ describe("continue_task", () => {
     lazy.stop();
   });
 
+  test("get_queue carries prBlocked on an awaiting-merge task's stuck PR, and on no other", async () => {
+    const stuck = { state: "open", merge: "dirty", at: 1 } as const;
+    const waiting = task({
+      id: "t-3",
+      state: "awaiting-merge",
+      prUrl: "https://github.com/acme/app/pull/1",
+      pr: stuck,
+    });
+    const reported = task({
+      id: "t-4",
+      state: "awaiting-merge",
+      prUrl: "https://github.com/acme/app/pull/2",
+      pr: stuck,
+      spec: { repo: ORIGIN, mode: "worktree", until: "reported" },
+    });
+    const merged = task({
+      id: "t-5",
+      state: "awaiting-merge",
+      prUrl: "https://github.com/acme/app/pull/3",
+      pr: { state: "merged", at: 1 },
+    });
+    const fake = leaderRelay([{ tasks: [waiting, reported, merged], at: 6_000 }], continuingMachines());
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const queue = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} }))) as {
+      tasks: Record<string, unknown>[];
+    };
+    expect(queue.tasks.find((t) => t["id"] === "t-3")).toMatchObject({ prBlocked: "conflict" });
+    expect(queue.tasks.find((t) => t["id"] === "t-4")).not.toHaveProperty("prBlocked");
+    expect(queue.tasks.find((t) => t["id"] === "t-5")).not.toHaveProperty("prBlocked");
+    lazy.stop();
+  });
+
   test("a cancelled task with an assignment is continued only on a box advertising continueCancelled", async () => {
     const cancelled = task({ ...failedTask, state: "cancelled", failure: undefined });
     const queued = await callContinue([cancelled], continuingMachines({ cancelled: true }));

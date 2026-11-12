@@ -269,6 +269,7 @@ export function alertToPush(alert: SchedulerAlert, at: number): PushAlert {
     const { taskId, window, projectedPct, spending } = alert;
     return { v: 1, kind: "spill", at, taskId, window, projectedPct, ...(spending === undefined ? {} : { spending }) };
   }
+  if (alert.kind === "pr-blocked") return { v: 1, kind: "pr-blocked", at, taskId: alert.taskId, reason: alert.reason };
   const { taskId, since, escalated, question } = alert;
   return { v: 1, kind: "needs-input", at, taskId, since, escalated, ...(question === undefined ? {} : { question }) };
 }

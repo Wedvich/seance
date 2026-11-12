@@ -405,6 +405,7 @@ describe("deriveQueue", () => {
       state: null,
       checks: null,
       stale: false,
+      blocked: null,
       description: "Pull request #123",
       accessibleName: "Open pull request #123",
     });
@@ -499,6 +500,28 @@ describe("deriveQueue", () => {
       expect(chip({ state: "open", at: NOW - PR_STATUS_STALE_MS - 1 })?.stale).toBe(true);
       expect(chip({ state: "closed", at: NOW - 60 * 60_000 })?.stale).toBe(true);
       expect(chip({ state: "merged", at: NOW - 60 * 60_000 })?.stale).toBe(false);
+    });
+
+    test("an awaiting-merge task's blocked reason is a chip word and part of the title, and no other task shows one", () => {
+      const HEAD = "0".repeat(40);
+      const blockedOf = (pr: PrStatus, fields: Partial<Task> = {}) =>
+        deriveQueue(state(ok([task("a", { state: "awaiting-merge", prUrl: URL, pr, ...fields })])), NOW).sections[0]
+          ?.rows[0]?.pr;
+      const reasons: readonly (readonly [Partial<PrStatus>, string])[] = [
+        [{ required: "failing", failing: ["test"] }, "check failing"],
+        [{ merge: "dirty" }, "conflict"],
+        [{ merge: "behind" }, "behind"],
+        [{ required: "passing", merge: "clean" }, "not set to merge"],
+      ];
+      for (const [over, word] of reasons) {
+        const chipOf = blockedOf({ state: "open", head: HEAD, at: NOW, ...over });
+        expect(chipOf?.blocked).toBe(word);
+        expect(chipOf?.description).toBe(`Pull request #123 · open · ${word} · read just now`);
+      }
+      expect(blockedOf({ state: "open", at: NOW, merge: "clean" })?.blocked).toBeNull();
+      expect(blockedOf({ state: "merged", at: NOW, merge: "dirty" })?.blocked).toBeNull();
+      const reported = { spec: { repo: ORIGIN, mode: "worktree", until: "reported" } } satisfies Partial<Task>;
+      expect(blockedOf({ state: "open", at: NOW, merge: "dirty" }, reported)?.blocked).toBeNull();
     });
 
     test("no reading is today's chip", () => {

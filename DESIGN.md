@@ -551,8 +551,8 @@ Séance's noise is cover for a real intruder.
    the record, so it does not bring push back; recorded under the Settings record's residual, as
    a gap with no repair path yet. The page's service worker holds no PSK: it opens
    nothing it receives, and a notification's text is fixed per kind with only a task id (or a
-   device id) from the payload, so a forged push (a thief leader's, with a subscription it
-   read) can make the browser show one of four sentences, a spill's with at worst a known window
+   device id) from the payload, and a blocked PR's per reason from a fixed set of four, so a forged push (a thief leader's, with a subscription it
+   read) can make the browser show one of a few fixed sentences, a spill's with at worst a known window
    label (`5h` or `7d`) and a number, and nothing else. A click opens a
    same-origin path the worker itself built from an id that passed `isTaskId`
    (`/?task=<id>` or `/?screen=machines`), re-checked when the click lands; the app reads the
@@ -1685,6 +1685,11 @@ an old peer's frames parse as before. Mixed versions:
   ignores (it settles a PR-less `ended` on the event, as before), and the `session_failed`
   failure code, which an older leader or app reads leniently (`parseTaskRecord` takes any
   bounded code); an older PWA words it as a spawn refusal.
+- `Task.prAlert` and the wider `Task.pr` fields (`head`, `required`, `failing`, `merge`, `armed`,
+  `reviewRequested`; 2026-11-12, Scheduler, "PR status" and "PR blocked"): an older leader's
+  parser drops each at its next write of the record, which costs one repeated alert, never a
+  missed one. A malformed `prAlert` is dropped at parse and the task stays readable; a malformed
+  `pr` reading is dropped as before.
 - `Task.inputAlerted` and `Task.spillAlert` (the persisted alert stamps, acted on since the push
   alerts landed; Scheduler, "Needs input" and "Credits spill") and `SettingsRecord.diskAlerts`
   (Scheduler, "Web Push", "Disk alerts"): an older leader's parser drops each at its next write
@@ -2413,9 +2418,10 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
 - **Alerts are a log line plus a push** (M3 item 5, M4 Web Push). The term's `Scheduler` takes
   `onAlert`, which `startTerm` logs as `warn scheduler: <message>` and hands to the push sender
   (_Web Push_, below): a dispatch that may spill into credits or already spends them, a wait for input (past 2 minutes, and again
-  past 30) and, from the leader's own watch, a nearly full disk (_The library_, "Credits spill"
-  and "Needs input"; _Disk alerts_, below). The line names task, account and device ids, never
-  a prompt or title; the push payload names a task or device id and state, and no account.
+  past 30), an `awaiting-merge` task's PR that is stuck ("PR blocked") and, from the leader's own
+  watch, a nearly full disk (_The library_, "Credits spill" and "Needs input"; _Disk alerts_,
+  below). The line names task, account and device ids, never a prompt, title or URL; the push
+  payload names a task or device id and state, and no account.
 - **Settings record** (M4). One record, `settings:main` (`SETTINGS_KEY`),
   holds what the leader keeps for the fleet: the VAPID keypair push sends are signed with and,
   as later items write them, the push subscriptions and the Linear key (`SettingsRecord`). The
@@ -2565,7 +2571,9 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     device id for disk) and state, in a record `parsePushAlert` reads strictly: no account id,
     prompt or title. `needs-input` carries `escalated` (false for the first alert, true for the
     30-minute one) and, on a first alert a question raised at once, `question: true`; `spill`
-    the window label and projected percent, `disk` the used percent.
+    the window label and projected percent, `disk` the used percent,
+    `pr-blocked` the reason (`checks`, `conflict`, `behind` or `unarmed`) and nothing else: not the
+    head, the PR URL or a check name. The parser refuses a reason outside the four.
   - **Encryption and signing** are on WebCrypto, with no dependency: RFC 8291 `aes128gcm`
     (ECDH P-256, HKDF-SHA256, one AES-128-GCM record with the 0x02 delimiter), checked against
     the RFC's Appendix A vector byte for byte (`daemon/test/web-push.test.ts`), and RFC 8292
@@ -2924,6 +2932,23 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   escalates it. `inputClock` also carries the stay's `inputReason`/`inputTool` (the wait reason,
   Session events): written by the event through `sessionChange`, cleared with the clock, kept into
   `lost`; display-only, nothing alerts or routes on them (`permission` lifts no debounce).
+- **PR blocked** (2026-11-12; `prBlockedAlert` in `scheduler/src/alerts.ts`, `Scheduler.onPrStatus`).
+  An `awaiting-merge` task whose PR reading names a reason (`taskPrBlock`: `checks`, `conflict`,
+  `behind` or `unarmed`, "PR status") alerts once, in the same `#update` as the reading's own write,
+  so the stamp and the reading land together. `until: "reported"` tasks are excluded everywhere:
+  such a task does not wait on its merge, so a stuck PR is not its problem, which is also why the
+  blocked-state read skips them. The de-dupe is `(reason, head)` on the record as
+  `prAlert: { reason, head, at }`, so a fix that fails again (a new head) alerts again, a PR that
+  stays stuck on one head alerts once, and a new leader does not repeat it. No alert is raised
+  while any continuation of the task, however deep its chain (`continuationUnderway`,
+  `shared/src/continue-task.ts`), is waiting, dispatching or placed: its session is on the PR, and
+  the next poll alerts if it ends without fixing it. The alert is sent only once the write has
+  landed with the stamp it raised, so a lost or refused write costs a repeat after a leader change,
+  never a missed alert. A malformed stamp is dropped at parse and the task stays readable (it never
+  voids the record, which a stamp past its bound would otherwise do). The log line is
+  `pr blocked: task=<id> reason=<reason>`, the head and the PR URL stay off it. The push is a
+  `PushAlert` kind `pr-blocked` carrying `reason` (an enum, owner-accepted as state), and
+  nothing else beyond the task id: no head, URL, check name or message.
 - **Credits spill** (M3 item 5). A reservation on a candidate carrying `spill` is recorded in
   the decision the reservation writes — the PWA's verdict shows it on the chosen line, "may
   spill into credits (5h projected at 93%)", or "would spend credits (5h full)" for `spending`
@@ -3843,6 +3868,49 @@ for the lot with its own `gh`.
   `open`, `draft`, `merged` or `closed`; the head commit's rollup as `pending`, `passing` or
   `failing`; `stacked` on a merge whose base is not the default branch; `at` the leader's
   clock at the read. Two tasks on one PR share an alias.
+- **A separate blocked-state read** (2026-11-12). An `awaiting-merge` task's PR can be stuck
+  while it reads `open`: a required check failed, a conflict, the branch behind its base, or
+  everything green with nothing that will merge it. A second query, aliased `b<i>` after the first
+  call's `p<i>` (the chunk's own index), reads that: `mergeStateStatus`, `isInMergeQueue`,
+  `autoMergeRequest{ enabledAt }`, `reviewRequests{ totalCount }`, and on the head commit its `oid`
+  and `statusCheckRollup.contexts(first: 50)` with `isRequired(pullRequestNumber:)` on each
+  `CheckRun` and `StatusContext`. It is its own query, not more selection on the merge query,
+  because it measured several times slower per PR (3-8 s for 50 against 1-2 s), and joined to the
+  merge query a slow or failing one would fail the whole chunk and back the poller off, which stops
+  merge detection fleet-wide. So the merge query stays byte-identical, and the second runs only for
+  the open primary PR (`url === task.prUrl`) of an `awaiting-merge` task not under `until:
+  "reported"` (`taskPrBlock`, below), in runs of `BLOCKED_CHUNK` (10) after the merge read of the
+  chunk. A run that fails, times out or leaves an alias `null` drops those PRs' wide fields and
+  nothing else: the poll does not fail, does not back off, and warns once per term ("the
+  blocked-state read did not answer"); the chip keeps its state and checks, and no alert is raised
+  on a reading that lacks them. Owner, repo and number are variables as in the first query.
+  - **Fields.** `PrStatus` gains, all optional so an older reader ignores them and a reading
+    without a wide read is today's: `head` (the commit oid, 40 or 64 hex), `required` (`pending`,
+    `passing` or `failing` over the head's required contexts alone: an optional check failing
+    blocks nothing, which is why the rollup `checks` cannot be the trigger; absent when no context
+    is required, so a repo without required checks is never "checks"), `failing` (the failing
+    required names, deduplicated, control characters dropped, at most `PR_FAILING_LIMITS.names` = 5
+    of `PR_FAILING_LIMITS.length` = 100 characters, and only beside `required: "failing"`), `merge`
+    (`mergeStateStatus` lowercased, one of `PR_MERGE_STATES`), `armed: true` (auto-merge enabled or
+    in the merge queue) and `reviewRequested: true`. `parsePrStatus` nulls the whole reading on one
+    malformed field, as it did for `state`. Only the first 50 contexts are read: a PR with more
+    required contexts than that, ahead of the failing one, is read as not failing. Accepted.
+  - **Reasons.** `prBlocked(pr)` (`shared/src/pr-blocked.ts`) names the first that holds for an
+    open PR: `conflict` (`merge: "dirty"`), `checks` (`required: "failing"`), `behind` (`merge:
+    "behind"`, which blocks only on a repo whose ruleset requires an up-to-date branch), then
+    `unarmed`: `required` passing, `merge` one of `clean`, `has_hooks` or `unstable`, not `armed`
+    and no review requested, so a PR that will merge once someone clicks reads as stuck. A PR with
+    no required check is never `unarmed`. `taskPrBlock(task)` is the one gate every reader asks
+    (the alert, the PWA chip, MCP's `prBlocked`): an `awaiting-merge` task not under `until:
+    "reported"`, because a task under `until: "reported"` does not wait on its merge.
+  - **Finished tasks keep chip fields only** (`prChipFields`, `state`, `checks`, `stacked`, `at`):
+    the wide fields speak for a PR a person is waiting on and would only cost record bytes on a
+    task that ended. `samePrReading` compares two readings field by field (`failing` element-wise,
+    `at` ignored), so an unchanged wide reading refreshes on the same 5-minute cadence as before.
+  - **Record size.** A worst-case awaiting-merge record, with `failing` at its bounds in two-byte
+    characters, `prAlert` and nine candidates, stays within `STORE_MAX_CT_LENGTH` (`parse.test.ts`).
+    The older "every bound at once" fixture is not that record (an awaiting-merge task holds no
+    failure, reservation or needs-input fields, which `advance` clears), and is left as it was.
 - **A stacked merge is asked about again.** A merged PR whose base is not the default branch
   takes a second batched call, only for those, aliased `c<i>` after the first call's `p<i>`:
   `repository{ defaultBranchRef{ compare(headRef: $h){ status } } }` with the PR's `mergeCommit`
@@ -6770,7 +6838,10 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   for a first alert carrying `question: true` (a worker that predates the field words it as any
   wait), "A task may spill into credits
   (7d projected at 95%)", "A task is spending credits (5h full)", "A machine's disk is nearly
-  full"); the spill is worded as spending only for a payload's `spending: true`, anything else
+  full", and per reason for a blocked PR: "A task's pull request has a failing required check",
+  "… has merge conflicts", "… is behind its base branch", "… is ready, but nothing will merge it",
+  falling back to "… is blocked" for a reason this worker does not know; the reason picks its text
+  through a frozen null-prototype map, so `__proto__` or `constructor` reach the fallback); the spill is worded as spending only for a payload's `spending: true`, anything else
   being the forecast, the weaker claim (a worker that predates the field words both as
   spending); the spill's window is shown only when it is one
   of the scheduler's labels (`5h`, `7d`, or a per-model `7d <model>`, shown as `7d`), never as
@@ -6780,7 +6851,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   id is also the target of a click. It holds no PSK, so it
   shows no name or title, and a payload it cannot read (an unknown kind or version, an id that
   fails the `isTaskId` rule it copies) shows the generic text with no target.
-  - **The deep link.** A click opens the app at `/?task=<id>` (a task or spill alert) or
+  - **The deep link.** A click opens the app at `/?task=<id>` (a task, spill or blocked-PR alert) or
     `/?screen=machines` (disk). The worker re-checks the target it stored against those two
     shapes before using it, focuses an open window of its own origin and posts it
     `{t: "open", url}`, or opens a window at the path when none is. `pwa/src/deep-link.ts`

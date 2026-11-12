@@ -16,4 +16,5 @@ export * from "./task-record.ts";
 export * from "./account-record.ts";
 export * from "./skill-token.ts";
 export * from "./continue-task.ts";
+export * from "./pr-blocked.ts";
 export * from "./slot-timer.ts";

@@ -1,5 +1,6 @@
 import type { Machine } from "./app-client.ts";
 import { autonomyOf } from "./autonomy.ts";
+import { TASK_PHASES } from "./task-phase.ts";
 import { CAPABILITIES, type Target, type Task, type TaskFailureCode, type TaskSpec } from "./types.ts";
 
 export type ContinueOffer =
@@ -60,6 +61,27 @@ export function waitingContinuation(task: Task, tasks: readonly Task[]): Task | 
     if (waits && (oldest === undefined || other.createdAt < oldest.createdAt)) oldest = other;
   }
   return oldest;
+}
+
+/**
+ * Whether any continuation of `task`, however deep its chain (a later one continues the previous,
+ * not the original), is waiting, dispatching or placed among `tasks`. Bounded by the list's length,
+ * so a cycle ends the walk.
+ */
+export function continuationUnderway(task: Task, tasks: readonly Task[]): boolean {
+  const chain = new Set<string>([task.id]);
+  for (let round = 0; round < tasks.length; round++) {
+    const before = chain.size;
+    for (const other of tasks) {
+      const continues = other.spec.continues?.task;
+      if (continues === undefined || !chain.has(continues) || chain.has(other.id)) continue;
+      const phase = TASK_PHASES[other.state];
+      if (phase === "waiting" || phase === "dispatching" || phase === "placed") return true;
+      chain.add(other.id);
+    }
+    if (chain.size === before) return false;
+  }
+  return false;
 }
 
 /** The task-level eligibility `continueOffer` applies, so it can tell whether a taker would itself pass it. */

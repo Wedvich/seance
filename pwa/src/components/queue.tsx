@@ -427,6 +427,7 @@ function QueueCard(props: {
               <PrStateIcon state={row.pr.state} />
               {row.pr.label}
               {row.pr.checks !== null && <PrChecksIcon checks={row.pr.checks} />}
+              {row.pr.blocked !== null && <span className="queue-pr-blocked">{row.pr.blocked}</span>}
             </a>
           )}
           {inline !== null && (

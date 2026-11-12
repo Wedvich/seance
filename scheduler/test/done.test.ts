@@ -13,7 +13,7 @@ import {
   wantsPrReading,
 } from "@seance/shared";
 import { advance, DEFAULT_CONFIG, MemoryQueueStore, Scheduler, type Task } from "../src/index.ts";
-import { branchChange, ended, prBound, progressed, reportedPr } from "../src/done.ts";
+import { branchChange, ended, prBound, prChange, progressed, reportedPr } from "../src/done.ts";
 import { expiry } from "../src/expiry.ts";
 import { enqueue, FakeFleet, machine, NOW, readerChecked, spec } from "./fixtures.ts";
 
@@ -1093,6 +1093,59 @@ describe("PR status", () => {
     const moved = prBound(before, { ...before, prUrl: "https://github.com/acme/app/pull/9" });
     expect(moved.pr).toBeUndefined();
     expect(moved.prUrl).toBe("https://github.com/acme/app/pull/9");
+  });
+});
+
+describe("PR status, the blocked-state fields", () => {
+  const H1 = "1".repeat(40);
+  const H2 = "2".repeat(40);
+  const waiting = (fields: Partial<Task> = {}): Task => ({
+    id: "t",
+    spec: spec(),
+    state: "awaiting-merge",
+    createdAt: NOW,
+    assignment: ON_A,
+    prUrl: PR,
+    ...fields,
+  });
+  const wide: PrStatus = {
+    state: "open",
+    checks: "failing",
+    head: H1,
+    required: "failing",
+    failing: ["checks"],
+    merge: "blocked",
+    reviewRequested: true,
+    at: NOW,
+  };
+
+  test("a reading keeps every field on an awaiting-merge task", () => {
+    expect(prChange(waiting(), PR, wide)?.pr).toEqual(wide);
+  });
+
+  test("a new head alone writes, however fresh the stored reading", () => {
+    const stored = waiting({ pr: wide });
+    expect(prChange(stored, PR, { ...wide, at: NOW + 1_000 })).toBeNull();
+    expect(prChange(stored, PR, { ...wide, head: H2, at: NOW + 1_000 })?.pr?.head).toBe(H2);
+    expect(prChange(stored, PR, { ...wide, failing: ["other"], at: NOW + 1_000 })?.pr?.failing).toEqual(["other"]);
+    expect(prChange(stored, PR, { ...wide, armed: true, at: NOW + 1_000 })?.pr?.armed).toBe(true);
+  });
+
+  test("a finished task keeps only what its chip shows", () => {
+    const finished = waiting({ state: "failed", failure: { code: "merge_expired", message: "expired" } });
+    expect(prChange(finished, PR, wide)?.pr).toEqual({ state: "open", checks: "failing", at: NOW });
+  });
+
+  test("finishing drops the alert stamp, and a move that does not finish keeps it", () => {
+    const stamped = waiting({ pr: wide, prAlert: { reason: "checks", head: H1, at: NOW } });
+    expect(advance(stamped, "cancelled")).not.toHaveProperty("prAlert");
+    expect(advance(stamped, "done", { doneBy: "manual" })).not.toHaveProperty("prAlert");
+    expect(advance(stamped, "failed", { failure: { code: "merge_expired", message: "x" } })).not.toHaveProperty(
+      "prAlert",
+    );
+    expect(advance(waiting({ state: "running", prAlert: stamped.prAlert }), "needs-input").prAlert).toEqual(
+      stamped.prAlert,
+    );
   });
 });
 

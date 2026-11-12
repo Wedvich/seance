@@ -1,4 +1,11 @@
-import { quote, type FleetQuotaEntry, type Machine, type SpillStamp } from "@seance/shared";
+import {
+  quote,
+  taskPrBlock,
+  type FleetQuotaEntry,
+  type Machine,
+  type PrBlockedReason,
+  type SpillStamp,
+} from "@seance/shared";
 import { SPAN_MS, windowResetOf, type Decision } from "./route.ts";
 import type { Task } from "./task.ts";
 
@@ -30,7 +37,31 @@ export type SchedulerAlert =
       /** The first alert, raised at once because the session waits on an AskUserQuestion (`questionAlert`). */
       readonly question?: true;
       readonly message: string;
+    }
+  | {
+      readonly kind: "pr-blocked";
+      readonly taskId: string;
+      readonly reason: PrBlockedReason;
+      /** The head the alert was raised for: the dedupe key with `reason`, never pushed. */
+      readonly head: string;
+      readonly message: string;
     };
+
+/**
+ * The first alert of a stuck PR: an `awaiting-merge` task whose reading names a reason (`taskPrBlock`,
+ * which leaves out an `until: "reported"` task), stamped `prAlert` with that reason and the head it was
+ * read at. Null when none is due: no head to key on, a continuation of the task still waiting or
+ * running (`continuing`: its session is on the PR, and the next poll alerts if it ends without
+ * fixing it), or the same `(reason, head)` already alerted. A fix that fails again is a new head, so
+ * it alerts again. On the record, so a new leader does not repeat it.
+ */
+export function prBlockedAlert(task: Task, continuing: boolean, now: number): Task | null {
+  const reason = taskPrBlock(task);
+  const head = task.pr?.head;
+  if (reason === null || continuing || head === undefined) return null;
+  if (task.prAlert?.reason === reason && task.prAlert.head === head) return null;
+  return { ...task, prAlert: { reason, head, at: now } };
+}
 
 /**
  * The needs-input clock rides the write that moves the state: entering

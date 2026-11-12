@@ -99,7 +99,7 @@ export function advance(task: Task, to: TaskState, fields: TaskFields = {}): Tas
   if (task.state === "lost" && to === "ready" && !isUnconfirmed(task)) {
     throw new Error(`task ${task.id}: a lost task that ran never returns to ready`);
   }
-  const { reservation, assignment, absentSince: _absent, reservedAt, pr, remoteSession, ...rest } = task;
+  const { reservation, assignment, absentSince: _absent, reservedAt, pr, remoteSession, prAlert, ...rest } = task;
   const keepsReservedAt = to === "reserved" || (to === "lost" && task.state === "reserved");
   return {
     ...rest,
@@ -109,6 +109,8 @@ export function advance(task: Task, to: TaskState, fields: TaskFields = {}): Tas
     // A session's, as the assignment is: back to `ready`, the next session gets its own.
     ...(to !== "ready" && remoteSession !== undefined ? { remoteSession } : {}),
     ...(pr !== undefined && (TASK_PHASES[to] !== "finished" || pr.state === "merged") ? { pr } : {}),
+    // The dedupe stamp of an alert about a PR still waiting to merge: nothing is left to repeat once finished.
+    ...(prAlert !== undefined && TASK_PHASES[to] !== "finished" ? { prAlert } : {}),
     ...fields,
     state: to,
   };
