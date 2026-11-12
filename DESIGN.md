@@ -8728,8 +8728,10 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   refusal (its notice), never a placement the cap-free route would not make.
   Every waiting card (`queued`, `blocked`, `ready`) also has **Start now** in its ⋯ menu, always shown (`QueueRow.startNow`),
   worded and greyed by the Spawn screen's rules (`decisionStartNowItem` over the task's latest decision: greyed only when
-  the decision has no winner and no candidate held by the caps alone, or the leader lacks `runNow`); a `queued` or `blocked` one the leader still
-  refuses `not_waiting`, as its notice.
+  the decision has no winner and no candidate held by the caps alone, or the leader lacks `runNow`). A `queued` or `blocked` one is
+  greyed too, its line saying why ("Not admitted by the scheduler yet", "Waits on the tasks it depends on"): `run-now` takes only
+  `ready` and refuses anything earlier `not_waiting`, so offering it there was a tap certain to fail (2026-11-12). A card shown
+  `blocked` after its dependencies cleared waits for the next read (a `queue-changed` nudge, or Refresh) to enable it.
 - **Continue on the Queue screen** (2026-10-26, widened 2026-10-27, Daemon, "Continuing a session"). A failed
   `session_failed` card, or a cancelled one that was placed, carries a single-tap **Continue** when
   `continueOffer` allows it (the task was not `here`, has an assignment, its machine is listed and
