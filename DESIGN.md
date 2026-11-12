@@ -7507,7 +7507,7 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   retry. A task whose dispatch
   routing spilled onto the very window that is full has already had the spending spill alert: the
   `quota-exhausted` one is stamped and logged, not pushed. A session's own pass the leader refuses
-  raises `pass-refused` (once per task per term). The log carries `successor placed after=<ms>
+  raises `pass-refused` (once per task per term). The log carries `successor placed task=<id> after=<ms>
   from=since|created`. The close is at once, since a session out of usage cannot finish a turn. The
   automatic pass has no `audit queue origin=` line of its own: its record is the scheduler's `audit pass
   ... trigger=quota` line, and what it causes audits under its own origins.
@@ -7544,10 +7544,10 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   one is already `superseded`); a successor whose session ends with the PR open goes `awaiting-merge`
   like any task, the old one never does.
 - **Measures**, read from audit and leader logs with no new storage: passes per week by trigger (the
-  leader's `audit pass … trigger=<t>` line); time from limit to successor running (stage 3 stamps
-  `succeeds.since`, and the leader logs `successor placed task=<id> after=<ms>` each time the successor
-  moves from `reserved` to `running` or `needs-input`, counted from its `createdAt` (stage 3 will count from
-  `succeeds.since`); for a manual or session pass, which has no limit time, it measures the pass to the
+  leader's `audit pass … trigger=<t>` line); time from limit to successor running (a quota pass
+  stamps `succeeds.since`, and the leader logs `successor placed task=<id> after=<ms> from=since|created`
+  each time the successor moves from `reserved` to `running` or `needs-input`, counted from `since` for a
+  quota pass and from its `createdAt` otherwise; for a manual or session pass, which has no limit time, it measures the pass to the
   start, not the limit to it); successors that end merged (the leader logs `successor settled task=<id>
   state=<s>[ doneBy=<d>][ failure=<code>]` when a task carrying `succeeds` finishes, read as the share
   ending `done` by `merged` against `pass_abandoned`, `failed` and `cancelled`).
