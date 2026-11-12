@@ -23,7 +23,7 @@ export function useMenu<T extends HTMLElement = HTMLButtonElement>(): MenuHandle
 
 function enabledItems(panel: HTMLElement | null): HTMLElement[] {
   if (panel === null) return [];
-  return [...panel.querySelectorAll<HTMLElement>('[role="menuitem"]')].filter(
+  return [...panel.querySelectorAll<HTMLElement>('[role="menuitem"], [role="menuitemcheckbox"]')].filter(
     (item) => !item.matches(':disabled, [aria-disabled="true"]'),
   );
 }
@@ -153,6 +153,35 @@ export function Menu<T extends HTMLElement>(props: {
   );
 }
 
+/** A card's ⋯: opens `menu`, which it anchors. `label` names the card ("More actions for …"). */
+export function MoreTrigger(props: { menu: MenuHandle<HTMLButtonElement>; label: string }): JSX.Element {
+  const { menu } = props;
+  return (
+    <button
+      ref={menu.anchor}
+      type="button"
+      className="queue-more"
+      popovertarget={menu.id}
+      aria-haspopup="menu"
+      aria-expanded={menu.open}
+      aria-label={props.label}
+    >
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true">
+        <circle cx="5" cy="12" r="1.8" />
+        <circle cx="12" cy="12" r="1.8" />
+        <circle cx="19" cy="12" r="1.8" />
+      </svg>
+    </button>
+  );
+}
+
+/** The panel takes taps through its fade-out; a second tap must not re-run. */
+function inOpenMenu(event: Event): boolean {
+  if (event.currentTarget instanceof Element && event.currentTarget.closest(":popover-open")) return true;
+  event.preventDefault();
+  return false;
+}
+
 /**
  * A pick closes the menu before its handler runs; `keepOpen` skips that for a
  * tap that only changes the item, such as arming a two-tap command that
@@ -181,11 +210,7 @@ export function MenuItem(props: {
     .join(" ");
   const disabled = props.disabled === true;
   const pick = (event: Event): void => {
-    // The panel takes taps through its fade-out; a second tap must not re-run.
-    if (!(event.currentTarget instanceof Element) || !event.currentTarget.closest(":popover-open")) {
-      event.preventDefault();
-      return;
-    }
+    if (!inOpenMenu(event)) return;
     if (props.keepOpen !== true) close();
     props.onClick?.();
   };
@@ -226,4 +251,29 @@ export function MenuItem(props: {
 
 export function MenuDivider(): JSX.Element {
   return <div className="menu-divider" role="separator" />;
+}
+
+/** A setting the menu shows and flips in place: it stays open, so the item can be flipped back. */
+export function MenuSwitchItem(props: {
+  label: string;
+  icon?: JSX.Element;
+  checked: boolean;
+  onToggle: () => void;
+}): JSX.Element {
+  const { checked } = props;
+  return (
+    <button
+      type="button"
+      className="menu-item"
+      role="menuitemcheckbox"
+      aria-checked={checked}
+      onClick={(event) => inOpenMenu(event) && props.onToggle()}
+    >
+      {props.icon !== undefined && <span className="menu-icon">{props.icon}</span>}
+      <span className="menu-text">{props.label}</span>
+      <span className={checked ? "menu-switch menu-switch-on" : "menu-switch"} aria-hidden="true">
+        <span className="menu-switch-knob" />
+      </span>
+    </button>
+  );
 }

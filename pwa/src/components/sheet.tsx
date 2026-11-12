@@ -16,9 +16,12 @@ export function Sheet(props: {
   closing?: boolean;
   onExited?: () => void;
   onClose: () => void;
+  /** A form rather than a list: still a bottom sheet on a phone, a centred dialog on a desk. */
+  variant?: "dialog";
   children: ComponentChildren;
 }): JSX.Element {
-  const { title, closing = false, onExited, onClose, children } = props;
+  const { title, closing = false, onExited, onClose, variant, children } = props;
+  const dialog = variant === "dialog";
   const panel = useRef<HTMLDivElement>(null);
   const list = useRef<HTMLDivElement>(null);
 
@@ -80,13 +83,13 @@ export function Sheet(props: {
 
   return (
     <div
-      className={closing ? "scrim scrim-closing" : "scrim"}
+      className={["scrim", closing && "scrim-closing", dialog && "scrim-dialog"].filter(Boolean).join(" ")}
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
     >
       <div
-        className="sheet card"
+        className={dialog ? "sheet card sheet-dialog" : "sheet card"}
         role="dialog"
         aria-modal="true"
         aria-label={title}
