@@ -30,6 +30,12 @@ import { pollUntil } from "./fixtures.ts";
 import { startTestRelay, type TestRelay } from "./harness.ts";
 
 const PSK = toBase64(new Uint8Array(32).fill(5));
+
+// Bun 1.4.4 regression: the relay socket dies with close 1002 "Received new message inside a
+// fragmented message" in these tests (CI pins 1.4.2). Exact versions, not a floor, so a fixed Bun
+// runs them again.
+const BUN_FRAGMENTED_FRAME_BROKEN: readonly string[] = ["1.4.4"];
+const fragmentedFrameBroken = BUN_FRAGMENTED_FRAME_BROKEN.includes(Bun.version);
 const TOKEN = "queue-store-test";
 let key: CryptoKey;
 
@@ -284,7 +290,7 @@ describe("reader rules", () => {
 });
 
 describe("write mapping", () => {
-  test("a term the relay does not hold revokes the store", async () => {
+  test.skipIf(fragmentedFrameBroken)("a term the relay does not hold revokes the store", async () => {
     await withRig(
       async ({ store }) => {
         await expect(store.put("a", 0, task("a"))).rejects.toBeInstanceOf(StoreRevoked);
@@ -318,7 +324,7 @@ describe("write mapping", () => {
     });
   });
 
-  test("not_leader from the relay throws, whatever the key", async () => {
+  test.skipIf(fragmentedFrameBroken)("not_leader from the relay throws, whatever the key", async () => {
     await withRig(async ({ relay, store }) => {
       relay.replyNextStore((frame) => ({ t: "store-refused", re: frame.id, code: "not_leader" }));
       await expect(store.put("a", 0, task("a"))).rejects.toThrow("store-put as not_leader");
@@ -387,19 +393,22 @@ describe("write mapping", () => {
     });
   });
 
-  test("a list waits out its own, longer deadline while a single read gives up at the short one", async () => {
-    await withRig(
-      async ({ relay, store }) => {
-        relay.holdStoreReplies = true;
-        await expect(store.get("a")).rejects.toThrow("timed out after 200ms");
-        const list = Date.now();
-        await expect(store.list()).rejects.toThrow("timed out after 1000ms");
-        // A timer cannot fire early, so a lower bound is not a race.
-        expect(Date.now() - list).toBeGreaterThanOrEqual(950);
-      },
-      { storeTimeoutMs: 200, storeListTimeoutMs: 1_000 },
-    );
-  });
+  test.skipIf(fragmentedFrameBroken)(
+    "a list waits out its own, longer deadline while a single read gives up at the short one",
+    async () => {
+      await withRig(
+        async ({ relay, store }) => {
+          relay.holdStoreReplies = true;
+          await expect(store.get("a")).rejects.toThrow("timed out after 200ms");
+          const list = Date.now();
+          await expect(store.list()).rejects.toThrow("timed out after 1000ms");
+          // A timer cannot fire early, so a lower bound is not a race.
+          expect(Date.now() - list).toBeGreaterThanOrEqual(950);
+        },
+        { storeTimeoutMs: 200, storeListTimeoutMs: 1_000 },
+      );
+    },
+  );
 
   test("with no socket to send on, the term is over", async () => {
     await withRig(async ({ relay, client, store }) => {
@@ -430,29 +439,32 @@ describe("write mapping", () => {
 });
 
 describe("read mapping", () => {
-  test("a page, a timeout and a record of another key reject rather than read as a short queue", async () => {
-    await withRig(async ({ relay, store }) => {
-      relay.replyNextStore((frame) => ({ t: "store-listed", re: frame.id, records: [], next: "task:z" }));
-      await expect(store.list()).rejects.toThrow();
+  test.skipIf(fragmentedFrameBroken)(
+    "a page, a timeout and a record of another key reject rather than read as a short queue",
+    async () => {
+      await withRig(async ({ relay, store }) => {
+        relay.replyNextStore((frame) => ({ t: "store-listed", re: frame.id, records: [], next: "task:z" }));
+        await expect(store.list()).rejects.toThrow();
 
-      relay.holdStoreReplies = true;
-      await expect(store.list()).rejects.toThrow("timed out");
-      await expect(store.get("a")).rejects.toThrow("timed out");
-      await expect(store.getPause()).rejects.toThrow("timed out");
-      relay.holdStoreReplies = false;
+        relay.holdStoreReplies = true;
+        await expect(store.list()).rejects.toThrow("timed out");
+        await expect(store.get("a")).rejects.toThrow("timed out");
+        await expect(store.getPause()).rejects.toThrow("timed out");
+        relay.holdStoreReplies = false;
 
-      const env = await taskEnv({ version: 1, task: task("other") });
-      relay.replyNextStore((frame) => ({
-        t: "store-record",
-        re: frame.id,
-        record: { key: "task:other", version: 1, env },
-      }));
-      await expect(store.get("a")).rejects.toThrow("another key");
+        const env = await taskEnv({ version: 1, task: task("other") });
+        relay.replyNextStore((frame) => ({
+          t: "store-record",
+          re: frame.id,
+          record: { key: "task:other", version: 1, env },
+        }));
+        await expect(store.get("a")).rejects.toThrow("another key");
 
-      relay.replyNextStore((frame) => ({ t: "store-refused", re: frame.id, code: "invalid_request" }));
-      await expect(store.list()).rejects.toThrow("invalid_request");
-    });
-  });
+        relay.replyNextStore((frame) => ({ t: "store-refused", re: frame.id, code: "invalid_request" }));
+        await expect(store.list()).rejects.toThrow("invalid_request");
+      });
+    },
+  );
 });
 
 describe("pause", () => {
