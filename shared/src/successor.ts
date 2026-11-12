@@ -1,6 +1,8 @@
 import type { Machine } from "./app-client.ts";
 import { autonomyOf } from "./autonomy.ts";
+import { statesIn } from "./task-phase.ts";
 import { taskPrs } from "./task-prs.ts";
+import { REPORT_DONE_INSTRUCTION } from "./task-record.ts";
 import {
   CAPABILITIES,
   SUCCESSOR_PROMPT_BYTES,
@@ -27,10 +29,15 @@ export type PassOffer = { readonly ok: true } | { readonly ok: false; readonly r
  * one answers an unknown op `invalid_request`, never a timeout.
  *
  * Only a `running` task: a task waiting on a person is never moved from under them (the person can
- * answer or cancel first), and `lost` has no live session to push from.
+ * answer or cancel first), and `lost` has no live session to push from. A finished task and a reserved
+ * one get their own words, as the leader answers them (`finished`, `dispatching`).
  */
 export function passOffer(task: Task, machines: readonly Machine[], leaderSuccessor: boolean): PassOffer {
   if (task.successor !== undefined) return { ok: false, reason: "it has already been passed to a successor" };
+  if (statesIn("finished").includes(task.state)) return { ok: false, reason: "it has already finished" };
+  if (task.state === "reserved") {
+    return { ok: false, reason: "it is still being started on a machine; try again in a moment" };
+  }
   if (task.state === "needs-input") {
     return { ok: false, reason: "it is waiting for you; answer it or cancel it before passing it on" };
   }
@@ -135,6 +142,7 @@ function quoted(value: string): string {
  * pushed work and track it (nothing is lost, the worktree is fresh), never to check `<r>` out under its
  * own name (a local branch of that name may be checked out in an older worktree), to rebuild where the
  * work stands from git and each pull request, and to push back to `<r>` into the existing pull request.
+ * With an inherited pull request it also says not to call `hand_off_task` for it.
  */
 export function successorPreamble(input: Pick<SuccessorPromptInput, "task" | "remoteBranch" | "tip">): string {
   const { task, remoteBranch, tip } = input;
@@ -157,6 +165,16 @@ export function successorPreamble(input: Pick<SuccessorPromptInput, "task" | "re
         ? "Open a pull request once there is something to review."
         : "Keep the existing pull request and never open a second one for the same work."),
   ];
+  if (prs.length > 0) {
+    // The successor's launch notes no PR (only a session's own `gh pr create` output is noted), so the daemon
+    // answers `hand_off_task` `prless` for one it inherited. A PR-less task's successor opens its own, which is noted.
+    lines.push(
+      "",
+      "Do not call hand_off_task for the pull request above: an earlier session opened it, so it would be refused. " +
+        "Push, end your turn and leave it open; the scheduler watches it" +
+        (task.spec.until === "reported" ? "." : " and settles this task when it merges."),
+    );
+  }
   if (task.spec.attachments !== undefined) {
     lines.push("", "The original task had attached files; they are not available to you.");
   }
@@ -187,19 +205,27 @@ function prefixWithin(text: string, units: number, bytes: number): string {
 }
 
 /**
- * The successor's prompt: the preamble, the record when one was written, the old prompt and the
- * Linear key. Pure and deterministic. Two bounds hold it, both after substitution:
- * `TASK_REQUEST_LIMITS.prompt` in UTF-16 units and `SUCCESSOR_PROMPT_BYTES` in UTF-8 bytes (the size a
- * create is built for with two-byte text; three-byte text would pass the unit bound and come back
- * `too_large` only after the push). The old prompt is cut first, from its end; a record only when it
- * and the preamble still pass a bound, from its end, and the prompt then says so. The preamble is
- * never cut: its values are each bounded by their own limits, so it always fits.
+ * The successor's prompt: the preamble, the record when one was written, the old prompt, the Linear
+ * key and, for an `until: "reported"` task, the report instruction. Pure and deterministic. Two bounds
+ * hold it, both after substitution: `TASK_REQUEST_LIMITS.prompt` in UTF-16 units and
+ * `SUCCESSOR_PROMPT_BYTES` in UTF-8 bytes (the size a create is built for with two-byte text;
+ * three-byte text would pass the unit bound and come back `too_large` only after the push). The old
+ * prompt is cut first, from its end; a record only when it and the preamble still pass a bound, from
+ * its end, and the prompt then says so. The preamble and the report instruction are never cut: the
+ * preamble's values are each bounded by their own limits, so it always fits, and the instruction is
+ * how the successor settles itself. The old prompt carries the same instruction when it was built with
+ * `withReportInstruction`; it is moved to the end rather than cut with the old prompt.
  */
 export function successorPrompt(input: SuccessorPromptInput): SuccessorPrompt {
   const { task, record } = input;
   const preamble = successorPreamble(input);
-  const old = task.spec.prompt === undefined || task.spec.prompt === "" ? undefined : task.spec.prompt;
+  const reportTail = `\n\n${REPORT_DONE_INSTRUCTION}`;
+  const prompt = task.spec.prompt ?? "";
+  const reported = task.spec.until === "reported";
+  const bare = reported && prompt.endsWith(reportTail) ? prompt.slice(0, -reportTail.length) : prompt;
+  const old = bare === "" ? undefined : bare;
   const linear = task.spec.linear === undefined ? "" : `\n\nLinear issue: ${task.spec.linear.issue}`;
+  const tail = reported ? reportTail : "";
   const room = (fixed: string): { readonly units: number; readonly bytes: number } => ({
     units: Math.max(0, TASK_REQUEST_LIMITS.prompt - fixed.length),
     bytes: Math.max(0, SUCCESSOR_PROMPT_BYTES - utf8Length(fixed)),
@@ -210,7 +236,8 @@ export function successorPrompt(input: SuccessorPromptInput): SuccessorPrompt {
     preamble +
     (recordText === undefined ? "" : RECORD_HEAD + recordText) +
     (oldText === undefined ? "" : OLD_PROMPT_HEAD + oldText) +
-    linear;
+    linear +
+    tail;
   const whole = compose(record, old);
   if (fits(whole)) return { prompt: whole, recordCut: false };
 
@@ -223,8 +250,10 @@ export function successorPrompt(input: SuccessorPromptInput): SuccessorPrompt {
     return { prompt: compose(record, kept === "" ? undefined : kept + OLD_PROMPT_CUT_NOTE), recordCut: false };
   }
 
-  // Then the record's end, with the old prompt gone and the preamble untouched.
+  // Then the record's end, with the old prompt gone and the preamble untouched. No record means there is
+  // nothing to cut: the fixed part alone is too long, and saying a record was cut would be false.
+  if (record === undefined) return { prompt: compose(undefined, undefined), recordCut: false };
   const left = room(compose("", undefined) + RECORD_CUT_NOTE);
-  const kept = prefixWithin(record ?? "", left.units, left.bytes);
+  const kept = prefixWithin(record, left.units, left.bytes);
   return { prompt: compose(kept + RECORD_CUT_NOTE, undefined), recordCut: true };
 }
