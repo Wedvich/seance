@@ -3101,7 +3101,11 @@ it through the store: an app's `store-put` create, read by the leader on `store-
     rejected: another machine carrying four tasks is normal load, and the kept-free one would then
     take work, so it would not replace `avoid`. Stickiness (−2) cannot outweigh it alone. Rollout: an
     older leader ignores the advertisement and places as before; an older daemon refuses `keepFree` in
-    config, so update the machine before setting it. Record size: a worst-case 8-candidate record with `keepFree: 1` on every candidate
+    config, so update the machine before setting it. Mixed versions: if leadership moves to a daemon
+    built before this one, it rewrites a task's decision on its next write without
+    `components.keepFree` (its `parseScore` drops the key) while `total` keeps the penalty, so the PWA
+    loses "kept free" for that candidate and the components no longer sum to the total; nothing is
+    misplaced. Record size: a worst-case 8-candidate record with `keepFree: 1` on every candidate
     measured 40,708 `ct` against `STORE_MAX_CT_LENGTH`'s 40,960 (40,568 without); the weight moves only `total`
     (a total of ten or more adds a character per candidate: 40,716). Each penalised candidate adds about 18 bytes, so the
     attachment record below, which measures 40,828 with ten unpenalised candidates (132 under), measures 41,004
