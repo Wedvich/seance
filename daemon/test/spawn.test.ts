@@ -1356,7 +1356,7 @@ describe("wire input cannot escape the repo set or the shell", () => {
 // docs/scheduler.md M4: a plain `seanced spawn` queues through the relay, so
 // `seanced spawn --now` is the form that must still work with the relay unreachable.
 describe("seanced spawn (the CLI, as a subprocess)", () => {
-  test("spawn --now never dials the relay, audited origin=cli", async () => {
+  test("spawn --now never dials the relay, audited origin=cli, and carries --autonomy", async () => {
     const configDir = join(base, "cli-config");
     const stateDir = join(base, "cli-state");
     await mkdir(configDir, { recursive: true });
@@ -1383,7 +1383,8 @@ describe("seanced spawn (the CLI, as a subprocess)", () => {
       }),
     );
     const mainPath = fileURLToPath(new URL("../src/main.ts", import.meta.url));
-    const proc = Bun.spawn([process.execPath, mainPath, "spawn", "--now", "myrepo", "--here", "-t", "No Relay"], {
+    const argv = ["spawn", "--now", "--autonomy", "steer", "myrepo", "--here", "-t", "No Relay"];
+    const proc = Bun.spawn([process.execPath, mainPath, ...argv], {
       env: { ...process.env, SEANCE_CONFIG_DIR: configDir, SEANCE_STATE_DIR: stateDir, HOME: home },
       stdout: "pipe",
       stderr: "pipe",
@@ -1398,6 +1399,8 @@ describe("seanced spawn (the CLI, as a subprocess)", () => {
       expect(stdout).toContain("spawned 'No Relay'");
       const log = await Bun.file(join(stateDir, "seanced.log")).text();
       expect(log).toContain("audit spawn origin=cli");
+      // `steer` reaches the spawn with the plan mode an older reader keys on.
+      expect(log).toContain("plan=true autonomy=steer");
       expect(log).not.toContain("audit enqueue");
       // After the positive result: a non-event, so it is asserted once the spawn is done.
       expect(dialled).toBe(0);

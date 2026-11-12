@@ -87,6 +87,17 @@ describe("spawnAuto", () => {
     expect(fake.requests).toEqual([]);
   });
 
+  test("--autonomy reaches the task; steer is sealed with plan for a leader that drops the level", async () => {
+    const auto = scheduledRelay();
+    expect((await run(auto, { autonomy: "auto" })).ok).toBe(true);
+    expect(auto.creates[0]?.spec).toMatchObject({ autonomy: "auto" });
+    expect(auto.creates[0]?.spec).not.toHaveProperty("plan");
+
+    const steer = scheduledRelay();
+    expect((await run(steer, { autonomy: "steer" })).ok).toBe(true);
+    expect(steer.creates[0]?.spec).toMatchObject({ autonomy: "steer", plan: true });
+  });
+
   test("with no leader the task still queues, and the answer says it waits for one", async () => {
     const fake = scheduledRelay({ kind: "none" });
     const { ok, text } = await run(fake);

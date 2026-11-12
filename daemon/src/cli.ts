@@ -1,10 +1,14 @@
 import { chmod, mkdir, realpath, stat } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import {
+  AUTONOMY_LEVELS,
   DAEMON_PATH,
   DEFAULT_EFFORT,
   DEFAULT_MODEL,
   fromBase64,
+  isAutonomyLevel,
+  withAutonomy,
+  type AutonomyLevel,
   type DespawnRequest,
   type SpawnRequest,
 } from "@seance/shared";
@@ -116,10 +120,11 @@ export interface SpawnCliArgs {
   readonly not?: readonly string[];
   /** Queued spawn only (refused with `--now`): start it past the concurrency cap once admitted, as `seanced start`; present only when given. */
   readonly start?: true;
+  /** The task's autonomy level, queued or `--now`; present only when given. */
+  readonly autonomy?: AutonomyLevel;
 }
 
-const SPAWN_USAGE =
-  "usage: seanced spawn [--now | [--start] [--machine <name|here>] [--account <alias|email|id>] [--not <machine|here>]...] <repo> [--here] [-t <title>] [[-p] <task>]";
+const SPAWN_USAGE = `usage: seanced spawn [--now | [--start] [--machine <name|here>] [--account <alias|email|id>] [--not <machine|here>]...] [--autonomy <${AUTONOMY_LEVELS.join("|")}>] <repo> [--here] [-t <title>] [[-p] <task>]`;
 
 /** The flags that take a value, and the field each fills. */
 const SPAWN_VALUE_FLAGS = {
@@ -128,7 +133,11 @@ const SPAWN_VALUE_FLAGS = {
   "--machine": "machine",
   "--account": "account",
   "--not": "not",
+  "--autonomy": "autonomy",
 } as const;
+
+/** Given at most once each. */
+const SPAWN_ONCE_FLAGS: ReadonlySet<string> = new Set(["machine", "account", "autonomy"]);
 
 type SpawnValueFlag = keyof typeof SPAWN_VALUE_FLAGS;
 
@@ -139,21 +148,22 @@ function isSpawnValueFlag(arg: string): arg is SpawnValueFlag {
 /**
  * Mirrors /spawn: -p is optional, bare words join into the prompt. The
  * placement flags and `--start` shape a queued spawn, so `--now` — which runs
- * here, right away — refuses them; each takes a value, and `--machine` and `--account`
- * are given at most once. `--auto` is a no-op kept for old muscle memory,
- * refused only beside `--now`. Exported for tests.
+ * here, right away — refuses them; each takes a value, and `--machine`, `--account`
+ * and `--autonomy` are given at most once. `--autonomy` shapes the session, not
+ * its placement, so `--now` takes it. Exported for tests.
  */
 export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
   let repo: string | undefined;
   let here = false;
   let now = false;
   let start = false;
-  let auto = false;
   let title: string | undefined;
   let machine: string | undefined;
   let account: string | undefined;
+  let autonomy: AutonomyLevel | undefined;
   const not: string[] = [];
   const promptParts: string[] = [];
+  const given = new Set<string>();
   let expect: (typeof SPAWN_VALUE_FLAGS)[SpawnValueFlag] | null = null;
   for (const arg of argv) {
     if (expect !== null) {
@@ -161,7 +171,9 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
       else if (expect === "prompt") promptParts.push(arg);
       else if (expect === "not") not.push(arg);
       else if (expect === "machine") machine = arg;
-      else account = arg;
+      else if (expect === "account") account = arg;
+      else if (isAutonomyLevel(arg)) autonomy = arg;
+      else throw new Error(SPAWN_USAGE);
       expect = null;
     } else if (arg === "--here") {
       here = true;
@@ -169,12 +181,11 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
       now = true;
     } else if (arg === "--start") {
       start = true;
-    } else if (arg === "--auto") {
-      auto = true;
     } else if (isSpawnValueFlag(arg)) {
       expect = SPAWN_VALUE_FLAGS[arg];
-      if ((expect === "machine" && machine !== undefined) || (expect === "account" && account !== undefined)) {
-        throw new Error(SPAWN_USAGE);
+      if (SPAWN_ONCE_FLAGS.has(expect)) {
+        if (given.has(expect)) throw new Error(SPAWN_USAGE);
+        given.add(expect);
       }
     } else if (arg.startsWith("-")) {
       throw new Error(SPAWN_USAGE);
@@ -185,7 +196,9 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
     }
   }
   if (repo === undefined) throw new Error(SPAWN_USAGE);
-  if (expect === "machine" || expect === "account" || expect === "not") throw new Error(SPAWN_USAGE);
+  if (expect === "machine" || expect === "account" || expect === "not" || expect === "autonomy") {
+    throw new Error(SPAWN_USAGE);
+  }
   const placed = machine !== undefined || account !== undefined || not.length > 0;
   if (now && placed) {
     throw new Error(
@@ -196,9 +209,6 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
     throw new Error(
       `--now spawns here directly; --start starts a queued spawn past the scheduler's cap — give one\n${SPAWN_USAGE}`,
     );
-  }
-  if (now && auto) {
-    throw new Error(`--now and --auto contradict: --now spawns here directly, a plain spawn queues\n${SPAWN_USAGE}`);
   }
   const prompt = promptParts.join(" ");
   return {
@@ -211,6 +221,7 @@ export function parseSpawnArgs(argv: readonly string[]): SpawnCliArgs {
     ...(machine === undefined ? {} : { machine }),
     ...(account === undefined ? {} : { account }),
     ...(not.length === 0 ? {} : { not }),
+    ...(autonomy === undefined ? {} : { autonomy }),
   };
 }
 
@@ -231,12 +242,15 @@ export async function cmdSpawn(argv: readonly string[]): Promise<void> {
     state.repos.length > 0
       ? state.repos
       : tagExclaves(await scanRepos(config.repoRoots), (await scanExclaves(homedir())).exclaves);
-  const request: SpawnRequest = {
+  const fields: SpawnRequest = {
     repo: args.repo,
     mode: args.here ? "here" : "worktree",
     ...(args.title !== undefined ? { title: args.title } : {}),
     ...(args.prompt !== undefined ? { prompt: args.prompt } : {}),
+    ...(args.autonomy === undefined ? {} : { autonomy: args.autonomy }),
   };
+  // `steer` gains `plan: true`, the permission mode the spawn reads. Never null: no `plan` is given.
+  const request = withAutonomy(fields) ?? fields;
   const audit = spawnAudit("cli", cliSink);
   await audit.request(request);
   try {
