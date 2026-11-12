@@ -914,10 +914,12 @@ nothing checked it. The last is the gap they leave.
   wording in the PR that builds each; Scheduler, "Passing to a successor"):
   - The daemon's one write to a forge is `pushTaskBranch` (`daemon/src/push-branch.ts`): a `git push`
     through `networkGit`, never forced, of `refs/heads/<b>:refs/heads/<r>` to `origin` only. `<b>` is the
-    branch its own launch ledger's worktree has checked out; `<r>` is that branch's configured upstream
-    on `origin` or, for a branch with no upstream, a scheduler-sealed `push-branch`'s `expect` only
-    when origin's tip of it is an ancestor of the local tip, else `<b>`. Never a path, never a branch
-    from a session frame; only on a clean tree and never to the default branch; refusing repo-local
+    branch its own launch ledger's worktree has checked out; `<r>` is, in order: that branch's
+    configured upstream on `origin` (an upstream on any other remote counts as none); with no upstream
+    and a scheduler-sealed `push-branch`'s `expect`, that `expect`, only when origin's tip of it is an
+    ancestor of the local tip (else nothing is pushed, `branch_mismatch`); with neither, `<b>`, except
+    that the session's own `pass` frame for a task whose ledger holds a PR is refused `no_upstream`.
+    Never a path, never a branch from a session frame; only on a clean tree and never to the default branch; refusing repo-local
     `remote.*.pushurl` and `url.*.pushinsteadof`; only on a `push-branch` sealed `from` the scheduler (or
     the leader in process) or the session's own bound `pass` frame; audited with no branch name, and with
     git's stderr never in a reply, a log or an audit line.
@@ -930,9 +932,12 @@ nothing checked it. The last is the gap they leave.
     the one task sealer, which appends `SUCCESSOR_DEP_SENTINEL` for an older leader to refuse. It is held
     until its predecessor is `superseded` naming it and is never spilled into credits. A `superseded`
     predecessor's dependents follow its `successor` chain, never fail on it.
-  - The daemon closes a session for a pass only for the pane its kernel-bound `pass` frame came from,
-    only after a `pass-close` sealed `from` the scheduler named that pane's task, at that pane's
-    `turnEnded` idle, after re-reading that it still carries the task.
+  - The daemon closes a session for a pass only after a `pass-close` sealed `from` the scheduler named
+    the task, and only for the pane its kernel-bound `pass` frame came from or, after a daemon
+    restart, the live pane carrying that task; at that pane's `turnEnded` idle of a turn begun after
+    the pass (a later non-idle state clears it), after re-reading that it still carries the task. A
+    mark a restart recreated has seen no turn end, so a session already idle is closed only by the
+    leader's backstop.
 - **Attachments** (built 2026-10-28) carry invariants of their own, recorded under
   Attachments and as requirements in `CLAUDE.md`. In short:
   - A daemon fetches only from its own config's relay origin, by an id held to
@@ -1648,18 +1653,23 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   is a task").
 - `pass { taskId }` (`TaskRef`) → `{ task, successorId, successor }` (`PassResponse`; `successor` is null when the
   leader cannot read it, e.g. an already-passed answer after a prune) (designed 2026-11-12, not
-  built; Scheduler, "Passing to a successor"). In `SCHEDULER_OPS`, 120 s timeout. Refusals are the
-  structured codes of that section, plus `conflict` and `unrecorded` as for `cancel`. Only to a
+  built; Scheduler, "Passing to a successor"). In `SCHEDULER_OPS`, 180 s timeout (the worst path adds
+  up to 15 s reading the PR, 90 s for `push-branch`, a create, an overwrite with retries, a
+  `sessions` read and a 20 s despawn; a client that gives up early retries safely, D15). Refusals are
+  the structured codes of that section, plus `conflict` and `unrecorded` as for `cancel`. Only to a
   leader advertising `CAPABILITIES.successor`; an older one answers an unknown op `invalid_request`,
   so every client checks the capability first.
 - `push-branch { taskId, expect? }` (`PushBranchRequest`) → `{ remoteBranch, tip, pushed }`
-  (`PushBranchResponse`), scheduler → daemon, `OP_TIMEOUT_MS["push-branch"]` 60 s (the push has its
-  own 45 s). `expect` is the PR head the leader read; the daemon only compares it, and uses it as the
+  (`PushBranchResponse`), scheduler → daemon, `OP_TIMEOUT_MS["push-branch"]` 90 s (the Q7 fetch has its
+  own 15 s and the push 45 s, beside the local git reads). `expect` is the PR head the leader read; the daemon only compares it, and uses it as the
   push target in one case (Scheduler, "Passing to a successor", "The push"). The local branch name
   never crosses the wire, and `remoteBranch` and `expect` are held to `isBranchName`, `tip` to 40
   or 64 lowercase hex. Codes (`PUSH_BRANCH_ERROR_CODES`): `not_launched`, `detached_head`,
-  `default_branch`, `dirty_worktree`, `branch_mismatch`, `push_rejected`, `push_failed`, and the
-  transport codes. Sealed `from: "scheduler"` only; any other `from` is `invalid_request`. A daemon
+  `default_branch`, `dirty_worktree`, `branch_mismatch`, `push_rejected`, `push_failed`, `no_upstream` (only for a
+  caller that holds a PR and sends no `expect`, the self path: the leader never asks for it) and the
+  transport codes. A `push-branch` that gets no answer in time, or a transport error, is the leader's
+  `push_failed` (fixed text: the machine did not answer and may have pushed; passing again pushes
+  nothing new). Sealed `from: "scheduler"` only; any other `from` is `invalid_request`. A daemon
   that predates it ignores the op and the caller times out, which is why the leader checks the
   old machine's `successor` capability first (designed 2026-11-12, not built).
 - `pass-close { taskId }` (`PassCloseRequest`) → `{ ok: true }` or `no_pane` / `unsupported` /
@@ -1857,18 +1867,25 @@ an old peer's frames parse as before. Mixed versions:
     `succeeds`, and nulls the spec when either is alone. An older leader rewriting a running task
     drops `successor` (`parseTask` rebuilds known fields only): leaders are an allowlist, updated
     together, and the orphan then fails `pass_abandoned` once the old task finishes.
-  - `CAPABILITIES.successor`: an unknown string to an older reader, which keeps the machine. A new
-    client offers the pass, and a new leader pushes, only against a machine or leader advertising it.
+  - `CAPABILITIES.successor` (2a) and `CAPABILITIES.successorSelf` (2b): unknown strings to an older
+    reader, which keeps the machine. `successor`: a daemon that answers `push-branch`, a leader that
+    answers `pass` and routes and admits `succeeds`. `successorSelf`: a daemon that ingests the `pass`
+    frame and answers `pass-close`, a leader that ingests `session-pass`. Two, not one, because a 2a
+    leader would advertise a shared one and drop `session-pass` (the leader's `onEvent` logs any op it
+    does not know as not a session event), so a 2b session would push and then time out on every
+    attempt: `pass_to_successor` gates on the verified leader advertising `successorSelf`. A new client
+    offers the pass, and a new leader pushes, only against a machine or leader advertising the one it
+    needs.
     `CAPABILITIES.successorAuto` (stage 3) gates `trigger: "quota"` and `succeeds.since` the same way,
     and PR 2's parser refuses `"quota"`, so an early leader never misreads one.
   - Reason `predecessor_account`: dropped by an older reader like any unknown reason, which keeps the
     candidate. Failure code `pass_abandoned` parses as any bounded name; an older PWA words it as a
     spawn refusal with the leader's message, the same residual as `continue_expired`.
   - `SCHEDULER_OPS` `pass` widens `SCHEDULER_REPLY_WINDOW_MS` (derived from `OP_TIMEOUT_MS` in
-    `relay/src/hub.ts`) to 120 s. It is log-only (past the window replies log as any other), so the
+    `relay/src/hub.ts`) to 180 s. It is log-only (past the window replies log as any other), so the
     relay redeploy only picks it up and nothing waits on it.
   - Rollout: PR 2a then 2b; relay, PWA and daemons in any order (a daemon that predates the
-    capability is never pushed to). Leadership moving from a new leader to an old one mid-pass leaves
+    capability is never pushed to; a 2b build advertises both capabilities). Leadership moving from a new leader to an old one mid-pass leaves
     the successor unreadable and the old task rewritten without `successor`; dependents wait. No
     second session ever works the branch: accepted, visible.
 
@@ -3242,9 +3259,14 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   fail them `dependency_failed` and `done` would release them as if the work were finished.
   Once `successor` is set, every way the old task would finish becomes `superseded` (the despawn's
   `ended`, a sweep finding no session, `lost` expiry, which settles it with `leftRunning: true`
-  instead of failing `lost_expired`), except what wins today as in `#yieldToCancel`: a merge
-  (`doneBy: "merged"`), the session's own `done` report, and a manual `cancel` or `mark-done`. Those
-  fail a still-unfinished successor `pass_abandoned`. `successor` is written only by the leader
+  instead of failing `lost_expired`), except what wins: a merge (`doneBy: "merged"`), the session's
+  own `done` report, and a manual `cancel` or `mark-done`. Those settle the old task as they do
+  today, with `successor` dropped (`advance`), and fail a still-unfinished successor `pass_abandoned`
+  (a merge settles it `done` instead, "Admission of a successor"). A cancel or mark-done wins over
+  the despawn's own `ended` too: `#yieldToCancel` holds a `superseded` settle as it holds a `failed`
+  one, and `markDone` of a task carrying `successor` counts in `#cancelling` for its call as `cancel`
+  does, so neither answers `superseded` nor lets the successor run on after the person said stop.
+  `successor` is written only by the leader
   (`appWrite: false`), and a `superseded` task without it is malformed. Rejected: `failed` with a
   code `superseded`; `done` with `doneBy: "successor"`.
 - **Admission and dependencies** (`deps.ts`, M3 item 4a). Every pass, after its
@@ -3287,13 +3309,17 @@ it through the store: an app's `store-put` create, read by the leader on `store-
 - **Admission of a successor, and dependents of a passed task** (designed 2026-11-12, not built).
   A task carrying `spec.succeeds` is judged against its predecessor, beside its own `deps` (none
   are carried): the predecessor `superseded` with `successor === this.id` releases it; unfinished,
-  unreadable, or missing inside `DEP_MISSING_GRACE_MS` keeps it `blocked`; finished any other way,
+  unreadable, or missing inside `DEP_MISSING_GRACE_MS` keeps it `blocked`; `done` by `merged`
+  settles it `done` (`doneBy: "merged"`) as its own PR reading would ("PR status"), so a merge landing
+  in the pass's window has one answer whichever reader sees it first; finished any other way,
   naming another successor, or missing past the grace fails it `pass_abandoned`, the message
   naming the predecessor's id and state. This is what stops two sessions working one remote branch.
   A dependent of the old task resolves a predecessor through `superseded → successor` links, at most
   `SUCCESSOR_CHAIN_MAX` (8) hops, before judging `released`, so it waits on the successor and never
   fails `dependency_failed`; a chain too long or looping reads `blocked` and logs once. `named()`
-  adds the ids on such a chain so pruning keeps the links a waiting dependent reads through.
+  adds the ids on such a chain, and the `succeeds.task` of every unfinished task (a waiting
+  successor reads its predecessor through it, and it is no dep), so pruning keeps the links a waiting
+  dependent or successor reads through.
 - **Batches** (`batch.ts`, M3 item 4a; a group only since 2026-10-26). **A batch is a group;
   order is `after`, concurrency is the caps.** No batch record exists: a batch is the tasks
   that name its id, each with its `index`. It is where a set of tasks came from, shown
@@ -3601,14 +3627,18 @@ reuses the record helpers.
   clone), `trigger` `"session"` or `"manual"` until stage 3. It is refused with a `mode` other than
   `worktree`, with `continues` and with `attachments`, and `succeeds.task === id` is `malformed` in
   `bindTaskRecord`, as a self-continuation is. `Task.successor` is the forward link; `parseTask`
-  returns null for it on any state but `running`, `needs-input`, `lost` and `superseded`. The
+  returns null for it on any state but `running`, `needs-input`, `lost` and `superseded`, so
+  `advance` carries it only into those four and drops it on any other transition (a merge, the
+  session's `done` report, a `cancel` or `mark-done` winning): no writer produces the record
+  `parseTask` would null, which every reader would then hold unreadable and never prune. The
   created task also carries the old task's `prUrl` and `prs`, so the chip and the PR poller follow
   the same PR; `parseTask` accepts progress fields in any state and `bindTaskRecord` requires only
   `queued` at version 1. `SUCCESSOR_DEP_SENTINEL` is appended by the one sealer whenever `succeeds`
   is present (Wire protocol, "Passing to a successor"). A successor create carries a full prompt
   plus these fields and must fit `STORE_CREATE_MAX_CT_LENGTH`; a sealed-size test with every field
-  at its bound proves it, and if it ever fails the fallback is to carry `prUrl` only, never to raise
-  the cap.
+  at its bound proves it, with a three-byte-character prompt held to `SUCCESSOR_PROMPT_BYTES` as well
+  as a two-byte one at 8 192 units, and if it ever fails the fallback is to carry `prUrl` only, never
+  to raise the cap.
 - **Unreadable is reported, never fatal, never deleted.** `RelayClient.listTasks` returns the
   tasks that bound beside `{ key, version, reason }` for each that did not; `getTask` returns
   either. The app leg has no delete at all (the relay forbids it), so clearing junk stays a
@@ -4180,15 +4210,16 @@ for the lot with its own `gh`.
   "Passing to a successor"). Once the old task is `superseded` the successor holds the PR, but the
   poller skips waiting phases. It now also reads a task in phase `waiting` carrying `spec.succeeds`
   and a `prUrl` (`readsPrWhileWaiting` in `task-phase.ts`, widening `wantsPrReading`;
-  `isPrReadable` is unchanged, and `targets()` stops counting a waiting task as finished, or it
-  would be read once per term). A merge into the default branch (`merged`, not `stacked`) settles
+  `isPrReadable` is unchanged, `prChange`'s `isPrReadable` early return, which only records a finished
+  task's chip, also lets a waiting successor through, or a merge would be recorded and never settle, and
+  `targets()` stops counting a waiting task as finished, or it would be read once per term). A merge into the default branch (`merged`, not `stacked`) settles
   it `done` (`doneBy: "merged"`) without spawning and without `leftRunning` (nothing was placed), so
   dependents release through the chain and no session starts to fetch a deleted branch. Under
   `until: "reported"` a merge is only recorded, as for a placed task. A closed, unmerged PR is
   recorded and moves nothing, so the successor still places and its preamble has it read the PR.
   `reserved` is not read as waiting. This is the one exception to "`done` from `queued`, `blocked`
   or `ready` is `mark-done`'s alone", and the transition is already legal. Separately, `readPrHead`
-  (`daemon/src/pr-status.ts`) reads the primary PR's `headRefName` and `isCrossRepository` through
+  (`daemon/src/pr-status.ts`) reads the primary PR's `headRefName`, `isCrossRepository` and `state` through
   one `gh api graphql` call, values as variables, 15 s timeout, the head held to `isBranchName`;
   `parseGithubPr` null skips it, anything else unreadable is null. It is injected into the scheduler
   as an optional port, logs nothing with the URL or head, and leaves the poller's query and
@@ -6605,7 +6636,8 @@ manual path in two PRs, the automatic trigger afterwards) and is where each is m
   | MCP tool, any task                       | `pass_task`                                                |
   | CLI                                      | `seanced pass <task-id>`                                   |
   | PWA button                               | "Pass to successor"                                        |
-  | Capability                               | `CAPABILITIES.successor`                                   |
+  | Capability, outside path (2a)            | `CAPABILITIES.successor`                                   |
+  | Capability, session's own path (2b)      | `CAPABILITIES.successorSelf`                               |
   | Audit origin (self path push and close)  | `successor`                                                |
   | Forward-compat gate on the new record    | `SUCCESSOR_DEP_SENTINEL` (`{ task: "", after: "opened" }`) |
   | Failure code of an orphaned successor    | `pass_abandoned`                                           |
@@ -6622,12 +6654,15 @@ manual path in two PRs, the automatic trigger afterwards) and is where each is m
     pushing to the local branch's name.
   - **O3: the automatic trigger is specced now and built later** ("The automatic trigger").
 - **Ordering, the same for every trigger (D1).** Leader-driven: (0) the in-flight guard; (1) validate;
-  (2) read the PR head when the task has a GitHub PR; (3) push (outside path: the leader asks the old
+  (2) read the PR's head and state when the task has a GitHub PR (a merged or closed one is
+  `pr_not_open`); (3) push (outside path: the leader asks the old
   machine with `push-branch { taskId, expect }`, `expect` being that head; self path: the daemon
   pushed before the event and sends `{ remoteBranch, tip }`, and the leader compares `remoteBranch`
-  with the head and refuses `branch_mismatch` there, the push already done and at worst a stray
-  remote branch); (4) create the successor `queued` through the leader's app-role leg; (5) the
-  **commit point**: overwrite the old task with `successor: <new id>`; (6) close the old session;
+  with the head and refuses `branch_mismatch` there, the push already done; a task whose ledger holds
+  a PR was refused `no_upstream` by the daemon before it pushed, so a stray remote branch needs a PR
+  the session never reported); (4) create the successor `queued` through the leader's app-role leg;
+  (5) the **commit point**: the leader notes the pass in `#passing` ("Closing"), then overwrites the
+  old task with `successor: <new id>`; (6) close the old session;
   (7) settle the old task `superseded`. Failure before step 4 changes nothing but a pushed branch,
   which is harmless; step 4 failing answers `pass_failed` with nothing else written; step 5
   failing (a conflict after retries, `StoreRevoked`) leaves a successor its predecessor never names,
@@ -6642,7 +6677,7 @@ manual path in two PRs, the automatic trigger afterwards) and is where each is m
   `pass joined`. A task `running`, `needs-input` or `lost` that already carries `successor` answers
   `ok` with it, no push and no create, and so does a `superseded` one. The entry is deleted in a
   `finally`. Rejected: a `passing` refusal code, which makes every client handle a retry for nothing.
-- **The push (O2, Q7).** `pushTaskBranch(site, expect?)` in `daemon/src/push-branch.ts` serves the
+- **The push (O2, Q7).** `pushTaskBranch(site, { expect?, hasPr? })` in `daemon/src/push-branch.ts` serves the
   relay handler, the leader in process and the session's frame. The site is the noted worktree of
   this machine's own launch ledger, never a path from the wire, and a `here` launch has none.
   In order:
@@ -6651,16 +6686,21 @@ manual path in two PRs, the automatic trigger afterwards) and is where each is m
      held to `isBranchName`.
   3. The **remote branch** `<r>` is the branch's configured upstream when `branch.<b>.remote` is
      exactly `origin` and `branch.<b>.merge` is `refs/heads/<x>` (`<r>` is `<x>`; a malformed one is
-     `push_failed`, an unset one is "no upstream", never a failure), because daemon worktrees sit on
-     `worktree-<name>` while sessions push `HEAD:martin/…`.
-  4. `expect` given and different from `<r>`: with an upstream set, `branch_mismatch` and nothing
-     pushed. **With no upstream** (a rate-limited session cannot set one), the daemon validates
-     `expect` with the same ref-format rule, fetches it into `refs/remotes/origin/<expect>`
-     through `networkGit`, and if that remote tip is an ancestor of the local tip
+     `push_failed`, an unset one, or one on another remote, is "no upstream", never a failure),
+     because daemon worktrees sit on `worktree-<name>` while sessions push `HEAD:martin/…`.
+  4. Three cases, in order. **An upstream is set**: `<r>` is it, and an `expect` that differs is
+     `branch_mismatch`, nothing pushed; an upstream always wins and is never overridden by
+     `expect`. **No upstream, `expect` given** (a rate-limited session cannot set one): the daemon
+     validates `expect` with the same ref-format rule, fetches it into `refs/remotes/origin/<expect>`
+     through `networkGit` (15 s), and if that remote tip is an ancestor of the local tip
      (`merge-base --is-ancestor`) takes `<r> = expect`: the PR head is this worktree's own line of
-     work. Otherwise (fetch failed, not an ancestor) `branch_mismatch`. No upstream and no `expect` (no
-     PR) pushes to `<b>`. An upstream always wins and is never overridden by `expect`, which comes only
-     from a scheduler-sealed request, never a session frame. The self path has no `expect`.
+     work. Otherwise (fetch failed, not an ancestor) `branch_mismatch`. **No upstream, no `expect`**:
+     pushes to `<b>` when the task has no PR; when the caller says it holds one (`hasPr`, the self
+     path, from the PR URL its ledger noted: it has no `expect`, and the leader would refuse another
+     branch after the push) it is `no_upstream`, nothing pushed, and the session is told to run
+     `git push -u origin HEAD:<pr branch>` or set the upstream and call again, which it can, being
+     live. `expect` comes only from a scheduler-sealed request, never a session frame; `hasPr` is the
+     daemon's own ledger.
   5. `<b>` or `<r>` equal to the repo's default branch (resolved from `refs/remotes/origin/HEAD` as
      branch-state's `repoBase` does; with none, `main` and `master`) is `default_branch`.
   6. Uncommitted or untracked changes are `dirty_worktree` (`pendingChanges`; unreadable is
@@ -6679,14 +6719,18 @@ manual path in two PRs, the automatic trigger afterwards) and is where each is m
      another machine's leader, `leader` in process (settled default 3), `successor` for the session's
      own frame.
 - **The PR head cross-check (D14a).** When the task has a GitHub PR (`prUrl`), the leader reads its
-  `headRefName` and `isCrossRepository` with its own `gh` ("PR status") before any push. A fork is
-  `branch_mismatch`, an unreadable PR `pr_unreadable`, nothing pushed either way. A non-GitHub URL
+  `headRefName`, `isCrossRepository` and `state` with its own `gh` ("PR status") before any push. A
+  fork is `branch_mismatch`, an unreadable PR `pr_unreadable`, a merged or closed one `pr_not_open`
+  (its head branch may be deleted, and the push would recreate it), nothing pushed in any case. A non-GitHub URL
   skips the check, logged once without the URL. A leader with no `gh`, or no injected port, refuses a
   PR-carrying task `pr_unreadable`. The head is validated with `isBranchName` and never logged.
 - **The successor (D7, D8).** `successorSpec(task, account, trigger)` in `shared/src/successor.ts`
   beside `continuationSpec`: it carries `repo`, `mode: "worktree"`, `title`, `model`, `effort`,
-  `until`, `linear`, `skill` and `avoid`; `steer` becomes `autonomy: "checkpoint"`, the plan having
-  been approved; `client` is `"scheduler"`. It drops `pin` (an account pin is the old account by
+  `until`, `linear`, `skill`, `avoid`, `autonomy` and `plan`, the last two as `continuationSpec`
+  carries them: `auto` stays `auto` and `checkpoint` stays `checkpoint` (an unattended failover must
+  not stop at its first choice), and `steer` becomes `autonomy: "checkpoint"` with `plan` dropped, the
+  plan having been approved (`withAutonomy` refuses `plan: true` beside `checkpoint`); `client` is
+  `"scheduler"`. It drops `pin` (an account pin is the old account by
   definition, and a machine pin would often have no other account; `repo_absent` covers a repo
   present on one machine only), `deps` (already satisfied), `batch` (not a new member), and `lineage`,
   `base`, `continues` and `attachments`. `succeeds` is described under "Task records". There is no new
@@ -6697,11 +6741,21 @@ manual path in two PRs, the automatic trigger afterwards) and is where each is m
   locally past `STORE_CREATE_MAX_CT_LENGTH`; one more `task:` record against the cap of 128 and the
   app write floor of 60 per 60 s.
 - **The fallback prompt (O1).** With no record (every outside pass, or a session that sends none) the
-  leader composes the prompt in `successorPrompt`, pure and deterministic: the preamble, the old
-  prompt truncated so the total fits `TASK_REQUEST_LIMITS.prompt` (8 192 UTF-16 units; the preamble is
-  never the part truncated), the remote branch, the PR URLs (`Task.prs`, else `prUrl`) and the Linear
-  key. `SUCCESSOR_PREAMBLE_MAX` is 1 024 and `SUCCESSOR_RECORD_MAX` 7 168, so a record and a preamble
-  together fit. A successor carries no attachments, so the 6 144 attachment bound does not apply, and
+  leader composes the prompt in `successorPrompt`, pure and deterministic: the preamble (its fixed
+  wording with the remote branch, sha, old task id and PR URLs, `Task.prs` else `prUrl`, substituted,
+  never cut), the old prompt and the Linear key. Two bounds hold the composed prompt, both measured
+  after substitution: `TASK_REQUEST_LIMITS.prompt` (8 192 UTF-16 units) and
+  `SUCCESSOR_PROMPT_BYTES` (16 384 UTF-8 bytes, the size the create cap is built for with
+  two-byte characters; three-byte text would pass the unit bound and come back `too_large` after the
+  push). The old prompt is cut first; a record is cut only when it and the preamble still pass a
+  bound, from its end at a code point, and the prompt then ends with a fixed line saying so; the leader
+  logs `pass record cut` and no content. `SUCCESSOR_PREAMBLE_MAX` (1 024) bounds the fixed wording
+  alone: the values substituted are each held by their own limit (`BRANCH_MAX_LENGTH` 255, up to five
+  times, a PR URL up to 2 048, a sha 64), so the whole preamble stays under about 4 500 units and a
+  record of about 3 700 always fits whole, a longer one (up to `SUCCESSOR_RECORD_MAX`, 7 168, the most
+  a session may send) when the values are short, as they are in practice. The tool counts
+  `record.length`, UTF-16 units, itself and refuses before the push (a JSON-schema `maxLength` counts
+  code points). A successor carries no attachments, so the 6 144 attachment bound does not apply, and
   the fallback names that the old task had some and that they are not available. The preamble names
   the remote branch `<r>`, never the old local branch, and tells the successor to: (1) know it
   continues task `<old id>`, which a session on another account began and pushed to `origin/<r>` at
@@ -6722,19 +6776,30 @@ manual path in two PRs, the automatic trigger afterwards) and is where each is m
   are fire-and-forget: that confirmation is `pass-close`, sent right after step 5 to the task's
   `assignment.deviceId` (in process on its own machine). The daemon keeps, per pane,
   `{ taskId, confirmed, turnEnded }`. The `pass` frame creates the entry unconfirmed; a `turnEnded`
-  idle sets `turnEnded`; `pass-close` sets `confirmed` (creating the entry from the live pane
-  carrying the task if none exists, as after a daemon restart); the daemon closes when both hold,
-  whichever lands second. A failed pass never sends `pass-close`, so it never closes the session.
-  `pass-close` answers at once and never waits for the close. **Backstop:** the leader keeps
-  `#passing: Map<taskId, { deadline }>` in memory, the deadline being the commit plus
-  `PASS_CLOSE_GRACE_MS` (120 000), and on each `tick` past it closes through `#endSession` (a session
-  that never reports a `turnEnded` idle, or whose daemon restarted and lost the entry); it never acts on
-  `idle` events. **Reconcile:** at takeover and on every tick, each `running`, `needs-input` or
-  connected `lost` task carrying `successor` and not in `#passing` is closed at once through
-  `#endSession`, unless its successor's `succeeds.trigger` is `"session"`, when `pass-close` is
-  re-sent (idempotent) with a fresh deadline. Only the leader-written `successor` and the leader's
-  own `pass-close` ever close a session for a pass: a forged successor record (any PSK holder can create
-  one) closes nothing, it only waits and then fails `pass_abandoned`.
+  idle sets `turnEnded`, and a later frame for that pane in any other state (`running`,
+  `needs-input`) clears it, so a turn begun after an unconfirmed pass (a person prompting the session
+  again) is never cut by a late `pass-close`; `pass-close` sets `confirmed` (creating the entry from the
+  live pane carrying the task if none exists, as after a daemon restart: that entry has seen no turn
+  end, so a session already idle is closed only by the backstop below); the daemon closes when both
+  hold, whichever lands second. A failed pass never sends `pass-close`, so it never closes the
+  session. `pass-close` answers at once and never waits for the close. Work after the commit point
+  is not carried: the successor starts from the pushed tip, and the graceful despawn keeps the old
+  worktree, so a commit made after the push stays there, recoverable manually (accepted); the tool
+  tells the session to end its turn whatever it answers, never to keep working. **Backstop:** the
+  leader keeps `#passing: Map<taskId, { deadline }>` in memory, inserted before the commit write so
+  no tick sees a task carrying `successor` that no entry covers, the deadline being the commit plus
+  `PASS_CLOSE_GRACE_MS` (120 000). On each `tick` past it the leader closes through `#endSession` (a
+  session that never reports a `turnEnded` idle, or whose daemon restarted and lost the entry) and
+  keeps the entry, so a failed close retries every tick; an entry is dropped only when its task no
+  longer is `running`, `needs-input` or `lost` carrying `successor`. It never acts on `idle` events.
+  **Reconcile:** at takeover and on every tick, each `running`, `needs-input` or connected `lost`
+  task carrying `successor`, in neither `#passing` nor `#passInFlight`, gets an entry with a fresh
+  deadline and: when its successor's `succeeds.trigger` is `"session"`, or the successor cannot be
+  read, and its machine advertises `successorSelf`, `pass-close` is re-sent (idempotent; a close at
+  the next turn's end is the gentler error); otherwise it is closed at once through `#endSession`.
+  Only the leader-written `successor` and the leader's own `pass-close` ever close a session for a
+  pass: a forged successor record (any PSK holder can create one) closes nothing, it only waits and
+  then fails `pass_abandoned`.
   Rejected: the leader closing at an `idle` event (the forwarded `SessionEvent` has no `turnEnded`, and
   a respawn's idle would close mid-turn); despawning at once on the self path (it interrupts the
   session's final message with Esc); the daemon deferring a scheduler `despawn`'s reply (it changes
@@ -6750,12 +6815,13 @@ manual path in two PRs, the automatic trigger afterwards) and is where each is m
   | `finished`               | already finished (a `superseded` one answers `ok` with its successor) |
   | `dispatching`            | `reserved`                                                            |
   | `not_running`            | waiting states, `lost`, `awaiting-merge`, or no assignment            |
-  | `needs_input`            | `needs-input`: never moved while a person is asked                    |
+  | `needs_input`            | `needs-input`, outside paths: never moved while a person is asked     |
   | `here`                   | `spec.mode === "here"`: no worktree branch of its own                 |
   | `offline`                | the old machine is not connected                                      |
   | `successor_unsupported`  | the old machine does not advertise `successor`                        |
   | `account_unknown`        | the old exclave reports no `accountId`                                |
   | `pr_unreadable`          | the task has a GitHub PR and the leader could not read its head       |
+  | `pr_not_open`            | the task's PR is already merged or closed: nothing to pass            |
   | `branch_mismatch`        | the remote branch is not the PR's head, or the PR is from a fork      |
   | `dirty_worktree`         | uncommitted or untracked changes                                      |
   | `detached_head`          | the worktree is on no branch                                          |
@@ -6766,11 +6832,15 @@ manual path in two PRs, the automatic trigger afterwards) and is where each is m
   | `pass_failed`            | the successor's create failed                                         |
   | `conflict`, `unrecorded` | as for `cancel`                                                       |
 
-  A `needs-input` task is refused on every path in v1 (decided by the orchestrator): the person can
-  answer or cancel first, and widening it is cheap later. `successor_unsupported` is checked before
-  `push-branch` is sent, since an old daemon would ignore the op and the call would time out. The
-  `pass` op takes a `TaskRef` only; the leader audits it like `cancel`, plus `trigger=manual`, and
-  logs `audit pass task=<id> successor=<id> trigger=<t>` at the commit point.
+  A `needs-input` task is refused on the outside paths in v1 (decided by the orchestrator): the person
+  can answer or cancel first, and widening it is cheap later. The self path accepts it (_Decided_: a
+  session calling a tool is waiting on nobody, and the leader's view can lag the session's answer by
+  an event, which would silently drop a pass the daemon already pushed). `successor_unsupported` is
+  checked before `push-branch` is sent, since an old daemon would ignore the op and the call would time
+  out. The `pass` op takes a `TaskRef` only; the leader audits it like `cancel`, plus `trigger=manual`,
+  and a refusal is that request line's `outcome=<code>`, with no line of its own, as `cancel`'s are. At
+  the commit point it logs `audit pass task=<id> successor=<id> trigger=<t>`. `no_upstream` is the self
+  path's alone, answered to the session by the daemon (above); the `pass` op never returns it.
 
 - **Clients.** `passOffer(task, machines, leader)` in `shared/src/successor.ts` is the one eligibility
   rule (state, mode, machine capability, leader capability), as `continueOffer` is, so the PWA, MCP
@@ -6789,8 +6859,9 @@ manual path in two PRs, the automatic trigger afterwards) and is where each is m
   `lost` or `reserved`) on that account: an `auto` task is passed by the leader itself, `pass` with
   `trigger: "quota"` and `succeeds.since` the reading's time, through the same in-flight guard, and its
   successor avoids the old account (`predecessor_account`); every other level gets a `PushAlert`
-  kind `quota-exhausted { taskId, at, window }` with fixed wording in `push-sw.js` and a tap opening
-  `/?task=<id>`. Each is deduped per task per window reset, persisted on the task as `spillAlert` is.
+  kind `quota-exhausted { taskId, at, window }` with fixed wording in `push-sw.js`, its `window`
+  shown only as one of the known `5h` and `7d`, as a spill's is, and omitted otherwise, and a tap
+  opening `/?task=<id>`. Each is deduped per task per window reset, persisted on the task as `spillAlert` is.
   `dirty_worktree` and `branch_mismatch` make the leader alert instead (reason `dirty` or `branch`);
   any other refusal is logged and retried once per reset. The close is at once, since a session out of
   usage cannot finish a turn. It needs `CAPABILITIES.successorAuto`.
@@ -6803,12 +6874,16 @@ manual path in two PRs, the automatic trigger afterwards) and is where each is m
   construction, and a downgraded one times out and the deadline closes the session). New leader,
   successor placed on an old daemon: fine, since it is a plain worktree spawn and the recipe is prompt
   text. New `seanced mcp` (2b) against an old daemon process: the frame answers `invalid` and the tool
-  says to restart `seanced`. New daemon, old leader (2b): the MCP tool's leader gate refuses before
-  any push, and only that tool sends a `pass` frame (`seanced session-event` drops one).
+  says to restart `seanced`. New daemon, old leader, and a 2b daemon against a 2a leader (which
+  advertises `successor` but not `successorSelf`, and would drop `session-pass`): the MCP tool's leader
+  gate, on `successorSelf`, refuses before any push, and only that tool sends a `pass` frame
+  (`seanced session-event` drops one).
 - **Platform.** The push needs credentials the daemon's environment can use. Fetch already works
   through the same `networkGit`, so an HTTPS clone with a global helper (`gh auth git-credential`) pushes
-  too. An SSH remote whose key lives only in a login session's agent fails under launchd or systemd;
-  `sshBatchEnv` forces `BatchMode`, so it fails fast as `push_failed` rather than hanging. The self path
+  too. An SSH remote whose key lives only in a login session's agent fails under launchd or systemd.
+  `sshBatchEnv` forces nothing there (it returns no override when the daemon has no controlling
+  terminal, as a service has none), so the push fails because ssh has no terminal or askpass to
+  prompt with, as `push_failed`, and the 45 s timeout and process-group kill bound a hang. The self path
   answers that at once, and the session can push itself and call again (the daemon then finds `pushed:
   false`). The leader's `gh` for `readPrHead` is the PR poller's own binary and auth. `GCM_INTERACTIVE=never`
   already applies on Windows and WSL. docs/platform-notes.md gets this when 2a lands.
@@ -6822,7 +6897,7 @@ manual path in two PRs, the automatic trigger afterwards) and is where each is m
   leader's `audit pass … trigger=<t>` line); time from limit to successor running (stage 3 stamps
   `succeeds.since`, and the leader logs `successor placed after=<ms>` at the successor's confirmed
   spawn, counted from `since`, or from the successor's `createdAt` for a manual or session pass, which
-  has no limit time); successors that end merged (the leader logs `successor settled state=<s>
+  has no limit time, so for those it measures the pass to the start, not the limit to it); successors that end merged (the leader logs `successor settled state=<s>
   doneBy=<d>` when a task carrying `succeeds` finishes, read as the share ending `done` by `merged`
   against `pass_abandoned`, `failed` and `cancelled`).
 - **Rejected.** Automatic continue of the old session (it cannot cross accounts); a new `mode` for the
@@ -8108,13 +8183,19 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   description says it ends the task's session and pushes its branch, is refused on a dirty tree, and
   is not for the calling session's own task.
 - **`pass_to_successor { record }`** (designed 2026-11-12, not built; `record` is 1 to
-  `SUCCESSOR_RECORD_MAX` characters). The session's own path, registered beside `hand_off_task`.
-  Gated on the verified leader advertising `successor` (without a fleet it refuses: it cannot confirm
-  the scheduler takes successors). It sends the local-socket `pass` frame ("Session events"), and on `ok`
-  polls the leader's queue for up to 20 s for the task's `successor` and says whether it was confirmed;
-  unconfirmed means the branch is pushed but the leader may have refused (for example the PR's head is
-  another branch). Refusals have a text per code (`dirty_worktree`: commit or stash first, nothing was
-  pushed; `invalid`: this machine's daemon predates passing, restart `seanced`). The description tells
+  `SUCCESSOR_RECORD_MAX` UTF-16 units, which the tool counts itself and refuses past before any push:
+  the schema's `maxLength` counts code points). The session's own path, registered beside
+  `hand_off_task`. Gated on the verified leader advertising `successorSelf` (without a fleet it
+  refuses: it cannot confirm the scheduler takes session passes; a 2a leader advertises only
+  `successor` and would drop the event). It sends the local-socket `pass` frame ("Session events"), and
+  on `ok` polls the leader's queue for up to 30 s for the task's `successor` and says whether it was
+  confirmed; unconfirmed says the branch is pushed, the leader may still confirm or may have refused (for
+  example the PR's head is another branch), and that the session must do no further work and end its
+  turn either way: the session is closed at the turn's end only if the leader confirms, and a commit
+  made after the push is not carried. Refusals have a text per code (`dirty_worktree`: commit or stash
+  first, nothing was pushed; `no_upstream`: the task has a PR, so push to its branch with `git push -u
+  origin HEAD:<pr branch>` and call again; `invalid`: this machine's daemon predates passing, restart
+  `seanced`). The description tells
   the session: commit everything first, `record` is the whole of what the successor knows (what is
   done, what is left, decisions taken, how to verify; it reads the branch and PR itself), call it last
   and end the turn with one line since the session is closed when the turn ends, and it is not
@@ -8901,27 +8982,35 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   only, never logged and never used to bind, route or close anything. For the bound pane's own task
   (the pane by the kernel's peer pid, the task from the pane's `@seance-task`, never a frame field)
   the daemon answers `untasked`, `unrecorded` (a task its ledger holds no launch of), `here` (a `here`
-  launch has no worktree branch), `dirty_worktree`, `detached_head`, `default_branch`, `push_rejected`,
+  launch has no worktree branch), `dirty_worktree`, `detached_head`, `default_branch`, `no_upstream`
+  (no upstream on `origin` while its ledger holds a PR URL for the task: the leader would refuse the
+  PR's other branch after the push, so the daemon refuses before it, and the session is told to
+  `git push -u origin HEAD:<pr branch>` or set the upstream and call again), `push_rejected`,
   `push_failed`, `stopping` once ingest stopped, and `invalid` on a daemon that predates it. Otherwise
-  it pushes the ledger-noted worktree's branch through `pushTaskBranch` with no `expect` (the daemon has
-  no PR head; the leader checks it, D1 step 3), audits it under `origin=successor`, marks the pane
+  it pushes the ledger-noted worktree's branch through `pushTaskBranch` with no `expect` and `hasPr`
+  from its ledger (the daemon has no PR head; the leader checks it, D1 step 3), audits it under
+  `origin=successor`, marks the pane
   in memory, sends one `session-pass` sealed to the scheduler (in process on the leader's machine),
   and answers `ok` with `pass { taskId, remoteBranch, tip, pushed }`. It never logs `record` or the
   remote branch. The mark is `{ taskId, confirmed, turnEnded }`. The daemon closes the session, through
   the graceful despawn (`/exit`, Keep on the worktree prompt, the close noted first so harvest reads
-  exit 0), audited `origin=successor`, only when **both** hold: that pane's next `idle` carrying
-  `turnEnded` has arrived, and a `pass-close` sealed `from` the scheduler (or the leader in process)
-  naming that pane's task has set `confirmed`; whichever lands second closes, after a re-read that the
-  pane still carries the task. An `ended`, a pane reused for another task, or a restart drops the
-  mark (`pass-close` then recreates it from the live pane carrying the task, so a restart is
-  survivable), and a plain idle, which a respawn also sends, closes nothing. The leader settles the old
-  task `superseded` only from the machine it was placed or reserved on and only when the `session-pass`
-  names that machine as `from`; any other `from` does nothing. The hand-off keeps its behaviour: marked
+  exit 0), audited `origin=successor`, only when **both** hold: that pane's `idle` carrying
+  `turnEnded` has arrived since its last frame in any other state (a `running` or `needs-input` frame
+  clears the flag, so a turn begun after an unconfirmed pass is never cut by a late `pass-close`), and a
+  `pass-close` sealed `from` the scheduler (or the leader in process) naming that pane's task has set
+  `confirmed`; whichever lands second closes, after a re-read that the pane still carries the task. An
+  `ended`, a pane reused for another task, or a restart drops the mark (`pass-close` then recreates it
+  from the live pane carrying the task, with no turn end seen, so a session already idle is closed only
+  by the leader's backstop), and a plain idle, which a respawn also sends, closes nothing. The leader
+  acts on a `session-pass` only when its `from` is the machine the task is placed on
+  (`assignment.deviceId`) and the task is `running` or `needs-input`: the session calling the tool is
+  itself the proof that nobody is being asked, and the leader's view can lag its last answer by an
+  event. Any other state or `from` does nothing but a log line naming the op and the machine. The hand-off keeps its behaviour: marked
   only by a `handoff` frame, closed only at its pane's `turnEnded` idle, audited `origin=handoff`;
   `createHandOff` is generalised to take the origin, nothing else changes. A session that lies about
   passing can do no more than one that pushes its own branch and runs `/exit`; the leader's PR-head
-  check bounds what it can claim, and the worst case of an unconfirmed pass is a stray remote branch
-  when the branch has no upstream and the PR is on another one. The session is told only "not
+  check bounds what it can claim, and the worst case of an unconfirmed pass is a pushed branch no
+  successor follows. The session is told only "not
   confirmed"; telling it why the leader refused is a docs/scheduler.md _Later_ item.
 - **Every field is untrusted; the pane is the kernel's answer.** The 0700 run
   directory admits any process of this user, and every session is this user, so a
@@ -9549,8 +9638,9 @@ are tmux-rename's, except where they say mods.
   and the owner sees it on the Queue screen. Holding costs a wait, spilling costs money the owner did
   not choose to spend. A forecast-only spill is a later option.
 - The self path pushes before the leader has checked the PR's head (designed 2026-11-12, not built):
-  a session with no upstream and a PR on another branch leaves a stray remote branch, which is
-  harmless, before the leader refuses `branch_mismatch`. The outside path has no such window.
+  a session with no upstream and a PR it never reported to the daemon (so `no_upstream` cannot fire)
+  on another branch leaves a stray remote branch, which is harmless, before the leader refuses
+  `branch_mismatch`. The outside path has no such window.
 
 ## Open design details (build time)
 
