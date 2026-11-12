@@ -384,7 +384,7 @@ item: every M3 item needed one within hours.
 started as the review's recommendation; where the owner chose otherwise, the entry says so. The
 numbers (#) are the review's owner-decision list; #7 and #13 lapsed with the OAuth poll, #1, #2
 and #20 were settled earlier, and #21 was added in the same session. #22 (junk under `account:`,
-found after store rules v2 landed) is still open.
+found after store rules v2 landed) was settled by the owner on 2026-11-12.
 
 **Order.** Wave 0 settles the seams the items share. Wave 1 is the items nothing else in M4 has to
 precede. Wave 2 waits on the wave-1 item named. _Later_ is deferred by the owner (2026-10-25),
@@ -820,10 +820,10 @@ of M4 has landed.
     (#8) — and that is accepted: a daemon socket needs a signed register on top of the bearer
     token, so it is harder to open than the app leg that already has those rights, and a writer
     without the PSK writes only records whose `accountId` does not hash to their key.
-  - _Open (#22), junk under `account:`:_ a bearer-token holder can create junk keys under
-    `account:` up to its cap of 64, and with deletes refused (#8) nothing in the product removes
-    them, so while they stand the fleet can alias no account it has not named already (DESIGN.md
-    _Threat model_, item 3, records it as a residual). `task:` has `discard` for the same junk (M3
+  - _Decided (#22) by the owner, 2026-11-12: (c)_, junk under `account:`. A bearer-token holder
+    can create junk keys under `account:` up to its cap of 64, and with deletes refused (#8)
+    nothing in the product removes them, so while they stand the fleet can alias no account it
+    has not named already (DESIGN.md _Threat model_, item 3, records it as an accepted residual). `task:` has `discard` for the same junk (M3
     review S2); `queue:` and `quota:` take one key each, so they cannot be squatted. Records
     sealed under an old PSK are unreadable the same way, and stay for the same reason: a PSK
     rotation orphans every `account:` record (it no longer opens), each holding a cap slot that
@@ -845,8 +845,14 @@ of M4 has landed.
       for the larger list it reads on open.
     - **(c) accept it and rotate the token.** Rotation stops new junk and clears none, so the
       taken slots stay taken.
-    - _Recommended:_ (a). It is the only option that clears the squat, and it reuses `discard`'s
-      shape and its guard instead of adding a new kind of write.
+    - _Decided:_ (c). The fleet has 3 accounts against a cap of 64, so only a leaked bearer token
+      or about 20 PSK rotations would fill the slots. (a) costs a relay rule change, a new leader
+      op, a PWA action and a weaker rollback guarantee (a purged key restarts at version 1, so a
+      kept version-1 blob reads as current) for a problem that does not exist yet. (a) is
+      rejected for now; the review had recommended it as the only option that clears the squat,
+      reusing `discard`'s shape and its guard.
+    - _Revisit when_ unreadable `account:` records take a meaningful share of the cap, or a token
+      is known to have leaked.
 - **Fleet quota record — Done (2026-10-25).** One record of each account's newest reading,
   written by every daemon by read-open-compare-`expect` on a 5-min cadence, folded with the
   statuses by every reader. Needed, not just nice: the kept status holds an account's quota only
