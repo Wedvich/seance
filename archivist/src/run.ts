@@ -11,7 +11,16 @@ import { Archive } from "./archive.ts";
 import { startCollector, type CollectTimings } from "./collect.ts";
 import { loadArchivistConfig } from "./config.ts";
 import { sealArchivistInfo } from "./info.ts";
-import { archivePathIn, archivistConfigPath, archivistStateDir, runtimePathIn, statePathIn } from "./paths.ts";
+import { MetricsArchive } from "./metrics-archive.ts";
+import { startMetricsCollector, type MetricsTimings } from "./metrics-collect.ts";
+import {
+  archivePathIn,
+  archivistConfigPath,
+  archivistStateDir,
+  metricsPathIn,
+  runtimePathIn,
+  statePathIn,
+} from "./paths.ts";
 import { loadSeatState } from "./state.ts";
 import { rootRefusal } from "./unprivileged.ts";
 
@@ -27,6 +36,8 @@ export interface ArchivistOpts {
   readonly maxBackoffMs?: number;
   /** The collector's pacing; tests shorten it. */
   readonly collect?: Partial<CollectTimings>;
+  /** The metrics pull's pacing; tests shorten it. */
+  readonly metrics?: Partial<MetricsTimings>;
 }
 
 /**
@@ -52,7 +63,8 @@ const STATE_DIR_MODE = 0o700;
  * only from the `ARCHIVIST` id — and an app-role socket for reading, as the
  * leader's own app leg reads. It advertises no repos and no exclaves, answers
  * no op, never enqueues and never writes the store; it writes only
- * `archive.sqlite` (`collect.ts`). What it may import is held by
+ * `archive.sqlite` (`collect.ts`) and `metrics.sqlite` (`metrics-collect.ts`).
+ * What it may import is held by
  * archivist/test/layering.test.ts.
  */
 export async function startArchivist(opts: ArchivistOpts = {}): Promise<Archivist> {
@@ -83,15 +95,18 @@ export async function startArchivist(opts: ArchivistOpts = {}): Promise<Archivis
   const [key, accountKey] = await Promise.all([importPsk(psk), importAccountKey(psk)]);
   const fingerprint = await pskFingerprint(psk);
   const archive = await Archive.open(archivePathIn(stateDir));
+  let metricsArchive: MetricsArchive | null = null;
   try {
-    return await startLegs();
+    metricsArchive = await MetricsArchive.open(metricsPathIn(stateDir));
+    return await startLegs(metricsArchive);
   } catch (err) {
-    // A throw before the returned `stop` exists would leave the handle, and the file's locks, open.
+    // A throw before the returned `stop` exists would leave the handles, and the files' locks, open.
     archive.close();
+    metricsArchive?.close();
     throw err;
   }
 
-  async function startLegs(): Promise<Archivist> {
+  async function startLegs(metrics: MetricsArchive): Promise<Archivist> {
     const startedAt = Date.now();
     let connectedSince: number | null = null;
     // Chained: the refusal loop flaps connected/disconnected back to back, and unordered renames could leave a stale value.
@@ -147,6 +162,14 @@ export async function startArchivist(opts: ArchivistOpts = {}): Promise<Archivis
       log,
       ...(opts.collect === undefined ? {} : { timings: opts.collect }),
     });
+    const metricsCollector = startMetricsCollector({
+      source: appLeg,
+      archive: metrics,
+      accountKey,
+      selfId: identity.deviceId,
+      log,
+      ...(opts.metrics === undefined ? {} : { timings: opts.metrics }),
+    });
 
     log.info(
       `seance-archivist ${quote(config.name)} on ${hostname()}: deviceId ${identity.deviceId}, ` +
@@ -161,10 +184,12 @@ export async function startArchivist(opts: ArchivistOpts = {}): Promise<Archivis
       stop: (): void => {
         unsubscribe();
         collector.stop();
+        metricsCollector.stop();
         seat.stop();
         appLeg.stop();
-        // After the collector: a reply landing past this point is dropped there, never written.
+        // After the collectors: a reply landing past this point is dropped there, never written.
         archive.close();
+        metrics.close();
       },
     };
   }
