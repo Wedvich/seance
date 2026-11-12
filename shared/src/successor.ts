@@ -186,7 +186,7 @@ export function successorPreamble(input: Pick<SuccessorPromptInput, "task" | "re
   return lines.join("\n");
 }
 
-function utf8Length(text: string): number {
+export function utf8Length(text: string): number {
   return new TextEncoder().encode(text).length;
 }
 

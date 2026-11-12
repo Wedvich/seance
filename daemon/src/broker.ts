@@ -4,7 +4,9 @@ import {
   isRecord,
   isTaskId,
   MACHINES_ID,
+  parseAmendDraft,
   parseTaskRef,
+  sendAmend,
   parseTaskSpec,
   queuedTask,
   quote,
@@ -161,7 +163,8 @@ function cleanDespawn(p: DespawnRequest): DespawnRequest {
  * the two apart, kept in the record and audited as `claimed_client`. It may
  * continue a task (`mode: "continue"` with `continues`, paired by the parser). Never
  * `pwa`, `raycast` or `scheduler`. `cancel`, `run-now` and `pass` take a task id alone (a leader
- * without `runNow` or `successor` refuses that op as unknown, so it needs no gate here), `queue` and `accounts` no payload, and
+ * without `runNow` or `successor` refuses that op as unknown, so it needs no gate here), `amend` a
+ * draft held to the leader's own checks (`parseAmendDraft`), `queue` and `accounts` no payload, and
  * whatever else the frame carries is never forwarded.
  */
 function parseSchedulerRequest(raw: Record<string, unknown>, id: string): Parsed {
@@ -176,6 +179,11 @@ function parseSchedulerRequest(raw: Record<string, unknown>, id: string): Parsed
     const ref = parseTaskRef({ taskId });
     if (ref === null) return { code: "invalid_request", message: "taskId is not a task id" };
     return { request: { ...head, schedulerOp, taskId: ref.taskId } };
+  }
+  if (schedulerOp === "amend") {
+    const amend = parseAmendDraft(raw["amend"]);
+    if (amend === null) return { code: "invalid_request", message: "malformed amendment" };
+    return { request: { ...head, schedulerOp, amend } };
   }
   if (!isTaskId(taskId)) return { code: "invalid_request", message: "taskId is not a task id" };
   const spec = parseTaskSpec(raw["spec"]);
@@ -324,15 +332,19 @@ export function createBroker(opts: BrokerOpts): Broker {
         await audited(task, outcome);
         return brokerOk(id, reply);
       }
-      if (request.schedulerOp === "pass") {
+      if (request.schedulerOp === "pass" || request.schedulerOp === "amend") {
         // A verified leader that does not advertise it answers an unknown op `invalid_request`: say why instead.
         // With none, the client's own refusal (`no_leader`, `leader_unverified`) is the plainer answer.
         const { machines, scheduler } = client.getState();
-        if (scheduler.kind === "ready" && !advertises(machines, scheduler, CAPABILITIES.successor)) {
+        const pass = request.schedulerOp === "pass";
+        if (
+          scheduler.kind === "ready" &&
+          !advertises(machines, scheduler, pass ? CAPABILITIES.successor : CAPABILITIES.amend)
+        ) {
           return await fail(
             id,
             "invalid_request",
-            "the scheduler's leader cannot pass a task to a successor yet — its daemon needs `seanced update`",
+            `the scheduler's leader cannot ${pass ? "pass a task to a successor" : "amend a queued task"} yet — its daemon needs \`seanced update\``,
           );
         }
       }
@@ -345,8 +357,10 @@ export function createBroker(opts: BrokerOpts): Broker {
               ? await client.runNow(request.taskId)
               : request.schedulerOp === "pass"
                 ? await client.pass(request.taskId)
-                : // Only a pin's resolution asks (labels never come through here), so the label hold does not apply.
-                  await cacheOf(client).read();
+                : request.schedulerOp === "amend"
+                  ? await sendAmend(client, request.amend)
+                  : // Only a pin's resolution asks (labels never come through here), so the label hold does not apply.
+                    await cacheOf(client).read();
       await audit.ok(id);
       return brokerOk(id, data);
     } catch (err) {
@@ -407,7 +421,7 @@ export function createBroker(opts: BrokerOpts): Broker {
       if (request.action === "machines") await audit.machines(id);
       else if (request.action === "fleet") await audit.fleet(id);
       else if (request.action === "scheduler") {
-        const task = "taskId" in request ? request.taskId : undefined;
+        const task = "taskId" in request ? request.taskId : "amend" in request ? request.amend.taskId : undefined;
         await audit.scheduler(
           id,
           request.schedulerOp,

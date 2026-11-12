@@ -706,6 +706,7 @@ export const SCHEDULER_OPS = [
   "push-subscribe",
   "push-unsubscribe",
   "pass",
+  "amend",
 ] as const;
 
 export type SchedulerOp = (typeof SCHEDULER_OPS)[number];
@@ -744,6 +745,7 @@ export const OP_TIMEOUT_MS = {
   "push-subscribe": 10_000,
   "push-unsubscribe": 10_000,
   pass: 180_000,
+  amend: 10_000,
   "push-branch": 90_000,
   "pass-close": 10_000,
 } as const satisfies Record<RequestOp, number>;
@@ -1060,6 +1062,9 @@ export interface MachineInfo {
  * checks of the verified leader.
  * `successorAuto`: as a leader, runs the automatic quota trigger and writes `trigger: "quota"`
  * with `since`. Nothing gates on it yet; it marks the leader's version in `status`.
+ * `amend`: as a leader, answers `amend` (a waiting task's prompt, title, model or effort
+ * changed in place) — what a client checks of the verified leader before offering it (an
+ * older one refuses the op as unknown).
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -1079,6 +1084,7 @@ export const CAPABILITIES = {
   successor: "successor",
   successorSelf: "successorSelf",
   successorAuto: "successorAuto",
+  amend: "amend",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -3131,6 +3137,14 @@ export const SCHEDULER_ERROR_CODES = [
   "not_launched",
   /** `pass`: the successor's create was refused, or went unanswered and was not seen on a read-back. */
   "pass_failed",
+  /** `amend`: the task was placed (`running`, `needs-input`, `lost`, `awaiting-merge`): its session has its prompt. */
+  "placed",
+  /** `amend`: the prompt is no longer the one the amendment was made against (`AmendRequest.basis`); re-read it. */
+  "prompt_changed",
+  /** `amend`: the amended prompt would pass its bound (`amendedPromptFits`); nothing was written. */
+  "prompt_too_long",
+  /** `amend`: the task is a successor, whose prompt the leader built; it takes `append` only. */
+  "append_only",
   ...TRANSPORT_ERROR_CODES,
 ] as const;
 
@@ -3228,9 +3242,32 @@ export interface TaskRef {
   readonly taskId: string;
 }
 
-/** `cancel`, `mark-done` and `run-now` → the task as it now stands. */
+/** `cancel`, `mark-done`, `run-now` and `amend` → the task as it now stands. */
 export interface TaskResponse {
   readonly task: Task;
+}
+
+export const AMEND_MODES = ["append", "replace"] as const;
+
+export type AmendMode = (typeof AMEND_MODES)[number];
+
+/**
+ * `amend` (DESIGN.md, Scheduler, "Amending a waiting task"): changes a task that has not been
+ * placed (`queued`, `blocked`, `ready`) in place, so its id and every dependent's `after` stay.
+ * `prompt` in `append` mode adds its text after a blank line; `replace` makes it the prompt (`""`
+ * drops it). `basis` is `promptBasis` of the prompt the amendment was made against, required beside
+ * `prompt`: a prompt changed since is `prompt_changed`, so neither a second editor nor a replayed
+ * append lands twice. `title`, `model` and `effort` set the field, or drop it at `null` (the
+ * default). At least one field; each held to `TASK_REQUEST_LIMITS`, the amended prompt to
+ * `amendedPromptFits`.
+ */
+export interface AmendRequest {
+  readonly taskId: string;
+  readonly prompt?: { readonly mode: AmendMode; readonly text: string };
+  readonly basis?: string;
+  readonly title?: string | null;
+  readonly model?: string | null;
+  readonly effort?: string | null;
 }
 
 /**

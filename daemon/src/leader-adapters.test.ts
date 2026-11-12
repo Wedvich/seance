@@ -20,6 +20,8 @@ const relay: AppRelay = {
   cancel: unused,
   runNow: unused,
   pass: unused,
+  getTask: unused,
+  amend: unused,
   listAccounts: unused,
   onStoreChanged: () => () => {},
 };

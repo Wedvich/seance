@@ -54,6 +54,7 @@ import {
   parseTaskRequest,
   parseAttachmentManifest,
   parseTaskSpec,
+  parseAmendRequest,
 } from "./parse.ts";
 import { REPLAY_WINDOW_MS } from "./crypto.ts";
 import { taskRecordAtRest } from "./task-record.ts";
@@ -2687,5 +2688,78 @@ describe("parsePushAlert", () => {
 
   test("refuses a payload past the byte bound", () => {
     expect(parsePushAlert({ ...spill, window: "w".repeat(PUSH_ALERT_MAX_BYTES) })).toBeNull();
+  });
+});
+
+describe("parseAmendRequest", () => {
+  const basis = "a".repeat(64);
+  const append = { taskId: "t-1", prompt: { mode: "append", text: "also" }, basis } as const;
+
+  test("takes a prompt with its basis, and title, model and effort, each alone or together", () => {
+    expect(parseAmendRequest(append)).toEqual(append);
+    expect(parseAmendRequest({ ...append, prompt: { mode: "replace", text: "" } })).toEqual({
+      ...append,
+      prompt: { mode: "replace", text: "" },
+    });
+    expect(parseAmendRequest({ taskId: "t-1", title: "" })).toEqual({ taskId: "t-1", title: "" });
+    expect(parseAmendRequest({ taskId: "t-1", title: null, model: null, effort: "high" })).toEqual({
+      taskId: "t-1",
+      title: null,
+      model: null,
+      effort: "high",
+    });
+  });
+
+  test("is built afresh", () => {
+    const parsed = parseAmendRequest({ ...append });
+    expect(parsed).toEqual(append);
+    expect(parsed?.prompt).not.toBe(append.prompt);
+  });
+
+  test("refuses a key it does not know, at the top or in the prompt, so a newer field never half-applies", () => {
+    expect(parseAmendRequest({ ...append, deps: [] })).toBeNull();
+    expect(parseAmendRequest({ ...append, state: "running" })).toBeNull();
+    expect(parseAmendRequest({ ...append, prompt: { ...append.prompt, extra: 1 } })).toBeNull();
+  });
+
+  test("refuses a missing or malformed task id", () => {
+    expect(parseAmendRequest({ title: "x" })).toBeNull();
+    expect(parseAmendRequest({ taskId: "", title: "x" })).toBeNull();
+    expect(parseAmendRequest({ taskId: 7, title: "x" })).toBeNull();
+    expect(parseAmendRequest(null)).toBeNull();
+    expect(parseAmendRequest("t-1")).toBeNull();
+  });
+
+  test("refuses a basis without a prompt, a prompt without one, and a malformed basis", () => {
+    expect(parseAmendRequest({ taskId: "t-1", title: "x", basis })).toBeNull();
+    expect(parseAmendRequest({ taskId: "t-1", prompt: append.prompt })).toBeNull();
+    expect(parseAmendRequest({ ...append, basis: "A".repeat(64) })).toBeNull();
+    expect(parseAmendRequest({ ...append, basis: "a".repeat(63) })).toBeNull();
+  });
+
+  test("refuses an unknown mode, a non-string text, an oversized one and an append of only whitespace", () => {
+    expect(parseAmendRequest({ ...append, prompt: { mode: "prepend", text: "x" } })).toBeNull();
+    expect(parseAmendRequest({ ...append, prompt: { mode: "append", text: 3 } })).toBeNull();
+    expect(parseAmendRequest({ ...append, prompt: "also" })).toBeNull();
+    const max = TASK_REQUEST_LIMITS.prompt;
+    expect(parseAmendRequest({ ...append, prompt: { mode: "replace", text: "x".repeat(max) } })).not.toBeNull();
+    expect(parseAmendRequest({ ...append, prompt: { mode: "replace", text: "x".repeat(max + 1) } })).toBeNull();
+    expect(parseAmendRequest({ ...append, prompt: { mode: "append", text: " \n\t" } })).toBeNull();
+    expect(parseAmendRequest({ ...append, prompt: { mode: "append", text: "" } })).toBeNull();
+  });
+
+  test("refuses an empty model or effort, an oversized field and a wrong type", () => {
+    expect(parseAmendRequest({ taskId: "t-1", model: "" })).toBeNull();
+    expect(parseAmendRequest({ taskId: "t-1", effort: "" })).toBeNull();
+    expect(parseAmendRequest({ taskId: "t-1", model: "m".repeat(TASK_REQUEST_LIMITS.model + 1) })).toBeNull();
+    expect(parseAmendRequest({ taskId: "t-1", title: "t".repeat(TASK_REQUEST_LIMITS.title + 1) })).toBeNull();
+    expect(parseAmendRequest({ taskId: "t-1", title: 5 })).toBeNull();
+    // One bad field spoils the rest.
+    expect(parseAmendRequest({ ...append, effort: "" })).toBeNull();
+  });
+
+  test("refuses an amendment of nothing", () => {
+    expect(parseAmendRequest({ taskId: "t-1" })).toBeNull();
+    expect(parseAmendRequest({ taskId: "t-1", other: "x" })).toBeNull();
   });
 });

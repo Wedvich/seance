@@ -6,6 +6,7 @@ import {
   REGISTRY_SETTLE_MS,
   STORE_LIST_TIMEOUT_MS,
   STORE_TIMEOUT_MS,
+  type AmendDraft,
   type FailureReason,
   type Machine,
   type RequestFailureTarget,
@@ -44,11 +45,11 @@ export function isBrokerOp(value: unknown): value is BrokerOp {
 
 /**
  * The scheduler ops a peer may ask the daemon to make as an app: what `auto`,
- * `queue_batch`, `get_queue`, `cancel_task`, `start_task`, `pass_task`, `seanced spawn`,
- * `seanced start` and `seanced pass` need, and the account read that resolves an alias. `mark-done`,
- * `pause`, `resume`, `discard`, `route-preview` and every `account:` write stay off the list.
+ * `queue_batch`, `get_queue`, `cancel_task`, `start_task`, `pass_task`, `amend_task`, `seanced spawn`,
+ * `seanced start`, `seanced pass` and `seanced amend` need, and the account read that resolves an alias.
+ * `mark-done`, `pause`, `resume`, `discard`, `route-preview` and every `account:` write stay off the list.
  */
-export const BROKER_SCHEDULER_OPS = ["enqueue", "queue", "cancel", "run-now", "pass", "accounts"] as const;
+export const BROKER_SCHEDULER_OPS = ["enqueue", "queue", "cancel", "run-now", "pass", "amend", "accounts"] as const;
 
 export type BrokerSchedulerOp = (typeof BROKER_SCHEDULER_OPS)[number];
 
@@ -81,6 +82,12 @@ export type BrokerRequest =
       readonly action: "scheduler";
       readonly schedulerOp: "cancel" | "run-now" | "pass";
       readonly taskId: string;
+    })
+  | (BrokerFrame & {
+      readonly action: "scheduler";
+      readonly schedulerOp: "amend";
+      /** Without `basis`, the daemon reads the task for it (`sendAmend`): the peer holds no key to. */
+      readonly amend: AmendDraft;
     })
   | (BrokerFrame & { readonly action: "scheduler"; readonly schedulerOp: "queue" | "accounts" })
   | {
@@ -333,6 +340,8 @@ const SCHEDULER_OP_BUDGET_MS: Record<BrokerSchedulerOp, number> = {
   cancel: OP_TIMEOUT_MS.cancel,
   "run-now": OP_TIMEOUT_MS["run-now"],
   pass: OP_TIMEOUT_MS.pass,
+  // Up to three store reads and three sends: an append whose prompt moved meanwhile goes again (`sendAmend`).
+  amend: 3 * (STORE_TIMEOUT_MS + OP_TIMEOUT_MS.amend),
   accounts: STORE_LIST_TIMEOUT_MS,
 };
 

@@ -3,6 +3,8 @@ import {
   parseAccountRecord,
   parseQueueReply,
   parsePassReply,
+  sendAmend,
+  type AmendDraft,
   parseTaskReply,
   RequestFailure,
   type AccountRecord,
@@ -73,6 +75,11 @@ export interface SchedulerLeg {
   /** `pass`: only to a leader advertising `CAPABILITIES.successor`, which the caller checks. Never retried: a lost answer may follow a successor already created. */
   readonly pass: (taskId: string) => Promise<PassReply | null>;
   /**
+   * `amend` through `sendAmend`, which reads the task for `basis` when the draft names none: only to a
+   * leader advertising `CAPABILITIES.amend`, which the caller checks. A lost answer is never retried.
+   */
+  readonly amend: (draft: AmendDraft) => Promise<TaskReply | null>;
+  /**
    * The readable account records, cached per socket (`AccountCache`); null when a listing was
    * refused or lost. `label` is a display read: it honours the cache's hold on a null answer,
    * where a pin's resolution asks again. Through the broker a label read is always null.
@@ -119,6 +126,7 @@ export function relayFleet(relay: LazyRelay): Fleet {
           cancel: (taskId) => client.cancel(taskId),
           runNow: (taskId) => client.runNow(taskId),
           pass: (taskId) => client.pass(taskId),
+          amend: (draft) => sendAmend(client, draft),
           accounts: (options) => cacheOf(client).read({ hold: options?.label === true }),
         },
         release: (): void => relay.release(),
@@ -210,6 +218,11 @@ export function brokerScheduler(
       send({ schedulerOp: "run-now", taskId }, (data) => (data === null ? null : (parseTaskReply(data) ?? undefined))),
     pass: (taskId) =>
       send({ schedulerOp: "pass", taskId }, (data) => (data === null ? null : (parsePassReply(data) ?? undefined))),
+    // The broker's daemon reads the task for `basis`: this end holds no key to read it with.
+    amend: (draft) =>
+      send({ schedulerOp: "amend", amend: draft }, (data) =>
+        data === null ? null : (parseTaskReply(data) ?? undefined),
+      ),
     accounts: async (options) => {
       // Labels never ask the broker: its `accounts` frame cannot say label from pin, so the daemon
       // reads it as a pin (no hold), and each call is a `local-broker` audit line (DESIGN.md "Fleet broker").

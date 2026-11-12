@@ -64,6 +64,10 @@ const SCHEDULER_ERROR_TEXT: Record<SchedulerErrorCode, string> = {
   not_launched: "the task's machine holds no worktree launch of it, so it has no branch to push",
   pass_failed:
     "the successor could not be created, or its create went unanswered; one created anyway ends on its own with this task (done if the task merges, failed otherwise), and passing again is safe",
+  placed: "the task has already been placed on a machine, so its session has its prompt; nothing changed",
+  prompt_changed: "the task's prompt changed since you read it; read it again and amend that",
+  prompt_too_long: "the amended prompt would be too long for the task; nothing changed",
+  append_only: "the task carries on a passed task, so its prompt can only be added to, not replaced",
 };
 
 /** A refusal's line; a code this build does not know is named rather than guessed at. */

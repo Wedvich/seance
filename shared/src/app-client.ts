@@ -59,6 +59,7 @@ import {
   type Task,
   type TaskRecord,
   type TaskRef,
+  type AmendRequest,
   type PassReply,
   type TaskReply,
   type UndeliverableCode,
@@ -2076,6 +2077,15 @@ export class RelayClient {
   pass(taskId: string): Promise<PassReply | null> {
     const ref: TaskRef = { taskId };
     return this.#schedule("pass", ref, parsePassReply);
+  }
+
+  /**
+   * Amends a task still waiting in the queue; the reply is the task as amended. Only to a leader
+   * advertising `CAPABILITIES.amend`: an older one answers an unknown op `invalid_request`. Sent
+   * once: `sendAmend` fills `basis` and is what callers use.
+   */
+  amend(request: AmendRequest): Promise<TaskReply | null> {
+    return this.#schedule("amend", request, parseTaskReply);
   }
 
   pause(request: PauseRequest): Promise<PauseReply | null> {

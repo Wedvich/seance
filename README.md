@@ -485,6 +485,7 @@ seanced spawn --start seance -p "fix the flaky spawn test"
 seanced start 3f2a…           # start a task already waiting in the queue now, past the concurrency cap
 seanced continue 3f2a…        # resume a failed (e.g. OOM-killed), cancelled or blocked-awaiting-merge task's conversation in its worktree, as a new task (--prompt <text> to add a note)
 seanced pass 3f2a…            # push a running task's branch, end its session and hand the work to a new task (a successor) on a fresh account's budget
+seanced amend 3f2a… "also cover the Windows path"   # add to a waiting task's prompt (--replace to replace it; --title, --model, --effort; --title "" or --model/--effort default clears)
 seanced sessions              # running claude windows: id, window, repo, path
 seanced despawn %12           # end one by id: asks claude to exit, kills the pane after ~5s (--force: now)
 seanced reap --dry-run        # what clean-up would remove: worktrees, branches, dead windows, fetched attachments
@@ -551,7 +552,7 @@ versus the one on disk, which is how you spot a `git pull` that still needs a
 
 With `seanced mcp install` done (step 6), a local Claude Code can list machines,
 query running sessions, and spawn and end sessions on other machines through the relay:
-`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`, `start_task` (start a queued task now, past the concurrency cap — the app's Start now; `spawn_session`'s `start` does the same for a new one), `continue_task` (resume a failed or cancelled task's, or a blocked awaiting-merge task's, session in its worktree, as a new task), `pass_task` (push a running task's branch, end its session and queue a successor that picks it up — never for the calling session's own task, which passes itself with `pass_to_successor`), `queue_batch` (several tasks queued as one group, ordered only by the dependencies between them) and, for a session settling its own task, `report_task_done`, or handing its open PR to the scheduler and closing, `hand_off_task`, or passing its own task to a successor with its notes, `pass_to_successor`. The server reads the daemon's own
+`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`, `start_task` (start a queued task now, past the concurrency cap — the app's Start now; `spawn_session`'s `start` does the same for a new one), `continue_task` (resume a failed or cancelled task's, or a blocked awaiting-merge task's, session in its worktree, as a new task), `pass_task` (push a running task's branch, end its session and queue a successor that picks it up — never for the calling session's own task, which passes itself with `pass_to_successor`), `amend_task` (change a waiting task's prompt, title, model or effort — appending to the prompt by default), `queue_batch` (several tasks queued as one group, ordered only by the dependencies between them) and, for a session settling its own task, `report_task_done`, or handing its open PR to the scheduler and closing, `hand_off_task`, or passing its own task to a successor with its notes, `pass_to_successor`. The server reads the daemon's own
 config and speaks to the relay exactly like the phone does.
 
 `spawn_session` always queues the task in the relay, as the app's **auto** does: it answers
@@ -579,7 +580,7 @@ On a box where only the daemon can read the key (below), a spawn goes through th
 On a Linux box whose PSK is TPM-sealed and delivered only to the daemon's system unit,
 the server can't read the key — so it asks the running daemon to make those requests
 for it, over the same local socket, and the key never leaves the daemon. Every tool,
-`spawn_session`, `get_queue`, `cancel_task`, `start_task` and `pass_task` included, still works for every machine, with the same
+`spawn_session`, `get_queue`, `cancel_task`, `start_task`, `pass_task` and `amend_task` included, still works for every machine, with the same
 registration; a server that started before the daemon was updated keeps the old "needs this machine's own
 key" answer for spawns until its Claude session restarts. `seanced doctor` says which
 path MCP takes from your shell. Only such a daemon brokers: wherever the server can

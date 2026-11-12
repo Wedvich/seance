@@ -328,6 +328,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         CAPABILITIES.successor,
         CAPABILITIES.successorSelf,
         CAPABILITIES.successorAuto,
+        CAPABILITIES.amend,
         ...(authHealth === null ? [] : [CAPABILITIES.authHealth]),
       ],
     };

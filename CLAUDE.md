@@ -173,7 +173,7 @@ green:
   `SCHEDULER_LEADERS` secret — unset nominates nobody, and no wildcard exists, in product code or
   as a test escape hatch, and the leader honours a scheduler request only when it was sealed
   `from: "app"`, parsed into a fresh value by that op's own parser (`parseQueueRequest`,
-  `parseTaskRequest`, `parseTaskRef`, …), and checked against the one replay guard per daemon
+  `parseTaskRequest`, `parseTaskRef`, `parseAmendRequest`, …), and checked against the one replay guard per daemon
   process that every term's leg and the `not_leader` answer share (`schedulerGuard` in
   `daemon/src/run.ts`) — never a guard per term, which would let the relay replay a `cancel` into
   each, and the launch ledger (`daemon/src/launch-ledger.ts`) is write-ahead — a task id is on
@@ -224,7 +224,11 @@ green:
   event — a session event or a branch state — moves only a task placed (or, for a session event,
   reserved) on the machine that sealed it, and a PR status is read only by the leader's own `gh`,
   bound to a PR URL the record holds (`taskPrs`), its values passed as GraphQL variables, and no frame
-  carries one, and the settings record (`settings:main`) is written only by the leader, held to
+  carries one, and a task's prompt, title, model and effort change after its create only by the
+  leader's own write on an `amend` (`Scheduler.amend`), only while the task is `queued`, `blocked` or
+  `ready` with no spawn out, a prompt change only at the `basis` it names (never a replace on a
+  successor), the record re-sealed through the one task sealer, and no prompt text — the amendment's
+  included — in any log or audit line, and the settings record (`settings:main`) is written only by the leader, held to
   the version floor, never regenerated nor written over when it cannot be read or has regressed,
   and never logged nor put in `queue`, MCP or `status`, and a push send goes only to an endpoint
   `pushEndpoint` accepts at send time (https, a `PUSH_SERVICE_HOSTS` host), redirects refused and
@@ -243,7 +247,7 @@ green:
   service-delivered (`source: "credential"`) — and only there — the same socket carries the
   fleet broker (`broker.ts`): its own frame kind, never a `Plain` or an `OpName`, four actions —
   `machines`, `fleet`, `request` (the same three remote ops) and `scheduler` (`enqueue`, `queue`,
-  `cancel`, `run-now`, `accounts`) — DESIGN.md's "Fleet broker" is the record, and any widening of it,
+  `cancel`, `run-now`, `pass`, `amend`, `accounts`) — DESIGN.md's "Fleet broker" is the record, and any widening of it,
   including running it on other daemons, is the same kind of change. A brokered enqueue is a create
   at `expect: 0` of a task the daemon sealed itself from a parsed spec, with the daemon's own
   `createdAt`, no lineage or base (a continue spec's `continues` is carried, and only while the

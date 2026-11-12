@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   cmdInstall,
+  parseAmendArgs,
   parseContinueArgs,
   parsePassArgs,
   parseStartArgs,
@@ -322,6 +323,46 @@ describe("parseModArgs", () => {
     expect(() => parseModArgs([])).toThrow("usage:");
     expect(() => parseModArgs(["reinstall"])).toThrow(/unknown mod subcommand "reinstall"/u);
     expect(() => parseModArgs(["install", "--force"])).toThrow(/takes no arguments/u);
+  });
+});
+
+describe("parseAmendArgs", () => {
+  test("bare words after the id are appended to the prompt", () => {
+    expect(parseAmendArgs(["t-1", "also", "check", "the", "docs"])).toEqual({
+      taskId: "t-1",
+      prompt: { mode: "append", text: "also check the docs" },
+    });
+  });
+
+  test("--replace makes the words the prompt, and with none clears it", () => {
+    expect(parseAmendArgs(["t-1", "--replace", "do", "this"])).toEqual({
+      taskId: "t-1",
+      prompt: { mode: "replace", text: "do this" },
+    });
+    expect(parseAmendArgs(["t-1", "--replace"])).toEqual({ taskId: "t-1", prompt: { mode: "replace", text: "" } });
+  });
+
+  test("fields set alone; an empty title and `default` model or effort clear them", () => {
+    expect(parseAmendArgs(["t-1", "--title", "New", "--model", "opus", "--effort", "high"])).toEqual({
+      taskId: "t-1",
+      title: "New",
+      model: "opus",
+      effort: "high",
+    });
+    expect(parseAmendArgs(["t-1", "--title", "", "--model", "default", "--effort", "default"])).toEqual({
+      taskId: "t-1",
+      title: null,
+      model: null,
+      effort: null,
+    });
+    // A flag's value is taken as is, even one that looks like a flag.
+    expect(parseAmendArgs(["t-1", "--title", "--replace"])).toEqual({ taskId: "t-1", title: "--replace" });
+  });
+
+  test("nothing to amend, no id, an unknown flag or a flag missing its value is a usage error", () => {
+    for (const argv of [[], ["t-1"], ["--replace"], ["t-1", "--nope", "x"], ["t-1", "--title"], ["t-1", "-r"]]) {
+      expect(() => parseAmendArgs(argv)).toThrow(/^usage: seanced amend/u);
+    }
   });
 });
 
