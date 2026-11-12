@@ -67,6 +67,7 @@ function state(overrides: Partial<AppState> = {}, form: Partial<PersistedForm> =
   return {
     relay: relay(),
     form: { ...DEFAULT_FORM, ...form },
+    autonomy: "checkpoint",
     promptUndo: null,
     sheet: null,
     settings: false,
@@ -465,6 +466,17 @@ describe("worktree hint", () => {
 });
 
 describe("the pickers", () => {
+  test("the autonomy tile names the level the next task runs at", () => {
+    expect(deriveView(state(), 0).autonomyTile).toEqual({
+      label: "AUTONOMY",
+      value: "Checkpoint",
+      mono: false,
+      dot: null,
+    });
+    expect(deriveView(state({ autonomy: "steer" }), 0).autonomyTile.value).toBe("Steer");
+    expect(deriveView(state({ autonomy: "auto" }), 0).autonomyTile.value).toBe("Auto");
+  });
+
   const leader = (machines: Machine[], capabilities: string[] = [CAPABILITIES.pinAccount]): RelayState =>
     relay({
       machines: machines.map((m, i) => (i === 0 ? { ...m, capabilities } : m)),

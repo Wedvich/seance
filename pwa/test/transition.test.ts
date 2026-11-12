@@ -28,6 +28,7 @@ function state(overrides: Partial<AppState> = {}): AppState {
       scheduler: { kind: "none" },
     },
     form: DEFAULT_FORM,
+    autonomy: "checkpoint",
     promptUndo: null,
     sheet: null,
     settings: false,

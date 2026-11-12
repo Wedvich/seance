@@ -56,6 +56,7 @@ function state(
       ...relay,
     },
     form: DEFAULT_FORM,
+    autonomy: "checkpoint",
     promptUndo: null,
     sheet: null,
     settings: false,

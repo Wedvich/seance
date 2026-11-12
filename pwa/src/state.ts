@@ -1,6 +1,7 @@
 import {
   DEFAULT_EFFORT,
   DEFAULT_MODEL,
+  type AutonomyLevel,
   METRIC_NAMES,
   type MetricName,
   type MetricsSeries,
@@ -38,7 +39,21 @@ export const MODEL_LABELS: Record<Model, string> = {
   haiku: "Haiku",
 };
 
-export type SheetKind = "machine" | "account" | "repo" | "model" | "effort" | "after";
+/** Short enough for a tile and the Queue card's chip. */
+export const AUTONOMY_LABELS: Record<AutonomyLevel, string> = {
+  steer: "Steer",
+  checkpoint: "Checkpoint",
+  auto: "Auto",
+};
+
+/** The sheet's one line per level, in DESIGN.md's words ("Autonomy level"). */
+export const AUTONOMY_HINTS: Record<AutonomyLevel, string> = {
+  steer: "Plans first and waits for your approval",
+  checkpoint: "Gets on with it, and stops only on a real choice",
+  auto: "Also makes reversible choices itself, and notes each one",
+};
+
+export type SheetKind = "machine" | "account" | "repo" | "model" | "effort" | "autonomy" | "after";
 
 /**
  * The Machine sheet's rescan action: inline scanning/failure state on the row it
