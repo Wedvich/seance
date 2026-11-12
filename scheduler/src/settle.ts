@@ -3,6 +3,7 @@ import {
   REPLAY_WINDOW_MS,
   TARGET_LIMITS,
   TASK_FAILURE_LIMITS,
+  type NeedsInputReason,
   type SessionEvent,
   type SessionState,
   type TaskFailureCode,
@@ -34,18 +35,25 @@ type SessionsAnswer = Extract<TaskSessionsReply, { readonly ok: true }>;
  * Who reported a session event: the machine that sealed it (the envelope's
  * AAD-bound `from`) and the pane its daemon bound the event to, plus the
  * session's own claim of its Remote Control id — display-only, written only
- * where the event moves the task.
+ * where the event moves the task — and its claim of why it waits, read only
+ * where the event is the task's own machine's (`questionAlert`).
  */
 export interface SessionSource {
   readonly deviceId: string;
   readonly pane: string;
   readonly remoteSession?: string;
+  readonly reason?: NeedsInputReason;
 }
 
 /** `event`'s source as sealed by `deviceId`. */
 export function sourceOf(deviceId: string, event: SessionEvent): SessionSource {
-  const { session: pane, remoteSession } = event;
-  return { deviceId, pane, ...(remoteSession === undefined ? {} : { remoteSession }) };
+  const { session: pane, remoteSession, reason } = event;
+  return {
+    deviceId,
+    pane,
+    ...(remoteSession === undefined ? {} : { remoteSession }),
+    ...(reason === undefined ? {} : { reason }),
+  };
 }
 
 /**

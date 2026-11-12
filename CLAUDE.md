@@ -250,9 +250,13 @@ green:
   `unrecorded`, `prless` otherwise): the daemon marks the pane in memory and, at that pane's next
   `idle` carrying `turnEnded` (its turn's end, never a respawn's idle), closes it through the graceful despawn after re-reading that it still carries that task,
   audited `origin=handoff` (`handoff.ts`), never a pane or task a frame names.
-  The frame's one other carried claim is `remoteSession`, Remote Control's id for the session:
+  The frame's other carried claims are `remoteSession`, Remote Control's id for the session:
   display-only (the PWA's claude.ai link), kept only as `isRemoteSessionId` passes it, and
-  never used to bind, route or move anything.
+  never used to bind, route or move anything — and `reason`, kept only as a known
+  `NEEDS_INPUT_REASONS` value beside `needs-input` (dropped otherwise, never the event), whose one
+  effect is the leader alerting that needs-input stay at once instead of after its debounce
+  (`questionAlert`), only for the task's own machine and once per stay; it never binds, routes,
+  moves or settles anything.
   Giving it any other act, or taking a session or task id from the frame to bind by, is the same
   kind of change too.
   Nothing reachable from `seanced mcp` may call `log.ts` — that writes to stdout, which is the MCP

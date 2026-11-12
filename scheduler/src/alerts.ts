@@ -27,6 +27,8 @@ export type SchedulerAlert =
       readonly since: number;
       /** The 30-minute re-alert; false for the first, after `needsInputAlertMs`. */
       readonly escalated: boolean;
+      /** The first alert, raised at once because the session waits on an AskUserQuestion (`questionAlert`). */
+      readonly question?: true;
       readonly message: string;
     };
 
@@ -64,6 +66,31 @@ export function inputAlert(task: Task, now: number, afterMs: number, escalateAft
   if (task.needsInputSince === undefined) return null;
   const waited = now - task.needsInputSince;
   return waited >= afterMs && waited < escalateAfterMs ? { ...task, inputAlerted: true } : null;
+}
+
+/**
+ * The first alert of a stay, at once: the session reports its wait is an
+ * AskUserQuestion, a real choice that cannot flicker as auto mode's classifier
+ * asks do, so it skips `inputAlert`'s debounce and takes its place (the same
+ * `inputAlerted`, so neither the pass nor the next leader alerts that stay
+ * again). The escalation is untouched. `moved` is what `sessionChange` made of
+ * the event, non-null only where it accepted the machine; a null one counts
+ * only for a needs-input stay its own machine (`deviceId`) re-reports, so no
+ * other machine's claim alerts a task. A stay already past `escalateAfterMs`
+ * is not due either: its escalation is, and that alert is the one, as in
+ * `inputAlert`. Null when nothing is due.
+ */
+export function questionAlert(
+  task: Task,
+  moved: Task | null,
+  deviceId: string,
+  now: number,
+  escalateAfterMs: number,
+): Task | null {
+  const heard = moved ?? (task.assignment?.deviceId === deviceId ? task : null);
+  if (heard?.state !== "needs-input" || heard.inputAlerted === true || heard.escalated === true) return null;
+  if (heard.needsInputSince !== undefined && now - heard.needsInputSince >= escalateAfterMs) return null;
+  return { ...heard, inputAlerted: true };
 }
 
 /**

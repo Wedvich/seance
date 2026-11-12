@@ -1122,6 +1122,13 @@ describe("parseSessionEvent", () => {
     // A PR URL is the event's own fate: it would otherwise become an href unchecked.
     expect(parseSessionEvent({ ...event, prUrl: "javascript:alert(1)" })).toBeNull();
   });
+
+  test("a question reason rides needs-input only; elsewhere, or unknown, it is dropped and the event kept", () => {
+    expect(parseSessionEvent({ ...event, reason: "question" })).toEqual({ ...event, reason: "question" });
+    expect(parseSessionEvent({ ...event, state: "busy", reason: "question" })).toEqual({ ...event, state: "busy" });
+    expect(parseSessionEvent({ ...event, reason: "permission" })).toEqual(event);
+    expect(parseSessionEvent({ ...event, reason: true })).toEqual(event);
+  });
 });
 
 describe("parseBranchState", () => {
@@ -2149,7 +2156,8 @@ describe("parsePushAlert", () => {
   test("accepts each kind as built, with a disk alert's readings optional", () => {
     const bare = { v: 1, kind: "disk", at: 5, deviceId: "dev-1" } as const;
     const spending = { ...spill, spending: true } as const;
-    for (const alert of [spill, spending, input, disk, bare]) {
+    const question = { ...input, escalated: false, question: true } as const;
+    for (const alert of [spill, spending, input, question, disk, bare]) {
       expect(parsePushAlert(alert)).toEqual(alert);
     }
   });
@@ -2165,6 +2173,7 @@ describe("parsePushAlert", () => {
       { ...input, escalated: "yes" },
       { ...spill, projectedPct: Number.NaN },
       { ...spill, spending: false },
+      { ...input, question: false },
       { ...disk, deviceId: "a/b" },
       { ...disk, freeMib: "400" },
       null,

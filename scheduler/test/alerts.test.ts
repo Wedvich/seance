@@ -384,6 +384,144 @@ describe("needs-input first alert", () => {
   });
 });
 
+describe("needs-input question alert", () => {
+  async function running(): Promise<
+    ReturnType<typeof setup> & { id: string; from: { deviceId: string; pane: string } }
+  > {
+    const env = setup();
+    const task = await enqueue(env.store, env.scheduler, spec());
+    await pass(env.scheduler, env.fleet, env.clock.now);
+    const from = { deviceId: "a", pane: env.scheduler.task(task.id)?.assignment?.pane ?? "" };
+    return { ...env, id: task.id, from };
+  }
+
+  test("alerted at once, in the write that enters the stay; no 2-minute alert after it, and the escalation still comes", async () => {
+    const { alerts, clock, fleet, from, id, make, scheduler, store } = await running();
+    const before = (await stored(store, id)).version;
+    await scheduler.onSession(id, "needs-input", { ...from, reason: "question" });
+    expect(alerts).toEqual([
+      {
+        kind: "needs-input",
+        taskId: id,
+        since: NOW,
+        escalated: false,
+        question: true,
+        message: `needs input: task="${id}" asking a question`,
+      },
+    ]);
+    expect((await stored(store, id)).body).toMatchObject({
+      state: "needs-input",
+      inputAlerted: true,
+      needsInputSince: NOW,
+    });
+    expect((await stored(store, id)).version).toBe(before + 1);
+
+    // The same question again, the pass past the debounce, and a new leader: nothing more.
+    await scheduler.onSession(id, "needs-input", { ...from, reason: "question" });
+    clock.now = NOW + 3 * MINUTE;
+    await pass(scheduler, fleet, clock.now);
+    const next = make();
+    await next.takeover();
+    clock.now = NOW + 4 * MINUTE;
+    await pass(next, fleet, clock.now);
+    expect(alerts).toHaveLength(1);
+
+    clock.now = NOW + 30 * MINUTE;
+    await pass(next, fleet, clock.now);
+    expect(alerts.map((a) => (a.kind === "needs-input" ? [a.escalated, a.question] : null))).toEqual([
+      [false, true],
+      [true, undefined],
+    ]);
+  });
+
+  test("a question opening in a stay already waiting is alerted then, once; a stay already alerted is not again", async () => {
+    const { alerts, clock, fleet, from, id, scheduler } = await running();
+    await scheduler.onSession(id, "needs-input", from);
+    clock.now = NOW + MINUTE;
+    await scheduler.onSession(id, "needs-input", { ...from, reason: "question" });
+    expect(alerts).toMatchObject([{ kind: "needs-input", since: NOW, question: true }]);
+
+    // Leaving re-arms it; a plain stay alerted at 2 minutes takes no question alert after.
+    await scheduler.onSession(id, "busy", from);
+    clock.now = NOW + 10 * MINUTE;
+    await scheduler.onSession(id, "needs-input", from);
+    clock.now = NOW + 12 * MINUTE;
+    await pass(scheduler, fleet, clock.now);
+    await scheduler.onSession(id, "needs-input", { ...from, reason: "question" });
+    expect(alerts.map((a) => (a.kind === "needs-input" ? a.question : null))).toEqual([true, undefined]);
+  });
+
+  test("another machine's question alerts nothing and writes nothing", async () => {
+    const { alerts, from, id, scheduler, store } = await running();
+    await scheduler.onSession(id, "needs-input", from);
+    const before = (await stored(store, id)).version;
+    await scheduler.onSession(id, "needs-input", { deviceId: "b", pane: from.pane, reason: "question" });
+    expect(alerts).toEqual([]);
+    expect((await stored(store, id)).version).toBe(before);
+    expect((await stored(store, id)).body).not.toHaveProperty("inputAlerted");
+  });
+
+  test("a question reason beside any other state alerts nothing", async () => {
+    const { alerts, from, id, scheduler } = await running();
+    await scheduler.onSession(id, "busy", { ...from, reason: "question" });
+    await scheduler.onSession(id, "idle", { ...from, reason: "question" });
+    expect(alerts).toEqual([]);
+  });
+
+  test("a question in a stay already past the escalation mark alerts nothing; the escalation is the one push", async () => {
+    const { alerts, clock, fleet, from, id, scheduler } = await running();
+    await scheduler.onSession(id, "needs-input", from);
+    clock.now = NOW + 31 * MINUTE;
+    await scheduler.onSession(id, "needs-input", { ...from, reason: "question" });
+    expect(alerts).toEqual([]);
+    await pass(scheduler, fleet, clock.now);
+    expect(alerts).toMatchObject([{ kind: "needs-input", escalated: true }]);
+    expect(alerts[0]).not.toHaveProperty("question");
+  });
+
+  test("a version conflict applies the question again to what the store holds: a stay another write alerted alerts nothing", async () => {
+    const { alerts, from, id, scheduler, store } = await running();
+    await scheduler.onSession(id, "needs-input", from);
+    const entry = await stored(store, id);
+    // Out of band, so the leader's held version is stale and its first write conflicts.
+    await store.put(id, entry.version, { ...entry.body, inputAlerted: true });
+    // A PR URL beside it, so the retry still writes: what is left to keep the alert back is the retry's own verdict.
+    const prUrl = "https://github.com/o/r/pull/1";
+    await scheduler.onSession(id, "needs-input", { ...from, reason: "question" }, prUrl);
+    expect((await stored(store, id)).body).toMatchObject({ prUrl, inputAlerted: true });
+    expect(alerts).toEqual([]);
+  });
+
+  test("a question as the first event on a reserved task resolves the reservation and alerts once", async () => {
+    const { alerts, from, id, scheduler, store } = await running();
+    // Put the running task back to its reservation: the spawn landed, the reply was lost.
+    const entry = await stored(store, id);
+    const { assignment, ...rest } = entry.body;
+    await store.put(id, entry.version, {
+      ...rest,
+      state: "reserved",
+      reservation: { deviceId: "a", exclave: assignment?.exclave ?? "main", clone: "app", expiresAt: NOW + 120_000 },
+      reservedAt: NOW,
+    });
+    await scheduler.load();
+    await scheduler.onSession(id, "needs-input", { ...from, reason: "question" });
+    expect(alerts).toMatchObject([{ kind: "needs-input", taskId: id, question: true }]);
+    expect((await stored(store, id)).body).toMatchObject({ state: "needs-input", inputAlerted: true });
+  });
+
+  test("a question write that fails alerts nothing; the 2-minute pass is still there for the stay", async () => {
+    const { alerts, clock, fleet, from, id, scheduler, store } = await running();
+    await scheduler.onSession(id, "needs-input", from);
+    store.failNext({ code: "refused" });
+    await scheduler.onSession(id, "needs-input", { ...from, reason: "question" });
+    expect(alerts).toEqual([]);
+    clock.now = NOW + 2 * MINUTE;
+    await pass(scheduler, fleet, clock.now);
+    expect(alerts).toMatchObject([{ kind: "needs-input", escalated: false }]);
+    expect(alerts[0]).not.toHaveProperty("question");
+  });
+});
+
 /** Machine `a` whose account reads `h`% in its 5h window — over the line by default — resetting at `hr`, with extra usage on. */
 function spilling(hr: number, h = 95): ReturnType<typeof machine> {
   return machine("a", {

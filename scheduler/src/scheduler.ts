@@ -14,7 +14,7 @@ import {
   type SpillStamp,
 } from "@seance/shared";
 import { isDeepStrictEqual } from "node:util";
-import { escalation, inputAlert, inputClock, SpillAlerts, type SchedulerAlert } from "./alerts.ts";
+import { escalation, inputAlert, inputClock, questionAlert, SpillAlerts, type SchedulerAlert } from "./alerts.ts";
 import { dispatchOrder } from "./batch.ts";
 import { DEFAULT_CONFIG, type SchedulerConfig } from "./config.ts";
 import { admission, named } from "./deps.ts";
@@ -584,14 +584,33 @@ export class Scheduler {
    * machine's answer (`sessionChange`, `#ending`): its exit says `failed` or
    * `done`. `done` is the session's own report (#21): it settles a
    * `until: "reported"` task from the machine it was placed on, and nothing else.
+   * A `needs-input` whose source says `reason: "question"` is alerted in the
+   * same write, without the debounce (`questionAlert`).
    */
   async onSession(taskId: string, state: SessionState, from?: SessionSource, prUrl?: string): Promise<void> {
     const awaitsExit = from !== undefined && this.#reportsExit(from.deviceId);
     let defers = false;
-    await this.#update(taskId, (task) => {
+    let asked = false;
+    const written = await this.#update(taskId, (task) => {
       defers = waitsForExit(task, state, from, prUrl, awaitsExit);
-      return this.#yieldToCancel(task, sessionChange(task, state, from, prUrl, awaitsExit));
+      const moved = this.#yieldToCancel(task, sessionChange(task, state, from, prUrl, awaitsExit));
+      if (state !== "needs-input" || from?.reason !== "question") return moved;
+      const alerted = questionAlert(task, moved, from.deviceId, this.#now(), this.#config.needsInputEscalateMs);
+      // Set on every run that gets here: a version conflict applies the change again to what the store holds.
+      asked = alerted !== null;
+      return alerted ?? moved;
     });
+    // From the written record: `inputClock` stamped the stay's start as it landed.
+    if (asked && written?.inputAlerted === true && written.needsInputSince !== undefined) {
+      this.#alert({
+        kind: "needs-input",
+        taskId: written.id,
+        since: written.needsInputSince,
+        escalated: false,
+        question: true,
+        message: `needs input: task=${quote(written.id)} asking a question`,
+      });
+    }
     this.#idleClock(taskId, state, from);
     this.#syncIdle();
     if (!defers) return;

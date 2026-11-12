@@ -199,12 +199,45 @@ describe("reports", () => {
     expect(sent).toEqual([]);
   });
 
-  test("a question to the person needs input until it is answered", async ($, on) => {
+  test("a question to the person needs input, as a question, until it is answered", async ($, on) => {
     const sent = record(on);
     on("tool.call", () => ({ result: { answers: {} } }));
     await $.tool.call({ tool: "AskUserQuestion", questions: [] });
     await settled(sent, 2);
-    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }, { state: "busy" }]);
+    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input", reason: "question" }, { state: "busy" }]);
+  });
+
+  test("a question beside a permission ask reports its reason while it is open, and only then", async ($, on) => {
+    const sent = record(on);
+    const question = latch();
+    const prompt = latch();
+    on("tool.check", (_$, e) => ({ decision: e.approver === undefined ? "allow" : "ask" }));
+    on("tool.call", async (_$, e) => {
+      await $.tool.check({
+        tool: e.tool,
+        input: {},
+        ...(e.tool_use_id === undefined ? {} : { tool_use_id: e.tool_use_id }),
+        approver: "person",
+      });
+      await (e.tool === "AskUserQuestion" ? question.held : prompt.held);
+      return e.tool === "AskUserQuestion" ? { result: { answers: {} } } : { result: { stdout: "" } };
+    });
+    const b = $.tool.call({ tool: "Bash", command: "x", tool_use_id: "ask-1" });
+    await settled(sent, 1);
+    const q = $.tool.call({ tool: "AskUserQuestion", questions: [] });
+    await settled(sent, 2);
+    question.release();
+    await q;
+    await settled(sent, 3);
+    prompt.release();
+    await b;
+    await settled(sent, 4);
+    expect(sent.map((s) => s.report)).toEqual([
+      { state: "needs-input" },
+      { state: "needs-input", reason: "question" },
+      { state: "needs-input" },
+      { state: "busy" },
+    ]);
   });
 
   test("a PR opened through gh is reported with its URL", async ($, on) => {
@@ -289,11 +322,11 @@ describe("reports", () => {
     await b;
     // A non-event cannot be polled for: wait as long as a send takes to land above.
     await settled(sent, 2);
-    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }]);
+    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input", reason: "question" }]);
     question.release();
     await q;
     await settled(sent, 2);
-    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }, { state: "busy" }]);
+    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input", reason: "question" }, { state: "busy" }]);
   });
 
   test("a question core also checked reports needs input once", async ($, on) => {
@@ -301,7 +334,7 @@ describe("reports", () => {
     tools($, on, { verdict: "ask" });
     await $.tool.call({ tool: "AskUserQuestion", questions: [] });
     await settled(sent, 3);
-    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input" }, { state: "busy" }]);
+    expect(sent.map((s) => s.report)).toEqual([{ state: "needs-input", reason: "question" }, { state: "busy" }]);
   });
 
   test("the main loop's turn ending leaves a subagent's open prompt standing", async ($, on) => {

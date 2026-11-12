@@ -22,7 +22,11 @@ import type { EngineInterface, Register } from "claude-code";
  * ended resumes to idle, and the main loop's own turn events drop its dialogs (one
  * cannot be open across them; any left is a leak) but never a subagent's.
  * Every `prUrl` goes with a state, since the daemon refuses a frame without one,
- * and the last one seen rides on `ended`.
+ * and the last one seen rides on `ended`. A needs-input while any outstanding
+ * dialog is an AskUserQuestion carries `reason: "question"`, a permission ask
+ * open beside it or not: a real choice is waiting either way, and unlike auto
+ * mode's asks it cannot flicker, so the leader alerts it without its debounce.
+ * The reason is part of the state: it goes and comes with that dialog.
  *
  * A dialog closes only when its `tool.call` settles, after the tool ran: core
  * prompts and runs under one `next`, and no engine event says an ask was settled.
@@ -46,6 +50,8 @@ interface Report {
   readonly prUrl?: string;
   /** Only beside `idle`: the main loop's own turn.complete put it there, not a `session.start`. */
   readonly turnEnded?: true;
+  /** Only beside `needs-input`: an outstanding dialog is an AskUserQuestion. */
+  readonly reason?: "question";
 }
 
 /** Long enough for the daemon's parent walk, short enough to never pile up behind a wedged one. */
@@ -99,12 +105,14 @@ async function report($: EngineInterface, body: Report): Promise<void> {
 function merge(older: Report | null, newer: Report): Report {
   const state = newer.state ?? older?.state;
   const prUrl = newer.prUrl ?? older?.prUrl;
-  // Belongs to its state, so it goes wherever the state comes from.
+  // Belong to their state, so they go wherever the state comes from.
   const turnEnded = newer.state === undefined ? older?.turnEnded : newer.turnEnded;
+  const reason = newer.state === undefined ? older?.reason : newer.reason;
   return {
     ...(state === undefined ? {} : { state }),
     ...(prUrl === undefined ? {} : { prUrl }),
     ...(turnEnded === true ? { turnEnded } : {}),
+    ...(reason === undefined ? {} : { reason }),
   };
 }
 
@@ -122,6 +130,8 @@ interface Tracker {
   pending: Report | null;
   /** What holds a loop on a person, by tool_use_id; the value is the loop's `agentId` (unset: main). */
   readonly outstanding: Map<string, string | undefined>;
+  /** The ids in `outstanding` that are AskUserQuestion dialogs, leaving with them. */
+  readonly questions: Set<string>;
   /** The main loop is at its prompt: its turn.complete came and no turn.start since. */
   atPrompt: boolean;
   /**
@@ -132,6 +142,7 @@ interface Tracker {
   turnEnded: boolean;
   lastState: State | undefined;
   lastTurnEnded: boolean;
+  lastQuestion: boolean;
   lastPrUrl: string | undefined;
   anonymous: number;
 }
@@ -141,10 +152,12 @@ function newTracker(): Tracker {
     running: false,
     pending: null,
     outstanding: new Map(),
+    questions: new Set(),
     atPrompt: false,
     turnEnded: false,
     lastState: undefined,
     lastTurnEnded: false,
+    lastQuestion: false,
     lastPrUrl: undefined,
     anonymous: 0,
   };
@@ -196,15 +209,27 @@ function sendCurrent($: EngineInterface, t: Tracker, prUrl?: string): void {
   const state = current(t);
   // Part of the state: a respawn's idle followed by the turn's own end is a change.
   const turnEnded = state === "idle" && t.turnEnded;
-  if (state === t.lastState && turnEnded === t.lastTurnEnded && prUrl === undefined) return;
+  // Part of the state too: a question opening beside a permission ask, or closing before it, is a change.
+  const question = state === "needs-input" && t.questions.size > 0;
+  if (state === t.lastState && turnEnded === t.lastTurnEnded && question === t.lastQuestion && prUrl === undefined) {
+    return;
+  }
   t.lastState = state;
   t.lastTurnEnded = turnEnded;
-  send($, t, { state, ...(prUrl === undefined ? {} : { prUrl }), ...(turnEnded ? { turnEnded } : {}) });
+  t.lastQuestion = question;
+  send($, t, {
+    state,
+    ...(prUrl === undefined ? {} : { prUrl }),
+    ...(turnEnded ? { turnEnded } : {}),
+    ...(question ? { reason: "question" } : {}),
+  });
 }
 
 function dropMain(t: Tracker): void {
   for (const [id, loop] of t.outstanding) {
-    if (loop === undefined) t.outstanding.delete(id);
+    if (loop !== undefined) continue;
+    t.outstanding.delete(id);
+    t.questions.delete(id);
   }
 }
 
@@ -262,13 +287,17 @@ export const register: Register = (on) => {
     const id = e.tool_use_id ?? (isQuestion ? `question-${++t.anonymous}` : undefined);
     if (isQuestion && id !== undefined) {
       t.outstanding.set(id, e.agentId);
+      t.questions.add(id);
       sendCurrent($, t);
     }
     /** Closes `id`; a dialog closing or a PR found reports the state the session is in now. */
     const finish = (prUrl?: string): void => {
       const wasOpen = id !== undefined && t.outstanding.delete(id);
+      const wasQuestion = id !== undefined && t.questions.delete(id);
       if (prUrl !== undefined) t.lastPrUrl = prUrl;
-      if (prUrl !== undefined || (wasOpen && t.outstanding.size === 0)) sendCurrent($, t, prUrl);
+      // The last question closing beside a permission ask still open is needs-input without its reason.
+      const questionsGone = wasQuestion && t.questions.size === 0;
+      if (prUrl !== undefined || (wasOpen && (t.outstanding.size === 0 || questionsGone))) sendCurrent($, t, prUrl);
     };
     // A rejection closes too, so the session resumes whatever the turn does next.
     const settled = async <R>(run: Promise<R>): Promise<R> =>

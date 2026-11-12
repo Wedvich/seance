@@ -957,8 +957,13 @@ of M4 has landed.
     `--now`; the no-op `--auto` is gone), an Autonomy dropdown in Raycast that starts at
     `checkpoint` on every open, and MCP's `plan` input removed, with every tool's input strict so a
     stale `plan` is refused by name instead of stripped. The wire `plan` stays for older readers.
-  - _Rejected:_ a shorter alert delay for a question. The 2-minute wait doesn't matter in practice,
-    and nothing else justifies a frame change.
+  - **Done** (2026-11-12, reverses the earlier rejection): a question reaches the phone at once.
+    The levels send every real choice through AskUserQuestion, and those are the waits to hear
+    about first. The 2-minute debounce exists for auto mode's flicker, which a question cannot
+    do. The mod reports `reason: "question"` beside `needs-input`, and the leader raises the first
+    alert in the write that applies it, pushed as "A task is asking you a question". The
+    30-minute escalation and every other needs-input's 2-minute alert stand. The record is
+    DESIGN.md's "Session events" ("The question reason") and "Needs input".
   - _Not built,_ and only if a re-cut of the transcripts shows that confirmations survive the preamble: a mod that,
     at `checkpoint` or `auto`, answers a turn ending on a plain-text "shall I proceed?" with one
     nudge to proceed or ask it properly. First check that an engine hook can continue a turn.
@@ -991,7 +996,8 @@ same PR, with the reason.
    window, 1% of a week) a new task is refused from ~85% current in 5h and ~89% in 7d; and a window that resets within 15 min counts as empty for the
    filter, since a task started then runs almost entirely after the reset.
 5. **`needs-input` alerts**: a first alert after 2 min (`needsInputAlertMs`, the debounce against
-   auto mode's per-call needs-input flicker), then one escalation after 30 min
+   auto mode's per-call needs-input flicker; at once for a session waiting on an AskUserQuestion,
+   which cannot flicker, 2026-11-12), then one escalation after 30 min
    (`needsInputEscalateMs`, built with M3 item 5): keep the slot, never kill. Each is a leader log
    line and a push, and each is persisted on the record (`inputAlerted`, `escalated`) so a new
    leader repeats neither.

@@ -264,12 +264,13 @@ function watched(inner: QueueStore, changed: (id: string | null) => void): Queue
  * (it names an account) or a title. Here, not in `push-sender.ts`, which stays
  * scheduler-free.
  */
-function alertToPush(alert: SchedulerAlert, at: number): PushAlert {
+export function alertToPush(alert: SchedulerAlert, at: number): PushAlert {
   if (alert.kind === "spill") {
     const { taskId, window, projectedPct, spending } = alert;
     return { v: 1, kind: "spill", at, taskId, window, projectedPct, ...(spending === undefined ? {} : { spending }) };
   }
-  return { v: 1, kind: "needs-input", at, taskId: alert.taskId, since: alert.since, escalated: alert.escalated };
+  const { taskId, since, escalated, question } = alert;
+  return { v: 1, kind: "needs-input", at, taskId, since, escalated, ...(question === undefined ? {} : { question }) };
 }
 
 /** Where admission leaves a `queued` task (`admission` in the library). */

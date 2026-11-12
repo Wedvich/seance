@@ -1581,11 +1581,23 @@ export const SESSION_STATES = ["busy", "idle", "needs-input", "ended", "done"] a
 export type SessionState = (typeof SESSION_STATES)[number];
 
 /**
+ * Why a session waits on a person, beside `needs-input` only. `question`: an
+ * AskUserQuestion dialog is open, a real choice that cannot flicker the way auto
+ * mode's classifier asks do, so the leader alerts it without the 2-minute
+ * debounce (DESIGN.md, "Session events"). A reader that does not know a value
+ * drops it and keeps the event: an unknown reason costs only the debounce.
+ */
+export const NEEDS_INPUT_REASONS = ["question"] as const;
+
+export type NeedsInputReason = (typeof NEEDS_INPUT_REASONS)[number];
+
+/**
  * `op: "session-event"`, daemon → scheduler, sealed to `SCHEDULER_ID`,
  * fire-and-forget. Every field is the daemon's own, never what the session
  * claimed: `session` and `taskId` from its pane map, `exclave` from the pane's
  * path, `prUrl` only once it parsed as `https:`, `remoteSession` only once it
- * matched `isRemoteSessionId` (DESIGN.md, "Session events").
+ * matched `isRemoteSessionId`, `reason` only beside `needs-input` and known
+ * (DESIGN.md, "Session events").
  * Sent only for sessions that carry a task id.
  */
 export interface SessionEvent {
@@ -1602,6 +1614,8 @@ export interface SessionEvent {
    * connected. A claim, display-only — it names the session's claude.ai page.
    */
   readonly remoteSession?: string;
+  /** Only beside `needs-input`: the session's claim of why. It lifts the alert's debounce for that stay, nothing else. */
+  readonly reason?: NeedsInputReason;
   /** Observed at by the daemon, ms. */
   readonly at: number;
 }
@@ -2841,6 +2855,8 @@ export type PushAlert =
       readonly taskId: string;
       readonly since: number;
       readonly escalated: boolean;
+      /** The session waits on an AskUserQuestion: alerted at once. A worker that predates it words it as any wait. */
+      readonly question?: true;
     }
   | {
       readonly v: 1;
