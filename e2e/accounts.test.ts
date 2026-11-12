@@ -111,6 +111,7 @@ describe("account aliases across clients", () => {
       expect(seen.accounts.aliases[E2E_ACCOUNT_ID]).toBeUndefined();
       expect(seen.accounts.aliases).toEqual({ [OTHER_ID]: "genuine" });
       const withCard = await b.waitForApp((state) => cardOf(state) !== undefined, "B's account card");
+      expect(cardOf(withCard)?.title).not.toContain("forged");
       expect(cardOf(withCard)?.detail).not.toContain("forged");
     } finally {
       for (const app of apps) app.stop();
@@ -133,7 +134,8 @@ describe("account aliases across clients", () => {
         (state) => state.accounts.aliases[E2E_ACCOUNT_ID] === "work",
         "B to show the new name",
       );
-      expect(cardOf(named)?.detail).toStartWith("work · on ");
+      expect(cardOf(named)?.title).toBe("work");
+      expect(cardOf(named)?.detail).toStartWith("default · acct e2e-acco · on ");
       // A nudge and one read, not a re-list.
       expect(reads.lists()).toBe(1);
       expect(reads.gets()).toBe(1);

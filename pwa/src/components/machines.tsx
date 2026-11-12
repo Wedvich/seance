@@ -1,5 +1,5 @@
 import type { JSX } from "preact";
-import { useMemo, useState } from "preact/hooks";
+import { useEffect, useId, useMemo, useRef, useState } from "preact/hooks";
 import { type ChartLine, chartLines } from "../chart.ts";
 import type { AccountCard, Gauge, GaugeIcon, MachineCard, MachinesView } from "../machines-view.ts";
 import {
@@ -11,9 +11,11 @@ import {
 } from "../state.ts";
 import { ACCOUNT_ALIAS_MAX_LENGTH } from "@seance/shared";
 import type { ConnectionState } from "../view.ts";
-import { Disclosure } from "./disclosure.tsx";
+import { StrokeIcon } from "./icons.tsx";
+import { Menu, MenuDivider, MenuItem, MenuSwitchItem, MoreTrigger, useMenu } from "./menu.tsx";
 import { RelayDot } from "./relay-dot.tsx";
 import { Seg } from "./seg.tsx";
+import { Sheet } from "./sheet.tsx";
 
 const TARGET_LABELS: Record<HistoryTarget["kind"], string> = { machine: "Load and disk", account: "Quota" };
 
@@ -40,9 +42,11 @@ export function MachinesScreen(props: {
   onDismiss?: () => void;
   onShowHistory: (target: HistoryTarget, range?: HistoryRange) => void;
   onHideHistory: () => void;
-  /** Resolves once the rename has settled: true when the name landed. */
+  onOpenRename: (accountId: string) => void;
+  /** Closes the dialog the way back does. */
+  onCloseRename: () => void;
+  /** Resolves once the rename has settled: true when the name landed, which closes the dialog. */
   onRename: (accountId: string, text: string) => Promise<boolean>;
-  onDismissAccountNotice: () => void;
 }): JSX.Element {
   const {
     view,
@@ -54,10 +58,17 @@ export function MachinesScreen(props: {
     onDismiss,
     onShowHistory,
     onHideHistory,
+    onOpenRename,
+    onCloseRename,
     onRename,
-    onDismissAccountNotice,
   } = props;
-
+  const { renaming } = accounts;
+  // Kept while the account is briefly unreported (a sign-out in between), so a typed draft survives; Cancel or Save closes it.
+  const seen = useRef<AccountCard | undefined>(undefined);
+  const found = view.accounts.find((account) => account.accountId === renaming);
+  if (found !== undefined) seen.current = found;
+  const renamed =
+    renaming === null ? undefined : (found ?? (seen.current?.accountId === renaming ? seen.current : undefined));
   return (
     <>
       <header className="header">
@@ -94,27 +105,12 @@ export function MachinesScreen(props: {
         ))}
 
         {view.accounts.length > 0 && <h2 className="label fleet-heading">Accounts</h2>}
-        {view.accounts.length > 0 && !accounts.nameable && (
-          <p className="fleet-note">Re-enter the pre-shared key in Settings to name accounts</p>
-        )}
-        {accounts.notice !== null && (
-          <div className="banner card banner-err" role="alert">
-            <span className="banner-rule" />
-            <span className="banner-text">
-              <span className="banner-body">{accounts.notice}</span>
-            </span>
-            <button type="button" className="queue-resume" onClick={onDismissAccountNotice}>
-              Dismiss
-            </button>
-          </div>
-        )}
         {view.accounts.map((account) => (
           <AccountCardView
             key={account.accountId}
             account={account}
             nameable={accounts.nameable}
-            busy={accounts.saving !== null}
-            onRename={onRename}
+            onRename={() => onOpenRename(account.accountId)}
             history={
               history?.target.kind === "account" && history.target.accountId === account.accountId ? history : null
             }
@@ -123,6 +119,17 @@ export function MachinesScreen(props: {
           />
         ))}
       </div>
+      {renamed !== undefined && (
+        <RenameDialog
+          key={renamed.accountId}
+          account={renamed}
+          saving={accounts.saving === renamed.accountId}
+          blocked={accounts.saving !== null && accounts.saving !== renamed.accountId}
+          notice={accounts.notice}
+          onSave={(text) => void onRename(renamed.accountId, text)}
+          onClose={onCloseRename}
+        />
+      )}
     </>
   );
 }
@@ -135,6 +142,9 @@ function MachineCardView(props: {
 }): JSX.Element {
   const { card, history, onShowHistory, onHideHistory } = props;
   const target: HistoryTarget = { kind: "machine", deviceId: card.deviceId };
+  const menu = useMenu();
+  // Kept while a chart is open even if its source drops: the item is the chart's only close.
+  const offersHistory = card.charts || history !== null;
 
   return (
     <section className="fleet-card card">
@@ -152,12 +162,14 @@ function MachineCardView(props: {
           <p className="fleet-meta">{card.meta}</p>
           {card.build !== null && <p className="fleet-meta fleet-build">{card.build}</p>}
         </div>
-        <HistoryToggle
-          available={card.charts}
-          history={history}
-          onShow={() => onShowHistory(target)}
-          onHide={onHideHistory}
-        />
+        {offersHistory && (
+          <>
+            <MoreTrigger menu={menu} label={`More actions for ${card.name}`} />
+            <Menu menu={menu} label={`Actions for ${card.name}`}>
+              <HistoryItem history={history} onShow={() => onShowHistory(target)} onHide={onHideHistory} />
+            </Menu>
+          </>
+        )}
       </div>
 
       {card.gauges.length > 0 && (
@@ -198,22 +210,20 @@ function MachineCardView(props: {
 function AccountCardView(props: {
   account: AccountCard;
   nameable: boolean;
-  /** Some rename is in flight; one at a time. */
-  busy: boolean;
   history: HistoryView | null;
-  onRename: (accountId: string, text: string) => Promise<boolean>;
+  onRename: () => void;
   onShowHistory: (target: HistoryTarget, range?: HistoryRange) => void;
   onHideHistory: () => void;
 }): JSX.Element {
-  const { account, nameable, busy, history, onRename, onShowHistory, onHideHistory } = props;
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState("");
+  const { account, nameable, history, onRename, onShowHistory, onHideHistory } = props;
+  const menu = useMenu();
   const { historyFrom } = account;
   // Pinned to the host it was opened against: a range change re-asks that one,
   // and a host gone since leaves the chart to say so rather than switch sources.
   const host = history?.target.kind === "account" ? history.target.deviceId : historyFrom;
   const target: HistoryTarget | null =
     host === null ? null : { kind: "account", accountId: account.accountId, deviceId: host };
+  const offersHistory = target !== null || history !== null;
 
   return (
     <section className="fleet-card card">
@@ -222,12 +232,26 @@ function AccountCardView(props: {
           <h2 className="fleet-name">{account.title}</h2>
           <p className="fleet-meta">{account.detail}</p>
         </div>
-        <HistoryToggle
-          available={target !== null}
-          history={history}
-          onShow={() => target !== null && onShowHistory(target)}
-          onHide={onHideHistory}
-        />
+        <MoreTrigger menu={menu} label={`More actions for ${account.title}`} />
+        <Menu menu={menu} label={`Actions for ${account.title}`}>
+          <MenuItem
+            label="Rename"
+            icon={<PencilIcon />}
+            sub={nameable ? undefined : "Re-enter the pre-shared key in Settings"}
+            disabled={!nameable}
+            onClick={onRename}
+          />
+          {offersHistory && (
+            <>
+              <MenuDivider />
+              <HistoryItem
+                history={history}
+                onShow={() => target !== null && onShowHistory(target)}
+                onHide={onHideHistory}
+              />
+            </>
+          )}
+        </Menu>
       </div>
       {account.bars.length > 0 && (
         <div className="bars">
@@ -237,46 +261,6 @@ function AccountCardView(props: {
         </div>
       )}
       <p className="fleet-note">{account.observed}</p>
-      {nameable && !editing && (
-        <button
-          type="button"
-          className="fleet-rename"
-          onClick={() => {
-            setDraft(account.alias ?? "");
-            setEditing(true);
-          }}
-        >
-          Rename
-        </button>
-      )}
-      {nameable && editing && (
-        <form
-          className="fleet-rename-form"
-          onSubmit={(event) => {
-            event.preventDefault();
-            // Open after a conflict or refusal: the notice says why, and the draft is still there to resend.
-            void onRename(account.accountId, draft).then((landed) => {
-              if (landed) setEditing(false);
-            });
-          }}
-        >
-          <input
-            type="text"
-            aria-label="Account name"
-            placeholder="Name this account"
-            maxLength={ACCOUNT_ALIAS_MAX_LENGTH}
-            value={draft}
-            disabled={busy}
-            onInput={(event) => setDraft(event.currentTarget.value)}
-          />
-          <button type="submit" className="queue-resume" disabled={busy}>
-            Save
-          </button>
-          <button type="button" className="queue-resume" disabled={busy} onClick={() => setEditing(false)}>
-            Cancel
-          </button>
-        </form>
-      )}
       {history !== null && target !== null && (
         <HistoryChart history={history} onPick={(range) => onShowHistory(target, range)} />
       )}
@@ -284,21 +268,117 @@ function AccountCardView(props: {
   );
 }
 
-function HistoryToggle(props: {
-  available: boolean;
-  history: HistoryView | null;
-  onShow: () => void;
-  onHide: () => void;
-}): JSX.Element | null {
-  const { available, history, onShow, onHide } = props;
-  // Kept while a chart is open even if its source drops: it is the chart's only close.
-  if (!available && history === null) return null;
+/** A switch, so the chart can be flipped on and off with the menu still open. */
+function HistoryItem(props: { history: HistoryView | null; onShow: () => void; onHide: () => void }): JSX.Element {
+  const { history, onShow, onHide } = props;
   return (
-    <Disclosure
-      open={history !== null}
-      label={history === null ? "History" : "Hide"}
+    <MenuSwitchItem
+      label="History"
+      icon={<HistoryIcon />}
+      checked={history !== null}
       onToggle={history === null ? onShow : onHide}
     />
+  );
+}
+
+/**
+ * One form, laid out by `Sheet`: a bottom sheet on a phone, centred on a desk.
+ * It stays open on a refusal, with the reason where the hint was, so the draft
+ * is there to send again.
+ */
+function RenameDialog(props: {
+  account: AccountCard;
+  /** This account's rename is in flight. */
+  saving: boolean;
+  /** Another account's rename is: the store takes one at a time, so Save waits. */
+  blocked: boolean;
+  notice: string | null;
+  onSave: (text: string) => void;
+  onClose: () => void;
+}): JSX.Element {
+  const { account, saving, blocked, notice, onSave, onClose } = props;
+  const [draft, setDraft] = useState(account.alias ?? "");
+  const input = useRef<HTMLInputElement>(null);
+  const noticeId = useId();
+  const inputId = useId();
+  // An effect, not a layout effect: `Sheet` focuses its panel in one, after its children's.
+  // Again after a save: disabling the field dropped its focus.
+  useEffect(() => {
+    if (!saving) input.current?.focus();
+  }, [saving]);
+
+  return (
+    <Sheet title="Rename account" variant="dialog" onClose={onClose}>
+      <form
+        className="rename"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!saving && !blocked) onSave(draft);
+        }}
+      >
+        <p className="rename-account">
+          {account.plainName} · {account.exclaves}
+        </p>
+        <label className="rename-label" htmlFor={inputId}>
+          Account name
+        </label>
+        <input
+          ref={input}
+          id={inputId}
+          type="text"
+          className="rename-input"
+          placeholder="Name this account"
+          maxLength={ACCOUNT_ALIAS_MAX_LENGTH}
+          value={draft}
+          disabled={saving}
+          aria-invalid={notice !== null}
+          aria-describedby={notice === null ? undefined : noticeId}
+          onInput={(event) => setDraft(event.currentTarget.value)}
+        />
+        {notice === null ? (
+          <p className="rename-hint">
+            <span>
+              {blocked
+                ? "Another account's name is still saving. Save is on hold until it lands."
+                : `Shown as the card title. Leave it empty to go back to “${account.exclaves}”.`}
+            </span>
+            <span className="rename-count">
+              {draft.length}/{ACCOUNT_ALIAS_MAX_LENGTH}
+            </span>
+          </p>
+        ) : (
+          <p id={noticeId} className="rename-error" role="alert">
+            {notice}
+          </p>
+        )}
+        <div className="rename-actions">
+          <button type="button" className="quiet" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="submit" className="primary" disabled={saving || blocked}>
+            {saving ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </form>
+    </Sheet>
+  );
+}
+
+function HistoryIcon(): JSX.Element {
+  return (
+    <StrokeIcon size={18}>
+      <path d="M4 19h16" />
+      <path d="M4 15l5-5 4 3 7-8" />
+    </StrokeIcon>
+  );
+}
+
+function PencilIcon(): JSX.Element {
+  return (
+    <StrokeIcon size={18}>
+      <path d="M4 20h4L19 9l-4-4L4 16v4z" />
+      <path d="M13.5 6.5l4 4" />
+    </StrokeIcon>
   );
 }
 

@@ -956,10 +956,13 @@
   height: 24px;
   border-radius: 7px;
   background: #ffffff;
-  transition: transform 0.18s ease;
+  transition:
+    transform 0.18s ease,
+    background-color 0.18s ease;
 }
 
 .toggle-on .toggle-knob {
+  background: var(--acc-fg);
   transform: translateX(20px);
 }
 
@@ -1997,34 +2000,12 @@
   overflow-wrap: anywhere;
 }
 
-/* Tap target from padding that negative margins take back, as `.prompt-action` does. */
-.disclosure {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 0.8125rem;
-  line-height: var(--fleet-line);
-  color: var(--fg2);
-  background: transparent;
-  border: 0;
-  padding: 12px 4px 12px 16px;
-  margin: -12px -4px;
-  white-space: nowrap;
-}
-
-@media (hover: hover) {
-  .disclosure:hover {
-    color: var(--acc);
-  }
-}
-
+/* The section toggle's chevron (`.queue-section-toggle` turns it). */
 .disclosure-chevron {
   font-size: 0.5625rem;
   transition: transform 150ms ease;
 }
 
-.disclosure[aria-expanded="true"] > .disclosure-chevron,
 .fleet-note {
   margin: 0;
   font-size: 0.8125rem;
@@ -2033,43 +2014,6 @@
 
 .fleet-warn {
   color: var(--warn);
-}
-
-/* Tap target from padding that negative margins take back, as `.disclosure` does. */
-.fleet-rename {
-  align-self: flex-start;
-  padding: 8px 4px;
-  margin: -8px -4px;
-  border: 0;
-  background: transparent;
-  font-size: 0.8125rem;
-  color: var(--fg2);
-}
-
-@media (hover: hover) {
-  .fleet-rename:hover {
-    color: var(--acc);
-  }
-}
-
-.fleet-rename-form {
-  display: flex;
-  gap: 8px;
-}
-
-.fleet-rename-form input {
-  flex: 1;
-  min-width: 0;
-  padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--bg);
-  font-size: 0.9375rem;
-  outline: none;
-}
-
-.fleet-rename-form input:focus {
-  border-color: var(--acc);
 }
 
 /* The dot leads the name on the card's own left edge, so every row below starts where it does. */
@@ -3088,8 +3032,9 @@
   color: var(--err);
 }
 
-.menu-item:disabled,
-.menu-item[aria-disabled="true"] {
+/* The label and icon dim; a sub-line stays at full `--fg2`, as it may be the only word on why. */
+.menu-item[aria-disabled="true"] .menu-icon,
+.menu-item[aria-disabled="true"] .menu-label {
   opacity: 0.5;
 }
 
@@ -3132,6 +3077,116 @@
   height: 1px;
   margin: 2px 8px; /* the flex gap adds 2px each side */
   background: var(--line);
+}
+
+/* `.toggle` scaled to a menu row. Off is `--switch-off`, not `--line`: on the menu's surface a
+   `--line` track all but disappears. */
+.menu-switch {
+  position: relative;
+  flex: none;
+  width: 36px;
+  height: 22px;
+  margin-left: auto;
+  border-radius: 8px;
+  background: var(--switch-off);
+  transition: background 0.18s ease;
+}
+
+.menu-switch-on {
+  background: var(--acc);
+}
+
+.menu-switch-knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 5px;
+  background: #ffffff;
+  transition:
+    transform 0.18s ease,
+    background-color 0.18s ease;
+}
+
+.menu-switch-on .menu-switch-knob {
+  background: var(--acc-fg);
+  transform: translateX(14px);
+}
+
+/* ---- rename dialog (machines.tsx): a bottom sheet here, centred under `.desk` ---- */
+
+.rename {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.rename-account {
+  margin: 0;
+  font-family: var(--mono);
+  font-variant-ligatures: none;
+  font-size: 0.75rem;
+  color: var(--fg2);
+  overflow-wrap: anywhere;
+}
+
+.rename-label {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--fg2);
+}
+
+.rename-input {
+  width: 100%;
+  padding: 12px 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--fg);
+  /* Under 16px, iOS Safari zooms the page in on focus. */
+  font-size: 1rem;
+  outline: none;
+}
+
+.rename-input:focus {
+  border-color: var(--acc);
+}
+
+.rename-input[aria-invalid="true"] {
+  border-color: var(--err);
+}
+
+.rename-input:disabled {
+  color: var(--fg2);
+}
+
+.rename-hint {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--fg2);
+}
+
+.rename-count {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.rename-error {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--err);
+}
+
+/* Save leads on a phone, as the form's own button does; Cancel sits quiet under it. */
+.rename-actions {
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 4px;
 }
 
 @media (hover: hover) {
@@ -3189,6 +3244,53 @@
 
 .desk .queue-pause:enabled:active {
   background: color-mix(in oklab, var(--acc) 14%, transparent);
+}
+
+/* A form sheet (the rename dialog) is a centred card here, framed like the menu. */
+.desk .scrim-dialog {
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.desk .sheet-dialog {
+  width: 400px;
+  max-width: 100%;
+  padding: 16px 16px 6px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.3);
+  animation: dialog-in 0.14s ease-out;
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+}
+
+.desk .rename-actions {
+  flex-direction: row;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.desk .rename-actions .primary,
+.desk .rename-actions .quiet {
+  width: auto;
+  border-radius: 10px;
+  font-size: 0.875rem;
+}
+
+.desk .rename-actions .primary {
+  padding: 12px 18px;
+}
+
+.desk .rename-actions .quiet {
+  padding: 12px 16px;
+  background: var(--sur2);
+  color: var(--fg);
 }
 
 /* ---- authoring (auto only): After sheet, batch sheet, Linear field ---- */

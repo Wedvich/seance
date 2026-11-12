@@ -88,7 +88,7 @@ function state(overrides: Partial<AppState> = {}, form: Partial<PersistedForm> =
     startNowRefusal: null,
     pausing: false,
     discarding: false,
-    accounts: { aliases: {}, nameable: true, saving: null, notice: null },
+    accounts: { aliases: {}, nameable: true, saving: null, renaming: null, notice: null },
     attachments: [],
     attachNotice: null,
     heldDropped: [],
@@ -532,7 +532,7 @@ describe("the pickers", () => {
       state(
         {
           relay: leader([mac]),
-          accounts: { aliases: { "acct-work": "Work" }, nameable: true, saving: null, notice: null },
+          accounts: { aliases: { "acct-work": "Work" }, nameable: true, saving: null, renaming: null, notice: null },
         },
         {
           account: "acct-work",

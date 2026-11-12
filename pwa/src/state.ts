@@ -239,6 +239,8 @@ export interface AccountsState {
   readonly nameable: boolean;
   /** The accountId a rename is in flight for. */
   readonly saving: string | null;
+  /** The account whose rename dialog is open: a layer, so back closes it. */
+  readonly renaming: string | null;
   /** The last rename's refusal or failure, as a sentence; cleared by the next rename or a dismiss. */
   readonly notice: string | null;
 }
