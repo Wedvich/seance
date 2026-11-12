@@ -22,7 +22,7 @@ import {
   type SessionsResponse,
   type Task,
 } from "@seance/shared";
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, jest, test } from "bun:test";
 import {
   connectApp,
   connectDaemon,
@@ -112,7 +112,10 @@ function startClient(
 ): {
   client: RelayClient;
   waitFor: (predicate: (state: RelayState) => boolean, label: string) => Promise<RelayState>;
+  /** Resolves at the relay's next pong: the uplink evidence a request's timeout blames the machine on. */
+  nextPong: () => Promise<void>;
 } {
+  const pongWaiters: (() => void)[] = [];
   const client = new RelayClient({
     url: opts.url ?? appUrl(),
     token: opts.token ?? TOKEN,
@@ -121,7 +124,14 @@ function startClient(
     // registry frames have gone by, and the socket dies with 1002 "Invalid
     // compressed data". Browsers handle the extension fine; suppressing the
     // offer keeps these tests measuring the relay instead of that bug.
-    createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
+    createSocket: (url) => {
+      const socket = new WebSocket(url, { perMessageDeflate: false });
+      socket.addEventListener("message", (event) => {
+        if (event.data !== "pong") return;
+        for (const waiter of pongWaiters.splice(0)) waiter();
+      });
+      return socket;
+    },
     ...(opts.timeouts === undefined ? {} : { timeouts: opts.timeouts }),
     ...(opts.pingIntervalMs === undefined ? {} : { pingIntervalMs: opts.pingIntervalMs }),
     ...(opts.pongTimeoutMs === undefined ? {} : { pongTimeoutMs: opts.pongTimeoutMs }),
@@ -146,8 +156,40 @@ function startClient(
       const unsubscribe = client.subscribe(() => void check());
       check();
     });
+  const nextPong = (): Promise<void> =>
+    new Promise((resolve) => {
+      pongWaiters.push(resolve);
+    });
   client.start();
-  return { client, waitFor };
+  return { client, waitFor, nextPong };
+}
+
+/** Real so an answered request never races it; the silent ones below run out on a fake clock. */
+const SESSIONS_TIMEOUT_MS = 5_000;
+
+/**
+ * Runs a sessions request the machine never answers out to its timeout on a fake clock, once the
+ * relay has ponged the request's probe. A short real timeout raced that pong on a slow runner, and
+ * without it the client rightly declines to blame the machine.
+ */
+async function unanswered(
+  { client, nextPong }: Pick<ReturnType<typeof startClient>, "client" | "nextPong">,
+  deviceId: string,
+): Promise<unknown> {
+  const ponged = nextPong();
+  jest.useFakeTimers();
+  try {
+    const pending = client.request(deviceId, "sessions", {});
+    pending.catch(() => {});
+    await ponged;
+    jest.advanceTimersByTime(SESSIONS_TIMEOUT_MS);
+    return await pending.then(
+      () => "answered",
+      (err: unknown) => err,
+    );
+  } finally {
+    jest.useRealTimers();
+  }
 }
 
 /**
@@ -528,11 +570,12 @@ describe("status", () => {
     const deviceId = await newDeviceId();
     const info = machineInfo("Sleeper");
     const daemon = await startFakeDaemon(relay, key, deviceId, info);
-    const { client, waitFor } = startClient({ timeouts: { sessions: 200 } });
+    const rig = startClient({ timeouts: { sessions: SESSIONS_TIMEOUT_MS } });
+    const { client, waitFor } = rig;
     try {
       await waitFor((s) => machineOf(s, deviceId)?.connected === true, "machine online");
       daemon.stop();
-      await expect(client.request(deviceId, "sessions", {})).rejects.toMatchObject({ reason: "timeout" });
+      expect(await unanswered(rig, deviceId)).toMatchObject({ reason: "timeout" });
       await waitFor((s) => machineOf(s, deviceId)?.connected === false, "marked offline");
       daemon.client.send(await statusEnvelope(deviceId, { at: 3, scan: info.scannedAt }));
       await waitFor((s) => machineOf(s, deviceId)?.connected === true, "a snapshot is proof of life");
@@ -768,11 +811,12 @@ describe("requests", () => {
 
   test("times out when the daemon never answers", async () => {
     const deviceId = await newDeviceId();
-    const { client, waitFor } = startClient({ timeouts: { sessions: 300 } });
+    const rig = startClient({ timeouts: { sessions: SESSIONS_TIMEOUT_MS } });
+    const { client, waitFor } = rig;
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Silent"));
     try {
       await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && m.connected), "machine online");
-      await expect(client.request(deviceId, "sessions", {})).rejects.toMatchObject({ reason: "timeout" });
+      expect(await unanswered(rig, deviceId)).toMatchObject({ reason: "timeout" });
       // The request's probe ping was ponged, so the uplink provably worked while
       // the machine stayed silent — a timeout is then evidence about the machine,
       // same as a relay refusal, and the connected flag is the staler claim.
@@ -788,11 +832,12 @@ describe("requests", () => {
   // to re-register.
   test("a decrypted message from the machine clears a timeout's offline mark", async () => {
     const deviceId = await newDeviceId();
-    const { client, waitFor } = startClient({ timeouts: { sessions: 250 } });
+    const rig = startClient({ timeouts: { sessions: SESSIONS_TIMEOUT_MS } });
+    const { client, waitFor } = rig;
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Slow Mac"));
     try {
       await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && m.connected), "machine online");
-      await expect(client.request(deviceId, "sessions", {})).rejects.toMatchObject({ reason: "timeout" });
+      expect(await unanswered(rig, deviceId)).toMatchObject({ reason: "timeout" });
       expect(client.getState().machines.find((m) => m.deviceId === deviceId)?.connected).toBe(false);
 
       const late: Plain = {
@@ -819,11 +864,12 @@ describe("requests", () => {
   // guard would turn "every request times out" into "every machine sticks asleep".
   test("a reply outside the replay window still clears the offline mark", async () => {
     const deviceId = await newDeviceId();
-    const { client, waitFor } = startClient({ timeouts: { sessions: 250 } });
+    const rig = startClient({ timeouts: { sessions: SESSIONS_TIMEOUT_MS } });
+    const { client, waitFor } = rig;
     const daemon = await startFakeDaemon(relay, key, deviceId, machineInfo("Skewed"));
     try {
       await waitFor((s) => s.machines.some((m) => m.deviceId === deviceId && m.connected), "machine online");
-      await expect(client.request(deviceId, "sessions", {})).rejects.toMatchObject({ reason: "timeout" });
+      expect(await unanswered(rig, deviceId)).toMatchObject({ reason: "timeout" });
       expect(client.getState().machines.find((m) => m.deviceId === deviceId)?.connected).toBe(false);
 
       const stale: Plain = {
@@ -1391,7 +1437,7 @@ describe("auto", () => {
 
 describe("heartbeat", () => {
   test("relay pongs keep a healthy socket open across many beats", async () => {
-    const { client, waitFor } = startClient({ pingIntervalMs: 30, pongTimeoutMs: 500 });
+    const { client, waitFor } = startClient({ pingIntervalMs: 30, pongTimeoutMs: 1_000 });
     try {
       await waitFor((s) => s.status === "open", "open");
       const drops: string[] = [];
@@ -1400,8 +1446,10 @@ describe("heartbeat", () => {
         if (status !== "open") drops.push(status);
       });
       // Negative assertion: a spurious re-dial cannot be polled for, so several
-      // beats get room to misfire before the check.
-      await Bun.sleep(300);
+      // beats get room to misfire before the check. The window outlasts a pong
+      // deadline, which is itself long enough that a loaded runner's slow pong
+      // is not the misfire.
+      await Bun.sleep(1_500);
       unsubscribe();
       expect(drops).toEqual([]);
     } finally {

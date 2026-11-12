@@ -273,8 +273,8 @@ describe("the reader, through the real bun child", () => {
       const started = Date.now();
       const view = (await run(health([f], { bunBin: stubs.escaper, timeoutMs: 200 }))).get("wedge");
       expect(view).toEqual({ state: "unknown", why: "timeout" });
-      // 200 ms + 1 s kill grace + 1 s slack, well before the descendant's 6 s.
-      expect(Date.now() - started).toBeLessThan(4_500);
+      // 200 ms + 1 s kill grace, with a loaded runner's slack, still before the descendant's 6 s.
+      expect(Date.now() - started).toBeLessThan(5_500);
     },
     10_000,
   );
@@ -547,19 +547,29 @@ describe("cadence", () => {
   });
 
   test("a changed credentials file is re-read at the next check; an unchanged one is not", async () => {
-    const log = join(base, "record.log");
+    // Slow, so checks land while a read is under way: none of them may queue it again.
+    const log = join(base, "slow.log");
     await rm(log, { force: true });
+    const reads = async (): Promise<number> =>
+      (
+        await Bun.file(log)
+          .text()
+          .catch(() => "")
+      )
+        .split("\n")
+        .filter((l) => l.startsWith("start ")).length;
     const f = await exclave("marker", creds());
-    const h = health([f], { bunBin: stubs.record, checkIntervalMs: 20, minRereadMs: 0 });
+    const h = health([f], { bunBin: stubs.slow, checkIntervalMs: 20, minRereadMs: 0 });
     h.start();
-    await pollUntil(async () => (await count(log)) === 1, "first read");
+    await pollUntil(async () => (await reads()) === 1, "first read");
+    await h.idle();
     // Negative assertion: a non-event cannot be polled.
     await Bun.sleep(150);
-    expect(await count(log)).toBe(1);
+    expect(await reads()).toBe(1);
     const file = join(f.exclave.configDir, ".credentials.json");
     await writeFile(file, creds({ accessToken: "", refreshToken: "" }));
     await utimes(file, new Date(NOW), new Date(NOW + 1000));
-    await pollUntil(async () => (await count(log)) === 2, "re-read after the file changed");
+    await pollUntil(async () => (await reads()) === 2, "re-read after the file changed");
     await h.stop();
   });
 

@@ -902,6 +902,8 @@ describe("register rate limit", () => {
   let limited: TestRelay;
 
   beforeAll(async () => {
+    // Same settle as the sweep suite: the entry-cap suite's dispose() just ran.
+    await Bun.sleep(500);
     limited = await startRelay(TOKEN);
   });
 

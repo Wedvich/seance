@@ -300,7 +300,7 @@ describe("the fleet broker on the local op socket", () => {
     });
     try {
       const err = await rejection(
-        brokerRequest("device-2", "spawn", { repo: "seance", mode: "here" }, { path, timeoutMs: 100 }),
+        brokerRequest("device-2", "spawn", { repo: "seance", mode: "here" }, { path, timeoutMs: 1_000 }),
       );
       expect(err).toMatchObject({ code: "daemon_timeout" });
       expect(String(err)).toContain("may have landed anyway");

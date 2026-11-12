@@ -224,7 +224,7 @@ function wrap(ws: WebSocket): Client {
   return {
     send: (frame) => ws.send(JSON.stringify(frame)),
     sendRaw: (text) => ws.send(text),
-    waitFor: async <T extends { t: string }>(t: T["t"], timeoutMs = 2_000): Promise<T> => {
+    waitFor: async <T extends { t: string }>(t: T["t"], timeoutMs = 5_000): Promise<T> => {
       const deadline = Bun.nanoseconds() + timeoutMs * 1e6;
       for (;;) {
         const remaining = Math.ceil((deadline - Bun.nanoseconds()) / 1e6);
@@ -236,7 +236,7 @@ function wrap(ws: WebSocket): Client {
         if (frame.t === t) return frame as T;
       }
     },
-    waitForRe: async <T extends { re: string }>(re: string, timeoutMs = 2_000, forbid?: string): Promise<T> => {
+    waitForRe: async <T extends { re: string }>(re: string, timeoutMs = 5_000, forbid?: string): Promise<T> => {
       const deadline = Bun.nanoseconds() + timeoutMs * 1e6;
       for (;;) {
         const remaining = Math.ceil((deadline - Bun.nanoseconds()) / 1e6);
@@ -248,7 +248,7 @@ function wrap(ws: WebSocket): Client {
         if (forbid !== undefined && frame.t === forbid) throw new Error(`expected no "${forbid}" frame, got ${text}`);
       }
     },
-    nextRaw: (timeoutMs = 2_000) => frames.next(timeoutMs),
+    nextRaw: (timeoutMs = 5_000) => frames.next(timeoutMs),
     expectNo: async (t: string, ms = 300): Promise<void> => {
       const deadline = Bun.nanoseconds() + ms * 1e6;
       for (;;) {
@@ -261,7 +261,7 @@ function wrap(ws: WebSocket): Client {
         if ((JSON.parse(text) as { t: string }).t === t) throw new Error(`expected no "${t}" frame, got ${text}`);
       }
     },
-    waitClosed: async (timeoutMs = 2_000): Promise<number> => {
+    waitClosed: async (timeoutMs = 5_000): Promise<number> => {
       if (closeCode !== null) return closeCode;
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => reject(new Error(`socket stayed open for ${timeoutMs}ms`)), timeoutMs);

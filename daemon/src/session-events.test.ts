@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -730,6 +730,14 @@ describe("peer binding probe", () => {
 });
 
 describe("coalescing", () => {
+  // The window is the subject: on a real clock a loaded runner's gap between two sends outlasted it.
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
   const pane: BoundPane = { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" };
 
   function setup(coalesceMs: number) {
@@ -755,8 +763,9 @@ describe("coalescing", () => {
       await send({ state: "idle", prUrl: "https://github.com/a/b/pull/1" });
       await send({ state: "busy" });
       await send({ state: "needs-input" });
+      jest.advanceTimersByTime(149);
       expect(forwarded).toHaveLength(1);
-      await pollUntil(() => forwarded.length === 2, "the folded event");
+      jest.advanceTimersByTime(1);
       expect(forwarded.map((e) => [e.state, e.prUrl])).toEqual([
         ["busy", undefined],
         ["needs-input", "https://github.com/a/b/pull/1"],
@@ -773,7 +782,7 @@ describe("coalescing", () => {
       expect(forwarded.map((e) => [e.state, e.reason])).toEqual([["needs-input", "question"]]);
       await send({ state: "needs-input", reason: "question" });
       await send({ state: "needs-input" });
-      await pollUntil(() => forwarded.length === 2, "the folded event");
+      jest.advanceTimersByTime(150);
       expect(forwarded.map((e) => [e.state, e.reason])).toEqual([
         ["needs-input", "question"],
         ["needs-input", undefined],
@@ -790,7 +799,7 @@ describe("coalescing", () => {
       expect(forwarded.map((e) => [e.state, e.reason, e.tool])).toEqual([["needs-input", "permission", "Bash"]]);
       await send({ state: "needs-input", reason: "permission", tool: "Bash" });
       await send({ state: "busy" });
-      await pollUntil(() => forwarded.length === 2, "the folded event");
+      jest.advanceTimersByTime(150);
       expect(forwarded.map((e) => [e.state, e.reason, e.tool])).toEqual([
         ["needs-input", "permission", "Bash"],
         ["busy", undefined, undefined],
@@ -805,7 +814,7 @@ describe("coalescing", () => {
     await send({ state: "busy" });
     await send({ state: "idle" });
     events.stop();
-    await Bun.sleep(200); // past the window: a non-event can't be polled
+    jest.advanceTimersByTime(200);
     expect(forwarded).toHaveLength(1);
   });
 });

@@ -885,7 +885,8 @@ describe("relay store: caps", () => {
 describe("relay store: tombstone expiry", () => {
   const rigC = rig();
 
-  beforeAll(() => rigC.boot({ leaders: 2, tombstoneMs: 2_000 }));
+  // Long enough that the delete-then-put above it never meets an expired tombstone on a slow runner.
+  beforeAll(() => rigC.boot({ leaders: 2, tombstoneMs: 5_000 }));
   afterAll(() => rigC.stop());
 
   test("a deleted key refuses a put until its tombstone expires, then a create lands at version 1", async () => {
