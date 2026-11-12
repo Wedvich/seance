@@ -2,18 +2,24 @@ import {
   CAPABILITIES,
   continuationUnderway,
   DECISION_MAX_CANDIDATES,
+  PASS_CLOSE_GRACE_MS,
   parseSpillStamp,
+  queuedTask,
   quote,
+  successorPrompt,
+  successorSpec,
   type BranchState,
   type FleetQuotaEntry,
   type IdleTaskRef,
   type PrAlertStamp,
+  type PassResponse,
   type PrStatus,
   type PauseHold,
   type PauseRequest,
   type ResumeRequest,
   type SessionState,
   type SpillStamp,
+  type SuccessorTrigger,
 } from "@seance/shared";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -37,9 +43,11 @@ import {
   UNREACHABLE,
   WRITE_ATTEMPTS,
   type Fleet,
+  type PrHeadReading,
   type QueueStore,
   type StoreEntry,
   type StoreWrite,
+  type TaskCreateResult,
   type TaskSessionsReply,
   type UnreadableTask,
 } from "./ports.ts";
@@ -59,7 +67,7 @@ import {
 } from "./settle.ts";
 export { sourceOf } from "./settle.ts";
 import { advance, FINISHED, forgetPrompt, PLACED, type Reservation, type Task, type TaskSpec } from "./task.ts";
-import { traitsHolding } from "./traits.ts";
+import { traitsHolding, type TraitHold } from "./traits.ts";
 
 export type { SessionSource } from "./settle.ts";
 export type { PauseResult } from "./pause.ts";
@@ -101,9 +109,27 @@ export interface SchedulerOptions {
   readonly onIdleChange?: (taskId: string) => void;
   /**
    * A required trait first holds a task unplaced (`traitsHolding`), once per task and trait in this
-   * scheduler's memory: a new term tells again. The host logs it ("What to measure"); a throw goes to `onError`.
+   * scheduler's memory: a new term tells again, and a trait that changes why it holds does not. `why` is
+   * `absent` (no machine carries the trait) or `unhealthy` (the ones that do have a failing probe). The
+   * host logs it ("What to measure"); a throw goes to `onError`.
    */
-  readonly onTraitHeld?: (taskId: string, trait: string) => void;
+  readonly onTraitHeld?: (taskId: string, trait: string, why: TraitHold["why"]) => void;
+  /**
+   * Creates a task record at `expect: 0` through the leader's app-role leg: what `pass` makes its
+   * successor with, since the daemon leg may not create under `task:`. Absent, `pass` answers
+   * `successor_unsupported`.
+   */
+  readonly create?: (task: Task) => Promise<TaskCreateResult>;
+  /**
+   * Reads the head of a task's PR with the host's own `gh` (`PrHeadReading`), for `pass`. Absent, a
+   * task with a PR answers `pr_unreadable`.
+   */
+  readonly prHead?: (prUrl: string) => Promise<PrHeadReading>;
+  /**
+   * One line per audited or measured event (`audit pass`, `pass joined`, `successor settled`,
+   * `successor placed`): never a branch name, a PR head or a record.
+   */
+  readonly log?: (line: string) => void;
 }
 
 /**
@@ -133,6 +159,53 @@ export type RunNowResult =
       readonly ok: false;
       readonly code: "not_found" | "dispatching" | "finished" | "not_waiting" | "unplaceable" | "conflict";
     };
+
+/**
+ * `pass`: the old task and its successor, or why not. `ok` also answers a task that already carries
+ * `successor` (a repeat pass, or a retry after a timeout), with that successor. `unrecorded`: the
+ * term ended before the commit was written. The codes are `SCHEDULER_ERROR_CODES`' (`not_found` is
+ * `task_not_found` on the wire).
+ */
+export type PassResult =
+  | ({ readonly ok: true } & PassResponse)
+  | {
+      readonly ok: false;
+      readonly code:
+        | "not_found"
+        | "finished"
+        | "dispatching"
+        | "not_running"
+        | "needs_input"
+        | "here"
+        | "offline"
+        | "successor_unsupported"
+        | "account_unknown"
+        | "pr_unreadable"
+        | "pr_not_open"
+        | "branch_mismatch"
+        | "dirty_worktree"
+        | "detached_head"
+        | "default_branch"
+        | "push_rejected"
+        | "push_failed"
+        | "not_launched"
+        | "pass_failed"
+        | "conflict"
+        | "unrecorded";
+    };
+
+type PassFailure = Extract<PassResult, { readonly ok: false }>;
+
+/**
+ * What a session's own pass (`session-pass`) brings: the machine that sent it (the leader acts only for the
+ * task's own), the branch its daemon pushed and the commit it holds (so the push is not asked again), and
+ * what the session wrote for its successor, which is prompt text: never logged.
+ */
+export interface SessionPassInput {
+  readonly from: string;
+  readonly pushed: { readonly remoteBranch: string; readonly tip: string };
+  readonly record?: string;
+}
 
 /** What a settle by hand knew before its write: the task as it was, whether its session was live, and whether one was despawned. */
 interface ByHand {
@@ -172,7 +245,10 @@ export class Scheduler {
   readonly #onError: (err: unknown) => void;
   readonly #onAlert: (alert: SchedulerAlert) => void;
   readonly #onIdleChange: (taskId: string) => void;
-  readonly #onTraitHeld: (taskId: string, trait: string) => void;
+  readonly #onTraitHeld: (taskId: string, trait: string, why: TraitHold["why"]) => void;
+  readonly #create: SchedulerOptions["create"];
+  readonly #prHead: SchedulerOptions["prHead"];
+  readonly #log: (line: string) => void;
   readonly #held = new Map<string, Held>();
   readonly #pause: PauseRecord;
   readonly #spills: SpillAlerts;
@@ -231,6 +307,24 @@ export class Scheduler {
    */
   readonly #cancelling = new Map<string, number>();
   /**
+   * Task id → its `cancel` and `markDone` calls still out, counted or not (`#cancelling` is the subset that
+   * holds the despawn's own `ended`). A pass refuses `conflict` while one is out, before it pushes, before
+   * it creates and inside the commit write, so a stop that began first wins over a pass that starts or
+   * commits under its despawn, as one that begins after the commit does (`#counting`).
+   */
+  readonly #stopping = new Map<string, number>();
+  /** Task id → its pass, still out (`pass`): a second pass of the task waits for it and answers its result. */
+  readonly #passInFlight = new Map<string, Promise<PassResult>>();
+  /**
+   * Task id → when the leader closes its session itself, for a task carrying `successor` whose close has
+   * not landed. Entered before the commit write (so no pass sees a task carrying `successor` that no
+   * entry covers), kept while the task still carries it, and retried every pass once past `deadline`.
+   * Memory only: reconcile (`#closePasses`) re-enters every such task after a takeover.
+   */
+  readonly #passing = new Map<string, { deadline: number }>();
+  /** Tasks whose dependency chain was reported unreadable, so it is logged once per stall. */
+  readonly #stalled = new Set<string>();
+  /**
    * `#ending` notes made by a hold (`#yieldToCancel`), not by a session's own
    * deferred `ended`: only the latter means "ended first" to a cancel. Cleared
    * with the note (`#clearEnding`), so a retry after `despawn_failed` holds again.
@@ -280,6 +374,9 @@ export class Scheduler {
     this.#onAlert = options.onAlert ?? (() => {});
     this.#onIdleChange = options.onIdleChange ?? (() => {});
     this.#onTraitHeld = options.onTraitHeld ?? (() => {});
+    this.#create = options.create;
+    this.#prHead = options.prHead;
+    this.#log = options.log ?? (() => {});
     this.#pause = new PauseRecord(this.#store, this.#now, this.#onError);
     this.#spills = new SpillAlerts(this.#config.resetGraceMs);
     this.#sweptAt = this.#now();
@@ -731,27 +828,20 @@ export class Scheduler {
    * safe (the despawn finds no session).
    */
   async cancel(taskId: string): Promise<CancelResult> {
-    const held = !this.#ending.has(taskId) || this.#heldNotes.has(taskId);
-    if (held) this.#cancelling.set(taskId, (this.#cancelling.get(taskId) ?? 0) + 1);
-    let result: CancelResult;
-    try {
-      result = await this.#byHand(taskId, (current, { task, live }) => {
-        if (FINISHED.includes(current.state)) return { ok: true, task: current };
-        if (current.state === "reserved") return { ok: false, code: "dispatching" };
-        const leftRunning = task.state === "lost" && task.assignment !== undefined && !live;
-        // What was despawned, or found gone, must still be what is cancelled.
-        if (leftRunning ? current.state !== "lost" : current.assignment?.deviceId !== task.assignment?.deviceId) {
-          return null;
-        }
-        return advance(current, "cancelled", leftRunning ? { leftRunning: true } : {});
-      });
-    } finally {
-      if (held) {
-        const left = (this.#cancelling.get(taskId) ?? 1) - 1;
-        if (left > 0) this.#cancelling.set(taskId, left);
-        else this.#cancelling.delete(taskId);
-      }
-    }
+    const result = await this.#stopOut(taskId, () =>
+      this.#counting(taskId, () =>
+        this.#byHand(taskId, (current, { task, live }) => {
+          if (FINISHED.includes(current.state)) return { ok: true, task: current };
+          if (current.state === "reserved") return { ok: false, code: "dispatching" };
+          const leftRunning = task.state === "lost" && task.assignment !== undefined && !live;
+          // What was despawned, or found gone, must still be what is cancelled.
+          if (leftRunning ? current.state !== "lost" : current.assignment?.deviceId !== task.assignment?.deviceId) {
+            return null;
+          }
+          return advance(current, "cancelled", leftRunning ? { leftRunning: true } : {});
+        }),
+      ),
+    );
     // A settle held for this cancel waits on the machine's answer: ask now, not at the next sweep.
     if (!result.ok && result.code === "despawn_failed" && this.#heldNotes.has(taskId)) {
       this.tick().catch(this.#onError);
@@ -759,11 +849,45 @@ export class Scheduler {
     return result;
   }
 
+  /** `run` with a stop (`cancel`, `markDone`) registered for `taskId` (`#stopping`), whatever it returns or throws. */
+  async #stopOut<T>(taskId: string, run: () => Promise<T>): Promise<T> {
+    this.#stopping.set(taskId, (this.#stopping.get(taskId) ?? 0) + 1);
+    try {
+      return await run();
+    } finally {
+      const left = (this.#stopping.get(taskId) ?? 1) - 1;
+      if (left > 0) this.#stopping.set(taskId, left);
+      else this.#stopping.delete(taskId);
+    }
+  }
+
+  /**
+   * `run` with a cancel counted out for `taskId` (`#cancelling`), unless an `ended` was already deferred
+   * on the machine before it began (that one ended first, and is not held): what `cancel` and the
+   * `markDone` of a task carrying `successor` share, so the despawn's own `ended` settles neither as
+   * `failed`, `done` by session or `superseded`.
+   */
+  async #counting<T>(taskId: string, run: () => Promise<T>): Promise<T> {
+    const held = !this.#ending.has(taskId) || this.#heldNotes.has(taskId);
+    if (held) this.#cancelling.set(taskId, (this.#cancelling.get(taskId) ?? 0) + 1);
+    try {
+      return await run();
+    } finally {
+      if (held) {
+        const left = (this.#cancelling.get(taskId) ?? 1) - 1;
+        if (left > 0) this.#cancelling.set(taskId, left);
+        else this.#cancelling.delete(taskId);
+      }
+    }
+  }
+
   /**
    * `next`, unless it settles a task whose cancel is out (`#cancelling`) as its
    * session ended — `failed`, or `done` by `session`: the cancel's own despawn
    * ends that session, and its write says `cancelled`. A merge and the
-   * session's own `done` report are its statement, not the despawn's. The
+   * session's own `done` report are its statement, not the despawn's. A
+   * `superseded` settle is held the same way: a task a person cancels or marks done after a pass's
+   * commit ends as they said, and its successor fails `pass_abandoned`. The
    * state stands and only the facts `next` carried are written (null when
    * none is new). Noted in `#ending`, so a cancel that writes nothing
    * (`despawn_failed`) leaves the next pass to ask its machine again.
@@ -771,9 +895,11 @@ export class Scheduler {
   #yieldToCancel(current: Task, next: Task | null): Task | null {
     const id = current.id;
     if (next === null || current.state === "reserved" || !this.#cancelling.has(id)) return next;
-    if (next.state !== "failed" && (next.state !== "done" || next.doneBy === "merged" || next.doneBy === "reported")) {
-      return next;
-    }
+    const heldEnd =
+      next.state === "failed" ||
+      next.state === "superseded" ||
+      (next.state === "done" && next.doneBy !== "merged" && next.doneBy !== "reported");
+    if (!heldEnd) return next;
     if (!this.#ending.has(id)) this.#ending.set(id, this.#now());
     // Even for a note an `ended` made during the cancel: it began held, so a retry holds too.
     this.#heldNotes.add(id);
@@ -863,7 +989,7 @@ export class Scheduler {
    * and then lost the right to write `done` is `unrecorded`, as for `cancel`.
    */
   async markDone(taskId: string): Promise<MarkDoneResult> {
-    return this.#byHand(taskId, (current, { task, live, despawned }) => {
+    const decide = (current: Task, { task, live, despawned }: ByHand): Task | ByHandResult | null => {
       // The despawn's `ended` event may have settled it first: unlike for cancel, that is the answer.
       if (FINISHED.includes(current.state))
         return despawned ? { ok: true, task: current } : { ok: false, code: "finished" };
@@ -874,7 +1000,13 @@ export class Scheduler {
       if (live && current.assignment?.deviceId !== task.assignment?.deviceId) return null;
       const leftRunning = !live && current.state === "lost";
       return advance(current, "done", { doneBy: "manual", ...(leftRunning ? { leftRunning: true } : {}) });
-    });
+    };
+    // A passed task's despawn ends its session as a cancel's does, and would settle it `superseded` first; so
+    // would one whose pass is in flight, which may commit while this despawn runs.
+    const counted = this.task(taskId)?.successor !== undefined || this.#passInFlight.has(taskId);
+    return this.#stopOut(taskId, () =>
+      counted ? this.#counting(taskId, () => this.#byHand(taskId, decide)) : this.#byHand(taskId, decide),
+    );
   }
 
   /**
@@ -900,6 +1032,273 @@ export class Scheduler {
     // A pass may have placed it meanwhile, which is what was asked.
     const current = this.task(taskId);
     return current?.state === "reserved" ? { ok: true, task: current } : { ok: false, code: "conflict" };
+  }
+
+  /**
+   * Passes a running task to a successor (DESIGN.md, "Passing to a successor"): its branch is pushed by
+   * its machine, a queued successor is created and held until the old task is `superseded`, the pass is
+   * committed on the old task (`successor`), its session is closed and it settles `superseded`. One pass
+   * per task at a time: a second call waits for the first and answers its result, and a task that
+   * already carries `successor` answers `ok` with it, so a client that timed out can ask again.
+   * Refused, with nothing written beyond a pushed branch, before the successor exists; after the commit
+   * a failed close still answers `ok` (the old task stays `running` with `successor` set, and `#closePasses`
+   * retries it every pass). A `cancel` or `markDone` out for the task is `conflict` (`#stopping`).
+   *
+   * With `session` (the session's own pass, `session-pass`) the machine already pushed, so the push is skipped and
+   * its branch is compared with the PR's head instead; a `needs-input` task is accepted, since the session
+   * calling the tool is waiting on nobody; the record becomes the successor's prompt; and the close is the
+   * daemon's, at the session's turn end, armed by `pass-close` once the commit is written. Only the
+   * task's own machine may ask.
+   */
+  pass(taskId: string, trigger: SuccessorTrigger = "manual", session?: SessionPassInput): Promise<PassResult> {
+    const joined = this.#passInFlight.get(taskId);
+    if (joined !== undefined) {
+      this.#log(`pass joined task=${quote(taskId)}`);
+      return joined;
+    }
+    const run = this.#runPass(taskId, session === undefined ? trigger : "session", session).finally(() =>
+      this.#passInFlight.delete(taskId),
+    );
+    this.#passInFlight.set(taskId, run);
+    return run;
+  }
+
+  #passed(task: Task, successorId: string, created?: Task): PassResult {
+    return { ok: true, task, successorId, successor: this.task(successorId) ?? created ?? null };
+  }
+
+  async #runPass(taskId: string, trigger: SuccessorTrigger, session?: SessionPassInput): Promise<PassResult> {
+    const task = this.task(taskId);
+    if (task === undefined) return { ok: false, code: "not_found" };
+    if (task.successor !== undefined) return this.#passed(task, task.successor);
+    if (FINISHED.includes(task.state)) return { ok: false, code: "finished" };
+    if (task.state === "reserved") return { ok: false, code: "dispatching" };
+    // The session's own pass is let through a `needs-input` task: its caller is waiting on nobody, and the
+    // leader's view can lag the answer by an event, which would silently drop a pass already pushed.
+    if (task.state === "needs-input" && session === undefined) return { ok: false, code: "needs_input" };
+    const { assignment } = task;
+    if ((task.state !== "running" && task.state !== "needs-input") || assignment === undefined) {
+      return { ok: false, code: "not_running" };
+    }
+    if (task.spec.mode === "here") return { ok: false, code: "here" };
+    if (session !== undefined && session.from !== assignment.deviceId) {
+      // Nothing to answer: the frame is fire-and-forget, and another machine has no say over this task.
+      this.#log(`pass refused op=session-pass task=${quote(taskId)} from=${quote(session.from)} outcome=not_holder`);
+      return { ok: false, code: "conflict" };
+    }
+    // A cancel or mark-done already out wins: its despawn would otherwise end a session this pass then supersedes.
+    if (this.#stopping.has(taskId)) return { ok: false, code: "conflict" };
+    const fleet = this.#fleet;
+    const create = this.#create;
+    // Before any push: an older host answers an unknown op `invalid_request`, which would read as a failure to push.
+    if (create === undefined || (session === undefined ? fleet.pushBranch : fleet.passClose) === undefined) {
+      return { ok: false, code: "successor_unsupported" };
+    }
+    const machine = fleet.machines().find((m) => m.deviceId === assignment.deviceId);
+    if (machine === undefined || !machine.connected) return { ok: false, code: "offline" };
+    const needed = session === undefined ? CAPABILITIES.successor : CAPABILITIES.successorSelf;
+    if (machine.capabilities?.includes(needed) !== true) return { ok: false, code: "successor_unsupported" };
+    const account = machine.exclaves?.find((x) => x.id === assignment.exclave)?.accountId;
+    if (account === undefined || account === null) return { ok: false, code: "account_unknown" };
+
+    let expect: string | undefined;
+    if (task.prUrl !== undefined) {
+      const prHead = this.#prHead;
+      if (prHead === undefined) return { ok: false, code: "pr_unreadable" };
+      const reading = await prHead(task.prUrl);
+      if (reading.kind === "unreadable") return { ok: false, code: "pr_unreadable" };
+      if (reading.kind === "read") {
+        if (reading.crossRepository) return { ok: false, code: "branch_mismatch" };
+        if (reading.state === "merged" || reading.state === "closed") return { ok: false, code: "pr_not_open" };
+        // The session's push has happened: all that is left to say is that it went to another branch than the PR's.
+        if (session !== undefined && reading.head !== session.pushed.remoteBranch) {
+          return { ok: false, code: "branch_mismatch" };
+        }
+        expect = reading.head;
+      }
+    }
+
+    let pushed: { readonly remoteBranch: string; readonly tip: string };
+    if (session !== undefined) {
+      pushed = session.pushed;
+    } else {
+      const pushBranch = fleet.pushBranch;
+      if (pushBranch === undefined) return { ok: false, code: "successor_unsupported" };
+      const reply = await pushBranch.call(fleet, assignment.deviceId, {
+        taskId,
+        ...(expect === undefined ? {} : { expect }),
+      });
+      if (!reply.ok) return passPushFailure(reply.code);
+      pushed = reply;
+    }
+
+    // The pushes and reads above took time: the task must still be the one that was checked.
+    const current = this.task(taskId);
+    const at = current?.assignment;
+    if (
+      current === undefined ||
+      (current.state !== "running" && !(session !== undefined && current.state === "needs-input")) ||
+      current.successor !== undefined ||
+      at === undefined ||
+      at.deviceId !== assignment.deviceId ||
+      this.#stopping.has(taskId)
+    ) {
+      return { ok: false, code: "conflict" };
+    }
+    const built = successorPrompt({
+      task: current,
+      remoteBranch: pushed.remoteBranch,
+      tip: pushed.tip,
+      ...(session?.record === undefined ? {} : { record: session.record }),
+    });
+    if (built.recordCut) this.#log(`pass record cut task=${quote(taskId)}`);
+    const spec: TaskSpec = {
+      ...successorSpec({ ...current, assignment: at }, account, trigger, built.prompt),
+      client: SCHEDULER_CLIENT,
+    };
+    const successor: Task = {
+      ...queuedTask(spec, this.#now()),
+      ...(current.prUrl === undefined ? {} : { prUrl: current.prUrl }),
+      ...(current.prs === undefined ? {} : { prs: current.prs }),
+    };
+    const made = await create(successor);
+    if (!made.ok) return { ok: false, code: "pass_failed" };
+    // Held now, not at the store's nudge: admission keeps it `blocked` from this pass on. A failed read is not a
+    // failed pass: it exists, the commit below names it, and a retry would only leave this one an orphan.
+    await this.refresh(successor.id).catch(this.#onError);
+
+    // Entered before the commit: no pass may see a task carrying `successor` that no entry covers.
+    this.#passing.set(taskId, { deadline: this.#now() + PASS_CLOSE_GRACE_MS });
+    let committed: Task | null = null;
+    try {
+      committed = await this.#update(taskId, (c) =>
+        (c.state === "running" || (session !== undefined && c.state === "needs-input")) &&
+        c.successor === undefined &&
+        c.assignment?.deviceId === assignment.deviceId &&
+        !this.#stopping.has(taskId)
+          ? { ...c, successor: successor.id }
+          : null,
+      );
+    } catch (err) {
+      this.#passing.delete(taskId);
+      if (!(err instanceof StoreRevoked)) throw err;
+      // The successor exists but its predecessor never named it: admission fails it `pass_abandoned` once this one ends.
+      this.#onError(err);
+      return { ok: false, code: "unrecorded" };
+    }
+    if (committed === null) {
+      this.#passing.delete(taskId);
+      return { ok: false, code: "conflict" };
+    }
+    this.#log(`audit pass task=${quote(taskId)} successor=${quote(successor.id)} trigger=${trigger}`);
+
+    if (session !== undefined) {
+      // The daemon closes at the turn's end, the gentler close; the deadline (`#closePasses`) backs anything
+      // that does not answer, and a session already gone settles through its `ended`.
+      await this.#armClose(assignment.deviceId, taskId);
+      return this.#passed(this.task(taskId) ?? committed, successor.id, successor);
+    }
+    const closed = await this.#endSession(committed);
+    if (!closed.ok) {
+      const entry = this.#passing.get(taskId);
+      if (entry !== undefined) entry.deadline = this.#now();
+      return this.#passed(this.task(taskId) ?? committed, successor.id, successor);
+    }
+    await this.#settlePassed(taskId);
+    return this.#passed(this.task(taskId) ?? committed, successor.id, successor);
+  }
+
+  /** `pass-close`: the daemon holding a session-passed task may close it at its turn's end. Best effort; the deadline backs it. */
+  async #armClose(deviceId: string, taskId: string): Promise<void> {
+    const passClose = this.#fleet.passClose;
+    if (passClose === undefined) return;
+    try {
+      const reply = await passClose.call(this.#fleet, deviceId, { taskId });
+      this.#log(`audit pass-close task=${quote(taskId)} outcome=${reply.ok ? "armed" : reply.code}`);
+      // No live pane carries the task: its session is already gone, so no turn's end is coming for the daemon to
+      // close at, and waiting out the grace only holds the successor blocked. The next tick's `#closePass` settles it.
+      if (!reply.ok && reply.code === "no_pane") {
+        const entry = this.#passing.get(taskId);
+        if (entry !== undefined) entry.deadline = this.#now();
+      }
+    } catch (err) {
+      this.#onError(err);
+    }
+  }
+
+  /**
+   * A passed task's session is closed: it settles `superseded`, unless a cancel or a mark-done is out for it
+   * (`#yieldToCancel`) or already settled it, or the despawn's own `ended` got there first. A term that ends
+   * before the write leaves it to reconcile (`#closePasses`) in the next one, which closes again harmlessly.
+   */
+  async #settlePassed(taskId: string): Promise<void> {
+    try {
+      await this.#update(taskId, (c) => (passCarried(c) ? this.#yieldToCancel(c, advance(c, "superseded")) : null));
+    } catch (err) {
+      if (!(err instanceof StoreRevoked)) throw err;
+      this.#onError(err);
+      return;
+    }
+    const after = this.task(taskId);
+    if (after === undefined || !passCarried(after)) this.#passing.delete(taskId);
+  }
+
+  /**
+   * Passes whose close has not landed: a task carrying `successor` that is still `running`, `needs-input`
+   * or `lost` has its session closed through `#endSession` once its entry's deadline passes, every pass
+   * until it settles. Every such task not in `#passing` or `#passInFlight` gets an entry with no wait
+   * first (reconcile: a takeover between the commit and the close, or a close that never landed). An entry
+   * is dropped once its task no longer carries `successor` in one of those states; a `lost` task on a
+   * machine that is not connected waits for it or for its expiry (`expiry`: `superseded` with `leftRunning`).
+   */
+  async #closePasses(): Promise<void> {
+    const now = this.#now();
+    const rearmed: Task[] = [];
+    for (const task of this.tasks()) {
+      if (!passCarried(task) || this.#passing.has(task.id) || this.#passInFlight.has(task.id)) continue;
+      // A session's own pass is closed by its daemon at the turn's end, so reconcile asks again (idempotent)
+      // and waits a fresh grace; anything else is closed at once, as an outside pass is.
+      if (this.#asksItsDaemon(task)) {
+        this.#passing.set(task.id, { deadline: now + PASS_CLOSE_GRACE_MS });
+        rearmed.push(task);
+      } else {
+        this.#passing.set(task.id, { deadline: now });
+      }
+    }
+    // Not awaited: the entry's deadline is already set, so nothing here depends on the answer, and a daemon that is
+    // connected but slow must not hold the tick's admission and dispatch for its 10 s (`#armClose` never rejects).
+    for (const t of rearmed) void this.#armClose(t.assignment?.deviceId ?? "", t.id);
+    const due: string[] = [];
+    for (const [id, entry] of this.#passing) {
+      const task = this.task(id);
+      if (task === undefined || !passCarried(task)) this.#passing.delete(id);
+      else if (entry.deadline <= now && !this.#passInFlight.has(id)) due.push(id);
+    }
+    await Promise.all(due.map((id) => this.#closePass(id)));
+  }
+
+  /** Whether a passed task's close is its daemon's to make: a session-triggered (or unreadable) successor, its machine 2b and connected. */
+  #asksItsDaemon(task: Task): boolean {
+    const deviceId = task.assignment?.deviceId;
+    if (deviceId === undefined || task.successor === undefined || this.#fleet.passClose === undefined) return false;
+    const trigger = this.task(task.successor)?.spec.succeeds?.trigger;
+    if (trigger !== undefined && trigger !== "session") return false;
+    return this.#fleet
+      .machines()
+      .some(
+        (m) => m.deviceId === deviceId && m.connected && m.capabilities?.includes(CAPABILITIES.successorSelf) === true,
+      );
+  }
+
+  async #closePass(id: string): Promise<void> {
+    const task = this.task(id);
+    if (task === undefined || !passCarried(task)) return;
+    const deviceId = task.assignment?.deviceId;
+    if (task.state === "lost" && (deviceId === undefined || !this.#connected(deviceId))) return;
+    const closed = await this.#endSession(task);
+    // Kept, so the next pass tries again.
+    if (!closed.ok) return;
+    await this.#settlePassed(id);
   }
 
   #connected(deviceId: string): boolean {
@@ -946,6 +1345,7 @@ export class Scheduler {
     await this.#markContinued();
     await this.#alertInput();
     await this.#escalate();
+    await this.#closePasses();
     // A check ticks again once its answer is settled, so a predecessor it settled releases or fails its dependents then.
     await this.#admit();
     // Again: a task admission just released may already be past its bound, and must not launch.
@@ -1014,12 +1414,12 @@ export class Scheduler {
   #tellTraitHeld(task: Task, decision: Decision): void {
     const requires = task.spec.requires ?? [];
     if (requires.length === 0) return;
-    for (const trait of traitsHolding(decision, requires)) {
+    for (const { trait, why } of traitsHolding(decision, requires)) {
       const told = this.#traitHeld.get(task.id) ?? new Set<string>();
       if (told.has(trait)) continue;
       this.#traitHeld.set(task.id, told.add(trait));
       try {
-        this.#onTraitHeld(task.id, trait);
+        this.#onTraitHeld(task.id, trait, why);
       } catch (err) {
         this.#onError(err);
       }
@@ -1128,12 +1528,23 @@ export class Scheduler {
    * re-checks that its task is still waiting where it was.
    */
   async #admit(): Promise<void> {
-    const moves = admission(this.tasks(), new Set(this.#unreadable.keys()), this.#now());
+    const stalled = new Set<string>();
+    const moves = admission(this.tasks(), new Set(this.#unreadable.keys()), this.#now(), (id) => {
+      stalled.add(id);
+      if (this.#stalled.has(id)) return;
+      this.#stalled.add(id);
+      this.#log(`dependency chain unreadable task=${quote(id)}`);
+    });
+    // Only a chain still unreadable stays noted: a pruned task leaves it, and a later stall is logged again.
+    for (const id of this.#stalled) if (!stalled.has(id)) this.#stalled.delete(id);
     await Promise.all(
       [...moves].map(([id, move]) =>
         this.#update(id, (current) => {
           if ((current.state !== "queued" && current.state !== "blocked") || current.state === move.state) return null;
-          return advance(current, move.state, move.state === "failed" ? { failure: move.failure } : {});
+          if (move.state === "failed") return advance(current, move.state, { failure: move.failure });
+          // A successor whose predecessor merged while it waited: its work is done, and nothing was placed.
+          if (move.state === "done") return advance(current, move.state, { doneBy: move.doneBy });
+          return advance(current, move.state);
         }),
       ),
     );
@@ -1416,6 +1827,7 @@ export class Scheduler {
           this.#held.set(id, { version: write.version, task: next });
           // A stay at the prompt ends with `running`: one back from `lost` starts its grace over.
           if (held.task.state !== "running" || next.state !== "running") this.#idleSince.delete(id);
+          this.#noteSuccessor(held.task, next);
           return next;
         }
         if (write.code === "too_large" && !trim && next.decision !== undefined) {
@@ -1434,6 +1846,7 @@ export class Scheduler {
         // lost reply, is our write — adopted as written, or the change would decline itself.
         if (write.code === "indeterminate" && fresh.body !== undefined && fresh.version === held.version + 1) {
           this.#held.set(id, { version: fresh.version, task: next });
+          this.#noteSuccessor(held.task, next);
           return next;
         }
         this.#keep(fresh);
@@ -1441,6 +1854,23 @@ export class Scheduler {
       }
       return null;
     });
+  }
+
+  /**
+   * The two measures a successor gives (DESIGN.md, "Passing to a successor"): how long it waited for a
+   * session of its own, and how it ended. Ids and states only.
+   */
+  #noteSuccessor(before: Task, after: Task): void {
+    if (after.spec.succeeds === undefined) return;
+    // A successor may land straight in `needs-input`: its first event is that one.
+    if (before.state === "reserved" && (after.state === "running" || after.state === "needs-input")) {
+      this.#log(`successor placed task=${quote(after.id)} after=${Math.max(0, this.#now() - after.createdAt)}`);
+      return;
+    }
+    if (FINISHED.includes(before.state) || !FINISHED.includes(after.state)) return;
+    const by = after.doneBy === undefined ? "" : ` doneBy=${after.doneBy}`;
+    const why = after.failure === undefined ? "" : ` failure=${quote(after.failure.code)}`;
+    this.#log(`successor settled task=${quote(after.id)} state=${after.state}${by}${why}`);
   }
 
   /** A record as read: held when it opened, set aside with its reason when it did not. */
@@ -1478,6 +1908,32 @@ function stamped(task: Task, at: Reservation, stamp: SpillStamp): Task | null {
     held.spending === stamp.spending;
   if (!mine || same) return null;
   return { ...task, spillAlert: stamp };
+}
+
+/** A passed task whose session is still to close: it carries `successor` and has not settled `superseded`. */
+function passCarried(task: Task): boolean {
+  return (
+    task.successor !== undefined && (task.state === "running" || task.state === "needs-input" || task.state === "lost")
+  );
+}
+
+/**
+ * A `push-branch` that did not push, as a pass's refusal. Anything the leader did not ask for or
+ * cannot act on (`no_upstream` is the session's own path's alone; `invalid_request` and the transport
+ * codes mean the daemon did not take the request) is `push_failed`: the machine may or may not have pushed.
+ */
+function passPushFailure(code: string): PassFailure {
+  switch (code) {
+    case "not_launched":
+    case "detached_head":
+    case "default_branch":
+    case "dirty_worktree":
+    case "branch_mismatch":
+    case "push_rejected":
+      return { ok: false, code };
+    default:
+      return { ok: false, code: "push_failed" };
+  }
 }
 
 /** Whether an idle clock started on `deviceId` still speaks for `task`: running there, as it was. */

@@ -78,6 +78,8 @@ interface Conn {
   outbound: Buffer;
   /** The connecting process as the kernel recorded it at connect(2); null where the host cannot say. */
   readonly peer: number | null;
+  /** Aborts when the peer goes away: an act that is not yet done is then not worth finishing (a pass is never sent to no one). */
+  readonly gone: AbortController;
 }
 
 export interface LocalSocketOpts {
@@ -93,7 +95,7 @@ export interface LocalSocketOpts {
    * The session-event ingest (`createSessionEvents(...).handle`). Absent,
    * such frames are answered `unsupported`.
    */
-  readonly sessionEvents?: (raw: unknown, peer: number | null) => Promise<SessionEventReply>;
+  readonly sessionEvents?: (raw: unknown, peer: number | null, caller?: AbortSignal) => Promise<SessionEventReply>;
   readonly path?: string;
 }
 
@@ -196,7 +198,7 @@ async function dispatchSessionEvent(
 ): Promise<void> {
   let reply: SessionEventReply;
   try {
-    reply = ingest === undefined ? { ok: false, code: "unsupported" } : await ingest(raw, conn.peer);
+    reply = ingest === undefined ? { ok: false, code: "unsupported" } : await ingest(raw, conn.peer, conn.gone.signal);
   } catch (err) {
     log.error(`local socket: session-event ingest crashed: ${String(err)}`);
     reply = { ok: false, code: "invalid" };
@@ -291,12 +293,19 @@ export async function startLocalSocket(opts: LocalSocketOpts): Promise<LocalSock
   const handlers = {
     open: (sock: Socket<undefined>): void => {
       // Asked at once, while the fd is certainly open; only an event uses it.
-      conns.set(sock, { inbound: EMPTY, outbound: EMPTY, peer: peerPid(socketFd(sock)) });
+      conns.set(sock, {
+        inbound: EMPTY,
+        outbound: EMPTY,
+        peer: peerPid(socketFd(sock)),
+        gone: new AbortController(),
+      });
     },
     close: (sock: Socket<undefined>): void => {
+      conns.get(sock)?.gone.abort();
       conns.delete(sock);
     },
     error: (sock: Socket<undefined>): void => {
+      conns.get(sock)?.gone.abort();
       conns.delete(sock);
     },
     drain: (sock: Socket<undefined>): void => {

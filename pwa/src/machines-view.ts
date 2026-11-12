@@ -5,6 +5,7 @@ import {
   type KnownAccount,
   effectivePct,
   exclaveAuth,
+  exclaveTraitHealth,
   lastHeardAt,
   liveStatus,
   METRIC_NAMES,
@@ -51,6 +52,8 @@ export interface ExclaveRow {
   readonly sessions: number | null;
   /** A login that needs attention: lapsed (err) or expiring within `AUTH_EXPIRING_MS` (warn). Null for ok and for unknown: unread says nothing. */
   readonly auth: { readonly text: string; readonly level: "err" | "warn" } | null;
+  /** The traits whose probe reads failing here (`exclaveTraitHealth`); unchecked says nothing, as unread auth does. */
+  readonly probes: { readonly text: string; readonly level: "err" } | null;
 }
 
 export interface MachineCard {
@@ -157,6 +160,15 @@ function authNote(machine: Machine, index: number, now: number): ExclaveRow["aut
   return { text: `login expires in ${text}`, level: "warn" };
 }
 
+/** The exclave's failing probes, by trait: "atlas probe failing", "atlas, az probes failing". */
+function probeNote(machine: Machine, exclave: ExclaveInfo, index: number, now: number): ExclaveRow["probes"] {
+  const failing = (exclave.traits ?? []).filter(
+    (trait) => exclaveTraitHealth(machine, index, trait, now) === "failing",
+  );
+  if (failing.length === 0) return null;
+  return { text: `${failing.join(", ")} ${failing.length === 1 ? "probe" : "probes"} failing`, level: "err" };
+}
+
 /** An account as the cards name it, for a screen that holds only its id (a pause's hold). */
 export function accountDisplayName(
   known: readonly KnownAccount[],
@@ -258,6 +270,7 @@ function machineCard(
       account: accountLabel(exclave, aliases, known),
       sessions: status?.sess?.[index] ?? null,
       auth: authNote(machine, index, now),
+      probes: probeNote(machine, exclave, index, now),
     })),
     charts: servesMetrics(machine),
   };

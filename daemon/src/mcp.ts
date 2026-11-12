@@ -6,12 +6,14 @@ import {
   accountNameIn,
   CAPABILITIES,
   fleetTraits,
+  traitHealthByMachine,
   AUTONOMY_LEVELS,
   autonomyOf,
   DEFAULT_AUTONOMY,
   withAutonomy,
   type AutonomyLevel,
   continueOffer,
+  passOffer,
   type OfferContext,
   DEP_AFTER,
   knownAccounts,
@@ -26,6 +28,7 @@ import {
   schedulerErrorText,
   schedulerRefusal,
   schedulerRole,
+  SUCCESSOR_RECORD_MAX,
   taskFailureText,
   TASK_FAILURE_LIMITS,
   TASK_REQUEST_LIMITS,
@@ -48,6 +51,8 @@ import {
   type TaskDep,
   type TaskUntil,
   exclaveAuth,
+  exclaveTraitHealth,
+  exclaveTraitUnchecked,
   lastHeardAt,
   sleepingMachine,
 } from "@seance/shared";
@@ -66,6 +71,7 @@ import {
   resolveOrigin,
   resolvePlacement,
   specError,
+  passAuto,
   startAuto,
   startGateError,
   startQueuedAuto,
@@ -94,7 +100,7 @@ import {
 } from "./fleet.ts";
 import { recordedBunCheck, resolvedMain } from "./link.ts";
 import { localRequest, localSocketReachable, LocalUnavailable } from "./local-client.ts";
-import { handOff, reportDone } from "./report-done.ts";
+import { handOff, passToSuccessor, reportDone } from "./report-done.ts";
 import { readState } from "./state.ts";
 
 /**
@@ -203,6 +209,22 @@ interface ToolResult {
 }
 
 const HAND_OFF_TOOL = "hand_off_task";
+const PASS_SELF_TOOL = "pass_to_successor";
+
+/**
+ * How long `pass_to_successor` looks for the leader's confirmation after its daemon pushed and reported:
+ * a commit point is written within seconds of a healthy leader's receipt, but the PR head read and the
+ * successor's create run first.
+ */
+export interface PassPoll {
+  readonly windowMs: number;
+  readonly everyMs: number;
+}
+const PASS_POLL: PassPoll = { windowMs: 30_000, everyMs: 1_000 };
+
+/** Said whatever the confirmation: the session is closed at its turn's end, or not at all, and nothing after the push is carried. */
+const END_THE_TURN =
+  "Do no further work and end your turn now with one line: if the pass stands, this session is closed when the turn ends, and anything committed after the push is not carried.";
 
 const textResult = (text: string): ToolResult => ({ content: [{ type: "text", text }] });
 const errorResult = (text: string): ToolResult => ({ content: [{ type: "text", text }], isError: true });
@@ -297,11 +319,19 @@ function describeMachine(
       : {
           exclaves: machine.exclaves.map((info, index) => {
             const auth = exclaveAuth(machine, index, now);
+            const traits = info.traits ?? [];
+            const failing = traits.filter((trait) => exclaveTraitHealth(machine, index, trait, now) === "failing");
+            // Only a probe the status lists as unread: a probe-less trait, or a machine offline or stale, has none to await.
+            const unchecked = traits.filter((trait) => exclaveTraitUnchecked(machine, index, trait, now));
             return {
               id: info.id,
               ...(info.accountId === null ? {} : { accountId: info.accountId }),
               ...(info.email === undefined ? {} : { email: info.email }),
               ...(info.traits === undefined ? {} : { traits: info.traits }),
+              ...(info.keepFree === undefined ? {} : { keepFree: info.keepFree }),
+              // A probe reading failing holds a task needing the trait off this exclave; unchecked still routes.
+              ...(failing.length === 0 ? {} : { traitsFailing: failing }),
+              ...(unchecked.length === 0 ? {} : { traitsUnchecked: unchecked }),
               ...(info.accountId === null ? {} : describeName(names, info.accountId)),
               // A signed-out exclave has no login to read: the scheduler already filters it as `auth_missing`.
               ...(info.accountId === null ? {} : { auth: auth.state }),
@@ -423,7 +453,7 @@ const AUTO_LIMITS =
 
 /** What `schedulerFailureText` and `olderDaemonText` name a scheduler call by. */
 type SchedulerCall = "get_queue" | "cancel_task";
-type SchedulerTool = "spawn_session" | "queue_batch" | "continue_task" | "start_task" | SchedulerCall;
+type SchedulerTool = "spawn_session" | "queue_batch" | "continue_task" | "start_task" | "pass_task" | SchedulerCall;
 
 /**
  * A keyless box's daemon brokers the scheduler (DESIGN.md "Fleet broker"), so a
@@ -638,7 +668,7 @@ const REQUIRES_FIELD = z
   .max(TASK_SPEC_LIMITS.requires)
   .optional()
   .describe(
-    `Traits the machine must declare (list_machines shows each exclave's \`traits\`): the task is placed only on an exclave carrying every one, at most ${TASK_SPEC_LIMITS.requires}. A trait no machine declares is refused, naming the ones that exist; so is a combination no exclave the task may reach carries. A trait on a machine that is offline makes the task wait for it`,
+    `Traits the machine must declare (list_machines shows each exclave's \`traits\`): the task is placed only on an exclave carrying every one, at most ${TASK_SPEC_LIMITS.requires}. A trait no machine declares is refused, naming the ones that exist; so is a combination no exclave the task may reach carries. A trait on a machine that is offline makes the task wait for it. A trait whose probe is failing on every exclave that carries it holds the task there too (list_machines shows traitsFailing; get_queue names the machines under requires[].failing)`,
   );
 
 const REPORTED_GATE =
@@ -728,6 +758,8 @@ function describeTask(
   offer: OfferContext,
   idle: ReadonlySet<string>,
   traits: ReadonlyMap<string, readonly string[]>,
+  leaderSuccessor: boolean,
+  now: number,
 ): Record<string, unknown> {
   const placement = placementOf(task, machines);
   const pin = describePin(task, machines, names);
@@ -745,10 +777,16 @@ function describeTask(
     ...(placement === null ? {} : { placement }),
     ...(pin === null ? {} : { pin }),
     ...(spec.avoid === undefined ? {} : { avoid: spec.avoid.map((id) => describeDevice(task, machines, id)) }),
-    // Where each trait is declared, so a task held for one reads with the machines that could end the wait.
+    // Where each trait is declared, so a task held for one reads with the machines that could end the wait,
+    // and which of them have a failing probe on every exclave that carries it ("MacBook's probe is failing").
     ...(spec.requires === undefined
       ? {}
-      : { requires: spec.requires.map((trait) => ({ trait, machines: traits.get(trait) ?? [] })) }),
+      : {
+          requires: spec.requires.map((trait) => {
+            const { failing } = traitHealthByMachine(machines, trait, now);
+            return { trait, machines: traits.get(trait) ?? [], ...(failing.length === 0 ? {} : { failing }) };
+          }),
+        }),
     ...(task.decision === undefined ? {} : { decision: decisionText(task.decision) }),
     ...(task.failure === undefined ? {} : { failure: `${task.failure.code}: ${failureMessage(task, task.failure)}` }),
     // A `manual` mark reads apart from a finish: a person settled it, nothing observed it end.
@@ -771,6 +809,10 @@ function describeTask(
     ...(spec.continues === undefined ? {} : { continues: spec.continues.task }),
     // The same offer the app's Continue button follows; `continue_task` still re-checks the leader.
     ...(continueOffer(task, machines, tasks, offer).ok ? { continuable: true } : {}),
+    ...(spec.succeeds === undefined ? {} : { succeeds: spec.succeeds.task }),
+    ...(task.successor === undefined ? {} : { passedTo: task.successor }),
+    // The same offer the app's menu follows; `pass_task` still re-checks the leader.
+    ...(passOffer(task, machines, leaderSuccessor).ok ? { passable: true } : {}),
     // Never `prBlocked` on the task: an `until: "reported"` task does not wait on its merge.
     ...(blocked === null ? {} : { prBlocked: blocked }),
   };
@@ -834,6 +876,8 @@ export function buildMcpServer(
   audit: AuditSink = cliSink,
   report: typeof reportDone = reportDone,
   handOffTask: typeof handOff = handOff,
+  passOwnTask: typeof passToSuccessor = passToSuccessor,
+  passPoll: PassPoll = PASS_POLL,
 ): McpServer {
   // 0.0.0 mirrors the package: the daemon versions by git sha, not semver.
   const server = new McpServer({ name: "seance", version: "0.0.0" });
@@ -858,7 +902,7 @@ export function buildMcpServer(
     {
       title: "List machines",
       description:
-        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any, plus `account`, the name every Séance client shows for it (its alias where one is set, else the email, else a short id; tagged where two accounts would read alike; no alias on a box whose daemon brokers for it, with no readable PSK) — a display name only, never a value for pin.account — and `alias` where one is set: a spawn's pin.account takes the `accountId`, the `email` or the `alias`, not `account`; a machine with the field absent or empty reports none, so the scheduler cannot place there until its daemon updates. Each signed-in exclave's `auth` is `expired` (its login needs /login; the scheduler does not place there), `expiring` (within 3 days, with `loginExpiresAt`; still placed), `ok`, or `unknown` (not read, or the machine is asleep or its daemon older; still placed). Offline machines are listed with their last-seen time: `lastSeen` is when the machine was last heard from (its last register or status beat, whichever is later). `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that every spawn goes through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue, cancel_task and start_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
+        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any, plus `account`, the name every Séance client shows for it (its alias where one is set, else the email, else a short id; tagged where two accounts would read alike; no alias on a box whose daemon brokers for it, with no readable PSK) — a display name only, never a value for pin.account — and `alias` where one is set: a spawn's pin.account takes the `accountId`, the `email` or the `alias`, not `account`; a machine with the field absent or empty reports none, so the scheduler cannot place there until its daemon updates. Each signed-in exclave's `auth` is `expired` (its login needs /login; the scheduler does not place there), `expiring` (within 3 days, with `loginExpiresAt`; still placed), `ok`, or `unknown` (not read, or the machine is asleep or its daemon older; still placed). Offline machines are listed with their last-seen time: `lastSeen` is when the machine was last heard from (its last register or status beat, whichever is later). `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that every spawn goes through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue, cancel_task, start_task and pass_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
       inputSchema: NO_INPUT,
       annotations: { readOnlyHint: true },
     },
@@ -953,8 +997,9 @@ export function buildMcpServer(
         };
         const idle = new Set((reply.idle ?? []).map((ref) => ref.taskId));
         const traits = fleetTraits(lease.machines);
+        const leaderSuccessor = advertises(lease.machines, lease.scheduler.availability(), CAPABILITIES.successor);
         const tasks = reply.tasks.map((task) =>
-          describeTask(task, lease.machines, names, reply.tasks, offer, idle, traits),
+          describeTask(task, lease.machines, names, reply.tasks, offer, idle, traits, leaderSuccessor, Date.now()),
         );
         const holds = (reply.holds ?? []).map((hold) => describeHold(hold, names));
         return textResult(JSON.stringify({ at: new Date(reply.at).toISOString(), holds, tasks }, null, 2));
@@ -1012,6 +1057,23 @@ export function buildMcpServer(
       withFleet(async (lease) => {
         if (lease.scheduler === null) return errorResult(olderDaemonText("start_task"));
         const outcome = await startAuto({ machines: lease.machines, scheduler: lease.scheduler }, taskId, "mcp");
+        return outcome.ok ? textResult(outcome.text) : errorResult(outcome.text);
+      }),
+  );
+
+  server.registerTool(
+    "pass_task",
+    {
+      title: "Pass a running scheduler task to a successor",
+      description:
+        "Pass a running task to a successor — the app's Pass to successor. The scheduler has the task's machine push its branch to origin, ends its session and queues a new task that carries the work on in a fresh session, with a prompt that names the branch and the pull request; the old task settles as superseded once the successor exists, and anything waiting on it waits on the successor instead. For a task that is stuck, or whose account is out of quota, and whose work is committed: a task with uncommitted changes, one in place (mode here) or one on the repo's default branch is refused, and nothing is pushed. Only a running task: one waiting for the user (needs-input) or for a merge is refused. Needs a scheduler leader and a task machine whose daemon supports it (get_queue shows both). Sent once and never retried: if the answer is lost, check get_queue before passing again. To pass your own task use `pass_to_successor`; `pass_task` is for other tasks and closes the target session at once. Answers with the successor's task id.",
+      inputSchema: z.strictObject({ taskId: z.string().describe("The running task's id from get_queue") }),
+      annotations: { readOnlyHint: false },
+    },
+    async ({ taskId }) =>
+      withFleet(async (lease) => {
+        if (lease.scheduler === null) return errorResult(olderDaemonText("pass_task"));
+        const outcome = await passAuto({ machines: lease.machines, scheduler: lease.scheduler }, taskId, "mcp");
         return outcome.ok ? textResult(outcome.text) : errorResult(outcome.text);
       }),
   );
@@ -1443,7 +1505,88 @@ export function buildMcpServer(
     },
   );
 
+  server.registerTool(
+    PASS_SELF_TOOL,
+    {
+      title: "Pass this session's task to a successor session",
+      description: `Pass this scheduler task to a successor session when this one is running out of usage, or the owner asks. Commit everything first: the daemon pushes this worktree's branch to its upstream and refuses a dirty tree (nothing is pushed then). \`record\` is the whole of what the successor knows besides the branch and the PR it reads itself: what is done, what is left, decisions taken and why, how to verify; at most ${SUCCESSOR_RECORD_MAX} characters. Call it last and end the turn with one line: this session is closed when the turn ends, and nothing done after the push is carried. To pass your own task use this; \`pass_task\` is for other tasks and closes the target session at once. Not \`hand_off_task\`, which leaves a finished PR to the scheduler. Needs a scheduler leader that takes session passes; the call is refused before anything is pushed when there is none. If the task has a PR whose branch this worktree does not track, it is refused and tells you what to push first.`,
+      inputSchema: z.strictObject({
+        record: z.string().min(1).describe("What the successor needs: done, left, decisions, how to verify"),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false },
+    },
+    async ({ record }, ctx) => {
+      // UTF-16 units, as the daemon and the leader count: a schema `maxLength` counts code points, which lets an over-long record through.
+      if (record.length > SUCCESSOR_RECORD_MAX) {
+        return errorResult(
+          `${PASS_SELF_TOOL} refused: the record is ${record.length} characters, ${record.length - SUCCESSOR_RECORD_MAX} over the ${SUCCESSOR_RECORD_MAX} allowed; cut it and call again. Nothing was pushed.`,
+        );
+      }
+      return withFleet(async (lease) => {
+        if (lease.scheduler === null) {
+          return errorResult(
+            `${PASS_SELF_TOOL} refused: can't confirm the scheduler takes session passes (${SCHEDULER_NEEDS_NEWER_DAEMON}). Nothing was pushed.`,
+          );
+        }
+        // Before the push: a leader that predates the pass drops the report, and the branch would be pushed for nothing.
+        if (!advertises(lease.machines, lease.scheduler.availability(), CAPABILITIES.successorSelf)) {
+          return errorResult(
+            `${PASS_SELF_TOOL} refused: ${
+              lease.scheduler.availability().kind === "ready"
+                ? "the scheduler's leader cannot take a session's pass yet — its daemon needs `seanced update`"
+                : "no verified scheduler is leading, so it cannot be confirmed to take a pass — try again once one leads"
+            }. Nothing was pushed.`,
+          );
+        }
+        // The cancellation closes the daemon's connection, which is what keeps an interrupted call from passing later.
+        const result = await passOwnTask(record, { signal: ctx.mcpReq.signal });
+        // No answer is not a refusal: the daemon may have pushed and sent the pass, and closes this session at its turn's end.
+        if (result.unanswered === true) {
+          return textResult(
+            `${PASS_SELF_TOOL}: no answer from this machine's daemon (${result.text}), so the branch may be pushed and the pass may have gone through; check get_queue for a successor on your task before pushing or passing again. ${END_THE_TURN}`,
+          );
+        }
+        if (!result.ok) return errorResult(`${PASS_SELF_TOOL} refused: ${result.text}`);
+        const taskId = result.pass?.taskId;
+        if (taskId === undefined) return textResult(`${result.text}. ${END_THE_TURN}`);
+        const successor = await successorOf(lease.scheduler, taskId, passPoll);
+        if (successor !== null) {
+          return textResult(
+            `passed: the scheduler recorded successor ${successor} for task ${taskId}; its branch is pushed. ${END_THE_TURN}`,
+          );
+        }
+        return textResult(
+          `the branch is pushed but no successor was recorded yet; the leader may still confirm, or may have refused (for example the PR's head is another branch). ${END_THE_TURN}`,
+        );
+      });
+    },
+  );
+
   return server;
+}
+
+/**
+ * The successor the leader recorded on `taskId`, polled for up to the window; null when none appeared, the queue
+ * could not be read, or the leader answered with an error. Never throws: the push has happened, and the
+ * session is told what it knows.
+ */
+async function successorOf(scheduler: SchedulerLeg, taskId: string, poll: PassPoll): Promise<string | null> {
+  const until = Date.now() + poll.windowMs;
+  for (;;) {
+    try {
+      // oxlint-disable-next-line no-await-in-loop -- one read at a time, the leader's confirmation being what is waited for
+      const queue = await scheduler.queue();
+      if (queue !== null && !("ok" in queue)) {
+        const successor = queue.tasks.find((t) => t.id === taskId)?.successor;
+        if (successor !== undefined) return successor;
+      }
+    } catch {
+      return null;
+    }
+    if (Date.now() + poll.everyMs > until) return null;
+    // oxlint-disable-next-line no-await-in-loop -- see above
+    await Bun.sleep(poll.everyMs);
+  }
 }
 
 /**

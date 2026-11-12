@@ -1,5 +1,6 @@
+import type { PrHeadReading } from "@seance/scheduler";
 import {
-  isPrReadable,
+  isBranchName,
   isRecord,
   PR_FAILING_LIMITS,
   PR_MERGE_STATES,
@@ -9,6 +10,7 @@ import {
   type PrState,
   type PrStatus,
   type Task,
+  TASK_PHASES,
   taskPrs,
   wantsPrReading,
 } from "@seance/shared";
@@ -410,7 +412,11 @@ type Answer =
  * alias, so a non-zero exit is not a failure by itself — only exit 4, a
  * timeout, or stdout that is no GraphQL answer is.
  */
-async function ask(deps: PrPollerDeps, query: string, variables: readonly string[]): Promise<Answer> {
+async function ask(
+  deps: Pick<PrPollerOpts, "gh" | "timeoutMs">,
+  query: string,
+  variables: readonly string[],
+): Promise<Answer> {
   const gh = deps.gh ?? process.env["SEANCE_GH_BIN"] ?? "gh";
   let result;
   try {
@@ -560,7 +566,8 @@ function targets(tasks: readonly Task[], unreadable: ReadonlySet<string>, read: 
   const byKey = new Map<string, Target>();
   for (const task of tasks) {
     if (!wantsPrReading(task)) continue;
-    const finished = !isPrReadable(task.state);
+    // Not `!isPrReadable`: a successor waiting for its predecessor is neither, and is read every poll.
+    const finished = TASK_PHASES[task.state] === "finished";
     if (finished && read.has(task.id)) continue;
     for (const { url } of taskPrs(task).toReversed()) {
       if (finished && unreadable.has(url)) continue;
@@ -737,4 +744,41 @@ export function startPrPoller(deps: PrPollerDeps): { readonly stop: () => void }
       timer = null;
     },
   };
+}
+
+/** A pass reads one PR's head once, at the moment it asks: bounded well under the scheduler's 15 s window. */
+const PR_HEAD_TIMEOUT_MS = 15_000;
+
+const PR_HEAD_QUERY =
+  "query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ pullRequest(number:$n){ headRefName isCrossRepository state isDraft } } }";
+
+/**
+ * The head branch of a task's PR, read by the leader's own `gh` for a pass (DESIGN.md, "Passing to a successor"):
+ * the one value the daemon holding the task compares its branch against, so a session's reported URL never decides
+ * where a push goes. Owner, repo and number reach `gh` as variables, as in the poll. Logs nothing: the head is the
+ * user's own text, and the URL names a repo. `skipped` for a URL that is not a GitHub pull request.
+ */
+export async function readPrHead(prUrl: string, opts: PrPollerOpts = {}): Promise<PrHeadReading> {
+  const pr = parseGithubPr(prUrl);
+  if (pr === null) return { kind: "skipped" };
+  // Never past the pass's budget, whatever timeout the poller was given.
+  const timeoutMs = Math.min(opts.timeoutMs ?? PR_HEAD_TIMEOUT_MS, PR_HEAD_TIMEOUT_MS);
+  const answer = await ask({ ...opts, timeoutMs }, PR_HEAD_QUERY, [
+    "-f",
+    `o=${pr.owner}`,
+    "-f",
+    `r=${pr.repo}`,
+    "-F",
+    `n=${pr.number}`,
+  ]);
+  if (answer.kind !== "ok") return { kind: "unreadable" };
+  const repository = answer.data["repository"];
+  const pullRequest = isRecord(repository) ? repository["pullRequest"] : undefined;
+  if (!isRecord(pullRequest)) return { kind: "unreadable" };
+  const { headRefName, isCrossRepository } = pullRequest;
+  const state = stateOf(pullRequest);
+  if (!isBranchName(headRefName) || typeof isCrossRepository !== "boolean" || state === null) {
+    return { kind: "unreadable" };
+  }
+  return { kind: "read", head: headRefName, crossRepository: isCrossRepository, state };
 }

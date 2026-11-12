@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { quote, type PrStatus } from "@seance/shared";
 import type { Task } from "../src/leader.ts";
-import { parseGithubPr, startPrPoller, type PrPollerOpts } from "../src/pr-status.ts";
+import { parseGithubPr, readPrHead, startPrPoller, type PrPollerOpts } from "../src/pr-status.ts";
 import { makeGhStub, pollUntil, type GhRun, type GhStub } from "./fixtures.ts";
 
 let base: string;
@@ -881,5 +881,94 @@ describe("the blocked-state read", () => {
     expect(runs[2]).toContain("n10=11");
     expect(runs[2]).toContain("n11=12");
     expect(seen.every((s) => s.status.head === HEAD)).toBe(true);
+  });
+});
+
+describe("a successor waiting for its predecessor", () => {
+  const successor = (n: number): Task =>
+    pr(n, {
+      id: "t-next",
+      state: "blocked",
+      spec: {
+        repo: "github.com/octo-org/widgets",
+        mode: "worktree",
+        succeeds: {
+          task: "t-old",
+          account: "org:a",
+          at: { deviceId: "dev-a", exclave: "default", clone: "w" },
+          trigger: "manual",
+        },
+      },
+    });
+
+  test("its PR is read every poll, not once a term as a finished task's is", async () => {
+    await gh.setReply(reply({ state: "OPEN" }), 0);
+    const { seen } = start([successor(9)]);
+    await pollUntil(() => seen.length >= 3, "three consecutive readings");
+    expect(new Set(seen.map((s) => s.id))).toEqual(new Set(["t-next"]));
+  });
+
+  test("a plain blocked task with a PR is not read", async () => {
+    await gh.setReply(reply({ state: "OPEN" }), 0);
+    const plain = pr(9, { id: "t-plain", state: "blocked" });
+    const { seen } = start([plain]);
+    // A non-event cannot be polled for.
+    await Bun.sleep(150);
+    expect(seen).toEqual([]);
+    expect(await gh.calls()).toBe(0);
+  });
+});
+
+describe("readPrHead", () => {
+  const head = (fields: Record<string, unknown>): string =>
+    JSON.stringify({
+      data: {
+        repository: {
+          pullRequest: { headRefName: "feature/x", isCrossRepository: false, state: "OPEN", isDraft: false, ...fields },
+        },
+      },
+    });
+
+  test("the head, whether it is a fork's, and the state; owner, repo and number reach gh as variables", async () => {
+    await gh.setReply(head({}), 0);
+    expect(await readPrHead(prUrl(42), { gh: stub.path })).toEqual({
+      kind: "read",
+      head: "feature/x",
+      crossRepository: false,
+      state: "open",
+    });
+    const argv = await gh.argv();
+    expect(argv).toContain("o=octo-org");
+    expect(argv).toContain("r=widgets");
+    expect(argv).toContain("n=42");
+    expect(argv.find((a) => a.startsWith("query="))).not.toContain("octo-org");
+    await gh.setReply(head({ isCrossRepository: true, isDraft: true }), 0);
+    expect(await readPrHead(prUrl(42), { gh: stub.path })).toMatchObject({ crossRepository: true, state: "draft" });
+    await gh.setReply(head({ state: "MERGED" }), 0);
+    expect(await readPrHead(prUrl(42), { gh: stub.path })).toMatchObject({ state: "merged" });
+  });
+
+  test("a URL that is not a pull request of this forge is skipped without asking gh", async () => {
+    expect(await readPrHead("https://example.com/a/b/pull/1", { gh: stub.path })).toEqual({ kind: "skipped" });
+    expect(await gh.calls()).toBe(0);
+  });
+
+  test("a head the repo would take as an option, a missing PR, an unknown state and a gh that fails are unreadable", async () => {
+    for (const body of [
+      head({ headRefName: "-oops" }),
+      head({ headRefName: 7 }),
+      head({ state: "SOMETHING_NEW" }),
+      head({ isCrossRepository: "no" }),
+      JSON.stringify({ data: { repository: { pullRequest: null } } }),
+      "garbage",
+    ]) {
+      // oxlint-disable-next-line no-await-in-loop -- one stub reply at a time
+      await gh.setReply(body, 0);
+      // oxlint-disable-next-line no-await-in-loop -- as above
+      expect(await readPrHead(prUrl(1), { gh: stub.path })).toEqual({ kind: "unreadable" });
+    }
+    await gh.setReply("{}", 4);
+    expect(await readPrHead(prUrl(1), { gh: stub.path })).toEqual({ kind: "unreadable" });
+    expect(await readPrHead(prUrl(1), { gh: join(base, "no-such-gh") })).toEqual({ kind: "unreadable" });
   });
 });

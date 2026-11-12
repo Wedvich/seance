@@ -7,6 +7,7 @@ import {
   TASK_SPEC_LIMITS,
   continueOffer,
   knownAccounts,
+  passOffer,
   taskPrBlock,
   waitingContinuation,
   type DepAfter,
@@ -36,6 +37,7 @@ import { taskTitle } from "./task-title.ts";
 import {
   deriveContinueAvailability,
   deriveContinueHandoffAvailability,
+  derivePassAvailability,
   deriveReportedOffered,
   deriveRunNowAvailability,
   failedBody,
@@ -63,7 +65,7 @@ export function primaryAction(row: Pick<QueueRow, "canContinue">): QueueInlineAc
   return row.canContinue ? "continue" : null;
 }
 
-export type ArmOp = "cancel" | "mark-done";
+export type ArmOp = "cancel" | "mark-done" | "pass";
 
 /** Names the act and the row, so one item's tap can't arm another's. */
 export function armKey(op: ArmOp, rowId: string): string {
@@ -80,14 +82,16 @@ export function armTap(
   armed: string | null,
 ): { readonly fire: boolean; readonly armed: string | null } {
   const key = armKey(op, row.id);
-  const endsSession = op === "cancel" ? row.cancelEndsSession : row.markDoneEndsSession;
+  // A pass always ends the session it passes on, and is only offered while one is live.
+  const endsSession = op === "pass" || (op === "cancel" ? row.cancelEndsSession : row.markDoneEndsSession);
   if (endsSession && armed !== key) return { fire: false, armed: key };
   return { fire: true, armed: null };
 }
 
 /** A row's menu closing, by any means, disarms that row's acts; Clear's arm and other rows' stay. */
 export function disarmRow(rowId: string, armed: string | null): string | null {
-  return armed === armKey("cancel", rowId) || armed === armKey("mark-done", rowId) ? null : armed;
+  const own = [armKey("cancel", rowId), armKey("mark-done", rowId), armKey("pass", rowId)];
+  return armed !== null && own.includes(armed) ? null : armed;
 }
 
 export interface QueueRow {
@@ -111,6 +115,12 @@ export interface QueueRow {
    * already waiting, live or settled.
    */
   readonly canContinue: boolean;
+  /**
+   * A running task that can hand its work to a successor: it has a branch of its own, its machine
+   * and the leader both advertise `successor`, and it is not waiting on anyone (`passOffer`).
+   * Only ever in the menu: it ends the session, so it asks twice.
+   */
+  readonly canPass: boolean;
   /** Continue is the card's primary action: a blocked PR is what the person was alerted to fix. */
   readonly inlinePrimary: boolean;
   /** A waiting task's Start now menu item: always shown, greyed (`enabled`) by the split button's rules; null once it is no longer waiting. */
@@ -121,6 +131,10 @@ export interface QueueRow {
   readonly deps: string | null;
   /** The earlier session it continues, one line; null for any other task. */
   readonly continues: string | null;
+  /** The earlier task whose work this one carries on, one line; null for any other task. */
+  readonly carriesOn: string | null;
+  /** The task its work was passed to, one line; null for any other task. */
+  readonly passedTo: string | null;
   /** A continuation of it still in the queue, one line naming it, and its row's id to reveal on tap; null for any other task. */
   readonly continuing: { readonly id: string; readonly text: string } | null;
   /** Its pin and avoid list, one line in the verdict's wording; null when it has neither. */
@@ -342,6 +356,18 @@ function continuesLine(task: Task, titles: ReadonlyMap<string, string>): string 
   return `Continues ${titles.get(earlier) ?? `task ${earlier.slice(0, 8)}`}`;
 }
 
+function carriesOnLine(task: Task, titles: ReadonlyMap<string, string>): string | null {
+  const earlier = task.spec.succeeds?.task;
+  if (earlier === undefined) return null;
+  return `Carries on ${titles.get(earlier) ?? `task ${earlier.slice(0, 8)}`}`;
+}
+
+function passedToLine(task: Task, titles: ReadonlyMap<string, string>): string | null {
+  const next = task.successor;
+  if (next === undefined) return null;
+  return `Passed to ${titles.get(next) ?? `task ${next.slice(0, 8)}`}`;
+}
+
 function continuingOf(task: Task, tasks: readonly Task[]): QueueRow["continuing"] {
   // A task whose continuation landed (`continuedBy`) is continued by whatever waits on that link, not on itself.
   const link = task.continuedBy === undefined ? undefined : tasks.find((other) => other.id === task.continuedBy?.task);
@@ -354,12 +380,12 @@ function batchLine(task: Task): string | null {
   return batch === undefined ? null : `Batch #${batch.index}`;
 }
 
-function placementLine(task: Task, state: AppState): string | null {
+function placementLine(task: Task, state: AppState, now: number): string | null {
   const { machines } = state.relay;
   const parts = [
     pinLine(task, machines, state.accounts.aliases),
     avoidLine(task, machines),
-    requiresLine(task, machines),
+    requiresLine(task, machines, now),
   ].filter((part): part is string => part !== null);
   return parts.length === 0 ? null : parts.join(". ");
 }
@@ -380,6 +406,7 @@ function rowOf(
   const context = { now: now + skew, leaderHandoff: deriveContinueHandoffAvailability(state.relay) };
   const canContinue =
     continueOffer(task, state.relay.machines, tasks, context).ok && deriveContinueAvailability(state.relay);
+  const canPass = passOffer(task, state.relay.machines, derivePassAvailability(state.relay)).ok;
   const waiting = task.state === "queued" || task.state === "blocked" || task.state === "ready";
   const item = decisionStartNowItem(task.decision ?? null);
   const startNow = waiting ? { ...item, enabled: item.enabled && deriveRunNowAvailability(state.relay) } : null;
@@ -398,13 +425,16 @@ function rowOf(
     markDoneEndsSession: task.state === "running" || task.state === "needs-input" || task.state === "lost",
     canFollowUp,
     canContinue,
+    canPass,
     startNow,
     inline: primaryAction({ canContinue }),
     inlinePrimary: canContinue && taskPrBlock(task) !== null,
     deps: depsLine(task, titles),
     continues: continuesLine(task, titles),
+    carriesOn: carriesOnLine(task, titles),
+    passedTo: passedToLine(task, titles),
     continuing: continuingOf(task, tasks),
-    placement: placementLine(task, state),
+    placement: placementLine(task, state, now),
     batch: batchLine(task),
     busy: state.taskAction?.taskId === task.id,
     pr: prOf(task, now, skew),

@@ -1,7 +1,8 @@
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { access, appendFile, chmod, mkdir, open, stat } from "node:fs/promises";
 import { userInfo } from "node:os";
-import { dirname } from "node:path";
+import { basename, dirname } from "node:path";
 import {
   DEFAULT_EFFORT,
   DEFAULT_MODEL,
@@ -10,6 +11,7 @@ import {
   type FailureReason,
   type SpawnClient,
   type SpawnRequest,
+  type SuccessorTrigger,
   type UpdateOutcome,
 } from "@seance/shared";
 import type { DespawnResult, SpawnOutcome } from "./backend.ts";
@@ -27,9 +29,11 @@ import { logPath } from "./paths.ts";
  * the `client` tag beside it is the rest of the answer. `leader` is this
  * daemon's own scheduler loop dispatching to this machine, which it reaches in
  * process rather than through the relay (`leader.ts`). `handoff` is a session
- * closing itself through `hand_off_task` (`handoff.ts`): despawn only.
+ * closing itself through `hand_off_task` (`handoff.ts`): despawn only. `successor` is a session passing
+ * its own task through `pass_to_successor`: the push it asked for and, once the leader confirms, the
+ * close at its turn's end (`handoff.ts`), never anything else.
  */
-export type SpawnOrigin = "relay" | "cli" | "local" | "leader" | "handoff";
+export type SpawnOrigin = "relay" | "cli" | "local" | "leader" | "handoff" | "successor";
 
 export type AuditSink = (line: string) => void | Promise<void>;
 
@@ -244,15 +248,63 @@ export function despawnAudit(origin: SpawnOrigin, sink: AuditSink): DespawnAudit
   };
 }
 
+/**
+ * A `push-branch`: which task's worktree, in which repo, and what came of it — a code, `pushed` or `unchanged`
+ * (origin already held the tip) — with the first seven characters of the tip. Never the branch, its remote name or a
+ * URL: they are the user's own text (DESIGN.md, "Passing to a successor").
+ */
+export interface PushAudit {
+  readonly refused: (taskId: string, outcome: string) => Promise<void>;
+  readonly done: (taskId: string, repo: string, outcome: string, tip: string | undefined) => Promise<void>;
+}
+
+export function pushAudit(origin: SpawnOrigin, sink: AuditSink): PushAudit {
+  return {
+    refused: async (taskId, outcome) => {
+      await sink(`audit push origin=${origin} task=${quote(taskId)} outcome=${outcome}`);
+    },
+    done: async (taskId, repo, outcome, tip) => {
+      const tipNote = tip === undefined ? "" : ` tip=${tip.slice(0, 7)}`;
+      await sink(`audit push origin=${origin} task=${quote(taskId)} repo=${quote(repo)} outcome=${outcome}${tipNote}`);
+    },
+  };
+}
+
+/** A `pass-close` the scheduler sent: whether it armed a pane's close at its turn end. Names the task, never a pane. */
+export function passCloseAudit(
+  origin: SpawnOrigin,
+  sink: AuditSink,
+): (taskId: string, outcome: string) => Promise<void> {
+  return async (taskId, outcome) => {
+    await sink(`audit pass-close origin=${origin} task=${quote(taskId)} outcome=${outcome}`);
+  };
+}
+
 export interface QueueAudit {
   readonly markedDone: (id: string, task: { readonly id: string }) => Promise<void>;
   /** A `run-now` that reserved the task past the concurrency caps. */
   readonly ranNow: (id: string, task: { readonly id: string }) => Promise<void>;
   readonly cancelled: (id: string, task: { readonly id: string; readonly leftRunning?: boolean }) => Promise<void>;
+  /** A `pass` that created `successor` for `task`. The branch and the PR stay out: they are the user's own text. */
+  readonly passed: (
+    id: string,
+    task: { readonly id: string },
+    successorId: string,
+    trigger: SuccessorTrigger,
+  ) => Promise<void>;
   /** A `discard` that deleted the unreadable record at `task` and `version`. */
   readonly discarded: (id: string, taskId: string, version: number) => Promise<void>;
   readonly refused: (
-    op: "cancel" | "mark-done" | "run-now" | "pause" | "resume" | "discard" | "push-subscribe" | "push-unsubscribe",
+    op:
+      | "cancel"
+      | "mark-done"
+      | "run-now"
+      | "pass"
+      | "pause"
+      | "resume"
+      | "discard"
+      | "push-subscribe"
+      | "push-unsubscribe",
     id: string,
     code: string,
     /** What the request named: a `cancel`, `mark-done` or `run-now`'s task, a `pause` or `resume`'s account (absent: the whole queue). */
@@ -286,6 +338,8 @@ export function queueAudit(sink: AuditSink): QueueAudit {
       emit(
         `op=cancel id=${quote(id)} task=${quote(task.id)} ok${task.leftRunning === true ? " leftRunning=true" : ""}`,
       ),
+    passed: (id, task, successorId, trigger) =>
+      emit(`op=pass id=${quote(id)} task=${quote(task.id)} successor=${quote(successorId)} trigger=${trigger} ok`),
     discarded: (id, taskId, version) => emit(`op=discard id=${quote(id)} task=${quote(taskId)} version=${version} ok`),
     held: (op, id, account) =>
       emit(`op=${op} id=${quote(id)}${account === undefined ? "" : ` account=${quote(account)}`} ok`),
@@ -536,5 +590,65 @@ export function updateAudit(origin: UpdateOrigin, sink: AuditSink): UpdateAudit 
     checking: (sha: string): Promise<void> => emit(`checking head=${sha.slice(0, 12)}`),
     outcome: (outcome: UpdateOutcome, detail?: string): Promise<void> =>
       emit(`outcome=${outcome}${detail === undefined ? "" : ` detail=${quote(detail)}`}`),
+  };
+}
+
+/**
+ * What ran a trait probe: only ever the daemon itself, on its own cadence, from the argv its own
+ * `config.json` names (`trait-probes.ts`). Not a spawn, but an exec surface, and a new surface
+ * adds an origin, never reuses one.
+ */
+export type ProbeOrigin = "probe";
+
+/** Why this daemon is arming: a process start, or a config reload swapping the daemon in place. */
+export type ProbeVia = "start" | "reload";
+
+/** The unit a line is about. A trait name and an exclave id both passed their name rules, so they are written bare. */
+export interface ProbeUnitAudit {
+  readonly trait: string;
+  readonly exclave?: string;
+  readonly everyMinutes: number;
+  readonly timeoutSeconds: number;
+  readonly argv: readonly string[];
+}
+
+export type ProbeOutcomeAudit =
+  | { readonly state: "healthy" }
+  | { readonly state: "failing"; readonly exit: number }
+  | { readonly state: "unknown"; readonly why: string };
+
+export interface ProbeAudit {
+  readonly armed: (unit: ProbeUnitAudit, via: ProbeVia) => Promise<void>;
+  readonly result: (unit: ProbeUnitAudit, outcome: ProbeOutcomeAudit) => Promise<void>;
+}
+
+/**
+ * The argv is never written: a word count, a SHA-256 prefix that says "the command changed", and the
+ * program's basename (the one word an operator needs to tell two probes apart) stand for it. A token
+ * pasted into an argv word must not reach the log, and neither may anything the probe printed (its
+ * stdio is ignored, never read).
+ */
+export function probeAudit(sink: AuditSink): ProbeAudit {
+  const emit = async (rest: string): Promise<void> => {
+    await sink(`audit probe origin=probe ${rest}`);
+  };
+  const who = (unit: ProbeUnitAudit): string =>
+    `trait=${unit.trait}${unit.exclave === undefined ? "" : ` exclave=${unit.exclave}`}`;
+  return {
+    armed: (unit, via) =>
+      emit(
+        `op=armed ${who(unit)} every=${unit.everyMinutes}m timeout=${unit.timeoutSeconds}s argv=${unit.argv.length} ` +
+          `argvSha=${createHash("sha256").update(unit.argv.join("\0")).digest("hex").slice(0, 12)} ` +
+          `argv0=${quote(basename(unit.argv[0] ?? ""))} via=${via}`,
+      ),
+    result: (unit, outcome) => {
+      const detail =
+        outcome.state === "failing"
+          ? ` exit=${outcome.exit}`
+          : outcome.state === "unknown"
+            ? ` why=${outcome.why}`
+            : "";
+      return emit(`op=result ${who(unit)} state=${outcome.state}${detail}`);
+    },
   };
 }

@@ -5,6 +5,7 @@ import {
   PIN_SENTINEL,
   SCHEDULER_ID,
   STORE_PREFIXES,
+  SUCCESSOR_DEP_SENTINEL,
   type Envelope,
   type RecordUnreadable,
   type StoreRecord,
@@ -13,7 +14,7 @@ import {
   type TaskRecord,
   type TaskRequest,
 } from "./types.ts";
-import { bindTaskRecord } from "./parse.ts";
+import { bindTaskRecord, isRecord } from "./parse.ts";
 import { openAtRest, sealAtRest } from "./crypto.ts";
 
 /** The store key a task lives at: the prefix, then its id as it stands (`STORE_KEY_PATTERN`). */
@@ -73,8 +74,8 @@ export function sealTaskRecord(key: CryptoKey, from: string, record: TaskRecord)
 
 /**
  * The record as it is sealed: a spec carrying `pin.account` or `avoid` gains
- * `pin.exclave: PIN_SENTINEL`, and one carrying `attachments` or `requires` gains
- * `ATTACHMENTS_DEP_SENTINEL` or `REQUIRES_DEP_SENTINEL` in its deps. An older leader's parser refuses
+ * `pin.exclave: PIN_SENTINEL`, and one carrying `attachments`, `requires` or `succeeds` gains
+ * `ATTACHMENTS_DEP_SENTINEL`, `REQUIRES_DEP_SENTINEL` or `SUCCESSOR_DEP_SENTINEL` in its deps. An older leader's parser refuses
  * each, so it holds the record unreadable instead of re-sealing it without
  * them. Here, in the one sealer, so the app's create and every leader write
  * emit them alike.
@@ -84,19 +85,17 @@ export function taskRecordAtRest(record: TaskRecord): unknown {
   const pinned = spec.pin?.account !== undefined || spec.avoid !== undefined;
   const attached = spec.attachments !== undefined;
   const required = spec.requires !== undefined;
-  if (!pinned && !attached && !required) return record;
+  const succeeding = spec.succeeds !== undefined;
+  if (!pinned && !attached && !required && !succeeding) return record;
+  const gates = [
+    ...(attached ? [ATTACHMENTS_DEP_SENTINEL] : []),
+    ...(required ? [REQUIRES_DEP_SENTINEL] : []),
+    ...(succeeding ? [SUCCESSOR_DEP_SENTINEL] : []),
+  ];
   const sealed = {
     ...spec,
     ...(pinned ? { pin: { ...spec.pin, exclave: PIN_SENTINEL } } : {}),
-    ...(attached || required
-      ? {
-          deps: [
-            ...(spec.deps ?? []),
-            ...(attached ? [ATTACHMENTS_DEP_SENTINEL] : []),
-            ...(required ? [REQUIRES_DEP_SENTINEL] : []),
-          ],
-        }
-      : {}),
+    ...(gates.length > 0 ? { deps: [...(spec.deps ?? []), ...gates] } : {}),
   };
   return { ...record, task: { ...record.task, spec: sealed } };
 }
@@ -122,7 +121,28 @@ export async function openTaskRecord(
   } catch {
     return "unopenable";
   }
+  if (succeedsWithoutGate(payload)) return "malformed";
   return bindTaskRecord(payload, stored, now);
+}
+
+/**
+ * A stored record carrying `succeeds` without `SUCCESSOR_DEP_SENTINEL` was written past the one sealer
+ * (`taskRecordAtRest`): an older leader would read it as a task with no deps and run it beside its still-running
+ * predecessor, so it is held unreadable here. Only on the store's read path: `parseTask` also reads a leader's
+ * replies, which carry `succeeds` unsealed.
+ */
+function succeedsWithoutGate(payload: unknown): boolean {
+  const task = isRecord(payload) ? payload["task"] : undefined;
+  const spec = isRecord(task) ? task["spec"] : undefined;
+  if (!isRecord(spec) || spec["succeeds"] === undefined) return false;
+  const deps = spec["deps"];
+  return !(
+    Array.isArray(deps) &&
+    deps.some(
+      (dep) =>
+        isRecord(dep) && dep["task"] === SUCCESSOR_DEP_SENTINEL.task && dep["after"] === SUCCESSOR_DEP_SENTINEL.after,
+    )
+  );
 }
 
 /** A stored task this build could not keep: skipped and reported with its reason, never fatal, never deleted. */

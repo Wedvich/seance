@@ -4,6 +4,7 @@ import {
   type CancelResult,
   type DiscardResult,
   type MarkDoneResult,
+  type PassResult,
   type PauseResult,
   type RunNowResult,
   type Scheduler,
@@ -29,6 +30,7 @@ import {
   type Decision,
   type DiscardResponse,
   type IdleTaskRef,
+  type PassResponse,
   type PauseHold,
   type PauseResponse,
   type Plain,
@@ -258,6 +260,53 @@ const CANCEL_REFUSALS: Record<Exclude<CancelResult, { readonly ok: true }>["code
   ),
 };
 
+/**
+ * Each refusal says what the caller can do about it; the leader's own words, never a machine's or git's, which
+ * would carry a branch or a URL. `unrecorded` is a transport code so MCP adds its "may have landed anyway": the
+ * successor was created and the old session may already be closed.
+ */
+const PASS_REFUSALS: Record<Exclude<PassResult, { readonly ok: true }>["code"], SchedulerError> = {
+  not_found: schedulerError("task_not_found", "the leader holds no task by that id"),
+  finished: schedulerError("finished", "the task has already finished"),
+  dispatching: schedulerError("dispatching", "its spawn is in flight; ask again once it lands"),
+  not_running: schedulerError(
+    "not_running",
+    "the task has no live session to pass on; it is waiting, lost or waiting for a merge",
+  ),
+  needs_input: schedulerError("needs_input", "the task is waiting for an answer; answer it, then pass it"),
+  here: schedulerError("here", "the task runs in place, so it has no branch of its own to pass on"),
+  offline: schedulerError("offline", "the machine running the task is not connected"),
+  successor_unsupported: schedulerError(
+    "successor_unsupported",
+    "the leader or the task's machine predates passing to a successor (needs seanced update)",
+  ),
+  account_unknown: schedulerError(
+    "account_unknown",
+    "the task's machine reports no account, so the successor cannot say whose it is",
+  ),
+  pr_unreadable: schedulerError("pr_unreadable", "the task's pull request could not be read; nothing was pushed"),
+  pr_not_open: schedulerError("pr_not_open", "the task's pull request is already merged or closed"),
+  branch_mismatch: schedulerError(
+    "branch_mismatch",
+    "the task's branch is not its pull request's head; nothing was pushed",
+  ),
+  dirty_worktree: schedulerError("dirty_worktree", "the task's worktree has uncommitted changes; nothing was pushed"),
+  detached_head: schedulerError("detached_head", "the task's worktree is on no branch"),
+  default_branch: schedulerError(
+    "default_branch",
+    "the task's branch is the repo's default branch; nothing was pushed",
+  ),
+  push_rejected: schedulerError("push_rejected", "origin refused the push; nothing was forced"),
+  push_failed: schedulerError("push_failed", "the push did not complete; nothing else was written"),
+  not_launched: schedulerError("not_launched", "the task's machine holds no worktree launch of it"),
+  pass_failed: schedulerError("pass_failed", "the successor could not be created; nothing else was written"),
+  conflict: schedulerError("conflict", "the task changed while the pass ran; ask again"),
+  unrecorded: schedulerError(
+    "internal_error",
+    "the successor was created, but the pass was not recorded before this daemon's term ended; check the queue, then pass again if the task still runs",
+  ),
+};
+
 type PushOp = "push-subscribe" | "push-unsubscribe";
 
 const SETTINGS_UNAVAILABLE = (): SchedulerError =>
@@ -354,6 +403,26 @@ async function answer(asked: Asked, op: SchedulerOp, payload: unknown): Promise<
       // What waited on it (an `after: merged` dependent) is released now rather than on the next 30s tick.
       tick();
       const reply: TaskResponse = { task: result.task };
+      return reply;
+    }
+    case "pass": {
+      const ref = parseTaskRef(payload);
+      if (ref === null) return schedulerError("invalid_request", "malformed pass request");
+      // A request from an app is a person's: the scheduler's own triggers come later and say so themselves.
+      const trigger = "manual";
+      const result = await scheduler.pass(ref.taskId, trigger);
+      if (!result.ok) {
+        await audit.refused("pass", id, result.code, { taskId: ref.taskId });
+        return PASS_REFUSALS[result.code];
+      }
+      await audit.passed(id, result.task, result.successorId, trigger);
+      // The successor waits for the old task's `superseded`, which is written by now: place it without a 30 s wait.
+      tick();
+      const full: PassResponse = { task: result.task, successorId: result.successorId, successor: result.successor };
+      // Two tasks with prompts at their caps seal past the envelope, and the transport would then answer `too_large`
+      // for a pass that has committed. The successor is display-only (the queue push carries it), so it goes first.
+      const reply: PassResponse =
+        Buffer.byteLength(JSON.stringify(full), "utf8") > REPLY_JSON_BUDGET ? { ...full, successor: null } : full;
       return reply;
     }
     case "push-subscribe": {

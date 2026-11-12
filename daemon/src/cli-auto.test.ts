@@ -20,7 +20,7 @@ import { startBrokerDouble } from "../test/broker-double.ts";
 import { fakeRelay, machine } from "../test/fake-app-relay.ts";
 import { LazyRelay } from "./app-relay.ts";
 import { brokerFail, brokerOk } from "./broker-protocol.ts";
-import { autoFleet, continueTaskAuto, spawnAuto, startTaskAuto } from "./cli-auto.ts";
+import { autoFleet, continueTaskAuto, passTaskAuto, spawnAuto, startTaskAuto } from "./cli-auto.ts";
 import type { ContinueCliArgs, SpawnCliArgs } from "./cli.ts";
 import type { Config } from "./config.ts";
 import { relayFleet, SCHEDULER_NEEDS_NEWER_DAEMON } from "./fleet.ts";
@@ -841,6 +841,110 @@ describe("start", () => {
       expect(held.text).not.toContain("may have landed");
     } finally {
       lazy.stop();
+    }
+  });
+});
+
+describe("pass", () => {
+  const AT = { deviceId: "device-2", exclave: "work", clone: "seance" };
+  const running: Task = {
+    id: "t-1",
+    state: "running",
+    createdAt: 4_000,
+    spec: { repo: ORIGIN, mode: "worktree" },
+    assignment: { ...AT, window: "fix-it" },
+  };
+
+  /** The leader (device-1) and the box the task runs on, each advertising `successor`. */
+  const machines = (): Machine[] => [
+    machine({ deviceId: "device-1", name: "Leader", capabilities: [CAPABILITIES.successor] }),
+    machine({ deviceId: "device-2", name: "Linux Box", capabilities: [CAPABILITIES.successor] }),
+  ];
+
+  const passed = {
+    task: { ...running, state: "superseded", successor: "t-2" },
+    successorId: "t-2",
+    successor: null,
+  };
+
+  test("seanced pass reads the queue, sends pass once, and names the successor", async () => {
+    const fake = fakeRelay(machines(), (op) => {
+      if (op === "queue") return { tasks: [running], at: 6_000 };
+      if (op === "pass") return passed;
+      return new Error(`unexpected ${op}`);
+    });
+    fake.setState({ scheduler: LEADING });
+    const lazy = new LazyRelay({ create: () => fake });
+    try {
+      const outcome = await passTaskAuto({ taskId: "t-1" }, relayFleet(lazy));
+      expect(outcome.ok).toBe(true);
+      expect(outcome.text).toContain("task t-1 passed to successor t-2");
+      expect(fake.requests.map((r) => [r.op, r.payload])).toEqual([
+        ["queue", {}],
+        ["pass", { taskId: "t-1" }],
+      ]);
+    } finally {
+      lazy.stop();
+    }
+  });
+
+  test("a malformed id and a task the shared rule refuses send no pass", async () => {
+    const waiting: Task = { ...running, state: "needs-input" };
+    const fake = fakeRelay(machines(), (op) =>
+      op === "queue" ? { tasks: [waiting], at: 6_000 } : new Error(`unexpected ${op}`),
+    );
+    fake.setState({ scheduler: LEADING });
+    const lazy = new LazyRelay({ create: () => fake });
+    try {
+      const bad = await passTaskAuto({ taskId: "not a task id!" }, relayFleet(lazy));
+      expect(bad).toEqual({ ok: false, text: 'pass refused: "not a task id!" is not a task id' });
+      expect(fake.requests).toEqual([]);
+      const refused = await passTaskAuto({ taskId: "t-1" }, relayFleet(lazy));
+      expect(refused.ok).toBe(false);
+      expect(refused.text).toStartWith("pass refused: it is waiting for you");
+      expect(fake.requests.map((r) => r.op)).toEqual(["queue"]);
+    } finally {
+      lazy.stop();
+    }
+  });
+
+  test("a lost answer says the pass may have landed, and is never retried", async () => {
+    const fake = fakeRelay(machines(), (op) =>
+      op === "queue" ? { tasks: [running], at: 6_000 } : new RequestFailure("timeout", "no reply within 180000ms"),
+    );
+    fake.setState({ scheduler: LEADING });
+    const lazy = new LazyRelay({ create: () => fake });
+    try {
+      const lost = await passTaskAuto({ taskId: "t-1" }, relayFleet(lazy));
+      expect(lost.ok).toBe(false);
+      expect(lost.text).toContain("the pass may have landed anyway — check the app's queue");
+      expect(fake.requests.filter((r) => r.op === "pass")).toHaveLength(1);
+    } finally {
+      lazy.stop();
+    }
+  });
+
+  test("seanced pass sends pass once, through the daemon's broker for a shell that cannot read the key", async () => {
+    const frames: Record<string, unknown>[] = [];
+    const double = await startBrokerDouble((raw, id) => {
+      if (!isRecord(raw)) return brokerFail(id, "invalid_request", "not a frame");
+      frames.push(raw);
+      if (raw["action"] === "fleet") return brokerOk(id, { machines: machines(), scheduler: LEADING });
+      if (raw["schedulerOp"] === "queue") return brokerOk(id, { tasks: [running], at: 6_000 });
+      if (raw["schedulerOp"] === "pass") return brokerOk(id, passed);
+      return brokerFail(id, "unsupported", "not in this double");
+    });
+    try {
+      const built = await autoFleet(config({ psk: "" }), { stores: [], broker: { path: double.path } });
+      const outcome = await passTaskAuto({ taskId: "t-1" }, built.fleet, { keyless: built.keyless });
+      expect(outcome.ok).toBe(true);
+      expect(outcome.text).toContain("passed to successor t-2");
+      expect(frames.filter((frame) => frame["action"] === "scheduler")).toEqual([
+        expect.objectContaining({ schedulerOp: "queue" }),
+        expect.objectContaining({ schedulerOp: "pass", taskId: "t-1" }),
+      ]);
+    } finally {
+      await double.stop();
     }
   });
 });

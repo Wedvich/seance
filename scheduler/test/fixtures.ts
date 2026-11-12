@@ -2,9 +2,14 @@ import type {
   AttachmentRef,
   DespawnRequest,
   DespawnResponse,
+  ErrorResponse,
   ExclaveInfo,
   Machine,
   MachineStatus,
+  PassCloseRequest,
+  PassCloseResponse,
+  PushBranchRequest,
+  PushBranchResponse,
   QuotaObservation,
   RepoEntry,
   SessionEntry,
@@ -14,6 +19,7 @@ import {
   DEFAULT_CONFIG,
   UNREACHABLE,
   type Fleet,
+  type NoAnswer,
   type QueueStore,
   type SchedulerConfig,
   type StoreEntry,
@@ -98,6 +104,31 @@ export class FakeFleet implements Fleet {
   fleet: Machine[];
   readonly spawns: { readonly deviceId: string; readonly request: TaskSpawnRequest }[] = [];
   readonly despawns: { readonly deviceId: string; readonly id: string }[] = [];
+  /** Every `push-branch` asked, and what the machine answers: the pushed branch `feature/x` unless a test says otherwise. */
+  readonly pushes: { readonly deviceId: string; readonly request: PushBranchRequest }[] = [];
+  pushReply: (
+    request: PushBranchRequest,
+  ) => PushBranchResponse | ErrorResponse | NoAnswer | Promise<PushBranchResponse | ErrorResponse | NoAnswer> = () => ({
+    ok: true,
+    remoteBranch: "feature/x",
+    tip: "a".repeat(40),
+    pushed: true,
+  });
+  /** A daemon that cannot push is a host without the port; a test sets this undefined for one. */
+  pushBranch: Fleet["pushBranch"] = async (deviceId, request) => {
+    this.pushes.push({ deviceId, request });
+    return this.pushReply(request);
+  };
+  /** Every `pass-close` asked, and what the machine answers: armed unless a test says otherwise. */
+  readonly passCloses: { readonly deviceId: string; readonly request: PassCloseRequest }[] = [];
+  passCloseReply: () => PassCloseResponse | ErrorResponse | NoAnswer = () => ({ ok: true });
+  /** A daemon that cannot arm a close is a host without the port; a test sets this undefined for one. */
+  passClose: Fleet["passClose"] = async (deviceId, request) => {
+    this.passCloses.push({ deviceId, request });
+    return this.passCloseReply();
+  };
+  /** What `despawn` answers instead of success, while set. */
+  despawnReply: (() => DespawnResponse) | null = null;
   readonly sessionCalls: string[] = [];
   readonly scripts = new Map<string, SpawnScript>();
   readonly running = new Map<string, SessionEntry[]>();
@@ -177,6 +208,7 @@ export class FakeFleet implements Fleet {
 
   async despawn(deviceId: string, request: DespawnRequest): Promise<DespawnResponse> {
     this.despawns.push({ deviceId, id: request.id });
+    if (this.despawnReply !== null) return this.despawnReply();
     return { ok: true, window: "w", outcome: "exited", sessions: [] };
   }
 }

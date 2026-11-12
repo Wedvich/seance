@@ -2,6 +2,7 @@ import {
   CAPABILITIES,
   parseAccountRecord,
   parseQueueReply,
+  parsePassReply,
   parseTaskReply,
   RequestFailure,
   type AccountRecord,
@@ -12,6 +13,7 @@ import {
   type StoreRefusal,
   type Task,
   type TaskCreated,
+  type PassReply,
   type TaskReply,
 } from "@seance/shared";
 import { accountCaches } from "./account-cache.ts";
@@ -68,6 +70,8 @@ export interface SchedulerLeg {
   readonly cancel: (taskId: string) => Promise<TaskReply | null>;
   /** `run-now`: only to a leader advertising `CAPABILITIES.runNow`, which the caller checks. */
   readonly runNow: (taskId: string) => Promise<TaskReply | null>;
+  /** `pass`: only to a leader advertising `CAPABILITIES.successor`, which the caller checks. Never retried: a lost answer may follow a successor already created. */
+  readonly pass: (taskId: string) => Promise<PassReply | null>;
   /**
    * The readable account records, cached per socket (`AccountCache`); null when a listing was
    * refused or lost. `label` is a display read: it honours the cache's hold on a null answer,
@@ -114,6 +118,7 @@ export function relayFleet(relay: LazyRelay): Fleet {
           queue: () => client.queue(),
           cancel: (taskId) => client.cancel(taskId),
           runNow: (taskId) => client.runNow(taskId),
+          pass: (taskId) => client.pass(taskId),
           accounts: (options) => cacheOf(client).read({ hold: options?.label === true }),
         },
         release: (): void => relay.release(),
@@ -203,6 +208,8 @@ export function brokerScheduler(
       send({ schedulerOp: "cancel", taskId }, (data) => (data === null ? null : (parseTaskReply(data) ?? undefined))),
     runNow: (taskId) =>
       send({ schedulerOp: "run-now", taskId }, (data) => (data === null ? null : (parseTaskReply(data) ?? undefined))),
+    pass: (taskId) =>
+      send({ schedulerOp: "pass", taskId }, (data) => (data === null ? null : (parsePassReply(data) ?? undefined))),
     accounts: async (options) => {
       // Labels never ask the broker: its `accounts` frame cannot say label from pin, so the daemon
       // reads it as a pin (no hold), and each call is a `local-broker` audit line (DESIGN.md "Fleet broker").

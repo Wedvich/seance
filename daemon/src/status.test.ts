@@ -5,6 +5,7 @@ import {
   seal,
   STATUS_MAX_AUTH_EXPIRED,
   STATUS_MAX_CT_LENGTH,
+  STATUS_MAX_TRAIT_PAIRS,
   toBase64,
   type MachineStatus,
   type Plain,
@@ -115,6 +116,26 @@ describe("fitStatus", () => {
     expect(crowded.ax).toEqual([1]);
     expect(crowded.ae).toEqual([[2, 1_760_000_000]]);
     expect(crowded.au).toEqual([0]);
+  });
+
+  test("the trait probe lists are never trimmed either, beside auth lists at their bounds", () => {
+    const pairs = (n: number, trait: number): [number, number][] => Array.from({ length: n }, (_, x) => [x, trait]);
+    const traits: MachineStatus = { ...status(3), tf: pairs(3, 0), tu: [[1, 1]], ax: [1] };
+    const { quota: _quota, ...rest } = traits;
+    const fitted = fitStatus(traits, padded({ ...rest, tr: 3 }));
+    expect(fitted.quota).toBeUndefined();
+    expect(fitted.tf).toEqual(pairs(3, 0));
+    expect(fitted.tu).toEqual([[1, 1]]);
+    // Both bounded lists whole at once: 16 auth entries and 16 trait pairs (tf and tu together).
+    const ae = Array.from({ length: STATUS_MAX_AUTH_EXPIRED }, (_, x): [number, number] => [x, 1_999_999_999]);
+    const tf = pairs(STATUS_MAX_TRAIT_PAIRS - 4, 123);
+    const tu = pairs(4, 456);
+    const worst = fitStatus({ ...status(12), ae, tf, tu, sess: Array.from({ length: 600 }, () => 9) });
+    expect(worst.ae).toEqual(ae);
+    expect(worst.tf).toEqual(tf);
+    expect(worst.tu).toEqual(tu);
+    expect(worst.sess).toBeUndefined();
+    expect(statusBytes(worst)).toBe(STATUS_PAYLOAD_BUDGET);
   });
 
   test("the worst case — 16 expiring exclaves, full quota, a huge sess — keeps every entry and lands on the budget", () => {

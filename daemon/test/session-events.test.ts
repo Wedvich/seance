@@ -365,6 +365,14 @@ describe("`seanced session-event` and a done report (#21)", () => {
     await runCli({ state: "busy" });
     expect(handled.length).toBe(before + 1);
   });
+
+  test("refuses a pass too: it pushes a branch and moves the task, and only the MCP tool may ask", async () => {
+    const before = handled.length;
+    await runCli({ pass: true, record: "done: a; left: b" });
+    expect(handled.length).toBe(before);
+    await runCli({ state: "busy" });
+    expect(handled.length).toBe(before + 1);
+  });
 });
 
 describe("activity", () => {

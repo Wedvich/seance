@@ -30,19 +30,25 @@ export type { Assignment, Placement, Reservation, Target, Task, TaskSpec, TaskSt
  * ledger proves the spawn never landed, and `failed` otherwise. `lost → ready`
  * is legal for that task alone, and `advance` refuses it for any other. `done` from `queued`, `blocked` or `ready` is `mark-done`'s alone: no signal ever settles never-placed work, and it always wins. `lost`
  * and `awaiting-merge` both fail past their expiry (`expiry.ts`), and so does a `ready` continuation; `ready → failed` is expiry's alone.
+ *
+ * `superseded` is a pass's end (DESIGN.md, "Passing to a successor"): only from the three states that
+ * hold a live or possibly live session, and only with `Task.successor` set, which the leader writes
+ * before the close. A merge, a `done` report, a cancel or a mark-done wins over it and leaves the task
+ * as it would have finished, with `successor` dropped (`advance`).
  */
 export const TRANSITIONS = {
   queued: ["blocked", "ready", "done", "failed", "cancelled"],
   blocked: ["ready", "done", "failed", "cancelled"],
   ready: ["reserved", "done", "failed", "cancelled"],
   reserved: ["running", "needs-input", "awaiting-merge", "done", "ready", "lost", "failed", "cancelled"],
-  running: ["needs-input", "awaiting-merge", "lost", "done", "failed", "cancelled"],
-  "needs-input": ["running", "awaiting-merge", "lost", "done", "failed", "cancelled"],
+  running: ["needs-input", "awaiting-merge", "lost", "done", "failed", "cancelled", "superseded"],
+  "needs-input": ["running", "awaiting-merge", "lost", "done", "failed", "cancelled", "superseded"],
   "awaiting-merge": ["done", "failed", "cancelled"],
-  lost: ["running", "needs-input", "awaiting-merge", "done", "ready", "failed", "cancelled"],
+  lost: ["running", "needs-input", "awaiting-merge", "done", "ready", "failed", "cancelled", "superseded"],
   done: [],
   failed: [],
   cancelled: [],
+  superseded: [],
 } as const satisfies Record<TaskState, readonly TaskState[]>;
 
 /**
@@ -84,6 +90,10 @@ export function isUnconfirmed(task: Task): boolean {
   return task.state === "lost" && task.reservedAt !== undefined;
 }
 
+function keepsSuccessor(to: TaskState): boolean {
+  return to === "running" || to === "needs-input" || to === "lost" || to === "superseded";
+}
+
 /**
  * The one way a task changes state. An illegal move is a scheduler bug, not
  * an input error, so it throws rather than returning a code. Leaving
@@ -108,6 +118,7 @@ export function advance(task: Task, to: TaskState, fields: TaskFields = {}): Tas
     remoteSession,
     prAlert,
     continuedBy,
+    successor,
     ...rest
   } = task;
   const keepsReservedAt = to === "reserved" || (to === "lost" && task.state === "reserved");
@@ -123,6 +134,9 @@ export function advance(task: Task, to: TaskState, fields: TaskFields = {}): Tas
     ...(prAlert !== undefined && TASK_PHASES[to] !== "finished" ? { prAlert } : {}),
     // Only an `awaiting-merge` task is offered from, and a finished record stays lean.
     ...(continuedBy !== undefined && TASK_PHASES[to] !== "finished" ? { continuedBy } : {}),
+    // The link of a pass whose close has not landed: any other way out (a merge, a report, a cancel) wins
+    // over it, and `parseTask` would hold a record carrying it on another state unreadable.
+    ...(successor !== undefined && keepsSuccessor(to) ? { successor } : {}),
     ...fields,
     state: to,
   };

@@ -1,4 +1,5 @@
 import type { Machine } from "./app-client.ts";
+import { exclaveTraitHealth } from "./status-reader.ts";
 import { TASK_SPEC_LIMITS, type ExclaveInfo, type TaskSpec } from "./types.ts";
 
 /**
@@ -37,6 +38,24 @@ export function fleetTraits(machines: readonly Machine[]): ReadonlyMap<string, r
     }
   }
   return new Map([...holders.keys()].toSorted().map((trait) => [trait, [...(holders.get(trait) ?? [])].toSorted()]));
+}
+
+/**
+ * The machines on which `trait`'s probe is failing on every exclave that carries it, sorted:
+ * a machine with one healthy or unknown holder can still place the task, so it is not named.
+ * Reads `exclaveTraitHealth`, the one rule routing shares.
+ */
+export function traitHealthByMachine(
+  machines: readonly Machine[],
+  trait: string,
+  nowMs: number,
+): { readonly failing: readonly string[] } {
+  const failing = machines.filter((machine) => {
+    const health = (machine.exclaves ?? []).map((_, index) => exclaveTraitHealth(machine, index, trait, nowMs));
+    const carried = health.filter((h) => h !== null);
+    return carried.length > 0 && carried.every((h) => h === "failing");
+  });
+  return { failing: [...new Set(failing.map((m) => m.name))].toSorted() };
 }
 
 /** The names in `requires` that no machine declares, in request order. */

@@ -34,7 +34,8 @@ export type PaddedStatus = MachineStatus & { readonly _: string };
  * Trimming takes the least useful fields first: the per-model windows, then
  * the reset stamps, then quota entries from the last exclave down (`default`
  * is index 0 and the one every machine has). Pressure, `ax`/`ae`/`au` (auth
- * health, capped together by `STATUS_MAX_AUTH_EXPIRED`) and `drn` (the launch gate) are never
+ * health, capped together by `STATUS_MAX_AUTH_EXPIRED`), `tf`/`tu` (trait probes, capped together by
+ * `STATUS_MAX_TRAIT_PAIRS`) and `drn` (the launch gate) are never
  * trimmed and always fit; `sess` goes only past any real exclave count.
  * Any trim sets `tr` to the count of quota entries dropped — 0 when only
  * detail went — so a reader can tell an exclave left out from one with no

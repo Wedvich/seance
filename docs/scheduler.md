@@ -174,7 +174,7 @@ they now live:
 
 - Filters (the per-account cap and `skill_absent` are DESIGN.md "Routing caps" and "Skills
   filter"; the per-batch bound M3 built went 2026-10-26, "Batches"): stacked base unpushed and not on this exclave (M4,
-  _Stacking_); auth expired (M4, _Auth health_); trait absent (built, DESIGN.md "Traits filter") or unhealthy (M4, _Traits_, probes).
+  _Stacking_); auth expired (M4, _Auth health_); trait absent or unhealthy (built, DESIGN.md "Traits filter").
 - Score: `dependencyDistance` gets an input once M4's stacking fills `TaskSpec.base`. The LXC
   pressure view (M4) reaches `machinePressure` folded into the LXC daemon's own `status`, so the
   library reads it as any other pressure.
@@ -409,8 +409,8 @@ of M4 has landed.
 | 2     | Stacking                                                           | authoring surface; #28                                                 | L                        |
 | 2     | Auth health — **Done**                                             | Web Push (built); spiked 2026-11-12                                    | M                        |
 | 2     | Traits: core — **Done** (#406)                                     | auth health's status lists (shape to copy)                             | M–L                      |
-| 2     | Traits: probes (new)                                               | traits core                                                            | M                        |
-| 2     | Traits: keep free (new)                                            | traits core                                                            | S                        |
+| 2     | Traits: probes — **Done** (#409)                                   | traits core                                                            | M                        |
+| 2     | Traits: keep free — **Done** (#414)                                | traits core                                                            | S                        |
 | 2     | Linear                                                             | settings; authoring surface                                            | L                        |
 | 2     | Successor (new) — spec 2026-11-12                                  | account records; fleet quota record; Web Push                          | M–L                      |
 | Later | LXC pressure view (was: Proxmox node view)                         | —                                                                      | S                        |
@@ -935,15 +935,17 @@ of M4 has landed.
     machine says what it is); detecting tools automatically (`which az` says installed, not
     signed in, and an MCP server's login state is not visible from outside).
   - _Decided, health probes:_ a trait may name a probe — an argv array from that file only, never
-    a shell string and never a frame field — run with a bare env (`HOME`, `PATH`, `USER`,
-    `LOGNAME`, plus `CLAUDE_CONFIG_DIR` for an exclave-scoped trait), stdio ignored and never
-    logged, one probe at a time per daemon, every `everyMinutes` (at least 5, default 30) and
-    killed after `timeoutSeconds` (1–30, default 10). Exit 0 is healthy, any other exit is
+    a shell string and never a frame field — run with the session's env (the daemon's, less
+    `CREDENTIALS_DIRECTORY`, plus `CLAUDE_CONFIG_DIR` for an exclave-scoped trait; a bare env was
+    the first draft, and a keyring-backed CLI fails in one, so a probe would say failing for a trait a
+    session reaches), stdio ignored and never logged, one probe at a time per daemon, every
+    `everyMinutes` (at least 5, at most 1440, default 30; a failing or unknown one reruns at the
+    5-minute floor) and killed after `timeoutSeconds` (1–30, default 10), and its process group killed when it exits on its own, so it leaves nothing running. Exit 0 is healthy, any other exit is
     failing, a timeout or spawn error is unknown. Failing is carried in `status` as
     `tf: [[exclaveIndex, traitIndex], …]` (at most 16, never trimmed, like `ax`); unknown routes,
     as for auth. Every probe runs once at daemon start, and a trait not yet probed is carried as
-    unknown (a `tu` list beside `tf`), never as healthy, so a restart does not route to a failing
-    trait for up to `everyMinutes`. Rejected: probes from the wire (remote code execution by definition), probes on
+    unknown (a `tu` list beside `tf`), never as healthy. Unknown routes, so a restart routes to a
+    failing trait only for the seconds before its first run ends, not for `everyMinutes`. Rejected: probes from the wire (remote code execution by definition), probes on
     every routing pass (a slow `az account show` would load the box and stall the leader), and
     a per-probe cadence below 5 minutes.
   - _Decided, where a task says what it requires:_ one spelling per client, as #390 did for
@@ -979,14 +981,23 @@ of M4 has landed.
     enqueue check is what keeps that rare.
   - _Decided, "keep me free":_ a trait may say `keepFree: true` — "prefer not to place tasks here
     that don't need this". Built as a score component, never a filter: a candidate exclave with a
-    `keepFree` trait the task does not require scores lower (`keepFree`, weight 4, beside
-    `machinePressure`), so the Mac fills last instead of never. `avoid` stays for "never here".
-    Advertised as `ExclaveInfo.keepFree` (names). An older leader ignores the extra component
-    (`parseScore` ignores extra keys). Rejected: a filter (a busy fleet would then refuse work the
+    `keepFree` trait the task does not require scores worse (a `keepFree` component of 1, weight 8,
+    beside `machinePressure`: its total rises by 8, and a lower total wins), so the Mac fills last
+    instead of never. Binary: several kept-free traits still cost one. The trade-off, stated honestly:
+    8 is `globalMax`'s worth of `queuePressure` (the Mac loses to a machine carrying up to 7 in-flight
+    tasks), two fully loaded machines (`machinePressure` weighs 4), or a competitor's account near 74%
+    projected at the start of a window, a little more later in it (account pressure is scaled by the
+    window still to run; 80% at the halfway point); ties go by deviceId. A weight of 4 was
+    rejected: another machine carrying four tasks is normal load, and the Mac would take work then,
+    so it would not keep the Mac free. `keepFree` covers only the standing "only when nothing better
+    is free"; `avoid` stays the owner's explicit "not here this time" for a batch (ahead of a reboot,
+    before closing the lid for a commute), which no config preference can know.
+    Advertised as `ExclaveInfo.keepFree` (names). An older leader drops `ExclaveInfo.keepFree`
+    (`parseExclaveInfo`) and places as before; an older reader's `parseScore` drops the component. Rejected: a filter (a busy fleet would then refuse work the
     Mac could take), and a per-task "prefer not" list (that is `avoid` again).
   - _PRs:_ (1) core — **built** (#406; DESIGN.md "Traits filter"); config, `ExclaveInfo.traits`, `TaskSpec.requires` with the sentinel, the
     filter and both reasons (`trait_unhealthy` parsed and worded, emitted by PR 2), MCP/CLI/PWA authoring, `get_queue`/PWA text, `CAPABILITIES.traits`;
-    (2) probes — `tf` in status, `trait_unhealthy`; (3) `keepFree`. Each with its DESIGN.md
+    (2) probes — **built** (#409; DESIGN.md "Trait probes"): `tf`/`tu` in status, `trait_unhealthy`; (3) `keepFree` — **built** (#414; DESIGN.md "Traits filter", "Keep free"). Each with its DESIGN.md
     subsection and threat-model entry (probes run operator-configured commands: a new exec
     surface, audited under its own origin `probe`).
 - **Offline machines and the caps** (checked 2026-11-12; already decided, no change) — a task in
@@ -1012,8 +1023,27 @@ of M4 has landed.
     (`trait_absent`/`trait_unhealthy`), and one per client refusal of an unknown trait (logged by
     the client); tasks held, for how long, and by which trait.
   - `avoid`: the leader logs, per admitted task, whether it carries `avoid`, `requires` or a pin
-    (counts only, no ids or names); the share of tasks with `avoid` before traits ship and a
-    month after `keepFree` does says whether the workaround went away.
+    (counts only, no ids or names); the share of tasks with `avoid` before `keepFree` ships and a
+    month after it does says how much of `avoid` was standing in for "keep this machine free". It is
+    not a target to drive to zero: `avoid` for a reboot or a commute is meant to go on. The counts exist only from the traits-core
+    deploy (#406), so "before" is the window between that deploy and the `keepFree` deploy; there is no
+    pre-traits baseline (earlier admit lines carry no counts, and no earlier line records `avoid`; the command skips them, or the
+    months before the deploy would read 100%). Owner,
+    monthly, on every machine that has led the scheduler; not a pass/fail gate:
+
+    ```sh
+    grep -h ' op=admit ' ~/.local/state/seance/seanced.log \
+    | awk '$0 !~ / avoid=[0-9]/ { next }  # admitted before #406: no counts, so neither numerator nor denominator
+           { match($0, /task="[^"]*"/); id=substr($0,RSTART,RLENGTH); if (seen[id]++) next;
+             month=substr($1,1,7); total[month]++; if ($0 ~ / avoid=[1-9]/) avoid[month]++ }
+           END { for (m in total) printf "%s admitted=%d with_avoid=%d share=%.0f%%\n", m, total[m], avoid[m], 100*avoid[m]/total[m] }' \
+    | sort
+    ```
+
+    To count across leaders, feed the logs of all of them into the `grep` (e.g. `ssh <box> cat
+    …/seanced.log`), so a task admitted under two leaders counts once. The "after" share is the month
+    starting a month after the `keepFree` deploy; the drop, if any, is the part of `avoid` that was
+    standing in for "keep this machine free", and what remains is deliberate.
 
 - **Spawn defaults to the scheduler** — **Done** (owner, 2026-10-25; PRs #309, #310 and #311): every
   spawn is a task, a machine or an account is a pin on it, and a task's pin and `avoid` show on
@@ -1154,7 +1184,8 @@ of M4 has landed.
     at `checkpoint` or `auto`, answers a turn ending on a plain-text "shall I proceed?" with one
     nudge to proceed or ask it properly. First check that an engine hook can continue a turn.
 
-- **Successor** — _Decided_ by the owner, 2026-11-12 (O1–O3 below); spec only, nothing built. A task
+- **Successor** — _Decided_ by the owner, 2026-11-12 (O1–O3 below); the outside path (2a) and the
+  session's own (2b) are built (2026-11-12), the automatic trigger is not. A task
   running on an account that runs out of usage passes its work to a **successor**: a new task, free
   to land on another account, that starts from the old task's pushed branch and a written record of
   where it stood. Quota failover is the reason: a task that is half done when its account's 5-hour
@@ -1164,15 +1195,15 @@ of M4 has landed.
   above), which ends a session whose work is finished and whose PR awaits merge. A pass moves work
   that is not finished. No identifier of this feature may contain the hand-off's names; the act is a
   **pass**, the new task the **successor**, the old one **`superseded`**. The record is DESIGN.md's
-  "Passing to a successor — designed 2026-11-12, not built".
+  "Passing to a successor".
   1. **Spec** — **Done** (this item and DESIGN.md), PR 1.
   2. **Manual path**, in two PRs. A person or the session itself passes a running task. The old
      machine's daemon pushes the clean branch, the leader creates the successor and links the two,
      and the old session is closed.
-     - **2a, from outside** — not built: the PWA's "Pass to successor" on a running card,
+     - **2a, from outside** — **Done** (2026-11-12): the PWA's "Pass to successor" on a running card,
        `seanced pass <task-id>` and MCP `pass_task { taskId }`. One scheduler op, `pass`, behind all
        three; the successor's prompt is the fallback one (below).
-     - **2b, from the session** — not built: MCP `pass_to_successor { record }`. The session commits
+     - **2b, from the session** — **Done** (2026-11-12): MCP `pass_to_successor { record }`. The session commits
        and calls it last; its daemon pushes at once and the session's `record` becomes the
        successor's prompt. The daemon closes the session at the end of that turn, once the leader
        has confirmed the successor. It has its own capability, `successorSelf`, so a session never
@@ -1218,8 +1249,8 @@ of M4 has landed.
       record's end, with a fixed closing line and a log line `pass record cut`; the preamble never.
       With no record (every outside pass, or a session that sends none) the leader composes the
       prompt: the preamble, the old prompt (cut to fit), the remote branch, the PR URLs and the
-      Linear key. The preamble tells the successor that it continues task `<old id>`, which a
-      session on another account began and pushed to `origin/<r>` at `<sha>`; that it is in a fresh
+      Linear key. The preamble tells the successor that it continues task `<old id>`, which an
+      earlier session began and pushed to `origin/<r>` at `<sha>`; that it is in a fresh
       worktree on its own new branch, which it keeps; to run `git fetch origin <r>`,
       `git reset --hard origin/<r>` (the worktree is fresh, nothing is lost) and
       `git branch --set-upstream-to=origin/<r>`; to rebuild state from `git log`,
@@ -1229,12 +1260,17 @@ of M4 has landed.
       _Rejected:_ a state file committed on the branch; switching the successor's worktree to `<r>`.
     - **O2. The daemon pushes, on a clean tree only.** The old task's daemon pushes the worktree's
       local branch `<b>` to its **remote branch** `<r>` on `origin`: argv only, never forced, only
-      `refs/heads/<b>:refs/heads/<r>`. `<r>` is the branch's configured upstream when
+      `<b>`'s tip sha to `refs/heads/<r>`. `<r>` is the branch's configured upstream when
       `branch.<b>.remote` is exactly `origin` (daemon worktrees sit on `worktree-<name>` while
       sessions push `HEAD:martin/…`, so `<b>` alone would leave a stray branch beside the PR's),
       else, for a branch with no upstream (an upstream on another remote counts as none): the PR head
-      the leader read, when origin's tip of it is an ancestor of the local tip (else `branch_mismatch`,
-      nothing pushed), or, with no PR head, `<b>` (Q7 below). A dirty tree refuses `dirty_worktree`; the
+      the leader read, when origin's tip of it is an ancestor of the local tip and of no default
+      branch's tip, the default fetched with it (else `branch_mismatch`, nothing pushed; the default
+      branch itself is `default_branch`, and a fetch that fails for a reason other than a missing
+      branch, or a clone with no `origin/HEAD`, is `push_failed`), or, with no PR head, `<b>` (Q7 below).
+      A push refused as a non-fast-forward is `push_rejected`, unless origin's branch moved on past a
+      tip already in it (a GitHub "Update branch"): then the pass goes on with origin's tip, nothing
+      pushed. A dirty tree refuses `dirty_worktree`; the
       daemon makes no WIP commits. This is the daemon's first write to GitHub, so a threat-model
       change (D12). _Rejected:_ daemon WIP commits; never pushing; always pushing to `<b>`.
     - **O3. The automatic trigger is specced now and built later** (stage 3).
@@ -1265,8 +1301,13 @@ of M4 has landed.
       `superseded`, the states `parseTask` accepts it on, so a task a winner finishes drops it, and
       no write produces a record every reader would hold unreadable. A cancel or mark-done wins over
       the despawn's own `ended`: `#yieldToCancel` holds a `superseded` settle as it holds a `failed`
-      one, and `markDone` of a task carrying `successor` counts in `#cancelling` for its call, so
-      neither answers `superseded` or lets the successor run after the person said stop.
+      one, and `markDone` of a task carrying `successor`, or whose pass is in flight (it may commit
+      while the despawn runs), counts in `#cancelling` for its call, so
+      neither answers `superseded` or lets the successor run after the person said stop. The other
+      order wins too: a pass refuses `conflict` while a `cancel` or `mark-done` is out (`#stopping`), at
+      its start, after the push and inside the commit write. A stop whose despawn fails writes
+      nothing: a pass it raced stands and is closed at its grace; a mark-done asked again before
+      then wins.
     - **D5. The successor waits for its predecessor.** It is released only when the predecessor is
       `superseded` naming it; `blocked` while the predecessor is unfinished, unreadable, or missing
       inside `DEP_MISSING_GRACE_MS`; `done` by `merged` when the predecessor was merged (the same answer
@@ -1277,21 +1318,27 @@ of M4 has landed.
       which leaves two sessions able to write one branch and holds a full account busy.
     - **D6. Closing.** An outside pass closes through the leader's `#endSession` at once, as
       `cancel` does. The self path is closed by the **daemon** at the pane's next `idle` carrying
-      `turnEnded` (a later frame in any other state clears the flag, so a turn begun after an
+      `turnEnded` (a later `busy` or `needs-input` frame clears the flag, so a turn begun after an
       unconfirmed pass is not cut), and only once the leader has confirmed the commit point with a new
       scheduler → daemon request, `pass-close`. The leader's 2-minute `PASS_CLOSE_GRACE_MS` deadline
       is a backstop: `#passing` is noted before the commit write, kept until the task leaves the pass
       states (a failed close retries each tick), and reconcile, which skips tasks in `#passing` or in
       flight, re-sends `pass-close` for a session-triggered or unreadable successor and closes any
-      other at once. Work committed after the push is not carried (the worktree is kept); the tool
-      tells the session to end its turn whatever it answers. _Rejected:_
+      other at once. A `pass-close` answered `no_pane` (the session is already gone, so no turn's end
+      is coming) sets the entry's deadline to now, and the re-ask is not awaited by the tick. Work
+      committed after the push is not carried (the worktree is kept); the tool
+      tells the session to end its turn whatever it answers, an unanswered call (a timeout past the
+      daemon's push window, or a lost connection) included, which it words as "may have gone through"
+      and never as a refusal. An interrupted call is fail-closed: the call's cancellation closes the
+      daemon connection and the daemon sends no pass for a caller that is gone. A pane carries one
+      close: a pass outranks a hand-off. _Rejected:_
       the leader closing at an `idle` event (`turnEnded` never reaches it, and a respawn's idle
       would close mid-turn); despawning at once on the self path (it interrupts the final message);
       the daemon deferring a `despawn` reply; the daemon closing on the `pass` frame alone (it would
       close a session whose pass the leader then refused).
     - **D7. The successor's spec** (`successorSpec`, `shared/src/successor.ts`) carries `repo`,
-      `mode: "worktree"`, `title`, `model`, `effort`, `until`, `linear`, `skill`, `avoid`, `autonomy`
-      and `plan`, the last two as `continuationSpec` carries them: `auto` and `checkpoint` stay, so an
+      `mode: "worktree"`, `title`, `model`, `effort`, `until`, `linear`, `skill`, `avoid`, `requires`,
+      `autonomy` and `plan`, the last two as `continuationSpec` carries them: `auto` and `checkpoint` stay, so an
       unattended failover does not stop at its first choice, and `steer` becomes
       `autonomy: "checkpoint"` with `plan` dropped, since the plan was approved. It drops `pin` (an
       account pin is the old account by definition), `deps`, `batch`, `lineage`, `base`, `continues`
@@ -1299,8 +1346,12 @@ of M4 has landed.
       `"session"` or `"manual"` until stage 3 adds `"quota"`. The task also carries the old
       `prUrl` and `prs`, so the PR chip and poller follow.
     - **D8. A forward-compat gate.** `SUCCESSOR_DEP_SENTINEL`, an empty-task-id dep, is appended by
-      the one task sealer whenever `succeeds` is present, as `ATTACHMENTS_DEP_SENTINEL` is, so an
-      older leader holds the record unreadable. _Rejected:_ a new `mode`: the spawn is a plain
+      the one task sealer whenever `succeeds` is present, as `ATTACHMENTS_DEP_SENTINEL` and
+      `REQUIRES_DEP_SENTINEL` are, so an older leader holds the record unreadable; its `after` is
+      `done`, against `merged` and `opened`, so the parser ties each sentinel to its own field when a
+      successor also carries `requires` (a copy of the old task's, D7); a new leader's `openTaskRecord` holds a stored one
+      carrying `succeeds` without it `malformed` (not `parseTask`, which also reads unsealed replies).
+      _Rejected:_ a new `mode`: the spawn is a plain
       worktree spawn and no daemon needs to know about successors to run one.
     - **D9. Placement.** Any clone is a candidate, the old one included: the successor never checks
       out the remote branch under its own name, so no local branch is shared across worktrees.
@@ -1308,7 +1359,9 @@ of M4 has landed.
       for `trigger: "quota"`; a manual or session pass relies on the quota filter, and is also how a
       long session gives a fresh context to an account with headroom. A successor never spills into
       credits: in `judgeAccount` the spill branch becomes `quota_over_line`, so it holds `ready`
-      with reasons rather than spending money the owner did not choose to spend (Q3).
+      with reasons rather than spending money the owner did not choose to spend (Q3). The successor
+      carries the old task's `requires` (D7), so the traits filter applies as to any task: only
+      exclaves declaring them are candidates, and none ready holds it `ready` with `trait_absent`.
     - **D10. Dependents follow the chain.** Admission resolves a predecessor through
       `superseded → successor` links, at most `SUCCESSOR_CHAIN_MAX` (8) hops, before judging
       `released`; a chain too long or looping reads `blocked`. Pruning keeps every link a waiting
@@ -1362,10 +1415,13 @@ of M4 has landed.
       needs a daemon-side spawn change this item avoids.
     - **Q7. No upstream, PR open on another branch.** A rate-limited session cannot set its own
       upstream, so refusing would strand the case the feature exists for. When the branch has no
-      upstream on `origin` and the scheduler-sealed `push-branch` carries `expect` (the PR head the
-      leader read), the daemon validates it with the same ref-format rule, fetches it, and pushes
-      `refs/heads/<b>:refs/heads/<expect>` only if that remote tip is an ancestor of the local tip:
-      the PR head is this worktree's own line of work. Otherwise `branch_mismatch`, nothing pushed.
+      upstream on `origin` (an upstream on another remote counts as none) and the scheduler-sealed
+      `push-branch` carries `expect` (the PR head the leader read), the daemon validates it with the
+      same ref-format rule, fetches it with the default branch, and pushes `<tip sha>:refs/heads/<expect>`
+      only if that remote tip is an ancestor of the local tip and not already in the default branch:
+      the PR head is this worktree's own line of work. A head that is the default branch is
+      `default_branch`; otherwise `branch_mismatch`, nothing pushed (a fetch that fails for any other
+      reason than a missing branch is `push_failed`).
       A branch with no upstream and no PR pushes to `<b>`. An upstream that is set always wins and
       is never overridden by `expect`. The value comes only from a request the scheduler sealed,
       never a session frame. The self path has no `expect` (the daemon has no PR head), but its
@@ -1384,7 +1440,9 @@ of M4 has landed.
     - a `seanced doctor` line for push credentials: a remote whose SSH key lives only in a login
       session's agent fails under launchd or systemd as `push_failed` (ssh has no terminal to prompt on);
     - the self path telling the session why the leader refused after the push (today: "not
-      confirmed" plus the leader's log line);
+      confirmed" plus the leader's warn line), and an alert or a Queue-screen mark for a session pass
+      the leader refused, since the task stays `running` and idle until someone looks (a new alert kind
+      spans the wire type, the push sender, the service worker's fixed texts and the PWA);
     - stacking, once it lands: a successor on a `baseBranch` instead of a reset to the remote branch.
   - _Deferred:_ moving a `needs-input` task on any path (Q2); a forecast-only spill for a successor
     (Q3).
@@ -1451,7 +1509,8 @@ same PR, with the reason.
    out-of-fleet use becomes routine.
 8. **Score weights and the rest of `SchedulerConfig`** (set with the library, 2026-10-16;
    `scheduler/src/config.ts` is the copy that runs): weights account 1, machine 4,
-   dependency 4, queue 1; sticky bonus 2; per-task estimate 5% of a 5h window and 1% of a
+   dependency 4, queue 1, keepFree 8 (a flat 0/1, added with traits, 2026-11-12: `globalMax`'s
+   worth of in-flight tasks on a competitor, two fully loaded machines); sticky bonus 2; per-task estimate 5% of a 5h window and 1% of a
    weekly (all-models or per-model); global max 8 in-flight tasks; a reservation's TTL 240 s
    (`reservationTtlMs`; 120 s, twice the replay window, until attachments (DESIGN.md, 2026-10-28)
    put a download of up to 120 s before launch: it outlives the leader's 210 s wait for a spawn

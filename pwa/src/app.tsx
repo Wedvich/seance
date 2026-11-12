@@ -85,6 +85,7 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
       onMarkDone={(id) => void store.markDone(id)}
       onRunNow={(id) => void store.runNow(id)}
       onContinue={(id) => void store.continueTask(id)}
+      onPass={(id) => void store.passTask(id)}
       onFollowUp={(id) => store.followUp(id)}
       onPause={() => void store.pauseQueue()}
       onResume={(account) => void store.resumeQueue(account)}

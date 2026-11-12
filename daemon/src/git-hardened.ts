@@ -155,18 +155,58 @@ const REFUSED_FAMILIES = [
   "filter.*",
 ] as const;
 
-const FAMILY_PATTERNS = REFUSED_FAMILIES.map(
-  (family) => [family, new RegExp(`^${family.replaceAll(".", String.raw`\.`).replaceAll("*", ".+")}$`, "u")] as const,
-);
+/**
+ * Families only a push is refused over: git sends a push to `remote.<name>.pushurl` or a `pushInsteadOf` rewrite
+ * and a fetch never does, so a clone whose pushes go elsewhere than the URL a successor fetches from would
+ * publish the work where nothing reads it back. Checked beside `REFUSED_FAMILIES` by `pushConfigRefusal`.
+ */
+const PUSH_REFUSED_FAMILIES = ["remote.*.pushurl", "url.*.pushinsteadof"] as const;
 
-/** The first refused family among config names (any case: git lowercases all but subsections); null when none. */
-export function refusedFamily(names: readonly string[]): string | null {
+function patternsOf(families: readonly string[]): readonly (readonly [string, RegExp])[] {
+  return families.map(
+    (family) => [family, new RegExp(`^${family.replaceAll(".", String.raw`\.`).replaceAll("*", ".+")}$`, "u")] as const,
+  );
+}
+
+const FAMILY_PATTERNS = patternsOf(REFUSED_FAMILIES);
+const PUSH_FAMILY_PATTERNS = patternsOf(PUSH_REFUSED_FAMILIES);
+
+function firstFamily(names: readonly string[], patterns: readonly (readonly [string, RegExp])[]): string | null {
   for (const name of names) {
     const lower = name.toLowerCase();
-    const hit = FAMILY_PATTERNS.find(([, pattern]) => pattern.test(lower));
+    const hit = patterns.find(([, pattern]) => pattern.test(lower));
     if (hit !== undefined) return hit[0];
   }
   return null;
+}
+
+/** The first refused family among config names (any case: git lowercases all but subsections); null when none. */
+export function refusedFamily(names: readonly string[]): string | null {
+  return firstFamily(names, FAMILY_PATTERNS);
+}
+
+/** The repo-local (and worktree) config names, or null when git cannot list them. */
+async function localConfigNames(repoPath: string): Promise<readonly string[] | null> {
+  const listed = await hardenedGit(repoPath, ["config", "--list", "--show-scope", "--name-only", "-z"]);
+  if (listed.exitCode !== 0) return null;
+  // `-z` with `--show-scope`: scope and name alternate, each NUL-terminated.
+  const fields = listed.stdout.split("\0");
+  const names: string[] = [];
+  for (let i = 0; i + 1 < fields.length; i += 2) {
+    if (fields[i] === "local" || fields[i] === "worktree") names.push(fields[i + 1] ?? "");
+  }
+  return names;
+}
+
+/**
+ * What makes a push from this repo go somewhere other than where it fetches from, or null: a repo-local
+ * `pushurl` or `pushInsteadOf` (`PUSH_REFUSED_FAMILIES`). A label, never the value. Fails closed: config git
+ * cannot list refuses. `networkGit` still applies `repoConfigRefusal` on top.
+ */
+export async function pushConfigRefusal(repoPath: string): Promise<string | null> {
+  const names = await localConfigNames(repoPath);
+  if (names === null) return "unreadable config";
+  return firstFamily(names, PUSH_FAMILY_PATTERNS);
 }
 
 const ATTRIBUTES_REFUSAL = "merge= in info/attributes";
@@ -178,14 +218,8 @@ const ATTRIBUTES_REFUSAL = "merge= in info/attributes";
  * attributes that exist but cannot be read, refuse.
  */
 export async function repoConfigRefusal(repoPath: string): Promise<string | null> {
-  const listed = await hardenedGit(repoPath, ["config", "--list", "--show-scope", "--name-only", "-z"]);
-  if (listed.exitCode !== 0) return "unreadable config";
-  // `-z` with `--show-scope`: scope and name alternate, each NUL-terminated.
-  const fields = listed.stdout.split("\0");
-  const names: string[] = [];
-  for (let i = 0; i + 1 < fields.length; i += 2) {
-    if (fields[i] === "local" || fields[i] === "worktree") names.push(fields[i + 1] ?? "");
-  }
+  const names = await localConfigNames(repoPath);
+  if (names === null) return "unreadable config";
   const family = refusedFamily(names);
   if (family !== null) return family;
   const commonDir = await resolveCommonDir(repoPath);

@@ -177,7 +177,7 @@ export async function brokerFleetState(
 /** What a scheduler frame carries beyond its envelope: the op and only the fields that op takes. */
 export type SchedulerCall =
   | { readonly schedulerOp: "enqueue"; readonly taskId: string; readonly spec: TaskSpec }
-  | { readonly schedulerOp: "cancel" | "run-now"; readonly taskId: string }
+  | { readonly schedulerOp: "cancel" | "run-now" | "pass"; readonly taskId: string }
   | { readonly schedulerOp: "queue" | "accounts" };
 
 /** Repeats that change nothing: reads, and an enqueue, whose second create of the same task id reads `landedEarlier`. */

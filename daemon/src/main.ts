@@ -32,6 +32,7 @@ usage: seanced [command]
               --now: spawn on this machine right away instead: no relay, key, leader or daemon needed; takes no pin flags, --requires or --start
   continue    resume a failed or cancelled task's, or a blocked awaiting-merge task's, session in its worktree, as a new queued task: seanced continue <task-id> [-p <note>] (needs the relay, and a PSK this shell or its daemon holds)
   start       start a queued task now, past the concurrency cap (the app's Start now): seanced start <task-id> (needs the relay, and a PSK this shell or its daemon holds)
+  pass        pass a running task to a successor (the app's Pass to successor): pushes its branch, ends its session, queues the task that carries on: seanced pass <task-id> (needs the relay, and a PSK this shell or its daemon holds)
   despawn     end a session: seanced despawn <id> [--force] — asks claude to exit (keeping its worktree), kills the pane after ~5s
   reap        clean up after sessions: merged, clean, idle worktrees, merged branches, dead windows — [--dry-run] [--min-age-days <n>]
   mcp         serve MCP over stdio for a local Claude Code; mcp install / mcp uninstall wire it into Claude's config
@@ -123,6 +124,9 @@ async function runCommand(command: string, rest: readonly string[]): Promise<voi
       break;
     case "start":
       await cli.cmdStart(rest);
+      break;
+    case "pass":
+      await cli.cmdPass(rest);
       break;
     case "despawn":
       await cli.cmdDespawn(rest);

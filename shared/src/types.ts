@@ -667,12 +667,22 @@ export type AtRestOp = (typeof AT_REST_OPS)[keyof typeof AT_REST_OPS];
 
 /**
  * Fire-and-forget ops — nothing correlates a reply: `update-available` a
- * broadcast, `session-event` and `branch-state` reports to the scheduler, and
+ * broadcast, `session-event`, `session-pass` and `branch-state` reports to the scheduler, and
  * `queue-changed` the scheduler's nudge to every app.
  */
-export type EventOp = "update-available" | "session-event" | "branch-state" | "queue-changed";
+export type EventOp = "update-available" | "session-event" | "session-pass" | "branch-state" | "queue-changed";
 
-export type OpName = "sessions" | "spawn" | "despawn" | "rescan" | "metrics" | AtRestOp | EventOp | SchedulerOp;
+export type OpName =
+  | "sessions"
+  | "spawn"
+  | "despawn"
+  | "rescan"
+  | "metrics"
+  | "push-branch"
+  | "pass-close"
+  | AtRestOp
+  | EventOp
+  | SchedulerOp;
 
 /** Ops that expect a response. */
 export type RequestOp = Exclude<OpName, AtRestOp | EventOp>;
@@ -695,6 +705,7 @@ export const SCHEDULER_OPS = [
   "discard",
   "push-subscribe",
   "push-unsubscribe",
+  "pass",
 ] as const;
 
 export type SchedulerOp = (typeof SCHEDULER_OPS)[number];
@@ -706,6 +717,12 @@ export type SchedulerOp = (typeof SCHEDULER_OPS)[number];
  * command timeout and spawn.ts's 3s pane-death check, and
  * despawn's clears its ~5s graceful exit plus the kill and its escalation.
  * `cancel` may despawn on the task's machine first, so it clears `despawn`'s.
+ * `push-branch` covers the daemon's local git reads, the fetch of the no-upstream
+ * fallback (its own 15 s) and the push (its own 45 s). `pass` is the worst path of
+ * a pass: the PR head read 15 s, `push-branch` 90 s, the create 10 s, the overwrite
+ * with its retries about 30 s, then the `sessions` read 10 s and the despawn 20 s,
+ * about 175 s. A client that gives up early retries safely (one pass per task at a time).
+ * `pass-close` answers at once (the daemon arms a close and never waits for it).
  */
 export const OP_TIMEOUT_MS = {
   sessions: 10_000,
@@ -723,6 +740,9 @@ export const OP_TIMEOUT_MS = {
   discard: 10_000,
   "push-subscribe": 10_000,
   "push-unsubscribe": 10_000,
+  pass: 180_000,
+  "push-branch": 90_000,
+  "pass-close": 10_000,
 } as const satisfies Record<RequestOp, number>;
 
 /**
@@ -871,6 +891,12 @@ export interface ExclaveInfo {
    * (the fail-closed direction for placement).
    */
   readonly traits?: readonly string[];
+  /**
+   * The subset of `traits` the machine asks to keep free: a score penalty for tasks
+   * that don't require them, never a filter. Declared like `traits` (own `config.json`
+   * only), absent when none, and an older reader drops it.
+   */
+  readonly keepFree?: readonly string[];
 }
 
 export interface SessionEntry {
@@ -1020,6 +1046,15 @@ export interface MachineInfo {
  * verified leader advertising it: an older one drops the field, and the sentinel
  * (`REQUIRES_DEP_SENTINEL`) only keeps it from placing the task anywhere. One build
  * does both halves.
+ * `successor` (passing a task to a successor, the outside path): as a daemon, answers
+ * `push-branch`; as a leader, answers `pass` and routes and admits a task carrying
+ * `spec.succeeds`. What `pass_task`, the PWA and the CLI check of the verified leader,
+ * and what a leader checks of the old task's machine before it asks for a push. The
+ * session's own path has a capability of its own (`successorSelf`): a leader advertising
+ * only `successor` would drop a session's `session-pass` event and time the tool out on
+ * every attempt. `successorSelf`: as a daemon, ingests the `pass` frame of its local socket
+ * and answers `pass-close`; as a leader, ingests `session-pass`. What `pass_to_successor`
+ * checks of the verified leader.
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -1036,6 +1071,8 @@ export const CAPABILITIES = {
   attachments: "attachments",
   authHealth: "authHealth",
   traits: "traits",
+  successor: "successor",
+  successorSelf: "successorSelf",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -1177,6 +1214,20 @@ export interface MachineStatus {
    */
   readonly au?: readonly number[];
   /**
+   * Trait probes reading failing (M4, Traits), each `[exclave index, trait index into that
+   * exclave's `ExclaveInfo.traits`]` — the registered blob's, so a reader range-checks both
+   * against the info it holds. Routing rejects the exclave for a task requiring that trait
+   * (`trait_unhealthy`). Disjoint from `tu`, at most `STATUS_MAX_TRAIT_PAIRS` across both,
+   * `tf` first, and never trimmed. A reader refuses more, or a pair repeated within or across
+   * the two. Absent from older daemons (which ignore it), and when none is failing.
+   */
+  readonly tf?: readonly (readonly [number, number])[];
+  /**
+   * Trait probes not yet known, as `tf`'s pairs: not run yet, or the last run timed out or
+   * could not start. Still placed; says nothing. Disjoint from `tf`, never trimmed.
+   */
+  readonly tu?: readonly (readonly [number, number])[];
+  /**
    * The daemon's task-launch gate is closed (`EndedTasks.drain`: a self-update's
    * restart, or a shutdown), so a task launch sent now is refused `internal_error`
    * and sits reserved until its TTL; routing filters the machine (`draining`).
@@ -1195,6 +1246,9 @@ export interface MachineStatus {
  * code for nothing.
  */
 export const STATUS_MAX_AUTH_EXPIRED = 16;
+
+/** `MachineStatus.tf` and `tu` pairs at most, combined; `tf` first. */
+export const STATUS_MAX_TRAIT_PAIRS = 16;
 
 /**
  * A refresh token's remaining life at which an exclave reads `expiring`: Claude
@@ -1508,6 +1562,70 @@ export type DespawnResponse =
     }
   | { readonly ok: false; readonly code: DespawnErrorCode; readonly message: string };
 
+/**
+ * `op: "push-branch"`, scheduler → the daemon holding a task, sealed `from: SCHEDULER_ID` (or the
+ * leader in process): push that task's worktree branch to its remote branch on `origin`
+ * (DESIGN.md, Scheduler, "Passing to a successor"). `expect` is the head of the task's PR as the
+ * leader read it with its own `gh`: the daemon only compares it, and takes it as the push target
+ * only for a branch with no upstream whose origin tip is an ancestor of the local tip and not of the default
+ * branch's (fetched with it). The task
+ * names its worktree through the daemon's own launch ledger, never a path from the wire.
+ */
+export interface PushBranchRequest {
+  readonly taskId: string;
+  readonly expect?: string;
+}
+
+/**
+ * `no_upstream` is the session's own path's alone (the daemon knows the task has a PR and the
+ * session can set its upstream); the leader never asks for it. The local branch name never
+ * crosses the wire.
+ */
+export const PUSH_BRANCH_ERROR_CODES = [
+  "not_launched",
+  "detached_head",
+  "default_branch",
+  "dirty_worktree",
+  "branch_mismatch",
+  "no_upstream",
+  "push_rejected",
+  "push_failed",
+  "invalid_request",
+  ...TRANSPORT_ERROR_CODES,
+] as const;
+
+export type PushBranchErrorCode = (typeof PUSH_BRANCH_ERROR_CODES)[number];
+
+/**
+ * `remoteBranch` is the branch on `origin` now holding `tip`; `pushed` false when it already did and nothing was sent,
+ * or when origin's branch had moved on past the local tip, in which case `tip` is origin's.
+ */
+export type PushBranchResponse =
+  | { readonly ok: true; readonly remoteBranch: string; readonly tip: string; readonly pushed: boolean }
+  | { readonly ok: false; readonly code: PushBranchErrorCode; readonly message: string };
+
+/**
+ * `op: "pass-close"`, scheduler → the daemon holding a task, sealed `from: SCHEDULER_ID` (or the leader in
+ * process): the leader has written the commit point of a pass its session asked for, so the daemon may close
+ * that session at the end of its turn (DESIGN.md, "Session events", `pass`). The task names the pane through
+ * the daemon's own pane map, never a pane from the wire.
+ */
+export interface PassCloseRequest {
+  readonly taskId: string;
+}
+
+/**
+ * Answered at once, never after the close. `no_pane`: no live pane carries the task, so the session is
+ * already gone. `unsupported`: this daemon runs no ingest to arm.
+ */
+export const PASS_CLOSE_ERROR_CODES = ["no_pane", "unsupported", "invalid_request", ...TRANSPORT_ERROR_CODES] as const;
+
+export type PassCloseErrorCode = (typeof PASS_CLOSE_ERROR_CODES)[number];
+
+export type PassCloseResponse =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly code: PassCloseErrorCode; readonly message: string };
+
 export interface SessionsResponse {
   readonly sessions: readonly SessionEntry[];
   readonly at: number;
@@ -1692,6 +1810,28 @@ export interface SessionEvent {
 }
 
 /**
+ * `op: "session-pass"`, daemon → scheduler, sealed to `SCHEDULER_ID`, fire-and-forget: a session asked to
+ * pass its own task to a successor and its daemon has already pushed the branch (DESIGN.md, "Session
+ * events", `pass`). Like `SessionEvent`, every field is the daemon's own (the task and pane from its pane
+ * map, `exclave` from the pane's path, `remoteBranch` and `tip` from its own push), except `record`: the
+ * session's claim, prompt text for the successor, at most `SUCCESSOR_RECORD_MAX` UTF-16 units, never
+ * logged and never used to bind, route or close anything.
+ */
+export interface SessionPass {
+  /** `SessionEntry.id` — the pane. */
+  readonly session: string;
+  readonly taskId: string;
+  readonly exclave: string;
+  /** The branch on `origin` the daemon pushed to; the leader compares it with the task's PR head. */
+  readonly remoteBranch: string;
+  /** The commit it holds. */
+  readonly tip: string;
+  readonly record?: string;
+  /** Observed at by the daemon, ms. */
+  readonly at: number;
+}
+
+/**
  * A git ref name's length at most, as `branch-state` and a task record carry one.
  * Those are only length-checked: git made the branch, so it is valid by
  * definition, and a stricter reader would cost a stored task. A branch an app or
@@ -1762,6 +1902,12 @@ export interface ErrorResponse {
  * `awaiting-merge`: its session ended with a PR open; it frees its slot but
  * keeps `after: "merged"` dependents blocked until the merge is seen, or
  * `mergeExpiryMs` fails it `merge_expired` and them with it.
+ *
+ * `superseded`: its work was passed to a successor (`Task.successor`), which continues
+ * from the pushed branch. Terminal, and neither `done` (which would release its
+ * dependents as if the work were finished) nor a failure (which would fail them):
+ * they follow the chain to the successor. An older reader holds a record in a state
+ * it does not know unreadable, which keeps those dependents waiting: the safe reading.
  */
 export const TASK_STATES = [
   "queued",
@@ -1775,6 +1921,7 @@ export const TASK_STATES = [
   "done",
   "failed",
   "cancelled",
+  "superseded",
 ] as const;
 
 export type TaskState = (typeof TASK_STATES)[number];
@@ -1971,6 +2118,40 @@ export const ATTACHMENTS_DEP_SENTINEL = { task: "", after: "merged" } as const;
  */
 export const REQUIRES_DEP_SENTINEL = { task: "", after: "opened" } as const;
 
+/**
+ * Sealed into `spec.deps` whenever a spec carries `succeeds` (`taskRecordAtRest`), as
+ * `ATTACHMENTS_DEP_SENTINEL` is: an older leader's dep parser refuses an empty task id, so
+ * it holds the record unreadable rather than run a successor without its wait for the
+ * predecessor. Told apart from the attachments (`merged`) and requires (`opened`) ones by `after`,
+ * so a record carrying several keeps each tied to its own field. This build's parser drops it
+ * only beside `succeeds`.
+ */
+export const SUCCESSOR_DEP_SENTINEL = { task: "", after: "done" } as const;
+
+/** What a session may send as the record of a pass, UTF-16 units: the successor's prompt below the preamble. */
+export const SUCCESSOR_RECORD_MAX = 7_168;
+
+/** The preamble's fixed wording alone, before its branch, sha, task id and PR URLs are substituted. */
+export const SUCCESSOR_PREAMBLE_MAX = 1_024;
+
+/**
+ * The composed successor prompt in UTF-8 bytes, beside `TASK_REQUEST_LIMITS.prompt`'s units: the size
+ * `STORE_CREATE_MAX_CT_LENGTH` is built for with two-byte characters. Three-byte text would pass the
+ * unit bound and come back `too_large` only after the branch was pushed.
+ */
+export const SUCCESSOR_PROMPT_BYTES = 16_384;
+
+/** Hops of a `superseded → successor` chain a dependent follows; a longer or looping one reads as waiting. */
+export const SUCCESSOR_CHAIN_MAX = 8;
+
+/** How long the leader waits, after a pass's commit point, before it closes the old session itself (the backstop). */
+export const PASS_CLOSE_GRACE_MS = 120_000;
+
+/** What set a pass off. The automatic trigger will add `"quota"` behind a capability of its own; a reader refuses any other value. */
+export const SUCCESSOR_TRIGGERS = ["session", "manual"] as const;
+
+export type SuccessorTrigger = (typeof SUCCESSOR_TRIGGERS)[number];
+
 /** One file a task carries: uploaded sealed before the task was created. */
 export interface AttachmentRef {
   /** `ATTACHMENT_ID_PATTERN`: minted by the PWA per file (`mintAttachmentId`). */
@@ -2071,6 +2252,22 @@ export interface TaskSpec extends TaskRequest {
    */
   readonly requires?: readonly string[];
   /**
+   * The task whose work this one continues, passed on because its account ran out or its owner
+   * asked (`pass`): the predecessor's id, the account its exclave bills (`ExclaveInfo.accountId`),
+   * its `assignment` as a `Target`, and what set the pass off. Routing and display only: nothing
+   * routes on its clone, and the successor starts a plain worktree spawn that resets its own fresh
+   * branch to the pushed one (`successorPrompt`). Held `blocked` until the predecessor is
+   * `superseded` naming it. Only with `mode: "worktree"`, never with `continues` or `attachments`.
+   * An older leader holds the record unreadable (`SUCCESSOR_DEP_SENTINEL`); a client never writes
+   * it, the leader does, through the app leg, only when it advertises `CAPABILITIES.successor`.
+   */
+  readonly succeeds?: {
+    readonly task: string;
+    readonly account: string;
+    readonly at: Target;
+    readonly trigger: SuccessorTrigger;
+  };
+  /**
    * Which app-role client enqueued it, as `SpawnRequest.client` — audit trail
    * only (the leader's admit line), at most `TASK_SPEC_LIMITS.client`. Absent
    * from older clients.
@@ -2124,6 +2321,12 @@ export type Reason =
   | { readonly code: "repo_absent" }
   /** A continue task's target is exactly one (machine, exclave, clone); this is another. */
   | { readonly code: "continue_elsewhere" }
+  /**
+   * The task passes on work from this exclave's account (`succeeds.account`, the automatic
+   * trigger's only): that account ran out, so it is not where the work goes on. A manual or
+   * session pass never has it: the quota filter already rejects a full account.
+   */
+  | { readonly code: "predecessor_account" }
   /** The target machine does not advertise both `CAPABILITIES.continueTask` and `continueSession`. */
   | { readonly code: "continue_unsupported" }
   /** The task carries attachments and the machine does not advertise `CAPABILITIES.attachments`. */
@@ -2139,8 +2342,8 @@ export type Reason =
   /** M4, Traits: the task requires `trait` and this exclave's `ExclaveInfo.traits` lacks it. One reason per missing trait. */
   | { readonly code: "trait_absent"; readonly trait: string }
   /**
-   * M4, Traits: the exclave declares `trait` but its probe is failing. Emitted only by
-   * the probes PR; parsed and worded now so a reader of this build does not drop it.
+   * M4, Traits: the exclave declares `trait` and its probe reads failing (its pair is in the
+   * status's `tf`). An unknown probe (`tu`, or a stale status) is not this reason.
    */
   | { readonly code: "trait_unhealthy"; readonly trait: string }
   /**
@@ -2186,6 +2389,8 @@ export interface ScoreComponents {
   readonly machinePressure: number;
   readonly dependencyDistance: number;
   readonly queuePressure: number;
+  /** 1 when the exclave carries a keepFree trait the task does not require; absent otherwise (and from an older leader). */
+  readonly keepFree?: number;
 }
 
 export interface Score {
@@ -2474,6 +2679,14 @@ export interface Task {
    * record an older leader moved there, which ages from `createdAt` instead.
    */
   readonly endedAt?: number;
+  /**
+   * The task its work was passed to (`pass`): written only by the leader, and only after that
+   * task's create. Carried on `running`, `needs-input` and `lost` (the old session is still to be
+   * closed) and on `superseded`, which requires it; a reader drops it from any other state's record
+   * with the record, since a merge, a `done` report or a cancel that won over the pass leaves none
+   * (`advance` drops it).
+   */
+  readonly successor?: string;
 }
 
 /**
@@ -2772,7 +2985,10 @@ export interface DiskAlerted {
  * `SchedulerConfig.pinExpiryMs` since `createdAt`; it never ran.
  * `session_closed`: its machine reported its window gone with no exit status
  * and no close of its own (`TaskProgress.vanished`), with no PR and no merge
- * seen. Its dependents fail as for `session_failed`.
+ * seen. Its dependents fail as for `session_failed`. `pass_abandoned`: a successor
+ * (`TaskSpec.succeeds`) whose predecessor finished any way but `superseded` naming it
+ * (cancelled, failed, done by its own report, or superseded to another task), or is gone
+ * past `DEP_MISSING_GRACE_MS`: it would run beside, or without, work that moved on.
  */
 export const TASK_FAILURE_CODES = [
   "dispatch_unconfirmed",
@@ -2786,6 +3002,7 @@ export const TASK_FAILURE_CODES = [
   "continue_expired",
   "pin_expired",
   "session_closed",
+  "pass_abandoned",
 ] as const;
 
 export type TaskFailureCode = (typeof TASK_FAILURE_CODES)[number];
@@ -2842,6 +3059,38 @@ export const SCHEDULER_ERROR_CODES = [
    * term will not write over a record it cannot read.
    */
   "settings_unavailable",
+  /** `pass`: the task waits, is `lost` or is `awaiting-merge`, or has no assignment: no live session to pass. */
+  "not_running",
+  /** `pass`: the task is `needs-input`: never moved while a person is asked. */
+  "needs_input",
+  /** `pass`: the task runs in place (`mode: "here"`), so it has no branch of its own to push. */
+  "here",
+  /** `pass`: the old task's machine is not connected. */
+  "offline",
+  /** `pass`: the leader or the old task's machine does not advertise `CAPABILITIES.successor`. */
+  "successor_unsupported",
+  /** `pass`: the old task's exclave reports no account id, so the successor cannot say whose it succeeds. */
+  "account_unknown",
+  /** `pass`: the task has a GitHub PR and the leader could not read its head. */
+  "pr_unreadable",
+  /** `pass`: the task's PR is already merged or closed: nothing to pass. */
+  "pr_not_open",
+  /** `pass`: the branch the worktree pushes to is not the PR's head, or the PR is from a fork. Nothing was pushed. */
+  "branch_mismatch",
+  /** `pass`: the worktree holds uncommitted or untracked changes; nothing was pushed. */
+  "dirty_worktree",
+  /** `pass`: the worktree is on no branch. */
+  "detached_head",
+  /** `pass`: the local or the remote branch is the repo's default branch. */
+  "default_branch",
+  /** `pass`: origin refused the push (not a fast-forward, or a protected ref); never forced. */
+  "push_rejected",
+  /** `pass`: git failed, timed out or refused the repo's config, or the machine did not answer. */
+  "push_failed",
+  /** `pass`: the old machine's launch ledger holds no worktree launch of the task. */
+  "not_launched",
+  /** `pass`: the successor's create failed; nothing else was written. */
+  "pass_failed",
   ...TRANSPORT_ERROR_CODES,
 ] as const;
 
@@ -2934,7 +3183,7 @@ export interface DiscardResponse {
   readonly taskId: string;
 }
 
-/** `op: "cancel"`, `op: "mark-done"` and `op: "run-now"`: the task, by id. */
+/** `op: "cancel"`, `op: "mark-done"`, `op: "run-now"` and `op: "pass"`: the task, by id. */
 export interface TaskRef {
   readonly taskId: string;
 }
@@ -2942,6 +3191,17 @@ export interface TaskRef {
 /** `cancel`, `mark-done` and `run-now` → the task as it now stands. */
 export interface TaskResponse {
   readonly task: Task;
+}
+
+/**
+ * `pass` → the old task as it now stands (`superseded`, or still running with `successor` set when
+ * its close is yet to land), the successor's id, and the successor as the leader holds it: null
+ * when it cannot be read (an already-passed answer after the successor was pruned).
+ */
+export interface PassResponse {
+  readonly task: Task;
+  readonly successorId: string;
+  readonly successor: Task | null;
 }
 
 /**
@@ -3094,5 +3354,6 @@ export type PushUnsubscribeReply = PushUnsubscribeResponse | SchedulerError;
 export type QueueReply = QueueResponse | SchedulerError;
 export type RoutePreviewReply = RoutePreviewResponse | SchedulerError;
 export type TaskReply = TaskResponse | SchedulerError;
+export type PassReply = PassResponse | SchedulerError;
 export type PauseReply = PauseResponse | SchedulerError;
 export type DiscardReply = DiscardResponse | SchedulerError;

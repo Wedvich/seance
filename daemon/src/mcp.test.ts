@@ -8,6 +8,7 @@ import {
   CAPABILITIES,
   isRecord,
   QUEUE_MAX_TASKS,
+  SUCCESSOR_RECORD_MAX,
   RequestFailure,
   SCHEDULER_ID,
   TASK_FAILURE_LIMITS,
@@ -19,6 +20,7 @@ import {
   type Decision,
   type ExclaveInfo,
   type Machine,
+  type MachineStatus,
   type RequestOp,
   type Task,
   type TaskSpec,
@@ -33,7 +35,7 @@ import { brokerFail, brokerOk } from "./broker-protocol.ts";
 import { resolveMachine, resolveOrigin, resolvePlacement, type PlacementInput } from "./auto.ts";
 import { brokerFleet, relayFleet, SCHEDULER_NEEDS_NEWER_DAEMON, selectFleet, type Fleet } from "./fleet.ts";
 import { LocalUnavailable } from "./local-client.ts";
-import type { handOff, reportDone } from "./report-done.ts";
+import type { handOff, passToSuccessor, reportDone } from "./report-done.ts";
 import {
   buildMcpServer,
   decisionText,
@@ -43,6 +45,7 @@ import {
   mcpScriptPath,
   ACCOUNT_LABEL_DEADLINE_MS,
   type LocalMachine,
+  type PassPoll,
 } from "./mcp.ts";
 
 interface FakeLocal extends LocalMachine {
@@ -76,6 +79,8 @@ async function connectedClient(
   audit: AuditSink = () => {},
   report?: typeof reportDone,
   handOffTask?: typeof handOff,
+  passOwnTask?: typeof passToSuccessor,
+  passPoll?: PassPoll,
 ): Promise<Client> {
   const fleet = relay instanceof LazyRelay ? relayFleet(relay) : relay;
   // Pinned, not auto: a fallback to the 2025 era would pass silently, and the
@@ -87,7 +92,9 @@ async function connectedClient(
     { versionNegotiation: { mode: { pin: "2026-07-28" } } },
   );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  serveStdio(() => buildMcpServer(fleet, local, audit, report, handOffTask), { transport: serverTransport });
+  serveStdio(() => buildMcpServer(fleet, local, audit, report, handOffTask, passOwnTask, passPoll), {
+    transport: serverTransport,
+  });
   await client.connect(clientTransport);
   return client;
 }
@@ -2071,6 +2078,124 @@ describe("traits in the tools' answers", () => {
   });
 });
 
+describe("keepFree in list_machines", () => {
+  test("an exclave advertising keepFree names them; one without shows no field", async () => {
+    // oxlint-disable no-map-spread -- a fixture, built once per test
+    const machines = traitMachines().map((m) =>
+      m.deviceId === "device-wsl"
+        ? { ...m, exclaves: (m.exclaves ?? []).map((e) => ({ ...e, keepFree: ["atlas"] })) }
+        : m,
+    );
+    // oxlint-enable no-map-spread
+    const fake = leaderRelay([], machines);
+    fake.setState({ scheduler: { kind: "ready", deviceId: "device-thad", term: 3 } });
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const listed: { name: string; exclaves: Record<string, unknown>[] }[] = JSON.parse(
+      toolText(await client.callTool({ name: "list_machines", arguments: {} })),
+    );
+    const byName = new Map(listed.map((m) => [m.name, m.exclaves.map((e) => e.keepFree)]));
+    expect(byName.get("WSL")).toEqual([["atlas"]]);
+    expect(byName.get("Thad")).toEqual([undefined, undefined]);
+    lazy.stop();
+  });
+});
+
+describe("trait probes", () => {
+  /**
+   * Thad's atlas and az probes fail on `default`, but az is healthy on `work`, which also carries it; WSL's
+   * atlas has not been read yet.
+   */
+  function probedMachines(): Machine[] {
+    const at = Math.floor(Date.now() / 1000);
+    const status: Record<string, MachineStatus> = {
+      "device-thad": {
+        at,
+        scan: 1,
+        tf: [
+          [0, 0],
+          [0, 1],
+        ],
+      },
+      "device-wsl": { at, scan: 1, tu: [[0, 0]] },
+    };
+    return traitMachines().map((m) =>
+      machine({
+        ...m,
+        ...(m.deviceId === "device-thad"
+          ? {
+              // oxlint-disable-next-line no-map-spread -- a fixture, built once per test
+              exclaves: (m.exclaves ?? []).map((e) => ({
+                ...e,
+                traits: e.id === "default" ? ["atlas", "az"] : ["az"],
+              })),
+            }
+          : {}),
+        ...(status[m.deviceId] === undefined ? {} : { status: status[m.deviceId] }),
+      }),
+    );
+  }
+
+  test("get_queue names the machines whose probe fails on every exclave carrying the trait, and list_machines each exclave's failing and unchecked ones", async () => {
+    const fake = leaderRelay(
+      [
+        {
+          tasks: [
+            task({ id: "t-1", state: "ready", spec: { repo: ORIGIN, mode: "worktree", requires: ["atlas", "az"] } }),
+          ],
+          at: 6_000,
+        },
+      ],
+      probedMachines(),
+    );
+    fake.setState({ scheduler: { kind: "ready", deviceId: "device-thad", term: 3 } });
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const { tasks } = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} })));
+    expect(tasks[0].requires).toEqual([
+      { trait: "atlas", machines: ["Thad", "WSL"], failing: ["Thad"] },
+      { trait: "az", machines: ["Thad", "WSL"] },
+    ]);
+    const listed: { name: string; exclaves: Record<string, unknown>[] }[] = JSON.parse(
+      toolText(await client.callTool({ name: "list_machines", arguments: {} })),
+    );
+    const byName = new Map(
+      listed.map((m) => [m.name, m.exclaves.map((e) => [e["id"], e["traitsFailing"], e["traitsUnchecked"]])]),
+    );
+    expect(byName.get("Thad")).toEqual([
+      ["default", ["atlas", "az"], undefined],
+      ["work", undefined, undefined],
+    ]);
+    expect(byName.get("WSL")).toEqual([["default", undefined, ["atlas"]]]);
+    lazy.stop();
+  });
+
+  test("list_machines lists no unchecked trait for an offline machine, a stale status or a trait without a probe", async () => {
+    const at = Math.floor(Date.now() / 1000);
+    const machines = traitMachines().map((m) => {
+      if (m.deviceId === "device-thad") return machine({ ...m, status: { at: at - 3600, scan: 1 } });
+      if (m.deviceId === "device-wsl")
+        return machine({ ...m, connected: false, status: { at, scan: 1, tu: [[0, 0]] } });
+      return machine({ ...m, status: { at, scan: 1 } });
+    });
+    const fake = leaderRelay([], machines);
+    fake.setState({ scheduler: { kind: "ready", deviceId: "device-thad", term: 3 } });
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    const listed: { name: string; exclaves: Record<string, unknown>[] }[] = JSON.parse(
+      toolText(await client.callTool({ name: "list_machines", arguments: {} })),
+    );
+    for (const m of listed) {
+      for (const e of m.exclaves) {
+        expect(e).not.toHaveProperty("traitsUnchecked");
+        expect(e).not.toHaveProperty("traitsFailing");
+      }
+    }
+    expect(listed.map((m) => m.name).toSorted()).toEqual(["Mac", "Thad", "WSL"]);
+    lazy.stop();
+  });
+});
+
 describe("queue_batch", () => {
   const member = (extra: Record<string, unknown> = {}) => ({ repo: "seance", prompt: "do it", ...extra });
 
@@ -2901,6 +3026,137 @@ describe("start_task", () => {
   });
 });
 
+describe("pass_task", () => {
+  const AT = { deviceId: "device-2", exclave: "work", clone: "seance" };
+  const passing = task({
+    id: "t-1",
+    state: "running",
+    spec: { repo: ORIGIN, mode: "worktree", prompt: "fix it" },
+    assignment: { ...AT, window: "fix-it" },
+  });
+
+  /** The leader (device-1) and the task's box (device-2), each advertising `successor` unless held back. */
+  function passingMachines(opts: { readonly leader?: boolean; readonly box?: boolean } = {}): Machine[] {
+    const [leader, box] = autoMachines();
+    return [
+      machine({ ...leader, ...(opts.leader === false ? {} : { capabilities: [CAPABILITIES.successor] }) }),
+      machine({ ...box, ...(opts.box === false ? {} : { capabilities: [CAPABILITIES.successor] }) }),
+    ];
+  }
+
+  async function callPass(
+    answer: () => unknown,
+    opts: { readonly machines?: readonly Machine[]; readonly tasks?: readonly Task[] } = {},
+  ): Promise<{ text: string; error: boolean; fake: FakeRelay }> {
+    const fake = fakeRelay(opts.machines ?? passingMachines(), (op) => {
+      if (op === "queue") return { tasks: opts.tasks ?? [passing], at: 6_000 };
+      if (op === "pass") return answer();
+      return new Error(`unexpected ${op}`);
+    });
+    fake.setState({ scheduler: LEADING });
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    try {
+      const result = await client.callTool({ name: "pass_task", arguments: { taskId: "t-1" } });
+      return { text: toolText(result), error: result.isError === true, fake };
+    } finally {
+      lazy.stop();
+    }
+  }
+
+  test("sends pass once for a running task and names the successor", async () => {
+    const { text, error, fake } = await callPass(() => ({
+      task: { ...passing, state: "superseded", successor: "t-2" },
+      successorId: "t-2",
+      successor: null,
+    }));
+    expect(error).toBe(false);
+    expect(text).toContain("task t-1 passed to successor t-2");
+    expect(fake.requests).toEqual([
+      { deviceId: SCHEDULER_ID, op: "queue", payload: {} },
+      { deviceId: SCHEDULER_ID, op: "pass", payload: { taskId: "t-1" } },
+    ]);
+  });
+
+  test("a task the shared rule refuses, or a leader or box that cannot, sends no pass", async () => {
+    const cases = [
+      [
+        "a leader that predates it",
+        { machines: passingMachines({ leader: false }) },
+        "its daemon needs `seanced update`",
+      ],
+      ["a box that predates it", { machines: passingMachines({ box: false }) }, "can't push for a successor yet"],
+      ["a task waiting on a person", { tasks: [{ ...passing, state: "needs-input" }] }, "waiting for you"],
+      ["a task that is not running", { tasks: [{ ...passing, state: "ready" }] }, "only a running task"],
+      ["a task already passed", { tasks: [{ ...passing, successor: "t-2" }] }, "already been passed"],
+      ["a task not in the list", { tasks: [] }, "is not in the leader's list"],
+    ] as const;
+    for (const [name, opts, said] of cases) {
+      // oxlint-disable-next-line no-await-in-loop -- one relay per case
+      const result = await callPass(() => new Error("must not be asked"), opts);
+      expect({ name, error: result.error, text: result.text }).toEqual({
+        name,
+        error: true,
+        text: expect.stringContaining(said),
+      });
+      expect(result.fake.requests.map((r) => r.op)).not.toContain("pass");
+    }
+  });
+
+  test("refusals are worded, and a lost or crashed answer may have landed", async () => {
+    const dirty = await callPass(() => ({ ok: false, code: "dirty_worktree", message: "x" }));
+    expect(dirty.error).toBe(true);
+    expect(dirty.text).toContain("pass_task refused (dirty_worktree)");
+    expect(dirty.text).not.toContain("may have landed");
+    const lost = await callPass(() => new RequestFailure("timeout", "no reply within 180000ms"));
+    expect(lost).toMatchObject({
+      error: true,
+      text: expect.stringContaining("the pass may have landed anyway — check get_queue"),
+    });
+    const big = await callPass(() => ({ ok: false, code: "too_large", message: "x" }));
+    expect(big.text).toContain("the pass may have landed anyway");
+  });
+
+  test("get_queue marks a task that can be passed, one that was, and the one that carries on", async () => {
+    const fake = leaderRelay(
+      [
+        {
+          tasks: [
+            passing,
+            { ...passing, id: "t-0", state: "superseded", successor: "t-3" },
+            {
+              id: "t-3",
+              state: "blocked",
+              createdAt: 4_000,
+              spec: {
+                repo: ORIGIN,
+                mode: "worktree",
+                succeeds: { task: "t-0", account: "acct", at: AT, trigger: "manual" },
+              },
+            },
+          ],
+          at: 6_000,
+        },
+      ],
+      passingMachines(),
+    );
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy);
+    try {
+      const listed = JSON.parse(toolText(await client.callTool({ name: "get_queue", arguments: {} }))) as {
+        tasks: Record<string, unknown>[];
+      };
+      const by = (id: string) => listed.tasks.find((t) => t["id"] === id);
+      expect(by("t-1")).toMatchObject({ passable: true });
+      expect(by("t-0")).toMatchObject({ passedTo: "t-3" });
+      expect(by("t-0")).not.toHaveProperty("passable");
+      expect(by("t-3")).toMatchObject({ succeeds: "t-0" });
+    } finally {
+      lazy.stop();
+    }
+  });
+});
+
 describe("continue_task", () => {
   const AT = { deviceId: "device-2", exclave: "work", clone: "seance" };
   const failedTask = task({
@@ -3233,5 +3489,173 @@ describe("continue_task", () => {
       ).not.toHaveProperty("continuable");
       lazy.stop();
     }
+  });
+});
+
+describe("pass_to_successor", () => {
+  const AT = { deviceId: "device-2", exclave: "work", clone: "seance" };
+  const active = task({
+    id: "t-1",
+    state: "running",
+    spec: { repo: ORIGIN, mode: "worktree", prompt: "fix it" },
+    assignment: { ...AT, window: "fix-it" },
+  });
+  const ACK = { taskId: "t-1", remoteBranch: "feature/x", tip: "a".repeat(40), pushed: true };
+  const FAST: PassPoll = { windowMs: 60, everyMs: 10 };
+
+  /** The leader (device-1), advertising `successorSelf` unless held back. */
+  function leaderMachines(capable = true): Machine[] {
+    const [leader, box] = autoMachines();
+    return [
+      machine({ ...leader, ...(capable ? { capabilities: [CAPABILITIES.successorSelf] } : {}) }),
+      machine({ ...box }),
+    ];
+  }
+
+  async function callSelf(
+    opts: {
+      readonly record?: string;
+      readonly pass?: Awaited<ReturnType<typeof passToSuccessor>>;
+      /** The queue read number n answers with this task list. */
+      readonly queued?: (n: number) => readonly Task[];
+      readonly machines?: readonly Machine[];
+      readonly leading?: boolean;
+    } = {},
+  ): Promise<{
+    text: string;
+    error: boolean;
+    passed: string[];
+    queueReads: number;
+    signals: (AbortSignal | undefined)[];
+  }> {
+    let reads = 0;
+    const signals: (AbortSignal | undefined)[] = [];
+    const fake = fakeRelay(opts.machines ?? leaderMachines(), (op) => {
+      if (op === "queue") return { tasks: opts.queued?.(reads++) ?? [active], at: 6_000 };
+      return new Error(`unexpected ${op}`);
+    });
+    if (opts.leading !== false) fake.setState({ scheduler: LEADING });
+    const passed: string[] = [];
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(
+      lazy,
+      null,
+      () => {},
+      undefined,
+      undefined,
+      (record, passOpts) => {
+        passed.push(record);
+        signals.push(passOpts?.signal);
+        return Promise.resolve(opts.pass ?? { ok: true, text: "pushed", pass: ACK });
+      },
+      FAST,
+    );
+    try {
+      const result = await client.callTool({
+        name: "pass_to_successor",
+        arguments: { record: opts.record ?? "done: a; left: b" },
+      });
+      return { text: toolText(result), error: result.isError === true, passed, queueReads: reads, signals };
+    } finally {
+      lazy.stop();
+    }
+  }
+
+  test("is always offered, takes a record, and both pass tools point at the right one for their case", async () => {
+    const lazy = new LazyRelay({ create: () => fakeRelay([]) });
+    const client = await connectedClient(lazy);
+    try {
+      const { tools } = await client.listTools();
+      const own = tools.find((t) => t.name === "pass_to_successor");
+      const other = tools.find((t) => t.name === "pass_task");
+      expect(own?.annotations?.readOnlyHint).toBe(false);
+      expect(own?.description).toContain("`pass_task` is for other tasks");
+      expect(other?.description).toContain("To pass your own task use `pass_to_successor`");
+      expect(own?.inputSchema).toMatchObject({ required: ["record"] });
+    } finally {
+      lazy.stop();
+    }
+  });
+
+  test("a record over the bound is refused before the daemon is asked, so nothing is pushed", async () => {
+    const result = await callSelf({ record: "x".repeat(SUCCESSOR_RECORD_MAX + 1) });
+    expect(result.error).toBe(true);
+    expect(result.text).toContain("1 over the 7168 allowed");
+    expect(result.text).toContain("Nothing was pushed");
+    expect(result.passed).toEqual([]);
+    expect(result.queueReads).toBe(0);
+    // The bound itself is allowed.
+    expect(
+      (await callSelf({ record: "x".repeat(SUCCESSOR_RECORD_MAX), queued: () => [{ ...active, successor: "t-2" }] }))
+        .error,
+    ).toBe(false);
+  });
+
+  test("a leader that predates it, or none leading, refuses before the daemon pushes anything", async () => {
+    const old = await callSelf({ machines: leaderMachines(false) });
+    expect([old.error, old.passed]).toEqual([true, []]);
+    expect(old.text).toContain("needs `seanced update`");
+    expect(old.text).toContain("Nothing was pushed");
+    const none = await callSelf({ leading: false });
+    expect([none.error, none.passed]).toEqual([true, []]);
+    expect(none.text).toContain("no verified scheduler is leading");
+  });
+
+  test("a refusal from the daemon is the tool's error, in the daemon's words", async () => {
+    const result = await callSelf({
+      pass: { ok: false, text: "commit your changes first; nothing was pushed" },
+    });
+    expect(result).toMatchObject({
+      error: true,
+      text: "pass_to_successor refused: commit your changes first; nothing was pushed",
+      queueReads: 0,
+    });
+  });
+
+  test("the daemon is asked with the call's cancellation, so an interrupted call is never passed later", async () => {
+    const result = await callSelf({ queued: () => [{ ...active, successor: "t-2" }] });
+    expect(result.signals).toHaveLength(1);
+    expect(result.signals[0]).toBeInstanceOf(AbortSignal);
+  });
+
+  test("no answer from the daemon is never worded as a refusal: the pass may have gone through", async () => {
+    const result = await callSelf({
+      pass: { ok: false, text: "the daemon did not answer in time", unanswered: true },
+    });
+    expect(result.error).toBe(false);
+    expect(result.text).not.toContain("refused");
+    expect(result.text).toContain("may be pushed and the pass may have gone through");
+    expect(result.text).toContain("check get_queue");
+    expect(result.text).toContain("end your turn now");
+    expect(result.queueReads).toBe(0);
+  });
+
+  test("a successor the leader recorded is named, and the session told to end its turn", async () => {
+    const result = await callSelf({ queued: () => [{ ...active, state: "superseded", successor: "t-2" }] });
+    expect(result.error).toBe(false);
+    expect(result.text).toContain("passed: the scheduler recorded successor t-2 for task t-1");
+    expect(result.text).toContain("end your turn now");
+    expect(result.passed).toEqual(["done: a; left: b"]);
+  });
+
+  test("the confirmation is polled for, and found when it lands within the window", async () => {
+    const result = await callSelf({ queued: (n) => [n < 2 ? active : { ...active, successor: "t-2" }] });
+    expect(result.text).toContain("recorded successor t-2");
+    expect(result.queueReads).toBe(3);
+  });
+
+  test("no successor within the window is told as such, not as a failure, and still ends the turn", async () => {
+    const result = await callSelf({ queued: () => [active] });
+    expect(result.error).toBe(false);
+    expect(result.text).toContain("the branch is pushed but no successor was recorded yet");
+    expect(result.text).toContain("end your turn now");
+    expect(result.queueReads).toBeGreaterThan(1);
+  });
+
+  test("an ok with no ack has nothing to confirm and says only that it was sent", async () => {
+    const result = await callSelf({ pass: { ok: true, text: "pushed, and the pass was sent to the scheduler" } });
+    expect(result.error).toBe(false);
+    expect(result.text).toContain("pushed, and the pass was sent to the scheduler.");
+    expect(result.queueReads).toBe(0);
   });
 });

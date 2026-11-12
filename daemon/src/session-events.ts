@@ -8,8 +8,12 @@ import {
   isTaskId,
   quote,
   SESSIONS_MAX_PROGRESS,
+  SUCCESSOR_RECORD_MAX,
   type NeedsInputReason,
+  type PassCloseResponse,
+  type PushBranchResponse,
   type SessionEvent,
+  type SessionPass,
   type SessionState,
   type TaskProgress,
 } from "@seance/shared";
@@ -22,7 +26,12 @@ import { LaunchLedger, pathOwners, type LaunchSite, type NoteOutcome } from "./l
 import { log } from "./log.ts";
 import type { OomProbe } from "./oom-kill.ts";
 import { ancestorIn, peerPid, peerPidSupported, socketFd } from "./peer.ts";
-import { SESSION_EVENT_KIND, SESSION_EVENT_VERSION, type SessionEventReply } from "./session-event-frame.ts";
+import {
+  SESSION_EVENT_KIND,
+  SESSION_EVENT_VERSION,
+  type PassAck,
+  type SessionEventReply,
+} from "./session-event-frame.ts";
 import { FIELD_SEP, TASK_FIELD, tmux } from "./tmux.ts";
 
 /**
@@ -67,6 +76,13 @@ export interface SessionEventFrame {
   /** `hand_off_task`'s: close this session at the end of its turn, its PR left to the scheduler. Carries no state. */
   readonly handoff?: true;
   /**
+   * `pass_to_successor`'s: push this session's branch and pass its task to a successor, closing it at the end
+   * of its turn once the leader confirms. Carries no state; `record` is the session's own prompt text for the
+   * successor, bounded here and never logged.
+   */
+  readonly pass?: true;
+  readonly record?: string;
+  /**
    * Only beside `idle`: the mod saw the main loop's turn complete, so its last message is written. A
    * `session.start` (a hooks-worker respawn mid-turn too) reads idle without it. Only a hand-off reads it.
    */
@@ -97,8 +113,20 @@ const MAX_FIELD = 64;
  */
 export function parseSessionEventFrame(raw: unknown): SessionEventFrame | null {
   if (!isRecord(raw) || raw["v"] !== SESSION_EVENT_VERSION || raw["kind"] !== SESSION_EVENT_KIND) return null;
-  const { state, prUrl, remoteSession, rateLimits, pane, handoff, turnEnded, reason, tool } = raw;
+  const { state, prUrl, remoteSession, rateLimits, pane, handoff, pass, record, turnEnded, reason, tool } = raw;
   if (pane !== undefined && (typeof pane !== "string" || pane.length > MAX_FIELD)) return null;
+  if (pass !== undefined) {
+    // Alone, as a hand-off is, and never beside one: no ingest path can read a pass as anything else.
+    if (pass !== true || handoff !== undefined || state !== undefined) return null;
+    if (typeof record !== "string" || record === "" || record.length > SUCCESSOR_RECORD_MAX) return null;
+    return {
+      v: SESSION_EVENT_VERSION,
+      kind: SESSION_EVENT_KIND,
+      pass: true,
+      record,
+      ...(pane === undefined ? {} : { pane }),
+    };
+  }
   if (handoff !== undefined) {
     // Alone: a hand-off rides no state, so no ingest path can read one as the other.
     if (handoff !== true || state !== undefined) return null;
@@ -474,6 +502,27 @@ export class EndedTasks {
   }
 
   /**
+   * Whether a session's own pass may push here, and from where: the task's worktree site, else why not.
+   * `here`: launched in place, no branch of its own. `unrecorded`: no launch of it here, or one still in
+   * flight, or a later task took over its worktree (the push is that task's).
+   */
+  passSite(
+    taskId: string,
+  ): { readonly site: { readonly repo: string; readonly path: string } } | { readonly code: "here" | "unrecorded" } {
+    if (!this.launched(taskId)) return { code: "unrecorded" };
+    const site = this.worktree(taskId);
+    if (!("refused" in site)) return { site };
+    const note = this.#ledger.notes().find((n) => n.taskId === taskId);
+    return { code: note?.path === undefined || note.repo === undefined ? "here" : "unrecorded" };
+  }
+
+  /** Whether this launch noted a PR (`handoffCheck`'s lookup), for a pass: a branch with no upstream then has to be the PR's. */
+  hasPr(taskId: string): boolean {
+    const note = this.#ledger.notes().find((n) => n.taskId === taskId);
+    return (this.#launches.get(taskId)?.prUrl ?? note?.prUrl ?? note?.continuedPr) !== undefined;
+  }
+
+  /**
    * The PR URL a session of this launch reported itself, for its `ended` event: the one event that carried
    * it may never have reached the leader. Never `continuedPr`: as the event's PR it would settle a
    * continuation `awaiting-merge` on a PR it never touched.
@@ -575,24 +624,12 @@ export class EndedTasks {
   }
 
   /**
-   * Where a continued task's session ran, from this ledger alone — the one authority on
-   * a worktree path and on the Claude session id it chose for the launch (DESIGN.md,
-   * Daemon, "Continuing a session"); a frame never names either. The newest note on a
-   * path owns it: a later launch there continued the same conversation (one shared id)
-   * and its work sits in the worktree, so only it may be continued. `refused` says why
-   * there is none, in words the task's failure carries.
+   * Where a task's worktree is, from this ledger alone — the one authority on a worktree path
+   * (a frame never names one). The newest note on a path owns it: a later launch there continued
+   * the same conversation and its work sits in the worktree, so only it may be continued or
+   * pushed for. `refused` says why there is none, in words a task's failure carries.
    */
-  continuation(taskId: string):
-    | {
-        readonly repo: string;
-        readonly path: string;
-        readonly session: string;
-        readonly exit?: number;
-        readonly vanished?: true;
-        readonly handedOff?: true;
-        readonly continuedPr?: string;
-      }
-    | { readonly refused: string } {
+  worktree(taskId: string): { readonly repo: string; readonly path: string } | { readonly refused: string } {
     if (this.#launches.has(taskId)) return { refused: "a launch of it is still in flight here" };
     if (!this.#ledger.ids().includes(taskId)) {
       return { refused: "this machine holds no launch of it (its launch ledger keeps a week, at most 128 launches)" };
@@ -608,6 +645,29 @@ export class EndedTasks {
         refused: `task ${owner.taskId} took over its worktree ${note.path} and its conversation after it; continue that task instead`,
       };
     }
+    return { repo: note.repo, path: note.path };
+  }
+
+  /**
+   * Where a continued task's session ran, and the Claude session id it chose for the launch
+   * (DESIGN.md, Daemon, "Continuing a session"): `worktree`'s site plus the id; a frame names neither.
+   */
+  continuation(taskId: string):
+    | {
+        readonly repo: string;
+        readonly path: string;
+        readonly session: string;
+        readonly exit?: number;
+        readonly vanished?: true;
+        readonly handedOff?: true;
+        readonly continuedPr?: string;
+      }
+    | { readonly refused: string } {
+    const site = this.worktree(taskId);
+    if ("refused" in site) return site;
+    const note = this.#ledger.notes().find((n) => n.taskId === taskId);
+    if (note === undefined)
+      return { refused: "no worktree of it was noted here (a here-mode run, or it never landed)" };
     // No `--continue` fallback: it is what misses a worktree spawn's conversation.
     if (note.session === undefined) {
       return { refused: "it was launched before this daemon noted session ids; resume it by hand" };
@@ -620,8 +680,8 @@ export class EndedTasks {
     const handedOff = note.handedOff === true && (note.exit ?? 0) === 0;
     const pr = note.cancelled === true ? undefined : (note.prUrl ?? note.continuedPr);
     return {
-      repo: note.repo,
-      path: note.path,
+      repo: site.repo,
+      path: site.path,
       session: note.session,
       ...(note.exit === undefined ? {} : { exit: note.exit }),
       ...(note.vanished === true && note.exit === undefined ? { vanished: true as const } : {}),
@@ -746,11 +806,30 @@ export interface SessionEventDeps {
   readonly handOff?: (pane: string, taskId: string) => Promise<void>;
   /** How long a hand-off waits for a PR URL still on its way from the mod; `HANDOFF_PR_WAIT_MS` unless a test shortens it. */
   readonly handoffPrWaitMs?: number;
+  /**
+   * A session's own pass (`pass_to_successor`), all of it the host's: the push the pass asks for (audited under
+   * its own origin), the report to the scheduler, and the close at a turn's end, which only
+   * `armPassClose` lets run. Absent, a pass is answered `unsupported`.
+   */
+  readonly pass?: {
+    readonly push: (taskId: string, options: { readonly hasPr: boolean }) => Promise<PushBranchResponse>;
+    /** False when the report could not be handed on at all. */
+    readonly send: (pass: SessionPass) => Promise<boolean>;
+    readonly close: (pane: string, taskId: string) => Promise<void>;
+  };
 }
 
 export interface SessionEvents {
-  /** `peer`: the kernel's pid for the connecting process, or null where the host cannot say. */
-  readonly handle: (raw: unknown, peer: number | null) => Promise<SessionEventReply>;
+  /**
+   * `peer`: the kernel's pid for the connecting process, or null where the host cannot say. `caller` aborts when
+   * the connection goes away before the reply: a pass whose caller is gone is never sent (an interrupted tool call).
+   */
+  readonly handle: (raw: unknown, peer: number | null, caller?: AbortSignal) => Promise<SessionEventReply>;
+  /**
+   * The leader's `pass-close`: its commit point for a session's pass is written, so the pane carrying
+   * `taskId` may be closed at its turn's end. Answers at once and never waits for the close.
+   */
+  readonly armPassClose: (taskId: string) => Promise<PassCloseResponse>;
   readonly stop: () => void;
 }
 
@@ -766,6 +845,12 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
   const outboxes = new Map<string, Outbox>();
   /** Pane → the task it handed off. Bound like a `done` report; acted on at that pane's next end of turn. */
   const handoffs = new Map<string, string>();
+  /**
+   * Pane → the task whose pass it asked for. `confirmed`: the leader's `pass-close` landed (its commit point is
+   * written). `turnEnded`: the pane's turn ended since. The close runs when both hold, whichever lands second, so
+   * a pass the leader refused never closes the session and a turn begun after an unconfirmed one is never cut.
+   */
+  const passes = new Map<string, { readonly taskId: string; confirmed: boolean; turnEnded: boolean }>();
   const prWaitMs = deps.handoffPrWaitMs ?? HANDOFF_PR_WAIT_MS;
   let stopped = false;
   const isStopped = (): boolean => stopped;
@@ -786,7 +871,86 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
       check = deps.ended.handoffCheck(taskId);
     }
     if (check !== "ok") return { ok: false, code: check };
+    // A pass is irreversible once the leader acts on it, so it outranks a hand-off: one close per pane, never two despawns.
+    if (passes.get(pane.id)?.taskId === taskId) return { ok: false, code: "passed" };
     handoffs.set(pane.id, taskId);
+    return { ok: true };
+  };
+
+  const markPass = async (
+    pane: BoundPane,
+    exclave: string,
+    record: string,
+    caller: AbortSignal | undefined,
+  ): Promise<SessionEventReply> => {
+    const taskId = pane.taskId;
+    if (taskId === null) return { ok: false, code: "untasked" };
+    const host = deps.pass;
+    if (host === undefined) return { ok: false, code: "unsupported" };
+    if (stopped) return { ok: false, code: "stopping" };
+    // Fail closed: a caller that has gone (the person interrupted the tool call, or it timed out) is told
+    // nothing and must leave no mark behind, which would close the session at some later turn's end.
+    const callerGone = (): boolean => caller?.aborted === true;
+    if (callerGone()) return { ok: false, code: "cancelled" };
+    const site = deps.ended.passSite(taskId);
+    if ("code" in site) return { ok: false, code: site.code };
+    // No `expect`: the daemon holds no PR head, and the leader refuses a branch that is not the PR's.
+    let pushed: PushBranchResponse;
+    try {
+      pushed = await host.push(taskId, { hasPr: deps.ended.hasPr(taskId) });
+    } catch (err) {
+      // An audit write or a repo read that threw: the push may have happened, but nothing was passed. Never the record or branch.
+      log.error(`local socket: a session's pass could not push (${String(err)})`);
+      return { ok: false, code: "push_failed" };
+    }
+    if (!pushed.ok) return { ok: false, code: passRefusal(pushed.code) };
+    // The push may have outlasted `stop()` or the caller: nothing is sent then, and the pushed branch is said to be there.
+    if (stopped) return { ok: false, code: "stopping_pushed" };
+    if (callerGone()) return { ok: false, code: "cancelled" };
+    const prior = passes.get(pane.id);
+    // Before the report: the leader's `pass-close` may land as soon as it is sent.
+    passes.set(pane.id, {
+      taskId,
+      confirmed: prior?.taskId === taskId && prior.confirmed,
+      turnEnded: false,
+    });
+    // One close per pane: a hand-off mark left on it would send a second despawn at the same turn's end.
+    if (handoffs.get(pane.id) === taskId) handoffs.delete(pane.id);
+    const sent = await host
+      .send({
+        session: pane.id,
+        taskId,
+        exclave,
+        remoteBranch: pushed.remoteBranch,
+        tip: pushed.tip,
+        record,
+        at: now(),
+      })
+      .catch((): boolean => false);
+    if (!sent) {
+      passes.delete(pane.id);
+      return { ok: false, code: "unsent" };
+    }
+    const pass: PassAck = { taskId, remoteBranch: pushed.remoteBranch, tip: pushed.tip, pushed: pushed.pushed };
+    return { ok: true, pass };
+  };
+
+  const armPassClose = async (taskId: string): Promise<PassCloseResponse> => {
+    // Not `no_pane`, which tells the leader the session is gone and lets it close at once: a stopping daemon arms nothing.
+    if (stopped) return { ok: false, code: "unsupported", message: "this daemon is stopping" };
+    const pane = (await deps.panes()).find((p) => !p.dead && p.taskId === taskId);
+    if (pane === undefined) return { ok: false, code: "no_pane", message: "no live pane carries the task" };
+    // After a restart the entry is gone: the pane carrying the task is the proof, and it has seen no turn end.
+    const entry = passes.get(pane.id);
+    if (entry === undefined || entry.taskId !== taskId) {
+      passes.set(pane.id, { taskId, confirmed: true, turnEnded: false });
+      return { ok: true };
+    }
+    entry.confirmed = true;
+    if (entry.turnEnded) {
+      passes.delete(pane.id);
+      void deps.pass?.close(pane.id, taskId);
+    }
     return { ok: true };
   };
 
@@ -842,7 +1006,7 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
   };
 
   return {
-    handle: async (raw, peer): Promise<SessionEventReply> => {
+    handle: async (raw, peer, caller): Promise<SessionEventReply> => {
       const frame = parseSessionEventFrame(raw);
       if (frame === null) {
         log.warn("local socket: dropped a malformed session-event frame");
@@ -858,6 +1022,7 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
       const exclave = exclaveOf(pane.path, deps.exclaves());
       if (!stopped) deps.onActivity?.(exclave);
       if (frame.handoff === true) return markHandoff(pane);
+      if (frame.pass === true && frame.record !== undefined) return markPass(pane, exclave, frame.record, caller);
       if (frame.state === "done" && pane.taskId === null) return { ok: false, code: "untasked" };
       if (frame.state === undefined || pane.taskId === null) return { ok: true };
       // A stopped ingest sends nothing, so a report must not be told it went.
@@ -912,14 +1077,55 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
         handoffs.delete(pane.id);
         if (turnEnd && handedOff === pane.taskId) void deps.handOff?.(pane.id, handedOff);
       }
+      const passed = passes.get(pane.id);
+      if (passed !== undefined) {
+        if (frame.state === "ended" || passed.taskId !== pane.taskId) {
+          passes.delete(pane.id);
+        } else if (turnEnd) {
+          if (!passed.confirmed) passed.turnEnded = true;
+          else {
+            passes.delete(pane.id);
+            void deps.pass?.close(pane.id, passed.taskId);
+          }
+        } else if (frame.state === "busy" || frame.state === "needs-input") {
+          passed.turnEnded = false;
+        }
+      }
       // Forwarded either way: only the proof that survives a restart is missing.
       return reported === "unwritten" ? { ok: false, code: "unwritten" } : { ok: true };
     },
+    armPassClose,
     stop: (): void => {
       stopped = true;
       handoffs.clear();
+      passes.clear();
       for (const box of outboxes.values()) if (box.timer !== null) clearTimeout(box.timer);
       outboxes.clear();
     },
   };
+}
+
+/** A `push-branch` refusal as the code a session is told: only the ones a pass can meet keep their own. */
+function passRefusal(
+  code: string,
+):
+  | "unrecorded"
+  | "dirty_worktree"
+  | "detached_head"
+  | "default_branch"
+  | "no_upstream"
+  | "push_rejected"
+  | "push_failed" {
+  switch (code) {
+    case "not_launched":
+      return "unrecorded";
+    case "dirty_worktree":
+    case "detached_head":
+    case "default_branch":
+    case "no_upstream":
+    case "push_rejected":
+      return code;
+    default:
+      return "push_failed";
+  }
 }

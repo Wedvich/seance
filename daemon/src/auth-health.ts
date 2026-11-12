@@ -266,10 +266,10 @@ export function createAuthHealth(deps: AuthHealthDeps): AuthHealth {
   const entries = new Map<string, Entry>();
   const queued: string[] = [];
   let draining: Promise<void> | null = null;
-  /** The id `drain` is reading: off `queued` already, so `enqueue` alone cannot see it. */
-  let inFlight: string | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
   let checking = false;
+  /** The exclave whose read is running: no longer in `queued`, and not yet in `entries` on a first read. */
+  let inFlight: string | null = null;
   let stopped = false;
   let running: number | null = null;
   let changed = false;
@@ -412,16 +412,21 @@ export function createAuthHealth(deps: AuthHealthDeps): AuthHealth {
     const entry = entries.get(id);
     // Floored, not skipped: a poke inside the floor stays set and the next check re-queues it.
     if (entry?.readAt !== undefined && entry.readAt !== null && now() - entry.readAt < minRereadMs) return;
-    const marker = await markerOf(exclave);
-    const reading = await readOnce(exclave);
-    if (stopped) return;
-    const next: Entry = entry ?? { reading: null, marker: null, readAt: null, poked: false, logged: null };
-    next.reading = reading;
-    next.marker = marker;
-    next.readAt = now();
-    next.poked = false;
-    entries.set(id, next);
-    noteChange(id, next);
+    inFlight = id;
+    try {
+      const marker = await markerOf(exclave);
+      const reading = await readOnce(exclave);
+      if (stopped) return;
+      const next: Entry = entry ?? { reading: null, marker: null, readAt: null, poked: false, logged: null };
+      next.reading = reading;
+      next.marker = marker;
+      next.readAt = now();
+      next.poked = false;
+      entries.set(id, next);
+      noteChange(id, next);
+    } finally {
+      inFlight = null;
+    }
   };
 
   const drain = (): void => {
@@ -431,10 +436,8 @@ export function createAuthHealth(deps: AuthHealthDeps): AuthHealth {
         for (;;) {
           const id = queued.shift();
           if (id === undefined || stopped) return;
-          inFlight = id;
           // oxlint-disable-next-line no-await-in-loop -- one child at a time is the point
           await inLane(() => attempt(id)).catch(() => undefined);
-          inFlight = null;
         }
       } finally {
         draining = null;
@@ -474,9 +477,9 @@ export function createAuthHealth(deps: AuthHealthDeps): AuthHealth {
         const readAt = entry?.readAt;
         // oxlint-disable-next-line no-await-in-loop -- a stat each
         const due = await isDue(exclave, entry);
-        // Judged after the stat, which a read may overtake: one under way or just landed is fresh, and
-        // queued again it would only meet the floor, or with none run twice. A poke still queues past one.
-        const overtaken = exclave.id === inFlight || entries.get(exclave.id)?.readAt !== readAt;
+        // Judged after the stat, which a read may overtake: a check landing mid-read, or on one that landed
+        // meanwhile, would find no entry (or the old one) and read the exclave twice over.
+        const overtaken = inFlight === exclave.id || entries.get(exclave.id)?.readAt !== readAt;
         if (due && !overtaken) enqueue(exclave.id);
       }
     } finally {

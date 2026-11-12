@@ -14,6 +14,7 @@ import {
   parseMachineStatus,
   parseMetricsReply,
   parseSessionEvent,
+  parseSessionPass,
   SCHEDULER_ID,
   seal,
   STATUS_MAX_CT_LENGTH,
@@ -704,6 +705,53 @@ describe("daemon ↔ relay integration", () => {
     }
   });
 
+  test("a session pass leaves sealed to the scheduler as `session-pass`, from this machine, and is false when it cannot be sent", async () => {
+    const relay = startTestRelay(TOKEN);
+    const identity = await identityFromSeed(generateIdentitySeed());
+    const routed: Envelope[] = [];
+    const client = new RelayClient({
+      url: relay.url,
+      bearerToken: TOKEN,
+      identity,
+      key: appKey,
+      buildInfo: () =>
+        seal(
+          appKey,
+          { to: APP_ID, from: identity.deviceId },
+          { id: crypto.randomUUID(), ts: Date.now(), op: "machine-info", payload: {} },
+        ),
+      handle: () => Promise.resolve(null),
+      onScheduler: (env) => routed.push(env) > 0,
+    });
+    const pass = {
+      session: "%3",
+      taskId: "t1",
+      exclave: "default",
+      remoteBranch: "feature/x",
+      tip: "a".repeat(40),
+      record: "done: a; left: b",
+      at: 5,
+    };
+    // Before it has connected there is nothing to send through.
+    expect(await client.sendSessionPass(pass)).toBe(false);
+    client.start();
+    try {
+      await relay.registers.next();
+      relay.lead(identity.deviceId, 1);
+      expect(await client.sendSessionPass(pass)).toBe(true);
+      await pollUntil(() => routed.length === 1, "the pass to come back routed to the leader");
+      const [env] = routed;
+      if (env === undefined) throw new Error("nothing routed");
+      expect({ to: env.to, from: env.from }).toEqual({ to: SCHEDULER_ID, from: identity.deviceId });
+      const plain = await open(appKey, env);
+      expect(plain.op).toBe("session-pass");
+      expect(parseSessionPass(plain.payload)).toEqual(pass);
+    } finally {
+      client.stop();
+      relay.stop();
+    }
+  });
+
   test("the blob carries the traits this machine's config declares, per exclave, and nothing from anywhere else", async () => {
     const relay = startTestRelay(TOKEN);
     const daemon = await startTestDaemon(relay.url, {
@@ -754,6 +802,8 @@ describe("daemon ↔ relay integration", () => {
         "runNow",
         "attachments",
         "traits",
+        "successor",
+        "successorSelf",
       ]);
       // A status leaves only after its tick wrote the store, so one in hand
       // means there is history to ask for.

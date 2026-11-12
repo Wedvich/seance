@@ -7,6 +7,7 @@ import {
   type AccountListing,
   type ErrorResponse,
   type QueueReply,
+  type PassReply,
   type TaskReply,
   type SchedulerEventHandler,
   type RelayState,
@@ -44,6 +45,7 @@ export interface AppRelay {
   readonly queue: () => Promise<QueueReply | null>;
   readonly cancel: (taskId: string) => Promise<TaskReply | null>;
   readonly runNow: (taskId: string) => Promise<TaskReply | null>;
+  readonly pass: (taskId: string) => Promise<PassReply | null>;
   /** As `RelayClient.listAccounts`: throws `unsupported` on a client built without an account key. */
   readonly listAccounts: () => Promise<AccountListing | StoreRefusal | null>;
   readonly onStoreChanged: (listener: (key: string, version: number) => void) => () => void;

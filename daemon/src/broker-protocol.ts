@@ -44,11 +44,11 @@ export function isBrokerOp(value: unknown): value is BrokerOp {
 
 /**
  * The scheduler ops a peer may ask the daemon to make as an app: what `auto`,
- * `queue_batch`, `get_queue`, `cancel_task`, `start_task`, `seanced spawn` and
- * `seanced start` need, and the account read that resolves an alias. `mark-done`,
+ * `queue_batch`, `get_queue`, `cancel_task`, `start_task`, `pass_task`, `seanced spawn`,
+ * `seanced start` and `seanced pass` need, and the account read that resolves an alias. `mark-done`,
  * `pause`, `resume`, `discard`, `route-preview` and every `account:` write stay off the list.
  */
-export const BROKER_SCHEDULER_OPS = ["enqueue", "queue", "cancel", "run-now", "accounts"] as const;
+export const BROKER_SCHEDULER_OPS = ["enqueue", "queue", "cancel", "run-now", "pass", "accounts"] as const;
 
 export type BrokerSchedulerOp = (typeof BROKER_SCHEDULER_OPS)[number];
 
@@ -79,7 +79,7 @@ export type BrokerRequest =
     })
   | (BrokerFrame & {
       readonly action: "scheduler";
-      readonly schedulerOp: "cancel" | "run-now";
+      readonly schedulerOp: "cancel" | "run-now" | "pass";
       readonly taskId: string;
     })
   | (BrokerFrame & { readonly action: "scheduler"; readonly schedulerOp: "queue" | "accounts" })
@@ -332,6 +332,7 @@ const SCHEDULER_OP_BUDGET_MS: Record<BrokerSchedulerOp, number> = {
   queue: OP_TIMEOUT_MS.queue,
   cancel: OP_TIMEOUT_MS.cancel,
   "run-now": OP_TIMEOUT_MS["run-now"],
+  pass: OP_TIMEOUT_MS.pass,
   accounts: STORE_LIST_TIMEOUT_MS,
 };
 

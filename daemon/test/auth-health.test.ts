@@ -547,30 +547,41 @@ describe("cadence", () => {
   });
 
   test("a changed credentials file is re-read at the next check; an unchanged one is not", async () => {
-    // Slow, so checks land while a read is under way: none of them may queue it again.
-    const log = join(base, "slow.log");
+    const log = join(base, "record.log");
     await rm(log, { force: true });
-    const reads = async (): Promise<number> =>
-      (
-        await Bun.file(log)
-          .text()
-          .catch(() => "")
-      )
-        .split("\n")
-        .filter((l) => l.startsWith("start ")).length;
     const f = await exclave("marker", creds());
-    const h = health([f], { bunBin: stubs.slow, checkIntervalMs: 20, minRereadMs: 0 });
+    const h = health([f], { bunBin: stubs.record, checkIntervalMs: 20, minRereadMs: 0 });
     h.start();
-    await pollUntil(async () => (await reads()) === 1, "first read");
-    await h.idle();
+    await pollUntil(async () => (await count(log)) === 1, "first read");
     // Negative assertion: a non-event cannot be polled.
     await Bun.sleep(150);
-    expect(await reads()).toBe(1);
+    expect(await count(log)).toBe(1);
     const file = join(f.exclave.configDir, ".credentials.json");
     await writeFile(file, creds({ accessToken: "", refreshToken: "" }));
     await utimes(file, new Date(NOW), new Date(NOW + 1000));
-    await pollUntil(async () => (await reads()) === 2, "re-read after the file changed");
+    await pollUntil(async () => (await count(log)) === 2, "re-read after the file changed");
     await h.stop();
+  });
+
+  test("a check that lands mid-read does not queue the same exclave again", async () => {
+    const log = join(base, "slow.log");
+    await rm(log, { force: true });
+    // The read (150 ms) spans several checks: each would find no entry yet and queue the exclave anew.
+    const h = health([await exclave("midread", creds())], { bunBin: stubs.slow, checkIntervalMs: 20, minRereadMs: 0 });
+    h.start();
+    await pollUntil(
+      async () =>
+        (
+          await Bun.file(log)
+            .text()
+            .catch(() => "")
+        ).includes("end"),
+      "first read",
+    );
+    // Negative assertion: a non-event cannot be polled.
+    await Bun.sleep(300);
+    await h.stop();
+    expect((await Bun.file(log).text()).match(/^start /gmu)?.length).toBe(1);
   });
 
   test("one child at a time across instances: a reload's two daemons never read at once", async () => {

@@ -260,6 +260,35 @@ describe("the local op socket", () => {
     expect(await localSocketReachable(sockPath)).toBe(true);
   });
 
+  test("a session-event ingest is handed a signal that aborts when the peer goes away mid-request", async () => {
+    let seen: AbortSignal | undefined;
+    const reached = Promise.withResolvers<void>();
+    const aborted = Promise.withResolvers<void>();
+    const path = join(base, "caller.sock");
+    const handle = await startLocalSocket({
+      handle: () => Promise.resolve(null),
+      path,
+      sessionEvents: (_raw, _peer, caller) => {
+        seen = caller;
+        caller?.addEventListener("abort", () => aborted.resolve(), { once: true });
+        reached.resolve();
+        // Never answers: the peer leaves first.
+        return new Promise(() => {});
+      },
+    });
+    try {
+      const client = await Bun.connect<undefined>({ unix: path, socket: { data: () => {} } });
+      client.write(`${JSON.stringify({ v: 1, kind: "session-event", pass: true, record: "r" })}\n`);
+      await reached.promise;
+      expect(seen?.aborted).toBe(false);
+      client.end();
+      await aborted.promise;
+      expect(seen?.aborted).toBe(true);
+    } finally {
+      handle.stop();
+    }
+  });
+
   test("a stale socket file left by a killed daemon is taken over, not refused", async () => {
     const orphan = join(base, "orphan.sock");
     await writeFile(orphan, "not a socket");

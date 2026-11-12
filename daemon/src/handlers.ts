@@ -7,7 +7,10 @@ import type {
   MetricsReply,
   MetricsRequest,
   MetricsSeries,
+  PassCloseResponse,
   Plain,
+  PushBranchErrorCode,
+  PushBranchResponse,
   RepoEntry,
   RescanResponse,
   SessionEntry,
@@ -23,6 +26,8 @@ import {
   isAutonomyLevel,
   isTaskId,
   parseAttachmentManifest,
+  parsePassCloseRequest,
+  parsePushBranchRequest,
   quote,
   REPLY_JSON_BUDGET,
   SCHEDULER_CLIENT,
@@ -31,9 +36,12 @@ import {
 } from "@seance/shared";
 import {
   despawnAudit,
+  passCloseAudit,
+  pushAudit,
   spawnAudit,
   type AuditSink,
   type DespawnAudit,
+  type PushAudit,
   type SpawnAudit,
   type SpawnOrigin,
 } from "./audit.ts";
@@ -49,6 +57,7 @@ import {
 import { AttachmentUnavailable } from "./attachments.ts";
 import { canonical } from "./gitdir.ts";
 import { log } from "./log.ts";
+import { pushTaskBranch, type PushOptions } from "./push-branch.ts";
 import { LaunchesClosed, type SettleLaunch } from "./session-events.ts";
 
 export interface HandlerContext {
@@ -76,6 +85,11 @@ export interface HandlerContext {
   readonly updateAvailable?: (notice: UpdateAvailable) => void;
   /** Fetching a spawn's attachments (`attachments.ts`); absent, a spawn carrying any is refused. */
   readonly attachments?: TaskAttachments;
+  /**
+   * The leader's `pass-close` (`SessionEvents.armPassClose`): its commit point for a session's pass is
+   * written, so the pane carrying the task may close at its turn's end. Absent, answered `unsupported`.
+   */
+  readonly armPassClose?: (taskId: string) => Promise<PassCloseResponse>;
 }
 
 /** What the handlers need of `attachments.ts`, bound to the daemon's own relay origin, token and key. */
@@ -94,6 +108,13 @@ export interface TaskLaunches {
   readonly launch: (taskId: string) => Promise<SettleLaunch>;
   /** The ledger holds the task as launched here, and no launch of it is in flight. */
   readonly launched: (taskId: string) => boolean;
+  /**
+   * Where the ledger noted `taskId`'s worktree, for `push-branch`; `refused` says why there is none.
+   * Never from the wire: the request names a task, this machine says where it ran.
+   */
+  readonly worktree: (
+    taskId: string,
+  ) => { readonly repo: string; readonly path: string } | { readonly refused: string };
   /**
    * Where the ledger noted `taskId`'s worktree and the session id it ran under, for a
    * continuation; `refused` says why there is none. Never from the wire: the request names a
@@ -516,6 +537,75 @@ async function handleDespawn(
 }
 
 /**
+ * `push-branch` (DESIGN.md, "Passing to a successor"): the scheduler asking the machine that ran a task to push its
+ * worktree branch. Only the scheduler's seal, and only for a task this machine's own launch ledger noted a worktree
+ * of, in a clone it still scans and under that clone's `.claude/worktrees/` — so a request names a task, never a
+ * path, a repo or a remote. Replies and audit lines carry codes and a short tip, never a branch or a URL.
+ */
+async function handlePushBranch(
+  ctx: HandlerContext,
+  audit: PushAudit,
+  payload: unknown,
+  scheduler: boolean,
+): Promise<PushBranchResponse> {
+  if (!scheduler) return { ok: false, code: "invalid_request", message: "only the scheduler pushes a task's branch" };
+  const request = parsePushBranchRequest(payload);
+  if (request === null) return { ok: false, code: "invalid_request", message: "malformed push-branch request" };
+  return pushForTask(ctx, audit, request.taskId, request.expect === undefined ? {} : { expect: request.expect });
+}
+
+/**
+ * `push-branch`'s body, shared by the scheduler's request and a session's own pass (`pass_to_successor`):
+ * the task's worktree is the one its launch ledger noted, found again under its repo's worktrees, never a
+ * path from the wire. `audit` names who asked.
+ */
+export async function pushForTask(
+  ctx: Pick<HandlerContext, "tasks" | "getRepos">,
+  audit: PushAudit,
+  taskId: string,
+  options: PushOptions,
+): Promise<PushBranchResponse> {
+  const refuse = async (code: PushBranchErrorCode, message: string): Promise<PushBranchResponse> => {
+    await audit.refused(taskId, code);
+    return { ok: false, code, message };
+  };
+  const site = ctx.tasks?.worktree(taskId);
+  if (site === undefined || "refused" in site)
+    return refuse("not_launched", "the task has no worktree on this machine");
+  const entry = ctx.getRepos().find((r) => r.path === site.repo);
+  if (entry === undefined) return refuse("not_launched", "the task's repo is no longer scanned here");
+  const real = await canonical(site.path);
+  if (real !== site.path || !real.startsWith(join(entry.path, ".claude", "worktrees") + sep)) {
+    return refuse("not_launched", "the task's worktree is not under its repo's worktrees");
+  }
+  const reply = await pushTaskBranch({ repo: entry.name, path: real }, options);
+  if (reply.ok) await audit.done(taskId, entry.name, reply.pushed ? "pushed" : "unchanged", reply.tip);
+  else await audit.done(taskId, entry.name, reply.code, undefined);
+  return reply;
+}
+
+/**
+ * `pass-close`: only the scheduler may say a session's pass reached its commit point. The close is the
+ * daemon's own, at that pane's turn end (`session-events.ts`), so nothing here names a pane or runs a command.
+ */
+async function handlePassClose(
+  ctx: HandlerContext,
+  audit: ReturnType<typeof passCloseAudit>,
+  payload: unknown,
+  scheduler: boolean,
+): Promise<PassCloseResponse> {
+  if (!scheduler) return { ok: false, code: "invalid_request", message: "only the scheduler arms a pass's close" };
+  const request = parsePassCloseRequest(payload);
+  if (request === null) return { ok: false, code: "invalid_request", message: "malformed pass-close request" };
+  if (ctx.armPassClose === undefined) {
+    return { ok: false, code: "unsupported", message: "this daemon runs no session-event ingest" };
+  }
+  const reply = await ctx.armPassClose(request.taskId);
+  await audit(request.taskId, reply.ok ? "armed" : reply.code);
+  return reply;
+}
+
+/**
  * One decimal: the units are whole percent, MiB and KiB/s, and a rollup's
  * average otherwise serializes to seventeen digits — a third of the reply.
  */
@@ -629,11 +719,13 @@ export function fitProgress(
   };
 }
 
-/** The three ops the scheduler dispatches, typed, for a caller inside this process. */
+/** The ops the scheduler dispatches, typed, for a caller inside this process. */
 export interface LocalOps {
   readonly sessions: () => Promise<SessionsResponse | ErrorResponse>;
   readonly spawn: (payload: unknown) => Promise<SpawnResponse | ErrorResponse>;
   readonly despawn: (payload: unknown) => Promise<DespawnResponse | ErrorResponse>;
+  readonly pushBranch: (payload: unknown) => Promise<PushBranchResponse | ErrorResponse>;
+  readonly passClose: (payload: unknown) => Promise<PassCloseResponse | ErrorResponse>;
 }
 
 /**
@@ -644,6 +736,8 @@ export interface LocalOps {
 export function createLocalOps(ctx: HandlerContext, origin: SpawnOrigin): LocalOps {
   const audit = spawnAudit(origin, ctx.auditSink);
   const despawnTrail = despawnAudit(origin, ctx.auditSink);
+  const pushTrail = pushAudit(origin, ctx.auditSink);
+  const passCloseTrail = passCloseAudit(origin, ctx.auditSink);
   // No `Plain` id to join on: a spawn's request line carries its task id, which the
   // spawn lines after it and the scheduler's task both name; the rest get a fresh one.
   const run = async <T>(op: string, id: string, body: () => Promise<T>): Promise<T | ErrorResponse> => {
@@ -662,6 +756,10 @@ export function createLocalOps(ctx: HandlerContext, origin: SpawnOrigin): LocalO
       );
     },
     despawn: (payload) => run("despawn", crypto.randomUUID(), () => handleDespawn(ctx, despawnTrail, payload, true)),
+    pushBranch: (payload) =>
+      run("push-branch", crypto.randomUUID(), () => handlePushBranch(ctx, pushTrail, payload, true)),
+    passClose: (payload) =>
+      run("pass-close", crypto.randomUUID(), () => handlePassClose(ctx, passCloseTrail, payload, true)),
   };
 }
 
@@ -689,6 +787,8 @@ export function createHandler(
 ): (plain: Plain, from?: string, replied?: Promise<unknown>) => Promise<Plain | null> {
   const audit = spawnAudit(origin, ctx.auditSink);
   const despawnTrail = despawnAudit(origin, ctx.auditSink);
+  const pushTrail = pushAudit(origin, ctx.auditSink);
+  const passCloseTrail = passCloseAudit(origin, ctx.auditSink);
   return async (plain: Plain, from?: string, replied?: Promise<unknown>): Promise<Plain | null> => {
     await auditRequest(ctx, origin, plain.op, plain.id);
 
@@ -709,6 +809,10 @@ export function createHandler(
           return { payload: await handleSpawn(ctx, audit, plain.payload, from === SCHEDULER_ID, replied) };
         case "despawn":
           return { payload: await handleDespawn(ctx, despawnTrail, plain.payload, from === SCHEDULER_ID) };
+        case "push-branch":
+          return { payload: await handlePushBranch(ctx, pushTrail, plain.payload, from === SCHEDULER_ID) };
+        case "pass-close":
+          return { payload: await handlePassClose(ctx, passCloseTrail, plain.payload, from === SCHEDULER_ID) };
         case "metrics":
           return { payload: handleMetrics(ctx, plain.payload) };
         case "rescan": {

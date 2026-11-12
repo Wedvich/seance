@@ -24,7 +24,7 @@ import {
   type SheetKind,
 } from "../state.ts";
 import { completeSkill, matchSkills, promptSegments, skillIndex, skillToken } from "../skills.ts";
-import { formatSeen, type AttachmentsView, type Tile, type ViewModel } from "../view.ts";
+import { formatSeen, type AttachmentChip, type AttachmentsView, type Tile, type ViewModel } from "../view.ts";
 import { DecisionCard } from "./decision.tsx";
 import { HeaderMenu } from "./header-menu.tsx";
 import { Menu, MenuItem, useMenu } from "./menu.tsx";
@@ -118,27 +118,22 @@ function carriesFiles(event: DragEvent): boolean {
 }
 
 /**
- * A local preview of an image file, or the file glyph with its extension. The object
- * URL lives exactly as long as the chip: made in an effect, revoked on cleanup, so a
- * remove, a queued task or leaving the screen frees it. An image the browser can't
- * decode (HEIC on Chrome) falls back to the glyph.
+ * A local preview of an image file, or the file glyph with its extension. An image
+ * that decodes is a button: the keyboard's way into the preview, whose click the
+ * chip handles as it does one anywhere else on it.
  */
-function AttachmentThumb(props: { image: Blob | null; ext: string | null }): JSX.Element {
-  const { image, ext } = props;
-  const [url, setUrl] = useState<string | null>(null);
-  const [broken, setBroken] = useState(false);
-  useEffect(() => {
-    if (image === null) return;
-    const made = URL.createObjectURL(image);
-    setUrl(made);
-    setBroken(false);
-    return () => URL.revokeObjectURL(made);
-  }, [image]);
-  if (image !== null && url !== null && !broken) {
+function AttachmentThumb(props: {
+  url: string | null;
+  ext: string | null;
+  name: string;
+  onBroken: () => void;
+}): JSX.Element {
+  const { url, ext, name, onBroken } = props;
+  if (url !== null) {
     return (
-      <span className="attach-thumb" aria-hidden="true">
-        <img src={url} alt="" decoding="async" onError={() => setBroken(true)} />
-      </span>
+      <button type="button" className="attach-thumb attach-thumb-open" aria-label={`Preview ${name}`}>
+        <img src={url} alt="" decoding="async" onError={onBroken} />
+      </button>
     );
   }
   return (
@@ -162,53 +157,174 @@ function AttachmentThumb(props: { image: Blob | null; ext: string | null }): JSX
 }
 
 /**
+ * An object URL for a picked file, living exactly as long as its user: made in an
+ * effect, revoked on cleanup, so a remove, a queued task or leaving the screen frees it.
+ */
+function useObjectUrl(blob: Blob | null): string | null {
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (blob === null) return;
+    const made = URL.createObjectURL(blob);
+    setUrl(made);
+    return () => {
+      URL.revokeObjectURL(made);
+      setUrl(null);
+    };
+  }, [blob]);
+  return url;
+}
+
+/**
+ * One chip. An image the browser can't decode (HEIC on Chrome) falls back to the
+ * glyph and opens no preview.
+ */
+function AttachmentChipItem(props: {
+  file: AttachmentChip;
+  removeLocked: boolean;
+  onRemove: (key: string) => void;
+  onPreview: (key: string) => void;
+}): JSX.Element {
+  const { file, removeLocked, onRemove, onPreview } = props;
+  const made = useObjectUrl(file.image);
+  const [broken, setBroken] = useState(false);
+  const url = broken ? null : made;
+  const classes = ["attach-chip"];
+  if (file.failed) classes.push("attach-chip-failed");
+  if (url !== null) classes.push("attach-chip-open");
+  return (
+    <li className={classes.join(" ")} onClick={url === null ? undefined : () => onPreview(file.key)}>
+      <AttachmentThumb url={url} ext={file.ext} name={file.name} onBroken={() => setBroken(true)} />
+      <span className="attach-text">
+        <span className="attach-row">
+          <span
+            className="attach-name"
+            // Set on the element, not as a prop: only a name the chip cuts gets a tooltip, and that is known at hover.
+            onPointerEnter={(event) => {
+              const node = event.currentTarget;
+              node.title = node.scrollWidth > node.clientWidth ? file.name : "";
+            }}
+          >
+            {file.name}
+          </span>
+          <button
+            type="button"
+            className="attach-remove"
+            aria-label={`Remove ${file.name}`}
+            disabled={removeLocked}
+            onClick={(event) => {
+              event.stopPropagation();
+              onRemove(file.key);
+            }}
+          >
+            ×
+          </button>
+        </span>
+        <span className="attach-status">{file.status}</span>
+      </span>
+      {file.percent !== null && (
+        <span
+          className="attach-progress"
+          role="progressbar"
+          aria-label={`Uploading ${file.name}`}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={file.percent}
+        >
+          <span className="attach-progress-fill" style={{ width: `${file.percent}%` }} />
+        </span>
+      )}
+    </li>
+  );
+}
+
+/**
+ * A picked image at full size, from the file still held on the form: nothing is
+ * fetched. A native modal dialog, as Settings is, for the inert page and for Escape
+ * and Android's back arriving as `cancel`; it is no history layer, so `close` is the
+ * one way out. Only ever an `<img>`: a picked SVG or HTML file opened as a document
+ * would run in the app's origin.
+ */
+function AttachmentPreview(props: { name: string; image: Blob; onClose: () => void }): JSX.Element {
+  const { name, image, onClose } = props;
+  const dialog = useRef<HTMLDialogElement>(null);
+  const url = useObjectUrl(image);
+
+  useLayoutEffect(() => {
+    const node = dialog.current;
+    if (node === null) return;
+    node.showModal();
+    // Before removal, so focus goes back to where it was: the thumbnail, for a keyboard open.
+    return () => node.close();
+  }, []);
+
+  return (
+    <dialog
+      ref={dialog}
+      className="attach-preview"
+      aria-label={name}
+      onClose={onClose}
+      // The dialog sits inside the prompt card: a file dragged over the preview must not reach the card's drop.
+      onDragOver={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+      onDrop={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+      onClick={(event) => {
+        // Anywhere but the picture closes: the backdrop, the margins around it, the ✕.
+        if (!(event.target instanceof HTMLImageElement)) onClose();
+      }}
+    >
+      <div className="attach-preview-head">
+        <span className="attach-preview-name">{name}</span>
+        <button type="button" className="sheet-close" aria-label="Close">
+          ✕
+        </button>
+      </div>
+      {/* A chip is clickable until its thumbnail's own error lands; an image that can't decode closes rather than showing broken. */}
+      {url !== null && <img className="attach-preview-image" src={url} alt={name} decoding="async" onError={onClose} />}
+    </dialog>
+  );
+}
+
+/**
  * The prompt card's files, above the text: two-row chips with a thumbnail, the name
  * and remove on the first row, size and upload state on the second. Still listed
  * after attaching stops being offered (the leader changed under them), so they can
- * be removed.
+ * be removed. A click on an image's chip opens it at full size.
  */
 function AttachmentChips(props: { view: AttachmentsView; onRemove: (key: string) => void }): JSX.Element | null {
   const { view, onRemove } = props;
+  const [previewKey, setPreviewKey] = useState<string | null>(null);
   if (view.files.length === 0 && view.notice === null) return null;
+  // Looked up each render, so a file that left the form takes its preview with it.
+  const previewed = view.files.find((file) => file.key === previewKey);
   return (
     <div className="attach">
       {view.files.length > 0 && (
         <ul className="attach-list" aria-label={view.summary ?? undefined}>
           {view.files.map((file) => (
-            <li key={file.key} className={file.failed ? "attach-chip attach-chip-failed" : "attach-chip"}>
-              <AttachmentThumb image={file.image} ext={file.ext} />
-              <span className="attach-text">
-                <span className="attach-row">
-                  <span className="attach-name">{file.name}</span>
-                  <button
-                    type="button"
-                    className="attach-remove"
-                    aria-label={`Remove ${file.name}`}
-                    disabled={view.removeLocked}
-                    onClick={() => onRemove(file.key)}
-                  >
-                    ×
-                  </button>
-                </span>
-                <span className="attach-status">{file.status}</span>
-              </span>
-              {file.percent !== null && (
-                <span
-                  className="attach-progress"
-                  role="progressbar"
-                  aria-label={`Uploading ${file.name}`}
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-valuenow={file.percent}
-                >
-                  <span className="attach-progress-fill" style={{ width: `${file.percent}%` }} />
-                </span>
-              )}
-            </li>
+            <AttachmentChipItem
+              key={file.key}
+              file={file}
+              removeLocked={view.removeLocked}
+              onRemove={onRemove}
+              onPreview={setPreviewKey}
+            />
           ))}
         </ul>
       )}
       {view.notice !== null && <p className="attach-notice">{view.notice}</p>}
+      {previewed !== undefined && previewed.image !== null && (
+        <AttachmentPreview
+          key={previewed.key}
+          name={previewed.name}
+          image={previewed.image}
+          onClose={() => setPreviewKey(null)}
+        />
+      )}
     </div>
   );
 }

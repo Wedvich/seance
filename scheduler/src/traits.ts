@@ -1,27 +1,37 @@
-import type { ExclaveInfo, Reason } from "@seance/shared";
+import { exclaveTraitHealth, type ExclaveInfo, type Machine, type Reason } from "@seance/shared";
 import type { Decision } from "./route.ts";
 import type { Task } from "./task.ts";
 
 /**
- * One `trait_absent` per required trait the exclave does not carry, in `requires` order (not just
- * the first: the PWA words each, and `traitsHolding` names which one holds). An exclave with no
- * `traits` — an older daemon, or none declared — carries none, so a task that requires one never
- * places there. Pinned, `run-now` and continuation tasks go through this too.
+ * One reason per required trait the exclave cannot offer, in `requires` order (not just the first:
+ * the PWA words each, and `traitsHolding` names which one holds): `trait_absent` when it does not
+ * carry the trait, `trait_unhealthy` when it does and its probe reads failing (`exclaveTraitHealth`,
+ * the one rule). An unknown probe (not yet run, timed out, a stale status) still routes, as an
+ * unknown login does. An exclave with no `traits` — an older daemon, or none declared — carries
+ * none, so a task that requires one never places there. Pinned, `run-now` and continuation tasks
+ * go through this too.
  */
-export function traitFilter(task: Task, exclave: ExclaveInfo): readonly Reason[] {
+export function traitFilter(
+  task: Task,
+  machine: Pick<Machine, "connected" | "status" | "exclaves">,
+  exclave: ExclaveInfo,
+  index: number,
+  nowMs: number,
+): readonly Reason[] {
   const carried = exclave.traits ?? [];
-  return (task.spec.requires ?? [])
-    .filter((trait) => !carried.includes(trait))
-    .map((trait): Reason => ({ code: "trait_absent", trait }));
+  return (task.spec.requires ?? []).flatMap((trait): readonly Reason[] => {
+    if (!carried.includes(trait)) return [{ code: "trait_absent", trait }];
+    return exclaveTraitHealth(machine, index, trait, nowMs) === "failing" ? [{ code: "trait_unhealthy", trait }] : [];
+  });
 }
 
-/**
- * The trait a reason is about, for the codes that mean "the exclave does not offer it". The probes
- * PR adds `trait_unhealthy` here, in this one place.
- */
+/** The trait a reason is about, for the codes that mean "the exclave cannot offer it". */
 function missingTrait(reason: Reason): string | null {
-  return reason.code === "trait_absent" ? reason.trait : null;
+  return reason.code === "trait_absent" || reason.code === "trait_unhealthy" ? reason.trait : null;
 }
+
+/** Why a required trait holds a task: no machine carries it, or the ones that do have a failing probe. */
+export type TraitHold = { readonly trait: string; readonly why: "absent" | "unhealthy" };
 
 /**
  * The required traits that hold an unplaced task, for the held-by-trait log line: not every trait
@@ -32,9 +42,10 @@ function missingTrait(reason: Reason): string | null {
  * - (b) every candidate that was judged lacks it: no machine has it. A machine whose blob lists
  *   no exclaves is rejected `exclaves_unknown` and never judged (`exclave: null`), so it is
  *   ignored here — it neither counts for nor against the trait.
- * In `requires` order.
+ * In `requires` order. `why` is `unhealthy` when any judged candidate is rejected for that trait's
+ * failing probe, `absent` otherwise.
  */
-export function traitsHolding(decision: Decision, requires: readonly string[]): readonly string[] {
+export function traitsHolding(decision: Decision, requires: readonly string[]): readonly TraitHold[] {
   if (decision.chosen !== null) return [];
   const lacks = (rejected: readonly Reason[], trait: string): boolean =>
     rejected.some((reason) => missingTrait(reason) === trait);
@@ -44,9 +55,13 @@ export function traitsHolding(decision: Decision, requires: readonly string[]): 
   );
   const onlyLacks = (rejected: readonly Reason[], trait: string): boolean =>
     rejected.every((reason) => missingTrait(reason) === trait);
-  return requires.filter(
-    (trait) =>
-      traitOnly.some((c) => onlyLacks(c.rejected, trait)) ||
-      (judged.length > 0 && judged.every((c) => lacks(c.rejected, trait))),
-  );
+  const unhealthy = (trait: string): boolean =>
+    judged.some((c) => c.rejected.some((reason) => reason.code === "trait_unhealthy" && reason.trait === trait));
+  return requires
+    .filter(
+      (trait) =>
+        traitOnly.some((c) => onlyLacks(c.rejected, trait)) ||
+        (judged.length > 0 && judged.every((c) => lacks(c.rejected, trait))),
+    )
+    .map((trait): TraitHold => ({ trait, why: unhealthy(trait) ? "unhealthy" : "absent" }));
 }

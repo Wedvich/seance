@@ -225,6 +225,22 @@ describe("the collector registry", () => {
     expect([h.cpu, c.cpu]).toEqual([50, 10]);
   });
 
+  test("trait probes' lists become tf and tu for the registered scan; empty lists and no source say nothing", async () => {
+    const seen: number[] = [];
+    const lists = { tf: [[0, 1]] as const, tu: [] };
+    const snapshot = await createTelemetry(MetricsStore.memory(), {
+      ...sources,
+      traits: (scan) => {
+        seen.push(scan.exclaves.length);
+        return lists;
+      },
+    }).tick(T0);
+    expect(snapshot.tf).toEqual([[0, 1]]);
+    expect(snapshot).not.toHaveProperty("tu");
+    expect(seen).toEqual([registered.exclaves.exclaves.length]);
+    expect(await createTelemetry(MetricsStore.memory(), sources).tick(T0)).not.toHaveProperty("tf");
+  });
+
   test("the default entries contribute disjoint field keys", async () => {
     // Fake sources that make every entry contribute: a cpu delta, an I/O delta, a cached quota.
     const dir = await mkdtemp(join(tmpdir(), "seance-collectors-"));
@@ -255,7 +271,12 @@ describe("the collector registry", () => {
         return { read: bytes, write: bytes };
       },
     };
-    const fullSources: CollectorSources = { ...sources, registered: () => cached, probe: full };
+    const fullSources: CollectorSources = {
+      ...sources,
+      registered: () => cached,
+      probe: full,
+      traits: () => ({ tf: [[0, 0]], tu: [[0, 1]] }),
+    };
     let fieldSets: string[][];
     try {
       fieldSets = await Promise.all(
@@ -273,7 +294,7 @@ describe("the collector registry", () => {
     }
     const all = fieldSets.flat();
 
-    expect(new Set(all)).toEqual(new Set(["cpu", "mem", "disk", "free", "rd", "wr", "sess", "quota"]));
+    expect(new Set(all)).toEqual(new Set(["cpu", "mem", "disk", "free", "rd", "wr", "sess", "quota", "tf", "tu"]));
     // Each entry's keys are unique to it: no key appears in two entries' sets.
     expect(all).toHaveLength(new Set(all).size);
   });

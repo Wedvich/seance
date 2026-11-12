@@ -390,6 +390,11 @@ export function deriveContinueHandoffAvailability(relay: RelayState): boolean {
   return verifiedLeaderAdvertises(relay, CAPABILITIES.continueHandoff);
 }
 
+/** Whether the verified leader answers `pass`; an older one refuses it as an op it does not know. */
+export function derivePassAvailability(relay: RelayState): boolean {
+  return verifiedLeaderAdvertises(relay, CAPABILITIES.successor);
+}
+
 /** Whether the verified leader answers `run-now`; an older one refuses it as an op it does not know. */
 export function deriveRunNowAvailability(relay: RelayState): boolean {
   return verifiedLeaderAdvertises(relay, CAPABILITIES.runNow);
