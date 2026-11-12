@@ -49,6 +49,7 @@ import type { Config } from "../src/config.ts";
 import type { LocalOps } from "../src/handlers.ts";
 import { boundedQueue } from "../src/leader-requests.ts";
 import {
+  alertToPush,
   createLeader,
   DEFAULT_CONFIG,
   MemoryQueueStore,
@@ -1109,6 +1110,27 @@ describe("leader settings", () => {
 });
 
 describe("leader push", () => {
+  test("a question's alert pushes `question: true`; a plain wait pushes no such key", () => {
+    const base = { kind: "needs-input", taskId: "t-1", since: 3, escalated: false, message: "m" } as const;
+    expect(alertToPush({ ...base, question: true }, 5)).toEqual({
+      v: 1,
+      kind: "needs-input",
+      at: 5,
+      taskId: "t-1",
+      since: 3,
+      escalated: false,
+      question: true,
+    });
+    expect(alertToPush(base, 5)).toEqual({
+      v: 1,
+      kind: "needs-input",
+      at: 5,
+      taskId: "t-1",
+      since: 3,
+      escalated: false,
+    });
+  });
+
   const sub = (id: string, host = "fcm.googleapis.com"): WebPushSubscription => ({
     endpoint: `https://${host}/fcm/send/${id}`,
     // RFC 8291 Appendix A's user agent: a real P-256 point, so a send can encrypt to it.

@@ -663,6 +663,23 @@ describe("coalescing", () => {
     }
   });
 
+  test("a question reason is forwarded with its needs-input, and belongs to it: a later state in the window drops it", async () => {
+    const { forwarded, events, send } = setup(150);
+    try {
+      await send({ state: "needs-input", reason: "question" });
+      expect(forwarded.map((e) => [e.state, e.reason])).toEqual([["needs-input", "question"]]);
+      await send({ state: "needs-input", reason: "question" });
+      await send({ state: "needs-input" });
+      await pollUntil(() => forwarded.length === 2, "the folded event");
+      expect(forwarded.map((e) => [e.state, e.reason])).toEqual([
+        ["needs-input", "question"],
+        ["needs-input", undefined],
+      ]);
+    } finally {
+      events.stop();
+    }
+  });
+
   test("stop cancels a pending send", async () => {
     const { forwarded, events, send } = setup(100);
     await send({ state: "busy" });
@@ -847,6 +864,24 @@ describe("a session's hand-off", () => {
     expect(parseSessionEventFrame(frame({ handoff: true, state: "idle" }))).toBeNull();
     expect(parseSessionEventFrame(frame({ handoff: false }))).toBeNull();
     expect(parseSessionEventFrame(frame({ handoff: true, pane: 7 }))).toBeNull();
+  });
+
+  test("a question reason rides only on needs-input; elsewhere, or unknown, it is dropped and the frame kept", () => {
+    const base = { v: 1, kind: "session-event" } as const;
+    expect(parseSessionEventFrame(frame({ state: "needs-input", reason: "question" }))).toEqual({
+      ...base,
+      state: "needs-input",
+      reason: "question",
+    });
+    expect(parseSessionEventFrame(frame({ state: "busy", reason: "question" }))).toEqual({ ...base, state: "busy" });
+    expect(parseSessionEventFrame(frame({ state: "needs-input", reason: "permission" }))).toEqual({
+      ...base,
+      state: "needs-input",
+    });
+    expect(parseSessionEventFrame(frame({ state: "needs-input", reason: 1 }))).toEqual({
+      ...base,
+      state: "needs-input",
+    });
   });
 
   test("a turn's end rides only on idle, and only as `true`", () => {

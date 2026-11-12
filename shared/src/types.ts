@@ -1596,7 +1596,8 @@ export type NeedsInputReason = (typeof NEEDS_INPUT_REASONS)[number];
  * fire-and-forget. Every field is the daemon's own, never what the session
  * claimed: `session` and `taskId` from its pane map, `exclave` from the pane's
  * path, `prUrl` only once it parsed as `https:`, `remoteSession` only once it
- * matched `isRemoteSessionId` (DESIGN.md, "Session events").
+ * matched `isRemoteSessionId`, `reason` only beside `needs-input` and known
+ * (DESIGN.md, "Session events").
  * Sent only for sessions that carry a task id.
  */
 export interface SessionEvent {

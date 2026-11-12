@@ -1,11 +1,13 @@
 import {
   httpsUrl,
   isRecord,
+  isNeedsInputReason,
   isRemoteSessionId,
   isSessionState,
   isTaskId,
   quote,
   SESSIONS_MAX_PROGRESS,
+  type NeedsInputReason,
   type SessionEvent,
   type SessionState,
   type TaskProgress,
@@ -68,6 +70,8 @@ export interface SessionEventFrame {
    * `session.start` (a hooks-worker respawn mid-turn too) reads idle without it. Only a hand-off reads it.
    */
   readonly turnEnded?: true;
+  /** Only beside `needs-input`: an AskUserQuestion is open. Lifts the leader's alert debounce for the stay, nothing else. */
+  readonly reason?: NeedsInputReason;
 }
 
 /** Routed on `kind` ahead of the `Plain` check, as broker frames are. */
@@ -83,10 +87,12 @@ const MAX_FIELD = 64;
  * it restarts (or `/reload-plugins`), and its reports are activity in its
  * exclave — the refresh's trigger — rather than malformed frames to warn about.
  * The numbers themselves are never read: the config dir's cache is the one source.
+ * A `reason` is kept only when known and beside `needs-input`, and otherwise
+ * dropped, never the frame: it is worth no more than the debounce it lifts.
  */
 export function parseSessionEventFrame(raw: unknown): SessionEventFrame | null {
   if (!isRecord(raw) || raw["v"] !== SESSION_EVENT_VERSION || raw["kind"] !== SESSION_EVENT_KIND) return null;
-  const { state, prUrl, remoteSession, rateLimits, pane, handoff, turnEnded } = raw;
+  const { state, prUrl, remoteSession, rateLimits, pane, handoff, turnEnded, reason } = raw;
   if (pane !== undefined && (typeof pane !== "string" || pane.length > MAX_FIELD)) return null;
   if (handoff !== undefined) {
     // Alone: a hand-off rides no state, so no ingest path can read one as the other.
@@ -111,6 +117,7 @@ export function parseSessionEventFrame(raw: unknown): SessionEventFrame | null {
     ...(remoteSession === undefined ? {} : { remoteSession }),
     ...(pane === undefined ? {} : { pane }),
     ...(turnEnded === true ? { turnEnded } : {}),
+    ...(state === "needs-input" && isNeedsInputReason(reason) ? { reason } : {}),
   };
 }
 
@@ -842,6 +849,7 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
           at,
           ...(prUrl === null ? {} : { prUrl }),
           ...(remoteSession === null ? {} : { remoteSession }),
+          ...(frame.reason === undefined ? {} : { reason: frame.reason }),
         });
       }
       // After the enqueue, so the idle is in the outbox before the close; a coalesced one may still give way to
