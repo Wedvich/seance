@@ -139,6 +139,25 @@ describe("branch-state emitter", () => {
     stopAll(w);
   });
 
+  test("a branch rewritten before its first push (a restack) reads as pushed, and its new tip is the work", async () => {
+    const w = await world();
+    const path = await launch(w, "t1", "x");
+    const emitter = start(w);
+    await writeFile(join(path, "a.txt"), "a\n");
+    await git(path, "add", "a.txt");
+    await git(path, "commit", "-q", "-m", "add a");
+    await emitter.check();
+    const firstTip = w.ledger.notes()[0]?.tip;
+    expect(firstTip).toBe(await git(path, "rev-parse", "HEAD"));
+
+    await git(path, "commit", "-q", "--amend", "-m", "add a, restacked");
+    await git(path, "push", "-q", "origin", "worktree-x");
+    await emitter.check();
+    expect(w.states.at(-1)?.pushed).toBe(true);
+    expect(w.ledger.notes()[0]?.tip).toBe(await git(path, "rev-parse", "HEAD"));
+    stopAll(w);
+  });
+
   test("a branch renamed in the worktree sends the new name on the next pass", async () => {
     const w = await world();
     const path = await launch(w, "t1", "x");
