@@ -1268,7 +1268,8 @@ of M4 has landed.
        not finished and carries no `successor`, so it is looked at again once it is back in `running` (a
        `conflict` is a task that moved mid-push, a `needs-input` answered meanwhile among them);
        `finished` and `not_found` leave it. A `conflict` after the successor's create (an orphan admission
-       fails `pass_abandoned`) keeps the stamp and alerts, so no second successor is made. A reading that
+       fails `pass_abandoned`) keeps the stamp and alerts, so no second successor is made; a `pass_failed` after a
+       create that landed unseen is retried under the same successor id, so none is made then either. A reading that
        gains a reset after a stamp written without one is the same window unless that reset puts the
        window's start after the stamp (the span rule applies while either side has none).
      - **Capability.** The daemon advertises `successorAuto`; nothing gates on it yet, it marks the
@@ -1448,7 +1449,8 @@ of M4 has landed.
       `successor_unsupported`, `account_unknown`, `pr_unreadable`, `pr_not_open`, `branch_mismatch`,
       `dirty_worktree`, `detached_head`, `default_branch`, `push_rejected`, `push_failed`,
       `not_launched`, `pass_failed` (the successor's create was refused, or went unanswered and was not
-      seen), `conflict` and `internal_error` (the library's `unrecorded`, as for `cancel`); a `push-branch`
+      seen; the task's next pass, the quota retry included, creates under the same id, so a successor that
+      landed unseen is found and named, not duplicated), `conflict` and `internal_error` (the library's `unrecorded`, as for `cancel`); a `push-branch`
       that gets no answer is `push_failed`, and a push is not started past 30 s after the daemon began it
       (`push_failed`, nothing pushed). A refusal is the request audit line's outcome, as for `cancel`. A task that
       already carries `successor` is not refused: it answers `ok` with it. A `needs-input` task is
@@ -1542,7 +1544,9 @@ of M4 has landed.
       so for those it is the pass to the start. Read as a median and p90 by trigger.
     - **Successors that end merged**: the leader logs `successor settled task=<id> state=<s>[ doneBy=<d>][ failure=<code>]` when
       a task carrying `succeeds` finishes; read as the share of settled successors with
-      `state=done doneBy=merged`, against `pass_abandoned`, `failed` and `cancelled`.
+      `state=done doneBy=merged`, against `pass_abandoned`, `failed` and `cancelled`, over the ids an `audit pass …
+      successor=<id>` line names only: an orphan (a create that landed unseen, or one whose commit never landed)
+      never ran, and its settle would count as a merge it did not carry.
     - Also: refusals by code (the request audit line's outcome), and successors that wait past an hour on
       `quota_over_line`, which says whether never spilling costs more than it saves.
 

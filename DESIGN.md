@@ -7239,13 +7239,16 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   task another pass has meanwhile named a successor for answers `ok` with that one. Step 4's create is re-sent
   once, identically, when its reply is lost (a `landedEarlier` answer counts as created), and read back when the
   re-send is lost too; a refused create, or one neither answered nor seen, answers `pass_failed`: one that landed
-  unseen waits `blocked` and ends with the task (`done` by `merged` if the task merges, `pass_abandoned`
-  otherwise), and a retry makes a new one. A failed
+  unseen waits `blocked`. The leader keeps that id (`#unsureSuccessors`, memory only, also after a create that
+  threw) until a create is confirmed or refused, and the task's next pass, the automatic quota retry included,
+  creates under it: the relay reads the create as landed (`landedEarlier`) if it did, so a retry never leaves a
+  second successor, and `pass_failed` is not a reason to hold the quota retry back. A new term has no such memory:
+  its pass makes a new id, and the orphan ends with the task (`done` by `merged` if the task merges,
+  `pass_abandoned` otherwise). A failed
   read-back of the created successor (the leader's `refresh`) is reported and the pass goes on to step 5, so a
   retry never leaves a second successor beside an orphan; step 5 declining because another pass named a
-  successor first answers `conflict` (across a term handover the relay's term fence refuses the old term's
-  commit before that check, so the answer is the same), and a retry answers `ok` with the named successor
-  (D15); step 5
+  successor first (its write pulled in by the create's refresh) answers `ok` with the named successor, as the
+  check after step 3 does (D15), ours left an orphan that ends with the task; step 5
   failing (a conflict after retries, `StoreRevoked`) leaves a successor its predecessor never names,
   which admission holds `blocked` and fails `pass_abandoned` once the predecessor finishes any other
   way, with no close armed; step 6 failing answers `ok` with the old task still `running` and
@@ -7503,7 +7506,8 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   alerts too. A refusal waiting cannot clear alerts at once as reason `refused`; dirty and mismatched
   branches as `dirty` and `branch`. A `needs_input`, `not_running` or `conflict` outcome clears the stamp
   while the task is unfinished with no `successor`, so it is looked at again; a `conflict` after the
-  successor's create keeps it and alerts, so no second successor is made. A stamp's `since` survives the
+  successor's create keeps it and alerts, so no second successor is made; a `pass_failed` after a create that
+  landed unseen is retried under the same successor id (step 4), so none is made then either. A stamp's `since` survives the
   retry. A task whose dispatch
   routing spilled onto the very window that is full has already had the spending spill alert: the
   `quota-exhausted` one is stamped and logged, not pushed. A session's own pass the leader refuses
@@ -7550,7 +7554,9 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   quota pass and from its `createdAt` otherwise; for a manual or session pass, which has no limit time, it measures the pass to the
   start, not the limit to it); successors that end merged (the leader logs `successor settled task=<id>
   state=<s>[ doneBy=<d>][ failure=<code>]` when a task carrying `succeeds` finishes, read as the share
-  ending `done` by `merged` against `pass_abandoned`, `failed` and `cancelled`).
+  ending `done` by `merged` against `pass_abandoned`, `failed` and `cancelled`, over the ids an `audit pass …
+  successor=<id>` line names: an orphan (a create that landed unseen, or one whose commit never landed) never
+  ran, and its settle would count as a merge it did not carry).
 - **Later.** A successor's own `hand_off_task`: its launch notes no PR (only a session's own `gh pr create`
   output is noted), so the tool answers `prless`, and the preamble tells it not to call it. Noting the
   inherited PR from the scheduler-sealed spawn would be a carried claim, a threat-model change, so it waits

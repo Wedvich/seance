@@ -417,7 +417,7 @@ describe("pass", () => {
       expect(s.scheduler.task(old.id)?.successor).toBeUndefined();
     });
 
-    test("a retry after a read-back that saw nothing makes a new successor, and the orphan fails on its own", async () => {
+    test("a retry after a read-back that saw nothing creates under the same id, so the orphan is found and named", async () => {
       const s = setup();
       const old = await running(s, false);
       landing(s, [unconfirmed]);
@@ -432,12 +432,34 @@ describe("pass", () => {
       expect(await s.scheduler.pass(old.id)).toEqual({ ok: false, code: "pass_failed" });
       s.create = () => ({ ok: true });
       const result = ok(await s.scheduler.pass(old.id));
-      const orphan = s.creates[0]?.id ?? "";
-      expect(result.successorId).not.toBe(orphan);
-      await tick(s.scheduler);
-      await s.scheduler.refresh(orphan);
-      await tick(s.scheduler);
-      expect(s.scheduler.task(orphan)).toMatchObject({ state: "failed", failure: { code: "pass_abandoned" } });
+      const landed = s.creates[0]?.id ?? "";
+      expect(result.successorId).toBe(landed);
+      expect(s.creates.map((task) => task.id)).toEqual([landed, landed, landed]);
+      expect(s.scheduler.task(old.id)).toMatchObject({ state: "superseded", successor: landed });
+    });
+
+    test("a create that threw is retried under the same id too", async () => {
+      const s = setup();
+      const old = await running(s, false);
+      s.create = () => {
+        throw new Error("store down");
+      };
+      await expect(s.scheduler.pass(old.id)).rejects.toThrow("store down");
+      s.create = () => ({ ok: true });
+      const result = ok(await s.scheduler.pass(old.id));
+      expect(s.creates).toHaveLength(2);
+      expect(s.creates[1]?.id).toBe(s.creates[0]?.id ?? "");
+      expect(result.successorId).toBe(s.creates[0]?.id ?? "");
+    });
+
+    test("a refused create is final: the retry is a new successor", async () => {
+      const s = setup();
+      const old = await running(s, false);
+      s.create = () => ({ ok: false, code: "store_full" });
+      expect(await s.scheduler.pass(old.id)).toEqual({ ok: false, code: "pass_failed" });
+      s.create = () => ({ ok: true });
+      ok(await s.scheduler.pass(old.id));
+      expect(s.creates[1]?.id).not.toBe(s.creates[0]?.id);
     });
   });
 
@@ -487,6 +509,22 @@ describe("pass", () => {
     const result = ok(await s.scheduler.pass(old.id));
     expect(result.successorId).toBe("other");
     expect(s.creates).toEqual([]);
+  });
+
+  test("a successor another pass named during the create answers ok with that one, ours left to end with the task", async () => {
+    const s = setup();
+    const old = await running(s, false);
+    s.create = async () => {
+      const held = s.scheduler.task(old.id);
+      const entry = await s.store.get(old.id);
+      if (held === undefined || entry === null || !("body" in entry)) throw new Error("the task is not held");
+      await s.store.put(old.id, entry.version, { ...held, successor: "other" });
+      await s.scheduler.refresh(old.id);
+      return { ok: true };
+    };
+    const result = ok(await s.scheduler.pass(old.id));
+    expect(result.successorId).toBe("other");
+    expect(s.scheduler.task(old.id)?.successor).toBe("other");
   });
 
   test("a task that needs a person during the create is a conflict, and the successor it left fails once the task ends", async () => {
@@ -1615,6 +1653,33 @@ describe("the automatic quota trigger", () => {
     later(s, RETRY_MS);
     await tick(s.scheduler);
     expect(s.scheduler.task("old")?.state).toBe("superseded");
+    expect(s.alerts).toEqual([]);
+  });
+
+  test("a create that landed unseen is not made twice by the retry: the same successor is found and named", async () => {
+    const s = setup(twoMachines());
+    await running(s, true, AUTO);
+    exhaust(s);
+    // Nothing answers either send and the read-back sees nothing, but the first create lands afterwards.
+    s.create = async (task) => {
+      if (s.creates.length === 1) await s.store.put(task.id, 0, task);
+      return { ok: false, code: "unreachable", unconfirmed: true };
+    };
+    const read = s.store.get.bind(s.store);
+    let blind = true;
+    s.store.get = async (id) => (id !== "old" && blind ? null : read(id));
+    await tick(s.scheduler);
+    expect(s.lines).toContain(`audit pass refused task="old" trigger=quota outcome=pass_failed`);
+    expect(stampOf(s)?.retry).toBe(true);
+    expect(s.alerts).toEqual([]);
+
+    blind = false;
+    s.create = () => ({ ok: true });
+    later(s, RETRY_MS);
+    await tick(s.scheduler);
+    const landed = s.creates[0]?.id ?? "";
+    expect(s.creates.every((task) => task.id === landed)).toBe(true);
+    expect(s.scheduler.task("old")).toMatchObject({ state: "superseded", successor: landed });
     expect(s.alerts).toEqual([]);
   });
 
