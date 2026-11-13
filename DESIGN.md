@@ -7208,13 +7208,16 @@ fields carry over), under the same gates.
   predating `continueSession`: "resume it by hand", and no `--continue` fallback, since that is what
   missed the conversation); the noted repo not being the clone `repo` resolved to; a
   noted path that is not canonical (a symlink anywhere on it) or not under
-  `<clone>/.claude/worktrees/`; the path gone (reap removes an idle worktree once nothing in it would be
-  lost — pushed is enough, Reap, "Nothing lost" — so this includes a pushed, unmerged task left past
-  reap's age gate; re-adding the worktree from its kept branch is follow-up work); and `repo_not_found` for a repo the scan set no longer
-  holds. _After it_ (`spawnContinued`, the new id already written ahead): the repo or the path gone
+  `<clone>/.claude/worktrees/`; the path gone with no branch noted for it, or gone and not exactly
+  `<clone>/.claude/worktrees/<one plain name>` under a canonical parent (no `..`, `.`, trailing or doubled
+  separator; a gone path otherwise passes, for the re-add below);
+  and `repo_not_found` for a repo the scan set no longer
+  holds. _After it_ (`spawnContinued`, the new id already written ahead): the repo gone
   again by then; the old task still having a live pane; any live pane whose cwd is inside the
   worktree (a second claude in one worktree would race the first on its transcript and its git
-  state); a worktree lock that is not a stale Claude one, one that could not be read, and one that
+  state); for a gone path, its branch gone too (merged and swept by reap, or deleted), a repo-local
+  config `repoConfigRefusal` refuses, a stale registration that could not be cleared, and a
+  `worktree add` or the `switch` onto the branch that git refused (the branch checked out in another worktree); a worktree lock that is not a stale Claude one, one that could not be read, and one that
   could not be unlocked (below). A refusal there is a `SpawnFailure`, so the handler retracts the
   write-ahead entry (`settle(false)`): nothing launched, and no entry for the new id stays. The code
   is not `task_running`, which the leader's verdict reads as "the new task is already running" and
@@ -7280,6 +7283,65 @@ fields carry over), under the same gates.
   `--remote-control` and a stdin seed delivers the seed as the next user turn is proven by Phase 0 (E2,
   E3, above) on Linux; the dev check on a worktree task (cancel, then Continue; the resumed transcript
   shows the preamble as a new user turn after the earlier ones) is what covers the Mac.
+- **Re-adding a removed worktree** (2026-11-13). A task's worktree can vanish while its conversation and
+  local branch stay: removed by hand (`git worktree remove`, `rm -rf`), or by `reap`'s nothing-lost rule
+  (Reap, "Nothing lost"; docs/custodian.md C32), which removes an idle clean worktree whose work is pushed and
+  leaves its branch (C34). A worktree reap judged merged loses its branch to the same pass's branch sweep, so
+  it reaches "both gone" below; the re-add serves a worktree whose branch survived: pushed-but-unmerged work
+  such as an awaiting-merge or cancelled task, one removed by hand, or one whose sweep failed or kept the
+  branch. When the noted path is
+  gone, `spawnContinued` (after the pane checks, before the lock read) puts it back at the same path,
+  under reap's lock (`withReapLock`; a held lock refuses `not_continuable`, "try again shortly"), re-adds one at a time within the daemon first (a second continuation waits for the first instead of being refused by the lock its own process holds, and each lock take stages a uniquely named file), because
+  reap's branch sweep deletes with `update-ref -d`, which does not refuse a branch checked out in a
+  worktree. `<branch>` is the note's `branch` (branch-state's last read of the live worktree,
+  `Continuation.branch`) and `<path>` the note's `path`, both this machine's ledger's, never a frame's. The
+  same path is the point: Claude files the transcript by it, the exclave is chosen by it, and the trust
+  entry is for it. In order: `repoConfigRefusal` (a checkout runs the filters repo-local config names,
+  which a session can write); a refusal when `<branch>` is the clone's default branch (the note's branch is
+  the last one branch-state saw, so a session that switched to `main` would otherwise resume there; any
+  other branch it switched to is accepted, as that is where its work was); an `lstat` of the leaf (anything there, a symlink included, refuses: a link
+  to an empty directory would take the checkout); `show-ref --verify -s refs/heads/<branch>` (the exact
+  ref: no revision syntax, no tag or remote branch of the name standing in) for the tip sha; a stale
+  registration (a directory removed by hand stays registered, which `worktree add` refuses) released of a
+  dead Claude lock as below and cleared by `worktree remove <path>` — that one entry, never `worktree
+  prune`, which would clear every missing one; `worktree add --detach -- <path> <sha>`; then `switch
+  --no-guess -- <branch>` inside it, and a check that `HEAD` is that sha on `refs/heads/<branch>` and the
+  path canonical. The add is detached at a full oid because `worktree add <path> <branch>` on a branch
+  deleted since the `show-ref` would make one tracking `origin/<branch>` (or detach at a tag of that
+  name): no ref a remote can move is ever checked out, with or without the lock. A failure after the add
+  runs `worktree remove <path>` (plain first, `--force` only if that fails, since nothing but this call's own
+  fresh checkout is there; both with the add's 60 s timeout) and refuses. If even the forced remove fails,
+  the refusal says the half-added tree is left at the path and `log.warn` names it. _Decided: no further
+  guard, because_ a present path is the ordinary continuation and a detached or dirty tree there is
+  indistinguishable from one the owner made; the next Continue finds it present and resumes in it, so
+  the owner removes the leftover first, as the message says. A failure after the re-add, at the
+  launch, leaves the tree, which the next Continue finds present. Any other throw inside the re-add
+  (the lock directory not creatable, say) is a `not_continuable` refusal too, never an unknown failure, so the
+  write-ahead entry is retracted rather than marked interrupted. The spawn's audit line carries
+  `readded=true` (no branch). One `log.info` names the path, never the branch. The handler lets a gone
+  path through only as a direct child of the clone's canonical `.claude/worktrees`, which may itself be
+  missing under a canonical clone and `.claude`; a present path is re-checked canonical in `continueLocked`
+  too, a link may have appeared since the handler. A re-added tree is a fresh checkout of the branch tip:
+  the work removed was clean, so nothing uncommitted was lost, but files Claude's `--worktree` copied in
+  from `.worktreeinclude` are not copied again, attachments removed with the worktree are not fetched
+  again (the continuation gets no `--add-dir` for them), and git hooks do not run (`hardenedGit` sets
+  `core.hooksPath=/dev/null`, so `post-checkout` hooks such as git-lfs's or husky's are skipped; a global
+  `filter.lfs` smudge still runs). The local tip may be behind origin's (a reviewer, a bot or a successor
+  pushed to the branch): the resumed session works on the stale tip and its next `pushTaskBranch` may be
+  `push_rejected`. The seed tells it it was resumed; fetching is not done on the spawn path.
+  - _Why only the local branch, never origin._ No network on the spawn path. A branch missing locally
+    means reap's merged-branch sweep took it (the work merged) or the owner deleted it; both say
+    there is nothing to resume onto.
+  - _Why the branch is not noted at launch._ Claude creates the branch after the spawn returns, and a
+    note at launch would make branch-state's first read match it and not report the branch to the
+    leader. Branch-state notes it within its minute; reap removes a worktree only after days untouched.
+    A launch with no branch noted (one that ended before a pass, or from a daemon predating this)
+    is refused as before.
+  - _Why not check the branch's tip against the note's `tip`._ Not done: the note holds a tip only for a
+    branch that once held own work, so the guard would be absent for the commonest case (a task stopped
+    before it committed), and a branch of a Claude worktree's name made by hand after the original was
+    deleted would be resumed onto. The session is told it was resumed and checks the worktree's state
+    first (the seed, above).
 - **Trust.** The worktree path is pre-trusted in the clone's exclave config ("Pre-trust on spawn"):
   claude starts in the worktree itself here, not the repo root, so the dialog would otherwise block it.
 - **The git lock residual.** Claude Code locks the worktree it created for the life of its process
@@ -7421,8 +7483,9 @@ fields carry over), under the same gates.
     to the new leader, whose takeover settles the gone session `done` or `failed` by its exit
     (Scheduler, "States"): Continue is then offered only for a nonzero exit.
   - _A cancelled task stopped before it committed_ has a clean worktree whose tip is merged by reap's rules,
-    so reap (default `minAgeDays`) may remove it while Continue is still offered; the daemon then refuses
-    "its worktree … is gone (removed or reaped)", an expected refusal.
+    so reap (default `minAgeDays`) may remove it while Continue is still offered; its merged-branch sweep
+    takes the branch with it, so the daemon then refuses "its worktree … and its branch are both gone", an
+    expected refusal (a branch the sweep kept is re-added: "Re-adding a removed worktree").
 
 - **Moved out of Rejected:** the daemon refusing any task whose path a newer ledger note owns. The objection
   was that a continuation cancelled or failed after it ran would be offered no Continue itself and the
@@ -8360,10 +8423,10 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
   - _The audit line_ for a removal carries `reason=` (`ancestor`, `squash`, `gone`, `origin` or `pr`), since a
     removal is no longer always a merge.
   - _The local branch is left_ (C34) for the branch pass below, which deletes it only once merged by its
-    own rules. A continuation of a task whose worktree reap removed is refused `not_continuable` today
-    (Daemon, "Continuing a session": the path gone), so a pushed, unmerged worktree idle past the age gate
-    can no longer be continued in place; the owner accepted that (2026-11-13: pushed is enough).
-    Re-adding the worktree from the kept branch on a continuation is follow-up work.
+    own rules. A continuation of a task whose worktree reap removed re-adds it at the same path from that
+    kept branch (Daemon, "Continuing a session", "Re-adding a removed worktree"), so a pushed, unmerged
+    worktree idle past the age gate still continues in place; once the sweep has taken the branch (merged),
+    the continuation is refused `not_continuable`.
   - _What it kept_ (C23): each acting run replaces `reap-refusals.json` in the state dir (0600,
     `ReapRefusals`, read by `readReapRefusals`) with every worktree kept `dirty` (with its change count),
     `unpushed` (with its kept-worktree reason), `unevaluated` (with the unknown reason) or `locked` (with

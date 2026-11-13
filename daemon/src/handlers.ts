@@ -1,5 +1,5 @@
-import { stat } from "node:fs/promises";
-import { join, sep } from "node:path";
+import { realpath, stat } from "node:fs/promises";
+import { basename, dirname, join, sep } from "node:path";
 import type {
   DespawnRequest,
   DespawnResponse,
@@ -146,6 +146,7 @@ export interface TaskLaunches {
         readonly vanished?: true;
         readonly handedOff?: true;
         readonly continuedPr?: string;
+        readonly branch?: string;
       }
     | { readonly refused: string };
   /**
@@ -361,12 +362,35 @@ function continuationRefusal(request: SpawnRequest, scheduler: boolean): SpawnRe
   return null;
 }
 
+const MISSING = "\0missing";
+
+/**
+ * Whether a gone worktree's parent is the clone's own canonical `.claude/worktrees`, or is missing under a
+ * canonical clone and `.claude` (a re-add creates the directories, which only land inside the clone then).
+ */
+async function goneSiteParentOk(clone: string, worktrees: string, path: string): Promise<boolean> {
+  // Exactly `<worktrees>/<one plain name>`: not `..`, `.`, a trailing slash or a doubled separator, which git
+  // would normalise to somewhere else than the path the session and its trust entry are keyed by.
+  if (dirname(path) !== worktrees || path !== join(worktrees, basename(path))) return false;
+  const real = (target: string): Promise<string | null> =>
+    realpath(target).catch((err: unknown) =>
+      err instanceof Error && "code" in err && err.code === "ENOENT" ? MISSING : null,
+    );
+  const parent = await real(worktrees);
+  if (parent !== MISSING) return parent === worktrees;
+  if ((await real(clone)) !== clone) return false;
+  const dot = join(clone, ".claude");
+  const dotReal = await real(dot);
+  return dotReal === MISSING || dotReal === dot;
+}
+
 /**
  * The worktree a continuation resumes in, from this machine's launch ledger and checked
  * before anything is recorded or run (DESIGN.md, Daemon, "Continuing a session"): the
  * clone `repo` resolved to is the one the ledger noted, and the path is canonical and under
  * that clone's `.claude/worktrees/`, so a ledger written by anything else cannot aim a
- * session at an arbitrary directory.
+ * session at an arbitrary directory. A gone path passes only as a direct child of a canonical
+ * `.claude/worktrees/` with a noted branch, for `spawnContinued` to re-add.
  */
 async function continuationSite(
   ctx: HandlerContext,
@@ -383,22 +407,34 @@ async function continuationSite(
   if (entry.path !== site.repo) {
     return notContinuable(`it ran in another clone of ${request.repo} (${site.repo}), not this one`);
   }
+  const worktrees = join(entry.path, ".claude", "worktrees");
   const real = await canonical(site.path);
   const present = await stat(real).then(
     (info) => info.isDirectory(),
     () => false,
   );
-  if (!present) return notContinuable(`its worktree ${site.path} is gone (removed or reaped)`);
-  if (real !== site.path || !real.startsWith(join(entry.path, ".claude", "worktrees") + sep)) {
+  if (!present) {
+    // `canonical` hands a missing path back unchanged, so the leaf's parent carries the symlink check; a
+    // re-add (`spawnContinued`) puts the worktree back at this path, only ever a direct child of `worktrees`.
+    if (!(await goneSiteParentOk(entry.path, worktrees, site.path))) {
+      return notContinuable(`its noted path ${site.path} is not a worktree of ${request.repo}`);
+    }
+    if (site.branch === undefined) {
+      return notContinuable(
+        `its worktree ${site.path} is gone (removed or reaped), and no branch of it was noted to re-add it from`,
+      );
+    }
+  } else if (real !== site.path || !real.startsWith(worktrees + sep)) {
     return notContinuable(`its noted path ${site.path} is not a worktree of ${request.repo}`);
   }
   return {
-    path: real,
+    path: site.path,
     session: site.session,
     ...(site.exit === undefined ? {} : { exit: site.exit }),
     ...(site.vanished === true ? { vanished: true as const } : {}),
     ...(site.handedOff === true ? { handedOff: true as const } : {}),
     ...(site.continuedPr === undefined ? {} : { continuedPr: site.continuedPr }),
+    ...(site.branch === undefined ? {} : { branch: site.branch }),
   };
 }
 

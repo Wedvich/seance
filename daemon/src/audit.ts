@@ -209,7 +209,9 @@ export function spawnAudit(origin: SpawnOrigin, sink: AuditSink): SpawnAudit {
       );
     },
     ok: async (outcome: SpawnOutcome): Promise<void> => {
-      await emit(`ok window=${quote(outcome.window)} path=${quote(outcome.path)}`);
+      // Only when set, so every other spawn's line stays byte-identical.
+      const readdedNote = outcome.readded === true ? " readded=true" : "";
+      await emit(`ok window=${quote(outcome.window)} path=${quote(outcome.path)}${readdedNote}`);
     },
     failed: async (code: string, id?: string): Promise<void> => {
       await emit(`failed code=${code}${id === undefined ? "" : ` target=${quote(id)}`}`);

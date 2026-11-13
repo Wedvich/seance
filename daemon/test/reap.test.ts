@@ -734,6 +734,27 @@ describe("reap: séance windows (real tmux, stub claude)", () => {
 });
 
 describe("withReapLock", () => {
+  test("callers racing in one process each run or are refused busy, never crash on a shared staged file", async () => {
+    const path = join(base, "locks-race", "reap.lock");
+    const settled = await Promise.allSettled(
+      Array.from({ length: 12 }, () =>
+        withReapLock(
+          () =>
+            new Promise<string>((r) => {
+              setTimeout(() => r("ran"), 5);
+            }),
+          path,
+        ),
+      ),
+    );
+    for (const result of settled) {
+      if (result.status === "fulfilled") expect(result.value).toBe("ran");
+      else expect(result.reason).toBeInstanceOf(ReapBusy);
+    }
+    expect(settled.some((r) => r.status === "fulfilled")).toBe(true);
+    expect(await Bun.file(path).exists()).toBe(false);
+  });
+
   test("one reap at a time; a crashed run's lock is taken over", async () => {
     const path = join(base, "locks", "reap.lock");
     const running = Promise.withResolvers<void>();

@@ -49,6 +49,8 @@ export interface DespawnResult {
 export interface SpawnOutcome {
   readonly window: string;
   readonly path: string;
+  /** A continuation put its reaped worktree back (`readdWorktree`): the audit line says so, for an owner asking why it reappeared. */
+  readonly readded?: true;
   readonly note?: string;
   /**
    * Whether the session had shown up in `sessions` by the time spawn returned.
@@ -90,6 +92,11 @@ export interface Continuation {
   readonly handedOff?: true;
   /** The PR URL the earlier launch had, from this ledger: noted on the new launch, never shown to the session. */
   readonly continuedPr?: string;
+  /**
+   * The local branch the ledger last saw the worktree on (`TaskNote.branch`): what `spawnContinued` re-adds the
+   * worktree from when reap removed it. Never shown to the session.
+   */
+  readonly branch?: string;
 }
 
 /** One fetched attachment, for the seed: `name` is display text only, never part of `path`. */

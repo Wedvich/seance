@@ -305,6 +305,8 @@ export class ReapBusy extends Error {
   }
 }
 
+let stagedSeq = 0;
+
 /**
  * One reap at a time per machine — the CLI and the daemon's schedule would
  * otherwise race on the same worktrees. Taken by `link`ing a file that already
@@ -315,7 +317,9 @@ export class ReapBusy extends Error {
  */
 export async function withReapLock<T>(fn: () => Promise<T>, path: string = join(runDir(), "reap.lock")): Promise<T> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  const staged = `${path}.${process.pid}`;
+  // Unique per call: two in-process callers sharing a name would unlink each other's staged file mid-`link`.
+  stagedSeq += 1;
+  const staged = `${path}.${process.pid}.${stagedSeq}`;
   await writeFile(staged, String(process.pid), { mode: 0o600 });
   try {
     for (let attempt = 0; ; attempt++) {

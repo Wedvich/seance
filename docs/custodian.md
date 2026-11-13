@@ -168,9 +168,11 @@ moment of the act.
   flags it `dirty` or `unpushed`. When the rule cannot be evaluated, the worktree is kept and
   nothing is flagged; `reap` tries again later. _Built:_ the rule's three-way verdict and `reap`'s
   keeping (DESIGN.md, Reap, "Nothing lost"). _Not built:_ the close and its flags (PRs 4 and 6).
-- **C34.** The local branch is left for `reap`'s merged-branch sweep (built). A `continue` of a task
-  whose worktree was removed is refused `not_continuable` today; re-adding the worktree from the
-  kept branch is follow-up work (DESIGN.md, Reap, "Nothing lost").
+- **C34.** The local branch is left for `reap`'s merged-branch sweep. A later `continue` of the
+  task re-adds the worktree at its old path from that branch (DESIGN.md, "Continuing a session",
+  "Re-adding a removed worktree"), so the conversation resumes. That covers pushed-but-unmerged work
+  (an awaiting-merge or cancelled task): the sweep keeps an unmerged branch, but takes a merged one
+  in the same pass, and the continue is then refused, there being nothing left to resume onto.
 - **C35.** Old worktrees with no session in them are `reap`'s, not the agent's: the check is code
   and needs no model. _Built:_ reap's defaults under a `custodian` key (DESIGN.md, Reap, "Surfaces").
 - **C36.** _Built:_ the daemon's forge read (DESIGN.md, Threat model, "A daemon reads a forge only

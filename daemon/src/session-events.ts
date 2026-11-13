@@ -714,6 +714,7 @@ export class EndedTasks {
         readonly vanished?: true;
         readonly handedOff?: true;
         readonly continuedPr?: string;
+        readonly branch?: string;
       }
     | { readonly refused: string } {
     const site = this.worktree(taskId);
@@ -740,6 +741,8 @@ export class EndedTasks {
       ...(note.vanished === true && note.exit === undefined ? { vanished: true as const } : {}),
       ...(handedOff ? { handedOff: true as const } : {}),
       ...(pr === undefined ? {} : { continuedPr: pr }),
+      // Branch-state's last read of the live worktree: what a reaped worktree is re-added from.
+      ...(note.branch === undefined ? {} : { branch: note.branch }),
     };
   }
 
