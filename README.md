@@ -692,6 +692,8 @@ seanced spawn --start seance -p "fix the flaky spawn test"
 seanced start 3f2a…           # start a task already waiting in the queue now, past the concurrency cap
 seanced continue 3f2a…        # resume a failed (e.g. OOM-killed), cancelled or blocked-awaiting-merge task's conversation in its worktree, as a new task (--prompt <text> to add a note)
 seanced pass 3f2a…            # push a running task's branch, end its session and hand the work to a new task (a successor) on a fresh account's budget
+seanced close [machine]      # stop the scheduler placing new work on a machine (default: this one); running sessions finish where they are. Over the relay as app-role, so a keyless box refuses: use the PWA
+seanced open [machine]        # reopen it
 seanced amend 3f2a… "also cover the Windows path"   # add to a waiting task's prompt (--replace to replace it; --title, --model, --effort; --title "" or --model/--effort default clears)
 seanced sessions              # running claude windows: id, window, repo, path
 seanced despawn %12           # end one by id: asks claude to exit, kills the pane after ~5s (--force: now)
@@ -759,7 +761,7 @@ versus the one on disk, which is how you spot a `git pull` that still needs a
 
 With `seanced mcp install` done (step 6), a local Claude Code can list machines,
 query running sessions, and spawn and end sessions on other machines through the relay:
-`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`, `start_task` (start a queued task now, past the concurrency cap — the app's Start now; `spawn_session`'s `start` does the same for a new one), `continue_task` (resume a failed or cancelled task's, or a blocked awaiting-merge task's, session in its worktree, as a new task), `pass_task` (push a running task's branch, end its session and queue a successor that picks it up — never for the calling session's own task, which passes itself with `pass_to_successor`), `amend_task` (change a waiting task's prompt, title, model or effort — appending to the prompt by default), `queue_batch` (several tasks queued as one group, ordered only by the dependencies between them) and, for a session settling its own task, `report_task_done`, or handing its open PR to the scheduler and closing, `hand_off_task`, or passing its own task to a successor with its notes, `pass_to_successor`. The server reads the daemon's own
+`list_machines`, `get_sessions`, `spawn_session`, `despawn_session`, `get_queue`, `cancel_task`, `start_task` (start a queued task now, past the concurrency cap — the app's Start now; `spawn_session`'s `start` does the same for a new one), `continue_task` (resume a failed or cancelled task's, or a blocked awaiting-merge task's, session in its worktree, as a new task), `set_machine_open` (close a machine to new scheduled work, or reopen it; `list_machines` shows when one was closed), `pass_task` (push a running task's branch, end its session and queue a successor that picks it up — never for the calling session's own task, which passes itself with `pass_to_successor`), `amend_task` (change a waiting task's prompt, title, model or effort — appending to the prompt by default), `queue_batch` (several tasks queued as one group, ordered only by the dependencies between them) and, for a session settling its own task, `report_task_done`, or handing its open PR to the scheduler and closing, `hand_off_task`, or passing its own task to a successor with its notes, `pass_to_successor`. The server reads the daemon's own
 config and speaks to the relay exactly like the phone does.
 
 `spawn_session` always queues the task in the relay, as the app's **auto** does: it answers
@@ -802,7 +804,7 @@ backend and audit trail either way — the log says `origin=local` instead of
 If a remote machine shares this one's name, local wins; reach the remote one by its
 `deviceId`.
 
-Treat `spawn_session` and `despawn_session` like the remotes they are: leave them
+Treat `spawn_session`, `despawn_session` and `set_machine_open` like the remotes they are: leave them
 behind Claude Code's per-tool approval rather than allowlisting them.
 
 ## Updating

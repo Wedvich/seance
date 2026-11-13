@@ -1006,6 +1006,12 @@ nothing checked it. The last is the gap they leave.
   `github.com`'s pull-request shape. The residual: a session can make the leader read any PR
   in any repo the operator's token can see, and the result lands only in a sealed record, so the worst
   case is a session settling its own task early by naming a merged PR. `gh`'s stderr is never logged.
+- **Closing is the owner's act, sealed, and never reachable without the app role** (2026-11-13, Daemon,
+  "Closing a machine"). The daemon answers `availability` only when sealed `from: "app"` on the relay leg,
+  parsed by `parseAvailabilityRequest`, audited without a payload; neither `LOCAL_OPS` nor `BROKER_OPS`
+  carries it. A `closed` it cannot read in `state.json` loads as closed (fail closed, in
+  `loadOrInitState` only; `readState` never logs). `cl` is never trimmed from `status`, a closed
+  daemon's gate runs before any fetch or ledger write, and `routesClosed` is accepted only as `true`.
 - **A pass** (built 2026-11-12, the outside path and the session's own, its `pass` frame,
   `pass-close` and the `successor` origin; `CLAUDE.md` carries those requirements; Scheduler,
   "Passing to a successor"):
@@ -1382,8 +1388,9 @@ Who owns each frame in code — the place to change when a frame changes:
 | envelope `seal`/`open`, AAD, replay                                 | `shared/src/crypto.ts`                                                                                                                                                                                                                                                                                                                                                             | same file — both ends share it, or nothing decrypts                                                                                                                                                                                                                                                                                                                                                     |
 | ops `sessions` / `spawn`                                            | `sessions`: `pwa/src/store.ts` via `shared/src/app-client.ts`; `spawn`: no PWA sender since M4 PR 2 (older apps, `seanced spawn --now`)                                                                                                                                                                                                                                            | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`; a `mode: "continue"` spawn (the leader's dispatch of a continue task, sealed `from: "scheduler"`) resolves its worktree from the launch ledger first (Daemon, "Continuing a session")                                                                                                                                            |
 | op `rescan`                                                         | `pwa/src/store.ts` via `shared/src/app-client.ts`, from a Machine-sheet row                                                                                                                                                                                                                                                                                                        | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                                                                                                                                                                                                                                                                                                           |
+| op `availability` (built 2026-11-13)                                | `pwa/src/store.ts` `setMachineOpen`, `daemon/src/availability-client.ts` (`seanced close`/`open`, MCP `set_machine_open`), over the relay as app-role only                                                                                                                                                                                                                         | `daemon/src/handlers.ts` `handleAvailability` → `MachineAvailability` in `daemon/src/run.ts`; sealed `from: "app"` only; writes `state.json` and refreshes `status` (Daemon, "Closing a machine")                                                                                                                                                                                                       |
 | op `despawn`                                                        | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                                                 | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                                                                                                                                                                                                                                                                                                                  |
-| `status` (daemon→relay)                                             | `daemon/src/run-collectors.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register (`ax`/`ae`/`au` from `daemon/src/auth-health.ts` through the `auth` collector, `tf`/`tu` from `daemon/src/trait-probes.ts` through the `traits` collector)                                                                                                                     | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest on the socket attachment, kept in the entry on close/sweep until the next register                                                                                                                                                                                                                                                   |
+| `status` (daemon→relay)                                             | `daemon/src/run-collectors.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register (`ax`/`ae`/`au` from `daemon/src/auth-health.ts` through the `auth` collector, `tf`/`tu` from `daemon/src/trait-probes.ts` through the `traits` collector; `cl` through the `closed` collector, from `state.json`)                                                             | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest on the socket attachment, kept in the entry on close/sweep until the next register                                                                                                                                                                                                                                                   |
 | `status` (relay→app)                                                | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`                                                                                                                                                                                                                                                                                               | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped                                                                                                                                                                                                                                                                                                  |
 | op `metrics`                                                        | `pwa/src/store.ts` and `archivist/src/metrics-collect.ts` via `shared/src/app-client.ts` `metrics()`, gated and parsed                                                                                                                                                                                                                                                             | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts` (tiers in `metrics-tiers.ts`); sized at the transport (`#sealReply`, `daemon/src/relay-client.ts`)                                                                                                                                                                                                                        |
 | op `archive-status`                                                 | `pwa/src/archivist-store.ts` via `shared/src/app-client.ts` `archiveStatus()`                                                                                                                                                                                                                                                                                                      | `archivist/src/health.ts` via the seat's `handle` in `archivist/src/run.ts` (sealed `from: "app"` only)                                                                                                                                                                                                                                                                                                 |
@@ -1737,6 +1744,7 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
   nothing and needs to. The daemon's transport allowlists it — any other op
   arriving group-addressed is dropped before dispatch.
 - `rescan {}` → `{ repos, scannedAt }`; daemon re-registers if the set changed.
+- `availability { open }` → `{ ok: true, closed: number | null } | { ok: false, code, message }`; app-sealed only (Daemon, "Closing a machine").
   The app folds the reply into the machine it came from, overriding that
   machine's register blob until a later one carries the scan: an unchanged set
   produces no register, so the reply is the only report the scan ever gets.
@@ -2031,6 +2039,14 @@ an old peer's frames parse as before. Mixed versions:
   (refused `internal_error`, settled at the TTL); an older daemon never sends it. An older app or
   leader drops `draining` from a decision and keeps the candidate, which the PWA words "rejected for
   a reason this app can't read".
+- `MachineStatus.cl`, reason `closed`, `CAPABILITIES.close`/`drain`, `SpawnRequest.routesClosed` and
+  spawn error `machine_closed` (2026-11-13; Daemon, "Closing a machine"): an older leader's or app's
+  `parseMachineStatus` ignores `cl`, so it routes into a closed daemon, which answers a spawn without
+  `routesClosed` `internal_error`, unrecorded, so the task settles at the TTL as for `drn`. An older
+  app or leader drops `closed` from a decision and keeps the candidate. The PWA, CLI and MCP offer a
+  close only to a target advertising `close` under a verified leader advertising `drain`; a reopen
+  needs only `close`, so a close can always be undone. An older daemon's `isSpawnRequest` reads
+  known fields only, so it ignores `routesClosed` and never closes.
 - Reasons `skill_absent { skill }`, `auth_expired` and `base_unpushed`: an older app or
   leader drops an unknown reason from a decision and keeps the candidate.
 - `TaskSpec.requires` (1 to `TASK_SPEC_LIMITS.requires` = 4 unique trait names), `ExclaveInfo.traits`
@@ -3094,7 +3110,8 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   bills; an empty list reads the same, since a real daemon always lists `default`, and
   stays in the record as one exclave-less candidate), `draining` (a fresh status carrying `drn`: the
   daemon is restarting; every routing path, `run-now` and pinned tasks included, since it is a machine
-  filter), `disk_low`, `pressure_unknown`, `pin_mismatch` (`field`: `deviceId` or `account`), `avoided` (the
+  filter), `closed` (a status carrying `cl`: the owner closed the machine; the same filter, so a pinned
+  task waits, worded "closed to new work"), `disk_low`, `pressure_unknown`, `pin_mismatch` (`field`: `deviceId` or `account`), `avoided` (the
   task's `avoid` names the machine), `repo_absent` (matched on
   `RepoEntry.origin`, never the machine-local name), `auth_missing`, `quota_unknown`,
   `quota_over_line`, `model_not_included` (the task's model is a gated one its seat bills
@@ -7895,6 +7912,61 @@ waiting task's prompt, title, model and effort in place, under its own id.
   op's strict keys leave room for them as they leave it for `deps`. A version-number `expect` in place of `basis`: an app never sees the store
   version of a leader write it did not make, and a hash survives a leader rewriting only state.
 
+## Closing a machine (`availability`) — built 2026-11-13 (drain 1/N)
+
+docs/drain.md is the spec of the whole feature; this section is what its first build-order item
+decided. Closing stops the scheduler placing new work on a machine and moves nothing already there:
+running sessions finish in place. The drain (moving the work off) is later items.
+
+- **State is the daemon's own and sticky.** `state.json` carries `closed: { at }` (absent when
+  open); it survives restarts, tmux restarts and reboots until reopened. `loadOrInitState` fails
+  closed: a `closed` field it cannot read loads as closed now, with a warning, so a damaged file never
+  reopens a box the owner took down; `readState` (the log-free reader `seanced mcp` uses) returns the
+  raw field. State writes go through `persistState`, one at a time, so a close racing a rescan's repos
+  write loses neither. _Rejected:_ a leader-owned store record (a new prefix with rules, caps and a
+  threat-model entry, to close a machine that takes no work offline anyway), a `config.json` field (the
+  operator's file, out of reach from a phone) and reopening on a new boot id (reopens a box taken down
+  because it was broken).
+- **`availability { open }`** is a request op, answered only when sealed `from: "app"` on the relay
+  leg (`origin` `relay`); the local socket and the fleet broker carry neither it nor any widening
+  (`LOCAL_OPS` and `BROKER_OPS` are unchanged, owner decision), so the CLI and MCP go over the relay as
+  app-role and a keyless box refuses and points to the PWA. It is idempotent: a request that changes
+  nothing is answered with the current state. The reply is `{ ok: true, closed }`, `closed` being the
+  close time or null. Audited `audit availability origin=relay open=<true|false|-> outcome=<closed|
+  reopened|unchanged|refused|invalid_request|unsupported|internal_error>`; no payload beyond that.
+  `now?` (the drain's grace) arrives with the drain.
+- **`MachineStatus.cl`** is the close time in unix ms. It rides the sealed status, so the relay learns
+  nothing, and `fitStatus` never trims it: a trimmed `cl` would read as open. A set or cleared `cl`
+  asks the status loop for a fresh status (`StatusLoop.refresh`, as `drn` does), so the leader hears it
+  within the relay's floor.
+- **Routing.** `closed` is a machine filter beside `draining`, on every path: pinned tasks, `run-now`,
+  continuations and successors. A pinned task waits, worded "closed to new work".
+- **The daemon's gate** sits after `relaunchRefusal` and before any fetch or ledger write, and covers the
+  seconds before the leader hears `cl`. A closed daemon refuses a scheduler-sealed spawn, and a spawn
+  the leader sealed with `routesClosed: true` is answered `machine_closed` (the leader's `verdict` settles
+  it as undelivered: the task is `ready` again at once, never `failed`, and the next pass routes it
+  afresh); a spawn without the flag, from a leader that predates this, is answered `internal_error`,
+  unrecorded, the code every older leader already settles at the TTL. The gate first looks up a live pane
+  for the task and answers `task_running`, so a retry of a launch whose reply was lost never reads as
+  closed. `routesClosed` is accepted only as `true` and only from the scheduler.
+- **Direct spawns still run.** A spawn the person aimed at this machine (`seanced spawn --now`, MCP
+  `spawn_session` with a machine, the PWA's picks) is their explicit choice, and the spawn sheet shows
+  the machine as closed. Closing is about what the scheduler does, not about locking the box.
+- **Capabilities.** `CAPABILITIES.close` (a daemon answers `availability`) and `CAPABILITIES.drain` (a
+  leader routes around `cl` and sends `routesClosed`; named for the feature, though item 1 only closes).
+  A close is offered only to a target advertising `close` under a verified leader advertising `drain`; a
+  reopen needs only `close`.
+- **Surfaces.** The PWA's Machines screen has an "Open for work" switch in the machine's menu, a Closed
+  badge and a confirm sheet; a pin on a closed machine says "<name> is closed: this waits until it
+  reopens" and the picker prefixes "closed to scheduled work". `seanced close|open [<machine>]` act on
+  this machine when none is named; MCP `set_machine_open { machine, open }` and a `closed` ISO time or
+  null on `list_machines`. The tool ends nothing and sends no keys, but, like `pass_task`, it changes
+  what the fleet does, so it belongs on an explicit allowlist, never a default one (docs/psk.md).
+  The archivist and the relay are unchanged: `status` is sealed to the app, and the archivist's
+  `parseMachineStatus` ignores `cl`.
+- **Threat model.** No new power: closing every machine stops the queue, as `pause` does. The op is
+  sealed and replay-guarded, answered only for an app, and audited.
+
 ## Reap (`seanced reap`) — designed 2026-10-09
 
 Remote sessions leave residue: linked worktrees, the branches they were on,
@@ -9223,6 +9295,11 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   boxes broker it ("Fleet broker"). `get_queue` shows `continues` on a continuation and `continuable:
   true` on a task that can be continued. Needs `mcp__seance__continue_task` allowed where an agent calls
   it, as `report_task_done` does.
+- **`set_machine_open { machine, open }`** (built 2026-11-13; Daemon, "Closing a machine"). Closes a
+  machine to new scheduled work or reopens it. Gated like the PWA: a close needs the target to advertise
+  `close` and the verified leader `drain`, a reopen only `close`. It goes over the relay as app-role,
+  even for this machine; a keyless server (the broker) refuses and names the PWA, since `availability`
+  is not a brokered op. `list_machines` gains `closed`, an ISO time or null.
 - **`pass_task { taskId }`** (built 2026-11-12; Scheduler, "Passing to a successor").
   Passes a running task to a successor: its machine's daemon pushes the branch and the session is
   ended, as the PWA's "Pass to successor" does. Gated on `leaderAdvertises(lease,
@@ -9557,7 +9634,7 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
   observable way: the origin tag.
 - **Semantic ops, never the key.** A peer sends a `Plain` and gets a `Plain`
   back; the ops it may ask for are `sessions`, `spawn` and `despawn` and nothing
-  else. `despawn` joined on 2026-10-09, deliberately — widening this list is a
+  else (`availability` is not one: it is app-sealed, and a keyless box points to the PWA). `despawn` joined on 2026-10-09, deliberately — widening this list is a
   threat-model change, so the reasoning is kept here: without it the
   `despawn_session` tool cannot end a session on the box it runs on whenever the
   relay is out of reach, which on a credential-delivered machine was then always
@@ -9674,7 +9751,7 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
 
 Non-goals: routing `seanced spawn --now` through the socket (it would collapse the
 executors further, but `origin=cli` should keep meaning "typed at this machine");
-a `rescan` op; the Raycast extension using it — its local-only reach was rejected
+a `rescan` op, or `availability`; the Raycast extension using it — its local-only reach was rejected
 on product grounds and that has not changed.
 
 ### Fleet broker (`daemon/src/broker.ts`) — designed 2026-10-14
@@ -9724,7 +9801,7 @@ app-role relay client with the key it imported at start.
   what `list_machines`' leader mark and a brokered `auto` need), `request` (`remoteOp` ∈
   `sessions`/`spawn`/`despawn`, to an exact `deviceId` this daemon's key can read — never a
   name, `"app"`, `"machines"`, or the daemon's own id, which belongs on the local op path)
-  and `scheduler` (`schedulerOp` ∈ `enqueue`/`queue`/`cancel`/`run-now`/`pass`/`amend`/`accounts`). The payload is
+  and `scheduler` (`schedulerOp` ∈ `enqueue`/`queue`/`cancel`/`run-now`/`pass`/`amend`/`accounts`); `availability` is in neither list (2026-11-13, owner decision: a keyless box refuses `seanced close` and points to the PWA). The payload is
   validated with the handler's own checks and rebuilt from the validated fields, so nothing
   else a peer adds reaches the wire. For `request`, `client` is stamped `"mcp"` by the
   broker, never copied from the peer, so the target audits the spawn as

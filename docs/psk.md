@@ -246,7 +246,8 @@ it cannot read the key, queue tasks for the scheduler, read the fleet queue (oth
 clients' titles and prompt previews included) and the account names, and cancel any
 task. That is the point — a Claude session here is meant to drive the fleet — and it is
 behind Claude Code's per-tool approval, so do not allowlist `spawn_session`,
-`despawn_session`, `queue_batch` or `cancel_task`. It is confined to this kind of box: a daemon
+`despawn_session`, `queue_batch`, `cancel_task` or `set_machine_open` (the last needs the app role, so a
+keyless box refuses it and the broker carries no `availability` op). It is confined to this kind of box: a daemon
 whose key came from anywhere but the systemd credential (keychain, DPAPI, a
 user-unsealed TPM blob, the config field) runs no broker at all, since there
 `seanced mcp` reads the key itself and a broker would only hand the same reach to
