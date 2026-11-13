@@ -1,6 +1,6 @@
 # The custodian — spec
 
-**Status: spec, nothing built.** Decided with the owner on 2026-11-12 and 2026-11-13. Like
+**Status: spec; build order item 2 (C15) built 2026-11-13 and folded into DESIGN.md.** Decided with the owner on 2026-11-12 and 2026-11-13. Like
 docs/messaging.md and docs/leaving.md, this file is the working record until the code lands; each
 part folds into DESIGN.md as it is built, and its text here goes.
 
@@ -119,10 +119,7 @@ Each is the owner's unless marked _derived_.
   No sessions, or every session busy and moving, means no round and no tokens. "Round now" (§9)
   skips the first two conditions.
 
-- **C15.** _Derived._ What the daemon keeps per pane to decide this, in memory only: the last
-  session state and when it began (session events already reach the daemon for untasked panes
-  too; today they are dropped after the `/usage` poke), and when the pane's visible content last
-  changed, as a hash sampled each minute. The screen text itself is never kept.
+- **C15.** Built: DESIGN.md, "Session events", "Per-pane retention and the screen sampler".
 - **C16.** A round has `roundTimeoutMinutes` to report. One that has not is closed through the
   graceful despawn, then killed, and counts as failed (§8).
 - **C17.** _Derived._ The seed is a constant plus the notes; the session list comes from a verb,
@@ -368,7 +365,8 @@ delivery); nothing else here does.
 
 1. The nothing-lost rule (C32–C34, C36) in `reap-git.ts`, used by `reap`, with the new defaults
    under a configured custodian (C35).
-2. Per-pane state and screen-change tracking for every `ours` pane (C15).
+2. ~~Per-pane state and screen-change tracking for every `ours` pane (C15).~~ Built 2026-11-13
+   (`daemon/src/pane-activity.ts`); its read API is `activity(paneId)`.
 3. The seat: config, `CAPABILITIES.custodian`, the due check, the exclave pick, the round's launch
    with its agent definition and fence, the deadline, and audit origin `custodian` (C1–C4,
    C8–C17, C18–C21).
@@ -400,7 +398,11 @@ delivery); nothing else here does.
 - **The live link.** `cu` is in a fixed-size frame; whether the round's Remote Control id rides
   there or in a reply to a card's own request.
 - **`unobserved` sessions.** A session in an exclave without the `session-events` mod is never
-  closed (C24). Whether `seanced doctor` should warn about it.
+  closed (C24). Whether `seanced doctor` should warn about it. The retained state is per process, so a
+  session already at rest when the daemon restarts is `unobserved` too until its next frame; whether
+  `sessions` (C23) should say why.
+- **The sampler's cost on a machine with no seat.** It runs whether or not `custodian` is configured
+  (one `list-panes` a minute, plus a capture per `ours` pane). PR 3 can start it only with the seat.
 - **The `gh` lookup's shape** for C32: by head branch, and how the PR's head is fetched to test
   that it contains the local tip once the remote branch is deleted.
 - **A closed machine.** Whether rounds run while a machine is draining. C7 already keeps the

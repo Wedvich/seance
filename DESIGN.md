@@ -10482,6 +10482,43 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   effect: the state times the constant keys the daemon types into that pane (and the Escape after the deadline),
   and no frame field chooses what is typed or which pane. The pane is still the kernel's answer, the task the
   pane's own.
+- **Per-pane retention and the screen sampler** (built 2026-11-13, docs/custodian.md C15; `daemon/src/pane-activity.ts`).
+  The custodian decides when a round is due (C14) and what its `sessions` verb reports (C23, C24) from facts the
+  daemon keeps per pane séance started (`ours`, the `--remote-control` start-command match, now also a field of
+  the binding's own `list-panes` read, `BoundPane.ours`), tasked or not, **in memory only**:
+  - **The last state.** Every bound frame carrying a state, untasked panes' included (before this they were
+    dropped after the `/usage` poke), is handed to the tracker (`retain`) before the untasked return and before
+    any reply is chosen: the state, when the current run of it began, and whether the frame was an `idle`
+    carrying `turnEnded`. A run is the pair: a turn-ended idle after a plain one starts a new run, so C24's
+    grace counts from the turn's end; a later plain idle (a respawn) makes `turnEnded` false again. **`done` is
+    never retained**, tasked or not: it is a report the session sends mid-turn, not a state it rests in, and an
+    untasked one is refused `untasked` anyway. Hand-off and pass frames carry no state and are not retained.
+    Nothing is retained once ingest has stopped (the daemon is going away, and the memory with it). A pane with
+    no frame since this process started reads `state: null`: C24's `unobserved`, never closed on the screen alone.
+  - **When the screen last changed.** Once a minute, one `list-panes` (the binding's format, through
+    `readPanePids`, which unlike `listPanePids` throws on a failed read) and one `capture-pane` of the visible
+    screen, no history, per live `ours` pane, one capture at a time; none when there is none. The capture is
+    hashed (`Bun.hash`) at once and the text dropped: `screenSince` moves when the hash differs from the last
+    one, and `sampledAt` says when it was last captured, so a reader can tell a stalled sampler from a still
+    screen. The first sample of a pane counts as a change, so `screenSince` is how long the screen has been
+    still as far as this process has seen, never longer: after a daemon restart nothing looks at rest earlier
+    than it is. A pass asked for while one runs joins it, so a slow tmux never stacks passes.
+  - **Entries go when the pane does.** An entry is keyed by pane id and holds the pane's pid: a tmux server
+    restart reuses `%n`, and a new pid starts a fresh entry. A successful listing prunes every entry it does not
+    list as a live `ours` pane (so a dead pane's entry goes too: C24 closes a dead pane without these facts),
+    except one made after the listing began, which may be a pane newer than it. A failed listing prunes nothing.
+    A failed capture leaves the entry as it was.
+  - **Read API:** `activity(paneId)` → `{state, stateSince, turnEnded, screenSince, sampledAt}`, or null for a
+    pane not tracked (foreign, gone, or neither sampled nor heard from). No reader yet: the due check (custodian
+    PR 3) and the `sessions` verb (PR 4) are its consumers.
+  - **Threat model: retention, not an act.** It gives the frame no new act: the pane is the kernel's answer
+    (the frame names nothing), only the state and `turnEnded` are kept, nothing is run, sent, forwarded or
+    persisted, and no reply, forward, coalescing, hand-off, pass or drain behaviour depends on it (`onState`
+    still sees tasked frames only). The sampler's subprocesses are fixed-argv tmux reads with a validated `%n`
+    target. The screen's text is never kept, logged or sent; what stays is a 64-bit hash and timestamps in this
+    process's memory. A same-uid process can make a pane's facts say what it likes (it can send frames from
+    that pane, or type into it), which is the residual already accepted above, and those facts will bound only
+    what the custodian's own verbs allow (docs/custodian.md, C19).
 - **Every field is untrusted; the pane is the kernel's answer.** The 0700 run
   directory admits any process of this user, and every session is this user, so a
   frame could name any pane or task. The daemon asks the kernel who connected. Bun
