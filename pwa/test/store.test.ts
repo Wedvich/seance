@@ -4839,9 +4839,10 @@ describe("task history", () => {
     const client = new ScriptedClient(ONLINE);
     const first = rows("a", 20);
     const cursor = { endedAt: 9_981, createdAt: 9_980, id: "a-19" };
+    const machines = [{ deviceId: "dev-gone", name: "old-box", lastSeen: 9_000 }];
     client.onArchiveTasks = async (request) =>
       request.before === undefined
-        ? { ok: true, tasks: first, total: 25, next: cursor }
+        ? { ok: true, tasks: first, total: 25, next: cursor, machines }
         : { ok: true, tasks: rows("b", 5), total: 25, next: null };
     const store = new Store(client);
     const detach = store.attach();
@@ -4863,6 +4864,8 @@ describe("task history", () => {
       expect(client.archiveTaskAsks[1]).toEqual({ limit: 20, before: cursor });
       const list = store.getState().older.list;
       expect(list?.kind === "ok" ? list.tasks.length : list).toBe(25);
+      // Page one's machine listing outlives the pages after it, which carry none.
+      expect(list?.kind === "ok" ? list.machines : list).toEqual(machines);
     } finally {
       detach();
     }
@@ -4971,6 +4974,9 @@ describe("task history", () => {
       });
       store.refreshOlder();
       await pollUntil(() => store.getState().older.list?.kind === "ok", "page one");
+      // An archivist too old to list its machines: the Machine sheet falls back to the rows read.
+      const first = store.getState().older.list;
+      expect(first?.kind === "ok" ? first.machines : first).toBeNull();
       client.onArchiveTasks = async () => ({ ok: false, code: "internal_error", message: "boom" });
       store.loadOlder();
       await pollUntil(() => {

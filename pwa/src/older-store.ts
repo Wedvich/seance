@@ -207,7 +207,16 @@ export class OlderStore {
     const seen = new Set((held?.tasks ?? []).map((row) => row.task.id));
     const added = reply.tasks.filter((row) => !seen.has(row.task.id));
     const tasks: readonly ArchivedTask[] = [...(held?.tasks ?? []), ...added];
-    const list: Ok = { kind: "ok", tasks, total: reply.total, next: reply.next, loadingMore: false, moreError: null };
+    const list: Ok = {
+      kind: "ok",
+      tasks,
+      total: reply.total,
+      next: reply.next,
+      // Only page one carries them; a later page keeps what it said.
+      machines: held === null ? (reply.machines ?? null) : held.machines,
+      loadingMore: false,
+      moreError: null,
+    };
     const live = liveTaskIds(this.#getState());
     // Only a page that added rows and showed none reads on: an empty or repeated page means a cursor that goes nowhere.
     const duplicates = added.length > 0 && added.every((row) => live.has(row.task.id));

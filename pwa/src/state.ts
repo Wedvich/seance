@@ -4,6 +4,7 @@ import {
   type ArchiveMetricsStep,
   type ArchiveTaskOutcome,
   type ArchiveTasksCursor,
+  type ArchivedMachine,
   type ArchivedTask,
   type ArchivistEntry,
   type AutonomyLevel,
@@ -305,6 +306,8 @@ export type OlderList =
       /** Every match, as the archive counts it (live duplicates included). */
       readonly total: number;
       readonly next: ArchiveTasksCursor | null;
+      /** The machines the archive holds tasks for, from page one; null from an archivist too old to list them. */
+      readonly machines: readonly ArchivedMachine[] | null;
       readonly loadingMore: boolean;
       /** Why the last Load older failed; the rows already read stay. */
       readonly moreError: string | null;
