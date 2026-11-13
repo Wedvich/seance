@@ -1,13 +1,11 @@
 import { stat } from "node:fs/promises";
 import {
-  APP_ID,
   parseArchiveStatusRequest,
-  quote,
-  type ArchiveStatusReply,
   type ArchiveStatusResponse,
   type ArchiveTableStatus,
   type Plain,
 } from "@seance/shared";
+import { answerApp } from "./answer.ts";
 import type { Archive } from "./archive.ts";
 import type { IngestClock } from "./ingest-clock.ts";
 import type { MetricsArchive } from "./metrics-archive.ts";
@@ -125,33 +123,12 @@ export function createStatusAnswer(deps: HealthDeps): () => Promise<ArchiveStatu
   };
 }
 
-/**
- * The seat's answer to an `archive-status` request: only to one sealed `from`
- * the app and carrying no `re`, parsed by its own parser. The transport has
- * already checked addressing, opening and the replay guard. A drop returns
- * null; the reply goes back as the handler's return value, which the shared
- * client seals to the sender.
- */
-export async function answerArchiveStatus(
+/** The seat's answer to an `archive-status` request, through `answerApp`'s gate. */
+export function answerArchiveStatus(
   plain: Plain,
   from: string,
   answer: () => Promise<ArchiveStatusResponse>,
   log: { readonly warn: (line: string) => void },
 ): Promise<Plain | null> {
-  if (from !== APP_ID || plain.re !== undefined) {
-    log.warn(`dropped ${quote(plain.op)} from ${from}: not sealed from the app`);
-    return null;
-  }
-  const reply = async (): Promise<ArchiveStatusReply> => {
-    if (parseArchiveStatusRequest(plain.payload) === null) {
-      return { ok: false, code: "invalid_request", message: "malformed archive-status request" };
-    }
-    try {
-      return await answer();
-    } catch (err) {
-      log.warn(`archive status failed: ${err instanceof Error ? err.message : String(err)}`);
-      return { ok: false, code: "internal_error", message: "archive status failed" };
-    }
-  };
-  return { id: crypto.randomUUID(), ts: Date.now(), op: "archive-status", re: plain.id, payload: await reply() };
+  return answerApp(plain, from, "archive-status", parseArchiveStatusRequest, answer, log);
 }

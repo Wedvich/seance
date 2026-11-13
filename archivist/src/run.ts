@@ -20,9 +20,11 @@ import { isUpdateAvailable } from "../../daemon/src/update-notice.ts";
 import { Archive } from "./archive.ts";
 import { startCollector, type CollectTimings } from "./collect.ts";
 import { loadArchivistConfig } from "./config.ts";
+import { ARCHIVIST_OPS } from "./answer.ts";
 import { answerArchiveStatus, createStatusAnswer, startCountRefresher } from "./health.ts";
 import { createIngestClock } from "./ingest-clock.ts";
 import { sealArchivistInfo } from "./info.ts";
+import { answerArchiveMetrics, answerArchiveTasks, createMetricsAnswer, createTasksAnswer } from "./query.ts";
 import { MetricsArchive } from "./metrics-archive.ts";
 import { startMetricsCollector, type MetricsTimings } from "./metrics-collect.ts";
 import {
@@ -77,8 +79,8 @@ const STATE_DIR_MODE = 0o700;
  * holds the seat — a v2 register claiming `archivist`, which the relay accepts
  * only from the `ARCHIVIST` id — and an app-role socket for reading, as the
  * leader's own app leg reads. It advertises no repos and no exclaves, answers
- * one op (`archive-status`, from the app only, counts and sizes and times),
- * never enqueues and never writes the store; it writes only
+ * three ops, from the app only (`archive-status`: counts, sizes and times;
+ * `archive-metrics` and `archive-tasks`: reads of its own two files), never enqueues and never writes the store; it writes only
  * `archive.sqlite` (`collect.ts`) and `metrics.sqlite` (`metrics-collect.ts`),
  * plus the update request a fleet announce asks for (`update-request.ts`).
  * What it may import is held by
@@ -162,6 +164,8 @@ export async function startArchivist(opts: ArchivistOpts = {}): Promise<Archivis
       archivePath: archivePathIn(stateDir),
       metricsPath: metricsPathIn(stateDir),
     });
+    const answerMetrics = createMetricsAnswer(metrics);
+    const answerTasks = createTasksAnswer(archive, log);
 
     const seat = new RelayClient({
       url: config.relayUrl,
@@ -176,16 +180,18 @@ export async function startArchivist(opts: ArchivistOpts = {}): Promise<Archivis
           platform: process.platform,
           ...(source === null ? {} : { source }),
         }),
-      // One request op is the archivist's, `archive-status`, answered only to the app; a request for anything else
-      // gets no answer. The one other frame it takes is the fleet's update announce, a broadcast no one awaits (A26).
+      // Three request ops are the archivist's (`ARCHIVIST_OPS`), answered only to the app; a request for anything
+      // else gets no answer. The one other frame it takes is the fleet's update announce, a broadcast no one awaits (A26).
       handle: (plain: Plain, from: string): Promise<Plain | null> => {
         if (plain.op === "archive-status") return answerArchiveStatus(plain, from, answerStatus, log);
+        if (plain.op === "archive-metrics") return answerArchiveMetrics(plain, from, answerMetrics, log);
+        if (plain.op === "archive-tasks") return answerArchiveTasks(plain, from, answerTasks, log);
         if (plain.op === "update-available") {
           if (isUpdateAvailable(plain.payload)) requestUpdate(updates.announce(plain.payload.sha));
           else log.warn("dropped malformed update-available payload");
           return Promise.resolve(null);
         }
-        log.warn(`dropped ${quote(plain.op)} from ${from}: the archivist answers only archive-status`);
+        log.warn(`dropped ${quote(plain.op)} from ${from}: the archivist answers only ${ARCHIVIST_OPS.join(", ")}`);
         return Promise.resolve(null);
       },
       onConnect: () => {

@@ -95,7 +95,7 @@ describe("seance-archivist run", () => {
     }
   });
 
-  test("answers no other op than archive-status, and sends no status and no store frame", async () => {
+  test("answers no op but its own three, and sends no status and no store frame", async () => {
     const relay = startTestRelay(TOKEN);
     const paths = await setup(relay.url);
     // Captured by hand rather than through `captureLog`: the drops are polled for while it runs.
@@ -105,7 +105,8 @@ describe("seance-archivist run", () => {
       lines.push(args.map(String).join(" "));
     };
     const drops = (): number =>
-      lines.filter((line) => line.includes("the archivist answers only archive-status")).length;
+      lines.filter((line) => line.includes("the archivist answers only archive-status, archive-metrics, archive-tasks"))
+        .length;
     let archivist: Awaited<ReturnType<typeof startArchivist>> | undefined;
     try {
       archivist = await startArchivist({ ...paths, credentialPath });
@@ -135,7 +136,7 @@ describe("seance-archivist run", () => {
     }
   });
 
-  test("answers archive-status from the app, and drops one sealed from anyone else", async () => {
+  test("answers each of its ops from the app, and drops one sealed from anyone else", async () => {
     const relay = startTestRelay(TOKEN);
     const paths = await setup(relay.url);
     const lines: string[] = [];
@@ -172,6 +173,37 @@ describe("seance-archivist run", () => {
       expect(parsed.database.archiveBytes).toBeGreaterThan(0);
       expect(parsed.database.metricsBytes).toBeGreaterThan(0);
       expect(Object.keys(parsed.lastIngest).toSorted()).toEqual(["pull", "registry", "status", "store"]);
+
+      // The query ops: dropped from anyone else, answered from the app over the empty archive.
+      const now = Math.floor(Date.now() / 1000);
+      const queries = [
+        { op: "archive-metrics", payload: { from: now - 3600, to: now, step: 300, machine: deviceId } },
+        { op: "archive-tasks", payload: { limit: 5 } },
+      ] as const;
+      for (const { op, payload } of queries) {
+        const before = lines.filter((line) => line.includes("not sealed from the app")).length;
+        const sealQuery = (from: string, id: string): ReturnType<typeof seal> =>
+          seal(key, { to: deviceId, from }, { id, ts: Date.now(), op, payload });
+        // oxlint-disable-next-line no-await-in-loop -- one op at a time, so each reply is the one asked for
+        relay.sendToDaemon(await sealQuery("some-daemon", `${op}-other`));
+        // oxlint-disable-next-line no-await-in-loop -- as above
+        await pollUntil(
+          () => lines.filter((line) => line.includes("not sealed from the app")).length === before + 1,
+          `the ${op} drop line`,
+        );
+        expect(relay.messages.size).toBe(0);
+        // oxlint-disable-next-line no-await-in-loop -- as above
+        relay.sendToDaemon(await sealQuery(APP_ID, `${op}-app`));
+        // oxlint-disable-next-line no-await-in-loop -- as above
+        await pollUntil(() => relay.messages.size === 1, `the ${op} reply`);
+        // oxlint-disable-next-line no-await-in-loop -- as above
+        const answer = await open(key, await relay.messages.next());
+        expect(answer.op).toBe(op);
+        expect(answer.re).toBe(`${op}-app`);
+        expect(answer.payload).toEqual(
+          op === "archive-metrics" ? { series: [] } : { ok: true, tasks: [], total: 0, next: null },
+        );
+      }
     } finally {
       console.log = realLog;
       archivist?.stop();

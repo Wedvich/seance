@@ -1,6 +1,12 @@
 import { Database } from "bun:sqlite";
 import { writeFile } from "node:fs/promises";
-import { forgetPrompt, TASK_PHASES, type ArchiveTableStatus, type Task } from "@seance/shared";
+import {
+  forgetPrompt,
+  TASK_PHASES,
+  type ArchiveTableStatus,
+  type ArchiveTasksRequest,
+  type Task,
+} from "@seance/shared";
 
 /**
  * `archive.sqlite`: the fleet's long-term history (docs/archivist.md, A16, A18,
@@ -130,7 +136,8 @@ export function archivedTask(task: Task): Task {
     failure,
     ...rest
   } = forgetPrompt(task);
-  const { pin, ...specRest } = spec;
+  // Dropped again whatever the phase: `forgetPrompt` leaves an unfinished record's spec whole, and a stored row's JSON is not held to its `state` column.
+  const { pin, prompt: _prompt, attachments: _attachments, ...specRest } = spec;
   const deviceId = pin?.deviceId;
   return {
     ...rest,
@@ -192,6 +199,42 @@ interface MachineRow {
 }
 
 const TERM_KEY = "scheduler_term";
+
+/** A row of `queryTasks`: the stored record as text, parsed by the caller. */
+export interface ArchivedRow {
+  readonly id: string;
+  readonly endedAt: number;
+  readonly createdAt: number;
+  readonly machine: string | null;
+  readonly account: string | null;
+  readonly alias: string | null;
+  readonly record: string;
+}
+
+/**
+ * `archive-tasks`'s filters, `?1`–`?7` in `queryTasks`'s order; each null
+ * matches everything. `LIKE` folds ASCII case only.
+ */
+const TASK_FILTERS = `(?1 IS NULL OR t.repo = ?1) AND (?2 IS NULL OR t.state = ?2)
+  AND (?3 IS NULL OR t.device_id = ?3) AND (?4 IS NULL OR t.account = ?4)
+  AND (?5 IS NULL OR t.first_archived_at >= ?5) AND (?6 IS NULL OR t.first_archived_at < ?6)
+  AND (?7 IS NULL OR t.title LIKE ?7 ESCAPE '\\')`;
+
+/** `TASK_FILTERS`' bindings, in order. */
+type TaskFilters = [
+  repo: string | null,
+  outcome: string | null,
+  machine: string | null,
+  account: string | null,
+  since: number | null,
+  until: number | null,
+  title: string | null,
+];
+
+/** A title search is a substring, never a pattern: the wildcards and the escape itself match only themselves. */
+function likeEscaped(text: string): string {
+  return text.replaceAll(/[\\%_]/gu, (c) => `\\${c}`);
+}
 
 export class Archive {
   readonly #db: Database;
@@ -256,6 +299,47 @@ export class Archive {
       tasks: one("SELECT count(*) AS rows, min(created_at) AS oldest FROM tasks"),
       events: one("SELECT count(*) AS rows, min(at) AS oldest FROM events"),
     };
+  }
+
+  /**
+   * One page of `archive-tasks` (A34), newest first by `first_archived_at` —
+   * the record carries no finish time, so the archive's first sight of it
+   * finished is the nearest — then `created_at`, then `id`, a keyset after
+   * `before`. Every filter is a bound parameter of one fixed statement. `total`
+   * counts every match, the cursor aside. A scan of `tasks`, which stays small
+   * (one row per finished task); an index on the order key is the step if it
+   * grows. `machine` is the assigned machine's last known name (A24).
+   */
+  queryTasks(
+    request: ArchiveTasksRequest,
+    limit: number,
+  ): { readonly rows: readonly ArchivedRow[]; readonly total: number } {
+    const filters: TaskFilters = [
+      request.repo ?? null,
+      request.outcome ?? null,
+      request.machine ?? null,
+      request.account ?? null,
+      request.since ?? null,
+      request.until ?? null,
+      request.title === undefined ? null : `%${likeEscaped(request.title)}%`,
+    ];
+    const { before } = request;
+    const rows = this.#db
+      .query<ArchivedRow, [...TaskFilters, number | null, number | null, string | null, number]>(
+        `SELECT t.id, t.first_archived_at AS endedAt, t.created_at AS createdAt,
+           coalesce(m.name, t.machine) AS machine, t.account, a.alias, t.record
+         FROM tasks t LEFT JOIN machines m ON m.device_id = t.device_id LEFT JOIN accounts a ON a.key = t.account
+         WHERE ${TASK_FILTERS}
+           AND (?8 IS NULL OR (t.first_archived_at, t.created_at, t.id) < (?8, ?9, ?10))
+         ORDER BY t.first_archived_at DESC, t.created_at DESC, t.id DESC
+         LIMIT ?11`,
+      )
+      .all(...filters, before?.endedAt ?? null, before?.createdAt ?? null, before?.id ?? null, limit);
+    const total =
+      this.#db
+        .query<{ n: number }, TaskFilters>(`SELECT count(*) AS n FROM tasks t WHERE ${TASK_FILTERS}`)
+        .get(...filters)?.n ?? 0;
+    return { rows, total };
   }
 
   /** The archived version of a task, or null when the archive holds none. */

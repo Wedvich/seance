@@ -8,7 +8,9 @@ DESIGN.md, "Archivist"; item 4 (metrics in `metrics.sqlite`) built 2026-11-12, r
 DESIGN.md, "Archivist", "Metrics", and Daemon, "Telemetry"; item 5 (install, update and the
 docs) built 2026-11-12, recorded in DESIGN.md, "Archivist", with setup in the README's step 9; item 6
 (the status op and the health card) built 2026-11-12, recorded in DESIGN.md, "Archivist", Threat
-model item 2 and the PWA's Machines section.** Decided with the owner on 2026-11-12. Like docs/scheduler.md and
+model item 2 and the PWA's Machines section; item 7 (the metrics and task query ops) built
+2026-11-13, recorded in DESIGN.md, "Archivist" ("The query ops"), Threat model item 2 and the
+frame→module table.** Decided with the owner on 2026-11-12. Like docs/scheduler.md and
 docs/leaving.md, this file is the working record until the code lands; each part folds into
 DESIGN.md as it is built, and its text here goes.
 
@@ -163,7 +165,10 @@ Each is the owner's, 2026-11-12, unless marked _derived_.
   days (new 90-day and 1-year ranges), and for a machine that is asleep.
 - **A33. Merging an account.** Series are stored per observer, unmerged. An account's value in a
   bucket is the newest observation in it from any machine, computed at query time, as the fleet
-  quota record already takes the newest reading per account.
+  quota record already takes the newest reading per account. As built, each observer's bucket is
+  first valued as a machine's own chart values it (stored, or the hourly average at 6 h and 1 d),
+  then merged: newest row, the larger at the same instant. A coarse bucket is therefore a
+  per-observer average, not the last reading, so one account reads alike at 1 h and at 1 d.
 - **A34. Task history.** The Queue screen's finished list continues into the archive ("older"),
   with filters for repo, outcome, machine, account and date range, and a substring search on the
   title.
@@ -263,7 +268,7 @@ One stack of PRs, each based on the one before, merged together.
 
 **Milestone 2 — read**
 
-7. The metrics and task query ops, in the archivist and `RelayClient` (A31, A33).
+7. The metrics and task query ops, in the archivist and `RelayClient` (A31, A33). **Built 2026-11-13.**
 8. PWA charts: 90-day and 1-year ranges, merged account charts, asleep machines (A32, A35,
    A36d–A36f).
 9. PWA task history: the older list, filters, title search (A34, A35, A36g–A36j).

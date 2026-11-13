@@ -14,6 +14,7 @@ import {
   seal,
   toBase64,
   type ArchiveStatusResponse,
+  type ArchiveTasksResponse,
   type ArchivistInfo,
   type Decision,
   type Envelope,
@@ -24,6 +25,7 @@ import {
   type RegistryView,
   type SessionsResponse,
   type Task,
+  type MetricsSeries,
 } from "@seance/shared";
 import { afterAll, beforeAll, describe, expect, jest, test } from "bun:test";
 import {
@@ -469,6 +471,54 @@ describe("registry", () => {
       }
     });
 
+    test("archiveMetrics and archiveTasks round-trip against the seat, carrying the request", async () => {
+      const account = `account:${"ab".repeat(32)}`;
+      const series: MetricsSeries = { metric: "quota_5h_pct", labels: { account }, points: [[300, 12.5]] };
+      const page: ArchiveTasksResponse = {
+        ok: true,
+        tasks: [
+          {
+            task: { id: "t-1", spec: { repo: "seance", mode: "worktree" }, state: "done", createdAt: 1_000 },
+            endedAt: 2_000,
+            machine: "Dev Box",
+            account,
+            alias: "work",
+          },
+        ],
+        total: 1,
+        next: null,
+      };
+      const asked: unknown[] = [];
+      const archivist = await startFakeDaemon(
+        relay,
+        key,
+        seat,
+        archivistInfo("Archive Box"),
+        {
+          "archive-metrics": (payload) => {
+            asked.push(payload);
+            return { series: [series] };
+          },
+          "archive-tasks": (payload) => {
+            asked.push(payload);
+            return page;
+          },
+        },
+        { roles: [DAEMON_ROLES.archivist] },
+      );
+      const { client, waitFor } = startClient();
+      try {
+        await waitFor((s) => s.archivist?.connected === true, "the archivist entry");
+        const metrics = { from: 0, to: 600, step: 300, account } as const;
+        expect(await client.archiveMetrics(metrics)).toEqual({ series: [series] });
+        expect(await client.archiveTasks({ outcome: "done", title: "fix" })).toEqual(page);
+        expect(asked).toEqual([metrics, { outcome: "done", title: "fix" }]);
+      } finally {
+        archivist.close();
+        client.stop();
+      }
+    });
+
     test("an archivist that never answers times out, and the card stays online", async () => {
       const archivist = await startFakeDaemon(
         relay,
@@ -494,13 +544,20 @@ describe("registry", () => {
       }
     });
 
-    test("archiveStatus with no connected archivist throws offline, sending nothing", async () => {
+    test("every archivist op with no connected archivist throws offline, sending nothing", async () => {
       const { client, waitFor } = startClient();
       try {
         await waitFor((s) => s.registrySettled && s.archivist?.connected !== true, "no connected archivist");
-        const failure = await client.archiveStatus().catch((err: unknown) => err);
-        expect(failure).toBeInstanceOf(RequestFailure);
-        expect(failure instanceof RequestFailure ? failure.reason : null).toBe("offline");
+        for (const ask of [
+          () => client.archiveStatus(),
+          () => client.archiveMetrics({ from: 0, to: 60, step: 30, machine: "m" }),
+          () => client.archiveTasks({}),
+        ]) {
+          // oxlint-disable-next-line no-await-in-loop -- each refusal is its own call
+          const failure = await ask().catch((err: unknown) => err);
+          expect(failure).toBeInstanceOf(RequestFailure);
+          expect(failure instanceof RequestFailure ? failure.reason : null).toBe("offline");
+        }
       } finally {
         client.stop();
       }
