@@ -8587,8 +8587,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   that daemon for `cpu_pct`/`mem_pct`/`disk_pct`; on an account it asks one online host of the account
   (the newest observer when it serves `metrics`) for the quota series and folds its exclaves'
   copies into one line per window. While an archivist is online the archive answers instead past
-  30 days, for an asleep machine and for an account, merged across machines (Archivist, "The
-  PWA's charts"). One chart at a time, its window fixed when asked, a reply
+  30 days, for an asleep machine and, where the install holds the account key, for an account,
+  merged across machines (Archivist, "The PWA's charts"). One chart at a time, its window fixed when asked, a reply
   that lands after the chart moved on is dropped. Disk shows as a third gauge, percent
   used on the fullest watched path (2026-10-19 — an LXC's small root fills quietly, and an
   earlier cut hid it as upkeep rather than load); it never scores. The floor reads `free`, not
@@ -10766,10 +10766,12 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   is offered exactly when it can be asked for. That is what gives an asleep machine's card ⋯ ›
   History, and an account whose every host is asleep a chart; with no archivist every chart reads
   as before it. A registry push that stops the archive serving an open 90d or 1y chart re-asks it
-  at 24h; a short range already open stays as it is, its answer still true. No source shows in
-  the UI (A36e) except a failure: a timeout or the client's unsent `offline` reads "No answer — the
-  archivist may be offline.", and an unreadable reply or error code names the archivist where the
-  daemon's lines name the machine. An asleep machine's lines simply stop at its last beat (A36f):
+  at 24h; a short range already open stays as it is, its answer still true; an asleep machine's chart
+  has no daemon to fall back to and closes. No source shows in the UI (A36e) except a failure: a
+  timeout or the client's unsent `offline` reads "No answer — the archivist may be offline.", any
+  other transport failure, an unreadable reply or an error code names the archivist where the
+  daemon's lines name the machine. The remembered range is the one last wanted, so a chart the
+  archive can't serve opens at 24h without costing the next one its long range. An asleep machine's lines simply stop at its last beat (A36f):
   the chart draws only the points it has.
 - **The read leg.** A second, app-role socket from `appRelayClient` with the PSK's key and the
   account key derived from it, as the leader's own app leg reads (A7); `archivist/src/collect.ts`

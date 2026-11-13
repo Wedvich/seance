@@ -700,7 +700,7 @@ describe("deriveArchivist", () => {
       online: false,
       meta: "offline · last seen 3h ago",
       rows: [],
-      note: "While it is offline, 90-day and 1-year charts, merged account charts and older tasks are hidden until it is back.",
+      note: "While it is offline, 90-day and 1-year charts, merged account charts, asleep machines' history and older tasks are hidden until it is back.",
     });
     expect(card?.build).not.toBeNull();
   });

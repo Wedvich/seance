@@ -27,7 +27,7 @@ import {
   type UpdateOutcome,
 } from "@seance/shared";
 import { METRIC_LABELS } from "./chart.ts";
-import { historyRanges, type HistoryRange, type HistoryTarget } from "./state.ts";
+import { historyRanges, type ArchiveReach, type HistoryRange, type HistoryTarget } from "./state.ts";
 import { formatSeen } from "./view.ts";
 
 /**
@@ -121,9 +121,7 @@ export interface MachinesView {
   readonly ranges: Readonly<Record<HistoryTarget["kind"], readonly HistoryRange[]>>;
 }
 
-/** What the archive can chart now (`archiveCharts`); nothing by default, as with no archivist. */
-export type ArchiveReach = Readonly<Record<HistoryTarget["kind"], boolean>>;
-
+/** Nothing by default, as with no archivist. */
 const NO_ARCHIVE: ArchiveReach = { machine: false, account: false };
 
 /** Shared by pressure, disk fill and quota: all are "how close to the wall". */
@@ -478,7 +476,7 @@ export interface ArchivistCard {
 
 const ARCHIVIST_NOTE = "Keeps task, chart and fleet history. Never runs sessions.";
 const ARCHIVIST_OFFLINE_NOTE =
-  "While it is offline, 90-day and 1-year charts, merged account charts and older tasks are hidden until it is back.";
+  "While it is offline, 90-day and 1-year charts, merged account charts, asleep machines' history and older tasks are hidden until it is back.";
 
 const dateFormat = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric" });
 

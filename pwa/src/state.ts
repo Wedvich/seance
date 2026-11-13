@@ -217,16 +217,15 @@ export function isArchiveRange(range: HistoryRange): boolean {
   return ARCHIVE_HISTORY_RANGES.some((long) => long === range);
 }
 
+export type ArchiveReach = Readonly<Record<HistoryTarget["kind"], boolean>>;
+
 /**
  * Which charts the archivist can serve now: none while it is offline (A35). An
  * account's needs the account key too, since the archive files its series under
  * the `account:` store key, never the raw id. The store and the screen read this
  * one rule, so a chart is offered exactly when it can be asked for.
  */
-export function archiveCharts(
-  archivist: ArchivistEntry | null,
-  nameable: boolean,
-): Readonly<Record<HistoryTarget["kind"], boolean>> {
+export function archiveCharts(archivist: ArchivistEntry | null, nameable: boolean): ArchiveReach {
   const online = archivist?.connected === true;
   return { machine: online, account: online && nameable };
 }
