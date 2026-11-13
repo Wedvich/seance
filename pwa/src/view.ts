@@ -1,6 +1,7 @@
 import {
   accountNameIn,
   CAPABILITIES,
+  closedAt,
   endedBySignal,
   fleetTraits,
   knownAccounts,
@@ -33,6 +34,7 @@ import {
   type PersistedForm,
   type PreviewState,
   type QueueState,
+  type AvailabilityState,
   type RescanState,
   type SessionsView,
   type SheetKind,
@@ -247,6 +249,8 @@ export interface AppState {
   readonly spawning: boolean;
   /** The Machine sheet's rescan action; a failure is cleared once its sheet closes. */
   readonly rescan: RescanState;
+  /** The Machines screen's open/close switch. */
+  readonly availability: AvailabilityState;
   readonly verdict: Verdict | null;
   /** Tasks queued while the relay was unreachable, oldest first; persisted (`writeHeld`). */
   readonly held: readonly HeldTask[];
@@ -425,6 +429,16 @@ export function deriveContinueHandoffAvailability(relay: RelayState): boolean {
 /** Whether the verified leader answers `pass`; an older one refuses it as an op it does not know. */
 export function derivePassAvailability(relay: RelayState): boolean {
   return verifiedLeaderAdvertises(relay, CAPABILITIES.successor);
+}
+
+/**
+ * Whether a close may be sent to `machine`: it answers `availability`, and the verified leader routes
+ * around `cl` (an older one fails the task it sends there). A reopen needs only the machine's `close`.
+ */
+export function deriveCloseAvailability(relay: RelayState, machine: Machine): boolean {
+  return (
+    machine.capabilities?.includes(CAPABILITIES.close) === true && verifiedLeaderAdvertises(relay, CAPABILITIES.drain)
+  );
 }
 
 /** Whether the verified leader answers `run-now`; an older one refuses it as an op it does not know. */
@@ -733,6 +747,8 @@ function deriveMachineChoices(state: AppState, now: number): readonly MachineCho
         sub = `${accountNameIn(known, form.account, aliasOf(state.accounts.aliases, form.account))} isn't signed in here`;
       }
       const here = rescan.kind !== "idle" && rescan.deviceId === machine.deviceId ? rescan.kind : null;
+      // Selectable: a direct spawn still runs there, only the scheduler's tasks stop.
+      if (!disabled && closedAt(machine) !== null) sub = `closed to scheduled work · ${sub}`;
       if (here === "scanning") sub = "scanning…";
       if (here === "failed") sub = "couldn't rescan — last known list";
       return {
@@ -857,6 +873,8 @@ function deriveFormStatus(state: AppState, machine: Machine | null, problem: Pin
   // The tile says "Unknown machine" here, so the status line must not claim the scheduler picks.
   if (state.form.machine !== null && machine === null) return "The pinned machine isn't listed";
   if (machine !== null && !machine.connected) return `${machine.name} is offline — the task waits for it`;
+  // Not a block: a pin waits, as for an offline machine.
+  if (machine !== null && closedAt(machine) !== null) return `${machine.name} is closed: this waits until it reopens`;
   if (note !== null) return note;
   return machine === null ? null : `Pinned to ${machine.name}`;
 }

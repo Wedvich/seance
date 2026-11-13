@@ -1,6 +1,7 @@
 import {
   accountNameIn,
   CAPABILITIES,
+  closedAt,
   knownAccounts,
   type KnownAccount,
   effectivePct,
@@ -78,6 +79,14 @@ export interface MachineCard {
   readonly exclaves: readonly ExclaveRow[];
   /** Whether a chart can be asked for: connected and the daemon serves `metrics`, or asleep while the archive charts machines. */
   readonly charts: boolean;
+  /** Its newest status carries `cl`: closed to new scheduled work. */
+  readonly closed: boolean;
+  /**
+   * The "Open for work" switch: null where the machine cannot be opened or closed (no `close`), `off` while
+   * closed (always offered, so a close can be undone), `on` while open only if the verified leader routes
+   * around a closed machine (`drain`), since an older one would fail the tasks it sends there.
+   */
+  readonly openSwitch: "on" | "off" | null;
 }
 
 export interface QuotaBar extends Gauge {
@@ -246,6 +255,12 @@ function schedulerLine(machines: readonly Machine[], scheduler: SchedulerAvailab
   return `scheduler on ${name ?? scheduler.deviceId.slice(0, 8)} · term ${scheduler.term}`;
 }
 
+/** The verified leader advertises `drain`: the gate `deriveCloseAvailability` applies, over the registry alone. */
+function leaderDrains(machines: readonly Machine[], scheduler: SchedulerAvailability): boolean {
+  if (scheduler.kind !== "ready") return false;
+  return machines.find((m) => m.deviceId === scheduler.deviceId)?.capabilities?.includes(CAPABILITIES.drain) === true;
+}
+
 function machineCard(
   machine: Machine,
   now: number,
@@ -253,7 +268,10 @@ function machineCard(
   aliases: AccountAliases,
   known: readonly KnownAccount[],
   archived: boolean,
+  canDrain: boolean,
 ): MachineCard {
+  const closed = closedAt(machine) !== null;
+  const canClose = machine.capabilities?.includes(CAPABILITIES.close) === true;
   // Not drawn for an asleep card: its status is the one the relay kept, and its
   // last beat would read as current pressure beside "last seen". Its quota
   // still counts — an observation carries its own stamp.
@@ -286,6 +304,8 @@ function machineCard(
     })),
     // An asleep machine's history is the archive's alone (A36f); a connected one's daemon keeps the short ranges.
     charts: servesMetrics(machine) || (archived && !machine.connected),
+    closed,
+    openSwitch: !canClose ? null : closed ? "off" : canDrain ? "on" : null,
   };
 }
 
@@ -450,7 +470,9 @@ export function deriveMachines(
   const known = knownAccounts(machines);
   return {
     scheduler: schedulerLine(machines, scheduler),
-    cards: machines.map((machine) => machineCard(machine, now, scheduler, aliases, known, archive.machine)),
+    cards: machines.map((machine) =>
+      machineCard(machine, now, scheduler, aliases, known, archive.machine, leaderDrains(machines, scheduler)),
+    ),
     accounts: deriveAccounts(machines, now, aliases, fleetQuota, known, archive.account),
     ranges: { machine: historyRanges(archive.machine), account: historyRanges(archive.account) },
   };

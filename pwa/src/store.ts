@@ -7,6 +7,7 @@ import type {
   MetricsErrorCode,
   MetricsReply,
   MetricsRequest,
+  AvailabilityResponse,
   RescanResponse,
   SessionsResponse,
   SpawnClient,
@@ -21,6 +22,7 @@ import {
   DEFAULT_AUTONOMY,
   failureReasonText,
   METRICS_STEPS,
+  parseAvailabilityResponse,
   queuedTask,
   RequestFailure,
   sentence,
@@ -48,6 +50,7 @@ import {
   heldStale,
   isArchiveRange,
   RANGE_SPANS,
+  AVAILABILITY_IDLE,
   RESCAN_IDLE,
   TARGET_METRICS,
   withWorktree,
@@ -80,6 +83,7 @@ import {
   canHold,
   deriveAttachmentsAvailability,
   deriveAutoAvailability,
+  deriveCloseAvailability,
   derivePinAccountAvailability,
   derivePinProblem,
   deriveReportedAvailability,
@@ -251,6 +255,7 @@ export class Store {
       history: null,
       spawning: false,
       rescan: RESCAN_IDLE,
+      availability: AVAILABILITY_IDLE,
       verdict: null,
       held,
       preview: null,
@@ -1050,6 +1055,38 @@ export class Store {
     } catch {
       // The previous list stays in place — the truth we had — with the failure said inline.
       this.#patch({ rescan: { kind: "failed", deviceId } });
+    }
+  }
+
+  /**
+   * Closes or reopens one machine to new scheduled work (`availability`). Nothing else to apply on
+   * success: the machine's next `status` carries `cl`. The switch shows the asked state meanwhile.
+   */
+  async setMachineOpen(deviceId: string, open: boolean): Promise<void> {
+    if (this.#state.availability.kind === "sending") return;
+    const machine = this.#state.relay.machines.find((m) => m.deviceId === deviceId);
+    // A close is offered only to a verified drain-capable leader (an older one would fail the tasks it sends); checked again at send.
+    if (machine === undefined || (!open && !deriveCloseAvailability(this.#state.relay, machine))) {
+      this.#patch({
+        availability: { kind: "failed", deviceId, text: "The scheduler can't route around a closed machine yet" },
+      });
+      return;
+    }
+    this.#patch({ availability: { kind: "sending", deviceId, open } });
+    try {
+      const reply = await this.#client.request<AvailabilityResponse>(deviceId, "availability", { open });
+      const parsed = parseAvailabilityResponse(reply);
+      if (parsed === null) throw new Error("unreadable reply");
+      if (!parsed.ok) throw new Error(parsed.message);
+      this.#patch({ availability: AVAILABILITY_IDLE });
+    } catch (err) {
+      this.#patch({
+        availability: {
+          kind: "failed",
+          deviceId,
+          text: `Couldn't ${open ? "reopen" : "close"} ${machine.name}: ${err instanceof Error ? err.message : String(err)}`,
+        },
+      });
     }
   }
 
