@@ -8586,9 +8586,11 @@ PR (custodian 4), and `docs/custodian.md` keeps the rest of the spec. Decisions 
   `pane-activity.ts` keeps: some `ours` pane has stood `idle`, or unchanged on screen, for `everyMinutes`; the
   last round ended at least that long ago; none is running; the daemon is not restarting (`EndedTasks.draining`).
   **Narrowed from the spec to the panes C7 lets the custodian act on:** a pane whose last state is `needs-input`,
-  or that carries a hand-off or pass mark or has a close under way (`SessionEvents.marked`) or has been asked by
-  the drain (`DrainAsk.asked`: an entry made for the pane under the current `cl`; `marked` alone is what the ask
-  _reads_, and does not say a pane was asked), never counts, since no verb may
+  or that carries a hand-off or pass mark or has a close under way (`SessionEvents.marked`) or has a live entry
+  in the drain's ask (`DrainAsk.holds`: waiting for the turn's end or the deadline, or mid-typing; `marked` alone
+  is what the ask _reads_, and does not say an entry is live; once the prompt is typed, the pane skipped or dropped
+  or its session ended, the pane is the custodian's again, so a pane the ask gave up on is not shut out for as long
+  as the machine stays closed), never counts, since no verb may
   touch it and it would otherwise keep a round due for ever. Pause (C45) is custodian 5. A round is not held
   back on a closed machine (`cl`): closing a machine routes work away and asks its sessions to pass, and the
   sessions it still holds are the ones a round tidies; only a restart drain stops a launch, because the daemon

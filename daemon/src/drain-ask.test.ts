@@ -636,17 +636,33 @@ describe("lifecycle", () => {
     expect(r.audits).toHaveLength(2);
   });
 
-  test("asked says a pane was asked under this cl, for the custodian, and a reopen or a new cl clears it", async () => {
+  test("holds is true only while an entry is live: gone once typed or skipped, and on a reopen", async () => {
     const r = rig();
-    r.panes = [pane("%1", "t-1"), pane("%2", null)];
-    expect(r.ask.asked("%1")).toBe(false);
+    r.panes = [pane("%1", "t-1"), pane("%2", "t-2"), pane("%3", null)];
+    expect(r.ask.holds("%1")).toBe(false);
+    frame(r, "busy", { pane: "%1", taskId: "t-1" });
+    frame(r, "busy", { pane: "%2", taskId: "t-2" });
     await r.ask.closed(CL, false);
     await settle();
-    expect(r.ask.asked("%1")).toBe(true);
-    expect(r.ask.asked("%2")).toBe(false);
-    expect(r.ask.asked("%")).toBe(false);
+    expect(r.ask.holds("%1")).toBe(true);
+    expect(r.ask.holds("%3")).toBe(false);
+    expect(r.ask.holds("%")).toBe(false);
+    frame(r, "idle", { pane: "%1", taskId: "t-1", turnEnded: true });
+    await settle();
+    expect(r.ask.holds("%1")).toBe(false);
+    expect(r.ask.holds("%2")).toBe(true);
     r.ask.reopened();
-    expect(r.ask.asked("%1")).toBe(false);
+    expect(r.ask.holds("%2")).toBe(false);
+  });
+
+  test("a pane the ask skipped is no longer held", async () => {
+    const r = rig();
+    turnEnd(r);
+    r.shown = false;
+    await r.ask.closed(CL, false);
+    await settle();
+    expect(r.audits).toEqual([{ taskId: "t-1", outcome: "skipped" }]);
+    expect(r.ask.holds("%1")).toBe(false);
   });
 
   test("after stop() nothing is sent", async () => {

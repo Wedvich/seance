@@ -173,8 +173,8 @@ export const custodianRetention = {
   users: (): number => paneActivityUsers,
   facts: (): readonly TrackedActivity[] => paneActivity.all(),
 } as const;
-/** The drain ask's `asked`: a pane it typed into is mid-pass, which `SessionEvents.marked` does not know until the session calls. */
-const drainAskedOf = new WeakMap<WiringCtx, DrainAsk["asked"]>();
+/** The drain ask's `holds`: a pane it has a live entry for, which `SessionEvents.marked` does not know. */
+const drainHoldsOf = new WeakMap<WiringCtx, DrainAsk["holds"]>();
 
 const sessionEvents: DaemonCapability = (ctx) => {
   // Where the kernel cannot name a socket's peer, an event's pane is its own
@@ -278,7 +278,7 @@ const sessionEvents: DaemonCapability = (ctx) => {
   });
   late.events = events;
   eventsOf.set(ctx, events);
-  if (drainAsk !== undefined) drainAskedOf.set(ctx, drainAsk.asked);
+  if (drainAsk !== undefined) drainHoldsOf.set(ctx, drainAsk.holds);
   drainAsk?.start();
   return {
     stop: (): void => {
@@ -371,7 +371,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
       now: ctx.now,
       ...(opts.checkIntervalMs === undefined ? {} : { checkIntervalMs: opts.checkIntervalMs }),
       activity: paneActivity.all,
-      untouchable: (pane) => eventsOf.get(ctx)?.marked(pane) === true || drainAskedOf.get(ctx)?.(pane) === true,
+      untouchable: (pane) => eventsOf.get(ctx)?.marked(pane) === true || drainHoldsOf.get(ctx)?.(pane) === true,
       draining: () => ctx.endedTasks.draining,
       stopped: ctx.stopped,
       record: ctx.custodianSeat,
