@@ -121,7 +121,16 @@ function archived(id: string, fields: Partial<Task> = {}, row: Partial<ArchivedT
 }
 
 function page(tasks: readonly ArchivedTask[], fields: Partial<Extract<OlderList, { kind: "ok" }>> = {}): OlderList {
-  return { kind: "ok", tasks, total: tasks.length, next: null, loadingMore: false, moreError: null, ...fields };
+  return {
+    kind: "ok",
+    tasks,
+    total: tasks.length,
+    next: null,
+    machines: null,
+    loadingMore: false,
+    moreError: null,
+    ...fields,
+  };
 }
 
 function live(ids: readonly string[]): QueueState {
@@ -323,6 +332,66 @@ describe("Older (DESIGN.md, Archivist, A34–A36j)", () => {
       ["old-box", "no longer listed · last seen 41d ago"],
     ]);
     expect(view?.sheet?.options.at(-1)?.pick).toEqual({ machine: { id: "dev-gone", label: "old-box" } });
+  });
+
+  test("the Machine sheet lists every retired machine the archive names, merged with the rows, newest first", () => {
+    const rows = [
+      // Newer than the archive's listing (a task archived since page one): its name and age win.
+      archived(
+        "t-1",
+        { assignment: { deviceId: "dev-gone", exclave: "default", clone: "app" } },
+        { machine: "old-box-renamed", endedAt: NOW - 5 * DAY },
+      ),
+      archived("t-2"),
+    ];
+    const view = deriveOlder(
+      state({
+        list: page(rows, {
+          machines: [
+            { deviceId: "dev-gone", name: "old-box", lastSeen: NOW - 9 * DAY },
+            // Registered: listed once, as the registry shows it.
+            { deviceId: "dev-a", name: "box-a-then", lastSeen: NOW - DAY },
+            { deviceId: "dev-far", name: "far-box", lastSeen: NOW - 200 * DAY },
+            { deviceId: "dev-unnamed-1234", name: null, lastSeen: NOW - 60 * DAY },
+          ],
+        }),
+        sheet: "machine",
+      }),
+      NOW,
+    );
+    expect(view?.sheet?.options.map((o) => [o.label, o.sub])).toEqual([
+      ["Any", "every machine"],
+      ["box-a", null],
+      ["old-box-renamed", "no longer listed · last seen 5d ago"],
+      ["dev-unna", "no longer listed · last seen 60d ago"],
+      ["far-box", "no longer listed · last seen 200d ago"],
+    ]);
+    expect(view?.sheet?.options.at(-1)?.pick).toEqual({ machine: { id: "dev-far", label: "far-box" } });
+  });
+
+  test("a newer sighting without a name keeps an older sighting's name", () => {
+    const view = deriveOlder(
+      state({
+        list: page(
+          [
+            archived(
+              "t-1",
+              { assignment: { deviceId: "dev-q", exclave: "default", clone: "app" } },
+              { machine: "q-box", endedAt: NOW - 9 * DAY },
+            ),
+          ],
+          {
+            machines: [{ deviceId: "dev-q", name: null, lastSeen: NOW - DAY }],
+          },
+        ),
+        sheet: "machine",
+      }),
+      NOW,
+    );
+    expect(view?.sheet?.options.map((o) => [o.label, o.sub]).at(-1)).toEqual([
+      "q-box",
+      "no longer listed · last seen 1d ago",
+    ]);
   });
 
   test("the Account sheet lists accounts by store key, never a raw id", () => {

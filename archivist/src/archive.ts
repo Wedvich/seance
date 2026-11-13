@@ -3,6 +3,7 @@ import { writeFile } from "node:fs/promises";
 import {
   forgetPrompt,
   TASK_PHASES,
+  type ArchivedMachine,
   type ArchiveTableStatus,
   type ArchiveTasksRequest,
   type Task,
@@ -340,6 +341,29 @@ export class Archive {
         .query<{ n: number }, TaskFilters>(`SELECT count(*) AS n FROM tasks t WHERE ${TASK_FILTERS}`)
         .get(...filters)?.n ?? 0;
     return { rows, total };
+  }
+
+  /**
+   * Every machine the archive holds an assigned task for, so the app can offer
+   * a retired machine no page read so far names (A24, A36h). Those off the
+   * registry come first (the only ones the app lacks), then newest end, so a cut
+   * at the cap drops live machines.
+   * The name is the machines table's, else the newest row's (SQLite's bare
+   * column beside a lone `max()` comes from that row). One aggregate scan of
+   * `tasks`, which every page's `total` already pays; no index, since one would
+   * be a migration on every existing archive for a table that stays small.
+   */
+  taskMachines(limit: number): readonly ArchivedMachine[] {
+    return this.#db
+      .query<ArchivedMachine, [number]>(
+        `SELECT t.device_id AS deviceId, coalesce(m.name, t.machine) AS name, max(t.first_archived_at) AS lastSeen
+         FROM tasks t LEFT JOIN machines m ON m.device_id = t.device_id
+         WHERE t.device_id IS NOT NULL
+         GROUP BY t.device_id
+         ORDER BY coalesce(m.in_registry, 0), lastSeen DESC, t.device_id
+         LIMIT ?1`,
+      )
+      .all(limit);
   }
 
   /** The archived version of a task, or null when the archive holds none. */

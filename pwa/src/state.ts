@@ -4,6 +4,7 @@ import {
   type ArchiveMetricsStep,
   type ArchiveTaskOutcome,
   type ArchiveTasksCursor,
+  type ArchivedMachine,
   type ArchivedTask,
   type ArchivistEntry,
   type AutonomyLevel,
@@ -300,14 +301,17 @@ export const NO_OLDER_FILTERS: OlderFilters = {
 
 /** What the archive answered for the current filters, pages appended in order. */
 export type OlderList =
-  | { readonly kind: "loading" }
-  | { readonly kind: "failed"; readonly message: string }
+  // `machines` on loading/failed: the last listing, kept across a re-read so the Machine sheet stays whole.
+  | { readonly kind: "loading"; readonly machines?: readonly ArchivedMachine[] }
+  | { readonly kind: "failed"; readonly message: string; readonly machines?: readonly ArchivedMachine[] }
   | {
       readonly kind: "ok";
       readonly tasks: readonly ArchivedTask[];
       /** Every match, as the archive counts it (live duplicates included). */
       readonly total: number;
       readonly next: ArchiveTasksCursor | null;
+      /** The machines the archive holds tasks for, from page one; null from an archivist too old to list them. */
+      readonly machines: readonly ArchivedMachine[] | null;
       readonly loadingMore: boolean;
       /** Why the last Load older failed; the rows already read stay. */
       readonly moreError: string | null;

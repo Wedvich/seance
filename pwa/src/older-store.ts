@@ -4,6 +4,7 @@ import {
   type ArchivedTask,
   type ArchiveTasksErrorCode,
   type ArchiveTasksRequest,
+  type ArchivedMachine,
   type RelayClient,
 } from "@seance/shared";
 import { ARCHIVE_NO_ANSWER, ARCHIVE_UNDELIVERED, ARCHIVE_UNREADABLE } from "./archivist-store.ts";
@@ -50,6 +51,8 @@ export class OlderStore {
   #generation = 0;
   /** The first page's request: Load older repeats it from the cursor, so a dates bound doesn't move between pages. */
   #base: ArchiveTasksRequest | null = null;
+  /** The machine listing of the list a re-read replaces, until its own page one answers. */
+  #carried: readonly ArchivedMachine[] | undefined = undefined;
   #searchTimer: ReturnType<typeof setTimeout> | null = null;
   #keying = false;
 
@@ -172,7 +175,12 @@ export class OlderStore {
     }
     const base = olderRequest(this.#older.filters, Date.now());
     this.#base = base;
-    this.#set({ list: { kind: "loading" }, deviceId: archivist.deviceId });
+    const previous = this.#older.list;
+    this.#carried = previous?.kind === "ok" ? (previous.machines ?? undefined) : previous?.machines;
+    this.#set({
+      list: this.#carried === undefined ? { kind: "loading" } : { kind: "loading", machines: this.#carried },
+      deviceId: archivist.deviceId,
+    });
     await this.#page(this.#generation, base, null);
   }
 
@@ -186,7 +194,10 @@ export class OlderStore {
     // A first page's failure replaces the list; a later one's keeps the rows already read.
     const fail = (message: string): void =>
       this.#set({
-        list: held === null ? { kind: "failed", message } : { ...held, loadingMore: false, moreError: message },
+        list:
+          held === null
+            ? { kind: "failed", message, ...(this.#carried === undefined ? {} : { machines: this.#carried }) }
+            : { ...held, loadingMore: false, moreError: message },
       });
     let reply: Awaited<ReturnType<RelayClient["archiveTasks"]>>;
     try {
@@ -207,7 +218,16 @@ export class OlderStore {
     const seen = new Set((held?.tasks ?? []).map((row) => row.task.id));
     const added = reply.tasks.filter((row) => !seen.has(row.task.id));
     const tasks: readonly ArchivedTask[] = [...(held?.tasks ?? []), ...added];
-    const list: Ok = { kind: "ok", tasks, total: reply.total, next: reply.next, loadingMore: false, moreError: null };
+    const list: Ok = {
+      kind: "ok",
+      tasks,
+      total: reply.total,
+      next: reply.next,
+      // Only page one carries them; a later page keeps what it said.
+      machines: held === null ? (reply.machines ?? null) : held.machines,
+      loadingMore: false,
+      moreError: null,
+    };
     const live = liveTaskIds(this.#getState());
     // Only a page that added rows and showed none reads on: an empty or repeated page means a cursor that goes nowhere.
     const duplicates = added.length > 0 && added.every((row) => live.has(row.task.id));

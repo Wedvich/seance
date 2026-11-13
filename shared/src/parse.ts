@@ -6,6 +6,7 @@ import {
   ACCOUNT_ALIAS_MAX_LENGTH,
   ATTACHMENT_HASH_PATTERN,
   ARCHIVE_INGEST_SOURCES,
+  ARCHIVE_MACHINES_MAX,
   ARCHIVE_METRICS_STEPS,
   ARCHIVE_STATUS_ERROR_CODES,
   ARCHIVE_TASK_OUTCOMES,
@@ -70,6 +71,7 @@ import {
   type ArchiveTasksCursor,
   type ArchiveTasksReply,
   type ArchiveTasksRequest,
+  type ArchivedMachine,
   type ArchivedTask,
   type ArchiveStatusRequest,
   type ArchiveStatusReply,
@@ -798,9 +800,16 @@ function parseArchivedTask(value: unknown): ArchivedTask | null {
   return { task, endedAt, machine, account, alias };
 }
 
+function parseArchivedMachine(value: unknown): ArchivedMachine | null {
+  if (!isRecord(value)) return null;
+  const { deviceId, name, lastSeen } = value;
+  return isRoutingId(deviceId) && isStringOrNull(name) && isUint(lastSeen) ? { deviceId, name, lastSeen } : null;
+}
+
 /**
- * Lenient per entry, as `queue`'s tasks are: a row an archivist a version
- * ahead writes in a shape this build cannot read costs that row, not the page.
+ * Lenient per entry, as `queue`'s tasks are: a row or machine an archivist a
+ * version ahead writes in a shape this build cannot read costs that entry, not
+ * the page. `machines` absent (an older archivist) or not an array stays absent.
  */
 export function parseArchiveTasksReply(value: unknown): ArchiveTasksReply | null {
   if (!isRecord(value)) return null;
@@ -809,7 +818,7 @@ export function parseArchiveTasksReply(value: unknown): ArchiveTasksReply | null
     if (code === undefined || typeof value["message"] !== "string") return null;
     return { ok: false, code, message: value["message"] };
   }
-  const { ok, tasks, total, next } = value;
+  const { ok, tasks, total, next, machines } = value;
   if (ok !== true || !Array.isArray(tasks) || !isUint(total)) return null;
   const cursor = next === null ? null : parseArchiveTasksCursor(next);
   if (cursor === null && next !== null) return null;
@@ -818,6 +827,15 @@ export function parseArchiveTasksReply(value: unknown): ArchiveTasksReply | null
     tasks: tasks.map(parseArchivedTask).filter((task) => task !== null),
     total,
     next: cursor,
+    // Display only: a listing this build cannot read as an array is absent, a longer one cut to what it bounds.
+    ...(Array.isArray(machines)
+      ? {
+          machines: machines
+            .slice(0, ARCHIVE_MACHINES_MAX)
+            .map(parseArchivedMachine)
+            .filter((machine) => machine !== null),
+        }
+      : {}),
   };
 }
 

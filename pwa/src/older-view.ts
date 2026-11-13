@@ -11,6 +11,7 @@ import {
   type ArchiveTaskOutcome,
   type ArchiveTasksCursor,
   type ArchiveTasksRequest,
+  type ArchivedMachine,
   type KnownAccount,
   type Task,
 } from "@seance/shared";
@@ -276,8 +277,17 @@ function outcomeOptions(state: AppState): OlderOption[] {
   ];
 }
 
-/** The registry's machines, then those only the archive names: retired, under their last known name (A24, A36h). */
-function machineOptions(state: AppState, rows: readonly ArchivedTask[], now: number): OlderOption[] {
+/**
+ * The registry's machines, then those only the archive names: retired, under
+ * their last known name (A24, A36h), newest first. The archive's own list says
+ * which; the rows read add what an older archivist, which sends none, leaves out.
+ */
+function machineOptions(
+  state: AppState,
+  rows: readonly ArchivedTask[],
+  archived: readonly ArchivedMachine[],
+  now: number,
+): OlderOption[] {
   const { machine } = state.older.filters;
   const listed = state.relay.machines.map((m): OlderOption => ({
     key: m.deviceId,
@@ -289,23 +299,35 @@ function machineOptions(state: AppState, rows: readonly ArchivedTask[], now: num
     pick: { machine: { id: m.deviceId, label: m.name } },
   }));
   const registered = new Set(state.relay.machines.map((m) => m.deviceId));
-  const retired = new Map<string, { name: string; seen: number }>();
+  const shown = (deviceId: string, name: string | null): string => name ?? deviceId.slice(0, 8);
+  const retired = new Map<string, { name: string | null; seen: number }>();
+  const note = (deviceId: string, name: string | null, seen: number): void => {
+    if (registered.has(deviceId)) return;
+    const held = retired.get(deviceId);
+    if (held === undefined) {
+      retired.set(deviceId, { name, seen });
+      return;
+    }
+    // The newer sighting's name wins, but a missing one never hides an older sighting's.
+    retired.set(deviceId, {
+      name: seen > held.seen ? (name ?? held.name) : (held.name ?? name),
+      seen: Math.max(seen, held.seen),
+    });
+  };
+  for (const entry of archived) note(entry.deviceId, entry.name, entry.lastSeen);
   for (const row of rows) {
     const deviceId = row.task.assignment?.deviceId;
-    if (deviceId === undefined || registered.has(deviceId)) continue;
-    const held = retired.get(deviceId);
-    if (held === undefined || held.seen < row.endedAt) {
-      retired.set(deviceId, { name: row.machine ?? held?.name ?? deviceId.slice(0, 8), seen: row.endedAt });
-    }
+    if (deviceId !== undefined) note(deviceId, row.machine, row.endedAt);
   }
-  const gone = [...retired].map(([deviceId, { name, seen }]): OlderOption => ({
+  const newest = [...retired].toSorted(([, a], [, b]) => b.seen - a.seen);
+  const gone = newest.map(([deviceId, { name, seen }]): OlderOption => ({
     key: deviceId,
-    label: name,
+    label: shown(deviceId, name),
     sub: `no longer listed · last seen ${formatSeen(seen, now)}`,
     mono: false,
     dot: "off",
     selected: machine?.id === deviceId,
-    pick: { machine: { id: deviceId, label: name } },
+    pick: { machine: { id: deviceId, label: shown(deviceId, name) } },
   }));
   // A pick no row read now names (a reload of the list): kept, so it can be seen and changed.
   const stray: OlderOption[] =
@@ -370,6 +392,7 @@ function sheetView(
   kind: OlderSheet,
   state: AppState,
   rows: readonly ArchivedTask[],
+  archived: readonly ArchivedMachine[],
   now: number,
   known: readonly KnownAccount[],
   ids: ReadonlyMap<string, string>,
@@ -377,7 +400,7 @@ function sheetView(
   const options = {
     repo: () => repoOptions(state, rows),
     outcome: () => outcomeOptions(state),
-    machine: () => machineOptions(state, rows, now),
+    machine: () => machineOptions(state, rows, archived, now),
     account: () => accountOptions(state, rows, known, ids),
     dates: () => dateOptions(state),
   }[kind]();
@@ -426,6 +449,9 @@ export function deriveOlder(state: AppState, now: number): OlderView | null {
     // Also with nothing shown: a read-on that failed or hit its cap, or rows that turned live since the read.
     more: ok !== null && ok.next !== null && (rows.length > 0 || !ok.loadingMore) ? { loading: ok.loadingMore } : null,
     moreError: ok?.moreError ?? null,
-    sheet: older.sheet === null ? null : sheetView(older.sheet, state, read, now, known, ids),
+    sheet:
+      older.sheet === null
+        ? null
+        : sheetView(older.sheet, state, read, ok?.machines ?? list?.machines ?? [], now, known, ids),
   };
 }

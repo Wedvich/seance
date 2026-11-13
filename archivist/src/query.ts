@@ -1,9 +1,11 @@
 import {
+  ARCHIVE_MACHINES_MAX,
   ARCHIVE_TASKS_PAGE,
   parseArchiveMetricsRequest,
   parseArchiveTasksRequest,
   parseTask,
   REPLY_JSON_BUDGET,
+  type ArchivedMachine,
   type ArchivedTask,
   type ArchiveMetricsRequest,
   type ArchiveTasksCursor,
@@ -21,6 +23,9 @@ type Log = { readonly warn: (line: string) => void };
 
 /** Room a page keeps for its own `ok`, `total` and `next` beside the rows. */
 const PAGE_FRAME_BYTES = 512;
+
+/** The most of a first page the machine list may take: machine names have no length bound, and the rows need the rest. */
+export const MACHINES_BUDGET_BYTES = 8_000;
 
 function jsonBytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), "utf8");
@@ -50,6 +55,19 @@ function archivedEntry(row: ArchivedRow): ArchivedTask | null {
   };
 }
 
+/** The leading machines whose JSON array fits `budget` bytes; one too big to fit is skipped, not the end. */
+function machinesWithin(all: readonly ArchivedMachine[], budget: number): ArchivedMachine[] {
+  const kept: ArchivedMachine[] = [];
+  let bytes = 2;
+  for (const machine of all) {
+    const next = bytes + jsonBytes(machine) + (kept.length > 0 ? 1 : 0);
+    if (next > budget) continue;
+    bytes = next;
+    kept.push(machine);
+  }
+  return kept;
+}
+
 function cursorOf(row: ArchivedRow): ArchiveTasksCursor {
   return { endedAt: row.endedAt, createdAt: row.createdAt, id: row.id };
 }
@@ -59,22 +77,35 @@ function cursorOf(row: ArchivedRow): ArchiveTasksCursor {
  * `queue` budget, which seals inside `ENVELOPE_MAX_CT_LENGTH`), never fewer
  * than one while any match. `next` follows the last row consumed whenever a
  * row is left, so a page cut short by size loses nothing. A record that does
- * not parse is skipped, counted in one warning, and still consumed.
+ * not parse is skipped, counted in one warning, and still consumed. A page
+ * asked without `before` also lists the machines the archive holds tasks for,
+ * the filters aside, charged against the same budget; a later page repeats none.
  */
 export function createTasksAnswer(
-  archive: Pick<Archive, "queryTasks">,
+  archive: Pick<Archive, "queryTasks" | "taskMachines">,
   log: Log,
 ): (query: ArchiveTasksRequest) => ArchiveTasksResponse {
   return (query) => {
     const limit = query.limit ?? ARCHIVE_TASKS_PAGE;
     const { rows, total } = archive.queryTasks(query, limit + 1);
-    let left = REPLY_JSON_BUDGET - PAGE_FRAME_BYTES;
+    const entries = rows.slice(0, limit).map(archivedEntry);
+    const frame = REPLY_JSON_BUDGET - PAGE_FRAME_BYTES;
+    // The first row is kept whatever its size, so the listing gets only what is left beside it: it never turns a page that fitted into one that does not.
+    const firstSize = jsonBytes(entries.find((entry) => entry !== null) ?? null) + 1;
+    const machines =
+      query.before === undefined
+        ? machinesWithin(
+            archive.taskMachines(ARCHIVE_MACHINES_MAX),
+            Math.min(MACHINES_BUDGET_BYTES, Math.max(0, frame - firstSize)),
+          )
+        : null;
+    let left = frame - (machines === null ? 0 : jsonBytes(machines));
     const tasks: ArchivedTask[] = [];
     let consumed: ArchivedRow | null = null;
     let cut = false;
     let unreadable = 0;
-    for (const row of rows.slice(0, limit)) {
-      const entry = archivedEntry(row);
+    for (const [index, row] of rows.slice(0, limit).entries()) {
+      const entry = entries[index] ?? null;
       if (entry === null) {
         unreadable += 1;
         consumed = row;
@@ -91,7 +122,13 @@ export function createTasksAnswer(
     }
     if (unreadable > 0) log.warn(`archive tasks: skipped ${unreadable} unreadable record(s)`);
     const more = cut || rows.length > limit;
-    return { ok: true, tasks, total, next: more && consumed !== null ? cursorOf(consumed) : null };
+    return {
+      ok: true,
+      tasks,
+      total,
+      next: more && consumed !== null ? cursorOf(consumed) : null,
+      ...(machines === null ? {} : { machines }),
+    };
   };
 }
 
