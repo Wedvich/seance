@@ -36,7 +36,7 @@ import {
 import { METRIC_LABELS } from "./chart.ts";
 import { taskTitle } from "./task-title.ts";
 import { historyRanges, type ArchiveReach, type HistoryRange, type HistoryTarget } from "./state.ts";
-import { formatSeen } from "./view.ts";
+import { canDrainNow, formatSeen } from "./view.ts";
 
 /**
  * The machines screen, derived in one pure pass like `deriveView`: pressure and
@@ -143,21 +143,45 @@ function drainRow(machine: Machine, inputs: DrainInputs): DrainRow | null {
   };
 }
 
+const ASK_LINE = "Its sessions are asked to pass themselves at their next pause (interrupted after 5 minutes).";
+
 /**
  * The close sheet's words: what happens to the running work. Without a `drainPass` leader, item 1's
  * line; with one, the tasks that will be passed and the sessions that cannot be.
  */
 export function deriveCloseSheet(machine: Machine, inputs: DrainInputs = NO_DRAINS): readonly string[] {
   const first = `Closing ${machine.name} stops new work landing on it.`;
-  if (!inputs.passes) return [first, "Running work finishes where it is."];
+  const asks = canDrainNow(machine);
+  // The drain's reads (queue, sessions) are taken only under a `drainPass` leader, so no counts without one.
+  if (!inputs.passes) return [first, asks ? ASK_LINE : "Running work finishes where it is."];
   if (inputs.tasks === null) {
-    return [first, "Its running tasks are passed to other machines 10 minutes after, unless you reopen it."];
+    return [
+      first,
+      asks
+        ? `${ASK_LINE.slice(0, -1)}; any left are passed to other machines 10 minutes after, unless you reopen it.`
+        : "Its running tasks are passed to other machines 10 minutes after, unless you reopen it.",
+    ];
   }
   const sessions = sessionsOf(inputs, machine.deviceId);
   const view = drainView(machine, inputs.tasks, sessions, null);
   const lines = [first];
   const n = view.moving.length;
-  if (n > 0) {
+  if (n > 0 && asks) {
+    lines.push(
+      `${n === 1 ? "1 running task" : `${n} running tasks`} will be asked to pass ${n === 1 ? "itself" : "themselves"} at their next pause (interrupted after 5 minutes); any left are passed to other machines in 10 minutes unless you reopen it.`,
+    );
+    // A question is dismissed by the interrupt; a permission wait is interrupted at the deadline like a busy turn.
+    const waiting = view.moving.filter(
+      (m) => m.waitingOnYou && inputs.tasks?.find((t) => t.id === m.taskId)?.inputReason === "question",
+    ).length;
+    if (waiting > 0) {
+      lines.push(
+        waiting === 1
+          ? "1 waiting on you will have its question dismissed."
+          : `${waiting} waiting on you will have their questions dismissed.`,
+      );
+    }
+  } else if (n > 0) {
     lines.push(
       `${n === 1 ? "1 running task" : `${n} running tasks`} will be passed to other machines in 10 minutes unless you reopen it.`,
     );

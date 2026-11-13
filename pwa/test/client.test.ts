@@ -2188,6 +2188,82 @@ describe("store", () => {
     }
   });
 
+  test("a drain-now close sends now to a drainAsk machine under a drain leader, and is refused locally for one without", async () => {
+    const leaderId = listed.autoLeader;
+    const info = await seal(
+      key,
+      { to: APP_ID, from: leaderId },
+      {
+        id: leaderId,
+        ts: Date.now(),
+        op: "machine-info",
+        payload: { ...machineInfo("Lead"), capabilities: ["drain"] },
+      },
+    );
+    const socket = await connectDaemon(relay);
+    socket.send(await register(leaderId, { roles: [DAEMON_ROLES.scheduler], info }));
+    const { term } = await socket.waitFor<{ t: "lead"; term: number }>("lead");
+    const proof = await seal(
+      key,
+      { to: APP_ID, from: leaderId },
+      { id: crypto.randomUUID(), ts: Date.now(), op: "lead-proof", payload: { term } },
+    );
+    socket.send({ t: "lead-proof", term, env: proof });
+    const asks = await newDeviceId();
+    const plain = await newDeviceId();
+    const askedBy: { asks: unknown[]; plain: unknown[] } = { asks: [], plain: [] };
+    const reply = { ok: true, closed: 1 } as const;
+    const asking = await startFakeDaemon(
+      relay,
+      key,
+      asks,
+      { ...machineInfo("Asks"), capabilities: ["close", "drainAsk"] },
+      {
+        sessions: () => ({ sessions: [], at: Date.now() }),
+        availability: (payload) => {
+          askedBy.asks.push(payload);
+          return reply;
+        },
+      },
+    );
+    const plainer = await startFakeDaemon(
+      relay,
+      key,
+      plain,
+      { ...machineInfo("Plain"), capabilities: ["close"] },
+      {
+        sessions: () => ({ sessions: [], at: Date.now() }),
+        availability: (payload) => {
+          askedBy.plain.push(payload);
+          return reply;
+        },
+      },
+    );
+    const { store, waitForApp, stop } = startStore({ machine: asks });
+    try {
+      await waitForApp(online(asks), "asking machine online");
+      await waitForApp(online(plain), "plain machine online");
+      await waitForApp((s) => s.relay.scheduler.kind === "ready", "leader verified");
+      await store.setMachineOpen(plain, false, true);
+      const refused = store.getState().availability[plain];
+      expect(refused?.kind === "failed" ? refused.text : "").toContain("can't drain now");
+      expect(askedBy.plain).toEqual([]);
+      await store.setMachineOpen(asks, false, true);
+      expect(askedBy.asks).toEqual([{ open: false, now: true }]);
+    } finally {
+      socket.close();
+      asking.close();
+      plainer.close();
+      await waitForApp((s) => s.relay.machines.every((m) => !m.connected), "the machines gone");
+      for (const id of [leaderId, asks, plain]) store.removeMachine(id);
+      await waitForApp(
+        (s) => s.relay.machines.every((m) => ![leaderId, asks, plain].includes(m.deviceId)),
+        "forgotten",
+      );
+      stop();
+    }
+  });
+
   test("a close without a verified drain-capable leader is never sent", async () => {
     const deviceId = await newDeviceId();
     const asked: unknown[] = [];

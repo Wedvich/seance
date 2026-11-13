@@ -152,7 +152,7 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
       }
       machines={state.relay.machines}
       onReadDrain={(deviceId) => store.readDrain(deviceId)}
-      onSetOpen={(deviceId, open) => void store.setMachineOpen(deviceId, open)}
+      onSetOpen={(deviceId, open, drainNow) => void store.setMachineOpen(deviceId, open, drainNow)}
       onDismiss={onDismiss}
       onShowHistory={(target, range) => void store.showHistory(target, range)}
       onHideHistory={() => store.hideHistory()}

@@ -147,6 +147,63 @@ describe("the drain row and the close sheet", () => {
   });
 });
 
+describe("the close sheet for a drainAsk machine", () => {
+  const asks = machine({ capabilities: [CAPABILITIES.close, CAPABILITIES.drainAsk] });
+  const running = (id: string, extra: Partial<Task> = {}): Task => ({
+    id,
+    spec: { repo: "github.com/m/seance", mode: "worktree", prompt: "x", title: id },
+    state: "running",
+    createdAt: 1,
+    assignment: { deviceId: "dev-1", exclave: "default", clone: "seance" },
+    ...extra,
+  });
+  const pane = (taskId: string): SessionEntry => ({ window: "w", repo: "seance", path: "/x", taskId });
+  const inputs = (tasks: Task[], passes = true): DrainInputs => ({
+    passes,
+    tasks,
+    sessions: { "dev-1": { sessions: tasks.map((t) => pane(t.id)) } },
+  });
+
+  test("says the sessions are asked to pass themselves, and what is left is passed in 10 minutes only under drainPass", () => {
+    expect(deriveCloseSheet(asks, inputs([running("t1")]))).toEqual([
+      "Closing mac stops new work landing on it.",
+      "1 running task will be asked to pass itself at their next pause (interrupted after 5 minutes); any left are passed to other machines in 10 minutes unless you reopen it.",
+    ]);
+    expect(deriveCloseSheet(asks, inputs([running("t1"), running("t2")]))[1]).toContain(
+      "2 running tasks will be asked",
+    );
+  });
+
+  test("without a drainPass leader there are no counts, and no promise that anything is passed on", () => {
+    expect(deriveCloseSheet(asks, inputs([running("t1")], false))).toEqual([
+      "Closing mac stops new work landing on it.",
+      "Its sessions are asked to pass themselves at their next pause (interrupted after 5 minutes).",
+    ]);
+    expect(deriveCloseSheet(asks, { passes: true, tasks: null, sessions: {} })[1]).toBe(
+      "Its sessions are asked to pass themselves at their next pause (interrupted after 5 minutes); any left are passed to other machines 10 minutes after, unless you reopen it.",
+    );
+  });
+
+  test("counts only an open question as waiting on you, singular and plural; a permission wait is not named", () => {
+    const question = (id: string): Task => running(id, { state: "needs-input", inputReason: "question" });
+    const permission = running("p", { state: "needs-input", inputReason: "permission" });
+    expect(deriveCloseSheet(asks, inputs([question("q1"), permission]))).toContain(
+      "1 waiting on you will have its question dismissed.",
+    );
+    expect(deriveCloseSheet(asks, inputs([question("q1"), question("q2")]))).toContain(
+      "2 waiting on you will have their questions dismissed.",
+    );
+    expect(deriveCloseSheet(asks, inputs([permission])).some((line) => line.includes("waiting on you"))).toBe(false);
+  });
+
+  test("a machine without drainAsk keeps the old wording", () => {
+    const old = machine({ capabilities: [CAPABILITIES.close] });
+    expect(deriveCloseSheet(old, inputs([running("t1")]))[1]).toBe(
+      "1 running task will be passed to other machines in 10 minutes unless you reopen it.",
+    );
+  });
+});
+
 describe("deriveMachines", () => {
   test("a daemon that predates exclaves still renders, marked as such", () => {
     const { exclaves: _, ...old } = machine();

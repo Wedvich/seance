@@ -441,6 +441,14 @@ export function deriveCloseAvailability(relay: RelayState, machine: Machine): bo
   );
 }
 
+/**
+ * Whether `machine`'s daemon asks its sessions to pass themselves when closed and honours `now` (`drainAsk`):
+ * the close sheet's ask wording and "Drain now" are gated on it, never on `close` or `drain`.
+ */
+export function canDrainNow(machine: Machine): boolean {
+  return machine.capabilities?.includes(CAPABILITIES.drainAsk) === true;
+}
+
 /** Whether the verified leader passes a closed machine's tasks (`drainPass`): the Machines screen then shows the drain's progress. */
 export function deriveDrainAvailability(relay: RelayState): boolean {
   return verifiedLeaderAdvertises(relay, CAPABILITIES.drainPass);
