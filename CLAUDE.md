@@ -229,7 +229,7 @@ green:
   an id from a frame — under the
   clone its `repo` name resolved to, and only while no later launch in that ledger noted the same worktree — a gone worktree
   re-added only at that noted path, a direct child of the clone's canonical `.claude/worktrees`, on the branch that ledger
-  noted and only while `refs/heads/<branch>` exists (never origin's, never `--force`, never `worktree prune`) — and a task record carrying `continues` always carries
+  noted and only while `refs/heads/<branch>` exists, under reap's lock, added detached at that ref's sha and then switched onto it (never origin's, never `--force`, never `worktree prune`) — and a task record carrying `continues` always carries
   `mode: "continue"`, which an older leader's parser refuses, and the leader's version floor (`daemon/src/version-floor.ts`) is one per
   process like `schedulerGuard`, persisted 0600, and only ever raised by a read (the leader's own
   pause write alone may set it lower): a task record below it is `version_regressed`, a pause
