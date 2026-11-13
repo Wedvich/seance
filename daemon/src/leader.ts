@@ -76,6 +76,19 @@ export {
   type Task,
 } from "@seance/scheduler";
 
+/**
+ * What the scheduler is told of a `session-pass`: the machine that sent it, what it pushed, the record (prompt
+ * text, never logged), and its `drain` mark, which the scheduler honours only while that machine's status carries `cl`.
+ */
+export function sessionPassInput(pass: SessionPass, from: string): NonNullable<Parameters<Scheduler["pass"]>[2]> {
+  return {
+    from,
+    pushed: { remoteBranch: pass.remoteBranch, tip: pass.tip },
+    ...(pass.record === undefined ? {} : { record: pass.record }),
+    ...(pass.drain === true ? { drain: true as const } : {}),
+  };
+}
+
 /** The library's own cadence for ready tasks (docs/scheduler.md, Routing). */
 const TICK_INTERVAL_MS = 30_000;
 
@@ -386,11 +399,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
       return false;
     }
     scheduler
-      .pass(pass.taskId, "session", {
-        from,
-        pushed: { remoteBranch: pass.remoteBranch, tip: pass.tip },
-        ...(pass.record === undefined ? {} : { record: pass.record }),
-      })
+      .pass(pass.taskId, "session", sessionPassInput(pass, from))
       .then((result) => {
         // A refusal is the one trace of why a session's pass stalled: the session is told only "not confirmed".
         const line = `scheduler: session-pass task=${quote(pass.taskId)} from=${quote(from)} outcome=${result.ok ? "ok" : result.code}`;

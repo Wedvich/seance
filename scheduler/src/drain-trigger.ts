@@ -14,8 +14,9 @@ import type { Task } from "./task.ts";
  * "wait or pass now" is decided here and nowhere else.
  */
 export function drainWaitMs(_machine: Machine, config: SchedulerConfig): number {
-  // Every machine gets the grace in this build, so a mistaken close is recoverable and a session may pass
-  // itself; the session ask (`CAPABILITIES.drainAsk`) and `now` revisit it with step A.
+  // Every machine gets the grace, so a mistaken close is recoverable, and on a `drainAsk` machine the session
+  // ask (step A) has interrupted at `DRAIN_INTERRUPT_MS` (5 min), or at once under `now`, and had at least 5
+  // min to pass itself; the leader never sees `now`.
   return config.drainSelfPassMs;
 }
 

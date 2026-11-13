@@ -59,6 +59,7 @@ import {
   createLeader,
   DEFAULT_CONFIG,
   MemoryQueueStore,
+  sessionPassInput,
   type Leader,
   type QueueStore,
   type SchedulerConfig,
@@ -2512,6 +2513,24 @@ describe("leader in the daemon", () => {
     expect(dropped).toHaveLength(3);
     expect(dropped.filter((line) => line.includes(`from="${APP_ID}"`))).toHaveLength(1);
     for (const line of dropped) expect(line).toContain("not a session event or branch state");
+  });
+
+  test("a session-pass's drain mark reaches the scheduler's pass input only as true; the record and branch ride as before", () => {
+    const pass = {
+      session: "%3",
+      taskId: "t-1",
+      exclave: "default",
+      remoteBranch: "feature/x",
+      tip: "a".repeat(40),
+      at: 1,
+    };
+    expect(sessionPassInput(pass, "a")).toEqual({ from: "a", pushed: { remoteBranch: "feature/x", tip: pass.tip } });
+    expect(sessionPassInput({ ...pass, record: "r", drain: true }, "a")).toEqual({
+      from: "a",
+      pushed: { remoteBranch: "feature/x", tip: pass.tip },
+      record: "r",
+      drain: true,
+    });
   });
 
   test("a session-pass reaches the leader's pass from the machine that sealed it; a malformed one and one from an app are dropped", async () => {
