@@ -4458,7 +4458,10 @@ for the lot with its own `gh`.
     without a wide read is today's: `head` (the commit oid, 40 or 64 hex), `required` (`pending`,
     `passing` or `failing` over the head's required contexts alone: an optional check failing
     blocks nothing, which is why the rollup `checks` cannot be the trigger; absent when no context
-    is required, so a repo without required checks is never "checks"), `failing` (the failing
+    is required, so a repo without required checks is never "checks"; only the newest CheckRun of
+    each name counts, by `databaseId`, as GitHub's merge gate judges it — a head whose first CI run
+    its concurrency group cancelled when a second event started another carries both, and the
+    superseded `CANCELLED` must not read as failing), `failing` (the failing
     required names, deduplicated, control characters dropped, at most `PR_FAILING_LIMITS.names` = 5
     of `PR_FAILING_LIMITS.length` = 100 characters, and only beside `required: "failing"`), `merge`
     (`mergeStateStatus` lowercased, one of `PR_MERGE_STATES`), `armed: true` (auto-merge enabled or

@@ -181,7 +181,7 @@ function blockedQueryText(wide: readonly Wide[]): string {
   const reads = wide
     .map(
       ({ index: i }) =>
-        `b${i}: repository(owner:$o${i},name:$r${i}){ pullRequest(number:$n${i}){ mergeStateStatus isInMergeQueue autoMergeRequest{ enabledAt } reviewRequests{ totalCount } commits(last:1){ nodes{ commit{ oid statusCheckRollup{ contexts(first:50){ nodes{ __typename ... on CheckRun{ name status conclusion isRequired(pullRequestNumber:$n${i}) } ... on StatusContext{ context state isRequired(pullRequestNumber:$n${i}) } } } } } } } } }`,
+        `b${i}: repository(owner:$o${i},name:$r${i}){ pullRequest(number:$n${i}){ mergeStateStatus isInMergeQueue autoMergeRequest{ enabledAt } reviewRequests{ totalCount } commits(last:1){ nodes{ commit{ oid statusCheckRollup{ contexts(first:50){ nodes{ __typename ... on CheckRun{ databaseId name status conclusion isRequired(pullRequestNumber:$n${i}) } ... on StatusContext{ context state isRequired(pullRequestNumber:$n${i}) } } } } } } } } }`,
     )
     .join(" ");
   return `query(${vars}){ ${reads} }`;
@@ -275,6 +275,37 @@ function contextOf(node: Record<string, unknown>): { readonly checks: PrChecks; 
 }
 
 /**
+ * The contexts with every CheckRun but the newest of its name dropped. A head can carry several runs
+ * of one check: a re-run, or a run its concurrency group cancelled when a second event on the same
+ * commit started another. GitHub's merge gate judges the newest alone, so a superseded `CANCELLED`
+ * must not read as a failing required check. Check run ids only grow; a run without one ranks below
+ * any with one, and later in the list above earlier, so the order stays total. A StatusContext is
+ * already one per context. Each name keeps its first run's place: the failing names' cap cuts from
+ * the end, and a re-run must not reorder what it cuts.
+ */
+function latestRuns(nodes: readonly unknown[]): Record<string, unknown>[] {
+  const latest = new Map<string, { readonly id: number; readonly node: Record<string, unknown> }>();
+  for (const node of nodes) {
+    if (!isRecord(node) || node["__typename"] !== "CheckRun" || typeof node["name"] !== "string") continue;
+    const raw = node["databaseId"];
+    const id = typeof raw === "number" ? raw : -1;
+    const seen = latest.get(node["name"]);
+    // An equal id ties to the later run, which is always this one.
+    if (seen === undefined || id >= seen.id) latest.set(node["name"], { id, node });
+  }
+  const placed = new Set<string>();
+  return nodes.flatMap((node): Record<string, unknown>[] => {
+    if (!isRecord(node)) return [];
+    const name = node["name"];
+    if (node["__typename"] !== "CheckRun" || typeof name !== "string") return [node];
+    const winner = latest.get(name);
+    if (winner === undefined || placed.has(name)) return [];
+    placed.add(name);
+    return [winner.node];
+  });
+}
+
+/**
  * The rollup of the head's required contexts alone (an optional check failing blocks nothing), and
  * the names of the failing ones. Undefined when none is required, or the shape is not the one asked
  * for: a repo with no required check never reads as blocked on one.
@@ -291,8 +322,8 @@ function requiredOf(
   let failing = false;
   let pending = false;
   const names = new Set<string>();
-  for (const node of nodes) {
-    if (!isRecord(node) || node["isRequired"] !== true) continue;
+  for (const node of latestRuns(nodes)) {
+    if (node["isRequired"] !== true) continue;
     any = true;
     const { checks, name } = contextOf(node);
     if (checks === "pending") pending = true;

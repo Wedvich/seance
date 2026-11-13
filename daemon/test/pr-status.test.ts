@@ -66,8 +66,14 @@ type Fake = {
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
 
 /** A required (or not) CheckRun as the blocked read returns it. */
-function run(name: string, conclusion: string | null, required = true, status = "COMPLETED"): unknown {
-  return { __typename: "CheckRun", name, status, conclusion, isRequired: required };
+function run(
+  name: string,
+  conclusion: string | null,
+  required = true,
+  status = "COMPLETED",
+  databaseId?: number,
+): unknown {
+  return { __typename: "CheckRun", databaseId, name, status, conclusion, isRequired: required };
 }
 
 function statusContext(context: string, state: string, required = true): unknown {
@@ -663,6 +669,30 @@ describe("the blocked-state read", () => {
     gh = await stub.fresh();
     expect((await read({ contexts: [statusContext("a", "PENDING"), statusContext("b", "SUCCESS")] }))?.required).toBe(
       "pending",
+    );
+  });
+
+  test("(c) only the newest run of a check counts: a superseded CANCELLED neither fails nor names", async () => {
+    // As GitHub answered for a head whose first CI run its concurrency group cancelled.
+    const superseded = await read({
+      contexts: [
+        run("checks", "SUCCESS", true, "COMPLETED", 20),
+        run("checks", "CANCELLED", true, "COMPLETED", 10),
+        run("test (ubuntu-latest)", "CANCELLED", true, "COMPLETED", 11),
+        run("test (ubuntu-latest)", "SUCCESS", true, "COMPLETED", 21),
+      ],
+    });
+    expect(superseded?.required).toBe("passing");
+    expect(superseded?.failing).toBeUndefined();
+    gh = await stub.fresh();
+    const rerun = await read({
+      contexts: [run("checks", "FAILURE", true, "COMPLETED", 20), run("checks", "SUCCESS", true, "COMPLETED", 10)],
+    });
+    expect(rerun?.failing).toEqual(["checks"]);
+    gh = await stub.fresh();
+    // Without ids, the later in the list is the newer.
+    expect((await read({ contexts: [run("checks", "CANCELLED"), run("checks", "SUCCESS")] }))?.required).toBe(
+      "passing",
     );
   });
 
