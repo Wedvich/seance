@@ -84,6 +84,12 @@ describe("drainView", () => {
     expect(view.empty).toBe(true);
   });
 
+  test("a successor named by a still-running predecessor and waiting for a machine is counted once, as stuck", () => {
+    const view = drainView(box(), [task("old", { successor: "s1" }), successorOf("s1")], [pane("old")]);
+    expect(view.stuck).toEqual([{ taskId: "s1", reason: "unplaced" }]);
+    expect(view.moved).toEqual([]);
+  });
+
   test("a pane with no task is stuck untasked; one whose task is not listed counts as moving", () => {
     const view = drainView(box(), [], [pane(), pane("unlisted")]);
     expect(view.stuck).toEqual([{ reason: "untasked" }]);

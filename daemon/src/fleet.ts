@@ -67,6 +67,8 @@ export interface SchedulerLeg {
    * so the task would queue unrestricted, and its stripped registry view would make every trait read unknown.
    */
   readonly staleDaemonRequires?: string;
+  /** Set only by the broker leg, whose `queue` carries no request: a by-id read is not worth asking for. */
+  readonly queueByIdUnsupported?: true;
   readonly enqueue: (task: Task) => Promise<TaskCreated | StoreRefusal | null>;
   readonly availability: () => SchedulerAvailability;
   /** `request.tasks` narrows the reply to those ids; the broker leg carries no request and answers its newest. */
@@ -211,6 +213,7 @@ export function brokerScheduler(
   };
   return {
     availability: () => availability,
+    queueByIdUnsupported: true,
     ...(staleDaemonRequires === undefined ? {} : { staleDaemonRequires }),
     enqueue: (task) => {
       // The gates refuse first; this keeps a caller that skipped them from sending a `requires` the daemon would drop.

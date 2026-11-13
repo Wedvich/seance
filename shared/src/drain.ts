@@ -93,7 +93,14 @@ export function drainView(
     moving.push({ taskId: session.taskId, waitingOnYou: false });
   }
 
-  return { moving, moved, stuck, empty: sessions === null ? null : sessions.length === 0 };
+  // A successor still waiting for a machine is stuck, not moved: counted once.
+  const unplaced = new Set(stuck.flatMap((s) => (s.reason === "unplaced" ? [s.taskId] : [])));
+  return {
+    moving,
+    moved: moved.filter((id) => !unplaced.has(id)),
+    stuck,
+    empty: sessions === null ? null : sessions.length === 0,
+  };
 }
 
 /** The fixed words per stuck reason. */

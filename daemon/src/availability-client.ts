@@ -6,6 +6,7 @@ import {
   drainView,
   isTransportError,
   parseAvailabilityResponse,
+  QUEUE_MAX_TASKS,
   RequestFailure,
   failureReasonText,
   lastHeardAt,
@@ -120,7 +121,8 @@ export interface DrainWaitOutcome {
 /**
  * The queue's tasks, plus the ones a capped reply left out that a pane carries (asked by id: the reply
  * keeps the newest unfinished first, so a long-running task on a closed box falls out under a backlog).
- * The broker's leg carries no request, so through it those stay unknown and a reader counts them as moving.
+ * The broker's leg carries no request (`queueByIdUnsupported`), so through it those stay unknown and a reader
+ * counts them as moving (DESIGN.md, "Closing a machine").
  * Null when the queue could not be read.
  */
 export async function queueTasksFor(
@@ -130,8 +132,8 @@ export async function queueTasksFor(
   const reply = await leg.queue().catch(() => null);
   if (reply === null || !("tasks" in reply)) return null;
   const known = new Set(reply.tasks.map((t) => t.id));
-  const missing = [...new Set(paneTaskIds.filter((id) => !known.has(id)))].slice(0, QUEUE_ASK_MAX);
-  if (missing.length === 0) return reply.tasks;
+  const missing = [...new Set(paneTaskIds.filter((id) => !known.has(id)))].slice(0, QUEUE_MAX_TASKS);
+  if (missing.length === 0 || leg.queueByIdUnsupported === true) return reply.tasks;
   const more = await leg.queue({ tasks: missing }).catch(() => null);
   if (more === null || !("tasks" in more)) return reply.tasks;
   // A leader that predates the filter answers its newest again: keep only what was asked for and what we lack.
@@ -139,13 +141,17 @@ export async function queueTasksFor(
   return [...reply.tasks, ...more.tasks.filter((t) => asked.has(t.id) && !known.has(t.id))];
 }
 
-const QUEUE_ASK_MAX = 20;
+const OFFLINE_POLLS = 3;
+const UNREADABLE_POLLS = 60;
 
 /**
  * Blocks until the machine named by a close is empty (code 0) or only work that cannot move is left
  * (code 2, one line per item), and fails (code 1) when it reopens or goes offline. Polls: no frame says
  * "empty". `closedAt` is the close reply's `cl`: status lags a close by up to the relay's status floor, so
- * a status without `cl` is a reopen only after one has shown it. A single failed read never ends the wait.
+ * a status without `cl` is a reopen only after this close's own has shown it (an older close's `cl` is that lag
+ * too; a later one is a reopen and a new close). A single failed read or a momentary disconnect (a daemon
+ * restarting itself) never ends the wait: it takes `OFFLINE_POLLS` offline polls in a row, or `UNREADABLE_POLLS`
+ * unreadable ones.
  * Nothing here may call `log.ts`.
  */
 export async function waitForDrain(opts: {
@@ -158,8 +164,10 @@ export async function waitForDrain(opts: {
   const { fleet, deviceId } = opts;
   const pollMs = opts.pollMs ?? 5_000;
   const print = opts.print ?? ((): void => undefined);
-  let sawClosed = false;
+  let sawCurrent = false;
   let lastLine = "";
+  let offline = 0;
+  let unreadable = 0;
   for (;;) {
     let lease: FleetLease;
     try {
@@ -174,11 +182,17 @@ export async function waitForDrain(opts: {
     try {
       const machine = lease.machines.find((m) => m.deviceId === deviceId);
       if (machine === undefined || !machine.connected) {
-        return { code: 1, text: `${machine?.name ?? deviceId} went offline while draining` };
+        offline += 1;
+        if (offline >= OFFLINE_POLLS)
+          return { code: 1, text: `${machine?.name ?? deviceId} went offline while draining` };
+        // oxlint-disable-next-line no-await-in-loop -- a wait between polls
+        await sleep(pollMs);
+        continue;
       }
+      offline = 0;
       const cl = closedAt(machine);
-      if (cl !== null) sawClosed = true;
-      if (sawClosed && cl !== opts.closedAt) {
+      if (cl === opts.closedAt) sawCurrent = true;
+      if ((cl === null && sawCurrent) || (cl !== null && cl > opts.closedAt)) {
         return { code: 1, text: `${machine.name} was reopened; the drain stopped` };
       }
       // oxlint-disable-next-line no-await-in-loop -- sessions first: they say which tasks the queue must name
@@ -188,8 +202,18 @@ export async function waitForDrain(opts: {
       // oxlint-disable-next-line no-await-in-loop -- the second queue read depends on the sessions
       const tasks = lease.scheduler === null ? null : await queueTasksFor(lease.scheduler, paneIds);
       if (sessions === null || tasks === null) {
-        print(`${machine.name}: could not read ${sessions === null ? "its sessions" : "the queue"}; trying again`);
+        unreadable += 1;
+        if (unreadable >= UNREADABLE_POLLS) {
+          return {
+            code: 1,
+            text: `${machine.name}: could not read ${sessions === null ? "its sessions" : "the queue"}`,
+          };
+        }
+        const line = `${machine.name}: could not read ${sessions === null ? "its sessions" : "the queue"}; trying again`;
+        if (line !== lastLine) print(line);
+        lastLine = line;
       } else {
+        unreadable = 0;
         const view = drainView(machine, tasks, sessions.sessions, opts.closedAt);
         const lineOf = (s: (typeof view.stuck)[number]): string => `${s.taskId ?? "-"} ${drainStuckText(s)}`;
         if (view.empty === true) {

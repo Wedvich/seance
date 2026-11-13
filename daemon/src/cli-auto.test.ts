@@ -1061,7 +1061,10 @@ describe("seanced close --wait", () => {
     return fake;
   }
 
-  async function wait(fake: ReturnType<typeof fakeRelay>): Promise<{ code: number; text: string; printed: string[] }> {
+  async function wait(
+    fake: ReturnType<typeof fakeRelay>,
+    pollMs = 1,
+  ): Promise<{ code: number; text: string; printed: string[] }> {
     const lazy = new LazyRelay({ create: () => fake });
     const printed: string[] = [];
     try {
@@ -1069,7 +1072,7 @@ describe("seanced close --wait", () => {
         fleet: relayFleet(lazy),
         deviceId: "device-1",
         closedAt: CL,
-        pollMs: 1,
+        pollMs,
         print: (line) => printed.push(line),
       });
       return { ...outcome, printed };
@@ -1190,6 +1193,30 @@ describe("seanced close --wait", () => {
     const outcome = await wait(fake);
     expect(polls).toBe(4);
     expect(outcome).toMatchObject({ code: 1, text: "MacBook Pro was reopened; the drain stopped" });
+  });
+
+  test("a disconnect shorter than three polls is a blip, not an exit", async () => {
+    const fake = polled(closedBox({ connected: false }), {
+      sessions: () => ({ sessions: [], at: 1 }),
+      queue: () => ({ tasks: [], at: 1 }),
+    });
+    setTimeout(() => fake.setState({ machines: [closedBox()] }), 25);
+    expect((await wait(fake, 20)).code).toBe(0);
+  });
+
+  test("an older close's cl is not a reopen", async () => {
+    let polls = 0;
+    const older = { at: 1, scan: 1, cpu: 0, mem: 0, free: 1, cl: CL - 1 };
+    const fake = polled(closedBox({ status: older }), {
+      sessions: () => {
+        polls += 1;
+        if (polls === 2) fake.setState({ machines: [closedBox()] });
+        return { sessions: polls < 4 ? [pane("t1")] : [], at: 1 };
+      },
+      queue: () => ({ tasks: [task("t1")], at: 1 }),
+    });
+    expect((await wait(fake)).code).toBe(0);
+    expect(polls).toBe(4);
   });
 
   test("a machine that goes offline ends the wait with 1", async () => {
