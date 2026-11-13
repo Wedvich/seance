@@ -64,6 +64,11 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   (Codex first) would touch — the agent as a task field, launch, accounts, quota, session events,
   MCP, clients — the two risks (Codex's remote control, binding by peer pid) and a spike-first
   order. Read it before adding a second agent or making the launch path agent-neutral.
+- **docs/orchestrator.md** — draft, nothing decided or built: queueing a whole tracker project as
+  a living task graph, tended by long-lived orchestrator sessions that are not tasks, with the
+  tracker (Linear first) kept out of Séance's code. It recommends withdrawing the leader's Linear
+  item and lists the open questions. Read it before building amend deps, anything that reads a
+  tracker, or a new kind of session that is not a task; build nothing from it until it is decided.
 
 Like DESIGN.md, the docs/ files are part of the record: a change that alters behavior they describe
 updates them in the same commit. They are not auto-discovered — this list is how sessions find them.
