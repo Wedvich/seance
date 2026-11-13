@@ -38,7 +38,7 @@ export const ROUTING_ID_PATTERN = new RegExp(`^[${ROUTING_ID_CHARS}]{1,${ROUTING
 /**
  * Plaintext `register.roles` values — the one capability the relay itself
  * reads. `scheduler`: the daemon may be nominated leader. `archivist`: the
- * fleet's one history seat (docs/archivist.md), honoured only from the id on
+ * fleet's one history seat (DESIGN.md, "Archivist"), honoured only from the id on
  * the relay's `ARCHIVIST` secret and never beside `scheduler`. Only a v2
  * register (signature over the roles) carries them; the relay acts on no other
  * value, and accepts an unknown one only so the signature covering it still verifies.
@@ -289,7 +289,7 @@ export interface RegistryEntry {
 export type RegistryView = RegistryEntry & {
   readonly connected: boolean;
   /**
-   * The fleet's archivist seat (docs/archivist.md): derived per push like
+   * The fleet's archivist seat (DESIGN.md, "Archivist"): derived per push like
    * `connected`, set only when this id's last accepted register signed the
    * role and it is the id on the relay's `ARCHIVIST` now. Never a machine:
    * `RelayClient` skips it when it builds `machines`.
@@ -1448,7 +1448,7 @@ export type ArchiveMetricsStep = (typeof ARCHIVE_METRICS_STEPS)[number];
 
 /**
  * `op: "archive-metrics"` — history from the archivist's `metrics.sqlite`
- * (docs/archivist.md, A31–A33): `MetricsRequest`'s range, step and filters
+ * (DESIGN.md, Archivist, A31–A33): `MetricsRequest`'s range, step and filters
  * over exactly one target. `machine` is a device id, its own observed series
  * (retired machines included). `account` is the `account:<hex>` store key,
  * never a raw id: every series labelled with it from any observer, merged per
@@ -3177,6 +3177,11 @@ export interface SettingsRecord extends VersionBound {
   readonly diskAlerts?: readonly DiskAlerted[];
   /** Exclaves whose login alert was sent and has not cleared yet (`daemon/src/auth-alerts.ts`). */
   readonly authAlerts?: readonly AuthAlerted[];
+  /**
+   * The archivist's silence watch (`daemon/src/archivist-silence.ts`). Present once a registry held an
+   * archivist entry, so a fleet that never had one is never alerted, whichever leader reads it.
+   */
+  readonly archivistSilence?: ArchivistSilence;
 }
 
 /**
@@ -3206,6 +3211,15 @@ export interface DiskAlerted {
   readonly deviceId: string;
   readonly at: number;
 }
+
+/**
+ * Whether the archivist's seat is connected, as the leader last wrote it. `since` is when the absence began
+ * (its entry's relay `lastSeen`, else the leader's clock), so a new leader measures 24 h from the same
+ * instant; `alerted` is an absence already pushed, held until the archivist connects again.
+ */
+export type ArchivistSilence =
+  | { readonly state: "present" }
+  | { readonly state: "absent" | "alerted"; readonly since: number };
 
 /**
  * `Task.failure` codes the scheduler sets itself, beside a daemon's refusal.
@@ -3619,6 +3633,13 @@ export type PushAlert =
       readonly deviceId: string;
       readonly exclave: string;
       readonly state: "expired" | "expiring";
+    }
+  | {
+      readonly v: 1;
+      readonly kind: "archivist";
+      readonly at: number;
+      /** When the archivist's absence began (ms). No id: a fleet has one seat. */
+      readonly since: number;
     };
 
 /** A push payload's plaintext at most, in bytes: well under the 4096-byte record a push service must accept. */

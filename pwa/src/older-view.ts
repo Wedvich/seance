@@ -30,7 +30,7 @@ import { taskTitle } from "./task-title.ts";
 import { formatSeen, scopedRepos, type AppState, type Dot, type Tile } from "./view.ts";
 
 /**
- * The Queue screen's Older section as data (docs/archivist.md A34, A35,
+ * The Queue screen's Older section as data (DESIGN.md, Archivist, A34, A35,
  * A36g–A36j): the archive's finished tasks past the live list, with its search,
  * filter tiles and sheets, derived in one pure pass like `deriveQueue`.
  */

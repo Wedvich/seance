@@ -801,7 +801,7 @@ export class Store {
   }
 
   /**
-   * Which side answers (docs/archivist.md A32), read from the registry at ask
+   * Which side answers (DESIGN.md, Archivist, A32), read from the registry at ask
    * time: a connected machine's own daemon for the ranges it keeps; the archive
    * for an account (merged across machines), past 30 days, and for a machine
    * not connected. With no archivist, exactly as before it: a machine's daemon,

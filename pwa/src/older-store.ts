@@ -36,7 +36,7 @@ function failureText(err: unknown): string {
 type Ok = Extract<OlderList, { kind: "ok" }>;
 
 /**
- * The Queue screen's Older section (docs/archivist.md A34, A35, A36g–A36j),
+ * The Queue screen's Older section (DESIGN.md, Archivist, A34, A35, A36g–A36j),
  * apart from `Store`: reads the archive page by page only while the section is
  * open, and only while the registry shows a connected archivist. Like
  * `ArchiveStore`, every read is generation-guarded, so an answer for filters or

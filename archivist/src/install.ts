@@ -67,7 +67,7 @@ export interface ArchivistInstallOptions {
 }
 
 /**
- * The archivist runs as a Unix user of its own (docs/archivist.md, A27a):
+ * The archivist runs as a Unix user of its own (DESIGN.md, Archivist, A27a):
  * sessions run as the daemon's user and must not be able to read or change the
  * archive. A `seanced` system unit names its user; a user unit in the target's
  * home is the same daemon by another route. Pure over what was read, so it is
@@ -80,7 +80,7 @@ export function daemonUserRefusal(
 ): string | null {
   const why =
     "the archivist runs as a user of its own, never the daemon's — sessions run as the daemon's user and must " +
-    "not be able to read or change archive.sqlite (docs/archivist.md, A27a); create one and pass `--user <name>`";
+    "not be able to read or change archive.sqlite (DESIGN.md, Archivist, A27a); create one and pass `--user <name>`";
   if (seancedSystemUnit !== null && unitUser(seancedSystemUnit) === target) {
     return `${target} is the user ${SYSTEM_UNIT_DIR}/${UNIT_NAME} runs seanced as — ${why}`;
   }

@@ -598,17 +598,22 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
           log,
           onError: fail,
         });
-  // Disk and login alerts ride the registry, not the scheduler: the record's `diskAlerts` and `authAlerts` lists
-  // are what keep a new term from repeating one, and an alert is raised only once that write has landed.
+  // Disk, login and archivist alerts ride the registry, not the scheduler: the record's `diskAlerts`, `authAlerts`
+  // and `archivistSilence` are what keep a new term from repeating one, and an alert is raised only once that
+  // write has landed. Nothing the scheduler reads learns of the archivist (A4).
   const machineAlerts = createMachineAlertWatch({
     settings: () => settings,
     ready: () => settingsState === "ready",
     machines: () => relay.getState().machines,
+    archivist: () => relay.getState().archivist,
+    registryKnown: () => relay.getState().registrySize > 0,
     onAlert: (alert) => {
       if (alert.kind === "disk") log.warn(`scheduler: disk nearly full: device=${quote(alert.deviceId)}`);
       if (alert.kind === "auth") {
         log.warn(`scheduler: login ${alert.state}: device=${quote(alert.deviceId)} exclave=${quote(alert.exclave)}`);
       }
+      if (alert.kind === "archivist")
+        log.warn(`scheduler: archivist silent: since=${new Date(alert.since).toISOString()}`);
       pushSender?.send(alert);
     },
     onRestored: (entry, at) =>
@@ -671,6 +676,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
   const fleetReady = Promise.withResolvers<void>();
   let seen = relay.getState().machines;
   let seenQuota = relay.getState().fleetQuota;
+  let seenArchivist = relay.getState().archivist;
   const unsubscribe = relay.subscribe(() => {
     const state = relay.getState();
     // Terminal: the shared client never redials a rejected token, so the term
@@ -683,6 +689,11 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     if (!running) {
       if (state.status === "open" && state.registrySettled) fleetReady.resolve();
       return;
+    }
+    // The seat changing is no news to the pass: it re-checks the alerts only.
+    if (state.archivist !== seenArchivist) {
+      seenArchivist = state.archivist;
+      if (state.machines === seen && state.fleetQuota === seenQuota) machineAlerts.check(true);
     }
     if (state.machines !== seen || state.fleetQuota !== seenQuota) {
       seen = state.machines;
@@ -744,6 +755,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     if (!live) return;
     seen = relay.getState().machines;
     seenQuota = relay.getState().fleetQuota;
+    seenArchivist = relay.getState().archivist;
     timer = setInterval(() => {
       // A create stamped ahead of this clock (a phone's fast clock) binds once the clock passes
       // its stamp, and no `store-changed` will say so: re-read it on the timer, one get each, and

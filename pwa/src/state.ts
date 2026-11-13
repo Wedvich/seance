@@ -199,7 +199,7 @@ export const TARGET_METRICS: Record<HistoryTarget["kind"], readonly MetricName[]
 
 /** Ranges a daemon keeps. */
 export const SHORT_HISTORY_RANGES = ["6h", "24h", "30d"] as const;
-/** Ranges only the archive keeps (docs/archivist.md A32), offered only while it serves the chart (A35, A36d). */
+/** Ranges only the archive keeps (DESIGN.md, Archivist, A32), offered only while it serves the chart (A35, A36d). */
 export const ARCHIVE_HISTORY_RANGES = ["90d", "1y"] as const;
 export const HISTORY_RANGES = [...SHORT_HISTORY_RANGES, ...ARCHIVE_HISTORY_RANGES] as const;
 export type HistoryRange = (typeof HISTORY_RANGES)[number];

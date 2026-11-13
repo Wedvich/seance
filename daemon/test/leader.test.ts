@@ -143,6 +143,7 @@ function leaderOver(
   httpFetch?: Fetch,
   storeTimeoutMs?: number,
   config?: SchedulerConfig,
+  now?: () => number,
 ) {
   const legs: RelayClient[] = [];
   const replies = new AsyncQueue<{ readonly to: string; readonly response: Plain }>("replies");
@@ -164,6 +165,7 @@ function leaderOver(
     ...(settings === undefined ? {} : { settings }),
     ...(httpFetch === undefined ? {} : { httpFetch }),
     ...(config === undefined ? {} : { config }),
+    ...(now === undefined ? {} : { now }),
     createRelay: (term, onEvent) => {
       const leg = new RelayClient({
         url: appRelayUrl(relay.url),
@@ -1942,6 +1944,7 @@ describe("leader disk alerts", () => {
       gets: () => gets,
       diskAlerts: () => held?.record?.diskAlerts,
       authAlerts: () => held?.record?.authAlerts,
+      archivistSilence: () => held?.record?.archivistSilence,
     };
   };
 
@@ -2018,6 +2021,108 @@ describe("leader disk alerts", () => {
     });
     expect(lines.filter((line) => line.includes("scheduler: login expired: device="))).toHaveLength(1);
     expect(lines.filter((line) => line.includes("scheduler: login restored: device="))).toHaveLength(1);
+  });
+  test("an archivist absent past 24 h is pushed once and recorded; a later term repeats nothing", async () => {
+    const relay = startTestRelay(TOKEN);
+    const push = startPushEndpoint();
+    const settings = await heldSettings();
+    const lastSeen = Date.now() - 25 * 60 * 60 * 1000;
+    const seat: RegistryView = {
+      deviceId: "arch",
+      info: await seal(
+        key,
+        { to: APP_ID, from: "arch" },
+        {
+          id: crypto.randomUUID(),
+          ts: Date.now(),
+          op: "machine-info",
+          payload: { archivist: true, name: "archive-box", platform: "linux" },
+        },
+      ),
+      lastSeen,
+      connected: false,
+      archivist: true,
+    };
+    relay.setRegistry([await routableEntry("b"), seat]);
+    const { leader } = leaderOver(relay, new MemoryQueueStore(), 40, undefined, settings.store, (input, init) =>
+      fetch(push.endpoint(new URL(String(input)).pathname.split("/").at(-1) ?? ""), init),
+    );
+    const lines = await captureLog(async () => {
+      try {
+        leader.lead(1);
+        await leader.settled();
+        await push.waitForRequests(1);
+        await pollUntil(() => settings.archivistSilence() !== undefined, "the silence on the record");
+        expect(settings.archivistSilence()).toEqual({ state: "alerted", since: lastSeen });
+
+        leader.lead(2);
+        await pollUntil(() => leader.term() === 2, "the second term");
+        await leader.settled();
+        await pollUntil(() => settings.gets() >= 2, "the second term's settings load");
+        await Bun.sleep(300);
+        expect(push.requests()).toHaveLength(1);
+      } finally {
+        leader.stop();
+        relay.stop();
+        await push.stop();
+      }
+    });
+    expect(lines.filter((line) => line.includes("scheduler: archivist silent: since="))).toHaveLength(1);
+  });
+
+  test("a registry push that changes only the archivist re-checks the alerts, with no tick to do it", async () => {
+    const relay = startTestRelay(TOKEN);
+    const push = startPushEndpoint();
+    const settings = await heldSettings();
+    const clock = { now: Date.now() };
+    const seatEntry = async (connected: boolean, lastSeen: number): Promise<RegistryView> => ({
+      deviceId: "arch",
+      info: await seal(
+        key,
+        { to: APP_ID, from: "arch" },
+        {
+          id: crypto.randomUUID(),
+          ts: Date.now(),
+          op: "machine-info",
+          payload: { archivist: true, name: "archive-box", platform: "linux" },
+        },
+      ),
+      lastSeen,
+      connected,
+      archivist: true,
+    });
+    const machine = await routableEntry("b");
+    relay.setRegistry([machine, await seatEntry(true, clock.now)]);
+    // A tick interval no test waits out: only a registry push can run the check.
+    const { leader } = leaderOver(
+      relay,
+      new MemoryQueueStore(),
+      600_000,
+      undefined,
+      settings.store,
+      (input, init) => fetch(push.endpoint(new URL(String(input)).pathname.split("/").at(-1) ?? ""), init),
+      undefined,
+      undefined,
+      () => clock.now,
+    );
+    try {
+      leader.lead(1);
+      await leader.settled();
+      await pollUntil(() => settings.archivistSilence()?.state === "present", "the seat recorded present");
+
+      clock.now += 60 * 60 * 1000;
+      relay.setRegistry([machine, await seatEntry(false, clock.now)]);
+      await pollUntil(() => settings.archivistSilence()?.state === "absent", "the absence from the push alone");
+
+      clock.now += 25 * 60 * 60 * 1000;
+      relay.setRegistry([machine, await seatEntry(false, clock.now - 1)]);
+      await push.waitForRequests(1);
+      expect(settings.archivistSilence()?.state).toBe("alerted");
+    } finally {
+      leader.stop();
+      relay.stop();
+      await push.stop();
+    }
   });
 });
 

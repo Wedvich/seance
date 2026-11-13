@@ -22,7 +22,7 @@ export const UPDATE_PATH_UNIT = "seance-archivist-update.path";
 export type ArchivistUnitName = typeof ARCHIVIST_UNIT | typeof UPDATE_UNIT | typeof UPDATE_PATH_UNIT;
 
 export interface ArchivistUnitOptions {
-  /** The archivist's own account, never root and never the daemon's (docs/archivist.md, A27a). */
+  /** The archivist's own account, never root and never the daemon's (DESIGN.md, Archivist, A27a). */
   readonly user: string;
   /** Resolved from `pathEnv`, never the running interpreter's realpath, which a package manager retires. */
   readonly bunPath: string;

@@ -30,7 +30,7 @@ export const UNIT_NAME = "seanced.service";
 export const ARCHIVIST_UNIT_NAME = "seance-archivist.service";
 
 /**
- * The other half of A27a (docs/archivist.md): the archivist's user must not run
+ * The other half of A27a (DESIGN.md, "Archivist"): the archivist's user must not run
  * sessions, so `install --system` refuses the user an installed archivist unit
  * runs as. Pure over the unit text read, null when there is none.
  */
@@ -42,7 +42,7 @@ export function archivistUserRefusal(
   if (archivistUnit === null || unitUser(archivistUnit) !== target) return null;
   return (
     `${target} is the user /etc/systemd/system/${ARCHIVIST_UNIT_NAME} runs the archivist as — sessions run as the ` +
-    `daemon's user and must not be able to read or change archive.sqlite (docs/archivist.md, A27a); ${remedy}`
+    `daemon's user and must not be able to read or change archive.sqlite (DESIGN.md, Archivist, A27a); ${remedy}`
   );
 }
 

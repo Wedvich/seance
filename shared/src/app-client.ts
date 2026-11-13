@@ -2044,7 +2044,7 @@ export class RelayClient {
     let skewedHere = 0;
     let unboundHere = 0;
     // The archivist's seat is a registry entry, never a spawn target
-    // (docs/archivist.md, A9). Skipped when machines are built (its blob is still opened), because
+    // (DESIGN.md, Archivist, A9). Skipped when machines are built (its blob is still opened), because
     // every Machine reader — the PWA's screens, the leader's candidates, MCP,
     // the broker, Raycast — reads this list. `#entries` keeps it for routing.
     const machineEntries = this.#entries.filter((entry) => entry.archivist !== true);

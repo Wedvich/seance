@@ -124,7 +124,7 @@ secret put SCHEDULER_LEADERS` from `relay/` replaces the whole list and rolls a 
 version, so every socket drops and re-registers. Set it before deploying a relay that
 first reads it (October 2026): until it is set, no daemon leads, so `auto` only queues.
 `ARCHIVIST` is a third, optional secret of the same kind: the one device id that may
-register as the archivist (docs/archivist.md). One id, never a list; unset, blank or
+register as the archivist (DESIGN.md, "Archivist"). One id, never a list; unset, blank or
 anything else honours nobody, and a register claiming the role from another id is
 closed `register role-refused` (DESIGN.md, "Leadership"). Nothing gates Durable Object migrations: a change to
 `migrations` in `relay/wrangler.jsonc` is applied by the next deploy, so review one as
