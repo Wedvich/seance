@@ -8600,11 +8600,15 @@ PR (custodian 4), and `docs/custodian.md` keeps the rest of the spec. Decisions 
   `LEADER_MODULES` in `scheduler/test/layering.test.ts`; `scheduler/src/route.ts` imports them and its tests
   pass unchanged. Readings are keyed by **account id**, not exclave id (`newestReadings`: empty while the
   status names another register blob), a reading is scored for the configured model, no added estimate (a round is
-  not a task), unknown quota ranks after known and stays eligible, and a tie goes to scan order. Skipped: a
+  not a task), unknown quota (no reading, or none with a window that applies to the model, as the scheduler's
+  `judgeAccount` reads it) ranks after known and stays eligible, and a tie goes to scan order. Skipped: a
   signed-out exclave, one whose auth lapsed (`AuthHealth.expired`), one whose round dir is untrusted or
   planted (below), one whose root does not exist (a root is never invented), and one whose round dir resolves into
   another exclave. A round runs when it is due however tight quota is, takes no queue slot and cannot block a task
-  (C13).
+  (C13). A pick that finds no exclave
+  is not repeated for `everyMinutes` (in memory, so a restart tries again): each pick parses every signed-in
+  exclave's `.claude.json`, several MB each, and the seat would otherwise do it every minute for as long as a pane
+  stands idle. After the owner's one-time trust step the next round starts within `everyMinutes`.
 - **The round dir, and trust (C12).** The exclave is decided by `$PWD` when the window's shell starts (the owner's
   hook picks `CLAUDE_CONFIG_DIR` from it; the daemon never sets one, "Exclaves"), so each exclave has its own
   round dir (`roundDirFor`): `<root>/.seance-custodian` for a named one, `stateDir()/custodian/cwd` for `default`.
@@ -8743,7 +8747,8 @@ PR (custodian 4), and `docs/custodian.md` keeps the rest of the spec. Decisions 
 - **The deadline (C16, `despawnRound`).** A round has `roundTimeoutMinutes` from its start. At that time the seat
   closes it: a graceful `/exit` for a round whose pane registered (titled), and a straight kill for one that never
   did (stuck on a dialog), audited `outcome=exited|killed`. A round whose pane is gone ends as `exited`
-  with no kill line; every end is `failed` until custodian 4 adds `done` (`healthy`). The tmp dir is removed at
+  with no kill line, and one whose pane is dead (the shell exited, the window stayed) is closed with a
+  `kill reason=exited` line first; every end is `failed` until custodian 4 adds `done` (`healthy`). The tmp dir is removed at
   every end.
 - **The seat record and adoption (C4).** `state.json` holds `custodian: { lastEndedAt?, round?: { pane, startedAt,
   tmpDir, exclave } }`, written **ahead of the launch** (the tmp dir exists before the window does, so
@@ -8753,16 +8758,20 @@ PR (custodian 4), and `docs/custodian.md` keeps the rest of the spec. Decisions 
   reads as none, and the stray sweep below still closes an orphan. `parseState` keeps unknown keys, so an older
   daemon's rewrite keeps the field. On start (a process restart or a config reload) the seat **adopts** the
   recorded round when its pane is still there, with its original deadline, and closes any other round pane as
-  `stray` (`reason=stray`); a recorded round whose pane is gone ends `lost`. **Never save after `stopped()`**: a
+  `stray` (`reason=stray`; the recorded round's own pane, found dead, is `reason=exited`); a recorded round whose
+  pane is gone ends `lost`, and a record with no pane that a later tick still finds (adoption failed to clear it)
+  ends `lost` there. **Never save after `stopped()`**: a
   reload starts the next `startDaemon` while the old one is stopping, and the outgoing instance writing over the
   incoming one's state is the race `reapSchedule` already guards; a launch finishing after the stop closes its
-  own pane, and the incoming instance's sweep is the backstop. Stopping a seat never closes its round, so a
+  own pane, and the incoming instance's sweep is the backstop. A failure after the pane exists (the start audit
+  line or the record's write) closes that pane and counts the round as ended, `kill reason=stray`: a round no
+  record names has no deadline and no reader can reach it (C10). Stopping a seat never closes its round, so a
   reload does not cost one. A daemon that was started for a seat (`RunOpts.custodian`) whose seat is off (no key,
   an unsupported platform, or rounds not live) closes whatever round is left (`reason=off`), removes its tmp
   dir, audits `end reason=lost` and saves `{ lastEndedAt }`.
 - **Audit (C48, C49).** `custodianAudit` (`audit.ts`), origin `custodian`, through the daemon's one sink: `audit
   custodian origin=custodian op=start exclave=<quoted id> pane=<id|-> outcome=started|launch_failed`, `op=kill
-  pane=<id> reason=deadline|stray|off outcome=exited|killed|gone`, `op=end pane=<id|-> outcome=failed
+  pane=<id> reason=deadline|exited|stray|off outcome=exited|killed|gone`, `op=end pane=<id|-> outcome=failed
   reason=deadline|exited|lost`. A round has no task id, so none is named; **nothing read from a pane, the seed,
   the notes or the agent's text reaches a line**, and the seat's own warnings say a reason from a fixed set
   and exclave ids.

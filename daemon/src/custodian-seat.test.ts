@@ -175,6 +175,14 @@ describe("pickExclave", () => {
     expect(pick({ readings, model: "haiku" })).toBe("a");
   });
 
+  test("a reading with no window that applies to the model is unknown, not the best", () => {
+    const readings = new Map([
+      ["org:a", { s: "cache", at: NOW / 1000, w: [{ m: "Fable", p: 99 }] } satisfies QuotaReading],
+      ["org:b", reading(30)],
+    ]);
+    expect(pick({ readings, model: "haiku" })).toBe("b");
+  });
+
   test("ranks by what newestReadings makes of a real status, not by exclave id", () => {
     const scan = scanOf(["default", "work"], { default: { accountId: "org:one" }, work: { accountId: "org:two" } });
     const status: MachineStatus = {
@@ -561,13 +569,80 @@ describe("the seat's lifecycle", () => {
     const r = rig();
     r.fail.pick = "a: signed-out";
     await r.seat.start();
-    await r.seat.tick();
-    await r.seat.tick();
-    await r.seat.tick();
+    for (let at = 0; at < 3; at++) {
+      await r.seat.tick();
+      r.clock.now += EVERY;
+    }
     expect(r.warnings).toHaveLength(1);
     r.fail.pick = "a: round dir untrusted";
     await r.seat.tick();
     expect(r.warnings).toHaveLength(2);
     r.seat.stop();
+  });
+
+  test("a pick that found nothing is not repeated before everyMinutes", async () => {
+    let picks = 0;
+    const r = rig({
+      pick: () => {
+        picks += 1;
+        return Promise.resolve({ none: "a: round dir untrusted" });
+      },
+    });
+    await r.seat.start();
+    await r.seat.tick();
+    r.clock.now += EVERY - 1;
+    await r.seat.tick();
+    await r.seat.tick();
+    expect(picks).toBe(1);
+    r.clock.now += 1;
+    await r.seat.tick();
+    expect(picks).toBe(2);
+    r.seat.stop();
+  });
+
+  test("a failure recording a started round closes its pane, so no round runs untracked", async () => {
+    const r = rig({
+      audit: {
+        start: () => Promise.reject(new Error("disk full")),
+        kill: (p, reason, outcome) => {
+          r.log.push(`kill ${p} ${reason} ${outcome}`);
+          return Promise.resolve();
+        },
+        end: () => Promise.resolve(),
+      },
+    });
+    await r.seat.start();
+    await r.seat.tick();
+    expect(r.live.size).toBe(0);
+    expect(r.log).toContain("kill %1 stray exited");
+    expect(r.log).toContain(`rm ${TMP}`);
+    expect(r.state.record).toEqual({ lastEndedAt: NOW });
+    expect(r.warnings.join("\n")).toContain("recording a started round failed");
+    expect(r.warnings.join("\n")).not.toContain("round launch failed");
+    r.seat.stop();
+  });
+
+  test("a recorded round with no pane that adoption did not clear is lost on the next tick", async () => {
+    const r = rig({}, { round: { pane: null, startedAt: NOW, tmpDir: TMP, exclave: "default" } });
+    await r.seat.tick();
+    expect(r.log).toEqual([`rm ${TMP}`, "end - lost", `save ${JSON.stringify({ lastEndedAt: NOW })}`]);
+    r.seat.stop();
+  });
+
+  test("a recorded round's pane found dead is closed with an exited kill, not a stray one, on adoption and on a tick", async () => {
+    const adopted = rig({}, { round: { pane: "%1", startedAt: NOW, tmpDir: TMP, exclave: "default" } });
+    adopted.lingering.rounds.push({ pane: "%1", dead: true });
+    await adopted.seat.start();
+    expect(adopted.log[0]).toBe("kill %1 exited gone");
+    adopted.seat.stop();
+
+    const ticked = rig({ paneAlive: () => Promise.resolve("dead") });
+    await ticked.seat.start();
+    await ticked.seat.tick();
+    ticked.log.length = 0;
+    ticked.clock.now += MIN;
+    await ticked.seat.tick();
+    expect(ticked.log.slice(0, 3)).toEqual(["kill %1 exited exited", `rm ${TMP}`, "end %1 exited"]);
+    ticked.seat.stop();
   });
 });

@@ -1,3 +1,4 @@
+import type { CustodianAudit } from "./audit.ts";
 import { quotaPressure, quotaWindows, windowAppliesTo, type QuotaReading } from "@seance/shared";
 import type { Config, CustodianConfig } from "./config.ts";
 import { exclaveOf, type Exclave, type ExclaveScan } from "./exclaves.ts";
@@ -113,17 +114,10 @@ export function pickExclave(o: {
     if (info === undefined || info.id !== exclave.id) return;
     if (exclaveSkip(info, o.expired) !== null || !o.eligible.has(exclave.id)) return;
     const reading = info.accountId === null ? undefined : o.readings.get(info.accountId);
-    ranked.push({
-      exclave,
-      pressure:
-        reading === undefined
-          ? null
-          : quotaPressure(
-              quotaWindows(reading).filter((window) => windowAppliesTo(window, o.model)),
-              () => 0,
-              o.now,
-            ),
-    });
+    // No window that applies to the model is unknown, as the scheduler's `judgeAccount` reads it, never zero pressure.
+    const windows =
+      reading === undefined ? [] : quotaWindows(reading).filter((window) => windowAppliesTo(window, o.model));
+    ranked.push({ exclave, pressure: windows.length === 0 ? null : quotaPressure(windows, () => 0, o.now) });
   });
   const known = ranked
     .filter((entry) => entry.pressure !== null)
@@ -197,13 +191,7 @@ export function createPick(d: PickDeps): () => Promise<PickResult> {
 
 export type { SeatRecord };
 
-export type CloseOutcome = "exited" | "killed" | "gone";
-
-export interface CustodianAuditLike {
-  readonly start: (exclave: string, pane: string | null, outcome: "started" | "launch_failed") => Promise<void>;
-  readonly kill: (pane: string, reason: "deadline" | "stray" | "off", outcome: CloseOutcome) => Promise<void>;
-  readonly end: (pane: string | null, reason: "deadline" | "exited" | "lost") => Promise<void>;
-}
+export type CloseOutcome = Parameters<CustodianAudit["kill"]>[2];
 
 export interface SeatDeps {
   readonly settings: CustodianConfig;
@@ -228,7 +216,7 @@ export interface SeatDeps {
   readonly paneAlive: (pane: string) => Promise<"live" | "dead" | "gone">;
   readonly close: (pane: string) => Promise<CloseOutcome>;
   readonly removeTmp: (tmpDir: string) => Promise<void>;
-  readonly audit: CustodianAuditLike;
+  readonly audit: CustodianAudit;
   readonly warn: (line: string) => void;
 }
 
@@ -246,6 +234,8 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
   let timer: ReturnType<typeof setInterval> | null = null;
   let busy = false;
   let lastNone: string | null = null;
+  /** A pick that found nothing is not repeated before `everyMinutes`: each one reads every exclave's `.claude.json`. */
+  let pickAfter = 0;
 
   // A reload's second `startDaemon` writes `state` too: the outgoing instance saving over it would clobber it
   // (the guard `reapSchedule` keeps). The next process's `adopt` covers what is left.
@@ -270,8 +260,10 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
     const kept = panes.find((pane) => round?.pane === pane.pane && !pane.dead);
     for (const pane of panes) {
       if (pane === kept) continue;
+      // The recorded round's own pane, found dead, is no stray.
+      const reason = pane.pane === round?.pane ? "exited" : "stray";
       // oxlint-disable-next-line no-await-in-loop -- one pane at a time: each close is a graceful exit
-      await d.audit.kill(pane.pane, "stray", await d.close(pane.pane));
+      await d.audit.kill(pane.pane, reason, await d.close(pane.pane));
     }
     if (round !== undefined && kept === undefined) await finish(round, "lost");
   };
@@ -279,6 +271,7 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
   const launch = async (): Promise<void> => {
     const picked = await d.pick();
     if ("none" in picked) {
+      pickAfter = d.now() + everyMs;
       if (picked.none !== lastNone) d.warn(`custodian: no exclave can host a round: ${picked.none}`);
       lastNone = picked.none;
       return;
@@ -291,21 +284,33 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
       ...(lastEndedAt === undefined ? {} : { lastEndedAt }),
       round: { pane, startedAt, tmpDir, exclave: exclave.id },
     });
+    let launched: { readonly pane: string; readonly tmpDir: string };
     try {
-      const launched = await d.launch(exclave, (tmpDir) => persist(ahead(null, tmpDir)));
-      if (d.stopped()) {
-        // Nothing saved this pane, so the incoming instance cannot adopt it: close it here.
-        await d.audit.kill(launched.pane, "stray", await d.close(launched.pane));
-        await d.removeTmp(launched.tmpDir);
-        return;
-      }
-      await d.audit.start(exclave.id, launched.pane, "started");
-      await persist(ahead(launched.pane, launched.tmpDir));
+      launched = await d.launch(exclave, (tmpDir) => persist(ahead(null, tmpDir)));
     } catch (err) {
       await d.audit.start(exclave.id, null, "launch_failed");
       // A broken launch retries only after `everyMinutes`, never every tick.
       await persist({ lastEndedAt: d.now() });
       d.warn(`custodian: round launch failed: ${String(err)}`);
+      return;
+    }
+    if (d.stopped()) {
+      // Nothing saved this pane, so the incoming instance cannot adopt it: close it here.
+      await d.audit.kill(launched.pane, "stray", await d.close(launched.pane));
+      await d.removeTmp(launched.tmpDir);
+      return;
+    }
+    try {
+      await d.audit.start(exclave.id, launched.pane, "started");
+      await persist(ahead(launched.pane, launched.tmpDir));
+    } catch (err) {
+      // The pane exists but its record may not: a round nothing tracks has no deadline and no reader can reach it
+      // (C10), so close it here and count it as ended.
+      d.warn(`custodian: recording a started round failed, closing it: ${String(err)}`);
+      const outcome = await d.close(launched.pane);
+      await d.removeTmp(launched.tmpDir);
+      await d.audit.kill(launched.pane, "stray", outcome).catch(() => {});
+      await persist({ lastEndedAt: d.now() }).catch(() => {});
     }
   };
 
@@ -323,10 +328,14 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
         panes: d.activity(),
         untouchable: d.untouchable,
       });
-      if (due) await launch();
+      if (due && now >= pickAfter) await launch();
       return;
     }
-    if (round.pane === null) return;
+    // A write-ahead record with no pane outside a launch (ticks never overlap one): a crash's, which `adopt` could not clear.
+    if (round.pane === null) {
+      await finish(round, "lost");
+      return;
+    }
     if (now >= round.startedAt + timeoutMs) {
       await d.audit.kill(round.pane, "deadline", await d.close(round.pane));
       await finish(round, "deadline");
@@ -334,7 +343,7 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
     }
     const alive = await d.paneAlive(round.pane);
     if (alive === "live") return;
-    if (alive === "dead") await d.close(round.pane);
+    if (alive === "dead") await d.audit.kill(round.pane, "exited", await d.close(round.pane));
     await finish(round, "exited");
   };
 
