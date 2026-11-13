@@ -1820,7 +1820,12 @@ export interface AvailabilityRequest {
   readonly now?: boolean;
 }
 
-export const AVAILABILITY_ERROR_CODES = ["invalid_request", "refused", "unsupported", ...TRANSPORT_ERROR_CODES] as const;
+export const AVAILABILITY_ERROR_CODES = [
+  "invalid_request",
+  "refused",
+  "unsupported",
+  ...TRANSPORT_ERROR_CODES,
+] as const;
 
 export type AvailabilityErrorCode = (typeof AVAILABILITY_ERROR_CODES)[number];
 

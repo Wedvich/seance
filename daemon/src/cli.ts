@@ -16,7 +16,14 @@ import {
 import { attachmentsRoot } from "./attachments.ts";
 import { auditLogChecks, cliSink, despawnAudit, reapAudit, spawnAudit } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
-import { cmdAmendAuto, cmdContinueAuto, cmdPassAuto, cmdSpawnAuto, cmdStartAuto } from "./cli-auto.ts";
+import {
+  cmdAmendAuto,
+  cmdAvailabilityAuto,
+  cmdContinueAuto,
+  cmdPassAuto,
+  cmdSpawnAuto,
+  cmdStartAuto,
+} from "./cli-auto.ts";
 import { installMods, modChecks, uninstallMods } from "./claude-mod.ts";
 import { DespawnFailure, SpawnFailure } from "./backend.ts";
 import { configSkeleton, loadConfig, loadPsk, REAP_DEFAULTS, type Config } from "./config.ts";
@@ -342,6 +349,26 @@ export function parsePassArgs(argv: readonly string[]): PassCliArgs {
 /** Passes a running task to a successor: pushes its branch, ends its session, queues the task that carries on (`cli-auto.ts`). */
 export async function cmdPass(argv: readonly string[]): Promise<void> {
   return cmdPassAuto(parsePassArgs(argv));
+}
+
+/** Exported for tests. `close` and `open` take at most the one machine they act on; none means this one. */
+export function parseAvailabilityArgs(
+  argv: readonly string[],
+  verb: "close" | "open",
+): { readonly machine: string | null } {
+  const [machine] = argv;
+  if (argv.length > 1 || machine?.startsWith("-") === true) throw new Error(`usage: seanced ${verb} [<machine>]`);
+  return { machine: machine ?? null };
+}
+
+/** Closes a machine to new scheduled work (default: this one); running work finishes where it is. Over the relay (`cli-auto.ts`). */
+export async function cmdClose(argv: readonly string[]): Promise<void> {
+  return cmdAvailabilityAuto(parseAvailabilityArgs(argv, "close").machine, false);
+}
+
+/** Reopens a closed machine. */
+export async function cmdOpen(argv: readonly string[]): Promise<void> {
+  return cmdAvailabilityAuto(parseAvailabilityArgs(argv, "open").machine, true);
 }
 
 const AMEND_USAGE =
