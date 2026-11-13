@@ -88,6 +88,11 @@ export interface RelayOptions {
    * before calling this.
    */
   readonly leaders?: readonly string[];
+  /**
+   * `ARCHIVIST`, the one id that may hold the archivist seat; absent leaves the
+   * binding unset, which honours nobody. Fixed at boot like `leaders`.
+   */
+  readonly archivist?: string;
   /** Collect the worker's console lines for `logs()` instead of printing them: for asserting what the relay logs. */
   readonly captureLogs?: boolean;
   /** `STORE_TOMBSTONE_MS`: how long a deleted task's key refuses a put, so a test can watch one expire. */
@@ -103,7 +108,7 @@ export interface RelayOptions {
 }
 
 export async function startRelay(token: string, opts: RelayOptions = {}): Promise<TestRelay> {
-  const { sweep, leaders, captureLogs, tombstoneMs, schedulerReplyWindowMs, uploadAllowance } = opts;
+  const { sweep, leaders, archivist, captureLogs, tombstoneMs, schedulerReplyWindowMs, uploadAllowance } = opts;
   const logs: string[] = [];
   const config = await readWranglerConfig();
   const binding = config.durable_objects.bindings[0];
@@ -127,6 +132,7 @@ export async function startRelay(token: string, opts: RelayOptions = {}): Promis
       bindings: {
         BEARER_TOKEN: token,
         ...(leaders === undefined ? {} : { SCHEDULER_LEADERS: leaders.join(",") }),
+        ...(archivist === undefined ? {} : { ARCHIVIST: archivist }),
         ...(tombstoneMs === undefined ? {} : { STORE_TOMBSTONE_MS: String(tombstoneMs) }),
         ...(schedulerReplyWindowMs === undefined ? {} : { SCHEDULER_REPLY_WINDOW_MS: String(schedulerReplyWindowMs) }),
         ...(uploadAllowance?.windowBytes === undefined

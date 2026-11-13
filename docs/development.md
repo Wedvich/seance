@@ -122,7 +122,11 @@ secret is neither. Unset or empty, nobody is nominated (fail closed — DESIGN.m
 id is the `deviceId` line `seanced doctor` prints under `state`. `bun run wrangler
 secret put SCHEDULER_LEADERS` from `relay/` replaces the whole list and rolls a new
 version, so every socket drops and re-registers. Set it before deploying a relay that
-first reads it (October 2026): until it is set, no daemon leads, so `auto` only queues. Nothing gates Durable Object migrations: a change to
+first reads it (October 2026): until it is set, no daemon leads, so `auto` only queues.
+`ARCHIVIST` is a third, optional secret of the same kind: the one device id that may
+register as the archivist (docs/archivist.md). One id, never a list; unset, blank or
+anything else honours nobody, and a register claiming the role from another id is
+closed `register role-refused` (DESIGN.md, "Leadership"). Nothing gates Durable Object migrations: a change to
 `migrations` in `relay/wrangler.jsonc` is applied by the next deploy, so review one as
 a production change. One that resets a class's storage (a dropped or renamed class,
 `deleted_classes`, or deploying to a fresh worker or account) restarts every `account:`
@@ -166,7 +170,8 @@ key's version at 1, which reopens alias rollback unless the PSK changes too: rot
   by design. The app's relay client is exercised against the shipped relay rather than
   a double. `SCHEDULER_LEADERS` is fixed at boot as a deploy fixes it, so a suite that
   needs a leader mints its ids (`newDeviceId`) before `startRelay({ leaders })`; left
-  out, the binding is unset and nobody leads. `startRelay({ tombstoneMs })` sets
+  out, the binding is unset and nobody leads. `startRelay({ archivist })` sets `ARCHIVIST`
+  the same way; left out, nobody holds the seat. `startRelay({ tombstoneMs })` sets
   `STORE_TOMBSTONE_MS` for a suite that must watch a tombstone expire, and
   `startRelay({ schedulerReplyWindowMs })` sets `SCHEDULER_REPLY_WINDOW_MS` for one that must watch a
   scheduler reply credit lapse. Once the relay binds it, the `ATTACHMENTS` R2 bucket comes from `r2_buckets` in

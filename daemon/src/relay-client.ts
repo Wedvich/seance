@@ -10,6 +10,7 @@ import {
   MACHINES_ID,
   parseStoreChanged,
   parseStoreReply,
+  REGISTER_REFUSALS,
   ReplayError,
   ReplayGuard,
   RequestFailure,
@@ -478,7 +479,7 @@ export class RelayClient {
     // relay without the algorithm) redials at the capped rate rather than once
     // per base interval, and the reason is logged because the close is the only
     // word the relay sends about it.
-    const refused = reason === "register unverified";
+    const refused = reason === REGISTER_REFUSALS.unverified;
     if (refused) this.#opts.onRefused?.();
     this.#signV1 = refused ? !this.#signV1 : false;
     if (this.#opened && !refused) this.#attempt = 0;

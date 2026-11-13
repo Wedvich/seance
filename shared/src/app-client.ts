@@ -525,7 +525,10 @@ export interface RelayState {
   readonly rejection: "unauthorized" | "bad-request" | null;
   /** Entries whose `info` decrypted; the list the app shows. */
   readonly machines: readonly Machine[];
-  /** Total entries the relay holds, including any that did not decrypt. */
+  /**
+   * Entries the relay holds that may be machines, including any that did not
+   * decrypt — never the archivist's seat, so a relay holding only that reads as empty.
+   */
   readonly registrySize: number;
   /** Entries whose info blob did not decrypt with this key — a stale PSK somewhere. */
   readonly ignored: number;
@@ -702,6 +705,8 @@ function parseRegistryView(value: unknown): RegistryView | null {
     info,
     lastSeen: value["lastSeen"],
     connected: value["connected"],
+    // Anything but `true` is no seat: a malformed flag costs the skip, never the entry.
+    ...(value["archivist"] === true ? { archivist: true } : {}),
     ...(status === null ? {} : { status }),
   };
 }
@@ -1934,7 +1939,12 @@ export class RelayClient {
     let reused = 0;
     let skewedHere = 0;
     let unboundHere = 0;
-    for (const entry of this.#entries) {
+    // The archivist's seat is a registry entry, never a spawn target
+    // (docs/archivist.md, A9). Skipped when machines are built (its blob is still opened), because
+    // every Machine reader — the PWA's screens, the leader's candidates, MCP,
+    // the broker, Raycast — reads this list. `#entries` keeps it for routing.
+    const machineEntries = this.#entries.filter((entry) => entry.archivist !== true);
+    for (const entry of machineEntries) {
       // Only #decryptInfo writes this cache, and it stores no MachineInfo for an
       // entry whose blob is not bound to its deviceId — so an unverified entry
       // can only ever miss here, never render half-built.
@@ -1999,10 +2009,10 @@ export class RelayClient {
       // resume re-sends a registry that is usually identical. Handing back the
       // previous array is what lets #patch — and Preact — skip the render.
       machines: reused === machines.length && reused === previous.length ? previous : machines,
-      registrySize: this.#entries.length + this.#skippedEntries,
+      registrySize: machineEntries.length + this.#skippedEntries,
       // Counted off entries the registry actually holds, so neither skew nor a
       // swapped pairing reads as a key mismatch.
-      ignored: this.#entries.length - machines.length - skewedHere - unboundHere,
+      ignored: machineEntries.length - machines.length - skewedHere - unboundHere,
       unbound: unboundHere,
       skewed: skewedHere + this.#skippedEntries,
       ...extra,

@@ -203,6 +203,8 @@ export interface StackOptions {
   readonly secondLeaders?: readonly string[];
   /** Further ids for SCHEDULER_LEADERS — one minted by `newDeviceId`, say. */
   readonly leaders?: readonly string[];
+  /** The relay's ARCHIVIST — one id minted by `newDeviceId` — fixed at boot like the leaders. */
+  readonly archivist?: string;
 }
 
 /** A second daemon's directory, from its name: where its state is pre-seeded and where it later boots. */
@@ -254,7 +256,10 @@ export async function startStack(
     mintDeviceId(stateDir),
     ...(stackOpts.secondLeaders ?? []).map((name) => mintDeviceId(join(secondDir(base, name), "state"))),
   ]);
-  const relay = await startRelay(TOKEN, { leaders: [...leaders, ...(stackOpts.leaders ?? [])] });
+  const relay = await startRelay(TOKEN, {
+    leaders: [...leaders, ...(stackOpts.leaders ?? [])],
+    ...(stackOpts.archivist === undefined ? {} : { archivist: stackOpts.archivist }),
+  });
   // A later step failing must not strand the relay: its workerd outlives the process otherwise (CLAUDE.md, Testing).
   const failed = async (error: unknown): Promise<never> => {
     await relay.dispose();

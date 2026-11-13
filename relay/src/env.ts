@@ -20,6 +20,13 @@ export interface Env {
    */
   readonly SCHEDULER_LEADERS?: string;
   /**
+   * The one device id that may register with the `archivist` role, set with
+   * `wrangler secret put ARCHIVIST`. A secret for the same deploy mechanics as
+   * `SCHEDULER_LEADERS`. Unset, blank or anything but one deviceId honours
+   * nobody (`parseArchivist` in seat.ts).
+   */
+  readonly ARCHIVIST?: string;
+  /**
    * Test-only overrides for the silent-socket sweep, the store's tombstone age
    * and the scheduler-reply window, in ms (vars are strings). Unset in
    * production — the defaults in hub.ts and shared's `STORE_TOMBSTONE_MS` apply.
