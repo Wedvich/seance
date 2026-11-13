@@ -3212,6 +3212,12 @@
   opacity: 0.5;
 }
 
+/* base.css gives every button the pointer; a disabled item must not look clickable. */
+.menu-item:disabled,
+.menu-item[aria-disabled="true"] {
+  cursor: default;
+}
+
 .sr-only {
   position: absolute;
   width: 1px;
