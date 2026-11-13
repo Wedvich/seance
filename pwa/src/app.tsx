@@ -129,6 +129,7 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
         state.accounts.aliases,
         state.relay.fleetQuota,
         archiveCharts(state.relay.archivist, state.accounts.nameable),
+        state.relay.status === "open",
       )}
       archivist={deriveArchivist(state.relay.archivist, state.archiveStatus, now)}
       relayLine={view.relayLine}
@@ -136,6 +137,8 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
       settled={state.relay.registrySettled}
       history={state.history}
       accounts={state.accounts}
+      availability={state.availability}
+      onSetOpen={(deviceId, open) => void store.setMachineOpen(deviceId, open)}
       onDismiss={onDismiss}
       onShowHistory={(target, range) => void store.showHistory(target, range)}
       onHideHistory={() => store.hideHistory()}

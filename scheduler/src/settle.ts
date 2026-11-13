@@ -417,7 +417,8 @@ function provesNeverLanded(reply: SessionsAnswer, reservedAt: number | undefined
 /**
  * One spawn resolves its reservation exactly once, with no second spawn:
  * started or already running → `running`; never delivered → `ready`, to be
- * routed afresh, since nothing can have run; a daemon refusal → `failed`; no
+ * routed afresh, since nothing can have run; refused by a closed machine → `ready` too;
+ * any other daemon refusal → `failed`; no
  * answer, or a transport error that may have come after the spawn ran → stay
  * reserved until the TTL check reads `sessions`.
  */
@@ -430,7 +431,8 @@ export function verdict(task: Task, at: Reservation, reply: TaskSpawnReply): Tas
   if (reply.code === "task_running") {
     return advance(task, "running", { assignment: assignmentOf(at, { id: "id" in reply ? reply.id : undefined }) });
   }
-  if (reply.code === UNDELIVERED) return advance(task, "ready");
+  // Never delivered, or turned away before anything ran (a closed machine): route afresh.
+  if (reply.code === UNDELIVERED || reply.code === "machine_closed") return advance(task, "ready");
   if (reply.code === UNREACHABLE || isTransportError(reply.code)) return null;
   // A daemon's message can carry a whole stderr; the record keeps a line of it.
   const failure = { code: reply.code, message: reply.message.slice(0, TASK_FAILURE_LIMITS.message) };

@@ -32,6 +32,11 @@ export interface State {
    */
   readonly identitySeed?: string;
   readonly repos: readonly RepoEntry[];
+  /**
+   * Set while closed to new scheduled work (docs/drain.md), absent while open. Sticky across
+   * restarts and reboots until someone reopens it. An older daemon ignores the field.
+   */
+  readonly closed?: { readonly at: number };
   readonly scannedAt: number | null;
   /** HEAD sha of the checkout the last run started from — the self-update announce compares against it. */
   readonly lastRunSha?: string;
@@ -100,6 +105,30 @@ export async function parseState(
   }
 }
 
+/** When this machine was closed (ms), or null while open or when the field is unreadable. */
+export function closedOf(state: State): number | null {
+  const closed: unknown = state.closed;
+  if (typeof closed !== "object" || closed === null) return null;
+  const at: unknown = (closed as { at?: unknown }).at;
+  return typeof at === "number" && Number.isFinite(at) && at > 0 ? at : null;
+}
+
+/** State without its close, for a reopen. */
+export function withoutClosed(state: State): State {
+  const { closed: _closed, ...rest } = state;
+  return rest;
+}
+
+/**
+ * A `closed` that is present but unreadable loads as closed now: a damaged close must not
+ * quietly put the box back in rotation. Only here, never in `readState`, which stays log-free.
+ */
+function failClosed(state: State, path: string): State {
+  if (state.closed === undefined || closedOf(state) !== null) return state;
+  log.warn(`state at ${path} has an unreadable closed field — staying closed`);
+  return { ...state, closed: { at: Date.now() } };
+}
+
 /**
  * State as it is on disk, or null — the probe for a reader that only wants to
  * know who this machine is. Two things it deliberately does not do, both of
@@ -131,12 +160,12 @@ export async function loadOrInitState(path: string = statePath()): Promise<State
       const { state } = result;
       if (state.identitySeed !== undefined) {
         const identity = await identityFromSeed(fromBase64(state.identitySeed)).catch(() => null);
-        if (identity !== null && identity.deviceId === state.deviceId) return state;
+        if (identity !== null && identity.deviceId === state.deviceId) return failClosed(state, path);
         log.warn(`state at ${path} has an identity that does not derive its deviceId — reinitializing`);
       } else {
         const { seed, identity } = await mintIdentity();
         log.info(`minted an identity for state at ${path}: deviceId ${state.deviceId} becomes ${identity.deviceId}`);
-        const upgraded: State = { ...state, deviceId: identity.deviceId, identitySeed: seed };
+        const upgraded: State = failClosed({ ...state, deviceId: identity.deviceId, identitySeed: seed }, path);
         await saveState(upgraded, path);
         return upgraded;
       }

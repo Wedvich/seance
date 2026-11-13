@@ -3,6 +3,7 @@ import {
   cmdInstall,
   parseAmendArgs,
   parseContinueArgs,
+  parseAvailabilityArgs,
   parsePassArgs,
   parseStartArgs,
   parseDespawnArgs,
@@ -362,6 +363,17 @@ describe("parseAmendArgs", () => {
   test("nothing to amend, no id, an unknown flag or a flag missing its value is a usage error", () => {
     for (const argv of [[], ["t-1"], ["--replace"], ["t-1", "--nope", "x"], ["t-1", "--title"], ["t-1", "-r"]]) {
       expect(() => parseAmendArgs(argv)).toThrow(/^usage: seanced amend/u);
+    }
+  });
+});
+
+describe("parseAvailabilityArgs", () => {
+  test("takes at most the one machine; none means this one", () => {
+    expect(parseAvailabilityArgs([], "close")).toEqual({ machine: null });
+    expect(parseAvailabilityArgs(["Thad"], "open")).toEqual({ machine: "Thad" });
+    for (const argv of [["a", "b"], ["--now"]]) {
+      expect(() => parseAvailabilityArgs(argv, "close")).toThrow("usage: seanced close [<machine>]");
+      expect(() => parseAvailabilityArgs(argv, "open")).toThrow("usage: seanced open [<machine>]");
     }
   });
 });

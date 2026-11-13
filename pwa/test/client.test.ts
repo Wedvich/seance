@@ -2153,6 +2153,69 @@ describe("store", () => {
     }
   });
 
+  test("a reopen sends availability to the machine; a refusal is kept as the machine's failure note", async () => {
+    const deviceId = await newDeviceId();
+    const asked: unknown[] = [];
+    let refuse = false;
+    const daemon = await startFakeDaemon(
+      relay,
+      key,
+      deviceId,
+      { ...machineInfo("Closable"), capabilities: ["close"] },
+      {
+        sessions: () => ({ sessions: [], at: Date.now() }),
+        availability: (payload) => {
+          asked.push(payload);
+          return refuse ? { ok: false, code: "unsupported", message: "cannot" } : { ok: true, closed: null };
+        },
+      },
+    );
+    const { store, waitForApp, stop } = startStore({ machine: deviceId });
+    try {
+      await waitForApp(online(deviceId), "machine online");
+      await store.setMachineOpen(deviceId, true);
+      expect(asked).toEqual([{ open: true }]);
+      // Held until the machine's status agrees, so the switch and badge do not bounce back meanwhile.
+      expect(store.getState().availability).toEqual({ [deviceId]: { kind: "sent", open: true } });
+      refuse = true;
+      await store.setMachineOpen(deviceId, true);
+      const failed = store.getState().availability[deviceId];
+      expect(failed?.kind).toBe("failed");
+      expect(failed?.kind === "failed" ? failed.text : "").toContain("cannot");
+    } finally {
+      stop();
+      daemon.close();
+    }
+  });
+
+  test("a close without a verified drain-capable leader is never sent", async () => {
+    const deviceId = await newDeviceId();
+    const asked: unknown[] = [];
+    const daemon = await startFakeDaemon(
+      relay,
+      key,
+      deviceId,
+      { ...machineInfo("Unled"), capabilities: ["close"] },
+      {
+        sessions: () => ({ sessions: [], at: Date.now() }),
+        availability: (payload) => {
+          asked.push(payload);
+          return { ok: true, closed: 1 };
+        },
+      },
+    );
+    const { store, waitForApp, stop } = startStore({ machine: deviceId });
+    try {
+      await waitForApp(online(deviceId), "machine online");
+      await store.setMachineOpen(deviceId, false);
+      expect(store.getState().availability[deviceId]?.kind).toBe("failed");
+      expect(asked).toEqual([]);
+    } finally {
+      stop();
+      daemon.close();
+    }
+  });
+
   test("a rescan failure survives another sheet and is cleared once its own closes", async () => {
     const deviceId = await newDeviceId();
     // No rescan handler: the request can only time out.

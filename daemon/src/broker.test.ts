@@ -139,6 +139,11 @@ describe("parseBrokerRequest refuses everything off the allowlist", () => {
     ["a registry delete", request({ action: "forget" }), "unsupported"],
     ["a newer protocol version", request({ v: 2 }), "unsupported"],
     ["remote rescan", request({ remoteOp: "rescan" }), "op_not_allowed"],
+    [
+      "remote availability (a keyless box closes nothing)",
+      request({ remoteOp: "availability", payload: { open: false } }),
+      "op_not_allowed",
+    ],
     ["remote update-available", request({ remoteOp: "update-available" }), "op_not_allowed"],
     ["remote machine-info", request({ remoteOp: "machine-info" }), "op_not_allowed"],
     ["a forget smuggled in as an op", request({ remoteOp: "forget" }), "op_not_allowed"],

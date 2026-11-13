@@ -93,6 +93,11 @@ export interface FleetLease {
   /** As `RelayClient.request`: any op may answer with an `ErrorResponse`. */
   readonly request: <T>(deviceId: string, op: BrokerOp, payload: unknown) => Promise<T | ErrorResponse>;
   /**
+   * A request over the relay as app-role, for an op the broker and the local socket do not carry
+   * (`availability`). Present only on a lease with a key of its own: absent, there is no such path.
+   */
+  readonly appRequest?: <T>(deviceId: string, op: "availability", payload: unknown) => Promise<T | ErrorResponse>;
+  /**
    * Null only through the broker, and only when this machine's daemon could not
    * say: it predates brokered scheduler access (DESIGN.md "Fleet broker") or was
    * restarting, so it answered `fleet` with `unsupported`, or not at all, and
@@ -118,6 +123,8 @@ export function relayFleet(relay: LazyRelay): Fleet {
       return {
         machines: client.getState().machines,
         request: <T>(deviceId: string, op: BrokerOp, payload: unknown): Promise<T | ErrorResponse> =>
+          client.request<T>(deviceId, op, payload),
+        appRequest: <T>(deviceId: string, op: "availability", payload: unknown): Promise<T | ErrorResponse> =>
           client.request<T>(deviceId, op, payload),
         scheduler: {
           enqueue: (task) => client.createTask(task),

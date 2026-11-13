@@ -1,8 +1,18 @@
 import { chmod, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { livePid, loadOrInitState, pidAlive, saveState, writeRuntime } from "./state.ts";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import {
+  closedOf,
+  livePid,
+  loadOrInitState,
+  pidAlive,
+  readState,
+  saveState,
+  withoutClosed,
+  writeRuntime,
+} from "./state.ts";
+import { log } from "./log.ts";
 
 describe("pidAlive", () => {
   test("true for this process, false for a pid that cannot exist", () => {
@@ -42,6 +52,60 @@ describe("livePid", () => {
   test("null when the file is corrupt", async () => {
     await Bun.write(path, "{ not json");
     expect(await livePid(path)).toBeNull();
+  });
+});
+
+describe("closed", () => {
+  let dir: string;
+  let path: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "seance-state-"));
+    path = join(dir, "state.json");
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test("survives a restart until someone reopens it", async () => {
+    const fresh = await loadOrInitState(path);
+    expect(closedOf(fresh)).toBeNull();
+    await saveState({ ...fresh, closed: { at: 1_763_000_000_000 } }, path);
+    const reloaded = await loadOrInitState(path);
+    expect(closedOf(reloaded)).toBe(1_763_000_000_000);
+    expect(closedOf(await loadOrInitState(path))).toBe(1_763_000_000_000);
+    await saveState(withoutClosed(reloaded), path);
+    expect(closedOf(await loadOrInitState(path))).toBeNull();
+  });
+
+  test("a closed field it cannot read loads as closed now, with a warning: a damaged close must not reopen the box", async () => {
+    const fresh = await loadOrInitState(path);
+    const warn = spyOn(log, "warn").mockImplementation(() => {});
+    try {
+      for (const closed of [{ at: "x" }, { at: -1 }, "yes", null, {}]) {
+        await Bun.write(path, JSON.stringify({ ...fresh, closed }));
+        warn.mockClear();
+        const before = Date.now();
+        const loaded = await loadOrInitState(path);
+        expect(closedOf(loaded) ?? 0).toBeGreaterThanOrEqual(before);
+        expect(warn).toHaveBeenCalledTimes(1);
+      }
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("readState returns the raw field and never logs", async () => {
+    const fresh = await loadOrInitState(path);
+    await Bun.write(path, JSON.stringify({ ...fresh, closed: { at: "x" } }));
+    const warn = spyOn(log, "warn").mockImplementation(() => {});
+    try {
+      expect(JSON.stringify((await readState(path))?.closed)).toBe('{"at":"x"}');
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 

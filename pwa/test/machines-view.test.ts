@@ -41,6 +41,27 @@ function machine(overrides: Partial<Machine> = {}): Machine {
   };
 }
 
+describe("the Open for work switch", () => {
+  const leader = machine({ deviceId: "lead", name: "lead", capabilities: [CAPABILITIES.drain] });
+  const ready: SchedulerAvailability = { kind: "ready", deviceId: "lead", term: 1 };
+  const closedStatus: MachineStatus = { at: S - 5, scan: 1, cl: NOW - 60_000 };
+  const cardOf = (m: Machine, scheduler: SchedulerAvailability, others: readonly Machine[] = []) =>
+    deriveMachines([m, ...others], NOW, scheduler).cards[0];
+
+  test("none without close; on only when the verified leader drains; off while closed, whatever the leader", () => {
+    expect(cardOf(machine({ capabilities: [] }), ready, [leader])?.openSwitch).toBeNull();
+    const closable = machine({ capabilities: [CAPABILITIES.close] });
+    expect(cardOf(closable, ready, [leader])).toMatchObject({ closed: false, openSwitch: "on" });
+    expect(cardOf(closable, NO_LEADER, [leader])?.openSwitch).toBeNull();
+    // Socket down: the last scheduler state is stale, and the store would refuse the close.
+    expect(deriveMachines([closable, leader], NOW, ready, {}, [], undefined, false).cards[0]?.openSwitch).toBeNull();
+    expect(cardOf(closable, ready, [{ ...leader, capabilities: [] }])?.openSwitch).toBeNull();
+    const closed = machine({ capabilities: [CAPABILITIES.close], status: closedStatus });
+    expect(cardOf(closed, NO_LEADER)).toMatchObject({ closed: true, openSwitch: "off" });
+    expect(cardOf(closed, ready, [{ ...leader, capabilities: [] }])).toMatchObject({ closed: true, openSwitch: "off" });
+  });
+});
+
 describe("deriveMachines", () => {
   test("a daemon that predates exclaves still renders, marked as such", () => {
     const { exclaves: _, ...old } = machine();

@@ -91,6 +91,7 @@ describe("dispatch", () => {
           plan: true,
           autonomy: "steer",
           client: SCHEDULER_CLIENT,
+          routesClosed: true,
           taskId: task.id,
         },
       },
@@ -152,6 +153,7 @@ describe("dispatch", () => {
         prompt: "do it",
         attachments: files,
         client: SCHEDULER_CLIENT,
+        routesClosed: true,
         taskId: task.id,
       });
       hung.resolve(fleet.start("a", sent));
@@ -201,6 +203,7 @@ describe("dispatch", () => {
             prompt: "do it",
             continues: "t-old",
             client: SCHEDULER_CLIENT,
+            routesClosed: true,
             taskId: task.id,
           },
         },
@@ -2471,6 +2474,29 @@ describe("a spawn the relay never delivered", () => {
     await pass(scheduler);
     expect(scheduler.task(task.id)).toMatchObject({ state: "ready" });
     expect(scheduler.task(task.id)?.reservation).toBeUndefined();
+    fleet.fleet = [machine("a", { connected: false }), machine("b")];
+    await pass(scheduler);
+    expect(scheduler.task(task.id)).toMatchObject({ state: "running", assignment: { deviceId: "b" } });
+    expect(fleet.spawns.map((s) => s.deviceId)).toEqual(["a", "b"]);
+  });
+});
+
+describe("a spawn a closed machine turned away", () => {
+  test("every scheduler spawn says it routes closed machines, so a closed daemon answers it machine_closed", async () => {
+    const { fleet, scheduler, store } = setup(new FakeFleet([machine("a")]));
+    await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    expect(fleet.spawns[0]?.request.routesClosed).toBe(true);
+  });
+
+  test("is ready again at once, never failed, and the next pass routes it afresh", async () => {
+    const { fleet, scheduler, store } = setup(new FakeFleet([machine("a")]));
+    fleet.scripts.set("a", () => ({ ok: false, code: "machine_closed", message: "closed" }));
+    const task = await enqueue(store, scheduler, spec());
+    await pass(scheduler);
+    expect(scheduler.task(task.id)).toMatchObject({ state: "ready" });
+    expect(scheduler.task(task.id)?.reservation).toBeUndefined();
+    expect(scheduler.task(task.id)?.failure).toBeUndefined();
     fleet.fleet = [machine("a", { connected: false }), machine("b")];
     await pass(scheduler);
     expect(scheduler.task(task.id)).toMatchObject({ state: "running", assignment: { deviceId: "b" } });

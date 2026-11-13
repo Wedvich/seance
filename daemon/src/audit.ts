@@ -293,6 +293,19 @@ export function passCloseAudit(
   };
 }
 
+/**
+ * An `availability` request: whether a person closed or reopened this machine, one line so a
+ * count of `open=false` is a count of closes (docs/drain.md). `open` is `-` for one that did not parse.
+ */
+export function availabilityAudit(
+  origin: SpawnOrigin,
+  sink: AuditSink,
+): (opened: boolean | null, outcome: string) => Promise<void> {
+  return async (opened, outcome) => {
+    await sink(`audit availability origin=${origin} open=${opened === null ? "-" : String(opened)} outcome=${outcome}`);
+  };
+}
+
 export interface QueueAudit {
   readonly markedDone: (id: string, task: { readonly id: string }) => Promise<void>;
   /** A `run-now` that reserved the task past the concurrency caps. */

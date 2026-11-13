@@ -37,6 +37,15 @@ export function liveStatus(machine: Pick<Machine, "connected" | "status">): Mach
   return machine.connected ? machine.status : undefined;
 }
 
+/**
+ * When the machine was closed to new scheduled work (ms), from its newest status, kept or
+ * live: closed is sticky, so a sleeping machine's last word stands. Display only; routing
+ * reads `liveStatus`.
+ */
+export function closedAt(machine: Pick<Machine, "status">): number | null {
+  return machine.status?.cl ?? null;
+}
+
 /** One exclave's login as a reader sees it; `expiresAt` is ms. */
 export type ExclaveAuth =
   | { readonly state: "ok" }

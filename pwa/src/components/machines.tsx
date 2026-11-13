@@ -2,7 +2,13 @@ import type { JSX } from "preact";
 import { useEffect, useId, useMemo, useRef, useState } from "preact/hooks";
 import { type ChartLine, chartLines } from "../chart.ts";
 import type { AccountCard, ArchivistCard, Gauge, GaugeIcon, MachineCard, MachinesView } from "../machines-view.ts";
-import { type AccountsState, type HistoryRange, type HistoryTarget, type HistoryView } from "../state.ts";
+import {
+  type AccountsState,
+  type AvailabilityState,
+  type HistoryRange,
+  type HistoryTarget,
+  type HistoryView,
+} from "../state.ts";
 import { ACCOUNT_ALIAS_MAX_LENGTH } from "@seance/shared";
 import type { ConnectionState } from "../view.ts";
 import { StrokeIcon } from "./icons.tsx";
@@ -34,6 +40,9 @@ export function MachinesScreen(props: {
   settled: boolean;
   history: HistoryView | null;
   accounts: AccountsState;
+  availability: AvailabilityState;
+  /** Asks a machine to close (false) or reopen (true); the confirm sheet for a close is this screen's. */
+  onSetOpen: (deviceId: string, open: boolean) => void;
   /** Absent in the desktop layout, where the screen is a column rather than a layer. */
   onDismiss?: () => void;
   onShowHistory: (target: HistoryTarget, range?: HistoryRange) => void;
@@ -52,6 +61,8 @@ export function MachinesScreen(props: {
     settled,
     history,
     accounts,
+    availability,
+    onSetOpen,
     onDismiss,
     onShowHistory,
     onHideHistory,
@@ -60,6 +71,8 @@ export function MachinesScreen(props: {
     onRename,
   } = props;
   const { renaming } = accounts;
+  const [closing, setClosing] = useState<string | null>(null);
+  const closingCard = closing === null ? undefined : view.cards.find((card) => card.deviceId === closing);
   // Kept while the account is briefly unreported (a sign-out in between), so a typed draft survives; Cancel or Save closes it.
   const seen = useRef<AccountCard | undefined>(undefined);
   const found = view.accounts.find((account) => account.accountId === renaming);
@@ -97,8 +110,10 @@ export function MachinesScreen(props: {
             card={card}
             history={history?.target.kind === "machine" && history.target.deviceId === card.deviceId ? history : null}
             ranges={view.ranges.machine}
+            availability={availability}
             onShowHistory={onShowHistory}
             onHideHistory={onHideHistory}
+            onToggleOpen={(open) => (open ? onSetOpen(card.deviceId, true) : setClosing(card.deviceId))}
           />
         ))}
         {archivist !== null && <ArchivistCardView card={archivist} />}
@@ -119,6 +134,16 @@ export function MachinesScreen(props: {
           />
         ))}
       </div>
+      {closingCard !== undefined && (
+        <CloseMachineDialog
+          name={closingCard.name}
+          onClose={() => setClosing(null)}
+          onConfirm={() => {
+            setClosing(null);
+            onSetOpen(closingCard.deviceId, false);
+          }}
+        />
+      )}
       {renamed !== undefined && (
         <RenameDialog
           key={renamed.accountId}
@@ -138,10 +163,19 @@ function MachineCardView(props: {
   card: MachineCard;
   history: HistoryView | null;
   ranges: readonly HistoryRange[];
+  availability: AvailabilityState;
   onShowHistory: (target: HistoryTarget, range?: HistoryRange) => void;
   onHideHistory: () => void;
+  /** The switch's new state: true reopens at once, false asks for confirmation first. */
+  onToggleOpen: (open: boolean) => void;
 }): JSX.Element {
-  const { card, history, ranges, onShowHistory, onHideHistory } = props;
+  const { card, history, ranges, availability, onShowHistory, onHideHistory, onToggleOpen } = props;
+  // The asked state shows while the request is out and until the status agrees, so neither the switch nor the badge bounces back.
+  const here = availability[card.deviceId] ?? null;
+  const asked = here?.kind === "sending" || here?.kind === "sent" ? here.open : null;
+  const switchOn = asked ?? card.openSwitch === "on";
+  const closed = here?.kind === "sent" ? !here.open : card.closed;
+  const offersMenu = card.charts || history !== null || card.openSwitch !== null;
   const target: HistoryTarget = { kind: "machine", deviceId: card.deviceId };
   const menu = useMenu();
   // Kept while a chart is open even if its source drops: the item is the chart's only close.
@@ -159,15 +193,27 @@ function MachineCardView(props: {
                 {card.role === "leader" ? "Scheduler" : "Unverified"}
               </span>
             )}
+            {closed && <span className="fleet-badge fleet-badge-closed">Closed</span>}
           </div>
           <p className="fleet-meta">{card.meta}</p>
           {card.build !== null && <p className="fleet-meta fleet-build">{card.build}</p>}
         </div>
-        {offersHistory && (
+        {offersMenu && (
           <>
             <MoreTrigger menu={menu} label={`More actions for ${card.name}`} />
             <Menu menu={menu} label={`Actions for ${card.name}`}>
-              <HistoryItem history={history} onShow={() => onShowHistory(target)} onHide={onHideHistory} />
+              {card.openSwitch !== null && (
+                <MenuSwitchItem
+                  label="Open for work"
+                  checked={switchOn}
+                  closesMenu={switchOn}
+                  onToggle={() => onToggleOpen(!switchOn)}
+                />
+              )}
+              {card.openSwitch !== null && offersHistory && <MenuDivider />}
+              {offersHistory && (
+                <HistoryItem history={history} onShow={() => onShowHistory(target)} onHide={onHideHistory} />
+              )}
             </Menu>
           </>
         )}
@@ -181,6 +227,11 @@ function MachineCardView(props: {
         </div>
       )}
 
+      {here?.kind === "failed" && (
+        <p className="fleet-note fleet-warn" role="alert">
+          {here.text}
+        </p>
+      )}
       {card.note !== null && <p className="fleet-note">{card.note}</p>}
       {card.updateNote !== null && <p className="fleet-note fleet-warn">{card.updateNote}</p>}
 
@@ -402,6 +453,26 @@ function RenameDialog(props: {
           </button>
         </div>
       </form>
+    </Sheet>
+  );
+}
+
+/** A close needs a yes: it stops the scheduler's new work landing there. Reopening needs none. */
+function CloseMachineDialog(props: { name: string; onClose: () => void; onConfirm: () => void }): JSX.Element {
+  const { name, onClose, onConfirm } = props;
+  return (
+    <Sheet title={`Close ${name}?`} variant="dialog" onClose={onClose}>
+      <div className="rename">
+        <p className="rename-hint">Closing {name} stops new work landing on it. Running work finishes where it is.</p>
+        <div className="rename-actions">
+          <button type="button" className="quiet" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="button" className="primary" onClick={onConfirm}>
+            Close
+          </button>
+        </div>
+      </div>
     </Sheet>
   );
 }

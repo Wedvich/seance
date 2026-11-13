@@ -184,6 +184,9 @@ import {
   type SpawnMode,
   type SourceInfo,
   type UpdateReport,
+  AVAILABILITY_ERROR_CODES,
+  type AvailabilityRequest,
+  type AvailabilityResponse,
 } from "./types.ts";
 
 /**
@@ -566,6 +569,8 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
   if (traitPairs.length > STATUS_MAX_TRAIT_PAIRS || new Set(traitPairs).size !== traitPairs.length) return null;
   const { drn } = value;
   if (drn !== undefined && drn !== true) return null;
+  const { cl } = value;
+  if (cl !== undefined && !(isFiniteNumber(cl) && cl > 0)) return null;
   return {
     at: value["at"],
     scan: value["scan"],
@@ -584,6 +589,7 @@ export function parseMachineStatus(value: unknown): MachineStatus | null {
     ...(tf === undefined ? {} : { tf }),
     ...(tu === undefined ? {} : { tu }),
     ...(drn === undefined ? {} : { drn }),
+    ...(cl === undefined ? {} : { cl }),
   };
 }
 
@@ -1280,6 +1286,7 @@ function parseReason(value: unknown): Reason | null {
     case "offline":
     case "status_stale":
     case "draining":
+    case "closed":
     case "task_id_unsupported":
     case "exclaves_unknown":
     case "pressure_unknown":
@@ -2188,6 +2195,27 @@ export function parsePushBranchResponse(value: unknown): PushBranchResponse | nu
     return null;
   }
   return typeof pushed === "boolean" ? { ok: true, remoteBranch, tip, pushed } : null;
+}
+
+/** `availability`, at the daemon: `now` is accepted and ignored until the drain lands, so a later client is not refused by this one. */
+export function parseAvailabilityRequest(value: unknown): AvailabilityRequest | null {
+  if (!isRecord(value) || typeof value["open"] !== "boolean") return null;
+  const { now } = value;
+  if (now !== undefined && typeof now !== "boolean") return null;
+  return { open: value["open"] };
+}
+
+/** An `availability` answer at a client: a code it does not know reads as a failure. */
+export function parseAvailabilityResponse(value: unknown): AvailabilityResponse | null {
+  if (!isRecord(value)) return null;
+  if (value["ok"] === true) {
+    const { closed } = value;
+    if (closed === null) return { ok: true, closed: null };
+    return isFiniteNumber(closed) && closed > 0 ? { ok: true, closed } : null;
+  }
+  const code = AVAILABILITY_ERROR_CODES.find((c) => c === value["code"]);
+  if (value["ok"] !== false || code === undefined || typeof value["message"] !== "string") return null;
+  return { ok: false, code, message: value["message"] };
 }
 
 /** `pass-close`, at the daemon holding the task. */

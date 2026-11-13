@@ -2326,7 +2326,8 @@
   color: var(--auto);
 }
 
-.fleet-badge-unverified {
+.fleet-badge-unverified,
+.fleet-badge-closed {
   border-color: var(--warn);
   color: var(--warn);
 }

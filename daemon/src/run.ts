@@ -21,7 +21,7 @@ import { appRelayClient } from "./app-relay.ts";
 import type { BranchStateDeps } from "./branch-state.ts";
 import { UPDATE_DRAIN_MS } from "./drain-limits.ts";
 import { attachmentsRoot, taskAttachments } from "./attachments.ts";
-import { createHandler, createLocalOps, type HandlerContext } from "./handlers.ts";
+import { createHandler, createLocalOps, type HandlerContext, type MachineAvailability } from "./handlers.ts";
 import { createFleetQuotaWriter, newestReadings } from "./fleet-quota.ts";
 import { createLeader, type Leader, type QueueStore } from "./leader.ts";
 import { startLocalSocket } from "./local-socket.ts";
@@ -45,7 +45,15 @@ import type { HostProbe, Registered } from "./telemetry.ts";
 import { createUpdater, type UpdateEffects, type Updater } from "./update.ts";
 import { createUsageRefresh, type UsageRefreshOpts } from "./usage-refresh.ts";
 import { unmatchedTraitExclaves, withTraits } from "./traits.ts";
-import { identityOfState, loadOrInitState, saveState, writeRuntime, type State } from "./state.ts";
+import {
+  closedOf,
+  identityOfState,
+  loadOrInitState,
+  saveState,
+  withoutClosed,
+  writeRuntime,
+  type State,
+} from "./state.ts";
 
 export interface DaemonHandle {
   readonly client: RelayClient;
@@ -233,6 +241,13 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   if (logProblem !== null) log.warn(logProblem);
 
   let state: State = await loadOrInitState();
+  // One write at a time, each of the latest `state`: two overlapping renames could land an older snapshot last and drop a close.
+  let saving: Promise<void> = Promise.resolve();
+  const persistState = (): Promise<void> => {
+    const run = saving.then(() => saveState(state));
+    saving = run.catch(() => {});
+    return run;
+  };
   const identity = await identityOfState(state);
   const key = await importPsk(resolved.psk);
   const now = opts.now ?? Date.now;
@@ -247,7 +262,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   const previousSha = state.lastRunSha;
   if (source !== null && previousSha !== source.sha) {
     state = { ...state, lastRunSha: source.sha };
-    await saveState(state);
+    await persistState();
   }
 
   // Read with the repos, so the blob's `exclaves` and each repo's `exclave`
@@ -322,6 +337,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         CAPABILITIES.successorSelf,
         CAPABILITIES.successorAuto,
         CAPABILITIES.amend,
+        CAPABILITIES.close,
+        CAPABILITIES.drain,
         ...(authHealth === null ? [] : [CAPABILITIES.authHealth]),
       ],
     };
@@ -374,7 +391,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     // is without a register, since every index still means the same exclave.
     if (exclaveInfoEqual(exclaves.info, registered.exclaves.info)) registered = { ...registered, exclaves };
     state = { ...state, repos: scanned, scannedAt: now() };
-    await saveState(state);
+    await persistState();
     if (changed) {
       log.info(
         `repo set or exclaves changed (${scanned.length} repos, ${exclaves.info.length} exclaves) — re-registering`,
@@ -435,7 +452,35 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   // audits through one formatter" true as surfaces are added.
   // Read late: session events start after the handler context, and a `pass-close` can only arrive once they run.
   const passClose: { arm?: NonNullable<HandlerContext["armPassClose"]> } = {};
+  // `status` is declared below: `set` runs only from a request, and those start once the relay does.
+  // One set at a time: a second request reads `was` only once the first is durable (or rolled back), so the reply and the audit line match what the disk holds.
+  let setting: Promise<unknown> = Promise.resolve();
+  const setOpen: MachineAvailability["set"] = async (open) => {
+    const was = closedOf(state);
+    if (open ? was === null : was !== null) return { closed: was, changed: false };
+    const previous = state.closed;
+    state = open ? withoutClosed(state) : { ...state, closed: { at: now() } };
+    const written = closedOf(state);
+    try {
+      await persistState();
+    } catch (err) {
+      // Only the close field: a concurrent rescan's repos stay.
+      state = previous === undefined ? withoutClosed(state) : { ...state, closed: previous };
+      throw err;
+    }
+    status.refresh();
+    return { closed: written, changed: true };
+  };
+  const availability: MachineAvailability = {
+    closed: () => closedOf(state),
+    set: (open) => {
+      const run = setting.then(() => setOpen(open));
+      setting = run.catch(() => {});
+      return run;
+    },
+  };
   const handlerCtx: HandlerContext = {
+    availability,
     armPassClose: (taskId) =>
       passClose.arm?.(taskId) ??
       Promise.resolve({ ok: false, code: "unsupported", message: "this daemon runs no session-event ingest" }),
@@ -471,6 +516,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       now,
       httpFetch,
       draining: () => endedTasks.draining,
+      closed: () => closedOf(state),
       ...(authHealth === null ? {} : { auth: () => authHealth.view() }),
       ...(traitProbes === null ? {} : { traits: (scan) => traitProbes.statusLists(scan) }),
       ...(opts.probe === undefined ? {} : { probe: opts.probe }),
@@ -597,7 +643,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       },
       report: async (report) => {
         state = { ...state, lastUpdate: report };
-        await saveState(state);
+        await persistState();
         // The register blob carries lastUpdate, so the app-visible record
         // refreshes without waiting for the next reconnect.
         await client.reRegister();
@@ -653,7 +699,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
     lastReapAt: () => state.lastReapAt,
     reaped: async (at) => {
       state = { ...state, lastReapAt: at };
-      await saveState(state);
+      await persistState();
     },
     stopped: () => stopped,
     now,

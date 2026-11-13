@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Task, TaskState } from "@seance/shared";
-import { CLOSED_OLDER, DEFAULT_FORM, RESCAN_IDLE, type Verdict } from "../src/state.ts";
+import { AVAILABILITY_IDLE, CLOSED_OLDER, DEFAULT_FORM, RESCAN_IDLE, type Verdict } from "../src/state.ts";
 import {
   screenKey,
   TRANSITION_KINDS,
@@ -37,6 +37,7 @@ function state(overrides: Partial<AppState> = {}): AppState {
     history: null,
     spawning: false,
     rescan: RESCAN_IDLE,
+    availability: AVAILABILITY_IDLE,
     verdict: null,
     held: [],
     preview: null,

@@ -78,6 +78,7 @@ export const TELEMETRY_COLLECTORS: readonly TelemetryCollector[] = [
   sessionsCollector,
   quotaCollector,
   drainCollector,
+  closedCollector,
   authCollector,
   traitCollector,
 ];
@@ -132,6 +133,14 @@ function diskIoCollector(sources: CollectorSources): Collect {
 function drainCollector(sources: CollectorSources): Collect {
   return () =>
     Promise.resolve(sources.draining?.() === true ? { fields: { drn: true }, samples: [] } : NO_CONTRIBUTION);
+}
+
+/** `cl` while a person has the machine closed: sticky, so every status carries it, the first after a restart included. No metric, as `drn`. */
+function closedCollector(sources: CollectorSources): Collect {
+  return () => {
+    const at = sources.closed?.() ?? null;
+    return Promise.resolve(at === null ? NO_CONTRIBUTION : { fields: { cl: at }, samples: [] });
+  };
 }
 
 /**

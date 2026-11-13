@@ -87,6 +87,7 @@ function start(
   draining: () => boolean,
   holds: Holds = {},
   cadence: Cadence = QUIET,
+  closed: () => number | null = () => null,
 ): { readonly loop: StatusLoop; readonly sent: Sent[] } {
   const sent: Sent[] = [];
   let reads = 0;
@@ -105,6 +106,7 @@ function start(
       httpFetch: () => Promise.reject(new Error("no network in this test")),
       probe,
       draining,
+      closed,
     },
     {
       ...cadence,
@@ -161,6 +163,31 @@ describe("startStatusLoop refresh", () => {
     expect(sent).toHaveLength(2);
     expect(sent[1]?.status).not.toHaveProperty("drn");
     expect(sent[1]?.atMs).toBe(asked);
+  });
+
+  test("a refresh after a close sends `cl`, and a reopen sends none", async () => {
+    let closedAt: number | null = null;
+    const { loop, sent } = start(
+      () => false,
+      {},
+      QUIET,
+      () => closedAt,
+    );
+    loop.sampleNow();
+    await settle();
+    expect(sent[0]?.status).not.toHaveProperty("cl");
+
+    await advance(FLOOR_MS * 1.5);
+    closedAt = Date.now();
+    loop.refresh();
+    await settle();
+    expect(sent[1]?.status.cl).toBe(closedAt);
+
+    await advance(FLOOR_MS * 1.5);
+    closedAt = null;
+    loop.refresh();
+    await settle();
+    expect(sent[2]?.status).not.toHaveProperty("cl");
   });
 
   test("stop drops a pending refresh", async () => {

@@ -299,12 +299,16 @@ export function MenuSwitchItem(props: {
   icon?: JSX.Element;
   checked: boolean;
   onToggle: () => void;
+  /** This flip opens a dialog over the menu, so the menu closes instead of staying open beneath it. */
+  closesMenu?: boolean;
 }): JSX.Element {
   const { checked } = props;
   const holdOpen = useContext(HoldMenuOpen);
+  const close = useContext(CloseMenu);
   const toggle = (event: Event): void => {
     if (!inOpenMenu(event)) return;
-    holdOpen();
+    if (props.closesMenu === true) close();
+    else holdOpen();
     props.onToggle();
   };
   return (

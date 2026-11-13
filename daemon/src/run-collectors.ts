@@ -26,6 +26,8 @@ export interface CollectorDeps {
   readonly probe?: HostProbe;
   /** `EndedTasks.draining`: the status's `drn`. */
   readonly draining?: () => boolean;
+  /** The close time (`state.closed`): the status's `cl`. */
+  readonly closed?: () => number | null;
   /** Auth health's view: the status's `ax`/`ae`/`au`. */
   readonly auth?: () => ReadonlyMap<string, AuthView>;
   /** Trait probes' pairs for the registered scan: the status's `tf`/`tu`. */
@@ -83,6 +85,7 @@ export function startStatusLoop(metrics: MetricsStore, collectors: CollectorDeps
     },
     ...(collectors.probe === undefined ? {} : { probe: collectors.probe }),
     ...(collectors.draining === undefined ? {} : { draining: collectors.draining }),
+    ...(collectors.closed === undefined ? {} : { closed: collectors.closed }),
     ...(collectors.auth === undefined ? {} : { auth: collectors.auth }),
     ...(collectors.traits === undefined ? {} : { traits: collectors.traits }),
   });

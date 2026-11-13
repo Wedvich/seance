@@ -2047,6 +2047,8 @@ export class Scheduler {
         ? {}
         : { inheritedPr: task.prUrl }),
       client: SCHEDULER_CLIENT,
+      // This leader routes a `machine_closed` refusal again; an older one would fail the task.
+      routesClosed: true,
       taskId: task.id,
     });
     // Only a confirmed spawn spent anything: a refused one must not alert or burn the window's one alert.

@@ -32,6 +32,8 @@ usage: seanced [command]
               --now: spawn on this machine right away instead: no relay, key, leader or daemon needed; takes no pin flags, --requires or --start
   continue    resume a failed or cancelled task's, or a blocked awaiting-merge task's, session in its worktree, as a new queued task: seanced continue <task-id> [-p <note>] (needs the relay, and a PSK this shell or its daemon holds)
   start       start a queued task now, past the concurrency cap (the app's Start now): seanced start <task-id> (needs the relay, and a PSK this shell or its daemon holds)
+  close       close a machine to new scheduled work, running work finishes where it is: seanced close [<machine>] (default: this one; over the relay, so needs a PSK this shell can read — a keyless box uses the PWA)
+  open        reopen a closed machine: seanced open [<machine>]
   pass        pass a running task to a successor (the app's Pass to successor): pushes its branch, ends its session, queues the task that carries on: seanced pass <task-id> (needs the relay, and a PSK this shell or its daemon holds)
   amend       change a task still waiting in the queue: seanced amend <task-id> [text…] appends to its prompt; --replace makes the text the prompt; --title, --model, --effort set those (needs the relay, and a PSK this shell or its daemon holds)
   despawn     end a session: seanced despawn <id> [--force] — asks claude to exit (keeping its worktree), kills the pane after ~5s
@@ -125,6 +127,12 @@ async function runCommand(command: string, rest: readonly string[]): Promise<voi
       break;
     case "start":
       await cli.cmdStart(rest);
+      break;
+    case "close":
+      await cli.cmdClose(rest);
+      break;
+    case "open":
+      await cli.cmdOpen(rest);
       break;
     case "pass":
       await cli.cmdPass(rest);

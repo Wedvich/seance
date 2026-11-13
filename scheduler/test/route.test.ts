@@ -182,6 +182,29 @@ describe("filter", () => {
     expect(codes(pinned.candidates.find((c) => c.deviceId === "a")!)).toEqual(["draining"]);
   });
 
+  test("closed: a machine a person closed takes no task — not by run-now past the caps, not when pinned to it", () => {
+    const closed = machine("a", { status: status({ quota: [obs(0)], cl: NOW - 1_000 }) });
+    const open = machine("b", { exclaves: [exclave("main", "org:a")] });
+    const decision = decide([closed, open]);
+    expect(decision.chosen?.deviceId).toBe("b");
+    expect(codes(decision.candidates.find((c) => c.deviceId === "a")!)).toEqual(["closed"]);
+
+    const runNow = route({
+      task: task(),
+      machines: [closed],
+      tasks: [],
+      now: NOW,
+      config: DEFAULT_CONFIG,
+      uncapped: true,
+    });
+    expect(runNow.chosen).toBeNull();
+    expect(codes(only(runNow))).toEqual(["closed"]);
+
+    const pinned = decide([closed, open], { task: task({ spec: spec({ pin: { deviceId: "a" } }) }) });
+    expect(pinned.chosen).toBeNull();
+    expect(codes(pinned.candidates.find((c) => c.deviceId === "a")!)).toEqual(["closed"]);
+  });
+
   describe("the task's own restrictions", () => {
     /** `a` holds accounts `org:a` and `org:w`; `b` and `c` hold `org:w` too, each with a clone. */
     function fleet(): Machine[] {

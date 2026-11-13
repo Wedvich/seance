@@ -40,14 +40,15 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   M3 (the durable queue in the relay's store) are built and recorded in DESIGN.md; M4 records
   decisions ahead of code, and DESIGN.md takes over each part as it lands. Read it before
   scheduler work.
+- **docs/drain.md** — spec for closing a machine to new scheduled work and draining it. Item 1
+  (close, reopen, `MachineStatus.cl`, the `closed` filter and `machine_closed` gate, the PWA switch,
+  `seanced close`/`open`, MCP `set_machine_open`) is built and recorded in DESIGN.md, "Closing a
+  machine"; the drain itself (passing the work off) is spec only. Read it before scheduler routing
+  or shutdown work.
 - **docs/leaving.md** — spec, nothing built: the daemon's sealed `leaving` note (why it is going
   away: update, restart, reboot, shutdown, sleep, unknown), how the relay keeps it, what clients
   and the leader do with it, macOS sleep/DarkWake, and the shutdown drain on a dying box. Read it
   before touching shutdown, presence or the systemd unit.
-- **docs/drain.md** — spec, nothing built: closing a machine to new work (a sticky, daemon-owned
-  state in `status`, a `closed` route filter) and draining what runs there through the successor
-  pass (the session asked to pass itself, then an outside pass, then a report of what stays). Read
-  it before touching machine availability, routing filters or the pass triggers.
 
 Like DESIGN.md, the docs/ files are part of the record: a change that alters behavior they describe
 updates them in the same commit. They are not auto-discovered — this list is how sessions find them.
@@ -263,6 +264,15 @@ green:
   labels an account only by the `account:` store key and removes rows only through the shared
   tiers' two horizon prunes (`daemon/src/metrics-tiers.ts`, the daemon's own rollup, imported,
   never copied). Don't let changes drift from them.
+- **Closing a machine is the owner's sealed act** (DESIGN.md, "Closing a machine"): the daemon answers
+  `availability` only when sealed `from: "app"` on the relay leg, parsed by `parseAvailabilityRequest`,
+  audited without a payload, and neither `LOCAL_OPS` nor `BROKER_OPS` carries it (a keyless box
+  refuses `seanced close` and points to the PWA). A `closed` it cannot read in `state.json` loads as
+  closed — in `loadOrInitState` only, `readState` stays log-free — `MachineStatus.cl` is never trimmed
+  by `fitStatus`, the gate runs after `relaunchRefusal` and before any fetch or ledger write, and
+  `SpawnRequest.routesClosed` is accepted only as `true`: a closed daemon answers `machine_closed` only
+  when it is set and `internal_error`, unrecorded, otherwise. A close is offered only to a target
+  advertising `CAPABILITIES.close` under a verified leader advertising `CAPABILITIES.drain`.
 - The daemon's local op socket (`daemon/src/local-socket.ts`) is what makes MCP's `get_sessions` and
   `despawn_session` aimed at this machine skip the relay (`spawn` stays on its allowlist only for a
   `seanced mcp` started before spawns became tasks). Its access control is the **0700 `stateDir()/run` directory**, not

@@ -51,6 +51,7 @@ import {
   type Task,
   type TaskDep,
   type TaskUntil,
+  closedAt,
   exclaveAuth,
   exclaveTraitHealth,
   exclaveTraitUnchecked,
@@ -59,6 +60,7 @@ import {
 } from "@seance/shared";
 import { appRelayClient, importAppKeys, LazyRelay, type AppKeys } from "./app-relay.ts";
 import { cliSink, traitRefusalAudit, type AuditSink } from "./audit.ts";
+import { setMachineOpen } from "./availability-client.ts";
 import {
   continueAuto,
   enqueueAuto,
@@ -308,6 +310,7 @@ function describeMachine(
   // Null when this transport has no view of the scheduler at all (a broker daemon that predates brokered scheduler access).
   const role = scheduler === null ? null : schedulerRole(machine.deviceId, scheduler);
   const { source, lastUpdate } = machine;
+  const closedMs = closedAt(machine);
   return {
     name: machine.name,
     deviceId: machine.deviceId,
@@ -344,6 +347,8 @@ function describeMachine(
     // Named so the model knows which target costs nothing to reach; get_sessions
     // and despawn_session there go straight to the daemon on this box.
     local: local !== null && machine.deviceId === local.deviceId,
+    // When a person closed it to new scheduled work, from its newest status; null while open.
+    closed: closedMs === null ? null : new Date(closedMs).toISOString(),
     ...(role === null ? {} : { scheduler: role }),
     ...(source === undefined
       ? {}
@@ -911,7 +916,7 @@ export function buildMcpServer(
     {
       title: "List machines",
       description:
-        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any, plus `account`, the name every Séance client shows for it (its alias where one is set, else the email, else a short id; tagged where two accounts would read alike; no alias on a box whose daemon brokers for it, with no readable PSK) — a display name only, never a value for pin.account — and `alias` where one is set: a spawn's pin.account takes the `accountId`, the `email` or the `alias`, not `account`; a machine with the field absent or empty reports none, so the scheduler cannot place there until its daemon updates. Each signed-in exclave's `auth` is `expired` (its login needs /login; the scheduler does not place there), `expiring` (within 3 days, with `loginExpiresAt`; still placed), `ok`, or `unknown` (not read, or the machine is asleep or its daemon older; still placed). Offline machines are listed with their last-seen time: `lastSeen` is when the machine was last heard from (its last register or status beat, whichever is later). `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that every spawn goes through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue, cancel_task, start_task and pass_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
+        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any, plus `account`, the name every Séance client shows for it (its alias where one is set, else the email, else a short id; tagged where two accounts would read alike; no alias on a box whose daemon brokers for it, with no readable PSK) — a display name only, never a value for pin.account — and `alias` where one is set: a spawn's pin.account takes the `accountId`, the `email` or the `alias`, not `account`; a machine with the field absent or empty reports none, so the scheduler cannot place there until its daemon updates. Each signed-in exclave's `auth` is `expired` (its login needs /login; the scheduler does not place there), `expiring` (within 3 days, with `loginExpiresAt`; still placed), `ok`, or `unknown` (not read, or the machine is asleep or its daemon older; still placed). Offline machines are listed with their last-seen time: `lastSeen` is when the machine was last heard from (its last register or status beat, whichever is later). `closed` is when a person closed the machine to new scheduled work (null when open). `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that every spawn goes through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue, cancel_task, start_task and pass_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
       inputSchema: NO_INPUT,
       annotations: { readOnlyHint: true },
     },
@@ -1524,6 +1529,25 @@ export function buildMcpServer(
         }
       });
     },
+  );
+
+  server.registerTool(
+    "set_machine_open",
+    {
+      title: "Close or reopen a machine",
+      description:
+        "Close a machine to new scheduled work, or reopen it. A closed machine takes no task from the scheduler (auto, pinned, run-now, continuations); running sessions finish where they are, and a direct spawn still runs. Closing needs the scheduler's leader to support it. Goes over the relay as an app-role client, this machine included, so a box whose key is service-delivered cannot send it: use the PWA's Machines screen there.",
+      inputSchema: z.strictObject({
+        machine: z.string().describe("Machine name (or deviceId) from list_machines"),
+        open: z.boolean().describe("false closes it to new scheduled work; true reopens it"),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: true },
+    },
+    async ({ machine, open }) =>
+      withFleet(async (lease) => {
+        const outcome = await setMachineOpen({ ref: machine, selfId: null, open, lease });
+        return outcome.ok ? textResult(outcome.text) : errorResult(outcome.text);
+      }),
   );
 
   server.registerTool(

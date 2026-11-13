@@ -34,6 +34,8 @@ import {
   parseArchiveTasksRequest,
   parseArchivistInfo,
   parseMachineInfo,
+  parseAvailabilityRequest,
+  parseAvailabilityResponse,
   parseMachineStatus,
   parseMetricsReply,
   parseMetricsResponse,
@@ -2244,6 +2246,34 @@ describe("M4 shapes", () => {
     expect(parseMachineStatus({ at: 1, scan: 2 })).not.toHaveProperty("drn");
     for (const drn of [false, 1, "true", null]) expect(parseMachineStatus({ at: 1, scan: 2, drn })).toBeNull();
     expect(parseDecision(decide({ code: "draining" }))?.candidates[0]?.rejected).toEqual([{ code: "draining" }]);
+  });
+
+  test("a status says when a person closed the machine only as a finite positive `cl`; an open machine says nothing", () => {
+    expect(parseMachineStatus({ at: 1, scan: 2, cl: 1_763_000_000_000 })).toEqual({
+      at: 1,
+      scan: 2,
+      cl: 1_763_000_000_000,
+    });
+    expect(parseMachineStatus({ at: 1, scan: 2 })).not.toHaveProperty("cl");
+    for (const cl of [0, -1, Number.NaN, "1", true, null])
+      expect(parseMachineStatus({ at: 1, scan: 2, cl })).toBeNull();
+    expect(parseDecision(decide({ code: "closed" }))?.candidates[0]?.rejected).toEqual([{ code: "closed" }]);
+  });
+
+  test("availability: open is required, now is accepted and dropped, a reply keeps its time or code", () => {
+    expect(parseAvailabilityRequest({ open: false })).toEqual({ open: false });
+    expect(parseAvailabilityRequest({ open: true, now: true })).toEqual({ open: true });
+    for (const bad of [null, "x", {}, { open: "false" }, { open: true, now: 1 }])
+      expect(parseAvailabilityRequest(bad)).toBeNull();
+    expect(parseAvailabilityResponse({ ok: true, closed: null })).toEqual({ ok: true, closed: null });
+    expect(parseAvailabilityResponse({ ok: true, closed: 5 })).toEqual({ ok: true, closed: 5 });
+    expect(parseAvailabilityResponse({ ok: false, code: "refused", message: "m" })).toEqual({
+      ok: false,
+      code: "refused",
+      message: "m",
+    });
+    for (const bad of [{ ok: true }, { ok: true, closed: 0 }, { ok: false, code: "nope", message: "m" }, 3])
+      expect(parseAvailabilityResponse(bad)).toBeNull();
   });
 
   test("a spec settles until merged or reported, absent read as merged; an edge may wait for done", () => {

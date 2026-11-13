@@ -71,6 +71,22 @@ export type RescanState =
 /** One shared object, so `#patch`'s identity check sees an idle rescan as unchanged. */
 export const RESCAN_IDLE: RescanState = { kind: "idle" };
 
+/**
+ * The Machines screen's "Open for work" switch, per machine: inline state on the row it was flipped
+ * on, so only that row shows it. `open` is what the person asked for. A `sent` entry holds the asked
+ * state until the machine's own status catches up (the relay's floor on status pushes is ~10 s), so
+ * the switch and badge do not flip back meanwhile; the store drops it after a bounded time.
+ */
+export type DeviceAvailability =
+  | { readonly kind: "sending"; readonly open: boolean }
+  | { readonly kind: "sent"; readonly open: boolean }
+  | { readonly kind: "failed"; readonly text: string };
+
+export type AvailabilityState = Readonly<Record<string, DeviceAvailability>>;
+
+/** One shared object, as `RESCAN_IDLE`. */
+export const AVAILABILITY_IDLE: AvailabilityState = {};
+
 export type Verdict =
   /**
    * A spawn the relay's store took. `task` is the newest copy the

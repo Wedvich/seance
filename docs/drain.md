@@ -1,8 +1,10 @@
 # Closing a machine and draining it — spec
 
-**Status: spec, nothing built.** Drafted 2026-11-13. Like docs/leaving.md, this file is the
-working record until the code lands; each part folds into DESIGN.md (Scheduler, "The library";
-Daemon; "Passing to a successor"; PWA; MCP server) as it is built, and its text here goes.
+**Status: build order item 1 (Close) is built** and recorded in DESIGN.md, "Closing a machine";
+§1, §2 and §7's reopen half below are pointers to it. Items 2 and 3 (the drain itself) are spec,
+nothing built. Drafted 2026-11-13. Like docs/leaving.md, this file is the working record until the
+code lands; each part folds into DESIGN.md (Scheduler, "The library"; Daemon; "Passing to a
+successor"; PWA; MCP server) as it is built, and its text here goes.
 
 ## Problem
 
@@ -37,7 +39,7 @@ happens when the box actually goes, and the two are complementary (§11).
 | Daemon refusal of a spawn        | `machine_closed` (`SPAWN_ERROR_CODES`)                                   |
 | App → daemon request op          | `availability` (payload `{ open: boolean; now?: boolean }`)              |
 | Successor trigger                | `succeeds.trigger: "drain"`                                              |
-| Capabilities                     | `CAPABILITIES.close` (daemon), `CAPABILITIES.drain` (leader)             |
+| Capabilities                     | `CAPABILITIES.close` (daemon), `CAPABILITIES.drain` (leader); see below  |
 | Audit origin (typed prompt)      | `drain`                                                                  |
 | CLI                              | `seanced close [<machine>] [--now] [--wait]`, `seanced open [<machine>]` |
 | MCP                              | `set_machine_open { machine, open, now? }`                               |
@@ -63,36 +65,21 @@ Everything else below is proposed, open to change at build time.
 
 ### 1. Closed is the daemon's own state, persisted, advertised in `status`
 
-- **Set by a request op**, `availability { open, now? }`, sealed `from: "app"` and checked against
-  the daemon's replay guard like `sessions`/`despawn`. The daemon writes `closed: { at }` to
-  `state.json` (absent when open), then asks the status loop for a fresh status
-  (`StatusLoop.refresh`, as the `drn` gate does), so the leader hears it within the relay's floor.
-- **`MachineStatus.cl`**: the close time, absent when open; the parser takes a finite positive
-  number only. A few bytes against the 1047 budget.
-- **Sticky.** A closed machine stays closed across daemon restarts, tmux restarts and reboots until
-  someone reopens it. A box you took down for maintenance should not take work again because it
-  booted (N2). _Rejected:_ reopening automatically when the daemon starts on a new boot id. Less
-  friction after a planned reboot, but it reopens a box you took down because it was broken.
-- _Rejected:_ a leader-owned store record (`machine:<deviceId>`). It would let you close an offline
-  machine, but it needs a new store prefix (rules, caps, a threat-model entry), and an offline
-  machine takes no work anyway. A machine that wakes and takes a task before you can close it is the
-  accepted gap. _Rejected:_ a `config.json` field. That is the operator's file, edited on the box,
-  read at start, and out of reach from a phone.
+**Built** (build order item 1): DESIGN.md, "Closing a machine" holds the op, the sticky
+`closed: { at }` in `state.json`, `MachineStatus.cl` and the rejected alternatives (a leader-owned
+store record, a `config.json` field, reopening on a new boot id). `now?` on `availability` arrives
+with item 2; item 1's request carries `open` only, and a daemon of this build accepts `now` and ignores it.
 
 ### 2. Routing: `closed` is a machine filter, and the daemon gates as well
 
-- **`closed`** joins `draining` as a machine filter on every routing path: pinned tasks,
-  `run-now`, continuations and successors included. A pinned task or a continuation (bound to its
-  machine's worktree) waits, worded "Waiting: Thad is closed". A successor can never land on the box
-  being drained, so a drain needs no `avoid` (D9's "any clone, the old one included" still holds for
-  open machines).
-- **The daemon's own gate.** A closed daemon refuses a scheduler-sealed spawn `machine_closed`. This
-  covers the seconds before the leader hears `cl` and a leader too old to read it. A drain-capable
-  leader treats `machine_closed` like `draining`: it drops the reservation and routes again on the
-  next tick, without waiting out the reservation TTL.
-- **Direct spawns still run.** A spawn the person aimed at this machine (`--now`, the PWA's direct
-  pick, Raycast) is their explicit choice; the spawn sheet shows the machine as closed. Closing is
-  about what the scheduler does, not about locking the box.
+**Built:** DESIGN.md, "Closing a machine". Two details differ from the first draft. The leader
+tells the daemon it routes closed machines (`SpawnRequest.routesClosed`), and only then does a
+closed daemon answer `machine_closed`; to a leader that does not say so it answers `internal_error`,
+unrecorded: an older leader fails a task on an unknown refusal code (`verdict`, `settle.ts`), which is why the flag exists, while `internal_error` keeps it reserved until the TTL, when `sessions` proves it never landed and it returns to `ready`. A successor can never land on the box
+being drained, so a drain needs no `avoid` (D9's "any clone, the old one included" still holds for
+open machines). The gate also looks up a live
+pane for the task first and answers `task_running`, so a retry after a lost reply never reads as
+closed.
 
 ### 3. Closing drains
 
@@ -192,7 +179,7 @@ running through the outage.
 ### 7. Reopening
 
 The switch back sends `availability { open: true }`, which clears `closed` and `cl`, and routing
-places work there again. Tasks already passed stay passed. Reopening mid-drain stops steps A and B
+places work there again (built: item 1). Tasks already passed stay passed. Reopening mid-drain stops steps A and B
 for every task not yet passed: the daemon drops pending prompts and the leader stops on `cl`'s
 absence. A prompt already typed stays typed. If that session goes on to pass itself, its successor
 may land anywhere, this box included. Harmless.
@@ -205,13 +192,17 @@ may land anywhere, this box included. Harmless.
   dismissed and be passed on, 1 session isn't a task". The
   sheet offers Close (5-min grace) or Drain now. The row then reads "Closed · moving 3 · 1 stuck",
   then "Closed · empty". Offered only when the machine advertises `close` and the verified
-  leader advertises `drain`.
+  leader advertises `drain`. (Item 1 built the switch, the Closed badge and a note on a pin to a
+  closed machine; the confirm sheet lists no counts yet, and a reopen is offered whenever the
+  machine advertises `close`.)
 - **CLI.** `seanced close [<machine>] [--now] [--wait]` and `seanced open [<machine>]`. With no
   machine argument they act on this machine. They go through the relay as app-role, like
-  `seanced pass`, so you can close Thad from the Mac.
+  `seanced pass`, so you can close Thad from the Mac. A keyless box (a daemon key delivered by the
+  service) has no app-role path, and neither the local socket nor the fleet broker carries
+  `availability`: the command refuses and points to the PWA (owner decision, 2026-11-13).
 - **MCP.** `set_machine_open { machine, open, now? }`, plus `closed` and the `drainView` counts on
-  `list_machines`. Closing ends other sessions, so the tool belongs on an explicit allowlist, never a
-  default one.
+  `list_machines`. Closing ends other sessions, so the tool stays behind Claude Code's per-tool
+  approval and is never allowlisted.
 - **Raycast:** none (spawn-only).
 
 ### 9. Threat model
@@ -231,12 +222,12 @@ may land anywhere, this box included. Harmless.
 
 ### 10. Skew
 
-| Combination                       | Behaviour                                                                                                                                                                                     |
-| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| New daemon, old leader            | Routing ignores `cl`; the daemon's gate refuses `machine_closed`. **Verify** how an old leader settles an unknown spawn code (expected: route again after the TTL). The PWA hides the switch. |
-| Old daemon, new leader            | No `close` capability, so no switch; routing never sees `cl`.                                                                                                                                 |
-| Old PWA                           | `parseMachineStatus` drops `cl`, so a closed machine looks open. Display only: routing is the leader's job.                                                                                   |
-| Successor with `trigger: "drain"` | An older leader's `parseSucceeds` holds it unreadable, as with `"quota"`. Only a drain-capable leader writes one.                                                                             |
+| Combination                       | Behaviour                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| New daemon, old leader            | Routing ignores `cl`. The gate answers a spawn without `routesClosed` `internal_error`, unrecorded: an older leader would fail the task on an unknown code, so the gate answers `internal_error`: the task stays reserved until the TTL, then `sessions` proves it never landed and it is `ready` again, and may be routed back to the closed box once per TTL, holding a cap slot there meanwhile. The PWA hides the close, offers the reopen. |
+| Old daemon, new leader            | No `close` capability, so no switch; routing never sees `cl`.                                                                                                                                                                                                                                                                                                                                                                                   |
+| Old PWA                           | `parseMachineStatus` drops `cl`, so a closed machine looks open. Display only: routing is the leader's job.                                                                                                                                                                                                                                                                                                                                     |
+| Successor with `trigger: "drain"` | An older leader's `parseSucceeds` holds it unreadable, as with `"quota"`. Only a drain-capable leader writes one.                                                                                                                                                                                                                                                                                                                               |
 
 Deploy order: daemons, then PWA/CLI. No relay change: the op rides the existing request path and
 `cl` rides the sealed status.
@@ -258,9 +249,14 @@ apart by the daemon's `origin=successor` push); stuck items by reason; time from
 
 ## Build order
 
+Capabilities: the names stay `close` and `drain`, but in item 1 `drain` means only "routes around `cl`
+and sends `routesClosed`". Items 2 and 3 each add a capability of their own (the leader's outside pass;
+the daemon's session ask), so a client gates "Drain now", the per-task counts and `now` on those, never
+on `close` or `drain`.
+
 Each PR lands on its own; ship without a soak in between.
 
-1. **Close.** Daemon state and `availability` op, `cl` in status, the `closed` filter and
+1. **Close (built).** Daemon state and `availability` op, `cl` in status, the `closed` filter and
    `machine_closed` gate, PWA switch and badge, CLI `close`/`open`, MCP. Useful alone: no new work
    lands, and running work finishes in place.
 2. **Drain, step B and C.** Leader outside pass with `trigger: "drain"`, `Task.drained`,
