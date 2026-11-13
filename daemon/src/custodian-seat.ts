@@ -241,7 +241,15 @@ export interface SeatDeps {
   readonly warn: (line: string) => void;
 }
 
-export function createCustodianSeat(d: SeatDeps): { readonly start: () => void; readonly stop: () => void } {
+export interface CustodianSeat {
+  /** Adopts what a restart left, then ticks on the interval; resolves once the adoption is done. */
+  readonly start: () => Promise<void>;
+  /** One pass now (the interval's own); a call while one runs does nothing. For tests. */
+  readonly tick: () => Promise<void>;
+  readonly stop: () => void;
+}
+
+export function createCustodianSeat(d: SeatDeps): CustodianSeat {
   const everyMs = d.settings.everyMinutes * MINUTE_MS;
   const timeoutMs = d.roundTimeoutMs ?? d.settings.roundTimeoutMinutes * MINUTE_MS;
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -352,18 +360,19 @@ export function createCustodianSeat(d: SeatDeps): { readonly start: () => void; 
   };
 
   return {
-    start: (): void => {
-      if (timer !== null) return;
+    start: (): Promise<void> => {
+      if (timer !== null) return Promise.resolve();
       busy = true;
-      void adopt()
+      timer = setInterval(() => void tick(), d.checkIntervalMs ?? CHECK_INTERVAL_MS);
+      // The daemon's stop clears it; a handle dropped without one must not hold the process open.
+      timer.unref();
+      return adopt()
         .catch((err: unknown) => d.warn(`custodian: adopting a round failed: ${String(err)}`))
         .finally(() => {
           busy = false;
         });
-      timer = setInterval(() => void tick(), d.checkIntervalMs ?? CHECK_INTERVAL_MS);
-      // The daemon's stop clears it; a handle dropped without one must not hold the process open.
-      timer.unref();
     },
+    tick,
     // Never closes the round: a reload or restart adopts it (C4).
     stop: (): void => {
       if (timer !== null) clearInterval(timer);

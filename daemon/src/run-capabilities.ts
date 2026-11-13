@@ -22,6 +22,7 @@ import {
 import {
   createCustodianSeat,
   createPick,
+  type CustodianSeat,
   custodianPlatform,
   seatEnabled,
   type CloseOutcome,
@@ -319,7 +320,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
   }
 
   // The checks are async and `Started` is sync: the seat starts once they pass, and `stop` before that cancels it.
-  let seat: ReturnType<typeof createCustodianSeat> | null = null;
+  let seat: CustodianSeat | null = null;
   let cancelled = false;
   let counted = false;
   const release = (): void => {
@@ -392,7 +393,7 @@ const custodianSeat: DaemonCapability = (ctx) => {
       audit,
       warn: (line) => log.warn(line),
     });
-    seat.start();
+    void seat.start();
   };
   void begin().catch((err: unknown) => {
     log.warn(`custodian: the seat did not start: ${String(err)}`);
