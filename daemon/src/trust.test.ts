@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureRepoTrusted } from "./trust.ts";
+import { ensureRepoTrusted, isDirTrusted } from "./trust.ts";
 
 let dir: string;
 
@@ -121,5 +121,46 @@ describe("ensureRepoTrusted", () => {
     const config = await readConfig();
     expect(config.projects?.[a]?.["hasTrustDialogAccepted"]).toBe(true);
     expect(config.projects?.[b]?.["hasTrustDialogAccepted"]).toBe(true);
+  });
+});
+
+describe("isDirTrusted", () => {
+  const roundDir = (): string => join(dir, "root", ".seance-custodian");
+
+  async function write(projects: unknown): Promise<void> {
+    await writeFile(configPath(), JSON.stringify({ projects }), { mode: 0o600 });
+  }
+
+  test("the dir's own entry, or an ancestor's, counts; neither does not", async () => {
+    await write({ [roundDir()]: { hasTrustDialogAccepted: true } });
+    expect(await isDirTrusted(roundDir(), configPath())).toBe(true);
+    await write({ [join(dir, "root")]: { hasTrustDialogAccepted: true } });
+    expect(await isDirTrusted(roundDir(), configPath())).toBe(true);
+    await write({
+      [roundDir()]: { hasTrustDialogAccepted: false },
+      [join(dir, "other")]: { hasTrustDialogAccepted: true },
+    });
+    expect(await isDirTrusted(roundDir(), configPath())).toBe(false);
+    await write({ "/": { hasTrustDialogAccepted: true } });
+    expect(await isDirTrusted(roundDir(), configPath())).toBe(true);
+  });
+
+  test("a missing file, malformed JSON and an unexpected shape are not trusted", async () => {
+    expect(await isDirTrusted(roundDir(), configPath())).toBe(false);
+    await writeFile(configPath(), "{not json");
+    expect(await isDirTrusted(roundDir(), configPath())).toBe(false);
+    await write("nope");
+    expect(await isDirTrusted(roundDir(), configPath())).toBe(false);
+    await write([roundDir()]);
+    expect(await isDirTrusted(roundDir(), configPath())).toBe(false);
+    await write({ [roundDir()]: "yes" });
+    expect(await isDirTrusted(roundDir(), configPath())).toBe(false);
+  });
+
+  test("never writes: the file's bytes and mtime are unchanged", async () => {
+    await write({ [roundDir()]: { hasTrustDialogAccepted: false } });
+    const before = { text: await readFile(configPath(), "utf8"), mtime: (await stat(configPath())).mtimeMs };
+    await isDirTrusted(roundDir(), configPath());
+    expect({ text: await readFile(configPath(), "utf8"), mtime: (await stat(configPath())).mtimeMs }).toEqual(before);
   });
 });

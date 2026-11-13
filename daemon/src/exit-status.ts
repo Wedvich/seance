@@ -83,7 +83,7 @@ export function tmuxHarvestPanes(audit: Pick<ReapAudit, "closedPane">): HarvestP
     close: async (pane) => {
       // Pane ids restart from %0 with the tmux server: the one listed may be another window's by now.
       const fresh = await paneInfo(pane.paneId);
-      if (fresh === null || !fresh.dead || fresh.windowId !== pane.windowId || fresh.taskId !== pane.taskId) return;
+      if (fresh === null || fresh.custodian || !fresh.dead || fresh.windowId !== pane.windowId || fresh.taskId !== pane.taskId) return;
       if ((await tmux(["kill-pane", "-t", pane.paneId])).exitCode !== 0) return;
       await audit.closedPane(pane.paneId, pane.windowName, "exit-status");
     },

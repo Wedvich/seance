@@ -92,6 +92,15 @@ export const CLOSED_OPTION_PREFIX = "@seance-closed-";
  */
 export const TASK_FIELD = `#{s/[${FIELD_SEP}]/-/:${TASK_OPTION}}`;
 
+/**
+ * Pane user option the custodian seat's round carries (value `1`; DESIGN.md, "The custodian's seat"). A round is
+ * never a session: every reader of panes skips a pane carrying it, and only `despawnRound` closes one.
+ */
+export const CUSTODIAN_OPTION = "@seance-custodian";
+
+/** `CUSTODIAN_OPTION` as a format field, sanitised like `TASK_FIELD`: read raw and compared to `"1"`. */
+export const CUSTODIAN_FIELD = `#{s/[${FIELD_SEP}]/-/:${CUSTODIAN_OPTION}}`;
+
 /** Window names reach us as unvalidated wire text; a separator inside one would misparse its pane line. */
 export function sanitizeWindowName(name: string): string {
   return name.replaceAll(FIELD_SEP, "-");

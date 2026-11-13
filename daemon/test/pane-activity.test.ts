@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPaneActivity, type PaneActivityTracker } from "../src/pane-activity.ts";
 import { readPanePids } from "../src/session-events.ts";
-import { capturePane, tmuxOk } from "../src/tmux.ts";
+import { capturePane, CUSTODIAN_OPTION, tmuxOk } from "../src/tmux.ts";
 import { pollUntil, usePrivateTmux, type PrivateTmux } from "./fixtures.ts";
 
 /**
@@ -84,4 +84,33 @@ test("an ours pane is sampled and a hand-started one is not; a screen change mov
   clock += 60_000;
   await tracker.sample();
   expect(tracker.activity(ours)).toBeNull();
+});
+
+test("a custodian round is never sampled, and all() lists exactly the tracked panes", async () => {
+  const spawnOurs = async (name: string): Promise<string> =>
+    (
+      await tmuxOk([
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        "act:",
+        "-n",
+        name,
+        `: --remote-control; printf '${name}\\n'; exec sleep 600`,
+      ])
+    ).trim();
+  const session = await spawnOurs("session");
+  const round = await spawnOurs("round");
+  await tmuxOk(["set-option", "-p", "-t", round, CUSTODIAN_OPTION, "1"]);
+  await pollUntil(() => screenShows(session, "session"), "the session pane printed");
+  await pollUntil(() => screenShows(round, "round"), "the round pane printed");
+
+  clock += 60_000;
+  await tracker.sample();
+  expect(tracker.activity(round)).toBeNull();
+  expect(tracker.activity(session)).not.toBeNull();
+  expect(tracker.all().map((entry) => entry.pane)).toEqual([session]);
 });

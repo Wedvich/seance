@@ -593,8 +593,9 @@ async function reapPanes(opts: ReapOptions, now: number): Promise<Pick<ReapRepor
     // Looked at again right before the key: Enter on anything but the prompt
     // would send whatever draft that pane holds.
     const fresh = await paneInfo(pane.paneId);
-    // Gone on its own: reap closed nothing, so it neither reports nor audits it.
-    if (fresh === null) return null;
+    // Gone on its own: reap closed nothing, so it neither reports nor audits it. A round on a reused `%n` is no pane
+    // of reap's either (C10).
+    if (fresh === null || fresh.custodian) return null;
     const current = await classifyPane(fresh);
     if (current !== "exit-prompt") return { open: { ...note, state: current } };
     await answerKeepWorktree(pane.paneId);
@@ -614,7 +615,7 @@ async function exits(paneId: string): Promise<boolean> {
   for (;;) {
     // oxlint-disable-next-line no-await-in-loop -- polling
     const pane = await paneInfo(paneId);
-    if (pane === null || pane.dead) return true;
+    if (pane === null || pane.custodian || pane.dead) return true;
     if (Date.now() >= deadline) return false;
     // oxlint-disable-next-line no-await-in-loop
     await Bun.sleep(100);

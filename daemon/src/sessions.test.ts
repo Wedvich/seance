@@ -18,8 +18,9 @@ function line(
   ours: "0" | "1" = "0",
   pane = `%${id.slice(1)}`,
   task = "",
+  custodian: "0" | "1" = "0",
 ): string {
-  return `${pane}|${id}|${name}|${cmd}|${ours}|${titled}|${task}|${path}`;
+  return `${pane}|${id}|${name}|${cmd}|${ours}|${titled}|${task}|${custodian}|${path}`;
 }
 
 describe("parsePanes", () => {
@@ -57,8 +58,16 @@ describe("parsePanes", () => {
   });
 
   test("a tmux too old for the title format lists nothing rather than everything", () => {
-    const literal = `%1|@1|seance|claude|1|#{?pane_title,#{?#{==:#{pane_title},#{host}},0,1},0}|/Users/m/repos/seance`;
+    const literal = `%1|@1|seance|claude|1|#{?pane_title,#{?#{==:#{pane_title},#{host}},0,1},0}||0|/Users/m/repos/seance`;
     expect(parsePanes(literal, repos)).toEqual([]);
+  });
+
+  test("the seat's round is not a session, however it is titled", () => {
+    const raw = [
+      line("@1", "custodian", "claude", "1", "/Users/m/.seance/custodian/cwd", "1", "%1", "", "1"),
+      line("@2", "seance", "claude", "1", "/Users/m/repos/seance", "1"),
+    ].join("\n");
+    expect(parsePanes(raw, repos).map((s) => s.window)).toEqual(["seance"]);
   });
 
   test("dedups grouped-session repeats and split panes by window id", () => {
@@ -153,6 +162,7 @@ interface InfoLine {
   readonly name?: string;
   readonly task?: string;
   readonly pid?: string;
+  readonly custodian?: string;
   readonly path?: string;
 }
 
@@ -171,6 +181,7 @@ function infoLine(fields: InfoLine): string {
     fields.name ?? "task",
     fields.task ?? "",
     fields.pid ?? "4242",
+    fields.custodian ?? "",
     fields.path ?? "/Users/m/repos/seance",
   ].join("|");
 }
@@ -194,6 +205,7 @@ describe("parsePaneInfo", () => {
         command: "claude",
         path: "/Users/m/repos/seance",
         taskId: null,
+        custodian: false,
         pid: 4242,
       },
       {
@@ -208,6 +220,7 @@ describe("parsePaneInfo", () => {
         command: "claude",
         path: "/Users/m/repos/seance",
         taskId: null,
+        custodian: false,
         // A dead pane's pid is the reaped process's, maybe someone else's by now.
         pid: null,
       },
@@ -259,6 +272,17 @@ describe("parsePaneInfo", () => {
 
   test("a separator inside the path keeps the line parseable", () => {
     expect(parsePaneInfo(infoLine({ pane: "%1", path: "/tmp/a|b" }))[0]?.path).toBe("/tmp/a|b");
+  });
+
+  test("reads the custodian option, and a separator in the path still parses after it", () => {
+    const raw = [
+      infoLine({ pane: "%1", window: "@1", custodian: "1", path: "/tmp/a|b" }),
+      infoLine({ pane: "%2", window: "@2", custodian: "" }),
+    ].join("\n");
+    expect(parsePaneInfo(raw).map((pane) => [pane.paneId, pane.custodian, pane.path])).toEqual([
+      ["%1", true, "/tmp/a|b"],
+      ["%2", false, "/Users/m/repos/seance"],
+    ]);
   });
 
   test("tolerates malformed lines and a trailing newline", () => {

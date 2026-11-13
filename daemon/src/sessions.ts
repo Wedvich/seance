@@ -1,7 +1,7 @@
 import { constants } from "node:os";
 import { EXIT_STATUS_MAX, isTaskId, type RepoEntry, type SessionEntry } from "@seance/shared";
 import { enclosingWorktreeCommonDir, resolveCommonDir } from "./gitdir.ts";
-import { capturePane, FIELD_SEP, listAllPanes, OURS, PANE_TITLED, TASK_FIELD, tmux } from "./tmux.ts";
+import { capturePane, CUSTODIAN_FIELD, FIELD_SEP, listAllPanes, OURS, PANE_TITLED, TASK_FIELD, tmux } from "./tmux.ts";
 
 // What tmux reports as a claude pane's foreground command depends on the host,
 // not on claude: macOS tmux reads the kernel's comm, the *resolved* executable's
@@ -108,10 +108,12 @@ function registeredPanes(raw: string): readonly Pane[] {
   const panes: Pane[] = [];
   for (const line of raw.split("\n")) {
     // Path last and taken as the remainder: a separator inside it can't shift the fields.
-    const [paneId, windowId, windowName, command, ours, titled, task, ...rest] = line.split(FIELD_SEP);
+    const [paneId, windowId, windowName, command, ours, titled, task, custodian, ...rest] = line.split(FIELD_SEP);
     const panePath = rest.join(FIELD_SEP);
     if (paneId === undefined || windowId === undefined || windowName === undefined || command === undefined) continue;
     if (panePath === "") continue;
+    // The seat's round is never a session (C10): not listed, whatever its title says.
+    if (custodian === "1") continue;
     // Grouped sessions repeat every window; splits repeat the window id too.
     if (seen.has(windowId)) continue;
     if (!isRegistered({ ours: ours === "1", titled: titled === "1", command })) continue;
@@ -149,6 +151,8 @@ export interface PaneInfo {
   readonly path: string;
   /** The `taskId` the pane was spawned with (`TASK_OPTION`); null for none. */
   readonly taskId: string | null;
+  /** Carries `@seance-custodian`: the seat's round, never a session. */
+  readonly custodian: boolean;
   /** Its process's pid while alive; null once dead, when tmux still reports the reaped one (`despawn.ts`). */
   readonly pid: number | null;
 }
@@ -188,6 +192,7 @@ const PANE_INFO_FORMAT = [
   `#{s/[${FIELD_SEP}]/-/:window_name}`,
   TASK_FIELD,
   "#{pane_pid}",
+  CUSTODIAN_FIELD,
   "#{pane_current_path}",
 ].join(FIELD_SEP);
 
@@ -209,6 +214,7 @@ export function parsePaneInfo(raw: string): readonly PaneInfo[] {
       windowName,
       task,
       pid,
+      custodian,
       ...rest
     ] = line.split(FIELD_SEP);
     if (paneId === undefined || windowId === undefined || command === undefined || dead === undefined) continue;
@@ -218,7 +224,8 @@ export function parsePaneInfo(raw: string): readonly PaneInfo[] {
       deadSignal === undefined ||
       windowName === undefined ||
       task === undefined ||
-      pid === undefined
+      pid === undefined ||
+      custodian === undefined
     )
       continue;
     if (rest.length === 0) continue;
@@ -238,6 +245,7 @@ export function parsePaneInfo(raw: string): readonly PaneInfo[] {
       command,
       path: rest.join(FIELD_SEP),
       taskId: taskIdFrom(task),
+      custodian: custodian === "1",
       pid: dead !== "1" && /^[1-9]\d{0,9}$/u.test(pid) ? Number(pid) : null,
     });
   }
@@ -270,7 +278,7 @@ function signalNumber(raw: string): number | null {
  * for none.
  */
 export async function listPanes(): Promise<readonly PaneInfo[]> {
-  return parsePaneInfo(await listAllPanes(PANE_INFO_FORMAT));
+  return parsePaneInfo(await listAllPanes(PANE_INFO_FORMAT)).filter((pane) => !pane.custodian);
 }
 
 /**
@@ -384,7 +392,8 @@ export async function listClaudeSessions(repos: readonly RepoEntry[]): Promise<r
     // substitutes the separator out of them before the line reaches us.
     `#{pane_id}${FIELD_SEP}#{window_id}${FIELD_SEP}#{s/[${FIELD_SEP}]/-/:window_name}${FIELD_SEP}` +
       `#{pane_current_command}${FIELD_SEP}` +
-      `${OURS}${FIELD_SEP}${PANE_TITLED}${FIELD_SEP}${TASK_FIELD}${FIELD_SEP}#{pane_current_path}`,
+      `${OURS}${FIELD_SEP}${PANE_TITLED}${FIELD_SEP}${TASK_FIELD}${FIELD_SEP}${CUSTODIAN_FIELD}${FIELD_SEP}` +
+      "#{pane_current_path}",
   );
   const panes = registeredPanes(stdout);
   const [paneCommonDirs, repoCommonDirs] = await Promise.all([

@@ -159,10 +159,12 @@ describe("per-pane retention (custodian C15)", () => {
 
 test("parsePanePids dedupes grouped panes, validates the task, reads ours, and keeps a separator in the path", () => {
   const raw = [
-    "%1|100|0|task-1|1|/a|b",
-    "%1|100|0|task-1|1|/a|b",
-    "%2|200|1||0|/c",
-    "%3|300|0|bad task|1|/d",
+    "%1|100|0|task-1|1||/a|b",
+    "%1|100|0|task-1|1||/a|b",
+    "%2|200|1||0||/c",
+    "%3|300|0|bad task|1||/d",
+    // The seat's round binds nothing (C10).
+    "%4|400|0|||1|1|/e",
     "junk",
   ].join("\n");
   expect(parsePanePids(raw)).toEqual([

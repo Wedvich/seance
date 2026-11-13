@@ -1,4 +1,6 @@
 import { rename, stat, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
+import { isRecord } from "@seance/shared";
 import { log } from "./log.ts";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -65,5 +67,28 @@ async function ensureNow(configPath: string, repoPath: string, memoKey: string):
   } catch (err) {
     // unreadable config or fs error — not memoized, so the next spawn retries
     log.warn(`could not pre-trust ${repoPath}: ${String(err)}`);
+  }
+}
+
+/**
+ * Whether Claude Code would start in `dir` without its trust dialog: `projects[<path>].hasTrustDialogAccepted` for the
+ * dir's own entry or an ancestor's (the custodian spec's verified rule). Read-only, silent and false on anything
+ * unreadable: the custodian's round dir is never pre-trusted by the daemon, because `.claude.json` races every
+ * running session's own rewrite of it (DESIGN.md, "Exclaves"); the owner trusts it once, which `seanced doctor`
+ * says. Never logs: nothing the seat reads from there reaches a log.
+ */
+export async function isDirTrusted(dir: string, configFile: string): Promise<boolean> {
+  let projects: unknown;
+  try {
+    const config: unknown = await Bun.file(configFile).json();
+    projects = isRecord(config) ? config["projects"] : undefined;
+  } catch {
+    return false;
+  }
+  if (!isRecord(projects)) return false;
+  for (let at = dir; ; at = dirname(at)) {
+    const entry = projects[at];
+    if (isRecord(entry) && entry["hasTrustDialogAccepted"] === true) return true;
+    if (dirname(at) === at) return false;
   }
 }

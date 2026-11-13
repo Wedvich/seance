@@ -32,6 +32,11 @@ export interface PaneActivity {
   readonly sampledAt: number | null;
 }
 
+/** One tracked pane's activity with its id: what the custodian seat's due check reads (`all`). */
+export interface TrackedActivity extends PaneActivity {
+  readonly pane: string;
+}
+
 /** A pane as the tracker needs it; `BoundPane` (`session-events.ts`) is one. */
 export interface TrackedPane {
   readonly id: string;
@@ -56,6 +61,8 @@ export interface PaneActivityTracker {
   readonly sample: () => Promise<void>;
   /** Null for a pane not tracked: not `ours`, gone, or neither sampled nor heard from yet. */
   readonly activity: (paneId: string) => PaneActivity | null;
+  /** Every tracked pane's activity, for the custodian seat's due check (C14). */
+  readonly all: () => readonly TrackedActivity[];
   /** Samples at once, then every `intervalMs`; a call while running does nothing. */
   readonly start: () => void;
   /**
@@ -200,6 +207,15 @@ export function createPaneActivity(deps: PaneActivityDeps): PaneActivityTracker 
         sampledAt: entry.sampledAt,
       };
     },
+    all: (): readonly TrackedActivity[] =>
+      [...entries].map(([pane, entry]) => ({
+        pane,
+        state: entry.state,
+        stateSince: entry.stateSince,
+        turnEnded: entry.turnEnded,
+        screenSince: entry.screenSince,
+        sampledAt: entry.sampledAt,
+      })),
     start: (): void => {
       if (timer !== null) return;
       void sample().catch(() => {});
