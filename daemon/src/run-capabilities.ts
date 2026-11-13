@@ -10,6 +10,7 @@ import type { ExclaveScan } from "./exclaves.ts";
 import { platformFsmonitor } from "./fsmonitor.ts";
 import { createDrainAsk, drainInputShows, sendKeys, type DrainAsk } from "./drain-ask.ts";
 import { pushForTask } from "./handlers.ts";
+import { createPaneActivity } from "./pane-activity.ts";
 import { createHandOff, createPassClose } from "./handoff.ts";
 import { sourceOf, type Leader } from "./leader.ts";
 import type { LocalSocketOpts } from "./local-socket.ts";
@@ -22,10 +23,12 @@ import {
   createSessionEvents,
   listPanePids,
   peerBindingProblem,
+  readPanePids,
   type EndedTasks,
   type SessionEvents,
 } from "./session-events.ts";
 import type { Fetch } from "./seams.ts";
+import { capturePane } from "./tmux.ts";
 import type { TraitProbes } from "./trait-probes.ts";
 import type { UsageRefresh } from "./usage-refresh.ts";
 
@@ -124,6 +127,11 @@ const sessionEvents: DaemonCapability = (ctx) => {
   // Without a despawn nothing could close a passed session, so no ask is wired (as for the pass itself).
   // `events` is built from the ask's own `observe`, and the ask reads its `marked`: bound late.
   const late: { events?: SessionEvents } = {};
+  // The custodian's per-pane facts (C15). No reader yet: the due check and its `sessions` verb are later PRs.
+  const paneActivity = createPaneActivity({
+    panes: readPanePids,
+    capture: (paneId) => capturePane(paneId, { history: false }),
+  });
   const drainAsk =
     despawn === undefined
       ? undefined
@@ -191,11 +199,14 @@ const sessionEvents: DaemonCapability = (ctx) => {
     // Activity is when a reading matters; the refresh spawns only if it is stale.
     onActivity: (exclave) => ctx.usageRefresh?.poke(exclave),
     ...(drainAsk === undefined ? {} : { onState: drainAsk.observe, drainMark: (): boolean => ctx.closed() !== null }),
+    retain: paneActivity.observe,
   });
   late.events = events;
   drainAsk?.start();
+  paneActivity.start();
   return {
     stop: (): void => {
+      paneActivity.stop();
       drainAsk?.stop();
       events.stop();
     },
