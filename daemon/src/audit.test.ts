@@ -8,6 +8,7 @@ import {
   availabilityAudit,
   brokerAudit,
   cliSink,
+  drainAskAudit,
   ensureAuditLog,
   enqueueAudit,
   spawnAudit,
@@ -123,6 +124,34 @@ describe("availability audit lines", () => {
       "audit availability origin=relay open=false outcome=closed",
       "audit availability origin=relay open=true outcome=reopened",
       "audit availability origin=relay open=- outcome=invalid_request",
+    ]);
+  });
+
+  test("now=true is appended only when it was set, so every other line is byte-identical", async () => {
+    const out: string[] = [];
+    const audit = availabilityAudit("relay", (line) => void out.push(line));
+    await audit(false, "closed", true);
+    await audit(false, "closed", false);
+    await audit(false, "unchanged", undefined);
+    expect(out).toEqual([
+      "audit availability origin=relay open=false outcome=closed now=true",
+      "audit availability origin=relay open=false outcome=closed",
+      "audit availability origin=relay open=false outcome=unchanged",
+    ]);
+  });
+});
+
+describe("drain ask audit lines", () => {
+  test("one line per act: origin drain, the quoted task, the outcome, and never a pane or text", async () => {
+    const out: string[] = [];
+    const audit = drainAskAudit((line) => void out.push(line));
+    await audit("t-1", "typed");
+    await audit('t"2', "interrupted");
+    await audit("t-3", "skipped");
+    expect(out).toEqual([
+      'audit drain origin=drain task="t-1" outcome=typed',
+      'audit drain origin=drain task="t\\"2" outcome=interrupted',
+      'audit drain origin=drain task="t-3" outcome=skipped',
     ]);
   });
 });

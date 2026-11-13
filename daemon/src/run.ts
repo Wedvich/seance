@@ -33,6 +33,7 @@ import type { PrPollerOpts } from "./pr-status.ts";
 import { RelayClient } from "./relay-client.ts";
 import { createAuthHealth, type AuthHealthDeps } from "./auth-health.ts";
 import { createTraitProbes, hasProbe, type TraitProbesDeps } from "./trait-probes.ts";
+import type { DrainAsk } from "./drain-ask.ts";
 import { startCapabilities } from "./run-capabilities.ts";
 import { startStatusLoop } from "./run-collectors.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
@@ -342,6 +343,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         CAPABILITIES.close,
         CAPABILITIES.drain,
         CAPABILITIES.drainPass,
+        CAPABILITIES.drainAsk,
         ...(authHealth === null ? [] : [CAPABILITIES.authHealth]),
       ],
     };
@@ -455,10 +457,12 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   // audits through one formatter" true as surfaces are added.
   // Read late: session events start after the handler context, and a `pass-close` can only arrive once they run.
   const passClose: { arm?: NonNullable<HandlerContext["armPassClose"]> } = {};
+  // Read late for the same reason: a close can land before the session events start, and `start()` covers it.
+  const drainAsk: { ask?: DrainAsk } = {};
   // `status` is declared below: `set` runs only from a request, and those start once the relay does.
   // One set at a time: a second request reads `was` only once the first is durable (or rolled back), so the reply and the audit line match what the disk holds.
   let setting: Promise<unknown> = Promise.resolve();
-  const setOpen: MachineAvailability["set"] = async (open) => {
+  const setOpen = async (open: boolean): ReturnType<MachineAvailability["set"]> => {
     const was = closedOf(state);
     if (open ? was === null : was !== null) return { closed: was, changed: false };
     const previous = state.closed;
@@ -476,8 +480,14 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   };
   const availability: MachineAvailability = {
     closed: () => closedOf(state),
-    set: (open) => {
-      const run = setting.then(() => setOpen(open));
+    set: (open, now) => {
+      // After the write is durable, inside the serialized chain; an unchanged close still reaches the ask, so `now` applies to an already-closed machine.
+      const run = setting.then(async () => {
+        const result = await setOpen(open);
+        if (!open && result.closed !== null) void drainAsk.ask?.closed(result.closed, now === true);
+        else if (open && result.changed) drainAsk.ask?.reopened();
+        return result;
+      });
       setting = run.catch(() => {});
       return run;
     },
@@ -706,6 +716,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       await persistState();
     },
     stopped: () => stopped,
+    closed: () => closedOf(state),
     now,
     httpFetch,
     ...(opts.rescanIntervalMs === undefined ? {} : { rescanIntervalMs: opts.rescanIntervalMs }),
@@ -714,6 +725,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   });
 
   passClose.arm = capabilities.armPassClose;
+  drainAsk.ask = capabilities.drainAsk;
 
   // After the relay leg, because the local surface is the optional one: it never
   // throws, and a box that cannot bind it still serves every phone.

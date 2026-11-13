@@ -103,7 +103,7 @@ export interface HandlerContext {
 export interface MachineAvailability {
   readonly closed: () => number | null;
   /** Persists, then refreshes status; `changed` false when it already was. Throws when the write fails. */
-  readonly set: (open: boolean) => Promise<{ readonly closed: number | null; readonly changed: boolean }>;
+  readonly set: (open: boolean, now?: boolean) => Promise<{ readonly closed: number | null; readonly changed: boolean }>;
 }
 
 /** What the handlers need of `attachments.ts`, bound to the daemon's own relay origin, token and key. */
@@ -680,7 +680,7 @@ async function handlePassClose(
 /**
  * `availability`: close this machine to new scheduled work, or reopen it. Only an app may say so, on the
  * relay leg: never the scheduler (a leader must not close a box), never the local socket. It writes the
- * machine's own sticky `closed` and refreshes `status`; `now` is accepted and ignored until the drain.
+ * machine's own sticky `closed` and refreshes `status`; `now` moves the drain ask's interrupt deadline to now (ignored on an open).
  */
 async function handleAvailability(
   ctx: HandlerContext,
@@ -699,15 +699,15 @@ async function handleAvailability(
     return { ok: false, code: "invalid_request", message: "malformed availability request" };
   }
   if (ctx.availability === undefined) {
-    await audit(request.open, "unsupported");
+    await audit(request.open, "unsupported", request.now);
     return { ok: false, code: "unsupported", message: "this daemon cannot be closed" };
   }
   try {
-    const { closed, changed } = await ctx.availability.set(request.open);
-    await audit(request.open, !changed ? "unchanged" : request.open ? "reopened" : "closed");
+    const { closed, changed } = await ctx.availability.set(request.open, request.now === true);
+    await audit(request.open, !changed ? "unchanged" : request.open ? "reopened" : "closed", request.now);
     return { ok: true, closed };
   } catch (err) {
-    await audit(request.open, "internal_error");
+    await audit(request.open, "internal_error", request.now);
     log.error(`availability: could not save state: ${String(err)}`);
     return { ok: false, code: "internal_error", message: "could not save this machine's state" };
   }

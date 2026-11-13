@@ -1766,3 +1766,184 @@ describe("a session's own pass", () => {
     });
   });
 });
+
+describe("the drain ask's hooks", () => {
+  const PR = "https://github.com/a/b/pull/1";
+  const TIP = "b".repeat(40);
+  const SITE = { repo: "/r", path: "/r/.claude/worktrees/x", session: SESSION };
+  const PUSHED: PushBranchResponse = { ok: true, remoteBranch: "feature/x", tip: TIP, pushed: true };
+  type State = [string, string, string, boolean, string | undefined, boolean];
+
+  function setup(opts: { readonly drain?: boolean; readonly closeSettles?: Promise<void> } = {}) {
+    const ledger = LaunchLedger.memory();
+    const ended = new EndedTasks(ledger);
+    const panes: BoundPane[] = [
+      { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" },
+      { id: "%2", pid: 20, dead: false, taskId: null, path: "/home" },
+    ];
+    const states: State[] = [];
+    const passes: SessionPass[] = [];
+    const forwarded: SessionEvent[] = [];
+    const events = createSessionEvents({
+      panes: () => Promise.resolve(panes),
+      exclaves: () => [],
+      forward: (event) => forwarded.push(event),
+      ended,
+      coalesceMs: 60_000,
+      hostNamesPeers: () => false,
+      handOff: () => opts.closeSettles ?? Promise.resolve(),
+      pass: {
+        push: () => Promise.resolve(PUSHED),
+        send: (pass) => {
+          passes.push(pass);
+          return Promise.resolve(true);
+        },
+        close: () => opts.closeSettles ?? Promise.resolve(),
+      },
+      onState: (pane, taskId, state, turnEnded, reason, closing) => {
+        states.push([pane, taskId, state, turnEnded, reason, closing]);
+      },
+      ...(opts.drain === undefined ? {} : { drainMark: () => opts.drain === true }),
+    });
+    const send = (pane: string, fields: object): Promise<unknown> => events.handle(frame({ pane, ...fields }), null);
+    const launch = async (): Promise<void> => {
+      await ledger.record("t1");
+      await ledger.note("t1", { ...SITE, prUrl: PR });
+    };
+    return { ledger, ended, panes, states, passes, forwarded, events, send, launch };
+  }
+
+  test("a session pass carries drain only while the machine is closed", async () => {
+    for (const drain of [true, false, undefined]) {
+      const { launch, passes, send, events } = setup(drain === undefined ? {} : { drain });
+      try {
+        await launch();
+        await send("%1", { pass: true, record: "r" });
+        expect(passes).toHaveLength(1);
+        expect("drain" in (passes[0] ?? {})).toBe(drain === true);
+        if (drain === true) expect(passes[0]).toMatchObject({ drain: true });
+      } finally {
+        events.stop();
+      }
+    }
+  });
+
+  test("onState sees every bound, tasked frame, including ones the outbox coalesces, and nothing else", async () => {
+    const { launch, states, forwarded, send, events } = setup();
+    try {
+      await launch();
+      await send("%1", { state: "busy" });
+      await send("%1", { state: "needs-input", reason: "question" });
+      await send("%1", { state: "idle", turnEnded: true });
+      await send("%1", { state: "idle" });
+      // Untasked pane, an unbound pane, a frame with no state: nothing.
+      await send("%2", { state: "busy" });
+      await send("%9", { state: "busy" });
+      await send("%1", {});
+      expect(states).toEqual([
+        ["%1", "t1", "busy", false, undefined, false],
+        ["%1", "t1", "needs-input", false, "question", false],
+        ["%1", "t1", "idle", true, undefined, false],
+        ["%1", "t1", "idle", false, undefined, false],
+      ]);
+      // The 60 s window coalesced the outbox: fewer events went on than frames were seen.
+      expect(forwarded.length).toBeLessThan(4);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("a hand-off mark fires on the turn-ended idle: onState says closing, and marked holds until the close settles", async () => {
+    const settles = Promise.withResolvers<void>();
+    const { launch, states, send, events } = setup({ closeSettles: settles.promise });
+    try {
+      await launch();
+      expect(events.marked("%1")).toBe(false);
+      await send("%1", { handoff: true });
+      expect(events.marked("%1")).toBe(true);
+      await send("%1", { state: "idle", turnEnded: true });
+      expect(states.at(-1)).toEqual(["%1", "t1", "idle", true, undefined, true]);
+      // The mark was consumed, but the despawn has not written its own: still marked.
+      expect(events.marked("%1")).toBe(true);
+      settles.resolve();
+      await pollUntil(() => !events.marked("%1"), "the close settled and the pane unmarked");
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("a confirmed pass close likewise: closing on the turn's end, marked until it settles", async () => {
+    const settles = Promise.withResolvers<void>();
+    const { launch, states, send, events } = setup({ closeSettles: settles.promise });
+    try {
+      await launch();
+      await send("%1", { pass: true, record: "r" });
+      expect(events.marked("%1")).toBe(true);
+      await events.armPassClose("t1");
+      await send("%1", { state: "idle", turnEnded: true });
+      expect(states.at(-1)).toEqual(["%1", "t1", "idle", true, undefined, true]);
+      expect(events.marked("%1")).toBe(true);
+      settles.resolve();
+      await pollUntil(() => !events.marked("%1"), "the close settled and the pane unmarked");
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("the leader's pass-close landing after the turn ended closes at once, and is marked as well", async () => {
+    const settles = Promise.withResolvers<void>();
+    const { launch, send, events } = setup({ closeSettles: settles.promise });
+    try {
+      await launch();
+      await send("%1", { pass: true, record: "r" });
+      await send("%1", { state: "idle", turnEnded: true });
+      await events.armPassClose("t1");
+      expect(events.marked("%1")).toBe(true);
+      settles.resolve();
+      await pollUntil(() => !events.marked("%1"), "the close settled and the pane unmarked");
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("an ended frame clears a hand-off mark; marked is then false", async () => {
+    const { launch, send, events } = setup();
+    try {
+      await launch();
+      await send("%1", { handoff: true });
+      expect(events.marked("%1")).toBe(true);
+      await send("%1", { state: "ended" });
+      expect(events.marked("%1")).toBe(false);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("askable: a worktree launch only, not reported done, not closed here, and one the ledger holds", async () => {
+    const ledger = LaunchLedger.memory();
+    const ended = new EndedTasks(ledger);
+    expect(ended.askable("none")).toBe(false);
+
+    await ledger.record("here");
+    expect(ended.askable("here")).toBe(false);
+
+    await ledger.record("wt");
+    await ledger.note("wt", SITE);
+    expect(ended.askable("wt")).toBe(true);
+
+    await ledger.record("done");
+    await ledger.note("done", SITE);
+    await ended.noteReported("done");
+    expect(ended.askable("done")).toBe(false);
+
+    await ledger.record("closing");
+    await ledger.note("closing", SITE);
+    await ended.closing("closing");
+    expect(ended.askable("closing")).toBe(false);
+
+    await ledger.record("handed");
+    await ledger.note("handed", SITE);
+    await ended.handingOff("handed");
+    expect(ended.askable("handed")).toBe(false);
+  });
+});

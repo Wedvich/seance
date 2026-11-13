@@ -1456,11 +1456,13 @@ describe("a scheduler spawn that continues a failed task", () => {
 
 describe("a closed machine", () => {
   /** A plain object stub: the injected seam, not mocked package code. */
+  const sets: { open: boolean; now: boolean | undefined }[] = [];
   function availabilityStub(initial: number | null = null): MachineAvailability {
     let closed = initial;
     return {
       closed: () => closed,
-      set: (open) => {
+      set: (open, now) => {
+        sets.push({ open, now });
         const was = closed;
         if (open ? was === null : was !== null) return Promise.resolve({ closed: was, changed: false });
         closed = open ? null : Date.now();
@@ -1642,8 +1644,29 @@ describe("a closed machine", () => {
       expect(logged()).toContain('audit request origin=relay op="availability"');
       expect(trail()).toEqual([
         "audit availability origin=relay open=false outcome=closed",
-        "audit availability origin=relay open=false outcome=unchanged",
+        "audit availability origin=relay open=false outcome=unchanged now=true",
         "audit availability origin=relay open=true outcome=reopened",
+      ]);
+    });
+
+    test("now reaches set and the audit line only when asked; on an open it is passed and harmless", async () => {
+      sets.length = 0;
+      const handle = createHandler({ ...ctx, availability: availabilityStub() });
+      await handle(ask(false), APP_ID);
+      await handle(ask(false, { now: true }), APP_ID);
+      await handle(ask(false, { now: false }), APP_ID);
+      await handle(ask(true, { now: true }), APP_ID);
+      expect(sets).toEqual([
+        { open: false, now: false },
+        { open: false, now: true },
+        { open: false, now: false },
+        { open: true, now: true },
+      ]);
+      expect(trail()).toEqual([
+        "audit availability origin=relay open=false outcome=closed",
+        "audit availability origin=relay open=false outcome=unchanged now=true",
+        "audit availability origin=relay open=false outcome=unchanged",
+        "audit availability origin=relay open=true outcome=reopened now=true",
       ]);
     });
 
