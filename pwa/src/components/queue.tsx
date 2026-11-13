@@ -278,6 +278,7 @@ export function QueueScreen(props: {
                 onMenuClosed={onMenuClosed}
                 onRunNow={props.onRunNow}
                 onContinue={props.onContinue}
+                onPass={props.onPass}
                 onFollowUp={props.onFollowUp}
                 onReveal={reveal}
               />
