@@ -299,12 +299,20 @@ function machineOptions(
     pick: { machine: { id: m.deviceId, label: m.name } },
   }));
   const registered = new Set(state.relay.machines.map((m) => m.deviceId));
-  const retired = new Map<string, { name: string; seen: number }>();
+  const shown = (deviceId: string, name: string | null): string => name ?? deviceId.slice(0, 8);
+  const retired = new Map<string, { name: string | null; seen: number }>();
   const note = (deviceId: string, name: string | null, seen: number): void => {
     if (registered.has(deviceId)) return;
     const held = retired.get(deviceId);
-    if (held !== undefined && held.seen >= seen) return;
-    retired.set(deviceId, { name: name ?? held?.name ?? deviceId.slice(0, 8), seen });
+    if (held === undefined) {
+      retired.set(deviceId, { name, seen });
+      return;
+    }
+    // The newer sighting's name wins, but a missing one never hides an older sighting's.
+    retired.set(deviceId, {
+      name: seen > held.seen ? (name ?? held.name) : (held.name ?? name),
+      seen: Math.max(seen, held.seen),
+    });
   };
   for (const entry of archived) note(entry.deviceId, entry.name, entry.lastSeen);
   for (const row of rows) {
@@ -314,12 +322,12 @@ function machineOptions(
   const newest = [...retired].toSorted(([, a], [, b]) => b.seen - a.seen);
   const gone = newest.map(([deviceId, { name, seen }]): OlderOption => ({
     key: deviceId,
-    label: name,
+    label: shown(deviceId, name),
     sub: `no longer listed · last seen ${formatSeen(seen, now)}`,
     mono: false,
     dot: "off",
     selected: machine?.id === deviceId,
-    pick: { machine: { id: deviceId, label: name } },
+    pick: { machine: { id: deviceId, label: shown(deviceId, name) } },
   }));
   // A pick no row read now names (a reload of the list): kept, so it can be seen and changed.
   const stray: OlderOption[] =
@@ -441,6 +449,9 @@ export function deriveOlder(state: AppState, now: number): OlderView | null {
     // Also with nothing shown: a read-on that failed or hit its cap, or rows that turned live since the read.
     more: ok !== null && ok.next !== null && (rows.length > 0 || !ok.loadingMore) ? { loading: ok.loadingMore } : null,
     moreError: ok?.moreError ?? null,
-    sheet: older.sheet === null ? null : sheetView(older.sheet, state, read, ok?.machines ?? [], now, known, ids),
+    sheet:
+      older.sheet === null
+        ? null
+        : sheetView(older.sheet, state, read, ok?.machines ?? list?.machines ?? [], now, known, ids),
   };
 }

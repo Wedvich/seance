@@ -369,6 +369,31 @@ describe("Older (DESIGN.md, Archivist, A34–A36j)", () => {
     expect(view?.sheet?.options.at(-1)?.pick).toEqual({ machine: { id: "dev-far", label: "far-box" } });
   });
 
+  test("a newer sighting without a name keeps an older sighting's name", () => {
+    const view = deriveOlder(
+      state({
+        list: page(
+          [
+            archived(
+              "t-1",
+              { assignment: { deviceId: "dev-q", exclave: "default", clone: "app" } },
+              { machine: "q-box", endedAt: NOW - 9 * DAY },
+            ),
+          ],
+          {
+            machines: [{ deviceId: "dev-q", name: null, lastSeen: NOW - DAY }],
+          },
+        ),
+        sheet: "machine",
+      }),
+      NOW,
+    );
+    expect(view?.sheet?.options.map((o) => [o.label, o.sub]).at(-1)).toEqual([
+      "q-box",
+      "no longer listed · last seen 1d ago",
+    ]);
+  });
+
   test("the Account sheet lists accounts by store key, never a raw id", () => {
     const view = deriveOlder(
       state({
