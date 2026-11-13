@@ -8143,7 +8143,7 @@ frame, only a mark on a frame it already takes.
   only in the transcript above an empty box fail it; read in memory, never returned or logged). Only then Enter.
   There is no abort between `C-c` and the text: an abort there would leave "Ctrl-C again to exit" armed for the
   next attempt's `C-c`. A text send that tmux refuses, a key that throws (a failed spawn) and a screen check
-  that fails with no frame since drop the entry (`skipped`, audited, a log line naming pane and task, never the
+  that fails for about a second of polls (seven reads, `KEY_GAP_MS` apart, a slow redraw allowed for) with no frame since drop the entry (`skipped`, audited, a log line naming pane and task, never the
   screen): the first two for the same reason, the third because no later turn end is coming and a screen that
   never matches would otherwise leave the entry waiting for good with the text unsent in the box (the
   parser is checked against Claude Code 2.1.323 screens captured with `tmux capture-pane -p`, wide and wrapped,

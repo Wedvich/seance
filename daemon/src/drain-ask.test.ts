@@ -213,6 +213,21 @@ describe("typing", () => {
     expect(r.audits.map((a) => a.outcome)).not.toContain("interrupted");
   });
 
+  test("a screen slow to show the typed prompt is read again before the pane is skipped", async () => {
+    const r = rig();
+    turnEnd(r);
+    let reads = 0;
+    r.shown = false;
+    r.afterScreen = () => {
+      reads += 1;
+      if (reads === 3) r.shown = true;
+    };
+    await r.ask.closed(CL, false);
+    await settle();
+    expect(argsOf(r)).toEqual([["C-c"], ["-l", DRAIN_PROMPT], ["Enter"]]);
+    expect(r.audits).toEqual([{ taskId: "t-1", outcome: "typed" }]);
+  });
+
   test("a busy pane gets nothing until a turn-ended idle arrives; a plain idle never types", async () => {
     const r = rig();
     frame(r, "busy");

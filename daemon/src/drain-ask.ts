@@ -35,6 +35,9 @@ export const DRAIN_INTERRUPT_MS = 300_000;
 /** How long an interrupted pane gets to reach a turn-ended idle before it is skipped (step B covers it). */
 export const DRAIN_SKIP_MS = 30_000;
 
+/** Screen reads after typing before the prompt counts as absent: about a second at `KEY_GAP_MS`. */
+const SCREEN_CHECK_TRIES = 7;
+
 const NORMALIZE = /\s+/gu;
 const RULE = /^─{8,}$/u;
 
@@ -268,8 +271,16 @@ export function createDrainAsk(deps: DrainAskDeps): DrainAsk {
       await record(entry.taskId, "skipped");
       return;
     }
-    await sleep(KEY_GAP_MS);
-    const shown = await deps.inputShows(pane);
+    // A slow redraw (a loaded box, a long prompt) may not show the text one gap after typing: poll a few gaps
+    // before calling it absent, stopping as soon as a frame moves.
+    let shown = false;
+    for (let attempt = 0; attempt < SCREEN_CHECK_TRIES && !shown; attempt++) {
+      // oxlint-disable-next-line no-await-in-loop -- paced polls of one pane, each gating the next
+      await sleep(KEY_GAP_MS);
+      if (!current(pane, entry) || last.get(pane)?.seq !== seq0) return;
+      // oxlint-disable-next-line no-await-in-loop
+      shown = await deps.inputShows(pane);
+    }
     // Synchronous from here to Enter, so nothing can move between the last check and the key.
     if (!current(pane, entry) || last.get(pane)?.seq !== seq0) return;
     if (!shown) {
