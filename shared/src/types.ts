@@ -3177,6 +3177,11 @@ export interface SettingsRecord extends VersionBound {
   readonly diskAlerts?: readonly DiskAlerted[];
   /** Exclaves whose login alert was sent and has not cleared yet (`daemon/src/auth-alerts.ts`). */
   readonly authAlerts?: readonly AuthAlerted[];
+  /**
+   * The archivist's silence watch (`daemon/src/archivist-silence.ts`). Present once a registry held an
+   * archivist entry, so a fleet that never had one is never alerted, whichever leader reads it.
+   */
+  readonly archivistSilence?: ArchivistSilence;
 }
 
 /**
@@ -3206,6 +3211,15 @@ export interface DiskAlerted {
   readonly deviceId: string;
   readonly at: number;
 }
+
+/**
+ * Whether the archivist's seat is connected, as the leader last wrote it. `since` is when the absence began
+ * (its entry's relay `lastSeen`, else the leader's clock), so a new leader measures 24 h from the same
+ * instant; `alerted` is an absence already pushed, held until the archivist connects again.
+ */
+export type ArchivistSilence =
+  | { readonly state: "present" }
+  | { readonly state: "absent" | "alerted"; readonly since: number };
 
 /**
  * `Task.failure` codes the scheduler sets itself, beside a daemon's refusal.
@@ -3619,6 +3633,13 @@ export type PushAlert =
       readonly deviceId: string;
       readonly exclave: string;
       readonly state: "expired" | "expiring";
+    }
+  | {
+      readonly v: 1;
+      readonly kind: "archivist";
+      readonly at: number;
+      /** When the archivist's absence began (ms). No id: a fleet has one seat. */
+      readonly since: number;
     };
 
 /** A push payload's plaintext at most, in bytes: well under the 4096-byte record a push service must accept. */

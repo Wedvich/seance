@@ -94,6 +94,7 @@ import {
   type QuotaReading,
   type SessionPass,
   type SettingsRecord,
+  type ArchivistSilence,
   type AuthAlerted,
   type DiskAlerted,
   type SpillStamp,
@@ -1915,6 +1916,7 @@ const PUSH_ALERT_KEYS = {
   "quota-exhausted": ["v", "kind", "at", "taskId", "window", "reason"],
   "pass-refused": ["v", "kind", "at", "taskId"],
   auth: ["v", "kind", "at", "deviceId", "exclave", "state"],
+  archivist: ["v", "kind", "at", "since"],
 } as const;
 
 /**
@@ -1982,6 +1984,11 @@ export function parsePushAlert(value: unknown): PushAlert | null {
     if (state !== "expired" && state !== "expiring") return null;
     return { v: 1, kind, at, deviceId, exclave, state };
   }
+  if (kind === "archivist") {
+    const { since } = value;
+    if (!known(PUSH_ALERT_KEYS.archivist) || !isFiniteNumber(since)) return null;
+    return { v: 1, kind, at, since };
+  }
   return null;
 }
 
@@ -2013,7 +2020,7 @@ function parseVapidKeys(value: unknown): VapidKeys | null {
  */
 export function parseSettingsRecord(value: unknown): SettingsRecord | null {
   if (!isRecord(value) || !isVersion(value["version"])) return null;
-  const { vapid, linearKey, subscriptions, diskAlerts, authAlerts } = value;
+  const { vapid, linearKey, subscriptions, diskAlerts, authAlerts, archivistSilence } = value;
   const keys = vapid === undefined ? undefined : parseVapidKeys(vapid);
   if (keys === null) return null;
   if (linearKey !== undefined && !isPrintableName(linearKey, LINEAR_KEY_MAX_LENGTH)) return null;
@@ -2029,6 +2036,8 @@ export function parseSettingsRecord(value: unknown): SettingsRecord | null {
   if (disk === null) return null;
   const auth = authAlerts === undefined ? undefined : parseAuthAlerts(authAlerts);
   if (auth === null) return null;
+  const silence = archivistSilence === undefined ? undefined : parseArchivistSilence(archivistSilence);
+  if (silence === null) return null;
   return {
     version: value["version"],
     ...(keys === undefined ? {} : { vapid: keys }),
@@ -2036,7 +2045,16 @@ export function parseSettingsRecord(value: unknown): SettingsRecord | null {
     ...(subscribed === undefined ? {} : { subscriptions: subscribed }),
     ...(disk === undefined ? {} : { diskAlerts: disk }),
     ...(auth === undefined ? {} : { authAlerts: auth }),
+    ...(silence === undefined ? {} : { archivistSilence: silence }),
   };
+}
+
+function parseArchivistSilence(value: unknown): ArchivistSilence | null {
+  if (!isRecord(value)) return null;
+  const { state, since } = value;
+  if (state === "present") return { state };
+  if ((state !== "absent" && state !== "alerted") || !isFiniteNumber(since)) return null;
+  return { state, since };
 }
 
 /** One entry per device and exclave. */

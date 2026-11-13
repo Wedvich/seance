@@ -2461,8 +2461,12 @@ describe("M4 shapes", () => {
         { deviceId: "dev-1", exclave: "default", state: "expired", at: 1_760_000_000_000 },
         { deviceId: "dev-1", exclave: "work", state: "expiring", at: 1_760_000_000_001 },
       ],
+      archivistSilence: { state: "alerted", since: 1_760_000_000_002 },
     };
     expect(parseSettingsRecord(settings)).toEqual(settings);
+    for (const archivistSilence of [{ state: "present" }, { state: "absent", since: 1 }] as const) {
+      expect(parseSettingsRecord({ ...settings, archivistSilence })).toEqual({ ...settings, archivistSilence });
+    }
     expect(parseSettingsRecord({ version: 1 })).toEqual({ version: 1 });
     const many = Array.from({ length: PUSH_MAX_SUBSCRIPTIONS + 1 }, (_, i) => ({
       ...subscription,
@@ -2506,6 +2510,10 @@ describe("M4 shapes", () => {
           at: 1,
         })),
       },
+      { ...settings, archivistSilence: { state: "absent" } },
+      { ...settings, archivistSilence: { state: "alerted", since: "1" } },
+      { ...settings, archivistSilence: { state: "gone", since: 1 } },
+      { ...settings, archivistSilence: "present" },
       { ...settings, diskAlerts: [{ deviceId: "dev/1", at: 1 }] },
       { ...settings, diskAlerts: [{ deviceId: "dev-1" }] },
       {
@@ -2628,6 +2636,7 @@ describe("M4 shapes", () => {
         state: "expiring" as const,
         at: 1_760_000_000_000,
       })),
+      archivistSilence: { state: "alerted", since: Number.MAX_SAFE_INTEGER },
     };
     expect(parseSettingsRecord(full)).toEqual(full);
     expect(await sealedRecordLength("settings", full)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
@@ -2653,7 +2662,8 @@ describe("parsePushAlert", () => {
     const question = { ...input, escalated: false, question: true } as const;
     const auth = { v: 1, kind: "auth", at: 5, deviceId: "dev-1", exclave: "default", state: "expired" } as const;
     const expiring = { ...auth, state: "expiring" } as const;
-    for (const alert of [spill, spending, input, question, disk, bare, auth, expiring]) {
+    const archivist = { v: 1, kind: "archivist", at: 5, since: 3 } as const;
+    for (const alert of [spill, spending, input, question, disk, bare, auth, expiring, archivist]) {
       expect(parsePushAlert(alert)).toEqual(alert);
     }
   });
@@ -2719,6 +2729,10 @@ describe("parsePushAlert", () => {
       { v: 1, kind: "auth", at: 5, deviceId: "dev-1", exclave: "default", state: "expired", account: "a" },
       { v: 1, kind: "auth", at: 5, deviceId: "dev-1", exclave: "a/b", state: "expired" },
       { v: 1, kind: "auth", at: 5, deviceId: "dev-1", state: "expired" },
+      { v: 1, kind: "archivist", at: 5 },
+      { v: 1, kind: "archivist", at: 5, since: "3" },
+      { v: 1, kind: "archivist", at: 5, since: 3, deviceId: "arch" },
+      { v: 1, kind: "archivist", at: 5, since: 3, name: "free text" },
       null,
       "spill",
     ]) {
