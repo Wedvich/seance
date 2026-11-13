@@ -1,6 +1,7 @@
 import type { NeedsInputReason, SessionState } from "@seance/shared";
 import type { DrainAskOutcome } from "./audit.ts";
-import { KEY_GAP_MS, PANE_ID } from "./despawn.ts";
+import { KEY_GAP_MS } from "./despawn.ts";
+import { PANE_ID } from "./pane-id.ts";
 import { log } from "./log.ts";
 import type { BoundPane } from "./session-events.ts";
 import { capturePane, tmux } from "./tmux.ts";

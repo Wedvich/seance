@@ -9,12 +9,11 @@ import {
   type RepoEntry,
   type UpdateReport,
 } from "@seance/shared";
-import { ROUND_TMP } from "./custodian-launch.ts";
-import type { SeatRecord } from "./custodian-seat.ts";
-import { PANE_ID } from "./despawn.ts";
 import { DEFAULT_EXCLAVE, EXCLAVE_NAME } from "./exclaves.ts";
 import { log } from "./log.ts";
+import { PANE_ID } from "./pane-id.ts";
 import { runtimePath, statePath } from "./paths.ts";
+import { ROUND_TMP, type SeatRecord } from "./seat-record.ts";
 
 /**
  * Owner-only, like the audit log: state.json lists every repo path this machine

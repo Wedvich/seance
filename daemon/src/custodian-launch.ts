@@ -3,7 +3,8 @@ import { dirname, join } from "node:path";
 import type { CustodianConfig } from "./config.ts";
 import { roundSeed, NOTES_MAX } from "./custodian-agent.ts";
 import { custodianFence, procSysReadOnly } from "./custodian-fence.ts";
-import { PANE_ID } from "./despawn.ts";
+import { PANE_ID } from "./pane-id.ts";
+import { ROUND_TMP, ROUND_TMP_PREFIX } from "./seat-record.ts";
 import { DEFAULT_EXCLAVE, type Exclave } from "./exclaves.ts";
 import { exec } from "./exec.ts";
 import { log } from "./log.ts";
@@ -19,16 +20,7 @@ import {
   tmuxOk,
 } from "./tmux.ts";
 
-/**
- * The tmux side of the custodian's round (docs/custodian.md, "The launch"; DESIGN.md, "The custodian's seat").
- *
- * `CLAUDE_CODE_TMPDIR` is `<ROUND_TMP_PREFIX><6 chars>`, 21 characters: Claude Code puts the round's `$TMPDIR` at
- * `$CLAUDE_CODE_TMPDIR/claude-<uid>` and silently falls back to the shared `/tmp/claude-<uid>` (every session's
- * scratchpad) when that path counts as long (32 characters kept, 35 fell back). So the prefix is a literal `/tmp`,
- * never `tmpdir()` (`/var/folders/…` on macOS) and never a realpath (`/private/tmp` adds 8): do not lengthen it.
- */
-export const ROUND_TMP_PREFIX = "/tmp/seance-cu-";
-export const ROUND_TMP = /^\/tmp\/seance-cu-[A-Za-z0-9]{6}$/u;
+/** The tmux side of the custodian's round (DESIGN.md, "The custodian's seat"; the tmp dir's shape is in `seat-record.ts`). */
 
 /**
  * Where an exclave's round runs: the exclave is decided by the window shell's `$PWD` (the owner's hook picks

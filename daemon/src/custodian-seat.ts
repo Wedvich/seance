@@ -2,6 +2,7 @@ import { quotaPressure, quotaWindows, windowAppliesTo, type QuotaReading } from 
 import type { Config, CustodianConfig } from "./config.ts";
 import { exclaveOf, type Exclave, type ExclaveScan } from "./exclaves.ts";
 import type { TrackedActivity } from "./pane-activity.ts";
+import type { SeatRecord } from "./seat-record.ts";
 
 /**
  * The custodian seat (docs/custodian.md C1–C4, C12–C16; DESIGN.md, "The custodian's seat"): once a minute, with no
@@ -194,17 +195,7 @@ export function createPick(d: PickDeps): () => Promise<PickResult> {
   };
 }
 
-export interface SeatRecord {
-  /** When the last round ended; due checks wait `everyMinutes` after it. */
-  readonly lastEndedAt?: number;
-  /** The running round, written ahead of its launch (`pane` null until it exists) so a restart or reload adopts it. */
-  readonly round?: {
-    readonly pane: string | null;
-    readonly startedAt: number;
-    readonly tmpDir: string;
-    readonly exclave: string;
-  };
-}
+export type { SeatRecord };
 
 export type CloseOutcome = "exited" | "killed" | "gone";
 

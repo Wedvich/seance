@@ -8,7 +8,7 @@ import { createBackend } from "../src/backend-default.ts";
 import { DespawnFailure } from "../src/backend.ts";
 import { CUSTODIAN_DEFAULTS, type Config } from "../src/config.ts";
 import { loadAgent } from "../src/custodian-agent.ts";
-import { ensureRoundDir, launchRound, listRoundPanes, removeRoundTmp, ROUND_TMP } from "../src/custodian-launch.ts";
+import { ensureRoundDir, launchRound, listRoundPanes, removeRoundTmp } from "../src/custodian-launch.ts";
 import { ROUND_SEED } from "../src/custodian-agent.ts";
 import {
   createCustodianSeat,
@@ -21,6 +21,7 @@ import { despawnRound, despawnSession } from "../src/despawn.ts";
 import type { Exclave } from "../src/exclaves.ts";
 import type { TrackedActivity } from "../src/pane-activity.ts";
 import { startDaemon } from "../src/run.ts";
+import { ROUND_TMP } from "../src/seat-record.ts";
 import { listPanePids } from "../src/session-events.ts";
 import { listClaudeSessions, listPanes, paneInfo } from "../src/sessions.ts";
 import { resolveTargetSession, tmuxOk } from "../src/tmux.ts";

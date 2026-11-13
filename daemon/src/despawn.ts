@@ -1,14 +1,8 @@
 import { DespawnFailure, type DespawnResult } from "./backend.ts";
 import { exec } from "./exec.ts";
+import { PANE_ID } from "./pane-id.ts";
 import { classifyPane, isRegistered, paneInfo, type PaneInfo } from "./sessions.ts";
 import { tmux } from "./tmux.ts";
-
-/**
- * tmux's own pane-id form, and the only target a wire-supplied id may name:
- * `-t` would also resolve `main:1.0`, `{marked}` or `=name`, none of which a
- * session list ever handed out.
- */
-export const PANE_ID = /^%\d+$/u;
 
 const DEFAULT_GRACE_MS = 5_000;
 /** How long a killed pane's processes get to exit on their own, and again after SIGTERM. */
