@@ -138,7 +138,7 @@ function live(ids: readonly string[]): QueueState {
 
 const CURSOR = { endedAt: NOW - 9 * DAY, createdAt: NOW - 10 * DAY, id: "t-z" };
 
-describe("Older (docs/archivist.md A34–A36j)", () => {
+describe("Older (DESIGN.md, Archivist, A34–A36j)", () => {
   test("is not there at all while no archivist is online (A35)", () => {
     expect(deriveOlder(state({}, {}, { archivist: null }), NOW)).toBeNull();
     expect(deriveOlder(state({}, {}, { archivist: { ...ARCHIVIST, connected: false } }), NOW)).toBeNull();

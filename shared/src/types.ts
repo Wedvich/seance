@@ -38,7 +38,7 @@ export const ROUTING_ID_PATTERN = new RegExp(`^[${ROUTING_ID_CHARS}]{1,${ROUTING
 /**
  * Plaintext `register.roles` values — the one capability the relay itself
  * reads. `scheduler`: the daemon may be nominated leader. `archivist`: the
- * fleet's one history seat (docs/archivist.md), honoured only from the id on
+ * fleet's one history seat (DESIGN.md, "Archivist"), honoured only from the id on
  * the relay's `ARCHIVIST` secret and never beside `scheduler`. Only a v2
  * register (signature over the roles) carries them; the relay acts on no other
  * value, and accepts an unknown one only so the signature covering it still verifies.
@@ -289,7 +289,7 @@ export interface RegistryEntry {
 export type RegistryView = RegistryEntry & {
   readonly connected: boolean;
   /**
-   * The fleet's archivist seat (docs/archivist.md): derived per push like
+   * The fleet's archivist seat (DESIGN.md, "Archivist"): derived per push like
    * `connected`, set only when this id's last accepted register signed the
    * role and it is the id on the relay's `ARCHIVIST` now. Never a machine:
    * `RelayClient` skips it when it builds `machines`.
@@ -1448,7 +1448,7 @@ export type ArchiveMetricsStep = (typeof ARCHIVE_METRICS_STEPS)[number];
 
 /**
  * `op: "archive-metrics"` — history from the archivist's `metrics.sqlite`
- * (docs/archivist.md, A31–A33): `MetricsRequest`'s range, step and filters
+ * (DESIGN.md, Archivist, A31–A33): `MetricsRequest`'s range, step and filters
  * over exactly one target. `machine` is a device id, its own observed series
  * (retired machines included). `account` is the `account:<hex>` store key,
  * never a raw id: every series labelled with it from any observer, merged per

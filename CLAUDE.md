@@ -7,7 +7,7 @@ monorepo: `daemon/` (seanced, per-machine), `relay/` (Cloudflare Worker + Durabl
 (Vite + Preact app), `raycast/` (a local-only Raycast extension — spawn only), `shared/` (wire types,
 envelope crypto + the app-role RelayClient), `scheduler/` (the scheduler as a pure library: routing,
 task state, reservations — no I/O, hosted only by the leader's modules — `LEADER_MODULES` in `scheduler/test/layering.test.ts`), `archivist/` (`seance-archivist`, the fleet's optional
-history service — docs/archivist.md; it imports daemon modules by path, never copies them), `e2e/` (full-stack test suite, no shipped code).
+history service — DESIGN.md, "Archivist"; it imports daemon modules by path, never copies them), `e2e/` (full-stack test suite, no shipped code).
 `claude-mods/` is not a workspace: Claude Code function-hook plugins, installed by
 `seanced mod install` (DESIGN.md, "Claude Code mods").
 
@@ -18,7 +18,10 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   rejected alternative with rationale. If a change alters decided behavior, update DESIGN.md with it.
   For protocol work, start at its "The map: one spawn, end to end" subsection — a sequence diagram
   plus a frame→module table saying which file owns each frame; `shared/src/types.ts` is the schema
-  of record, so a frame change touches both.
+  of record, so a frame change touches both. Its "Archivist" section is the archivist's whole
+  record — the decisions code cites as A1–A37 and their rejected alternatives at its end; read it
+  before touching history, retention, registry roles or the Machines screen's charts (setup,
+  move-the-seat runbook and schema are the README's step 9).
 - **docs/psk.md** — where the PSK lives on each platform (keychain / DPAPI blob / TPM-sealed blob /
   a blob systemd unseals and delivers to the unit on systemd ≥ 256),
   how import keeps it off argv and shell history, and what the TPM path does and does not protect.
@@ -41,11 +44,6 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   away: update, restart, reboot, shutdown, sleep, unknown), how the relay keeps it, what clients
   and the leader do with it, macOS sleep/DarkWake, and the shutdown drain on a dying box. Read it
   before touching shutdown, presence or the systemd unit.
-- **docs/archivist.md** — spec, partly built (its "Build order" says which items): the archivist, an optional single-seat service in
-  its own workspace that keeps long-term task, metrics and fleet history in SQLite (the seat and
-  the `ARCHIVIST` secret, what it collects and never stores, retention, how the PWA reads it, the
-  build order). Read it before touching history, retention, registry roles or the Machines
-  screen's charts. Its setup, move-the-seat runbook and schema are the README's step 9.
 
 Like DESIGN.md, the docs/ files are part of the record: a change that alters behavior they describe
 updates them in the same commit. They are not auto-discovered — this list is how sessions find them.

@@ -508,7 +508,7 @@ function tableRow(label: string, table: ArchiveTableStatus | null): ArchivistRow
 }
 
 /**
- * The archivist's card (docs/archivist.md, A36): built from the flagged registry
+ * The archivist's card (DESIGN.md, Archivist, A36): built from the flagged registry
  * entry and, online, the last `archive-status` reply held for that same
  * device. Offline it states what is hidden until the archivist is back and
  * shows no counts, which would only be the last ones it gave.

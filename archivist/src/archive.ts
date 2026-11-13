@@ -9,7 +9,7 @@ import {
 } from "@seance/shared";
 
 /**
- * `archive.sqlite`: the fleet's long-term history (docs/archivist.md, A16, A18,
+ * `archive.sqlite`: the fleet's long-term history (DESIGN.md, Archivist, A16, A18,
  * A21, A23, A24). Append-only by construction — no statement here removes a row
  * (archivist/test/layering.test.ts holds that), none lowers a task's version or
  * rewrites an event; a purge is SQL on the box. Times are ms since the epoch, as

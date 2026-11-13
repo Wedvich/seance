@@ -144,7 +144,7 @@ export function fleetOf(state: RelayState, selfId: string): Fleet {
 }
 
 /**
- * The archivist's collection over its app leg (docs/archivist.md, A13–A16,
+ * The archivist's collection over its app leg (DESIGN.md, Archivist, A13–A16,
  * A18): finished tasks and account aliases from the store, fleet events from
  * the registry. Read-only on the wire: it lists and gets, and writes only
  * `archive.sqlite`. A record it cannot read is counted and skipped; one that

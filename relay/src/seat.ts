@@ -2,7 +2,7 @@ import { DAEMON_ROLES } from "@seance/shared";
 import { isDeviceId } from "./wire.ts";
 
 /**
- * The archivist's seat (docs/archivist.md, A5/A6/A9): one device id on the
+ * The archivist's seat (DESIGN.md, Archivist, A5/A6/A9): one device id on the
  * `ARCHIVIST` secret may register with the `archivist` role. No terms, no
  * nomination, no standby — so, unlike `SCHEDULER_LEADERS`, one id, never a
  * list. Pure, like `leadership.ts`, so its suite needs no workerd.

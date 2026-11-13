@@ -149,7 +149,7 @@ Two verified LXC sharp edges (Debian 13 guest, systemd 257):
 
 ### A second service: the archivist
 
-The archivist (docs/archivist.md) holds the PSK too, and takes it only one way: its own
+The archivist (DESIGN.md, "Archivist") holds the PSK too, and takes it only one way: its own
 system unit, `seance-archivist.service`, loads it with `LoadCredentialEncrypted=`. There is
 no keychain, no `psk` in its config, no direct unseal and no keyless mode, on any systemd
 version — PID 1 unseals a system unit's credential on 250+ as well, so the ≥ 256 split above
@@ -187,7 +187,7 @@ TPM-sealed blob is bound to the TPM, not to its path, so
 `sudo install -m 600 -o archivist -g archivist ~you/.local/state/seance/psk.cred ~archivist/.local/state/seance-archivist/psk.cred`
 gives the archivist a copy that decrypts. What the unit never does is point at the daemon's
 file. That file is the daemon's user's to replace or delete, and the archivist's user exists
-so that the daemon's user cannot change what the archivist runs with (docs/archivist.md,
+so that the daemon's user cannot change what the archivist runs with (DESIGN.md, Archivist,
 A27a). Each service also re-seals on its own schedule this way.
 
 Order matters, unlike the daemon's: `install --system` refuses until the blob is there and

@@ -5,6 +5,6 @@ BEARER_TOKEN=
 # machine's `deviceId` line in `seanced doctor`. Empty nominates nobody, so auto
 # stays unavailable until your local daemon's id is here.
 SCHEDULER_LEADERS=
-# The one device id that may register as the archivist (docs/archivist.md).
+# The one device id that may register as the archivist (DESIGN.md, "Archivist").
 # Empty honours nobody; a list or anything but one deviceId honours nobody too.
 ARCHIVIST=

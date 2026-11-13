@@ -309,7 +309,7 @@ export function QueueScreen(props: {
 const PASS_CONFIRM = "Pushes its branch and ends this session; a new task picks it up.";
 
 /**
- * Older (docs/archivist.md A36g–A36j): the Asleep section's toggle, closed by
+ * Older (DESIGN.md, Archivist, A36g–A36j): the Asleep section's toggle, closed by
  * default and with no count, since the archive is paged; open, the title search
  * in the rename field's style, the spawn form's tile grid, and archived cards.
  */

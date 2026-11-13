@@ -13,7 +13,7 @@ const USAGE = `usage: seance-archivist <command>
   update               fetch, fast-forward this checkout, bun install, restart the service
   help                 this text
 
-The PSK comes only from the unit's systemd credential (docs/psk.md); see docs/archivist.md.`;
+The PSK comes only from the unit's systemd credential (docs/psk.md); see DESIGN.md, "Archivist".`;
 
 /**
  * install, uninstall and update are loaded by `import()` in their own branches,

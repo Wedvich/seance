@@ -46,6 +46,6 @@
   // daemon is nominated and auto is unavailable.
   //   deploy: bun run --cwd relay wrangler secret put SCHEDULER_LEADERS
   // And ARCHIVIST (the one device id that may hold the archivist seat,
-  // docs/archivist.md): unset, nothing may register with that role.
+  // DESIGN.md, "Archivist"): unset, nothing may register with that role.
   //   deploy: bun run --cwd relay wrangler secret put ARCHIVIST
 }

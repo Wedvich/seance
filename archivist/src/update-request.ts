@@ -2,7 +2,7 @@ import { readFile, stat, writeFile } from "node:fs/promises";
 
 /**
  * How the running archivist follows the fleet's update announce without running
- * anything itself (docs/archivist.md, A26). The `run` process holds the PSK and
+ * anything itself (DESIGN.md, Archivist, A26). The `run` process holds the PSK and
  * loads no exec path (archivist/test/layering.test.ts), so it only writes this
  * file; `seance-archivist-update.path` sees the write and starts
  * `seance-archivist-update.service`, which runs `seance-archivist update

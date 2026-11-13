@@ -71,11 +71,11 @@ export interface Archivist {
   readonly stop: () => void;
 }
 
-/** Owner-only: it holds the identity seed and the plaintext history (docs/archivist.md, A12). */
+/** Owner-only: it holds the identity seed and the plaintext history (DESIGN.md, Archivist, A12). */
 const STATE_DIR_MODE = 0o700;
 
 /**
- * The archivist's two legs (docs/archivist.md, A7, A8): a `/daemon` socket that
+ * The archivist's two legs (DESIGN.md, Archivist, A7, A8): a `/daemon` socket that
  * holds the seat — a v2 register claiming `archivist`, which the relay accepts
  * only from the `ARCHIVIST` id — and an app-role socket for reading, as the
  * leader's own app leg reads. It advertises no repos and no exclaves, answers

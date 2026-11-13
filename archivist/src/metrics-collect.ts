@@ -126,7 +126,7 @@ export async function statusSamples(
 }
 
 /**
- * Metrics into `metrics.sqlite` (docs/archivist.md, A17, A19, A20, A33): every
+ * Metrics into `metrics.sqlite` (DESIGN.md, Archivist, A17, A19, A20, A33): every
  * `status` the app leg holds, as it arrives, and a pull of each connected
  * machine's `metrics` op every `pullMs`, on its connect and on the leg's
  * ready. A pull continues each tier from its watermark; a machine whose raw

@@ -4,7 +4,7 @@ import { describe, expect, test } from "bun:test";
 
 /**
  * The archivist holds the PSK and, later, every prompt in plaintext
- * (docs/archivist.md, A11), so what it can do is held by what it can load: it
+ * (DESIGN.md, Archivist, A11), so what it can do is held by what it can load: it
  * reuses the daemon's relay, identity, state and credential modules by import,
  * and never reaches one that spawns, drives tmux, brokers, leads, or writes the
  * queue or the store. The walk is transitive and counts type-only imports, so
@@ -265,7 +265,7 @@ describe("archivist layering", () => {
       if (specifiers(await readFile(join(ROOT, file), "utf8")).includes("bun:sqlite")) sqliteUsers.push(file);
     }
     expect(sqliteUsers.toSorted()).toEqual(["archivist/src/archive.ts", "archivist/src/metrics-archive.ts"]);
-    // Append-only (docs/archivist.md, A23): a purge is SQL on the box, never this code. The metrics tiers'
+    // Append-only (DESIGN.md, Archivist, A23): a purge is SQL on the box, never this code. The metrics tiers'
     // retention (A22) is the one prune, and it is the daemon's own module's, not a statement here.
     // Comments are stripped first: one saying "never delete" is not a statement.
     const sources = await Promise.all(

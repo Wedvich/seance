@@ -17,7 +17,7 @@ function parseJson(text: string, path: string): unknown {
  * Shape only, like the daemon's `loadConfig`: empty strings load, and
  * `runnableProblems` reports them. A `psk` key is refused outright rather than
  * ignored: the archivist reads its key only from its unit's credential
- * (docs/archivist.md, A12), and a key left in this file would be one more
+ * (DESIGN.md, Archivist, A12), and a key left in this file would be one more
  * plaintext copy that nothing reads.
  */
 export async function loadArchivistConfig(path: string): Promise<ArchivistConfig> {

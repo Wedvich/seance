@@ -376,8 +376,8 @@ checkout's `daemon/src/main.ts session-event` with `bun` from PATH, so it needs 
 
 The relay prunes finished tasks and each daemon keeps 30 days of its own metrics. The
 archivist keeps both for good, in SQLite, for the whole fleet: one service, one seat on
-the relay, never load-bearing (docs/archivist.md is the spec, DESIGN.md "Archivist" the
-record). It holds the PSK and acts on nothing. It runs as a systemd system unit on Linux,
+the relay, never load-bearing (DESIGN.md "Archivist" is the record, its decisions
+included). It holds the PSK and acts on nothing. It runs as a systemd system unit on Linux,
 as a Unix user of its own, never the daemon's, since sessions run as the daemon's user
 and must not be able to read or change the archive.
 
@@ -860,8 +860,6 @@ that still needs it.
   plus the one-time catch-up for older installs.
 - [docs/development.md](docs/development.md) — running the relay and app locally, and
   the test suite.
-- [docs/archivist.md](docs/archivist.md) — the archivist's spec: what it keeps, for how
-  long, and what is still to be built (setup is step 9 above).
 
 This is a personal project shared publicly rather than one looking for contributors:
 issues and observations are welcome, but the roadmap is whatever I happen to need

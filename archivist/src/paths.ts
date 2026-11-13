@@ -3,7 +3,7 @@ import { xdgConfigDir, xdgStateDir } from "../../daemon/src/paths.ts";
 
 /**
  * Its own directories, never the daemon's `seance` ones: on a shared box the
- * archivist runs as a Unix user of its own (docs/archivist.md, A27a), and even
+ * archivist runs as a Unix user of its own (DESIGN.md, Archivist, A27a), and even
  * as the same user it must not read or mint the daemon's identity.
  */
 const NAME = "seance-archivist";

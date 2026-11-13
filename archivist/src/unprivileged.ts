@@ -1,5 +1,5 @@
 /**
- * The archivist never runs as root (docs/archivist.md, A12): it holds the PSK
+ * The archivist never runs as root (DESIGN.md, Archivist, A12): it holds the PSK
  * and a plaintext history, and nothing it does needs privilege — PID 1 unseals
  * its key for it. uid and gid both, as `assertUnprivileged` in
  * `daemon/src/target-user.ts` checks a unit's user: gid 0 reaches as far as

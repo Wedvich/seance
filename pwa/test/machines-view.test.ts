@@ -440,7 +440,7 @@ describe("deriveMachines", () => {
     expect(deriveMachines([asleep, old], NOW, NO_LEADER).accounts[0]?.historyFrom).toBeNull();
   });
 
-  // docs/archivist.md A35, A36d, A36f: with no archivist nothing changes; with one, an asleep
+  // DESIGN.md, Archivist, A35, A36d, A36f: with no archivist nothing changes; with one, an asleep
   // machine and a host-less account gain a chart, and the picker gains 90d and 1y.
   test("the archive adds charts and long ranges only while it serves them", () => {
     const fleet = [machine({ deviceId: "a" }), machine({ deviceId: "z", connected: false })];

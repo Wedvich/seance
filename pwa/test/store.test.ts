@@ -4569,7 +4569,7 @@ describe("the archivist's counts", () => {
   });
 });
 
-// docs/archivist.md A32, A35, A36d–A36f: which side answers a chart, read from the registry at ask time.
+// DESIGN.md, Archivist, A32, A35, A36d–A36f: which side answers a chart, read from the registry at ask time.
 describe("history sources", () => {
   let fake: ReturnType<typeof fakeHistory>;
 
@@ -4795,7 +4795,7 @@ describe("history sources", () => {
   });
 });
 
-// docs/archivist.md A34, A35, A36g–A36j: the Queue screen's Older section, read page by page from the archive.
+// DESIGN.md, Archivist, A34, A35, A36g–A36j: the Queue screen's Older section, read page by page from the archive.
 describe("task history", () => {
   let fake: ReturnType<typeof fakeHistory>;
 

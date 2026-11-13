@@ -74,7 +74,7 @@ const MIGRATIONS: readonly ((db: Database) => void)[] = [
 export const METRICS_ARCHIVE_SCHEMA_VERSION = MIGRATIONS.length;
 
 /**
- * The archivist's `metrics.sqlite` (docs/archivist.md, A17, A22): the daemon's
+ * The archivist's `metrics.sqlite` (DESIGN.md, Archivist, A17, A22): the daemon's
  * own tiered store (`daemon/src/metrics-tiers.ts`) at the archive's retention,
  * series per observer and unmerged. Its own file, not tables in
  * `archive.sqlite`: retention prunes these tiers while that file is
