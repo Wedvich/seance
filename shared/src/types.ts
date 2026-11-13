@@ -701,6 +701,7 @@ export type OpName =
   | "sessions"
   | "spawn"
   | "despawn"
+  | "availability"
   | "rescan"
   | "metrics"
   | "push-branch"
@@ -761,6 +762,8 @@ export const OP_TIMEOUT_MS = {
   rescan: 15_000,
   spawn: 210_000,
   despawn: 20_000,
+  // A local write plus one state save.
+  availability: 10_000,
   metrics: 15_000,
   // Answered from a cached count and two stat calls, never a scan.
   "archive-status": 10_000,
@@ -1114,6 +1117,11 @@ export interface MachineInfo {
  * `amend`: as a leader, answers `amend` (a waiting task's prompt, title, model or effort
  * changed in place) — what a client checks of the verified leader before offering it (an
  * older one refuses the op as unknown).
+ * `close`: as a daemon, answers `availability`, sends `cl`, refuses a scheduler spawn
+ * `machine_closed` while closed.
+ * `drain`: as a leader, routes around `cl` and routes a `machine_closed` refusal again; a
+ * client closes a machine only while the verified leader advertises it, since an older
+ * leader fails the task.
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -1134,6 +1142,8 @@ export const CAPABILITIES = {
   successorSelf: "successorSelf",
   successorAuto: "successorAuto",
   amend: "amend",
+  close: "close",
+  drain: "drain",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -1296,6 +1306,12 @@ export interface MachineStatus {
    * an older reader ignores it.
    */
   readonly drn?: true;
+  /**
+   * Unix ms this machine was closed to new scheduled work (docs/drain.md), absent while
+   * open. Never trimmed. Not `QuotaObservation.cl` (credit limit), which is a field of a
+   * quota entry.
+   */
+  readonly cl?: number;
 }
 
 /**
@@ -1613,6 +1629,12 @@ export type SpawnClient = (typeof SPAWN_CLIENTS)[number];
 export const SCHEDULER_CLIENT = "scheduler";
 
 export interface SpawnRequest {
+  /**
+   * Set only by a drain-capable leader on a scheduler spawn: a closed machine answers it
+   * `machine_closed` (routed again at once) rather than `internal_error` (an older
+   * leader's TTL path).
+   */
+  readonly routesClosed?: true;
   readonly repo: string;
   readonly mode: SpawnMode;
   readonly prompt?: string;
@@ -1726,6 +1748,13 @@ export const SPAWN_ERROR_CODES = [
    * never a session without its files. The message names the file by index, never by name.
    */
   "attachment_unavailable",
+  /**
+   * A scheduler spawn (`client: SCHEDULER_CLIENT`, sealed from the scheduler, or the leader's
+   * in-process dispatch) to a machine closed to new work. Refused before the launch ledger's
+   * write-ahead record, so nothing ran and nothing is recorded. A drain-capable leader routes
+   * the task again; an older one fails it.
+   */
+  "machine_closed",
   "launch_error",
   "claude_died",
   "timeout",
@@ -1784,6 +1813,21 @@ export type DespawnErrorCode = (typeof DESPAWN_ERROR_CODES)[number];
 
 /** `exited`: claude left on its own once asked. `killed`: it didn't, or `force` said not to wait. */
 export type DespawnOutcome = "exited" | "killed";
+
+/** `now` is the drain's (docs/drain.md); parsed and ignored until the drain lands. */
+export interface AvailabilityRequest {
+  readonly open: boolean;
+  readonly now?: boolean;
+}
+
+export const AVAILABILITY_ERROR_CODES = ["invalid_request", "refused", "unsupported", ...TRANSPORT_ERROR_CODES] as const;
+
+export type AvailabilityErrorCode = (typeof AVAILABILITY_ERROR_CODES)[number];
+
+/** `closed`: the close time (ms) after the request, null when open. */
+export type AvailabilityResponse =
+  | { readonly ok: true; readonly closed: number | null }
+  | { readonly ok: false; readonly code: AvailabilityErrorCode; readonly message: string };
 
 export type DespawnResponse =
   | {
@@ -2544,6 +2588,8 @@ export type Reason =
   | { readonly code: "status_stale" }
   /** Its status carries `drn`: the daemon is restarting and refuses task launches meanwhile. */
   | { readonly code: "draining" }
+  /** Its status carries `cl`: closed to new scheduled work by a person. */
+  | { readonly code: "closed" }
   | { readonly code: "task_id_unsupported" }
   /** A daemon predating exclaves: which account a spawn would bill is unknown. */
   | { readonly code: "exclaves_unknown" }

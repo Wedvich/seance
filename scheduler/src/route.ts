@@ -336,6 +336,8 @@ function machineFilter(machine: Machine, now: number, config: SchedulerConfig): 
   else {
     // Its launch gate refuses a spawn `internal_error`, which leaves the task reserved for the whole TTL.
     if (status.drn === true) reasons.push({ code: "draining" });
+    // A person closed it; its daemon refuses a scheduler spawn `machine_closed` meanwhile.
+    if (status.cl !== undefined) reasons.push({ code: "closed" });
     // An absent `free` is a host with no statfs answer — unknown, and the floor guards a known-full disk only.
     if (status.free !== undefined && status.free < config.minFreeMib)
       reasons.push({ code: "disk_low", freeMib: status.free });
