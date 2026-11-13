@@ -390,7 +390,7 @@ delivery); nothing else here does.
 
 Verified 2026-11-13 on macOS with Claude Code 2.1.323, against the current docs and by running
 fenced `haiku` rounds in a private tmux server through two batteries of commands. Linux was run the
-same day and needs one choice from the owner (Linux, below). Re-verify on a Claude Code upgrade:
+same day, with its own fence keys (Linux, below). Re-verify on a Claude Code upgrade:
 several of these are behaviours, not documented contracts.
 
 ### The command
@@ -574,6 +574,12 @@ box has never trusted, stopped at the dialog. Differences:
   the host `/proc` readable. On a VM or bare-metal Linux `allowAllUnixSockets` alone is expected to
   work, but was not tested: no such box was online.
 
+**Decided (owner, 2026-11-13): accept both on Linux.** The Linux fence sets `allowAllUnixSockets:
+true` in place of `allowUnixSockets`, and adds `enableWeakerNestedSandbox: true` only where
+`--disable-userns` cannot run (a container whose `/proc/sys` is read-only); `seanced doctor` names
+the weaker mode. A deliberate command can then get past the write fence, which C21 already allows:
+the fence is for a cheap model's mistakes, and C19 bounds what a session or worktree change can do.
+
 ## Open details (build time)
 
 - **Trusting a round dir.** A round cannot answer the trust dialog (above), so an exclave whose
@@ -581,12 +587,6 @@ box has never trusted, stopped at the dialog. Differences:
   `.claude.json`), skips such an exclave as C12 skips a lapsed one, and `seanced doctor` names it;
   the owner trusts it once by running `claude` in that dir. Writing the entry ourselves would race
   every running session's rewrite of `.claude.json` (DESIGN.md, "Exclaves"). The owner's call.
-- **Linux (the owner's call).** Run (The launch, "Linux"): on Linux C18's `capture-pane` and the
-  verbs' socket need `allowAllUnixSockets`, wider than macOS's two directories, and in a container
-  whose `/proc/sys` is read-only that also needs `enableWeakerNestedSandbox`, under which a
-  sandboxed command can make a user namespace and get around C20's write fence on purpose (not by
-  mistake: C21). Options: accept both on Linux; accept the first only and skip the seat (doctor
-  names it) where `--disable-userns` cannot run; or keep the seat off Linux. Undecided.
 - **Importing the scheduler's scoring.** `scheduler/test/layering.test.ts` lets only the leader's
   modules host the scheduler library. C12 needs the pure scoring function outside them: either the
   test's list grows by the custodian's one module, or the function moves somewhere both import.
