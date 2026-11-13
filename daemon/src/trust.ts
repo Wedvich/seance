@@ -4,9 +4,7 @@ import { isRecord } from "@seance/shared";
 import { log } from "./log.ts";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
+  return isRecord(value) ? value : null;
 }
 
 /** Repo paths already ensured this run, keyed by config file — trust never un-sets itself mid-run. */
