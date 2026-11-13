@@ -737,9 +737,15 @@ describe("withReapLock", () => {
   test("callers racing in one process each run or are refused busy, never crash on a shared staged file", async () => {
     const path = join(base, "locks-race", "reap.lock");
     const settled = await Promise.allSettled(
-      Array.from({ length: 12 }, () => withReapLock(() => new Promise<string>((r) => {
-          setTimeout(() => r("ran"), 5);
-        }), path)),
+      Array.from({ length: 12 }, () =>
+        withReapLock(
+          () =>
+            new Promise<string>((r) => {
+              setTimeout(() => r("ran"), 5);
+            }),
+          path,
+        ),
+      ),
     );
     for (const result of settled) {
       if (result.status === "fulfilled") expect(result.value).toBe("ran");

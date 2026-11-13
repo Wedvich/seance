@@ -1281,7 +1281,14 @@ describe("spawnSession continuing a failed task's session", () => {
       const results = await Promise.allSettled(
         [a, b].map((wt, i) =>
           spawnSession(
-            { repo: "myrepo", mode: "continue", title: `Cont Pair ${i}`, taskId: `cont-pair-${i}`, continues: OLD, client: "scheduler" },
+            {
+              repo: "myrepo",
+              mode: "continue",
+              title: `Cont Pair ${i}`,
+              taskId: `cont-pair-${i}`,
+              continues: OLD,
+              client: "scheduler",
+            },
             repos,
             WAIT,
             { path: wt.path, session: CONTINUED_SESSION, branch: `wt-${wt.name}` },
