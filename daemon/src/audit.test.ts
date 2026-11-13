@@ -8,6 +8,7 @@ import {
   availabilityAudit,
   brokerAudit,
   cliSink,
+  custodianAudit,
   drainAskAudit,
   ensureAuditLog,
   enqueueAudit,
@@ -153,6 +154,25 @@ describe("drain ask audit lines", () => {
       'audit drain origin=drain task="t-1" outcome=typed',
       'audit drain origin=drain task="t\\"2" outcome=interrupted',
       'audit drain origin=drain task="t-3" outcome=skipped',
+    ]);
+  });
+});
+
+describe("custodian audit lines", () => {
+  test("start, kill and end: origin custodian, the quoted exclave, pane ids and enumerated reasons only", async () => {
+    const out: string[] = [];
+    const audit = custodianAudit((line) => void out.push(line));
+    await audit.start('ex"1', "%7", "started");
+    await audit.start("default", null, "launch_failed");
+    await audit.kill("%7", "deadline", "killed");
+    await audit.end("%7", "deadline");
+    await audit.end(null, "lost");
+    expect(out).toEqual([
+      'audit custodian origin=custodian op=start exclave="ex\\"1" pane=%7 outcome=started',
+      'audit custodian origin=custodian op=start exclave="default" pane=- outcome=launch_failed',
+      "audit custodian origin=custodian op=kill pane=%7 reason=deadline outcome=killed",
+      "audit custodian origin=custodian op=end pane=%7 outcome=failed reason=deadline",
+      "audit custodian origin=custodian op=end pane=- outcome=failed reason=lost",
     ]);
   });
 });

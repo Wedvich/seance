@@ -720,6 +720,41 @@ export function drainAskAudit(sink: AuditSink): (taskId: string, outcome: DrainA
   };
 }
 
+/** The daemon starting, killing and ending the custodian seat's round (`custodian-seat.ts`). */
+export type CustodianOrigin = "custodian";
+
+export interface CustodianAudit {
+  readonly start: (exclave: string, pane: string | null, outcome: "started" | "launch_failed") => Promise<void>;
+  readonly kill: (
+    pane: string,
+    reason: "deadline" | "stray" | "off",
+    outcome: "exited" | "killed" | "gone",
+  ) => Promise<void>;
+  readonly end: (pane: string | null, reason: "deadline" | "exited" | "lost") => Promise<void>;
+}
+
+/**
+ * One line per round start, kill and end. A round has no task id, so none is named; nothing read from a pane, the
+ * seed, the notes or the agent's text reaches a line. Every end is `failed` until the verbs exist (custodian PR 4
+ * adds `healthy`).
+ */
+export function custodianAudit(sink: AuditSink): CustodianAudit {
+  const origin: CustodianOrigin = "custodian";
+  return {
+    start: async (exclave, pane, outcome) => {
+      await sink(
+        `audit custodian origin=${origin} op=start exclave=${quote(exclave)} pane=${pane ?? "-"} outcome=${outcome}`,
+      );
+    },
+    kill: async (pane, reason, outcome) => {
+      await sink(`audit custodian origin=${origin} op=kill pane=${pane} reason=${reason} outcome=${outcome}`);
+    },
+    end: async (pane, reason) => {
+      await sink(`audit custodian origin=${origin} op=end pane=${pane ?? "-"} outcome=failed reason=${reason}`);
+    },
+  };
+}
+
 /** A session's message to another session on this machine (`messages.ts`). */
 export type MessageOrigin = "message";
 
