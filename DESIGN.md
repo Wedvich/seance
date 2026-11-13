@@ -7168,8 +7168,9 @@ fields carry over), under the same gates.
   predating `continueSession`: "resume it by hand", and no `--continue` fallback, since that is what
   missed the conversation); the noted repo not being the clone `repo` resolved to; a
   noted path that is not canonical (a symlink anywhere on it) or not under
-  `<clone>/.claude/worktrees/`; the path gone with no branch noted for it, or gone and not a direct
-  child of a canonical `<clone>/.claude/worktrees` (a gone path otherwise passes, for the re-add below);
+  `<clone>/.claude/worktrees/`; the path gone with no branch noted for it, or gone and not exactly
+  `<clone>/.claude/worktrees/<one plain name>` under a canonical parent (no `..`, `.`, trailing or doubled
+  separator; a gone path otherwise passes, for the re-add below);
   and `repo_not_found` for a repo the scan set no longer
   holds. _After it_ (`spawnContinued`, the new id already written ahead): the repo gone
   again by then; the old task still having a live pane; any live pane whose cwd is inside the
@@ -7250,13 +7251,15 @@ fields carry over), under the same gates.
   (removed by hand, or a sweep that failed or kept it) and, when C32 is built, pushed-but-unmerged work such
   as an awaiting-merge or cancelled task. When the noted path is
   gone, `spawnContinued` (after the pane checks, before the lock read) puts it back at the same path,
-  under reap's lock (`withReapLock`; a held lock refuses `not_continuable`, "try again shortly"), because
+  under reap's lock (`withReapLock`; a held lock refuses `not_continuable`, "try again shortly"), re-adds one at a time within the daemon first (a second continuation waits for the first instead of being refused by the lock its own process holds, and each lock take stages a uniquely named file), because
   reap's branch sweep deletes with `update-ref -d`, which does not refuse a branch checked out in a
   worktree. `<branch>` is the note's `branch` (branch-state's last read of the live worktree,
   `Continuation.branch`) and `<path>` the note's `path`, both this machine's ledger's, never a frame's. The
   same path is the point: Claude files the transcript by it, the exclave is chosen by it, and the trust
   entry is for it. In order: `repoConfigRefusal` (a checkout runs the filters repo-local config names,
-  which a session can write); an `lstat` of the leaf (anything there, a symlink included, refuses: a link
+  which a session can write); a refusal when `<branch>` is the clone's default branch (the note's branch is
+  the last one branch-state saw, so a session that switched to `main` would otherwise resume there; any
+  other branch it switched to is accepted, as that is where its work was); an `lstat` of the leaf (anything there, a symlink included, refuses: a link
   to an empty directory would take the checkout); `show-ref --verify -s refs/heads/<branch>` (the exact
   ref: no revision syntax, no tag or remote branch of the name standing in) for the tip sha; a stale
   registration (a directory removed by hand stays registered, which `worktree add` refuses) released of a
@@ -7266,8 +7269,15 @@ fields carry over), under the same gates.
   path canonical. The add is detached at a full oid because `worktree add <path> <branch>` on a branch
   deleted since the `show-ref` would make one tracking `origin/<branch>` (or detach at a tag of that
   name): no ref a remote can move is ever checked out, with or without the lock. A failure after the add
-  runs `worktree remove <path>` (clean, never `--force`) and refuses; a failure after the re-add, at the
-  launch, leaves the tree, which the next Continue finds present. The spawn's audit line carries
+  runs `worktree remove <path>` (plain first, `--force` only if that fails, since nothing but this call's own
+  fresh checkout is there; both with the add's 60 s timeout) and refuses. If even the forced remove fails,
+  the refusal says the half-added tree is left at the path and `log.warn` names it. _Decided: no further
+  guard, because_ a present path is the ordinary continuation and a detached or dirty tree there is
+  indistinguishable from one the owner made; the next Continue finds it present and resumes in it, so
+  the owner removes the leftover first, as the message says. A failure after the re-add, at the
+  launch, leaves the tree, which the next Continue finds present. Any other throw inside the re-add
+  (the lock directory not creatable, say) is a `not_continuable` refusal too, never an unknown failure, so the
+  write-ahead entry is retracted rather than marked interrupted. The spawn's audit line carries
   `readded=true` (no branch). One `log.info` names the path, never the branch. The handler lets a gone
   path through only as a direct child of the clone's canonical `.claude/worktrees`, which may itself be
   missing under a canonical clone and `.claude`; a present path is re-checked canonical in `continueLocked`

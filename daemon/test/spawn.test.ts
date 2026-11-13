@@ -1275,6 +1275,46 @@ describe("spawnSession continuing a failed task's session", () => {
       }
     });
 
+    test("two re-adds of different worktrees together both succeed, one after the other", async () => {
+      const [a, b] = [await makeWorktree(), await makeWorktree()];
+      for (const wt of [a, b]) await git(fixture.repoPath, ["worktree", "remove", wt.path]);
+      const results = await Promise.allSettled(
+        [a, b].map((wt, i) =>
+          spawnSession(
+            { repo: "myrepo", mode: "continue", title: `Cont Pair ${i}`, taskId: `cont-pair-${i}`, continues: OLD, client: "scheduler" },
+            repos,
+            WAIT,
+            { path: wt.path, session: CONTINUED_SESSION, branch: `wt-${wt.name}` },
+          ),
+        ),
+      );
+      try {
+        expect(results.map((r) => (r.status === "rejected" ? String(r.reason) : r.status))).toEqual([
+          "fulfilled",
+          "fulfilled",
+        ]);
+        for (const wt of [a, b]) expect((await stat(join(wt.path, ".git"))).isFile()).toBe(true);
+      } finally {
+        await Promise.all(results.map((r) => (r.status === "fulfilled" ? killWindow(r.value.window) : undefined)));
+        await Promise.all([a, b].map((wt) => dropWorktree(wt)));
+      }
+    });
+
+    test("is refused, adding nothing, when the noted branch is the default branch", async () => {
+      const wt = await makeWorktree();
+      await git(fixture.repoPath, ["worktree", "remove", wt.path]);
+      try {
+        const refused = await continuingOn(wt, "Cont Default", "main").catch((err: unknown) => err);
+        expect(refused).toMatchObject({
+          code: "not_continuable",
+          message: expect.stringContaining("default branch"),
+        });
+        expect(await stat(wt.path).catch(() => null)).toBeNull();
+      } finally {
+        await git(fixture.repoPath, ["branch", "-D", `wt-${wt.name}`]);
+      }
+    });
+
     test("is refused when its branch is checked out in another worktree", async () => {
       const wt = await makeWorktree();
       await git(fixture.repoPath, ["worktree", "remove", wt.path]);

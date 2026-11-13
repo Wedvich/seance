@@ -13,6 +13,7 @@ import { hardenedGit, repoConfigRefusal } from "./git-hardened.ts";
 import { log } from "./log.ts";
 import { parseWorktreeList, parseWorktreeLock } from "./reap-git.ts";
 import { ReapBusy, withReapLock } from "./reap.ts";
+import { readDefaultBranch } from "./scan.ts";
 import { isRegistered, listPanes, paneRunningTask, type PaneInfo } from "./sessions.ts";
 import {
   capturePane,
@@ -638,11 +639,27 @@ async function readdWorktree(repo: RepoEntry, path: string, branch: string | und
     );
   }
   try {
-    await withReapLock(() => readdLocked(repo, path, branch));
+    await serialReadd(() => withReapLock(() => readdLocked(repo, path, branch)));
   } catch (err) {
-    if (!(err instanceof ReapBusy)) throw err;
-    throw new SpawnFailure("not_continuable", `its worktree ${path} is gone and ${err.message}; try again shortly`);
+    if (err instanceof SpawnFailure) throw err;
+    if (err instanceof ReapBusy) {
+      throw new SpawnFailure("not_continuable", `its worktree ${path} is gone and ${err.message}; try again shortly`);
+    }
+    // Any other throw would reach the handler as an unknown failure and mark a launch that never ran interrupted.
+    const why = err instanceof Error ? err.message : String(err);
+    throw new SpawnFailure("not_continuable", `its worktree ${path} is gone and re-adding it failed: ${why}`);
   }
+}
+
+/**
+ * Re-adds run one at a time in this process: `withReapLock` is a cross-process lock keyed by pid, so two
+ * continuations of different tasks reaching it together would refuse each other as "a reap is already running".
+ */
+let readdQueue: Promise<unknown> = Promise.resolve();
+function serialReadd<T>(run: () => Promise<T>): Promise<T> {
+  const next = readdQueue.catch(() => undefined).then(run);
+  readdQueue = next;
+  return next;
 }
 
 async function readdLocked(repo: RepoEntry, path: string, branch: string): Promise<void> {
@@ -658,6 +675,15 @@ async function readdLocked(repo: RepoEntry, path: string, branch: string): Promi
   // the checkout through a link into an empty directory.
   if ((await lstat(path).catch(() => null)) !== null) {
     throw new SpawnFailure("not_continuable", `its worktree ${path} reappeared`);
+  }
+  // The branch is the one the worktree was last seen on, which a session may have switched to the default
+  // branch; a re-add resumes onto it, where the session's commits and pushes would then land.
+  const defaultBranch = await readDefaultBranch(repo.path);
+  if (defaultBranch !== null && defaultBranch === branch) {
+    throw new SpawnFailure(
+      "not_continuable",
+      `its worktree ${path} is gone, and it was last on the default branch (${branch}), which a re-add does not check out`,
+    );
   }
   // The exact ref: no revision syntax, no tag or remote branch of the same name standing in.
   const kept = await hardenedGit(repo.path, ["show-ref", "--verify", "-s", `refs/heads/${branch}`]);
@@ -689,11 +715,22 @@ async function readdLocked(repo: RepoEntry, path: string, branch: string): Promi
     );
   }
   const undo = async (why: string): Promise<never> => {
-    // Clean and unlocked, so no `--force`: what this call added and nothing else.
-    await hardenedGit(repo.path, ["worktree", "remove", path]);
+    // Plain first; `--force` only when that fails (an interrupted checkout leaves it dirty): nothing but this
+    // call's own fresh checkout lives there, under the reap lock and `pathSpawns`.
+    let removed = await hardenedGit(repo.path, ["worktree", "remove", path], READD_TIMEOUT_MS);
+    if (removed.exitCode !== 0) {
+      removed = await hardenedGit(repo.path, ["worktree", "remove", "--force", path], READD_TIMEOUT_MS);
+    }
+    if (removed.exitCode !== 0) {
+      log.warn(`re-add of ${path} failed and the half-added tree could not be removed: ${removed.stderr.trim()}`);
+      throw new SpawnFailure(
+        "not_continuable",
+        `its worktree ${path} could not be re-added: ${why}; the half-added tree is left at that path (${removed.stderr.trim()}): remove it before continuing`,
+      );
+    }
     throw new SpawnFailure("not_continuable", `its worktree ${path} could not be re-added: ${why}`);
   };
-  const switched = await hardenedGit(path, ["switch", "--no-guess", "--", branch]);
+  const switched = await hardenedGit(path, ["switch", "--no-guess", "--", branch], READD_TIMEOUT_MS);
   if (switched.exitCode !== 0) return undo(`its branch could not be checked out: ${switched.stderr.trim()}`);
   const [head, onBranch] = await Promise.all([
     hardenedGit(path, ["rev-parse", "HEAD"]),
