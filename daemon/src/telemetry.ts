@@ -75,6 +75,8 @@ export interface TelemetrySources {
   readonly now?: () => number;
   /** True while the daemon refuses task launches (`EndedTasks.draining`); absent reads as never. */
   readonly draining?: () => boolean;
+  /** When a person closed this machine to new scheduled work (ms), null while open: the status's `cl`. */
+  readonly closed?: () => number | null;
   /** Auth health's view by exclave id (`ax`/`ae`/`au`); absent reads as no auth fields. */
   readonly auth?: () => ReadonlyMap<string, AuthView>;
   /** Trait probes' failing and unknown pairs for the registered scan (`tf`/`tu`); absent reads as no trait fields. */

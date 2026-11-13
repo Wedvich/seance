@@ -8,6 +8,7 @@ import type {
   MetricsRequest,
   MetricsSeries,
   PassCloseResponse,
+  AvailabilityResponse,
   Plain,
   PushBranchErrorCode,
   PushBranchResponse,
@@ -28,16 +29,19 @@ import {
   isTaskId,
   parseAttachmentManifest,
   parsePassCloseRequest,
+  parseAvailabilityRequest,
   parsePushBranchRequest,
   quote,
   REPLY_JSON_BUDGET,
   SCHEDULER_CLIENT,
+  APP_ID,
   SCHEDULER_ID,
   withAutonomy,
 } from "@seance/shared";
 import {
   despawnAudit,
   passCloseAudit,
+  availabilityAudit,
   pushAudit,
   spawnAudit,
   type AuditSink,
@@ -92,6 +96,14 @@ export interface HandlerContext {
    * written, so the pane carrying the task may close at its turn's end. Absent, answered `unsupported`.
    */
   readonly armPassClose?: (taskId: string) => Promise<PassCloseResponse>;
+  /** Closed-to-new-work state (docs/drain.md); absent, `availability` answers `unsupported` and no spawn is gated. */
+  readonly availability?: MachineAvailability;
+}
+
+export interface MachineAvailability {
+  readonly closed: () => number | null;
+  /** Persists, then refreshes status; `changed` false when it already was. Throws when the write fails. */
+  readonly set: (open: boolean) => Promise<{ readonly closed: number | null; readonly changed: boolean }>;
 }
 
 /** What the handlers need of `attachments.ts`, bound to the daemon's own relay origin, token and key. */
@@ -190,6 +202,8 @@ export function isSpawnRequest(payload: unknown): payload is SpawnRequest {
   // `continues` is the one field of a continuation and only of one. It is a ledger key: the
   // worktree comes from this machine's own record of that task, never from the request.
   if (obj["continues"] !== undefined && !isTaskId(obj["continues"])) return false;
+  // Only ever `true`: it is the drain-capable leader's word that it routes a `machine_closed` again.
+  if (obj["routesClosed"] !== undefined && obj["routesClosed"] !== true) return false;
   // The rules a well-formed continuation can still break (the scheduler's client, a task id, not itself)
   // are `continuationRefusal`'s: a malformed request answers `internal_error`, a transport code that
   // leaves the leader's task reserved, where `not_continuable` settles it.
@@ -262,6 +276,34 @@ async function relaunchRefusal(
 }
 
 type SpawnRefusal = Extract<SpawnResponse, { readonly ok: false }>;
+
+/**
+ * A scheduler spawn to a machine a person closed. After the relaunch refusals, so a re-dispatch of a
+ * task running here still answers `task_running` and never routes a twin elsewhere; and a live pane
+ * carrying the id is looked for whatever the ledger says, for the same reason. Before anything is
+ * fetched or recorded. A leader that routes `machine_closed` says so (`routesClosed`); an older one
+ * would fail the task on an unknown code, so it gets `internal_error` unrecorded, as the restart
+ * gate answers: the task stays reserved until its TTL, whose `sessions` read proves it never landed.
+ */
+async function closedRefusal(
+  ctx: HandlerContext,
+  request: SpawnRequest,
+  scheduler: boolean,
+): Promise<(SpawnRefusal & { readonly id?: string }) | null> {
+  if (!scheduler || request.client !== SCHEDULER_CLIENT) return null;
+  if (ctx.availability === undefined || ctx.availability.closed() === null) return null;
+  const { taskId } = request;
+  if (taskId !== undefined) {
+    const running = (await ctx.backend.sessions(ctx.getRepos())).find((s) => s.taskId === taskId);
+    if (running !== undefined) {
+      return { ok: false, code: "task_running", message: `task ${taskId} is already running`, id: running.id };
+    }
+  }
+  if (request.routesClosed === true) {
+    return { ok: false, code: "machine_closed", message: "this machine is closed to new scheduled work" };
+  }
+  return { ok: false, code: "internal_error", message: "this machine is closed to new scheduled work" };
+}
 
 function attachmentUnavailable(message: string): SpawnRefusal {
   return { ok: false, code: "attachment_unavailable", message };
@@ -387,6 +429,11 @@ async function handleSpawn(
   if (refused !== null) {
     await audit.failed(refused.code, refused.id);
     return refused;
+  }
+  const closed = await closedRefusal(ctx, payload, scheduler);
+  if (closed !== null) {
+    await audit.failed(closed.code, closed.id);
+    return closed;
   }
   // Read once: a rescan in between must not pair the spawn with another clone.
   const repos = ctx.getRepos();
@@ -631,6 +678,42 @@ async function handlePassClose(
 }
 
 /**
+ * `availability`: close this machine to new scheduled work, or reopen it. Only an app may say so, on the
+ * relay leg: never the scheduler (a leader must not close a box), never the local socket. It writes the
+ * machine's own sticky `closed` and refreshes `status`; `now` is accepted and ignored until the drain.
+ */
+async function handleAvailability(
+  ctx: HandlerContext,
+  audit: ReturnType<typeof availabilityAudit>,
+  payload: unknown,
+  from: string | undefined,
+  origin: SpawnOrigin,
+): Promise<AvailabilityResponse> {
+  if (origin !== "relay" || from !== APP_ID) {
+    await audit(null, "refused");
+    return { ok: false, code: "refused", message: "only an app may open or close a machine" };
+  }
+  const request = parseAvailabilityRequest(payload);
+  if (request === null) {
+    await audit(null, "invalid_request");
+    return { ok: false, code: "invalid_request", message: "malformed availability request" };
+  }
+  if (ctx.availability === undefined) {
+    await audit(request.open, "unsupported");
+    return { ok: false, code: "unsupported", message: "this daemon cannot be closed" };
+  }
+  try {
+    const { closed, changed } = await ctx.availability.set(request.open);
+    await audit(request.open, !changed ? "unchanged" : request.open ? "reopened" : "closed");
+    return { ok: true, closed };
+  } catch (err) {
+    await audit(request.open, "internal_error");
+    log.error(`availability: could not save state: ${String(err)}`);
+    return { ok: false, code: "internal_error", message: "could not save this machine's state" };
+  }
+}
+
+/**
  * One decimal: the units are whole percent, MiB and KiB/s, and a rollup's
  * average otherwise serializes to seventeen digits — a third of the reply.
  */
@@ -814,6 +897,7 @@ export function createHandler(
   const despawnTrail = despawnAudit(origin, ctx.auditSink);
   const pushTrail = pushAudit(origin, ctx.auditSink);
   const passCloseTrail = passCloseAudit(origin, ctx.auditSink);
+  const availabilityTrail = availabilityAudit(origin, ctx.auditSink);
   return async (plain: Plain, from?: string, replied?: Promise<unknown>): Promise<Plain | null> => {
     await auditRequest(ctx, origin, plain.op, plain.id);
 
@@ -838,6 +922,8 @@ export function createHandler(
           return { payload: await handlePushBranch(ctx, pushTrail, plain.payload, from === SCHEDULER_ID) };
         case "pass-close":
           return { payload: await handlePassClose(ctx, passCloseTrail, plain.payload, from === SCHEDULER_ID) };
+        case "availability":
+          return { payload: await handleAvailability(ctx, availabilityTrail, plain.payload, from, origin) };
         case "metrics":
           return { payload: handleMetrics(ctx, plain.payload) };
         case "rescan": {
