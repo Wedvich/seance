@@ -1127,6 +1127,8 @@ export interface MachineInfo {
  * counts or offering `seanced close --wait`.
  * `drainAsk`: as a daemon, asks its sessions to pass themselves when closed (drain step A) and honours
  * `now`; clients gate `now`/"Drain now" on it, and the leader reads it in reconcile (`#asksItsDaemon`).
+ * `messages`: as a daemon, binds `inbox` listeners by peer pid and delivers `message` frames to its own tasked panes
+ * (docs/messaging.md); advertised only where the host names a socket's peer.
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -1151,6 +1153,7 @@ export const CAPABILITIES = {
   drain: "drain",
   drainPass: "drainPass",
   drainAsk: "drainAsk",
+  messages: "messages",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];

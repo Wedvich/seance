@@ -7,6 +7,8 @@ import { brokerFail, brokerFrameId, isBrokerFrame, type BrokerReply } from "./br
 import type { Check } from "./check.ts";
 import { localSocketReachable } from "./local-client.ts";
 import { log } from "./log.ts";
+import { isInboxFrameKind, isMessageFrameKind, type MessageReply } from "./message-frame.ts";
+import { LISTENER_OUTBOUND_MAX, type ListenerSink, type Messages } from "./messages.ts";
 import { runDir, socketPath } from "./paths.ts";
 import { peerPid, socketFd } from "./peer.ts";
 import type { SessionEventReply } from "./session-event-frame.ts";
@@ -47,6 +49,12 @@ import { isSessionEventFrameKind } from "./session-events.ts";
  * reports from the session-events mod, bound to a pane by the peer's
  * kernel-reported pid, never by what the frame says. It can store and forward,
  * nothing else — DESIGN.md's "Session events" records the widening.
+ *
+ * The fourth and fifth are `message` (a session's `send_message` to another task on this machine) and `inbox`
+ * (the inbox mod's `seanced inbox` child, which holds its connection open and is written one line per
+ * message). `inbox` is the first frame that *reads* something a session did not write, so both are bound
+ * by the kernel's peer pid only and refused where the host names no peer, never by a field a sender
+ * claims. DESIGN.md's "Session messages" records the widening.
  */
 
 /**
@@ -80,6 +88,8 @@ interface Conn {
   readonly peer: number | null;
   /** Aborts when the peer goes away: an act that is not yet done is then not worth finishing (a pass is never sent to no one). */
   readonly gone: AbortController;
+  /** An `inbox` listener's connection: it sends one frame, and anything more is dropped. */
+  listening: boolean;
 }
 
 export interface LocalSocketOpts {
@@ -96,6 +106,11 @@ export interface LocalSocketOpts {
    * such frames are answered `unsupported`.
    */
   readonly sessionEvents?: (raw: unknown, peer: number | null, caller?: AbortSignal) => Promise<SessionEventReply>;
+  /**
+   * Session messages (`createMessages(...)`): `send` answers a `message` frame, `listen` serves an `inbox`
+   * connection. Absent, both kinds are answered `unsupported`.
+   */
+  readonly messages?: Pick<Messages, "listen" | "send">;
   readonly path?: string;
 }
 
@@ -206,17 +221,75 @@ async function dispatchSessionEvent(
   sendLine(sock, conn, JSON.stringify(reply));
 }
 
+/** Always answers, so `send_message` can wait for the reply — and stay alive while its pid is walked. */
+async function dispatchMessage(
+  sock: Socket<undefined>,
+  conn: Conn,
+  raw: unknown,
+  messages: LocalSocketOpts["messages"],
+): Promise<void> {
+  let reply: MessageReply;
+  try {
+    reply = messages === undefined ? { ok: false, code: "unsupported" } : await messages.send(raw, conn.peer);
+  } catch (err) {
+    // Never the frame: it carries message text.
+    log.error(`local socket: message delivery crashed: ${String(err)}`);
+    reply = { ok: false, code: "internal" };
+  }
+  sendLine(sock, conn, JSON.stringify(reply));
+}
+
+/** The connection stays open after this returns: the daemon writes to it as messages arrive. */
+async function dispatchInbox(
+  sock: Socket<undefined>,
+  conn: Conn,
+  raw: unknown,
+  messages: LocalSocketOpts["messages"],
+): Promise<void> {
+  conn.listening = true;
+  if (messages === undefined) {
+    sendLine(sock, conn, JSON.stringify({ ok: false, code: "unsupported" }));
+    sock.end();
+    return;
+  }
+  const sink: ListenerSink = {
+    write: (line) => {
+      if (conn.gone.signal.aborted) return false;
+      // A mod that stopped reading: its queue is not this daemon's to hold.
+      if (conn.outbound.length > LISTENER_OUTBOUND_MAX) {
+        sock.end();
+        return false;
+      }
+      sendLine(sock, conn, line);
+      return true;
+    },
+    close: () => sock.end(),
+    gone: conn.gone.signal,
+  };
+  try {
+    await messages.listen(raw, conn.peer, sink);
+  } catch (err) {
+    log.error(`local socket: inbox listener crashed: ${String(err)}`);
+    sock.end();
+  }
+}
+
 async function dispatch(
   sock: Socket<undefined>,
   conn: Conn,
   line: string,
-  opts: Pick<LocalSocketOpts, "handle" | "broker" | "sessionEvents">,
+  opts: Pick<LocalSocketOpts, "handle" | "broker" | "sessionEvents" | "messages">,
 ): Promise<void> {
   let raw: unknown;
   try {
     raw = JSON.parse(line);
   } catch {
     log.warn("local socket: dropped a frame that is not JSON");
+    sock.end();
+    return;
+  }
+  if (conn.listening) {
+    log.warn("local socket: dropped a frame on an inbox listener's connection");
     sock.end();
     return;
   }
@@ -229,6 +302,14 @@ async function dispatch(
   // Likewise exclusive: an event never reaches the op handler, and carries no `op` to try.
   if (isSessionEventFrameKind(raw)) {
     await dispatchSessionEvent(sock, conn, raw, opts.sessionEvents);
+    return;
+  }
+  if (isMessageFrameKind(raw)) {
+    await dispatchMessage(sock, conn, raw, opts.messages);
+    return;
+  }
+  if (isInboxFrameKind(raw)) {
+    await dispatchInbox(sock, conn, raw, opts.messages);
     return;
   }
   if (!isPlain(raw)) {
@@ -298,6 +379,7 @@ export async function startLocalSocket(opts: LocalSocketOpts): Promise<LocalSock
         outbound: EMPTY,
         peer: peerPid(socketFd(sock)),
         gone: new AbortController(),
+        listening: false,
       });
     },
     close: (sock: Socket<undefined>): void => {

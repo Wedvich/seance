@@ -23,3 +23,4 @@ export * from "./successor.ts";
 export * from "./drain.ts";
 export * from "./amend.ts";
 export * from "./amend-client.ts";
+export * from "./messages.ts";

@@ -11,6 +11,7 @@ import {
   type AmendRequest,
   type DespawnRequest,
   type FailureReason,
+  type MessageKind,
   type SpawnClient,
   type SpawnRequest,
   type SuccessorTrigger,
@@ -716,5 +717,46 @@ export function drainAskAudit(sink: AuditSink): (taskId: string, outcome: DrainA
   const origin: DrainOrigin = "drain";
   return async (taskId, outcome) => {
     await sink(`audit drain origin=${origin} task=${quote(taskId)} outcome=${outcome}`);
+  };
+}
+
+/** A session's message to another session on this machine (`messages.ts`). */
+export type MessageOrigin = "message";
+
+/**
+ * `out` outcomes are the sender's answer (`sent`: held for a listener that has not connected; `held`: the task has
+ * no pane yet, nothing kept); `in` outcomes are what became of the message at the receiving pane. `dropped` is a
+ * daemon-inbox cap drop, which the record's three `in` outcomes do not cover.
+ */
+export type MessageOutcome =
+  | "delivered"
+  | "sent"
+  | "held"
+  | "ended"
+  | "nolistener"
+  | "dropped"
+  | "unknown"
+  | "too_long"
+  | "rate_limited"
+  | "unbound";
+
+export type MessageAudit = (line: {
+  readonly dir: "out" | "in";
+  /** A task id; null for an untasked sender; undefined when the sender could not be bound at all. */
+  readonly from: string | null | undefined;
+  readonly to: string;
+  readonly kind: MessageKind;
+  readonly bytes: number;
+  readonly outcome: MessageOutcome;
+}) => Promise<void>;
+
+/** Ids, kind and a byte count, never text, a title, a message id or a pane. */
+export function messageAudit(sink: AuditSink): MessageAudit {
+  const origin: MessageOrigin = "message";
+  return async (line) => {
+    const from = line.from === undefined ? "-" : line.from === null ? "untasked" : quote(line.from);
+    await sink(
+      `audit message origin=${origin} dir=${line.dir} from=${from} to=${quote(line.to)} kind=${line.kind} bytes=${line.bytes} outcome=${line.outcome}`,
+    );
   };
 }

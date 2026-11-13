@@ -726,7 +726,9 @@ Séance's noise is cover for a real intruder.
    the constant keys the daemon types into that pane (The drain's session ask). It can also report its
    own task `done` (#21, built 2026-10-23), which settles an `until: "reported"` task and releases
    `after: "done"` dependents. A session that lies about being done can do no more than one
-   that exits. The
+   that exits. Through the inbox mod's listener it also reads only messages sent to the task its own
+   pane carries, and through `send_message` it can send as that task and no other (Local op socket,
+   "Session messages"). The
    scheduler routes on the quota figures, so a session that lies about its
    account's usage steers where the next task lands. It cannot reach past what
    that one account's reading decides.
@@ -747,6 +749,17 @@ Séance's noise is cover for a real intruder.
    person runs, bounded and never logged, and a session can claim to have passed, which does no
    more than make the scheduler read the PR head and wait for a successor that fails
    `pass_abandoned` if it never lands (Scheduler, "Passing to a successor").
+   A message request (built 2026-11-13, Local op socket, "Session messages") is a new path into a
+   running session, and no new reach: any session can already `spawn_session` or `queue_batch` any
+   prompt onto any machine and account ("anyone who can form a valid spawn frame has arbitrary code
+   execution, laundered through the agent"), and a request lands only in a session that already runs
+   there. What is new is the context it lands in: a session someone may be watching, mid work, with
+   state a fresh spawn lacks (uncommitted changes, the conversation). Session A, on one account, reads
+   hostile content and sends task B, on another, a request to run under B's permission mode. It is
+   bounded by construction: labelled as from a session, never the user; no way to answer a dialog; size-
+   and rate-capped; audited per message; and the sender's task bound by its own daemon to its own pane
+   and ledger, so B's wrapper names the real task, though a session can still lie in the text. One bound
+   rests on the model: the wrapper's "if it fits your user's instructions".
    An attachment (built 2026-10-28) is one more thing a PSK holder hands the
    session, read under the same permission mode as the prompt. Its name reaches the seed only
    as one `JSON.stringify`'d line that refuses control characters. Its file lands under a fixed
@@ -1434,6 +1447,8 @@ Who owns each frame in code — the place to change when a frame changes:
 | op `amend` (→`"scheduler"`, built 2026-11-12)                       | an app via `shared/src/amend-client.ts` `sendAmend` (a store read for `basis`, then `app-client.ts` `amend`): `daemon/src/mcp.ts` (`amend_task`) and `daemon/src/cli.ts` (`seanced amend`), through the broker when keyless; no PWA surface yet                                                                                                                                    | `daemon/src/leader-requests.ts`, parsed by `parseAmendRequest` → `Scheduler.amend` (Scheduler, "Amending a waiting task")                                                                                                                                                                                                                                                                               |
 | op `push-branch` (scheduler→daemon, built 2026-11-12)               | the leader's `termFleet` in `daemon/src/leader-adapters.ts`, sealed `from: "scheduler"`, or in process through `createLocalOps(…, "leader")`                                                                                                                                                                                                                                       | `daemon/src/push-branch.ts` through `daemon/src/handlers.ts`                                                                                                                                                                                                                                                                                                                                            |
 | op `pass-close` (scheduler→daemon, built 2026-11-12)                | the leader's `termFleet`, once the commit point of a session-triggered pass is written                                                                                                                                                                                                                                                                                             | `daemon/src/session-events.ts` (`armPassClose`) through `daemon/src/handlers.ts`                                                                                                                                                                                                                                                                                                                        |
+| frame `message` (local socket, built 2026-11-13)                    | `daemon/src/send-message.ts`, from MCP's `send_message` only                                                                                                                                                                                                                                                                                                                       | `daemon/src/messages.ts`                                                                                                                                                                                                                                                                                                                                                                                |
+| frame `inbox` (local socket, built 2026-11-13)                      | `daemon/src/inbox-cli.ts`, the `inbox` mod's child (`seanced inbox`)                                                                                                                                                                                                                                                                                                               | `daemon/src/messages.ts`                                                                                                                                                                                                                                                                                                                                                                                |
 | frame `pass` (local socket, built 2026-11-12)                       | `daemon/src/report-done.ts` (`passToSuccessor`), from MCP's `pass_to_successor` only                                                                                                                                                                                                                                                                                               | `daemon/src/session-events.ts`                                                                                                                                                                                                                                                                                                                                                                          |
 | op `session-pass` (→`"scheduler"`, built 2026-11-12)                | `daemon/src/session-events.ts`, once per accepted `pass` frame                                                                                                                                                                                                                                                                                                                     | `daemon/src/leader.ts` `onSessionPass`                                                                                                                                                                                                                                                                                                                                                                  |
 | op `queue-changed` (→`"app"`)                                       | `daemon/src/leader.ts` on the term's leg, as `from: "scheduler"`, coalesced to one per 500 ms                                                                                                                                                                                                                                                                                      | `shared/src/app-client.ts`, via `parseQueueChanged`: heard only by an app client (one with no term) and only `from: "scheduler"`, handed to `onQueueChanged` listeners — `pwa/src/scheduler-store.ts` re-reads on it                                                                                                                                                                                    |
@@ -9616,6 +9631,19 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   install` does per exclave, and the tool allowed there (`mcp__seance__report_task_done` in its
   permissions): a call stopped at a permission prompt is no report. Without either the report is
   never made and the task waits for `mark-done`, its exit, or `merge_expired`.
+- **`send_message { to, kind, text, inReplyTo? }`** (built 2026-11-13; Local op socket, "Session messages").
+  Messages another Séance session's task on this machine: `kind` is `note` (information), `question` (may be
+  answered) or `request` (act on it if it fits). It reaches the daemon as the `message` frame, bound by the
+  peer pid of `seanced mcp` (a child of `claude` in the pane) exactly as `report_task_done` is, never by a
+  field, over the local socket and never the broker; the text is never in argv and `seanced mcp` logs nothing.
+  It checks no capability: it sends the frame, and an old daemon that drops it as malformed shows as a
+  connection closed with no answer, worded "may predate send_message" (as `invalid` is); a handler crash
+  answers `internal`, worded as a daemon error, since an update would not help. A task on another machine
+  answers `unknown` in this version (PR 2 routes it). There is no
+  list tool: `get_queue` names every task by id, title, machine and state. `read_messages` lives on the inbox
+  mod, not here: the mod holds what was pushed, and a second reader in another process would need its own
+  binding and cursor. Needs `mcp__seance__send_message` allowed where an agent calls it, as `report_task_done`
+  does, or the call stops at a permission prompt.
 - **`continue_task { taskId, prompt? }`** (2026-10-26, Daemon, "Continuing a session"). Enqueues
   a continuation of a `session_failed` or cancelled (after placement) task, the newest in a chain: the session's conversation is resumed in its worktree, on
   the same machine and clone, as a new task (the old one stays as it was). It reads the leader's queue for
@@ -10005,7 +10033,9 @@ semantic ops with per-op policy and the existing audit trail, never the raw key.
   grants no op: it is ingest, and what it ingests is bound to the
   sender's own pane. Its acts beyond ingest are a `done` report for the sender's own
   task, which writes a ledger note and forwards it, and a hand-off, which closes the
-  sender's own pane once it goes idle ("Session events").
+  sender's own pane once it goes idle ("Session events"). The `message` and `inbox` kinds ("Session
+  messages") grant no op either: a message goes to a task this machine's ledger holds, and the listener reads
+  only what is addressed to the task its own pane carries, bound by peer pid with no claimed-pane fallback.
 - **Connection per request; no correlation, no heartbeat, no backoff.** One
   `Plain` per line, one reply, close. This is deliberately not the relay
   protocol: there is no reordering to correlate against and no network to
@@ -10089,6 +10119,189 @@ Non-goals: routing `seanced spawn --now` through the socket (it would collapse t
 executors further, but `origin=cli` should keep meaning "typed at this machine");
 a `rescan` op, or `availability`; the Raycast extension using it — its local-only reach was rejected
 on product grounds and that has not changed.
+
+### Session messages (`daemon/src/messages.ts`) — built 2026-11-13, docs/messaging.md PR 1
+
+Two sessions Séance spawned, on one machine, can message each other, across Claude accounts (exclaves
+share the machine's daemon). The sender's MCP `send_message` reaches the daemon over this socket; the
+receiver's `inbox` mod holds a listener connection open and delivers by Claude mod calls only. Cross-machine
+routing through the leader (PR 2) and the adapter seam (PR 3) are not built; docs/messaging.md keeps them.
+
+**Two frame kinds beside `Plain`**, both bound to a pane only by the kernel-reported peer pid (`peerPid`,
+`ancestorIn`) and refused `unbound` where the host cannot name a peer (`peerPidSupported()`; a `message`, a
+listener is told `unsupported`, below) or the pid came back null. Unlike `session-event` there is no claimed-pane fallback: `session-event` only _claims_ a state;
+`inbox` _hands text out_, so trusting a claimed pane would let any process of the same user read any
+session's messages. On a host that names no peer a listener is told `unsupported` rather than `unbound`: no
+retry can ever bind there, so the mod waits it out for minutes. `parseMessageFrame` and `parseInboxFrame` (`daemon/src/message-frame.ts`) accept exactly
+their fields and no `pane`.
+
+- **`message`** (`{ v: 1, kind: "message", to, messageKind, text, inReplyTo? }`), sent by `seanced mcp`'s
+  `send_message` (`daemon/src/send-message.ts`, silent: nothing reachable from `seanced mcp` calls `log.ts`,
+  which is why the grace constant lives in `message-frame.ts`). One reply line:
+  `{ ok: true, id, outcome: "delivered" | "sent" }` or `{ ok: false, code, reason? }`. The sender's task is
+  the one its pane carries **and this machine's launch ledger holds a launch of** (`EndedTasks.launchedAt`);
+  a pane tagged with any other id is untasked, so a session cannot borrow a task's name in the wrapper by
+  setting `@seance-task` on its own pane. The text crosses on the socket, never in argv.
+- **`inbox`** (`{ v: 1, kind: "inbox" }`), sent by `seanced inbox` (`daemon/src/inbox-cli.ts`), the child the
+  `inbox` mod runs. It binds once, at accept (`LOCAL_PEERPID` fails once the peer has closed), and the
+  connection then stays open: the daemon writes an ack line and one `InboxLine` per message, and the child
+  copies stdout through. It is the first frame that hands text out. A second frame written on a listening
+  connection closes it. **One listener per pane**: a later `inbox` frame bound to the same pane replaces the
+  first, whose child exits 0 (the `claude --resume` in the same pane case). The daemon closes a listener whose
+  pane is gone, dead, re-tagged or whose pid changed (`sweep`, lazily at every send and listen, not on a
+  timer).
+
+**The ack** is `{ ok: true, keep: { messages, bytes } }`,
+and only for a pane that carries a task this machine's ledger holds a launch of: nothing is ever addressed to
+any other pane, so its listener would only idle (**decided here**: a hand-started session, or a pane tagged
+with an id this machine never launched, is refused `untasked` instead, one bun process saved per such
+session). A refusal is `{ ok: false, code }` with `invalid`, `unbound`, `unsupported`, `stopping` or
+`untasked`. Exit codes of the CLI: 0 after an ack, 3 for an explicit `unsupported` and 4 for `untasked`
+(nothing a retry changes soon: the mod waits five minutes after either), 5 for `unbound` (**decided here**:
+mostly permanent, a claude in another tmux server, but also what a failed `tmux list-panes`, a null peer pid or
+a failed `/proc` read answers for a moment, so the mod waits a minute, under the 120 s listener grace, where
+five minutes would cost a message held for that session), 2 otherwise (a connection closed with no reply is what an old daemon dropping the frame
+looks like, and what a pulled-but-not-restarted one looks like during a self-update, so the mod backs off from
+one second to fifteen and retries instead of giving up; a stdout nobody reads any more is 2 too, since the
+child exits on a write error so the daemon drops the binding and holds the next message under its grace
+rather than audit `delivered` to an orphan, and a child whose parent changed is 2 as well: see "The orphaned
+child" below).
+
+**The orphaned child** (**decided here**, from the macOS spike's gap (a)). `claude` killed hard (an OOM
+kill) leaves the `seanced inbox` child alive, reparented to init (ppid 1), still connected, so the daemon's
+writes to it succeed while its stdout, a pipe nobody reads, fails: the message is lost under an audited
+`delivered`. The child therefore records `process.ppid` at start and exits 2 when it changes, checked every
+2 s by an unref'd timer, and exits on any stdout write error (the quiet-time check and the after-death
+check). Exiting closes the socket, the daemon's abort handler drops the binding, and the next message is held
+under the grace (`sent`) instead. **Accepted gap**: a message written between the kill and the next check (up
+to 2 s) is lost; the daemon keeps nothing after a write
+(Accepted gaps, below), and an ack line from the child was rejected as protocol for a window the grace
+already bounds. No other end needs the check: `/exit` SIGTERMs the child before the mod's `session.end` runs
+(so the mod uses no connection from `session.end`: it only cancels its loop, and the backoff sleep with it),
+and `tmux kill-session` SIGHUPs it within 0.5 s. `kill -9` of `claude` is the only path found that leaves a
+connected orphan. **Accepted gap**: the parent check assumes `bun` is exec'd in place, so the child's parent is
+`claude`. A version-manager shim that spawns the real binary as a child (rather than exec) makes the shim the
+parent, which `kill -9` of `claude` reparents without ending, so only the stdout check covers that case and a
+message written before the first failed write is lost under `delivered`. Walking the whole ancestor chain
+every 2 s was rejected for a failure that needs both a `kill -9` and such a shim.
+
+**Resolution (PR 1, local only).** `to` is a task id. The daemon delivers only to a live pane whose
+`@seance-task` is that task and whose task this machine's launch ledger holds a launch of; anything else
+answers `unknown`. A launched task with no pane yet is `held` (`ok: false`, nothing kept: the sender may
+retry) within the listener grace, `ended` after it. The ledger evicts by count (128 launches) and age, so a
+task whose session still runs can fall out of it: sends to it answer `unknown` (worded "no launch record of
+task X", not "not running"), and its own sends are an untasked session's. That is the same rule as the
+`done` report and the hand-off, accepted. The window name is the title in the wrapper
+(`displayTitle`: controls, backticks and quotes stripped, 80 code points), display-only like
+`assignment.window`: nothing routes on it.
+
+**The inbox in the daemon** is memory only, per pane: at most 32 messages and `4 × MESSAGE_MAX` bytes. A
+message is held only while the pane is bound to a task and its listener has not yet connected; any other goes
+to the listener at once, and the mod keeps it. Past either cap the oldest is dropped and the next push says
+how many were. Each held message has its own grace timer, from when it was held (never one per inbox, which
+would age a later message by an earlier one's clock). A flush whose write fails (the connection closed, or its
+unread output passed the cap) leaves the unwritten messages held with their timers, for the next listener,
+typically a second away. It is cleared on the pane's `ended`, when the pane is bound to another task, and on a
+daemon restart; nothing is at rest on disk, in the store or in the launch ledger.
+
+- **Outcomes** (the `send_message` result and the audit's `outcome`): `delivered` (written to a live
+  listener), `sent` (held in the inbox awaiting the listener: **decided here**, never `delivered`, since the
+  sender cannot know it will), `held`, `ended`, `ended` + `reason: "nolistener"` (the pane has no listener
+  past the grace: its exclave lacks the mod), `unknown`, `too_long`, `rate_limited`, `unbound`, `invalid`,
+  `unsupported`, `stopping`, `internal` (a handler crash, never `invalid`), and `dropped` (audit only:
+  **decided here**, an inbox cap took a held message; a clear, by a rebind, an `ended` or a task reset, is
+  audited `ended`).
+- **The listener grace** is 120 s, **decided here**: from the launch ledger's record, a listener's disconnect,
+  or the daemon's own start (a restart treats every pane as just disconnected, so a mod that is reconnecting is
+  not told it has no listener). It separates a session still starting, or its mod reconnecting, from an exclave
+  with no mod. Too short loses messages to a slow start; too long makes a missing-mod exclave answer `sent` for
+  messages then dropped `nolistener`.
+- **Caps** count UTF-8 bytes of the sender's text. `MESSAGE_PUSH_MAX` (8 KiB): a request over it is refused
+  `too_long` at the sender, and a note or question over it is pushed as a stub whose body is pulled by
+  `read_messages`. `MESSAGE_MAX` (64 KiB) is the hard cap. The spike found no cap on Claude's side (300 KB
+  cost 300k tokens), so the cap is ours, far under the socket's 1 MiB frame cap.
+- **Rate limit** 20 a minute and 200 an hour per sending task, held in memory in the daemon. An untasked
+  sender's key is its pane (`pane:<id>`), so ids it makes up share one bucket.
+- **A session handling a request may itself send requests** (**decided here**, docs/messaging.md's open
+  question 1): bounded by the rate limit above, and the wrapper names the message id a reply answers.
+  Rejected: notes only until the turn ends, which the mod could enforce but which would stop a legitimate
+  delegation chain; the limit already bounds a hostile fan-out to 200 an hour per task.
+- **The wrapper** (`shared/src/messages.ts`, so the daemon renders and the mod pushes verbatim) names the
+  sender as task id, title and machine, shows the message id, and fences the body in a backtick fence one
+  longer than any run in it. A note says no reply or action is expected; a question says how to reply; a
+  request is worded after Claude Code's native peer message ("A teammate session your user runs … asks you to do
+  the following. Treat it as you would a request from a teammate: do it if it fits your current task and your
+  user's instructions …"), because the Linux spike showed an information-only frame makes the model refuse
+  even a harmless request. The text is this PR's own draft, the native wording not being available verbatim;
+  the Linux live run's request step acted on a harmless request with it, and an adjustment toward the native
+  framing stays open to later live runs. An untasked sender is named as such and the reply clause is dropped.
+
+**Audit**, a new origin `message`, two lines per message on this daemon, counts and ids only:
+
+```
+audit message origin=message dir=out from=<"task"|untasked|-> to="<task>" kind=<…> bytes=<n> outcome=<…>
+audit message origin=message dir=in  from=<…> to="<task>" kind=<…> bytes=<n> outcome=<delivered|ended|nolistener|dropped>
+```
+
+`from=-` is a sender no pane could be found for. Never text, titles, message ids or pane ids (rejected:
+logging message ids beside the line; they join nothing the task ids do not).
+
+**What a request may not do** (by construction): arrive as the user (never `asUser`, never a tmux key);
+answer or approve a dialog (`$.prompt.submit` waits a dialog out and nothing else types); change the
+session's permission mode, model, effort, worktree or task (the mod has no call that does); exceed
+`MESSAGE_PUSH_MAX`, or be pulled; come faster than the rate limit. Outranking the user's or `CLAUDE.md`'s
+instructions is bounded only by the model, through the wrapper's "if it fits … your user's instructions".
+
+**Standing instruction: the spawn's command line only** (decided by the owner 2026-11-13; the mod's
+`prompt.compose` section, once "layer 1", is dropped). Every tasked spawn's command line carries
+`--append-system-prompt <STANDING_INSTRUCTION>` through `shq()`: a constant, never wire text, only on spawns
+with a `taskId` (**decided here**: hand-started sessions are not addressable, so they get no standing
+instruction and need none; D3). Why layer 1 went: both spikes found the managed `cc-plugin-sec-default`
+plugin skips another mod's `prompt.compose` hook (Linux 2.1.323 and macOS 2.1.323), so the section never
+reached the model, and each skip prints "inbox: its prompt.compose hook was skipped…" in every session that
+loads the mod. Re-adding it is a small change if an org without the managed plugin wants it: a
+`prompt.compose` hook in the mod appending a `session`-scope section, and the constant back on the ack (the
+mod holds no wording of its own). Rejected: a line in the seed (lost at `/compact`, absent after `--resume`,
+and the seed is the prompt `forgetPrompt` and the record's size budget govern).
+
+**What each kind of session gets.** A spawned (tasked) session is addressable, can send and receives. A
+hand-started session in a tmux pane can send (the message says `from` an untasked session on `<machine>`);
+it is not addressable, so its listener is refused `untasked`. `claude --bg` has no `TMUX_PANE`, so the mod starts
+no listener and `send_message` answers `unbound`.
+
+**Rejected** for the listener: a `$.process.run` per check (a Bun start, tmux and ps calls per tick per
+session); `$.http.fetch({ socketPath })` polling (verified on macOS to bind the right pane, but
+request/response only, so delivery waits for the next poll; kept as the fallback if the long-held child fails);
+a file drop the mod polls (binds by path, leaves text at rest); a loopback TCP port (no peer pid). For the
+sender: the fleet broker (credential-keyed daemons only, app-role so no sender binding), `seanced mcp`'s direct
+app-role client (the same missing binding, and a keyless server cannot seal), and a `Plain` op on `LOCAL_OPS`
+(those are relay ops served locally; this is a session's claim about itself, which the frame kinds beside
+`Plain` are for). `LOCAL_OPS` and the broker are unchanged.
+
+**Evidence**, on both Linux and macOS (Claude Code 2.1.323), is docs/messaging.md's table: long-held
+`$.process.spawn` child (30 minutes across `/compact`, a new child binding the same pane after `/exit` and
+`--resume`, and an in-process `/resume` with no reconnect), a pushed stub heeded with the spawn's command
+line alone (Linux 2.4 s idle and mid-turn; macOS 4 of 4, and 3 of 3 with no instruction at all), the managed
+plugin skipping `prompt.compose` on both, and `read_messages` raising no permission prompt in manual mode.
+macOS found the two gaps recorded here: the orphaned child, and `/clear` and `/resume` firing `session.end`
+with no `session.start`.
+
+**`/clear` and `/resume` inside a session** (macOS gap (b)) fire `session.end` (reason `clear` or `resume`)
+and no `session.start`: the child and its binding carry on under the next conversation. That is correct,
+since the pane's `@seance-task` does not change on either, so the mod's `session.end` leaves the loop alone
+for exactly those two reasons (`CONTINUES`) and must never count on `session.start` to rebind. Any other end
+stops the loop. Messages the mod already holds stay readable by `read_messages` across a `/clear` (the
+conversation changed, the task did not; the message names its sender and id, so a stale one is
+recognisable). Accepted.
+
+**Accepted gaps.** Stub bodies live only in the mod's memory (the daemon keeps nothing after the write), so
+a hooks-worker respawn loses them and `read_messages` says so. A message held for a mod that never connects is
+dropped silently at the grace's end (audited `nolistener`, never told to the sender, who was answered `sent`).
+The mod is installed by `seanced mod install` on each machine (self-update does not run it); until then
+`doctor` warns per exclave and sessions already running lack the mod and the flag. A new mod against an old
+daemon: the old daemon drops the `inbox` frame as malformed and warns, the child exits 2, and the mod backs off
+to 15 s. Advertised as `CAPABILITIES.messages` only where the host names peers and the peer-binding probe
+(`peerBindingProblem`, run once per process) passed.
 
 ### Fleet broker (`daemon/src/broker.ts`) — designed 2026-10-14
 
@@ -11079,12 +11292,14 @@ version breaks the build.
 
 ## Claude Code mods (`claude-mods/`) — designed 2026-10-09
 
-Function-hook plugins ("mods") for the Claude Code sessions séance spawns. Two
+Function-hook plugins ("mods") for the Claude Code sessions séance spawns. Three
 today: **tmux-rename**, which keeps a `/rename` tagged and renames the session's
-tmux window to the untagged name; and **session-events** (scheduler M2), which
+tmux window to the untagged name; **session-events** (scheduler M2), which
 reports the session's state and the PR it opened to the local
-daemon. Its design is under Local op socket, "Session events". The bullets below
-are tmux-rename's, except where they say mods.
+daemon. Its design is under Local op socket, "Session events"; and **inbox**
+(built 2026-11-13), which delivers other sessions' messages into this one and adds `read_messages`. Its
+design is under Local op socket, "Session messages", and its bullets are at the end of this section.
+The bullets below are tmux-rename's, except where they say mods.
 
 - **Why it lives here, not in dotfiles**: it extends a séance decision ("Session
   name vs window name" above) — the session is named `slug (machineTag)`, the
@@ -11198,6 +11413,46 @@ are tmux-rename's, except where they say mods.
   once left session-events' tests unrun behind tmux-rename's — (the summary
   format matches bun's), and skips those shards, visibly, where `claude` isn't on
   PATH — which today includes CI.
+
+**inbox** (built 2026-11-13; `claude-mods/inbox/`; the frames, the daemon's side and the audit are under
+Local op socket, "Session messages"):
+
+- **A third mod, not a fold into session-events.** The model reads a push as "The `<plugin>` plugin sent a
+  message", and "inbox" is the label wanted. session-events is fire-and-forget by design ("a missing `bun`, a
+  stopped daemon or a slow one costs the session nothing"), and a delivery bug must not cost the scheduler its
+  events.
+- **The listener.** At `session.start`, only when `TMUX_PANE` is set (`claude --bg` gets none), one
+  `$.process.spawn` child, `bun <checkout>/daemon/src/main.ts inbox` (`daemonMain`, by path from the mod's own
+  folder, copied from session-events because a mod folder cannot import outside itself), restarted with
+  backoff: a second after an ack, five minutes after an explicit `unsupported` or `untasked`, a minute after
+  `unbound` (exit 5), else a second doubling to fifteen. The wait is `$.clock.sleep` with the loop's abort
+  signal, never a timer of the mod's own; a wait that is refused is tried once more, then logged to the debug log
+  and given up, and the next main `turn.start` of a live session begins a new loop. The mod reads each stdout line (a piece is not a line: it reassembles), takes the ack's
+  `keep`, and pushes each message's `push` text verbatim; it holds no wording of its own.
+- **Which call delivers.** A question or a request is `$.prompt.submit` (never awaited by the reader: it stays
+  pending until a running turn ends), which wakes an idle session, waits a dialog out and never answers it.
+  A note is `$.session.append`, a row the model reads at its next turn without waking the session, mid-turn or
+  idle (the Evidence rows say neither wakes it), held in the mod only while a dialog is open and flushed when the
+  last one closes or the main loop's turn starts or completes. **Never `asUser`, never `$.prompt.fill`,
+  never tmux keys:** the person's draft is never touched and no delivery can answer a dialog. A request is
+  always pushed, never pulled: pulled text is read but not obeyed (macOS spike), so a request that went by
+  pull would silently become a note, hence its cap.
+- **`read_messages`** (`mcp__inbox__read_messages`, registered with `$.tool.register`, no permission prompt in
+  manual mode) returns every held message, oldest first, bodies of stubs in full, bounded by the ack's `keep`;
+  with none it says so, and that a lost one means the plugin reloaded. It also drops notes still waiting on a
+  dialog, which it has just shown. Held in the mod's memory only, so a hooks-worker respawn loses them (the
+  daemon keeps nothing after the write).
+- **The standing instruction** is the spawn's `--append-system-prompt` alone: the mod registers no
+  `prompt.compose` hook (dropped 2026-11-13, "Standing instruction", above: the managed plugin skips it, with a
+  notice per session). A pushed stub was heeded that way, idle and mid-turn. The constant sits in `shared/` with
+  the wrapper texts; the mod holds none.
+- **A parent that changes ends the child**, and `session.end` with reason `clear` or `resume` does not stop
+  the loop (the process carries on): "The orphaned child" and the `/clear` paragraph, above.
+- **Same rules as session-events:** engine events only (never `classic.*`), every hook fails open
+  (`.catch(($, e, next) => next(e))`), and `$` only inside top-level functions. Installed by the same
+  `seanced mod install` (the marketplace lists it, so doctor warns per exclave where it is missing); nothing
+  runs it on a self-update. The tool is declared by hand in `types/mcp.d.ts` because the kit lays its MCP types
+  only from servers connected at a save.
 
 ## Archivist (`archivist/`) — built 2026-11-12 to 2026-11-13
 

@@ -11,6 +11,7 @@ import {
   drainAskAudit,
   ensureAuditLog,
   enqueueAudit,
+  messageAudit,
   spawnAudit,
   traitRefusalAudit,
   type AuditSink,
@@ -152,6 +153,21 @@ describe("drain ask audit lines", () => {
       'audit drain origin=drain task="t-1" outcome=typed',
       'audit drain origin=drain task="t\\"2" outcome=interrupted',
       'audit drain origin=drain task="t-3" outcome=skipped',
+    ]);
+  });
+});
+
+describe("message audit lines", () => {
+  test("one shape per sender: a task, an untasked session, and a sender no pane could be found for; never text", async () => {
+    const out: string[] = [];
+    const audit = messageAudit((line) => void out.push(line));
+    await audit({ dir: "out", from: "t-1", to: "t-2", kind: "note", bytes: 12, outcome: "delivered" });
+    await audit({ dir: "in", from: null, to: "t-2", kind: "request", bytes: 7, outcome: "nolistener" });
+    await audit({ dir: "out", from: undefined, to: 't"3', kind: "question", bytes: 0, outcome: "unbound" });
+    expect(out).toEqual([
+      'audit message origin=message dir=out from="t-1" to="t-2" kind=note bytes=12 outcome=delivered',
+      'audit message origin=message dir=in from=untasked to="t-2" kind=request bytes=7 outcome=nolistener',
+      'audit message origin=message dir=out from=- to="t\\"3" kind=question bytes=0 outcome=unbound',
     ]);
   });
 });

@@ -657,6 +657,14 @@ export class EndedTasks {
   }
 
   /**
+   * When the ledger recorded the task's launch, in flight or not (it is written before the worktree is made
+   * and the window opened); undefined when it holds none. Messaging's grace for a session still starting.
+   */
+  launchedAt(taskId: string): number | undefined {
+    return this.#ledger.recordedAt(taskId);
+  }
+
+  /**
    * Where a task's worktree is, from this ledger alone — the one authority on a worktree path
    * (a frame never names one). The newest note on a path owns it: a later launch there continued
    * the same conversation and its work sits in the worktree, so only it may be continued or
@@ -773,11 +781,27 @@ const PROBE_TIMEOUT_MS = 2_000;
  * but this fails, every event is refused — the probe is what says why, at
  * start, instead of a stream of `unbound` replies after a Bun upgrade.
  */
-export async function peerBindingProblem(): Promise<string | null> {
+export function peerBindingProblem(): Promise<string | null> {
+  if (peerProbe !== undefined) return peerProbe;
+  const probe = probePeerBinding();
+  peerProbe = probe;
+  // Only a success stands for the process, like `peerPidSupported`. The probe runs at start, when the box is
+  // busiest, and a slow accept or a full tmpdir there must not withhold the `messages` capability until a restart
+  // while binding itself works: a failure is probed again by the next reader.
+  void probe.then((problem) => {
+    if (problem !== null && peerProbe === probe) peerProbe = undefined;
+  });
+  return probe;
+}
+
+let peerProbe: Promise<string | null> | undefined;
+
+async function probePeerBinding(): Promise<string | null> {
   if (!peerPidSupported()) return null;
-  const dir = await mkdtemp(join(tmpdir(), "seanced-peer-"));
-  const accepted = Promise.withResolvers<number | null>();
+  let dir: string | undefined;
   try {
+    dir = await mkdtemp(join(tmpdir(), "seanced-peer-"));
+    const accepted = Promise.withResolvers<number | null>();
     const server = Bun.listen<undefined>({
       unix: join(dir, "probe.sock"),
       socket: {
@@ -803,7 +827,8 @@ export async function peerBindingProblem(): Promise<string | null> {
   } catch (err) {
     return `the probe socket failed: ${String(err)}`;
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    // Never rejects: this promise is awaited by every register.
+    if (dir !== undefined) await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
@@ -827,6 +852,8 @@ export interface SessionEventDeps {
    * The `/usage` refresh's poke, which runs nothing while the cache is fresh.
    */
   readonly onActivity?: (exclave: string) => void;
+  /** A bound, tasked `ended` frame: messaging clears that pane's held messages and listener for the task. */
+  readonly onEnded?: (pane: string, taskId: string) => void;
   readonly ended: EndedTasks;
   readonly now?: () => number;
   readonly coalesceMs?: number;
@@ -1107,7 +1134,10 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
       // prove the session ran and may leave no exit note (a clean exit closes the window); a live one is cleared
       // by the `sessions` listing once it registers, which a bare `running` frame does not show.
       if (frame.state === "ended" || frame.state === "done") void deps.ended.sessionSeen(pane.taskId);
-      if (frame.state === "ended") deps.ended.ended(pane.taskId);
+      if (frame.state === "ended") {
+        deps.ended.ended(pane.taskId);
+        deps.onEnded?.(pane.id, pane.taskId);
+      }
       // Before the reply, so `ok` tells the session its report is on disk — or says it is not.
       let reported: NoteOutcome | null = null;
       if (frame.state === "done") {

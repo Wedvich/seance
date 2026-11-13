@@ -1,7 +1,15 @@
 import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { autonomyOf, DEFAULT_EFFORT, DEFAULT_MODEL, isTaskId, type RepoEntry, type SpawnRequest } from "@seance/shared";
+import {
+  autonomyOf,
+  DEFAULT_EFFORT,
+  DEFAULT_MODEL,
+  isTaskId,
+  STANDING_INSTRUCTION,
+  type RepoEntry,
+  type SpawnRequest,
+} from "@seance/shared";
 import { autonomyNote } from "./autonomy.ts";
 import { SpawnFailure, type Continuation, type SessionAttachments, type SpawnOutcome } from "./backend.ts";
 import { freshenBase } from "./base-fetch.ts";
@@ -327,6 +335,9 @@ async function buildInnerCommand(
   const base =
     `exec ${caffeinate}${claude} -n ${shq(session)} --remote-control ${addDirs}` +
     `--model ${shq(request.model ?? DEFAULT_MODEL)} --effort ${shq(request.effort ?? DEFAULT_EFFORT)}` +
+    // A constant, never wire text (docs/messaging.md, the standing instruction's second layer); only a task's
+    // session is addressable, so an untracked spawn's command line stays byte-identical.
+    `${request.taskId === undefined ? "" : ` --append-system-prompt ${shq(STANDING_INSTRUCTION)}`}` +
     // literal value, so nothing wire-supplied reaches the command line — no shq() needed
     `${level === "steer" ? " --permission-mode plan" : ""}` +
     `${level === "steer" && allowBypass ? " --allow-dangerously-skip-permissions" : ""}` +

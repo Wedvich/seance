@@ -829,6 +829,7 @@ describe("daemon ↔ relay integration", () => {
         "close",
         "drain",
         "drainPass",
+        "messages",
         "drainAsk",
       ]);
       // A status leaves only after its tick wrote the store, so one in hand

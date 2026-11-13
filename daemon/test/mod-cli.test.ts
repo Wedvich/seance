@@ -85,12 +85,14 @@ exit 0
       `${dir} plugin marketplace add ${checkout} --scope user --json`,
       `${dir} plugin install tmux-rename@seance --scope user`,
       `${dir} plugin install session-events@seance --scope user`,
+      `${dir} plugin install inbox@seance --scope user`,
     ];
     expect(argv).toEqual([...once("-"), ...once(work)]);
     expect(out).toContain(`skipped gone — ${gone} does not exist yet`);
     for (const label of ["default", "work"]) {
       expect(out).toContain(`Claude mod tmux-rename installed in ${label}`);
       expect(out).toContain(`Claude mod session-events installed in ${label}`);
+      expect(out).toContain(`Claude mod inbox installed in ${label}`);
     }
   });
 
@@ -100,7 +102,7 @@ exit 0
     expect(code).not.toBe(0);
     expect(err).toContain("default: claude plugin marketplace add");
     expect(err).toContain("unexpected token");
-    expect(argv.filter((line) => line.startsWith(work))).toHaveLength(3);
+    expect(argv.filter((line) => line.startsWith(work))).toHaveLength(4);
     expect(out).toContain("Claude mod session-events installed in work");
   });
 

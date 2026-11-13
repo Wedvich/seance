@@ -34,6 +34,8 @@ const forwarded: SessionEvent[] = [];
 const handled: { readonly peer: number | null; readonly reply: unknown }[] = [];
 /** Every exclave a bound event poked, in order: the `/usage` refresh's trigger. */
 const poked: string[] = [];
+/** Every bound `ended` frame's pane and task, as messaging hears of it. */
+const endedFrames: { readonly pane: string; readonly taskId: string }[] = [];
 const ended = new EndedTasks();
 
 /** A backend with no sessions of its own: the `ended` field is what is under test. */
@@ -84,6 +86,7 @@ beforeAll(async () => {
     exclaves: () => scan.exclaves,
     forward: (event) => void forwarded.push(event),
     onActivity: (exclave) => void poked.push(exclave),
+    onEnded: (pane, taskId) => void endedFrames.push({ pane, taskId }),
     ended,
     // Coalescing has its own unit test; here every event goes out at once.
     coalesceMs: 0,
@@ -207,6 +210,8 @@ describe("binding", () => {
       },
     ]);
     expect(forwardedFor("task-b")).toEqual([]);
+    // Messaging hears of the sender's own pane and task, never the ones the frame named.
+    expect(endedFrames).toEqual([{ pane: forger.pane, taskId: "task-a" }]);
 
     // The session exits after its SessionEnd: the backstop reports its task, and only it —
     // to the scheduler (here the leader's in-process path), never to a local-socket caller.

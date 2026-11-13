@@ -50,11 +50,11 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   away: update, restart, reboot, shutdown, sleep, unknown), how the relay keeps it, what clients
   and the leader do with it, macOS sleep/DarkWake, and the shutdown drain on a dying box. Read it
   before touching shutdown, presence or the systemd unit.
-- **docs/messaging.md** — spec, nothing built: session-to-session messages (note, question,
-  request) addressed by task id, delivered by the `inbox` mod over new local-socket frame kinds
-  bound by peer pid, routed across machines through the leader, and the local adapter seam. Read it
-  before adding a local-socket frame kind, a mod that delivers text into a session, or a leader
-  event op.
+- **docs/messaging.md** — spec, PR 1 built: local delivery (the `inbox` mod, the `inbox` and
+  `message` frames, `send_message` for tasks on this machine), recorded in DESIGN.md (Local op socket,
+  "Session messages"; Claude Code mods; MCP server; Threat model item 6). What is left in the file is
+  cross-machine routing (PR 2), the adapter seam (PR 3), the open questions and the spike evidence.
+  Read it before adding a leader event op or an adapter.
 - **docs/custodian.md** — spec, two parts built (the nothing-lost rule in `reap`, C32–C36, in DESIGN.md,
   Reap, "Nothing lost"; per-pane state and screen tracking, C15, in DESIGN.md, "Session events"): the
   custodian, one seat per machine whose daemon
@@ -181,6 +181,7 @@ green:
   the daemon's reap timer, `probe` for the daemon's trait probes, `harvest` for the daemon closing a dead task pane after noting its exit
   status, `handoff` for the daemon closing a session that handed its PR off (`hand_off_task`),
   `drain` for the daemon typing its constant drain prompt, or the Escape before it, into a pane of a closed machine,
+  `message` for a session's message to another task on this machine (one `dir=out` and one `dir=in` line per message: task ids, kind, byte count and outcome, never text),
   `successor` for the daemon pushing a task's branch on its own session's `pass_to_successor` and closing
   that session once the leader confirmed it,
   `leader` for the scheduler loop dispatching to its own machine in
@@ -384,6 +385,23 @@ green:
   kind of change too.
   Nothing reachable from `seanced mcp` may call `log.ts` — that writes to stdout, which is the MCP
   server's JSON-RPC channel (this is why `readState` exists alongside `loadOrInitState`).
+- The local socket's fourth and fifth frame kinds are `message` (`send_message`,
+  `daemon/src/send-message.ts`) and `inbox` (the `inbox` mod's `seanced inbox` child,
+  `daemon/src/messages.ts`; DESIGN.md "Session messages"). Both are bound to a pane only by the
+  kernel-reported peer pid: refused `unbound` where the host names no peer (`peerPidSupported`; an `inbox`
+  listener there is told `unsupported`, not `unbound`, since no retry can bind) or the pid came back null, never
+  falling back to a claimed pane. `inbox` is the first frame that hands text
+  out, and binds once at accept; there is one listener per pane, closed (lazily, at the next send or listen)
+  when the pane's task changes, and only a pane carrying a task this machine launched is acked.
+  The daemon's inbox is memory only (32 messages, `4 × MESSAGE_MAX`), cleared on `ended`, rebind and
+  restart. A message is delivered only to a live pane carrying a task this machine's launch ledger
+  holds, and a sender counts as tasked only when the ledger holds its pane's task. Text is never
+  logged and never in argv: `--append-system-prompt` carries only the constant `STANDING_INSTRUCTION`,
+  on tasked spawns. The mod delivers only by `$.prompt.submit` or `$.session.append`, never `asUser`,
+  `$.prompt.fill` or tmux keys. A sending task may send 20 messages a minute and 200 an hour.
+  Nothing reachable from `seanced mcp` imports `log.ts` (`send-message.ts`, `message-frame.ts`), and
+  `inbox-cli.ts` is silent because its stdout is the mod's data channel. Giving either frame any
+  other act, or binding by a field, is a threat-model change.
 - **`raycast/` layering: nothing under `raycast/src/lib/` may import `@raycast/api`.** It throws
   outside the Raycast host, so such a module could not run under `bun test` and would take every
   test in the directory down at import time. Views are `.tsx` at `src/`, logic is `.ts` at
