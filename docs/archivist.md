@@ -11,7 +11,9 @@ docs) built 2026-11-12, recorded in DESIGN.md, "Archivist", with setup in the RE
 model item 2 and the PWA's Machines section; item 7 (the metrics and task query ops) built
 2026-11-13, recorded in DESIGN.md, "Archivist" ("The query ops"), Threat model item 2 and the
 frame→module table; item 8 (the PWA's charts) built 2026-11-13, recorded in DESIGN.md,
-"Archivist" ("The PWA's charts") and the PWA's Machines section.** Decided with the owner on 2026-11-12. Like docs/scheduler.md and
+"Archivist" ("The PWA's charts") and the PWA's Machines section; item 9 (the PWA's task history)
+built 2026-11-13, recorded in DESIGN.md, "Archivist" ("The PWA's task history") and the PWA's
+Queue screen.** Decided with the owner on 2026-11-12. Like docs/scheduler.md and
 docs/leaving.md, this file is the working record until the code lands; each part folds into
 DESIGN.md as it is built, and its text here goes.
 
@@ -272,7 +274,8 @@ One stack of PRs, each based on the one before, merged together.
 7. The metrics and task query ops, in the archivist and `RelayClient` (A31, A33). **Built 2026-11-13.**
 8. PWA charts: 90-day and 1-year ranges, merged account charts, asleep machines (A32, A35,
    A36d–A36f). **Built 2026-11-13.**
-9. PWA task history: the older list, filters, title search (A34, A35, A36g–A36j).
+9. PWA task history: the older list, filters, title search (A34, A35, A36g–A36j). **Built
+   2026-11-13.**
 
 **Milestone 3 — alert**
 
@@ -306,3 +309,15 @@ under its `account:` store key; an install without it keeps the account chart on
 the account no long ranges. A machine asleep is charted from the archive at every range, not only
 the long ones. Only a 90d or 1y chart falls back to 24h when the archivist leaves; a short range
 already open stays.
+
+Settled at item 9 (DESIGN.md, "Archivist", "The PWA's task history"): a row the leader's queue
+still lists, in any section, is dropped (not only one in Finished: a task the live list holds
+must not show twice, and the archive and the leader may disagree on its state), and its count
+comes off `total`; a page made only of such rows reads on, at most six pages in a row and never
+past a page that added nothing, then "Load older" takes over.
+The Machine, Repo and Account sheets offer the registry's values plus those of the rows read,
+since the archive has no listing op; a retired machine's "last seen" is the newest archived end
+among its rows. An account shows by its live display name through the store key this install
+derives, else the archived alias. Older resets when the Queue screen closes, and closing the
+section drops its list, so reopening reads again with the filters as they stand. The title
+search waits 300 ms.

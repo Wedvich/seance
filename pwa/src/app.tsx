@@ -1,13 +1,14 @@
 import type { ComponentChildren, JSX } from "preact";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { MachinesScreen } from "./components/machines.tsx";
-import { QueueScreen } from "./components/queue.tsx";
+import { QueueScreen, type OlderActions } from "./components/queue.tsx";
 import { Settings } from "./components/settings.tsx";
 import { SpawnScreen, type SpawnActions } from "./components/spawn-screen.tsx";
 import { VerdictView } from "./components/verdict.tsx";
 import type { PushClient } from "./push.ts";
 import { readRelayUrl } from "./relay/keys.ts";
 import { deriveArchivist, deriveMachines } from "./machines-view.ts";
+import { deriveOlder } from "./older-view.ts";
 import { archiveCharts } from "./state.ts";
 import { deriveAfterSheet, deriveQueue } from "./queue-view.ts";
 import "./screen.css";
@@ -20,6 +21,7 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
   const state = useStoreState(store);
   const { layer } = screenKey(state);
   const actions = useSpawnActions(store);
+  const olderActions = useOlderActions(store);
   const wide = useWide(store);
 
   useEffect(() => store.attach(), [store]);
@@ -82,7 +84,10 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
       focusedTask={state.focusedTask}
       onFocused={() => store.clearFocus()}
       onDismiss={onDismiss}
-      onRefresh={() => void store.refreshQueue()}
+      onRefresh={() => {
+        void store.refreshQueue();
+        store.refreshOlder();
+      }}
       onCancel={(id) => void store.cancelTask(id)}
       onMarkDone={(id) => void store.markDone(id)}
       onRunNow={(id) => void store.runNow(id)}
@@ -93,6 +98,8 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
       onResume={(account) => void store.resumeQueue(account)}
       onDiscard={() => void store.discardUnreadable()}
       onOpenSettings={onOpenSettings}
+      older={deriveOlder(state, now)}
+      olderActions={olderActions}
     />
   );
   // A modal dialog rather than a screen: full-screen on a phone, centred over
@@ -274,6 +281,22 @@ function useSpawnActions(store: Store): SpawnActions {
       retryHeld: (taskId) => store.retryHeld(taskId),
       discardHeld: (taskId) => store.discardHeld(taskId),
       dismissHeldDropped: () => store.dismissHeldDropped(),
+    }),
+    [store],
+  );
+}
+
+/** The Queue screen's Older acts, wrapped and memoized as `useSpawnActions` is. */
+function useOlderActions(store: Store): OlderActions {
+  return useMemo(
+    () => ({
+      toggle: () => store.toggleOlder(),
+      search: (title) => store.searchOlder(title),
+      openSheet: (sheet) => store.openOlderSheet(sheet),
+      closeSheet: () => store.closeOlderSheet(),
+      pick: (pick) => store.pickOlder(pick),
+      clear: () => store.clearOlderFilters(),
+      loadMore: () => store.loadOlder(),
     }),
     [store],
   );

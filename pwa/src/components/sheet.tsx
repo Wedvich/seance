@@ -1,7 +1,7 @@
 import type { ComponentChildren, JSX } from "preact";
-import { useEffect, useLayoutEffect, useRef } from "preact/hooks";
+import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import { centeredScrollTop } from "../scroll.ts";
-import type { Dot } from "../view.ts";
+import type { Dot, Tile } from "../view.ts";
 
 const FOCUSABLE = 'button:not([disabled]), [href], input, textarea, [tabindex]:not([tabindex="-1"])';
 
@@ -143,6 +143,49 @@ function TrashIcon(): JSX.Element {
 
 export function dotClass(dot: Dot): string {
   return dot === "ok" ? "dot dot-ok" : dot === "auto" ? "dot dot-auto" : "dot";
+}
+
+/**
+ * Keeps the sheet mounted while its exit animation plays; state has already
+ * dropped it. The timeout backstops a lost animationend, which would otherwise
+ * strand an invisible scrim over the screen.
+ */
+export function useSheetExit<K>(sheet: K | null): [K | null, boolean, () => void] {
+  const [rendered, setRendered] = useState(sheet);
+
+  useLayoutEffect(() => {
+    if (sheet !== null) setRendered(sheet);
+  }, [sheet]);
+
+  const closing = sheet === null && rendered !== null;
+
+  useEffect(() => {
+    if (!closing) return;
+    const timer = setTimeout(() => setRendered(null), 400);
+    return () => clearTimeout(timer);
+  }, [closing]);
+
+  return [rendered, closing, () => setRendered(null)];
+}
+
+/** A tile of the spawn form's grid, which opens a sheet; the Queue screen's Older filters reuse it. */
+export function TileButton(props: { tile: Tile; offline?: boolean; onClick: () => void }): JSX.Element {
+  const { tile, offline = false, onClick } = props;
+  const valueClass = tile.mono ? "tile-value tile-value-mono" : "tile-value";
+  return (
+    <button
+      type="button"
+      className={offline ? "tile card tile-offline" : "tile card"}
+      onClick={onClick}
+      aria-label={`${tile.label}: ${tile.value}`}
+    >
+      <span className="label">{tile.label}</span>
+      <span className={valueClass}>
+        {tile.dot !== null && <span className={dotClass(tile.dot)} />}
+        <span>{tile.value}</span>
+      </span>
+    </button>
+  );
 }
 
 export function SheetItem(props: {

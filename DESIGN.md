@@ -8833,7 +8833,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   to use Bash on …", "It's waiting for input on …"; an escalated row's body "May be waiting for
   permission to use Bash since …". Tasks group by what each needs from
   the owner: Needs you (escalated first, then `needs-input`, then `lost`), Running, Idle, Waiting,
-  Asleep (collapsed; below), Awaiting merge, Finished, in the leader's order within each (`queue-view.ts`), except Waiting, oldest first (FIFO, as the scheduler routes ready tasks; batch grouping and blocked tasks are not reflected). Idle holds the
+  Asleep (collapsed; below), Awaiting merge, Finished, in the leader's order within each (`queue-view.ts`), except Waiting, oldest first (FIFO, as the scheduler routes ready tasks; batch grouping and blocked tasks are not reflected); while the archivist is connected, Finished continues into a collapsed Older section read from the archive (Archivist, "The PWA's task history"). Idle holds the
   `running` tasks the reply's `idle` lists (an entry for a task no longer running is ignored, so an
   action's own reply wins), each saying "Idle at its prompt since … — its slot is free", and the
   summary counts them ("2 running · 3 idle · 1 waiting", the idle count only when there are some).
@@ -10780,6 +10780,33 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   daemon's lines name the machine. The remembered range is the one last wanted, so a chart the
   archive can't serve opens at 24h without costing the next one its long range. An asleep machine's lines simply stop at its last beat (A36f):
   the chart draws only the points it has.
+- **The PWA's task history** (item 9, A34, A35, A36g–A36j; 2026-11-13). Finished continues into
+  Older, a section after it with the Asleep section's toggle, closed by default and counted
+  nowhere. Its state and reads live in `pwa/src/older-store.ts`, its rows in
+  `pwa/src/older-view.ts`. Open, it shows a title search (the rename field's style) and five tiles
+  — Repo, Outcome, Machine, Account, Dates — that open the spawn form's sheets (`TileButton`,
+  `Sheet`, both in `pwa/src/components/sheet.tsx`), each a history layer as the form's are. Dates
+  is a preset (7, 30, 90 days, a year, any time), sent as `since` from the app's clock. Filters
+  apply to Older only. It reads `archiveTasks` 20 at a time, the search debounced 300 ms, and
+  pages on `next` with a quiet "Load older". A row whose id the leader's queue still lists is
+  dropped (dedup by id, against the whole live queue, whichever section lists it), and so is
+  its count: "Showing 20 of N" takes the duplicates already read off `total`. A page made only
+  of such rows reads on by itself rather than showing an empty page, at most six pages in a
+  row and never past a page that added nothing; "Load older" is offered whenever a cursor
+  remains, even with nothing shown. An archived card is a Queue card with every action off: no ⋯ menu, no Continue,
+  the PR chip in its last archived state with no checks icon. Its machine is the registry's
+  current name, else the archive's last-known one. Its account is the live account's display
+  name, matched by the `account:` store key this install derives, else the archived alias, else
+  a short key, never the raw id. The Machine sheet lists the registry's machines, then those
+  only the rows read name, as "no longer listed · last seen 41d ago", where "last seen" is the
+  newest archived end among them; the archive has no machine listing to ask. The Repo and
+  Account sheets likewise offer the registry's or the rows' values. The states are "Loading…"
+  under the filters, "No older tasks match." with "Clear search and filters", and the charts'
+  failure wording ("No answer — the archivist may be offline." for a timeout or an unsent ask;
+  a later page's failure keeps the rows). With no archivist connected nothing of Older shows
+  (A35): the registry push that drops it resets the section and closes an open sheet. Closing
+  the Queue screen resets it too, so it reopens closed and unread, and closing the section
+  drops its list, so a reopen reads afresh.
 - **The read leg.** A second, app-role socket from `appRelayClient` with the PSK's key and the
   account key derived from it, as the leader's own app leg reads (A7); `archivist/src/collect.ts`
   reads the store through it, and `archivist/src/metrics-collect.ts` the registry's `status`
