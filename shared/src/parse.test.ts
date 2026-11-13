@@ -1062,6 +1062,25 @@ describe("tasks and their records", () => {
     }
   });
 
+  test("a running task's idleRelease survives a parse; a malformed one, or one on another state, is dropped and the task stays readable", () => {
+    const released: Task = { ...task, state: "running", idleRelease: { since: 9, deviceId: "a" } };
+    expect(parseTask(released)).toEqual(released);
+    const { idleRelease: _idleRelease, ...bare } = released;
+    for (const bad of [
+      { since: "now", deviceId: "a" },
+      { since: Number.NaN, deviceId: "a" },
+      { since: 9 },
+      { since: 9, deviceId: "" },
+      { since: 9, deviceId: "a", extra: 1 },
+      9,
+      null,
+    ]) {
+      expect(parseTask({ ...released, idleRelease: bad })).toEqual(bare);
+    }
+    const { idleRelease: _waiting, ...waiting } = { ...released, state: "needs-input" as const };
+    expect(parseTask({ ...waiting, idleRelease: { since: 9, deviceId: "a" } })).toEqual(waiting);
+  });
+
   test("a progress field that is not exactly its shape nulls the task", () => {
     for (const bad of [
       { ...task, prUrl: "javascript:alert(1)" },

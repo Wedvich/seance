@@ -2701,6 +2701,15 @@ export interface Task {
   readonly inputReason?: NeedsInputReason;
   readonly inputTool?: string;
   /**
+   * Its session's idle release ("Routing caps" in DESIGN.md): when the stay at its prompt began
+   * and on which machine, written by the leader once the stay passes `idleReleaseAfterMs` and
+   * dropped by the write that ends it, so a new leader seeds its clock from it instead of counting
+   * the task until its next `idle`. Never from a frame. Kept on `running` only; dropped, never
+   * fatal, when malformed (a lost one costs the release until the next `idle`), and by an older
+   * leader's parser.
+   */
+  readonly idleRelease?: IdleRelease;
+  /**
    * The credit-spill alert this dispatch earned, stamped by the leader after its spawn is
    * confirmed: the account's window and the reset (ms, 0 when unknown) it was alerted under.
    * A new leader seeds its de-dupe from these, so one window alerts once across terms.
@@ -3192,9 +3201,9 @@ export interface QueueResponse {
   /**
    * Every `running` task the leader holds no slot for because its session has
    * sat idle at its prompt past the grace (DESIGN.md, Scheduler, "Routing
-   * caps"), whatever `QueueRequest.tasks` asked for: the release is the
-   * leader's memory, on no record, so only this says it. Absent from older
-   * leaders, and when there are none.
+   * caps"), whatever `QueueRequest.tasks` asked for: the leader's own clock,
+   * which `Task.idleRelease` only seeds, so this is what an app reads it by.
+   * Absent from older leaders, and when there are none.
    */
   readonly idle?: readonly IdleTaskRef[];
   /**
@@ -3208,6 +3217,12 @@ export interface QueueResponse {
 export interface IdleTaskRef {
   readonly taskId: string;
   readonly since: number;
+}
+
+/** `Task.idleRelease`: when the stay at the prompt began (leader's clock, ms), and the machine whose `idle` began it. */
+export interface IdleRelease {
+  readonly since: number;
+  readonly deviceId: string;
 }
 
 /** A `task:` record the leader holds as unreadable: its id, the relay's version, and why. */

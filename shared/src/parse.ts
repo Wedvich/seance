@@ -113,6 +113,7 @@ import {
   AMEND_MODES,
   type AmendRequest,
   type UnreadableTaskRef,
+  type IdleRelease,
   type IdleTaskRef,
   METRICS_ERROR_CODES,
   METRICS_MAX_FILTER_LENGTH,
@@ -1379,6 +1380,13 @@ export function parseContinuedBy(value: unknown): ContinuedBy | null {
   return { task, createdAt, ...(live === true ? { live } : {}) };
 }
 
+/** A task's idle release stamp, built field by field; null when absent or malformed. */
+function parseIdleRelease(value: unknown): IdleRelease | null {
+  if (!isRecord(value) || !Object.keys(value).every((key) => key === "since" || key === "deviceId")) return null;
+  const { since, deviceId } = value;
+  return isFiniteNumber(since) && isRoutingId(deviceId) ? { since, deviceId } : null;
+}
+
 /**
  * A task as `queue`, `cancel` and `mark-done` carry it, and as its
  * record holds it at rest. A state this build does not know nulls the task: it
@@ -1444,6 +1452,8 @@ export function parseTask(value: unknown): Task | null {
     value["quotaExhausted"] === undefined ? null : parseQuotaExhaustedStamp(value["quotaExhausted"]);
   // Apart from `progress` too: the leader rewrites it on its next pass, so a lost one costs a pass.
   const continuedBy = value["continuedBy"] === undefined ? null : parseContinuedBy(value["continuedBy"]);
+  // Dropped, never fatal, and only a `running` task's: a lost one costs a release until the next `idle`.
+  const idleRelease = known === "running" ? parseIdleRelease(value["idleRelease"]) : null;
   const { remoteSession, inputReason, inputTool } = value;
   const waiting = known === "needs-input" || known === "lost";
   return {
@@ -1465,6 +1475,7 @@ export function parseTask(value: unknown): Task | null {
     ...(prAlert === null ? {} : { prAlert }),
     ...(quotaExhausted === null ? {} : { quotaExhausted }),
     ...(continuedBy === null ? {} : { continuedBy }),
+    ...(idleRelease === null ? {} : { idleRelease }),
     // Dropped, never fatal, like `pr`: a link is display-only.
     ...(isRemoteSessionId(remoteSession) ? { remoteSession } : {}),
     // Dropped, never fatal, like `remoteSession`: display-only. Only on the states a wait lives in
