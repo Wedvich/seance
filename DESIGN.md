@@ -10151,8 +10151,9 @@ app-role client (the same missing binding, and a keyless server cannot seal), an
 (those are relay ops served locally; this is a session's claim about itself, which the frame kinds beside
 `Plain` are for). `LOCAL_OPS` and the broker are unchanged.
 
-**Evidence** is docs/messaging.md's table: long-held `$.process.spawn` child (Linux 2.1.323, 20+ minutes
-across `/compact` and an in-process `/resume`, no reconnect; macOS unconfirmed), a pushed stub heeded with
+**Evidence** is docs/messaging.md's table: long-held `$.process.spawn` child (Linux 2.1.323, 30 minutes
+across `/compact` and an in-process `/resume` with no reconnect, and a new child binding the same pane
+within a second of `claude --continue`; macOS unconfirmed), a pushed stub heeded with
 layer 2 only (2.4 s idle, and mid-turn), and `read_messages` raising no permission prompt in manual mode.
 
 **Accepted gaps.** Stub bodies live only in the mod's memory (the daemon keeps nothing after the write), so
