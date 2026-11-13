@@ -181,7 +181,9 @@ Edit `~/.config/seance/config.json`:
   unsuffixed names.
 - `reap` — optional: `{ "intervalHours": 24, "minAgeDays": 4 }` runs `seanced reap`
   from the daemon every day, with its report in the log. Without `intervalHours` the
-  schedule is off (the default); `minAgeDays` also sets the CLI's age gate.
+  schedule is off (the default); `minAgeDays` also sets the CLI's age gate. A machine whose
+  config carries a `custodian` key (docs/custodian.md) defaults instead to every 6 hours and
+  one day; any field set here still wins.
 - `quota` — optional: `{ "staleAfterMinutes": 10 }` (the default) is how old an
   account's cached quota may get before the daemon refreshes it with `claude -p /usage`.
   Values under 1 are refused: Claude Code debounces `/usage` for 60 s anyway.
@@ -739,13 +741,17 @@ the way out, so the work stays where it was; cleaning up worktrees and branches 
 `reap`'s job.
 
 `reap` cleans up after sessions across every repo the daemon scans. It removes a
-linked worktree only when no tmux pane is inside it, it is clean, its branch is merged
-(including squash-merged — checked locally, no `gh`), and nothing has touched it for
-four days (`--min-age-days` to change). It deletes merged branches, closes séance windows
+linked worktree only when no tmux pane is inside it, nothing has touched it for
+four days (`--min-age-days` to change), and nothing in it would be lost: it is clean, and
+its tip is merged (including squash-merged, checked locally), or already on its branch on
+`origin`, or in the head of a merged GitHub PR from that branch (read with your own `gh`).
+Its branch stays until merged, but a task whose worktree reap removed can no longer be
+continued. It deletes merged branches, closes séance windows
 that are dead or sitting on claude's "keep or remove this worktree?" prompt, and
 reports what it left: dirty worktrees, branches and worktrees whose upstream is gone but
 which hold unpushed commits, worktrees on a never-pushed branch, detached worktrees with
-commits on no branch, a count of worktrees on a branch whose upstream is still live, and live sessions with the id `despawn` takes. Where git runs
+commits on no branch, worktrees it could not check (no network, `gh` failing, an origin
+not on GitHub), a count of young worktrees on a branch whose upstream is still live, and live sessions with the id `despawn` takes. Where git runs
 `core.fsmonitor=true` daemons (macOS), it also stops every one with no tmux pane in its
 checkout and an hour unused, and any on a directory gone or no longer a repo, reporting
 the memory freed; git starts a new one when a repo next needs it. It also removes a task's fetched
