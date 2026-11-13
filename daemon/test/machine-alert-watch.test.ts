@@ -105,7 +105,7 @@ function watchOver(
   settings: TermSettings,
   machines: { current: readonly Machine[] },
   ready = () => true,
-  archivist: { current: ArchivistEntry | null } = { current: null },
+  archivist?: { current: ArchivistEntry | null },
 ) {
   const raised: PushAlert[] = [];
   const restored: AuthAlerted[] = [];
@@ -114,7 +114,7 @@ function watchOver(
     settings: () => settings,
     ready,
     machines: () => machines.current,
-    archivist: () => archivist.current,
+    archivist: () => archivist?.current ?? null,
     onAlert: (alert) => raised.push(alert),
     onRestored: (entry) => restored.push(entry),
     onError: (err) => {
