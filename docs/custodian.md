@@ -387,13 +387,166 @@ delivery); nothing else here does.
 
 8. `nudge` over messaging's local delivery, and `interrupt` (C26–C28, C30).
 
+## The launch (verified)
+
+Verified 2026-11-13 on macOS with Claude Code 2.1.323, against the current docs and by running
+fenced `haiku` rounds in a private tmux server through two batteries of commands. Linux is untested
+(below). Re-verify on a Claude Code upgrade: several of these are behaviours, not documented
+contracts.
+
+### The command
+
+The tmux inner command, every value constant or daemon-made, in a window started with `-c <round
+dir>` (next section):
+
+```sh
+export CLAUDE_CODE_TMPDIR=<round tmp> CLAUDE_CODE_DISABLE_CLAUDE_MDS=1
+exec caffeinate -is claude -n custodian --remote-control \
+  --agents '<agent JSON>' --agent custodian \
+  --settings '<fence>' --setting-sources project \
+  --permission-mode dontAsk --strict-mcp-config \
+  --model <config model> --effort <effort> -- < <seed file>
+```
+
+- **The agent definition** is a markdown agent file in the repo; the daemon turns its frontmatter
+  and body into `--agents` JSON on argv. `--agents <file>` is read only with `--print`, and
+  `--add-dir` (which would load a `.claude/agents/`) also widens the sandbox's write scope. The
+  definition's `tools: Bash, Read` holds for the main thread: Write, Edit and WebFetch answer "No
+  such tool available". Its prompt replaces the system prompt. Its **`permissionMode` is ignored**
+  for the main thread: a round carrying only that ran in the exclave's own `bypassPermissions`. The
+  mode is the flag.
+- **`--permission-mode dontAsk` is the only mode that holds C20's last rule.** In `default` a host
+  off the allowlist raised a "Network request outside of sandbox" prompt, where a round would hang;
+  `bypassPermissions` and `auto` both let `curl https://example.com` out past the sandbox's
+  allowlist. Under `dontAsk` that request, an unparseable command (`$(echo rm) …`, `eval '…'`) and
+  `find -delete` are refused, never asked. The fence sets `defaultMode: dontAsk` as well.
+- **`--setting-sources project`** keeps the exclave's user settings out: its hooks, its plugins
+  (`tmux-rename` would rename the window; `session-events` would report the round as a session),
+  its statusline and its `bypassPermissions` default. `--settings` still applies, and auth and
+  Remote Control still work. The round dir holds no `.claude/settings.json`, so nothing loads from
+  the project either.
+- **`--strict-mcp-config`** with no `--mcp-config`: no MCP server starts, claude.ai connectors
+  included.
+- **`CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`**: without it the owner's CLAUDE.md files (the user one,
+  and the exclave root's by walk-up) load into every round, 25k tokens of context against 11k.
+- **`--effort`** must be passed: with user settings out, a round fell back to `medium`. C2 has no
+  effort key yet; the build adds one or fixes a constant.
+- The seed on stdin works as spawn's does. Killing the tmux server left `claude` running for a few
+  seconds; C16's graceful despawn, then kill, covers it.
+
+### The fence
+
+Passed as `--settings` (a file was tested; the flag also takes a JSON string). Its shape is
+constant; the paths are the daemon's:
+
+```json
+{
+  "permissions": {
+    "defaultMode": "dontAsk",
+    "allow": ["Read", "Bash(seanced custodian *)"],
+    "deny": ["…the deny list below"]
+  },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "allowUnsandboxedCommands": false,
+    "autoAllowBashIfSandboxed": true,
+    "enableWeakerNetworkIsolation": true,
+    "filesystem": { "denyWrite": ["<round dir>"] },
+    "network": {
+      "allowedDomains": ["github.com", "api.github.com", "*.githubusercontent.com"],
+      "allowUnixSockets": ["<tmux socket dir>", "<stateDir()/run>"]
+    }
+  }
+}
+```
+
+- `autoAllowBashIfSandboxed` makes C18's near-full shell: every sandboxed command no rule denies
+  runs, without an allow rule.
+- `Read` in `allow`: under `dontAsk` the Read tool is otherwise refused outside the round dir.
+- `enableWeakerNetworkIsolation`: without it every `gh` call fails TLS (`x509: OSStatus -26276`)
+  inside the macOS sandbox. It lets sandboxed commands reach `trustd`.
+- `allowUnixSockets`: without it `tmux capture-pane` and the daemon's local socket fail with
+  `Operation not permitted`. A directory works as an entry. Git's fsmonitor socket stays blocked:
+  `git status` prints an `fsmonitor_ipc` error and still succeeds.
+- `allowedDomains`: GitHub's hosts only. Every other host is refused silently.
+
+### Writes: one directory
+
+A sandboxed command may write its cwd and `$TMPDIR`, and Claude Code chooses that `$TMPDIR`:
+`$CLAUDE_CODE_TMPDIR/claude-<uid>`, unless that path counts as long, when it falls back to the
+shared `/tmp/claude-<uid>`. That is every session's temp dir, and a round wrote into another
+session's scratchpad there. The cut-off is undocumented: 32 characters kept, 35 fell back. A
+`denyWrite` on `/tmp/claude-<uid>` is no fix, because Claude Code's own shell wrapper writes its cwd
+file there, so every command then fails. So:
+
+- `CLAUDE_CODE_TMPDIR` is a fresh 0700 `mkdtemp` under `/tmp/seance-cu-` (21 characters), removed
+  after the round. The `claude-<uid>` dir under it is the round's scratch.
+- The round dir, the cwd, is in `denyWrite`.
+
+With both, the round's shell could not write to the cwd, the exclave root, `/tmp/claude-501`,
+`/private/tmp` or the default `/var/folders/…/T`. The fallback is silent, and the daemon cannot see
+the sandbox's `$TMPDIR`; keep the prefix this short. Claude Code's own process is not sandboxed: it
+still writes `.claude/` into the cwd and the transcript into the config dir.
+
+### The deny list
+
+`rm`, `rmdir`, `kill`, `pkill`, `killall`; the `git` and `tmux` subcommands of C20; `gh` writes;
+every `seanced` command but `custodian`. Every entry tested (all but `rmdir`, `killall`, tmux's
+`send`/`pasteb` aliases and some `gh` verbs) was refused with "Permission to use Bash with command …
+has been denied", in plain form and through each workaround below that Claude Code unwraps.
+
+- **Unwrapped, so refused:** compound commands (`;`, `&&`, `|`): `seanced custodian sessions;
+  seanced status` was refused whole. Also `env rm`, `command rm`, bare `xargs rm`, and an absolute
+  path to the binary (`/bin/rm`, `/usr/bin/git … push`, `/opt/homebrew/bin/tmux … send-keys`).
+- **A global option before the subcommand is not unwrapped.** `Bash(git push *)` does not catch
+  `git -C <path> push`, and `Bash(tmux send-keys *)` does not catch `tmux -L <socket> send-keys`
+  (keys reached a pane). So every `git` and `tmux` entry comes in four forms: `git push`,
+  `git push *`, `git * push` and `git * push *`, with `*` matching across spaces. The cost is a few
+  false refusals (`git -C … checkout --help`).
+- **`seanced`:** deny beats allow, so `Bash(seanced *)` would refuse `seanced custodian` too. The
+  list denies `Bash(seanced)` and `Bash(seanced <command>*)` for every command but `custodian`,
+  generated from the CLI's own command table, with a test that each one is covered, so a new
+  command is denied by default. `seanced custodian …` runs, with stdin piped or as a heredoc.
+- **`gh` writes, by verb:** `Bash(gh * <verb>*)` for `create`, `delete`, `edit`, `merge`,
+  `comment`, `close`, `reopen`, `review`, `ready`, `cancel` and `rerun`; `gh workflow`, `gh auth`,
+  `gh secret`, `gh variable` and `gh extension` whole; and `gh api` with `-X`, `--method`, `-f`,
+  `-F`, `--field`, `--raw-field` or `--input`. That last refuses `gh api graphql -f …` reads too, so
+  a round reads through `gh pr view --json`, `gh run view` and plain `gh api <path>`. A verb missing
+  from the list runs.
+
+**What gets through** (C21: noted, not chased): `bash -c '…'` and `sh -c '…'` around any denied
+command (`rm`, `kill`, `tmux send-keys` and `seanced status` all ran), `python3 -c` and other
+interpreters, and `xargs -n1 rm` (`xargs` with a flag is not unwrapped). The sandbox still confines
+their file writes to the scratch dir, but not `kill`, `tmux send-keys`, a `gh` write or a
+`seanced` command, which act through a signal, a socket or the network. What is left is C19.
+
+### Where a round runs
+
+The exclave is decided by `$PWD` when the window's shell starts: the owner's zsh hook picks
+`CLAUDE_CONFIG_DIR` from it, and the daemon never sets one (DESIGN.md, "Exclaves"). So each exclave
+gets its own round dir, created empty by the daemon:
+
+- a named exclave `<name>`: `~/<name>/.seance-custodian`. Verified: the round came up with
+  `CLAUDE_CONFIG_DIR=~/.claude-<name>` and that account;
+- `default`: a dir under `~` outside every named root, such as `stateDir()/custodian/cwd` (tested
+  as another dir under `~/.local/state/seance`).
+
+The dir must be trusted in that exclave's `.claude.json`: its own entry, or an ancestor's
+`hasTrustDialogAccepted`. A round dir under a named root the owner had trusted started with no
+dialog. One in `default`, where `~` is not trusted, stopped at "Is this a project you created or one
+you trust?", which nobody answers, and Remote Control never came up.
+
 ## Open details (build time)
 
-- **The launch.** Which Claude Code flags carry the agent definition, the permission rules and the
-  sandbox, and whether a refused command can be made a refusal rather than a prompt in every
-  permission mode. Verify against the current Claude Code docs before PR 3.
-- **Where a round runs.** An exclave is decided by the session's path, so each exclave needs a
-  directory for a round to start in.
+- **Trusting a round dir.** A round cannot answer the trust dialog (above), so an exclave whose
+  round dir is untrusted cannot host one. Recommended: the daemon reads the trust (it already reads
+  `.claude.json`), skips such an exclave as C12 skips a lapsed one, and `seanced doctor` names it;
+  the owner trusts it once by running `claude` in that dir. Writing the entry ourselves would race
+  every running session's rewrite of `.claude.json` (DESIGN.md, "Exclaves"). The owner's call.
+- **Linux.** Untested: the sandbox is bubblewrap there, `allowUnixSockets` is macOS-only
+  (`allowAllUnixSockets` may be what Linux needs), and the temp fallback rule may differ. Verify on a
+  Linux box before the seat ships there.
 - **Importing the scheduler's scoring.** `scheduler/test/layering.test.ts` lets only the leader's
   modules host the scheduler library. C12 needs the pure scoring function outside them: either the
   test's list grows by the custodian's one module, or the function moves somewhere both import.
