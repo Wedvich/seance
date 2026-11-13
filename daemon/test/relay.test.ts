@@ -810,6 +810,7 @@ describe("daemon ↔ relay integration", () => {
         "amend",
         "close",
         "drain",
+        "drainPass",
       ]);
       // A status leaves only after its tick wrote the store, so one in hand
       // means there is history to ask for.
