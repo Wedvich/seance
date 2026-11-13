@@ -1942,6 +1942,7 @@ describe("leader disk alerts", () => {
       gets: () => gets,
       diskAlerts: () => held?.record?.diskAlerts,
       authAlerts: () => held?.record?.authAlerts,
+      archivistSilence: () => held?.record?.archivistSilence,
     };
   };
 
@@ -2018,6 +2019,53 @@ describe("leader disk alerts", () => {
     });
     expect(lines.filter((line) => line.includes("scheduler: login expired: device="))).toHaveLength(1);
     expect(lines.filter((line) => line.includes("scheduler: login restored: device="))).toHaveLength(1);
+  });
+  test("an archivist absent past 24 h is pushed once and recorded; a later term repeats nothing", async () => {
+    const relay = startTestRelay(TOKEN);
+    const push = startPushEndpoint();
+    const settings = await heldSettings();
+    const lastSeen = Date.now() - 25 * 60 * 60 * 1000;
+    const seat: RegistryView = {
+      deviceId: "arch",
+      info: await seal(
+        key,
+        { to: APP_ID, from: "arch" },
+        {
+          id: crypto.randomUUID(),
+          ts: Date.now(),
+          op: "machine-info",
+          payload: { archivist: true, name: "archive-box", platform: "linux" },
+        },
+      ),
+      lastSeen,
+      connected: false,
+      archivist: true,
+    };
+    relay.setRegistry([await routableEntry("b"), seat]);
+    const { leader } = leaderOver(relay, new MemoryQueueStore(), 40, undefined, settings.store, (input, init) =>
+      fetch(push.endpoint(new URL(String(input)).pathname.split("/").at(-1) ?? ""), init),
+    );
+    const lines = await captureLog(async () => {
+      try {
+        leader.lead(1);
+        await leader.settled();
+        await push.waitForRequests(1);
+        await pollUntil(() => settings.archivistSilence() !== undefined, "the silence on the record");
+        expect(settings.archivistSilence()).toEqual({ state: "alerted", since: lastSeen });
+
+        leader.lead(2);
+        await pollUntil(() => leader.term() === 2, "the second term");
+        await leader.settled();
+        await pollUntil(() => settings.gets() >= 2, "the second term's settings load");
+        await Bun.sleep(300);
+        expect(push.requests()).toHaveLength(1);
+      } finally {
+        leader.stop();
+        relay.stop();
+        await push.stop();
+      }
+    });
+    expect(lines.filter((line) => line.includes("scheduler: archivist silent: since="))).toHaveLength(1);
   });
 });
 

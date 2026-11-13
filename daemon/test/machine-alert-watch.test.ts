@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { CAPABILITIES, type AuthAlerted, type Machine, type PushAlert, type SettingsRecord } from "@seance/shared";
+import {
+  CAPABILITIES,
+  type ArchivistEntry,
+  type AuthAlerted,
+  type Machine,
+  type PushAlert,
+  type SettingsRecord,
+} from "@seance/shared";
+import { ARCHIVIST_SILENCE_MS } from "../src/archivist-silence.ts";
 import { createMachineAlertWatch } from "../src/machine-alerts.ts";
 import { pollUntil } from "./fixtures.ts";
 import { createTermSettings, type TermSettings } from "../src/settings.ts";
@@ -93,7 +101,12 @@ const authMachine = (deviceId: string, auth: { ax?: number[]; au?: number[] }): 
   status: { at: NOW / 1000 - 10, scan: NOW, disk: 10, ...auth },
 });
 
-function watchOver(settings: TermSettings, machines: { current: readonly Machine[] }, ready = () => true) {
+function watchOver(
+  settings: TermSettings,
+  machines: { current: readonly Machine[] },
+  ready = () => true,
+  archivist: { current: ArchivistEntry | null } = { current: null },
+) {
   const raised: PushAlert[] = [];
   const restored: AuthAlerted[] = [];
   const clock = { now: NOW };
@@ -101,6 +114,7 @@ function watchOver(settings: TermSettings, machines: { current: readonly Machine
     settings: () => settings,
     ready,
     machines: () => machines.current,
+    archivist: () => archivist.current,
     onAlert: (alert) => raised.push(alert),
     onRestored: (entry) => restored.push(entry),
     onError: (err) => {
@@ -341,5 +355,111 @@ describe("createMachineAlertWatch", () => {
       await Bun.sleep(20);
       expect(restored).toHaveLength(1);
     }
+  });
+});
+
+describe("createMachineAlertWatch: the archivist's silence", () => {
+  const seat = (connected: boolean, lastSeen = NOW): ArchivistEntry => ({
+    deviceId: "arch",
+    name: "archive-box",
+    platform: "linux",
+    connected,
+    lastSeen,
+  });
+
+  test("a registry that never held an archivist writes nothing and alerts nothing, however long", async () => {
+    const { settings, record } = await setup();
+    const { watch, raised, clock } = watchOver(settings, { current: [] });
+    for (const hours of [0, 25, 24 * 30]) {
+      clock.now = NOW + hours * 3_600_000;
+      watch.check(false);
+      // oxlint-disable-next-line no-await-in-loop -- a non-event: each check has its turn before the next
+      await Bun.sleep(20);
+    }
+    expect(raised).toEqual([]);
+    expect(record().version).toBe(1);
+    expect(record().archivistSilence).toBeUndefined();
+  });
+
+  test("absent past 24 h is pushed once, after its write; later checks and a new leader's watch repeat nothing", async () => {
+    const { settings, record } = await setup();
+    const seatNow: { current: ArchivistEntry | null } = { current: seat(true) };
+    const { watch, raised, clock } = watchOver(settings, { current: [] }, () => true, seatNow);
+    watch.check(false);
+    await pollUntil(() => record().archivistSilence?.state === "present", "the seat recorded present");
+
+    seatNow.current = seat(false, NOW + 1000);
+    clock.now = NOW + 2000;
+    watch.check(false);
+    await pollUntil(() => record().archivistSilence?.state === "absent", "the absence recorded");
+    clock.now = NOW + 1000 + ARCHIVIST_SILENCE_MS - 1;
+    watch.check(false);
+    await Bun.sleep(20);
+    expect(raised).toEqual([]);
+
+    clock.now = NOW + 1000 + ARCHIVIST_SILENCE_MS;
+    watch.check(false);
+    await pollUntil(() => raised.length === 1, "the silence alert");
+    expect(raised).toEqual([{ v: 1, kind: "archivist", at: clock.now, since: NOW + 1000 }]);
+    expect(record().archivistSilence).toEqual({ state: "alerted", since: NOW + 1000 });
+    // The vapid pair rides the same write untouched.
+    expect(record().vapid).toBeDefined();
+
+    const version = record().version;
+    clock.now += ARCHIVIST_SILENCE_MS;
+    watch.check(false);
+    // A new leader's watch over the same record, its seat entry now gone altogether.
+    const next = watchOver(settings, { current: [] });
+    next.clock.now = clock.now;
+    next.watch.check(false);
+    await Bun.sleep(20);
+    expect(raised).toHaveLength(1);
+    expect(next.raised).toEqual([]);
+    expect(record().version).toBe(version);
+  });
+
+  test("a return re-arms it: gone again past 24 h is a second push", async () => {
+    const { settings, record } = await setup();
+    const seatNow: { current: ArchivistEntry | null } = { current: seat(false, NOW - ARCHIVIST_SILENCE_MS) };
+    const { watch, raised, clock } = watchOver(settings, { current: [] }, () => true, seatNow);
+    watch.check(false);
+    await pollUntil(() => raised.length === 1, "the first alert");
+
+    seatNow.current = seat(true, NOW + 1000);
+    clock.now = NOW + 1000;
+    watch.check(false);
+    await pollUntil(() => record().archivistSilence?.state === "present", "the return recorded");
+
+    seatNow.current = seat(false, NOW + 2000);
+    clock.now = NOW + 2000;
+    watch.check(false);
+    await pollUntil(() => record().archivistSilence?.state === "absent", "the second absence");
+    clock.now = NOW + 2000 + ARCHIVIST_SILENCE_MS;
+    watch.check(false);
+    await pollUntil(() => raised.length === 2, "the second alert");
+    expect(raised.map((alert) => (alert.kind === "archivist" ? alert.since : null))).toEqual([
+      NOW - ARCHIVIST_SILENCE_MS,
+      NOW + 2000,
+    ]);
+  });
+
+  test("a write whose answer was lost, but landed, is pushed once by the next check", async () => {
+    const { settings, record } = await setup(0, 1, true);
+    const seatNow: { current: ArchivistEntry | null } = { current: seat(false, NOW - ARCHIVIST_SILENCE_MS) };
+    const { watch, raised, clock } = watchOver(settings, { current: [] }, () => true, seatNow);
+    watch.check(false);
+    await pollUntil(() => record().archivistSilence?.state === "alerted", "the write whose answer was lost");
+    await Bun.sleep(20);
+    expect(raised).toEqual([]);
+
+    clock.now += 1000;
+    watch.check(false);
+    await pollUntil(() => raised.length === 1, "the alert, once the record shows it landed");
+    expect(raised).toEqual([{ v: 1, kind: "archivist", at: NOW, since: NOW - ARCHIVIST_SILENCE_MS }]);
+
+    clock.now += 1000;
+    watch.check(false);
+    await Bun.sleep(20);
+    expect(raised).toHaveLength(1);
   });
 });

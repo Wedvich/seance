@@ -1,4 +1,5 @@
-import type { AuthAlerted, Machine, PushAlert, SettingsRecord } from "@seance/shared";
+import type { ArchivistEntry, AuthAlerted, Machine, PushAlert, SettingsRecord } from "@seance/shared";
+import { archivistSilenceStep } from "./archivist-silence.ts";
 import { authAlertStep } from "./auth-alerts.ts";
 import { diskAlertStep } from "./disk-alerts.ts";
 import type { TermSettings } from "./settings.ts";
@@ -8,6 +9,8 @@ export interface MachineAlertWatchOpts {
   /** True once the term's settings load decided `ready`; only then is the record a held, writable thing. */
   readonly ready: () => boolean;
   readonly machines: () => readonly Machine[];
+  /** The registry's archivist seat entry, flagged by the relay (`RelayState.archivist`). */
+  readonly archivist: () => ArchivistEntry | null;
   /** Called for each alert whose list write landed. */
   readonly onAlert: (alert: PushAlert) => void;
   /** Called for each held login alert whose exclave reads `ok` again, once the write clearing it landed. */
@@ -25,9 +28,9 @@ export interface MachineAlertWatch {
 }
 
 /**
- * Runs `diskAlertStep` and `authAlertStep` against the term's held settings
- * record, in one write per check (`diskAlerts` and `authAlerts` are fields of
- * the same record, so two writes would only conflict with each other). The
+ * Runs `diskAlertStep`, `authAlertStep` and `archivistSilenceStep` against the term's held settings
+ * record, in one write per check (`diskAlerts`, `authAlerts` and `archivistSilence` are fields of
+ * the same record, so separate writes would only conflict with each other). The
  * lists are written first and the alerts are raised only once that write
  * landed, as the scheduler's own are (a repeat after a lost write would be
  * worse than the next check's recompute); the steps are re-applied to whatever
@@ -53,6 +56,10 @@ export function createMachineAlertWatch(o: MachineAlertWatchOpts): MachineAlertW
     if (alert.kind === "disk") {
       return (record.diskAlerts ?? []).some((e) => e.deviceId === alert.deviceId && e.at === alert.at);
     }
+    if (alert.kind === "archivist") {
+      const held = record.archivistSilence;
+      return held?.state === "alerted" && held.since === alert.since;
+    }
     if (alert.kind !== "auth") return false;
     return (record.authAlerts ?? []).some(
       (e) =>
@@ -76,7 +83,8 @@ export function createMachineAlertWatch(o: MachineAlertWatchOpts): MachineAlertW
         pending.length === 0 &&
         pendingRestored.length === 0 &&
         diskAlertStep(o.machines(), held.diskAlerts ?? [], at).next === null &&
-        authAlertStep(o.machines(), held.authAlerts ?? [], at).next === null
+        authAlertStep(o.machines(), held.authAlerts ?? [], at).next === null &&
+        archivistSilenceStep(o.archivist(), held.archivistSilence, at).next === null
       ) {
         return;
       }
@@ -96,11 +104,12 @@ export function createMachineAlertWatch(o: MachineAlertWatchOpts): MachineAlertW
           const machines = o.machines();
           const disk = diskAlertStep(machines, record.diskAlerts ?? [], at);
           const auth = authAlertStep(machines, record.authAlerts ?? [], at);
-          raised = [...disk.alerts, ...auth.alerts];
+          const silence = archivistSilenceStep(o.archivist(), record.archivistSilence, at);
+          raised = [...disk.alerts, ...auth.alerts, ...silence.alerts];
           restored = auth.restored;
           const { version: _version, ...body } = record;
           // Nothing to change, but an unsettled alert is still to be told from a lost write: write anyway.
-          if (disk.next === null && auth.next === null) {
+          if (disk.next === null && auth.next === null && silence.next === null) {
             const unsettledAny = unsettled.length + unsettledRestored.length > 0;
             return unsettledAny && confirmed.length + restoredEarlier.length === 0 ? body : null;
           }
@@ -111,6 +120,7 @@ export function createMachineAlertWatch(o: MachineAlertWatchOpts): MachineAlertW
             ...rest,
             ...(diskNext.length === 0 ? {} : { diskAlerts: diskNext }),
             ...(authNext.length === 0 ? {} : { authAlerts: authNext }),
+            ...(silence.next === null ? {} : { archivistSilence: silence.next }),
           };
         })
         .then(
