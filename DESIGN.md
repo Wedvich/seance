@@ -8675,8 +8675,9 @@ PR (custodian 4), and `docs/custodian.md` keeps the rest of the spec. Decisions 
     plausible cheap-model slip); the `git` subcommands of C20 (`worktree remove`, `branch -d/-D/--delete`, `push`,
     `reset`, `clean`, `checkout`, `switch`, `stash`) and the `tmux` ones, each in four forms (`git push`, `git push *`,
     `git * push`, `git * push *`: a global option before the subcommand is not unwrapped, so `git -C <path> push` and
-    `tmux -L <socket> send-keys` would otherwise pass, and the latter's keys reached a pane); `gh` writes by verb,
-    `Bash(gh * <verb>*)`, and `gh workflow`, `auth`, `secret`, `variable`, `extension`, `codespace`, `ssh-key` and
+    `tmux -L <socket> send-keys` would otherwise pass, and the latter's keys reached a pane); `gh` writes by verb, each as a
+    whole word in the four forms (`Bash(gh * <verb> *)` …: not a prefix, which refused `--state closed`,
+    `--json mergeable,reviewDecision` and `--json comments`, the reads a round makes), and `gh workflow`, `auth`, `secret`, `variable`, `extension`, `codespace`, `ssh-key` and
     `gpg-key` whole, `gh api` with `-X`/`--method`/`-f`/`-F`/`--field`/`--raw-field`/`--input` (which also refuses
     `gh api graphql -f …` reads, so a round reads through `gh pr view --json`, `gh run view` and plain `gh api
     <path>`); and `seanced` itself: `Bash(seanced)` and `Bash(seanced <command>*)` for **every `COMMANDS` name but
@@ -8689,7 +8690,10 @@ PR (custodian 4), and `docs/custodian.md` keeps the rest of the spec. Decisions 
     server runs outside the sandbox and the round's shell can reach its socket, so each runs a shell unsandboxed
     and escapes the write fence; its state setters (`set-option`, `set-window-option`, which could set
     `@seance-task` or `@seance-custodian`, and `load-buffer`, `set-buffer`, which feed pastes); the aliases the
-    spec missed (`killp`, `killw`, `unlink-window`, `send-prefix`); and `gh`'s further write verbs (`update-branch`,
+    spec missed (`killp`, `killw`, `unlink-window`, `send-prefix`); tmux's other writers of state a reader trusts, or of commands that run later
+    (`set-environment`, which every session started later inherits, `bind-key`, `display-menu`, `select-pane`, whose
+    `-T` sets the title `isRegistered` reads, the `rename-*`, `swap-*`, `move-*`, `link-window`, `join-pane`,
+    `break-pane`, `switch-client` and `detach-client` families); and `gh`'s further write verbs (`update-branch`,
     `revert`, `lock`, `pin`, `transfer`, `develop`, `archive`, `rename`, `sync`, `fork`, `add`, `upload`, `set`,
     `clone`, `link`, `copy`, `item-*`, `field-*`, `mark-template`, …). `capture-pane`, `list-*`,
     `display-message` and the `gh` read verbs stay free (a test checks it). Every entry tested was refused with

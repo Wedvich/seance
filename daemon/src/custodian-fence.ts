@@ -85,11 +85,45 @@ const TMUX_DENIED = [
   "setb",
   "unlink-window",
   "unlinkw",
+  // State other readers trust (a pane's title and options, a window's identity, the server's environment, which every
+  // session started later inherits) or commands that run later.
+  "set-environment",
+  "setenv",
+  "bind-key",
+  "bind",
+  "display-menu",
+  "menu",
+  "select-pane",
+  "selectp",
+  "rename-window",
+  "renamew",
+  "rename-session",
+  "rename",
+  "swap-pane",
+  "swapp",
+  "swap-window",
+  "swapw",
+  "move-window",
+  "movew",
+  "move-pane",
+  "movep",
+  "link-window",
+  "linkw",
+  "join-pane",
+  "joinp",
+  "break-pane",
+  "breakp",
+  "switch-client",
+  "switchc",
+  "detach-client",
+  "detach",
 ] as const;
 
 /**
- * `gh` verbs that write, as `Bash(gh * <verb>*)`. The spec's list is the first eleven; the rest write to GitHub over
- * the allowed network too. `*` needs a space before the verb, so `create` does not catch `item-create`.
+ * `gh` verbs that write, each as a whole word anywhere after `gh` (`fourForms`). The spec's list is the first eleven;
+ * the rest write to GitHub over the allowed network too. A whole word, not a prefix: `closed`, `mergeable`,
+ * `reviewDecision`, `comments` and `additions` are the reads a round makes (`--state closed`, `--json mergeable`),
+ * and a word that merely starts with a verb must not be refused.
  */
 const GH_WRITE_VERBS = [
   "create",
@@ -167,7 +201,7 @@ export const DENY: readonly string[] = [
   ...PLAIN_DENIED.flatMap((command) => [`Bash(${command})`, `Bash(${command} *)`]),
   ...GIT_DENIED.flatMap((subcommand) => fourForms("git", subcommand)),
   ...TMUX_DENIED.flatMap((subcommand) => fourForms("tmux", subcommand)),
-  ...GH_WRITE_VERBS.map((verb) => `Bash(gh * ${verb}*)`),
+  ...GH_WRITE_VERBS.flatMap((verb) => fourForms("gh", verb)),
   ...GH_WHOLE_DENIED.flatMap((command) => [`Bash(gh ${command})`, `Bash(gh ${command} *)`]),
   // `*` matches no empty gap (verified on Linux), so the flag directly after `api` needs its own entry.
   ...GH_API_WRITE_FLAGS.flatMap((flag) => [`Bash(gh api * ${flag}*)`, `Bash(gh api ${flag}*)`]),
