@@ -466,6 +466,16 @@ describe("worktree hint", () => {
   });
 });
 
+describe("tile tags", () => {
+  test("the repository tile says worktree while it is on, the after tile says on report", () => {
+    expect(deriveView(state({}, { worktree: true }), NOW).repoTile.tag).toBe("worktree");
+    expect(deriveView(state({}, { worktree: false }), NOW).repoTile.tag).toBeNull();
+    expect(deriveView(state({}, { until: "reported" }), NOW).afterTile.tag).toBe("on report");
+    expect(deriveView(state({}, { until: "merged" }), NOW).afterTile.tag).toBeNull();
+    expect(deriveView(state(), NOW).modelTile.tag).toBeNull();
+  });
+});
+
 describe("the pickers", () => {
   test("the autonomy tile names the level the next task runs at", () => {
     expect(deriveView(state(), 0).autonomyTile).toEqual({
@@ -473,6 +483,7 @@ describe("the pickers", () => {
       value: "Checkpoint",
       mono: false,
       dot: null,
+      tag: null,
     });
     expect(deriveView(state({ autonomy: "steer" }), 0).autonomyTile.value).toBe("Steer");
     expect(deriveView(state({ autonomy: "auto" }), 0).autonomyTile.value).toBe("Auto");
@@ -749,6 +760,21 @@ describe("deriveReportedAvailability", () => {
     expect(deriveReportedAvailability(relay({ machines: [capable], scheduler: leading, status: "retrying" }))).toBe(
       false,
     );
+  });
+
+  test("the footer hint follows the setting and whether the leader takes it", () => {
+    const merges = "Settles when its PR merges or its session ends";
+    const alone =
+      "A merge alone won't settle it. The session is told to report when it is finished; it needs the seance MCP server";
+    const refused = "The scheduler's leader doesn't take this yet — update seanced on its machine";
+    const hint = (r: RelayState, until: "merged" | "reported"): string =>
+      deriveView(state({ relay: r }, { until }), NOW).reportedHint;
+    const offered = relay({ machines: [capable], scheduler: leading });
+    const notOffered = relay({ machines: [machine()], scheduler: leading });
+    expect(hint(offered, "merged")).toBe(merges);
+    expect(hint(offered, "reported")).toBe(alone);
+    expect(hint(notOffered, "merged")).toBe(refused);
+    expect(hint(notOffered, "reported")).toBe(alone);
   });
 
   test("the After tile says what is set", () => {

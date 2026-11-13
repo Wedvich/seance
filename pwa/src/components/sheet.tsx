@@ -1,7 +1,9 @@
 import type { ComponentChildren, JSX } from "preact";
-import { useEffect, useLayoutEffect, useRef } from "preact/hooks";
+import { useEffect, useId, useLayoutEffect, useRef } from "preact/hooks";
 import { centeredScrollTop } from "../scroll.ts";
+import type { MatchSplit } from "../sheet-filter.ts";
 import type { Dot } from "../view.ts";
+import { lockedSheetHeight, viewportInsets } from "../viewport.ts";
 
 const FOCUSABLE = 'button:not([disabled]), [href], input, textarea, [tabindex]:not([tabindex="-1"])';
 
@@ -9,6 +11,9 @@ const FOCUSABLE = 'button:not([disabled]), [href], input, textarea, [tabindex]:n
  * Bottom sheet with dialog semantics. Escape and focus return are here for
  * keyboard use in a desktop browser as much as for assistive tech — the sheet
  * replaces the screen's focus context, so leaving focus behind it strands you.
+ * `search` and `footer` pin a filter field and a setting row around the list;
+ * a sheet with a field is the one the on-screen keyboard can cover, so only it
+ * locks its height and follows the visual viewport.
  */
 export function Sheet(props: {
   title: string;
@@ -18,12 +23,81 @@ export function Sheet(props: {
   onClose: () => void;
   /** A form rather than a list: still a bottom sheet on a phone, a centred dialog on a desk. */
   variant?: "dialog";
+  /** A filter field pinned under the head; the sheet then keeps one height and tracks the visible viewport. */
+  search?: { readonly label: string; readonly query: string; readonly onQuery: (query: string) => void } | null;
+  /** Pinned under the list, outside its scroll. */
+  footer?: ComponentChildren;
   children: ComponentChildren;
 }): JSX.Element {
-  const { title, closing = false, onExited, onClose, variant, children } = props;
+  const { title, closing = false, onExited, onClose, variant, search = null, footer, children } = props;
   const dialog = variant === "dialog";
   const panel = useRef<HTMLDivElement>(null);
   const list = useRef<HTMLDivElement>(null);
+  const scrim = useRef<HTMLDivElement>(null);
+  const searchInput = useRef<HTMLInputElement>(null);
+  const tracked = search !== null;
+  const lastQuery = useRef(search?.query);
+  const pressedScrim = useRef(false);
+  const listId = useId();
+  const filtering = search !== null && search.query !== "";
+
+  // Padding, not a resized scrim: visual-viewport events trail the keyboard (on iOS by its whole animation), and the
+  // scrim must keep dimming and swallowing taps over the whole screen meanwhile. Written to the node, not state, so it
+  // lands before the scroll measurement below; Preact owns className, so no classList.
+  useLayoutEffect(() => {
+    const node = scrim.current;
+    const viewport = window.visualViewport;
+    if (!tracked || node === null || viewport === null) return;
+    const apply = (): void => {
+      const insets = viewportInsets(viewport, document.documentElement.clientHeight);
+      if (insets === null) {
+        node.style.removeProperty("padding-top");
+        node.style.removeProperty("padding-bottom");
+        delete node.dataset.viewport;
+        return;
+      }
+      node.style.paddingTop = `${insets.top}px`;
+      node.style.paddingBottom = `${insets.bottom}px`;
+      node.dataset.viewport = "visual";
+    };
+    apply();
+    viewport.addEventListener("resize", apply);
+    viewport.addEventListener("scroll", apply);
+    return () => {
+      viewport.removeEventListener("resize", apply);
+      viewport.removeEventListener("scroll", apply);
+    };
+  }, [tracked]);
+
+  // Locked so narrowing the list can't shrink the sheet and drop the field down the screen, hence skipped while a
+  // filter is typed. Otherwise re-measured on every render: the list arrives late (After reads the queue on open) and
+  // the footer hint changes length. Measured with the keyboard-only styles off (hidden hint, trimmed padding), or a
+  // sheet opened under the keyboard would lock short of its footer; and against the layout viewport, so a sheet opened
+  // while the keyboard is closing doesn't lock to the squeezed height. One synchronous block: nothing paints between.
+  const relock = useRef<() => void>(() => {});
+  relock.current = (): void => {
+    const node = panel.current;
+    const items = list.current;
+    if (!tracked || node === null || items === null) return;
+    if (filtering && node.style.height !== "") return;
+    const scrimNode = scrim.current;
+    const viewportMode = scrimNode?.dataset.viewport;
+    if (scrimNode !== null) delete scrimNode.dataset.viewport;
+    node.style.removeProperty("height");
+    // Everything but the list (head, field, footer, padding, border) is what the panel adds to it.
+    const content = node.offsetHeight - items.offsetHeight + items.scrollHeight;
+    if (scrimNode !== null && viewportMode !== undefined) scrimNode.dataset.viewport = viewportMode;
+    node.style.height = `${lockedSheetHeight(content, document.documentElement.clientHeight)}px`;
+  };
+  useLayoutEffect(() => {
+    relock.current();
+  });
+  useEffect(() => {
+    if (!tracked) return;
+    const onResize = (): void => relock.current();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [tracked]);
 
   // Before first paint, so a long list opens on its selection rather than
   // visibly jumping to it. Rects, not offsetTop: the panel is mid slide-in.
@@ -46,7 +120,10 @@ export function Sheet(props: {
   useLayoutEffect(() => {
     const previous = document.activeElement;
     const node = panel.current;
-    node?.focus();
+    const input = searchInput.current;
+    // A phone's keyboard would open over the list the sheet was opened to show.
+    if (input !== null && window.matchMedia("(pointer: fine)").matches) input.focus({ preventScroll: true });
+    else node?.focus();
     return () => {
       // The sheet outlives its dismissal by the exit animation, and the form
       // beneath is tappable for all of it. Focus that has already moved on is the
@@ -57,6 +134,13 @@ export function Sheet(props: {
       previous.focus();
     };
   }, []);
+
+  // A narrowed list keeps its old offset, which can sit past the first matches.
+  useLayoutEffect(() => {
+    if (lastQuery.current === search?.query) return;
+    lastQuery.current = search?.query;
+    if (list.current !== null) list.current.scrollTop = 0;
+  }, [search?.query]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -83,13 +167,20 @@ export function Sheet(props: {
 
   return (
     <div
+      ref={scrim}
       className={["scrim", closing && "scrim-closing", dialog && "scrim-dialog"].filter(Boolean).join(" ")}
+      onPointerDown={(event) => {
+        pressedScrim.current = event.target === event.currentTarget;
+      }}
       onClick={(event) => {
-        if (event.target === event.currentTarget) onClose();
+        // A drag that selects text in the field and lets go over the scrim clicks the scrim, the press's common ancestor.
+        if (event.target === event.currentTarget && pressedScrim.current) onClose();
       }}
     >
       <div
-        className={dialog ? "sheet card sheet-dialog" : "sheet card"}
+        className={[dialog ? "sheet card sheet-dialog" : "sheet card", tracked && "sheet-locked"]
+          .filter(Boolean)
+          .join(" ")}
         role="dialog"
         aria-modal="true"
         aria-label={title}
@@ -105,9 +196,71 @@ export function Sheet(props: {
             ✕
           </button>
         </div>
-        <div className="sheet-items" ref={list}>
+        {search !== null && (
+          <div className="sheet-search">
+            <svg
+              viewBox="0 0 24 24"
+              width="16"
+              height="16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <circle cx="11" cy="11" r="7" />
+              <path d="M20 20l-4-4" />
+            </svg>
+            <input
+              ref={searchInput}
+              type="search"
+              enterKeyHint="search"
+              aria-controls={listId}
+              className="sheet-search-input"
+              aria-label={search.label}
+              placeholder={search.label}
+              value={search.query}
+              autoComplete="off"
+              autoCapitalize="off"
+              spellcheck={false}
+              onInput={(event) => search.onQuery(event.currentTarget.value)}
+            />
+            {search.query !== "" && (
+              <button
+                type="button"
+                className="sheet-search-clear"
+                aria-label="Clear filter"
+                // Keeps focus where it was, so a tap neither opens nor drops the keyboard.
+                onPointerDown={(event) => event.preventDefault()}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={(event) => {
+                  // The button unmounts under a keyboard activation (detail 0); focus would fall to body and escape the
+                  // Tab trap. A tap or click never moves focus.
+                  search.onQuery("");
+                  if (event.detail === 0) searchInput.current?.focus();
+                }}
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  width="14"
+                  height="14"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2.2"
+                  stroke-linecap="round"
+                  aria-hidden="true"
+                >
+                  <path d="M6 6l12 12M18 6L6 18" />
+                </svg>
+              </button>
+            )}
+          </div>
+        )}
+        <div className="sheet-items" ref={list} id={listId}>
           {children}
         </div>
+        {footer !== undefined && <div className="sheet-foot">{footer}</div>}
       </div>
     </div>
   );
@@ -154,6 +307,8 @@ export function SheetItem(props: {
   /** Command row (does something) rather than option row (picks something). */
   action?: boolean;
   dot?: Dot | null;
+  /** The filter's first hit in `label`, drawn in the accent colour. */
+  match?: MatchSplit | null;
   /** Trailing remove button. A nested button would be invalid, so this splits the row in two. */
   onRemove?: (() => void) | null;
   removeLabel?: string;
@@ -172,6 +327,7 @@ export function SheetItem(props: {
     mono = false,
     action = false,
     dot = null,
+    match = null,
     onRemove = null,
     removeLabel = `Remove ${label}`,
     onAction = null,
@@ -189,7 +345,17 @@ export function SheetItem(props: {
     <button type="button" className={classes.join(" ")} onClick={onClick} disabled={disabled} aria-current={selected}>
       {dot !== null && <span className={dotClass(dot)} />}
       <span className="sheet-item-text">
-        <span className={mono ? "sheet-item-label sheet-item-mono" : "sheet-item-label"}>{label}</span>
+        <span className={mono ? "sheet-item-label sheet-item-mono" : "sheet-item-label"}>
+          {match === null ? (
+            label
+          ) : (
+            <>
+              {match.before}
+              <mark className="sheet-item-hit">{match.hit}</mark>
+              {match.after}
+            </>
+          )}
+        </span>
         {sub !== null && <span className="sheet-item-sub">{sub}</span>}
       </span>
       {selected && (
@@ -221,5 +387,34 @@ export function SheetItem(props: {
         </button>
       )}
     </div>
+  );
+}
+
+/** One switch row for a setting that belongs to the sheet's choice, pinned in its footer. */
+export function SheetSetting(props: {
+  title: string;
+  hint: string;
+  on: boolean;
+  disabled?: boolean;
+  onToggle: () => void;
+}): JSX.Element {
+  const { title, hint, on, disabled = false, onToggle } = props;
+  return (
+    <button
+      type="button"
+      className="sheet-setting"
+      role="switch"
+      aria-checked={on}
+      disabled={disabled}
+      onClick={onToggle}
+    >
+      <span className="sheet-setting-text">
+        <span className="sheet-setting-title">{title}</span>
+        <span className="sheet-setting-hint">{hint}</span>
+      </span>
+      <span className={on ? "toggle toggle-on" : "toggle"} aria-hidden="true">
+        <span className="toggle-knob" />
+      </span>
+    </button>
   );
 }

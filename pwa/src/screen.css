@@ -800,7 +800,7 @@
 /* These live inside <button>, which permits only phrasing content — hence spans
    made block rather than <p>. */
 .banner-text,
-.worktree-text {
+.sheet-setting-text {
   flex: 1;
   min-width: 0;
 }
@@ -929,6 +929,21 @@
   min-width: 0;
 }
 
+/* At the value row's right end, where the value's ellipsis gives way to it; beside the label it overran a 360-390px tile. */
+.tile-tag {
+  flex: none;
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--sur2);
+  font-family: var(--mono);
+  font-variant-ligatures: none;
+  font-size: 0.71875rem;
+  font-weight: 500;
+  color: var(--acc);
+  white-space: nowrap;
+}
+
 .tile-offline {
   border-color: var(--fg2);
 }
@@ -949,7 +964,8 @@
   font-weight: 500;
 }
 
-.tile-value span {
+.tile-value > span:not(.tile-tag) {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1066,26 +1082,13 @@
   opacity: 0.4;
 }
 
-/* ---- worktree row ---- */
-
-.worktree {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 14px 16px;
-  border-radius: 14px;
-  text-align: left;
-  width: 100%;
-}
-
-.worktree-title {
+.sheet-setting-title {
   display: block;
   font-size: 0.96875rem;
   font-weight: 600;
 }
 
-.worktree-hint {
+.sheet-setting-hint {
   display: block;
   margin: 2px 0 0;
   font-size: 0.8125rem;
@@ -1283,20 +1286,20 @@
 
 /* Tap acknowledgment: a tint plus a slight press-down on every main target. */
 .tile,
-.worktree,
 .sheet-item,
+.sheet-setting,
 .sheet-item-remove,
 .primary {
   transition: transform 0.12s ease;
 }
 
-.tile:active,
-.worktree:active {
+.tile:active {
   background: color-mix(in oklab, var(--sur) 93%, var(--fg));
   transform: scale(0.98);
 }
 
 .sheet-item:enabled:active,
+.sheet-setting:enabled:active,
 .sheet-item-remove:active {
   background: color-mix(in oklab, var(--sur2) 88%, var(--fg));
   transform: scale(0.98);
@@ -1512,6 +1515,133 @@
   padding: 0 13px;
   font-size: 0.78125rem;
   color: var(--fg2);
+}
+
+/* Its height is set inline on open, so filtering can't drop the field down the screen; this cap is what shortens it
+   under the keyboard. 100% is the scrim's content box, which the viewport padding shrinks to the visible area; 48px
+   leaves scrim to tap, and the top inset keeps that strip clear of a translucent iOS status bar. No CSS height here: a
+   short list must stay short. Scrolls as a whole when even the list's floor does not fit (landscape with the keyboard
+   up, a large text scale), or the footer would spill out of the panel. */
+.sheet-locked {
+  max-height: calc(100% - 48px - env(safe-area-inset-top));
+  overflow-y: auto;
+}
+
+/* Overscroll containment: with the keyboard up the page itself can pan, and a list scrolled past its end would hand
+   the drag to it (as .skill-list). */
+.sheet-locked .sheet-items {
+  flex: 1;
+  min-height: 4rem;
+  overscroll-behavior: contain;
+}
+
+/* The footer keeps its title and switch only while the keyboard is up, or at a large text scale the pinned parts leave
+   the list no room. */
+.scrim[data-viewport="visual"] .sheet-setting-hint {
+  display: none;
+}
+
+/* The keyboard covers the home indicator, so its inset would only open a gap above the keyboard. */
+.scrim[data-viewport="visual"] .sheet {
+  padding-bottom: 14px;
+}
+
+.sheet-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  min-height: 2.75rem;
+  margin-bottom: 8px;
+  padding: 0 6px 0 12px;
+  border-radius: 11px;
+  background: var(--sur2);
+  color: var(--fg2);
+}
+
+.sheet-search:focus-within {
+  box-shadow: 0 0 0 2px var(--acc);
+}
+
+/* 1rem: below 16px iOS zooms the page on focus. */
+.sheet-search-input {
+  flex: 1;
+  min-width: 0;
+  align-self: stretch;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--fg);
+  font-size: 1rem;
+  appearance: none;
+}
+
+/* Firefox dims placeholders by default. */
+.sheet-search-input::placeholder {
+  color: var(--fg2);
+  opacity: 1;
+}
+
+/* Our own clear button replaces the engine's. */
+.sheet-search-input::-webkit-search-cancel-button,
+.sheet-search-input::-webkit-search-decoration {
+  appearance: none;
+  display: none;
+}
+
+.sheet-search-clear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg2);
+}
+
+/* The sheet's own padding-bottom supplies the bottom inset. */
+.sheet-foot {
+  flex: none;
+  margin: 0 -14px;
+  padding: 10px 14px 0;
+  border-top: 1px solid var(--line);
+}
+
+.sheet-setting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 11px 9px 11px 13px;
+  border: 0;
+  border-radius: 11px;
+  background: var(--sur2);
+  text-align: left;
+}
+
+/* As .menu-switch: a --line track all but disappears on --sur2. */
+.sheet-setting .toggle:not(.toggle-on) {
+  background: var(--switch-off);
+}
+
+/* Dim the switch only, so the hint that explains why stays at full contrast. */
+.sheet-setting:disabled {
+  cursor: default;
+}
+
+.sheet-setting:disabled .toggle {
+  opacity: 0.55;
+}
+
+/* <mark>'s UA yellow reset. */
+.sheet-item-hit {
+  background: transparent;
+  color: var(--acc);
 }
 
 /* ---- verdict ---- */

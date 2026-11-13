@@ -379,8 +379,8 @@ checkout's `daemon/src/main.ts session-event` with `bun` from PATH, so it needs 
 Type what the session should do — or leave the prompt blank to start an empty one —
 then pick where it runs. Tiles open pickers: **machine**, **account**, **repository**,
 **model** (Fable / Opus / Sonnet / Haiku), and **effort** (Low through Max), plus the
-authoring ones below. **Fresh worktree** is on by default; switching it off runs the
-session in the repo as it stands. Then queue it — or, from the chevron beside **Queue**,
+authoring ones below. **Fresh worktree** is the switch under the repository list (on by default, and the
+tile shows a `worktree` tag while it is; off runs the session in the repo as it stands). Then queue it — or, from the chevron beside **Queue**,
 **Start now**, which queues it and asks the scheduler to place it at once, past its
 concurrency caps (shown only while the scheduler's leader supports it).
 
