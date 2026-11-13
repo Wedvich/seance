@@ -230,7 +230,7 @@ function accountIds(state: AppState): ReadonlyMap<string, string> {
 }
 
 function tile(label: string, value: string | null, mono = false): Tile {
-  return { label, value: value ?? "Any", mono: mono && value !== null, dot: null };
+  return { label, value: value ?? "Any", mono: mono && value !== null, dot: null, tag: null };
 }
 
 const ANY = (kind: string): Omit<OlderOption, "selected" | "pick"> => ({
@@ -440,7 +440,10 @@ export function deriveOlder(state: AppState, now: number): OlderView | null {
       { sheet: "outcome", tile: tile("Outcome", filters.outcome === null ? null : OUTCOME_LABELS[filters.outcome]) },
       { sheet: "machine", tile: tile("Machine", filters.machine?.label ?? null) },
       { sheet: "account", tile: tile("Account", filters.account?.label ?? null) },
-      { sheet: "dates", tile: { label: "Dates", value: OLDER_DATE_LABELS[filters.dates], mono: false, dot: null } },
+      {
+        sheet: "dates",
+        tile: { label: "Dates", value: OLDER_DATE_LABELS[filters.dates], mono: false, dot: null, tag: null },
+      },
     ],
     rows,
     status,

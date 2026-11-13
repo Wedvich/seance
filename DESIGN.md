@@ -8975,7 +8975,8 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   the "since" — it starts a pass after the leader's own view flipped, exists only on `lost`, and
   would make the same card change its age at the 15-minute mark.
 - **Authoring from the auto form** (2026-10-23, M4 #21). The form adds an AFTER
-  tile and a "Settle on its done report" switch. (A Linear issue field, unused, was removed 2026-10-27; the
+  tile and a "Settle on its done report" switch (moved into the AFTER sheet's footer as "Settle this task on its done
+  report" 2026-11-13). (A Linear issue field, unused, was removed 2026-10-27; the
   spec's `linear` stays on the wire, and a persisted form's `linearIssue` is ignored.) **AFTER** opens a sheet of
   the tasks the leader holds that have not failed or been cancelled (read when the sheet opens),
   each with an Opened, Merged or Done choice; Done is offered only while the verified leader
@@ -9049,6 +9050,25 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   Every known `/name` token (at the start or after whitespace) is painted in the accent colour, as Claude Code marks one; a
   textarea can't style its own text, so a mirror behind it with the same metrics draws the
   glyphs and follows its scroll, and the field keeps only caret, selection and input.
+- **The Repository and After sheets filter, and carry their setting** (2026-11-13). Each pins a filter field under its
+  head: a case-insensitive substring of the trimmed text (repos on label or origin, tasks on title or status headline;
+  regex characters literal), the first run of the label or title drawn in the accent colour, nothing tinted when only the
+  origin or headline matched. It autofocuses only on a `pointer: fine` device, since a phone's keyboard would open over
+  the list the sheet was opened to show. The filter is component state and each open remounts the sheet, so every open starts empty. The toggle that
+  belonged to each pick moved off the form into a footer pinned under the list: "Fresh worktree" in the Repository sheet,
+  "Settle this task on its done report" in the After sheet (disabled exactly as the form row was); flipping one leaves the
+  sheet open. The REPOSITORY and AFTER tiles carry a `worktree` / `on report` tag at the right end of the value row while the setting is on, so the form
+  still shows it. These two sheets alone lock their height (content height, measured against the layout viewport with the
+  keyboard-only styles off and capped at 74% as before; re-measured on every render and on resize while the filter is
+  empty, held while it holds text, so a late-arriving list or a longer hint re-fits but filtering never moves the field):
+  shrink-to-fit would drop the field down the screen as the list
+  narrows, and a fixed 74% would stretch a three-repo sheet. They also follow the visual viewport so the footer sits
+  above the on-screen keyboard: as padding on a scrim that stays full-screen, never a resized scrim, because
+  visual-viewport events trail the keyboard (on iOS by its whole animation) and a resized scrim would leave the form
+  bare and tappable meanwhile. With the keyboard up the footer drops its hint, so the list keeps room. Rejected:
+  `interactive-widget=resizes-content` (changes every screen's layout under the keyboard, Chrome-only, and iOS ignores
+  it, so script is needed anyway); the VirtualKeyboard API (Chrome-only, a global opt-in); moving Opened / Merged / Done
+  into the footer (it is per task, so it stays on each row); a filter on the short sheets.
 
 ## MCP server (`seanced mcp`) — designed 2026-08-03
 

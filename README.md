@@ -585,9 +585,9 @@ root; the archivist's user is the files' only reader.
 Type what the session should do — or leave the prompt blank to start an empty one —
 then pick where it runs. Tiles open pickers: **machine**, **account**, **repository**,
 **model** (Fable / Opus / Sonnet / Haiku), and **effort** (Low through Max), plus the
-authoring ones below. **Fresh worktree** is on by default; switching it off runs the
-session in the repo as it stands. The form remembers the choice per repository, so picking
-one again brings back what you last chose there. Then queue it — or, from the chevron beside **Queue**,
+authoring ones below. **Fresh worktree** is the switch under the repository list (on by default, and the
+tile shows a `worktree` tag while it is; off runs the session in the repo as it stands). The form remembers
+the choice per repository, so picking one again brings back what you last chose there. Then queue it — or, from the chevron beside **Queue**,
 **Start now**, which queues it and asks the scheduler to place it at once, past its
 concurrency caps (shown only while the scheduler's leader supports it).
 

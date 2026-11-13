@@ -23,13 +23,14 @@ import {
   type PreviewState,
   type SheetKind,
 } from "../state.ts";
+import { matchesFilter, splitMatch } from "../sheet-filter.ts";
 import { completeSkill, matchSkills, promptSegments, skillIndex, skillToken } from "../skills.ts";
 import { formatSeen, type AttachmentChip, type AttachmentsView, type ViewModel } from "../view.ts";
 import { DecisionCard } from "./decision.tsx";
 import { HeaderMenu } from "./header-menu.tsx";
 import { Menu, MenuItem, useMenu } from "./menu.tsx";
 import { Seg } from "./seg.tsx";
-import { Sheet, SheetItem, TileButton, useSheetExit } from "./sheet.tsx";
+import { Sheet, SheetItem, SheetSetting, TileButton, useSheetExit } from "./sheet.tsx";
 import { SkillPicker, skillOptionId } from "./skill-picker.tsx";
 
 const SKILL_LIST_ID = "skill-list";
@@ -473,6 +474,8 @@ function ActiveSheet(props: {
   autonomy: AutonomyLevel;
   /** Derived while the After sheet is open, so the list is not rebuilt on every keystroke. */
   afterSheet: AfterSheetView | null;
+  worktree: boolean;
+  until: TaskUntil;
   /** True while the exit animation plays; the sheet is already popped from state. */
   closing: boolean;
   onExited: () => void;
@@ -485,13 +488,24 @@ function ActiveSheet(props: {
     effort: selectedEffort,
     autonomy: selectedAutonomy,
     afterSheet,
+    worktree,
+    until,
     closing,
     onExited,
   } = props;
   const close = actions.dismissLayer;
 
   if (kind === "after" && afterSheet !== null) {
-    return <AfterSheet actions={actions} sheet={afterSheet} closing={closing} onExited={onExited} />;
+    return (
+      <AfterSheet
+        actions={actions}
+        view={view}
+        sheet={afterSheet}
+        until={until}
+        closing={closing}
+        onExited={onExited}
+      />
+    );
   }
 
   if (kind === "machine") {
@@ -556,23 +570,7 @@ function ActiveSheet(props: {
   }
 
   if (kind === "repo") {
-    return (
-      <Sheet title={SHEET_TITLES.repo} closing={closing} onExited={onExited} onClose={close}>
-        {view.repos.map((repo) => (
-          <SheetItem
-            key={repo.origin}
-            label={repo.label}
-            mono
-            sub={repo.origin === repo.label ? null : repo.origin}
-            selected={repo.origin === view.repo?.origin}
-            onClick={() => actions.selectRepo(repo.origin)}
-          />
-        ))}
-        {view.repos.length === 0 && (
-          <p className="sheet-note">No clone with an origin is in scope of the pinned machine and account.</p>
-        )}
-      </Sheet>
-    );
+    return <RepoSheet actions={actions} view={view} worktree={worktree} closing={closing} onExited={onExited} />;
   }
 
   if (kind === "model") {
@@ -653,6 +651,52 @@ function ActiveSheet(props: {
   );
 }
 
+/** The filter text is component state; every open remounts the sheet (keyed by SpawnScreen), so it starts empty. */
+function RepoSheet(props: {
+  actions: SpawnActions;
+  view: ViewModel;
+  worktree: boolean;
+  closing: boolean;
+  onExited: () => void;
+}): JSX.Element {
+  const { actions, view, worktree, closing, onExited } = props;
+  const [query, setQuery] = useState("");
+  const rows = view.repos.filter((repo) => matchesFilter(query, [repo.label, repo.origin]));
+  return (
+    <Sheet
+      title={SHEET_TITLES.repo}
+      closing={closing}
+      onExited={onExited}
+      onClose={actions.dismissLayer}
+      search={{ label: "Filter repos", query, onQuery: setQuery }}
+      footer={
+        <SheetSetting title="Fresh worktree" hint={view.worktreeHint} on={worktree} onToggle={actions.toggleWorktree} />
+      }
+    >
+      {rows.map((repo) => (
+        <SheetItem
+          key={repo.origin}
+          label={repo.label}
+          match={splitMatch(repo.label, query)}
+          mono
+          sub={repo.origin === repo.label ? null : repo.origin}
+          selected={repo.origin === view.repo?.origin}
+          onClick={() => actions.selectRepo(repo.origin)}
+        />
+      ))}
+      {view.repos.length === 0 ? (
+        <p className="sheet-note">No clone with an origin is in scope of the pinned machine and account.</p>
+      ) : (
+        rows.length === 0 && (
+          <p className="sheet-note" role="status">
+            No repo matches that filter.
+          </p>
+        )
+      )}
+    </Sheet>
+  );
+}
+
 /**
  * Each unfinished task as a row to tick; a ticked one shows when its edge
  * releases. `Done` is offered only to a leader that takes it, but a held one
@@ -660,14 +704,34 @@ function ActiveSheet(props: {
  */
 function AfterSheet(props: {
   actions: SpawnActions;
+  view: ViewModel;
   sheet: AfterSheetView;
+  until: TaskUntil;
   closing: boolean;
   onExited: () => void;
 }): JSX.Element {
-  const { actions, sheet, closing, onExited } = props;
+  const { actions, view, sheet, until, closing, onExited } = props;
+  const [query, setQuery] = useState("");
+  const options = sheet.options.filter((option) => matchesFilter(query, [option.title, option.headline]));
+  const reported = until === "reported";
   return (
-    <Sheet title={SHEET_TITLES.after} closing={closing} onExited={onExited} onClose={actions.dismissLayer}>
-      {sheet.options.map((option) => {
+    <Sheet
+      title={SHEET_TITLES.after}
+      closing={closing}
+      onExited={onExited}
+      onClose={actions.dismissLayer}
+      search={{ label: "Filter tasks", query, onQuery: setQuery }}
+      footer={
+        <SheetSetting
+          title="Settle this task on its done report"
+          hint={view.reportedHint}
+          on={reported}
+          disabled={!view.reportedAvailable && !reported}
+          onToggle={() => actions.setUntil(reported ? "merged" : "reported")}
+        />
+      }
+    >
+      {options.map((option) => {
         const { when } = option;
         const whens: readonly DepAfter[] =
           sheet.doneAvailable || when === "done" ? ["opened", "merged", "done"] : ["opened", "merged"];
@@ -675,6 +739,7 @@ function AfterSheet(props: {
           <div key={option.id}>
             <SheetItem
               label={option.title}
+              match={splitMatch(option.title, query)}
               sub={option.headline}
               selected={when !== null}
               disabled={when === null && sheet.full}
@@ -694,6 +759,11 @@ function AfterSheet(props: {
           </div>
         );
       })}
+      {sheet.options.length > 0 && options.length === 0 && (
+        <p className="sheet-note" role="status">
+          No task matches that filter.
+        </p>
+      )}
       {sheet.note !== null && <p className="sheet-note">{sheet.note}</p>}
       {sheet.full && <p className="sheet-note">A task waits on at most {TASK_SPEC_LIMITS.deps} others.</p>}
       <p className="sheet-note">
@@ -882,6 +952,10 @@ export function SpawnScreen(props: {
   // The list is derived only while its sheet is open; the exit animation still needs it.
   const lastAfterSheet = useRef(afterSheet);
   if (afterSheet !== null) lastAfterSheet.current = afterSheet;
+  // Keys the sheet so a reopen during the exit animation remounts it: filter text, locked height and focus start over.
+  const opens = useRef({ count: 0, wasOpen: false });
+  if (sheet !== null && !opens.current.wasOpen) opens.current.count += 1;
+  opens.current.wasOpen = sheet !== null;
 
   // Open from the prompt text and caret, never focus: a tap on a row blurs the
   // textarea before its click lands on some browsers, and a focus-driven picker
@@ -1224,49 +1298,11 @@ export function SpawnScreen(props: {
         {view.previewShown && (
           <PreviewCard preview={preview} machines={machines} now={now} onRefresh={actions.refreshPreview} />
         )}
-
-        <button
-          type="button"
-          className="worktree card"
-          onClick={actions.toggleWorktree}
-          role="switch"
-          aria-checked={view.worktree}
-        >
-          <span className="worktree-text">
-            <span className="worktree-title">Fresh worktree</span>
-            <span className="worktree-hint">{view.worktreeHint}</span>
-          </span>
-          <span className={view.worktree ? "toggle toggle-on" : "toggle"} aria-hidden="true">
-            <span className="toggle-knob" />
-          </span>
-        </button>
-
-        <button
-          type="button"
-          className="worktree card"
-          onClick={() => actions.setUntil(form.until === "reported" ? "merged" : "reported")}
-          role="switch"
-          aria-checked={form.until === "reported"}
-          disabled={!view.reportedAvailable && form.until !== "reported"}
-        >
-          <span className="worktree-text">
-            <span className="worktree-title">Settle on its done report</span>
-            <span className="worktree-hint">
-              {view.reportedAvailable || form.until === "reported"
-                ? form.until === "reported"
-                  ? "A merge alone won't settle it. The session is told to report when it is finished; it needs the seance MCP server"
-                  : "Settles when its PR merges or its session ends"
-                : "The scheduler's leader doesn't take this yet — update seanced on its machine"}
-            </span>
-          </span>
-          <span className={form.until === "reported" ? "toggle toggle-on" : "toggle"} aria-hidden="true">
-            <span className="toggle-knob" />
-          </span>
-        </button>
       </div>
 
       {renderedSheet !== null && (
         <ActiveSheet
+          key={opens.current.count}
           actions={actions}
           view={view}
           kind={renderedSheet}
@@ -1274,6 +1310,8 @@ export function SpawnScreen(props: {
           effort={form.effort}
           autonomy={autonomy}
           afterSheet={lastAfterSheet.current}
+          worktree={view.worktree}
+          until={form.until}
           closing={sheetClosing}
           onExited={unmountSheet}
         />

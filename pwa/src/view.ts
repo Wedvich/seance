@@ -62,6 +62,8 @@ export interface Tile {
   readonly value: string;
   readonly mono: boolean;
   readonly dot: Dot | null;
+  /** A setting kept in the tile's sheet that is on, shown as a small tag; null when off. */
+  readonly tag: string | null;
 }
 
 export interface Banner {
@@ -195,6 +197,8 @@ export interface ViewModel {
   /** The Fresh worktree toggle as it stands for the repo the form resolves to. */
   readonly worktree: boolean;
   readonly worktreeHint: string;
+  /** The line under the "Settle this task on its done report" switch. */
+  readonly reportedHint: string;
   /** The line under the prompt card; null when there is nothing to say. */
   readonly formStatus: string | null;
   readonly button: PrimaryButton;
@@ -376,6 +380,15 @@ export function canHold(relay: RelayState): boolean {
 /** Offered while held: the leader's capability is read when the task is sent, not when it is queued. */
 export function deriveReportedOffered(relay: RelayState): boolean {
   return deriveReportedAvailability(relay) || canHold(relay);
+}
+
+function reportedHint(until: TaskUntil, offered: boolean): string {
+  if (!offered && until !== "reported") {
+    return "The scheduler's leader doesn't take this yet — update seanced on its machine";
+  }
+  return until === "reported"
+    ? "A merge alone won't settle it. The session is told to report when it is finished; it needs the seance MCP server"
+    : "Settles when its PR merges or its session ends";
 }
 
 /**
@@ -962,37 +975,53 @@ export function deriveView(state: AppState, now: number): ViewModel {
     banner: deriveBanner(state),
     machineTile:
       form.machine === null
-        ? { label: "MACHINE", value: "Auto", mono: false, dot: availability.available ? "auto" : "off" }
+        ? { label: "MACHINE", value: "Auto", mono: false, dot: availability.available ? "auto" : "off", tag: null }
         : {
             label: "MACHINE",
             value: machine?.name ?? "Unknown machine",
             mono: false,
             dot: machine?.connected === true ? "ok" : "off",
+            tag: null,
           },
     accountTile:
       account === null
-        ? { label: "ACCOUNT", value: "Auto", mono: false, dot: availability.available ? "auto" : "off" }
+        ? { label: "ACCOUNT", value: "Auto", mono: false, dot: availability.available ? "auto" : "off", tag: null }
         : {
             label: "ACCOUNT",
             value: `${accountNameIn(known, account, aliasOf(state.accounts.aliases, account))}${signedIn ? "" : " · signed in nowhere"}`,
             mono: false,
             dot: signedIn ? "ok" : "off",
+            tag: null,
           },
-    repoTile: { label: "REPOSITORY", value: repo?.label ?? "No repos", mono: true, dot: null },
+    repoTile: {
+      label: "REPOSITORY",
+      value: repo?.label ?? "No repos",
+      mono: true,
+      dot: null,
+      tag: worktree ? "worktree" : null,
+    },
     modelTile: {
       label: "MODEL",
       value: MODEL_LABELS[form.model],
       mono: false,
       dot: null,
+      tag: null,
     },
     effortTile: {
       label: "EFFORT",
       value: EFFORT_LABELS[form.effort],
       mono: false,
       dot: null,
+      tag: null,
     },
-    autonomyTile: { label: "AUTONOMY", value: AUTONOMY_LABELS[state.autonomy], mono: false, dot: null },
-    afterTile: { label: "AFTER", value: afterValue(form.after), mono: false, dot: null },
+    autonomyTile: { label: "AUTONOMY", value: AUTONOMY_LABELS[state.autonomy], mono: false, dot: null, tag: null },
+    afterTile: {
+      label: "AFTER",
+      value: afterValue(form.after),
+      mono: false,
+      dot: null,
+      tag: form.until === "reported" ? "on report" : null,
+    },
     requiresTile:
       fleetTraits(relay.machines).size === 0 && form.requires.length === 0
         ? null
@@ -1001,11 +1030,13 @@ export function deriveView(state: AppState, now: number): ViewModel {
             value: requiresValue(form.requires),
             mono: false,
             dot: form.requires.length > 0 && !deriveTraitsAvailability(relay) ? "off" : null,
+            tag: null,
           },
     requires: deriveRequires(state),
     reportedAvailable: deriveReportedOffered(relay),
     held: state.held.map((entry) => heldRow(entry, relay)),
     heldDropped: heldDroppedText(state.heldDropped),
+    reportedHint: reportedHint(form.until, deriveReportedOffered(relay)),
     worktree,
     worktreeHint: worktree ? "Branches off the default branch on origin" : "Runs in the repo as it stands",
     formStatus: deriveFormStatus(state, machine, problem),
