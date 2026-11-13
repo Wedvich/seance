@@ -2514,6 +2514,11 @@ describe("M4 shapes", () => {
       { ...settings, archivistSilence: { state: "alerted", since: "1" } },
       { ...settings, archivistSilence: { state: "gone", since: 1 } },
       { ...settings, archivistSilence: "present" },
+      { ...settings, archivistSilence: { state: "present", since: 1 } },
+      { ...settings, archivistSilence: { state: "absent", since: 1, extra: true } },
+      { ...settings, archivistSilence: { state: "absent", since: -1 } },
+      { ...settings, archivistSilence: { state: "absent", since: 1.5 } },
+      { ...settings, archivistSilence: { state: "alerted", since: 8.64e15 + 1 } },
       { ...settings, diskAlerts: [{ deviceId: "dev/1", at: 1 }] },
       { ...settings, diskAlerts: [{ deviceId: "dev-1" }] },
       {
@@ -2636,7 +2641,7 @@ describe("M4 shapes", () => {
         state: "expiring" as const,
         at: 1_760_000_000_000,
       })),
-      archivistSilence: { state: "alerted", since: Number.MAX_SAFE_INTEGER },
+      archivistSilence: { state: "alerted", since: 8.64e15 },
     };
     expect(parseSettingsRecord(full)).toEqual(full);
     expect(await sealedRecordLength("settings", full)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);

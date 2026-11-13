@@ -2052,8 +2052,11 @@ export function parseSettingsRecord(value: unknown): SettingsRecord | null {
 function parseArchivistSilence(value: unknown): ArchivistSilence | null {
   if (!isRecord(value)) return null;
   const { state, since } = value;
-  if (state === "present") return { state };
-  if ((state !== "absent" && state !== "alerted") || !isFiniteNumber(since)) return null;
+  if (state === "present") return Object.keys(value).length === 1 ? { state } : null;
+  if (state !== "absent" && state !== "alerted") return null;
+  if (Object.keys(value).length !== 2) return null;
+  // A valid Date, since the leader formats it for its log line.
+  if (typeof since !== "number" || !Number.isSafeInteger(since) || since < 0 || since > MAX_DATE_MS) return null;
   return { state, since };
 }
 
