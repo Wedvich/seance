@@ -33,7 +33,7 @@ import type { PrPollerOpts } from "./pr-status.ts";
 import { RelayClient } from "./relay-client.ts";
 import { createAuthHealth, type AuthHealthDeps } from "./auth-health.ts";
 import { createTraitProbes, hasProbe, type TraitProbesDeps } from "./trait-probes.ts";
-import type { DrainAsk } from "./drain-ask.ts";
+import { createLateDrainAsk } from "./drain-ask.ts";
 import { startCapabilities } from "./run-capabilities.ts";
 import { startStatusLoop } from "./run-collectors.ts";
 import { repoSetsEqual, scanRepos } from "./scan.ts";
@@ -343,7 +343,9 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         CAPABILITIES.close,
         CAPABILITIES.drain,
         CAPABILITIES.drainPass,
-        CAPABILITIES.drainAsk,
+        // Only where an ask is wired (`sessionEvents` wires none without a despawn): the clients' wording and
+        // "Drain now" promise an action.
+        ...(handlerCtx.backend.despawn === undefined ? [] : [CAPABILITIES.drainAsk]),
         ...(authHealth === null ? [] : [CAPABILITIES.authHealth]),
       ],
     };
@@ -458,7 +460,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   // Read late: session events start after the handler context, and a `pass-close` can only arrive once they run.
   const passClose: { arm?: NonNullable<HandlerContext["armPassClose"]> } = {};
   // Read late for the same reason: a close can land before the session events start, and `start()` covers it.
-  const drainAsk: { ask?: DrainAsk } = {};
+  // A `now` landing before the wiring is replayed there, since `start()` asks without it.
+  const drainAsk = createLateDrainAsk();
   // `status` is declared below: `set` runs only from a request, and those start once the relay does.
   // One set at a time: a second request reads `was` only once the first is durable (or rolled back), so the reply and the audit line match what the disk holds.
   let setting: Promise<unknown> = Promise.resolve();
@@ -484,8 +487,8 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
       // After the write is durable, inside the serialized chain; an unchanged close still reaches the ask, so `now` applies to an already-closed machine.
       const run = setting.then(async () => {
         const result = await setOpen(open);
-        if (!open && result.closed !== null) void drainAsk.ask?.closed(result.closed, immediately === true);
-        else if (open && result.changed) drainAsk.ask?.reopened();
+        if (!open && result.closed !== null) drainAsk.closed(result.closed, immediately === true);
+        else if (open && result.changed) drainAsk.reopened();
         return result;
       });
       setting = run.catch(() => {});
@@ -725,7 +728,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
   });
 
   passClose.arm = capabilities.armPassClose;
-  drainAsk.ask = capabilities.drainAsk;
+  drainAsk.wire(capabilities.drainAsk, closedOf(state));
 
   // After the relay leg, because the local surface is the optional one: it never
   // throws, and a box that cannot bind it still serves every phone.

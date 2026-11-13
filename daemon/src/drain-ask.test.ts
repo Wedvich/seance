@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { NeedsInputReason, SessionState } from "@seance/shared";
 import type { DrainAskOutcome } from "./audit.ts";
-import { createDrainAsk, DRAIN_PROMPT, inputBoxShows, type DrainAsk } from "./drain-ask.ts";
+import { createDrainAsk, createLateDrainAsk, DRAIN_PROMPT, inputBoxShows, type DrainAsk } from "./drain-ask.ts";
 import type { BoundPane } from "./session-events.ts";
 
 const CL = 1_000_000;
@@ -663,5 +663,49 @@ describe("inputBoxShows", () => {
   test("a screen with fewer than two rules is not the box", () => {
     expect(inputBoxShows(`${RULE}\n❯ ${DRAIN_PROMPT}`, DRAIN_PROMPT)).toBe(false);
     expect(inputBoxShows(`❯ ${DRAIN_PROMPT}`, DRAIN_PROMPT)).toBe(false);
+  });
+});
+
+describe("createLateDrainAsk", () => {
+  test("a now that lands before the ask is wired is replayed at the wiring", async () => {
+    const r = rig();
+    frame(r, "busy");
+    const late = createLateDrainAsk();
+    late.closed(CL, true);
+    late.wire(r.ask, CL);
+    await settle();
+    expect(argsOf(r)).toEqual([["Escape"]]);
+  });
+
+  test("a plain close before the wiring replays nothing, and a reopen drops a pending now", async () => {
+    const plain = rig();
+    frame(plain, "busy");
+    const a = createLateDrainAsk();
+    a.closed(CL, false);
+    a.wire(plain.ask, CL);
+    await settle();
+    expect(plain.keys).toEqual([]);
+
+    const reopened = rig();
+    frame(reopened, "busy");
+    const b = createLateDrainAsk();
+    b.closed(CL, true);
+    b.reopened();
+    b.wire(reopened.ask, CL);
+    await settle();
+    expect(reopened.keys).toEqual([]);
+  });
+
+  test("a now replays only while the machine is still closed, and an ask wired later takes calls directly", async () => {
+    const r = rig();
+    frame(r, "busy");
+    const late = createLateDrainAsk();
+    late.closed(CL, true);
+    late.wire(r.ask, null);
+    await settle();
+    expect(r.keys).toEqual([]);
+    late.closed(CL, true);
+    await settle();
+    expect(argsOf(r)).toEqual([["Escape"]]);
   });
 });

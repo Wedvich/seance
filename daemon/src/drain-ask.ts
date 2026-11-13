@@ -417,3 +417,36 @@ export function createDrainAsk(deps: DrainAskDeps): DrainAsk {
     },
   };
 }
+
+/**
+ * The ask as `run.ts` holds it: the relay client starts before the capabilities that build the ask, so a close
+ * can land first. A plain close needs nothing (`start()` reads the state); a `now` would be lost, so it is kept
+ * and replayed once the ask is wired.
+ */
+export interface LateDrainAsk {
+  readonly closed: (cl: number, now: boolean) => void;
+  readonly reopened: () => void;
+  /** `ask` is undefined where none is wired; `cl` is the machine's close at this moment. */
+  readonly wire: (ask: DrainAsk | undefined, cl: number | null) => void;
+}
+
+export function createLateDrainAsk(): LateDrainAsk {
+  let ask: DrainAsk | undefined;
+  let nowPending = false;
+  return {
+    closed: (cl, now): void => {
+      if (ask === undefined) nowPending ||= now;
+      else void ask.closed(cl, now);
+    },
+    reopened: (): void => {
+      nowPending = false;
+      ask?.reopened();
+    },
+    wire: (wired, cl): void => {
+      ask = wired;
+      const replay = nowPending;
+      nowPending = false;
+      if (replay && cl !== null) void wired?.closed(cl, true);
+    },
+  };
+}
