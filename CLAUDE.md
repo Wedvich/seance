@@ -55,7 +55,8 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   bound by peer pid, routed across machines through the leader, and the local adapter seam. Read it
   before adding a local-socket frame kind, a mod that delivers text into a session, or a leader
   event op.
-- **docs/custodian.md** — spec, nothing built: the custodian, one seat per machine whose daemon
+- **docs/custodian.md** — spec, one part built (per-pane state and screen tracking, C15, now in DESIGN.md,
+  "Session events"): the custodian, one seat per machine whose daemon
   starts a fresh, fenced Claude session per round to close finished sessions (removing a worktree
   when nothing would be lost), nudge and interrupt stuck ones through `seanced custodian` verbs the
   daemon checks, and flag the rest. Read it before touching despawn, reap's merged check, a pane's
@@ -370,6 +371,9 @@ green:
   `get_queue`).
   While this machine is closed, a bound, tasked frame's state, `turnEnded` and `reason` also time the drain ask's
   constant keys for that pane (`onState`), and never choose what is typed or which pane.
+  Keeping each `ours` pane's last state and `turnEnded`, tasked or not, in memory (`pane-activity.ts`, for the
+  custodian) is retention of what ingest bound, not an act: nothing there is run, sent or persisted, no reply
+  depends on it, and its screen sampler keeps only a hash of `capture-pane` and timestamps, never the text.
   Giving it any other act, or taking a session or task id from the frame to bind by, is the same
   kind of change too.
   Nothing reachable from `seanced mcp` may call `log.ts` — that writes to stdout, which is the MCP

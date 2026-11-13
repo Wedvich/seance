@@ -10,6 +10,7 @@ import type { ExclaveScan } from "./exclaves.ts";
 import { platformFsmonitor } from "./fsmonitor.ts";
 import { createDrainAsk, drainInputShows, sendKeys, type DrainAsk } from "./drain-ask.ts";
 import { pushForTask } from "./handlers.ts";
+import { createPaneActivity } from "./pane-activity.ts";
 import { createHandOff, createPassClose } from "./handoff.ts";
 import { sourceOf, type Leader } from "./leader.ts";
 import type { LocalSocketOpts } from "./local-socket.ts";
@@ -22,10 +23,12 @@ import {
   createSessionEvents,
   listPanePids,
   peerBindingProblem,
+  readPanePids,
   type EndedTasks,
   type SessionEvents,
 } from "./session-events.ts";
 import type { Fetch } from "./seams.ts";
+import { capturePane } from "./tmux.ts";
 import type { TraitProbes } from "./trait-probes.ts";
 import type { UsageRefresh } from "./usage-refresh.ts";
 
@@ -106,6 +109,18 @@ const fleetBroker: DaemonCapability = (ctx) => {
   });
   return { stop: broker.stop, local: { broker: broker.handle } };
 };
+
+/**
+ * The custodian's per-pane facts (C15), one per process like `endedTasksFor`: a config reload restarts the daemon in
+ * process, and a tracker per instance would forget every pane's state at each one. No reader yet: the due check and
+ * its `sessions` verb are later PRs. Instances share its timer by count, so an outgoing instance's stop never
+ * halts the incoming one's sampling.
+ */
+const paneActivity = createPaneActivity({
+  panes: readPanePids,
+  capture: (paneId) => capturePane(paneId, { history: false }),
+});
+let paneActivityUsers = 0;
 
 const sessionEvents: DaemonCapability = (ctx) => {
   // Where the kernel cannot name a socket's peer, an event's pane is its own
@@ -191,11 +206,16 @@ const sessionEvents: DaemonCapability = (ctx) => {
     // Activity is when a reading matters; the refresh spawns only if it is stale.
     onActivity: (exclave) => ctx.usageRefresh?.poke(exclave),
     ...(drainAsk === undefined ? {} : { onState: drainAsk.observe, drainMark: (): boolean => ctx.closed() !== null }),
+    retain: paneActivity.observe,
   });
   late.events = events;
   drainAsk?.start();
+  paneActivityUsers += 1;
+  paneActivity.start();
   return {
     stop: (): void => {
+      paneActivityUsers -= 1;
+      if (paneActivityUsers === 0) paneActivity.stop();
       drainAsk?.stop();
       events.stop();
     },

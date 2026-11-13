@@ -3,7 +3,14 @@ import { DespawnFailure, type DespawnResult } from "./backend.ts";
 import { createHandOff, createPassClose } from "./handoff.ts";
 import type { BoundPane } from "./session-events.ts";
 
-const pane = (taskId: string | null, dead = false): BoundPane => ({ id: "%1", pid: 10, dead, taskId, path: "/w" });
+const pane = (taskId: string | null, dead = false): BoundPane => ({
+  id: "%1",
+  pid: 10,
+  dead,
+  taskId,
+  ours: true,
+  path: "/w",
+});
 
 function setup(panes: readonly BoundPane[], despawn?: () => Promise<DespawnResult>) {
   const lines: string[] = [];

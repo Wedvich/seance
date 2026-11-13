@@ -32,12 +32,14 @@ import {
   type PassAck,
   type SessionEventReply,
 } from "./session-event-frame.ts";
-import { FIELD_SEP, TASK_FIELD, tmux } from "./tmux.ts";
+import type { TrackedState } from "./pane-activity.ts";
+import { FIELD_SEP, listAllPanes, OURS, TASK_FIELD, tmux } from "./tmux.ts";
 
 /**
  * The `session-event` frame kind on the local op socket (DESIGN.md, "Session
  * events"): what the `claude-mods/session-events` mod reports about the session
  * it runs in, through `seanced session-event`. Ingest-only — the handler stores
+ * (the ended-task memory, and each séance pane's last state, `pane-activity.ts`)
  * and forwards, and tells the bound pane's exclave it saw activity (the `/usage`
  * refresh's trigger, which decides alone whether anything runs); nothing here
  * spawns or runs a command shaped by the frame. The one despawn is a hand-off's
@@ -155,16 +157,18 @@ export function parseSessionEventFrame(raw: unknown): SessionEventFrame | null {
   };
 }
 
-/** A pane as the binding needs it: its process, liveness, task and where it sits. */
+/** A pane as the binding needs it: its process, liveness, task, whether séance started it, and where it sits. */
 export interface BoundPane {
   readonly id: string;
   readonly pid: number;
   readonly dead: boolean;
   readonly taskId: string | null;
+  /** Started by séance (`OURS`): only these are retained per pane (`pane-activity.ts`). */
+  readonly ours: boolean;
   readonly path: string;
 }
 
-const PANE_PID_FORMAT = ["#{pane_id}", "#{pane_pid}", "#{pane_dead}", TASK_FIELD, "#{pane_current_path}"].join(
+const PANE_PID_FORMAT = ["#{pane_id}", "#{pane_pid}", "#{pane_dead}", TASK_FIELD, OURS, "#{pane_current_path}"].join(
   FIELD_SEP,
 );
 
@@ -173,8 +177,15 @@ export function parsePanePids(raw: string): readonly BoundPane[] {
   const seen = new Set<string>();
   const panes: BoundPane[] = [];
   for (const line of raw.split("\n")) {
-    const [id, pid, dead, task, ...rest] = line.split(FIELD_SEP);
-    if (id === undefined || pid === undefined || dead === undefined || task === undefined || rest.length === 0)
+    const [id, pid, dead, task, ours, ...rest] = line.split(FIELD_SEP);
+    if (
+      id === undefined ||
+      pid === undefined ||
+      dead === undefined ||
+      task === undefined ||
+      ours === undefined ||
+      rest.length === 0
+    )
       continue;
     // Grouped sessions repeat every pane.
     if (seen.has(id) || !/^%\d+$/u.test(id)) continue;
@@ -184,6 +195,7 @@ export function parsePanePids(raw: string): readonly BoundPane[] {
       pid: Number(pid),
       dead: dead === "1",
       taskId: isTaskId(task) ? task : null,
+      ours: ours === "1",
       path: rest.join(FIELD_SEP),
     });
   }
@@ -193,6 +205,14 @@ export function parsePanePids(raw: string): readonly BoundPane[] {
 export async function listPanePids(): Promise<readonly BoundPane[]> {
   const result = await tmux(["list-panes", "-a", "-F", PANE_PID_FORMAT]);
   return result.exitCode === 0 ? parsePanePids(result.stdout) : [];
+}
+
+/**
+ * As `listPanePids`, but a failed read throws (`TmuxError`) and only a missing server reads as no panes: the
+ * screen sampler must never take a tmux hiccup for every pane gone.
+ */
+export async function readPanePids(): Promise<readonly BoundPane[]> {
+  return parsePanePids(await listAllPanes(PANE_PID_FORMAT));
 }
 
 /**
@@ -836,6 +856,12 @@ export interface SessionEventDeps {
   /** True while this machine is closed: a pass sent then carries `drain`. */
   readonly drainMark?: () => boolean;
   /**
+   * Every bound frame's state, tasked or not, except `done` (a report sent mid-turn, not a state the session
+   * rests in): retention for the custodian (`pane-activity.ts`), never an act. It sees the kernel-bound pane and
+   * the state alone, and runs before any reply is chosen, so no reply depends on it.
+   */
+  readonly retain?: (pane: BoundPane, state: TrackedState, turnEnded: boolean) => void;
+  /**
    * A session's own pass (`pass_to_successor`), all of it the host's: the push the pass asks for (audited under
    * its own origin), the report to the scheduler, and the close at a turn's end, which only
    * `armPassClose` lets run. Absent, a pass is answered `unsupported`.
@@ -1069,6 +1095,10 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
       if (!stopped) deps.onActivity?.(exclave);
       if (frame.handoff === true) return markHandoff(pane);
       if (frame.pass === true && frame.record !== undefined) return markPass(pane, exclave, frame.record, caller);
+      // Before the untasked return: an untasked pane's state is retained too, and goes nowhere else.
+      if (!stopped && frame.state !== undefined && frame.state !== "done") {
+        deps.retain?.(pane, frame.state, frame.state === "idle" && frame.turnEnded === true);
+      }
       if (frame.state === "done" && pane.taskId === null) return { ok: false, code: "untasked" };
       if (frame.state === undefined || pane.taskId === null) return { ok: true };
       // A stopped ingest sends nothing, so a report must not be told it went.

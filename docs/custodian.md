@@ -1,6 +1,6 @@
 # The custodian — spec
 
-**Status: spec, nothing built.** Decided with the owner on 2026-11-12 and 2026-11-13. Like
+**Status: spec; build order item 2 (C15) built 2026-11-13 and folded into DESIGN.md.** Decided with the owner on 2026-11-12 and 2026-11-13. Like
 docs/messaging.md and docs/leaving.md, this file is the working record until the code lands; each
 part folds into DESIGN.md as it is built, and its text here goes.
 
@@ -19,8 +19,9 @@ dead task pane, a scheduler cancel. Everything else waits for the owner, per mac
 - **A stuck session stays stuck.** A session waiting on a CI watch whose condition it lost, or
   idle mid-task without a report, sits until the owner asks it what is going on. The needs-input
   alert covers only a session waiting on the owner.
-- **Nothing reads a pane.** No code looks at a live session's screen except to spot an exit dialog,
-  so nothing can tell "finished" from "waiting" from "hung".
+- **Nothing reads a pane's meaning.** Code looks at a live session's screen to spot an exit dialog and,
+  since C15, hashes it once a minute to tell a still screen from a moving one; nothing can tell
+  "finished" from "waiting" from "hung" by what it says.
 
 The custodian is a cheap agent, one seat per machine, that walks the machine's sessions on a
 timer, closes the finished ones, nudges the stuck ones and flags what it cannot settle.
@@ -119,10 +120,7 @@ Each is the owner's unless marked _derived_.
   No sessions, or every session busy and moving, means no round and no tokens. "Round now" (§9)
   skips the first two conditions.
 
-- **C15.** _Derived._ What the daemon keeps per pane to decide this, in memory only: the last
-  session state and when it began (session events already reach the daemon for untasked panes
-  too; today they are dropped after the `/usage` poke), and when the pane's visible content last
-  changed, as a hash sampled each minute. The screen text itself is never kept.
+- **C15.** Built: DESIGN.md, "Session events", "Per-pane retention and the screen sampler".
 - **C16.** A round has `roundTimeoutMinutes` to report. One that has not is closed through the
   graceful despawn, then killed, and counts as failed (§8).
 - **C17.** _Derived._ The seed is a constant plus the notes; the session list comes from a verb,
@@ -368,7 +366,8 @@ delivery); nothing else here does.
 
 1. The nothing-lost rule (C32–C34, C36) in `reap-git.ts`, used by `reap`, with the new defaults
    under a configured custodian (C35).
-2. Per-pane state and screen-change tracking for every `ours` pane (C15).
+2. ~~Per-pane state and screen-change tracking for every `ours` pane (C15).~~ Built 2026-11-13
+   (`daemon/src/pane-activity.ts`); its read API is `activity(paneId)`.
 3. The seat: config, `CAPABILITIES.custodian`, the due check, the exclave pick, the round's launch
    with its agent definition and fence, the deadline, and audit origin `custodian` (C1–C4,
    C8–C17, C18–C21).
@@ -400,7 +399,18 @@ delivery); nothing else here does.
 - **The live link.** `cu` is in a fixed-size frame; whether the round's Remote Control id rides
   there or in a reply to a card's own request.
 - **`unobserved` sessions.** A session in an exclave without the `session-events` mod is never
-  closed (C24). Whether `seanced doctor` should warn about it.
+  closed (C24). Whether `seanced doctor` should warn about it. The retained state is per process, so a
+  session already at rest when the daemon restarts is `unobserved` too until its next frame; whether
+  `sessions` (C23) should say why.
+- **The sampler's cost on a machine with no seat.** It runs whether or not `custodian` is configured
+  (one `list-panes` a minute, plus a capture per `ours` pane). Decided for C15: left running, because
+  gating it needs the config block PR 3 adds; PR 3 can start it only with the seat.
+- **What "unchanged on screen" cannot see.** The change hash drops Claude's input box and footer and masks
+  elapsed timers and the spinner glyph (DESIGN.md, "Per-pane retention"), matched on wording from Claude
+  Code 2.1.x. A release that rewords them, or a repaint nobody has listed (a rotating tip, a clock in the
+  transcript), moves the hash while the session is hung, so C27's `interrupt` would read it as moving:
+  it fails to fire, never fires wrongly. Worth checking against a live busy session when PR 3 or 5 builds
+  on it. A resize (another client attaching at another size) moves it too.
 - **The `gh` lookup's shape** for C32: by head branch, and how the PR's head is fetched to test
   that it contains the local tip once the remote branch is deleted.
 - **A closed machine.** Whether rounds run while a machine is draining. C7 already keeps the

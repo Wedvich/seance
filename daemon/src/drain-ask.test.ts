@@ -13,6 +13,7 @@ const pane = (id: string, taskId: string | null, extra: Partial<BoundPane> = {})
   pid: 100,
   dead: false,
   taskId,
+  ours: true,
   path: "/work",
   ...extra,
 });
