@@ -1298,6 +1298,26 @@
   transform: scale(0.98);
 }
 
+/* Pointer hover on a sheet row: halfway from the sheet's surface to the selected row's, so
+   it reads as "under the cursor" and never as "chosen". :where() keeps these at the
+   pressed rules' specificity, so the ones below still win while a row is held. */
+@media (hover: hover) {
+  .sheet-item:enabled:hover:where(:not(.sheet-item-selected, .sheet-item-action)),
+  .sheet-item-remove:hover:where(:enabled) {
+    background: color-mix(in oklab, var(--sur) 50%, var(--sur2));
+  }
+
+  .sheet-item-remove:hover:where(:enabled) {
+    opacity: 1;
+  }
+
+  /* Already on --sur2: step toward the pressed tint instead. */
+  .sheet-item-action:enabled:hover,
+  .sheet-setting:enabled:hover {
+    background: color-mix(in oklab, var(--sur2) 94%, var(--fg));
+  }
+}
+
 .sheet-item:enabled:active,
 .sheet-setting:enabled:active,
 .sheet-item-remove:active {
