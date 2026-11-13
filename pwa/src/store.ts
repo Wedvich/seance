@@ -39,6 +39,7 @@ import {
 } from "@seance/shared";
 import {
   archiveCharts,
+  CLOSED_OLDER,
   AUTONOMY_LABELS,
   DEFAULT_FORM,
   DEFAULT_HISTORY_RANGE,
@@ -254,6 +255,7 @@ export class Store {
       discarding: false,
       accounts: { aliases: {}, nameable: client.accountsNamed, saving: null, renaming: null, notice: null },
       archiveStatus: null,
+      older: CLOSED_OLDER,
       attachments: [],
       attachNotice: null,
       heldDropped: [],

@@ -2,6 +2,9 @@ import {
   DEFAULT_EFFORT,
   DEFAULT_MODEL,
   type ArchiveMetricsStep,
+  type ArchiveTaskOutcome,
+  type ArchiveTasksCursor,
+  type ArchivedTask,
   type ArchivistEntry,
   type AutonomyLevel,
   METRIC_NAMES,
@@ -234,6 +237,101 @@ export function archiveCharts(archivist: ArchivistEntry | null, nameable: boolea
 export function historyRanges(archived: boolean): readonly HistoryRange[] {
   return archived ? HISTORY_RANGES : SHORT_HISTORY_RANGES;
 }
+
+/** The task history's Dates presets (A36h): no custom range. */
+export const OLDER_DATES = ["7d", "30d", "90d", "1y", "any"] as const;
+export type OlderDates = (typeof OLDER_DATES)[number];
+
+export const OLDER_DATE_LABELS: Record<OlderDates, string> = {
+  "7d": "Last 7 days",
+  "30d": "Last 30 days",
+  "90d": "Last 90 days",
+  "1y": "Last year",
+  any: "Any time",
+};
+
+const DAY_MS = 24 * 3600 * 1000;
+
+/** How far back each preset reaches, ms; `any` sends no bound. */
+export const OLDER_DATE_SPANS: Record<Exclude<OlderDates, "any">, number> = {
+  "7d": 7 * DAY_MS,
+  "30d": 30 * DAY_MS,
+  "90d": 90 * DAY_MS,
+  "1y": 365 * DAY_MS,
+};
+
+/** The Older section's filter sheets, one per tile. */
+export type OlderSheet = "repo" | "outcome" | "machine" | "account" | "dates";
+
+/** A picked machine or account: the id the archivist filters on, and the name the tile shows. */
+export interface OlderPicked {
+  readonly id: string;
+  readonly label: string;
+}
+
+/** What Older is narrowed to; they never touch the live sections (A36h). */
+export interface OlderFilters {
+  /** An origin, as `task.spec.repo` holds it. */
+  readonly repo: string | null;
+  readonly outcome: ArchiveTaskOutcome | null;
+  /** By device id, retired machines included. */
+  readonly machine: OlderPicked | null;
+  /** By `account:` store key: the raw id never goes to the archivist. */
+  readonly account: OlderPicked | null;
+  readonly dates: OlderDates;
+  /** The search field's text as typed; sent trimmed. */
+  readonly title: string;
+}
+
+/** Any of the sheets' picks: everything but the search. */
+export type OlderPick = Partial<Omit<OlderFilters, "title">>;
+
+export const NO_OLDER_FILTERS: OlderFilters = {
+  repo: null,
+  outcome: null,
+  machine: null,
+  account: null,
+  dates: "any",
+  title: "",
+};
+
+/** What the archive answered for the current filters, pages appended in order. */
+export type OlderList =
+  | { readonly kind: "loading" }
+  | { readonly kind: "failed"; readonly message: string }
+  | {
+      readonly kind: "ok";
+      readonly tasks: readonly ArchivedTask[];
+      /** Every match, as the archive counts it (live duplicates included). */
+      readonly total: number;
+      readonly next: ArchiveTasksCursor | null;
+      readonly loadingMore: boolean;
+      /** Why the last Load older failed; the rows already read stay. */
+      readonly moreError: string | null;
+    };
+
+/** The Queue screen's Older section (A34, A36g–A36j). Memory only, like the Asleep toggle. */
+export interface OlderState {
+  readonly open: boolean;
+  readonly filters: OlderFilters;
+  /** The archivist the list was read from: a seat move drops it. */
+  readonly deviceId: string | null;
+  /** Null until opened, or after whatever dropped it. */
+  readonly list: OlderList | null;
+  /** The filter sheet showing, a layer like the form's sheets. */
+  readonly sheet: OlderSheet | null;
+  /** `account:` store key → account id, for the accounts this install knows: an archived row's account shows by its name here. */
+  readonly accountKeys: Readonly<Record<string, string>>;
+}
+
+export const CLOSED_OLDER: OlderState = {
+  open: false,
+  filters: NO_OLDER_FILTERS,
+  deviceId: null,
+  list: null,
+  sheet: null,
+  accountKeys: {},
+};
 
 /** The form's `route-preview`: what the scheduler would decide now, for the repo it was asked about. */
 export type PreviewState =

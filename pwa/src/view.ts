@@ -28,6 +28,7 @@ import {
   type AccountsState,
   type HeldTask,
   type HistoryView,
+  type OlderState,
   type PersistedForm,
   type PreviewState,
   type QueueState,
@@ -271,6 +272,8 @@ export interface AppState {
    * null until one lands, and dropped when the seat moves or the archivist is offline.
    */
   readonly archiveStatus: { readonly deviceId: string; readonly reply: ArchiveStatusResponse } | null;
+  /** The Queue screen's Older section, read from the archive; closed and empty while no archivist is online. */
+  readonly older: OlderState;
   /** Files on the form. Not in `form`: a `File` can't be persisted, and a reload drops them. */
   readonly attachments: readonly PickedFile[];
   /** Why the last pick or paste left files out; cleared by the next pick or a remove. */

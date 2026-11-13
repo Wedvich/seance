@@ -15,7 +15,7 @@ import {
 } from "@seance/shared";
 import { armTap, deriveAfterSheet, deriveQueue, disarmRow, primaryAction } from "../src/queue-view.ts";
 import { NEEDS_INPUT_SCREEN_MS, nextReveal } from "../src/input-debounce.ts";
-import { DEFAULT_FORM, RESCAN_IDLE, type QueueState } from "../src/state.ts";
+import { CLOSED_OLDER, DEFAULT_FORM, RESCAN_IDLE, type QueueState } from "../src/state.ts";
 import { CAPABILITIES, reasonText } from "@seance/shared";
 import { deriveView, failedBody, type AppState } from "../src/view.ts";
 
@@ -85,6 +85,7 @@ function state(
     heldDropped: [],
     awaitingUploads: false,
     archiveStatus: null,
+    older: CLOSED_OLDER,
     ...overrides,
   };
 }
