@@ -1,6 +1,6 @@
 import { link, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { RepoEntry } from "@seance/shared";
+import { isRecord, type RepoEntry } from "@seance/shared";
 import { pruneAttachments, type AttachmentPruneReason, type PrunedAttachments } from "./attachments.ts";
 import type { ReapAudit } from "./audit.ts";
 import { mapLimit } from "./concurrency.ts";
@@ -16,12 +16,13 @@ import {
   deleteBranch,
   fetchIfStale,
   gitDirOf,
+  githubRepoOf,
   isMerged,
   lastTouched,
   listBranches,
   listWorktrees,
+  nothingLost,
   patchIndex,
-  pendingChanges,
   pruneWorktrees,
   readPruneLog,
   removeWorktree,
@@ -30,8 +31,10 @@ import {
   type BranchVerdict,
   type FetchOutcome,
   type Merged,
+  type NothingLostUnknown,
+  type WorktreeRecord,
 } from "./reap-git.ts";
-import { readDefaultBranch } from "./scan.ts";
+import { normalizeOrigin, readDefaultBranch, readOriginUrl } from "./scan.ts";
 import { classifyPane, listPanes, paneInfo, type PaneState } from "./sessions.ts";
 import { pidAlive, writeAtomic } from "./state.ts";
 import { tmux } from "./tmux.ts";
@@ -82,6 +85,13 @@ export interface ReapOptions {
    */
   readonly pruneLogPath: string;
   /**
+   * Where a run that acts records the worktrees it kept and why (`ReapRefusals`). Required for the same reason as
+   * `pruneLogPath`.
+   */
+  readonly refusalsPath: string;
+  /** The nothing-lost rule's `gh`; `SEANCE_GH_BIN` then the PATH when absent. */
+  readonly gh?: string;
+  /**
    * `git fsmonitor--daemon` handling (`platformFsmonitor()`), null where git has
    * none. Required for the same reason as `pruneLogPath`: a test that forgot it
    * would signal the developer's own daemons.
@@ -105,20 +115,30 @@ export interface RepoReport {
   readonly removedWorktrees: readonly {
     readonly path: string;
     readonly branch: string | null;
-    readonly why: Merged;
+    /** How the nothing-lost rule passed it. */
+    readonly why: Merged | "origin" | "pr";
     readonly idleDays: number;
   }[];
   readonly deletedBranches: readonly { readonly name: string; readonly sha: string; readonly why: Merged }[];
   readonly pruned: readonly string[];
-  readonly dirty: readonly { readonly path: string; readonly changes: number }[];
+  readonly dirty: readonly { readonly path: string; readonly branch: string | null; readonly changes: number }[];
   /** Upstream gone, commits on it nowhere upstream: unpushed work, kept. */
   readonly keptBranches: readonly { readonly name: string; readonly ahead: number | null }[];
-  /** Linked worktrees on unpushed work — upstream gone, never pushed, or detached past the default branch. Kept. */
+  /**
+   * Linked worktrees on unpushed work — upstream gone, never pushed, detached past the default branch, or, once old
+   * enough for the nothing-lost rule, a tip neither origin nor a merged PR holds. Kept.
+   */
   readonly keptWorktrees: readonly {
     readonly path: string;
     readonly branch: string | null;
     readonly why: KeptWorktreeWhy;
     readonly ahead: number | null;
+  }[];
+  /** Old and clean enough to judge, but the nothing-lost rule could not be evaluated: kept, judged again next run. */
+  readonly unevaluated: readonly {
+    readonly path: string;
+    readonly branch: string | null;
+    readonly why: NothingLostUnknown;
   }[];
   /** Worktrees whose pane is open in tmux — someone is in them. */
   readonly inUse: readonly string[];
@@ -130,13 +150,91 @@ export interface RepoReport {
   readonly failed: readonly { readonly what: string; readonly detail: string }[];
 }
 
-export type KeptWorktreeWhy = "upstream-gone" | "never-pushed" | "detached";
+export type KeptWorktreeWhy = "upstream-gone" | "never-pushed" | "detached" | "unpushed";
 
 const KEPT_WORKTREE_TEXT: Readonly<Record<KeptWorktreeWhy, string>> = {
   "upstream-gone": "upstream gone",
   "never-pushed": "never pushed",
   detached: "detached",
+  unpushed: "not on origin or in a merged PR",
 };
+
+const UNEVALUATED_TEXT: Readonly<Record<NothingLostUnknown, string>> = {
+  status: "git status failed",
+  remote: "origin could not be asked",
+  forge: "gh gave no usable answer",
+  "not-github": "not on origin, which is not on GitHub to ask for a merged PR",
+};
+
+/**
+ * A worktree the last acting run kept, and why (custodian C23): what holds disk, for a reader that is not reap.
+ * `detail` is the change count for `dirty`, the `KeptWorktreeWhy` for `unpushed`, the `NothingLostUnknown` for
+ * `unevaluated`.
+ */
+export interface ReapRefusal {
+  readonly repo: string;
+  readonly path: string;
+  readonly branch: string | null;
+  readonly why: "dirty" | "unpushed" | "unevaluated" | "locked";
+  readonly detail?: string;
+}
+
+export interface ReapRefusals {
+  readonly at: number;
+  readonly worktrees: readonly ReapRefusal[];
+}
+
+const REFUSAL_WHYS: ReadonlySet<unknown> = new Set(["dirty", "unpushed", "unevaluated", "locked"]);
+
+function isRefusal(value: unknown): value is ReapRefusal {
+  if (!isRecord(value)) return false;
+  const { repo, path, branch, why, detail } = value;
+  return (
+    typeof repo === "string" &&
+    typeof path === "string" &&
+    (branch === null || typeof branch === "string") &&
+    REFUSAL_WHYS.has(why) &&
+    (detail === undefined || typeof detail === "string")
+  );
+}
+
+/** Missing or unreadable is null: nothing known, not "nothing kept". */
+export async function readReapRefusals(path: string): Promise<ReapRefusals | null> {
+  const parsed: unknown = await Bun.file(path)
+    .json()
+    .catch(() => null);
+  if (!isRecord(parsed)) return null;
+  const { at, worktrees } = parsed;
+  if (typeof at !== "number" || !Array.isArray(worktrees) || !worktrees.every(isRefusal)) return null;
+  return { at, worktrees };
+}
+
+function refusalsOf(repos: readonly RepoReport[]): ReapRefusal[] {
+  return repos.flatMap((repo) => [
+    ...repo.dirty.map((w) => ({
+      repo: repo.repo,
+      path: w.path,
+      branch: w.branch,
+      why: "dirty" as const,
+      detail: String(w.changes),
+    })),
+    ...repo.keptWorktrees.map((w) => ({
+      repo: repo.repo,
+      path: w.path,
+      branch: w.branch,
+      why: "unpushed" as const,
+      detail: w.why,
+    })),
+    ...repo.unevaluated.map((w) => ({
+      repo: repo.repo,
+      path: w.path,
+      branch: w.branch,
+      why: "unevaluated" as const,
+      detail: w.why,
+    })),
+    ...repo.locked.map((path) => ({ repo: repo.repo, path, branch: null, why: "locked" as const })),
+  ]);
+}
 
 /** Why an unmerged worktree is listed, or null for one on a live upstream (counted `active`). */
 function keptWorktreeWhy(
@@ -251,7 +349,7 @@ function inside(dir: string, path: string): boolean {
 /**
  * Cleans up what remote sessions leave behind, in one pass: séance windows
  * that are dead or parked on the worktree exit prompt, then — per repo in the
- * scan set — linked worktrees whose branch is merged, clean and idle, then the
+ * scan set — idle linked worktrees the nothing-lost rule passes, then the
  * merged branches, a removed worktree's included. Everything it destroys is
  * audited; everything it keeps for a reason a human should see is reported.
  */
@@ -294,6 +392,10 @@ export async function runReap(opts: ReapOptions): Promise<ReapReport> {
       // Unwritten, the next run fetches again — never worth failing a run that already reaped.
       await writeAtomic(opts.pruneLogPath, next).catch(() => {});
     }
+    // Replaced whole each run: a worktree since removed or settled must not linger in it. Unwritten, a reader sees the
+    // previous run's — never worth failing a run that already reaped.
+    const refusals: ReapRefusals = { at: now, worktrees: refusalsOf(repos) };
+    await writeAtomic(opts.refusalsPath, refusals).catch(() => {});
     await opts.audit.done({
       worktrees: repos.reduce((sum, repo) => sum + repo.removedWorktrees.length, 0),
       branches: repos.reduce((sum, repo) => sum + repo.deletedBranches.length, 0),
@@ -522,6 +624,7 @@ type ListKey =
   | "dirty"
   | "keptBranches"
   | "keptWorktrees"
+  | "unevaluated"
   | "inUse"
   | "locked"
   | "failed";
@@ -541,6 +644,7 @@ function emptyLists(): RepoLists {
     dirty: [],
     keptBranches: [],
     keptWorktrees: [],
+    unevaluated: [],
     inUse: [],
     locked: [],
     failed: [],
@@ -628,6 +732,8 @@ async function reapRepo(
     return skipped(repo.name, "git could not list its worktrees or branches");
   const baseTree = baseTreeOut.stdout.trim();
 
+  // Read fresh, not from the scan's cached key: a session may have repointed origin since.
+  const github = githubRepoOf(normalizeOrigin((await readOriginUrl(commonDir)) ?? ""));
   const report = emptyLists();
   let young = 0;
   let active = 0;
@@ -643,6 +749,24 @@ async function reapRepo(
     const verdict = await classifyTip(repo.path, sha, base, baseTree, gone, patches);
     verdicts.set(key, verdict);
     return verdict;
+  };
+
+  /**
+   * Lists an unmerged worktree as kept; false for one on a live upstream with nothing to say (counted `active`). Its
+   * checked-out branch is skipped by the branch pass, so this row is its only report; a detached tip is never
+   * patch-checked (verdict active), listed because no branch holds its commits. A branch missing from `byName` claims
+   * nothing and stays counted.
+   */
+  const keepUnmerged = async (
+    worktree: WorktreeRecord,
+    verdict: BranchVerdict,
+    fallback: KeptWorktreeWhy | null,
+  ): Promise<boolean> => {
+    const why = keptWorktreeWhy(worktree.branch, verdict, byName) ?? fallback;
+    if (why === null) return false;
+    const ahead = await commitsAhead(repo.path, worktree.head, base);
+    report.keptWorktrees.push({ path: worktree.path, branch: worktree.branch, why, ahead });
+    return true;
   };
 
   // The main worktree comes first and is never a candidate.
@@ -673,20 +797,6 @@ async function reapRepo(
     }
     // oxlint-disable-next-line no-await-in-loop
     const verdict = await verdictFor(worktree.head, worktree.branch);
-    if (!isMerged(verdict)) {
-      // Checked-out branch is skipped by the branch pass, so this row is its only report; a detached tip is never
-      // patch-checked (verdict active), listed here because no branch holds its commits. A branch missing from
-      // `byName` claims nothing and stays counted.
-      const why = keptWorktreeWhy(worktree.branch, verdict, byName);
-      if (why === null) {
-        active += 1;
-        continue;
-      }
-      // oxlint-disable-next-line no-await-in-loop
-      const ahead = await commitsAhead(repo.path, worktree.head, base);
-      report.keptWorktrees.push({ path: worktree.path, branch: worktree.branch, why, ahead });
-      continue;
-    }
     // oxlint-disable-next-line no-await-in-loop
     const gitDir = await gitDirOf(worktree.path);
     if (gitDir === null) {
@@ -697,17 +807,32 @@ async function reapRepo(
     // oxlint-disable-next-line no-await-in-loop
     const touched = await lastTouched(worktree.path, gitDir, [real]);
     if (now - touched < opts.minAgeMs) {
-      young += 1;
+      if (isMerged(verdict)) young += 1;
+      // oxlint-disable-next-line no-await-in-loop
+      else if (!(await keepUnmerged(worktree, verdict, null))) active += 1;
       continue;
     }
+    // Old enough: a merge `classifyTip` found passes locally; anything else asks origin, then GitHub.
     // oxlint-disable-next-line no-await-in-loop
-    const changes = await pendingChanges(worktree.path);
-    if (changes === null) {
-      report.failed.push({ what: `status ${worktree.path}`, detail: "git status failed" });
+    const rule = await nothingLost({
+      repoPath: repo.path,
+      worktree: worktree.path,
+      tip: worktree.head,
+      branch: worktree.branch,
+      github,
+      ...(isMerged(verdict) ? { merged: verdict } : {}),
+      fetch: !opts.dryRun,
+      ...(opts.gh === undefined ? {} : { gh: opts.gh }),
+    });
+    if (rule.kind === "unknown") {
+      report.unevaluated.push({ path: worktree.path, branch: worktree.branch, why: rule.why });
       continue;
     }
-    if (changes > 0) {
-      report.dirty.push({ path: worktree.path, changes });
+    if (rule.kind === "fails") {
+      if (rule.why === "dirty")
+        report.dirty.push({ path: worktree.path, branch: worktree.branch, changes: rule.changes });
+      // oxlint-disable-next-line no-await-in-loop
+      else await keepUnmerged(worktree, verdict, "unpushed");
       continue;
     }
     const idleDays = Math.floor((now - touched) / DAY_MS);
@@ -723,7 +848,7 @@ async function reapRepo(
       // oxlint-disable-next-line no-await-in-loop
       await opts.audit.removedWorktree(repo.name, worktree.path, worktree.branch, worktree.head);
     }
-    report.removedWorktrees.push({ path: worktree.path, branch: worktree.branch, why: verdict, idleDays });
+    report.removedWorktrees.push({ path: worktree.path, branch: worktree.branch, why: rule.how, idleDays });
     released.add(worktree.path);
   }
 
@@ -825,6 +950,11 @@ export function formatReport(report: ReapReport): readonly string[] {
       const why = kept.branch === null ? text : `${kept.branch}   ${text}`;
       rows.push(row("kept worktree", `${tildify(kept.path)}   ${why}, ${aheadText(kept.ahead)}`));
     }
+    for (const unchecked of repo.unevaluated) {
+      const branch = unchecked.branch ?? "detached";
+      const why = UNEVALUATED_TEXT[unchecked.why];
+      rows.push(row("unchecked worktree", `${tildify(unchecked.path)}   ${branch}   ${why} — kept, checked next run`));
+    }
     for (const path of repo.inUse) rows.push(row("in use", `${tildify(path)}   a tmux pane is inside it`));
     for (const path of repo.locked) rows.push(row("locked worktree", tildify(path)));
     for (const failure of repo.failed) rows.push(row("failed", `${failure.what}: ${failure.detail}`));
@@ -892,6 +1022,7 @@ export function formatReport(report: ReapReport): readonly string[] {
         sum((repo) => repo.keptWorktrees.length),
         "kept worktree",
       ),
+      ...(sum((repo) => repo.unevaluated.length) === 0 ? [] : [`${sum((repo) => repo.unevaluated.length)} unchecked`]),
       `${sum((repo) => repo.active)} active`,
       `${plural(report.openPanes.length, "session")} left open`,
       `${sum((repo) => repo.young)} younger than ${report.minAgeDays}d`,

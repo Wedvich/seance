@@ -12,12 +12,12 @@ import { LaunchLedger } from "../src/launch-ledger.ts";
 import {
   DAY_MS,
   formatReport,
+  readReapRefusals,
   ReapBusy,
   runReap,
   withReapLock,
   type ReapOptions,
   type ReapReport,
-  type RepoReport,
 } from "../src/reap.ts";
 import { transcriptDir } from "../src/reap-git.ts";
 import { scanRepos } from "../src/scan.ts";
@@ -89,6 +89,8 @@ interface Repo {
   readonly pruneLog: string;
   /** Its own attachments root, for the same reason. */
   readonly attachments: string;
+  /** Its own refusals file, for the same reason. */
+  readonly refusals: string;
 }
 
 /** A clone of its own origin, logged as just pruned — the run fetches only where a test ages that. */
@@ -102,6 +104,7 @@ async function freshRepo(): Promise<Repo> {
     path: fixture.repoPath,
     pruneLog: join(base, `prune-log-${fixtures}.json`),
     attachments: join(base, `attachments-${fixtures}`),
+    refusals: join(base, `refusals-${fixtures}.json`),
   };
   await logPrune(repo, Date.now());
   return repo;
@@ -167,6 +170,9 @@ async function reap(repo: Repo, overrides: Partial<ReapOptions> = {}): Promise<R
     pruneLogPath: repo.pruneLog,
     fsmonitor: null,
     attachments: repo.attachments,
+    refusalsPath: repo.refusals,
+    // A fixture's origin is a local path, so the rule never asks GitHub; were it to, this fails rather than reach one.
+    gh: join(base, "no-gh"),
     ...overrides,
   });
 }
@@ -322,15 +328,18 @@ describe("reap: worktrees and branches (real git)", () => {
     expect(await git(repo.path, "rev-parse", "wip")).toBe(tip);
   });
 
-  test("unmerged worktrees are kept: gone-upstream, never-pushed and detached ones listed, active ones counted", async () => {
+  test("old unmerged worktrees: pushed ones go, detached ones are kept, ones the rule can't judge are unchecked — and recorded", async () => {
     const repo = await freshRepo();
     const gone = join(repo.path, ".claude", "worktrees", "gone");
     const detached = join(repo.path, ".claude", "worktrees", "detached");
     const active = join(repo.path, ".claude", "worktrees", "active");
     const locked = join(repo.path, ".claude", "worktrees", "locked");
     const local = join(repo.path, ".claude", "worktrees", "local");
+    const fresh = join(repo.path, ".claude", "worktrees", "fresh");
     await addWorktree(repo.path, local);
     const localTip = await commit(local, "local.txt");
+    await addWorktree(repo.path, fresh);
+    await commit(fresh, "fresh.txt");
     await addWorktree(repo.path, gone);
     await commit(gone, "pushed.txt");
     await git(gone, "push", "-q", "-u", "origin", "wt-gone");
@@ -354,36 +363,74 @@ describe("reap: worktrees and branches (real git)", () => {
     }
 
     const preview = formatReport(await reap(repo, { dryRun: true })).join("\n");
+    // Origin here is a local path: what isn't on it can't be asked of GitHub either.
     expect(preview).toContain(
-      `kept worktree      ${gone}   wt-gone   upstream gone, 2 commits not on the default branch`,
+      `unchecked worktree ${gone}   wt-gone   not on origin, which is not on GitHub to ask for a merged PR — kept, checked next run`,
     );
     expect(preview).toContain(`kept worktree      ${detached}   detached, 1 commit not on the default branch`);
     expect(preview).toContain(
-      `kept worktree      ${local}   wt-local   never pushed, 1 commit not on the default branch`,
+      `kept worktree      ${fresh}   wt-fresh   never pushed, 1 commit not on the default branch`,
     );
-    expect(preview).toContain("3 kept worktrees · 1 active");
-    expect(await exists(local)).toBe(true);
+    expect(preview).toContain(`would remove worktree ${active}   wt-active (origin), idle 10d`);
+    expect(preview).toContain("2 kept worktrees · 2 unchecked · 0 active");
+    expect(await exists(active)).toBe(true);
+    expect(await readReapRefusals(repo.refusals)).toBeNull();
 
     const report = await reap(repo);
     const [result] = report.repos;
     // `git worktree list` order is the filesystem's, not ours.
-    const expected: RepoReport["keptWorktrees"] = [
-      { path: detached, branch: null, why: "detached", ahead: 1 },
-      { path: gone, branch: "wt-gone", why: "upstream-gone", ahead: 2 },
-      { path: local, branch: "wt-local", why: "never-pushed", ahead: 1 },
-    ];
-    expect((result?.keptWorktrees ?? []).toSorted((a, b) => a.path.localeCompare(b.path))).toEqual(
-      expected.toSorted((a, b) => a.path.localeCompare(b.path)),
+    const byPath = <T extends { readonly path: string }>(rows: readonly T[] | undefined): T[] =>
+      (rows ?? []).toSorted((a, b) => a.path.localeCompare(b.path));
+    expect(byPath(result?.keptWorktrees)).toEqual(
+      byPath([
+        { path: detached, branch: null, why: "detached", ahead: 1 },
+        { path: fresh, branch: "wt-fresh", why: "never-pushed", ahead: 1 },
+      ]),
+    );
+    expect(byPath(result?.unevaluated)).toEqual(
+      byPath([
+        { path: gone, branch: "wt-gone", why: "not-github" },
+        { path: local, branch: "wt-local", why: "not-github" },
+      ]),
     );
     expect(result?.locked).toEqual([locked]);
-    expect(result?.active).toBe(1);
-    expect(result?.removedWorktrees).toEqual([]);
+    expect(result?.active).toBe(0);
+    expect(result?.removedWorktrees).toEqual([{ path: active, branch: "wt-active", why: "origin", idleDays: 10 }]);
+    expect(await exists(active)).toBe(false);
+    // The branch stays for the merged-branch sweep, as it would for a continuation to find.
+    expect(await branchExists(repo, "wt-active")).toBe(true);
     expect(result?.keptBranches).toEqual([]);
     expect(await git(repo.path, "rev-parse", "refs/heads/wt-local")).toBe(localTip);
-    for (const worktree of [gone, detached, active, locked, local]) {
+    for (const worktree of [gone, detached, locked, local, fresh]) {
       // oxlint-disable-next-line no-await-in-loop
       expect(await exists(worktree)).toBe(true);
     }
+
+    const refusals = await readReapRefusals(repo.refusals);
+    expect(byPath(refusals?.worktrees)).toEqual(
+      byPath([
+        { repo: "myrepo", path: detached, branch: null, why: "unpushed", detail: "detached" },
+        { repo: "myrepo", path: fresh, branch: "wt-fresh", why: "unpushed", detail: "never-pushed" },
+        { repo: "myrepo", path: gone, branch: "wt-gone", why: "unevaluated", detail: "not-github" },
+        { repo: "myrepo", path: local, branch: "wt-local", why: "unevaluated", detail: "not-github" },
+        { repo: "myrepo", path: locked, branch: null, why: "locked" },
+      ]),
+    );
+  });
+
+  test("a pushed worktree origin can't be asked about is unchecked, kept, and not failed", async () => {
+    const repo = await freshRepo();
+    const worktree = join(repo.path, ".claude", "worktrees", "offline");
+    await addWorktree(repo.path, worktree);
+    await commit(worktree, "work.txt");
+    await git(worktree, "push", "-q", "-u", "origin", "wt-offline");
+    await git(repo.path, "remote", "set-url", "origin", join(base, "no-such-origin.git"));
+    await age(worktree);
+
+    const [result] = (await reap(repo)).repos;
+    expect(result?.unevaluated).toEqual([{ path: worktree, branch: "wt-offline", why: "remote" }]);
+    expect(result?.keptWorktrees).toEqual([]);
+    expect(await exists(worktree)).toBe(true);
   });
 
   test("a dirty worktree is reported and left, whatever showUntrackedFiles says; ignored files alone don't make one dirty", async () => {
@@ -401,7 +448,7 @@ describe("reap: worktrees and branches (real git)", () => {
     await age(ignored);
 
     const [result] = (await reap(repo)).repos;
-    expect(result?.dirty).toEqual([{ path: dirty, changes: 1 }]);
+    expect(result?.dirty).toEqual([{ path: dirty, branch: "wt-dirty", changes: 1 }]);
     expect(await exists(dirty)).toBe(true);
     expect(result?.removedWorktrees.map((w) => w.path)).toEqual([ignored]);
     expect(await exists(ignored)).toBe(false);

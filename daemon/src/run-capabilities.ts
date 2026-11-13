@@ -15,7 +15,7 @@ import { createHandOff, createPassClose } from "./handoff.ts";
 import { sourceOf, type Leader } from "./leader.ts";
 import type { LocalSocketOpts } from "./local-socket.ts";
 import { log } from "./log.ts";
-import { pruneLogPath } from "./paths.ts";
+import { pruneLogPath, reapRefusalsPath } from "./paths.ts";
 import { peerPidSupported } from "./peer.ts";
 import { DAY_MS, formatReport, ReapBusy, runReap, withReapLock } from "./reap.ts";
 import type { RelayClient } from "./relay-client.ts";
@@ -300,6 +300,7 @@ const reapSchedule: DaemonCapability = (ctx) => {
           closing: (id) => ctx.endedTasks.closing(id),
           signal: abort.signal,
           pruneLogPath: pruneLogPath(),
+          refusalsPath: reapRefusalsPath(),
           attachments: attachmentsRoot(),
           fsmonitor: platformFsmonitor(),
         }),
