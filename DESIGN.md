@@ -7244,12 +7244,12 @@ fields carry over), under the same gates.
   E3, above) on Linux; the dev check on a worktree task (cancel, then Continue; the resumed transcript
   shows the preamble as a new user turn after the earlier ones) is what covers the Mac.
 - **Re-adding a removed worktree** (2026-11-13). A task's worktree can vanish while its conversation and
-  local branch stay: removed by hand (`git worktree remove`, `rm -rf`), or by `reap` once docs/custodian.md's
-  C32 removes a clean worktree whose work is pushed and leaves its branch (C34). Today's `reap` removes only
-  a worktree whose tip it judges merged, and its same-pass branch sweep then takes that branch too, so a
-  reaped merged worktree reaches "both gone" below; the re-add serves a worktree whose branch survived
-  (removed by hand, or a sweep that failed or kept it) and, when C32 is built, pushed-but-unmerged work such
-  as an awaiting-merge or cancelled task. When the noted path is
+  local branch stay: removed by hand (`git worktree remove`, `rm -rf`), or by `reap`'s nothing-lost rule
+  (Reap, "Nothing lost"; docs/custodian.md C32), which removes an idle clean worktree whose work is pushed and
+  leaves its branch (C34). A worktree reap judged merged loses its branch to the same pass's branch sweep, so
+  it reaches "both gone" below; the re-add serves a worktree whose branch survived: pushed-but-unmerged work
+  such as an awaiting-merge or cancelled task, one removed by hand, or one whose sweep failed or kept the
+  branch. When the noted path is
   gone, `spawnContinued` (after the pane checks, before the lock read) puts it back at the same path,
   under reap's lock (`withReapLock`; a held lock refuses `not_continuable`, "try again shortly"), re-adds one at a time within the daemon first (a second continuation waits for the first instead of being refused by the lock its own process holds, and each lock take stages a uniquely named file), because
   reap's branch sweep deletes with `update-ref -d`, which does not refuse a branch checked out in a
@@ -8381,10 +8381,10 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
   - _The audit line_ for a removal carries `reason=` (`ancestor`, `squash`, `gone`, `origin` or `pr`), since a
     removal is no longer always a merge.
   - _The local branch is left_ (C34) for the branch pass below, which deletes it only once merged by its
-    own rules. A continuation of a task whose worktree reap removed is refused `not_continuable` today
-    (Daemon, "Continuing a session": the path gone), so a pushed, unmerged worktree idle past the age gate
-    can no longer be continued in place; the owner accepted that (2026-11-13: pushed is enough).
-    Re-adding the worktree from the kept branch on a continuation is follow-up work.
+    own rules. A continuation of a task whose worktree reap removed re-adds it at the same path from that
+    kept branch (Daemon, "Continuing a session", "Re-adding a removed worktree"), so a pushed, unmerged
+    worktree idle past the age gate still continues in place; once the sweep has taken the branch (merged),
+    the continuation is refused `not_continuable`.
   - _What it kept_ (C23): each acting run replaces `reap-refusals.json` in the state dir (0600,
     `ReapRefusals`, read by `readReapRefusals`) with every worktree kept `dirty` (with its change count),
     `unpushed` (with its kept-worktree reason), `unevaluated` (with the unknown reason) or `locked` (with
