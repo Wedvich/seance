@@ -110,6 +110,11 @@ export interface DrainAsk {
   readonly closed: (cl: number, now: boolean) => Promise<void>;
   /** Reopened: every pending ask and timer is dropped; a prompt already typed stays typed. */
   readonly reopened: () => void;
+  /**
+   * Whether this ask made an entry for the pane under the current `cl` (typed, skipped or still waiting): its session
+   * is being asked to pass. Read-only, for the custodian's `untouchable`; cleared on a reopen or a newer `cl`.
+   */
+  readonly asked: (pane: string) => boolean;
   /** A daemon that starts closed asks again; one ask per pane per process per `cl`. */
   readonly start: () => void;
   readonly stop: () => void;
@@ -417,6 +422,10 @@ export function createDrainAsk(deps: DrainAskDeps): DrainAsk {
       else maybeInterrupt(pane, entry);
     },
     closed,
+    asked: (pane): boolean => {
+      for (const key of asked) if (key.startsWith(`${pane}\0`)) return true;
+      return false;
+    },
     reopened: (): void => {
       clearEntries();
       clearDeadline();

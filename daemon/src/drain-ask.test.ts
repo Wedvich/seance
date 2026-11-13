@@ -636,6 +636,19 @@ describe("lifecycle", () => {
     expect(r.audits).toHaveLength(2);
   });
 
+  test("asked says a pane was asked under this cl, for the custodian, and a reopen or a new cl clears it", async () => {
+    const r = rig();
+    r.panes = [pane("%1", "t-1"), pane("%2", null)];
+    expect(r.ask.asked("%1")).toBe(false);
+    await r.ask.closed(CL, false);
+    await settle();
+    expect(r.ask.asked("%1")).toBe(true);
+    expect(r.ask.asked("%2")).toBe(false);
+    expect(r.ask.asked("%")).toBe(false);
+    r.ask.reopened();
+    expect(r.ask.asked("%1")).toBe(false);
+  });
+
   test("after stop() nothing is sent", async () => {
     const r = rig();
     frame(r, "busy");
