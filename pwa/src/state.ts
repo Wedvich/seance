@@ -1,11 +1,12 @@
 import {
   DEFAULT_EFFORT,
   DEFAULT_MODEL,
+  type ArchiveMetricsStep,
+  type ArchivistEntry,
   type AutonomyLevel,
   METRIC_NAMES,
   type MetricName,
   type MetricsSeries,
-  type MetricsStep,
   type PauseHold,
   type Decision,
   type SessionEntry,
@@ -170,12 +171,15 @@ export interface SessionsView {
 
 /**
  * Pressure belongs to a machine, quota to an account: a machine's chart is its
- * own load, an account's is read from one machine hosting it (`deviceId`) and
- * narrowed to that account's series.
+ * own load, an account's is read from one machine hosting it (`deviceId`, null
+ * when none online can serve it) and narrowed to that account's series — or,
+ * while the archivist serves it, merged across machines from the archive. Which
+ * side answers is the store's choice at ask time (`Store.showHistory`), never
+ * part of the target.
  */
 export type HistoryTarget =
   | { readonly kind: "machine"; readonly deviceId: string }
-  | { readonly kind: "account"; readonly accountId: string; readonly deviceId: string };
+  | { readonly kind: "account"; readonly accountId: string; readonly deviceId: string | null };
 
 /**
  * A chart asks for its own series only: every series of a multi-exclave machine
@@ -187,18 +191,50 @@ export const TARGET_METRICS: Record<HistoryTarget["kind"], readonly MetricName[]
   account: [METRIC_NAMES.h, METRIC_NAMES.d, METRIC_NAMES.w],
 };
 
-export const HISTORY_RANGES = ["6h", "24h", "30d"] as const;
+/** Ranges a daemon keeps. */
+export const SHORT_HISTORY_RANGES = ["6h", "24h", "30d"] as const;
+/** Ranges only the archive keeps (docs/archivist.md A32), offered only while it serves the chart (A35, A36d). */
+export const ARCHIVE_HISTORY_RANGES = ["90d", "1y"] as const;
+export const HISTORY_RANGES = [...SHORT_HISTORY_RANGES, ...ARCHIVE_HISTORY_RANGES] as const;
 export type HistoryRange = (typeof HISTORY_RANGES)[number];
 
 /** Opens on a day: long enough to show a working pattern, on the tier that fits it. */
 export const DEFAULT_HISTORY_RANGE: HistoryRange = "24h";
 
-/** Each range on the coarsest-needed store tier, so none crosses `METRICS_MAX_POINTS`. */
-export const RANGE_SPANS: Record<HistoryRange, { readonly span: number; readonly step: MetricsStep }> = {
+/**
+ * Each range on the coarsest-needed tier, so none crosses `METRICS_MAX_POINTS`.
+ * 90 days and a year take the archive's own steps (6 h, 1 d), which no daemon takes.
+ */
+export const RANGE_SPANS: Record<HistoryRange, { readonly span: number; readonly step: ArchiveMetricsStep }> = {
   "6h": { span: 6 * 3600, step: 30 },
   "24h": { span: 24 * 3600, step: 300 },
   "30d": { span: 30 * 24 * 3600, step: 3600 },
+  "90d": { span: 90 * 24 * 3600, step: 21_600 },
+  "1y": { span: 365 * 24 * 3600, step: 86_400 },
 };
+
+export function isArchiveRange(range: HistoryRange): boolean {
+  return ARCHIVE_HISTORY_RANGES.some((long) => long === range);
+}
+
+/**
+ * Which charts the archivist can serve now: none while it is offline (A35). An
+ * account's needs the account key too, since the archive files its series under
+ * the `account:` store key, never the raw id. The store and the screen read this
+ * one rule, so a chart is offered exactly when it can be asked for.
+ */
+export function archiveCharts(
+  archivist: ArchivistEntry | null,
+  nameable: boolean,
+): Readonly<Record<HistoryTarget["kind"], boolean>> {
+  const online = archivist?.connected === true;
+  return { machine: online, account: online && nameable };
+}
+
+/** The range picker's options: the long ones only while the archive serves the chart (A36d). */
+export function historyRanges(archived: boolean): readonly HistoryRange[] {
+  return archived ? HISTORY_RANGES : SHORT_HISTORY_RANGES;
+}
 
 /** The form's `route-preview`: what the scheduler would decide now, for the repo it was asked about. */
 export type PreviewState =
@@ -262,7 +298,7 @@ export interface HistoryView {
   readonly range: HistoryRange;
   readonly from: number;
   readonly to: number;
-  readonly step: MetricsStep;
+  readonly step: ArchiveMetricsStep;
   readonly result: HistoryResult;
 }
 

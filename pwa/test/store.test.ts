@@ -1,9 +1,10 @@
-import { importPsk, toBase64 } from "@seance/shared";
+import { importAccountKey, importPsk, toBase64 } from "@seance/shared";
 import { afterEach, beforeAll, beforeEach, describe, expect, jest, test } from "bun:test";
 import {
   ATTACHMENT_LIMITS,
   CAPABILITIES,
   accountRecord,
+  METRICS_MAX_POINTS,
   QUEUE_MAX_TASKS,
   RelayClient,
   RequestFailure,
@@ -11,6 +12,7 @@ import {
   TASK_SPEC_LIMITS,
   withReportInstruction,
   type Decision,
+  type ArchiveMetricsRequest,
   type ArchiveStatusReply,
   type ArchiveStatusResponse,
   type ArchivistEntry,
@@ -56,9 +58,12 @@ import { fakeHistory, installBrowserGlobals, setVisibility } from "./stubs.ts";
 installBrowserGlobals();
 
 let key: CryptoKey;
+let accountKey: CryptoKey;
 
 beforeAll(async () => {
-  key = await importPsk(toBase64(new Uint8Array(32).fill(3)));
+  const psk = toBase64(new Uint8Array(32).fill(3));
+  key = await importPsk(psk);
+  accountKey = await importAccountKey(psk);
 });
 
 /** Never started, so nothing dials: the store is the subject here, not the transport. */
@@ -466,9 +471,31 @@ class ScriptedClient extends RelayClient {
     task: { version: 1, task: { ...QUEUED, id } },
   });
 
-  constructor(relay: Partial<RelayState> = {}) {
-    super({ url: "ws://127.0.0.1:1/app", token: "unused", key });
+  /** Every daemon `metrics` read, and every archive one, in order. */
+  readonly metricsAsks: { readonly deviceId: string; readonly request: MetricsRequest }[] = [];
+  onMetrics: (request: MetricsRequest) => Promise<MetricsReply | null> = async () => ({ series: [] });
+  readonly archiveMetricsAsks: ArchiveMetricsRequest[] = [];
+  onArchiveMetrics: (request: ArchiveMetricsRequest) => Promise<MetricsReply | null> = async () => ({ series: [] });
+
+  /** `namesAccounts`, the account key, makes the install one that names accounts, as a PSK entered since account records does. */
+  constructor(relay: Partial<RelayState> = {}, namesAccounts?: CryptoKey) {
+    super({
+      url: "ws://127.0.0.1:1/app",
+      token: "unused",
+      key,
+      ...(namesAccounts === undefined ? {} : { accountKey: namesAccounts }),
+    });
     this.relay = { ...LEADING_RELAY, ...relay };
+  }
+
+  override metrics(deviceId: string, request: MetricsRequest): Promise<MetricsReply | null> {
+    this.metricsAsks.push({ deviceId, request });
+    return this.onMetrics(request);
+  }
+
+  override archiveMetrics(request: ArchiveMetricsRequest): Promise<MetricsReply | null> {
+    this.archiveMetricsAsks.push(request);
+    return this.onArchiveMetrics(request);
   }
 
   override getState = (): RelayState => this.relay;
@@ -4521,5 +4548,155 @@ describe("the archivist's counts", () => {
     } finally {
       detach();
     }
+  });
+});
+
+// docs/archivist.md A32, A35, A36d–A36f: which side answers a chart, read from the registry at ask time.
+describe("history sources", () => {
+  let fake: ReturnType<typeof fakeHistory>;
+
+  afterEach(() => fake.restore());
+
+  const ONLINE = { archivist: archivistEntry("arch-1") };
+  const ACCOUNT_ID = "org-1:acct-1";
+  const points = (request: { from: number; to: number; step: number }): number =>
+    (request.to - request.from) / request.step + 1;
+
+  test("a connected machine's short ranges come from its daemon, 90 days and a year from the archive", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    const store = new Store(client);
+
+    await store.showHistory({ kind: "machine", deviceId: "dev-a" }, "24h");
+    expect(client.metricsAsks.map((ask) => [ask.deviceId, ask.request.step])).toEqual([["dev-a", 300]]);
+    expect(client.archiveMetricsAsks).toEqual([]);
+
+    await store.showHistory({ kind: "machine", deviceId: "dev-a" }, "90d");
+    await store.showHistory({ kind: "machine", deviceId: "dev-a" }, "1y");
+    expect(client.metricsAsks).toHaveLength(1);
+    expect(client.archiveMetricsAsks.map((ask) => ["machine" in ask ? ask.machine : null, ask.step])).toEqual([
+      ["dev-a", 21_600],
+      ["dev-a", 86_400],
+    ]);
+    // Both fit one reply's point cap, which the archivist refuses past.
+    for (const ask of client.archiveMetricsAsks) expect(points(ask)).toBeLessThanOrEqual(METRICS_MAX_POINTS);
+    expect(store.getState().history).toMatchObject({ range: "1y", step: 86_400, result: { kind: "ok" } });
+  });
+
+  test("an asleep machine's chart comes from the archive at every range", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient({
+      ...ONLINE,
+      machines: [autoMachine("dev-a"), autoMachine("dev-z", { connected: false })],
+    });
+    const store = new Store(client);
+
+    await store.showHistory({ kind: "machine", deviceId: "dev-z" }, "6h");
+    expect(client.metricsAsks).toEqual([]);
+    expect(client.archiveMetricsAsks).toEqual([
+      expect.objectContaining({ machine: "dev-z", step: 30, names: ["cpu_pct", "mem_pct", "disk_pct"] }),
+    ]);
+  });
+
+  test("an account's chart comes merged from the archive, asked and narrowed by its store key", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE, accountKey);
+    const storeKey = await client.accountStoreKey(ACCOUNT_ID);
+    // The archive's merge drops `machine` and `exclave` and keeps `account`, as the store key.
+    client.onArchiveMetrics = async (request): Promise<MetricsReply> => {
+      const series: MetricsSeries[] = [
+        { metric: "quota_5h_pct", labels: { account: storeKey }, points: [[request.to, 40]] },
+        { metric: "quota_7d_pct", labels: { account: storeKey, model: "opus" }, points: [[request.to, 70]] },
+      ];
+      return { series };
+    };
+    const store = new Store(client);
+
+    await store.showHistory({ kind: "account", accountId: ACCOUNT_ID, deviceId: "dev-a" }, "24h");
+    expect(client.metricsAsks).toEqual([]);
+    expect(client.archiveMetricsAsks).toHaveLength(1);
+    const [ask] = client.archiveMetricsAsks;
+    expect(ask !== undefined && "account" in ask ? [ask.account, ask.labels] : ask).toEqual([storeKey, undefined]);
+    const result = store.getState().history?.result;
+    expect(result?.kind === "ok" ? result.series.map((s) => [s.metric, s.labels, s.points[0]?.[1]]) : result).toEqual([
+      ["quota_5h_pct", {}, 40],
+      ["quota_7d_pct", { model: "opus" }, 70],
+    ]);
+  });
+
+  test("an install without the account key keeps an account's chart on its host", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    const store = new Store(client);
+
+    await store.showHistory({ kind: "account", accountId: ACCOUNT_ID, deviceId: "dev-a" }, "1y");
+    expect(client.archiveMetricsAsks).toEqual([]);
+    expect(client.metricsAsks).toEqual([
+      { deviceId: "dev-a", request: expect.objectContaining({ step: 300, labels: { account: ACCOUNT_ID } }) },
+    ]);
+    expect(store.getState().history?.range).toBe("24h");
+  });
+
+  test("with no archivist, charts read as before it: an account from its host, and no long range", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient({}, accountKey);
+    const store = new Store(client);
+
+    await store.showHistory({ kind: "account", accountId: ACCOUNT_ID, deviceId: "dev-b" }, "30d");
+    // A long range remembered from when it was online opens at a day.
+    await store.showHistory({ kind: "machine", deviceId: "dev-a" }, "1y");
+    expect(client.archiveMetricsAsks).toEqual([]);
+    expect(client.metricsAsks.map((ask) => [ask.deviceId, ask.request.step])).toEqual([
+      ["dev-b", 3600],
+      ["dev-a", 300],
+    ]);
+    expect(store.getState().history?.range).toBe("24h");
+  });
+
+  test("a long range falls back to a day from the daemon when the archivist leaves", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      await store.showHistory({ kind: "machine", deviceId: "dev-a" }, "90d");
+      expect(client.archiveMetricsAsks).toHaveLength(1);
+
+      client.emit({ archivist: archivistEntry("arch-1", false) });
+      expect(store.getState().history?.range).toBe("24h");
+      await pollUntil(() => store.getState().history?.result.kind === "ok", "the day's chart");
+      expect(client.metricsAsks.map((ask) => [ask.deviceId, ask.request.step])).toEqual([["dev-a", 300]]);
+
+      // A short range open as it leaves stays as it is.
+      client.emit({ archivist: archivistEntry("arch-1") });
+      await store.showHistory({ kind: "machine", deviceId: "dev-a" }, "30d");
+      client.emit({ archivist: archivistEntry("arch-1", false) });
+      expect(store.getState().history?.range).toBe("30d");
+      expect(client.metricsAsks).toHaveLength(2);
+    } finally {
+      detach();
+    }
+  });
+
+  test("the archive's failures say the archivist, not the machine", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient({ ...ONLINE, machines: [autoMachine("dev-a", { connected: false })] });
+    const store = new Store(client);
+    const failure = async (): Promise<unknown> => {
+      await store.showHistory({ kind: "machine", deviceId: "dev-a" }, "24h");
+      return store.getState().history?.result;
+    };
+
+    client.onArchiveMetrics = () => Promise.reject(new RequestFailure("timeout", "no reply"));
+    expect(await failure()).toEqual({ kind: "failed", message: "No answer — the archivist may be offline." });
+    client.onArchiveMetrics = () => Promise.reject(new RequestFailure("offline", "the archivist is offline"));
+    expect(await failure()).toEqual({ kind: "failed", message: "No answer — the archivist may be offline." });
+    client.onArchiveMetrics = async () => null;
+    expect(await failure()).toEqual({
+      kind: "failed",
+      message: "Couldn't read the archivist's answer. Update the archivist and the app to matching versions.",
+    });
+    client.onArchiveMetrics = async () => ({ ok: false, code: "internal_error", message: "boom" });
+    expect(await failure()).toEqual({ kind: "failed", message: "The archivist couldn't read its history store." });
   });
 });

@@ -27,6 +27,7 @@ import {
   type UpdateOutcome,
 } from "@seance/shared";
 import { METRIC_LABELS } from "./chart.ts";
+import { historyRanges, type HistoryRange, type HistoryTarget } from "./state.ts";
 import { formatSeen } from "./view.ts";
 
 /**
@@ -75,7 +76,7 @@ export interface MachineCard {
   readonly gauges: readonly Gauge[];
   readonly note: string | null;
   readonly exclaves: readonly ExclaveRow[];
-  /** Whether a chart can be asked for: connected, and the daemon serves `metrics`. */
+  /** Whether a chart can be asked for: connected and the daemon serves `metrics`, or asleep while the archive charts machines. */
   readonly charts: boolean;
 }
 
@@ -105,8 +106,10 @@ export interface AccountCard {
   readonly detail: string;
   readonly bars: readonly QuotaBar[];
   readonly observed: string;
-  /** The machine to read this account's quota history from; null when none online can serve it. */
+  /** The machine to read this account's quota history from without the archive; null when none online can serve it. */
   readonly historyFrom: string | null;
+  /** Whether a chart can be asked for: from `historyFrom`, or merged from the archive while it charts accounts. */
+  readonly charts: boolean;
 }
 
 export interface MachinesView {
@@ -114,7 +117,14 @@ export interface MachinesView {
   readonly scheduler: string;
   readonly cards: readonly MachineCard[];
   readonly accounts: readonly AccountCard[];
+  /** The range picker's options per chart kind (`historyRanges`). */
+  readonly ranges: Readonly<Record<HistoryTarget["kind"], readonly HistoryRange[]>>;
 }
+
+/** What the archive can chart now (`archiveCharts`); nothing by default, as with no archivist. */
+export type ArchiveReach = Readonly<Record<HistoryTarget["kind"], boolean>>;
+
+const NO_ARCHIVE: ArchiveReach = { machine: false, account: false };
 
 /** Shared by pressure, disk fill and quota: all are "how close to the wall". */
 export function levelFor(pct: number): Level {
@@ -244,6 +254,7 @@ function machineCard(
   scheduler: SchedulerAvailability,
   aliases: AccountAliases,
   known: readonly KnownAccount[],
+  archived: boolean,
 ): MachineCard {
   // Not drawn for an asleep card: its status is the one the relay kept, and its
   // last beat would read as current pressure beside "last seen". Its quota
@@ -275,7 +286,8 @@ function machineCard(
       auth: authNote(machine, index, now),
       probes: probeNote(machine, exclave, index, now),
     })),
-    charts: servesMetrics(machine),
+    // An asleep machine's history is the archive's alone (A36f); a connected one's daemon keeps the short ranges.
+    charts: servesMetrics(machine) || (archived && !machine.connected),
   };
 }
 
@@ -366,6 +378,7 @@ function deriveAccounts(
   aliases: AccountAliases,
   fleetQuota: readonly FleetQuotaEntry[],
   known: readonly KnownAccount[],
+  archived: boolean,
 ): AccountCard[] {
   const groups = new Map<string, AccountGroup>();
   for (const machine of machines) {
@@ -412,6 +425,7 @@ function deriveAccounts(
     const exclaves = [...group.exclaves].join(" · ");
     const plainName = accountNameIn(known, group.accountId);
     const where = `${plainName} · on ${[...group.machines].join(", ")}`;
+    const historyFrom = historyHost(group, observer);
     return {
       accountId: group.accountId,
       alias: alias ?? null,
@@ -421,7 +435,8 @@ function deriveAccounts(
       detail: alias === undefined ? where : `${exclaves} · ${where}`,
       bars: quota === undefined ? [] : quotaBars(quota.observation, now),
       observed: observedLine(quota, observer, now),
-      historyFrom: historyHost(group, observer),
+      historyFrom,
+      charts: archived || historyFrom !== null,
     };
   });
 }
@@ -432,12 +447,14 @@ export function deriveMachines(
   scheduler: SchedulerAvailability,
   aliases: AccountAliases = {},
   fleetQuota: readonly FleetQuotaEntry[] = [],
+  archive: ArchiveReach = NO_ARCHIVE,
 ): MachinesView {
   const known = knownAccounts(machines);
   return {
     scheduler: schedulerLine(machines, scheduler),
-    cards: machines.map((machine) => machineCard(machine, now, scheduler, aliases, known)),
-    accounts: deriveAccounts(machines, now, aliases, fleetQuota, known),
+    cards: machines.map((machine) => machineCard(machine, now, scheduler, aliases, known, archive.machine)),
+    accounts: deriveAccounts(machines, now, aliases, fleetQuota, known, archive.account),
+    ranges: { machine: historyRanges(archive.machine), account: historyRanges(archive.account) },
   };
 }
 
