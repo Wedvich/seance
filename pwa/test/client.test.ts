@@ -2255,6 +2255,8 @@ describe("store", () => {
       asking.close();
       plainer.close();
       await waitForApp((s) => s.relay.machines.every((m) => !m.connected), "the machines gone");
+      // The registry is permanent and capped (the relay's `MAX_DEVICES`, 32, one relay for this whole file): a
+      // register past it is refused, so a test that leaves three more entries starves the later ones' "online".
       for (const id of [leaderId, asks, plain]) store.removeMachine(id);
       await waitForApp(
         (s) => s.relay.machines.every((m) => ![leaderId, asks, plain].includes(m.deviceId)),
