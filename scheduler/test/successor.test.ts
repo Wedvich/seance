@@ -1309,6 +1309,22 @@ describe("the session's own pass", () => {
       expect(s.creates).toHaveLength(1);
     });
 
+    test("a session pass joining a refused manual pass is answered with that refusal, never re-run", async () => {
+      const s = setup([machine("a", { capabilities: [...SELF] })]);
+      const old = await running(s, false);
+      const gate = Promise.withResolvers<void>();
+      s.fleet.pushReply = async () => {
+        await gate.promise;
+        return { ok: false, code: "dirty_worktree", message: "no" };
+      };
+      const manual = s.scheduler.pass(old.id);
+      const session = s.scheduler.pass(old.id, "session", self("the record"));
+      gate.resolve();
+      expect(await manual).toEqual({ ok: false, code: "dirty_worktree" });
+      expect(await session).toEqual({ ok: false, code: "dirty_worktree" });
+      expect(s.creates).toEqual([]);
+    });
+
     test("a manual pass joined by another manual pass still returns the joined result, refusals included", async () => {
       const s = setup();
       const old = await running(s, false);
@@ -2262,6 +2278,29 @@ describe("the drain pass", () => {
     const result = ok(await session);
     expect(s.creates).toHaveLength(1);
     expect(s.scheduler.task(result.successorId)?.spec.succeeds?.trigger).toBe("drain");
+  });
+
+  test("a refusal of the drain's own pass is not stamped when a session's pass joined it and lands", async () => {
+    const s = setup([machine("a", { capabilities: [...CAPABLE, CAPABILITIES.successorSelf] })]);
+    await running(s, true);
+    close(s, "a");
+    later(s, WAIT);
+    const gate = Promise.withResolvers<void>();
+    s.fleet.pushReply = async () => {
+      await gate.promise;
+      return { ok: false, code: "dirty_worktree", message: "no" };
+    };
+    await s.scheduler.tick();
+    // The pass is detached from the tick: wait for it to be out at the machine.
+    for (let i = 0; i < 200 && s.fleet.pushes.length === 0; i += 1) await Bun.sleep(1);
+    expect(s.fleet.pushes).toHaveLength(1);
+    const session = s.scheduler.pass("old", "session", { from: "a", pushed: PUSHED, drain: true });
+    gate.resolve();
+    const result = ok(await session);
+    await s.scheduler.drain();
+    expect(s.scheduler.task(result.successorId)?.spec.succeeds?.trigger).toBe("drain");
+    expect(s.scheduler.task("old")?.drained?.refused).toBeUndefined();
+    expect(s.creates).toHaveLength(1);
   });
 
   test("a needs-input task is passed by the drain, and still refused a manual pass", async () => {

@@ -398,8 +398,14 @@ export class Scheduler {
   readonly #stopping = new Map<string, number>();
   /** Task id → its pass, still out (`pass`): a second pass of the task waits for it and answers its result. */
   readonly #passInFlight = new Map<string, Promise<PassResult>>();
-  /** Task id → what its pass in flight is: whether it is a session's own, and whether it reached the successor's create by the time it ended. */
-  readonly #passInfo = new Map<string, { readonly session: boolean; created: boolean }>();
+  /**
+   * Task id → what its pass in flight is: its trigger, whether it is a session's own, whether a session's pass
+   * joined it, and whether it reached the successor's create by the time it ended.
+   */
+  readonly #passInfo = new Map<
+    string,
+    { readonly trigger: SuccessorTrigger; readonly session: boolean; created: boolean; joinedBySession: boolean }
+  >();
   /**
    * Task id → the id of a successor whose create nothing confirmed or refused (unanswered twice and not seen on
    * read-back, or thrown): it may have landed. The next pass of the task creates under that id, which the relay
@@ -1305,9 +1311,10 @@ export class Scheduler {
    * calling the tool is waiting on nobody; the record becomes the successor's prompt; and the close is the
    * daemon's, at the session's turn end, armed by `pass-close` once the commit is written. Only the
    * task's own machine may ask. A session pass marked `drain` (its machine was closed) writes `trigger: "drain"`
-   * when that machine's status carries `cl`, else `session`. A session pass that arrives while an outside pass is in
-   * flight waits for it, and runs as its own pass if that one was refused before the successor's create (a dirty
-   * tree read before the session committed); an outside pass that succeeded answers it.
+   * when that machine's status carries `cl`, else `session`. A session pass that arrives while the drain's outside
+   * pass is in flight waits for it, and runs as its own pass if that one was refused before the successor's create
+   * (a dirty tree read before the session committed); the drain pass then stamps no refusal, and one that succeeded
+   * answers it. Any other pass in flight (manual, quota) answers its joiners, a session's included, as before.
    *
    * `since` is the reading's time (ms) of a `quota` pass, written into the successor's `succeeds`.
    */
@@ -1321,12 +1328,19 @@ export class Scheduler {
     if (joined !== undefined) {
       this.#log(`pass joined task=${quote(taskId)}`);
       const info = this.#passInfo.get(taskId);
-      if (session === undefined || info === undefined || info.session) return joined;
-      // An outside pass refused before it created anything must not swallow the session's: that one holds the
+      // Only the drain's outside pass is ever re-run: a manual or quota pass answers its joiners as it always did.
+      if (session === undefined || info === undefined || info.session || info.trigger !== "drain") return joined;
+      info.joinedBySession = true;
+      // The drain pass refused before it created anything must not swallow the session's: that one holds the
       // commit and the record the outside pass could not make.
       return joined.then((result) => (result.ok || info.created ? result : this.pass(taskId, trigger, session, since)));
     }
-    const info = { session: session !== undefined, created: false };
+    const info = {
+      trigger: session === undefined ? trigger : ("session" as const),
+      session: session !== undefined,
+      created: false,
+      joinedBySession: false,
+    };
     this.#passInfo.set(taskId, info);
     const run = this.#runPass(taskId, session === undefined ? trigger : "session", session, since)
       .then((result) => {
@@ -1892,8 +1906,13 @@ export class Scheduler {
     });
     if (written?.drained?.tried !== now) return;
     let result: PassResult;
+    let joinedBySession = (): boolean => false;
     try {
-      result = await this.pass(id, "drain");
+      const pass = this.pass(id, "drain");
+      // Set synchronously by `pass`; read once it ends, since a session's pass may join in between.
+      const info = this.#passInfo.get(id);
+      if (info !== undefined) joinedBySession = (): boolean => info.joinedBySession;
+      result = await pass;
     } catch (err) {
       this.#onError(err);
       return;
@@ -1908,6 +1927,9 @@ export class Scheduler {
     this.#log(`audit pass refused task=${quote(id)} trigger=drain outcome=${result.code}`);
     // Per attempt, not per task: an orphan from an earlier cut-off pass must not make a pre-create conflict `held`.
     const created = this.#reachedCreate.delete(id);
+    // A session's own pass joined and re-runs: a refusal stamped now would show the task stuck until it lands.
+    // If that one fails too, the write-ahead stamp is what brings the retry round.
+    if (joinedBySession()) return;
     const outcome = drainOutcome(result.code, created);
     if (outcome === null) return;
     await this.#update(id, (c) => stampDrainRefusal(c, cl, outcome));
