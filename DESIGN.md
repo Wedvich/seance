@@ -8035,16 +8035,19 @@ keeps item 1's behaviour. `CAPABILITIES.drainAsk` is defined for item 3 and adve
   as stuck `unplaced`, never also as moved.
 - **Surfaces.** The PWA's close sheet counts the tasks that will be passed and lists what cannot move
   (runs in the clone, not a task); a closed machine's row shows "Draining: moving N · M stuck" and
-  re-reads its sessions on `queue-changed` (at most once per ten seconds: a box parked closed for days
+  re-reads its sessions on `queue-changed` (at most once per ten seconds, a nudge inside the spacing read when it ends: a box parked closed for days
   must not cost a read per nudge), when the Machines screen opens and when its status's session
   counts change; a sessions read not yet answered reads "reading", an unanswered one "unknown". The
   sheet folds a `needs-input` task into "N running tasks" where docs/drain.md §8 wanted a separate
   "waiting on you" line, and lists an untasked pane per line rather than counting it. `seanced close
   [--wait]` exits 0 when empty (a successor still `unplaced` is listed after "is empty" and does not
   block it), 2 when only stuck work is left, 1 on a failure; it uses the close reply's `closed` as the
-  drain's `cl` since status lags. Exit 1 also covers a reopen (no `cl` after this close's own showed, or
-  a later one: an older close's `cl` is the lag, not a reopen), three polls in a row offline (one is a
-  daemon restarting itself), and sixty unreadable polls in a row.
+  drain's `cl` since status lags. Exit 1 also covers a reopen (a status without `cl` that was sampled after
+  the close — `status.at` later than the close's `cl`, both the target daemon's clock — or after this close's own
+  `cl` had shown; a status sampled before the close and an older close's `cl` are the lag, not a reopen; a later
+  `cl` is a reopen and a new close), an outage of `RESTART_GRACE_MS` (20 s, the daemon's own restart budget: a
+  daemon restarting itself is not an exit) measured from the first offline sighting, and sixty unreadable polls
+  in a row.
   MCP `list_machines` adds `drain` to a closed machine, reading this machine's own sessions through
   `local.request` (the broker refuses `self_target`).
 - **Skew.** An older PWA, MCP or archivist parsing a queue reply drops a `trigger: "drain"` successor

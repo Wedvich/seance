@@ -16,6 +16,7 @@ import {
 } from "@seance/shared";
 import { advertises, resolveMachine, type AutoEnqueued } from "./auto.ts";
 import { SCHEDULER_NEEDS_NEWER_DAEMON, type Fleet, type FleetLease, type SchedulerLeg } from "./fleet.ts";
+import { RESTART_GRACE_MS } from "./local-client.ts";
 
 /**
  * Closing and reopening a machine as an app-role client does it, apart from the MCP SDK so `seanced
@@ -126,7 +127,7 @@ export interface DrainWaitOutcome {
  * Null when the queue could not be read.
  */
 export async function queueTasksFor(
-  leg: SchedulerLeg,
+  leg: Pick<SchedulerLeg, "queue" | "queueByIdUnsupported">,
   paneTaskIds: readonly string[],
 ): Promise<readonly Task[] | null> {
   const reply = await leg.queue().catch(() => null);
@@ -141,17 +142,17 @@ export async function queueTasksFor(
   return [...reply.tasks, ...more.tasks.filter((t) => asked.has(t.id) && !known.has(t.id))];
 }
 
-const OFFLINE_POLLS = 3;
 const UNREADABLE_POLLS = 60;
 
 /**
  * Blocks until the machine named by a close is empty (code 0) or only work that cannot move is left
  * (code 2, one line per item), and fails (code 1) when it reopens or goes offline. Polls: no frame says
  * "empty". `closedAt` is the close reply's `cl`: status lags a close by up to the relay's status floor, so
- * a status without `cl` is a reopen only after this close's own has shown it (an older close's `cl` is that lag
- * too; a later one is a reopen and a new close). A single failed read or a momentary disconnect (a daemon
- * restarting itself) never ends the wait: it takes `OFFLINE_POLLS` offline polls in a row, or `UNREADABLE_POLLS`
- * unreadable ones.
+ * a status without `cl` is a reopen only when it was sampled after the close (`at` later than `closedAt`) or
+ * after this close's own `cl` had shown (a status sampled before the close, or an older close's `cl`, is that
+ * lag; a later `cl` is a reopen and a new close). A single failed read or a momentary disconnect (a daemon
+ * restarting itself) never ends the wait: it takes an outage of `offlineGraceMs` (default `RESTART_GRACE_MS`,
+ * the daemon's own restart budget), or `UNREADABLE_POLLS` unreadable polls in a row.
  * Nothing here may call `log.ts`.
  */
 export async function waitForDrain(opts: {
@@ -159,6 +160,8 @@ export async function waitForDrain(opts: {
   readonly deviceId: string;
   readonly closedAt: number;
   readonly pollMs?: number;
+  /** How long a machine may stay offline before the wait gives up; tests only. */
+  readonly offlineGraceMs?: number;
   readonly print?: (line: string) => void;
 }): Promise<DrainWaitOutcome> {
   const { fleet, deviceId } = opts;
@@ -166,7 +169,8 @@ export async function waitForDrain(opts: {
   const print = opts.print ?? ((): void => undefined);
   let sawCurrent = false;
   let lastLine = "";
-  let offline = 0;
+  const offlineGraceMs = opts.offlineGraceMs ?? RESTART_GRACE_MS;
+  let offlineSince: number | null = null;
   let unreadable = 0;
   for (;;) {
     let lease: FleetLease;
@@ -179,20 +183,22 @@ export async function waitForDrain(opts: {
       await sleep(pollMs);
       continue;
     }
-    try {
+    // Labelled so the offline branch leaves through `finally` (the lease is released) to the common sleep.
+    poll: try {
       const machine = lease.machines.find((m) => m.deviceId === deviceId);
       if (machine === undefined || !machine.connected) {
-        offline += 1;
-        if (offline >= OFFLINE_POLLS)
+        offlineSince ??= Date.now();
+        if (Date.now() - offlineSince >= offlineGraceMs)
           return { code: 1, text: `${machine?.name ?? deviceId} went offline while draining` };
-        // oxlint-disable-next-line no-await-in-loop -- a wait between polls
-        await sleep(pollMs);
-        continue;
+        break poll;
       }
-      offline = 0;
+      offlineSince = null;
       const cl = closedAt(machine);
       if (cl === opts.closedAt) sawCurrent = true;
-      if ((cl === null && sawCurrent) || (cl !== null && cl > opts.closedAt)) {
+      // `status.at` (seconds) and `closedAt` are the daemon's own clock: a status sampled after the close that
+      // carries no `cl` says the machine was reopened before this close ever showed.
+      const sampledAfter = machine.status !== undefined && machine.status.at * 1000 > opts.closedAt;
+      if ((cl === null && (sawCurrent || sampledAfter)) || (cl !== null && cl > opts.closedAt)) {
         return { code: 1, text: `${machine.name} was reopened; the drain stopped` };
       }
       // oxlint-disable-next-line no-await-in-loop -- sessions first: they say which tasks the queue must name

@@ -19,7 +19,7 @@ import {
 import { startBrokerDouble } from "../test/broker-double.ts";
 import { fakeRelay, machine } from "../test/fake-app-relay.ts";
 import { LazyRelay } from "./app-relay.ts";
-import { waitForDrain } from "./availability-client.ts";
+import { queueTasksFor, waitForDrain } from "./availability-client.ts";
 import { brokerFail, brokerOk } from "./broker-protocol.ts";
 import {
   autoFleet,
@@ -1064,6 +1064,7 @@ describe("seanced close --wait", () => {
   async function wait(
     fake: ReturnType<typeof fakeRelay>,
     pollMs = 1,
+    offlineGraceMs = 30,
   ): Promise<{ code: number; text: string; printed: string[] }> {
     const lazy = new LazyRelay({ create: () => fake });
     const printed: string[] = [];
@@ -1073,6 +1074,7 @@ describe("seanced close --wait", () => {
         deviceId: "device-1",
         closedAt: CL,
         pollMs,
+        offlineGraceMs,
         print: (line) => printed.push(line),
       });
       return { ...outcome, printed };
@@ -1195,13 +1197,34 @@ describe("seanced close --wait", () => {
     expect(outcome).toMatchObject({ code: 1, text: "MacBook Pro was reopened; the drain stopped" });
   });
 
-  test("a disconnect shorter than three polls is a blip, not an exit", async () => {
+  test("a disconnect shorter than the offline grace is a blip, not an exit", async () => {
     const fake = polled(closedBox({ connected: false }), {
       sessions: () => ({ sessions: [], at: 1 }),
       queue: () => ({ tasks: [], at: 1 }),
     });
     setTimeout(() => fake.setState({ machines: [closedBox()] }), 25);
-    expect((await wait(fake, 20)).code).toBe(0);
+    expect((await wait(fake, 5, 2_000)).code).toBe(0);
+  });
+
+  test("a status sampled after the close that carries no cl is a reopen, though this close never showed", async () => {
+    const fake = polled(closedBox({ status: { at: CL / 1000 + 5, scan: 1, cpu: 0, mem: 0, free: 1 } }), {
+      sessions: () => ({ sessions: [pane("t1")], at: 1 }),
+      queue: () => ({ tasks: [task("t1")], at: 1 }),
+    });
+    expect(await wait(fake)).toMatchObject({ code: 1, text: "MacBook Pro was reopened; the drain stopped" });
+  });
+
+  test("the by-id queue ask is skipped on a leg that cannot carry it, and sent on one that can", async () => {
+    const asked: unknown[] = [];
+    const queue = (request?: { tasks?: readonly string[] }): Promise<{ tasks: Task[]; at: number }> => {
+      asked.push(request);
+      return Promise.resolve({ tasks: request?.tasks === undefined ? [] : [task("old-t")], at: 1 });
+    };
+    expect(await queueTasksFor({ queue, queueByIdUnsupported: true }, ["old-t"])).toEqual([]);
+    expect(asked).toEqual([undefined]);
+    asked.length = 0;
+    expect(await queueTasksFor({ queue }, ["old-t"])).toEqual([task("old-t")]);
+    expect(asked).toEqual([undefined, { tasks: ["old-t"] }]);
   });
 
   test("an older close's cl is not a reopen", async () => {
