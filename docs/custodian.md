@@ -380,9 +380,9 @@ delivery); nothing else here does.
 ## The launch (verified)
 
 Verified 2026-11-13 on macOS with Claude Code 2.1.323, against the current docs and by running
-fenced `haiku` rounds in a private tmux server through two batteries of commands. Linux is untested
-(below). Re-verify on a Claude Code upgrade: several of these are behaviours, not documented
-contracts.
+fenced `haiku` rounds in a private tmux server through two batteries of commands. Linux was run the
+same day, with its own fence keys (Linux, below). Re-verify on a Claude Code upgrade:
+several of these are behaviours, not documented contracts.
 
 ### The command
 
@@ -527,6 +527,50 @@ The dir must be trusted in that exclave's `.claude.json`: its own entry, or an a
 dialog. One in `default`, where `~` is not trusted, stopped at "Is this a project you created or one
 you trust?", which nobody answers, and Remote Control never came up.
 
+### Linux
+
+Run 2026-11-13 with Claude Code 2.1.323 on Debian 13 in an LXC container (Proxmox),
+with real `haiku` rounds in a window of the daemon's own tmux server, so under its `--system` unit's
+environment (no user bus, no `XDG_RUNTIME_DIR`). Held as on macOS: Bash and Read only; writes
+refused everywhere but `$CLAUDE_CODE_TMPDIR/claude-<uid>` (the cwd, the exclave root, the worktree,
+`/tmp/claude-<uid>` and `/tmp` all `Read-only file system`), with the same short prefix; reads,
+`git` (fetch included) and `gh` reads on any path; the deny list refusing in every form above (`gh
+api -X …` needs `Bash(gh api -X*)` beside `Bash(gh api * -X*)`, as `*` matches no empty gap);
+`seanced custodian` allowed; a host off `allowedDomains`, `eval` and `find -delete` refused without
+a prompt; `bash -c` and `xargs -n1 rm` getting through; and the round landing in the exclave its
+`$PWD` picks (`EXCLAVE=pengefix2`, `CLAUDE_CONFIG_DIR=~/.claude-pengefix2`). Trust behaved as
+above: a round dir under a trusted repo started; `~/pengefix2/.seance-custodian`, whose root this
+box has never trusted, stopped at the dialog. Differences:
+
+- **Prerequisite: `bubblewrap` and `socat`** (`apt install bubblewrap socat`). Without them
+  `failIfUnavailable` refuses to start: "sandbox required but unavailable … bubblewrap (bwrap) not
+  installed, socat not installed". The daemon's doctor should name them.
+- **No `caffeinate`.** It is macOS-only; the Linux command drops it.
+- **`enableWeakerNetworkIsolation`** is for macOS's `trustd`; it was left set, and `gh` worked. Not
+  tried without it.
+- **Unix sockets are all or none.** `allowUnixSockets` is "macOS only … Ignored on Linux (seccomp
+  cannot filter by path)". With it, `tmux capture-pane` and the daemon's local socket fail with
+  `Operation not permitted`: the seccomp filter refuses every `AF_UNIX` socket, so C18's
+  `capture-pane` and C19's `seanced custodian` cannot run. The Linux key is `allowAllUnixSockets:
+  true`, which turns the filter off and reaches every socket the user can (Docker's, an
+  ssh-agent's, a bus), not just the two directories. `excludedCommands` did not run `tmux
+  capture-pane` unsandboxed under `allowUnsandboxedCommands: false`.
+- **On this host `allowAllUnixSockets` alone breaks every command.** With the seccomp filter off,
+  Claude Code passes bubblewrap `--disable-userns`, which writes
+  `/proc/sys/user/max_user_namespaces`;
+  LXC mounts `/proc/sys` read-only, so every sandboxed command failed with `bwrap: cannot open
+  /proc/sys/user/max_user_namespaces: Read-only file system`. Adding `enableWeakerNestedSandbox:
+  true` makes every command above work, but drops `--disable-userns` (Claude Code warns a sandboxed
+  command "that creates [a user namespace] can undo the write denies"; `unshare -Ur` ran) and leaves
+  the host `/proc` readable. On a VM or bare-metal Linux `allowAllUnixSockets` alone is expected to
+  work, but was not tested: no such box was online.
+
+**Decided (owner, 2026-11-13): accept both on Linux.** The Linux fence sets `allowAllUnixSockets:
+true` in place of `allowUnixSockets`, and adds `enableWeakerNestedSandbox: true` only where
+`--disable-userns` cannot run (a container whose `/proc/sys` is read-only); `seanced doctor` names
+the weaker mode. A deliberate command can then get past the write fence, which C21 already allows:
+the fence is for a cheap model's mistakes, and C19 bounds what a session or worktree change can do.
+
 ## Open details (build time)
 
 - **Trusting a round dir.** A round cannot answer the trust dialog (above), so an exclave whose
@@ -534,9 +578,6 @@ you trust?", which nobody answers, and Remote Control never came up.
   `.claude.json`), skips such an exclave as C12 skips a lapsed one, and `seanced doctor` names it;
   the owner trusts it once by running `claude` in that dir. Writing the entry ourselves would race
   every running session's rewrite of `.claude.json` (DESIGN.md, "Exclaves"). The owner's call.
-- **Linux.** Untested: the sandbox is bubblewrap there, `allowUnixSockets` is macOS-only
-  (`allowAllUnixSockets` may be what Linux needs), and the temp fallback rule may differ. Verify on a
-  Linux box before the seat ships there.
 - **Importing the scheduler's scoring.** `scheduler/test/layering.test.ts` lets only the leader's
   modules host the scheduler library. C12 needs the pure scoring function outside them: either the
   test's list grows by the custodian's one module, or the function moves somewhere both import.
