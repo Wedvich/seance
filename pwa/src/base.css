@@ -51,6 +51,13 @@ textarea {
   font-variant-ligatures: none;
 }
 
+/* Translucent and background only: the prompt textarea's glyphs are transparent and
+   painted by a mirror behind it, so an opaque selection (the browser's default) hides
+   the selected text, and a `color` here would draw it twice. */
+::selection {
+  background: color-mix(in srgb, var(--acc) 30%, transparent);
+}
+
 :focus-visible {
   outline: 2px solid var(--acc);
   outline-offset: 2px;
