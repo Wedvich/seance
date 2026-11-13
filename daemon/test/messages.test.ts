@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { INBOX_MAX_BYTES, INBOX_MAX_MESSAGES, MESSAGE_MAX, MESSAGE_PUSH_MAX } from "@seance/shared";
 import { messageAudit, type MessageAudit } from "../src/audit.ts";
+import { exec } from "../src/exec.ts";
 import { startLocalSocket, type LocalSocketHandle } from "../src/local-socket.ts";
 import type { InboxLine } from "../src/message-frame.ts";
 import { createMessages, type ListenerSink, type Messages, type MessagesDeps } from "../src/messages.ts";
@@ -317,7 +318,7 @@ describe("the real listener child and a real sender", () => {
     expect((await readLines(outA)).length).toBe(1);
   });
 
-  test("the CLI's exit code is the mod's backoff signal: 3 for unsupported, 4 for a pane in no tmux of the daemon's, 2 for no daemon, a close with no reply, and a reader that went away", async () => {
+  test("the CLI's exit code is the mod's backoff signal: 3 for unsupported, 5 for a pane in no tmux of the daemon's, 2 for no daemon, a close with no reply, and a reader that went away", async () => {
     const exitOf = async (name: string, state: string): Promise<string> => {
       const out = join(base, `${name}.out`);
       const proc = Bun.spawn(["sh", "-c", inboxCommand(out, state)], { stdout: "ignore", stderr: "ignore" });
@@ -339,7 +340,7 @@ describe("the real listener child and a real sender", () => {
     }
 
     // This process runs in no pane of the daemon's tmux: its pid walks to none.
-    expect(await exitOf("x-unbound", stateDir)).toBe("4");
+    expect(await exitOf("x-unbound", stateDir)).toBe("5");
 
     // Nothing listening.
     expect(await exitOf("x-nodaemon", join(base, "exit-none"))).toBe("2");
@@ -360,19 +361,28 @@ describe("the real listener child and a real sender", () => {
 
   test("a child whose stdout has no reader exits 2 at its first write, so the daemon holds the next message instead of calling it delivered", async () => {
     const receiver = await launched("epipe");
+    const sender = await launched("epipesend");
     const out = join(base, "epipe.out");
-    const go2 = join(base, "epipe-start.go");
-    // `true` is gone before the child starts: its first write, the ack, meets a closed pipe.
+    const readerPid = join(base, "epipe.reader");
+    // The reader records its pid (atomically) and exits at once; the child starts only once that pid is gone, so
+    // its first write, the ack, meets a closed pipe rather than racing the reader's exit.
+    const reader = `echo $$ > ${shq(`${readerPid}.part`)} && mv ${shq(`${readerPid}.part`)} ${shq(readerPid)}`;
     const child = `SEANCE_STATE_DIR=${shq(stateDir)} ${shq(process.execPath)} ${shq(MAIN)} inbox; echo $? > ${shq(`${out}.exit`)}`;
-    const command = `( while [ ! -e ${shq(go2)} ]; do sleep 0.05; done; ${child} ) | true`;
+    const wait = `while [ ! -e ${shq(readerPid)} ] || kill -0 "$(cat ${shq(readerPid)})" 2>/dev/null; do sleep 0.05; done`;
+    const command = `( ${wait}; ${child} ) | sh -c ${shq(reader)}`;
     const listeners = await runner("epipe-listener", command, receiver);
     await listeners.go();
-    await new Promise<void>((resolve) => {
-      setTimeout(resolve, 100);
-    });
-    await writeFile(go2, "");
     await pollUntil(() => Bun.file(`${out}.exit`).exists(), "the child to exit on its broken stdout");
     expect((await readFile(`${out}.exit`, "utf8")).trim()).toBe("2");
+
+    // The connection is gone with the child, so the message is held for a listener, not called delivered.
+    const send = await senderCommand("epipe-send", [message(receiver, "note", "to a dead reader")]);
+    const from = await runner("epipe-from", send.command, sender);
+    await from.go();
+    await pollUntil(() => Bun.file(send.replies).exists(), "the sender's reply");
+    expect(JSON.parse(await readFile(send.replies, "utf8"))).toEqual([
+      { ok: true, id: expect.stringMatching(MESSAGE_ID), outcome: "sent" },
+    ]);
   });
 
   test("a child orphaned by its parent's death exits within seconds and drops its binding, so the next message is held, not called delivered", async () => {
@@ -389,18 +399,16 @@ describe("the real listener child and a real sender", () => {
     await pollUntil(async () => (await readLines(out)).length > 0, "the listener's ack");
     const pidOf = async (file: string): Promise<number> => Number((await readFile(file, "utf8")).trim());
     const [parent, child] = [await pidOf(parentFile), await pidOf(childFile)];
-    const alive = (pid: number): boolean => {
-      try {
-        process.kill(pid, 0);
-        return true;
-      } catch {
-        return false;
-      }
+    // A zombie still answers `kill(pid, 0)`, and whatever reaps an orphan here (init, a subreaper, a container's
+    // PID 1) may not do it promptly: exited is what counts.
+    const alive = async (pid: number): Promise<boolean> => {
+      const ps = await exec(["ps", "-o", "stat=", "-p", String(pid)]);
+      return ps.exitCode === 0 && !ps.stdout.trim().startsWith("Z");
     };
-    expect(alive(child)).toBe(true);
+    expect(await alive(child)).toBe(true);
 
     process.kill(parent, "SIGKILL");
-    await pollUntil(() => !alive(child), "the orphaned child to exit", 10_000);
+    await pollUntil(async () => !(await alive(child)), "the orphaned child to exit", 10_000);
 
     const send = await senderCommand("orphan-send", [message(receiver, "note", "to a dead session")]);
     const from = await runner("orphan-from", send.command, sender);
@@ -537,7 +545,9 @@ describe("the daemon's inbox", () => {
   });
 
   test("each held message has its own grace: an earlier one's expiry takes no later one with it", async () => {
-    const messages = setup({ graceMs: 600 });
+    // Real timers: the second message must still be held when the first expires, and the listener must connect
+    // between the two expiries, so the margin is the gap (1.5 s), wide enough for a slow `list-panes`.
+    const messages = setup({ graceMs: 3_000 });
     const receiver = await launched("peritem");
     const sender = await launched("peritemsend");
     const target = await pane("peritem-target", receiver);
@@ -545,7 +555,7 @@ describe("the daemon's inbox", () => {
     await messages.send(message(receiver, "note", "first"), from.pid);
     // The second is held part-way through the first's grace: a fixed wait is the scenario itself.
     await new Promise<void>((resolve) => {
-      setTimeout(resolve, 400);
+      setTimeout(resolve, 1_500);
     });
     await messages.send(message(receiver, "note", "second"), from.pid);
     await pollUntil(() => inAudits("nolistener").length === 1, "the first message's grace to end");
