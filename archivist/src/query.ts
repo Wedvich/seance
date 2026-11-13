@@ -1,9 +1,11 @@
 import {
+  ARCHIVE_MACHINES_MAX,
   ARCHIVE_TASKS_PAGE,
   parseArchiveMetricsRequest,
   parseArchiveTasksRequest,
   parseTask,
   REPLY_JSON_BUDGET,
+  type ArchivedMachine,
   type ArchivedTask,
   type ArchiveMetricsRequest,
   type ArchiveTasksCursor,
@@ -21,6 +23,9 @@ type Log = { readonly warn: (line: string) => void };
 
 /** Room a page keeps for its own `ok`, `total` and `next` beside the rows. */
 const PAGE_FRAME_BYTES = 512;
+
+/** The most of a first page the machine list may take: machine names have no length bound, and the rows need the rest. */
+export const MACHINES_BUDGET_BYTES = 8_000;
 
 function jsonBytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), "utf8");
@@ -50,6 +55,19 @@ function archivedEntry(row: ArchivedRow): ArchivedTask | null {
   };
 }
 
+/** The newest machines that fit `MACHINES_BUDGET_BYTES`. */
+function machinesWithin(all: readonly ArchivedMachine[]): ArchivedMachine[] {
+  const kept: ArchivedMachine[] = [];
+  let left = MACHINES_BUDGET_BYTES;
+  for (const machine of all) {
+    const size = jsonBytes(machine) + 1;
+    if (size > left) break;
+    left -= size;
+    kept.push(machine);
+  }
+  return kept;
+}
+
 function cursorOf(row: ArchivedRow): ArchiveTasksCursor {
   return { endedAt: row.endedAt, createdAt: row.createdAt, id: row.id };
 }
@@ -59,16 +77,19 @@ function cursorOf(row: ArchivedRow): ArchiveTasksCursor {
  * `queue` budget, which seals inside `ENVELOPE_MAX_CT_LENGTH`), never fewer
  * than one while any match. `next` follows the last row consumed whenever a
  * row is left, so a page cut short by size loses nothing. A record that does
- * not parse is skipped, counted in one warning, and still consumed.
+ * not parse is skipped, counted in one warning, and still consumed. A page
+ * asked without `before` also lists the machines the archive holds tasks for,
+ * the filters aside, charged against the same budget; a later page repeats none.
  */
 export function createTasksAnswer(
-  archive: Pick<Archive, "queryTasks">,
+  archive: Pick<Archive, "queryTasks" | "taskMachines">,
   log: Log,
 ): (query: ArchiveTasksRequest) => ArchiveTasksResponse {
   return (query) => {
     const limit = query.limit ?? ARCHIVE_TASKS_PAGE;
     const { rows, total } = archive.queryTasks(query, limit + 1);
-    let left = REPLY_JSON_BUDGET - PAGE_FRAME_BYTES;
+    const machines = query.before === undefined ? machinesWithin(archive.taskMachines(ARCHIVE_MACHINES_MAX)) : null;
+    let left = REPLY_JSON_BUDGET - PAGE_FRAME_BYTES - (machines === null ? 0 : jsonBytes(machines));
     const tasks: ArchivedTask[] = [];
     let consumed: ArchivedRow | null = null;
     let cut = false;
@@ -91,7 +112,13 @@ export function createTasksAnswer(
     }
     if (unreadable > 0) log.warn(`archive tasks: skipped ${unreadable} unreadable record(s)`);
     const more = cut || rows.length > limit;
-    return { ok: true, tasks, total, next: more && consumed !== null ? cursorOf(consumed) : null };
+    return {
+      ok: true,
+      tasks,
+      total,
+      next: more && consumed !== null ? cursorOf(consumed) : null,
+      ...(machines === null ? {} : { machines }),
+    };
   };
 }
 

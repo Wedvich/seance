@@ -4,19 +4,27 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   APP_ID,
+  ARCHIVE_MACHINES_MAX,
   ENVELOPE_MAX_CT_LENGTH,
   importPsk,
   parseArchiveTasksReply,
   parseMetricsReply,
   seal,
   toBase64,
+  type ArchivedMachine,
   type ArchiveTasksRequest,
   type Plain,
   type Task,
 } from "@seance/shared";
 import { Archive, taskRow, type ArchivedRow } from "./archive.ts";
 import { MetricsArchive } from "./metrics-archive.ts";
-import { answerArchiveMetrics, answerArchiveTasks, createMetricsAnswer, createTasksAnswer } from "./query.ts";
+import {
+  answerArchiveMetrics,
+  answerArchiveTasks,
+  createMetricsAnswer,
+  createTasksAnswer,
+  MACHINES_BUDGET_BYTES,
+} from "./query.ts";
 
 const RAW_ACCOUNT = "11111111-2222-3333-4444-555555555555:66666666-7777-8888-9999-000000000000";
 const PROMPT = "PROMPT-TEXT the launch codes";
@@ -112,6 +120,44 @@ describe("archive-tasks", () => {
     expect(answer({ title: "launch codes" }).tasks).toEqual([]);
     expect(answer({ title: "the thing" }).tasks).toHaveLength(1);
   });
+
+  test("a first page lists every machine the archive holds tasks for by last known name, the filters aside; a later page none", () => {
+    archive.applyFleet(
+      { machines: [{ deviceId: "dev-gone", name: "old-box", platform: "linux", build: null, connected: true }], leader: null },
+      10,
+    );
+    // Retired: it keeps its row and name (A24).
+    archive.applyFleet({ machines: [], leader: null }, 20);
+    const put = (id: string, deviceId: string, machine: string | null, at: number): void => {
+      const row = taskRow(task({ id, assignment: { deviceId, exclave: "default", clone: "seance" } }), 1, {
+        machine,
+        account: null,
+      });
+      if (row === null) throw new Error("finished task refused");
+      archive.upsertTask(row, at);
+    };
+    put("t-1", "dev-gone", "stale-name", 100);
+    put("t-2", "dev-gone", null, 300);
+    put("t-3", "dev-x", "row-box-old", 150);
+    put("t-4", "dev-x", "row-box", 200);
+    put("t-5", "dev-y", null, 50);
+    const { assignment: _assignment, ...unassigned } = task({ id: "t-6" });
+    const bare = taskRow(unassigned, 1, { machine: null, account: null });
+    if (bare === null) throw new Error("finished task refused");
+    archive.upsertTask(bare, 400);
+
+    const answer = createTasksAnswer(archive, quiet);
+    const machines = [
+      { deviceId: "dev-gone", name: "old-box", lastSeen: 300 },
+      { deviceId: "dev-x", name: "row-box", lastSeen: 200 },
+      { deviceId: "dev-y", name: null, lastSeen: 50 },
+    ];
+    expect(answer({}).machines).toEqual(machines);
+    expect(answer({ repo: "elsewhere", machine: "dev-y" }).machines).toEqual(machines);
+    const later = answer({ before: { endedAt: 300, createdAt: 1_000, id: "t-2" } });
+    expect(later.tasks.length).toBeGreaterThan(0);
+    expect("machines" in later).toBe(false);
+  });
 });
 
 describe("page filling", () => {
@@ -133,7 +179,10 @@ describe("page filling", () => {
     }));
   }
 
-  function fake(all: readonly ArchivedRow[]): { queryTasks: Archive["queryTasks"]; readonly asked: number[] } {
+  function fake(
+    all: readonly ArchivedRow[],
+    machines: readonly ArchivedMachine[] = [],
+  ): Pick<Archive, "queryTasks" | "taskMachines"> & { readonly asked: number[] } {
     const asked: number[] = [];
     return {
       asked,
@@ -141,8 +190,35 @@ describe("page filling", () => {
         asked.push(limit);
         return { rows: all.slice(0, limit), total: all.length };
       },
+      taskMachines: (limit: number) => machines.slice(0, limit),
     };
   }
+
+  test("a first page's machines are cut to their budget, newest first, and the rows still seal inside an envelope", async () => {
+    const machines = Array.from({ length: ARCHIVE_MACHINES_MAX }, (_, i) => ({
+      deviceId: `dev-${i}`,
+      name: "n".repeat(200),
+      lastSeen: 10_000 - i,
+    }));
+    const reply = await answerArchiveTasks(
+      plain("archive-tasks", { limit: 50 }),
+      APP_ID,
+      createTasksAnswer(fake(rows(60), machines), quiet),
+      quiet,
+    );
+    if (reply === null) throw new Error("dropped");
+    const parsed = parseArchiveTasksReply(reply.payload);
+    if (parsed === null || !parsed.ok) throw new Error("not an ok page");
+    const listed = parsed.machines ?? [];
+    expect(listed.length).toBeGreaterThan(0);
+    expect(listed.length).toBeLessThan(ARCHIVE_MACHINES_MAX);
+    expect(listed).toEqual(machines.slice(0, listed.length));
+    expect(JSON.stringify(listed).length).toBeLessThanOrEqual(MACHINES_BUDGET_BYTES);
+    expect(parsed.tasks.length).toBeGreaterThan(0);
+    const key = await importPsk(toBase64(crypto.getRandomValues(new Uint8Array(32))));
+    const sealed = await seal(key, { to: APP_ID, from: "archivist" }, reply);
+    expect(sealed.ct.length).toBeLessThanOrEqual(ENVELOPE_MAX_CT_LENGTH);
+  });
 
   test("a full page of the largest rows is cut to the budget, seals inside an envelope, and points past its last row", async () => {
     const archive = fake(rows(60));
