@@ -1245,7 +1245,7 @@ export function buildMcpServer(
         repo: z
           .string()
           .describe(
-            "A repo name from list_machines that means one repo across the fleet, or the repo's origin when it does not (host/path, or the remote URL as git prints it; case does not matter). Under a machine or account pin, the name is read only where the pin points: the pinned machine's repo list (cut to its clones where the pinned account is signed in), the pinned account's clones, or the origin",
+            "A repo name from list_machines that means one repo across the fleet (a bare basename such as `backend` also matches names listed as `parent/backend`), or the repo's origin when it does not (host/path, or the remote URL as git prints it; case does not matter). Under a machine or account pin, the name is read only where the pin points: the pinned machine's repo list (cut to its clones where the pinned account is signed in), the pinned account's clones, or the origin",
           ),
         prompt: z.string().optional().describe("The task for the spawned session"),
         title: z
