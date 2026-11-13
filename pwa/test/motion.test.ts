@@ -38,13 +38,13 @@ describe("the waiting rings", () => {
  * out as a collapsed row.
  */
 describe("the menu popover", () => {
-  test("declares nothing while open but display and what it transitions", () => {
+  test("declares nothing while open but display, its open timing and what it transitions", () => {
     const transitioned = (/transition:([^;]*);/u.exec(declarations(".menu"))?.[1] ?? "")
       .split(",")
       .map((part) => part.trim().split(/\s+/u)[0]);
     const open = [...declarations(".menu:popover-open").matchAll(/([\w-]+)\s*:/gu)].map((match) => match[1]);
     expect(transitioned).toContain("display");
     expect(open).toContain("display");
-    expect(open.filter((property) => !transitioned.includes(property))).toEqual([]);
+    expect(open.filter((property) => property !== "transition" && !transitioned.includes(property))).toEqual([]);
   });
 });
