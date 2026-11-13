@@ -44,6 +44,10 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   away: update, restart, reboot, shutdown, sleep, unknown), how the relay keeps it, what clients
   and the leader do with it, macOS sleep/DarkWake, and the shutdown drain on a dying box. Read it
   before touching shutdown, presence or the systemd unit.
+- **docs/drain.md** — spec, nothing built: closing a machine to new work (a sticky, daemon-owned
+  state in `status`, a `closed` route filter) and draining what runs there through the successor
+  pass (the session asked to pass itself, then an outside pass, then a report of what stays). Read
+  it before touching machine availability, routing filters or the pass triggers.
 
 Like DESIGN.md, the docs/ files are part of the record: a change that alters behavior they describe
 updates them in the same commit. They are not auto-discovered — this list is how sessions find them.
