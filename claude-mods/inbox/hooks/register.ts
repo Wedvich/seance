@@ -13,9 +13,9 @@ import type { EngineInterface, Register } from "claude-code";
  * not the person's own words and must read as a plugin's), never `$.prompt.fill`
  * and never tmux keys (they would land in whatever the person is typing). A
  * question or a request is `$.prompt.submit`, which waits for a running turn to
- * end and wakes an idle session. A note is `$.session.append`, a row the model
- * reads at its next turn without waking it, held back only while a dialog is open
- * and flushed when the last one closes. Any text over the daemon's push cap
+ * end and wakes an idle session. A note is `$.session.append`, a row added at once
+ * (the model reads it within a running turn too) that never wakes an idle session,
+ * held back only while a dialog is open and flushed when the last one closes. Any text over the daemon's push cap
  * arrives as a stub naming `read_messages`, whose body is kept here.
  *
  * Every message is also kept (newest within the cap the daemon's ack names) for
@@ -40,10 +40,10 @@ const DEFAULT_KEEP = { messages: 32, bytes: 262_144 } as const;
 
 const FIRST_RETRY_MS = 1_000;
 const MAX_RETRY_MS = 15_000;
-/** An explicit `unsupported`: the daemon runs no message delivery at all. */
-const UNSUPPORTED_RETRY_MS = 5 * 60_000;
-/** The CLI's exit code for an explicit `unsupported` reply. */
-const EXIT_UNSUPPORTED = 3;
+/** A refusal a retry does not change soon: the daemon runs no delivery, or will not bind this pane. */
+const REFUSED_RETRY_MS = 5 * 60_000;
+/** The CLI's exit codes for `unsupported` (3) and for a refused pane, `unbound` or `untasked` (4). */
+const REFUSED_EXITS: ReadonlySet<number | null> = new Set([3, 4]);
 
 /** session.end reasons after which the same process, in the same pane, carries on. */
 const CONTINUES: ReadonlySet<string> = new Set(["clear", "resume"]);
@@ -68,10 +68,11 @@ export function daemonMain(pluginRoot: string): string {
 /**
  * How long to wait before the child is started again, and the failure delay for the
  * one after. An exit after an ack (a rebind, a daemon restart) restarts at once-ish
- * and resets the failure delay; an explicit `unsupported` waits out a daemon that
- * must be updated; anything else, including a close with no reply and no daemon at
- * all, doubles from one second to fifteen, since a pulled-but-not-restarted daemon
- * looks exactly like that during a self-update. Exported for tests.
+ * and resets the failure delay; an explicit refusal (`unsupported`, an unbindable
+ * or untasked pane) waits out what a retry would not change; anything else,
+ * including a close with no reply and no daemon at all, doubles from one second to
+ * fifteen, since a pulled-but-not-restarted daemon looks exactly like that during a
+ * self-update. Exported for tests.
  */
 export function restartDelay(
   exitCode: number | null,
@@ -79,7 +80,7 @@ export function restartDelay(
   failureMs: number,
 ): { readonly delayMs: number; readonly failureMs: number } {
   if (acked) return { delayMs: FIRST_RETRY_MS, failureMs: FIRST_RETRY_MS };
-  if (exitCode === EXIT_UNSUPPORTED) return { delayMs: UNSUPPORTED_RETRY_MS, failureMs };
+  if (REFUSED_EXITS.has(exitCode)) return { delayMs: REFUSED_RETRY_MS, failureMs };
   return { delayMs: failureMs, failureMs: Math.min(failureMs * 2, MAX_RETRY_MS) };
 }
 
@@ -112,13 +113,34 @@ interface Tracker {
   /** `push` texts of notes waiting for the dialogs to close. */
   pendingNotes: string[];
   buffer: string;
-  listening: boolean;
-  stopped: boolean;
+  /** The running listen loop, null before the first `session.start` and after a terminal `session.end`. */
+  loop: Loop | null;
   registered: boolean;
   /** The current child has been acked: it spoke to a daemon that runs delivery. */
   acked: boolean;
   /** Ids for an AskUserQuestion call that carries none. */
   anonymous: number;
+}
+
+/** One listen loop's lifetime. A new loop never shares a `stopped` flag with an old one still winding down. */
+interface Loop {
+  stopped: boolean;
+  /** Resolves when the loop is told to stop, so a wait on the child or on a backoff ends at once. */
+  readonly cancelled: Promise<void>;
+  readonly cancel: () => void;
+}
+
+function newLoop(): Loop {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  const loop: Loop = {
+    stopped: false,
+    cancelled: promise,
+    cancel: () => {
+      loop.stopped = true;
+      resolve();
+    },
+  };
+  return loop;
 }
 
 function newTracker(): Tracker {
@@ -129,8 +151,7 @@ function newTracker(): Tracker {
     held: [],
     pendingNotes: [],
     buffer: "",
-    listening: false,
-    stopped: false,
+    loop: null,
     registered: false,
     acked: false,
     anonymous: 0,
@@ -228,8 +249,8 @@ function onText($: EngineInterface, t: Tracker, text: string): void {
   }
 }
 
-/** One child's life: its stdout lines to `onLine`, ending with its exit code (null on a signal or a failed start). */
-async function runChild($: EngineInterface, t: Tracker): Promise<number | null> {
+/** One child's life: its stdout lines to `onLine`, ending with its exit code (null on a signal, a stop or a failed start). */
+async function runChild($: EngineInterface, t: Tracker, loop: Loop): Promise<number | null> {
   t.acked = false;
   t.buffer = "";
   try {
@@ -237,7 +258,12 @@ async function runChild($: EngineInterface, t: Tracker): Promise<number | null> 
     // By hand, not `for await`: the exit code is the generator's return value.
     for (;;) {
       // oxlint-disable-next-line no-await-in-loop -- pieces in order
-      const step = await proc.next();
+      const step = await Promise.race([proc.next(), loop.cancelled]);
+      if (step === undefined) {
+        // The session ended for good: leaving the stream is what kills the child.
+        proc.return({ code: null, signal: null }).catch(() => {});
+        return null;
+      }
       if (step.done === true) return step.value.code;
       // stderr carries nothing the session needs: the CLI is silent by design.
       if (step.value.stream === "stdout") onText($, t, step.value.text);
@@ -250,19 +276,28 @@ async function runChild($: EngineInterface, t: Tracker): Promise<number | null> 
   }
 }
 
-/** The child for the session's life: restarted with backoff until the session ends for good. */
-async function listenLoop($: EngineInterface, t: Tracker): Promise<void> {
+/**
+ * The child for the session's life: restarted with backoff until the session ends for good. The backoff is the
+ * engine's `$.clock.sleep`, never a timer of this module's own: a hot reload cancels the old environment's waits,
+ * which rejects here and ends the loop, where a raw timer would fire into an unloaded `$` and retry as a zombie.
+ */
+async function listenLoop($: EngineInterface, t: Tracker, loop: Loop): Promise<void> {
   let failureMs = FIRST_RETRY_MS;
-  while (!t.stopped) {
-    // oxlint-disable-next-line no-await-in-loop -- one child at a time
-    const code = await runChild($, t);
-    if (t.stopped) return;
-    const next = restartDelay(code, t.acked, failureMs);
-    failureMs = next.failureMs;
-    // oxlint-disable-next-line no-await-in-loop -- the backoff
-    await new Promise<void>((resolve) => {
-      setTimeout(resolve, next.delayMs);
-    });
+  try {
+    while (!loop.stopped) {
+      // oxlint-disable-next-line no-await-in-loop -- one child at a time
+      const code = await runChild($, t, loop);
+      if (loop.stopped) return;
+      const next = restartDelay(code, t.acked, failureMs);
+      failureMs = next.failureMs;
+      // oxlint-disable-next-line no-await-in-loop -- the backoff
+      await Promise.race([$.clock.sleep(next.delayMs), loop.cancelled]);
+    }
+  } catch {
+    // The wait was cancelled with the environment: this loop belongs to one that is gone.
+  } finally {
+    // The next `session.start` may begin a loop of its own; a stopped loop was already replaced or cleared.
+    if (t.loop === loop) t.loop = null;
   }
 }
 
@@ -287,9 +322,10 @@ async function start($: EngineInterface, t: Tracker): Promise<void> {
     });
   }
   // session.start comes again on a hooks-worker respawn or a reload: one child per registration is enough.
-  if (t.listening) return;
-  t.listening = true;
-  listenLoop($, t).catch(() => {
+  if (t.loop !== null) return;
+  const loop = newLoop();
+  t.loop = loop;
+  listenLoop($, t, loop).catch(() => {
     // runChild already swallows; this only keeps a bug here from going unhandled.
   });
 }
@@ -362,9 +398,13 @@ export const register: Register = (on) => {
       sections: [...composed.sections, { id: "inbox:standing", text: t.instruction, scope: "session" as const }],
     };
   }).catch(($, e, next) => next(e));
-  // The module unloading kills the child; this only stops a restart in between.
+  // A session that carries on in the same process keeps its child. Any other end stops the loop and its child here
+  // (the module unloading would too, but a process may outlive an end such as a logout).
   on("session.end", ($, e, next) => {
-    if (!CONTINUES.has(e.reason)) t.stopped = true;
+    if (!CONTINUES.has(e.reason) && t.loop !== null) {
+      t.loop.cancel();
+      t.loop = null;
+    }
     return next(e);
   }).catch(($, e, next) => next(e));
 };

@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from "claude-code/testing";
-import type { Engine } from "claude-code/testing";
+import type { Engine, MockClock } from "claude-code/testing";
 import type { On, ToolCheckDecision } from "claude-code";
 import { daemonMain, restartDelay } from "./register.ts";
 
@@ -17,12 +17,15 @@ interface Child {
   readonly say: (text: string) => void;
   /** The child exits. */
   readonly exit: (code: number | null) => void;
+  /** The stream was left, as the engine does when it kills a child. */
+  readonly killed: () => boolean;
 }
 
 /** Stands in for the `seanced inbox` child: nothing is written until the test says, and it lives until it exits. */
 function fakeChild(on: On): Child {
   const argvs: (readonly string[])[] = [];
   const queue: ({ readonly text: string } | { readonly exit: number | null })[] = [];
+  let killed = false;
   let wake = (): void => {};
   const parked = (): Promise<void> =>
     new Promise<void>((resolve) => {
@@ -30,19 +33,24 @@ function fakeChild(on: On): Child {
     });
   on("process.spawn", async function* (_$, e) {
     argvs.push([...e.argv]);
-    for (;;) {
-      while (queue.length === 0) {
-        // oxlint-disable-next-line no-await-in-loop -- parked until the test speaks
-        await parked();
+    try {
+      for (;;) {
+        while (queue.length === 0) {
+          // oxlint-disable-next-line no-await-in-loop -- parked until the test speaks
+          await parked();
+        }
+        const item = queue.shift();
+        if (item === undefined) continue;
+        if ("exit" in item) return { value: { code: item.exit, signal: null } };
+        yield { stream: "stdout" as const, text: item.text };
       }
-      const item = queue.shift();
-      if (item === undefined) continue;
-      if ("exit" in item) return { value: { code: item.exit, signal: null } };
-      yield { stream: "stdout" as const, text: item.text };
+    } finally {
+      killed = true;
     }
   });
   return {
     argvs,
+    killed: () => killed,
     say: (text) => {
       queue.push({ text });
       wake();
@@ -143,16 +151,17 @@ async function readMessages($: Engine): Promise<string> {
   return typeof read.result === "string" ? read.result : JSON.stringify(read);
 }
 
-/** A session in a pane, its child up and acked. */
-async function acked($: Engine, on: On, ack = ACK): Promise<Child & Delivered> {
+/** A session in a pane, its child up and acked; the clock is the test's, so a backoff waits for `clock.advance`. */
+async function acked($: Engine, on: On, ack = ACK): Promise<Child & Delivered & { readonly clock: MockClock }> {
   mock.env(on, { TMUX_PANE: "%7" });
+  const clock = mock.clock(on);
   const delivered = session(on);
   tools(on);
   const child = fakeChild(on);
   await start($);
   await until(() => child.argvs.length === 1, "the child to start");
   child.say(ack);
-  return { ...child, ...delivered };
+  return { ...child, ...delivered, clock };
 }
 
 describe("daemonMain", () => {
@@ -163,12 +172,13 @@ describe("daemonMain", () => {
 });
 
 describe("restartDelay", () => {
-  test("restarts soon after an ack, backs off after a failure, and waits out an explicit unsupported", () => {
+  test("restarts soon after an ack, backs off after a failure, and waits out an explicit refusal", () => {
     expect(restartDelay(0, true, 8_000)).toEqual({ delayMs: 1_000, failureMs: 1_000 });
     expect(restartDelay(2, false, 1_000)).toEqual({ delayMs: 1_000, failureMs: 2_000 });
     expect(restartDelay(null, false, 8_000)).toEqual({ delayMs: 8_000, failureMs: 15_000 });
     expect(restartDelay(2, false, 15_000)).toEqual({ delayMs: 15_000, failureMs: 15_000 });
     expect(restartDelay(3, false, 2_000)).toEqual({ delayMs: 300_000, failureMs: 2_000 });
+    expect(restartDelay(4, false, 2_000)).toEqual({ delayMs: 300_000, failureMs: 2_000 });
   });
 });
 
@@ -204,21 +214,94 @@ describe("starting", () => {
     expect(registered).toEqual(["read_messages"]);
   });
 
-  test("a child that exited after an ack is started again, and a session that ended is not", async ($, on) => {
+  test("a child that exited after an ack is started again after a second, and a session that ended is not", async ($, on) => {
     const child = await acked($, on);
     child.exit(0);
+    await until(() => child.argvs.length === 1 && !child.killed(), "the child to finish");
+    await child.clock.advance(999);
+    expect(child.argvs).toHaveLength(1);
+    await child.clock.advance(1);
     await until(() => child.argvs.length === 2, "the restart after an ack");
     child.say(ACK);
     await end($, "prompt_input_exit");
     child.exit(0);
+    await child.clock.advance(60_000);
+    // A non-event cannot be polled for: let anything a restart would launch get going.
     await new Promise<void>((resolve) => {
-      setTimeout(resolve, 1_300);
+      setTimeout(resolve, 50);
     });
     expect(child.argvs).toHaveLength(2);
   });
+
+  test("an explicit refusal (exit 3, unsupported; exit 4, an unbindable or untasked pane) is waited out for five minutes, however often the child is refused", async ($, on) => {
+    mock.env(on, { TMUX_PANE: "%7" });
+    const clock = mock.clock(on);
+    session(on);
+    tools(on);
+    const child = fakeChild(on);
+    await start($);
+    await until(() => child.argvs.length === 1, "the child to start");
+    for (const [code, starts] of [
+      [3, 2],
+      [4, 3],
+    ] as const) {
+      child.exit(code);
+      // oxlint-disable-next-line no-await-in-loop -- ordered rounds
+      await clock.advance(299_999);
+      // oxlint-disable-next-line no-await-in-loop -- a non-event cannot be polled for
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 30);
+      });
+      expect(child.argvs).toHaveLength(starts - 1);
+      // oxlint-disable-next-line no-await-in-loop -- ordered rounds
+      await clock.advance(1);
+      // oxlint-disable-next-line no-await-in-loop -- ordered rounds
+      await until(() => child.argvs.length === starts, `the restart after exit ${code}`);
+    }
+  });
+
+  test("any other failure backs off from one second, doubling", async ($, on) => {
+    mock.env(on, { TMUX_PANE: "%7" });
+    const clock = mock.clock(on);
+    session(on);
+    tools(on);
+    const child = fakeChild(on);
+    await start($);
+    await until(() => child.argvs.length === 1, "the child to start");
+    child.exit(2);
+    await clock.advance(1_000);
+    await until(() => child.argvs.length === 2, "the first retry, after a second");
+    child.exit(2);
+    await clock.advance(1_999);
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 30);
+    });
+    expect(child.argvs).toHaveLength(2);
+    await clock.advance(1);
+    await until(() => child.argvs.length === 3, "the second retry, after two");
+  });
+
+  test("a session that ended for good stops its child, and a later session.start in the same process starts a fresh one", async ($, on) => {
+    const child = await acked($, on);
+    await end($, "logout");
+    await until(() => child.killed(), "the child to be left");
+    await start($);
+    await until(() => child.argvs.length === 2, "a fresh child");
+  });
+
+  test("a session that continues in the same process keeps its child", async ($, on) => {
+    const child = await acked($, on);
+    await end($, "clear");
+    await start($);
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 50);
+    });
+    expect(child.argvs).toHaveLength(1);
+    expect(child.killed()).toBe(false);
+  });
 });
 
-function end($: Engine, reason: "clear" | "resume" | "prompt_input_exit"): Promise<unknown> {
+function end($: Engine, reason: "clear" | "resume" | "logout" | "prompt_input_exit"): Promise<unknown> {
   return $.session.end({ reason, sessionId: "s1", resume: { id: "s1" } });
 }
 
@@ -387,7 +470,7 @@ describe("the standing instruction", () => {
     });
   });
 
-  test("an ack without one, as an untasked pane's is, leaves the prompt alone", async ($, on) => {
+  test("an ack without one leaves the prompt alone", async ($, on) => {
     const child = await acked($, on, `${JSON.stringify({ ok: true, keep: KEEP })}\n`);
     child.say(line("m1", "note", "x"));
     await until(() => child.appended().length === 1, "the note");
