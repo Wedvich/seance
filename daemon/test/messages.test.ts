@@ -2,13 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  INBOX_MAX_BYTES,
-  INBOX_MAX_MESSAGES,
-  MESSAGE_MAX,
-  MESSAGE_PUSH_MAX,
-  STANDING_INSTRUCTION,
-} from "@seance/shared";
+import { INBOX_MAX_BYTES, INBOX_MAX_MESSAGES, MESSAGE_MAX, MESSAGE_PUSH_MAX } from "@seance/shared";
 import { messageAudit, type MessageAudit } from "../src/audit.ts";
 import { startLocalSocket, type LocalSocketHandle } from "../src/local-socket.ts";
 import type { InboxLine } from "../src/message-frame.ts";
@@ -258,7 +252,7 @@ const readLines = async (file: string): Promise<string[]> => {
 };
 
 describe("the real listener child and a real sender", () => {
-  test("a tasked listener is acked with the standing instruction, an untasked one is refused (exit 4), and a note arrives as one line naming its sender", async () => {
+  test("a tasked listener is acked, an untasked one is refused (exit 4), and a note arrives as one line naming its sender", async () => {
     const receiver = await launched("recv");
     const sender = await launched("send");
     const recvOut = join(base, "a-recv.out");
@@ -272,7 +266,6 @@ describe("the real listener child and a real sender", () => {
     expect(JSON.parse((await readLines(recvOut))[0] ?? "")).toEqual({
       ok: true,
       keep: { messages: INBOX_MAX_MESSAGES, bytes: INBOX_MAX_BYTES },
-      instruction: STANDING_INSTRUCTION,
     });
     // The refusal is the CLI's exit code, never a line the mod would read.
     expect(await readLines(bareOut)).toEqual([]);
@@ -382,6 +375,42 @@ describe("the real listener child and a real sender", () => {
     expect((await readFile(`${out}.exit`, "utf8")).trim()).toBe("2");
   });
 
+  test("a child orphaned by its parent's death exits within seconds and drops its binding, so the next message is held, not called delivered", async () => {
+    const receiver = await launched("orphan");
+    const sender = await launched("orphansend");
+    const out = join(base, "orphan.out");
+    const parentFile = join(base, "orphan.parent");
+    const childFile = join(base, "orphan.child");
+    // The inner shell stands for claude: the child's parent, killed below. `$!` is the child's own pid, as the
+    // background simple command execs in place.
+    const inner = `echo $$ > ${shq(parentFile)}; SEANCE_STATE_DIR=${shq(stateDir)} ${shq(process.execPath)} ${shq(MAIN)} inbox > ${shq(out)} & echo $! > ${shq(childFile)}; wait`;
+    const listeners = await runner("orphan-listener", `sh -c ${shq(inner)}`, receiver);
+    await listeners.go();
+    await pollUntil(async () => (await readLines(out)).length > 0, "the listener's ack");
+    const pidOf = async (file: string): Promise<number> => Number((await readFile(file, "utf8")).trim());
+    const [parent, child] = [await pidOf(parentFile), await pidOf(childFile)];
+    const alive = (pid: number): boolean => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    expect(alive(child)).toBe(true);
+
+    process.kill(parent, "SIGKILL");
+    await pollUntil(() => !alive(child), "the orphaned child to exit", 10_000);
+
+    const send = await senderCommand("orphan-send", [message(receiver, "note", "to a dead session")]);
+    const from = await runner("orphan-from", send.command, sender);
+    await from.go();
+    await pollUntil(() => Bun.file(send.replies).exists(), "the sender's reply");
+    expect(JSON.parse(await readFile(send.replies, "utf8"))).toEqual([
+      { ok: true, id: expect.stringMatching(MESSAGE_ID), outcome: "sent" },
+    ]);
+  });
+
   test("an unbound sender, in no pane, is refused", async () => {
     // This process runs in no pane: its pid walks to none.
     let reply = "";
@@ -476,7 +505,7 @@ describe("the daemon's inbox", () => {
     const listener = sinkDouble();
     await messages.listen(INBOX, target.pid, listener.sink);
     const [ack, ...delivered] = listener.lines;
-    expect(JSON.parse(ack ?? "")).toMatchObject({ ok: true, instruction: STANDING_INSTRUCTION });
+    expect(JSON.parse(ack ?? "")).toMatchObject({ ok: true });
     expect(delivered).toHaveLength(INBOX_MAX_MESSAGES);
     expect(lineOf(delivered[0]).push).toContain("2 earlier message(s) to this session were dropped before delivery.");
     expect(lineOf(delivered[0]).push).toContain("n2");

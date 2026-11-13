@@ -4,8 +4,7 @@ import type { On, ToolCheckDecision } from "claude-code";
 import { daemonMain, restartDelay } from "./register.ts";
 
 const KEEP = { messages: 32, bytes: 262_144 };
-const INSTRUCTION = "Other Séance sessions your user runs may message you.";
-const ACK = `${JSON.stringify({ ok: true, keep: KEEP, instruction: INSTRUCTION })}\n`;
+const ACK = `${JSON.stringify({ ok: true, keep: KEEP })}\n`;
 const READ = "mcp__inbox__read_messages";
 
 const line = (id: string, messageKind: string, push: string, body?: string): string =>
@@ -75,7 +74,6 @@ function session(on: On): Delivered {
     submitted.push(e.text);
     return { text: e.text };
   });
-  on("prompt.compose", () => ({ sections: [] }));
   on("session.start", (_$, e) => ({ cwd: e.cwd }));
   on("session.end", (_$, e) => ({ sessionId: e.sessionId }));
   on("turn.start", (_$, e) => ({ turnId: e.turnId }));
@@ -138,10 +136,6 @@ function latch(): { readonly release: () => void; readonly held: Promise<void> }
   });
   return { release, held };
 }
-
-/** The system prompt's sections as the engine would compose them for a plain session. */
-const composed = ($: Engine): Promise<{ readonly sections: readonly { readonly id: string }[] }> =>
-  $.prompt.compose({ model: "m", promptModel: "m", surfaces: [], tools: [], outputStyle: null, traits: [] });
 
 const start = ($: Engine): Promise<unknown> =>
   $.session.start({ cwd: "/repo", surface: "terminal", isInteractive: true });
@@ -289,9 +283,10 @@ describe("starting", () => {
     await until(() => child.argvs.length === 2, "a fresh child");
   });
 
-  test("a session that continues in the same process keeps its child", async ($, on) => {
+  test("a session that continues in the same process (/clear, /resume) keeps its child, with or without a session.start after", async ($, on) => {
     const child = await acked($, on);
     await end($, "clear");
+    await end($, "resume");
     await start($);
     await new Promise<void>((resolve) => {
       setTimeout(resolve, 50);
@@ -444,36 +439,5 @@ describe("read_messages", () => {
       setTimeout(resolve, 50);
     });
     expect(delivered.appended()).toEqual([]);
-  });
-});
-
-describe("the standing instruction", () => {
-  test("joins the system prompt once the ack carries it, and not before", async ($, on) => {
-    mock.env(on, { TMUX_PANE: "%7" });
-    session(on);
-    tools(on);
-    const child = fakeChild(on);
-    await start($);
-    await until(() => child.argvs.length === 1, "the child to start");
-    expect((await composed($)).sections).toEqual([]);
-
-    child.say(ACK);
-    // The ack is read by the unawaited reader: compose until it has landed.
-    for (let i = 0; i < 200 && (await composed($)).sections.length === 0; i++) {
-      // oxlint-disable-next-line no-await-in-loop -- a poll, one wait at a time
-      await new Promise<void>((resolve) => {
-        setTimeout(resolve, 5);
-      });
-    }
-    expect(await composed($)).toEqual({
-      sections: [{ id: "inbox:standing", text: INSTRUCTION, scope: "session" }],
-    });
-  });
-
-  test("an ack without one leaves the prompt alone", async ($, on) => {
-    const child = await acked($, on, `${JSON.stringify({ ok: true, keep: KEEP })}\n`);
-    child.say(line("m1", "note", "x"));
-    await until(() => child.appended().length === 1, "the note");
-    expect((await composed($)).sections).toEqual([]);
   });
 });

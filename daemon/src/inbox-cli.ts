@@ -13,13 +13,21 @@ import { socketPath } from "./paths.ts";
  * (the pane is in no tmux server of this daemon's) or `untasked` (a hand-started session): nothing a retry changes
  * soon, so retry rarely. 2: anything else — no daemon, another refusal, a stdout nobody reads any more, or a
  * close with no reply at all, which an older daemon (it drops the frame as malformed) and a daemon mid-update
- * look the same as, so neither is told apart from a restart.
+ * look the same as, so neither is told apart from a restart, and a parent that changed (below).
+ *
+ * A `claude` killed hard (an OOM kill) orphans this process, which keeps its connection while its stdout goes
+ * nowhere, so the daemon's writes succeed and the message is lost under an audited `delivered`. The stdout error
+ * covers a write after the death; the parent check covers the quiet time before one. A message written between the
+ * kill and the next check, up to `PARENT_CHECK_MS`, is lost: the daemon keeps nothing after a write (accepted).
  */
 
 const EXIT_ACKED = 0;
 const EXIT_OTHER = 2;
 const EXIT_UNSUPPORTED = 3;
 const EXIT_PANE_REFUSED = 4;
+
+/** How often the parent is compared with the one this process started under. */
+const PARENT_CHECK_MS = 2_000;
 
 type FirstLine = "pending" | "acked" | "unsupported" | "pane-refused" | "other";
 
@@ -49,6 +57,11 @@ function lostReader(): never {
 
 export async function cmdInbox(): Promise<void> {
   process.stdout.on("error", lostReader);
+  // Reparented (to init or a subreaper) means claude is gone. Unref'd: the connection alone holds this process up.
+  const parent = process.ppid;
+  setInterval(() => {
+    if (process.ppid !== parent) lostReader();
+  }, PARENT_CHECK_MS).unref();
   const decoder = new TextDecoder();
   let head = "";
   let first: FirstLine = "pending";

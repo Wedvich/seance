@@ -8,7 +8,6 @@ import {
   MESSAGE_RATE,
   messageStub,
   renderMessage,
-  STANDING_INSTRUCTION,
   type MessageKind,
 } from "@seance/shared";
 import type { MessageAudit } from "./audit.ts";
@@ -282,7 +281,6 @@ export function createMessages(deps: MessagesDeps): Messages {
     const ack: InboxAck = {
       ok: true,
       keep: { messages: INBOX_MAX_MESSAGES, bytes: INBOX_MAX_BYTES },
-      instruction: STANDING_INSTRUCTION,
     };
     sink.write(JSON.stringify(ack));
 

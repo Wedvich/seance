@@ -22,10 +22,10 @@ import type { EngineInterface, Register } from "claude-code";
  * `read_messages`, in this worker's memory only: a hooks-worker respawn loses
  * them, and the tool says so.
  *
- * Engine events only, never `classic.*` (see session-events). The standing
- * instruction rides the ack and joins the system prompt through `prompt.compose`
- * (layer 1; a managed plugin may skip it, which is why the daemon also puts it on
- * the spawn's command line).
+ * Engine events only, never `classic.*` (see session-events). No `prompt.compose`
+ * hook: the managed `cc-plugin-sec-default` skips it and prints a notice in every
+ * session, so the standing instruction rests on the spawn's command line alone
+ * (DESIGN.md, "Session messages").
  *
  * Fire-and-forget throughout: nothing waits on the daemon, and a missing `bun`, a
  * stopped daemon or one that predates the frame costs the session nothing but a
@@ -105,8 +105,6 @@ interface Delivery {
 interface Tracker {
   /** What holds a loop on a person, by tool_use_id; the value is the loop's `agentId` (unset: main). */
   readonly outstanding: Map<string, string | undefined>;
-  /** From the daemon's ack; present only for a pane that carries a task. */
-  instruction: string | undefined;
   keep: { messages: number; bytes: number };
   /** Oldest first, capped by `keep`. */
   held: Held[];
@@ -146,7 +144,6 @@ function newLoop(): Loop {
 function newTracker(): Tracker {
   return {
     outstanding: new Map(),
-    instruction: undefined,
     keep: { ...DEFAULT_KEEP },
     held: [],
     pendingNotes: [],
@@ -203,7 +200,6 @@ function parseDelivery(value: unknown): Delivery | null {
 
 function onAck(t: Tracker, ack: Record<string, unknown>): void {
   t.acked = true;
-  t.instruction = typeof ack["instruction"] === "string" ? ack["instruction"] : undefined;
   const keep = ack["keep"];
   if (!isRecord(keep)) return;
   const { messages, bytes } = keep;
@@ -390,14 +386,6 @@ export const register: Register = (on) => {
     }
   }).catch(($, e, next) => next(e));
   on("tool.call", { tool: READ_MESSAGES }, () => ({ result: readMessages(t) })).catch(($, e, next) => next(e));
-  // Layer 1 of the standing instruction (the spawn's command line is layer 2).
-  on("prompt.compose", async ($, e, next) => {
-    const composed = await next(e);
-    if (t.instruction === undefined) return composed;
-    return {
-      sections: [...composed.sections, { id: "inbox:standing", text: t.instruction, scope: "session" as const }],
-    };
-  }).catch(($, e, next) => next(e));
   // A session that carries on in the same process keeps its child. Any other end stops the loop and its child here
   // (the module unloading would too, but a process may outlive an end such as a logout).
   on("session.end", ($, e, next) => {

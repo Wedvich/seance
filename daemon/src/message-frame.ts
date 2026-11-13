@@ -55,7 +55,6 @@ export const INBOX_REFUSAL_CODES = ["invalid", "unbound", "unsupported", "stoppi
 export type InboxAck =
   | {
       readonly ok: true;
-      readonly instruction: string;
       readonly keep: { readonly messages: number; readonly bytes: number };
     }
   | { readonly ok: false; readonly code: (typeof INBOX_REFUSAL_CODES)[number] };
