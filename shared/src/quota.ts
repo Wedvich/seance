@@ -132,3 +132,61 @@ export function effectivePct(pct: number, resetsAtS: number | undefined, nowMs: 
   if (resetsAtS !== undefined && resetsAtS * 1000 <= nowMs) return 0;
   return pct;
 }
+
+/** How long a quota window runs: the 5h session window, or any weekly (all-models or per-model). */
+export type QuotaSpan = "5h" | "7d";
+
+export const QUOTA_SPAN_MS: Readonly<Record<QuotaSpan, number>> = { "5h": 5 * 3600_000, "7d": 7 * 86_400_000 };
+
+/** The convex cost is unbounded at 100%; this keeps an over-full account finite and still worst. */
+const MAX_UTILISATION = 0.99;
+
+export interface QuotaWindow {
+  readonly label: string;
+  readonly pct: number;
+  /** Unix seconds. */
+  readonly resetsAt: number | undefined;
+  readonly span: QuotaSpan;
+  /** A per-model weekly's display name (`Fable`); absent on the all-models windows. */
+  readonly model?: string;
+}
+
+/** Every window the reading has; which of them a task is judged on is `windowAppliesTo`'s. */
+export function quotaWindows(o: QuotaReading): QuotaWindow[] {
+  const windows: QuotaWindow[] = [];
+  if (o.h !== undefined) windows.push({ label: "5h", pct: o.h, resetsAt: o.hr, span: "5h" });
+  if (o.d !== undefined) windows.push({ label: "7d", pct: o.d, resetsAt: o.dr, span: "7d" });
+  for (const w of o.w ?? []) windows.push({ label: `7d ${w.m}`, pct: w.p, resetsAt: w.r, span: "7d", model: w.m });
+  return windows;
+}
+
+/**
+ * All-models windows bind every task; a per-model weekly only a task on that
+ * model — a full Fable week leaves Opus work free. Matched on the display
+ * name's first word (`Fable` in `claude-fable-5-1[1m]`), since the cache
+ * holds no model id.
+ */
+export function windowAppliesTo(window: QuotaWindow, model: string): boolean {
+  if (window.model === undefined) return true;
+  const family = window.model.trim().split(/\s+/u)[0]?.toLowerCase() ?? "";
+  return family !== "" && model.toLowerCase().includes(family);
+}
+
+/**
+ * max over windows of the convex `(u/(1-u))²` at projected usage, discounted
+ * by the share of the window still to run: a nearly-spent 5h window that
+ * resets in ten minutes costs little, the same reading on a fresh one a lot.
+ */
+export function quotaPressure(windows: readonly QuotaWindow[], added: (w: QuotaWindow) => number, now: number): number {
+  let worst = 0;
+  for (const w of windows) {
+    const u = Math.min((effectivePct(w.pct, w.resetsAt, now) + added(w)) / 100, MAX_UTILISATION);
+    const remaining = w.resetsAt === undefined ? 1 : clamp((w.resetsAt * 1000 - now) / QUOTA_SPAN_MS[w.span]);
+    worst = Math.max(worst, (u / (1 - u)) ** 2 * remaining);
+  }
+  return worst;
+}
+
+function clamp(x: number): number {
+  return Math.min(Math.max(x, 0), 1);
+}

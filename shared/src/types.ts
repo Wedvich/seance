@@ -85,6 +85,14 @@ export const CLOSE_ROLE_REFUSED = 4403;
 export const DEFAULT_MODEL = "opus";
 export const DEFAULT_EFFORT = "medium";
 
+/** The efforts the clients offer and `claude --effort` takes; the wire keeps `effort` a free string. */
+export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+export type Effort = (typeof EFFORTS)[number];
+
+export function isEffort(value: unknown): value is Effort {
+  return EFFORTS.some((effort) => effort === value);
+}
+
 /**
  * Encrypted envelope — all the relay sees besides routing. The 12-byte GCM
  * IV doubles as the replay nonce; `v|to|from` are bound as AAD so the relay

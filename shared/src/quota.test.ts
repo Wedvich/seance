@@ -3,6 +3,9 @@ import {
   effectivePct,
   liveStatus,
   newestQuotaByAccount,
+  quotaPressure,
+  quotaWindows,
+  windowAppliesTo,
   type ExclaveInfo,
   type FleetQuotaEntry,
   type Machine,
@@ -228,5 +231,44 @@ describe("effectivePct", () => {
   test("a window still running, or with no reset known, reads as reported", () => {
     expect(effectivePct(73, S + 1, now)).toBe(73);
     expect(effectivePct(73, undefined, now)).toBe(73);
+  });
+});
+
+describe("quotaWindows, windowAppliesTo, quotaPressure", () => {
+  const now = S * 1000;
+
+  test("quotaWindows maps the 5h, the 7d and each per-model weekly", () => {
+    const windows = quotaWindows({
+      h: 10,
+      hr: S + 60,
+      d: 20,
+      dr: S + 120,
+      w: [{ m: "Fable", p: 30, r: S + 180 }],
+      s: "cache",
+      at: S,
+    });
+    expect(windows.map((w) => [w.label, w.pct, w.span, w.model])).toEqual([
+      ["5h", 10, "5h", undefined],
+      ["7d", 20, "7d", undefined],
+      ["7d Fable", 30, "7d", "Fable"],
+    ]);
+  });
+
+  test("a per-model weekly applies by family; an all-models window applies to every model", () => {
+    const perModel = { label: "7d Fable", pct: 90, resetsAt: undefined, span: "7d", model: "Fable" } as const;
+    const all = { label: "5h", pct: 10, resetsAt: undefined, span: "5h" } as const;
+    expect(windowAppliesTo(perModel, "claude-fable-5-1[1m]")).toBe(true);
+    expect(windowAppliesTo(perModel, "opus")).toBe(false);
+    expect(windowAppliesTo(all, "opus")).toBe(true);
+  });
+
+  test("pressure reads a passed reset as 0, rises with a fresh window, and stays finite at 100%", () => {
+    const at = (pct: number, resetsAt: number | undefined) => [{ label: "5h", pct, resetsAt, span: "5h" as const }];
+    const none = (): number => 0;
+    expect(quotaPressure(at(100, S - 1), none, now)).toBe(0);
+    const fresh = quotaPressure(at(80, S + 5 * 3600), none, now);
+    const nearlyReset = quotaPressure(at(80, S + 600), none, now);
+    expect(fresh).toBeGreaterThan(nearlyReset);
+    expect(Number.isFinite(quotaPressure(at(100, S + 5 * 3600), none, now))).toBe(true);
   });
 });
