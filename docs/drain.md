@@ -122,6 +122,27 @@ so that the leader writes `succeeds.trigger: "drain"`, not `"session"`.
   waiting on in its record, so the successor asks it again. The self path already accepts a pass
   from a `needs-input` task.
 
+**Spike, 2026-11-13, Claude Code 2.1.323** (a live session in a private tmux server, `-f /dev/null`,
+manual permission mode, with a throwaway mod logging the engine's `turn.start`, `turn.complete`,
+`tool.check` and `tool.call`, the events the session-events mod reads). All four held:
+
+- **Typed text plus Enter at a turn-ended idle starts a new turn.** `send-keys -l` with a one-line
+  508-character prompt (non-ASCII included), then `Enter`: `turn.start` carried the whole text,
+  unchanged. The prompt must stay one line: a newline in `-l` text would submit early.
+- **The draft-clearing sequence never exits.** The graceful despawn's `Escape`, `C-c` (150 ms apart):
+  Esc arms "Esc again to clear", Ctrl+C clears the draft (a single line, a two-line one, and an empty
+  box alike) and arms "Press Ctrl-C again to exit", which the typed text disarms. Claude Code stayed up
+  in every case; the following prompt reached `turn.start` with no trace of the draft.
+- **Esc on a permission dialog** (Bash `touch b.txt`, `decision=ask approver=person`) rejected the
+  tool call ("Interrupted · What should Claude do instead?"), the file was not created, and the main
+  loop's `turn.complete` followed at once (`reason=answer`, `isAborted=false`): the mod reports that as
+  `idle` with `turnEnded`.
+- **Esc on an AskUserQuestion** ("User declined to answer questions"): the same, `turn.complete`
+  at once (`reason=answer`).
+- Also measured: Esc on a busy turn (a long answer, no tools) ends it with `turn.complete`
+  (`reason=aborted`, `isAborted=true`), so the interrupt after `DRAIN_INTERRUPT_MS` is followed by a
+  turn-ended idle too. Esc on an idle box raises no event at all.
+
 **Step B: pass from outside (leader).** **Built** (item 2): DESIGN.md, "The drain's outside pass" holds
 the trigger, the 10-minute grace on every machine (the first draft's "at once when the machine lacks
 `successorSelf`" was not built), `needs-input` and every autonomy level, placement not gating the pass,
