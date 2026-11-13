@@ -1,4 +1,5 @@
-import type { AuthAlerted, Machine, PushAlert, SettingsRecord } from "@seance/shared";
+import type { ArchivistEntry, AuthAlerted, Machine, PushAlert, SettingsRecord } from "@seance/shared";
+import { type ArchivistSilenceStep, archivistSilenceStep } from "./archivist-silence.ts";
 import { authAlertStep } from "./auth-alerts.ts";
 import { diskAlertStep } from "./disk-alerts.ts";
 import type { TermSettings } from "./settings.ts";
@@ -8,6 +9,13 @@ export interface MachineAlertWatchOpts {
   /** True once the term's settings load decided `ready`; only then is the record a held, writable thing. */
   readonly ready: () => boolean;
   readonly machines: () => readonly Machine[];
+  /** The registry's archivist seat entry, flagged by the relay (`RelayState.archivist`). */
+  readonly archivist: () => ArchivistEntry | null;
+  /**
+   * True once a registry push has landed (the leader's own entry is always in one). Before it a null seat
+   * entry means "no push yet", not "vanished", so the archivist step waits rather than record an absence.
+   */
+  readonly registryKnown: () => boolean;
   /** Called for each alert whose list write landed. */
   readonly onAlert: (alert: PushAlert) => void;
   /** Called for each held login alert whose exclave reads `ok` again, once the write clearing it landed. */
@@ -19,15 +27,17 @@ export interface MachineAlertWatchOpts {
   readonly minGapMs: number;
 }
 
+const NO_SILENCE: ArchivistSilenceStep = { alerts: [], next: null };
+
 export interface MachineAlertWatch {
   /** One step over the registry. `debounce` skips it when one ran less than `minGapMs` ago. */
   readonly check: (debounce: boolean) => void;
 }
 
 /**
- * Runs `diskAlertStep` and `authAlertStep` against the term's held settings
- * record, in one write per check (`diskAlerts` and `authAlerts` are fields of
- * the same record, so two writes would only conflict with each other). The
+ * Runs `diskAlertStep`, `authAlertStep` and `archivistSilenceStep` against the term's held settings
+ * record, in one write per check (`diskAlerts`, `authAlerts` and `archivistSilence` are fields of
+ * the same record, so separate writes would only conflict with each other). The
  * lists are written first and the alerts are raised only once that write
  * landed, as the scheduler's own are (a repeat after a lost write would be
  * worse than the next check's recompute); the steps are re-applied to whatever
@@ -49,9 +59,16 @@ export function createMachineAlertWatch(o: MachineAlertWatchOpts): MachineAlertW
   let checkedAt = Number.NEGATIVE_INFINITY;
   let pending: readonly PushAlert[] = [];
   let pendingRestored: readonly AuthAlerted[] = [];
+  const silenceStep = (record: SettingsRecord, at: number): ArchivistSilenceStep =>
+    o.registryKnown() ? archivistSilenceStep(o.archivist(), record.archivistSilence, at) : NO_SILENCE;
   const holds = (record: SettingsRecord, alert: PushAlert): boolean => {
     if (alert.kind === "disk") {
       return (record.diskAlerts ?? []).some((e) => e.deviceId === alert.deviceId && e.at === alert.at);
+    }
+    if (alert.kind === "archivist") {
+      const held = record.archivistSilence;
+      // An archivist back by the time a lost write is settled is not "offline for 24 hours" any more.
+      return held?.state === "alerted" && held.since === alert.since && o.archivist()?.connected !== true;
     }
     if (alert.kind !== "auth") return false;
     return (record.authAlerts ?? []).some(
@@ -76,7 +93,8 @@ export function createMachineAlertWatch(o: MachineAlertWatchOpts): MachineAlertW
         pending.length === 0 &&
         pendingRestored.length === 0 &&
         diskAlertStep(o.machines(), held.diskAlerts ?? [], at).next === null &&
-        authAlertStep(o.machines(), held.authAlerts ?? [], at).next === null
+        authAlertStep(o.machines(), held.authAlerts ?? [], at).next === null &&
+        silenceStep(held, at).next === null
       ) {
         return;
       }
@@ -96,11 +114,12 @@ export function createMachineAlertWatch(o: MachineAlertWatchOpts): MachineAlertW
           const machines = o.machines();
           const disk = diskAlertStep(machines, record.diskAlerts ?? [], at);
           const auth = authAlertStep(machines, record.authAlerts ?? [], at);
-          raised = [...disk.alerts, ...auth.alerts];
+          const silence = silenceStep(record, at);
+          raised = [...disk.alerts, ...auth.alerts, ...silence.alerts];
           restored = auth.restored;
           const { version: _version, ...body } = record;
           // Nothing to change, but an unsettled alert is still to be told from a lost write: write anyway.
-          if (disk.next === null && auth.next === null) {
+          if (disk.next === null && auth.next === null && silence.next === null) {
             const unsettledAny = unsettled.length + unsettledRestored.length > 0;
             return unsettledAny && confirmed.length + restoredEarlier.length === 0 ? body : null;
           }
@@ -111,6 +130,7 @@ export function createMachineAlertWatch(o: MachineAlertWatchOpts): MachineAlertW
             ...rest,
             ...(diskNext.length === 0 ? {} : { diskAlerts: diskNext }),
             ...(authNext.length === 0 ? {} : { authAlerts: authNext }),
+            ...(silence.next === null ? {} : { archivistSilence: silence.next }),
           };
         })
         .then(

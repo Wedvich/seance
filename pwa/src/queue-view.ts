@@ -296,6 +296,17 @@ const PR_BLOCKED_LABEL: Record<PrBlockedReason, string> = {
 /** GitHub's `/pull/<n>`, GitLab's `/-/merge_requests/<n>`. */
 const PR_NUMBER = /\/(?:pull|merge_requests)\/(\d+)(?:\/|$)/u;
 
+/** A PR's chip label (`#123` where the URL names a number), the noun for sentences, and that noun capitalised. */
+export function prNames(prUrl: string): { readonly label: string; readonly noun: string; readonly name: string } {
+  const number = PR_NUMBER.exec(new URL(prUrl).pathname)?.[1];
+  const noun = number === undefined ? "pull request" : `pull request #${number}`;
+  return {
+    label: number === undefined ? "PR" : `#${number}`,
+    noun,
+    name: `${noun.slice(0, 1).toUpperCase()}${noun.slice(1)}`,
+  };
+}
+
 /**
  * `prUrl` is `https:`-checked at parse (`httpsUrl`), so it is safe as an href. `skew` is the
  * leader's clock minus this device's (`QueueState.skew`): `pr.at` is the leader's, so ageing it
@@ -303,10 +314,7 @@ const PR_NUMBER = /\/(?:pull|merge_requests)\/(\d+)(?:\/|$)/u;
  */
 function prOf(task: Task, now: number, skew: number): QueueRow["pr"] {
   if (task.prUrl === undefined) return null;
-  const number = PR_NUMBER.exec(new URL(task.prUrl).pathname)?.[1];
-  const label = number === undefined ? "PR" : `#${number}`;
-  const noun = number === undefined ? "pull request" : `pull request #${number}`;
-  const name = `${noun.slice(0, 1).toUpperCase()}${noun.slice(1)}`;
+  const { label, noun, name } = prNames(task.prUrl);
   const { pr } = task;
   const base = { url: task.prUrl, label };
   if (pr === undefined) {

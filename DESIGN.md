@@ -298,6 +298,39 @@ Séance's noise is cover for a real intruder.
    inside an LXC guest whose seal path fully works — masked sysfs/ACPI
    firmware info — so the strict probe gates only _import_, and reads never
    consult it.
+   **The archivist, a PSK holder that never acts** (added 2026-11-12; "Archivist" below,
+   A8, A11, A12). The fleet's optional history service holds the PSK — and,
+   in `archive.sqlite` (0600 in that 0700 dir), a plaintext history of finished tasks, accounts,
+   fleet events and later metrics — on a box of its choosing, so it is one more place the key
+   rests. The history holds no prompt text, no attachment manifest and no raw account id (only
+   the store's HMAC'd key), so a thief of the file alone learns titles, repos, PRs and timings,
+   not what was asked. Its key is held only the way this item ends: delivered
+   by a systemd system unit (`LoadCredentialEncrypted=seance-psk:<blob>`, the name imported from
+   `daemon/src/credential.ts`, never restated), read from `$CREDENTIALS_DIRECTORY` and nowhere
+   else — no config field (a `psk` key in its config is refused at start, not ignored), no
+   keychain, DPAPI or direct unseal — so the plaintext is in that tmpfs and the process's memory
+   only. It never runs as root (uid or gid 0 is refused before it writes a file), and its state
+   dir is its own (`~/.local/state/seance-archivist`, 0700), never a daemon's. What a thief of
+   it gains is what a thief of any daemon's key gains — every envelope and record the fleet
+   seals — and nothing more: what it can _do_ is bounded by what it loads, not by what it holds
+   the key to. `archivist/test/layering.test.ts` walks the `run` process's whole import closure,
+   type-only imports counted, and fails on any module that spawns, drives tmux, dispatches ops,
+   brokers, leads, or writes the queue or the store, and its own code may call no write method of
+   either client — it never enqueues, cancels, writes the store, sends a request or a
+   `status`; it answers exactly three ops, `archive-status`, `archive-metrics` and
+   `archive-tasks`, only when sealed `from: "app"` to its own device id and past the seat leg's
+   replay guard, each through its own parser into a fresh value, with counts, sizes and
+   timestamps (added 2026-11-12, item 6), metric points, and task records stripped of prompt,
+   attachments and raw account ids, which the archive never stored (added 2026-11-13, item 7). Even its own update is not run by the process that holds the key (added 2026-11-12,
+   item 5): on the fleet's announce it writes one request file, and a separate unit, with the same
+   user and no credential, runs git and `bun install`. `install`, `uninstall` and `update` load
+   the daemon's exec path only through `import()` in their own command branches, never into
+   `run`'s closure, and their processes are never delivered the key.
+   That is what separates it from the standalone scheduler box rejected in docs/scheduler.md
+   (the PSK holder that acts on its own). Its seat on the relay is the `ARCHIVIST` id alone
+   (item 3 below), so a stolen bearer token plus a minted identity squats nothing. Letting it
+   request sessions, or giving it any act on the fleet, is a change to this entry with an audit
+   origin of its own, not a tweak.
 3. **Bearer token disclosure** (T1654 Log Enumeration). The `?t=` reasoning
    above holds for Cloudflare itself, but the token also reached Workers Trace
    Events and would reach any Logpush sink — enabling Logpush to a third party
@@ -565,7 +598,7 @@ Séance's noise is cover for a real intruder.
    the record, so it does not bring push back; recorded under the Settings record's residual, as
    a gap with no repair path yet. The page's service worker holds no PSK: it opens
    nothing it receives, and a notification's text is fixed per kind with only a task id (or a
-   device id) from the payload, and a blocked PR's per reason from a fixed set of four, so a forged push (a thief leader's, with a subscription it
+   device id, or nothing for the archivist's silence) from the payload, and a blocked PR's per reason from a fixed set of four, so a forged push (a thief leader's, with a subscription it
    read) can make the browser show one of a few fixed sentences, a spill's with at worst a known window
    label (`5h` or `7d`) and a number, and nothing else. A click opens a
    same-origin path the worker itself built from an id that passed `isTaskId`
@@ -584,6 +617,14 @@ Séance's noise is cover for a real intruder.
    would be the timeline this item refuses. What stays visible is the store's metadata
    class: each object's length (its plaintext length plus 28, unpadded) and, by timing,
    how many files one task carried.
+   **The archivist's seat** (added 2026-11-12; Scheduler, "Leadership"). A holder can mint an id
+   and sign the `archivist` role, but the relay closes any register claiming it from an id other
+   than the one on `ARCHIVIST` (`register role-refused`) and writes nothing, so it cannot take the
+   seat or hide an entry of its own as one. A seed copied out of the seat's `state.json` registers
+   as the seat, which today buys nothing: the relay answers no op for it and apps make no
+   `Machine` of it (an app does ask the archivist itself three read ops, `archive-status`,
+   `archive-metrics` and `archive-tasks`, below; they are sealed under the PSK, so a seed without
+   it can take them only to leave them unanswered). Remedy as for a leader's seed: a new identity, its id on `ARCHIVIST`.
 4. **Relay compromise** (T1557 — the relay _is_ the AiTM position). Handled:
    AAD binding makes re-addressing fail closed. Residual is availability and
    traffic analysis, both accepted — the accepted kind is a relay that stops
@@ -661,6 +702,10 @@ Séance's noise is cover for a real intruder.
    accepts. Rolling a task record back to an older version carries that version's manifest,
    whose objects still match their hashes. That is the rollback above, closed by the same
    floor and ledger refusal.
+   The archivist's seat (added 2026-11-12) is the relay's word alone: `ARCHIVIST` is
+   enforced only by the relay, and apps skip an entry it flags as the seat, so it can
+   hide any machine from every spawn target. That is availability, as dropping the entry
+   from the push already is.
 5. **Supply chain** (T1195.001). `git pull` + `launchctl kickstart -k` is
    unsigned; a compromised repo is RCE on every machine, onto boxes that
    already carry launchd persistence. Bounded by 2FA and branch protection
@@ -1340,7 +1385,10 @@ Who owns each frame in code — the place to change when a frame changes:
 | op `despawn`                                                        | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                                                 | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                                                                                                                                                                                                                                                                                                                  |
 | `status` (daemon→relay)                                             | `daemon/src/run-collectors.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register (`ax`/`ae`/`au` from `daemon/src/auth-health.ts` through the `auth` collector, `tf`/`tu` from `daemon/src/trait-probes.ts` through the `traits` collector)                                                                                                                     | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest on the socket attachment, kept in the entry on close/sweep until the next register                                                                                                                                                                                                                                                   |
 | `status` (relay→app)                                                | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`                                                                                                                                                                                                                                                                                               | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped                                                                                                                                                                                                                                                                                                  |
-| op `metrics`                                                        | `pwa/src/store.ts` via `shared/src/app-client.ts` `metrics()`, gated and parsed                                                                                                                                                                                                                                                                                                    | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts`; sized at the transport (`#sealReply`, `daemon/src/relay-client.ts`)                                                                                                                                                                                                                                                      |
+| op `metrics`                                                        | `pwa/src/store.ts` and `archivist/src/metrics-collect.ts` via `shared/src/app-client.ts` `metrics()`, gated and parsed                                                                                                                                                                                                                                                             | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts` (tiers in `metrics-tiers.ts`); sized at the transport (`#sealReply`, `daemon/src/relay-client.ts`)                                                                                                                                                                                                                        |
+| op `archive-status`                                                 | `pwa/src/archivist-store.ts` via `shared/src/app-client.ts` `archiveStatus()`                                                                                                                                                                                                                                                                                                      | `archivist/src/health.ts` via the seat's `handle` in `archivist/src/run.ts` (sealed `from: "app"` only)                                                                                                                                                                                                                                                                                                 |
+| op `archive-metrics`                                                | `pwa/src/store.ts` via `shared/src/app-client.ts` `archiveMetrics()`                                                                                                                                                                                                                                                                                                               | `archivist/src/query.ts` → `queryArchive` in `archivist/src/metrics-archive.ts`, via the seat's `handle` (sealed `from: "app"` only, `parseArchiveMetricsRequest`)                                                                                                                                                                                                                                      |
+| op `archive-tasks`                                                  | `pwa/src/older-store.ts` via `shared/src/app-client.ts` `archiveTasks()`                                                                                                                                                                                                                                                                                                           | `archivist/src/query.ts` → `queryTasks` and `taskMachines` in `archivist/src/archive.ts`, via the seat's `handle` (sealed `from: "app"` only, `parseArchiveTasksRequest`)                                                                                                                                                                                                                               |
 | op `session-event` (→`"scheduler"`)                                 | `daemon/src/session-events.ts` via `sendToScheduler()` in `daemon/src/relay-client.ts`; on the leader's own machine, `Leader.onSession` in process                                                                                                                                                                                                                                 | `daemon/src/leader.ts`: opened by the term's leg (`onEvent` in `shared/src/app-client.ts`, under the daemon's one scheduler `ReplayGuard`), validated by `parseSessionEvent`, applied by `Scheduler.onSession`                                                                                                                                                                                          |
 | `store-list` / `store-get` / `store-put` / `store-delete`           | apps via `shared/src/app-client.ts` (list/get/create); the leader's daemon socket via `daemon/src/queue-store.ts` and `daemon/src/settings-store.ts`, with `term` on writes; the fleet broker's enqueue (`daemon/src/broker.ts`)                                                                                                                                                   | parsed and bounded in `relay/src/wire.ts`, rules in `relay/src/store.ts`, dispatched by `relay/src/hub.ts` `#onStoreFrame`                                                                                                                                                                                                                                                                              |
 | `store-listed` / `store-record` / `store-written` / `store-refused` | `relay/src/hub.ts` `#onStoreFrame`, answering from `relay/src/store.ts`                                                                                                                                                                                                                                                                                                            | `parseStoreReply` in `shared/src/parse.ts`; correlated on `re` by the app-client, which settles a reply it cannot read as `null` at once, and by the queue and settings stores                                                                                                                                                                                                                          |
@@ -1357,7 +1405,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | op `branch-state` (→`"scheduler"`)                                  | `daemon/src/branch-state.ts` via `RelayClient.sendBranchState()`; on the leader's own machine `run-capabilities.ts` hands it in process to `leader.onBranchState` instead (Scheduler, "Branch state")                                                                                                                                                                              | `daemon/src/leader.ts` `onEvent`, via `parseBranchState`, into the one `onBranchState` sink, which feeds the library                                                                                                                                                                                                                                                                                    |
 | record `quota` (at rest)                                            | `sealFleetQuotaRecord` (`shared/src/fleet-quota.ts`), by each daemon's fleet quota writer (`daemon/src/fleet-quota.ts`) on its own socket                                                                                                                                                                                                                                          | `openFleetQuotaRecord` (`shared/src/fleet-quota.ts`) — `openAtRest`, sealed `to: "app"`, `parseFleetQuotaRecord`, sealed `version` the store's — by the app-client's `refreshFleetQuota` (the PWA and the leader's leg) and the writer; stored under `quota:fleet` (_Scheduler_, "Fleet quota record")                                                                                                  |
 | record `account` (at rest)                                          | `sealAccountRecord` (`shared/src/account-record.ts`) from the PWA's rename                                                                                                                                                                                                                                                                                                         | `openAccountRecord`, which opens at rest then `parseAccountRecord` and binds version and key; stored under `account:` (_Scheduler_, "The store")                                                                                                                                                                                                                                                        |
-| record `settings` (at rest)                                         | `sealAtRest` with op `settings`, by the leader's settings store (`createSettingsStore` in `daemon/src/settings-store.ts`), creating `settings:main` once at a term's start when none exists (Scheduler, "Settings record")                                                                                                                                                         | `openAtRest` with its op, then `parseSettingsRecord`, bound to its key and sealed version and held to the version floor, by the same store; an app's `store-get` opens it the same way once the PWA reads it (M4, Web Push); its `diskAlerts` and `authAlerts` lists are the leader's own, one write for both (`daemon/src/machine-alerts.ts`); stored under `settings:main` (_Scheduler_, "The store") |
+| record `settings` (at rest)                                         | `sealAtRest` with op `settings`, by the leader's settings store (`createSettingsStore` in `daemon/src/settings-store.ts`), creating `settings:main` once at a term's start when none exists (Scheduler, "Settings record")                                                                                                                                                         | `openAtRest` with its op, then `parseSettingsRecord`, bound to its key and sealed version and held to the version floor, by the same store; an app's `store-get` opens it the same way once the PWA reads it (M4, Web Push); its `diskAlerts`, `authAlerts`, `archivistSilence`: the leader's own, one update (`daemon/src/machine-alerts.ts`); stored under `settings:main` (_Scheduler_, "The store") |
 | op `push-subscribe` (→`"scheduler"`)                                | `shared/src/app-client.ts` `pushSubscribe`, from `pwa/src/push.ts` (the Settings Notifications card, and a silent re-send after a page load when permission is already granted and push not turned off, retried while the leader starts; sent with the `deviceLabel` label, and the re-send is also the one-time label backfill for a browser already held without one)            | the term's `answer` in `daemon/src/leader-requests.ts`: `parsePushSubscribeRequest`, then one `update` of the settings record (_Scheduler_, "Web Push"); a leader that predates the op answers `invalid_request` as it does any op it does not handle                                                                                                                                                   |
 | op `push-unsubscribe` (→`"scheduler"`)                              | `shared/src/app-client.ts` `pushUnsubscribe`, from `pwa/src/push.ts` `disablePush` (the Notifications card's Turn off, after the browser unsubscribed) and `removeDevice` (the card's per-row Remove for another device)                                                                                                                                                           | the term's `answer` in `daemon/src/leader-requests.ts`: `parsePushUnsubscribeRequest`, then one `update` of the settings record that drops the endpoint, none when it is not held (_Scheduler_, "Web Push"); a leader that predates the op answers `invalid_request`                                                                                                                                    |
 | HTTP `PUT /attachments/<id>`                                        | built: `RelayClient.uploadAttachment` (`shared/src/app-client.ts`) from the PWA's spawn form (`pwa/src/store.ts`), sealed by `sealAttachment`, with `Authorization: Bearer`                                                                                                                                                                                                        | built: `relay/src/attachments.ts`, after `Hub.reserveUpload` (`relay/src/allowance.ts`); into R2 through the `ATTACHMENTS` binding                                                                                                                                                                                                                                                                      |
@@ -1586,7 +1634,8 @@ requesting socket only.
   same process redialling after a network change (its backoff caps at 60 s) still
   owes the answer, and failing its spawn as "may have landed" would throw away a
   real reply. A presence push cannot say which it is; the blob can.
-  - **A read** (`RESENDABLE_OPS`: `sessions`, `metrics`, `queue`, `route-preview`)
+  - **A read** (`RESENDABLE_OPS`: `sessions`, `metrics`, `archive-status`,
+    `archive-metrics`, `archive-tasks`, `queue`, `route-preview`)
     whose target is shown gone or offline, or whose term moved on, waits a
     one-second grace (`STRANDED_GRACE_MS`), then waits for the target to come back
     and goes again under its original id and deadline. A machine back under
@@ -1629,7 +1678,8 @@ requesting socket only.
   opened but was not shaped like a `MachineInfo`, names its sender instead.
   Payloads are never logged, on any tier.
 - **`OP_TIMEOUT_MS`** lives in `shared/` (sessions 10s, rescan 15s, spawn
-  210s, despawn 20s, metrics 15s) because the right values derive from daemon internals — an attachment
+  210s, despawn 20s, metrics 15s; the archivist's `archive-status` 10s, `archive-metrics` 15s,
+  `archive-tasks` 10s) because the right values derive from daemon internals — an attachment
   download's 120s deadline plus `exec.ts`'s 60s command timeout and `spawn.ts`'s 3s pane-death check — and would silently
   drift if kept in PWA code. It is a backstop; the daemon returns a structured
   error on its own.
@@ -1718,8 +1768,9 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
   series count grows with exclaves, accounts and models, so no cap fits every
   machine); trimming the oldest points to fit (the chart silently shows less
   range than it asked for); positional value arrays with implied timestamps
-  (~3.5× smaller, and no longer Prometheus's shape). History lives only on its
-  daemon, so an asleep machine's is unavailable until it wakes — accepted.
+  (~3.5× smaller, and no longer Prometheus's shape). History lives on its
+  daemon, so without an archivist an asleep machine's is unavailable until it wakes — accepted;
+  with one, the archive's copy serves it (Archivist, "The PWA's charts").
 
 Layer 2 also carries the app → scheduler ops, sealed `to: "scheduler"` and answered by the
 leader (Scheduler, "The leader"), each `T | SchedulerError`:
@@ -1915,6 +1966,11 @@ an old peer's frames parse as before. Mixed versions:
   alerts landed; Scheduler, "Needs input" and "Credits spill") and `SettingsRecord.diskAlerts` and `authAlerts`
   (Scheduler, "Web Push", "Disk alerts", "Auth alerts"): an older leader's parser drops each at its next write
   of that record, which costs one repeated alert, never a missed one.
+- `SettingsRecord.archivistSilence` (2026-11-13; Scheduler, "Web Push", "Silence alert"): dropped the
+  same way. A later leader re-reads a still-down archivist's kept entry as absent since its `lastSeen`
+  and pushes once more; an archivist whose entry has also left the registry reads as never held, so
+  that absence goes unalerted. An older service worker shows its generic notification for the new
+  kind. No rollout order.
 - `Task.failure.exit` (2026-10-26, a `session_failed` task's exit status, 1–255): lenient both
   ways. A reader drops one out of range and keeps the failure; an older reader's parser takes only
   `code` and `message`, so it shows "exited with an error" as before, and an older leader
@@ -2059,8 +2115,9 @@ in #132–#149; its findings are labelled Q, S, P and M. The **M3 review** (2026
 
 ### Leadership (`relay/src/leadership.ts`) — landed 2026-10-16, M2
 
-- **Capable is signed `roles`.** `register` carries a plaintext `roles` list — today only
-  `"scheduler"` (`DAEMON_ROLES`) — because the relay must read it to nominate on it. Since the
+- **Capable is signed `roles`.** `register` carries a plaintext `roles` list — `"scheduler"`, and
+  since 2026-11-12 `"archivist"` (`DAEMON_ROLES`; the seat, below) — because the relay must read it
+  to nominate on it. Since the
   relay acts on it, the signature covers it: a register with `roles` is signed over
   `seance-register-v2|<deviceId>|<ts>|<roles joined by ",">` and verified against that message
   only (`shared/src/identity.ts`). A register without `roles` is v1 and verifies as before, as a
@@ -2069,7 +2126,7 @@ in #132–#149; its findings are labelled Q, S, P and M. The **M3 review** (2026
   roleless: the relay never guesses which half of a frame to believe. Roles stay raw strings on
   the wire, bounded like ids (≤8, id charset, so neither separator can appear), because the
   signature covers the list as sent and a role minted later must still verify; the hub keeps only
-  the roles it knows on the socket attachment (`knownRoles`). Every daemon advertises the role.
+  the roles it knows on the socket attachment (`knownRoles`). Every daemon advertises `scheduler`.
   A daemon whose v2 register is refused signs its next one v1 and alternates from there
   (`#signV1` in `daemon/src/relay-client.ts`), so a daemon that self-updated ahead of its relay's
   deploy gets in roleless instead of being locked out; any other refusal cause fails both alike.
@@ -2161,6 +2218,31 @@ in #132–#149; its findings are labelled Q, S, P and M. The **M3 review** (2026
   list. Rejected: a wildcard entry (it would reopen capture by configuration), a committed var
   (CI would overwrite it), and the reader check alone (it changes what readers believe, not who
   holds the term).
+- **The archivist's seat** (`relay/src/seat.ts`; built 2026-11-12, Archivist, A5/A6/A9).
+  The fleet's one history service registers on `/daemon` with the role `archivist`, signed in the
+  v2 register like `scheduler`. The relay honours it only from the one device id on the Worker
+  secret `ARCHIVIST` — one id, never a list, since a second archivist would hold a different
+  database and failover would leave two partial archives. `parseArchivist` trims it; unset, blank,
+  a list, a reserved name or anything outside the deviceId bounds honours nobody (logged once per
+  wake, never fatal), and no wildcard exists: `*` is outside the id charset, and no test option
+  adds one. After `verifyRegister` passes and before the entry cap, the supersede or the put, a
+  register claiming the role from any other id — or from the seat beside `scheduler`, so the seat
+  can never be a leader candidate — is closed `CLOSE_ROLE_REFUSED` (4403) with the reason
+  `register role-refused` (`REGISTER_REFUSALS`, `shared/src/types.ts`), its socket marked like an
+  unverified one; it takes no route and writes nothing. An honoured register stores the signed
+  claim on its entry (`archivistClaim`, the relay's own field, never pushed), and `#leftBy` keeps it
+  across a close or sweep; a register without the role drops it. Each registry push derives
+  `RegistryView.archivist` from that claim against the secret as it is now (`isSeat`), like
+  `connected`: a stored flag would outlive a moved or unset seat and hide the old entry from every
+  app for good, where derived the old entry reads as an ordinary offline one that `forget` removes by id (its blob
+  is not a `MachineInfo`, so no app lists it as a machine to forget). `RelayClient` skips a flagged
+  entry in `#rebuildMachines` (its blob is still opened like any entry's) and
+  leaves it out of `registrySize` and `ignored`; every `Machine` reader — the PWA's Machines screen
+  and spawn form, the leader's candidates, MCP `list_machines`, the fleet broker, Raycast — reads
+  that list, so the seat is never a spawn target. No terms, no nomination, no standby, no op the
+  relay answers for it. Rejected: a list (above), a wildcard (as for `SCHEDULER_LEADERS`), and a
+  plain app-role client with no seat (every app socket is the anonymous `"app"`, so the relay
+  could not refuse a second archivist — Archivist, "Rejected alternatives").
 - **Scheduler replies log no line, paired by credit** (M2 review; the rule is Threat model,
   item 3). The leader's reply to an app is sealed `to: "app"` on its daemon socket, wire-identical
   to that machine's replies to its own `sessions` or `spawn`, and a blind relay cannot read `re`.
@@ -2703,10 +2785,11 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   past 30), an `awaiting-merge` task's PR that is stuck ("PR blocked"), a running task whose account ran
   out of usage (`quota-exhausted`, _Successor_, "The automatic trigger"), a session's own pass the leader
   refused (`pass-refused`) and, from the leader's own
-  watch, a nearly full disk or an exclave whose login lapsed or is about to (_The library_,
-  "Credits spill" and "Needs input"; _Disk alerts_ and _Auth alerts_, below). The line names task,
-  account and device ids, never a prompt, title or URL; the push payload names a task or device id
-  and state (a login alert, a device and exclave id and its state), and no account. A login's
+  watch, a nearly full disk, an exclave whose login lapsed or is about to, or an archivist absent
+  24 h (_The library_, "Credits spill" and "Needs input"; _Disk alerts_, _Auth alerts_ and
+  _Silence alert_, below). The line names task, account and device ids, never a prompt, title or
+  URL; the push payload names a task or device id and state (a login alert, a device and exclave
+  id and its state; the silence alert, only when the absence began), and no account. A login's
   lines are `scheduler: login expired:` or `login expiring: device=<id> exclave=<id>`, and, when
   the exclave reads `ok` again, `scheduler: login restored: device=<id> exclave=<id> after=<minutes>m`.
 - **Settings record** (M4). One record, `settings:main` (`SETTINGS_KEY`),
@@ -2762,7 +2845,8 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     from its parsed form, so a field a newer build added is dropped by an older leader's
     subscription write. Concretely: a leader from before `diskAlerts` drops that list on its
     next write, so a later leader may push each still-full disk once more, and one from before
-    `authAlerts` likewise each still-lapsed login. Accepted.
+    `authAlerts` likewise each still-lapsed login, and one from before `archivistSilence` a
+    still-down archivist (_Silence alert_). Accepted.
 - **Web Push** (M4; `daemon/src/web-push.ts`, `push-sender.ts`). The
   leader pushes each alert to every subscription in the settings record, beside its log line.
   - **Subscribing.** The PWA reads the VAPID public key with `store-get` and subscribes the
@@ -2864,6 +2948,8 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     head, the PR URL or a check name. The parser refuses a reason outside the four.
     `quota-exhausted` carries the window label (shown only as `5h`/`7d`) and, when the leader alerts
     instead of passing, `reason` `dirty` or `branch`; `pass-refused` carries the task id alone.
+    `auth` carries its device and exclave ids and state, and `archivist` only `since`, when the
+    absence began.
   - **Encryption and signing** are on WebCrypto, with no dependency: RFC 8291 `aes128gcm`
     (ECDH P-256, HKDF-SHA256, one AES-128-GCM record with the 0x02 delimiter), checked against
     the RFC's Appendix A vector byte for byte (`daemon/test/web-push.test.ts`), and RFC 8292
@@ -2915,6 +3001,41 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     Rollout: a leader from before `authAlerts` drops the list at its next write, so a later leader
     pushes each still-lapsed login once more, once per term alternation (31 terms in 6 hours is the
     measured worst case, as for the disk list). Accepted.
+  - **Silence alert** (`daemon/src/archivist-silence.ts`, scheduler-free like the disk and auth steps;
+    Archivist, A37; built 2026-11-13). The same watch, in the same single write, runs
+    `archivistSilenceStep` over the registry's seat entry (`RelayState.archivist`, the entry the relay
+    flags per push, so it follows the seat, never an old id's kept entry). The archivist is absent when no
+    connected flagged entry exists: the relay keeps a down archivist's entry `connected: false`, and an
+    entry can also vanish (forgotten, the seat moved to an id not yet registered, a blob this build cannot
+    open). The record's `archivistSilence` holds `{state: "present"}`, `{state: "absent", since}` or
+    `{state: "alerted", since}`. Its existence is the "a registry held an archivist" fact, so a fleet
+    whose registry never held one is never alerted, by any leader, while a new leader of a fleet whose
+    archivist died before it took over still is. `since` is when the absence began: the leader's own clock
+    at the check that first reads the seat absent after a recorded `present` (the relay's `lastSeen` is the
+    time of the register while a socket is listed, and a relay redeploy can drop sockets with no close
+    stamp, so it can be days old and would alert at once on a seconds-old disconnect), and the entry's
+    `lastSeen` (clamped to the leader's clock) only for a record with no field, where nothing else says
+    when it left; persisted, so every leader measures
+    24 h (`ARCHIVIST_SILENCE_MS`) from the same instant, and the tick catches the threshold with no
+    registry change. Past it the step writes `alerted` and the push goes once that write landed; nothing
+    more while it stays absent; a connected entry writes `present` again, which re-arms it. A record with
+    no field but a kept, disconnected flagged entry counts as held, measured from that `lastSeen`. A lost
+    write is settled as the other alerts' are: the next check's re-read record holding `alerted` at the
+    alert's own `since` raises it, unless the archivist is connected again by then (no push for one that
+    is back). The step waits for a first registry push (`registrySize > 0`, the leader's own entry always
+    being in one): before it a missing seat entry is "no push yet", not "vanished". The leader re-checks on a registry push whose seat entry changed, but
+    does not run the scheduler pass for it: nothing in routing, placement or the pass reads the archivist
+    (A4). One log line, `scheduler: archivist silent: since=<ISO time>`. The push payload is `{v: 1,
+    kind: "archivist", at, since}`, no id (one seat per fleet); the service worker shows the fixed "The
+    archivist has been offline for 24 hours." under the tag `archivist` and a click opens the Machines
+    screen. No "restored" push or line. Retiring the archivist on purpose (unsetting `ARCHIVIST`, forgetting its
+    entry) is read as an absence: one push 24 h later, and the field then stays `alerted`, with nothing to
+    clear it (the relay's push does not say whether a seat is configured, and a wire change for a
+    once-per-retirement push is not worth it). Accepted. The parser holds `since` to a non-negative integer a `Date` can
+    format (the log line formats it) and refuses extra keys. Rollout: a leader from before `archivistSilence` drops it at its
+    next write; a later leader then reads a still-down archivist's kept entry as held and absent since its
+    `lastSeen`, so it pushes once more (as for `authAlerts`), and one whose entry has left the registry
+    altogether reads as never held and is not alerted for that absence. Accepted.
   - **Not built:** removing another browser's subscription from the PWA (a retired device's
     slot still goes only when its push service answers 404/410), and a recovery path for an
     unreadable record (above).
@@ -3817,7 +3938,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   creates past `maxTasks` (`MAX_TASKS`) as the relay does, tombstones counting toward
   nothing.
 - **A finished task keeps no prompt** (2026-10-18, owner), **nor attachment manifest** ("Attachments", 2026-10-28), **and only its decision's winner**
-  (M3 review P4, 2026-10-18). `lean` — `forgetPrompt` (`task.ts`) plus the cut to the winner
+  (M3 review P4, 2026-10-18). `lean` — `forgetPrompt` (`shared/src/task-phase.ts`) plus the cut to the winner
   `too_large` already made — runs in `#update`, the one write path, as for the clocks, so the
   write that moves a task to `done`, `failed` or `cancelled` carries `spec` without `prompt`
   and a winner-only decision, at no extra version, whatever built the record (`advance`,
@@ -4458,7 +4579,10 @@ for the lot with its own `gh`.
     without a wide read is today's: `head` (the commit oid, 40 or 64 hex), `required` (`pending`,
     `passing` or `failing` over the head's required contexts alone: an optional check failing
     blocks nothing, which is why the rollup `checks` cannot be the trigger; absent when no context
-    is required, so a repo without required checks is never "checks"), `failing` (the failing
+    is required, so a repo without required checks is never "checks"; only the newest CheckRun of
+    each name counts, by `databaseId`, as GitHub's merge gate judges it — a head whose first CI run
+    its concurrency group cancelled when a second event started another carries both, and the
+    superseded `CANCELLED` must not read as failing), `failing` (the failing
     required names, deduplicated, control characters dropped, at most `PR_FAILING_LIMITS.names` = 5
     of `PR_FAILING_LIMITS.length` = 100 characters, and only beside `required: "failing"`), `merge`
     (`mergeStateStatus` lowercased, one of `PR_MERGE_STATES`), `armed: true` (auto-merge enabled or
@@ -6154,7 +6278,7 @@ of this section built.
   line (`sealMachineInfo`), since the relay would drop the whole registration unseen; a
   blob still over after that logs an error line saying the relay will refuse it. Both log
   once per size-deciding content (the repos and exclaves, not the scan time), not per register.
-- **Telemetry** (`daemon/src/telemetry.ts`, `daemon/src/metrics-store.ts`, added
+- **Telemetry** (`daemon/src/telemetry.ts`, `daemon/src/metrics-store.ts`, `daemon/src/metrics-tiers.ts`, added
   2026-10-15 for the scheduler): every `STATUS_INTERVAL_MS` the daemon samples
   cpu, memory and disk pressure as whole percent, disk free and I/O rates,
   running sessions per exclave (by pane path, so a session outside every
@@ -6198,6 +6322,14 @@ of this section built.
   `METRICS_STEPS`. No sample carries the machine's name: the store is its
   machine's alone, so the label said nothing, and a rename split every series in
   two. Tiers are raw 30s for 48h, 5-min averages for 30d, hourly forever.
+  The tiers — the series table, the rollup formula, the prune horizons and the
+  label-matching query — are one module, `daemon/src/metrics-tiers.ts`
+  (`TieredMetrics`, retention a parameter), which the archivist runs its own
+  `metrics.sqlite` on too (Archivist, "Metrics"); `metrics-store.ts` is the
+  daemon's path, migrations and 48h/30d keep. In `daemon/`, not `shared/`: the
+  relay and the PWA bundle `shared/`, and `bun:sqlite` must reach neither. The
+  quota label scheme (`quotaSamples`) lives there too, so the archivist's live
+  ingest writes the series the daemon does.
   Each tier is keyed `(ts, series)`, because every rollup, prune and query is a
   time range — keyed series-first, each rollup was a full scan plus a sort, ~3 ms
   and ~150 KiB of WAL a tick. A schema change is an entry in `MIGRATIONS`,
@@ -6243,7 +6375,8 @@ of this section built.
   `metrics` op's. Nothing routes from this store — the scheduler reads only the
   latest `status` — so a Prometheus + Grafana stack later is one more consumer
   (an exposition endpoint, or remote write, since daemons dial out and laptops
-  roam), not a redesign. Not built: PSI and cgroup v2 views in an LXC, the
+  roam), not a redesign; the archivist is the first such consumer, pulling the
+  `metrics` op into a longer-lived copy without changing this store. Not built: PSI and cgroup v2 views in an LXC, the
   Proxmox node view (docs/scheduler.md, M4), macOS I/O rates. Rejected: the 1-min load average as cpu (counts runnable
   tasks, so it exceeds 100% and on Linux includes I/O wait); `os.freemem()` on
   macOS (free pages only, a fraction of what is reclaimable); a fixed EMA alpha
@@ -8179,6 +8312,10 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   persisted too (`seance:pending`) so a lost reply could be reconciled; every spawn is a
   queued task now, whose record is the relay's, so nothing pending is kept and
   `dropLegacyPending` clears the old key on start.
+  The Fresh worktree choice is kept per repo origin (`worktreeByRepo`, read through
+  `worktreeFor`): a repo's own last choice, else the last made anywhere. Kept on this phone
+  only, not in a relay record — a per-device habit, not fleet state — and bounded to the
+  newest `WORKTREE_REPOS_MAX` origins.
 - **Queue works with the relay unreachable: the task is held on the phone and sent
   on reconnect** (2026-10-29). Held only once this document has seen a registry
   (`canHold`): the repo and pins resolve against the machines the socket left in
@@ -8283,7 +8420,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   for a first alert carrying `question: true` (a worker that predates the field words it as any
   wait), "A task may spill into credits
   (7d projected at 95%)", "A task is spending credits (5h full)", "A machine's disk is nearly
-  full", and per reason for a blocked PR: "A task's pull request has a failing required check",
+  full", "The archivist has been offline for 24 hours" (nothing of its payload shown), and per reason for a blocked PR: "A task's pull request has a failing required check",
   "… has merge conflicts", "… is behind its base branch", "… is ready, but nothing will merge it",
   falling back to "… is blocked" for a reason this worker does not know; the reason picks its text
   through a frozen null-prototype map, so `__proto__` or `constructor` reach the fallback); the spill is worded as spending only for a payload's `spending: true`, anything else
@@ -8297,7 +8434,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   shows no name or title, and a payload it cannot read (an unknown kind or version, an id that
   fails the `isTaskId` rule it copies) shows the generic text with no target.
   - **The deep link.** A click opens the app at `/?task=<id>` (a task, spill or blocked-PR alert) or
-    `/?screen=machines` (disk). The worker re-checks the target it stored against those two
+    `/?screen=machines` (disk, login or the archivist's silence). The worker re-checks the target it stored against those two
     shapes before using it, focuses an open window of its own origin and posts it
     `{t: "open", url}`, or opens a window at the path when none is. `pwa/src/deep-link.ts`
     reads the query on launch and the message on a running app (`parseDeepLink`: the id must
@@ -8500,7 +8637,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   chart to offer has no menu) on a machine asks
   that daemon for `cpu_pct`/`mem_pct`/`disk_pct`; on an account it asks one online host of the account
   (the newest observer when it serves `metrics`) for the quota series and folds its exclaves'
-  copies into one line per window. One chart at a time, its window fixed when asked, a reply
+  copies into one line per window. While an archivist is online the archive answers instead past
+  30 days, for an asleep machine and, where the install holds the account key, for an account,
+  merged across machines (Archivist, "The PWA's charts"). One chart at a time, its window fixed when asked, a reply
   that lands after the chart moved on is dropped. Disk shows as a third gauge, percent
   used on the fullest watched path (2026-10-19 — an LXC's small root fills quietly, and an
   earlier cut hid it as upkeep rather than load); it never scores. The floor reads `free`, not
@@ -8519,6 +8658,16 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   `shared/src/app-client.ts`, the rule `list_machines` uses too, so an unproven nominee is
   never drawn as leading. Each card shows its daemon's build (short sha, commit age, branch)
   and, when its last update attempt was a skip or failure, a note saying which and how long ago.
+- **The archivist has a card, never a target** (2026-11-12). After the machine cards and before
+  Accounts, built only from the flagged registry entry whose `info` blob is sealed `from` its own
+  id and parses as `ArchivistInfo` (`RelayState.archivist`; an impostor's blob leaves it null).
+  Online it shows the platform, last ingest, the build line and Tasks, Samples, Events and
+  Database rows from the last `archive-status` reply held for that same device; offline, `offline ·
+  last seen`, no rows and a line on what is hidden. No menu, no spawn, no gauges. The counts are
+  read when the Machines screen is visible (tab shown, socket open) and the archivist connected, then every 60 s while it
+  stays so (`pwa/src/archivist-store.ts`), dropped when the seat moves or goes offline; a timeout
+  or error leaves the card without rows and does not mark it offline — the card follows the
+  registry.
 - **Stored secrets show as a masked placeholder, and a blank field keeps them.**
   The PSK cannot be read back at all and the bearer is not worth redisplaying,
   but two empty inputs read as "credentials lost" on a working install. So
@@ -8728,7 +8877,7 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   to use Bash on …", "It's waiting for input on …"; an escalated row's body "May be waiting for
   permission to use Bash since …". Tasks group by what each needs from
   the owner: Needs you (escalated first, then `needs-input`, then `lost`), Running, Idle, Waiting,
-  Asleep (collapsed; below), Awaiting merge, Finished, in the leader's order within each (`queue-view.ts`), except Waiting, oldest first (FIFO, as the scheduler routes ready tasks; batch grouping and blocked tasks are not reflected). Idle holds the
+  Asleep (collapsed; below), Awaiting merge, Finished, in the leader's order within each (`queue-view.ts`), except Waiting, oldest first (FIFO, as the scheduler routes ready tasks; batch grouping and blocked tasks are not reflected); while the archivist is connected, Finished continues into a collapsed Older section read from the archive (Archivist, "The PWA's task history"). Idle holds the
   `running` tasks the reply's `idle` lists (an entry for a task no longer running is ignored, so an
   action's own reply wins), each saying "Idle at its prompt since … — its slot is free", and the
   summary counts them ("2 running · 3 idle · 1 waiting", the idle count only when there are some).
@@ -10575,7 +10724,606 @@ are tmux-rename's, except where they say mods.
   format matches bun's), and skips those shards, visibly, where `claude` isn't on
   PATH — which today includes CI.
 
+## Archivist (`archivist/`) — built 2026-11-12 to 2026-11-13
+
+The fleet's optional history service. Its decisions, A1–A37, and the alternatives rejected are at
+the end of this section ("Decisions", "Rejected alternatives"), where the spec it was built from
+was folded once the last item landed. Build order item 2 is the
+workspace and its two relay legs; item 3 (2026-11-12) is
+`archive.sqlite` and what it collects into it: finished tasks, accounts and fleet events; item 4
+(2026-11-12) is metrics, in `metrics.sqlite` beside it. Its trust entry is the Threat model, item 2 ("The archivist, a PSK holder
+that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archivist's seat").
+
+- **A workspace of its own, reusing the daemon by import.** `archivist/`, command
+  `seance-archivist` with `run` and `status` (and, at item 5, `install --system`,
+  `uninstall --system` and `update`, below). It imports the daemon's relay client, app-leg
+  factory, state, credential, paths, log and the relay-side config checks by relative path, as
+  `e2e/` does, and copies none. Where a module it needs sat beside one it must not load, the
+  module moved: `runnableProblems`, `bearerTokenWarnings` and `pskFingerprint` from `config.ts`
+  (which reaches the exclave scan and the broker's protocol) to `daemon/src/config-checks.ts`,
+  `CRED_NAME` from `tpmcreds.ts` (an exec path) to `credential.ts`, and `appRelayClient` now takes
+  the two fields it reads rather than the daemon's `Config`. Rejected: a copy of any of them (the
+  credential name or a check would drift), and moving them into `shared/` (bundled by the relay
+  and the PWA, and a change there deploys both).
+- **Its own config and state.** `~/.config/seance-archivist/config.json` holds `name`, `relayUrl`
+  and `bearerToken` only, checked by the daemon's own `runnableProblems`; a `psk` key is refused.
+  `~/.local/state/seance-archivist/` (0700, re-`chmod`ed at every start since `mkdir` honours the
+  umask and skips an existing dir) holds `state.json` — the identity seed, minted by the daemon's
+  `loadOrInitState` only when the file is absent, never leaving the file — and `runtime.json` for
+  `status`. Unlike the daemon, an unreadable, malformed or seed-mismatched `state.json` refuses
+  start (`loadSeatState`) rather than being replaced: the id must equal the relay's `ARCHIVIST`,
+  so a re-mint would be a squatter refused 4403 forever, and an overwrite destroys the seed. Never the daemon's
+  `seance` dirs: on a shared box it is a different Unix user (A27a), and even
+  as the same user it must not read or mint the daemon's identity.
+- **The key, from the unit only.** `readCredentialPsk` at `$CREDENTIALS_DIRECTORY/seance-psk`;
+  nothing found refuses start, naming the path and docs/psk.md. Root (uid or gid 0) is refused
+  first, before any file is read or written.
+- **The seat's leg.** The daemon's `RelayClient` on `/daemon` with `role: "archivist"`: the v2
+  register claims that role alone, never v1 (a roleless register would admit it as an ordinary
+  machine), and a `lead` frame is dropped unproven. A close with `CLOSE_ROLE_REFUSED` (4403) or
+  the reason `register role-refused` counts as a refusal, as `register unverified` does, so the
+  backoff keeps growing — a misconfigured archivist (its id not on `ARCHIVIST`) redials at the
+  ceiling, not the base interval — and unlike `unverified` it never flips the scheduler leg to
+  v1, since the relay read the v2 signature to refuse it. Its registry blob is sealed under op
+  `machine-info` from its own id, but carries `{archivist, name, platform}` — no `repos`, no
+  `scannedAt`, no exclaves — a shape `parseMachineInfo` refuses: a client that predates the
+  seat flag counts the entry `skewed` ("update", true of that client), never a `Machine` and
+  never `ignored` (which would send someone to rotate a correct key); one with the flag skips it.
+  Every op that reaches it is dropped with a warning and no reply, except the fleet's
+  `update-available` broadcast, which writes an update request and is answered by nothing
+  (item 5, below), and `archive-status` (item 6): answered only when sealed `from: "app"`
+  (anything else, or a frame carrying `re`, is dropped with a warning), parsed by
+  `parseArchiveStatusRequest`, through the leg's replay guard, with `{onlineSince, lastIngest,
+  tasks, samples, events, database, countedAt}` — counts, byte sizes and timestamps, never a row.
+  `lastIngest` is per source (`store`, `registry`, `status`, `pull`) and per process: null until
+  that source's first success since the archivist started. Row counts of the sample tiers
+  (`WITHOUT ROWID`, tens of millions of rows) are never taken in the request path: a background
+  pass at start and every 5 minutes counts them in bounded `ts` ranges, yielding a macrotask
+  between chunks so the heartbeat and collectors keep running, and the answer reads the last
+  published value (`countedAt`; null until the first pass ends, and a failed pass keeps the
+  previous value). Database size is the files' `stat` (plus `-wal`). The build line comes from
+  `served-source.json` (0600), which the credential-less update unit writes before it signals the
+  restart, since the run process has no git; it first appears one update after this lands, with
+  no fallback. There is no capability gate: an archivist that predates the op never answers, and
+  the app's 10 s timeout leaves a card without rows. No `status`, no store frame.
+- **The query ops** (item 7, A31–A34). `archive-metrics` and `archive-tasks` pass the same gate
+  as `archive-status` (`answerApp` in `archivist/src/answer.ts`: sealed `from: "app"`, no `re`,
+  the op's own parser, `invalid_request` on a malformed one, `internal_error` naming only the op
+  on a throw), and the app sends both through `RelayClient` (`archiveMetrics()`,
+  `archiveTasks()`), resendable reads like `archive-status`, with no capability gate for the
+  same reason. Nothing of a request is logged: a task query may carry title text.
+  - `archive-metrics` is `MetricsRequest` naming exactly one of `machine` (a device id, the
+    series' observer label) or `account` (its `account:` store key), with two more steps, 6 h and
+    1 d (`ARCHIVE_METRICS_STEPS`), under the same `METRICS_MAX_POINTS` cap, so a year is
+    reachable at 1 d. The reply is a `MetricsReply`. A machine gets its own observed series as
+    stored at the step's tier, and at 6 h or 1 d the average of its hourly rows per bucket. An
+    account gets every series labelled with it, from any observer and exclave, each valued as a
+    machine's own series is (so a chart reads alike at every step: the same account at 1 h and
+    1 d no longer disagrees by taking a different statistic), merged at query time (A33): per
+    bucket the newest row wins, and rows at the same instant (every row of a rolled or averaged
+    tier sits at its bucket's start) take the larger value, since within a window usage only
+    rises; the merged series drop `machine` and `exclave`. Series are picked by label in the
+    `series` table first, bound as one JSON array; the tier is then read by `ts` range (its key
+    is `(ts, series)`, so every series in the range is scanned, then filtered to those ids,
+    synchronously) — a `(series, ts)` index would be a shared-schema migration, left until a
+    fleet's size makes it matter. A reply past `REPLY_JSON_BUDGET` is refused `too_large` by the
+    archivist itself, with a message: a year at 1 d with more than a handful of series is the
+    case, and the app asks per `names` or a shorter range.
+  - `archive-tasks` is a page, newest first by end time, filtered by `repo`, `outcome` (`done`,
+    `failed`, `cancelled`), `machine`, `account`, `since`/`until` and a `title` substring
+    (`LIKE` with `%`, `_` and `\` escaped, so case-insensitive for ASCII only: "øl" does not
+    find "Øl-oppsett"); every filter is a bound parameter. The archive has no
+    finish time, so end time is `first_archived_at`, the first time the archivist saw the task
+    finished (one clock reading per listing pass, so a first start's backfill, whose true finish
+    times are unknown, ties and falls to `created_at` then id); ties go to `created_at`, then
+    id, all descending, and `before` is a keyset cursor on those three. `limit` is 1–50 (`ARCHIVE_TASKS_PAGE` 20 by default), and a page is also
+    filled only to `REPLY_JSON_BUDGET`, keeping at least one row; `next` points past the last row
+    it consumed whenever one is left, so a page cut by size loses nothing, and `total` counts
+    every match. Each row carries the task record, its end time, the machine's last-known name
+    and the account's alias. The record is parsed and passed through `archivedTask` again on the
+    way out, so even a row an older build or a hand edit stored whole sends no prompt, no
+    attachment manifest and no raw account id; a record that no longer parses is skipped, counted
+    in one warning, and still consumed. A page asked without `before` also carries `machines`:
+    every machine the archive holds an assigned task for, whatever the filters, as its device id,
+    last-known name (the machines table's, else the newest row's) and newest end time, those off
+    the archivist's registry first (the only ones an app lacks), then newest first, at most
+    `ARCHIVE_MACHINES_MAX` (100) and cut to 8 000 bytes of the page's budget (machine names have no
+    length bound; one that does not fit is skipped, the rest still listed) and to what the
+    page's forced first row leaves, so the listing never turns a page that fitted into a
+    `too_large` one. An app reads it leniently: a `machines` that is not an array is absent, a
+    longer one cut to the cap, an unreadable entry dropped. It is one aggregate over `tasks`, which each page's `total`
+    already scans, with no index (one would be a migration on every existing archive); later pages
+    repeat none. An older archivist sends no `machines`, and an older app's parser ignores it.
+- **The PWA's charts** (item 8, A32, A35, A36d–A36f; 2026-11-13). The range picker is
+  `6h · 24h · 30d · 90d · 1y`; 90 days asks at 6 h and a year at 1 d, so neither crosses
+  `METRICS_MAX_POINTS`. Which side answers is the store's choice at ask time, from the registry
+  (`Store.showHistory`), never part of the chart's target: a connected machine's own daemon for
+  the three short ranges, as before; the archive (`archiveMetrics`) for 90d and 1y, for a machine
+  that is not connected, at any range, and for an account at any range, merged (A33) and asked by
+  its `account:` store key. The archive labels an account's series with that key, never the raw
+  id, so the reply is narrowed by it (`accountSeries`, which also drops the label from the legend).
+  One rule, `archiveCharts` in `pwa/src/state.ts`, says what the archive serves now — machines
+  while the archivist's registry entry is connected, accounts only then and while this install
+  holds the account key (an install saved before account records cannot derive the key, so its
+  account charts stay on a host) — and both the screen and the store read it, so a chart or range
+  is offered exactly when it can be asked for. That is what gives an asleep machine's card ⋯ ›
+  History, and an account whose every host is asleep a chart; with no archivist every chart reads
+  as before it. A registry push that stops the archive serving an open 90d or 1y chart re-asks it
+  at 24h; a short range already open stays as it is, its answer still true; an asleep machine's chart
+  has no daemon to fall back to and closes. No source shows in the UI (A36e) except a failure: a
+  timeout or the client's unsent `offline` reads "No answer — the archivist may be offline.", any
+  other transport failure, an unreadable reply or an error code names the archivist where the
+  daemon's lines name the machine. The remembered range is the one last wanted, so a chart the
+  archive can't serve opens at 24h without costing the next one its long range. An asleep machine's lines simply stop at its last beat (A36f):
+  the chart draws only the points it has.
+- **The PWA's task history** (item 9, A34, A35, A36g–A36j; 2026-11-13). Finished continues into
+  Older, a section after it with the Asleep section's toggle, closed by default and counted
+  nowhere. Its state and reads live in `pwa/src/older-store.ts`, its rows in
+  `pwa/src/older-view.ts`. Open, it shows a title search (the rename field's style) and five tiles
+  — Repo, Outcome, Machine, Account, Dates — that open the spawn form's sheets (`TileButton`,
+  `Sheet`, both in `pwa/src/components/sheet.tsx`), each a history layer as the form's are. Dates
+  is a preset (7, 30, 90 days, a year, any time), sent as `since` from the app's clock. Filters
+  apply to Older only. It reads `archiveTasks` 20 at a time, the search debounced 300 ms, and
+  pages on `next` with a quiet "Load older". A row whose id the leader's queue still lists is
+  dropped (dedup by id, against the whole live queue, whichever section lists it), and so is
+  its count: "Showing 20 of N" takes the duplicates already read off `total`. A page made only
+  of such rows reads on by itself rather than showing an empty page, at most six pages in a
+  row and never past a page that added nothing; "Load older" is offered whenever a cursor
+  remains, even with nothing shown. An archived card is a Queue card with every action off: no ⋯ menu, no Continue,
+  the PR chip in its last archived state with no checks icon. Its machine is the registry's
+  current name, else the archive's last-known one. Its account is the live account's display
+  name, matched by the `account:` store key this install derives, else the archived alias, else
+  a short key, never the raw id. The Machine sheet lists the registry's machines, then every
+  other machine the archive names, newest first, as "no longer listed · last seen 41d ago", where
+  "last seen" is the newest archived end among its tasks: page one's `machines` listing (above,
+  "The query ops"), kept while Load older pages on and across a re-read (a filter pick, a
+  refresh) until the new page one answers, merged with the rows read, the newer sighting
+  giving the name and age (a newer sighting with no name never hides an older one's). From an archivist too old to send the listing, only the rows
+  read name them. The Repo and
+  Account sheets likewise offer the registry's or the rows' values. The states are "Loading…"
+  under the filters, "No older tasks match." with "Clear search and filters", and the charts'
+  failure wording ("No answer — the archivist may be offline." for a timeout or an unsent ask;
+  a later page's failure keeps the rows). With no archivist connected nothing of Older shows
+  (A35): the registry push that drops it resets the section and closes an open sheet. Closing
+  the Queue screen resets it too, so it reopens closed and unread, and closing the section
+  drops its list, so a reopen reads afresh.
+- **The read leg.** A second, app-role socket from `appRelayClient` with the PSK's key and the
+  account key derived from it, as the leader's own app leg reads (A7); `archivist/src/collect.ts`
+  reads the store through it, and `archivist/src/metrics-collect.ts` the registry's `status`
+  snapshots and each daemon's `metrics` op (below). A 4401 on it is
+  permanent for that client, so the seat leg's `/daemon` upgrade succeeding — proof the token works
+  now — redials it. The seat leg's `onConnect` fires when the register has left, not when it is
+  accepted (the relay sends no ack), so `runtime.json` and `status` can say "connected" for a seat
+  the relay is refusing 4403; the log's `register role-refused` line is the diagnosis.
+- **Held by a test, not a habit.** `archivist/test/layering.test.ts` walks the transitive import
+  closure from every file in `archivist/src`, counting type-only imports, and fails on any daemon
+  module that spawns, drives tmux, dispatches ops, brokers, leads or writes the queue or store,
+  on `daemon/src/config.ts`, `run.ts`, `cli.ts` and `mcp.ts`, on any path into `scheduler/`, and
+  on `@seance/scheduler`, `@seance/daemon` and `child_process`, and on `Bun.spawn`/`Bun.$` anywhere
+  in the closure. A second scan forbids every write method either
+  client offers (dotted, bracketed or destructured), and `execPath`, in the archivist's own source. Transitive because an allowed
+  module that later grows an edge to a forbidden one must fail here, not in review. A third holds
+  `bun:sqlite` to `archive.ts` and `metrics-archive.ts`, and both to no `DELETE`, `DROP`,
+  `TRUNCATE` or replacing insert (A23); a fourth holds the shared tiers'
+  (`daemon/src/metrics-tiers.ts`) removing statements to their two horizon prunes, the one way a
+  metrics row leaves (A22).
+- **`archive.sqlite`** (item 3), in the state dir beside `state.json`: created empty at 0600
+  before SQLite opens it, so the WAL and shared-memory files take that mode (as
+  `metrics-store.ts` does), `journal_mode = WAL`, and migrations keyed on `PRAGMA user_version`,
+  each run in the one transaction that opens the file. A file at a newer schema than the build
+  refuses start: an older archivist would write rows a newer schema reads differently. Schema 1,
+  every time in ms:
+  - `tasks` — one row per finished task, `id` its key: `version` (the store version it was read
+    at), `state` (`done`, `failed`, `cancelled` only, by `CHECK`), `repo`, `title`, `created_at`,
+    `device_id` (its assignment's), `machine` (that machine's name when archived), `account` (the
+    `account:<hex>` store key, never the raw id), `pr_url`, `pr_state`, `done_by`, `failure` (its
+    code), `record` (the task as JSON, below), `first_archived_at`, `archived_at`. The record has
+    no finish time, so `first_archived_at` is the nearest the archive knows.
+  - `accounts` — `key` (the `account:<hex>` store key), `alias` (display only), `version` (the
+    record's store version, 0 for an account only seen signed in on a machine), `first_seen_at`,
+    `updated_at`.
+  - `machines` — `device_id`, the last known `name` and `platform`, `build` (`SourceInfo.sha`),
+    `connected`, `in_registry`, `first_seen_at`, `updated_at`. Never deleted: a retired machine
+    keeps its row and name (A24).
+  - `events` — append-only: `at`, `kind` (`first_seen`, `connected`, `gone`, `build_changed`,
+    `term_changed`), `device_id`, `name`, `build` and `previous_build` (for `first_seen` and
+    `build_changed`), `term` and `previous_term` (for `term_changed`, whose `device_id` is the
+    leader).
+  - `meta` — the last verified scheduler term (`scheduler_term`), the baseline for `term_changed`.
+- **Tasks** (A13, A14, A16). Read only through the app leg's own readers, `listTasks`
+  (`store-list task:`) and `getTask` (`store-get`), so every record is opened by `openTaskRecord`
+  then `bindTaskRecord`; one they cannot read is counted in a log line and skipped, never deleted
+  or written over. Only a `finished`-phase task gets a row, through `taskRow`: `forgetPrompt`
+  first (prompt and attachment manifest gone even if a record still carries them), then
+  `spec.pin.account` and `spillAlert` dropped, the two fields that hold a raw account id, and
+  everything the daemon or the router derives from prompt text: `assignment.window` and `branch`
+  (a title-less task's window and worktree branch are slugged from the prompt's first words),
+  `failure.message` (a daemon's text, which may name the worktree; `failure.code` stays, in its
+  column too) and `decision` (a `skill_absent` reason carries a `/skill` read off the prompt; the
+  placement stays in `assignment`). The store prunes these with the task; the archive would keep
+  them for good. A row is
+  written when the archive holds none or holds it at a lower store version (`ON CONFLICT … WHERE
+  excluded.version > tasks.version`), so a PR that merges after its task settled lands, and an
+  older blob put back never wins; a machine name the archivist cannot resolve this time keeps the
+  one held. A record that leaves the store leaves its row as it was. The account is resolved when
+  archived: the assignment's machine's exclave in the registry, else `pin.account`, HMAC'd with
+  the account key (`accountStoreKey`) — so it names the account that exclave held then, and the
+  **first** one resolved stays (`coalesce(tasks.account, excluded.account)`): a later PR reading
+  never moves a task to whatever the exclave signed into since. A named get waits for the settled
+  registry (before it no exclave resolves; the listing at ready covers what was missed). Pacing, against the relay's list floors (4 lists per minute per socket per prefix, and a
+  shared bucket of one per 8 s): a `queue-changed` naming tasks adds each id to a set one worker
+  drains, a batch at a time by `store-get` (no floor), so a burst of nudges or a slow relay reads
+  each task once per round, never once per nudge; one naming none, the leg's every (re)open, and
+  a 10-minute poll list, at most one list per prefix per 20 s, coalesced; a refused or failed
+  list retries after a minute, and a failed get (task or account) falls back to the paced list.
+  The app leg's log drops the shared client's send and recv lines for `store-get` (two per get
+  would swamp a burst); timeouts, refusals and drops still log.
+- **Accounts** (A15). `listAccounts`/`getAccountRecord`, so only through `openAccountRecord`,
+  on open, on the poll and on a `store-changed` nudge for an `account:` key (relay plaintext, a
+  hint only: the reader re-checks the key against the record's own HMAC), coalesced per key. An
+  alias moves only to a higher store version. Every account signed in on a registry machine is
+  noted by its store key, alias empty, so a removed account's tasks still name a key (A24). A key
+  is marked noted only after its write lands. **A PSK rotation splits an account's history**: the
+  key is an HMAC under a key derived from the PSK, so the same account files under a new key
+  afterwards, and rows from before name one no later row or `accounts` entry shares. Inherent to
+  A15 (a stable key without the PSK would be a raw account id) and accepted: nothing records the
+  epoch, and a per-account query across a rotation reads the account as two.
+- **Fleet events** (A18). Diffed from the app leg's settled registry (`registrySettled` on an
+  open socket, never before: an empty list then means no push yet) against the `machines` table,
+  not memory, so a restart repeats no `first_seen`. Machines are the client's decrypted
+  `Machine`s, the seat's own id skipped besides (A9). `first_seen` on a new id (then `connected`
+  if it is), `connected` when a machine not up is, `gone` when one that was up is not, whether it
+  disconnected or its entry left the registry (a machine already down when its entry leaves writes
+  no event: its row's `in_registry = 0` and `updated_at` say when), `build_changed` when its `SourceInfo.sha` moves (a daemon that stops saying is no
+  change), `term_changed` when a verified (`ready`) leader's term differs from the last recorded.
+  `at` is the archivist's clock: what changed while it was down is recorded when it returns, and a
+  machine whose blob this build cannot read is absent to it (after a PSK rotation that is every
+  machine, so each reads as `gone`, and `connected` again once its blob opens). The connection
+  waits up to 2 s on a lock (`busy_timeout`; a purge in `sqlite3` is expected, A23), and a write
+  that still fails is logged and tried again on the next registry change, never thrown into the
+  client's listener.
+- **Metrics** (item 4; A17, A19, A20, A22, A33). `metrics.sqlite` in the state dir, beside
+  `archive.sqlite` and opened like it (0600 before SQLite, WAL, `busy_timeout`, `user_version`, a
+  newer schema refuses start), on the daemon's own tiered store (`daemon/src/metrics-tiers.ts`,
+  Daemon, "Telemetry") at the archive's retention: raw 30 s for 48 h, 5-min for a year, hourly
+  forever, each tier the average of the one below. A file of its own, not tables in
+  `archive.sqlite`: retention prunes these tiers while that file is append-only (A23), and each
+  file's schema moves alone. `archivist/src/metrics-archive.ts` holds it, `metrics-collect.ts`
+  fills it.
+  - **Series per observer**, unmerged (A33): every series carries `machine`, the observing
+    machine's device id (its name would split a series at a rename; a daemon's own series name no
+    machine, its store being its own). An `account` label is the `account:<hex>` store key
+    (`accountStoreKey`, A15), never the raw id the daemon labels with; `exclave` and `model` are
+    kept as the daemon writes them.
+  - **Live.** Each `Machine.status` the app leg holds (already bound to the blob it indexes) with
+    an `at` newer than the last ingested from that machine (and no more than 5 minutes ahead of
+    the archivist's clock: a daemon with a wrong clock is not kept, and is not remembered, so
+    fixing it does not leave it silent until real time catches up) becomes raw samples the way the daemon
+    wrote its own: the six gauges at `at`, `sessions` per exclave, and each quota observation at
+    its own stamp through the daemon's `quotaSamples`. A live sample never replaces a row.
+  - **Pulled.** Every connected machine advertising `CAPABILITIES.metrics` (never the seat) is
+    pulled through `RelayClient.metrics`, one machine and one request at a time: every 5 minutes
+    (`METRICS_TIMINGS.pullMs`; live frames already arrive every 30 s, so the pull fills what they
+    missed and replaces their whole-percent values with the daemon's one-decimal ones, and one
+    small request a machine a round is the steady cost), at the leg's ready and when a machine
+    (re)connects. A pulled raw sample replaces a live one at the same `(series, ts)`; a pulled
+    5-min or hourly row is flagged (`pulled`, a column only the archive's rolled tiers carry) and
+    no rollup in the archive re-averages it — a re-roll crosses every series from its oldest new
+    sample, so a bound on where it starts could not protect one machine's imported bucket from
+    another's late sample. Buckets no pull supplied roll up as the daemon's do.
+  - **Watermarks.** `pull_marks` holds the newest pulled point per machine, tier and series. A
+    tier's next pull starts at the laggiest series' mark (a quota reading is stamped at its fetch
+    time, so lags the gauges), but never more than `lateS` (15 min, past the quota refresh's
+    default 10) behind the newest, so a series that stopped (an exclave removed) cannot drag
+    every round back to it. Raw is pulled each round from its mark (at most the daemon's 48 h
+    back). When that mark is older than the daemon's raw keep (less an hour for clock skew) —
+    never pulled (the first start, A19), asleep, or this archivist down (A20) — the 5-min tier is
+    pulled too, from the later of its own and raw's mark, at most the daemon's 30 d back; and when
+    that start is older than 30 d, the hourly tier, from `METRICS_HISTORY_START_S` (2026-10-15, the
+    daemon tiers' recreation) on a first start. Rolled tiers are pulled only to the last bucket
+    closed 15 minutes ago (`settleS` = `lateS`: a quota sample stamped that far back re-rolls
+    its bucket, and a flagged row is never re-averaged here), so a bucket the daemon may still
+    re-roll is never fixed. What a daemon
+    pruned or rolled past in between is lost (A20). A machine whose store answers empty keeps its
+    marks where they were, so the last whole pull's end (in memory, less `lateS`) floors the
+    next start: it is not caught up again every round.
+  - **Paging.** Contiguous pages of at most `METRICS_MAX_POINTS` steps, oldest first, each
+    starting a second past the last (a raw sample sits at its tick's second). A reply too large
+    for an envelope (`too_large`) is asked again one `METRIC_NAMES` name at a time, then halved by
+    the second; a name this build does not know is not split out. A page is written whole, its
+    pieces together and its marks with them, in one transaction (one re-roll a page): marks per
+    series moved piece by piece would let the `lateS` cap skip what a failed piece's series
+    missed. Points outside the page's requested range are dropped before the write, and a mark
+    is the newest in-range point, never the last one a reply lists. The first failure ends that
+    machine's round with its marks where the last whole page left them; it is warned once per
+    streak and its recovery logged. The relay's `store-list` floors do not apply: the op is an envelope
+    to a daemon, which the relay neither reads nor rate-limits.
+
+Item 5 (2026-11-12): installing, updating and the docs (A25–A30; setup, the
+move-the-seat runbook, the schema and example queries are the README's step 9).
+
+- **Three system units, written by `install --system`** (`archivist/src/units.ts`,
+  `install.ts`). `seance-archivist.service` runs `run` with `User=` the archivist's account,
+  `LoadCredentialEncrypted=seance-psk:<state dir>/psk.cred` (`CRED_NAME`, imported),
+  `Restart=always`, `RestartSec=5`, `WantedBy=multi-user.target`, and journald for its log (no
+  `append:` file for root to create under the wrong owner). `seance-archivist-update.path`
+  watches `<state dir>/update-requested` with `PathChanged=` and starts
+  `seance-archivist-update.service`, a oneshot with the same `User=`, no credential,
+  `update --requested`, `TimeoutStartSec=15min`, `StartLimitIntervalSec=0` (a crash-looping service
+  asks on every start and a skip exits fast; the default start limit would fail this unit and then
+  the path unit, which would stop watching). All three come from one set of values through
+  the daemon's `unitEscape` and `assertUnitFlag`, so they cannot disagree on user, checkout or
+  PATH. The target user is resolved as the daemon's `install --system` resolves it
+  (`daemon/src/target-user.ts`: `requireRoot`, `lookupUser`, `asTargetArgv`, `reachablePath`,
+  `missingUnitBinaries` over bun and git, `whichIn`), never from root's environment, and never
+  `process.execPath`; it never invokes `sudo`. `--user` is required (the sudo caller is usually
+  the daemon's user), and so is `--path`: nothing ambient reaches a unit, and the sudo form drops
+  `--preserve-env=PATH`. Refused before anything is written: root or uid/gid 0, the user
+  `/etc/systemd/system/seanced.service` names (`unitUser`, now exported) or one with a
+  `seanced` user unit (A27a), a checkout not owned by the target uid (`update` fast-forwards it
+  as that user, and the unit runs its code with the key), any code the units run that the target
+  and root alone do not control (`untrustedCode`: the checkout's tree and ancestors, the resolved
+  bun and git, every PATH entry — owned by root or the target uid, not world-writable, not
+  group-writable by a group but root's or the target's; `writeRisk` in `target-user.ts`; a
+  `root:staff` 2775 `/usr/local/bin`, Debian before trixie, fails on purpose, since membership is not
+  checked). The walk is by `lstat`, never `realpath` and never a recursive `readdir` (both follow
+  links: a cycle crashes it and a link out lists another's files): `untrustedChain` checks every
+  component as given, a symlink as a link (its owner) and the directory holding it before it
+  resolves the link, so a link in a directory the daemon's user can write is refused whatever it points
+  at, with a link-count bound; `untrustedTree` never descends a link, checks the chain of one that leaves
+  the checkout, skips what vanishes mid-walk (the update unit runs `bun install` as the same user) and is
+  bounded in entries. `--path` entries must be absolute. Two gaps are accepted and documented rather
+  than closed: mode bits only, so a POSIX ACL granting the daemon's user write is not seen, and the
+  target's own gid is trusted, which assumes a per-user group (a shared `users` group the daemon's user
+  is in would pass). The refusal's sudo form names the archivist's own bun by absolute path
+  (`~archivist/.bun/bin/bun`), never `$(command -v bun)`, which would run the daemon user's bun as
+  root. A config `loadArchivistConfig`
+  refuses, and a blob that is missing or that `blobLoadable` cannot decrypt — unlike the
+  daemon, the archivist has no keyless mode, so a unit without its key would fail and restart
+  every five seconds. Then `daemon-reload`, `enable --now` of the path unit and the service, and
+  a restart when the service's definition (or, for the path unit, its watch) changed, since
+  `enable --now` leaves a running unit on its old one. The daemon's `install --system` refuses the
+  user an installed `seance-archivist.service` runs as (`archivistUserRefusal`), the other half of
+  A27a, and so does a user-scope `seanced install` for the invoking user. `uninstall --system` disables, stops and removes the three, leaving the state
+  dir.
+- **The key's blob is the archivist's own** (A27b, settled). Sealed under the same credential
+  id, `seance-psk`: the id is embedded in the blob and the archivist reads
+  `$CREDENTIALS_DIRECTORY/seance-psk` with the daemon's code, and two units' credentials never
+  collide (each gets a private tmpfs). A copy of the box's `seanced` blob decrypts too (a TPM
+  blob is bound to the TPM, not its path), so copying it is a documented way to make one
+  (docs/psk.md). Rejected: the unit pointing at the daemon's file — the daemon's user owns it
+  and could swap or delete what the archivist runs with, which A27a's separate user exists to
+  prevent — and a name of its own, which would need a credential-name parameter through the
+  daemon's reader for nothing.
+- **Updating without exec in the key's process** (A26). The `run` process takes the
+  `update-available` broadcast the relay fans to every `/daemon` socket (the seat's included,
+  through `RelayClient`'s broadcast allowlist; no wire change) and, for a sha it has not asked
+  about, writes `update-requested` (0600, `archivist/src/update-request.ts`). It also writes one
+  when it takes its seat, at most every 30 minutes (counted from the file's own mtime across
+  processes, so a crash loop does not fetch on every start), to catch an announce it slept
+  through. systemd
+  starts the update unit, which runs the daemon's own `updateNow` (fetch, ff-only on the default
+  branch, `bun install --frozen-lockfile`) against the archivist's checkout, audited under the
+  request's origin, and restarts the service with `signalRestartUnit`. That is the daemon's
+  system-unit restart, now parameterised by unit: SIGTERM to the `MainPID` as the same user,
+  `Restart=always` relaunching it. The oneshot cannot know what the service runs, so `served-sha`
+  in the state dir stands for it: written only after a restart the update made, which follows a
+  successful install, so it never names a sha whose install failed. With none, what the service
+  runs is unknown, so the checkout is installed and the service restarted onto it once (a seed from
+  HEAD would hide a failed install and a hand pull). A checkout ahead of it (an install that failed after a fast-forward, or
+  a hand `git pull`) is installed again and restarted onto, the daemon's `servingSha` path. A
+  request landing while the oneshot runs merges into the running job and nothing re-fires it, so
+  the oneshot runs again while the request file changed during a run (at most three; the stamp is
+  mtime and ctime at full resolution plus the text, taken before anything slow runs). One update at
+  a time holds `update.lock` in the state dir (created `wx`, a dead or 20-minute-old holder's taken
+  over): a hand `update` and the oneshot would otherwise run two git and `bun install` pipelines in
+  one checkout, and a hand update's restart can start the oneshot. The loser exits (the unit
+  quietly, a hand run with a message); the holder's request loop covers what arrived since. A
+  residual window stays: a request landing between the last stamp and the process exiting merges
+  into the finishing job and is lost, until the next register's check (at most 30 minutes) or
+  announce; closing it would need a hook after the unit has ended. No unit is
+  ever rewritten by the service or the update (neither is root); the update warns when the
+  installed units differ from what the checkout would write (a change a pull brings in is seen
+  on the next run, since the running code is the old), and the change lands when root re-runs
+  `install --system`. Rejected: the daemon's in-process
+  `Updater` in `run` — it execs git and `bun install` from origin in the process holding the
+  key, which Threat model item 2 and the layering test forbid — and a timer polling origin,
+  which would update on a push the fleet has not announced.
+- **Two closures in the layering test.** `run`'s closure is held as before, with
+  `install.ts`, `self-update.ts` and `units.ts` excluded by name. Those three are reachable only
+  through `main.ts`'s `import()` in their own command branches, never a static import (checked
+  per specifier). Their own closure may load `daemon/src/exec.ts` and `tpmcreds.ts` (and, as
+  type-only imports through `audit.ts`, `backend.ts` and `broker-protocol.ts`, checked per edge),
+  and nothing else
+  the service closure forbids. Its only spawner is `exec.ts`.
+- **What moved in the daemon to allow it.** `isUpdateAvailable` from `handlers.ts` (an op
+  dispatcher) to `daemon/src/update-notice.ts`; `requireRoot` and `missingUnitBinaries` take the
+  sudo form and the binaries; `systemMainPid`, `signalRestartUnit`, `scopeArgv`, `unitEscape`
+  and `unitUser` take or name a unit; `updateNow` takes an audit origin. The daemon's own
+  behaviour is unchanged.
+
+### Decisions (A1–A37)
+
+Decided with the owner on 2026-11-12 unless marked _derived_; numbered as code comments cite them.
+Built in ten items, 2026-11-12 to 2026-11-13: the seat (item 1), the workspace (2), tasks and fleet
+events (3), metrics (4), install, update and the docs (5), the status op and the health card (6),
+the query ops (7), the PWA's charts (8) and task history (9), and the silence alert (10).
+
+Why it exists: machine and usage history lived only in each daemon's `metrics.sqlite` (unavailable
+while it sleeps, an account's split across the machines that observed it), task history only in the
+relay store, which prunes finished tasks (`pruneAt` 96 down to `keepFinished` 50), and fleet history
+nowhere. Scope: collecting, keeping and answering reads; **not** routing on history, an MCP surface,
+prompt text or any act on the fleet.
+
+**Optional, and never load-bearing.**
+
+- **A1.** A fleet with no archivist behaves exactly as without one. No task, spawn, scheduler pass,
+  prune or PWA screen waits on it.
+- **A2.** Pruning in the relay store is unchanged: the leader never waits for the archivist to have a
+  record. Raising `keepFinished`/`pruneAt` is the lever if the window proves short.
+- **A3.** Daemons are unchanged: their `metrics.sqlite`, retention and `metrics` op stay as they are.
+  The archivist is removable by stopping it.
+- **A4.** The scheduler library gets no dependency on the archivist. The one place the leader's host
+  learns it exists is the silence alert (A37), which affects no routing.
+
+**The seat.**
+
+- **A5, A6.** One archivist per fleet: the `archivist` role on the one id on the `ARCHIVIST` secret,
+  every other claim refused (Scheduler, "Leadership", "The archivist's seat").
+- **A7, A8.** A second, app-role connection for reading, and read-only by its own code, held by
+  `archivist/test/layering.test.ts` (above, "The read leg", "Held by a test, not a habit").
+- **A9.** `RelayClient` skips the seat's entry as a machine, for every reader at once.
+- **A10.** No endpoint of its own. The relay has one shared `BEARER_TOKEN`, and the box holds the PSK
+  anyway, so a separate token would protect little.
+
+**Trust.**
+
+- **A11, A12.** A new kind of PSK holder that never acts, its key only from a systemd unit's
+  `LoadCredentialEncrypted` credential, never as root (Threat model, item 2).
+- **A13.** Records are opened only through the existing readers (`openAtRest`, `openTaskRecord` then
+  `bindTaskRecord`, `openAccountRecord`, `openFleetQuotaRecord`). The archivist deletes and overwrites
+  nothing it cannot read.
+- **A14.** No prompt text and no attachment is ever stored, logged or served. _Derived:_ `forgetPrompt`
+  (moved to `shared/src/task-phase.ts` so the archivist can load it) runs before a task row is
+  written, and everything derived from the prompt is dropped too (above, "Tasks").
+- **A15.** _Derived._ An account is keyed by the HMAC'd account id the store already uses, never a raw
+  account identifier or email; an alias is display only. A PSK rotation files the same account under
+  a new key: accepted (above, "Accounts").
+
+**What it collects.**
+
+- **A16. Tasks.** Finished tasks only (`done`, `failed`, `cancelled`), metadata only, upserted whenever
+  the finished record's store version changes while it is still in the store, so a PR that merges after
+  its task settled is captured. Once the record is pruned the row is final.
+- **A17. Metrics.** Live `status` frames and timed pulls of each daemon's `metrics` op with a watermark
+  per series; where both cover a timestamp the pulled sample wins. Rollups use the daemon's own
+  formula from one module both import (`daemon/src/metrics-tiers.ts`), not a copy.
+- **A18. Fleet events.** From registry pushes: a machine first seen, connected, gone, its build changed,
+  the scheduler leader's term changed.
+- **A19. First start.** Every machine's existing hourly and 5-minute history is pulled once, then
+  collection continues from the watermark. Task history starts from what the store holds that day.
+- **A20. Outages.** After its own downtime, or a machine's sleep, it backfills from the relay store and
+  the daemons' local history. What was pruned or rolled past in between is lost: accepted (A2, A3).
+
+**Retention.**
+
+- **A21.** Tasks and fleet events: forever.
+- **A22.** Metrics: 30 s for 48 h, 5 min for 1 year, hourly forever (`ARCHIVE_RETENTION`,
+  `archivist/src/metrics-archive.ts`).
+- **A23.** Append-only. Nothing on the wire removes or changes history; a purge is SQL on the box.
+  Held by the layering test (no removing statement in `archive.ts` or `metrics-archive.ts`; A22's prunes
+  are the shared tiers' two horizon deletes).
+- **A24.** A retired machine's and a removed account's history stays, keyed by its stable id with the
+  last known name.
+
+**Hosting and packaging.**
+
+- **A25.** A workspace of its own, `archivist/`, command `seance-archivist`, unit
+  `seance-archivist.service`, `archive.sqlite` in its state dir (0600, WAL, migrations on
+  `PRAGMA user_version`). Bun and `bun:sqlite`; no other database, no Node. _Derived_ at item 4:
+  metrics live in a second file, `metrics.sqlite`, since retention prunes them while `archive.sqlite`
+  is append-only and each file's schema moves alone; A30's queries `ATTACH` it.
+- **A26.** It runs from the same git checkout layout as `seanced` and follows the fleet's update
+  announce: an archivist that cannot parse a newer task record would archive nothing, silently (above,
+  "Updating without exec in the key's process").
+- **A27.** It runs on any Linux box or container a daemon can run on (an unprivileged LXC included),
+  alone or beside a `seanced`. Where is the operator's choice; Séance ships the service's installer,
+  never a container.
+- **A27a.** On a shared box it runs as a Unix user of its own, never the daemon's: sessions run as the
+  daemon's user and must not be able to read or change `archive.sqlite`. Each installer refuses the
+  other's user. That user owns the state dir (0700) and its own checkout, shared with the daemon in
+  neither. A daemon's user who can `sudo` is outside what this protects against.
+- **A27b.** Its PSK is its own sealed blob under its own unit, under the same credential id
+  `seance-psk` (docs/psk.md, "A second service: the archivist").
+- **A28.** Backups are the host's (snapshots of the box or container). The service ships no copies
+  anywhere.
+- **A29.** Moving the seat is manual and documented (the README's step 9, "Moving the seat"): stop the
+  service, copy both databases, seal the PSK on the new box, put the new id on `ARCHIVIST`, forget the
+  old id.
+
+**Reading it.**
+
+- **A30. SQL.** `ssh` to the box and `sqlite3`, the file opened read-only; schema and example queries
+  are in the README's step 9, "Reading it".
+- **A31. The PWA** reads through the relay only (its CSP allows nothing else): sealed requests to the
+  archivist's device id, answered sealed. Three ops: `archive-status`, `archive-metrics` and
+  `archive-tasks` (above).
+- **A32. Charts.** A machine's own daemon stays the source for the short ranges. The archivist is the
+  source for an account's chart (merged), for ranges past 30 days (90 days, 1 year) and for a machine
+  that is asleep.
+- **A33. Merging an account.** Series are stored per observer, unmerged; an account's value in a
+  bucket is the newest observation from any machine, computed at query time, each observer's bucket
+  first valued as a machine's own chart values it (above, "The query ops").
+- **A34. Task history.** Finished continues into the archive ("Older"), filtered by repo, outcome,
+  machine, account and date range, with a substring search on the title.
+- **A35.** With no archivist online, none of these controls is shown.
+- **A36. Health.** The Machines screen shows the archivist as its own card: online, last ingest, row
+  counts, database size.
+- **A36a–A36j. The PWA's surfaces**, settled by the owner's review of a design canvas built from the
+  PWA's own tokens and markup; nothing adds a component or style but `.exclave-sessions-wide`. The
+  card sits last in the machine list, before Accounts, with no gauges, exclave rows, ⋯ menu or
+  Scheduler badge (A36a); its rows are Tasks, Samples, Events and Database with their oldest dates,
+  under one line "Keeps task, chart and fleet history. Never runs sessions." (A36b); offline it shows
+  a grey dot, `offline · last seen <age>` and what is hidden until it is back, and a fleet whose
+  registry never held an archivist shows no card (A36c); one range control `6h · 24h · 30d · 90d · 1y`,
+  the last two only while it is online (A36d); no source marking but a failure's wording (A36e); an
+  account chart adds nothing and an asleep machine gains ⋯ › History (A36f); Older is a closed,
+  uncounted section after Finished (A36g) with a title search and Repo, Outcome, Machine, Account and
+  Dates tiles (A36h), archived cards carry no action (A36i), and it pages 20 at a time (A36j). As
+  built: PWA, "The archivist has a card, never a target", and above, "The PWA's charts" and "The PWA's
+  task history".
+
+**The silence alert.**
+
+- **A37.** The leader sends one push when the archivist's registry entry has been absent 24 h, and
+  again only after it has returned and gone absent again. A fleet whose registry has never held an
+  archivist is never alerted. The payload carries state only, with fixed text, like every push.
+  Built 2026-11-13: Scheduler, "Web Push", "Silence alert". The relay derives the seat flag per push,
+  so moving the seat turns the old id's kept entry into an ordinary offline one (never a `Machine`,
+  removed by `forget` per the runbook), and both the health card and this alert follow the seat.
+
+### Rejected alternatives
+
+- **A relay endpoint of its own (`/archive`) with a read-only rule.** One shared token and a PSK on the
+  box make the rule weak, and the future case (requesting a session) is an ordinary app-role enqueue
+  (A10).
+- **A plain app-role client with no seat.** Every app socket is the anonymous `"app"`: the relay could
+  not refuse a second archivist and the PWA could not address the one.
+- **Sealed blobs only, decrypted by the PWA.** No SQL, no aggregation, no downsampling.
+- **Pruning that waits for the archivist.** Makes an optional box load-bearing for the store's size
+  (A2).
+- **A mode of `seanced`.** The archivist must not be able to spawn; a separate workspace with a
+  layering test is the stronger line (A8).
+- **Live frames only, or pulls only.** Live alone loses whatever was sent while the archivist was down;
+  pulls alone lag by the timer. Both, with the pull authoritative (A17).
+- **Archiving tasks from creation.** An unfinished record still carries its prompt, and the live queue
+  already shows it (A16).
+- **A standby or failover seat** (A6), **a purge op on the wire** (A23), **service-run backups** (A28),
+  **a provisioning script for a container** (A27).
+- **Requiring a box of its own.** A box that already runs a daemon has the TPM, the checkout and Bun,
+  and A29 moves the seat later; the separation that matters on a shared box is the Unix user (A27a).
+- **Names.** `ledger` (the launch ledger), `codex` (an existing tool), `familiar` (acts for its
+  master). `archivist` says what it does, like `scheduler` and `relay`.
+- **For the silence alert:** a `since` taken from memory or the relay's `lastSeen` at every check (a new
+  leader would restart the clock, and an entry that vanished has no `lastSeen`), and a device id in the
+  payload (one seat per fleet; nothing for the worker to show or check).
+
 ## Accepted trade-offs
+
+- Root runs the archivist's code at install and uninstall. `install --system` and `uninstall
+  --system` execute the archivist's own checkout and bun as root (the checkout must be the target's,
+  since `update` fast-forwards it), and the update unit pulls from origin unattended as that user. A
+  compromise of that account therefore reaches root the next time an operator runs either command,
+  where for the daemon the account is the operator. The runbook says to read what changed first.
+  Rejected: refusing a non-root-owned `process.execPath` (main.ts, the larger part of that code, is
+  the archivist's whatever bun runs it) and a root-owned copy of the checkout (a second tree to keep
+  in step with the one `update` moves).
+- Each archivist pull is one audit line on a daemon (`origin=relay op=metrics`, like any app
+  request: the relay is blind and the archivist is an app-role client, so nothing tells its
+  requests apart). That is about 300 a day a machine in steady state and a few hundred at a first
+  start or catch-up, a constant background to the "something enumerated" trail. Accepted rather
+  than exempting the op from the audit or the archivist from it, which would hide a stolen key
+  reading the same op; `METRICS_TIMINGS.pullMs` is the dial.
 
 - A task with `requires` is invisible to an app or CLI older than traits (its leader-side record is
   refused by an older leader, and an older app drops what it cannot read), as with `attachments`;

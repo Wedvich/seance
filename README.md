@@ -372,6 +372,212 @@ minutes old, checking every minute and whenever a session there reports. It runs
 checkout's `daemon/src/main.ts session-event` with `bun` from PATH, so it needs no
 `seanced link`. A session started outside tmux reports nothing.
 
+### 9. Optional: the archivist (fleet history)
+
+The relay prunes finished tasks and each daemon keeps 30 days of its own metrics. The
+archivist keeps both for good, in SQLite, for the whole fleet: one service, one seat on
+the relay, never load-bearing (DESIGN.md "Archivist" is the record, its decisions
+included). It holds the PSK and acts on nothing. It runs as a systemd system unit on Linux,
+as a Unix user of its own, never the daemon's, since sessions run as the daemon's user
+and must not be able to read or change the archive.
+
+The steps below set it up in an unprivileged Debian 13 LXC on Proxmox with the host's TPM
+passed through. Any Linux box with systemd ≥ 250 and a TPM works, beside a `seanced` or
+alone.
+
+**On the Proxmox host**, pass the TPM through (PID 1 in the container does the unseal,
+so the bare device is enough):
+
+```sh
+pct set <ctid> --dev0 path=/dev/tpmrm0
+```
+
+**In the container, as root**, add the TPM runtime and the archivist's user:
+
+```sh
+apt install git unzip curl sqlite3 libtss2-dev    # tpm-udev's postinst may fail noisily; harmless here (docs/psk.md)
+adduser --disabled-password --gecos '' archivist
+```
+
+**As `archivist`** (`su - archivist`), install bun, clone, and write the config. It is
+the daemon's `relayUrl` (the `/daemon` URL) and bearer token, and a display name:
+
+```sh
+curl -fsSL https://bun.sh/install | bash
+git clone <this repo> ~/seance
+cd ~/seance && ~/.bun/bin/bun install --frozen-lockfile
+mkdir -p -m 700 ~/.config/seance-archivist ~/.local/state/seance-archivist
+(umask 077; cat > ~/.config/seance-archivist/config.json) <<'EOF'
+{ "name": "archivist", "relayUrl": "wss://seance-relay.<subdomain>.workers.dev/daemon", "bearerToken": "<token>" }
+EOF
+```
+
+**As root**, seal the PSK into `~archivist/.local/state/seance-archivist/psk.cred`
+(docs/psk.md, "A second service: the archivist", which also says when copying a
+`seanced` blob on the same box is fine), then install the units from the archivist's
+checkout:
+
+```sh
+/home/archivist/.bun/bin/bun /home/archivist/seance/archivist/src/main.ts \
+  install --system --user archivist --path "/home/archivist/.bun/bin:/usr/local/bin:/usr/bin:/bin"
+```
+
+`install --system` takes `--user` and `--path` always and records nothing from root's
+own or the sudo caller's environment: the unit's PATH is the `--path` you give, never
+`$PATH`. It refuses root, the user a `seanced` unit on the box runs as (and
+`seanced install --system` refuses the archivist's), a checkout that user does not own,
+a missing config, a blob that is missing or doesn't decrypt, and any code the unit
+would run that someone else could rewrite: the checkout's whole tree and the
+directories above it, the resolved `bun` and `git`, and every `--path` entry must
+belong to root or `archivist` and be writable by neither anyone else nor a group other
+than root's or `archivist`'s. `--path` entries must be absolute. The check walks each
+path component as the unit will resolve it, by `lstat` and never following a link
+unchecked: a symlink, and the directory holding it, are checked before its target, so a
+link in a directory the daemon's user can write is refused however safe its target
+(a link out of the checkout is followed the same way, one inside it is not walked). That
+is what keeps the daemon's user, whose sessions run arbitrary code, from swapping a
+binary the key is delivered to. A group-writable `/usr/local/bin` (`root:staff` on
+Debian before trixie, or wherever `/etc/staff-group-for-usr-local` exists) is refused for
+that reason: put bun in `~archivist/.bun/bin`, as above. Two things it cannot see:
+a POSIX ACL (`setfacl`) granting someone write, and a shared primary group such as
+`users` that the daemon's user also belongs to (the archivist's own group is trusted, so
+give the account a group of its own, as `adduser` does by default). It writes `seance-archivist.service` and two update units (docs/platform-notes.md,
+"The archivist's units") and starts the service. `uninstall --system` removes them and
+leaves the state dir.
+
+Install and uninstall run the archivist's own checkout and bun as root, so what the
+update unit pulls from origin runs as root the next time you run either. That is the
+trade for a service account that updates itself. Before running `install --system`,
+read what changed since the last sha you vetted, as `archivist` and not as root (git as
+root refuses the archivist's repo as unsafe, and honouring its `.git/config` would run
+whatever pager or diff driver that account configured, as root):
+`su - archivist -c 'git --no-pager -C ~/seance log -p <vetted-sha>..HEAD'`. Removing the
+units needs none of the archivist's code: `systemctl disable --now seance-archivist
+seance-archivist-update.path; systemctl stop seance-archivist-update.service`, delete the
+three files in `/etc/systemd/system`, and `systemctl daemon-reload`, which is all
+`uninstall --system` does. The sudo form the refusals print names the archivist's own bun
+by absolute path for the same reason: never one found on your PATH, which root would run.
+
+**Give it the seat.** The relay closes an archivist's register until the `ARCHIVIST`
+Worker secret names its device id, one id, never a list. The service mints its id on
+first start. Read it in the container, as the archivist's user (the `device:` line):
+
+```sh
+su - archivist -c '~/.bun/bin/bun ~/seance/archivist/src/main.ts status'
+```
+
+then put it from `relay/` in your own checkout:
+
+```sh
+bun run wrangler secret put ARCHIVIST    # paste the device id
+```
+
+Like `SCHEDULER_LEADERS`, putting it rolls a new relay version, so everything reconnects
+once. The archivist redials with backoff, up to a minute apart, and `status` then shows
+`running: … connected`. `journalctl -u seance-archivist` is its log.
+
+**Updating** needs nothing: the archivist follows the fleet's update announce like a
+daemon, and also checks when it takes its seat. To update by hand, run
+`… main.ts update` as `archivist`. The update remembers which sha it last restarted the
+service onto (`served-sha` in the state dir, written only after an install succeeded),
+so a checkout ahead of that, from a hand `git pull` or an install that failed after a
+fast-forward, is installed again and restarted onto by the next `update`. With no
+`served-sha` yet (the first run after an upgrade) the checkout is installed and the
+service restarted once, since what it runs is unknown. One update runs at a time
+(`update.lock` in the state dir): a hand `update` while the update unit works is refused,
+and the unit exits quietly when a hand one holds the lock; the running one repeats for a
+request that arrived meanwhile. A request landing in the instants after that last check
+is picked up by the next register's check (at most 30 minutes) or announce. A change to the units themselves lands only when
+root re-runs `install --system`; `update` prints a warning, and the update unit's journal
+carries it, when the installed units differ from what the checkout would write.
+
+**Moving the seat** to another box is manual. The TPM blob is machine-bound and the seat
+is one id:
+
+1. On the old box: `systemctl disable --now seance-archivist seance-archivist-update.path`.
+   A clean stop leaves no `-wal` or `-shm` beside the databases. If there are some,
+   copy them too.
+2. Set up the new box as above, up to and including the config. Don't start the service
+   yet.
+3. Copy `archive.sqlite` and `metrics.sqlite` from the old state dir into
+   `~archivist/.local/state/seance-archivist/` on the new box, owned by `archivist`, mode 600.
+   Copy no `state.json`: the new box mints its own identity, so the old box's copy can
+   never claim the seat again.
+4. Seal the PSK on the new box and run `install --system` there.
+5. Read the new id with `status` and put it on `ARCHIVIST`, as above.
+6. Forget the old id. Its relay entry is no machine, so the app offers no forget button
+   for it. From the new box's checkout, as `archivist`, once the old service is down:
+
+   ```sh
+   cd ~/seance && OLD_ID=<old device id> ~/.bun/bin/bun -e '
+     import { deregisterMachine } from "./daemon/src/deregister.ts";
+     import { loadArchivistConfig } from "./archivist/src/config.ts";
+     const config = await loadArchivistConfig(`${process.env.HOME}/.config/seance-archivist/config.json`);
+     console.log(await deregisterMachine(config, process.env.OLD_ID));'
+   ```
+
+   It prints `{ kind: "forgotten" }` (or `absent`). `connected` means the old
+   archivist is still online.
+
+7. On the old box, `… main.ts uninstall --system` as root. Keep or delete its state dir.
+
+**Reading it.** Open the files read-only, as `archivist` or root. The service keeps
+writing while you read, and WAL lets both run at once:
+
+```sh
+sqlite3 -readonly ~archivist/.local/state/seance-archivist/archive.sqlite
+```
+
+`archive.sqlite` (times in Unix milliseconds):
+
+- `tasks`: one row per finished task, upserted by store `version`. `state` is `done`,
+  `failed` or `cancelled`, plus `repo`, `title`, `created_at`, `device_id`, `machine`
+  (name), `account` (the `account:<hex>` key, never the raw id), `pr_url`, `pr_state`,
+  `done_by`, `failure` (a code), `first_archived_at`, `archived_at`. `record` is the
+  whole task as JSON, minus the prompt, the attachments and anything derived from them.
+- `accounts`: `key`, the display-only `alias`, `version`, `first_seen_at`, `updated_at`.
+- `machines`: `device_id`, `name`, `platform`, `build`, `connected`, `in_registry`,
+  `first_seen_at`, `updated_at`.
+- `events`: `at`, `kind` (`first_seen`, `connected`, `gone`, `build_changed`,
+  `term_changed`), `device_id`, `name`, `build`/`previous_build`, `term`/`previous_term`.
+- `meta`: key/value bookkeeping.
+
+`metrics.sqlite` (times in Unix seconds): `series` (`id`, `metric`, `labels` as JSON,
+with `machine` the observing daemon's device id and, on quota metrics, `account` the
+`account:<hex>` key), and one table per resolution of `(series, ts, value)`: `raw`
+(30 s, kept 48 h), `m5` (5 min, kept a year) and `h1` (hourly, kept for good). `m5` and
+`h1` also carry `pulled`, set on a row the archivist pulled from a daemon rather than
+rolled up from its own samples, and `pull_marks` (`machine`, `step`, `series`, `ts`) is
+the newest point pulled per machine, tier and series. Metrics
+are `cpu_pct`, `mem_pct`, `disk_pct`, `disk_free_mib`, `disk_read_kibs`,
+`disk_write_kibs`, `sessions`, `quota_5h_pct`, `quota_7d_pct`, `quota_7d_model_pct` and
+`quota_credits_pct`.
+
+```sql
+-- Finished tasks per repo and outcome, last 30 days
+SELECT repo, state, count(*) FROM tasks
+WHERE created_at > (unixepoch() - 30 * 86400) * 1000
+GROUP BY repo, state ORDER BY count(*) DESC;
+
+-- Failures by code and machine
+SELECT failure, machine, count(*) FROM tasks WHERE state = 'failed' GROUP BY 1, 2 ORDER BY 3 DESC;
+
+-- A machine's last day of comings and goings
+SELECT datetime(at / 1000, 'unixepoch') AS at, kind, name, build FROM events
+WHERE device_id = '<device id>' AND at > (unixepoch() - 86400) * 1000 ORDER BY at;
+
+-- Hourly CPU per machine for the last week, with machine names
+ATTACH 'file:/home/archivist/.local/state/seance-archivist/metrics.sqlite?mode=ro' AS m;
+SELECT ma.name, datetime(h.ts, 'unixepoch') AS hour, round(h.value, 1) AS cpu
+FROM m.h1 h JOIN m.series s ON s.id = h.series
+JOIN machines ma ON ma.device_id = json_extract(s.labels, '$.machine')
+WHERE s.metric = 'cpu_pct' AND h.ts > unixepoch() - 7 * 86400 ORDER BY ma.name, h.ts;
+```
+
+The `file:` URI's `?mode=ro` keeps the attached file read-only on its own, whatever
+the connection it is attached to was opened with. Run the queries as `archivist` or
+root; the archivist's user is the files' only reader.
+
 ## Usage
 
 ### From the phone
@@ -380,7 +586,8 @@ Type what the session should do — or leave the prompt blank to start an empty 
 then pick where it runs. Tiles open pickers: **machine**, **account**, **repository**,
 **model** (Fable / Opus / Sonnet / Haiku), and **effort** (Low through Max), plus the
 authoring ones below. **Fresh worktree** is the switch under the repository list (on by default, and the
-tile shows a `worktree` tag while it is; off runs the session in the repo as it stands). Then queue it — or, from the chevron beside **Queue**,
+tile shows a `worktree` tag while it is; off runs the session in the repo as it stands). The form remembers
+the choice per repository, so picking one again brings back what you last chose there. Then queue it — or, from the chevron beside **Queue**,
 **Start now**, which queues it and asks the scheduler to place it at once, past its
 concurrency caps (shown only while the scheduler's leader supports it).
 

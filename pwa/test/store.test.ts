@@ -1,9 +1,10 @@
-import { importPsk, toBase64 } from "@seance/shared";
+import { importAccountKey, importPsk, toBase64 } from "@seance/shared";
 import { afterEach, beforeAll, beforeEach, describe, expect, jest, test } from "bun:test";
 import {
   ATTACHMENT_LIMITS,
   CAPABILITIES,
   accountRecord,
+  METRICS_MAX_POINTS,
   QUEUE_MAX_TASKS,
   RelayClient,
   RequestFailure,
@@ -11,6 +12,13 @@ import {
   TASK_SPEC_LIMITS,
   withReportInstruction,
   type Decision,
+  type ArchiveMetricsRequest,
+  type ArchiveStatusReply,
+  type ArchiveStatusResponse,
+  type ArchivedTask,
+  type ArchiveTasksReply,
+  type ArchiveTasksRequest,
+  type ArchivistEntry,
   type AttachmentRefusal,
   type AttachmentUploaded,
   type DiscardReply,
@@ -40,21 +48,27 @@ import {
   type UploadOptions,
 } from "@seance/shared";
 import { openDeepLink } from "../src/deep-link.ts";
-import { DEFAULT_FORM, HELD_MAX, HELD_MAX_AGE_MS, type HeldTask } from "../src/state.ts";
+import { DEFAULT_FORM, HELD_MAX, HELD_MAX_AGE_MS, WORKTREE_REPOS_MAX, type HeldTask } from "../src/state.ts";
 import { deriveQueue } from "../src/queue-view.ts";
 import { deriveView } from "../src/view.ts";
 import { describeVerdict } from "../src/verdict-view.ts";
 import { PREVIEW_DEBOUNCE_MS, PREVIEW_RETRY_MS, QUEUE_POLL_MS, QUEUE_POLLS } from "../src/scheduler-store.ts";
+import { OLDER_READ_ON_MAX, OLDER_SEARCH_MS } from "../src/older-store.ts";
+import { deriveOlder } from "../src/older-view.ts";
 import { Store, UNDO_WINDOW_MS } from "../src/store.ts";
 import { VERIFY_WAIT_MS } from "../src/upload-queue.ts";
+import { pollUntil } from "./poll.ts";
 import { fakeHistory, installBrowserGlobals, setVisibility } from "./stubs.ts";
 
 installBrowserGlobals();
 
 let key: CryptoKey;
+let accountKey: CryptoKey;
 
 beforeAll(async () => {
-  key = await importPsk(toBase64(new Uint8Array(32).fill(3)));
+  const psk = toBase64(new Uint8Array(32).fill(3));
+  key = await importPsk(psk);
+  accountKey = await importAccountKey(psk);
 });
 
 /** Never started, so nothing dials: the store is the subject here, not the transport. */
@@ -401,6 +415,21 @@ describe("layers and history", () => {
  * scripts, `queue-changed` nudges emitted on demand. The relay is a
  * network boundary; the real client meets the real relay in client.test.ts.
  */
+const ARCHIVE_STATUS: ArchiveStatusResponse = {
+  ok: true,
+  onlineSince: 1,
+  lastIngest: { store: 2, registry: null, status: null, pull: null },
+  tasks: { rows: 1, oldest: 1 },
+  samples: { rows: 2, oldest: 1 },
+  events: { rows: 3, oldest: 1 },
+  database: { archiveBytes: 10, metricsBytes: 20 },
+  countedAt: 3,
+};
+
+function archivistEntry(deviceId: string, connected = true): ArchivistEntry {
+  return { deviceId, name: "archive", platform: "linux", connected, lastSeen: 1 };
+}
+
 class ScriptedClient extends RelayClient {
   relay: RelayState;
   readonly listeners = new Set<() => void>();
@@ -434,6 +463,9 @@ class ScriptedClient extends RelayClient {
     holds: [{ until: "resume", at: 5 }],
   });
   onResume: (request: ResumeRequest) => Promise<PauseReply | null> = async () => ({ holds: [] });
+  /** How many times the archivist's counts were asked for. */
+  archiveAsks = 0;
+  onArchiveStatus: () => Promise<ArchiveStatusReply | null> = async () => ARCHIVE_STATUS;
   readonly nudgeListeners = new Set<(change: QueueChanged) => void>();
   readonly getTasks: string[] = [];
   readonly discards: DiscardRequest[] = [];
@@ -444,9 +476,44 @@ class ScriptedClient extends RelayClient {
     task: { version: 1, task: { ...QUEUED, id } },
   });
 
-  constructor(relay: Partial<RelayState> = {}) {
-    super({ url: "ws://127.0.0.1:1/app", token: "unused", key });
+  /** Every daemon `metrics` read, and every archive one, in order. */
+  readonly metricsAsks: { readonly deviceId: string; readonly request: MetricsRequest }[] = [];
+  onMetrics: (request: MetricsRequest) => Promise<MetricsReply | null> = async () => ({ series: [] });
+  readonly archiveMetricsAsks: ArchiveMetricsRequest[] = [];
+  onArchiveMetrics: (request: ArchiveMetricsRequest) => Promise<MetricsReply | null> = async () => ({ series: [] });
+  /** Every `archive-tasks` page asked for, in order. */
+  readonly archiveTaskAsks: ArchiveTasksRequest[] = [];
+  onArchiveTasks: (request: ArchiveTasksRequest) => Promise<ArchiveTasksReply | null> = async () => ({
+    ok: true,
+    tasks: [],
+    total: 0,
+    next: null,
+  });
+
+  /** `namesAccounts`, the account key, makes the install one that names accounts, as a PSK entered since account records does. */
+  constructor(relay: Partial<RelayState> = {}, namesAccounts?: CryptoKey) {
+    super({
+      url: "ws://127.0.0.1:1/app",
+      token: "unused",
+      key,
+      ...(namesAccounts === undefined ? {} : { accountKey: namesAccounts }),
+    });
     this.relay = { ...LEADING_RELAY, ...relay };
+  }
+
+  override metrics(deviceId: string, request: MetricsRequest): Promise<MetricsReply | null> {
+    this.metricsAsks.push({ deviceId, request });
+    return this.onMetrics(request);
+  }
+
+  override archiveMetrics(request: ArchiveMetricsRequest): Promise<MetricsReply | null> {
+    this.archiveMetricsAsks.push(request);
+    return this.onArchiveMetrics(request);
+  }
+
+  override archiveTasks(request: ArchiveTasksRequest): Promise<ArchiveTasksReply | null> {
+    this.archiveTaskAsks.push(request);
+    return this.onArchiveTasks(request);
   }
 
   override getState = (): RelayState => this.relay;
@@ -500,6 +567,11 @@ class ScriptedClient extends RelayClient {
     this.uploads.push(bytes);
     this.uploadOpts.push(opts);
     return this.onUpload(bytes, opts);
+  }
+
+  override archiveStatus(): Promise<ArchiveStatusReply | null> {
+    this.archiveAsks += 1;
+    return this.onArchiveStatus();
   }
 
   override queue(request: QueueRequest = {}): Promise<QueueReply | null> {
@@ -571,6 +643,7 @@ function autoMachine(deviceId: string, fields: Partial<Machine> = {}): Machine {
 const LEADING_RELAY: RelayState = {
   status: "open",
   rejection: null,
+  archivist: null,
   machines: [autoMachine("dev-a"), autoMachine("dev-b")],
   registrySize: 2,
   ignored: 0,
@@ -3777,6 +3850,78 @@ describe("authoring a task from the auto form", () => {
   });
 });
 
+describe("the fresh worktree choice", () => {
+  let timers: ReturnType<typeof captureTimers>;
+  let fake: ReturnType<typeof fakeHistory>;
+
+  beforeEach(() => {
+    timers = captureTimers();
+    fake = fakeHistory();
+  });
+
+  afterEach(() => {
+    timers.restore();
+    fake.restore();
+  });
+
+  const OPS = "github.com/acme/ops";
+  const twoRepos = (): ScriptedClient =>
+    new ScriptedClient({
+      machines: [
+        autoMachine("dev-a", {
+          repos: [
+            { name: "app", path: "/r/dev-a/app", defaultBranch: "main", origin: ORIGIN },
+            { name: "ops", path: "/r/dev-a/ops", defaultBranch: "main", origin: OPS },
+          ],
+        }),
+      ],
+    });
+
+  test("is remembered per repo: picking a repo again brings back the last choice made there", async () => {
+    const client = twoRepos();
+    const store = new Store(client, { ...DEFAULT_FORM, repo: ORIGIN, prompt: "fix it" });
+    store.toggleWorktree();
+    expect(deriveView(store.getState(), 0).worktree).toBe(false);
+
+    // A repo never toggled starts from the last choice made anywhere.
+    store.selectRepo(OPS);
+    expect(deriveView(store.getState(), 0).worktree).toBe(false);
+    store.toggleWorktree();
+    expect(deriveView(store.getState(), 0).worktree).toBe(true);
+
+    store.selectRepo(ORIGIN);
+    expect(deriveView(store.getState(), 0).worktree).toBe(false);
+    await store.spawn();
+    expect(firstCreate(client).spec).toMatchObject({ repo: ORIGIN, mode: "here" });
+    // The routing preview asks with the repo's own choice too.
+    expect(client.previews.at(-1)).toMatchObject({ repo: ORIGIN, mode: "here" });
+
+    store.selectRepo(OPS);
+    expect(deriveView(store.getState(), 0).worktree).toBe(true);
+    await store.spawn();
+    expect(client.creates[1]?.spec).toMatchObject({ repo: OPS, mode: "worktree" });
+  });
+
+  test("with no repo picked, it belongs to the repo the form resolves to", () => {
+    const store = new Store(twoRepos(), { ...DEFAULT_FORM, repo: null });
+    store.toggleWorktree();
+    expect(store.getState().form.worktreeByRepo).toEqual({ [ORIGIN]: false });
+    expect(deriveView(store.getState(), 0).worktree).toBe(false);
+  });
+
+  test("a repo toggled past the bound evicts the oldest choice, not the newest", () => {
+    const remembered = Object.fromEntries(
+      Array.from({ length: WORKTREE_REPOS_MAX }, (_, i) => [`github.com/acme/r${i}`, true]),
+    );
+    const store = new Store(twoRepos(), { ...DEFAULT_FORM, repo: OPS, worktreeByRepo: remembered });
+    store.toggleWorktree();
+    const kept = Object.keys(store.getState().form.worktreeByRepo);
+    expect(kept).toHaveLength(WORKTREE_REPOS_MAX);
+    expect(kept).not.toContain("github.com/acme/r0");
+    expect(kept.at(-1)).toBe(OPS);
+  });
+});
+
 describe("attachments", () => {
   /** A fleet whose verified leader advertises attachments. */
   function capable(): ScriptedClient {
@@ -3964,7 +4109,10 @@ describe("attachments", () => {
     const client = capable();
     // Ignores the abort, as a PUT that had already landed does.
     const answers: ((reply: AttachmentUploaded) => void)[] = [];
-    client.onUpload = () => new Promise((resolve) => answers.push(resolve));
+    client.onUpload = () =>
+      new Promise((resolve) => {
+        answers.push(resolve);
+      });
     const store = new Store(client, { ...DEFAULT_FORM, prompt: "go" });
     const detach = store.attach();
     store.addFiles([file("a.txt", "first")]);
@@ -4370,5 +4518,829 @@ describe("attachments", () => {
     await store.spawn();
     expect(store.getState().held.map(({ task }) => task.spec.attachments)).toEqual([undefined]);
     detach();
+  });
+});
+
+describe("the archivist's counts", () => {
+  let fake: ReturnType<typeof fakeHistory>;
+
+  afterEach(() => fake.restore());
+
+  test("are not asked for while the Machines screen is closed, and once it opens", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient({ archivist: archivistEntry("arch-1") });
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      // A negative assertion: a non-event cannot be polled.
+      await Bun.sleep(20);
+      expect(client.archiveAsks).toBe(0);
+      store.openMachines();
+      await pollUntil(() => store.getState().archiveStatus !== null, "the counts to land");
+      expect(client.archiveAsks).toBe(1);
+      expect(store.getState().archiveStatus).toEqual({ deviceId: "arch-1", reply: ARCHIVE_STATUS });
+      // Another relay push inside the minute reads nothing more.
+      client.emit({ registrySize: 9 });
+      expect(client.archiveAsks).toBe(1);
+    } finally {
+      detach();
+    }
+  });
+
+  test("are not asked for while the tab is hidden or the socket is down, and are once it is back", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient({ archivist: archivistEntry("arch-1") });
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      setVisibility("hidden");
+      store.openMachines();
+      // Negative assertions: a non-event cannot be polled.
+      await Bun.sleep(20);
+      expect(client.archiveAsks).toBe(0);
+      setVisibility("visible");
+      client.emit({ status: "retrying" });
+      await Bun.sleep(20);
+      expect(client.archiveAsks).toBe(0);
+      client.emit({ status: "open" });
+      await pollUntil(() => store.getState().archiveStatus !== null, "the counts after the socket is back");
+      expect(client.archiveAsks).toBe(1);
+    } finally {
+      setVisibility("visible");
+      detach();
+    }
+  });
+
+  test("a failed ask leaves no counts and throws nothing", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient({ archivist: archivistEntry("arch-1") });
+    client.onArchiveStatus = (): Promise<ArchiveStatusReply | null> =>
+      Promise.reject(new RequestFailure("timeout", "no answer"));
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openMachines();
+      await pollUntil(() => client.archiveAsks === 1, "the ask");
+      await Bun.sleep(10);
+      expect(store.getState().archiveStatus).toBeNull();
+    } finally {
+      detach();
+    }
+  });
+
+  test("an error reply, like no reply, leaves no counts", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient({ archivist: archivistEntry("arch-1") });
+    client.onArchiveStatus = async (): Promise<ArchiveStatusReply | null> => ({
+      ok: false,
+      code: "internal_error",
+      message: "archive status failed",
+    });
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openMachines();
+      await pollUntil(() => client.archiveAsks === 1, "the ask");
+      await Bun.sleep(10);
+      expect(store.getState().archiveStatus).toBeNull();
+    } finally {
+      detach();
+    }
+  });
+
+  test("are dropped when the seat moves to another device, and read again from the new one", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient({ archivist: archivistEntry("arch-1") });
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openMachines();
+      await pollUntil(() => store.getState().archiveStatus?.deviceId === "arch-1", "the first counts");
+      client.emit({ archivist: archivistEntry("arch-2") });
+      await pollUntil(() => store.getState().archiveStatus?.deviceId === "arch-2", "the counts of the new seat");
+      expect(client.archiveAsks).toBe(2);
+    } finally {
+      detach();
+    }
+  });
+
+  test("are dropped when the archivist goes offline", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient({ archivist: archivistEntry("arch-1") });
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openMachines();
+      await pollUntil(() => store.getState().archiveStatus !== null, "the counts");
+      client.emit({ archivist: archivistEntry("arch-1", false) });
+      expect(store.getState().archiveStatus).toBeNull();
+      expect(client.archiveAsks).toBe(1);
+    } finally {
+      detach();
+    }
+  });
+});
+
+// DESIGN.md, Archivist, A32, A35, A36d–A36f: which side answers a chart, read from the registry at ask time.
+describe("history sources", () => {
+  let fake: ReturnType<typeof fakeHistory>;
+
+  afterEach(() => fake.restore());
+
+  const ONLINE = { archivist: archivistEntry("arch-1") };
+  const ACCOUNT_ID = "org-1:acct-1";
+  const points = (request: { from: number; to: number; step: number }): number =>
+    (request.to - request.from) / request.step + 1;
+
+  test("a connected machine's short ranges come from its daemon, 90 days and a year from the archive", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    const store = new Store(client);
+
+    await store.showHistory({ kind: "machine", deviceId: "dev-a" }, "24h");
+    expect(client.metricsAsks.map((ask) => [ask.deviceId, ask.request.step])).toEqual([["dev-a", 300]]);
+    expect(client.archiveMetricsAsks).toEqual([]);
+
+    await store.showHistory({ kind: "machine", deviceId: "dev-a" }, "90d");
+    await store.showHistory({ kind: "machine", deviceId: "dev-a" }, "1y");
+    expect(client.metricsAsks).toHaveLength(1);
+    expect(client.archiveMetricsAsks.map((ask) => ["machine" in ask ? ask.machine : null, ask.step])).toEqual([
+      ["dev-a", 21_600],
+      ["dev-a", 86_400],
+    ]);
+    // Both fit one reply's point cap, which the archivist refuses past.
+    for (const ask of client.archiveMetricsAsks) expect(points(ask)).toBeLessThanOrEqual(METRICS_MAX_POINTS);
+    expect(store.getState().history).toMatchObject({ range: "1y", step: 86_400, result: { kind: "ok" } });
+  });
+
+  test("an asleep machine's chart comes from the archive at every range", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient({
+      ...ONLINE,
+      machines: [autoMachine("dev-a"), autoMachine("dev-z", { connected: false })],
+    });
+    const store = new Store(client);
+
+    await store.showHistory({ kind: "machine", deviceId: "dev-z" }, "6h");
+    expect(client.metricsAsks).toEqual([]);
+    expect(client.archiveMetricsAsks).toEqual([
+      expect.objectContaining({ machine: "dev-z", step: 30, names: ["cpu_pct", "mem_pct", "disk_pct"] }),
+    ]);
+  });
+
+  test("an account's chart comes merged from the archive, asked and narrowed by its store key", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE, accountKey);
+    const storeKey = await client.accountStoreKey(ACCOUNT_ID);
+    // The archive's merge drops `machine` and `exclave` and keeps `account`, as the store key.
+    client.onArchiveMetrics = async (request): Promise<MetricsReply> => {
+      const series: MetricsSeries[] = [
+        { metric: "quota_5h_pct", labels: { account: storeKey }, points: [[request.to, 40]] },
+        { metric: "quota_7d_pct", labels: { account: storeKey, model: "opus" }, points: [[request.to, 70]] },
+      ];
+      return { series };
+    };
+    const store = new Store(client);
+
+    await store.showHistory({ kind: "account", accountId: ACCOUNT_ID, deviceId: "dev-a" }, "24h");
+    expect(client.metricsAsks).toEqual([]);
+    expect(client.archiveMetricsAsks).toHaveLength(1);
+    const [ask] = client.archiveMetricsAsks;
+    expect(ask !== undefined && "account" in ask ? [ask.account, ask.labels] : ask).toEqual([storeKey, undefined]);
+    const result = store.getState().history?.result;
+    expect(result?.kind === "ok" ? result.series.map((s) => [s.metric, s.labels, s.points[0]?.[1]]) : result).toEqual([
+      ["quota_5h_pct", {}, 40],
+      ["quota_7d_pct", { model: "opus" }, 70],
+    ]);
+  });
+
+  test("an install without the account key keeps an account's chart on its host", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    const store = new Store(client);
+
+    await store.showHistory({ kind: "account", accountId: ACCOUNT_ID, deviceId: "dev-a" }, "1y");
+    expect(client.archiveMetricsAsks).toEqual([]);
+    expect(client.metricsAsks).toEqual([
+      { deviceId: "dev-a", request: expect.objectContaining({ step: 300, labels: { account: ACCOUNT_ID } }) },
+    ]);
+    expect(store.getState().history?.range).toBe("24h");
+  });
+
+  test("with no archivist, charts read as before it: an account from its host, and no long range", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient({}, accountKey);
+    const store = new Store(client);
+
+    await store.showHistory({ kind: "account", accountId: ACCOUNT_ID, deviceId: "dev-b" }, "30d");
+    // A long range remembered from when it was online opens at a day.
+    await store.showHistory({ kind: "machine", deviceId: "dev-a" }, "1y");
+    expect(client.archiveMetricsAsks).toEqual([]);
+    expect(client.metricsAsks.map((ask) => [ask.deviceId, ask.request.step])).toEqual([
+      ["dev-b", 3600],
+      ["dev-a", 300],
+    ]);
+    expect(store.getState().history?.range).toBe("24h");
+  });
+
+  test("a long range falls back to a day from the daemon when the archivist leaves", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      await store.showHistory({ kind: "machine", deviceId: "dev-a" }, "90d");
+      expect(client.archiveMetricsAsks).toHaveLength(1);
+
+      client.emit({ archivist: archivistEntry("arch-1", false) });
+      expect(store.getState().history?.range).toBe("24h");
+      await pollUntil(() => store.getState().history?.result.kind === "ok", "the day's chart");
+      expect(client.metricsAsks.map((ask) => [ask.deviceId, ask.request.step])).toEqual([["dev-a", 300]]);
+
+      // A short range open as it leaves stays as it is.
+      client.emit({ archivist: archivistEntry("arch-1") });
+      await store.showHistory({ kind: "machine", deviceId: "dev-a" }, "30d");
+      client.emit({ archivist: archivistEntry("arch-1", false) });
+      expect(store.getState().history?.range).toBe("30d");
+      expect(client.metricsAsks).toHaveLength(2);
+    } finally {
+      detach();
+    }
+  });
+
+  test("with no archivist, an asleep machine's chart still goes to its daemon", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient({ machines: [autoMachine("dev-z", { connected: false })] });
+    const store = new Store(client);
+
+    await store.showHistory({ kind: "machine", deviceId: "dev-z" }, "24h");
+    expect(client.archiveMetricsAsks).toEqual([]);
+    expect(client.metricsAsks.map((ask) => ask.deviceId)).toEqual(["dev-z"]);
+  });
+
+  test("an asleep machine's chart closes when the archivist leaves, asking nothing", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient({
+      ...ONLINE,
+      machines: [autoMachine("dev-a"), autoMachine("dev-z", { connected: false })],
+    });
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      await store.showHistory({ kind: "machine", deviceId: "dev-z" }, "1y");
+      expect(store.getState().history).toMatchObject({ range: "1y", result: { kind: "ok" } });
+
+      client.emit({ archivist: archivistEntry("arch-1", false) });
+      expect(store.getState().history).toBeNull();
+      expect(client.metricsAsks).toEqual([]);
+    } finally {
+      detach();
+    }
+  });
+
+  test("an account's long chart falls back to its host, or says the archivist is away with none", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE, accountKey);
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      await store.showHistory({ kind: "account", accountId: ACCOUNT_ID, deviceId: "dev-a" }, "1y");
+      client.emit({ archivist: archivistEntry("arch-1", false) });
+      expect(store.getState().history?.range).toBe("24h");
+      await pollUntil(() => store.getState().history?.result.kind === "ok", "the day's chart");
+      expect(client.metricsAsks.map((ask) => [ask.deviceId, ask.request.step])).toEqual([["dev-a", 300]]);
+
+      // Every host asleep: the chart came from the archive alone.
+      client.emit({ archivist: archivistEntry("arch-1") });
+      await store.showHistory({ kind: "account", accountId: ACCOUNT_ID, deviceId: null }, "1y");
+      expect(client.archiveMetricsAsks).toHaveLength(2);
+      client.emit({ archivist: archivistEntry("arch-1", false) });
+      await pollUntil(() => store.getState().history?.result.kind === "failed", "the failure");
+      expect(store.getState().history).toMatchObject({
+        range: "24h",
+        result: { kind: "failed", message: "No answer — the archivist may be offline." },
+      });
+      expect(client.metricsAsks).toHaveLength(1);
+    } finally {
+      detach();
+    }
+  });
+
+  test("a chart the archive can't serve doesn't cost the next one its remembered long range", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    const store = new Store(client);
+
+    await store.showHistory({ kind: "machine", deviceId: "dev-a" }, "1y");
+    // No account key: the account's chart clamps to a day.
+    await store.showHistory({ kind: "account", accountId: ACCOUNT_ID, deviceId: "dev-a" });
+    expect(store.getState().history?.range).toBe("24h");
+    await store.showHistory({ kind: "machine", deviceId: "dev-a" });
+    expect(store.getState().history?.range).toBe("1y");
+  });
+
+  test("the archive's failures say the archivist, not the machine", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient({ ...ONLINE, machines: [autoMachine("dev-a", { connected: false })] });
+    const store = new Store(client);
+    const failure = async (): Promise<unknown> => {
+      await store.showHistory({ kind: "machine", deviceId: "dev-a" }, "24h");
+      return store.getState().history?.result;
+    };
+
+    client.onArchiveMetrics = () => Promise.reject(new RequestFailure("timeout", "no reply"));
+    expect(await failure()).toEqual({ kind: "failed", message: "No answer — the archivist may be offline." });
+    client.onArchiveMetrics = () => Promise.reject(new RequestFailure("offline", "the archivist is offline"));
+    expect(await failure()).toEqual({ kind: "failed", message: "No answer — the archivist may be offline." });
+    client.onArchiveMetrics = () => Promise.reject(new RequestFailure("unknown", "never seen"));
+    expect(await failure()).toEqual({
+      kind: "failed",
+      message: "The relay couldn't deliver the request to the archivist.",
+    });
+    client.onArchiveMetrics = async () => null;
+    expect(await failure()).toEqual({
+      kind: "failed",
+      message: "Couldn't read the archivist's answer. Update the archivist and the app to matching versions.",
+    });
+    client.onArchiveMetrics = async () => ({ ok: false, code: "internal_error", message: "boom" });
+    expect(await failure()).toEqual({ kind: "failed", message: "The archivist couldn't read its history store." });
+  });
+});
+
+// DESIGN.md, Archivist, A34, A35, A36g–A36j: the Queue screen's Older section, read page by page from the archive.
+describe("task history", () => {
+  let fake: ReturnType<typeof fakeHistory>;
+
+  afterEach(() => fake.restore());
+
+  const ONLINE = { archivist: archivistEntry("arch-1") };
+
+  function archivedRow(id: string, endedAt = 1_000): ArchivedTask {
+    return {
+      task: { id, spec: { repo: ORIGIN, mode: "worktree", title: id }, state: "done", createdAt: endedAt - 1 },
+      endedAt,
+      machine: "dev-a",
+      account: null,
+      alias: null,
+    };
+  }
+
+  function rows(prefix: string, count: number): ArchivedTask[] {
+    return Array.from({ length: count }, (_, i) => archivedRow(`${prefix}-${i}`, 10_000 - i));
+  }
+
+  test("with no archivist, nothing is asked and Older never opens", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient();
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openQueue();
+      store.toggleOlder();
+      // A negative assertion: a non-event cannot be polled.
+      await Bun.sleep(20);
+      expect(client.archiveTaskAsks).toEqual([]);
+      expect(store.getState().older.list).toBeNull();
+    } finally {
+      detach();
+    }
+  });
+
+  test("reads nothing until Older opens, then page one, and Load older from its cursor", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    const first = rows("a", 20);
+    const cursor = { endedAt: 9_981, createdAt: 9_980, id: "a-19" };
+    const machines = [{ deviceId: "dev-gone", name: "old-box", lastSeen: 9_000 }];
+    client.onArchiveTasks = async (request) =>
+      request.before === undefined
+        ? { ok: true, tasks: first, total: 25, next: cursor, machines }
+        : { ok: true, tasks: rows("b", 5), total: 25, next: null };
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openQueue();
+      // A negative assertion: a non-event cannot be polled.
+      await Bun.sleep(20);
+      expect(client.archiveTaskAsks).toEqual([]);
+
+      store.toggleOlder();
+      await pollUntil(() => store.getState().older.list?.kind === "ok", "page one");
+      expect(client.archiveTaskAsks).toEqual([{ limit: 20 }]);
+
+      store.loadOlder();
+      await pollUntil(() => {
+        const list = store.getState().older.list;
+        return list?.kind === "ok" && list.next === null;
+      }, "the next page");
+      expect(client.archiveTaskAsks[1]).toEqual({ limit: 20, before: cursor });
+      const list = store.getState().older.list;
+      expect(list?.kind === "ok" ? list.tasks.length : list).toBe(25);
+      // Page one's machine listing outlives the pages after it, which carry none.
+      expect(list?.kind === "ok" ? list.machines : list).toEqual(machines);
+    } finally {
+      detach();
+    }
+  });
+
+  test("a filter pick reads again with it and closes its sheet through history", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openQueue();
+      store.toggleOlder();
+      await pollUntil(() => client.archiveTaskAsks.length === 1, "page one");
+      store.openOlderSheet("outcome");
+      expect(store.getState().older.sheet).toBe("outcome");
+      store.pickOlder({ outcome: "failed" });
+      fake.settle(store);
+      expect(store.getState().older.sheet).toBeNull();
+      expect(store.getState().queue).toBe(true);
+      await pollUntil(() => client.archiveTaskAsks.length === 2, "the filtered read");
+      expect(client.archiveTaskAsks[1]).toEqual({ limit: 20, outcome: "failed" });
+
+      store.clearOlderFilters();
+      await pollUntil(() => client.archiveTaskAsks.length === 3, "the cleared read");
+      expect(client.archiveTaskAsks[2]).toEqual({ limit: 20 });
+    } finally {
+      detach();
+    }
+  });
+
+  test("a re-read keeps the last machine listing until its own page one replaces it", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    const before = [{ deviceId: "dev-gone", name: "old-box", lastSeen: 9_000 }];
+    const after = [{ deviceId: "dev-far", name: "far-box", lastSeen: 100 }];
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    client.onArchiveTasks = async (request) => {
+      if (request.outcome === undefined)
+        return { ok: true, tasks: rows("a", 1), total: 1, next: null, machines: before };
+      await gate;
+      return { ok: true, tasks: rows("a", 1), total: 1, next: null, machines: after };
+    };
+    const store = new Store(client);
+    const detach = store.attach();
+    const machinesOf = (): unknown => {
+      const list = store.getState().older.list;
+      return list === null || list.kind === "failed" ? list : list.machines;
+    };
+    try {
+      store.openQueue();
+      store.toggleOlder();
+      await pollUntil(() => store.getState().older.list?.kind === "ok", "page one");
+      store.pickOlder({ outcome: "failed" });
+      await pollUntil(() => store.getState().older.list?.kind === "loading", "the re-read");
+      expect(machinesOf()).toEqual(before);
+      release();
+      await pollUntil(() => store.getState().older.list?.kind === "ok", "the filtered page");
+      expect(machinesOf()).toEqual(after);
+    } finally {
+      detach();
+    }
+  });
+
+  test("the search asks once typing pauses, trimmed", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openQueue();
+      store.toggleOlder();
+      await pollUntil(() => client.archiveTaskAsks.length === 1, "page one");
+      store.searchOlder("de");
+      store.searchOlder("deploy ");
+      expect(store.getState().older.filters.title).toBe("deploy ");
+      expect(client.archiveTaskAsks).toHaveLength(1);
+      await pollUntil(() => client.archiveTaskAsks.length === 2, "the search");
+      expect(client.archiveTaskAsks[1]).toEqual({ limit: 20, title: "deploy" });
+      // A negative assertion: the first keystroke's timer was replaced, so no second read follows.
+      await Bun.sleep(OLDER_SEARCH_MS + 50);
+      expect(client.archiveTaskAsks).toHaveLength(2);
+    } finally {
+      detach();
+    }
+  });
+
+  test("a page holding only tasks the live queue lists reads on to the next", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    client.onQueue = async () => ({
+      tasks: [
+        { ...QUEUED, id: "a-0", state: "done" },
+        { ...QUEUED, id: "a-1", state: "done" },
+      ],
+      at: 1,
+    });
+    const cursor = { endedAt: 1, createdAt: 0, id: "a-1" };
+    client.onArchiveTasks = async (request) =>
+      request.before === undefined
+        ? { ok: true, tasks: rows("a", 2), total: 3, next: cursor }
+        : { ok: true, tasks: [archivedRow("old")], total: 3, next: null };
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openQueue();
+      await pollUntil(() => store.getState().queueView?.kind === "ok", "the live queue");
+      store.toggleOlder();
+      await pollUntil(() => {
+        const list = store.getState().older.list;
+        return list?.kind === "ok" && list.next === null;
+      }, "the read-on");
+      expect(client.archiveTaskAsks).toEqual([{ limit: 20 }, { limit: 20, before: cursor }]);
+    } finally {
+      detach();
+    }
+  });
+
+  test("an unanswered read says the archivist may be offline; a later page's failure keeps the rows", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    client.onArchiveTasks = () => Promise.reject(new RequestFailure("timeout", "no answer"));
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openQueue();
+      store.toggleOlder();
+      await pollUntil(() => store.getState().older.list?.kind === "failed", "the failure");
+      expect(store.getState().older.list).toEqual({
+        kind: "failed",
+        message: "No answer — the archivist may be offline.",
+      });
+
+      client.onArchiveTasks = async () => ({
+        ok: true,
+        tasks: rows("a", 1),
+        total: 2,
+        next: { endedAt: 1, createdAt: 0, id: "a-0" },
+      });
+      store.refreshOlder();
+      await pollUntil(() => store.getState().older.list?.kind === "ok", "page one");
+      // An archivist too old to list its machines: the Machine sheet falls back to the rows read.
+      const first = store.getState().older.list;
+      expect(first?.kind === "ok" ? first.machines : first).toBeNull();
+      client.onArchiveTasks = async () => ({ ok: false, code: "internal_error", message: "boom" });
+      store.loadOlder();
+      await pollUntil(() => {
+        const list = store.getState().older.list;
+        return list?.kind === "ok" && list.moreError !== null;
+      }, "the later failure");
+      const list = store.getState().older.list;
+      expect(list?.kind === "ok" ? [list.tasks.length, list.moreError] : list).toEqual([
+        1,
+        "The archivist couldn't read its task history.",
+      ]);
+    } finally {
+      detach();
+    }
+  });
+
+  test("goes on the registry push that drops the archivist, its sheet closing, and reads nothing more", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openQueue();
+      store.toggleOlder();
+      await pollUntil(() => store.getState().older.list?.kind === "ok", "page one");
+      store.openOlderSheet("dates");
+
+      client.emit({ archivist: archivistEntry("arch-1", false) });
+      fake.settle(store);
+      expect(store.getState().older).toMatchObject({ open: false, list: null, sheet: null });
+      expect(store.getState().queue).toBe(true);
+
+      client.emit({ archivist: archivistEntry("arch-1") });
+      // A negative assertion: a non-event cannot be polled.
+      await Bun.sleep(20);
+      expect(client.archiveTaskAsks).toHaveLength(1);
+      expect(store.getState().older.open).toBe(false);
+    } finally {
+      detach();
+    }
+  });
+
+  test("closing the Queue screen closes Older", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openQueue();
+      store.toggleOlder();
+      await pollUntil(() => store.getState().older.list?.kind === "ok", "page one");
+      store.dismissLayer();
+      fake.settle(store);
+      expect(store.getState().queue).toBe(false);
+      expect(store.getState().older).toMatchObject({ open: false, list: null });
+    } finally {
+      detach();
+    }
+  });
+
+  test("an answer for filters since replaced lands nowhere", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    const held: Array<() => void> = [];
+    client.onArchiveTasks = (request) =>
+      new Promise((resolve) => {
+        const id = request.outcome === "failed" ? "new" : "old";
+        held.push(() => resolve({ ok: true, tasks: [archivedRow(id)], total: 1, next: null }));
+      });
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openQueue();
+      store.toggleOlder();
+      await pollUntil(() => held.length === 1, "page one");
+      store.pickOlder({ outcome: "failed" });
+      await pollUntil(() => held.length === 2, "the filtered read");
+      held[1]?.();
+      await pollUntil(() => store.getState().older.list?.kind === "ok", "the filtered answer");
+      held[0]?.();
+      // A negative assertion: a stale answer is dropped, which no state change shows.
+      await Bun.sleep(20);
+      const list = store.getState().older.list;
+      expect(list?.kind === "ok" ? list.tasks.map((row) => row.task.id) : list).toEqual(["new"]);
+    } finally {
+      detach();
+    }
+  });
+
+  test("a moved archivist seat drops the list and reads page one again", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openQueue();
+      store.toggleOlder();
+      await pollUntil(() => store.getState().older.list?.kind === "ok", "page one");
+      client.emit({ archivist: archivistEntry("arch-2") });
+      await pollUntil(() => client.archiveTaskAsks.length === 2, "the read at the new seat");
+      expect(store.getState().older.deviceId).toBe("arch-2");
+    } finally {
+      detach();
+    }
+  });
+
+  test("a pick while the socket is down waits for it to open", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openQueue();
+      store.toggleOlder();
+      await pollUntil(() => store.getState().older.list?.kind === "ok", "page one");
+      client.emit({ status: "retrying" });
+      store.pickOlder({ outcome: "failed" });
+      expect(store.getState().older.list).toBeNull();
+      expect(client.archiveTaskAsks).toHaveLength(1);
+      client.emit({ status: "open" });
+      await pollUntil(() => client.archiveTaskAsks.length === 2, "the read once open");
+      expect(client.archiveTaskAsks[1]).toEqual({ limit: 20, outcome: "failed" });
+    } finally {
+      detach();
+    }
+  });
+
+  test("a pick cancels a search still waiting on typing", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openQueue();
+      store.toggleOlder();
+      await pollUntil(() => client.archiveTaskAsks.length === 1, "page one");
+      store.searchOlder("fix");
+      store.pickOlder({ outcome: "failed" });
+      await pollUntil(() => client.archiveTaskAsks.length === 2, "the pick's read");
+      // A negative assertion: the search's timer was cancelled, so no second read follows.
+      await Bun.sleep(OLDER_SEARCH_MS + 50);
+      expect(client.archiveTaskAsks).toEqual([{ limit: 20 }, { limit: 20, outcome: "failed", title: "fix" }]);
+    } finally {
+      detach();
+    }
+  });
+
+  test("closing the section drops its list, and reopening reads with the filters as they stand", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openQueue();
+      store.toggleOlder();
+      await pollUntil(() => client.archiveTaskAsks.length === 1, "page one");
+      store.searchOlder("deploy");
+      store.toggleOlder();
+      expect(store.getState().older).toMatchObject({ open: false, list: null });
+      store.toggleOlder();
+      await pollUntil(() => client.archiveTaskAsks.length === 2, "the reopen's read");
+      expect(client.archiveTaskAsks[1]).toEqual({ limit: 20, title: "deploy" });
+      // A negative assertion: the closed section's timer was cancelled.
+      await Bun.sleep(OLDER_SEARCH_MS + 50);
+      expect(client.archiveTaskAsks).toHaveLength(2);
+    } finally {
+      detach();
+    }
+  });
+
+  test("a read-on that fails partway keeps Load older on offer with nothing shown", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    client.onQueue = async () => ({ tasks: [{ ...QUEUED, id: "a-0", state: "done" }], at: 1 });
+    const cursor = { endedAt: 1, createdAt: 0, id: "a-0" };
+    client.onArchiveTasks = async (request) =>
+      request.before === undefined
+        ? { ok: true, tasks: rows("a", 1), total: 5, next: cursor }
+        : { ok: false, code: "internal_error", message: "boom" };
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openQueue();
+      await pollUntil(() => store.getState().queueView?.kind === "ok", "the live queue");
+      store.toggleOlder();
+      await pollUntil(() => {
+        const list = store.getState().older.list;
+        return list?.kind === "ok" && list.moreError !== null;
+      }, "the read-on's failure");
+      const view = deriveOlder(store.getState(), Date.now());
+      expect(view?.rows).toEqual([]);
+      expect(view?.more).toEqual({ loading: false });
+      expect(view?.moreError).toBe("The archivist couldn't read its task history.");
+    } finally {
+      detach();
+    }
+  });
+
+  test("the read-on stops at its cap, and at a page that adds nothing", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    client.onQueue = async () => ({
+      tasks: Array.from({ length: 30 }, (_, i) => ({ ...QUEUED, id: `a-${i}`, state: "done" as const })),
+      at: 1,
+    });
+    let page = 0;
+    client.onArchiveTasks = async () => {
+      const at = page;
+      page += 1;
+      return {
+        ok: true,
+        tasks: [archivedRow(`a-${at}`)],
+        total: 50,
+        next: { endedAt: 1, createdAt: 0, id: `a-${at}` },
+      };
+    };
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openQueue();
+      await pollUntil(() => store.getState().queueView?.kind === "ok", "the live queue");
+      store.toggleOlder();
+      await pollUntil(() => store.getState().older.list?.kind === "ok", "the capped read");
+      expect(client.archiveTaskAsks).toHaveLength(OLDER_READ_ON_MAX + 1);
+      expect(deriveOlder(store.getState(), Date.now())?.more).toEqual({ loading: false });
+
+      client.onArchiveTasks = async () => ({
+        ok: true,
+        tasks: [],
+        total: 50,
+        next: { endedAt: 1, createdAt: 0, id: "x" },
+      });
+      client.archiveTaskAsks.length = 0;
+      store.refreshOlder();
+      await pollUntil(() => store.getState().older.list?.kind === "ok", "the empty page");
+      expect(client.archiveTaskAsks).toHaveLength(1);
+    } finally {
+      detach();
+    }
+  });
+
+  test("an Older sheet left up when the layout changes is closed through history", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.setWide(true);
+      store.toggleOlder();
+      await pollUntil(() => store.getState().older.list?.kind === "ok", "page one");
+      store.openOlderSheet("dates");
+      store.setWide(false);
+      fake.settle(store);
+      expect(store.getState().older.sheet).toBeNull();
+    } finally {
+      detach();
+    }
   });
 });

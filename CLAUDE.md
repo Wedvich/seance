@@ -6,7 +6,8 @@ Séance spawns remote-controlled Claude Code sessions on dev machines via a blin
 monorepo: `daemon/` (seanced, per-machine), `relay/` (Cloudflare Worker + Durable Object), `pwa/`
 (Vite + Preact app), `raycast/` (a local-only Raycast extension — spawn only), `shared/` (wire types,
 envelope crypto + the app-role RelayClient), `scheduler/` (the scheduler as a pure library: routing,
-task state, reservations — no I/O, hosted only by the leader's modules — `LEADER_MODULES` in `scheduler/test/layering.test.ts`), `e2e/` (full-stack test suite, no shipped code).
+task state, reservations — no I/O, hosted only by the leader's modules — `LEADER_MODULES` in `scheduler/test/layering.test.ts`), `archivist/` (`seance-archivist`, the fleet's optional
+history service — DESIGN.md, "Archivist"; it imports daemon modules by path, never copies them), `e2e/` (full-stack test suite, no shipped code).
 `claude-mods/` is not a workspace: Claude Code function-hook plugins, installed by
 `seanced mod install` (DESIGN.md, "Claude Code mods").
 
@@ -17,7 +18,10 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   rejected alternative with rationale. If a change alters decided behavior, update DESIGN.md with it.
   For protocol work, start at its "The map: one spawn, end to end" subsection — a sequence diagram
   plus a frame→module table saying which file owns each frame; `shared/src/types.ts` is the schema
-  of record, so a frame change touches both.
+  of record, so a frame change touches both. Its "Archivist" section is the archivist's whole
+  record — the decisions code cites as A1–A37 and their rejected alternatives at its end; read it
+  before touching history, retention, registry roles or the Machines screen's charts (setup,
+  move-the-seat runbook and schema are the README's step 9).
 - **docs/psk.md** — where the PSK lives on each platform (keychain / DPAPI blob / TPM-sealed blob /
   a blob systemd unseals and delivers to the unit on systemd ≥ 256),
   how import keeps it off argv and shell history, and what the TPM path does and does not protect.
@@ -119,7 +123,7 @@ green:
   memoized because `Bun.build` runs once per process, and every caller must `dispose()` — `bun test`
   fires no exit hooks, so an undisposed instance leaves its workerd running past the test process.
   (An older note here said the opposite, that disposing mid-process hangs the next boot. That scar
-  is real but sharding routes around it: the relay, pwa and e2e boots now sit in three separate
+  is real but sharding routes around it: the relay, pwa, e2e and archivist boots now sit in four separate
   processes, never one. Put them back together — a bare `bun test` over the whole tree — and the
   rate-limit suite still fails, because booting workerd within ~100ms of a previous instance being
   disposed makes Bun's `child_process` fail to wire up the new one's stdio (`Failed to connect`,
@@ -159,7 +163,7 @@ green:
   (`exec.ts` strips `CREDENTIALS_DIRECTORY`, or the tmux server it boots hands the PSK's path to
   every session), and a registry entry whose `info` blob is not sealed `from` its own `deviceId`
   never becomes a `Machine` (verified app-side in `shared/src/app-client.ts` — the relay is blind,
-  so only the AAD-bound `from` says which machine an entry describes), and the daemon process never holds a Claude credential: auth health (`daemon/src/auth-health.ts`) reads each exclave's credential store only through a short-lived `bun -e` child running the one constant script, with the file handed over as a file descriptor (or, on macOS, `security -w` run by the child), a bare env and a timeout, and keeps only the child's `{lapsed, refreshExpiresAt}` after an exact-shape check — never the child's stdout or stderr in a log, and nothing on the wire but `ax`/`ae`/`au` indices, an expiry time and `CAPABILITIES.authHealth`, every blob opened outside
+  so only the AAD-bound `from` says which machine an entry describes), and the archivist answers only `archive-status`, `archive-metrics` and `archive-tasks`, only when sealed `from: "app"` with no `re`, parsed by that op's own parser (`parseArchiveStatusRequest`, `parseArchiveMetricsRequest`, `parseArchiveTasksRequest`) through one gate (`answerApp`, `archivist/src/answer.ts`), through its seat leg's replay guard, with a reply of counts, sizes and timestamps, metric points, or task records re-stripped through `archivedTask` (never a prompt, an attachment or a raw account id) with the machines the archive holds tasks for (device id, last known name, newest end time; display only), every task filter a bound SQL parameter, and nothing of a request logged, and an app believes the archivist card only from the flagged entry whose `info` blob is sealed `from` its own `deviceId` and parses as `ArchivistInfo`, and the daemon process never holds a Claude credential: auth health (`daemon/src/auth-health.ts`) reads each exclave's credential store only through a short-lived `bun -e` child running the one constant script, with the file handed over as a file descriptor (or, on macOS, `security -w` run by the child), a bare env and a timeout, and keeps only the child's `{lapsed, refreshExpiresAt}` after an exact-shape check — never the child's stdout or stderr in a log, and nothing on the wire but `ax`/`ae`/`au` indices, an expiry time and `CAPABILITIES.authHealth`, every blob opened outside
   the replay guard (`machine-info`, `status`, `lead-proof`, and the store's `task` and
   `pause-state` records) goes through `openAtRest` in
   `shared/src/crypto.ts`, which refuses one whose `op` isn't the slot's — shape alone does not say
@@ -171,7 +175,13 @@ green:
   relay acts on — today `roles`, which decides nomination — is covered by that signature (the v2
   message), never trusted as plaintext, and the relay nominates only ids on its
   `SCHEDULER_LEADERS` secret — unset nominates nobody, and no wildcard exists, in product code or
-  as a test escape hatch, and the leader honours a scheduler request only when it was sealed
+  as a test escape hatch, and the relay honours the `archivist` role only on a verified v2
+  register from the one id on its `ARCHIVIST` secret (`relay/src/seat.ts`) — unset honours nobody,
+  no wildcard in product code or tests, and any other claim, or one beside `scheduler`, is closed
+  `register role-refused` and writes nothing — and pushes an entry as the seat only while its
+  stored claim's id is the secret's now (`isSeat`), never a stored flag, and `RelayClient` never
+  makes a seat entry a `Machine` (`#rebuildMachines`), so it is no spawn target to any reader,
+  and the leader honours a scheduler request only when it was sealed
   `from: "app"`, parsed into a fresh value by that op's own parser (`parseQueueRequest`,
   `parseTaskRequest`, `parseTaskRef`, `parseAmendRequest`, …), and checked against the one replay guard per daemon
   process that every term's leg and the `not_leader` answer share (`schedulerGuard` in
@@ -235,9 +245,20 @@ green:
   timed out, never awaited by the scheduler pass; its payload carries ids and state only, and no
   endpoint, key, JWT or payload is logged, and the service worker (`pwa/public/push-sw.js`) holds
   no PSK, so a notification's text is fixed per kind (a spill's window label shown only as one of
-  the known `5h`/`7d`; a blocked PR's one of four texts by its `reason`, an enum; a quota-exhausted's window shown only as `5h`/`7d` and its one of two texts by `reason`, an enum; a pass-refused's text fixed) and a click opens only a same-origin path it
+  the known `5h`/`7d`; a blocked PR's one of four texts by its `reason`, an enum; a quota-exhausted's window shown only as `5h`/`7d` and its one of two texts by `reason`, an enum; a pass-refused's text fixed; the archivist's silence one text, nothing of its payload shown) and a click opens only a same-origin path it
   built from an id that passed `isTaskId` (`/?task=<id>`, `/?screen=machines`), which the app
-  reads back through the same rule. Don't let changes drift from them.
+  reads back through the same rule, and the archivist's `archive.sqlite` (`archivist/src/archive.ts`)
+  holds no prompt text, no attachment manifest and no raw account id: a task row is written only
+  through `taskRow`, only for a finished task read through `listTasks`/`getTask`, after
+  `forgetPrompt` and with `pin.account`, `spillAlert`, `assignment.window`, `branch`,
+  `failure.message` and `decision` dropped (the daemon slugs a title-less task's window and branch
+  from its prompt), its account only as the
+  `account:` store key, and only over a row at a lower store version; an account row only from
+  `openAccountRecord` or a key `accountStoreKey` made; and no statement there removes a row
+  (`archivist/test/layering.test.ts`), and its `metrics.sqlite` (`archivist/src/metrics-archive.ts`)
+  labels an account only by the `account:` store key and removes rows only through the shared
+  tiers' two horizon prunes (`daemon/src/metrics-tiers.ts`, the daemon's own rollup, imported,
+  never copied). Don't let changes drift from them.
 - The daemon's local op socket (`daemon/src/local-socket.ts`) is what makes MCP's `get_sessions` and
   `despawn_session` aimed at this machine skip the relay (`spawn` stays on its allowlist only for a
   `seanced mcp` started before spawns became tasks). Its access control is the **0700 `stateDir()/run` directory**, not
@@ -328,9 +349,28 @@ green:
   the same version has all four, so the version alone answers nothing). `shared/` uses both as
   globals, so `raycast/src/lib/runtime.ts` installs them and the extension carries a `ws` dependency
   for it. Don't add injectable crypto/socket seams to `shared/` for this.
+- **The archivist holds the PSK and never acts** (DESIGN.md, Threat model item 2, and "Archivist").
+  Its key comes only from its unit's `$CREDENTIALS_DIRECTORY/seance-psk` (`CRED_NAME`, imported),
+  never a config field; it never runs as root; its state dir is its own, never the daemon's. It
+  registers only claiming `archivist`, with a blob `parseMachineInfo` refuses, answers three ops,
+  `archive-status`, `archive-metrics` and `archive-tasks`, sealed `from: "app"` to its own id past
+  the seat leg's replay guard, with counts, sizes and timestamps, metric points, or stripped task
+  records with the machines the archive holds tasks for, sends no `status` and no store frame, and never enqueues; the fleet's `update-available` broadcast only
+  makes it write `update-requested`, for the credential-less update unit to act on. `archivist/test/layering.test.ts` walks
+  `run`'s whole import closure (type-only imports too) and its own source's calls: a module that spawns,
+  drives tmux, dispatches ops, brokers, leads or writes the queue or store, `daemon/src/config.ts`,
+  anything in `scheduler/`, or a client write method is refused. `install.ts`, `self-update.ts` and
+  `units.ts` are the admin closure: reached only by `main.ts`'s `import()`, allowed the daemon's
+  exec path (`exec.ts`, `tpmcreds.ts`) and, type-only (`import type`, checked per edge), the
+  two modules `audit.ts` names for its line formats (`backend.ts`, `broker-protocol.ts`), nothing else
+  forbidden, and never run with the key. When a daemon module it needs sits
+  beside one it must not load, move the module (as `config-checks.ts` was), never copy it, and
+  never widen the forbidden list's exceptions.
 - The daemon never runs as root. `install --system` / `uninstall --system` are the only commands
   that require it (they write `/etc/systemd/system`), they refuse a target user that resolves to
   root, and they never invoke `sudo` themselves — the operator supplies the privilege. Under them
   nothing may read the ambient environment for a value that ends up in the unit: as root
   `homedir()`, `stateDir()`, `logPath()`, `PATH` and `Bun.which` all answer for the wrong user, and
-  the unit outlives the install. `daemon/src/target-user.ts` resolves the target instead.
+  the unit outlives the install. `daemon/src/target-user.ts` resolves the target instead. The same
+  holds for `seance-archivist install --system` / `uninstall --system` (`archivist/src/install.ts`),
+  which reuse that module and the daemon's unit helpers rather than copying them.

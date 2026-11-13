@@ -5,7 +5,8 @@
  * A push always shows a notification, even for a payload it cannot read: Chrome shows its own
  * "updated in the background" one otherwise, and WebKit revokes a subscription after a few
  * silent pushes. The text is fixed per kind, a spill's or a quota-exhausted's window label shown only as one of
- * the known `5h`/`7d`, a quota-exhausted's reason and a login alert's state only as one of a few fixed texts; the payload carries ids and state, never a title or a prompt, and this worker holds no
+ * the known `5h`/`7d`, a quota-exhausted's reason and a login alert's state only as one of a few fixed texts, and the
+ * archivist's silence as one fixed text with nothing of its payload; the payload carries ids and state, never a title or a prompt, and this worker holds no
  * PSK to open anything more.
  */
 
@@ -74,6 +75,10 @@
             : null;
       if (body === null) return null;
       return { body, tag: `auth:${alert.deviceId}:${alert.exclave}`, url: MACHINES_URL };
+    }
+    // One seat per fleet, so no id: the text and tag are fixed, and nothing of the payload is shown.
+    if (alert.kind === "archivist") {
+      return { body: "The archivist has been offline for 24 hours.", tag: "archivist", url: MACHINES_URL };
     }
     if (typeof alert.taskId !== "string" || !TASK_ID.test(alert.taskId)) return null;
     const url = `/?task=${encodeURIComponent(alert.taskId)}`;

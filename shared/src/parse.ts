@@ -5,6 +5,13 @@ import { isPromptBasis } from "./amend.ts";
 import {
   ACCOUNT_ALIAS_MAX_LENGTH,
   ATTACHMENT_HASH_PATTERN,
+  ARCHIVE_INGEST_SOURCES,
+  ARCHIVE_MACHINES_MAX,
+  ARCHIVE_METRICS_STEPS,
+  ARCHIVE_STATUS_ERROR_CODES,
+  ARCHIVE_TASK_OUTCOMES,
+  ARCHIVE_TASKS_ERROR_CODES,
+  ARCHIVE_TASKS_MAX_PAGE,
   ATTACHMENT_ID_PATTERN,
   ATTACHMENT_LIMITS,
   ATTACHMENTS_DEP_SENTINEL,
@@ -59,6 +66,18 @@ import {
   TASK_SPEC_LIMITS,
   TOOL_NAME_MAX_LENGTH,
   type AccountRecord,
+  type ArchiveIngestSource,
+  type ArchiveMetricsRequest,
+  type ArchiveTasksCursor,
+  type ArchiveTasksReply,
+  type ArchiveTasksRequest,
+  type ArchivedMachine,
+  type ArchivedTask,
+  type ArchiveStatusRequest,
+  type ArchiveStatusReply,
+  type ArchiveStatusResponse,
+  type ArchiveTableStatus,
+  type ArchivistInfo,
   type AttachmentRef,
   type BatchMembership,
   type FleetQuotaEntry,
@@ -77,6 +96,7 @@ import {
   type QuotaReading,
   type SessionPass,
   type SettingsRecord,
+  type ArchivistSilence,
   type AuthAlerted,
   type DiskAlerted,
   type SpillStamp,
@@ -582,12 +602,12 @@ export function isMetricsRequest(value: unknown): value is MetricsRequest {
   return labels === undefined || isLabelMatchers(labels);
 }
 
-function isMetricNames(value: unknown): boolean {
+function isMetricNames(value: unknown): value is readonly string[] {
   if (!isStringArray(value) || value.length === 0 || value.length > METRICS_MAX_FILTERS) return false;
   return value.every((name) => name !== "" && name.length <= METRICS_MAX_FILTER_LENGTH);
 }
 
-function isLabelMatchers(value: unknown): boolean {
+function isLabelMatchers(value: unknown): value is Readonly<Record<string, string>> {
   if (!isRecord(value)) return false;
   const entries = Object.entries(value);
   if (entries.length === 0 || entries.length > METRICS_MAX_FILTERS) return false;
@@ -628,6 +648,195 @@ export function parseMetricsReply(value: unknown): MetricsReply | null {
   const code = METRICS_ERROR_CODES.find((c) => c === value["code"]);
   if (code === undefined || typeof value["message"] !== "string") return null;
   return { ok: false, code, message: value["message"] };
+}
+
+/** Any record: the request carries nothing, and a later one may add a field. */
+export function parseArchiveStatusRequest(value: unknown): ArchiveStatusRequest | null {
+  return isRecord(value) ? {} : null;
+}
+
+function isFiniteOrNull(value: unknown): value is number | null {
+  return value === null || (typeof value === "number" && Number.isFinite(value));
+}
+
+function parseArchiveTable(value: unknown): ArchiveTableStatus | null | undefined {
+  if (value === null) return null;
+  if (!isRecord(value) || !isUint(value["rows"]) || !isFiniteOrNull(value["oldest"])) return undefined;
+  return { rows: value["rows"], oldest: value["oldest"] };
+}
+
+function isFiniteNonNegative(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+/** The card's numbers: an archivist a version ahead must cost the rows, not the app. */
+export function parseArchiveStatusResponse(value: unknown): ArchiveStatusResponse | null {
+  if (!isRecord(value)) return null;
+  const { onlineSince, lastIngest, database, countedAt } = value;
+  if (!isFiniteOrNull(onlineSince) || !isFiniteOrNull(countedAt) || !isRecord(lastIngest) || !isRecord(database)) {
+    return null;
+  }
+  const ingest: Partial<Record<ArchiveIngestSource, number | null>> = {};
+  for (const source of ARCHIVE_INGEST_SOURCES) {
+    const at = lastIngest[source] ?? null;
+    if (!isFiniteOrNull(at)) return null;
+    ingest[source] = at;
+  }
+  const tasks = parseArchiveTable(value["tasks"]);
+  const samples = parseArchiveTable(value["samples"]);
+  const events = parseArchiveTable(value["events"]);
+  if (tasks === undefined || samples === undefined || events === undefined) return null;
+  const { archiveBytes, metricsBytes } = database;
+  if (!isFiniteNonNegative(archiveBytes) || !isFiniteNonNegative(metricsBytes)) return null;
+  return {
+    ok: true,
+    onlineSince,
+    lastIngest: {
+      store: ingest.store ?? null,
+      registry: ingest.registry ?? null,
+      status: ingest.status ?? null,
+      pull: ingest.pull ?? null,
+    },
+    tasks,
+    samples,
+    events,
+    database: { archiveBytes, metricsBytes },
+    countedAt,
+  };
+}
+
+export function parseArchiveStatusReply(value: unknown): ArchiveStatusReply | null {
+  if (!isRecord(value) || value["ok"] !== false) return parseArchiveStatusResponse(value);
+  const code = ARCHIVE_STATUS_ERROR_CODES.find((c) => c === value["code"]);
+  if (code === undefined || typeof value["message"] !== "string") return null;
+  return { ok: false, code, message: value["message"] };
+}
+
+/**
+ * The archivist's register blob. An invalid `source` drops the build line, not
+ * the blob, so the card still shows.
+ */
+export function parseArchivistInfo(value: unknown): ArchivistInfo | null {
+  if (!isRecord(value) || value["archivist"] !== true) return null;
+  const { name, platform } = value;
+  if (typeof name !== "string" || typeof platform !== "string") return null;
+  const source = parseSourceInfo(value["source"]);
+  return { archivist: true, name, platform, ...(source === null ? {} : { source }) };
+}
+
+/** An `account:<hex>` store key: how the archive names an account, never by its raw id (A15). */
+function isAccountStoreKey(value: unknown): value is string {
+  return isStoreKey(value) && value.startsWith(STORE_PREFIXES.account.prefix);
+}
+
+/**
+ * The archivist's `archive-metrics` request, as a fresh value: `metrics`'s
+ * range, step and filter bounds over the archive's steps, and exactly one
+ * target. A span past `METRICS_MAX_POINTS` per series is refused before the
+ * archive reads a row.
+ */
+export function parseArchiveMetricsRequest(value: unknown): ArchiveMetricsRequest | null {
+  if (!isRecord(value)) return null;
+  const { from, to, step, names, labels, machine, account } = value;
+  if (!isUint(from) || !isUint(to) || from > to) return null;
+  const known = ARCHIVE_METRICS_STEPS.find((s) => s === step);
+  if (known === undefined || (to - from) / known + 1 > METRICS_MAX_POINTS) return null;
+  if (names !== undefined && !isMetricNames(names)) return null;
+  if (labels !== undefined && !isLabelMatchers(labels)) return null;
+  const range = {
+    from,
+    to,
+    step: known,
+    ...(names === undefined ? {} : { names: [...names] }),
+    ...(labels === undefined ? {} : { labels: { ...labels } }),
+  };
+  if (account === undefined && isRoutingId(machine)) return { ...range, machine };
+  if (machine === undefined && isAccountStoreKey(account)) return { ...range, account };
+  return null;
+}
+
+function parseArchiveTasksCursor(value: unknown): ArchiveTasksCursor | null {
+  if (!isRecord(value)) return null;
+  const { endedAt, createdAt, id } = value;
+  return isUint(endedAt) && isUint(createdAt) && isTaskId(id) ? { endedAt, createdAt, id } : null;
+}
+
+/** The archivist's `archive-tasks` request, as a fresh value; any bound broken refuses the whole request. */
+export function parseArchiveTasksRequest(value: unknown): ArchiveTasksRequest | null {
+  if (!isRecord(value)) return null;
+  const { limit, before, repo, outcome, machine, account, since, until, title } = value;
+  if (limit !== undefined && !(isUint(limit) && limit >= 1 && limit <= ARCHIVE_TASKS_MAX_PAGE)) return null;
+  const cursor = before === undefined ? undefined : parseArchiveTasksCursor(before);
+  const known = outcome === undefined ? undefined : ARCHIVE_TASK_OUTCOMES.find((o) => o === outcome);
+  if (cursor === null || (outcome !== undefined && known === undefined)) return null;
+  if (repo !== undefined && !isName(repo, TASK_REQUEST_LIMITS.repo)) return null;
+  if (machine !== undefined && !isRoutingId(machine)) return null;
+  if (account !== undefined && !isAccountStoreKey(account)) return null;
+  if (!isOptionalUint(since) || !isOptionalUint(until)) return null;
+  if (title !== undefined && !isName(title, TASK_REQUEST_LIMITS.title)) return null;
+  return {
+    ...(limit === undefined ? {} : { limit }),
+    ...(cursor === undefined ? {} : { before: cursor }),
+    ...(repo === undefined ? {} : { repo }),
+    ...(known === undefined ? {} : { outcome: known }),
+    ...(machine === undefined ? {} : { machine }),
+    ...(account === undefined ? {} : { account }),
+    ...(since === undefined ? {} : { since }),
+    ...(until === undefined ? {} : { until }),
+    ...(title === undefined ? {} : { title }),
+  };
+}
+
+function isStringOrNull(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+function parseArchivedTask(value: unknown): ArchivedTask | null {
+  if (!isRecord(value)) return null;
+  const task = parseTask(value["task"]);
+  const { endedAt, machine, account, alias } = value;
+  if (task === null || !isUint(endedAt) || !isStringOrNull(machine)) return null;
+  if (!isStringOrNull(account) || !isStringOrNull(alias)) return null;
+  return { task, endedAt, machine, account, alias };
+}
+
+function parseArchivedMachine(value: unknown): ArchivedMachine | null {
+  if (!isRecord(value)) return null;
+  const { deviceId, name, lastSeen } = value;
+  return isRoutingId(deviceId) && isStringOrNull(name) && isUint(lastSeen) ? { deviceId, name, lastSeen } : null;
+}
+
+/**
+ * Lenient per entry, as `queue`'s tasks are: a row or machine an archivist a
+ * version ahead writes in a shape this build cannot read costs that entry, not
+ * the page. `machines` absent (an older archivist) or not an array stays absent.
+ */
+export function parseArchiveTasksReply(value: unknown): ArchiveTasksReply | null {
+  if (!isRecord(value)) return null;
+  if (value["ok"] === false) {
+    const code = ARCHIVE_TASKS_ERROR_CODES.find((c) => c === value["code"]);
+    if (code === undefined || typeof value["message"] !== "string") return null;
+    return { ok: false, code, message: value["message"] };
+  }
+  const { ok, tasks, total, next, machines } = value;
+  if (ok !== true || !Array.isArray(tasks) || !isUint(total)) return null;
+  const cursor = next === null ? null : parseArchiveTasksCursor(next);
+  if (cursor === null && next !== null) return null;
+  return {
+    ok: true,
+    tasks: tasks.map(parseArchivedTask).filter((task) => task !== null),
+    total,
+    next: cursor,
+    // Display only: a listing this build cannot read as an array is absent, a longer one cut to what it bounds.
+    ...(Array.isArray(machines)
+      ? {
+          machines: machines
+            .slice(0, ARCHIVE_MACHINES_MAX)
+            .map(parseArchivedMachine)
+            .filter((machine) => machine !== null),
+        }
+      : {}),
+  };
 }
 
 /**
@@ -1725,6 +1934,7 @@ const PUSH_ALERT_KEYS = {
   "quota-exhausted": ["v", "kind", "at", "taskId", "window", "reason"],
   "pass-refused": ["v", "kind", "at", "taskId"],
   auth: ["v", "kind", "at", "deviceId", "exclave", "state"],
+  archivist: ["v", "kind", "at", "since"],
 } as const;
 
 /**
@@ -1792,6 +2002,11 @@ export function parsePushAlert(value: unknown): PushAlert | null {
     if (state !== "expired" && state !== "expiring") return null;
     return { v: 1, kind, at, deviceId, exclave, state };
   }
+  if (kind === "archivist") {
+    const { since } = value;
+    if (!known(PUSH_ALERT_KEYS.archivist) || !isFiniteNumber(since)) return null;
+    return { v: 1, kind, at, since };
+  }
   return null;
 }
 
@@ -1823,7 +2038,7 @@ function parseVapidKeys(value: unknown): VapidKeys | null {
  */
 export function parseSettingsRecord(value: unknown): SettingsRecord | null {
   if (!isRecord(value) || !isVersion(value["version"])) return null;
-  const { vapid, linearKey, subscriptions, diskAlerts, authAlerts } = value;
+  const { vapid, linearKey, subscriptions, diskAlerts, authAlerts, archivistSilence } = value;
   const keys = vapid === undefined ? undefined : parseVapidKeys(vapid);
   if (keys === null) return null;
   if (linearKey !== undefined && !isPrintableName(linearKey, LINEAR_KEY_MAX_LENGTH)) return null;
@@ -1839,6 +2054,8 @@ export function parseSettingsRecord(value: unknown): SettingsRecord | null {
   if (disk === null) return null;
   const auth = authAlerts === undefined ? undefined : parseAuthAlerts(authAlerts);
   if (auth === null) return null;
+  const silence = archivistSilence === undefined ? undefined : parseArchivistSilence(archivistSilence);
+  if (silence === null) return null;
   return {
     version: value["version"],
     ...(keys === undefined ? {} : { vapid: keys }),
@@ -1846,7 +2063,19 @@ export function parseSettingsRecord(value: unknown): SettingsRecord | null {
     ...(subscribed === undefined ? {} : { subscriptions: subscribed }),
     ...(disk === undefined ? {} : { diskAlerts: disk }),
     ...(auth === undefined ? {} : { authAlerts: auth }),
+    ...(silence === undefined ? {} : { archivistSilence: silence }),
   };
+}
+
+function parseArchivistSilence(value: unknown): ArchivistSilence | null {
+  if (!isRecord(value)) return null;
+  const { state, since } = value;
+  if (state === "present") return Object.keys(value).length === 1 ? { state } : null;
+  if (state !== "absent" && state !== "alerted") return null;
+  if (Object.keys(value).length !== 2) return null;
+  // A valid Date, since the leader formats it for its log line.
+  if (typeof since !== "number" || !Number.isSafeInteger(since) || since < 0 || since > MAX_DATE_MS) return null;
+  return { state, since };
 }
 
 /** One entry per device and exclave. */

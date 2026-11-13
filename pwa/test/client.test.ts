@@ -13,14 +13,19 @@ import {
   SCHEDULER_ID,
   seal,
   toBase64,
+  type ArchiveStatusResponse,
+  type ArchiveTasksResponse,
+  type ArchivistInfo,
   type Decision,
   type Envelope,
   type MachineInfo,
   type MachineStatus,
   type Plain,
   type QueueChanged,
+  type RegistryView,
   type SessionsResponse,
   type Task,
+  type MetricsSeries,
 } from "@seance/shared";
 import { afterAll, beforeAll, describe, expect, jest, test } from "bun:test";
 import {
@@ -56,13 +61,17 @@ let otherKey: CryptoKey;
  * SCHEDULER_LEADERS can list them, as an operator lists real machines.
  */
 let listed: { readonly legLeader: string; readonly stolenSeed: string; readonly autoLeader: string };
+/** On the relay's ARCHIVIST, minted before boot for the same reason. */
+let seat: string;
 
 beforeAll(async () => {
   const [legLeader, stolenSeed, autoLeader] = await Promise.all([newDeviceId(), newDeviceId(), newDeviceId()]);
   listed = { legLeader, stolenSeed, autoLeader };
+  seat = await newDeviceId();
   // Only the attachment suite uploads; a low count bound lets it reach the allowance's 429 in a few puts.
   relay = await startRelay(TOKEN, {
     leaders: [legLeader, stolenSeed, autoLeader],
+    archivist: seat,
     uploadAllowance: { hourUploads: ATTACHMENT_HOUR_UPLOADS },
   });
   key = await importPsk(PSK);
@@ -94,10 +103,29 @@ function machineInfo(name: string): MachineInfo {
   };
 }
 
+function archivistInfo(name: string): ArchivistInfo {
+  return { archivist: true, name, platform: "linux" };
+}
+
+const STATUS: ArchiveStatusResponse = {
+  ok: true,
+  onlineSince: 1_700_000_000_000,
+  lastIngest: { store: 1_700_000_001_000, registry: null, status: null, pull: null },
+  tasks: { rows: 12, oldest: 1_600_000_000_000 },
+  samples: { rows: 3_400, oldest: 1_650_000_000_000 },
+  events: { rows: 5, oldest: 1_650_000_000_000 },
+  database: { archiveBytes: 1_000, metricsBytes: 2_000 },
+  countedAt: 1_700_000_002_000,
+};
+
 function startClient(
   opts: {
     readonly token?: string;
-    readonly timeouts?: { readonly sessions?: number; readonly rescan?: number };
+    readonly timeouts?: {
+      readonly sessions?: number;
+      readonly rescan?: number;
+      readonly "archive-status"?: number;
+    };
     readonly pingIntervalMs?: number;
     readonly pongTimeoutMs?: number;
     /** Wire-log sink; the suites that assert on a frame the client only logs pass one. */
@@ -299,6 +327,241 @@ describe("registry", () => {
       daemon.close();
       client.stop();
     }
+  });
+
+  // The seat's blob opens under this key and names repos, so only the relay's
+  // flag keeps it out of `machines` — the list every spawn target comes from.
+  // Its absence is asserted only once this client has listed a machine that
+  // registered after it, so the push it read held the seat; the same blob,
+  // registered again without the role, then lists — proving it was the skip.
+  test("the archivist's seat never becomes a machine, nor counts as ignored or registered", async () => {
+    const plainId = await newDeviceId();
+    const raw = await connectApp(relay);
+    const { client, waitFor } = startClient();
+    const info = machineInfo("Archive Box");
+    let archivist = await startFakeDaemon(
+      relay,
+      key,
+      seat,
+      archivistInfo("Archive Box"),
+      {},
+      { roles: [DAEMON_ROLES.archivist] },
+    );
+    let plain: Awaited<ReturnType<typeof startFakeDaemon>> | null = null;
+    const seatId = seat;
+    const isLiveSeat = (entry: RegistryView): boolean =>
+      entry.deviceId === seatId && entry.connected && entry.archivist === true;
+    try {
+      for (;;) {
+        const frame = await raw.waitFor<{ t: "registry"; entries: readonly RegistryView[] }>("registry");
+        if (frame.entries.some(isLiveSeat)) break;
+      }
+      const before = await waitFor((s) => s.registrySettled, "the first push");
+      plain = await startFakeDaemon(relay, key, plainId, machineInfo("Plain Box"));
+      const after = await waitFor(
+        (s) => s.machines.some((m) => m.deviceId === plainId && m.connected),
+        "the machine registered after the seat",
+      );
+      expect(after.machines.some((m) => m.deviceId === seat)).toBe(false);
+      expect(after.archivist).toEqual({
+        deviceId: seat,
+        name: "Archive Box",
+        platform: "linux",
+        connected: true,
+        lastSeen: expect.any(Number),
+      });
+      expect(after.ignored).toBe(before.ignored);
+      expect(after.skewed).toBe(before.skewed);
+      expect(after.registrySize).toBe(before.registrySize + 1);
+
+      archivist.close();
+      archivist = await startFakeDaemon(relay, key, seat, info);
+      const roleless = await waitFor(
+        (s) => s.machines.some((m) => m.deviceId === seat && m.connected),
+        "the same blob, registered without the role",
+      );
+      expect(roleless.machines.find((m) => m.deviceId === seat)?.repos.map((r) => r.name)).toEqual([
+        "seance",
+        "pengefix",
+      ]);
+      expect(roleless.registrySize).toBe(after.registrySize + 1);
+      expect(roleless.ignored).toBe(before.ignored);
+    } finally {
+      archivist.close();
+      plain?.close();
+      raw.close();
+      client.stop();
+    }
+  });
+
+  describe("the archivist's card state", () => {
+    test("keeps its object while a push changes nothing about it, and reads the build line", async () => {
+      const source = { sha: "e".repeat(40), commitTs: 1_700_000_000_000, branch: "main" };
+      const archivist = await startFakeDaemon(
+        relay,
+        key,
+        seat,
+        { ...archivistInfo("Archive Box"), source },
+        {},
+        { roles: [DAEMON_ROLES.archivist] },
+      );
+      const other = await newDeviceId();
+      const { client, waitFor } = startClient();
+      let daemon: Awaited<ReturnType<typeof startFakeDaemon>> | null = null;
+      try {
+        const first = await waitFor((s) => s.archivist?.connected === true, "the archivist entry");
+        expect(first.archivist?.source).toEqual(source);
+        // Another registration pushes the whole registry again.
+        daemon = await startFakeDaemon(relay, key, other, machineInfo("Other Box"));
+        const second = await waitFor((s) => s.machines.some((m) => m.deviceId === other), "the next push");
+        expect(second.archivist).toBe(first.archivist);
+      } finally {
+        daemon?.close();
+        archivist.close();
+        client.stop();
+      }
+    });
+
+    test("a blob sealed from another id leaves the archivist null and the seat no machine", async () => {
+      const impostor = await newDeviceId();
+      const info = await seal(
+        key,
+        { to: APP_ID, from: impostor },
+        { id: crypto.randomUUID(), ts: Date.now(), op: "machine-info", payload: archivistInfo("Impostor") },
+      );
+      const raw = await connectApp(relay);
+      const daemon = await connectDaemon(relay);
+      let client: RelayClient | null = null;
+      try {
+        const seatId = seat;
+        daemon.send(await register(seatId, { info, roles: [DAEMON_ROLES.archivist] }));
+        for (;;) {
+          const frame = await raw.waitFor<{ t: "registry"; entries: readonly RegistryView[] }>("registry");
+          if (frame.entries.some((entry) => entry.deviceId === seatId && entry.info.iv === info.iv)) break;
+        }
+        // Started after the push that holds it, so its first registry is the one under test.
+        const started = startClient();
+        client = started.client;
+        const state = await started.waitFor((s) => s.registrySettled, "the registry");
+        expect(state.archivist).toBeNull();
+        expect(state.machines.some((m) => m.deviceId === seat)).toBe(false);
+      } finally {
+        daemon.close();
+        raw.close();
+        client?.stop();
+      }
+    });
+
+    test("archiveStatus round-trips against the seat", async () => {
+      const archivist = await startFakeDaemon(
+        relay,
+        key,
+        seat,
+        archivistInfo("Archive Box"),
+        { "archive-status": () => STATUS },
+        { roles: [DAEMON_ROLES.archivist] },
+      );
+      const { client, waitFor } = startClient();
+      try {
+        await waitFor((s) => s.archivist?.connected === true, "the archivist entry");
+        expect(await client.archiveStatus()).toEqual(STATUS);
+      } finally {
+        archivist.close();
+        client.stop();
+      }
+    });
+
+    test("archiveMetrics and archiveTasks round-trip against the seat, carrying the request", async () => {
+      const account = `account:${"ab".repeat(32)}`;
+      const series: MetricsSeries = { metric: "quota_5h_pct", labels: { account }, points: [[300, 12.5]] };
+      const page: ArchiveTasksResponse = {
+        ok: true,
+        tasks: [
+          {
+            task: { id: "t-1", spec: { repo: "seance", mode: "worktree" }, state: "done", createdAt: 1_000 },
+            endedAt: 2_000,
+            machine: "Dev Box",
+            account,
+            alias: "work",
+          },
+        ],
+        total: 1,
+        next: null,
+      };
+      const asked: unknown[] = [];
+      const archivist = await startFakeDaemon(
+        relay,
+        key,
+        seat,
+        archivistInfo("Archive Box"),
+        {
+          "archive-metrics": (payload) => {
+            asked.push(payload);
+            return { series: [series] };
+          },
+          "archive-tasks": (payload) => {
+            asked.push(payload);
+            return page;
+          },
+        },
+        { roles: [DAEMON_ROLES.archivist] },
+      );
+      const { client, waitFor } = startClient();
+      try {
+        await waitFor((s) => s.archivist?.connected === true, "the archivist entry");
+        const metrics = { from: 0, to: 600, step: 300, account } as const;
+        expect(await client.archiveMetrics(metrics)).toEqual({ series: [series] });
+        expect(await client.archiveTasks({ outcome: "done", title: "fix" })).toEqual(page);
+        expect(asked).toEqual([metrics, { outcome: "done", title: "fix" }]);
+      } finally {
+        archivist.close();
+        client.stop();
+      }
+    });
+
+    test("an archivist that never answers times out, and the card stays online", async () => {
+      const archivist = await startFakeDaemon(
+        relay,
+        key,
+        seat,
+        archivistInfo("Archive Box"),
+        {},
+        {
+          roles: [DAEMON_ROLES.archivist],
+        },
+      );
+      const { client, waitFor } = startClient({ timeouts: { "archive-status": 300 } });
+      try {
+        await waitFor((s) => s.archivist?.connected === true, "the archivist entry");
+        const failure = await client.archiveStatus().catch((err: unknown) => err);
+        expect(failure).toBeInstanceOf(RequestFailure);
+        expect(failure instanceof RequestFailure ? failure.reason : null).toBe("timeout");
+        // A timeout marks a machine offline; the archivist's card follows the registry, not the mark.
+        expect(client.getState().archivist?.connected).toBe(true);
+      } finally {
+        archivist.close();
+        client.stop();
+      }
+    });
+
+    test("every archivist op with no connected archivist throws offline, sending nothing", async () => {
+      const { client, waitFor } = startClient();
+      try {
+        await waitFor((s) => s.registrySettled && s.archivist?.connected !== true, "no connected archivist");
+        for (const ask of [
+          () => client.archiveStatus(),
+          () => client.archiveMetrics({ from: 0, to: 60, step: 30, machine: "m" }),
+          () => client.archiveTasks({}),
+        ]) {
+          // oxlint-disable-next-line no-await-in-loop -- each refusal is its own call
+          const failure = await ask().catch((err: unknown) => err);
+          expect(failure).toBeInstanceOf(RequestFailure);
+          expect(failure instanceof RequestFailure ? failure.reason : null).toBe("offline");
+        }
+      } finally {
+        client.stop();
+      }
+    });
   });
 
   test("counts an entry sealed with another key as ignored, not as a machine", async () => {

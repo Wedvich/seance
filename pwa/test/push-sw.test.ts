@@ -89,6 +89,7 @@ describe("push-sw.js", () => {
       { v: 1, kind: "disk", at: 5, deviceId: "dev-1", diskPct: 93 },
       { v: 1, kind: "auth", at: 5, deviceId: "dev-1", exclave: "work", state: "expired" },
       { v: 1, kind: "auth", at: 5, deviceId: "dev-1", exclave: "work", state: "expiring" },
+      { v: 1, kind: "archivist", at: 5, since: 1 },
     ];
     const worker = boot();
     for (const alert of alerts) await worker.push(JSON.stringify(alert));
@@ -161,6 +162,33 @@ describe("push-sw.js", () => {
         options: {
           body: "A Claude login expires within 3 days.",
           tag: "auth:dev-1:work",
+          renotify: true,
+          data: { url: "/?screen=machines" },
+        },
+      },
+      {
+        title: "Séance",
+        options: {
+          body: "The archivist has been offline for 24 hours.",
+          tag: "archivist",
+          renotify: true,
+          data: { url: "/?screen=machines" },
+        },
+      },
+    ]);
+  });
+
+  test("an archivist alert shows its one fixed text whatever else its payload carries", async () => {
+    const worker = boot();
+    await worker.push(
+      JSON.stringify({ v: 1, kind: "archivist", at: 1, since: "<b>x</b>", deviceId: "../x", name: "secret" }),
+    );
+    expect(worker.shown).toEqual([
+      {
+        title: "Séance",
+        options: {
+          body: "The archivist has been offline for 24 hours.",
+          tag: "archivist",
           renotify: true,
           data: { url: "/?screen=machines" },
         },

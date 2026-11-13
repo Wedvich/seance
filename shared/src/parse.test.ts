@@ -27,6 +27,12 @@ import {
   parseDiscardReply,
   parseDiscardRequest,
   parseExclaveList,
+  parseArchiveMetricsRequest,
+  parseArchiveStatusReply,
+  parseArchiveStatusRequest,
+  parseArchiveTasksReply,
+  parseArchiveTasksRequest,
+  parseArchivistInfo,
   parseMachineInfo,
   parseMachineStatus,
   parseMetricsReply,
@@ -60,6 +66,10 @@ import { REPLAY_WINDOW_MS } from "./crypto.ts";
 import { taskRecordAtRest } from "./task-record.ts";
 import {
   ACCOUNT_ALIAS_MAX_LENGTH,
+  ARCHIVE_STATUS_ERROR_CODES,
+  ARCHIVE_TASKS_ERROR_CODES,
+  ARCHIVE_MACHINES_MAX,
+  ARCHIVE_TASKS_MAX_PAGE,
   BRANCH_MAX_LENGTH,
   CANDIDATE_MAX_REASONS,
   EXIT_STATUS_MAX,
@@ -2452,8 +2462,12 @@ describe("M4 shapes", () => {
         { deviceId: "dev-1", exclave: "default", state: "expired", at: 1_760_000_000_000 },
         { deviceId: "dev-1", exclave: "work", state: "expiring", at: 1_760_000_000_001 },
       ],
+      archivistSilence: { state: "alerted", since: 1_760_000_000_002 },
     };
     expect(parseSettingsRecord(settings)).toEqual(settings);
+    for (const archivistSilence of [{ state: "present" }, { state: "absent", since: 1 }] as const) {
+      expect(parseSettingsRecord({ ...settings, archivistSilence })).toEqual({ ...settings, archivistSilence });
+    }
     expect(parseSettingsRecord({ version: 1 })).toEqual({ version: 1 });
     const many = Array.from({ length: PUSH_MAX_SUBSCRIPTIONS + 1 }, (_, i) => ({
       ...subscription,
@@ -2497,6 +2511,15 @@ describe("M4 shapes", () => {
           at: 1,
         })),
       },
+      { ...settings, archivistSilence: { state: "absent" } },
+      { ...settings, archivistSilence: { state: "alerted", since: "1" } },
+      { ...settings, archivistSilence: { state: "gone", since: 1 } },
+      { ...settings, archivistSilence: "present" },
+      { ...settings, archivistSilence: { state: "present", since: 1 } },
+      { ...settings, archivistSilence: { state: "absent", since: 1, extra: true } },
+      { ...settings, archivistSilence: { state: "absent", since: -1 } },
+      { ...settings, archivistSilence: { state: "absent", since: 1.5 } },
+      { ...settings, archivistSilence: { state: "alerted", since: 8.64e15 + 1 } },
       { ...settings, diskAlerts: [{ deviceId: "dev/1", at: 1 }] },
       { ...settings, diskAlerts: [{ deviceId: "dev-1" }] },
       {
@@ -2619,6 +2642,7 @@ describe("M4 shapes", () => {
         state: "expiring" as const,
         at: 1_760_000_000_000,
       })),
+      archivistSilence: { state: "alerted", since: 8.64e15 },
     };
     expect(parseSettingsRecord(full)).toEqual(full);
     expect(await sealedRecordLength("settings", full)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
@@ -2644,7 +2668,8 @@ describe("parsePushAlert", () => {
     const question = { ...input, escalated: false, question: true } as const;
     const auth = { v: 1, kind: "auth", at: 5, deviceId: "dev-1", exclave: "default", state: "expired" } as const;
     const expiring = { ...auth, state: "expiring" } as const;
-    for (const alert of [spill, spending, input, question, disk, bare, auth, expiring]) {
+    const archivist = { v: 1, kind: "archivist", at: 5, since: 3 } as const;
+    for (const alert of [spill, spending, input, question, disk, bare, auth, expiring, archivist]) {
       expect(parsePushAlert(alert)).toEqual(alert);
     }
   });
@@ -2710,6 +2735,10 @@ describe("parsePushAlert", () => {
       { v: 1, kind: "auth", at: 5, deviceId: "dev-1", exclave: "default", state: "expired", account: "a" },
       { v: 1, kind: "auth", at: 5, deviceId: "dev-1", exclave: "a/b", state: "expired" },
       { v: 1, kind: "auth", at: 5, deviceId: "dev-1", state: "expired" },
+      { v: 1, kind: "archivist", at: 5 },
+      { v: 1, kind: "archivist", at: 5, since: "3" },
+      { v: 1, kind: "archivist", at: 5, since: 3, deviceId: "arch" },
+      { v: 1, kind: "archivist", at: 5, since: 3, name: "free text" },
       null,
       "spill",
     ]) {
@@ -2792,5 +2821,187 @@ describe("parseAmendRequest", () => {
   test("refuses an amendment of nothing", () => {
     expect(parseAmendRequest({ taskId: "t-1" })).toBeNull();
     expect(parseAmendRequest({ taskId: "t-1", other: "x" })).toBeNull();
+  });
+});
+
+describe("archive-status", () => {
+  const good = {
+    ok: true,
+    onlineSince: 5,
+    lastIngest: { store: 1, registry: null, status: 3, pull: 4 },
+    tasks: { rows: 2, oldest: 10 },
+    samples: { rows: 0, oldest: null },
+    events: null,
+    database: { archiveBytes: 100, metricsBytes: 200 },
+    countedAt: 9,
+  } as const;
+
+  test("a good reply parses, including a table still unread", () => {
+    expect(parseArchiveStatusReply(good)).toEqual(good);
+  });
+
+  test("each error code parses, an unknown one is unreadable", () => {
+    for (const code of ARCHIVE_STATUS_ERROR_CODES) {
+      expect(parseArchiveStatusReply({ ok: false, code, message: "m" })).toEqual({ ok: false, code, message: "m" });
+    }
+    expect(parseArchiveStatusReply({ ok: false, code: "nope", message: "m" })).toBeNull();
+    expect(parseArchiveStatusReply(null)).toBeNull();
+  });
+
+  test("a missing source counts as null and an extra one is ignored", () => {
+    const parsed = parseArchiveStatusReply({ ...good, lastIngest: { store: 1, later: 7 } });
+    expect(parsed).toEqual({ ...good, lastIngest: { store: 1, registry: null, status: null, pull: null } });
+  });
+
+  test("a negative row count, a bad size or a non-record is unreadable", () => {
+    expect(parseArchiveStatusReply({ ...good, tasks: { rows: -1, oldest: null } })).toBeNull();
+    expect(parseArchiveStatusReply({ ...good, database: { archiveBytes: -1, metricsBytes: 0 } })).toBeNull();
+    expect(parseArchiveStatusReply({ ...good, lastIngest: "x" })).toBeNull();
+  });
+
+  test("the request is any record", () => {
+    expect(parseArchiveStatusRequest({ later: 1 })).toEqual({});
+    expect(parseArchiveStatusRequest([])).toBeNull();
+    expect(parseArchiveStatusRequest(null)).toBeNull();
+  });
+
+  test("the archivist's blob keeps the card when its source is bad, and refuses archivist: false", () => {
+    const source = { sha: "a".repeat(40), commitTs: 1_700_000_000_000, branch: null };
+    const base = { archivist: true, name: "n", platform: "linux" } as const;
+    expect(parseArchivistInfo(base)).toEqual(base);
+    expect(parseArchivistInfo({ ...base, source })).toEqual({ ...base, source });
+    expect(parseArchivistInfo({ ...base, source: { sha: "x" } })).toEqual(base);
+    expect(parseArchivistInfo({ ...base, archivist: false })).toBeNull();
+  });
+});
+
+describe("archive-metrics", () => {
+  const account = `${STORE_PREFIXES.account.prefix}${"ab".repeat(32)}`;
+  const day = 86_400;
+
+  test("a machine or an account target parses into a fresh value; never both, never neither", () => {
+    const names = ["quota_5h_pct"];
+    const labels = { exclave: "default" };
+    const request = { from: 0, to: 3600, step: 300, names, labels, machine: "dev-1", later: 1 };
+    const parsed = parseArchiveMetricsRequest(request);
+    expect(parsed).toEqual({ from: 0, to: 3600, step: 300, names, labels, machine: "dev-1" });
+    expect(parsed !== null && "names" in parsed ? parsed.names : null).not.toBe(names);
+    expect(parseArchiveMetricsRequest({ from: 0, to: 60, step: 30, account })).toEqual({
+      from: 0,
+      to: 60,
+      step: 30,
+      account,
+    });
+    expect(parseArchiveMetricsRequest({ from: 0, to: 60, step: 30, machine: "dev-1", account })).toBeNull();
+    expect(parseArchiveMetricsRequest({ from: 0, to: 60, step: 30 })).toBeNull();
+  });
+
+  test("an account is its store key, never a raw id or another prefix's key", () => {
+    expect(parseArchiveMetricsRequest({ from: 0, to: 60, step: 30, account: "org:acct" })).toBeNull();
+    expect(parseArchiveMetricsRequest({ from: 0, to: 60, step: 30, account: "task:abc" })).toBeNull();
+    expect(parseArchiveMetricsRequest({ from: 0, to: 60, step: 30, machine: "has space" })).toBeNull();
+  });
+
+  test("a year fits at a day and 90 days at 6 h; the points cap holds at every step", () => {
+    expect(parseArchiveMetricsRequest({ from: 0, to: 365 * day, step: day, machine: "m" })).not.toBeNull();
+    expect(parseArchiveMetricsRequest({ from: 0, to: 90 * day, step: 21_600, machine: "m" })).not.toBeNull();
+    expect(parseArchiveMetricsRequest({ from: 0, to: METRICS_MAX_POINTS * day, step: day, machine: "m" })).toBeNull();
+    expect(parseArchiveMetricsRequest({ from: 0, to: 90 * day, step: 3600, machine: "m" })).toBeNull();
+    expect(parseArchiveMetricsRequest({ from: 0, to: 60, step: 60, machine: "m" })).toBeNull();
+    expect(parseArchiveMetricsRequest({ from: 10, to: 0, step: 30, machine: "m" })).toBeNull();
+  });
+
+  test("names and labels keep the metrics op's bounds", () => {
+    const base = { from: 0, to: 60, step: 30, machine: "m" };
+    expect(parseArchiveMetricsRequest({ ...base, names: [] })).toBeNull();
+    expect(parseArchiveMetricsRequest({ ...base, names: Array.from({ length: 9 }, (_, i) => `n${i}`) })).toBeNull();
+    expect(parseArchiveMetricsRequest({ ...base, labels: { a: 1 } })).toBeNull();
+    expect(
+      parseArchiveMetricsRequest({ ...base, labels: { a: "x".repeat(METRICS_MAX_FILTER_LENGTH + 1) } }),
+    ).toBeNull();
+  });
+});
+
+describe("archive-tasks", () => {
+  const account = `${STORE_PREFIXES.account.prefix}${"cd".repeat(32)}`;
+  const cursor = { endedAt: 2_000, createdAt: 1_000, id: "t-1" };
+
+  test("every filter parses into a fresh value, unknown keys dropped", () => {
+    const request = {
+      limit: 20,
+      before: cursor,
+      repo: "seance",
+      outcome: "failed" as const,
+      machine: "dev-1",
+      account,
+      since: 1,
+      until: 5,
+      title: "50%_off",
+      later: true,
+    };
+    const { later: _later, ...expected } = request;
+    const parsed = parseArchiveTasksRequest(request);
+    expect(parsed).toEqual(expected);
+    expect(parsed?.before).not.toBe(cursor);
+    expect(parseArchiveTasksRequest({})).toEqual({});
+    expect(parseArchiveTasksRequest(null)).toBeNull();
+  });
+
+  test("each bound refuses the whole request", () => {
+    for (const bad of [
+      { limit: 0 },
+      { limit: ARCHIVE_TASKS_MAX_PAGE + 1 },
+      { limit: 1.5 },
+      { before: { ...cursor, id: "" } },
+      { before: { ...cursor, endedAt: -1 } },
+      { outcome: "running" },
+      { repo: "" },
+      { repo: "r".repeat(513) },
+      { machine: "has space" },
+      { account: "org:acct" },
+      { since: -1 },
+      { until: "soon" },
+      { title: "" },
+      { title: "t".repeat(201) },
+    ]) {
+      expect(parseArchiveTasksRequest(bad)).toBeNull();
+    }
+  });
+
+  test("a reply keeps the rows it can read and drops the rest; a bad cursor or total is unreadable", () => {
+    const task = { id: "t-1", spec: { repo: "seance", mode: "worktree" }, state: "done", createdAt: 1_000 } as const;
+    const row = { task, endedAt: 2_000, machine: "dev", account, alias: null };
+    const reply = { ok: true, tasks: [row, { ...row, task: { ...task, state: "later" } }], total: 2, next: cursor };
+    expect(parseArchiveTasksReply(reply)).toEqual({ ok: true, tasks: [row], total: 2, next: cursor });
+    expect(parseArchiveTasksReply({ ...reply, next: null })?.ok).toBe(true);
+    expect(parseArchiveTasksReply({ ...reply, next: { id: "t-1" } })).toBeNull();
+    expect(parseArchiveTasksReply({ ...reply, total: -1 })).toBeNull();
+    expect(parseArchiveTasksReply({ ...reply, ok: undefined })).toBeNull();
+  });
+
+  test("machines stay absent from an older archivist, drop a bad entry, and never cost the page when not a bounded list", () => {
+    const reply = { ok: true, tasks: [], total: 0, next: null } as const;
+    expect(parseArchiveTasksReply(reply)).toEqual(reply);
+    const gone = { deviceId: "dev-gone", name: "old-box", lastSeen: 2_000 };
+    const unnamed = { deviceId: "dev-x", name: null, lastSeen: 1_000 };
+    expect(
+      parseArchiveTasksReply({
+        ...reply,
+        machines: [gone, unnamed, { ...gone, deviceId: "has space" }, { ...gone, lastSeen: -1 }, { ...gone, name: 1 }],
+      }),
+    ).toEqual({ ...reply, machines: [gone, unnamed] });
+    expect(parseArchiveTasksReply({ ...reply, machines: {} })).toEqual(reply);
+    const long = parseArchiveTasksReply({
+      ...reply,
+      machines: Array.from({ length: ARCHIVE_MACHINES_MAX + 1 }, () => gone),
+    });
+    expect(long?.ok && long.machines).toHaveLength(ARCHIVE_MACHINES_MAX);
+  });
+
+  test("each error code parses, an unknown one is unreadable", () => {
+    for (const code of ARCHIVE_TASKS_ERROR_CODES) {
+      expect(parseArchiveTasksReply({ ok: false, code, message: "m" })).toEqual({ ok: false, code, message: "m" });
+    }
+    expect(parseArchiveTasksReply({ ok: false, code: "nope", message: "m" })).toBeNull();
   });
 });

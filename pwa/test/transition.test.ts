@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Task, TaskState } from "@seance/shared";
-import { DEFAULT_FORM, RESCAN_IDLE, type Verdict } from "../src/state.ts";
+import { CLOSED_OLDER, DEFAULT_FORM, RESCAN_IDLE, type Verdict } from "../src/state.ts";
 import {
   screenKey,
   TRANSITION_KINDS,
@@ -17,6 +17,7 @@ function state(overrides: Partial<AppState> = {}): AppState {
     relay: {
       status: "open",
       rejection: null,
+      archivist: null,
       machines: [],
       registrySize: 0,
       ignored: 0,
@@ -54,6 +55,8 @@ function state(overrides: Partial<AppState> = {}): AppState {
     attachNotice: null,
     heldDropped: [],
     awaitingUploads: false,
+    archiveStatus: null,
+    older: CLOSED_OLDER,
     ...overrides,
   };
 }

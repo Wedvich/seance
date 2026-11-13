@@ -45,4 +45,7 @@
   // secret, but a var here would be overwritten by every CI deploy. Unset, no
   // daemon is nominated and auto is unavailable.
   //   deploy: bun run --cwd relay wrangler secret put SCHEDULER_LEADERS
+  // And ARCHIVIST (the one device id that may hold the archivist seat,
+  // DESIGN.md, "Archivist"): unset, nothing may register with that role.
+  //   deploy: bun run --cwd relay wrangler secret put ARCHIVIST
 }

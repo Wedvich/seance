@@ -11,15 +11,25 @@ import {
   taskFailureText,
   type TaskUntil,
 } from "@seance/shared";
-import type { AutonomyLevel, Capability, KnownAccount, Machine, RelayState, Task } from "@seance/shared";
+import type {
+  ArchiveStatusResponse,
+  AutonomyLevel,
+  Capability,
+  KnownAccount,
+  Machine,
+  RelayState,
+  Task,
+} from "@seance/shared";
 import {
   AUTONOMY_LABELS,
   EFFORT_LABELS,
   HELD_MAX,
   MODEL_LABELS,
+  worktreeFor,
   type AccountsState,
   type HeldTask,
   type HistoryView,
+  type OlderState,
   type PersistedForm,
   type PreviewState,
   type QueueState,
@@ -184,6 +194,8 @@ export interface ViewModel {
   readonly held: readonly HeldRow[];
   /** Held tasks dropped for age, as one line naming them; null when none or dismissed. */
   readonly heldDropped: string | null;
+  /** The Fresh worktree toggle as it stands for the repo the form resolves to. */
+  readonly worktree: boolean;
   readonly worktreeHint: string;
   /** The line under the "Settle this task on its done report" switch. */
   readonly reportedHint: string;
@@ -262,6 +274,13 @@ export interface AppState {
   /** Unreadable records being discarded. */
   readonly discarding: boolean;
   readonly accounts: AccountsState;
+  /**
+   * The archivist's last `archive-status` reply and the device it came from, for the Machines screen's card;
+   * null until one lands, and dropped when the seat moves or the archivist is offline.
+   */
+  readonly archiveStatus: { readonly deviceId: string; readonly reply: ArchiveStatusResponse } | null;
+  /** The Queue screen's Older section, read from the archive; closed and empty while no archivist is online. */
+  readonly older: OlderState;
   /** Files on the form. Not in `form`: a `File` can't be persisted, and a reload drops them. */
   readonly attachments: readonly PickedFile[];
   /** Why the last pick or paste left files out; cleared by the next pick or a remove. */
@@ -943,6 +962,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
   const machine = form.machine === null ? null : (relay.machines.find((m) => m.deviceId === form.machine) ?? null);
   const repos = scopedRepos(relay.machines, form);
   const repo = resolveRepo(repos, form);
+  const worktree = worktreeFor(form, repo?.origin ?? null);
   const problem = derivePinProblem(relay, form, state.accounts.aliases);
   const availability = deriveAutoAvailability(relay);
   const known = formAccounts(relay.machines, form);
@@ -978,7 +998,7 @@ export function deriveView(state: AppState, now: number): ViewModel {
       value: repo?.label ?? "No repos",
       mono: true,
       dot: null,
-      tag: form.worktree ? "worktree" : null,
+      tag: worktree ? "worktree" : null,
     },
     modelTile: {
       label: "MODEL",
@@ -1017,7 +1037,8 @@ export function deriveView(state: AppState, now: number): ViewModel {
     held: state.held.map((entry) => heldRow(entry, relay)),
     heldDropped: heldDroppedText(state.heldDropped),
     reportedHint: reportedHint(form.until, deriveReportedOffered(relay)),
-    worktreeHint: form.worktree ? "Branches off the default branch on origin" : "Runs in the repo as it stands",
+    worktree,
+    worktreeHint: worktree ? "Branches off the default branch on origin" : "Runs in the repo as it stands",
     formStatus: deriveFormStatus(state, machine, problem),
     button: deriveButton(state, machine, repo, problem),
     startNow: deriveRunNowAvailability(relay),

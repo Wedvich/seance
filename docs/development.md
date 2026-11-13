@@ -28,7 +28,7 @@ its `wss:` one (DESIGN.md, "Attachments").
 | `bun run perf`         | PWA idle/resume cost, opt-in (see below)           |
 
 The daemon CLI runs straight from source: `bun daemon/src/main.ts <command>` (`help`
-lists the commands).
+lists the commands). So does the archivist's: `bun archivist/src/main.ts <command>`.
 
 Narrow the suite to one shard by naming a file: `bun run test daemon/test/spawn.test.ts`.
 The runner is `scripts/test.ts`, which also raises bun's 5s hook timeout — the suites
@@ -122,7 +122,11 @@ secret is neither. Unset or empty, nobody is nominated (fail closed — DESIGN.m
 id is the `deviceId` line `seanced doctor` prints under `state`. `bun run wrangler
 secret put SCHEDULER_LEADERS` from `relay/` replaces the whole list and rolls a new
 version, so every socket drops and re-registers. Set it before deploying a relay that
-first reads it (October 2026): until it is set, no daemon leads, so `auto` only queues. Nothing gates Durable Object migrations: a change to
+first reads it (October 2026): until it is set, no daemon leads, so `auto` only queues.
+`ARCHIVIST` is a third, optional secret of the same kind: the one device id that may
+register as the archivist (DESIGN.md, "Archivist"). One id, never a list; unset, blank or
+anything else honours nobody, and a register claiming the role from another id is
+closed `register role-refused` (DESIGN.md, "Leadership"). Nothing gates Durable Object migrations: a change to
 `migrations` in `relay/wrangler.jsonc` is applied by the next deploy, so review one as
 a production change. One that resets a class's storage (a dropped or renamed class,
 `deleted_classes`, or deploying to a fresh worker or account) restarts every `account:`
@@ -166,7 +170,8 @@ key's version at 1, which reopens alias rollback unless the PSK changes too: rot
   by design. The app's relay client is exercised against the shipped relay rather than
   a double. `SCHEDULER_LEADERS` is fixed at boot as a deploy fixes it, so a suite that
   needs a leader mints its ids (`newDeviceId`) before `startRelay({ leaders })`; left
-  out, the binding is unset and nobody leads. `startRelay({ tombstoneMs })` sets
+  out, the binding is unset and nobody leads. `startRelay({ archivist })` sets `ARCHIVIST`
+  the same way; left out, nobody holds the seat. `startRelay({ tombstoneMs })` sets
   `STORE_TOMBSTONE_MS` for a suite that must watch a tombstone expire, and
   `startRelay({ schedulerReplyWindowMs })` sets `SCHEDULER_REPLY_WINDOW_MS` for one that must watch a
   scheduler reply credit lapse. Once the relay binds it, the `ATTACHMENTS` R2 bucket comes from `r2_buckets` in
@@ -221,6 +226,13 @@ key's version at 1, which reopens alias rollback unless the PSK changes too: rot
   and the layering test. No tmux, git or workerd. The fixtures' statuses are stamped
   against a fixed clock, so a test that moves it past 90s calls `fleet.beat()` or every
   machine reads stale.
+- **archivist** — one process, since its relay suite boots workerd and nothing else in it does.
+  `run.test.ts` drives `startArchivist` against the daemon's relay double (a 4403 on demand
+  through `refuseWith`), `relay.test.ts` against the real relay with `startRelay({ archivist })`,
+  the seat's id minted first through the daemon's `loadOrInitState` as e2e mints its daemons'.
+  Each test hands in its own config, state dir and credential file (`credentialPath`), never
+  `$CREDENTIALS_DIRECTORY`. `layering.test.ts` walks the import closure of `archivist/src`, so a
+  new daemon import that reaches a forbidden module fails there.
 - **raycast** — the fastest shard: pure form/cache logic, plus drift guards that
   import the daemon's and the PWA's implementations alongside the extension's and
   assert they agree. No React harness — the relay client underneath is already

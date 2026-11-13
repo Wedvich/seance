@@ -37,16 +37,30 @@ export const ROUTING_ID_PATTERN = new RegExp(`^[${ROUTING_ID_CHARS}]{1,${ROUTING
 
 /**
  * Plaintext `register.roles` values — the one capability the relay itself
- * reads. `scheduler`: the daemon may be nominated leader. Only a v2 register
- * (signature over the roles) carries them; the relay acts on no other value,
- * and accepts an unknown one only so the signature covering it still verifies.
+ * reads. `scheduler`: the daemon may be nominated leader. `archivist`: the
+ * fleet's one history seat (DESIGN.md, "Archivist"), honoured only from the id on
+ * the relay's `ARCHIVIST` secret and never beside `scheduler`. Only a v2
+ * register (signature over the roles) carries them; the relay acts on no other
+ * value, and accepts an unknown one only so the signature covering it still verifies.
  */
-export const DAEMON_ROLES = { scheduler: "scheduler" } as const;
+export const DAEMON_ROLES = { scheduler: "scheduler", archivist: "archivist" } as const;
 
 export type DaemonRole = (typeof DAEMON_ROLES)[keyof typeof DAEMON_ROLES];
 
-/** `register.roles` entries at most — a bound for the relay, far above the one role there is. */
+/** `register.roles` entries at most — a bound for the relay, far above the roles there are. */
 export const MAX_REGISTER_ROLES = 8;
+
+/**
+ * The `/daemon` close reasons a register is refused with: fixed words a daemon
+ * matches on, never prose. `unverified`: the signature, key or freshness
+ * failed (closed 1000). `roleRefused`: verified, but it claimed `archivist`
+ * from an id other than the relay's `ARCHIVIST`, or beside `scheduler`
+ * (closed `CLOSE_ROLE_REFUSED`). Neither writes the registry.
+ */
+export const REGISTER_REFUSALS = {
+  unverified: "register unverified",
+  roleRefused: "register role-refused",
+} as const;
 
 /** WS upgrade paths. Role is fixed by path, so the app sends no register frame. */
 export const DAEMON_PATH = "/daemon";
@@ -55,14 +69,18 @@ export const APP_PATH = "/app";
 export const TOKEN_PARAM = "t";
 
 /**
- * App-side close codes (4000–4999 is the app-defined range). A browser cannot
- * read the HTTP status of a failed WS handshake, so `/app` accepts the upgrade
- * and then closes with one of these; both are permanent, so the app must stop
- * reconnecting rather than back off. Daemons read the real 401 from `fetch`,
- * so `/daemon` keeps refusing pre-upgrade.
+ * Close codes (4000–4999 is the app-defined range, used on both legs). A
+ * browser cannot read the HTTP status of a failed WS handshake, so `/app`
+ * accepts the upgrade and then closes with `CLOSE_BAD_REQUEST` or
+ * `CLOSE_UNAUTHORIZED`; both are permanent, so the app must stop reconnecting
+ * rather than back off. Daemons read the real 401 from `fetch`, so `/daemon`
+ * keeps refusing pre-upgrade; only after the upgrade, on a verified register,
+ * does it close with `CLOSE_ROLE_REFUSED`.
  */
 export const CLOSE_BAD_REQUEST = 4400;
 export const CLOSE_UNAUTHORIZED = 4401;
+/** `/daemon`: a verified register claimed a role the relay will not honour from it (`REGISTER_REFUSALS.roleRefused`). */
+export const CLOSE_ROLE_REFUSED = 4403;
 
 export const DEFAULT_MODEL = "opus";
 export const DEFAULT_EFFORT = "medium";
@@ -270,6 +288,13 @@ export interface RegistryEntry {
  */
 export type RegistryView = RegistryEntry & {
   readonly connected: boolean;
+  /**
+   * The fleet's archivist seat (DESIGN.md, "Archivist"): derived per push like
+   * `connected`, set only when this id's last accepted register signed the
+   * role and it is the id on the relay's `ARCHIVIST` now. Never a machine:
+   * `RelayClient` skips it when it builds `machines`.
+   */
+  readonly archivist?: true;
   /**
    * The live socket's latest `status` while `connected`, else the one the
    * entry kept. A kept one describes the machine's accounts, not its pressure.
@@ -680,6 +705,9 @@ export type OpName =
   | "metrics"
   | "push-branch"
   | "pass-close"
+  | "archive-status"
+  | "archive-metrics"
+  | "archive-tasks"
   | AtRestOp
   | EventOp
   | SchedulerOp;
@@ -734,6 +762,11 @@ export const OP_TIMEOUT_MS = {
   spawn: 210_000,
   despawn: 20_000,
   metrics: 15_000,
+  // Answered from a cached count and two stat calls, never a scan.
+  "archive-status": 10_000,
+  // As `metrics`: a bounded read of one SQLite file, a year at most at a coarse step.
+  "archive-metrics": 15_000,
+  "archive-tasks": 10_000,
   queue: 10_000,
   "route-preview": 10_000,
   cancel: 25_000,
@@ -964,6 +997,22 @@ export interface UpdateReport {
 export interface UpdateAvailable {
   readonly sha: string;
   readonly commitTs: number;
+}
+
+/**
+ * The archivist's registry blob. Sealed under op `machine-info` like a
+ * daemon's, but deliberately not a `MachineInfo`: no `repos`, no `scannedAt`,
+ * no exclaves, so `parseMachineInfo` refuses it. A client built before the
+ * relay flagged the seat opens the blob, fails that parse and counts the entry
+ * `skewed` — "update" — rather than a machine to spawn on. A client with the
+ * flag reads it as `ArchivistInfo` (the Machines screen's card). `name`,
+ * `platform` and `source` are display only.
+ */
+export interface ArchivistInfo {
+  readonly archivist: true;
+  readonly name: string;
+  readonly platform: string;
+  readonly source?: SourceInfo;
 }
 
 /**
@@ -1344,6 +1393,168 @@ export interface MetricsError {
 }
 
 export type MetricsReply = MetricsResponse | MetricsError;
+
+/** Nothing to ask: the archivist answers with what it holds. Unknown keys are ignored. */
+export type ArchiveStatusRequest = Record<string, never>;
+
+export const ARCHIVE_INGEST_SOURCES = ["store", "registry", "status", "pull"] as const;
+
+export type ArchiveIngestSource = (typeof ARCHIVE_INGEST_SOURCES)[number];
+
+export interface ArchiveTableStatus {
+  readonly rows: number;
+  /** Ms epoch of the oldest row; null when the table is empty. */
+  readonly oldest: number | null;
+}
+
+/** Counts, sizes and timestamps only: no id, name, prompt or account crosses in it. */
+export interface ArchiveStatusResponse {
+  readonly ok: true;
+  /** Ms; the seat socket's latest accepted register in this process. */
+  readonly onlineSince: number | null;
+  /** Ms, per source, this process only: null until the first success after start. */
+  readonly lastIngest: Readonly<Record<ArchiveIngestSource, number | null>>;
+  /** The tables are null until the first background count pass finishes (the reply never scans). */
+  readonly tasks: ArchiveTableStatus | null;
+  /** Raw, 5-min and hourly tiers summed. */
+  readonly samples: ArchiveTableStatus | null;
+  readonly events: ArchiveTableStatus | null;
+  /** Bytes, each file plus its `-wal`. */
+  readonly database: { readonly archiveBytes: number; readonly metricsBytes: number };
+  /** Ms the counts were taken; null with them. */
+  readonly countedAt: number | null;
+}
+
+export const ARCHIVE_STATUS_ERROR_CODES = ["invalid_request", ...TRANSPORT_ERROR_CODES] as const;
+
+export type ArchiveStatusErrorCode = (typeof ARCHIVE_STATUS_ERROR_CODES)[number];
+
+export interface ArchiveStatusError {
+  readonly ok: false;
+  readonly code: ArchiveStatusErrorCode;
+  readonly message: string;
+}
+
+export type ArchiveStatusReply = ArchiveStatusResponse | ArchiveStatusError;
+
+/**
+ * Steps `archive-metrics` takes, seconds: the daemon's three tiers, then 6 h and
+ * 1 d, which the archive averages from its hourly tier at query time so 90 days
+ * and a year fit `METRICS_MAX_POINTS`.
+ */
+export const ARCHIVE_METRICS_STEPS = [...METRICS_STEPS, 21_600, 86_400] as const;
+
+export type ArchiveMetricsStep = (typeof ARCHIVE_METRICS_STEPS)[number];
+
+/**
+ * `op: "archive-metrics"` — history from the archivist's `metrics.sqlite`
+ * (DESIGN.md, Archivist, A31–A33): `MetricsRequest`'s range, step and filters
+ * over exactly one target. `machine` is a device id, its own observed series
+ * (retired machines included). `account` is the `account:<hex>` store key,
+ * never a raw id: every series labelled with it from any observer, merged per
+ * bucket at query time. Same point cap per series as `metrics`. The reply is
+ * a `MetricsReply`: past one envelope (a year at 1 d with many series) it is
+ * `too_large`, and the ask is fewer `names` or a shorter range.
+ */
+export type ArchiveMetricsRequest = Omit<MetricsRequest, "step"> & { readonly step: ArchiveMetricsStep } & (
+    | { readonly machine: string; readonly account?: never }
+    | { readonly account: string; readonly machine?: never }
+  );
+
+/** The finished states the archive keeps (A16), each an `outcome` filter. */
+export const ARCHIVE_TASK_OUTCOMES = ["done", "failed", "cancelled"] as const satisfies readonly TaskState[];
+
+export type ArchiveTaskOutcome = (typeof ARCHIVE_TASK_OUTCOMES)[number];
+
+/** Rows an `archive-tasks` page holds when the request names no `limit`, and the most it may name. */
+export const ARCHIVE_TASKS_PAGE = 20;
+export const ARCHIVE_TASKS_MAX_PAGE = 50;
+
+/** Where the next page starts: the last row of the one before, in the page's order. */
+export interface ArchiveTasksCursor {
+  readonly endedAt: number;
+  readonly createdAt: number;
+  readonly id: string;
+}
+
+/**
+ * `op: "archive-tasks"` — one page of archived tasks, newest first by
+ * `ArchivedTask.endedAt`, then `createdAt`, then id. Every filter is optional
+ * and they combine. `since`/`until` bound `endedAt` (ms; `until` exclusive).
+ * `title` is a substring of the task's title, case-insensitive for ASCII
+ * letters only (SQLite's `LIKE`): "øl" does not find "Øl-oppsett". A task with no
+ * title never matches, since its shown title comes from the prompt the archive
+ * never holds.
+ */
+export interface ArchiveTasksRequest {
+  readonly limit?: number;
+  readonly before?: ArchiveTasksCursor;
+  readonly repo?: string;
+  readonly outcome?: ArchiveTaskOutcome;
+  /** The assigned machine's device id. */
+  readonly machine?: string;
+  /** The `account:<hex>` store key. */
+  readonly account?: string;
+  readonly since?: number;
+  readonly until?: number;
+  readonly title?: string;
+}
+
+/**
+ * One archived task. `task` is the archive's copy (`archivedTask`): no prompt,
+ * no attachment manifest, no raw account id. `endedAt` is when the archive
+ * first held it finished, the nearest the record allows (it carries no finish
+ * time). `machine` is the assigned machine's last known name, `account` the
+ * store key it ran under and `alias` that account's, display only.
+ */
+export interface ArchivedTask {
+  readonly task: Task;
+  readonly endedAt: number;
+  readonly machine: string | null;
+  readonly account: string | null;
+  readonly alias: string | null;
+}
+
+/**
+ * A machine the archive holds assigned tasks for, display only (A24): `name`
+ * its last known one (null when the archive never resolved one), `lastSeen`
+ * the newest `ArchivedTask.endedAt` among its tasks.
+ */
+export interface ArchivedMachine {
+  readonly deviceId: string;
+  readonly name: string | null;
+  readonly lastSeen: number;
+}
+
+/** The most machines one `archive-tasks` reply lists. */
+export const ARCHIVE_MACHINES_MAX = 100;
+
+export interface ArchiveTasksResponse {
+  readonly ok: true;
+  /** Filled to `REPLY_JSON_BUDGET`: fewer than `limit` when the rows are large, never none while any match. */
+  readonly tasks: readonly ArchivedTask[];
+  /** Every task matching the filters, the cursor aside. */
+  readonly total: number;
+  /** Null when this page reached the last match. */
+  readonly next: ArchiveTasksCursor | null;
+  /**
+   * Every machine the archive holds tasks for, the filters aside, newest first;
+   * only on a page asked without `before`, and absent from an older archivist.
+   */
+  readonly machines?: readonly ArchivedMachine[];
+}
+
+export const ARCHIVE_TASKS_ERROR_CODES = ["invalid_request", ...TRANSPORT_ERROR_CODES] as const;
+
+export type ArchiveTasksErrorCode = (typeof ARCHIVE_TASKS_ERROR_CODES)[number];
+
+export interface ArchiveTasksError {
+  readonly ok: false;
+  readonly code: ArchiveTasksErrorCode;
+  readonly message: string;
+}
+
+export type ArchiveTasksReply = ArchiveTasksResponse | ArchiveTasksError;
 
 /**
  * The series the daemon's store keeps, one per `MachineStatus` field plus the
@@ -2985,6 +3196,11 @@ export interface SettingsRecord extends VersionBound {
   readonly diskAlerts?: readonly DiskAlerted[];
   /** Exclaves whose login alert was sent and has not cleared yet (`daemon/src/auth-alerts.ts`). */
   readonly authAlerts?: readonly AuthAlerted[];
+  /**
+   * The archivist's silence watch (`daemon/src/archivist-silence.ts`). Present once a registry held an
+   * archivist entry, so a fleet that never had one is never alerted, whichever leader reads it.
+   */
+  readonly archivistSilence?: ArchivistSilence;
 }
 
 /**
@@ -3014,6 +3230,15 @@ export interface DiskAlerted {
   readonly deviceId: string;
   readonly at: number;
 }
+
+/**
+ * Whether the archivist's seat is connected, as the leader last wrote it. `since` is when the absence began
+ * (its entry's relay `lastSeen`, else the leader's clock), so a new leader measures 24 h from the same
+ * instant; `alerted` is an absence already pushed, held until the archivist connects again.
+ */
+export type ArchivistSilence =
+  | { readonly state: "present" }
+  | { readonly state: "absent" | "alerted"; readonly since: number };
 
 /**
  * `Task.failure` codes the scheduler sets itself, beside a daemon's refusal.
@@ -3427,6 +3652,13 @@ export type PushAlert =
       readonly deviceId: string;
       readonly exclave: string;
       readonly state: "expired" | "expiring";
+    }
+  | {
+      readonly v: 1;
+      readonly kind: "archivist";
+      readonly at: number;
+      /** When the archivist's absence began (ms). No id: a fleet has one seat. */
+      readonly since: number;
     };
 
 /** A push payload's plaintext at most, in bytes: well under the 4096-byte record a push service must accept. */

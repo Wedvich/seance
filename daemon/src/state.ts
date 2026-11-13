@@ -82,7 +82,9 @@ function isState(raw: unknown): raw is State {
  * sizes from the descriptor it opened, so one open sees one whole file. Seen
  * once on a GitHub macOS runner, never reproduced locally.
  */
-async function parseState(path: string): Promise<{ readonly state: State } | { readonly problem: string } | null> {
+export async function parseState(
+  path: string,
+): Promise<{ readonly state: State } | { readonly problem: string } | null> {
   let text: string;
   try {
     text = await readFile(path, "utf8");

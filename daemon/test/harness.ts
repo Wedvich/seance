@@ -135,6 +135,11 @@ export interface TestRelay {
   /** Refuse this many registers as `refuseRegisters` does, then admit — no race with a redial. */
   refuseNextRegisters: number;
   /**
+   * The close a refused register gets: `register unverified` (1000) by default, or the real DO's
+   * role refusal (`CLOSE_ROLE_REFUSED`, `register role-refused`) for a client claiming a seat.
+   */
+  refuseWith: { readonly code: number; readonly reason: string };
+  /**
    * The real DO's per-socket status floor (`STATUS_MIN_INTERVAL_MS`, which a register clears), opt-in and
    * 0 (none) by default: a status arriving within it of the last accepted one is dropped, not queued.
    */
@@ -239,6 +244,7 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
     autoPong: boolean;
     refuseRegisters: boolean;
     refuseNextRegisters: number;
+    refuseWith: { readonly code: number; readonly reason: string };
     statusFloorMs: number;
     rejectApps: boolean;
     schedulerTerm: number | null;
@@ -247,6 +253,7 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
     autoPong: true,
     refuseRegisters: false,
     refuseNextRegisters: 0,
+    refuseWith: { code: 1000, reason: "register unverified" },
     statusFloorMs: 0,
     rejectApps: false,
     schedulerTerm: null,
@@ -355,7 +362,7 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
       if (relay.refuseRegisters || relay.refuseNextRegisters > 0) {
         if (relay.refuseNextRegisters > 0) relay.refuseNextRegisters -= 1;
         registers.push(frame);
-        ws.close(1000, "register unverified");
+        ws.close(relay.refuseWith.code, relay.refuseWith.reason);
         return;
       }
       daemons.set(frame.deviceId, ws);
@@ -484,6 +491,12 @@ export function startTestRelay(bearerToken: string, port = 0): TestRelay {
     },
     set refuseNextRegisters(value: number) {
       relay.refuseNextRegisters = value;
+    },
+    get refuseWith() {
+      return relay.refuseWith;
+    },
+    set refuseWith(value: { readonly code: number; readonly reason: string }) {
+      relay.refuseWith = value;
     },
     get rejectApps() {
       return relay.rejectApps;

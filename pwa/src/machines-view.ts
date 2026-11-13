@@ -13,6 +13,9 @@ import {
   newestQuotaByAccount,
   sameCreditMonth,
   schedulerRole,
+  type ArchiveStatusResponse,
+  type ArchiveTableStatus,
+  type ArchivistEntry,
   type ExclaveInfo,
   type FleetQuotaEntry,
   type Machine,
@@ -20,9 +23,11 @@ import {
   type QuotaReading,
   type SchedulerAvailability,
   type SchedulerRole,
+  type SourceInfo,
   type UpdateOutcome,
 } from "@seance/shared";
 import { METRIC_LABELS } from "./chart.ts";
+import { historyRanges, type ArchiveReach, type HistoryRange, type HistoryTarget } from "./state.ts";
 import { formatSeen } from "./view.ts";
 
 /**
@@ -71,7 +76,7 @@ export interface MachineCard {
   readonly gauges: readonly Gauge[];
   readonly note: string | null;
   readonly exclaves: readonly ExclaveRow[];
-  /** Whether a chart can be asked for: connected, and the daemon serves `metrics`. */
+  /** Whether a chart can be asked for: connected and the daemon serves `metrics`, or asleep while the archive charts machines. */
   readonly charts: boolean;
 }
 
@@ -101,8 +106,10 @@ export interface AccountCard {
   readonly detail: string;
   readonly bars: readonly QuotaBar[];
   readonly observed: string;
-  /** The machine to read this account's quota history from; null when none online can serve it. */
+  /** The machine to read this account's quota history from without the archive; null when none online can serve it. */
   readonly historyFrom: string | null;
+  /** Whether a chart can be asked for: from `historyFrom`, or merged from the archive while it charts accounts. */
+  readonly charts: boolean;
 }
 
 export interface MachinesView {
@@ -110,7 +117,12 @@ export interface MachinesView {
   readonly scheduler: string;
   readonly cards: readonly MachineCard[];
   readonly accounts: readonly AccountCard[];
+  /** The range picker's options per chart kind (`historyRanges`). */
+  readonly ranges: Readonly<Record<HistoryTarget["kind"], readonly HistoryRange[]>>;
 }
+
+/** Nothing by default, as with no archivist. */
+const NO_ARCHIVE: ArchiveReach = { machine: false, account: false };
 
 /** Shared by pressure, disk fill and quota: all are "how close to the wall". */
 export function levelFor(pct: number): Level {
@@ -214,8 +226,7 @@ function updateNote(machine: Machine, now: number): string | null {
   return trouble === null ? null : `Last update attempt ${formatSeen(report.at, now)}: ${trouble}.`;
 }
 
-function buildLine(machine: Machine, now: number): string | null {
-  const { source } = machine;
+function buildLine(source: SourceInfo | undefined, now: number): string | null {
   if (source === undefined) return null;
   const where = source.branch ?? "detached";
   return `${source.sha.slice(0, 12)} · committed ${formatSeen(source.commitTs, now)} · ${where}`;
@@ -241,6 +252,7 @@ function machineCard(
   scheduler: SchedulerAvailability,
   aliases: AccountAliases,
   known: readonly KnownAccount[],
+  archived: boolean,
 ): MachineCard {
   // Not drawn for an asleep card: its status is the one the relay kept, and its
   // last beat would read as current pressure beside "last seen". Its quota
@@ -261,7 +273,7 @@ function machineCard(
     connected: machine.connected,
     meta,
     role: schedulerRole(machine.deviceId, scheduler),
-    build: buildLine(machine, now),
+    build: buildLine(machine.source, now),
     updateNote: updateNote(machine, now),
     gauges,
     note: machineNote(machine),
@@ -272,7 +284,8 @@ function machineCard(
       auth: authNote(machine, index, now),
       probes: probeNote(machine, exclave, index, now),
     })),
-    charts: servesMetrics(machine),
+    // An asleep machine's history is the archive's alone (A36f); a connected one's daemon keeps the short ranges.
+    charts: servesMetrics(machine) || (archived && !machine.connected),
   };
 }
 
@@ -363,6 +376,7 @@ function deriveAccounts(
   aliases: AccountAliases,
   fleetQuota: readonly FleetQuotaEntry[],
   known: readonly KnownAccount[],
+  archived: boolean,
 ): AccountCard[] {
   const groups = new Map<string, AccountGroup>();
   for (const machine of machines) {
@@ -409,6 +423,7 @@ function deriveAccounts(
     const exclaves = [...group.exclaves].join(" · ");
     const plainName = accountNameIn(known, group.accountId);
     const where = `${plainName} · on ${[...group.machines].join(", ")}`;
+    const historyFrom = historyHost(group, observer);
     return {
       accountId: group.accountId,
       alias: alias ?? null,
@@ -418,7 +433,8 @@ function deriveAccounts(
       detail: alias === undefined ? where : `${exclaves} · ${where}`,
       bars: quota === undefined ? [] : quotaBars(quota.observation, now),
       observed: observedLine(quota, observer, now),
-      historyFrom: historyHost(group, observer),
+      historyFrom,
+      charts: archived || historyFrom !== null,
     };
   });
 }
@@ -429,11 +445,110 @@ export function deriveMachines(
   scheduler: SchedulerAvailability,
   aliases: AccountAliases = {},
   fleetQuota: readonly FleetQuotaEntry[] = [],
+  archive: ArchiveReach = NO_ARCHIVE,
 ): MachinesView {
   const known = knownAccounts(machines);
   return {
     scheduler: schedulerLine(machines, scheduler),
-    cards: machines.map((machine) => machineCard(machine, now, scheduler, aliases, known)),
-    accounts: deriveAccounts(machines, now, aliases, fleetQuota, known),
+    cards: machines.map((machine) => machineCard(machine, now, scheduler, aliases, known, archive.machine)),
+    accounts: deriveAccounts(machines, now, aliases, fleetQuota, known, archive.account),
+    ranges: { machine: historyRanges(archive.machine), account: historyRanges(archive.account) },
+  };
+}
+
+export interface ArchivistRow {
+  readonly label: string;
+  readonly detail: string;
+  readonly value: string;
+  readonly unit: string;
+}
+
+export interface ArchivistCard {
+  readonly name: string;
+  readonly online: boolean;
+  readonly meta: string;
+  /** The build its service runs; null from an archivist that was not updated since it learned to say. */
+  readonly build: string | null;
+  /** Empty offline, and online until a reply for this very device is held. */
+  readonly rows: readonly ArchivistRow[];
+  readonly note: string;
+}
+
+const ARCHIVIST_NOTE = "Keeps task, chart and fleet history. Never runs sessions.";
+const ARCHIVIST_OFFLINE_NOTE =
+  "While it is offline, 90-day and 1-year charts, merged account charts, asleep machines' history and older tasks are hidden until it is back.";
+
+const dateFormat = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric" });
+
+/** Whole thousands separated below a million, then one decimal of millions or billions. */
+function countText(rows: number): string {
+  if (rows < 1_000_000) return rows.toLocaleString("en-US");
+  if (rows < 1_000_000_000) return `${(rows / 1_000_000).toFixed(1)}M`;
+  return `${(rows / 1_000_000_000).toFixed(1)}B`;
+}
+
+const BYTE_UNITS = ["B", "KB", "MB", "GB", "TB"] as const;
+
+/** SI, one decimal; value and unit apart, as the row's two cells. */
+function bytesText(bytes: number): { readonly value: string; readonly unit: string } {
+  let index = 0;
+  let size = bytes;
+  while (size >= 1000 && index < BYTE_UNITS.length - 1) {
+    size /= 1000;
+    index += 1;
+  }
+  return { value: index === 0 ? String(Math.round(size)) : size.toFixed(1), unit: BYTE_UNITS[index] ?? "B" };
+}
+
+function tableRow(label: string, table: ArchiveTableStatus | null): ArchivistRow {
+  // Null before the archivist's first count pass: a row the card has no number for yet, not an empty table.
+  if (table === null) return { label, detail: "", value: "—", unit: "rows" };
+  const detail = table.oldest === null ? "none yet" : `since ${dateFormat.format(table.oldest)}`;
+  return { label, detail, value: countText(table.rows), unit: "rows" };
+}
+
+/**
+ * The archivist's card (DESIGN.md, Archivist, A36): built from the flagged registry
+ * entry and, online, the last `archive-status` reply held for that same
+ * device. Offline it states what is hidden until the archivist is back and
+ * shows no counts, which would only be the last ones it gave.
+ */
+export function deriveArchivist(
+  entry: ArchivistEntry | null,
+  held: { readonly deviceId: string; readonly reply: ArchiveStatusResponse } | null,
+  now: number,
+): ArchivistCard | null {
+  if (entry === null) return null;
+  const build = buildLine(entry.source, now);
+  if (!entry.connected) {
+    return {
+      name: entry.name,
+      online: false,
+      meta: `offline · last seen ${formatSeen(entry.lastSeen, now)}`,
+      build,
+      rows: [],
+      note: ARCHIVIST_OFFLINE_NOTE,
+    };
+  }
+  const reply = held?.deviceId === entry.deviceId ? held.reply : null;
+  const ingests = reply === null ? [] : Object.values(reply.lastIngest).filter((at) => at !== null);
+  const meta =
+    ingests.length === 0 ? entry.platform : `${entry.platform} · last ingest ${formatSeen(Math.max(...ingests), now)}`;
+  const database = reply === null ? null : bytesText(reply.database.archiveBytes + reply.database.metricsBytes);
+  return {
+    name: entry.name,
+    online: true,
+    meta,
+    build,
+    rows:
+      reply === null || database === null
+        ? []
+        : [
+            tableRow("Tasks", reply.tasks),
+            tableRow("Samples", reply.samples),
+            tableRow("Events", reply.events),
+            { label: "Database", detail: "archive + metrics", ...database },
+          ],
+    note: ARCHIVIST_NOTE,
   };
 }

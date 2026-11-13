@@ -1,14 +1,8 @@
 import type { JSX } from "preact";
 import { useEffect, useId, useMemo, useRef, useState } from "preact/hooks";
 import { type ChartLine, chartLines } from "../chart.ts";
-import type { AccountCard, Gauge, GaugeIcon, MachineCard, MachinesView } from "../machines-view.ts";
-import {
-  HISTORY_RANGES,
-  type AccountsState,
-  type HistoryRange,
-  type HistoryTarget,
-  type HistoryView,
-} from "../state.ts";
+import type { AccountCard, ArchivistCard, Gauge, GaugeIcon, MachineCard, MachinesView } from "../machines-view.ts";
+import { type AccountsState, type HistoryRange, type HistoryTarget, type HistoryView } from "../state.ts";
 import { ACCOUNT_ALIAS_MAX_LENGTH } from "@seance/shared";
 import type { ConnectionState } from "../view.ts";
 import { StrokeIcon } from "./icons.tsx";
@@ -32,6 +26,8 @@ const PALETTE_SIZE = 5;
  */
 export function MachinesScreen(props: {
   view: MachinesView;
+  /** The archivist's own card, after the machines; null with no archivist in the registry. */
+  archivist: ArchivistCard | null;
   relayLine: string;
   relayState: ConnectionState;
   /** The registry is authoritative (`RelayState.registrySettled`). */
@@ -50,6 +46,7 @@ export function MachinesScreen(props: {
 }): JSX.Element {
   const {
     view,
+    archivist,
     relayLine,
     relayState,
     settled,
@@ -99,10 +96,12 @@ export function MachinesScreen(props: {
             key={card.deviceId}
             card={card}
             history={history?.target.kind === "machine" && history.target.deviceId === card.deviceId ? history : null}
+            ranges={view.ranges.machine}
             onShowHistory={onShowHistory}
             onHideHistory={onHideHistory}
           />
         ))}
+        {archivist !== null && <ArchivistCardView card={archivist} />}
 
         {view.accounts.length > 0 && <h2 className="label fleet-heading">Accounts</h2>}
         {view.accounts.map((account) => (
@@ -114,6 +113,7 @@ export function MachinesScreen(props: {
             history={
               history?.target.kind === "account" && history.target.accountId === account.accountId ? history : null
             }
+            ranges={view.ranges.account}
             onShowHistory={onShowHistory}
             onHideHistory={onHideHistory}
           />
@@ -137,10 +137,11 @@ export function MachinesScreen(props: {
 function MachineCardView(props: {
   card: MachineCard;
   history: HistoryView | null;
+  ranges: readonly HistoryRange[];
   onShowHistory: (target: HistoryTarget, range?: HistoryRange) => void;
   onHideHistory: () => void;
 }): JSX.Element {
-  const { card, history, onShowHistory, onHideHistory } = props;
+  const { card, history, ranges, onShowHistory, onHideHistory } = props;
   const target: HistoryTarget = { kind: "machine", deviceId: card.deviceId };
   const menu = useMenu();
   // Kept while a chart is open even if its source drops: the item is the chart's only close.
@@ -205,7 +206,43 @@ function MachineCardView(props: {
         </ul>
       )}
 
-      {history !== null && <HistoryChart history={history} onPick={(range) => onShowHistory(target, range)} />}
+      {history !== null && (
+        <HistoryChart history={history} ranges={ranges} onPick={(range) => onShowHistory(target, range)} />
+      )}
+    </section>
+  );
+}
+
+/** No actions: it is a status, not a target, so no menu and no spawn. */
+function ArchivistCardView(props: { card: ArchivistCard }): JSX.Element {
+  const { card } = props;
+  return (
+    <section className="fleet-card card" aria-label="Archivist">
+      <div className="fleet-card-head">
+        <div className="fleet-card-title">
+          <div className="fleet-name-row">
+            <span className={card.online ? "dot dot-ok" : "dot"} aria-hidden="true" />
+            <h2 className="fleet-name">{card.name}</h2>
+          </div>
+          <p className="fleet-meta">{card.meta}</p>
+          {card.build !== null && <p className="fleet-meta fleet-build">{card.build}</p>}
+        </div>
+      </div>
+      {card.rows.length > 0 && (
+        <ul className="exclaves">
+          {card.rows.map((row) => (
+            <li key={row.label} className="exclave">
+              <span className="exclave-id">{row.label}</span>
+              <span className="exclave-account">{row.detail}</span>
+              <span className="exclave-sessions exclave-sessions-wide">
+                <b>{row.value}</b>
+                <span>{row.unit}</span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="fleet-note">{card.note}</p>
     </section>
   );
 }
@@ -214,19 +251,21 @@ function AccountCardView(props: {
   account: AccountCard;
   nameable: boolean;
   history: HistoryView | null;
+  ranges: readonly HistoryRange[];
   onRename: () => void;
   onShowHistory: (target: HistoryTarget, range?: HistoryRange) => void;
   onHideHistory: () => void;
 }): JSX.Element {
-  const { account, nameable, history, onRename, onShowHistory, onHideHistory } = props;
+  const { account, nameable, history, ranges, onRename, onShowHistory, onHideHistory } = props;
   const menu = useMenu();
   const { historyFrom } = account;
-  // Pinned to the host it was opened against: a range change re-asks that one,
-  // and a host gone since leaves the chart to say so rather than switch sources.
+  // Pinned to the host it was opened against: without the archive a range change
+  // re-asks that one, and a host gone since leaves the chart to say so rather than switch hosts.
   const host = history?.target.kind === "account" ? history.target.deviceId : historyFrom;
+  // Kept while a chart is open even if its source drops: the item is the chart's only close.
   const target: HistoryTarget | null =
-    host === null ? null : { kind: "account", accountId: account.accountId, deviceId: host };
-  const offersHistory = target !== null || history !== null;
+    account.charts || history !== null ? { kind: "account", accountId: account.accountId, deviceId: host } : null;
+  const offersHistory = target !== null;
 
   return (
     <section className="fleet-card card">
@@ -265,7 +304,7 @@ function AccountCardView(props: {
       )}
       <p className="fleet-note">{account.observed}</p>
       {history !== null && target !== null && (
-        <HistoryChart history={history} onPick={(range) => onShowHistory(target, range)} />
+        <HistoryChart history={history} ranges={ranges} onPick={(range) => onShowHistory(target, range)} />
       )}
     </section>
   );
@@ -442,8 +481,13 @@ const GAUGE_ICONS: Record<GaugeIcon, JSX.Element> = {
   ),
 };
 
-function HistoryChart(props: { history: HistoryView; onPick: (range: HistoryRange) => void }): JSX.Element {
-  const { history, onPick } = props;
+function HistoryChart(props: {
+  history: HistoryView;
+  /** Offered ranges: the archive's only while it serves this chart; the store falls back to 24h when it stops. */
+  ranges: readonly HistoryRange[];
+  onPick: (range: HistoryRange) => void;
+}): JSX.Element {
+  const { history, ranges, onPick } = props;
   const { result, from, to, step } = history;
   const series = result.kind === "ok" ? result.series : null;
   // The screen re-renders on every status beat; the geometry changes only with the reply or its window.
@@ -461,7 +505,7 @@ function HistoryChart(props: { history: HistoryView; onPick: (range: HistoryRang
   return (
     <div className="chart">
       <div className="chart-controls">
-        <Seg label="Range" options={HISTORY_RANGES} value={history.range} render={(range) => range} onChange={onPick} />
+        <Seg label="Range" options={ranges} value={history.range} render={(range) => range} onChange={onPick} />
       </div>
       <div className="chart-frame">
         {result.kind === "loading" && <p className="chart-status">Loading…</p>}

@@ -2486,6 +2486,11 @@
   color: var(--fg2);
 }
 
+/* The archivist's counts: "18.4M" and "250,000" are wider than a session count's two digits. */
+.exclave-sessions-wide {
+  grid-template-columns: 7ch 4ch;
+}
+
 .exclave-sessions b {
   font-weight: inherit;
   text-align: right;
@@ -3246,12 +3251,20 @@
 /* ---- menu popover (menu.tsx): header menu, and any short command menu ---- */
 
 /* Top-layer popover; `top` or `bottom`, and `right`, are set from the anchor on
-   open. base.css's reduced-motion rule clamps the transitions to an instant. */
+   open. base.css's reduced-motion rule clamps the transitions to an instant.
+   A transition runs under the rule of the state it lands in: this one is the
+   close, shorter than the open and easing in so it leaves rather than lingers.
+   Firefox does not transition `display`, so a close there is a cut. */
 .menu {
   --menu-slide: -4px;
   position: fixed;
   inset: auto;
   margin: 0;
+  /* Layout lives here, not under :popover-open: the close transition keeps
+     `display: flex` for its length, and anything set only while open snaps
+     back on the first closing frame. */
+  flex-direction: column;
+  gap: 2px;
   min-width: 236px;
   padding: 6px;
   border: 1px solid var(--line);
@@ -3263,10 +3276,10 @@
   transform: translateY(var(--menu-slide)) scale(0.98);
   transform-origin: top right;
   transition:
-    opacity 0.14s ease,
-    transform 0.14s ease,
-    overlay 0.14s allow-discrete,
-    display 0.14s allow-discrete;
+    opacity 0.09s ease-in,
+    transform 0.09s ease-in,
+    overlay 0.09s allow-discrete,
+    display 0.09s allow-discrete;
 }
 
 .menu[data-direction="up"] {
@@ -3281,10 +3294,19 @@
 
 .menu:popover-open {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
   opacity: 1;
   transform: none;
+  transition:
+    opacity 0.14s ease-out,
+    transform 0.14s ease-out,
+    overlay 0.14s allow-discrete,
+    display 0.14s allow-discrete;
+}
+
+/* Closed because the page moved under it (menu.tsx): a fade would hang in
+   place while its anchor scrolls away. */
+.menu[data-close="cut"] {
+  transition: none;
 }
 
 @starting-style {
@@ -3323,6 +3345,12 @@
 .menu-item[aria-disabled="true"] .menu-icon,
 .menu-item[aria-disabled="true"] .menu-label {
   opacity: 0.5;
+}
+
+/* base.css gives every button the pointer; a disabled item must not look clickable. */
+.menu-item:disabled,
+.menu-item[aria-disabled="true"] {
+  cursor: default;
 }
 
 .sr-only {

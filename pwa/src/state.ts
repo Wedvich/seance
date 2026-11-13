@@ -1,11 +1,16 @@
 import {
   DEFAULT_EFFORT,
   DEFAULT_MODEL,
+  type ArchiveMetricsStep,
+  type ArchiveTaskOutcome,
+  type ArchiveTasksCursor,
+  type ArchivedMachine,
+  type ArchivedTask,
+  type ArchivistEntry,
   type AutonomyLevel,
   METRIC_NAMES,
   type MetricName,
   type MetricsSeries,
-  type MetricsStep,
   type PauseHold,
   type Decision,
   type SessionEntry,
@@ -152,7 +157,10 @@ export interface PersistedForm {
   /** The repo to run, by `RepoEntry.origin` — the cross-machine key, since no clone is chosen. */
   readonly repo: string | null;
   readonly prompt: string;
+  /** The last worktree choice made: what a repo with none remembered in `worktreeByRepo` starts with. */
   readonly worktree: boolean;
+  /** The worktree choice last made per repo, by origin; read through `worktreeFor`. Newest last, at most `WORKTREE_REPOS_MAX`. */
+  readonly worktreeByRepo: Readonly<Record<string, boolean>>;
   readonly model: Model;
   readonly effort: Effort;
   /** Per task: the tasks this one waits on. Cleared once a task is queued. */
@@ -170,12 +178,15 @@ export interface SessionsView {
 
 /**
  * Pressure belongs to a machine, quota to an account: a machine's chart is its
- * own load, an account's is read from one machine hosting it (`deviceId`) and
- * narrowed to that account's series.
+ * own load, an account's is read from one machine hosting it (`deviceId`, null
+ * when none online can serve it) and narrowed to that account's series — or,
+ * while the archivist serves it, merged across machines from the archive. Which
+ * side answers is the store's choice at ask time (`Store.showHistory`), never
+ * part of the target.
  */
 export type HistoryTarget =
   | { readonly kind: "machine"; readonly deviceId: string }
-  | { readonly kind: "account"; readonly accountId: string; readonly deviceId: string };
+  | { readonly kind: "account"; readonly accountId: string; readonly deviceId: string | null };
 
 /**
  * A chart asks for its own series only: every series of a multi-exclave machine
@@ -187,17 +198,146 @@ export const TARGET_METRICS: Record<HistoryTarget["kind"], readonly MetricName[]
   account: [METRIC_NAMES.h, METRIC_NAMES.d, METRIC_NAMES.w],
 };
 
-export const HISTORY_RANGES = ["6h", "24h", "30d"] as const;
+/** Ranges a daemon keeps. */
+export const SHORT_HISTORY_RANGES = ["6h", "24h", "30d"] as const;
+/** Ranges only the archive keeps (DESIGN.md, Archivist, A32), offered only while it serves the chart (A35, A36d). */
+export const ARCHIVE_HISTORY_RANGES = ["90d", "1y"] as const;
+export const HISTORY_RANGES = [...SHORT_HISTORY_RANGES, ...ARCHIVE_HISTORY_RANGES] as const;
 export type HistoryRange = (typeof HISTORY_RANGES)[number];
 
 /** Opens on a day: long enough to show a working pattern, on the tier that fits it. */
 export const DEFAULT_HISTORY_RANGE: HistoryRange = "24h";
 
-/** Each range on the coarsest-needed store tier, so none crosses `METRICS_MAX_POINTS`. */
-export const RANGE_SPANS: Record<HistoryRange, { readonly span: number; readonly step: MetricsStep }> = {
+/**
+ * Each range on the coarsest-needed tier, so none crosses `METRICS_MAX_POINTS`.
+ * 90 days and a year take the archive's own steps (6 h, 1 d), which no daemon takes.
+ */
+export const RANGE_SPANS: Record<HistoryRange, { readonly span: number; readonly step: ArchiveMetricsStep }> = {
   "6h": { span: 6 * 3600, step: 30 },
   "24h": { span: 24 * 3600, step: 300 },
   "30d": { span: 30 * 24 * 3600, step: 3600 },
+  "90d": { span: 90 * 24 * 3600, step: 21_600 },
+  "1y": { span: 365 * 24 * 3600, step: 86_400 },
+};
+
+export function isArchiveRange(range: HistoryRange): boolean {
+  return ARCHIVE_HISTORY_RANGES.some((long) => long === range);
+}
+
+export type ArchiveReach = Readonly<Record<HistoryTarget["kind"], boolean>>;
+
+/**
+ * Which charts the archivist can serve now: none while it is offline (A35). An
+ * account's needs the account key too, since the archive files its series under
+ * the `account:` store key, never the raw id. The store and the screen read this
+ * one rule, so a chart is offered exactly when it can be asked for.
+ */
+export function archiveCharts(archivist: ArchivistEntry | null, nameable: boolean): ArchiveReach {
+  const online = archivist?.connected === true;
+  return { machine: online, account: online && nameable };
+}
+
+/** The range picker's options: the long ones only while the archive serves the chart (A36d). */
+export function historyRanges(archived: boolean): readonly HistoryRange[] {
+  return archived ? HISTORY_RANGES : SHORT_HISTORY_RANGES;
+}
+
+/** The task history's Dates presets (A36h): no custom range. */
+export const OLDER_DATES = ["7d", "30d", "90d", "1y", "any"] as const;
+export type OlderDates = (typeof OLDER_DATES)[number];
+
+export const OLDER_DATE_LABELS: Record<OlderDates, string> = {
+  "7d": "Last 7 days",
+  "30d": "Last 30 days",
+  "90d": "Last 90 days",
+  "1y": "Last year",
+  any: "Any time",
+};
+
+const DAY_MS = 24 * 3600 * 1000;
+
+/** How far back each preset reaches, ms; `any` sends no bound. */
+export const OLDER_DATE_SPANS: Record<Exclude<OlderDates, "any">, number> = {
+  "7d": 7 * DAY_MS,
+  "30d": 30 * DAY_MS,
+  "90d": 90 * DAY_MS,
+  "1y": 365 * DAY_MS,
+};
+
+/** The Older section's filter sheets, one per tile. */
+export type OlderSheet = "repo" | "outcome" | "machine" | "account" | "dates";
+
+/** A picked machine or account: the id the archivist filters on, and the name the tile shows. */
+export interface OlderPicked {
+  readonly id: string;
+  readonly label: string;
+}
+
+/** What Older is narrowed to; they never touch the live sections (A36h). */
+export interface OlderFilters {
+  /** An origin, as `task.spec.repo` holds it. */
+  readonly repo: string | null;
+  readonly outcome: ArchiveTaskOutcome | null;
+  /** By device id, retired machines included. */
+  readonly machine: OlderPicked | null;
+  /** By `account:` store key: the raw id never goes to the archivist. */
+  readonly account: OlderPicked | null;
+  readonly dates: OlderDates;
+  /** The search field's text as typed; sent trimmed. */
+  readonly title: string;
+}
+
+/** Any of the sheets' picks: everything but the search. */
+export type OlderPick = Partial<Omit<OlderFilters, "title">>;
+
+export const NO_OLDER_FILTERS: OlderFilters = {
+  repo: null,
+  outcome: null,
+  machine: null,
+  account: null,
+  dates: "any",
+  title: "",
+};
+
+/** What the archive answered for the current filters, pages appended in order. */
+export type OlderList =
+  // `machines` on loading/failed: the last listing, kept across a re-read so the Machine sheet stays whole.
+  | { readonly kind: "loading"; readonly machines?: readonly ArchivedMachine[] }
+  | { readonly kind: "failed"; readonly message: string; readonly machines?: readonly ArchivedMachine[] }
+  | {
+      readonly kind: "ok";
+      readonly tasks: readonly ArchivedTask[];
+      /** Every match, as the archive counts it (live duplicates included). */
+      readonly total: number;
+      readonly next: ArchiveTasksCursor | null;
+      /** The machines the archive holds tasks for, from page one; null from an archivist too old to list them. */
+      readonly machines: readonly ArchivedMachine[] | null;
+      readonly loadingMore: boolean;
+      /** Why the last Load older failed; the rows already read stay. */
+      readonly moreError: string | null;
+    };
+
+/** The Queue screen's Older section (A34, A36g–A36j). Memory only, like the Asleep toggle. */
+export interface OlderState {
+  readonly open: boolean;
+  readonly filters: OlderFilters;
+  /** The archivist the list was read from: a seat move drops it. */
+  readonly deviceId: string | null;
+  /** Null until opened, or after whatever dropped it. */
+  readonly list: OlderList | null;
+  /** The filter sheet showing, a layer like the form's sheets. */
+  readonly sheet: OlderSheet | null;
+  /** `account:` store key → account id, for the accounts this install knows: an archived row's account shows by its name here. */
+  readonly accountKeys: Readonly<Record<string, string>>;
+}
+
+export const CLOSED_OLDER: OlderState = {
+  open: false,
+  filters: NO_OLDER_FILTERS,
+  deviceId: null,
+  list: null,
+  sheet: null,
+  accountKeys: {},
 };
 
 /** The form's `route-preview`: what the scheduler would decide now, for the repo it was asked about. */
@@ -262,7 +402,7 @@ export interface HistoryView {
   readonly range: HistoryRange;
   readonly from: number;
   readonly to: number;
-  readonly step: MetricsStep;
+  readonly step: ArchiveMetricsStep;
   readonly result: HistoryResult;
 }
 
@@ -277,12 +417,31 @@ export const DEFAULT_FORM: PersistedForm = {
   repo: null,
   prompt: "",
   worktree: true,
+  worktreeByRepo: {},
   model: DEFAULT_MODEL,
   effort: DEFAULT_EFFORT,
   after: [],
   until: "merged",
   requires: [],
 };
+
+/** Bounds a map that gains a key per repo ever toggled in; the oldest choice goes first. */
+export const WORKTREE_REPOS_MAX = 100;
+
+/** The worktree choice for `origin`: its own remembered one, else the last made anywhere. Null is no repo in scope. */
+export function worktreeFor(form: Pick<PersistedForm, "worktree" | "worktreeByRepo">, origin: string | null): boolean {
+  // Own keys only: an origin is wire data, and `constructor` would otherwise read Object's.
+  if (origin === null || !Object.hasOwn(form.worktreeByRepo, origin)) return form.worktree;
+  return form.worktreeByRepo[origin] === true;
+}
+
+/** `form` with `worktree` chosen for `origin`, which moves to the newest end of the map. */
+export function withWorktree(form: PersistedForm, origin: string | null, worktree: boolean): PersistedForm {
+  if (origin === null) return { ...form, worktree };
+  const others = Object.entries(form.worktreeByRepo).filter(([key]) => key !== origin);
+  const kept = others.slice(Math.max(0, others.length - (WORKTREE_REPOS_MAX - 1)));
+  return { ...form, worktree, worktreeByRepo: Object.fromEntries([...kept, [origin, worktree]]) };
+}
 
 export function isModel(value: unknown): value is Model {
   return typeof value === "string" && (MODELS as readonly string[]).includes(value);

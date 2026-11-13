@@ -25,12 +25,12 @@ import {
 } from "../state.ts";
 import { matchesFilter, splitMatch } from "../sheet-filter.ts";
 import { completeSkill, matchSkills, promptSegments, skillIndex, skillToken } from "../skills.ts";
-import { formatSeen, type AttachmentChip, type AttachmentsView, type Tile, type ViewModel } from "../view.ts";
+import { formatSeen, type AttachmentChip, type AttachmentsView, type ViewModel } from "../view.ts";
 import { DecisionCard } from "./decision.tsx";
 import { HeaderMenu } from "./header-menu.tsx";
 import { Menu, MenuItem, useMenu } from "./menu.tsx";
 import { Seg } from "./seg.tsx";
-import { dotClass, Sheet, SheetItem, SheetSetting } from "./sheet.tsx";
+import { Sheet, SheetItem, SheetSetting, TileButton, useSheetExit } from "./sheet.tsx";
 import { SkillPicker, skillOptionId } from "./skill-picker.tsx";
 
 const SKILL_LIST_ID = "skill-list";
@@ -461,26 +461,6 @@ function PromptAction(props: {
   return (
     <button type="button" className="prompt-action" onClick={onClear}>
       CLEAR
-    </button>
-  );
-}
-
-function TileButton(props: { tile: Tile; offline?: boolean; onClick: () => void }): JSX.Element {
-  const { tile, offline = false, onClick } = props;
-  const valueClass = tile.mono ? "tile-value tile-value-mono" : "tile-value";
-  return (
-    <button
-      type="button"
-      className={offline ? "tile card tile-offline" : "tile card"}
-      onClick={onClick}
-      aria-label={tile.tag === null ? `${tile.label}: ${tile.value}` : `${tile.label}: ${tile.value}, ${tile.tag}`}
-    >
-      <span className="label">{tile.label}</span>
-      <span className={valueClass}>
-        {tile.dot !== null && <span className={dotClass(tile.dot)} />}
-        <span>{tile.value}</span>
-        {tile.tag !== null && <span className="tile-tag">{tile.tag}</span>}
-      </span>
     </button>
   );
 }
@@ -1330,7 +1310,7 @@ export function SpawnScreen(props: {
           effort={form.effort}
           autonomy={autonomy}
           afterSheet={lastAfterSheet.current}
-          worktree={form.worktree}
+          worktree={view.worktree}
           until={form.until}
           closing={sheetClosing}
           onExited={unmountSheet}
@@ -1338,27 +1318,4 @@ export function SpawnScreen(props: {
       )}
     </>
   );
-}
-
-/**
- * Keeps the sheet mounted while its exit animation plays; state has already
- * dropped it. The timeout backstops a lost animationend, which would otherwise
- * strand an invisible scrim over the screen.
- */
-function useSheetExit(sheet: SheetKind | null): [SheetKind | null, boolean, () => void] {
-  const [rendered, setRendered] = useState(sheet);
-
-  useLayoutEffect(() => {
-    if (sheet !== null) setRendered(sheet);
-  }, [sheet]);
-
-  const closing = sheet === null && rendered !== null;
-
-  useEffect(() => {
-    if (!closing) return;
-    const timer = setTimeout(() => setRendered(null), 400);
-    return () => clearTimeout(timer);
-  }, [closing]);
-
-  return [rendered, closing, () => setRendered(null)];
 }

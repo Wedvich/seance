@@ -91,6 +91,12 @@ export function Menu<T extends HTMLElement>(props: {
   );
 
   const close = useCallback((): void => node.current?.hidePopover(), []);
+  // For a close the page's own movement causes: the panel is fixed, so its fade
+  // would stay put while the anchor leaves. Cleared at the next open.
+  const cut = useCallback((): void => {
+    if (node.current !== null) node.current.dataset.close = "cut";
+    close();
+  }, [close]);
 
   // A flipped switch can shift the content under the anchor (a chart above it
   // closing); the scroll that follows is the page moving, not the person.
@@ -113,10 +119,10 @@ export function Menu<T extends HTMLElement>(props: {
     if (!menu.open) return;
     const width = document.documentElement.clientWidth;
     const dismiss = (): void => {
-      if (settling.current === null) close();
+      if (settling.current === null) cut();
     };
     const onResize = (): void => {
-      if (document.documentElement.clientWidth !== width) return close();
+      if (document.documentElement.clientWidth !== width) return cut();
       place(node.current?.offsetHeight ?? null);
     };
     window.addEventListener("scroll", dismiss, { capture: true, passive: true });
@@ -127,7 +133,12 @@ export function Menu<T extends HTMLElement>(props: {
       if (settling.current !== null) clearTimeout(settling.current);
       settling.current = null;
     };
-  }, [menu.open, close, place]);
+  }, [menu.open, cut, place]);
+
+  const beforeOpen = (): void => {
+    delete node.current?.dataset.close;
+    place(null);
+  };
 
   const onToggle = (newState: string): void => {
     menu.onToggle(newState);
@@ -164,7 +175,7 @@ export function Menu<T extends HTMLElement>(props: {
       popover="auto"
       role="menu"
       aria-label={props.label}
-      onBeforeToggle={(event) => event.newState === "open" && place(null)}
+      onBeforeToggle={(event) => event.newState === "open" && beforeOpen()}
       onToggle={(event) => onToggle(event.newState)}
       onKeyDown={onKeyDown}
     >

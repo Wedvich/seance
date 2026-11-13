@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  APP_ID,
   AT_REST_OPS,
   openAtRest,
   parseStoreReply,
@@ -12,7 +13,10 @@ import {
   RelayClient,
   REQUIRES_DEP_SENTINEL,
   SCHEDULER_ID,
+  seal,
   signRegister,
+  type MachineInfo,
+  type Plain,
   type QueueChanged,
   type QueueReply,
   type SessionEntry,
@@ -48,10 +52,11 @@ import { fixtureOrigin, startSuite, watchLeader, type Suite } from "./suite.ts";
 let suite: Suite | undefined;
 let stack: Stack;
 let stolenSeedId: string;
+let archivistId: string;
 
 beforeAll(async () => {
   suite = await startSuite("e2e-auto");
-  ({ stack, stolenSeedId } = suite);
+  ({ stack, stolenSeedId, archivistId } = suite);
 });
 
 // A task a test leaves running holds a slot under its account's cap (4) for every later test.
@@ -1493,6 +1498,111 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       if (down) await stack.restartDaemon();
       app.stop();
       watch.close();
+    }
+  }, 60_000);
+
+  // The seat's blob opens under the PSK and lists the fixture clone, so only
+  // the relay's flag keeps it from every Machine reader: the app (the PWA's
+  // screens and spawn form) and MCP's list_machines, which read the same
+  // RelayClient list the leader's candidates do. Each absence is asserted only
+  // after that reader listed a machine registered after the seat; the same
+  // blob without the role then lists, so the absence was the skip.
+  test("the archivist's seat is in the registry but never a machine, to the app or to list_machines", async () => {
+    const app = startApp(stack);
+    const watch = watchLeader(stack.relay);
+    const plainId = await newDeviceId();
+    const lazy = new LazyRelay({
+      create: () =>
+        new RelayClient({
+          url: wsUrl(stack.relay, "/app"),
+          token: TOKEN,
+          key: stack.appKey,
+          createSocket: (url) => new WebSocket(url, { perMessageDeflate: false }),
+        }),
+    });
+    const mcp = new Client(
+      { name: "e2e-auto", version: "0.0.0" },
+      { versionNegotiation: { mode: { pin: "2026-07-28" } } },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    serveStdio(() => buildMcpServer(relayFleet(lazy), null), { transport: serverTransport });
+    await mcp.connect(clientTransport);
+    const listed = async (): Promise<readonly string[]> => {
+      const { content }: { readonly content: unknown } = await mcp.callTool({ name: "list_machines", arguments: {} });
+      const [first]: unknown[] = Array.isArray(content) ? content : [];
+      if (!isRecord(first) || typeof first["text"] !== "string") return [];
+      const machines: unknown = JSON.parse(first["text"]);
+      return Array.isArray(machines)
+        ? machines.flatMap((m: unknown) => (isRecord(m) && typeof m["deviceId"] === "string" ? [m["deviceId"]] : []))
+        : [];
+    };
+    const sockets: Awaited<ReturnType<typeof connectDaemon>>[] = [];
+    const registerBox = async (deviceId: string, roles?: readonly string[]): Promise<void> => {
+      const own = ownMachine(app.store.getState(), stack.deviceId);
+      if (own === null) throw new Error("the suite's daemon is not listed");
+      const info: MachineInfo = {
+        name: `Box ${deviceId.slice(0, 6)}`,
+        platform: "linux",
+        repos: own.repos,
+        scannedAt: Date.now(),
+      };
+      const plain: Plain = { id: crypto.randomUUID(), ts: Date.now(), op: "machine-info", payload: info };
+      const socket = await connectDaemon(stack.relay);
+      sockets.push(socket);
+      const sealed = await seal(stack.appKey, { to: APP_ID, from: deviceId }, plain);
+      socket.send(await register(deviceId, { info: sealed, ...(roles === undefined ? {} : { roles }) }));
+    };
+    try {
+      await app.waitForApp(
+        (state) => (ownMachine(state, stack.deviceId)?.repos.length ?? 0) > 0,
+        "the suite's daemon listing its clone",
+      );
+      await registerBox(archivistId, [DAEMON_ROLES.archivist]);
+      await pollUntil(
+        () => watch.connected(archivistId) && watch.entry(archivistId)?.archivist === true,
+        "the seat registered and flagged",
+      );
+
+      await registerBox(plainId);
+      const seen = await app.waitForApp(
+        (state) => ownMachine(state, plainId)?.connected === true,
+        "the machine registered after the seat",
+      );
+      expect(ownMachine(seen, archivistId)).toBeNull();
+      const names: { listing: readonly string[] } = { listing: [] };
+      await pollUntil(async () => {
+        names.listing = await listed();
+        return names.listing.includes(plainId);
+      }, "list_machines naming the machine registered after the seat");
+      expect(names.listing).not.toContain(archivistId);
+
+      sockets.shift()?.close();
+      await pollUntil(() => !watch.connected(archivistId), "the seat gone");
+      await registerBox(archivistId);
+      await app.waitForApp(
+        (state) => ownMachine(state, archivistId)?.connected === true,
+        "the same blob, registered without the role",
+      );
+    } finally {
+      for (const socket of sockets) socket.close();
+      // The clients stop even when a poll below times out: they live in the shared stack.
+      const raw = await connectApp(stack.relay);
+      try {
+        // Gone from the registry, so no later test meets either as an offline machine.
+        await pollUntil(() => !watch.connected(archivistId) && !watch.connected(plainId), "both sockets gone");
+        raw.send({ t: "forget", deviceId: archivistId });
+        raw.send({ t: "forget", deviceId: plainId });
+        await pollUntil(
+          () => watch.entry(archivistId) === undefined && watch.entry(plainId) === undefined,
+          "both entries forgotten",
+        );
+      } finally {
+        raw.close();
+        await mcp.close();
+        lazy.stop();
+        app.stop();
+        watch.close();
+      }
     }
   }, 60_000);
 });
