@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { usePrivateTmux as privateTmuxFor } from "../daemon/test/fixtures.ts";
 import { newDeviceId, type TestRelay } from "../relay/test/harness.ts";
 import type { AppState } from "../pwa/src/view.ts";
-import { startStack, TOKEN, wsUrl, type Stack } from "./harness.ts";
+import { startStack, TOKEN, wsUrl, type Stack, type StackOptions } from "./harness.ts";
 
 /**
  * The one suite where all three components are real: seanced from daemon/src,
@@ -38,7 +38,7 @@ export interface Suite {
  * on another's setup. `label` names its private tmux server: one per file, so
  * no socket path is reused within the process.
  */
-export async function startSuite(label: string): Promise<Suite> {
+export async function startSuite(label: string, stackOpts: Pick<StackOptions, "drainMs"> = {}): Promise<Suite> {
   const base = await mkdtemp(join(tmpdir(), "seance-e2e-"));
   process.env["SEANCE_STATE_DIR"] = join(base, "state");
   const privateTmux = privateTmuxFor(base, label);
@@ -69,6 +69,7 @@ export async function startSuite(label: string): Promise<Suite> {
       secondLeaders: ["LeaderBox"],
       leaders: [stolenSeedId],
       archivist: archivistId,
+      ...stackOpts,
     });
     return { base, stack, stolenSeedId, archivistId, dispose: () => dispose(stack) };
   } catch (error) {

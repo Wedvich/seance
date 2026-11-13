@@ -24,6 +24,7 @@ import { tmux, tmuxOk } from "../daemon/src/tmux.ts";
 import { pollUntil } from "../daemon/test/fixtures.ts";
 import {
   cancelTask,
+  DRAIN_GRACE_MS,
   killWindow,
   listRegisteredWindows,
   listWindows,
@@ -43,7 +44,7 @@ let daemonStore: Mock<DaemonRelayClient["store"]> | undefined;
 
 beforeAll(async () => {
   daemonStore = spyOn(DaemonRelayClient.prototype, "store");
-  suite = await startSuite("e2e-leader");
+  suite = await startSuite("e2e-leader", { drainMs: DRAIN_GRACE_MS });
   ({ base, stack } = suite);
 });
 

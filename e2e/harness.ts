@@ -60,7 +60,7 @@ Object.defineProperty(globalThis, "history", {
   configurable: true,
 });
 
-/** What the suite's leader waits after a close before it passes a machine's tasks on (`drainSelfPassMs`). */
+/** What a stack's leader waits after a close before it passes a machine's tasks on, when `StackOptions.drainMs` asks (`drainSelfPassMs`). */
 export const DRAIN_GRACE_MS = 1_500;
 
 export const TOKEN = "e2e-bearer";
@@ -208,6 +208,12 @@ export interface StackOptions {
   readonly leaders?: readonly string[];
   /** The relay's ARCHIVIST — one id minted by `newDeviceId` — fixed at boot like the leaders. */
   readonly archivist?: string;
+  /**
+   * The leader's drain wait and retry (`drainSelfPassMs`, `drainRetryMs`) in ms. Default: the product's
+   * 10 and 5 minutes, so a test that closes a machine does not see its tasks passed on; only the stack of
+   * the one file that tests the drain shortens it.
+   */
+  readonly drainMs?: number;
 }
 
 /** A second daemon's directory, from its name: where its state is pre-seeded and where it later boots. */
@@ -305,9 +311,11 @@ export async function startStack(
       httpFetch: pushGuardFetch(pushAttempts),
       // A failed takeover still retries promptly: only the regular tick waits the hour.
       ...(quiet ? { telemetryIntervalMs: QUIET_MS } : {}),
-      // The drain's 10-minute grace and 5-minute retry would outlast any test: seconds here.
       leader: {
-        config: { ...DEFAULT_CONFIG, drainSelfPassMs: DRAIN_GRACE_MS, drainRetryMs: DRAIN_GRACE_MS },
+        config:
+          stackOpts.drainMs === undefined
+            ? DEFAULT_CONFIG
+            : { ...DEFAULT_CONFIG, drainSelfPassMs: stackOpts.drainMs, drainRetryMs: stackOpts.drainMs },
         ...(quiet ? { tickIntervalMs: QUIET_MS, takeoverRetryMs: 200 } : {}),
       },
     });
