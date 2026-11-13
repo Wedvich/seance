@@ -11,6 +11,9 @@ import {
   TASK_SPEC_LIMITS,
   withReportInstruction,
   type Decision,
+  type ArchiveStatusReply,
+  type ArchiveStatusResponse,
+  type ArchivistEntry,
   type AttachmentRefusal,
   type AttachmentUploaded,
   type DiscardReply,
@@ -47,6 +50,7 @@ import { describeVerdict } from "../src/verdict-view.ts";
 import { PREVIEW_DEBOUNCE_MS, PREVIEW_RETRY_MS, QUEUE_POLL_MS, QUEUE_POLLS } from "../src/scheduler-store.ts";
 import { Store, UNDO_WINDOW_MS } from "../src/store.ts";
 import { VERIFY_WAIT_MS } from "../src/upload-queue.ts";
+import { pollUntil } from "./poll.ts";
 import { fakeHistory, installBrowserGlobals, setVisibility } from "./stubs.ts";
 
 installBrowserGlobals();
@@ -401,6 +405,21 @@ describe("layers and history", () => {
  * scripts, `queue-changed` nudges emitted on demand. The relay is a
  * network boundary; the real client meets the real relay in client.test.ts.
  */
+const ARCHIVE_STATUS: ArchiveStatusResponse = {
+  ok: true,
+  onlineSince: 1,
+  lastIngest: { store: 2, registry: null, status: null, pull: null },
+  tasks: { rows: 1, oldest: 1 },
+  samples: { rows: 2, oldest: 1 },
+  events: { rows: 3, oldest: 1 },
+  database: { archiveBytes: 10, metricsBytes: 20 },
+  countedAt: 3,
+};
+
+function archivistEntry(deviceId: string, connected = true): ArchivistEntry {
+  return { deviceId, name: "archive", platform: "linux", connected, lastSeen: 1 };
+}
+
 class ScriptedClient extends RelayClient {
   relay: RelayState;
   readonly listeners = new Set<() => void>();
@@ -434,6 +453,9 @@ class ScriptedClient extends RelayClient {
     holds: [{ until: "resume", at: 5 }],
   });
   onResume: (request: ResumeRequest) => Promise<PauseReply | null> = async () => ({ holds: [] });
+  /** How many times the archivist's counts were asked for. */
+  archiveAsks = 0;
+  onArchiveStatus: () => Promise<ArchiveStatusReply | null> = async () => ARCHIVE_STATUS;
   readonly nudgeListeners = new Set<(change: QueueChanged) => void>();
   readonly getTasks: string[] = [];
   readonly discards: DiscardRequest[] = [];
@@ -500,6 +522,11 @@ class ScriptedClient extends RelayClient {
     this.uploads.push(bytes);
     this.uploadOpts.push(opts);
     return this.onUpload(bytes, opts);
+  }
+
+  override archiveStatus(): Promise<ArchiveStatusReply | null> {
+    this.archiveAsks += 1;
+    return this.onArchiveStatus();
   }
 
   override queue(request: QueueRequest = {}): Promise<QueueReply | null> {
@@ -571,6 +598,7 @@ function autoMachine(deviceId: string, fields: Partial<Machine> = {}): Machine {
 const LEADING_RELAY: RelayState = {
   status: "open",
   rejection: null,
+  archivist: null,
   machines: [autoMachine("dev-a"), autoMachine("dev-b")],
   registrySize: 2,
   ignored: 0,
@@ -4036,7 +4064,10 @@ describe("attachments", () => {
     const client = capable();
     // Ignores the abort, as a PUT that had already landed does.
     const answers: ((reply: AttachmentUploaded) => void)[] = [];
-    client.onUpload = () => new Promise((resolve) => answers.push(resolve));
+    client.onUpload = () =>
+      new Promise((resolve) => {
+        answers.push(resolve);
+      });
     const store = new Store(client, { ...DEFAULT_FORM, prompt: "go" });
     const detach = store.attach();
     store.addFiles([file("a.txt", "first")]);
@@ -4442,5 +4473,125 @@ describe("attachments", () => {
     await store.spawn();
     expect(store.getState().held.map(({ task }) => task.spec.attachments)).toEqual([undefined]);
     detach();
+  });
+});
+
+describe("the archivist's counts", () => {
+  let fake: ReturnType<typeof fakeHistory>;
+
+  afterEach(() => fake.restore());
+
+  test("are not asked for while the Machines screen is closed, and once it opens", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient({ archivist: archivistEntry("arch-1") });
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      // A negative assertion: a non-event cannot be polled.
+      await Bun.sleep(20);
+      expect(client.archiveAsks).toBe(0);
+      store.openMachines();
+      await pollUntil(() => store.getState().archiveStatus !== null, "the counts to land");
+      expect(client.archiveAsks).toBe(1);
+      expect(store.getState().archiveStatus).toEqual({ deviceId: "arch-1", reply: ARCHIVE_STATUS });
+      // Another relay push inside the minute reads nothing more.
+      client.emit({ registrySize: 9 });
+      expect(client.archiveAsks).toBe(1);
+    } finally {
+      detach();
+    }
+  });
+
+  test("are not asked for while the tab is hidden or the socket is down, and are once it is back", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient({ archivist: archivistEntry("arch-1") });
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      setVisibility("hidden");
+      store.openMachines();
+      // Negative assertions: a non-event cannot be polled.
+      await Bun.sleep(20);
+      expect(client.archiveAsks).toBe(0);
+      setVisibility("visible");
+      client.emit({ status: "retrying" });
+      await Bun.sleep(20);
+      expect(client.archiveAsks).toBe(0);
+      client.emit({ status: "open" });
+      await pollUntil(() => store.getState().archiveStatus !== null, "the counts after the socket is back");
+      expect(client.archiveAsks).toBe(1);
+    } finally {
+      setVisibility("visible");
+      detach();
+    }
+  });
+
+  test("a failed ask leaves no counts and throws nothing", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient({ archivist: archivistEntry("arch-1") });
+    client.onArchiveStatus = (): Promise<ArchiveStatusReply | null> =>
+      Promise.reject(new RequestFailure("timeout", "no answer"));
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openMachines();
+      await pollUntil(() => client.archiveAsks === 1, "the ask");
+      await Bun.sleep(10);
+      expect(store.getState().archiveStatus).toBeNull();
+    } finally {
+      detach();
+    }
+  });
+
+  test("an error reply, like no reply, leaves no counts", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient({ archivist: archivistEntry("arch-1") });
+    client.onArchiveStatus = async (): Promise<ArchiveStatusReply | null> => ({
+      ok: false,
+      code: "internal_error",
+      message: "archive status failed",
+    });
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openMachines();
+      await pollUntil(() => client.archiveAsks === 1, "the ask");
+      await Bun.sleep(10);
+      expect(store.getState().archiveStatus).toBeNull();
+    } finally {
+      detach();
+    }
+  });
+
+  test("are dropped when the seat moves to another device, and read again from the new one", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient({ archivist: archivistEntry("arch-1") });
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openMachines();
+      await pollUntil(() => store.getState().archiveStatus?.deviceId === "arch-1", "the first counts");
+      client.emit({ archivist: archivistEntry("arch-2") });
+      await pollUntil(() => store.getState().archiveStatus?.deviceId === "arch-2", "the counts of the new seat");
+      expect(client.archiveAsks).toBe(2);
+    } finally {
+      detach();
+    }
+  });
+
+  test("are dropped when the archivist goes offline", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient({ archivist: archivistEntry("arch-1") });
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openMachines();
+      await pollUntil(() => store.getState().archiveStatus !== null, "the counts");
+      client.emit({ archivist: archivistEntry("arch-1", false) });
+      expect(store.getState().archiveStatus).toBeNull();
+      expect(client.archiveAsks).toBe(1);
+    } finally {
+      detach();
+    }
   });
 });

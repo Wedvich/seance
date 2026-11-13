@@ -6,6 +6,7 @@ import type { Machine, QueueChanged, RelayState, Task, TaskListing, TaskLookup }
 import { pollUntil } from "../../daemon/test/fixtures.ts";
 import { Archive } from "./archive.ts";
 import { Paced, startCollector, type ArchiveSource } from "./collect.ts";
+import { createIngestClock } from "./ingest-clock.ts";
 
 /**
  * `Paced` on its own, and the collector over a scripted source: the relay
@@ -55,6 +56,7 @@ function stateOf(machines: readonly Machine[]): RelayState {
   return {
     status: "open",
     rejection: null,
+    archivist: null,
     machines,
     registrySize: machines.length,
     ignored: 0,
@@ -143,13 +145,18 @@ describe("collector", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  const start = async (source: ArchiveSource, warnings: string[] = []): Promise<ReturnType<typeof startCollector>> =>
+  const start = async (
+    source: ArchiveSource,
+    warnings: string[] = [],
+    clock = createIngestClock(),
+  ): Promise<ReturnType<typeof startCollector>> =>
     startCollector({
       source,
       archive,
       accountKey: await crypto.subtle.generateKey({ name: "HMAC", hash: "SHA-256" }, false, ["sign"]),
       selfId: "seat",
       log: { info: () => {}, warn: (line) => warnings.push(line) },
+      clock,
       timings: { listGapMs: 10_000, retryMs: 10_000, pollMs: 60_000 },
     });
 
@@ -173,6 +180,19 @@ describe("collector", () => {
       // A negative assertion: inside the gap the listing is paced, and a non-event cannot be polled.
       await Bun.sleep(50);
       expect(fake.lists).toBe(1);
+    } finally {
+      collector.stop();
+    }
+  });
+
+  test("the ingest clock notes the store when a listing lands and the registry when a fleet is written", async () => {
+    const fake = script();
+    const clock = createIngestClock();
+    const collector = await start(fake.source, [], clock);
+    try {
+      await pollUntil(() => clock.snapshot().store !== null, "the store noted after the listing");
+      expect(clock.snapshot().status).toBeNull();
+      await pollUntil(() => clock.snapshot().registry !== null, "the registry noted after the fleet write");
     } finally {
       collector.stop();
     }

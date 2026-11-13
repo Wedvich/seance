@@ -50,6 +50,7 @@ function relay(overrides: Partial<RelayState> = {}): RelayState {
   return {
     status: "open",
     rejection: null,
+    archivist: null,
     machines,
     registrySize: machines.length,
     ignored: 0,
@@ -93,6 +94,7 @@ function state(overrides: Partial<AppState> = {}, form: Partial<PersistedForm> =
     attachNotice: null,
     heldDropped: [],
     awaitingUploads: false,
+    archiveStatus: null,
     ...overrides,
   };
 }

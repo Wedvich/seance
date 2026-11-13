@@ -2356,6 +2356,11 @@
   color: var(--fg2);
 }
 
+/* The archivist's counts: "18.4M" and "250,000" are wider than a session count's two digits. */
+.exclave-sessions-wide {
+  grid-template-columns: 7ch 4ch;
+}
+
 .exclave-sessions b {
   font-weight: inherit;
   text-align: right;

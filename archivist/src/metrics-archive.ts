@@ -1,9 +1,18 @@
 import { Database } from "bun:sqlite";
 import { writeFile } from "node:fs/promises";
-import type { MetricsRequest, MetricsSeries, MetricsStep } from "@seance/shared";
-import { tierSchema, TieredMetrics, type Retention, type Sample } from "../../daemon/src/metrics-tiers.ts";
+import {
+  METRICS_STEPS,
+  type ArchiveTableStatus,
+  type MetricsRequest,
+  type MetricsSeries,
+  type MetricsStep,
+} from "@seance/shared";
+import { TIERS, tierSchema, TieredMetrics, type Retention, type Sample } from "../../daemon/src/metrics-tiers.ts";
 
 const HOUR_S = 3_600;
+
+/** Buckets of a tier per count range (see `countSamples`). */
+const COUNT_CHUNK_BUCKETS = 2_000;
 
 /** A22: 30 s for 48 h, 5 min for a year, hourly forever. */
 export const ARCHIVE_RETENTION: Retention = { rawKeepS: 48 * HOUR_S, m5KeepS: 365 * 24 * HOUR_S };
@@ -137,6 +146,41 @@ export class MetricsArchive {
     const row = this.#marks.get(machine, step);
     if (row === null || row.lo === null || row.hi === null) return null;
     return Math.max(row.lo, row.hi - lateS);
+  }
+
+  /**
+   * Rows over the three tiers, in bounded `ts` ranges with a macrotask between
+   * them. `bun:sqlite` is synchronous on the one loop the seat socket and the
+   * collectors share, and the tiers are `WITHOUT ROWID` with tens of millions
+   * of rows on a mature fleet, so one `count(*)` would stall all of them. A
+   * range is `COUNT_CHUNK_BUCKETS` buckets of its tier (30 s raw: about 17 h;
+   * 5 min: about 7 d; hourly: about 83 d), a short primary-key range scan.
+   * Rows written or pruned while a pass runs make the total approximate, which
+   * a display tolerates. `oldest` is in ms; `ts` is seconds.
+   */
+  async countSamples(chunkBuckets: number = COUNT_CHUNK_BUCKETS): Promise<ArchiveTableStatus> {
+    let rows = 0;
+    let oldestS: number | null = null;
+    for (const step of METRICS_STEPS) {
+      const table = TIERS[step];
+      const bounds = this.#db
+        .query<{ lo: number | null; hi: number | null }, []>(`SELECT min(ts) AS lo, max(ts) AS hi FROM ${table}`)
+        .get();
+      if (bounds === null || bounds.lo === null || bounds.hi === null) continue;
+      oldestS = oldestS === null ? bounds.lo : Math.min(oldestS, bounds.lo);
+      const count = this.#db.query<{ n: number }, [number, number]>(
+        `SELECT count(*) AS n FROM ${table} WHERE ts >= ? AND ts < ?`,
+      );
+      const span = step * chunkBuckets;
+      for (let from = bounds.lo; from <= bounds.hi; from += span) {
+        rows += count.get(from, from + span)?.n ?? 0;
+        // oxlint-disable-next-line no-await-in-loop -- the yield between ranges is the point
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 0);
+        });
+      }
+    }
+    return { rows, oldest: oldestS === null ? null : oldestS * 1000 };
   }
 
   query(request: MetricsRequest): readonly MetricsSeries[] {

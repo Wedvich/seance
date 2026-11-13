@@ -4,6 +4,8 @@ import {
   CAPABILITIES,
   METRIC_NAMES,
   MIN_FREE_MIB,
+  type ArchiveStatusResponse,
+  type ArchivistEntry,
   type ExclaveInfo,
   type Machine,
   type MachineStatus,
@@ -11,7 +13,7 @@ import {
   type SchedulerAvailability,
 } from "@seance/shared";
 import { accountSeries, chartLines } from "../src/chart.ts";
-import { accountDisplayName, deriveMachines } from "../src/machines-view.ts";
+import { accountDisplayName, deriveArchivist, deriveMachines } from "../src/machines-view.ts";
 import { knownAccounts } from "@seance/shared";
 
 const NOW = 1_800_000_000_000;
@@ -578,5 +580,112 @@ describe("accountSeries", () => {
     expect(
       chartLines(folded, { from: 0, to: 60, step: 30 }, { width: 60, height: 100 }).map((line) => line.label),
     ).toEqual(["5h", "7d Fable"]);
+  });
+});
+
+describe("deriveArchivist", () => {
+  const source = { sha: "a".repeat(40), commitTs: NOW - 2 * 3_600_000, branch: "main" };
+  const entry: ArchivistEntry = {
+    deviceId: "arch-1",
+    name: "archive",
+    platform: "linux",
+    connected: true,
+    lastSeen: NOW - 3 * 3_600_000,
+    source,
+  };
+  // Noon UTC: the same calendar day in every zone.
+  const since = Date.UTC(2026, 10, 12, 12);
+  const reply: ArchiveStatusResponse = {
+    ok: true,
+    onlineSince: NOW - 1000,
+    lastIngest: { store: NOW - 12_000 - 100_000, registry: NOW - 12_000, status: null, pull: null },
+    tasks: { rows: 1284, oldest: since },
+    samples: { rows: 18_400_000, oldest: since },
+    events: { rows: 52, oldest: since },
+    database: { archiveBytes: 100_000_000, metricsBytes: 2_000_000_000 },
+    countedAt: NOW,
+  };
+  const held = { deviceId: "arch-1", reply };
+
+  test("no archivist, no card", () => {
+    expect(deriveArchivist(null, held, NOW)).toBeNull();
+  });
+
+  test("online with a reply: last ingest, the build line, four rows and the history note", () => {
+    const card = deriveArchivist(entry, held, NOW);
+    expect(card).toMatchObject({
+      name: "archive",
+      online: true,
+      meta: "linux · last ingest just now",
+      note: "Keeps task, chart and fleet history. Never runs sessions.",
+    });
+    expect(card?.build).toBe(`${"a".repeat(12)} · committed 2h ago · main`);
+    expect(card?.rows).toEqual([
+      { label: "Tasks", detail: "since 12 Nov 2026", value: "1,284", unit: "rows" },
+      { label: "Samples", detail: "since 12 Nov 2026", value: "18.4M", unit: "rows" },
+      { label: "Events", detail: "since 12 Nov 2026", value: "52", unit: "rows" },
+      { label: "Database", detail: "archive + metrics", value: "2.1", unit: "GB" },
+    ]);
+  });
+
+  test("last ingest is the newest of the sources, aged", () => {
+    const older = {
+      deviceId: "arch-1",
+      reply: { ...reply, lastIngest: { store: NOW - 5 * 60_000, registry: null, status: null, pull: null } },
+    };
+    expect(deriveArchivist(entry, older, NOW)?.meta).toBe("linux · last ingest 5m ago");
+  });
+
+  test("online without a reply, or with one for another device, has the platform and no rows", () => {
+    expect(deriveArchivist(entry, null, NOW)).toMatchObject({ meta: "linux", rows: [] });
+    expect(deriveArchivist(entry, { deviceId: "arch-2", reply }, NOW)).toMatchObject({ meta: "linux", rows: [] });
+  });
+
+  test("a reply with no ingest yet reads as the platform alone", () => {
+    const fresh = { ...reply, lastIngest: { store: null, registry: null, status: null, pull: null } };
+    expect(deriveArchivist(entry, { deviceId: "arch-1", reply: fresh }, NOW)?.meta).toBe("linux");
+  });
+
+  test("offline: last seen, no rows even with counts held, and the offline note", () => {
+    const card = deriveArchivist({ ...entry, connected: false }, held, NOW);
+    expect(card).toMatchObject({
+      online: false,
+      meta: "offline · last seen 3h ago",
+      rows: [],
+      note: "While it is offline, 90-day and 1-year charts, merged account charts and older tasks are hidden until it is back.",
+    });
+    expect(card?.build).not.toBeNull();
+  });
+
+  test("an archivist with no source has no build line", () => {
+    const { source: _source, ...bare } = entry;
+    expect(deriveArchivist(bare, null, NOW)?.build).toBeNull();
+  });
+
+  test("an empty table says none yet, and an uncounted one a dash", () => {
+    const card = deriveArchivist(
+      entry,
+      { deviceId: "arch-1", reply: { ...reply, tasks: { rows: 0, oldest: null }, samples: null } },
+      NOW,
+    );
+    expect(card?.rows[0]).toEqual({ label: "Tasks", detail: "none yet", value: "0", unit: "rows" });
+    expect(card?.rows[1]).toEqual({ label: "Samples", detail: "", value: "—", unit: "rows" });
+  });
+
+  test("counts of a billion or more read in B, sizes under a kilobyte in bytes", () => {
+    const card = deriveArchivist(
+      entry,
+      {
+        deviceId: "arch-1",
+        reply: {
+          ...reply,
+          events: { rows: 2_500_000_000, oldest: since },
+          database: { archiveBytes: 500, metricsBytes: 0 },
+        },
+      },
+      NOW,
+    );
+    expect(card?.rows[2]?.value).toBe("2.5B");
+    expect(card?.rows[3]).toMatchObject({ value: "500", unit: "B" });
   });
 });

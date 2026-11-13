@@ -45,6 +45,7 @@ function state(
     relay: {
       status: "open",
       rejection: null,
+      archivist: null,
       machines,
       registrySize: machines.length,
       ignored: 0,
@@ -83,6 +84,7 @@ function state(
     attachNotice: null,
     heldDropped: [],
     awaitingUploads: false,
+    archiveStatus: null,
     ...overrides,
   };
 }

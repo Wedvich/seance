@@ -78,6 +78,7 @@ export function fakeRelay(
   let state: RelayState = {
     status,
     rejection: status === "rejected" ? "unauthorized" : null,
+    archivist: null,
     machines,
     registrySize: machines.length,
     ignored: 0,

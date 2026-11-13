@@ -295,3 +295,31 @@ describe("fleet events", () => {
     ]);
   });
 });
+
+describe("counts", () => {
+  test("an empty archive has no rows and no oldest", () => {
+    expect(archive.counts()).toEqual({ tasks: { rows: 0, oldest: null }, events: { rows: 0, oldest: null } });
+  });
+
+  test("rows and the oldest time (ms) of tasks and events", () => {
+    for (const [id, createdAt] of [
+      ["t-1", 5_000],
+      ["t-2", 3_000],
+    ] as const) {
+      const row = taskRow(task({ id, createdAt }), 2, context);
+      if (row === null) throw new Error("finished task refused");
+      archive.upsertTask(row, 10);
+    }
+    archive.applyFleet(
+      {
+        machines: [{ deviceId: "dev-a", name: "alpha", platform: "linux", build: "sha1", connected: true }],
+        leader: null,
+      },
+      7_000,
+    );
+    expect(archive.counts()).toEqual({
+      tasks: { rows: 2, oldest: 3_000 },
+      events: { rows: 2, oldest: 7_000 },
+    });
+  });
+});

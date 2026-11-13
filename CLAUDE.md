@@ -165,7 +165,7 @@ green:
   (`exec.ts` strips `CREDENTIALS_DIRECTORY`, or the tmux server it boots hands the PSK's path to
   every session), and a registry entry whose `info` blob is not sealed `from` its own `deviceId`
   never becomes a `Machine` (verified app-side in `shared/src/app-client.ts` — the relay is blind,
-  so only the AAD-bound `from` says which machine an entry describes), and the daemon process never holds a Claude credential: auth health (`daemon/src/auth-health.ts`) reads each exclave's credential store only through a short-lived `bun -e` child running the one constant script, with the file handed over as a file descriptor (or, on macOS, `security -w` run by the child), a bare env and a timeout, and keeps only the child's `{lapsed, refreshExpiresAt}` after an exact-shape check — never the child's stdout or stderr in a log, and nothing on the wire but `ax`/`ae`/`au` indices, an expiry time and `CAPABILITIES.authHealth`, every blob opened outside
+  so only the AAD-bound `from` says which machine an entry describes), and the archivist answers only `archive-status`, only when sealed `from: "app"`, parsed by `parseArchiveStatusRequest`, through its seat leg's replay guard, with a reply of counts, sizes and timestamps only, and an app believes the archivist card only from the flagged entry whose `info` blob is sealed `from` its own `deviceId` and parses as `ArchivistInfo`, and the daemon process never holds a Claude credential: auth health (`daemon/src/auth-health.ts`) reads each exclave's credential store only through a short-lived `bun -e` child running the one constant script, with the file handed over as a file descriptor (or, on macOS, `security -w` run by the child), a bare env and a timeout, and keeps only the child's `{lapsed, refreshExpiresAt}` after an exact-shape check — never the child's stdout or stderr in a log, and nothing on the wire but `ax`/`ae`/`au` indices, an expiry time and `CAPABILITIES.authHealth`, every blob opened outside
   the replay guard (`machine-info`, `status`, `lead-proof`, and the store's `task` and
   `pause-state` records) goes through `openAtRest` in
   `shared/src/crypto.ts`, which refuses one whose `op` isn't the slot's — shape alone does not say
@@ -354,8 +354,9 @@ green:
 - **The archivist holds the PSK and never acts** (DESIGN.md, Threat model item 2, and "Archivist").
   Its key comes only from its unit's `$CREDENTIALS_DIRECTORY/seance-psk` (`CRED_NAME`, imported),
   never a config field; it never runs as root; its state dir is its own, never the daemon's. It
-  registers only claiming `archivist`, with a blob `parseMachineInfo` refuses, answers no op, sends
-  no `status` and no store frame, and never enqueues; the fleet's `update-available` broadcast only
+  registers only claiming `archivist`, with a blob `parseMachineInfo` refuses, answers one op,
+  `archive-status`, sealed `from: "app"` to its own id past the seat leg's replay guard, with counts,
+  sizes and timestamps only, sends no `status` and no store frame, and never enqueues; the fleet's `update-available` broadcast only
   makes it write `update-requested`, for the credential-less update unit to act on. `archivist/test/layering.test.ts` walks
   `run`'s whole import closure (type-only imports too) and its own source's calls: a module that spawns,
   drives tmux, dispatches ops, brokers, leads or writes the queue or store, `daemon/src/config.ts`,

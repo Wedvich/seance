@@ -18,6 +18,7 @@ import { MetricsStore, RAW_KEEP_S } from "../../daemon/src/metrics-store.ts";
 import { pollUntil } from "../../daemon/test/fixtures.ts";
 import { MetricsArchive } from "./metrics-archive.ts";
 import { startMetricsCollector, statusSamples, type MetricsCollector } from "./metrics-collect.ts";
+import { createIngestClock, type IngestClock } from "./ingest-clock.ts";
 
 /**
  * The collector over a scripted app leg whose `metrics` op answers from a real
@@ -59,6 +60,7 @@ function stateOf(machines: readonly Machine[]): RelayState {
   return {
     status: "open",
     rejection: null,
+    archivist: null,
     machines,
     registrySize: machines.length,
     ignored: 0,
@@ -172,19 +174,21 @@ function start(
   source: Fleet["source"],
   clock: { ms: number },
   pullMs = 60 * 60_000,
-): { collector: MetricsCollector; archive: MetricsArchive } {
+): { collector: MetricsCollector; archive: MetricsArchive; ingest: IngestClock } {
   const archive = MetricsArchive.memory();
+  const ingest = createIngestClock();
   const collector = startMetricsCollector({
     source,
     archive,
     accountKey,
     selfId: "seat",
     log,
+    clock: ingest,
     timings: { pullMs },
     now: () => clock.ms,
   });
   running.push({ collector, archive, daemon });
-  return { collector, archive };
+  return { collector, archive, ingest };
 }
 
 describe("metrics collection", () => {
@@ -221,8 +225,10 @@ describe("metrics collection", () => {
     daemonHistory(daemon, NOW - 3600, NOW, 30);
     const clock = { ms: NOW * 1000 };
     const { requests, source, push } = fleet(daemon, 1_000_000);
-    const { archive } = start(daemon, source, clock, 50);
+    const { archive, ingest } = start(daemon, source, clock, 50);
     await pollUntil(() => archive.pullFrom("dev-a", 30, 900) === NOW, "the first import");
+    expect(ingest.snapshot().pull).not.toBeNull();
+    expect(ingest.snapshot().status).toBeNull();
     const imported = requests.length;
 
     // The next tick: the daemon stores the unrounded value, the status frame carries it as a whole percent.
@@ -230,6 +236,7 @@ describe("metrics collection", () => {
     const status: MachineStatus = { at: NOW + 30, scan: 0, cpu: 12 };
     push([machine({ status })]);
     await pollUntil(() => archive.query({ from: NOW + 30, to: NOW + 30, step: 30 }).length === 1, "the live sample");
+    expect(ingest.snapshot().status).not.toBeNull();
     clock.ms = (NOW + 60) * 1000;
     await pollUntil(
       () => archive.query({ from: NOW + 30, to: NOW + 30, step: 30 })[0]?.points[0]?.[1] === 12.3,

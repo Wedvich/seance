@@ -4,13 +4,20 @@
 // (update-request.ts) — in both cases a process with no credential delivered,
 // loaded only by main.ts's `import()` in this command (archivist/test/layering.test.ts).
 
-import { readFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
+import type { SourceInfo } from "@seance/shared";
 import { fileURLToPath } from "node:url";
 import { daemonSink } from "../../daemon/src/audit.ts";
 import { checkoutRoot, readSource, trimRoot } from "../../daemon/src/selfsource.ts";
 import { signalRestartUnit } from "../../daemon/src/systemd.ts";
 import { defaultUpdateEffects, updateNow, type ManualUpdate } from "../../daemon/src/update.ts";
-import { archivistStateDir, servedShaPathIn, updateLockPathIn, updateRequestPathIn } from "./paths.ts";
+import {
+  archivistStateDir,
+  servedShaPathIn,
+  servedSourcePathIn,
+  updateLockPathIn,
+  updateRequestPathIn,
+} from "./paths.ts";
 import { ARCHIVIST_UNIT, expectedArchivistUnits } from "./units.ts";
 import { rootRefusal } from "./unprivileged.ts";
 import { withUpdateLock } from "./update-lock.ts";
@@ -55,6 +62,25 @@ export async function unitDrift(
 }
 
 /**
+ * Write the checkout's git identity for the restarted archivist's card (its build line).
+ * Best-effort: a cosmetic file never decides whether new code goes live, so a failed
+ * write is logged and the restart goes on. With no readable source the old file is
+ * removed, since it describes a commit this update replaced — no build line beats a wrong one.
+ */
+export async function recordServedSource(path: string, read: () => Promise<SourceInfo | null>): Promise<void> {
+  try {
+    const source = await read();
+    if (source === null) {
+      await rm(path, { force: true });
+      return;
+    }
+    await Bun.write(path, JSON.stringify(source), { mode: 0o600 });
+  } catch (err) {
+    console.error(`warning: could not record the served source: ${String(err)}`);
+  }
+}
+
+/**
  * Fetch, fast-forward the default branch, `bun install --frozen-lockfile`, and on
  * `ok` restart the service the way `seanced restart` restarts a system unit's
  * daemon: SIGTERM its MainPID, as the same user, for `Restart=always` to relaunch
@@ -88,6 +114,7 @@ export async function updateArchivist(opts: { readonly requested: boolean }): Pr
     const sha = (await readSource(root))?.sha;
     if (sha !== undefined) await Bun.write(servedPath, `${sha}\n`, { mode: 0o600 });
   };
+  const recordSource = (): Promise<void> => recordServedSource(servedSourcePathIn(stateDir), () => readSource(root));
   const readServed = async (): Promise<string | null> => {
     const text = (await readFile(servedPath, "utf8").catch(() => "")).trim();
     return SHA.test(text) ? text : null;
@@ -109,6 +136,8 @@ export async function updateArchivist(opts: { readonly requested: boolean }): Pr
         effects: {
           install: defaultUpdateEffects().install,
           restart: async () => {
+            // Before the signal: the restarted process reads it at start, so it must be there first.
+            await recordSource();
             await signalRestartUnit(ARCHIVIST_UNIT, RESTART_WORDING);
             await recordServed();
           },

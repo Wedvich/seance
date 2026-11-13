@@ -139,3 +139,46 @@ describe("MetricsArchive", () => {
     }
   });
 });
+
+describe("countSamples", () => {
+  test("an empty archive has no rows and no oldest", async () => {
+    const archive = MetricsArchive.memory();
+    expect(await archive.countSamples()).toEqual({ rows: 0, oldest: null });
+    archive.close();
+  });
+
+  test("sums the tiers across several ranges, oldest in ms, and yields between ranges", async () => {
+    const archive = MetricsArchive.memory();
+    archive.writePulled(
+      "dev-a",
+      30,
+      [
+        series([
+          [NOW, 1],
+          [NOW + 30, 2],
+          [NOW + 3000, 3],
+        ]),
+      ],
+      NOW + 3000,
+    );
+    archive.writePulled("dev-a", 3600, [series([[NOW - 7200, 4]])], NOW + 3000);
+    // One bucket a range: the total must not depend on the range size.
+    const held = ([30, 300, 3600] as const).reduce(
+      (sum, step) => sum + values(archive, step, NOW - 100_000, NOW + 100_000).length,
+      0,
+    );
+    const whole = await archive.countSamples();
+    const chunked = await archive.countSamples(1);
+    expect(chunked).toEqual(whole);
+    expect(whole.oldest).toBe((NOW - 7200) * 1000);
+    expect(whole.rows).toBe(held);
+    // A macrotask runs between ranges: a timer set before the count fires before it ends.
+    let fired = false;
+    setTimeout(() => {
+      fired = true;
+    }, 0);
+    await archive.countSamples(1);
+    expect(fired).toBe(true);
+    archive.close();
+  });
+});
