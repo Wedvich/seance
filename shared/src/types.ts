@@ -1125,8 +1125,8 @@ export interface MachineInfo {
  * `drainPass`: as a leader, passes the work off a closed machine (`trigger: "drain"`) and writes
  * `Task.drained`; what a client checks of the verified leader before showing a drain's per-task
  * counts or offering `seanced close --wait`.
- * `drainAsk`: as a daemon, asks its sessions to pass themselves when closed (docs/drain.md, step A,
- * build-order item 3). Advertised by no daemon yet; the leader does not read it yet.
+ * `drainAsk`: as a daemon, asks its sessions to pass themselves when closed (drain step A) and honours
+ * `now`; clients gate `now`/"Drain now" on it, and the leader reads it in reconcile (`#asksItsDaemon`).
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -1821,7 +1821,7 @@ export type DespawnErrorCode = (typeof DESPAWN_ERROR_CODES)[number];
 /** `exited`: claude left on its own once asked. `killed`: it didn't, or `force` said not to wait. */
 export type DespawnOutcome = "exited" | "killed";
 
-/** `now` is the drain's (docs/drain.md); parsed and ignored until the drain lands. */
+/** `now` is the drain's no-wait: a close's interrupt deadline moves to now (a daemon advertising `CAPABILITIES.drainAsk`); ignored on an open, and by an older daemon. */
 export interface AvailabilityRequest {
   readonly open: boolean;
   readonly now?: boolean;
@@ -2115,6 +2115,11 @@ export interface SessionPass {
   /** The commit it holds. */
   readonly tip: string;
   readonly record?: string;
+  /**
+   * Sent while this machine is closed: the leader writes `trigger: "drain"` when the machine's status
+   * carries `cl`; an older leader drops it and writes `session`.
+   */
+  readonly drain?: true;
   /** Observed at by the daemon, ms. */
   readonly at: number;
 }
@@ -2437,7 +2442,8 @@ export const PASS_CLOSE_GRACE_MS = 120_000;
 
 /**
  * What set a pass off; a reader refuses any other value. `quota` is written only by the leader's automatic
- * trigger (`CAPABILITIES.successorAuto`); `drain` only by the leader's drain pass (`CAPABILITIES.drainPass`).
+ * trigger (`CAPABILITIES.successorAuto`); `drain` by the leader's drain pass (`CAPABILITIES.drainPass`) or a
+ * session's own pass marked `drain` from a machine whose status carries `cl`.
  */
 export const SUCCESSOR_TRIGGERS = ["session", "manual", "quota", "drain"] as const;
 

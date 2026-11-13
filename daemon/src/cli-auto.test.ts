@@ -983,7 +983,9 @@ describe("seanced close / open", () => {
     fake.setState({ scheduler: LEADING });
     const lazy = new LazyRelay({ create: () => fake });
     try {
-      const outcome = await availabilityViaFleet(null, false, relayFleet(lazy), () => Promise.resolve("device-1"));
+      const outcome = await availabilityViaFleet(null, false, false, relayFleet(lazy), () =>
+        Promise.resolve("device-1"),
+      );
       expect(outcome.ok).toBe(true);
       expect(fake.requests).toEqual([{ deviceId: "device-1", op: "availability", payload: { open: false } }]);
     } finally {
@@ -991,11 +993,44 @@ describe("seanced close / open", () => {
     }
   });
 
+  test("--now is sent as { open: false, now: true } to a drainAsk machine, refused before any request to one without", async () => {
+    const asks = machine({ capabilities: ["close", "drain", "drainAsk"] });
+    const fake = fakeRelay([asks], () => ({ ok: true, closed: 9_000 }));
+    fake.setState({ scheduler: LEADING });
+    const lazy = new LazyRelay({ create: () => fake });
+    try {
+      const outcome = await availabilityViaFleet(null, false, true, relayFleet(lazy), () =>
+        Promise.resolve("device-1"),
+      );
+      expect(outcome.ok).toBe(true);
+      expect(outcome.text).toContain("interrupted now");
+      expect(fake.requests).toEqual([
+        { deviceId: "device-1", op: "availability", payload: { open: false, now: true } },
+      ]);
+    } finally {
+      lazy.stop();
+    }
+
+    const oldFake = fakeRelay([self], () => ({ ok: true, closed: 9_000 }));
+    oldFake.setState({ scheduler: LEADING });
+    const oldLazy = new LazyRelay({ create: () => oldFake });
+    try {
+      const outcome = await availabilityViaFleet(null, false, true, relayFleet(oldLazy), () =>
+        Promise.resolve("device-1"),
+      );
+      expect(outcome.ok).toBe(false);
+      expect(outcome.text).toContain("seanced update");
+      expect(oldFake.requests).toEqual([]);
+    } finally {
+      oldLazy.stop();
+    }
+  });
+
   test("a machine with no daemon state has no this-machine to act on", async () => {
     const fake = fakeRelay([self]);
     const lazy = new LazyRelay({ create: () => fake });
     try {
-      const outcome = await availabilityViaFleet(null, true, relayFleet(lazy), () => Promise.resolve(null));
+      const outcome = await availabilityViaFleet(null, true, false, relayFleet(lazy), () => Promise.resolve(null));
       expect(outcome).toMatchObject({ ok: false });
       expect(outcome.text).toContain("no daemon state");
       expect(fake.requests).toEqual([]);
@@ -1016,7 +1051,7 @@ describe("seanced close / open", () => {
         self: () => Promise.resolve("device-1"),
         stores: [],
       });
-      const outcome = await availabilityViaFleet(null, false, fleet, () => Promise.resolve("device-1"));
+      const outcome = await availabilityViaFleet(null, false, false, fleet, () => Promise.resolve("device-1"));
       expect(outcome.ok).toBe(false);
       expect(outcome.text).toContain("PWA");
       expect(double.frames.every((frame) => isRecord(frame) && frame["action"] === "fleet")).toBe(true);
@@ -1092,6 +1127,7 @@ describe("seanced close --wait", () => {
       const outcome = await availabilityViaFleet(
         null,
         false,
+        false,
         relayFleet(lazy),
         () => Promise.resolve("device-1"),
         true,
@@ -1112,6 +1148,7 @@ describe("seanced close --wait", () => {
     try {
       const outcome = await availabilityViaFleet(
         null,
+        false,
         false,
         relayFleet(lazy),
         () => Promise.resolve("device-1"),

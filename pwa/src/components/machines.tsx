@@ -10,7 +10,7 @@ import {
   type HistoryView,
 } from "../state.ts";
 import { ACCOUNT_ALIAS_MAX_LENGTH, type Machine } from "@seance/shared";
-import type { ConnectionState } from "../view.ts";
+import { canDrainNow, type ConnectionState } from "../view.ts";
 import { StrokeIcon } from "./icons.tsx";
 import { Menu, MenuDivider, MenuItem, MenuSwitchItem, MoreTrigger, useMenu } from "./menu.tsx";
 import { RelayDot } from "./relay-dot.tsx";
@@ -41,8 +41,8 @@ export function MachinesScreen(props: {
   history: HistoryView | null;
   accounts: AccountsState;
   availability: AvailabilityState;
-  /** Asks a machine to close (false) or reopen (true); the confirm sheet for a close is this screen's. */
-  onSetOpen: (deviceId: string, open: boolean) => void;
+  /** Asks a machine to close (false) or reopen (true); `now` is the close sheet's "Drain now". The confirm sheet for a close is this screen's. */
+  onSetOpen: (deviceId: string, open: boolean, now?: boolean) => void;
   /** The registry, which the confirm sheet's words are derived from (`closeSheet`). */
   machines: readonly Machine[];
   /** The confirm sheet's lines for a machine (`deriveCloseSheet`). */
@@ -157,6 +157,14 @@ export function MachinesScreen(props: {
             setClosing(null);
             onSetOpen(closingCard.deviceId, false);
           }}
+          {...(canDrainNow(closingMachine)
+            ? {
+                onDrainNow: () => {
+                  setClosing(null);
+                  onSetOpen(closingCard.deviceId, false, true);
+                },
+              }
+            : {})}
         />
       )}
       {renamed !== undefined && (
@@ -498,8 +506,10 @@ function CloseMachineDialog(props: {
   lines: readonly string[];
   onClose: () => void;
   onConfirm: () => void;
+  /** Present for a machine that asks its sessions to pass themselves (`canDrainNow`): close and interrupt them at once. */
+  onDrainNow?: () => void;
 }): JSX.Element {
-  const { name, lines, onClose, onConfirm } = props;
+  const { name, lines, onClose, onConfirm, onDrainNow } = props;
   return (
     <Sheet title={`Close ${name}?`} variant="dialog" onClose={onClose}>
       <div className="rename">
@@ -512,6 +522,11 @@ function CloseMachineDialog(props: {
           <button type="button" className="quiet" onClick={onClose}>
             Cancel
           </button>
+          {onDrainNow !== undefined && (
+            <button type="button" className="quiet" onClick={onDrainNow}>
+              Drain now
+            </button>
+          )}
           <button type="button" className="primary" onClick={onConfirm}>
             Close
           </button>

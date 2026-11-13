@@ -759,7 +759,7 @@ describe("set_machine_open", () => {
 
   async function call(
     fake: FakeRelay,
-    args: { machine: string; open: boolean },
+    args: { machine: string; open: boolean; now?: boolean },
   ): Promise<{ readonly text: string; readonly error: boolean }> {
     const lazy = new LazyRelay({ create: () => fake });
     const client = await connectedClient(lazy, fakeLocal());
@@ -775,6 +775,78 @@ describe("set_machine_open", () => {
     expect(error).toBe(false);
     expect(text).toBe("homelab is closed to new work; running work finishes where it is");
     expect(fake.requests).toEqual([{ deviceId: "device-2", op: "availability", payload: { open: false } }]);
+  });
+
+  describe("the drain's session ask", () => {
+    const ASKS = machine({ deviceId: "device-2", name: "homelab", capabilities: ["close", "drainAsk"] });
+    const PASSING = machine({ capabilities: ["drain", "drainPass"] });
+
+    test("now goes only to a target that advertises drainAsk, as { open: false, now: true }", async () => {
+      const fake = fakeRelay([LEADER, ASKS], () => ({ ok: true, closed: 1_763_000_000_000 }));
+      fake.setState({ scheduler: LEADS });
+      const { text, error } = await call(fake, { machine: "homelab", open: false, now: true });
+      expect(error).toBe(false);
+      expect(text).toBe(
+        "homelab is closed to new work; its sessions are asked to pass themselves at their next pause (interrupted now)",
+      );
+      expect(fake.requests).toEqual([
+        { deviceId: "device-2", op: "availability", payload: { open: false, now: true } },
+      ]);
+    });
+
+    test("an asks target says it asks, with the 10 minute pass under a drainPass leader, and no now is sent without one", async () => {
+      const fake = fakeRelay([PASSING, ASKS], () => ({ ok: true, closed: 1_763_000_000_000 }));
+      fake.setState({ scheduler: LEADS });
+      const { text } = await call(fake, { machine: "homelab", open: false });
+      expect(text).toBe(
+        "homelab is closed to new work; its sessions are asked to pass themselves at their next pause (interrupted after 5 minutes); any left are passed to other machines in 10 minutes unless you reopen it",
+      );
+      expect(fake.requests).toEqual([{ deviceId: "device-2", op: "availability", payload: { open: false } }]);
+    });
+
+    test("now to a target without drainAsk is refused before anything is sent, and the old wording stands without it", async () => {
+      const fake = fakeRelay([LEADER, TARGET], () => ({ ok: true, closed: 1_763_000_000_000 }));
+      fake.setState({ scheduler: LEADS });
+      const refused = await call(fake, { machine: "homelab", open: false, now: true });
+      expect(refused.error).toBe(true);
+      expect(refused.text).toBe("homelab cannot drain now yet — its daemon needs `seanced update`");
+      expect(fake.requests).toEqual([]);
+      const plain = await call(fake, { machine: "homelab", open: false });
+      expect(plain.text).toBe("homelab is closed to new work; running work finishes where it is");
+    });
+
+    test("an already-closed asks target with now says its sessions are being interrupted", async () => {
+      const closedAsks = machine({
+        deviceId: "device-2",
+        name: "homelab",
+        capabilities: ["close", "drainAsk"],
+        status: { at: 1, scan: 1, cl: 1_763_000_000_000 },
+      });
+      const fake = fakeRelay([LEADER, closedAsks], () => ({ ok: true, closed: 1_763_000_000_000 }));
+      fake.setState({ scheduler: LEADS });
+      const now = await call(fake, { machine: "homelab", open: false, now: true });
+      expect(now.text).toBe(
+        `homelab was already closed (since ${new Date(1_763_000_000_000).toISOString()}); its sessions are being interrupted now`,
+      );
+      const plain = await call(fake, { machine: "homelab", open: false });
+      expect(plain.text).toBe(`homelab was already closed (since ${new Date(1_763_000_000_000).toISOString()})`);
+    });
+
+    test("now on a reopen is not sent, and an unknown key is still refused", async () => {
+      const fake = fakeRelay([LEADER, ASKS], () => ({ ok: true, closed: null }));
+      fake.setState({ scheduler: LEADS });
+      await call(fake, { machine: "homelab", open: true, now: true });
+      expect(fake.requests).toEqual([{ deviceId: "device-2", op: "availability", payload: { open: true } }]);
+      const lazy = new LazyRelay({ create: () => fake });
+      const client = await connectedClient(lazy, fakeLocal());
+      const result = await client.callTool({
+        name: "set_machine_open",
+        arguments: { machine: "homelab", open: false, nowish: true },
+      });
+      lazy.stop();
+      expect(result.isError).toBe(true);
+      expect(fake.requests).toHaveLength(1);
+    });
   });
 
   test("a close without a leader that advertises drain is refused, and nothing is sent", async () => {

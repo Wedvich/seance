@@ -955,7 +955,7 @@ export function parseSessionEvent(value: unknown): SessionEvent | null {
  */
 export function parseSessionPass(value: unknown): SessionPass | null {
   if (!isRecord(value)) return null;
-  const { session, taskId, exclave, remoteBranch, tip, record, at } = value;
+  const { session, taskId, exclave, remoteBranch, tip, record, drain, at } = value;
   if (typeof session !== "string" || session === "" || session.length > ROUTING_ID_MAX_LENGTH) return null;
   if (!isTaskId(taskId) || typeof exclave !== "string" || exclave.length > ROUTING_ID_MAX_LENGTH) return null;
   if (!isBranchName(remoteBranch) || typeof tip !== "string" || !COMMIT_OID.test(tip)) return null;
@@ -963,7 +963,16 @@ export function parseSessionPass(value: unknown): SessionPass | null {
   if (record !== undefined && (typeof record !== "string" || record === "" || record.length > SUCCESSOR_RECORD_MAX)) {
     return null;
   }
-  return { session, taskId, exclave, remoteBranch, tip, at, ...(record === undefined ? {} : { record }) };
+  return {
+    session,
+    taskId,
+    exclave,
+    remoteBranch,
+    tip,
+    at,
+    ...(record === undefined ? {} : { record }),
+    ...(drain === true ? { drain: true as const } : {}),
+  };
 }
 
 function isBoundedString(value: unknown, max: number): value is string {
@@ -2219,12 +2228,12 @@ export function parsePushBranchResponse(value: unknown): PushBranchResponse | nu
   return typeof pushed === "boolean" ? { ok: true, remoteBranch, tip, pushed } : null;
 }
 
-/** `availability`, at the daemon: `now` is accepted and ignored until the drain lands, so a later client is not refused by this one. */
+/** `availability`, at the daemon: `now` is kept only as `true` (the drain's no-wait); a non-boolean refuses the request. */
 export function parseAvailabilityRequest(value: unknown): AvailabilityRequest | null {
   if (!isRecord(value) || typeof value["open"] !== "boolean") return null;
   const { now } = value;
   if (now !== undefined && typeof now !== "boolean") return null;
-  return { open: value["open"] };
+  return { open: value["open"], ...(now === true ? { now: true as const } : {}) };
 }
 
 /** An `availability` answer at a client: a code it does not know reads as a failure. */

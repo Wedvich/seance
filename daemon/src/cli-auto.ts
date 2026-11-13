@@ -325,6 +325,7 @@ export async function cmdAmendAuto(draft: AmendDraft): Promise<void> {
 export async function availabilityViaFleet(
   machine: string | null,
   open: boolean,
+  now: boolean,
   fleet: Fleet,
   self: () => Promise<string | null> = ownDeviceId,
   wait = false,
@@ -347,7 +348,7 @@ export async function availabilityViaFleet(
       return failed(NO_WAIT_TEXT);
     }
     if (wait && lease.scheduler === null) return failed(NO_WAIT_TEXT);
-    return await setMachineOpen({ ref: machine, selfId: machine === null ? await self() : null, open, lease });
+    return await setMachineOpen({ ref: machine, selfId: machine === null ? await self() : null, open, now, lease });
   } finally {
     lease.release();
   }
@@ -356,10 +357,15 @@ export async function availabilityViaFleet(
 const NO_WAIT_TEXT =
   "not closed — --wait needs the scheduler's leader to drain closed machines; update seanced on the leader's machine";
 
-export async function cmdAvailabilityAuto(machine: string | null, open: boolean, wait: boolean): Promise<void> {
+export async function cmdAvailabilityAuto(
+  machine: string | null,
+  open: boolean,
+  now: boolean,
+  wait: boolean,
+): Promise<void> {
   const config = await loadConfig();
   const built = await autoFleet(config);
-  const outcome = await availabilityViaFleet(machine, open, built.fleet, undefined, wait).catch((err: unknown) => {
+  const outcome = await availabilityViaFleet(machine, open, now, built.fleet, undefined, wait).catch((err: unknown) => {
     built.fleet.stop();
     throw err;
   });

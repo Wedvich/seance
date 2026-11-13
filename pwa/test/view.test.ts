@@ -10,6 +10,7 @@ import {
   type SessionsView,
 } from "../src/state.ts";
 import {
+  canDrainNow,
   deriveCloseAvailability,
   deriveDrainAvailability,
   derivePinProblem,
@@ -353,6 +354,12 @@ describe("banner and button", () => {
     expect(deriveCloseAvailability(relay({ machines: [target] }), target)).toBe(false);
     const mute = machine({ capabilities: [] });
     expect(deriveCloseAvailability(leading([CAPABILITIES.drain]), mute)).toBe(false);
+  });
+
+  test("Drain now is offered only to a machine that advertises drainAsk, whatever else it advertises", () => {
+    expect(canDrainNow(machine({ capabilities: [CAPABILITIES.close, CAPABILITIES.drainAsk] }))).toBe(true);
+    expect(canDrainNow(machine({ capabilities: [CAPABILITIES.close, CAPABILITIES.drain] }))).toBe(false);
+    expect(canDrainNow(machine({ capabilities: [] }))).toBe(false);
   });
 
   // The task waits for it, so an offline pin is a note, never a block.

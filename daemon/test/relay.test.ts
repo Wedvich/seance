@@ -29,6 +29,7 @@ import {
   type SessionsResponse,
   type SpawnResponse,
 } from "@seance/shared";
+import type { SessionBackend } from "../src/backend.ts";
 import { createBackend } from "../src/backend-default.ts";
 import type { Config, TraitsConfig } from "../src/config.ts";
 import { MetricsStore, type Sample } from "../src/metrics-store.ts";
@@ -93,6 +94,7 @@ async function startTestDaemon(
     readonly home?: string;
     readonly extraRoots?: readonly string[];
     readonly traits?: TraitsConfig;
+    readonly backend?: SessionBackend;
   } = {},
 ): Promise<DaemonHandle> {
   const { spawnWaitMs = 700, extraRoots = [], traits, ...rest } = overrides;
@@ -786,6 +788,22 @@ describe("daemon ↔ relay integration", () => {
     }
   });
 
+  test("a daemon whose backend cannot despawn does not advertise the drain's session ask", async () => {
+    const relay = startTestRelay(TOKEN);
+    const full = createBackend(makeConfig(relay.url), { home: join(base, "home"), waitMs: 700 });
+    const daemon = await startTestDaemon(relay.url, {
+      backend: { spawn: full.spawn, sessions: full.sessions, doctor: full.doctor },
+    });
+    try {
+      const { info } = await registerWithRepo(relay, "myrepo");
+      expect(info.capabilities).toContain("drain");
+      expect(info.capabilities).not.toContain("drainAsk");
+    } finally {
+      daemon.stop();
+      relay.stop();
+    }
+  });
+
   test("the blob advertises metrics, and the op answers from what the telemetry tick stored", async () => {
     const relay = startTestRelay(TOKEN);
     const daemon = await startTestDaemon(relay.url);
@@ -811,6 +829,7 @@ describe("daemon ↔ relay integration", () => {
         "close",
         "drain",
         "drainPass",
+        "drainAsk",
       ]);
       // A status leaves only after its tick wrote the store, so one in hand
       // means there is history to ask for.

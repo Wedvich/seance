@@ -300,9 +300,12 @@ export function passCloseAudit(
 export function availabilityAudit(
   origin: SpawnOrigin,
   sink: AuditSink,
-): (opened: boolean | null, outcome: string) => Promise<void> {
-  return async (opened, outcome) => {
-    await sink(`audit availability origin=${origin} open=${opened === null ? "-" : String(opened)} outcome=${outcome}`);
+): (opened: boolean | null, outcome: string, now?: boolean) => Promise<void> {
+  return async (opened, outcome, now) => {
+    const nowNote = now === true ? " now=true" : "";
+    await sink(
+      `audit availability origin=${origin} open=${opened === null ? "-" : String(opened)} outcome=${outcome}${nowNote}`,
+    );
   };
 }
 
@@ -693,5 +696,18 @@ export function probeAudit(sink: AuditSink): ProbeAudit {
             : "";
       return emit(`op=result ${who(unit)} state=${outcome.state}${detail}`);
     },
+  };
+}
+
+/** The daemon typing its constant drain prompt or Esc into a pane of a closed machine (`drain-ask.ts`). */
+export type DrainOrigin = "drain";
+
+export type DrainAskOutcome = "typed" | "interrupted" | "skipped";
+
+/** One line per act, naming the task and what happened, never the text typed or a pane. */
+export function drainAskAudit(sink: AuditSink): (taskId: string, outcome: DrainAskOutcome) => Promise<void> {
+  const origin: DrainOrigin = "drain";
+  return async (taskId, outcome) => {
+    await sink(`audit drain origin=${origin} task=${quote(taskId)} outcome=${outcome}`);
   };
 }

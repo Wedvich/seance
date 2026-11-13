@@ -1233,6 +1233,115 @@ describe("the session's own pass", () => {
     expect(s.lines.join("\n")).not.toContain("done: a; left: b");
   });
 
+  describe("the drain mark", () => {
+    const marked = (record?: string) => ({ ...self(record), drain: true as const });
+    /** `a` reads closed since `NOW`, as its status carries `cl`. */
+    const close = (s: Setup): void => {
+      s.fleet.fleet = s.fleet.fleet.map((m) => (m.deviceId === "a" ? { ...m, status: status({ cl: NOW }) } : m));
+    };
+
+    test("from a machine whose status carries cl it writes trigger drain, keeps steer, and logs trigger=drain", async () => {
+      const s = setup([machine("a", { capabilities: SELF })]);
+      const old = await running(s, false, { autonomy: "steer" });
+      close(s);
+      const result = ok(await s.scheduler.pass(old.id, "session", marked("done: a")));
+      const successor = s.scheduler.task(result.successorId);
+      expect(successor?.spec).toMatchObject({ succeeds: { task: "old", trigger: "drain" }, autonomy: "steer" });
+      expect(successor?.spec.prompt).toContain("done: a");
+      expect(s.lines).toContain(`audit pass task="old" successor="${result.successorId}" trigger=drain`);
+      // Still the daemon's close at the turn's end, whatever the label.
+      expect(s.fleet.passCloses).toHaveLength(1);
+      expect(s.fleet.despawns).toEqual([]);
+    });
+
+    test("from a machine without cl it writes session", async () => {
+      const s = setup([machine("a", { capabilities: SELF })]);
+      const old = await running(s, false);
+      const result = ok(await s.scheduler.pass(old.id, "session", marked()));
+      expect(s.scheduler.task(result.successorId)?.spec.succeeds?.trigger).toBe("session");
+      expect(s.lines).toContain(`audit pass task="old" successor="${result.successorId}" trigger=session`);
+    });
+
+    test("an unmarked pass from a closed machine writes session, and keeps steer's checkpoint rule", async () => {
+      const s = setup([machine("a", { capabilities: SELF })]);
+      const old = await running(s, false, { autonomy: "steer" });
+      close(s);
+      const result = ok(await s.scheduler.pass(old.id, "session", self()));
+      const successor = s.scheduler.task(result.successorId);
+      expect(successor?.spec.succeeds?.trigger).toBe("session");
+      expect(successor?.spec.autonomy).toBe("checkpoint");
+    });
+
+    test("a session pass that joined an outside pass refused before its create runs as its own, with its record", async () => {
+      const s = setup([machine("a", { capabilities: [...SELF] })]);
+      const old = await running(s, false);
+      close(s);
+      const gate = Promise.withResolvers<void>();
+      s.fleet.pushReply = async () => {
+        await gate.promise;
+        return { ok: false, code: "dirty_worktree", message: "no" };
+      };
+      const outside = s.scheduler.pass(old.id, "drain");
+      const session = s.scheduler.pass(old.id, "session", marked("the session's record"));
+      gate.resolve();
+      expect(await outside).toEqual({ ok: false, code: "dirty_worktree" });
+      const result = ok(await session);
+      expect(s.creates).toHaveLength(1);
+      const successor = s.scheduler.task(result.successorId);
+      expect(successor?.spec.prompt).toContain("the session's record");
+      expect(successor?.spec.succeeds?.trigger).toBe("drain");
+      expect(s.lines).toContain(`pass joined task="old"`);
+    });
+
+    test("one that joined an outside pass that succeeded is answered with its result, nothing duplicated", async () => {
+      const s = setup([machine("a", { capabilities: [...SELF] })]);
+      const old = await running(s, false);
+      const gate = Promise.withResolvers<void>();
+      const answer = s.fleet.pushReply;
+      s.fleet.pushReply = async (request) => {
+        await gate.promise;
+        return answer(request);
+      };
+      const outside = s.scheduler.pass(old.id);
+      const session = s.scheduler.pass(old.id, "session", self("late"));
+      gate.resolve();
+      expect(ok(await session).successorId).toBe(ok(await outside).successorId);
+      expect(s.creates).toHaveLength(1);
+    });
+
+    test("a session pass joining a refused manual pass is answered with that refusal, never re-run", async () => {
+      const s = setup([machine("a", { capabilities: [...SELF] })]);
+      const old = await running(s, false);
+      const gate = Promise.withResolvers<void>();
+      s.fleet.pushReply = async () => {
+        await gate.promise;
+        return { ok: false, code: "dirty_worktree", message: "no" };
+      };
+      const manual = s.scheduler.pass(old.id);
+      const session = s.scheduler.pass(old.id, "session", self("the record"));
+      gate.resolve();
+      expect(await manual).toEqual({ ok: false, code: "dirty_worktree" });
+      expect(await session).toEqual({ ok: false, code: "dirty_worktree" });
+      expect(s.creates).toEqual([]);
+    });
+
+    test("a manual pass joined by another manual pass still returns the joined result, refusals included", async () => {
+      const s = setup();
+      const old = await running(s, false);
+      const gate = Promise.withResolvers<void>();
+      s.fleet.pushReply = async () => {
+        await gate.promise;
+        return { ok: false, code: "dirty_worktree", message: "no" };
+      };
+      const first = s.scheduler.pass(old.id);
+      const second = s.scheduler.pass(old.id);
+      gate.resolve();
+      expect(await first).toMatchObject({ ok: false, code: "dirty_worktree" });
+      expect(await second).toMatchObject({ ok: false, code: "dirty_worktree" });
+      expect(s.fleet.pushes).toHaveLength(1);
+    });
+  });
+
   test("the session's end settles the old task superseded and releases the successor", async () => {
     const s = setup([machine("a", { capabilities: SELF })]);
     const old = await running(s, false);
@@ -1327,6 +1436,49 @@ describe("the session's own pass", () => {
   });
 
   describe("the close the daemon was asked for", () => {
+    const closed = (s: Setup): void => {
+      s.fleet.fleet = s.fleet.fleet.map((m) => ({ ...m, status: status({ cl: NOW }) }));
+    };
+    const takeover = async (s: Setup): Promise<Scheduler> => {
+      const next = new Scheduler({
+        store: readerChecked(s.store, () => s.clock.now),
+        fleet: s.fleet,
+        now: () => s.clock.now,
+      });
+      await next.takeover();
+      return next;
+    };
+
+    test("a drain-marked pass on a drainAsk machine is asked again by a takeover and given the grace", async () => {
+      const s = setup([machine("a", { capabilities: [...SELF, CAPABILITIES.drainAsk] })]);
+      const old = await running(s, false);
+      closed(s);
+      const result = ok(await s.scheduler.pass(old.id, "session", { ...self(), drain: true as const }));
+      expect(s.scheduler.task(result.successorId)?.spec.succeeds?.trigger).toBe("drain");
+      expect(s.fleet.passCloses).toHaveLength(1);
+      const next = await takeover(s);
+      await tick(next);
+      expect(s.fleet.passCloses).toHaveLength(2);
+      expect(s.fleet.despawns).toEqual([]);
+      expect(next.task(old.id)?.state).toBe("running");
+      s.clock.now += PASS_CLOSE_GRACE_MS + 1;
+      await tick(next);
+      expect(next.task(old.id)?.state).toBe("superseded");
+      expect(s.fleet.despawns).toHaveLength(1);
+    });
+
+    test("without drainAsk the drain successor is closed at once, as an outside pass is", async () => {
+      const s = setup([machine("a", { capabilities: SELF })]);
+      const old = await running(s, false);
+      closed(s);
+      ok(await s.scheduler.pass(old.id, "session", { ...self(), drain: true as const }));
+      const next = await takeover(s);
+      await tick(next);
+      expect(s.fleet.passCloses).toHaveLength(1);
+      expect(s.fleet.despawns).toHaveLength(1);
+      expect(next.task(old.id)?.state).toBe("superseded");
+    });
+
     test("a daemon that never answers leaves the pass committed, and the deadline closes it through the leader", async () => {
       const s = setup([machine("a", { capabilities: SELF })]);
       const old = await running(s, false);
@@ -2108,6 +2260,49 @@ describe("the drain pass", () => {
     expect(manual.scheduler.task(result.successorId)?.spec.autonomy).toBe("checkpoint");
   });
 
+  test("a drain-marked session pass in flight is joined, not duplicated, by the drain's own pass", async () => {
+    const s = setup([machine("a", { capabilities: [...CAPABLE, CAPABILITIES.successorSelf] })]);
+    await running(s, true);
+    close(s, "a");
+    later(s, WAIT);
+    const gate = Promise.withResolvers<void>();
+    const made = s.create;
+    s.create = async (task) => {
+      await gate.promise;
+      return made(task);
+    };
+    const session = s.scheduler.pass("old", "session", { from: "a", pushed: PUSHED, drain: true });
+    await tick(s.scheduler);
+    expect(s.fleet.pushes).toEqual([]);
+    gate.resolve();
+    const result = ok(await session);
+    expect(s.creates).toHaveLength(1);
+    expect(s.scheduler.task(result.successorId)?.spec.succeeds?.trigger).toBe("drain");
+  });
+
+  test("a refusal of the drain's own pass is not stamped when a session's pass joined it and lands", async () => {
+    const s = setup([machine("a", { capabilities: [...CAPABLE, CAPABILITIES.successorSelf] })]);
+    await running(s, true);
+    close(s, "a");
+    later(s, WAIT);
+    const gate = Promise.withResolvers<void>();
+    s.fleet.pushReply = async () => {
+      await gate.promise;
+      return { ok: false, code: "dirty_worktree", message: "no" };
+    };
+    await s.scheduler.tick();
+    // The pass is detached from the tick: wait for it to be out at the machine.
+    for (let i = 0; i < 200 && s.fleet.pushes.length === 0; i += 1) await Bun.sleep(1);
+    expect(s.fleet.pushes).toHaveLength(1);
+    const session = s.scheduler.pass("old", "session", { from: "a", pushed: PUSHED, drain: true });
+    gate.resolve();
+    const result = ok(await session);
+    await s.scheduler.drain();
+    expect(s.scheduler.task(result.successorId)?.spec.succeeds?.trigger).toBe("drain");
+    expect(s.scheduler.task("old")?.drained?.refused).toBeUndefined();
+    expect(s.creates).toHaveLength(1);
+  });
+
   test("a needs-input task is passed by the drain, and still refused a manual pass", async () => {
     const s = setup();
     const old = await running(s, true);
@@ -2196,6 +2391,40 @@ describe("the drain pass", () => {
     await tick(s.scheduler);
     expect(s.creates).toHaveLength(1);
     expect(s.fleet.pushes).toHaveLength(1);
+  });
+
+  test("a conflict after the create is held even when a session's pass joined: one successor", async () => {
+    const s = setup([
+      machine("a", { capabilities: [...CAPABLE, CAPABILITIES.successorSelf] }),
+      machine("b", { capabilities: CAPABLE }),
+    ]);
+    await running(s, true);
+    const gate = Promise.withResolvers<void>();
+    let creating = false;
+    const made = s.create;
+    s.create = async (task) => {
+      creating = true;
+      await gate.promise;
+      const result = await made(task);
+      // Moved under the pass between the create and its commit.
+      s.create = made;
+      await placeOn(s, "b");
+      return result;
+    };
+    close(s, "a");
+    later(s, WAIT);
+    await s.scheduler.tick();
+    await until(() => creating);
+    const session = s.scheduler.pass("old", "session", { from: "a", pushed: PUSHED, drain: true });
+    gate.resolve();
+    expect(await session).toMatchObject({ ok: false, code: "conflict" });
+    await s.scheduler.drain();
+    expect(s.creates).toHaveLength(1);
+    await placeOn(s, "a");
+    expect(s.scheduler.task("old")?.drained?.held).toBe(true);
+    later(s, 10 * RETRY);
+    await tick(s.scheduler);
+    expect(s.creates).toHaveLength(1);
   });
 
   test("a conflict before the create is retried after the retry wait", async () => {

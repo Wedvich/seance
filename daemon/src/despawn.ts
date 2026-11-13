@@ -8,13 +8,13 @@ import { tmux } from "./tmux.ts";
  * `-t` would also resolve `main:1.0`, `{marked}` or `=name`, none of which a
  * session list ever handed out.
  */
-const PANE_ID = /^%\d+$/u;
+export const PANE_ID = /^%\d+$/u;
 
 const DEFAULT_GRACE_MS = 5_000;
 /** How long a killed pane's processes get to exit on their own, and again after SIGTERM. */
 const DEFAULT_REAP_WAIT_MS = 2_000;
 /** Between keys: an ESC chased too closely by the next key reads as one Alt chord. */
-const KEY_GAP_MS = 150;
+export const KEY_GAP_MS = 150;
 const POLL_MS = 100;
 
 export interface DespawnOptions {

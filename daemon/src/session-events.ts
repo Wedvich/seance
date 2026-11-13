@@ -518,6 +518,17 @@ export class EndedTasks {
     return { code: note?.path === undefined || note.repo === undefined ? "here" : "unrecorded" };
   }
 
+  /**
+   * Whether the drain ask may type into this task's pane: a worktree launch this ledger holds (`passSite`),
+   * not yet reported done (a pass would be refused `not_running`) and not being closed here (`closedHere`:
+   * a close's own keys are going in).
+   */
+  askable(taskId: string): boolean {
+    if (!("site" in this.passSite(taskId))) return false;
+    const note = this.#ledger.notes().find((n) => n.taskId === taskId);
+    return note?.reported !== true && note?.closedHere !== true;
+  }
+
   /** Whether this launch noted a PR (`handoffCheck`'s lookup, a continuation's or successor's inherited one included), for a pass: a branch with no upstream then has to be the PR's. */
   hasPr(taskId: string): boolean {
     const note = this.#ledger.notes().find((n) => n.taskId === taskId);
@@ -809,6 +820,22 @@ export interface SessionEventDeps {
   /** How long a hand-off waits for a PR URL still on its way from the mod; `HANDOFF_PR_WAIT_MS` unless a test shortens it. */
   readonly handoffPrWaitMs?: number;
   /**
+   * Every bound, tasked event's state, after its marks are handled; the drain ask times its keys by it. It sees
+   * the pane's binding, never a frame field but the state. `reason` is the frame's kept reason (beside
+   * needs-input only); `closing` is true when this very frame started a hand-off or pass close for the pane
+   * (its mark was consumed here), so the drain drops its entry.
+   */
+  readonly onState?: (
+    pane: string,
+    taskId: string,
+    state: SessionState,
+    turnEnded: boolean,
+    reason: NeedsInputReason | undefined,
+    closing: boolean,
+  ) => void;
+  /** True while this machine is closed: a pass sent then carries `drain`. */
+  readonly drainMark?: () => boolean;
+  /**
    * A session's own pass (`pass_to_successor`), all of it the host's: the push the pass asks for (audited under
    * its own origin), the report to the scheduler, and the close at a turn's end, which only
    * `armPassClose` lets run. Absent, a pass is answered `unsupported`.
@@ -832,6 +859,12 @@ export interface SessionEvents {
    * `taskId` may be closed at its turn's end. Answers at once and never waits for the close.
    */
   readonly armPassClose: (taskId: string) => Promise<PassCloseResponse>;
+  /**
+   * Whether the pane holds a hand-off or pass mark, or its close for one has started and not settled: the
+   * mark is consumed before the despawn writes `closedHere`, so this covers that gap. The drain never types
+   * into such a pane (one close per pane; two C-c exit Claude Code).
+   */
+  readonly marked: (pane: string) => boolean;
   readonly stop: () => void;
 }
 
@@ -853,6 +886,16 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
    * a pass the leader refused never closes the session and a turn begun after an unconfirmed one is never cut.
    */
   const passes = new Map<string, { readonly taskId: string; confirmed: boolean; turnEnded: boolean }>();
+  /** Panes whose hand-off or pass close was started and has not settled. */
+  const closing = new Set<string>();
+  const startClose = (pane: string, run: Promise<void> | undefined): void => {
+    if (run === undefined) return;
+    closing.add(pane);
+    const settled = (): void => {
+      closing.delete(pane);
+    };
+    run.then(settled, settled);
+  };
   const prWaitMs = deps.handoffPrWaitMs ?? HANDOFF_PR_WAIT_MS;
   let stopped = false;
   const isStopped = (): boolean => stopped;
@@ -927,6 +970,7 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
         tip: pushed.tip,
         record,
         at: now(),
+        ...(deps.drainMark?.() === true ? { drain: true as const } : {}),
       })
       .catch((): boolean => false);
     if (!sent) {
@@ -951,7 +995,7 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
     entry.confirmed = true;
     if (entry.turnEnded) {
       passes.delete(pane.id);
-      void deps.pass?.close(pane.id, taskId);
+      startClose(pane.id, deps.pass?.close(pane.id, taskId));
     }
     return { ok: true };
   };
@@ -1075,9 +1119,13 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
       // hooks-worker respawn mid-turn would close the session before its final message.
       const handedOff = handoffs.get(pane.id);
       const turnEnd = frame.state === "idle" && frame.turnEnded === true;
+      let closingNow = false;
       if (handedOff !== undefined && (frame.state === "ended" || turnEnd || handedOff !== pane.taskId)) {
         handoffs.delete(pane.id);
-        if (turnEnd && handedOff === pane.taskId) void deps.handOff?.(pane.id, handedOff);
+        if (turnEnd && handedOff === pane.taskId) {
+          closingNow = true;
+          startClose(pane.id, deps.handOff?.(pane.id, handedOff));
+        }
       }
       const passed = passes.get(pane.id);
       if (passed !== undefined) {
@@ -1087,20 +1135,31 @@ export function createSessionEvents(deps: SessionEventDeps): SessionEvents {
           if (!passed.confirmed) passed.turnEnded = true;
           else {
             passes.delete(pane.id);
-            void deps.pass?.close(pane.id, passed.taskId);
+            closingNow = true;
+            startClose(pane.id, deps.pass?.close(pane.id, passed.taskId));
           }
         } else if (frame.state === "busy" || frame.state === "needs-input") {
           passed.turnEnded = false;
         }
       }
+      deps.onState?.(
+        pane.id,
+        pane.taskId,
+        frame.state,
+        turnEnd,
+        frame.state === "needs-input" ? frame.reason : undefined,
+        closingNow,
+      );
       // Forwarded either way: only the proof that survives a restart is missing.
       return reported === "unwritten" ? { ok: false, code: "unwritten" } : { ok: true };
     },
     armPassClose,
+    marked: (pane): boolean => handoffs.has(pane) || passes.has(pane) || closing.has(pane),
     stop: (): void => {
       stopped = true;
       handoffs.clear();
       passes.clear();
+      closing.clear();
       for (const box of outboxes.values()) if (box.timer !== null) clearTimeout(box.timer);
       outboxes.clear();
     },

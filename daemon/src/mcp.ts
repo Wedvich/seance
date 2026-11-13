@@ -1600,16 +1600,28 @@ export function buildMcpServer(
     {
       title: "Close or reopen a machine",
       description:
-        "Close a machine to new scheduled work, or reopen it. A closed machine takes no task from the scheduler (auto, pinned, run-now, continuations); the scheduler's leader passes its running tasks to other machines after 10 minutes unless it is reopened (pushing each one's branch and ending its session; a task run in place, a session that isn't a task, or a pass refused is left, and list_machines' drain field shows them), and a direct spawn still runs. Closing needs the scheduler's leader to support it. Goes over the relay as an app-role client, this machine included, so a box whose key is service-delivered cannot send it: use the PWA's Machines screen there.",
+        "Close a machine to new scheduled work, or reopen it. A closed machine takes no task from the scheduler (auto, pinned, run-now, continuations); the scheduler's leader passes its running tasks to other machines after 10 minutes unless it is reopened (pushing each one's branch and ending its session; a task run in place, a session that isn't a task, or a pass refused is left, and list_machines' drain field shows them), and a direct spawn still runs. Closing needs the scheduler's leader to support it. A machine whose daemon supports it also asks each running session to commit and pass itself at its next pause, interrupting a turn still running after 5 minutes; `now` (closing only, a machine advertising drain-now) interrupts its sessions at once instead of after 5 minutes, and a session waiting on the person has its question dismissed. Goes over the relay as an app-role client, this machine included, so a box whose key is service-delivered cannot send it: use the PWA's Machines screen there.",
       inputSchema: z.strictObject({
         machine: z.string().describe("Machine name (or deviceId) from list_machines"),
         open: z.boolean().describe("false closes it to new scheduled work; true reopens it"),
+        now: z
+          .boolean()
+          .optional()
+          .describe(
+            "closing only: interrupt its sessions at once instead of after 5 minutes (a machine advertising drain-now)",
+          ),
       }),
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
-    async ({ machine, open }) =>
+    async ({ machine, open, now }) =>
       withFleet(async (lease) => {
-        const outcome = await setMachineOpen({ ref: machine, selfId: null, open, lease });
+        const outcome = await setMachineOpen({
+          ref: machine,
+          selfId: null,
+          open,
+          ...(now === undefined ? {} : { now }),
+          lease,
+        });
         return outcome.ok ? textResult(outcome.text) : errorResult(outcome.text);
       }),
   );

@@ -624,6 +624,9 @@ describe("the session's own pass on the wire", () => {
     expect(parseSessionPass({ ...pass, record: "x".repeat(SUCCESSOR_RECORD_MAX) })?.record).toHaveLength(
       SUCCESSOR_RECORD_MAX,
     );
+    // The drain mark only chooses a trigger label: kept as `true`, dropped otherwise, the frame never nulled.
+    expect(parseSessionPass({ ...pass, drain: true })).toEqual({ ...pass, drain: true });
+    for (const drain of ["yes", 1, false, null]) expect(parseSessionPass({ ...pass, drain })).toEqual(pass);
     // The same bound the daemon holds the frame to, counted in UTF-16 units: an over-long one is refused whole.
     for (const bad of [
       { ...pass, record: "x".repeat(SUCCESSOR_RECORD_MAX + 1) },

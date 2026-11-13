@@ -1,6 +1,6 @@
 import type { RepoEntry } from "@seance/shared";
 import { attachmentsRoot } from "./attachments.ts";
-import { daemonSink, pushAudit, reapAudit } from "./audit.ts";
+import { daemonSink, drainAskAudit, pushAudit, reapAudit } from "./audit.ts";
 import type { SessionBackend } from "./backend.ts";
 import { createBranchStates, type BranchStateDeps } from "./branch-state.ts";
 import { brokerRelay, createBroker } from "./broker.ts";
@@ -8,6 +8,7 @@ import { REAP_DEFAULTS, type Config, type ResolvedPsk } from "./config.ts";
 import type { AuthHealth } from "./auth-health.ts";
 import type { ExclaveScan } from "./exclaves.ts";
 import { platformFsmonitor } from "./fsmonitor.ts";
+import { createDrainAsk, drainInputShows, sendKeys, type DrainAsk } from "./drain-ask.ts";
 import { pushForTask } from "./handlers.ts";
 import { createHandOff, createPassClose } from "./handoff.ts";
 import { sourceOf, type Leader } from "./leader.ts";
@@ -59,6 +60,8 @@ export interface WiringCtx {
   /** Persists `lastReapAt` through the daemon's one `state`. */
   readonly reaped: (at: number) => Promise<void>;
   readonly stopped: () => boolean;
+  /** This machine's `cl`, or null while open (`closedOf(state)`): a session pass sent then carries `drain`. */
+  readonly closed: () => number | null;
   readonly now: () => number;
   /** The outbound HTTP seam, for a capability that polls or pushes (M4). */
   readonly httpFetch: Fetch;
@@ -75,6 +78,8 @@ export interface Started {
   readonly local?: LocalSurfaces;
   /** The leader's `pass-close`, once session events run: the handler context reads it late (`run.ts`). */
   readonly armPassClose?: SessionEvents["armPassClose"];
+  /** The drain's session ask, once session events run: `run.ts`'s availability reads it late. */
+  readonly drainAsk?: DrainAsk;
 }
 
 /** One optional subsystem `startDaemon` wires once the relay client exists. */
@@ -116,6 +121,21 @@ const sessionEvents: DaemonCapability = (ctx) => {
     });
   }
   const { despawn } = ctx.backend;
+  // Without a despawn nothing could close a passed session, so no ask is wired (as for the pass itself).
+  // `events` is built from the ask's own `observe`, and the ask reads its `marked`: bound late.
+  const late: { events?: SessionEvents } = {};
+  const drainAsk =
+    despawn === undefined
+      ? undefined
+      : createDrainAsk({
+          closed: ctx.closed,
+          panes: listPanePids,
+          askable: (taskId) => ctx.endedTasks.askable(taskId),
+          marked: (pane) => late.events?.marked(pane) ?? false,
+          keys: sendKeys,
+          inputShows: drainInputShows,
+          audit: drainAskAudit(daemonSink),
+        });
   const events = createSessionEvents({
     panes: listPanePids,
     exclaves: () => ctx.exclaveScan().exclaves,
@@ -170,8 +190,19 @@ const sessionEvents: DaemonCapability = (ctx) => {
         }),
     // Activity is when a reading matters; the refresh spawns only if it is stale.
     onActivity: (exclave) => ctx.usageRefresh?.poke(exclave),
+    ...(drainAsk === undefined ? {} : { onState: drainAsk.observe, drainMark: (): boolean => ctx.closed() !== null }),
   });
-  return { stop: events.stop, local: { sessionEvents: events.handle }, armPassClose: events.armPassClose };
+  late.events = events;
+  drainAsk?.start();
+  return {
+    stop: (): void => {
+      drainAsk?.stop();
+      events.stop();
+    },
+    local: { sessionEvents: events.handle },
+    armPassClose: events.armPassClose,
+    ...(drainAsk === undefined ? {} : { drainAsk }),
+  };
 };
 
 /** Auth health's timer: the first walk runs at once, then every minute. Its `stop` waits for a read in flight. */
@@ -291,6 +322,7 @@ export const DAEMON_CAPABILITIES: readonly DaemonCapability[] = [
 
 export interface StartedCapabilities {
   readonly armPassClose?: SessionEvents["armPassClose"];
+  readonly drainAsk?: DrainAsk;
   readonly local: LocalSurfaces;
   readonly stop: () => void;
 }
@@ -308,13 +340,20 @@ export function startEach<C>(ctx: C, capabilities: readonly ((ctx: C) => Started
   try {
     let local: LocalSurfaces = {};
     let armPassClose: Started["armPassClose"];
+    let drainAsk: Started["drainAsk"];
     for (const capability of capabilities) {
       const entry = capability(ctx);
       started.push(entry);
       local = mergeSurfaces(local, entry);
       armPassClose ??= entry.armPassClose;
+      drainAsk ??= entry.drainAsk;
     }
-    return { local, stop, ...(armPassClose === undefined ? {} : { armPassClose }) };
+    return {
+      local,
+      stop,
+      ...(armPassClose === undefined ? {} : { armPassClose }),
+      ...(drainAsk === undefined ? {} : { drainAsk }),
+    };
   } catch (err) {
     // Already-started ones hold timers and sockets nothing else will stop.
     stop();
