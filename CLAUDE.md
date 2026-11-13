@@ -49,6 +49,11 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   away: update, restart, reboot, shutdown, sleep, unknown), how the relay keeps it, what clients
   and the leader do with it, macOS sleep/DarkWake, and the shutdown drain on a dying box. Read it
   before touching shutdown, presence or the systemd unit.
+- **docs/messaging.md** — spec, nothing built: session-to-session messages (note, question,
+  request) addressed by task id, delivered by the `inbox` mod over new local-socket frame kinds
+  bound by peer pid, routed across machines through the leader, and the local adapter seam. Read it
+  before adding a local-socket frame kind, a mod that delivers text into a session, or a leader
+  event op.
 
 Like DESIGN.md, the docs/ files are part of the record: a change that alters behavior they describe
 updates them in the same commit. They are not auto-discovered — this list is how sessions find them.
