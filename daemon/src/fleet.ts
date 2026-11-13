@@ -11,6 +11,7 @@ import {
   type ErrorResponse,
   type Machine,
   type QueueReply,
+  type QueueRequest,
   type SchedulerAvailability,
   type StoreRefusal,
   type Task,
@@ -68,7 +69,8 @@ export interface SchedulerLeg {
   readonly staleDaemonRequires?: string;
   readonly enqueue: (task: Task) => Promise<TaskCreated | StoreRefusal | null>;
   readonly availability: () => SchedulerAvailability;
-  readonly queue: () => Promise<QueueReply | null>;
+  /** `request.tasks` narrows the reply to those ids; the broker leg carries no request and answers its newest. */
+  readonly queue: (request?: QueueRequest) => Promise<QueueReply | null>;
   readonly cancel: (taskId: string) => Promise<TaskReply | null>;
   /** `run-now`: only to a leader advertising `CAPABILITIES.runNow`, which the caller checks. */
   readonly runNow: (taskId: string) => Promise<TaskReply | null>;
@@ -129,7 +131,7 @@ export function relayFleet(relay: LazyRelay): Fleet {
         scheduler: {
           enqueue: (task) => client.createTask(task),
           availability: () => client.getState().scheduler,
-          queue: () => client.queue(),
+          queue: (request) => client.queue(request),
           cancel: (taskId) => client.cancel(taskId),
           runNow: (taskId) => client.runNow(taskId),
           pass: (taskId) => client.pass(taskId),

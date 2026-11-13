@@ -46,12 +46,15 @@ import {
   type RepoEntry,
   type RequestOp,
   type SchedulerAvailability,
+  type DrainView,
   type SessionsResponse,
   type SpawnClient,
   type Task,
   type TaskDep,
   type TaskUntil,
   closedAt,
+  drainStuckText,
+  drainView,
   exclaveAuth,
   exclaveTraitHealth,
   exclaveTraitUnchecked,
@@ -60,7 +63,7 @@ import {
 } from "@seance/shared";
 import { appRelayClient, importAppKeys, LazyRelay, type AppKeys } from "./app-relay.ts";
 import { cliSink, traitRefusalAudit, type AuditSink } from "./audit.ts";
-import { setMachineOpen } from "./availability-client.ts";
+import { queueTasksFor, setMachineOpen } from "./availability-client.ts";
 import {
   continueAuto,
   enqueueAuto,
@@ -300,12 +303,56 @@ async function accountNames(
   return { known, aliases: await accountAliases(lease, ids) };
 }
 
+/**
+ * What each closed machine's drain has done (`drainView`), read only while a machine is closed and only
+ * under a leader that advertises `drainPass`: one queue read and one `sessions` read per closed, connected
+ * machine. This box's own sessions come from its local daemon (a brokered request aimed at the broker's own
+ * machine is refused `self_target`). A queue read that fails yields nothing, never a guessed view; sessions
+ * that cannot be read leave `empty` null.
+ */
+async function readDrains(
+  lease: FleetLease,
+  local: LocalMachine | null,
+  scheduler: SchedulerAvailability | null,
+): Promise<ReadonlyMap<string, DrainView>> {
+  const views = new Map<string, DrainView>();
+  const leg = lease.scheduler;
+  if (leg === null || scheduler === null || !advertises(lease.machines, scheduler, CAPABILITIES.drainPass)) {
+    return views;
+  }
+  const closed = lease.machines.filter((m) => closedAt(m) !== null);
+  if (closed.length === 0) return views;
+  const readSessions = async (machine: Machine): Promise<SessionsResponse | null> => {
+    if (!machine.connected) return null;
+    try {
+      const reply =
+        local !== null && machine.deviceId === local.deviceId
+          ? await local.request<SessionsResponse>("sessions", {})
+          : await lease.request<SessionsResponse>(machine.deviceId, "sessions", {});
+      return "ok" in reply ? null : reply;
+    } catch {
+      return null;
+    }
+  };
+  const sessions = await Promise.all(closed.map(readSessions));
+  const paneTaskIds = sessions.flatMap((reply) =>
+    (reply?.sessions ?? []).flatMap((s) => (s.taskId === undefined ? [] : [s.taskId])),
+  );
+  const tasks = await queueTasksFor(leg, paneTaskIds);
+  if (tasks === null) return views;
+  closed.forEach((machine, index) => {
+    views.set(machine.deviceId, drainView(machine, tasks, sessions[index]?.sessions ?? null));
+  });
+  return views;
+}
+
 function describeMachine(
   machine: Machine,
   local: LocalMachine | null,
   scheduler: SchedulerAvailability | null,
   names: AccountNames,
   now: number,
+  drain?: DrainView,
 ): Record<string, unknown> {
   // Null when this transport has no view of the scheduler at all (a broker daemon that predates brokered scheduler access).
   const role = scheduler === null ? null : schedulerRole(machine.deviceId, scheduler);
@@ -349,6 +396,20 @@ function describeMachine(
     local: local !== null && machine.deviceId === local.deviceId,
     // When a person closed it to new scheduled work, from its newest status; null while open.
     closed: closedMs === null ? null : new Date(closedMs).toISOString(),
+    ...(drain === undefined
+      ? {}
+      : {
+          drain: {
+            moving: drain.moving.length,
+            waitingOnYou: drain.moving.filter((m) => m.waitingOnYou).length,
+            moved: drain.moved.length,
+            stuck: drain.stuck.map((s) => ({
+              ...(s.taskId === undefined ? {} : { taskId: s.taskId }),
+              reason: drainStuckText(s),
+            })),
+            empty: drain.empty,
+          },
+        }),
     ...(role === null ? {} : { scheduler: role }),
     ...(source === undefined
       ? {}
@@ -916,7 +977,7 @@ export function buildMcpServer(
     {
       title: "List machines",
       description:
-        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any, plus `account`, the name every Séance client shows for it (its alias where one is set, else the email, else a short id; tagged where two accounts would read alike; no alias on a box whose daemon brokers for it, with no readable PSK) — a display name only, never a value for pin.account — and `alias` where one is set: a spawn's pin.account takes the `accountId`, the `email` or the `alias`, not `account`; a machine with the field absent or empty reports none, so the scheduler cannot place there until its daemon updates. Each signed-in exclave's `auth` is `expired` (its login needs /login; the scheduler does not place there), `expiring` (within 3 days, with `loginExpiresAt`; still placed), `ok`, or `unknown` (not read, or the machine is asleep or its daemon older; still placed). Offline machines are listed with their last-seen time: `lastSeen` is when the machine was last heard from (its last register or status beat, whichever is later). `closed` is when a person closed the machine to new scheduled work (null when open). `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that every spawn goes through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue, cancel_task, start_task and pass_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
+        "List the dev machines registered with the Séance relay: name, platform, connectivity, and the repos each one can spawn a Claude Code session in. `exclaves` are its exclaves (the accounts' homes): each one's id, and the accountId and email of the Claude account signed in there, if any, plus `account`, the name every Séance client shows for it (its alias where one is set, else the email, else a short id; tagged where two accounts would read alike; no alias on a box whose daemon brokers for it, with no readable PSK) — a display name only, never a value for pin.account — and `alias` where one is set: a spawn's pin.account takes the `accountId`, the `email` or the `alias`, not `account`; a machine with the field absent or empty reports none, so the scheduler cannot place there until its daemon updates. Each signed-in exclave's `auth` is `expired` (its login needs /login; the scheduler does not place there), `expiring` (within 3 days, with `loginExpiresAt`; still placed), `ok`, or `unknown` (not read, or the machine is asleep or its daemon older; still placed). Offline machines are listed with their last-seen time: `lastSeen` is when the machine was last heard from (its last register or status beat, whichever is later). `closed` is when a person closed the machine to new scheduled work (null when open). On a closed machine, under a leader that drains closed machines, `drain` says how that is going: `moving` tasks still being passed to other machines (`waitingOnYou` of them waiting on a person), `moved` successors created, `stuck` what the drain cannot move or was refused, each with a reason, and `empty`, whether no session is left on it (null when its sessions could not be read). `source` is the build a machine's daemon runs (sha, commit time, branch) and `lastUpdate` its last reported self-update attempt, with when it ran (a skipped_* or *_failed outcome is replaced by `current` once a later check finds the machine up to date). `scheduler: \"leader\"` marks the verified scheduler leader that every spawn goes through; `\"unverified\"` marks a nominee that has not proven it holds this fleet's key, so get_queue, cancel_task, start_task and pass_task refuse to ask it; no mark on any entry means no verified leader, or that this machine's daemon could not say (older, or restarting).",
       inputSchema: NO_INPUT,
       annotations: { readOnlyHint: true },
     },
@@ -941,7 +1002,10 @@ export function buildMcpServer(
       try {
         const scheduler = lease.scheduler?.availability() ?? null;
         const names = await accountNames(lease);
-        const machines = lease.machines.map((machine) => describeMachine(machine, local, scheduler, names, Date.now()));
+        const drains = await readDrains(lease, local, scheduler);
+        const machines = lease.machines.map((machine) =>
+          describeMachine(machine, local, scheduler, names, Date.now(), drains.get(machine.deviceId)),
+        );
         return textResult(JSON.stringify(machines, null, 2));
       } finally {
         lease.release();
@@ -1536,7 +1600,7 @@ export function buildMcpServer(
     {
       title: "Close or reopen a machine",
       description:
-        "Close a machine to new scheduled work, or reopen it. A closed machine takes no task from the scheduler (auto, pinned, run-now, continuations); running sessions finish where they are, and a direct spawn still runs. Closing needs the scheduler's leader to support it. Goes over the relay as an app-role client, this machine included, so a box whose key is service-delivered cannot send it: use the PWA's Machines screen there.",
+        "Close a machine to new scheduled work, or reopen it. A closed machine takes no task from the scheduler (auto, pinned, run-now, continuations); the scheduler's leader passes its running tasks to other machines after 10 minutes unless it is reopened (pushing each one's branch and ending its session; a task run in place, a session that isn't a task, or a pass refused is left, and list_machines' drain field shows them), and a direct spawn still runs. Closing needs the scheduler's leader to support it. Goes over the relay as an app-role client, this machine included, so a box whose key is service-delivered cannot send it: use the PWA's Machines screen there.",
       inputSchema: z.strictObject({
         machine: z.string().describe("Machine name (or deviceId) from list_machines"),
         open: z.boolean().describe("false closes it to new scheduled work; true reopens it"),

@@ -140,7 +140,7 @@ export function fakeRelay(
       if (reply instanceof Error) throw reply;
       return reply;
     },
-    queue: () => schedule<QueueReply | null>("queue", {}),
+    queue: (request = {}) => schedule<QueueReply | null>("queue", request),
     cancel: (taskId) => schedule<TaskReply | null>("cancel", { taskId }),
     runNow: (taskId) => schedule<TaskReply | null>("run-now", { taskId }),
     pass: (taskId) => schedule<PassReply | null>("pass", { taskId }),

@@ -339,6 +339,7 @@ export async function startDaemon(opts: RunOpts = {}): Promise<DaemonHandle> {
         CAPABILITIES.amend,
         CAPABILITIES.close,
         CAPABILITIES.drain,
+        CAPABILITIES.drainPass,
         ...(authHealth === null ? [] : [CAPABILITIES.authHealth]),
       ],
     };
