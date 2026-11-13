@@ -1558,6 +1558,18 @@ describe("store", () => {
     expect(await sealedLength(waiting)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
   });
 
+  test("a running record carrying its idle release stamp, the deviceId at its bound, fits beside eight candidates", async () => {
+    const { failure: _failure, ...unfailed } = written;
+    const running: Task = {
+      ...unfailed,
+      state: "running",
+      idleRelease: { since: 1_760_000_000_000, deviceId: "d".repeat(ROUTING_ID_MAX_LENGTH) },
+      decision: { at: 1_760_000_000_000, chosen: target, candidates: Array.from({ length: 8 }, () => candidate) },
+    };
+    expect(parseTask(running)).toEqual(running);
+    expect(await sealedLength(running)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
+  });
+
   test("a PR list at its bound, its primary as prUrl, costs no more than a prUrl at its own: the same record fits", async () => {
     const each = TASK_PRS_MAX_LENGTH / TASK_PRS_MAX;
     const prs = Array.from({ length: TASK_PRS_MAX }, (_, i) => ({

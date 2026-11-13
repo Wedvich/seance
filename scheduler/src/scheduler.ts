@@ -96,6 +96,8 @@ export const SCHEDULER_CLIENT = "scheduler";
  * worked off a few at a time.
  */
 const LEAN_PER_PASS = 8;
+/** How long a stamp write the store refused outright waits before `#stampIdle` tries it again. */
+const STAMP_RETRY_MS = 5 * 60_000;
 
 export interface SchedulerOptions {
   readonly store: QueueStore;
@@ -311,6 +313,8 @@ export class Scheduler {
    * grace is memory only, and a new leader counts that task until its next `idle`.
    */
   readonly #idleSince = new Map<string, IdleRelease>();
+  /** Task id → the stamp write the store last refused outright, and when: `#stampIdle` holds off repeating it. */
+  readonly #stampRefused = new Map<string, { readonly key: string; readonly at: number }>();
   /** The idle releases last told to the host (`onIdleChange`): what `#syncIdle` diffs against. */
   #idleTold: ReadonlySet<string> = new Set();
   /**
@@ -446,7 +450,11 @@ export class Scheduler {
     for (const { task } of this.#held.values()) {
       const stamp = task.idleRelease;
       if (stamp !== undefined && idleHere(task, stamp.deviceId) && !this.#idleSince.has(task.id))
-        this.#idleSince.set(task.id, { since: stamp.since, deviceId: stamp.deviceId });
+        // The stamp proves the grace passed, but its `since` is another leader's wall clock: capped, so skew never withholds the release.
+        this.#idleSince.set(task.id, {
+          since: Math.min(stamp.since, this.#now() - this.#config.idleReleaseAfterMs),
+          deviceId: stamp.deviceId,
+        });
     }
     await this.#pause.load();
   }
@@ -738,25 +746,47 @@ export class Scheduler {
   }
 
   /**
-   * Stamps each release on its record once (`Task.idleRelease`), so the next
-   * term seeds it: one write as a release begins, never one per turn. Judged
-   * again inside the write against the clock, so a stamp queued behind an event
-   * that stopped it writes nothing (`onSession` stops the clock before its write).
+   * Keeps each `running` record's `Task.idleRelease` equal to the clock's release: stamps one as a
+   * release begins (once, never per turn, so the next term seeds it), and drops a stamp the
+   * clock no longer backs. The drop is retried on every pass, since a clearing write that failed
+   * must not leave a stamp the next leader would free a working session on. Judged again inside the
+   * write against the clock, so a write queued behind an event that moved it writes nothing
+   * (`onSession` stops the clock before its write). A write the store refused outright is not
+   * repeated for `STAMP_RETRY_MS`, so a persistent refusal costs an error line per interval, not per event.
+   * `only` narrows it to one task, for an event that can have moved no other.
    */
-  async #stampIdle(): Promise<void> {
-    const carries = (task: Task, clock: IdleRelease): boolean =>
-      task.idleRelease?.since === clock.since && task.idleRelease.deviceId === clock.deviceId;
+  async #stampIdle(only?: string): Promise<void> {
+    const target = (task: Task): IdleRelease | undefined => {
+      const clock = this.#idleSince.get(task.id);
+      const due =
+        clock !== undefined &&
+        idleHere(task, clock.deviceId) &&
+        this.#now() - clock.since >= this.#config.idleReleaseAfterMs;
+      return due ? clock : undefined;
+    };
+    const same = (a: IdleRelease | undefined, b: IdleRelease | undefined): boolean =>
+      a?.since === b?.since && a?.deviceId === b?.deviceId;
+    for (const id of this.#stampRefused.keys()) if (!this.#held.has(id)) this.#stampRefused.delete(id);
     await Promise.all(
-      this.#idleReleases(this.#now()).flatMap(({ taskId }) => {
-        const clock = this.#idleSince.get(taskId);
-        const held = this.#held.get(taskId)?.task;
-        if (clock === undefined || held === undefined || carries(held, clock)) return [];
+      [...this.#held.values()].flatMap(({ task }) => {
+        if (task.state !== "running" || (only !== undefined && task.id !== only)) return [];
+        const want = target(task);
+        if (same(task.idleRelease, want)) return [];
+        const key = want === undefined ? "clear" : `${want.since}/${want.deviceId}`;
+        const refused = this.#stampRefused.get(task.id);
+        if (refused !== undefined && refused.key === key && this.#now() - refused.at < STAMP_RETRY_MS) return [];
         return [
-          this.#update(taskId, (task) => {
-            if (this.#idleSince.get(taskId) !== clock || !idleHere(task, clock.deviceId) || carries(task, clock))
-              return null;
-            return { ...task, idleRelease: { since: clock.since, deviceId: clock.deviceId } };
-          }),
+          this.#update(
+            task.id,
+            (current) => {
+              const now = target(current);
+              if (current.state !== "running" || same(current.idleRelease, now)) return null;
+              if (now !== undefined) return { ...current, idleRelease: { since: now.since, deviceId: now.deviceId } };
+              const { idleRelease: _stamp, ...rest } = current;
+              return rest;
+            },
+            () => this.#stampRefused.set(task.id, { key, at: this.#now() }),
+          ),
         ];
       }),
     );
@@ -852,7 +882,7 @@ export class Scheduler {
     }
     this.#idleClock(taskId, state, from);
     this.#syncIdle();
-    await this.#stampIdle();
+    await this.#stampIdle(taskId);
     if (!defers) return;
     const held = this.#held.get(taskId)?.task;
     if (held === undefined || !PLACED.includes(held.state)) return;
@@ -2299,6 +2329,7 @@ export class Scheduler {
         // lost reply, is our write — adopted as written, or the change would decline itself.
         if (write.code === "indeterminate" && fresh.body !== undefined && fresh.version === held.version + 1) {
           this.#held.set(id, { version: fresh.version, task: next });
+          if (held.task.state !== "running" || next.state !== "running") this.#idleSince.delete(id);
           this.#noteSuccessor(held.task, next);
           return next;
         }
