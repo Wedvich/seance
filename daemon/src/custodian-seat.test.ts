@@ -639,7 +639,12 @@ describe("the seat's lifecycle", () => {
     r.state.record = { round: { pane: null, startedAt: NOW, tmpDir: TMP, exclave: "default" } };
     r.log.length = 0;
     await r.seat.tick();
-    expect(r.log).toEqual(["kill %1 stray exited", `rm ${TMP}`, "end - lost", `save ${JSON.stringify({ lastEndedAt: NOW })}`]);
+    expect(r.log).toEqual([
+      "kill %1 stray exited",
+      `rm ${TMP}`,
+      "end - lost",
+      `save ${JSON.stringify({ lastEndedAt: NOW })}`,
+    ]);
     expect(r.live.size).toBe(0);
     r.seat.stop();
   });

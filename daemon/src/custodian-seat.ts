@@ -289,9 +289,10 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
   const adopt = async (): Promise<void> => {
     const round = d.record().round;
     const panes = await d.listRounds();
-    const recorded = round?.pane == null ? undefined : panes.find((pane) => pane.pane === round.pane);
+    const recordedPane = round?.pane ?? null;
+    const recorded = recordedPane === null ? undefined : panes.find((pane) => pane.pane === recordedPane);
     const kept = recorded !== undefined && !recorded.dead ? recorded.pane : null;
-    await sweep(panes, round?.pane ?? null, kept);
+    await sweep(panes, recordedPane, kept);
     if (round === undefined || kept !== null) return;
     await finish(round, recorded === undefined ? "lost" : "exited");
   };
