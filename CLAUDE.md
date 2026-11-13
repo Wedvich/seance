@@ -40,6 +40,11 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   away: update, restart, reboot, shutdown, sleep, unknown), how the relay keeps it, what clients
   and the leader do with it, macOS sleep/DarkWake, and the shutdown drain on a dying box. Read it
   before touching shutdown, presence or the systemd unit.
+- **docs/archivist.md** — spec, nothing built: the archivist, an optional single-seat service in
+  its own workspace that keeps long-term task, metrics and fleet history in SQLite (the seat and
+  the `ARCHIVIST` secret, what it collects and never stores, retention, how the PWA reads it, the
+  build order). Read it before touching history, retention, registry roles or the Machines
+  screen's charts.
 
 Like DESIGN.md, the docs/ files are part of the record: a change that alters behavior they describe
 updates them in the same commit. They are not auto-discovered — this list is how sessions find them.
