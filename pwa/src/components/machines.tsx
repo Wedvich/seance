@@ -228,6 +228,7 @@ function MachineCardView(props: {
               {card.openSwitch !== null && (
                 <MenuSwitchItem
                   label="Open for work"
+                  icon={<WorkIcon />}
                   checked={switchOn}
                   closesMenu={switchOn}
                   onToggle={() => onToggleOpen(!switchOn)}
@@ -533,6 +534,16 @@ function CloseMachineDialog(props: {
         </div>
       </div>
     </Sheet>
+  );
+}
+
+function WorkIcon(): JSX.Element {
+  return (
+    <StrokeIcon size={18}>
+      <path d="M5 8h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z" />
+      <path d="M9 8V6a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+      <path d="M4 13h16" />
+    </StrokeIcon>
   );
 }
 
