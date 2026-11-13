@@ -8,6 +8,7 @@ import { VerdictView } from "./components/verdict.tsx";
 import type { PushClient } from "./push.ts";
 import { readRelayUrl } from "./relay/keys.ts";
 import { deriveArchivist, deriveMachines } from "./machines-view.ts";
+import { archiveCharts } from "./state.ts";
 import { deriveAfterSheet, deriveQueue } from "./queue-view.ts";
 import "./screen.css";
 import type { Store } from "./store.ts";
@@ -120,6 +121,7 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
         state.relay.scheduler,
         state.accounts.aliases,
         state.relay.fleetQuota,
+        archiveCharts(state.relay.archivist, state.accounts.nameable),
       )}
       archivist={deriveArchivist(state.relay.archivist, state.archiveStatus, now)}
       relayLine={view.relayLine}

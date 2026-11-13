@@ -1,7 +1,9 @@
 import type {
+  ArchiveMetricsStep,
   AttachmentRef,
   AutonomyLevel,
   DepAfter,
+  MetricName,
   MetricsErrorCode,
   MetricsReply,
   MetricsRequest,
@@ -18,6 +20,7 @@ import {
   ATTACHMENT_LIMITS,
   DEFAULT_AUTONOMY,
   failureReasonText,
+  METRICS_STEPS,
   queuedTask,
   RequestFailure,
   sentence,
@@ -35,12 +38,14 @@ import {
   type RelayClient,
 } from "@seance/shared";
 import {
+  archiveCharts,
   AUTONOMY_LABELS,
   DEFAULT_FORM,
   DEFAULT_HISTORY_RANGE,
   HELD_MAX,
   heldOrder,
   heldStale,
+  isArchiveRange,
   RANGE_SPANS,
   RESCAN_IDLE,
   TARGET_METRICS,
@@ -121,6 +126,29 @@ const HISTORY_ERRORS: Record<MetricsErrorCode, string> = {
   too_large: "Too much history for one answer. 24h asks for the fewest points.",
   invalid_request: "The machine refused the request. Update seanced and the app to matching versions.",
   internal_error: "The machine couldn't read its history store.",
+};
+
+/** The archive's failures, worded like the daemon's: the one place a chart says which side answered (A36e). */
+const ARCHIVE_NO_ANSWER = "No answer — the archivist may be offline.";
+
+/** Any other transport failure (`unknown`, `dropped`, ...): their shared lines name a machine, and a read has nothing to land. */
+const ARCHIVE_UNDELIVERED = "The relay couldn't deliver the request to the archivist.";
+
+const ARCHIVE_UNREADABLE =
+  "Couldn't read the archivist's answer. Update the archivist and the app to matching versions.";
+
+const ARCHIVE_ERRORS: Record<MetricsErrorCode, string> = {
+  too_large: "Too much history for one answer. A shorter range asks for fewer points.",
+  invalid_request: "The archivist refused the request. Update the archivist and the app to matching versions.",
+  internal_error: "The archivist couldn't read its history store.",
+};
+
+/** A chart's window and series, before the side that answers shapes them into its request. */
+type HistoryWindow = {
+  readonly from: number;
+  readonly to: number;
+  readonly step: ArchiveMetricsStep;
+  readonly names: readonly MetricName[];
 };
 
 /**
@@ -321,6 +349,7 @@ export class Store {
     // Only an authoritative registry may prune — while it is unsettled an empty
     // `machines` means "no push yet", not "every machine vanished".
     this.#patch({ relay, ...(relay.registrySettled ? this.#pruneGone(relay.machines) : {}) });
+    this.#fallBackHistory();
     this.#uploads.onRelay(socketBack);
     const decided = relay.status === "open" ? relay.registrySettled : !relay.settling;
     if (decided && this.#settleWaiters.length > 0) {
@@ -716,21 +745,17 @@ export class Store {
    * The window ends on the tier's newest bucket, so it never ends mid-bucket.
    */
   async showHistory(target: HistoryTarget, pick?: HistoryRange): Promise<void> {
-    const range = pick ?? this.#historyRange;
-    this.#historyRange = range;
+    const wanted = pick ?? this.#historyRange;
+    // Only the archive keeps a long range: remembered, or picked as the archivist left, it opens at a day (A36d).
+    const range = isArchiveRange(wanted) && !this.#archiveServes(target) ? DEFAULT_HISTORY_RANGE : wanted;
+    // The wanted range is what is remembered, so a chart the archive can't serve doesn't cost a later one its long range.
+    this.#historyRange = wanted;
     const { span, step } = RANGE_SPANS[range];
     const to = Math.floor(Date.now() / 1000 / step) * step;
     const from = to - span + step;
     const asked: HistoryView = { target, range, from, to, step, result: { kind: "loading" } };
     this.#patch({ history: asked });
-    const names = TARGET_METRICS[target.kind];
-    // Only this account's series cross the wire; a daemon that predates `labels`
-    // sends every exclave's, which `#fetchHistory` narrows all the same.
-    const request: MetricsRequest =
-      target.kind === "account"
-        ? { from, to, step, names, labels: { account: target.accountId } }
-        : { from, to, step, names };
-    const result = await this.#fetchHistory(target, request);
+    const result = await this.#fetchHistory(target, { from, to, step, names: TARGET_METRICS[target.kind] });
     // A later pick or a closed screen has replaced the chart this answers.
     if (this.#state.history !== asked) return;
     this.#patch({ history: { ...asked, result } });
@@ -740,10 +765,82 @@ export class Store {
     this.#patch({ history: null });
   }
 
-  async #fetchHistory(target: HistoryTarget, request: MetricsRequest): Promise<HistoryResult> {
+  #archiveServes(target: HistoryTarget): boolean {
+    return archiveCharts(this.#state.relay.archivist, this.#state.accounts.nameable)[target.kind];
+  }
+
+  #isConnected(target: HistoryTarget): boolean {
+    return this.#state.relay.machines.some((machine) => machine.deviceId === target.deviceId && machine.connected);
+  }
+
+  /**
+   * An open chart the archivist stops serving: a long range falls back to a day (A36d). An asleep
+   * machine's has no daemon to fall back to, so it closes, as its History is not offered without the
+   * archive (A35); a re-ask would only fail with the machine's own offline.
+   */
+  #fallBackHistory(): void {
+    const open = this.#state.history;
+    if (open === null || this.#archiveServes(open.target)) return;
+    if (open.target.kind === "machine" && !this.#isConnected(open.target)) {
+      this.hideHistory();
+      return;
+    }
+    if (!isArchiveRange(open.range)) return;
+    void this.showHistory(open.target, DEFAULT_HISTORY_RANGE);
+  }
+
+  /**
+   * Which side answers (docs/archivist.md A32), read from the registry at ask
+   * time: a connected machine's own daemon for the ranges it keeps; the archive
+   * for an account (merged across machines), past 30 days, and for a machine
+   * not connected. With no archivist, exactly as before it: a machine's daemon,
+   * an account's host.
+   */
+  async #fetchHistory(target: HistoryTarget, window: HistoryWindow): Promise<HistoryResult> {
+    const daemonStep = METRICS_STEPS.find((step) => step === window.step);
+    const connected = this.#isConnected(target);
+    if (this.#archiveServes(target) && (target.kind === "account" || daemonStep === undefined || !connected)) {
+      return this.#fetchArchived(target, window);
+    }
+    // No archive and no daemon step: an account chart opened with every host asleep (`deviceId: null`) and
+    // re-asked after the archivist left. A long range never reaches here, `showHistory` clamps it first.
+    if (daemonStep === undefined || target.deviceId === null) return { kind: "failed", message: ARCHIVE_NO_ANSWER };
+    const { from, to, names } = window;
+    // Only this account's series cross the wire; a daemon that predates `labels`
+    // sends every exclave's, which `#fetchFromDaemon` narrows all the same.
+    const request: MetricsRequest =
+      target.kind === "account"
+        ? { from, to, step: daemonStep, names, labels: { account: target.accountId } }
+        : { from, to, step: daemonStep, names };
+    return this.#fetchFromDaemon(target, target.deviceId, request);
+  }
+
+  /** An account's series come back merged and labelled with its store key (A33), never the raw id. */
+  async #fetchArchived(target: HistoryTarget, window: HistoryWindow): Promise<HistoryResult> {
+    let reply: MetricsReply | null;
+    let accountKey: string | null = null;
+    try {
+      if (target.kind === "account") {
+        accountKey = await this.#client.accountStoreKey(target.accountId);
+        reply = await this.#client.archiveMetrics({ ...window, account: accountKey });
+      } else {
+        reply = await this.#client.archiveMetrics({ ...window, machine: target.deviceId });
+      }
+    } catch (err) {
+      if (!(err instanceof RequestFailure)) return { kind: "failed", message: "Couldn't load the history." };
+      // `offline` is the client's refusal unsent: the registry shows no connected archivist.
+      if (err.reason === "timeout" || err.reason === "offline") return { kind: "failed", message: ARCHIVE_NO_ANSWER };
+      return { kind: "failed", message: ARCHIVE_UNDELIVERED };
+    }
+    if (reply === null) return { kind: "failed", message: ARCHIVE_UNREADABLE };
+    if ("ok" in reply) return { kind: "failed", message: ARCHIVE_ERRORS[reply.code] };
+    return { kind: "ok", series: accountKey === null ? reply.series : accountSeries(reply.series, accountKey) };
+  }
+
+  async #fetchFromDaemon(target: HistoryTarget, deviceId: string, request: MetricsRequest): Promise<HistoryResult> {
     let reply: MetricsReply | null;
     try {
-      reply = await this.#client.metrics(target.deviceId, request);
+      reply = await this.#client.metrics(deviceId, request);
     } catch (err) {
       // Caught whole: the caller is fire-and-forget, so a rethrow would strand the chart on "Loading…".
       if (!(err instanceof RequestFailure)) return { kind: "failed", message: "Couldn't load the history." };

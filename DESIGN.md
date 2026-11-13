@@ -1768,8 +1768,9 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
   series count grows with exclaves, accounts and models, so no cap fits every
   machine); trimming the oldest points to fit (the chart silently shows less
   range than it asked for); positional value arrays with implied timestamps
-  (~3.5× smaller, and no longer Prometheus's shape). History lives only on its
-  daemon, so an asleep machine's is unavailable until it wakes — accepted.
+  (~3.5× smaller, and no longer Prometheus's shape). History lives on its
+  daemon, so without an archivist an asleep machine's is unavailable until it wakes — accepted;
+  with one, the archive's copy serves it (Archivist, "The PWA's charts").
 
 Layer 2 also carries the app → scheduler ops, sealed `to: "scheduler"` and answered by the
 leader (Scheduler, "The leader"), each `T | SchedulerError`:
@@ -8592,7 +8593,9 @@ Models offered: `fable`/`opus`/`sonnet`/`haiku`; efforts: all five the CLI accep
   chart to offer has no menu) on a machine asks
   that daemon for `cpu_pct`/`mem_pct`/`disk_pct`; on an account it asks one online host of the account
   (the newest observer when it serves `metrics`) for the quota series and folds its exclaves'
-  copies into one line per window. One chart at a time, its window fixed when asked, a reply
+  copies into one line per window. While an archivist is online the archive answers instead past
+  30 days, for an asleep machine and, where the install holds the account key, for an account,
+  merged across machines (Archivist, "The PWA's charts"). One chart at a time, its window fixed when asked, a reply
   that lands after the chart moved on is dropped. Disk shows as a third gauge, percent
   used on the fullest watched path (2026-10-19 — an LXC's small root fills quietly, and an
   earlier cut hid it as upkeep rather than load); it never scores. The floor reads `free`, not
@@ -10755,6 +10758,28 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
     way out, so even a row an older build or a hand edit stored whole sends no prompt, no
     attachment manifest and no raw account id; a record that no longer parses is skipped, counted
     in one warning, and still consumed.
+- **The PWA's charts** (item 8, A32, A35, A36d–A36f; 2026-11-13). The range picker is
+  `6h · 24h · 30d · 90d · 1y`; 90 days asks at 6 h and a year at 1 d, so neither crosses
+  `METRICS_MAX_POINTS`. Which side answers is the store's choice at ask time, from the registry
+  (`Store.showHistory`), never part of the chart's target: a connected machine's own daemon for
+  the three short ranges, as before; the archive (`archiveMetrics`) for 90d and 1y, for a machine
+  that is not connected, at any range, and for an account at any range, merged (A33) and asked by
+  its `account:` store key. The archive labels an account's series with that key, never the raw
+  id, so the reply is narrowed by it (`accountSeries`, which also drops the label from the legend).
+  One rule, `archiveCharts` in `pwa/src/state.ts`, says what the archive serves now — machines
+  while the archivist's registry entry is connected, accounts only then and while this install
+  holds the account key (an install saved before account records cannot derive the key, so its
+  account charts stay on a host) — and both the screen and the store read it, so a chart or range
+  is offered exactly when it can be asked for. That is what gives an asleep machine's card ⋯ ›
+  History, and an account whose every host is asleep a chart; with no archivist every chart reads
+  as before it. A registry push that stops the archive serving an open 90d or 1y chart re-asks it
+  at 24h; a short range already open stays as it is, its answer still true; an asleep machine's chart
+  has no daemon to fall back to and closes. No source shows in the UI (A36e) except a failure: a
+  timeout or the client's unsent `offline` reads "No answer — the archivist may be offline.", any
+  other transport failure, an unreadable reply or an error code names the archivist where the
+  daemon's lines name the machine. The remembered range is the one last wanted, so a chart the
+  archive can't serve opens at 24h without costing the next one its long range. An asleep machine's lines simply stop at its last beat (A36f):
+  the chart draws only the points it has.
 - **The read leg.** A second, app-role socket from `appRelayClient` with the PSK's key and the
   account key derived from it, as the leader's own app leg reads (A7); `archivist/src/collect.ts`
   reads the store through it, and `archivist/src/metrics-collect.ts` the registry's `status`

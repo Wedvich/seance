@@ -15,6 +15,7 @@ import {
 import { accountSeries, chartLines } from "../src/chart.ts";
 import { accountDisplayName, deriveArchivist, deriveMachines } from "../src/machines-view.ts";
 import { knownAccounts } from "@seance/shared";
+import { archiveCharts } from "../src/state.ts";
 
 const NOW = 1_800_000_000_000;
 const S = NOW / 1000;
@@ -439,6 +440,53 @@ describe("deriveMachines", () => {
     expect(deriveMachines([asleep, old], NOW, NO_LEADER).accounts[0]?.historyFrom).toBeNull();
   });
 
+  // docs/archivist.md A35, A36d, A36f: with no archivist nothing changes; with one, an asleep
+  // machine and a host-less account gain a chart, and the picker gains 90d and 1y.
+  test("the archive adds charts and long ranges only while it serves them", () => {
+    const fleet = [machine({ deviceId: "a" }), machine({ deviceId: "z", connected: false })];
+    const charts = (view: ReturnType<typeof deriveMachines>): unknown => ({
+      machines: view.cards.map((card) => card.charts),
+      account: view.accounts.map((account) => [account.historyFrom, account.charts]),
+      ranges: view.ranges,
+    });
+
+    expect(charts(deriveMachines(fleet, NOW, NO_LEADER))).toEqual({
+      machines: [true, false],
+      account: [["a", true]],
+      ranges: { machine: ["6h", "24h", "30d"], account: ["6h", "24h", "30d"] },
+    });
+    expect(charts(deriveMachines(fleet, NOW, NO_LEADER, {}, [], { machine: true, account: true }))).toEqual({
+      machines: [true, true],
+      account: [["a", true]],
+      ranges: { machine: ["6h", "24h", "30d", "90d", "1y"], account: ["6h", "24h", "30d", "90d", "1y"] },
+    });
+
+    // Every host asleep: only the archive can chart the account, and only with the key its series are filed under.
+    const asleep = [machine({ deviceId: "z", connected: false })];
+    expect(charts(deriveMachines(asleep, NOW, NO_LEADER, {}, [], { machine: true, account: false }))).toEqual({
+      machines: [true],
+      account: [[null, false]],
+      ranges: { machine: ["6h", "24h", "30d", "90d", "1y"], account: ["6h", "24h", "30d"] },
+    });
+    expect(deriveMachines(asleep, NOW, NO_LEADER, {}, [], { machine: true, account: true }).accounts[0]?.charts).toBe(
+      true,
+    );
+  });
+
+  test("the archive charts a machine only while the archivist is connected, an account only with the account key", () => {
+    const entry = (connected: boolean): ArchivistEntry => ({
+      deviceId: "arch",
+      name: "archive",
+      platform: "linux",
+      connected,
+      lastSeen: 1,
+    });
+    expect(archiveCharts(null, true)).toEqual({ machine: false, account: false });
+    expect(archiveCharts(entry(false), true)).toEqual({ machine: false, account: false });
+    expect(archiveCharts(entry(true), false)).toEqual({ machine: true, account: false });
+    expect(archiveCharts(entry(true), true)).toEqual({ machine: true, account: true });
+  });
+
   // An unverified nominee is never drawn as the leader (DESIGN.md, Leadership).
   test("the leader is named and badged only once verified; an unverified nominee is named as such", () => {
     const fleet = [machine({ deviceId: "a", name: "mac" }), machine({ deviceId: "b", name: "box" })];
@@ -652,7 +700,7 @@ describe("deriveArchivist", () => {
       online: false,
       meta: "offline · last seen 3h ago",
       rows: [],
-      note: "While it is offline, 90-day and 1-year charts, merged account charts and older tasks are hidden until it is back.",
+      note: "While it is offline, 90-day and 1-year charts, merged account charts, asleep machines' history and older tasks are hidden until it is back.",
     });
     expect(card?.build).not.toBeNull();
   });
