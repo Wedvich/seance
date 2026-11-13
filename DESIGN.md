@@ -10048,8 +10048,8 @@ receiver's `inbox` mod holds a listener connection open and delivers by Claude m
 routing through the leader (PR 2) and the adapter seam (PR 3) are not built; docs/messaging.md keeps them.
 
 **Two frame kinds beside `Plain`**, both bound to a pane only by the kernel-reported peer pid (`peerPid`,
-`ancestorIn`) and refused `unbound` where the host cannot name a peer (`peerPidSupported()`) or the pid came
-back null. Unlike `session-event` there is no claimed-pane fallback: `session-event` only _claims_ a state;
+`ancestorIn`) and refused `unbound` where the host cannot name a peer (`peerPidSupported()`; a `message`, a
+listener is told `unsupported`, below) or the pid came back null. Unlike `session-event` there is no claimed-pane fallback: `session-event` only _claims_ a state;
 `inbox` _hands text out_, so trusting a claimed pane would let any process of the same user read any
 session's messages. On a host that names no peer a listener is told `unsupported` rather than `unbound`: no
 retry can ever bind there, so the mod waits it out for minutes. `parseMessageFrame` and `parseInboxFrame` (`daemon/src/message-frame.ts`) accept exactly
@@ -10076,9 +10076,11 @@ and only for a pane that carries a task this machine's ledger holds a launch of:
 any other pane, so its listener would only idle (**decided here**: a hand-started session, or a pane tagged
 with an id this machine never launched, is refused `untasked` instead, one bun process saved per such
 session). A refusal is `{ ok: false, code }` with `invalid`, `unbound`, `unsupported`, `stopping` or
-`untasked`. Exit codes of the CLI: 0 after an ack, 3 for an explicit `unsupported`, 4 for `unbound` or
-`untasked` (a pane this daemon will not bind, which a retry does not change soon: the mod waits five minutes
-after 3 and 4 alike), 2 otherwise (a connection closed with no reply is what an old daemon dropping the frame
+`untasked`. Exit codes of the CLI: 0 after an ack, 3 for an explicit `unsupported` and 4 for `untasked`
+(nothing a retry changes soon: the mod waits five minutes after either), 5 for `unbound` (**decided here**:
+mostly permanent, a claude in another tmux server, but also what a failed `tmux list-panes`, a null peer pid or
+a failed `/proc` read answers for a moment, so the mod waits a minute, under the 120 s listener grace, where
+five minutes would cost a message held for that session), 2 otherwise (a connection closed with no reply is what an old daemon dropping the frame
 looks like, and what a pulled-but-not-restarted one looks like during a self-update, so the mod backs off from
 one second to fifteen and retries instead of giving up; a stdout nobody reads any more is 2 too, since the
 child exits on a write error so the daemon drops the binding and holds the next message under its grace
@@ -10097,7 +10099,11 @@ to 2 s) is lost; the daemon keeps nothing after a write
 already bounds. No other end needs the check: `/exit` SIGTERMs the child before the mod's `session.end` runs
 (so the mod uses no connection from `session.end`: it only cancels its loop, and the backoff sleep with it),
 and `tmux kill-session` SIGHUPs it within 0.5 s. `kill -9` of `claude` is the only path found that leaves a
-connected orphan.
+connected orphan. **Accepted gap**: the parent check assumes `bun` is exec'd in place, so the child's parent is
+`claude`. A version-manager shim that spawns the real binary as a child (rather than exec) makes the shim the
+parent, which `kill -9` of `claude` reparents without ending, so only the stdout check covers that case and a
+message written before the first failed write is lost under `delivered`. Walking the whole ancestor chain
+every 2 s was rejected for a failure that needs both a `kill -9` and such a shim.
 
 **Resolution (PR 1, local only).** `to` is a task id. The daemon delivers only to a live pane whose
 `@seance-task` is that task and whose task this machine's launch ledger holds a launch of; anything else
@@ -11288,8 +11294,10 @@ Local op socket, "Session messages"):
 - **The listener.** At `session.start`, only when `TMUX_PANE` is set (`claude --bg` gets none), one
   `$.process.spawn` child, `bun <checkout>/daemon/src/main.ts inbox` (`daemonMain`, by path from the mod's own
   folder, copied from session-events because a mod folder cannot import outside itself), restarted with
-  backoff: a second after an ack, five minutes after an explicit `unsupported`, else a second doubling to
-  fifteen. The mod reads each stdout line (a piece is not a line: it reassembles), takes the ack's
+  backoff: a second after an ack, five minutes after an explicit `unsupported` or `untasked`, a minute after
+  `unbound` (exit 5), else a second doubling to fifteen. The wait is `$.clock.sleep` with the loop's abort
+  signal, never a timer of the mod's own; a wait that is refused is tried once more, then logged to the debug log
+  and given up, and the next main `turn.start` of a live session begins a new loop. The mod reads each stdout line (a piece is not a line: it reassembles), takes the ack's
   `keep`, and pushes each message's `push` text verbatim; it holds no wording of its own.
 - **Which call delivers.** A question or a request is `$.prompt.submit` (never awaited by the reader: it stays
   pending until a running turn ends), which wakes an idle session, waits a dialog out and never answers it.

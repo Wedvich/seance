@@ -369,8 +369,9 @@ green:
 - The local socket's fourth and fifth frame kinds are `message` (`send_message`,
   `daemon/src/send-message.ts`) and `inbox` (the `inbox` mod's `seanced inbox` child,
   `daemon/src/messages.ts`; DESIGN.md "Session messages"). Both are bound to a pane only by the
-  kernel-reported peer pid: refused `unbound` where the host names no peer (`peerPidSupported`) or the
-  pid came back null, never falling back to a claimed pane. `inbox` is the first frame that hands text
+  kernel-reported peer pid: refused `unbound` where the host names no peer (`peerPidSupported`; an `inbox`
+  listener there is told `unsupported`, not `unbound`, since no retry can bind) or the pid came back null, never
+  falling back to a claimed pane. `inbox` is the first frame that hands text
   out, and binds once at accept; there is one listener per pane, closed (lazily, at the next send or listen)
   when the pane's task changes, and only a pane carrying a task this machine launched is acked.
   The daemon's inbox is memory only (32 messages, `4 × MESSAGE_MAX`), cleared on `ended`, rebind and

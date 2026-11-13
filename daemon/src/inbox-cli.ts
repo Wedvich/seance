@@ -21,6 +21,8 @@ import { socketPath } from "./paths.ts";
  * nowhere, so the daemon's writes succeed and the message is lost under an audited `delivered`. The stdout error
  * covers a write after the death; the parent check covers the quiet time before one. A message written between the
  * kill and the next check, up to `PARENT_CHECK_MS`, is lost: the daemon keeps nothing after a write (accepted).
+ * The parent check assumes `bun` is exec'd in place, so the parent is `claude`: a shim that spawns it as a child
+ * leaves the shim as the parent, which does not change when `claude` dies (accepted; DESIGN.md, "The orphaned child").
  */
 
 const EXIT_ACKED = 0;
