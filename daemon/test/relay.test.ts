@@ -791,7 +791,9 @@ describe("daemon ↔ relay integration", () => {
   test("a daemon whose backend cannot despawn does not advertise the drain's session ask", async () => {
     const relay = startTestRelay(TOKEN);
     const full = createBackend(makeConfig(relay.url), { home: join(base, "home"), waitMs: 700 });
-    const daemon = await startTestDaemon(relay.url, { backend: { spawn: full.spawn, sessions: full.sessions, doctor: full.doctor } });
+    const daemon = await startTestDaemon(relay.url, {
+      backend: { spawn: full.spawn, sessions: full.sessions, doctor: full.doctor },
+    });
     try {
       const { info } = await registerWithRepo(relay, "myrepo");
       expect(info.capabilities).toContain("drain");
