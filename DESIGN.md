@@ -10071,7 +10071,7 @@ their fields and no `pane`.
   pane is gone, dead, re-tagged or whose pid changed (`sweep`, lazily at every send and listen, not on a
   timer).
 
-**The ack** is `{ ok: true, keep: { messages, bytes }, instruction }` (the constant `STANDING_INSTRUCTION`),
+**The ack** is `{ ok: true, keep: { messages, bytes } }`,
 and only for a pane that carries a task this machine's ledger holds a launch of: nothing is ever addressed to
 any other pane, so its listener would only idle (**decided here**: a hand-started session, or a pane tagged
 with an id this machine never launched, is refused `untasked` instead, one bun process saved per such
@@ -10082,7 +10082,22 @@ after 3 and 4 alike), 2 otherwise (a connection closed with no reply is what an 
 looks like, and what a pulled-but-not-restarted one looks like during a self-update, so the mod backs off from
 one second to fifteen and retries instead of giving up; a stdout nobody reads any more is 2 too, since the
 child exits on a write error so the daemon drops the binding and holds the next message under its grace
-rather than audit `delivered` to an orphan).
+rather than audit `delivered` to an orphan, and a child whose parent changed is 2 as well: see "The orphaned
+child" below).
+
+**The orphaned child** (**decided here**, from the macOS spike's gap (a)). `claude` killed hard (an OOM
+kill) leaves the `seanced inbox` child alive, reparented to init (ppid 1), still connected, so the daemon's
+writes to it succeed while its stdout, a pipe nobody reads, fails: the message is lost under an audited
+`delivered`. The child therefore records `process.ppid` at start and exits 2 when it changes, checked every
+2 s by an unref'd timer, and exits on any stdout write error (the quiet-time check and the after-death
+check). Exiting closes the socket, the daemon's abort handler drops the binding, and the next message is held
+under the grace (`sent`) instead. **Accepted gap**: a message written between the kill and the next check (up
+to 2 s) is lost; the daemon keeps nothing after a write
+(Accepted gaps, below), and an ack line from the child was rejected as protocol for a window the grace
+already bounds. No other end needs the check: `/exit` SIGTERMs the child before the mod's `session.end` runs
+(so the mod uses no connection from `session.end`: it only cancels its loop, and the backoff sleep with it),
+and `tmux kill-session` SIGHUPs it within 0.5 s. `kill -9` of `claude` is the only path found that leaves a
+connected orphan.
 
 **Resolution (PR 1, local only).** `to` is a task id. The daemon delivers only to a live pane whose
 `@seance-task` is that task and whose task this machine's launch ledger holds a launch of; anything else
@@ -10151,13 +10166,17 @@ session's permission mode, model, effort, worktree or task (the mod has no call 
 `MESSAGE_PUSH_MAX`, or be pulled; come faster than the rate limit. Outranking the user's or `CLAUDE.md`'s
 instructions is bounded only by the model, through the wrapper's "if it fits … your user's instructions".
 
-**Standing instruction, two layers.** (1) The mod's `prompt.compose` section from the ack; (2) every tasked
-spawn's command line carries `--append-system-prompt <STANDING_INSTRUCTION>` through `shq()`: a constant,
-never wire text, only on spawns with a `taskId` (**decided here**: hand-started sessions are not
-addressable). Layer 2 is what spawned sessions rely on: spike check 2 found the managed `cc-plugin-sec-default`
-plugin on this org skips another mod's `prompt.compose` hook. Rejected: a line in the seed (lost at
-`/compact`, absent after `--resume`, and the seed is the prompt `forgetPrompt` and the record's size budget
-govern).
+**Standing instruction: the spawn's command line only** (decided by the owner 2026-11-13; the mod's
+`prompt.compose` section, once "layer 1", is dropped). Every tasked spawn's command line carries
+`--append-system-prompt <STANDING_INSTRUCTION>` through `shq()`: a constant, never wire text, only on spawns
+with a `taskId` (**decided here**: hand-started sessions are not addressable, so they get no standing
+instruction and need none; D3). Why layer 1 went: both spikes found the managed `cc-plugin-sec-default`
+plugin skips another mod's `prompt.compose` hook (Linux 2.1.323 and macOS 2.1.323), so the section never
+reached the model, and each skip prints "inbox: its prompt.compose hook was skipped…" in every session that
+loads the mod. Re-adding it is a small change if an org without the managed plugin wants it: a
+`prompt.compose` hook in the mod appending a `session`-scope section, and the constant back on the ack (the
+mod holds no wording of its own). Rejected: a line in the seed (lost at `/compact`, absent after `--resume`,
+and the seed is the prompt `forgetPrompt` and the record's size budget govern).
 
 **What each kind of session gets.** A spawned (tasked) session is addressable, can send and receives. A
 hand-started session in a tmux pane can send (the message says `from` an untasked session on `<machine>`);
@@ -10173,10 +10192,21 @@ app-role client (the same missing binding, and a keyless server cannot seal), an
 (those are relay ops served locally; this is a session's claim about itself, which the frame kinds beside
 `Plain` are for). `LOCAL_OPS` and the broker are unchanged.
 
-**Evidence** is docs/messaging.md's table: long-held `$.process.spawn` child (Linux 2.1.323, 30 minutes
-across `/compact` and an in-process `/resume` with no reconnect, and a new child binding the same pane
-within a second of `claude --continue`; macOS unconfirmed), a pushed stub heeded with
-layer 2 only (2.4 s idle, and mid-turn), and `read_messages` raising no permission prompt in manual mode.
+**Evidence**, on both Linux and macOS (Claude Code 2.1.323), is docs/messaging.md's table: long-held
+`$.process.spawn` child (30 minutes across `/compact`, a new child binding the same pane after `/exit` and
+`--resume`, and an in-process `/resume` with no reconnect), a pushed stub heeded with the spawn's command
+line alone (Linux 2.4 s idle and mid-turn; macOS 4 of 4, and 3 of 3 with no instruction at all), the managed
+plugin skipping `prompt.compose` on both, and `read_messages` raising no permission prompt in manual mode.
+macOS found the two gaps recorded here: the orphaned child, and `/clear` and `/resume` firing `session.end`
+with no `session.start`.
+
+**`/clear` and `/resume` inside a session** (macOS gap (b)) fire `session.end` (reason `clear` or `resume`)
+and no `session.start`: the child and its binding carry on under the next conversation. That is correct,
+since the pane's `@seance-task` does not change on either, so the mod's `session.end` leaves the loop alone
+for exactly those two reasons (`CONTINUES`) and must never count on `session.start` to rebind. Any other end
+stops the loop. Messages the mod already holds stay readable by `read_messages` across a `/clear` (the
+conversation changed, the task did not; the message names its sender and id, so a stale one is
+recognisable). Accepted.
 
 **Accepted gaps.** Stub bodies live only in the mod's memory (the daemon keeps nothing after the write), so
 a hooks-worker respawn loses them and `read_messages` says so. A message held for a mod that never connects is
@@ -11260,7 +11290,7 @@ Local op socket, "Session messages"):
   folder, copied from session-events because a mod folder cannot import outside itself), restarted with
   backoff: a second after an ack, five minutes after an explicit `unsupported`, else a second doubling to
   fifteen. The mod reads each stdout line (a piece is not a line: it reassembles), takes the ack's
-  `keep` and `instruction`, and pushes each message's `push` text verbatim; it holds no wording of its own.
+  `keep`, and pushes each message's `push` text verbatim; it holds no wording of its own.
 - **Which call delivers.** A question or a request is `$.prompt.submit` (never awaited by the reader: it stays
   pending until a running turn ends), which wakes an idle session, waits a dialog out and never answers it.
   A note is `$.session.append`, a row the model reads at its next turn without waking the session, mid-turn or
@@ -11274,10 +11304,12 @@ Local op socket, "Session messages"):
   with none it says so, and that a lost one means the plugin reloaded. It also drops notes still waiting on a
   dialog, which it has just shown. Held in the mod's memory only, so a hooks-worker respawn loses them (the
   daemon keeps nothing after the write).
-- **The standing instruction** reaches the system prompt by a `prompt.compose` section from the ack (layer 1)
-  and by the spawn's `--append-system-prompt` (layer 2, what spawned sessions rely on: on this org the managed
-  `cc-plugin-sec-default` plugin skips another mod's compose hook). A pushed stub was heeded with layer 2 only,
-  idle (2.4 s) and mid-turn. It sits in `shared/` with the wrapper texts; the mod holds none.
+- **The standing instruction** is the spawn's `--append-system-prompt` alone: the mod registers no
+  `prompt.compose` hook (dropped 2026-11-13, "Standing instruction", above: the managed plugin skips it, with a
+  notice per session). A pushed stub was heeded that way, idle and mid-turn. The constant sits in `shared/` with
+  the wrapper texts; the mod holds none.
+- **A parent that changes ends the child**, and `session.end` with reason `clear` or `resume` does not stop
+  the loop (the process carries on): "The orphaned child" and the `/clear` paragraph, above.
 - **Same rules as session-events:** engine events only (never `classic.*`), every hook fails open
   (`.catch(($, e, next) => next(e))`), and `$` only inside top-level functions. Installed by the same
   `seanced mod install` (the marketplace lists it, so doctor warns per exclave where it is missing); nothing
