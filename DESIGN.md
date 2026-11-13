@@ -8626,9 +8626,9 @@ PR (custodian 4), and `docs/custodian.md` keeps the rest of the spec. Decisions 
   the trust (`isDirTrusted`, `trust.ts`: the dir's own `projects[<path>].hasTrustDialogAccepted` or an ancestor's)
   and skips an exclave that lacks it; `seanced doctor` names it with the one-time fix (`mkdir -p <dir> && cd <dir> &&
   claude`). **The daemon never writes a `.claude.json` for the custodian**: it races every running session's own
-  rewrite of the file. The check is read-only, silent, and walks the uncreated path and its ancestors, under both its own spelling and
-  its real path (the deepest existing ancestor realpath'd: Claude Code keys `projects` by the real cwd, so a state
-  dir under a symlink is trusted under a path the uncreated one does not spell), so the pick touches no disk until an exclave is chosen: only then is the round dir made (0700, `ensureRoundDir`) and
+  rewrite of the file. The check is read-only, silent, and walks the uncreated path's real path (the deepest existing ancestor realpath'd) and its ancestors,
+  and only that spelling: Claude Code keys `projects` by the real cwd, a round runs there, and trust recorded under a symlinked spelling is
+  trust it would not see, so the pick touches no disk until an exclave is chosen: only then is the round dir made (0700, `ensureRoundDir`) and
   its real path compared again with `exclaveOf`. `roundDirPlanted` refuses a dir holding `.claude/settings.json` or
   `.claude/agents` (`--setting-sources project` still loads a project `settings.json`, and a project agent of the
   same name may outrank `--agents`; `.claude/` itself is Claude Code's own and is never refused as a whole).

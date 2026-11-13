@@ -84,15 +84,12 @@ export async function isDirTrusted(dir: string, configFile: string): Promise<boo
     return false;
   }
   if (!isRecord(projects)) return false;
-  // Claude Code keys `projects` by the session's real cwd, and a round runs in the real path (`ensureRoundDir`): a
-  // dir reached through a symlink (a state dir under one) is trusted under the real path, which the uncreated path
-  // does not spell. Either spelling counts.
-  for (const start of new Set([dir, await realpathOfExisting(dir)])) {
-    for (let at = start; ; at = dirname(at)) {
-      const entry = projects[at];
-      if (isRecord(entry) && entry["hasTrustDialogAccepted"] === true) return true;
-      if (dirname(at) === at) break;
-    }
+  // Claude Code keys `projects` by the session's real cwd, and a round runs in the real path (`ensureRoundDir`): trust
+  // recorded under a symlinked spelling is trust a round would not see, so only the real path and its ancestors count.
+  for (let at = await realpathOfExisting(dir); ; at = dirname(at)) {
+    const entry = projects[at];
+    if (isRecord(entry) && entry["hasTrustDialogAccepted"] === true) return true;
+    if (dirname(at) === at) break;
   }
   return false;
 }

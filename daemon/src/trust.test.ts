@@ -125,7 +125,12 @@ describe("ensureRepoTrusted", () => {
 });
 
 describe("isDirTrusted", () => {
-  const roundDir = (): string => join(dir, "root", ".seance-custodian");
+  // Claude Code keys by the real path, which macOS spells /private/var/... for a tmpdir.
+  let base: string;
+  beforeEach(async () => {
+    base = await realpath(dir);
+  });
+  const roundDir = (): string => join(base, "root", ".seance-custodian");
 
   async function write(projects: unknown): Promise<void> {
     await writeFile(configPath(), JSON.stringify({ projects }), { mode: 0o600 });
@@ -134,11 +139,11 @@ describe("isDirTrusted", () => {
   test("the dir's own entry, or an ancestor's, counts; neither does not", async () => {
     await write({ [roundDir()]: { hasTrustDialogAccepted: true } });
     expect(await isDirTrusted(roundDir(), configPath())).toBe(true);
-    await write({ [join(dir, "root")]: { hasTrustDialogAccepted: true } });
+    await write({ [join(base, "root")]: { hasTrustDialogAccepted: true } });
     expect(await isDirTrusted(roundDir(), configPath())).toBe(true);
     await write({
       [roundDir()]: { hasTrustDialogAccepted: false },
-      [join(dir, "other")]: { hasTrustDialogAccepted: true },
+      [join(base, "other")]: { hasTrustDialogAccepted: true },
     });
     expect(await isDirTrusted(roundDir(), configPath())).toBe(false);
     await write({ "/": { hasTrustDialogAccepted: true } });
@@ -167,6 +172,9 @@ describe("isDirTrusted", () => {
     expect(await isDirTrusted(join(dir, "link", "root", "x", "y"), configPath())).toBe(true);
     await write({ [join(dir, "elsewhere")]: { hasTrustDialogAccepted: true } });
     expect(await isDirTrusted(join(dir, "link", "root", "x"), configPath())).toBe(false);
+    // The symlinked spelling is not what a round's cwd is, so trust under it does not count.
+    await write({ [join(dir, "link", "root", ".seance-custodian")]: { hasTrustDialogAccepted: true } });
+    expect(await isDirTrusted(join(dir, "link", "root", ".seance-custodian"), configPath())).toBe(false);
   });
 
   test("never writes: the file's bytes and mtime are unchanged", async () => {
