@@ -9969,7 +9969,9 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   busy) and never a subagent's: a continuation turn starts with no typed prompt
   (`text: ""`) while a background subagent's dialog may be open.
   A Bash `gh pr create` that printed an `https:` `/pull/<n>` URL adds `prUrl` to the current
-  state, needs-input included: the daemon refuses a frame without a `state` (its note of the
+  state — read from the call's error text too when the call exited non-zero, since a create
+  chained before a failing `gh pr merge --auto` has still opened the PR, and losing it refuses
+  the session's `hand_off_task` — needs-input included: the daemon refuses a frame without a `state` (its note of the
   PR is behind that check), so a bare `prUrl` would be lost. The map is updated before the
   result is read, so an odd result shape cannot drop the resume. `session.end` is ended
   unless its reason is `clear` or `resume`, carrying the last `prUrl` seen. Reports go out
