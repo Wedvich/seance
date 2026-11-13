@@ -79,3 +79,21 @@ export function wantsPrReading(task: Pick<Task, "state" | "prUrl" | "pr" | "spec
 export function readsPrWhileWaiting(task: Pick<Task, "state" | "prUrl" | "spec">): boolean {
   return TASK_PHASES[task.state] === "waiting" && task.spec.succeeds !== undefined && task.prUrl !== undefined;
 }
+
+/**
+ * A finished task keeps no prompt: nothing left reads it. The transcript on
+ * the machine is the copy from when the task ran; one that never ran has none
+ * (DESIGN.md, Threat model, "Assets"). Its attachment manifest goes too: names
+ * are prompt text, and a continuation finds its files by worktree, not manifest.
+ * Returns `task` itself when there is nothing to drop, so callers can tell.
+ * Here rather than in the scheduler library so the archivist, which may not
+ * load `scheduler/`, applies the same rule before it writes a row.
+ */
+export function forgetPrompt(task: Task): Task {
+  const { spec } = task;
+  if (TASK_PHASES[task.state] !== "finished" || (spec.prompt === undefined && spec.attachments === undefined)) {
+    return task;
+  }
+  const { prompt: _prompt, attachments: _attachments, ...rest } = spec;
+  return { ...task, spec: rest };
+}

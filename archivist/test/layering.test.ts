@@ -130,6 +130,10 @@ export function forbiddenCalls(source: string): string[] {
   return [...source.matchAll(FORBIDDEN_CALLS)].map((m) => m[0]);
 }
 
+function removing(source: string): RegExpMatchArray | null {
+  return source.match(/\b(?:DELETE|DROP|TRUNCATE|REPLACE\s+INTO|INSERT\s+OR\s+REPLACE)\b/giu);
+}
+
 async function archivistSources(): Promise<string[]> {
   const entries = await readdir(join(ROOT, "archivist/src"), { recursive: true });
   return entries
@@ -159,6 +163,24 @@ describe("archivist layering", () => {
       for (const call of forbiddenCalls(await readFile(join(ROOT, file), "utf8"))) offenders.push(`${file}: ${call}`);
     }
     expect(offenders).toEqual([]);
+  });
+
+  test("only archive.ts opens SQLite, and it holds no statement that removes or rewrites history", async () => {
+    const sqliteUsers: string[] = [];
+    for (const file of await archivistSources()) {
+      // oxlint-disable-next-line no-await-in-loop -- a handful of small files
+      if (specifiers(await readFile(join(ROOT, file), "utf8")).includes("bun:sqlite")) sqliteUsers.push(file);
+    }
+    expect(sqliteUsers).toEqual(["archivist/src/archive.ts"]);
+    // Append-only (docs/archivist.md, A23): a purge is SQL on the box, never this code.
+    // Comments are stripped first: one saying "never delete" is not a statement.
+    const source = (await readFile(join(ROOT, "archivist/src/archive.ts"), "utf8")).replaceAll(
+      /\/\*[\s\S]*?\*\/|^\s*\/\/.*$/gmu,
+      "",
+    );
+    expect(removing(source)).toBeNull();
+    // And an event is never rewritten, whatever else UPDATE touches.
+    expect(source.match(/\bUPDATE\s+events\b/giu)).toBeNull();
   });
 
   test("the walk catches a forbidden module behind an allowed one, a type-only import, and a package", async () => {

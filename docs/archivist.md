@@ -3,7 +3,8 @@
 **Status: spec; Build order item 1 (the role and the seat) built 2026-11-12, recorded in
 DESIGN.md, Scheduler, "Leadership" ("The archivist's seat"); item 2 (the `archivist/` workspace)
 built 2026-11-12, recorded in DESIGN.md, "Archivist", and its trust entry in the Threat model,
-item 2.** Decided with the owner on 2026-11-12. Like docs/scheduler.md and
+item 2; item 3 (tasks and fleet events in `archive.sqlite`) built 2026-11-12, recorded in
+DESIGN.md, "Archivist".** Decided with the owner on 2026-11-12. Like docs/scheduler.md and
 docs/leaving.md, this file is the working record until the code lands; each part folds into
 DESIGN.md as it is built, and its text here goes.
 
@@ -47,8 +48,8 @@ Each is the owner's, 2026-11-12, unless marked _derived_.
 - **A5, A6.** Built: one archivist per fleet, the `archivist` role on the one id on the
   `ARCHIVIST` secret, every other claim refused (DESIGN.md, Scheduler, "Leadership", "The
   archivist's seat", which is now the record).
-- **A7, A8.** Built: a second, app-role connection for reading (live `status` frames, the
-  `metrics` op and store reads arrive with items 3 and 4), and read-only by its own code, held by
+- **A7, A8.** Built: a second, app-role connection for reading (store reads arrived with
+  item 3; live `status` frames and the `metrics` op arrive with item 4), and read-only by its own code, held by
   `archivist/test/layering.test.ts` (DESIGN.md, "Archivist", which is now the record).
 - **A9.** Built: `RelayClient` skips the seat's entry as a machine, for every reader at once
   (DESIGN.md, as A5).
@@ -62,25 +63,30 @@ Each is the owner's, 2026-11-12, unless marked _derived_.
   "The archivist, a PSK holder that never acts", which is now the record).
 - **A13.** Records are opened only through the existing readers (`openAtRest`, `openTaskRecord`
   then `bindTaskRecord`, `openAccountRecord`, `openFleetQuotaRecord`). The archivist deletes and
-  overwrites nothing it cannot read.
+  overwrites nothing it cannot read. Built for tasks and accounts (DESIGN.md, "Archivist").
 - **A14.** No prompt text and no attachment is ever stored, logged or served. _Derived:_ the
   archivist applies `forgetPrompt` before writing a task row, in case a record it reads still
-  carries one.
+  carries one. Built: `forgetPrompt` moved to `shared/src/task-phase.ts` so the archivist can
+  load it. Also dropped from the stored record: `assignment.window`, `branch`,
+  `failure.message` and `decision`, which the daemon or router derive from the prompt (slugs of
+  its first words, a `/skill` name).
 - **A15.** _Derived._ An account is keyed in the archive by the HMAC'd account id the store
   already uses, never by a raw account identifier or email. An alias is stored for display only.
+  Built. A PSK rotation changes the HMAC key, so the same account files under a new key after it:
+  accepted, not engineered around (DESIGN.md, "Archivist", Accounts).
 
 ### 4. What it collects
 
 - **A16. Tasks.** Finished tasks only (`done`, `failed`, `cancelled`), metadata only. A row is
   upserted whenever the finished record's store version changes while the record is still in the
   store, so a PR that merges after its task settled is captured. Once the record is pruned the
-  row is final.
+  row is final. Built (DESIGN.md, "Archivist", which is now the record).
 - **A17. Metrics.** Two sources into one store: live `status` frames, and timed pulls from each
   daemon's `metrics` op with a watermark per series. Where both cover a timestamp the pulled
   sample wins. Rollups use the daemon's own formula (`metrics-store.ts`: each tier is the average
   of the tier below per bucket), from one module both import, not a copy.
 - **A18. Fleet events.** From registry pushes: a machine first seen, connected, gone, its build
-  changed, the scheduler leader's term changed.
+  changed, the scheduler leader's term changed. Built (DESIGN.md, "Archivist").
 - **A19. First start.** It pulls every machine's existing hourly and 5-minute history once, then
   continues from the watermark. Task history starts from what the store holds that day.
 - **A20. Outages.** After its own downtime, or a machine's sleep, it backfills from the relay
@@ -89,11 +95,13 @@ Each is the owner's, 2026-11-12, unless marked _derived_.
 
 ### 5. Retention
 
-- **A21.** Tasks and fleet events: forever.
+- **A21.** Tasks and fleet events: forever. Built: nothing prunes either table.
 - **A22.** Metrics: 30 s for 48 h, 5 min for 1 year, hourly forever.
 - **A23.** Append-only. Nothing on the wire removes or changes history; a purge is SQL on the box.
+  Built for tasks and events, held by `archivist/test/layering.test.ts` (no removing statement in
+  `archive.ts`).
 - **A24.** A retired machine's and a removed account's history stays, keyed by its stable id with
-  the last known name.
+  the last known name. Built for machines and accounts (DESIGN.md, "Archivist").
 
 ### 6. Hosting and packaging
 
@@ -224,7 +232,7 @@ One stack of PRs, each based on the one before, merged together.
 2. The `archivist/` workspace: config, PSK, signed register, the app-role leg, the layering test,
    `run` and `status` (A7, A8, A11, A12, A25). **Built 2026-11-12.**
 3. Tasks and fleet events: schema, migrations, the store reader, upsert by version (A13–A16, A18,
-   A21).
+   A21). **Built 2026-11-12.**
 4. Metrics: the shared rollup module, live `status` ingest, `metrics` pulls with watermarks, the
    first-start import, retention (A17, A19, A20, A22).
 5. `install --system`, update on the announce, and the docs: README setup, the move-the-seat

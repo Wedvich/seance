@@ -300,8 +300,11 @@ Séance's noise is cover for a real intruder.
    consult it.
    **The archivist, a PSK holder that never acts** (added 2026-11-12; "Archivist" below,
    docs/archivist.md A8, A11, A12). The fleet's optional history service holds the PSK — and,
-   from its database onward, a plaintext history of tasks and metrics — on a box of its choosing,
-   so it is one more place the key rests. Its key is held only the way this item ends: delivered
+   in `archive.sqlite` (0600 in that 0700 dir), a plaintext history of finished tasks, accounts,
+   fleet events and later metrics — on a box of its choosing, so it is one more place the key
+   rests. The history holds no prompt text, no attachment manifest and no raw account id (only
+   the store's HMAC'd key), so a thief of the file alone learns titles, repos, PRs and timings,
+   not what was asked. Its key is held only the way this item ends: delivered
    by a systemd system unit (`LoadCredentialEncrypted=seance-psk:<blob>`, the name imported from
    `daemon/src/credential.ts`, never restated), read from `$CREDENTIALS_DIRECTORY` and nowhere
    else — no config field (a `psk` key in its config is refused at start, not ignored), no
@@ -3874,7 +3877,7 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   creates past `maxTasks` (`MAX_TASKS`) as the relay does, tombstones counting toward
   nothing.
 - **A finished task keeps no prompt** (2026-10-18, owner), **nor attachment manifest** ("Attachments", 2026-10-28), **and only its decision's winner**
-  (M3 review P4, 2026-10-18). `lean` — `forgetPrompt` (`task.ts`) plus the cut to the winner
+  (M3 review P4, 2026-10-18). `lean` — `forgetPrompt` (`shared/src/task-phase.ts`) plus the cut to the winner
   `too_large` already made — runs in `#update`, the one write path, as for the clocks, so the
   write that moves a task to `done`, `failed` or `cancelled` carries `spec` without `prompt`
   and a winner-only decision, at no extra version, whatever built the record (`advance`,
@@ -10622,8 +10625,9 @@ are tmux-rename's, except where they say mods.
 ## Archivist (`archivist/`) — built 2026-11-12
 
 The fleet's optional history service (docs/archivist.md is the spec; each part lands here as it
-is built). Build order item 2 is the workspace and its two relay legs; it collects nothing yet
-and has no database. Its trust entry is the Threat model, item 2 ("The archivist, a PSK holder
+is built). Build order item 2 is the workspace and its two relay legs; item 3 (2026-11-12) is
+`archive.sqlite` and what it collects into it: finished tasks, accounts and fleet events. Metrics
+are item 4. Its trust entry is the Threat model, item 2 ("The archivist, a PSK holder
 that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archivist's seat").
 
 - **A workspace of its own, reusing the daemon by import.** `archivist/`, command
@@ -10661,8 +10665,9 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   seat flag counts the entry `skewed` ("update", true of that client), never a `Machine` and
   never `ignored` (which would send someone to rotate a correct key); one with the flag skips it.
   Every op that reaches it is dropped with a warning and no reply. No `status`, no store frame.
-- **The read leg.** A second, app-role socket from `appRelayClient` with the PSK's key, as the
-  leader's own app leg reads (A7). Nothing reads through it yet (items 3 and 4). A 4401 on it is
+- **The read leg.** A second, app-role socket from `appRelayClient` with the PSK's key and the
+  account key derived from it, as the leader's own app leg reads (A7); `archivist/src/collect.ts`
+  reads through it (below). A 4401 on it is
   permanent for that client, so the seat leg's `/daemon` upgrade succeeding — proof the token works
   now — redials it. The seat leg's `onConnect` fires when the register has left, not when it is
   accepted (the relay sends no ack), so `runtime.json` and `status` can say "connected" for a seat
@@ -10674,7 +10679,84 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   on `@seance/scheduler`, `@seance/daemon` and `child_process`, and on `Bun.spawn`/`Bun.$` anywhere
   in the closure. A second scan forbids every write method either
   client offers (dotted, bracketed or destructured), and `execPath`, in the archivist's own source. Transitive because an allowed
-  module that later grows an edge to a forbidden one must fail here, not in review.
+  module that later grows an edge to a forbidden one must fail here, not in review. A third holds
+  `bun:sqlite` to `archive.ts` alone, and that file to no `DELETE`, `DROP`, `TRUNCATE` or
+  replacing insert (A23).
+- **`archive.sqlite`** (item 3), in the state dir beside `state.json`: created empty at 0600
+  before SQLite opens it, so the WAL and shared-memory files take that mode (as
+  `metrics-store.ts` does), `journal_mode = WAL`, and migrations keyed on `PRAGMA user_version`,
+  each run in the one transaction that opens the file. A file at a newer schema than the build
+  refuses start: an older archivist would write rows a newer schema reads differently. Schema 1,
+  every time in ms:
+  - `tasks` — one row per finished task, `id` its key: `version` (the store version it was read
+    at), `state` (`done`, `failed`, `cancelled` only, by `CHECK`), `repo`, `title`, `created_at`,
+    `device_id` (its assignment's), `machine` (that machine's name when archived), `account` (the
+    `account:<hex>` store key, never the raw id), `pr_url`, `pr_state`, `done_by`, `failure` (its
+    code), `record` (the task as JSON, below), `first_archived_at`, `archived_at`. The record has
+    no finish time, so `first_archived_at` is the nearest the archive knows.
+  - `accounts` — `key` (the `account:<hex>` store key), `alias` (display only), `version` (the
+    record's store version, 0 for an account only seen signed in on a machine), `first_seen_at`,
+    `updated_at`.
+  - `machines` — `device_id`, the last known `name` and `platform`, `build` (`SourceInfo.sha`),
+    `connected`, `in_registry`, `first_seen_at`, `updated_at`. Never deleted: a retired machine
+    keeps its row and name (A24).
+  - `events` — append-only: `at`, `kind` (`first_seen`, `connected`, `gone`, `build_changed`,
+    `term_changed`), `device_id`, `name`, `build` and `previous_build` (for `first_seen` and
+    `build_changed`), `term` and `previous_term` (for `term_changed`, whose `device_id` is the
+    leader).
+  - `meta` — the last verified scheduler term (`scheduler_term`), the baseline for `term_changed`.
+- **Tasks** (A13, A14, A16). Read only through the app leg's own readers, `listTasks`
+  (`store-list task:`) and `getTask` (`store-get`), so every record is opened by `openTaskRecord`
+  then `bindTaskRecord`; one they cannot read is counted in a log line and skipped, never deleted
+  or written over. Only a `finished`-phase task gets a row, through `taskRow`: `forgetPrompt`
+  first (prompt and attachment manifest gone even if a record still carries them), then
+  `spec.pin.account` and `spillAlert` dropped, the two fields that hold a raw account id, and
+  everything the daemon or the router derives from prompt text: `assignment.window` and `branch`
+  (a title-less task's window and worktree branch are slugged from the prompt's first words),
+  `failure.message` (a daemon's text, which may name the worktree; `failure.code` stays, in its
+  column too) and `decision` (a `skill_absent` reason carries a `/skill` read off the prompt; the
+  placement stays in `assignment`). The store prunes these with the task; the archive would keep
+  them for good. A row is
+  written when the archive holds none or holds it at a lower store version (`ON CONFLICT … WHERE
+  excluded.version > tasks.version`), so a PR that merges after its task settled lands, and an
+  older blob put back never wins; a machine name the archivist cannot resolve this time keeps the
+  one held. A record that leaves the store leaves its row as it was. The account is resolved when
+  archived: the assignment's machine's exclave in the registry, else `pin.account`, HMAC'd with
+  the account key (`accountStoreKey`) — so it names the account that exclave held then, and the
+  **first** one resolved stays (`coalesce(tasks.account, excluded.account)`): a later PR reading
+  never moves a task to whatever the exclave signed into since. A named get waits for the settled
+  registry (before it no exclave resolves; the listing at ready covers what was missed). Pacing, against the relay's list floors (4 lists per minute per socket per prefix, and a
+  shared bucket of one per 8 s): a `queue-changed` naming tasks adds each id to a set one worker
+  drains, a batch at a time by `store-get` (no floor), so a burst of nudges or a slow relay reads
+  each task once per round, never once per nudge; one naming none, the leg's every (re)open, and
+  a 10-minute poll list, at most one list per prefix per 20 s, coalesced; a refused or failed
+  list retries after a minute, and a failed get (task or account) falls back to the paced list.
+  The app leg's log drops the shared client's send and recv lines for `store-get` (two per get
+  would swamp a burst); timeouts, refusals and drops still log.
+- **Accounts** (A15). `listAccounts`/`getAccountRecord`, so only through `openAccountRecord`,
+  on open, on the poll and on a `store-changed` nudge for an `account:` key (relay plaintext, a
+  hint only: the reader re-checks the key against the record's own HMAC), coalesced per key. An
+  alias moves only to a higher store version. Every account signed in on a registry machine is
+  noted by its store key, alias empty, so a removed account's tasks still name a key (A24). A key
+  is marked noted only after its write lands. **A PSK rotation splits an account's history**: the
+  key is an HMAC under a key derived from the PSK, so the same account files under a new key
+  afterwards, and rows from before name one no later row or `accounts` entry shares. Inherent to
+  A15 (a stable key without the PSK would be a raw account id) and accepted: nothing records the
+  epoch, and a per-account query across a rotation reads the account as two.
+- **Fleet events** (A18). Diffed from the app leg's settled registry (`registrySettled` on an
+  open socket, never before: an empty list then means no push yet) against the `machines` table,
+  not memory, so a restart repeats no `first_seen`. Machines are the client's decrypted
+  `Machine`s, the seat's own id skipped besides (A9). `first_seen` on a new id (then `connected`
+  if it is), `connected` when a machine not up is, `gone` when one that was up is not, whether it
+  disconnected or its entry left the registry (a machine already down when its entry leaves writes
+  no event: its row's `in_registry = 0` and `updated_at` say when), `build_changed` when its `SourceInfo.sha` moves (a daemon that stops saying is no
+  change), `term_changed` when a verified (`ready`) leader's term differs from the last recorded.
+  `at` is the archivist's clock: what changed while it was down is recorded when it returns, and a
+  machine whose blob this build cannot read is absent to it (after a PSK rotation that is every
+  machine, so each reads as `gone`, and `connected` again once its blob opens). The connection
+  waits up to 2 s on a lock (`busy_timeout`; a purge in `sqlite3` is expected, A23), and a write
+  that still fails is logged and tried again on the next registry change, never thrown into the
+  client's listener.
 
 ## Accepted trade-offs
 

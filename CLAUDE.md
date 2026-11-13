@@ -249,7 +249,15 @@ green:
   no PSK, so a notification's text is fixed per kind (a spill's window label shown only as one of
   the known `5h`/`7d`; a blocked PR's one of four texts by its `reason`, an enum; a quota-exhausted's window shown only as `5h`/`7d` and its one of two texts by `reason`, an enum; a pass-refused's text fixed) and a click opens only a same-origin path it
   built from an id that passed `isTaskId` (`/?task=<id>`, `/?screen=machines`), which the app
-  reads back through the same rule. Don't let changes drift from them.
+  reads back through the same rule, and the archivist's `archive.sqlite` (`archivist/src/archive.ts`)
+  holds no prompt text, no attachment manifest and no raw account id: a task row is written only
+  through `taskRow`, only for a finished task read through `listTasks`/`getTask`, after
+  `forgetPrompt` and with `pin.account`, `spillAlert`, `assignment.window`, `branch`,
+  `failure.message` and `decision` dropped (the daemon slugs a title-less task's window and branch
+  from its prompt), its account only as the
+  `account:` store key, and only over a row at a lower store version; an account row only from
+  `openAccountRecord` or a key `accountStoreKey` made; and no statement there removes a row
+  (`archivist/test/layering.test.ts`). Don't let changes drift from them.
 - The daemon's local op socket (`daemon/src/local-socket.ts`) is what makes MCP's `get_sessions` and
   `despawn_session` aimed at this machine skip the relay (`spawn` stays on its allowlist only for a
   `seanced mcp` started before spawns became tasks). Its access control is the **0700 `stateDir()/run` directory**, not

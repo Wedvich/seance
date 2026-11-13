@@ -24,3 +24,7 @@ export function statePathIn(stateDirectory: string): string {
 export function runtimePathIn(stateDirectory: string): string {
   return join(stateDirectory, "runtime.json");
 }
+
+export function archivePathIn(stateDirectory: string): string {
+  return join(stateDirectory, "archive.sqlite");
+}
