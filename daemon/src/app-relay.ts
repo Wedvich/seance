@@ -19,7 +19,6 @@ import {
   type Task,
   type TaskCreated,
 } from "@seance/shared";
-import type { Config } from "./config.ts";
 
 /**
  * The app-role relay connection, lazily dialled and shared — neutral ground
@@ -249,7 +248,8 @@ export async function importAppKeys(psk: string): Promise<AppKeys> {
  * and `get_queue`, and the broker reads for a keyless peer's; the leader's leg never does.
  */
 export function appRelayClient(
-  config: Pick<Config, "relayUrl" | "bearerToken">,
+  // Structural, not `Pick<Config, …>`: `config.ts` reaches the broker, and the archivist dials through here.
+  config: { readonly relayUrl: string; readonly bearerToken: string },
   keys: CryptoKey | AppKeys,
   log: (line: string) => void,
   scheduler?: { readonly term: number; readonly onEvent?: SchedulerEventHandler; readonly guard?: ReplayGuard },

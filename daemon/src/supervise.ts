@@ -1,4 +1,5 @@
-import { loadConfig, loadPsk, runnableProblems, watchConfigFile, type Config, type ResolvedPsk } from "./config.ts";
+import { loadConfig, loadPsk, watchConfigFile, type Config, type ResolvedPsk } from "./config.ts";
+import { runnableProblems } from "./config-checks.ts";
 import { log } from "./log.ts";
 import { configPath } from "./paths.ts";
 import { startDaemon, type DaemonHandle, type RunOpts } from "./run.ts";

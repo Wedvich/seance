@@ -28,7 +28,7 @@ its `wss:` one (DESIGN.md, "Attachments").
 | `bun run perf`         | PWA idle/resume cost, opt-in (see below)           |
 
 The daemon CLI runs straight from source: `bun daemon/src/main.ts <command>` (`help`
-lists the commands).
+lists the commands). So does the archivist's: `bun archivist/src/main.ts <command>`.
 
 Narrow the suite to one shard by naming a file: `bun run test daemon/test/spawn.test.ts`.
 The runner is `scripts/test.ts`, which also raises bun's 5s hook timeout — the suites
@@ -226,6 +226,13 @@ key's version at 1, which reopens alias rollback unless the PSK changes too: rot
   and the layering test. No tmux, git or workerd. The fixtures' statuses are stamped
   against a fixed clock, so a test that moves it past 90s calls `fleet.beat()` or every
   machine reads stale.
+- **archivist** — one process, since its relay suite boots workerd and nothing else in it does.
+  `run.test.ts` drives `startArchivist` against the daemon's relay double (a 4403 on demand
+  through `refuseWith`), `relay.test.ts` against the real relay with `startRelay({ archivist })`,
+  the seat's id minted first through the daemon's `loadOrInitState` as e2e mints its daemons'.
+  Each test hands in its own config, state dir and credential file (`credentialPath`), never
+  `$CREDENTIALS_DIRECTORY`. `layering.test.ts` walks the import closure of `archivist/src`, so a
+  new daemon import that reaches a forbidden module fails there.
 - **raycast** — the fastest shard: pure form/cache logic, plus drift guards that
   import the daemon's and the PWA's implementations alongside the extension's and
   assert they agree. No React harness — the relay client underneath is already

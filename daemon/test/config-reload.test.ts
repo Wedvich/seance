@@ -3,7 +3,7 @@ import { mkdtemp, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { importPsk, open, toBase64, type MachineInfo } from "@seance/shared";
-import { pskFingerprint } from "../src/config.ts";
+import { pskFingerprint } from "../src/config-checks.ts";
 import { startSupervisor, type SupervisorHandle } from "../src/supervise.ts";
 import {
   awaitWatcherLive,

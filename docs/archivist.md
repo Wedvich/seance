@@ -1,7 +1,9 @@
 # The archivist — spec
 
 **Status: spec; Build order item 1 (the role and the seat) built 2026-11-12, recorded in
-DESIGN.md, Scheduler, "Leadership" ("The archivist's seat").** Decided with the owner on 2026-11-12. Like docs/scheduler.md and
+DESIGN.md, Scheduler, "Leadership" ("The archivist's seat"); item 2 (the `archivist/` workspace)
+built 2026-11-12, recorded in DESIGN.md, "Archivist", and its trust entry in the Threat model,
+item 2.** Decided with the owner on 2026-11-12. Like docs/scheduler.md and
 docs/leaving.md, this file is the working record until the code lands; each part folds into
 DESIGN.md as it is built, and its text here goes.
 
@@ -45,13 +47,9 @@ Each is the owner's, 2026-11-12, unless marked _derived_.
 - **A5, A6.** Built: one archivist per fleet, the `archivist` role on the one id on the
   `ARCHIVIST` secret, every other claim refused (DESIGN.md, Scheduler, "Leadership", "The
   archivist's seat", which is now the record).
-- **A7.** It reads through a second, app-role connection, as the leader's own app leg does
-  (`daemon/src/app-relay.ts`): live `status` frames, the `metrics` op, store reads.
-- **A8.** It is read-only by its own code: it never enqueues, never writes the store, never
-  handles a spawn, despawn or scheduler op, and advertises no repos and no exclaves. A layering
-  test holds this (no import of spawn, tmux, broker or queue-writing modules), in the style of
-  `scheduler/test/layering.test.ts`. Letting it request sessions later is a threat-model change
-  with its own audit origin, not a tweak.
+- **A7, A8.** Built: a second, app-role connection for reading (live `status` frames, the
+  `metrics` op and store reads arrive with items 3 and 4), and read-only by its own code, held by
+  `archivist/test/layering.test.ts` (DESIGN.md, "Archivist", which is now the record).
 - **A9.** Built: `RelayClient` skips the seat's entry as a machine, for every reader at once
   (DESIGN.md, as A5).
 - **A10.** No endpoint of its own. The relay has one shared `BEARER_TOKEN`, and the box holds the
@@ -59,12 +57,9 @@ Each is the owner's, 2026-11-12, unless marked _derived_.
 
 ### 3. Trust
 
-- **A11.** The archivist holds the PSK and a plaintext history database. It is a new kind of PSK
-  holder, and DESIGN.md's threat model gains an entry for it. It differs from the standalone
-  scheduler box rejected in docs/scheduler.md ("the fifth kind of PSK holder and the first to act
-  on its own") in that it never acts (A8).
-- **A12.** The PSK is held as a daemon's is on Linux: a TPM-sealed blob delivered by a systemd
-  system unit (`LoadCredentialEncrypted`, docs/psk.md). The service never runs as root.
+- **A11, A12.** Built: a new kind of PSK holder that never acts, its key only from a systemd
+  unit's `LoadCredentialEncrypted` credential, never as root (DESIGN.md, Threat model, item 2,
+  "The archivist, a PSK holder that never acts", which is now the record).
 - **A13.** Records are opened only through the existing readers (`openAtRest`, `openTaskRecord`
   then `bindTaskRecord`, `openAccountRecord`, `openFleetQuotaRecord`). The archivist deletes and
   overwrites nothing it cannot read.
@@ -103,7 +98,8 @@ Each is the owner's, 2026-11-12, unless marked _derived_.
 ### 6. Hosting and packaging
 
 - **A25.** A workspace of its own, `archivist/`, command `seance-archivist` (`run`,
-  `install --system`, `update`, `status`), unit `seance-archivist.service`, database
+  `install --system`, `update`, `status`; the workspace, `run` and `status` built 2026-11-12,
+  DESIGN.md, "Archivist"), unit `seance-archivist.service`, database
   `archive.sqlite` in its state dir (0600, WAL, migrations on `PRAGMA user_version` as
   `metrics-store.ts` does). Bun and `bun:sqlite`; no other database, no Node.
 - **A26.** It runs from the same git checkout layout as `seanced` and follows the fleet's update
@@ -226,7 +222,7 @@ One stack of PRs, each based on the one before, merged together.
 1. The role and the seat: `DAEMON_ROLES.archivist`, the `ARCHIVIST` secret, the relay's refusal,
    and every registry reader skipping the entry as a machine (A5, A6, A9). **Built 2026-11-12.**
 2. The `archivist/` workspace: config, PSK, signed register, the app-role leg, the layering test,
-   `run` and `status` (A7, A8, A12, A25).
+   `run` and `status` (A7, A8, A11, A12, A25). **Built 2026-11-12.**
 3. Tasks and fleet events: schema, migrations, the store reader, upsert by version (A13–A16, A18,
    A21).
 4. Metrics: the shared rollup module, live `status` ingest, `metrics` pulls with watermarks, the
@@ -255,28 +251,12 @@ One stack of PRs, each based on the one before, merged together.
   `bun:sqlite` must not reach either bundle.
 - The pull timer and the page size against `METRICS_MAX_POINTS` (720) and the relay's
   `store-list` floors (4 per minute per socket per prefix).
-- Whether the archivist's registry entry carries a `machine-info` blob, and what it says, given
-  A8's "no repos, no exclaves". **Constraint from item 1:** a client built before it parses no
-  `archivist` flag and makes a `Machine` of any entry whose blob opens as a `MachineInfo` (empty
-  `repos` included) — an old daemon's leader candidates, machine alerts and broker, a cached PWA,
-  a Raycast build. So item 2 must not register a blob a pre-item-1 client opens as one.
-  _Decided: seal it under op `machine-info` with a shape `parseMachineInfo` refuses (never a
-  real `MachineInfo`), because a client counts that as `skewed`, the PWA's "Version mismatch,
-  update", which is true of a client that predates the flag. Sealed under another op it would be
-  `unopenable`, counted in `ignored` and rendered "Key mismatch, check the pre-shared key", which
-  sends someone to rotate a credential that is correct._ A client with the flag skips the entry
-  when it builds machines (its blob is still opened and parsed like any entry's, so it may log
-  one `dropped … reason=info-shape` line per blob). The skip in `RelayClient` is the main line;
-  the skewed blob is the fallback for clients that predate it.
 - **The flag is per push.** The relay stores the signed claim and derives `archivist` against
   `ARCHIVIST` as it is at each push. Moving the seat (A29, the runbook in item 5) turns the old
-  id's kept entry into an ordinary offline entry. With the blob above it is never a `Machine`
+  id's kept entry into an ordinary offline entry. With the seat's blob (not a `MachineInfo`;
+  DESIGN.md, "Archivist") it is never a `Machine`
   row, so the PWA counts it as skewed and offers no forget button; the runbook must say to
   forget it by id (`RelayClient.forget`, or a raw `forget` frame from an app socket). Item 6's health card and item 10's silence alert read the flag, so
   they follow the seat, not the old entry.
-- **The refusal's backoff.** A refused claim is closed 4403 (`CLOSE_ROLE_REFUSED`) with the
-  reason `register role-refused`. The daemon's relay client treats only `register unverified` as
-  a refusal (backoff keeps growing); item 2's client must treat 4403 the same, or a misconfigured
-  archivist redials at the base interval.
 - The label an archived series carries for its observer, since a daemon's own series name no
   machine.

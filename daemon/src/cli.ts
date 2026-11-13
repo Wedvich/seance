@@ -19,16 +19,8 @@ import { createBackend } from "./backend-default.ts";
 import { cmdAmendAuto, cmdContinueAuto, cmdPassAuto, cmdSpawnAuto, cmdStartAuto } from "./cli-auto.ts";
 import { installMods, modChecks, uninstallMods } from "./claude-mod.ts";
 import { DespawnFailure, SpawnFailure } from "./backend.ts";
-import {
-  bearerTokenWarnings,
-  configSkeleton,
-  loadConfig,
-  loadPsk,
-  pskFingerprint,
-  REAP_DEFAULTS,
-  runnableProblems,
-  type Config,
-} from "./config.ts";
+import { configSkeleton, loadConfig, loadPsk, REAP_DEFAULTS, type Config } from "./config.ts";
+import { bearerTokenWarnings, pskFingerprint, runnableProblems } from "./config-checks.ts";
 import type { Check } from "./check.ts";
 import { cliOnPath, createLink, removeLinks, resolvedBun, resolvedMain } from "./link.ts";
 import { localSocketReachable } from "./local-client.ts";

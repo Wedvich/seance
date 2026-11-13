@@ -5,6 +5,7 @@
   "description": "Spawn new Claude Code sessions on any of your machines, from your phone",
   "license": "MIT",
   "workspaces": [
+    "archivist",
     "daemon",
     "e2e",
     "pwa",
