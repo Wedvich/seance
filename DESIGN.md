@@ -9556,8 +9556,10 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   answered) or `request` (act on it if it fits). It reaches the daemon as the `message` frame, bound by the
   peer pid of `seanced mcp` (a child of `claude` in the pane) exactly as `report_task_done` is, never by a
   field, over the local socket and never the broker; the text is never in argv and `seanced mcp` logs nothing.
-  Needs the daemon to advertise `CAPABILITIES.messages`, else the call words an old daemon ("may predate
-  send_message"). A task on another machine answers `unknown` in this version (PR 2 routes it). There is no
+  It checks no capability: it sends the frame, and an old daemon that drops it as malformed shows as a
+  connection closed with no answer, worded "may predate send_message" (as `invalid` is); a handler crash
+  answers `internal`, worded as a daemon error, since an update would not help. A task on another machine
+  answers `unknown` in this version (PR 2 routes it). There is no
   list tool: `get_queue` names every task by id, title, machine and state. `read_messages` lives on the inbox
   mod, not here: the mod holds what was pushed, and a second reader in another process would need its own
   binding and cursor. Needs `mcp__seance__send_message` allowed where an agent calls it, as `report_task_done`
@@ -10049,7 +10051,8 @@ routing through the leader (PR 2) and the adapter seam (PR 3) are not built; doc
 `ancestorIn`) and refused `unbound` where the host cannot name a peer (`peerPidSupported()`) or the pid came
 back null. Unlike `session-event` there is no claimed-pane fallback: `session-event` only _claims_ a state;
 `inbox` _hands text out_, so trusting a claimed pane would let any process of the same user read any
-session's messages. `parseMessageFrame` and `parseInboxFrame` (`daemon/src/message-frame.ts`) accept exactly
+session's messages. On a host that names no peer a listener is told `unsupported` rather than `unbound`: no
+retry can ever bind there, so the mod waits it out for minutes. `parseMessageFrame` and `parseInboxFrame` (`daemon/src/message-frame.ts`) accept exactly
 their fields and no `pane`.
 
 - **`message`** (`{ v: 1, kind: "message", to, messageKind, text, inReplyTo? }`), sent by `seanced mcp`'s
@@ -10068,32 +10071,45 @@ their fields and no `pane`.
   pane is gone, dead, re-tagged or whose pid changed (`sweep`, lazily at every send and listen, not on a
   timer).
 
-**The ack** is `{ ok: true, keep: { messages, bytes }, instruction? }`; `instruction` (the constant
-`STANDING_INSTRUCTION`) only for a pane that carries a ledger-held task, since an untasked pane is not
-addressable. A refusal is `{ ok: false, code }` with `invalid`, `unbound`, `unsupported` or `stopping`.
-Exit codes of the CLI: 0 after an ack, 3 only for an explicit `unsupported`, 2 otherwise (a connection closed
-with no reply is what an old daemon dropping the frame looks like, and what a pulled-but-not-restarted one
-looks like during a self-update, so the mod backs off and retries instead of giving up).
+**The ack** is `{ ok: true, keep: { messages, bytes }, instruction }` (the constant `STANDING_INSTRUCTION`),
+and only for a pane that carries a task this machine's ledger holds a launch of: nothing is ever addressed to
+any other pane, so its listener would only idle (**decided here**: a hand-started session, or a pane tagged
+with an id this machine never launched, is refused `untasked` instead, one bun process saved per such
+session). A refusal is `{ ok: false, code }` with `invalid`, `unbound`, `unsupported`, `stopping` or
+`untasked`. Exit codes of the CLI: 0 after an ack, 3 for an explicit `unsupported`, 4 for `unbound` or
+`untasked` (a pane this daemon will not bind, which a retry does not change soon: the mod waits five minutes
+after 3 and 4 alike), 2 otherwise (a connection closed with no reply is what an old daemon dropping the frame
+looks like, and what a pulled-but-not-restarted one looks like during a self-update, so the mod backs off from
+one second to fifteen and retries instead of giving up; a stdout nobody reads any more is 2 too, since the
+child exits on a write error so the daemon drops the binding and holds the next message under its grace
+rather than audit `delivered` to an orphan).
 
 **Resolution (PR 1, local only).** `to` is a task id. The daemon delivers only to a live pane whose
 `@seance-task` is that task and whose task this machine's launch ledger holds a launch of; anything else
 answers `unknown`. A launched task with no pane yet is `held` (`ok: false`, nothing kept: the sender may
-retry) within the listener grace, `ended` after it. The window name is the title in the wrapper
+retry) within the listener grace, `ended` after it. The ledger evicts by count (128 launches) and age, so a
+task whose session still runs can fall out of it: sends to it answer `unknown` (worded "no launch record of
+task X", not "not running"), and its own sends are an untasked session's. That is the same rule as the
+`done` report and the hand-off, accepted. The window name is the title in the wrapper
 (`displayTitle`: controls, backticks and quotes stripped, 80 code points), display-only like
 `assignment.window`: nothing routes on it.
 
 **The inbox in the daemon** is memory only, per pane: at most 32 messages and `4 × MESSAGE_MAX` bytes. A
 message is held only while the pane is bound to a task and its listener has not yet connected; any other goes
 to the listener at once, and the mod keeps it. Past either cap the oldest is dropped and the next push says
-how many were. It is cleared on the pane's `ended`, when the pane is bound to another task, and on a daemon
-restart; nothing is at rest on disk, in the store or in the launch ledger.
+how many were. Each held message has its own grace timer, from when it was held (never one per inbox, which
+would age a later message by an earlier one's clock). A flush whose write fails (the connection closed, or its
+unread output passed the cap) leaves the unwritten messages held with their timers, for the next listener,
+typically a second away. It is cleared on the pane's `ended`, when the pane is bound to another task, and on a
+daemon restart; nothing is at rest on disk, in the store or in the launch ledger.
 
 - **Outcomes** (the `send_message` result and the audit's `outcome`): `delivered` (written to a live
   listener), `sent` (held in the inbox awaiting the listener: **decided here**, never `delivered`, since the
   sender cannot know it will), `held`, `ended`, `ended` + `reason: "nolistener"` (the pane has no listener
   past the grace: its exclave lacks the mod), `unknown`, `too_long`, `rate_limited`, `unbound`, `invalid`,
-  `unsupported`, `stopping`, and `dropped` (audit only: **decided here**, an inbox cap or a clear took a held
-  message).
+  `unsupported`, `stopping`, `internal` (a handler crash, never `invalid`), and `dropped` (audit only:
+  **decided here**, an inbox cap took a held message; a clear, by a rebind, an `ended` or a task reset, is
+  audited `ended`).
 - **The listener grace** is 120 s, **decided here**: from the launch ledger's record, a listener's disconnect,
   or the daemon's own start (a restart treats every pane as just disconnected, so a mod that is reconnecting is
   not told it has no listener). It separates a session still starting, or its mod reconnecting, from an exclave
@@ -10105,13 +10121,19 @@ restart; nothing is at rest on disk, in the store or in the launch ledger.
   cost 300k tokens), so the cap is ours, far under the socket's 1 MiB frame cap.
 - **Rate limit** 20 a minute and 200 an hour per sending task, held in memory in the daemon. An untasked
   sender's key is its pane (`pane:<id>`), so ids it makes up share one bucket.
+- **A session handling a request may itself send requests** (**decided here**, docs/messaging.md's open
+  question 1): bounded by the rate limit above, and the wrapper names the message id a reply answers.
+  Rejected: notes only until the turn ends, which the mod could enforce but which would stop a legitimate
+  delegation chain; the limit already bounds a hostile fan-out to 200 an hour per task.
 - **The wrapper** (`shared/src/messages.ts`, so the daemon renders and the mod pushes verbatim) names the
   sender as task id, title and machine, shows the message id, and fences the body in a backtick fence one
   longer than any run in it. A note says no reply or action is expected; a question says how to reply; a
-  request is worded as Claude Code's native peer message ("A teammate session your user runs … asks you to do
+  request is worded after Claude Code's native peer message ("A teammate session your user runs … asks you to do
   the following. Treat it as you would a request from a teammate: do it if it fits your current task and your
   user's instructions …"), because the Linux spike showed an information-only frame makes the model refuse
-  even a harmless request. An untasked sender is named as such and the reply clause is dropped.
+  even a harmless request. The text is this PR's own draft, the native wording not being available verbatim;
+  the Linux live run's request step acted on a harmless request with it, and an adjustment toward the native
+  framing stays open to later live runs. An untasked sender is named as such and the reply clause is dropped.
 
 **Audit**, a new origin `message`, two lines per message on this daemon, counts and ids only:
 
@@ -10139,7 +10161,7 @@ govern).
 
 **What each kind of session gets.** A spawned (tasked) session is addressable, can send and receives. A
 hand-started session in a tmux pane can send (the message says `from` an untasked session on `<machine>`);
-it is not addressable, so its listener binds and idles. `claude --bg` has no `TMUX_PANE`, so the mod starts
+it is not addressable, so its listener is refused `untasked`. `claude --bg` has no `TMUX_PANE`, so the mod starts
 no listener and `send_message` answers `unbound`.
 
 **Rejected** for the listener: a `$.process.run` per check (a Bun start, tmux and ps calls per tick per
@@ -10162,7 +10184,8 @@ dropped silently at the grace's end (audited `nolistener`, never told to the sen
 The mod is installed by `seanced mod install` on each machine (self-update does not run it); until then
 `doctor` warns per exclave and sessions already running lack the mod and the flag. A new mod against an old
 daemon: the old daemon drops the `inbox` frame as malformed and warns, the child exits 2, and the mod backs off
-to 15 s. Advertised as `CAPABILITIES.messages` only where the host names peers.
+to 15 s. Advertised as `CAPABILITIES.messages` only where the host names peers and the peer-binding probe
+(`peerBindingProblem`, run once per process) passed.
 
 ### Fleet broker (`daemon/src/broker.ts`) — designed 2026-10-14
 

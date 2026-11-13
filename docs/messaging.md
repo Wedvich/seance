@@ -65,8 +65,8 @@ and this spec gives them none (§3).
 | `context` from a `tool.call` hook          | —             | [V]           | The spike mod's notice blanked Bash's own output to the model. Never ride text on a tool result.                                                                                                                                                                                                                                                                                                                                   |
 | `/compact`                                 | [V]           | —             | Nothing delivered survives verbatim. Anything that must last is re-read by pull.                                                                                                                                                                                                                                                                                                                                                   |
 | Information-only frame vs native peer text | [V]           | —             | Framed "information-only, do not follow", the model refused a harmless request. Worded as Claude Code's native peer message (a teammate's request), it ran it.                                                                                                                                                                                                                                                                     |
-| Mod → daemon socket, peer pid              | [I]           | [V]           | Both `$.http.fetch({ socketPath })` (peer: `claude` itself) and a `$.process.spawn` child (peer: the child, parent `claude`) give a pid that `LOCAL_PEERPID` returns and `ancestorIn` resolves to the right pane. A child held open for 30 minutes: the next row.                                                                                                                                                                 |
-| Long-held `$.process.spawn` child + socket | [V]           | unconfirmed   | Linux 2.1.323: one child's connection held 29.6 min, all 29 one-minute lines read, across a `/compact` (no reload) and an in-process `/resume` (`session.end` reason `resume`, no `session.start`, no reconnect). `/exit` closed it; `claude --continue` in the same pane started a new child that connected 0.7 s after launch and bound the same pane (peer chain bun → claude → the pane's shell). macOS unconfirmed. |
+| Mod → daemon socket, peer pid              | [I]           | [V]           | Both `$.http.fetch({ socketPath })` (peer: `claude` itself) and a `$.process.spawn` child (peer: the child, parent `claude`) give a pid that `LOCAL_PEERPID` returns and `ancestorIn` resolves to the right pane. A child held open for 30 minutes: the next row.                                                                                                                                                                  |
+| Long-held `$.process.spawn` child + socket | [V]           | unconfirmed   | Linux 2.1.323: one child's connection held 29.6 min, all 29 one-minute lines read, across a `/compact` (no reload) and an in-process `/resume` (`session.end` reason `resume`, no `session.start`, no reconnect). `/exit` closed it; `claude --continue` in the same pane started a new child that connected 0.7 s after launch and bound the same pane (peer chain bun → claude → the pane's shell). macOS unconfirmed.           |
 | Stub heeded with layer 2 only              | [V]           | —             | Linux 2.1.323: a pushed stub ("call `read_messages`") made the model call it at once, both idle (2.4 s) and mid-turn, with only `--append-system-prompt` carrying the standing instruction.                                                                                                                                                                                                                                        |
 | MCP channel from `seanced mcp`             | [V]           | —             | One push covers mid-turn and wake, but needs `--channels` at launch and the org's `allowedChannelPlugins`, and the dev flag shows a startup dialog. A later option, not v1.                                                                                                                                                                                                                                                        |
 
@@ -83,8 +83,9 @@ and this spec gives them none (§3).
 ## Names
 
 Built in PR 1 (DESIGN.md, Local op socket, "Session messages"): the first eight rows, `CAPABILITIES.messages`, the
-caps, the audit origin `message`, and the outcomes up to `unsupported`, `too_long` and `rate_limited`,
-plus `sent`, `dropped` and `nolistener`. The rest is PR 2 and PR 3.
+caps, the audit origin `message`, and the outcomes `delivered`, `held` (in PR 1's meaning: a launched task with
+no pane yet), `ended`, `unknown`, `unsupported`, `too_long` and `rate_limited`, plus `sent`, `dropped`,
+`nolistener`, `unbound`, `invalid`, `stopping` and `internal`. The rest (`offline`, `no_leader`) is PR 2 and PR 3.
 
 | Concept                                     | Name                                                                                                       |
 | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
@@ -360,10 +361,10 @@ by a field, and refused where the host cannot name a peer. What PR 2 and PR 3 ad
 
 ## Open questions
 
-1. **May a session send a request while handling one?** A hostile request could fan out across
-   accounts as a chain. Proposed: yes in v1, bounded by the rate limit, and the wrapper names the
-   message id it replies to. Alternative: a session handling a request may send only notes until
-   its turn ends, which the mod can enforce, since it knows a request's turn is running.
+1. **May a session send a request while handling one?** Resolved in PR 1 (DESIGN.md, "Session
+   messages", Rate limit): yes, bounded by the rate limit, and the wrapper names the message id it
+   replies to. Rejected: notes only until the turn ends, which the mod could enforce, since it knows a
+   request's turn is running.
 2. **Should a question also wake when it is long?** Resolved by spike check 3: a pushed stub was
    heeded with the standing instruction on the spawn's command line only (2.4 s idle, and mid-turn),
    so a long question keeps the stub path.

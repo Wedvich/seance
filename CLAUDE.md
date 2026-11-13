@@ -371,7 +371,8 @@ green:
   `daemon/src/messages.ts`; DESIGN.md "Session messages"). Both are bound to a pane only by the
   kernel-reported peer pid: refused `unbound` where the host names no peer (`peerPidSupported`) or the
   pid came back null, never falling back to a claimed pane. `inbox` is the first frame that hands text
-  out, and binds once at accept; there is one listener per pane, closed when the pane's task changes.
+  out, and binds once at accept; there is one listener per pane, closed (lazily, at the next send or listen)
+  when the pane's task changes, and only a pane carrying a task this machine launched is acked.
   The daemon's inbox is memory only (32 messages, `4 × MESSAGE_MAX`), cleared on `ended`, rebind and
   restart. A message is delivered only to a live pane carrying a task this machine's launch ledger
   holds, and a sender counts as tasked only when the ledger holds its pane's task. Text is never
