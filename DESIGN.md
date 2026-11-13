@@ -8088,7 +8088,8 @@ keeps item 1's behaviour. `CAPABILITIES.drainAsk` is item 3's (below).
 
 A closed machine's sessions are asked to move themselves before the leader moves them (docs/drain.md is the spec's
 remainder; this is what item 3 decided). Capability `CAPABILITIES.drainAsk`, advertised by every daemon of this
-build: `now`, "Drain now", `seanced close --now`, MCP `now`, the close sheet's ask wording and its "N waiting on
+build whose backend can despawn (the ask is wired only then, as the session's own pass is; without one nothing would
+be typed or interrupted, and the clients' wording promises it): `now`, "Drain now", `seanced close --now`, MCP `now`, the close sheet's ask wording and its "N waiting on
 you will have its question dismissed" line are all gated on the target advertising it, never on `close` or
 `drain`. The ask is the daemon's, since it owns the panes (`daemon/src/drain-ask.ts`); the leader needs no new
 frame, only a mark on a frame it already takes.
@@ -8141,8 +8142,15 @@ frame, only a mark on a frame it already takes.
   `❯`, whitespace-normalised, equal to the prompt; a permission dialog, a question, the Rewind menu or the prompt
   only in the transcript above an empty box fail it; read in memory, never returned or logged). Only then Enter.
   There is no abort between `C-c` and the text: an abort there would leave "Ctrl-C again to exit" armed for the
-  next attempt's `C-c`. A text send that tmux refuses drops the entry (`skipped`) for the same reason. A
-  turn-ended idle that arrives while a sequence runs is tried again once it settles. The graceful despawn's
+  next attempt's `C-c`. A text send that tmux refuses, a key that throws (a failed spawn) and a screen check
+  that fails with no frame since drop the entry (`skipped`, audited, a log line naming pane and task, never the
+  screen): the first two for the same reason, the third because no later turn end is coming and a screen that
+  never matches would otherwise leave the entry waiting for good with the text unsent in the box (the
+  parser is checked against Claude Code 2.1.323 screens captured with `tmux capture-pane -p`, wide and wrapped,
+  a permission dialog open or dismissed, and an empty box with the prompt only in the transcript). A
+  turn-ended idle that arrives while a sequence runs is tried again once it settles; a sequence that ends without
+  Enter, or a frame, after the deadline has passed over a pane no longer at a turn end, interrupts it then, since
+  the deadline timer fires once. The graceful despawn's
   `Escape`/`C-c` pair is not reused for the clear (above); its `KEY_GAP_MS` and pane-id check are.
 - **Residual race.** The screen check is a snapshot: between it and Enter a dialog could still open (a
   background subagent finishing, a tool call that had not reported needs-input yet). The re-checks narrow the
@@ -8165,16 +8173,23 @@ frame, only a mark on a frame it already takes.
   once. Without `drainAsk` the rule is unchanged. A session pass that joins an outside pass already in flight
   (the leader's drain pass, started 10 minutes after `cl`) is no longer swallowed by it: if the outside pass was
   refused before the successor's create (the dirty tree it read before the session committed), the session's
-  runs as its own, with the commit and the record; one that succeeded answers it, as before.
+  runs as its own, with the commit and the record, and the drain pass stamps no refusal for it (the task would
+  show stuck until the rerun lands; if that fails too, the write-ahead stamp already brings the retry round); one
+  that succeeded answers it, as before. Only the drain's pass is re-run: a session pass that joins a manual or quota
+  pass is answered with its result, refusals included, as it always was.
 - **Reopen, restart.** A reopen that changes state drops every entry and timer; a prompt already typed stays
   typed, and a session that goes on to pass itself may land anywhere, this box included. Nothing is persisted:
-  a restart while closed re-enumerates (`start`), one ask per pane per `cl` per process, so a pane asked and
-  still working gets one more prompt after a restart. A pane reused for another task, an `ended` frame or a
+  a restart while closed re-enumerates (`start`), one ask per pane and task per `cl` per process (a repeated close
+  at the same `cl`, `--now` on an already-closed machine included, only moves the deadline of entries still
+  waiting and never asks or Escapes a pane already typed into or skipped), so a pane asked and still working gets
+  one more prompt after a restart. A `now` that lands before the daemon has wired the ask (the relay client
+  starts first) is kept and replayed at the wiring while the machine is still closed. A pane reused for another task, an `ended` frame or a
   pane that is marked drops its entry.
 - **Where it sits.** `SessionEventDeps.onState` is called for every bound, tasked frame with its state,
   `turnEnded`, reason and whether a hand-off or pass close began on this very frame (the outbox coalesces; this
   does not). That is the only effect of a session's state on the ask: it times the constant keys, and no frame
-  field chooses what is typed or which pane. `SessionEvents.marked` also holds while a hand-off's or a pass's own
+  field chooses what is typed or which pane (a `question` reason also brings the Escape forward, see When).
+  `SessionEvents.marked` also holds while a hand-off's or a pass's own
   close keys are going in (a `closing` set), which a mark alone did not cover once the mark was consumed.
 - **Skew.** A daemon without `drainAsk` asks nothing; the PWA, `seanced` and MCP show item 1 and 2's wording for
   it and refuse `now` locally, naming `seanced update`, and an old daemon would have ignored `now` anyway. An
@@ -10576,8 +10591,12 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   replaces it. Like `remoteSession` it is the session's claim and travels on `SessionSource`,
   read only where the event is the task's own machine's. It moves, binds and settles nothing,
   and starts no command. All it can do is bring its own task's first alert forward, once per
-  stay. A same-uid process that sends it falsely gets a push up to 2 minutes early for a task
-  already in needs-input on its machine, which it could cause anyway by holding a dialog open.
+  stay, and, on a closed machine, bring the drain ask's Escape for that pane forward from the
+  deadline to now (The drain's session ask: the pane is bound by peer pid, the key is constant,
+  and the ask Escapes each pane once per `cl`). A same-uid process that sends it falsely gets a
+  push up to 2 minutes early for a task already in needs-input on its machine, which it could
+  cause anyway by holding a dialog open, and, on a closed machine, an Escape of its own pane that
+  the deadline would send within 5 minutes anyway.
 - **Forwarded only for task sessions, at most one per session per 5 s.** An event
   for a pane with no task id goes nowhere; like every bound event, it still pokes the refresh. The first event in a
   window leaves at once. A burst after it folds into one trailing send, carrying the
