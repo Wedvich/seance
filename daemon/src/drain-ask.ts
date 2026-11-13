@@ -145,6 +145,11 @@ export function createDrainAsk(deps: DrainAskDeps): DrainAsk {
   /** Always kept, so a close knows who is idle. */
   const last = new Map<string, PaneFrame>();
   const entries = new Map<string, Entry>();
+  /**
+   * Pane and task pairs an entry was made for under `currentCl`: an entry is deleted once typed or skipped, so
+   * without this a repeated close at the same `cl` would ask (and Escape) the same pane again.
+   */
+  const asked = new Set<string>();
   let currentCl: number | null = null;
   let deadlineAt: number | null = null;
   let cancelDeadline: (() => void) | undefined;
@@ -191,17 +196,24 @@ export function createDrainAsk(deps: DrainAskDeps): DrainAsk {
 
   /** Esc, once per entry: it ends a turn, denies a permission, dismisses a question. */
   const interrupt = async (pane: string, entry: Entry): Promise<void> => {
-    if (entry.phase !== "waiting") return;
+    // Checked before the key, not after: a reopen sets the state before it reaches `reopened()`.
+    if (entry.phase !== "waiting" || !current(pane, entry)) return;
     entry.phase = "interrupted";
-    const sent = await deps.keys(pane, ["Escape"]);
-    if (!current(pane, entry)) return;
-    if (!sent) {
-      log.warn(`drain ask: could not send Escape to pane ${pane} (task ${entry.taskId}) — dropped it`);
-      drop(pane, entry);
+    let sent = false;
+    try {
+      sent = await deps.keys(pane, ["Escape"]);
+    } catch (err) {
+      log.warn(`drain ask: could not send Escape to pane ${pane} (task ${entry.taskId}) (${String(err)})`);
+    }
+    if (sent) {
+      if (current(pane, entry)) armSkip(pane, entry);
+      await record(entry.taskId, "interrupted");
       return;
     }
-    armSkip(pane, entry);
-    await record(entry.taskId, "interrupted");
+    if (!current(pane, entry)) return;
+    log.warn(`drain ask: could not send Escape to pane ${pane} (task ${entry.taskId}) — dropped it`);
+    drop(pane, entry);
+    await record(entry.taskId, "skipped");
   };
 
   /** A pane's last frame is a turn's end: the only thing that lets the text in. */
@@ -218,6 +230,14 @@ export function createDrainAsk(deps: DrainAskDeps): DrainAsk {
   /** A pane the entry may be Escaped for: not typing, and not at a turn's end. */
   const interruptible = (pane: string, entry: Entry): boolean =>
     entry.phase === "waiting" && !entry.busy && !idleNow(pane);
+
+  const pastDeadline = (): boolean => deadlineAt !== null && deadlineAt <= now();
+
+  /** A question goes at once; anything else once the deadline has passed (it fires only once per `cl`). */
+  const maybeInterrupt = (pane: string, entry: Entry): void => {
+    if (questionNow(pane) && !entry.busy) void interrupt(pane, entry);
+    else if (pastDeadline() && interruptible(pane, entry)) void interrupt(pane, entry);
+  };
 
   const typeInto = async (pane: string, entry: Entry, seq0: number): Promise<void> => {
     const live = (await deps.panes()).find((p) => p.id === pane && !p.dead);
@@ -236,7 +256,10 @@ export function createDrainAsk(deps: DrainAskDeps): DrainAsk {
     if (last.get(pane)?.seq !== seq0) return;
     // Draft clear: Ctrl+C alone, never a second one, never an Escape. No abort between it and the text: an
     // abort here would leave "Ctrl-C again to exit" armed for the next attempt's Ctrl+C.
-    if (!(await deps.keys(pane, ["C-c"]))) return;
+    if (!(await deps.keys(pane, ["C-c"]))) {
+      log.warn(`drain ask: could not send Ctrl+C to pane ${pane} (task ${entry.taskId})`);
+      return;
+    }
     await sleep(KEY_GAP_MS);
     if (!(await deps.keys(pane, ["-l", DRAIN_PROMPT]))) {
       // Exit is armed and nothing disarmed it: another attempt's Ctrl+C would exit Claude Code.
@@ -248,9 +271,20 @@ export function createDrainAsk(deps: DrainAskDeps): DrainAsk {
     await sleep(KEY_GAP_MS);
     const shown = await deps.inputShows(pane);
     // Synchronous from here to Enter, so nothing can move between the last check and the key.
-    if (!shown || !current(pane, entry) || last.get(pane)?.seq !== seq0) return;
+    if (!current(pane, entry) || last.get(pane)?.seq !== seq0) return;
+    if (!shown) {
+      // No frame moved, so no later turn end is coming to try again, and a screen that never matches would
+      // otherwise leave the entry waiting for good with the text unsent in the box. Step B covers the task.
+      log.warn(`drain ask: pane ${pane} (task ${entry.taskId}) did not show the prompt in its input box — skipped it`);
+      drop(pane, entry);
+      await record(entry.taskId, "skipped");
+      return;
+    }
     if (deps.marked(pane) || !deps.askable(entry.taskId)) return;
-    if (!(await deps.keys(pane, ["Enter"]))) return;
+    if (!(await deps.keys(pane, ["Enter"]))) {
+      log.warn(`drain ask: could not send Enter to pane ${pane} (task ${entry.taskId})`);
+      return;
+    }
     drop(pane, entry);
     await record(entry.taskId, "typed");
   };
@@ -262,12 +296,20 @@ export function createDrainAsk(deps: DrainAskDeps): DrainAsk {
     entry.again = false;
     try {
       await typeInto(pane, entry, frame.seq);
+    } catch (err) {
+      // Dropped, never retried: a throw after the first Ctrl+C may have left exit armed, and a second would exit
+      // Claude Code. Step B covers the task.
+      log.warn(`drain ask: typing into pane ${pane} (task ${entry.taskId}) failed — dropped it (${String(err)})`);
+      if (entries.get(pane) === entry) {
+        drop(pane, entry);
+        await record(entry.taskId, "skipped");
+      }
     } finally {
       entry.busy = false;
     }
     if (!current(pane, entry)) return;
     if (entry.again && idleNow(pane)) void type(pane, entry);
-    else if (questionNow(pane)) void interrupt(pane, entry);
+    else if (questionNow(pane) || pastDeadline()) maybeInterrupt(pane, entry);
   };
 
   const fireDeadline = (): void => {
@@ -292,6 +334,7 @@ export function createDrainAsk(deps: DrainAskDeps): DrainAsk {
     if (stopped) return;
     if (currentCl !== cl) {
       clearEntries();
+      asked.clear();
       currentCl = cl;
       deadlineAt = cl + interruptMs;
     }
@@ -309,6 +352,9 @@ export function createDrainAsk(deps: DrainAskDeps): DrainAsk {
       const taskId = pane.taskId;
       if (pane.dead || taskId === null || !PANE_ID.test(pane.id)) continue;
       if (!deps.askable(taskId) || deps.marked(pane.id) || entries.has(pane.id)) continue;
+      const key = `${pane.id}\0${taskId}`;
+      if (asked.has(key)) continue;
+      asked.add(key);
       const entry: Entry = {
         taskId,
         cl,
@@ -350,12 +396,13 @@ export function createDrainAsk(deps: DrainAskDeps): DrainAsk {
         return;
       }
       if (idleNow(pane)) void type(pane, entry);
-      else if (questionNow(pane)) void interrupt(pane, entry);
+      else maybeInterrupt(pane, entry);
     },
     closed,
     reopened: (): void => {
       clearEntries();
       clearDeadline();
+      asked.clear();
       currentCl = null;
       deadlineAt = null;
     },

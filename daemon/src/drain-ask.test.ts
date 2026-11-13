@@ -66,6 +66,8 @@ interface Rig {
   /** Runs once the screen has been read, before Enter. */
   afterScreen: (() => void) | undefined;
   failKey: string | undefined;
+  /** A key whose send throws, as a failed spawn does. */
+  throwKey: string | undefined;
 }
 
 function rig(): Rig {
@@ -82,6 +84,7 @@ function rig(): Rig {
     onTyped: undefined,
     afterScreen: undefined,
     failKey: undefined,
+    throwKey: undefined,
     ask: undefined as never,
   };
   const ask = createDrainAsk({
@@ -90,6 +93,7 @@ function rig(): Rig {
     askable: (taskId) => r.askable === "all" || r.askable.has(taskId),
     marked: (p) => r.marked.has(p),
     keys: (p, args) => {
+      if (r.throwKey !== undefined && args[0] === r.throwKey) return Promise.reject(new Error("spawn failed"));
       if (r.failKey !== undefined && args[0] === r.failKey) return Promise.resolve(false);
       r.keys.push({ pane: p, args });
       if (args[0] === "-l") r.onTyped?.();
@@ -157,19 +161,56 @@ describe("typing", () => {
     expect(r.audits).toEqual([{ taskId: "t-1", outcome: "typed" }]);
   });
 
-  test("a screen that does not show the prompt gets no Enter; the next turn-ended idle clears and retypes", async () => {
+  test("a screen that does not show the prompt gets no Enter, audits skipped and is not asked again", async () => {
     const r = rig();
     turnEnd(r);
     r.shown = false;
     await r.ask.closed(CL, false);
     await settle();
     expect(argsOf(r)).toEqual([["C-c"], ["-l", DRAIN_PROMPT]]);
-    expect(r.audits).toEqual([]);
+    expect(r.audits).toEqual([{ taskId: "t-1", outcome: "skipped" }]);
     r.shown = true;
     turnEnd(r);
     await settle();
-    expect(argsOf(r)).toEqual([...TYPING.slice(0, 2), ...TYPING]);
-    expect(r.audits).toEqual([{ taskId: "t-1", outcome: "typed" }]);
+    expect(argsOf(r)).toEqual([["C-c"], ["-l", DRAIN_PROMPT]]);
+  });
+
+  test("a throwing key drops the pane without a second Ctrl+C, and audits skipped", async () => {
+    const r = rig();
+    turnEnd(r);
+    r.throwKey = "-l";
+    await r.ask.closed(CL, false);
+    await settle();
+    expect(argsOf(r)).toEqual([["C-c"]]);
+    expect(r.audits).toEqual([{ taskId: "t-1", outcome: "skipped" }]);
+    r.throwKey = undefined;
+    turnEnd(r);
+    await settle();
+    expect(argsOf(r)).toEqual([["C-c"]]);
+  });
+
+  test("a repeated close at the same cl asks no pane again, typed or skipped, even past the deadline", async () => {
+    const r = rig();
+    r.panes = [pane("%1", "t-1"), pane("%2", "t-2")];
+    turnEnd(r);
+    turnEnd(r, { pane: "%2", taskId: "t-2" });
+    // %1 is typed; %2's screen then never shows the prompt, so it is skipped.
+    r.afterScreen = () => {
+      r.afterScreen = undefined;
+      r.shown = false;
+    };
+    await r.ask.closed(CL, false);
+    await settle();
+    expect(r.audits.map((a) => `${a.taskId}:${a.outcome}`).toSorted()).toEqual(["t-1:typed", "t-2:skipped"]);
+    const before = argsOf(r).length;
+    frame(r, "busy");
+    frame(r, "busy", { pane: "%2", taskId: "t-2" });
+    r.clock.advance(INTERRUPT_MS * 2);
+    await r.ask.closed(CL, false);
+    await r.ask.closed(CL, true);
+    await settle();
+    expect(argsOf(r)).toHaveLength(before);
+    expect(r.audits.map((a) => a.outcome)).not.toContain("interrupted");
   });
 
   test("a busy pane gets nothing until a turn-ended idle arrives; a plain idle never types", async () => {
@@ -368,12 +409,62 @@ describe("the interrupt", () => {
   test("the deadline never Escapes a pane whose last frame is a turn's end", async () => {
     const r = rig();
     turnEnd(r);
-    r.shown = false;
+    r.failKey = "C-c";
     await r.ask.closed(CL, false);
     await settle();
     r.clock.advance(INTERRUPT_MS);
     await settle();
-    expect(argsOf(r)).toEqual([["C-c"], ["-l", DRAIN_PROMPT]]);
+    expect(r.keys).toEqual([]);
+  });
+
+  test("a pane that turns busy after the deadline passed over its idle is Escaped then", async () => {
+    const r = rig();
+    turnEnd(r);
+    r.failKey = "C-c";
+    await r.ask.closed(CL, false);
+    await settle();
+    r.clock.advance(INTERRUPT_MS);
+    await settle();
+    expect(r.keys).toEqual([]);
+    frame(r, "busy");
+    await settle();
+    expect(argsOf(r)).toEqual([["Escape"]]);
+  });
+
+  test("typing that ends without Enter past the deadline, on a pane no longer at a turn's end, Escapes it", async () => {
+    const r = rig();
+    turnEnd(r);
+    r.onTyped = () => {
+      r.onTyped = undefined;
+      frame(r, "busy");
+    };
+    await r.ask.closed(CL, true);
+    await settle();
+    expect(argsOf(r)).toEqual([["C-c"], ["-l", DRAIN_PROMPT], ["Escape"]]);
+  });
+
+  test("no Escape once the machine reads as open, before the reopen reaches the ask", async () => {
+    const r = rig();
+    frame(r, "busy");
+    await r.ask.closed(CL, false);
+    r.cl = null;
+    r.clock.advance(INTERRUPT_MS);
+    frame(r, "needs-input", { reason: "question" });
+    await settle();
+    expect(r.keys).toEqual([]);
+    expect(r.audits).toEqual([]);
+  });
+
+  test("a failed Escape drops the pane and audits skipped; a throwing one the same", async () => {
+    for (const mode of ["failKey", "throwKey"] as const) {
+      const r = rig();
+      frame(r, "needs-input", { reason: "question" });
+      r[mode] = "Escape";
+      await r.ask.closed(CL, false);
+      await settle();
+      expect(r.keys).toEqual([]);
+      expect(r.audits).toEqual([{ taskId: "t-1", outcome: "skipped" }]);
+    }
   });
 });
 
