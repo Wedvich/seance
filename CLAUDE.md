@@ -55,6 +55,11 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   bound by peer pid, routed across machines through the leader, and the local adapter seam. Read it
   before adding a local-socket frame kind, a mod that delivers text into a session, or a leader
   event op.
+- **docs/custodian.md** — spec, nothing built: the custodian, one seat per machine whose daemon
+  starts a fresh, fenced Claude session per round to close finished sessions (removing a worktree
+  when nothing would be lost), nudge and interrupt stuck ones through `seanced custodian` verbs the
+  daemon checks, and flag the rest. Read it before touching despawn, reap's merged check, a pane's
+  tracked state, or anything that reads a live session's screen.
 
 Like DESIGN.md, the docs/ files are part of the record: a change that alters behavior they describe
 updates them in the same commit. They are not auto-discovered — this list is how sessions find them.
