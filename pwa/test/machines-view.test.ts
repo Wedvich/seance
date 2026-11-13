@@ -117,6 +117,20 @@ describe("the drain row and the close sheet", () => {
     expect(draw(inputs({ tasks: [], sessions: { "dev-1": { sessions: [] } } }))?.drain?.summary).toBe("empty");
   });
 
+  test("a sessions read not yet answered reads as reading, not as unreadable", () => {
+    const open = machine({ capabilities: [CAPABILITIES.close] });
+    expect(draw(inputs({ tasks: [], sessions: {} }))?.drain?.summary).toBe("reading sessions");
+    expect(deriveCloseSheet(open, inputs({ tasks: [], sessions: {} }))).toEqual([
+      "Closing mac stops new work landing on it.",
+      "Reading what runs there…",
+    ]);
+    expect(deriveCloseSheet(open, inputs({ tasks: [], sessions: { "dev-1": "unknown" } }))[1]).toBe(
+      "Its sessions could not be read.",
+    );
+    const lines = deriveCloseSheet(open, inputs({ sessions: { "dev-1": "unknown" } }));
+    expect(lines.at(-1)).toBe("Its sessions could not be read.");
+  });
+
   test("the close sheet keeps item 1's words without drainPass, and counts the passes with it", () => {
     const open = machine({ capabilities: [CAPABILITIES.close] });
     expect(deriveCloseSheet(open, inputs({ passes: false }))).toEqual([

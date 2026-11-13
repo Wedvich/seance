@@ -1932,10 +1932,13 @@ export class Scheduler {
     switch (result.code) {
       case "dirty_worktree":
         this.#alertQuota(id, ex, "dirty", result.code);
-        return;
+        break;
       case "branch_mismatch":
         this.#alertQuota(id, ex, "branch", result.code);
-        return;
+        break;
+      case "finished":
+      case "not_found":
+        break;
       case "needs_input":
       case "not_running":
       case "conflict":
@@ -1950,10 +1953,7 @@ export class Scheduler {
           const { quotaExhausted: _stamp, ...rest } = c;
           return rest;
         });
-        return;
-      case "finished":
-      case "not_found":
-        return;
+        break;
       case "not_launched":
       case "detached_head":
       case "default_branch":
@@ -1963,7 +1963,7 @@ export class Scheduler {
       case "here":
         this.#log(`audit pass refused task=${quote(id)} trigger=quota outcome=${result.code}`);
         this.#alertQuota(id, ex, "refused", result.code);
-        return;
+        break;
       default:
         await this.#autoRefused(id, ex, now, isRetry, result.code);
     }

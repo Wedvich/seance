@@ -250,8 +250,8 @@ function MachineCardView(props: {
       {card.drain !== null && closed && (
         <div className="fleet-note">
           <p>Draining: {card.drain.summary}</p>
-          {card.drain.stuck.map((line) => (
-            <p key={line} className="fleet-warn">
+          {keyed(card.drain.stuck).map(({ key, line }) => (
+            <p key={key} className="fleet-warn">
               {line}
             </p>
           ))}
@@ -482,6 +482,16 @@ function RenameDialog(props: {
   );
 }
 
+/** Lines made unique for keys: two panes can read the same ("Not a task: close it yourself"). */
+function keyed(lines: readonly string[]): { readonly key: string; readonly line: string }[] {
+  const seen = new Map<string, number>();
+  return lines.map((line) => {
+    const nth = (seen.get(line) ?? 0) + 1;
+    seen.set(line, nth);
+    return { key: `${line}#${nth}`, line };
+  });
+}
+
 /** A close needs a yes: it stops the scheduler's new work landing there. Reopening needs none. */
 function CloseMachineDialog(props: {
   name: string;
@@ -493,8 +503,8 @@ function CloseMachineDialog(props: {
   return (
     <Sheet title={`Close ${name}?`} variant="dialog" onClose={onClose}>
       <div className="rename">
-        {lines.map((line) => (
-          <p key={line} className="rename-hint">
+        {keyed(lines).map(({ key, line }) => (
+          <p key={key} className="rename-hint">
             {line}
           </p>
         ))}

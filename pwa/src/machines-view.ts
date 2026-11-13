@@ -131,7 +131,16 @@ function stuckLine(tasks: readonly Task[], stuck: DrainStuck): string {
 function drainRow(machine: Machine, inputs: DrainInputs): DrainRow | null {
   if (!inputs.passes || inputs.tasks === null || closedAt(machine) === null) return null;
   const view = drainView(machine, inputs.tasks, sessionsOf(inputs, machine.deviceId));
-  return { summary: drainSummary(view), stuck: view.stuck.map((entry) => stuckLine(inputs.tasks ?? [], entry)) };
+  // Not yet read is not unreadable: say so until the first answer.
+  const reading =
+    inputs.sessions[machine.deviceId] === undefined &&
+    view.empty === null &&
+    view.moving.length === 0 &&
+    view.stuck.length === 0;
+  return {
+    summary: reading ? "reading sessions" : drainSummary(view),
+    stuck: view.stuck.map((entry) => stuckLine(inputs.tasks ?? [], entry)),
+  };
 }
 
 /**
@@ -152,9 +161,13 @@ export function deriveCloseSheet(machine: Machine, inputs: DrainInputs = NO_DRAI
     lines.push(
       `${n === 1 ? "1 running task" : `${n} running tasks`} will be passed to other machines in 10 minutes unless you reopen it.`,
     );
-  } else {
-    lines.push(sessions === null ? "Its sessions could not be read." : "No running task to pass on.");
+  } else if (sessions !== null) {
+    lines.push("No running task to pass on.");
+  } else if (inputs.sessions[machine.deviceId] === undefined) {
+    lines.push("Reading what runs there…");
   }
+  if (sessions === null && inputs.sessions[machine.deviceId] === "unknown")
+    lines.push("Its sessions could not be read.");
   for (const entry of view.stuck) lines.push(stuckLine(inputs.tasks, entry));
   return lines;
 }

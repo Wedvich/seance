@@ -168,6 +168,8 @@ const REPORTED_UNAVAILABLE = "The scheduler's leader doesn't take tasks that set
 
 /** How long a close or reopen's asked state is held for the machine's status to catch up (the relay's floor is ~10 s). */
 const AVAILABILITY_HOLD_MS = 20_000;
+/** Spacing of the closed machines' session re-reads a queue nudge may cause. */
+const CLOSED_SESSIONS_NUDGE_MS = 10_000;
 
 /** How long a cleared prompt stays recoverable. Undo instead of a confirm dialog. */
 export const UNDO_WINDOW_MS = 6000;
@@ -194,6 +196,8 @@ export class Store {
   #wokenAt = new Map<string, number>();
   /** deviceId -> its status's session counts as last seen while closed, so a change re-reads its sessions (`#readMovedSessions`). */
   #closedSess = new Map<string, string>();
+  /** When a queue nudge last re-read the closed machines' sessions: a box parked closed for days must not cost a read per nudge. */
+  #nudgeReadAt = 0;
   /** The last range picked, so opening another chart keeps it; a reload starts on a day again. */
   #historyRange: HistoryRange = DEFAULT_HISTORY_RANGE;
   /** Tells this document's history entries from ones a previous load left behind. */
@@ -327,6 +331,9 @@ export class Store {
     document.addEventListener("visibilitychange", onVisibility);
     const unsubscribeQueue = this.#client.onQueueChanged((change) => {
       this.#queue.onQueueChanged(change);
+      const now = Date.now();
+      if (now - this.#nudgeReadAt < CLOSED_SESSIONS_NUDGE_MS) return;
+      this.#nudgeReadAt = now;
       this.#refreshClosedSessions();
     });
     const unsubscribeAccounts = this.#client.onStoreChanged((key, version) =>
@@ -388,6 +395,7 @@ export class Store {
       // connect saw.
       this.#wokenAt = new Map();
       this.#closedSess = new Map();
+      this.#nudgeReadAt = 0;
       this.#queue.onDrop();
       this.#wasOpen = false;
       this.#sentOnSettle = false;
@@ -439,7 +447,8 @@ export class Store {
   /**
    * A closed machine's sessions are what its drain row counts, and they change without its register
    * (a pass closes a pane): re-read them when the queue changes and when its status's per-exclave
-   * session counts do, never on a timer. Only under a `drainPass` leader, and not for a machine
+   * session counts do, never on a timer; a queue nudge at most once per `CLOSED_SESSIONS_NUDGE_MS`
+   * (a status change carries on from there). Only under a `drainPass` leader, and not for a machine
    * `woken` already read this call.
    */
   #refreshClosedSessions(skip: readonly { readonly deviceId: string }[] = []): void {

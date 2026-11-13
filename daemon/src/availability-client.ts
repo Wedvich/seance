@@ -201,6 +201,7 @@ export async function waitForDrain(opts: {
       const paneIds = (sessions?.sessions ?? []).flatMap((x) => (x.taskId === undefined ? [] : [x.taskId]));
       // oxlint-disable-next-line no-await-in-loop -- the second queue read depends on the sessions
       const tasks = lease.scheduler === null ? null : await queueTasksFor(lease.scheduler, paneIds);
+      let line: string;
       if (sessions === null || tasks === null) {
         unreadable += 1;
         if (unreadable >= UNREADABLE_POLLS) {
@@ -209,9 +210,7 @@ export async function waitForDrain(opts: {
             text: `${machine.name}: could not read ${sessions === null ? "its sessions" : "the queue"}`,
           };
         }
-        const line = `${machine.name}: could not read ${sessions === null ? "its sessions" : "the queue"}; trying again`;
-        if (line !== lastLine) print(line);
-        lastLine = line;
+        line = `${machine.name}: could not read ${sessions === null ? "its sessions" : "the queue"}; trying again`;
       } else {
         unreadable = 0;
         const view = drainView(machine, tasks, sessions.sessions, opts.closedAt);
@@ -225,10 +224,10 @@ export async function waitForDrain(opts: {
         if (view.moving.length === 0 && !closing && blocking.length > 0) {
           return { code: 2, text: `${machine.name} still runs:\n${view.stuck.map(lineOf).join("\n")}` };
         }
-        const line = `${machine.name}: ${drainSummary(view)}`;
-        if (line !== lastLine) print(line);
-        lastLine = line;
+        line = `${machine.name}: ${drainSummary(view)}`;
       }
+      if (line !== lastLine) print(line);
+      lastLine = line;
     } finally {
       lease.release();
     }

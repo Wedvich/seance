@@ -24,7 +24,9 @@ import {
   type DiscardReply,
   type DiscardRequest,
   type ExclaveInfo,
+  type ErrorResponse,
   type Machine,
+  type RequestOp,
   type MetricsReply,
   type MetricsRequest,
   type MetricsSeries,
@@ -514,6 +516,14 @@ class ScriptedClient extends RelayClient {
   override archiveTasks(request: ArchiveTasksRequest): Promise<ArchiveTasksReply | null> {
     this.archiveTaskAsks.push(request);
     return this.onArchiveTasks(request);
+  }
+
+  /** Every `sessions` read, by machine; answered as a failure, which the store keeps as "unknown". */
+  readonly sessionAsks: string[] = [];
+
+  override async request<T>(deviceId: string, op: RequestOp, _payload: unknown): Promise<T | ErrorResponse> {
+    if (op === "sessions") this.sessionAsks.push(deviceId);
+    return { ok: false, code: "internal_error", message: "scripted" };
   }
 
   override getState = (): RelayState => this.relay;
@@ -4518,6 +4528,77 @@ describe("attachments", () => {
     await store.spawn();
     expect(store.getState().held.map(({ task }) => task.spec.attachments)).toEqual([undefined]);
     detach();
+  });
+});
+
+describe("a closed machine's drain reads", () => {
+  const CLOSED = { at: 1, scan: 1, cpu: 0, mem: 0, free: 1, cl: 5 };
+  const relayWith = (leaderCaps: readonly string[]): Partial<RelayState> => ({
+    machines: [
+      autoMachine("dev-a", { capabilities: leaderCaps }),
+      autoMachine("dev-b", { capabilities: [CAPABILITIES.close], status: CLOSED }),
+    ],
+  });
+  const asked = (client: ScriptedClient): number => client.sessionAsks.filter((id) => id === "dev-b").length;
+
+  test("readDrain reads the queue and that machine's sessions, only under a drainPass leader", async () => {
+    const passing = new ScriptedClient(relayWith([CAPABILITIES.drainPass]));
+    const store = new Store(passing, { ...DEFAULT_FORM });
+    const detach = store.attach();
+    await drain();
+    const sessions = asked(passing);
+    const queues = passing.queueRequests.length;
+    store.readDrain("dev-b");
+    await drain();
+    expect(asked(passing)).toBe(sessions + 1);
+    expect(passing.queueRequests.length).toBeGreaterThan(queues);
+    detach();
+
+    const plain = new ScriptedClient(relayWith([CAPABILITIES.drain]));
+    const other = new Store(plain, { ...DEFAULT_FORM });
+    const detachOther = other.attach();
+    await drain();
+    const before = asked(plain);
+    other.readDrain("dev-b");
+    await drain();
+    expect(asked(plain)).toBe(before);
+    detachOther();
+  });
+
+  test("a queue-changed re-reads the closed machine's sessions, at most once per spacing, and only under drainPass", async () => {
+    const client = new ScriptedClient(relayWith([CAPABILITIES.drainPass]));
+    const store = new Store(client, { ...DEFAULT_FORM });
+    const detach = store.attach();
+    await drain();
+    const base = asked(client);
+    const realNow = Date.now;
+    let now = 1_000_000;
+    Date.now = () => now;
+    try {
+      client.nudge({ at: 2, tasks: ["x"] });
+      await drain();
+      expect(asked(client)).toBe(base + 1);
+      client.nudge({ at: 3, tasks: ["x"] });
+      await drain();
+      expect(asked(client)).toBe(base + 1);
+      now += 11_000;
+      client.nudge({ at: 4, tasks: ["x"] });
+      await drain();
+      expect(asked(client)).toBe(base + 2);
+    } finally {
+      Date.now = realNow;
+    }
+    detach();
+
+    const plain = new ScriptedClient(relayWith([CAPABILITIES.drain]));
+    const other = new Store(plain, { ...DEFAULT_FORM });
+    const detachOther = other.attach();
+    await drain();
+    const before = asked(plain);
+    plain.nudge({ at: 2, tasks: ["x"] });
+    await drain();
+    expect(asked(plain)).toBe(before);
+    detachOther();
   });
 });
 
