@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   admitAudit,
   auditLogChecks,
+  availabilityAudit,
   brokerAudit,
   cliSink,
   ensureAuditLog,
@@ -108,6 +109,21 @@ describe("spawn audit lines", () => {
   test("a spawn naming no level carries no autonomy field, so ordinary lines stay byte-identical", async () => {
     await audit.request({ repo: "myrepo", mode: "here" });
     expect(emitted()).not.toContain("autonomy=");
+  });
+});
+
+describe("availability audit lines", () => {
+  test("one line per request: origin, the asked state, the outcome; an unparsed request says `open=-`", async () => {
+    const out: string[] = [];
+    const audit = availabilityAudit("relay", (line) => void out.push(line));
+    await audit(false, "closed");
+    await audit(true, "reopened");
+    await audit(null, "invalid_request");
+    expect(out).toEqual([
+      "audit availability origin=relay open=false outcome=closed",
+      "audit availability origin=relay open=true outcome=reopened",
+      "audit availability origin=relay open=- outcome=invalid_request",
+    ]);
   });
 });
 

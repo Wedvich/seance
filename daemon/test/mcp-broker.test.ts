@@ -131,6 +131,19 @@ function brokerOnly(path: string): Fleet {
   });
 }
 
+describe("set_machine_open through the broker", () => {
+  test("a keyless process refuses and points to the PWA; the broker sees no availability op", async () => {
+    const path = socket.path;
+    if (path === null) throw new Error("the op socket did not bind");
+    const before = relays.length;
+    const brokered = await connect(brokerOnly(path));
+    const text = await brokered("set_machine_open", { machine: "Linux Box", open: false });
+    expect(text).toStartWith("ERROR ");
+    expect(text).toContain("PWA");
+    for (const fake of relays.slice(before)) expect(fake.requests.some((r) => r.op === "availability")).toBe(false);
+  });
+});
+
 describe("the MCP tools, direct and brokered", () => {
   test("produce the same output and the same requests at the target", async () => {
     const path = socket.path;

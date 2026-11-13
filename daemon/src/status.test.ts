@@ -158,6 +158,15 @@ describe("fitStatus", () => {
     expect(statusBytes(crowded)).toBe(STATUS_PAYLOAD_BUDGET);
   });
 
+  test("the closed time is never trimmed: a trimmed one would read as open", () => {
+    const closed = { ...status(3), cl: 1_763_000_000_000 };
+    const crowded = fitStatus({ ...closed, sess: Array.from({ length: 600 }, () => 9) });
+    expect(crowded.sess).toBeUndefined();
+    expect(crowded.cl).toBe(1_763_000_000_000);
+    expect(statusBytes(crowded)).toBe(STATUS_PAYLOAD_BUDGET);
+    expect(fitStatus(closed, padded({ ...closed, quota: undefined, tr: 3 })).cl).toBe(1_763_000_000_000);
+  });
+
   test("an exclave list too long even for sess still says it was trimmed", () => {
     const huge = { ...status(1), sess: Array.from({ length: 600 }, () => 9) };
     const fitted = fitStatus(huge);

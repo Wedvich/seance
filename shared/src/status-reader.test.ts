@@ -43,10 +43,10 @@ const status: MachineStatus = {
 
 describe("closedAt", () => {
   test("reads the newest status's close, kept or live; null without one", () => {
-    const asleep = { connected: false, status: { ...status, cl: NOW_MS - 1_000 } };
+    const asleep = { status: { ...status, cl: NOW_MS - 1_000 } };
     expect(closedAt(asleep)).toBe(NOW_MS - 1_000);
-    expect(closedAt({ connected: true, status })).toBeNull();
-    expect(closedAt({ connected: true })).toBeNull();
+    expect(closedAt({ status })).toBeNull();
+    expect(closedAt({})).toBeNull();
   });
 });
 

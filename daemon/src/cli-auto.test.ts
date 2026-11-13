@@ -20,7 +20,14 @@ import { startBrokerDouble } from "../test/broker-double.ts";
 import { fakeRelay, machine } from "../test/fake-app-relay.ts";
 import { LazyRelay } from "./app-relay.ts";
 import { brokerFail, brokerOk } from "./broker-protocol.ts";
-import { autoFleet, continueTaskAuto, passTaskAuto, spawnAuto, startTaskAuto } from "./cli-auto.ts";
+import {
+  autoFleet,
+  availabilityViaFleet,
+  continueTaskAuto,
+  passTaskAuto,
+  spawnAuto,
+  startTaskAuto,
+} from "./cli-auto.ts";
 import type { ContinueCliArgs, SpawnCliArgs } from "./cli.ts";
 import type { Config } from "./config.ts";
 import { relayFleet, SCHEDULER_NEEDS_NEWER_DAEMON } from "./fleet.ts";
@@ -961,6 +968,58 @@ describe("pass", () => {
         expect.objectContaining({ schedulerOp: "queue" }),
         expect.objectContaining({ schedulerOp: "pass", taskId: "t-1" }),
       ]);
+    } finally {
+      await double.stop();
+    }
+  });
+});
+
+describe("seanced close / open", () => {
+  const self = machine({ capabilities: ["close", "drain"] });
+
+  test("no argument acts on this machine, by its own device id, over the relay", async () => {
+    const fake = fakeRelay([self], () => ({ ok: true, closed: 9_000 }));
+    fake.setState({ scheduler: LEADING });
+    const lazy = new LazyRelay({ create: () => fake });
+    try {
+      const outcome = await availabilityViaFleet(null, false, relayFleet(lazy), () => Promise.resolve("device-1"));
+      expect(outcome.ok).toBe(true);
+      expect(fake.requests).toEqual([{ deviceId: "device-1", op: "availability", payload: { open: false } }]);
+    } finally {
+      lazy.stop();
+    }
+  });
+
+  test("a machine with no daemon state has no this-machine to act on", async () => {
+    const fake = fakeRelay([self]);
+    const lazy = new LazyRelay({ create: () => fake });
+    try {
+      const outcome = await availabilityViaFleet(null, true, relayFleet(lazy), () => Promise.resolve(null));
+      expect(outcome).toMatchObject({ ok: false });
+      expect(outcome.text).toContain("no daemon state");
+      expect(fake.requests).toEqual([]);
+    } finally {
+      lazy.stop();
+    }
+  });
+
+  test("a keyless box refuses and points to the PWA", async () => {
+    const double = await startBrokerDouble((raw, id) =>
+      isRecord(raw) && raw["action"] === "fleet"
+        ? brokerOk(id, { machines: [self], scheduler: LEADING })
+        : brokerFail(id, "unsupported", "not in this double"),
+    );
+    try {
+      const { fleet } = await autoFleet(config({ psk: "" }), {
+        broker: { path: double.path },
+        self: () => Promise.resolve("device-1"),
+        stores: [],
+      });
+      const outcome = await availabilityViaFleet(null, false, fleet, () => Promise.resolve("device-1"));
+      expect(outcome.ok).toBe(false);
+      expect(outcome.text).toContain("PWA");
+      expect(double.frames.every((frame) => isRecord(frame) && frame["action"] === "fleet")).toBe(true);
+      fleet.stop();
     } finally {
       await double.stop();
     }

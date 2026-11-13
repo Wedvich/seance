@@ -91,6 +91,21 @@ describe("the collector registry", () => {
     expect(metrics).toEqual(new Set([METRIC_NAMES.mem, METRIC_NAMES.disk, METRIC_NAMES.free, METRIC_NAMES.sess]));
   });
 
+  test("a closed machine adds `cl`, its close time, to every tick it is closed for, and nothing to the store", async () => {
+    let closed: number | null = null;
+    const store = MetricsStore.memory();
+    const telemetry = createTelemetry(store, { ...sources, closed: () => closed });
+
+    expect(await telemetry.tick(T0)).not.toHaveProperty("cl");
+    closed = T0 - 5_000;
+    expect((await telemetry.tick(T0 + 30_000)).cl).toBe(T0 - 5_000);
+    expect((await telemetry.tick(T0 + 60_000)).cl).toBe(T0 - 5_000);
+    closed = null;
+    expect(await telemetry.tick(T0 + 90_000)).not.toHaveProperty("cl");
+    const metrics = new Set(store.query({ from: 0, to: T0 / 1000 + 90, step: 30 }).map((s) => s.metric));
+    expect(metrics).toEqual(new Set([METRIC_NAMES.mem, METRIC_NAMES.disk, METRIC_NAMES.free, METRIC_NAMES.sess]));
+  });
+
   test("auth health's view becomes ax, ae and au through the registered list; empty lists and unknown ids say nothing", async () => {
     const four: Registered = {
       scan: 1,

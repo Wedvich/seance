@@ -752,6 +752,124 @@ describe("despawn_session", () => {
   });
 });
 
+describe("set_machine_open", () => {
+  const LEADER = machine({ capabilities: ["drain"] });
+  const TARGET = machine({ deviceId: "device-2", name: "homelab", capabilities: ["close"] });
+  const LEADS = { kind: "ready", deviceId: "device-1", term: 3 } as const;
+
+  async function call(
+    fake: FakeRelay,
+    args: { machine: string; open: boolean },
+  ): Promise<{ readonly text: string; readonly error: boolean }> {
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy, fakeLocal());
+    const result = await client.callTool({ name: "set_machine_open", arguments: args });
+    lazy.stop();
+    return { text: toolText(result), error: result.isError === true };
+  }
+
+  test("a close to a machine that answers it, under a leader that routes around it, sends availability and says so", async () => {
+    const fake = fakeRelay([LEADER, TARGET], () => ({ ok: true, closed: 1_763_000_000_000 }));
+    fake.setState({ scheduler: LEADS });
+    const { text, error } = await call(fake, { machine: "homelab", open: false });
+    expect(error).toBe(false);
+    expect(text).toBe("homelab is closed to new work; running work finishes where it is");
+    expect(fake.requests).toEqual([{ deviceId: "device-2", op: "availability", payload: { open: false } }]);
+  });
+
+  test("a close without a leader that advertises drain is refused, and nothing is sent", async () => {
+    const old = fakeRelay([machine({ capabilities: [] }), TARGET]);
+    old.setState({ scheduler: LEADS });
+    const refused = await call(old, { machine: "homelab", open: false });
+    expect(refused.error).toBe(true);
+    expect(refused.text).toContain("predates closing machines");
+    const none = fakeRelay([LEADER, TARGET]);
+    expect((await call(none, { machine: "homelab", open: false })).error).toBe(true);
+    expect(old.requests).toEqual([]);
+    expect(none.requests).toEqual([]);
+  });
+
+  test("a reopen needs only the target, so a close can always be undone", async () => {
+    const fake = fakeRelay([machine({ capabilities: [] }), TARGET], () => ({ ok: true, closed: null }));
+    const { text, error } = await call(fake, { machine: "homelab", open: true });
+    expect(error).toBe(false);
+    expect(text).toBe("homelab is open for work");
+    expect(fake.requests).toEqual([{ deviceId: "device-2", op: "availability", payload: { open: true } }]);
+  });
+
+  test("a target that does not advertise close is refused", async () => {
+    const fake = fakeRelay([LEADER, machine({ deviceId: "device-2", name: "homelab" })]);
+    fake.setState({ scheduler: LEADS });
+    const { text, error } = await call(fake, { machine: "homelab", open: false });
+    expect(error).toBe(true);
+    expect(text).toContain("needs `seanced update`");
+    expect(fake.requests).toEqual([]);
+  });
+
+  test("this machine goes through the relay as well, never the local socket", async () => {
+    const self = machine({ capabilities: ["close", "drain"] });
+    const fake = fakeRelay([self], () => ({ ok: true, closed: 7_000 }));
+    fake.setState({ scheduler: LEADS });
+    const local = fakeLocal();
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy, local);
+    const result = await client.callTool({
+      name: "set_machine_open",
+      arguments: { machine: "MacBook Pro", open: false },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(fake.requests).toEqual([{ deviceId: "device-1", op: "availability", payload: { open: false } }]);
+    expect(local.requests).toEqual([]);
+    lazy.stop();
+  });
+
+  test("a daemon's refusal surfaces its code", async () => {
+    const fake = fakeRelay([LEADER, TARGET], () => ({ ok: false, code: "unsupported", message: "cannot" }));
+    fake.setState({ scheduler: LEADS });
+    const { text, error } = await call(fake, { machine: "homelab", open: false });
+    expect(error).toBe(true);
+    expect(text).toContain("close failed (unsupported): cannot");
+  });
+
+  test("a keyless box (the broker) refuses, points to the PWA, and sends nothing", async () => {
+    const double = await startBrokerDouble((raw, id) =>
+      isRecord(raw) && raw["action"] === "fleet"
+        ? brokerOk(id, { machines: [LEADER, TARGET], scheduler: LEADING })
+        : brokerFail(id, "unsupported", "not in this double"),
+    );
+    try {
+      const fleet = selectFleet({
+        key: () => Promise.resolve(null),
+        direct: () => {
+          throw new Error("no key, so no direct path");
+        },
+        broker: brokerFleet({ path: double.path }, () => Promise.resolve("device-1")),
+      });
+      const client = await connectedClient(fleet, fakeLocal());
+      const result = await client.callTool({
+        name: "set_machine_open",
+        arguments: { machine: "homelab", open: false },
+      });
+      expect(result.isError).toBe(true);
+      expect(toolText(result)).toContain("PWA");
+      expect(double.frames.every((frame) => isRecord(frame) && frame["action"] === "fleet")).toBe(true);
+    } finally {
+      await double.stop();
+    }
+  });
+
+  test("list_machines shows when a machine was closed, from its status", async () => {
+    const closed = machine({ status: { at: 1, scan: 1, cl: 1_763_000_000_000 } });
+    const lazy = new LazyRelay({ create: () => fakeRelay([closed]) });
+    const client = await connectedClient(lazy);
+    const listed: { closed: string | null }[] = JSON.parse(
+      toolText(await client.callTool({ name: "list_machines", arguments: {} })),
+    );
+    expect(listed[0]?.closed).toBe(new Date(1_763_000_000_000).toISOString());
+    lazy.stop();
+  });
+});
+
 const ORIGIN = "github.com/m/seance";
 const LEADING = { kind: "ready", deviceId: "device-1", term: 3 } as const;
 
