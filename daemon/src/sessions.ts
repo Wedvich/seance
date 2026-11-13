@@ -1,7 +1,7 @@
 import { constants } from "node:os";
 import { EXIT_STATUS_MAX, isTaskId, type RepoEntry, type SessionEntry } from "@seance/shared";
 import { enclosingWorktreeCommonDir, resolveCommonDir } from "./gitdir.ts";
-import { capturePane, FIELD_SEP, listAllPanes, PANE_TITLED, TASK_FIELD, tmux } from "./tmux.ts";
+import { capturePane, FIELD_SEP, listAllPanes, OURS, PANE_TITLED, TASK_FIELD, tmux } from "./tmux.ts";
 
 // What tmux reports as a claude pane's foreground command depends on the host,
 // not on claude: macOS tmux reads the kernel's comm, the *resolved* executable's
@@ -34,9 +34,6 @@ export function isRegistered(pane: {
 function runsClaude(pane: { readonly ours: boolean; readonly command: string }): boolean {
   return pane.ours || CLAUDE_COMMAND.test(pane.command);
 }
-
-/** Reduced to 0/1 inside tmux: the raw command carries wire-supplied values (model, effort). */
-const OURS = "#{m:*--remote-control*,#{pane_start_command}}";
 
 /**
  * Git facts read off disk for attribution, kept out of the parser so it stays

@@ -59,8 +59,8 @@ describe("parseSessionEventFrame", () => {
 
 describe("activity", () => {
   const panes: readonly BoundPane[] = [
-    { id: "%1", pid: 10, dead: false, taskId: null, path: "/home/u/work/repo" },
-    { id: "%2", pid: 20, dead: false, taskId: "t1", path: "/home/u/repo" },
+    { id: "%1", pid: 10, dead: false, taskId: null, ours: true, path: "/home/u/work/repo" },
+    { id: "%2", pid: 20, dead: false, taskId: "t1", ours: true, path: "/home/u/repo" },
   ];
   const exclaves = [
     { id: "default", root: "/home/u", configDir: "/home/u/.claude", configFile: "/home/u/.claude.json" },
@@ -92,14 +92,83 @@ describe("activity", () => {
   });
 });
 
-test("parsePanePids dedupes grouped panes, validates the task, and keeps a separator in the path", () => {
-  const raw = ["%1|100|0|task-1|/a|b", "%1|100|0|task-1|/a|b", "%2|200|1||/c", "%3|300|0|bad task|/d", "junk"].join(
-    "\n",
-  );
+describe("per-pane retention (custodian C15)", () => {
+  const panes: readonly BoundPane[] = [
+    { id: "%1", pid: 10, dead: false, taskId: null, ours: true, path: "/home" },
+    { id: "%2", pid: 20, dead: false, taskId: "t1", ours: true, path: "/home" },
+  ];
+
+  function setup() {
+    const retained: [string, string, boolean][] = [];
+    const states: [string, string, boolean][] = [];
+    const forwarded: SessionEvent[] = [];
+    const events = createSessionEvents({
+      panes: () => Promise.resolve(panes),
+      exclaves: () => [],
+      forward: (event) => void forwarded.push(event),
+      ended: new EndedTasks(),
+      coalesceMs: 0,
+      hostNamesPeers: () => false,
+      retain: (pane, state, turnEnded) => void retained.push([pane.id, state, turnEnded]),
+      onState: (pane, _taskId, state, turnEnded) => void states.push([pane, state, turnEnded]),
+      handOff: () => Promise.resolve(),
+    });
+    const send = (pane: string, fields: object): Promise<unknown> => events.handle(frame({ pane, ...fields }), null);
+    return { retained, states, forwarded, events, send };
+  }
+
+  test("an untasked pane's states are retained while its replies, forwards and onState stay as they were", async () => {
+    const { retained, states, forwarded, events, send } = setup();
+    try {
+      expect(await send("%1", { state: "busy" })).toEqual({ ok: true });
+      expect(await send("%1", { state: "idle", turnEnded: true })).toEqual({ ok: true });
+      expect(await send("%1", { state: "done" })).toEqual({ ok: false, code: "untasked" });
+      expect(await send("%1", { handoff: true })).toEqual({ ok: false, code: "untasked" });
+      expect(retained).toEqual([
+        ["%1", "busy", false],
+        ["%1", "idle", true],
+      ]);
+      expect(forwarded).toEqual([]);
+      expect(states).toEqual([]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("a tasked pane's state is retained beside its forward and onState; a bare activity frame and done are not", async () => {
+    const { retained, states, forwarded, events, send } = setup();
+    try {
+      expect(await send("%2", { state: "needs-input", reason: "question" })).toEqual({ ok: true });
+      expect(await send("%2", { rateLimits: [] })).toEqual({ ok: true });
+      expect(await send("%2", { state: "done" })).toEqual({ ok: false, code: "unrecorded" });
+      expect(retained).toEqual([["%2", "needs-input", false]]);
+      expect(states).toEqual([["%2", "needs-input", false]]);
+      expect(forwarded.map((e) => e.state)).toEqual(["needs-input"]);
+    } finally {
+      events.stop();
+    }
+  });
+
+  test("a stopped ingest retains nothing", async () => {
+    const { retained, events, send } = setup();
+    events.stop();
+    expect(await send("%1", { state: "busy" })).toEqual({ ok: true });
+    expect(retained).toEqual([]);
+  });
+});
+
+test("parsePanePids dedupes grouped panes, validates the task, reads ours, and keeps a separator in the path", () => {
+  const raw = [
+    "%1|100|0|task-1|1|/a|b",
+    "%1|100|0|task-1|1|/a|b",
+    "%2|200|1||0|/c",
+    "%3|300|0|bad task|1|/d",
+    "junk",
+  ].join("\n");
   expect(parsePanePids(raw)).toEqual([
-    { id: "%1", pid: 100, dead: false, taskId: "task-1", path: "/a|b" },
-    { id: "%2", pid: 200, dead: true, taskId: null, path: "/c" },
-    { id: "%3", pid: 300, dead: false, taskId: null, path: "/d" },
+    { id: "%1", pid: 100, dead: false, taskId: "task-1", ours: true, path: "/a|b" },
+    { id: "%2", pid: 200, dead: true, taskId: null, ours: false, path: "/c" },
+    { id: "%3", pid: 300, dead: false, taskId: null, ours: true, path: "/d" },
   ]);
 });
 
@@ -675,7 +744,7 @@ describe("EndedTasks interrupted launches and the drain", () => {
   test("a bound ended event from the pane of an interrupted task clears its mark", async () => {
     await inTmp(async (path) => {
       const restarted = await afterCrash(path, "t1");
-      const events = paneEvents(restarted, { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" });
+      const events = paneEvents(restarted, { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, path: "/home" });
       try {
         await events.handle(frame({ pane: "%1", state: "ended" }), null);
         await pollUntil(() => restarted.ledger.interrupted().length === 0, "the mark cleared");
@@ -689,7 +758,7 @@ describe("EndedTasks interrupted launches and the drain", () => {
   test("a bound busy or stateless event leaves the mark: a live session is cleared by the listing", async () => {
     await inTmp(async (path) => {
       const restarted = await afterCrash(path, "t1");
-      const events = paneEvents(restarted, { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" });
+      const events = paneEvents(restarted, { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, path: "/home" });
       try {
         await events.handle(frame({ pane: "%1", state: "busy" }), null);
         await events.handle(frame({ pane: "%1" }), null);
@@ -704,7 +773,7 @@ describe("EndedTasks interrupted launches and the drain", () => {
   test("an ended event after the ingest stopped leaves the mark", async () => {
     await inTmp(async (path) => {
       const restarted = await afterCrash(path, "t1");
-      const events = paneEvents(restarted, { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" });
+      const events = paneEvents(restarted, { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, path: "/home" });
       events.stop();
       await events.handle(frame({ pane: "%1", state: "ended" }), null);
       await Bun.sleep(30); // a non-event can't be polled
@@ -715,7 +784,14 @@ describe("EndedTasks interrupted launches and the drain", () => {
   test("an unbound event, and one from another task's pane, clear nothing", async () => {
     await inTmp(async (path) => {
       const restarted = await afterCrash(path, "t1");
-      const events = paneEvents(restarted, { id: "%2", pid: 20, dead: false, taskId: "other", path: "/home" });
+      const events = paneEvents(restarted, {
+        id: "%2",
+        pid: 20,
+        dead: false,
+        taskId: "other",
+        ours: true,
+        path: "/home",
+      });
       try {
         await events.handle(frame({ pane: "%9", state: "ended" }), null);
         await events.handle(frame({ pane: "%2", state: "ended" }), null);
@@ -765,7 +841,7 @@ describe("coalescing", () => {
     jest.useRealTimers();
   });
 
-  const pane: BoundPane = { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" };
+  const pane: BoundPane = { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, path: "/home" };
 
   function setup(coalesceMs: number) {
     const forwarded: SessionEvent[] = [];
@@ -850,7 +926,7 @@ describe("the PR URL is kept for the scheduler's progress", () => {
   function setup(taskId: string) {
     const ledger = LaunchLedger.memory();
     const ended = new EndedTasks(ledger);
-    const pane: BoundPane = { id: "%1", pid: 10, dead: false, taskId, path: "/home" };
+    const pane: BoundPane = { id: "%1", pid: 10, dead: false, taskId, ours: true, path: "/home" };
     const events = createSessionEvents({
       panes: () => Promise.resolve([pane]),
       exclaves: () => [],
@@ -902,7 +978,7 @@ describe("an ended event carries the PR its own launch noted", () => {
   function setup() {
     const ledger = LaunchLedger.memory();
     const ended = new EndedTasks(ledger);
-    const pane: BoundPane = { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" };
+    const pane: BoundPane = { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, path: "/home" };
     const forwarded: SessionEvent[] = [];
     const events = createSessionEvents({
       panes: () => Promise.resolve([pane]),
@@ -961,8 +1037,8 @@ describe("an ended event carries the PR its own launch noted", () => {
 });
 
 describe("a session's done report (#21)", () => {
-  const tasked: BoundPane = { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" };
-  const bare: BoundPane = { id: "%2", pid: 20, dead: false, taskId: null, path: "/home" };
+  const tasked: BoundPane = { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, path: "/home" };
+  const bare: BoundPane = { id: "%2", pid: 20, dead: false, taskId: null, ours: true, path: "/home" };
 
   function setup(coalesceMs = 0, ledger = LaunchLedger.memory()) {
     const ended = new EndedTasks(ledger);
@@ -1144,8 +1220,8 @@ describe("a session's hand-off", () => {
     const ledger = LaunchLedger.memory();
     const ended = new EndedTasks(ledger);
     const panes: BoundPane[] = [
-      { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" },
-      { id: "%2", pid: 20, dead: false, taskId: null, path: "/home" },
+      { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, path: "/home" },
+      { id: "%2", pid: 20, dead: false, taskId: null, ours: true, path: "/home" },
     ];
     const forwarded: SessionEvent[] = [];
     const closed: [string, string][] = [];
@@ -1300,10 +1376,10 @@ describe("a session's hand-off", () => {
       expect(closed).toEqual([]);
 
       await send("%1", { handoff: true });
-      panes[0] = { id: "%1", pid: 11, dead: false, taskId: "t2", path: "/home" };
+      panes[0] = { id: "%1", pid: 11, dead: false, taskId: "t2", ours: true, path: "/home" };
       await ledger.record("t2");
       await send("%1", { state: "idle", turnEnded: true });
-      panes[0] = { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" };
+      panes[0] = { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, path: "/home" };
       await send("%1", { state: "idle", turnEnded: true });
       expect(closed).toEqual([]);
     } finally {
@@ -1347,8 +1423,8 @@ describe("a session's own pass", () => {
     const ledger = LaunchLedger.memory();
     const ended = new EndedTasks(ledger);
     const panes: BoundPane[] = [
-      { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" },
-      { id: "%2", pid: 20, dead: false, taskId: null, path: "/home" },
+      { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, path: "/home" },
+      { id: "%2", pid: 20, dead: false, taskId: null, ours: true, path: "/home" },
     ];
     const pushes: { taskId: string; hasPr: boolean }[] = [];
     const passes: SessionPass[] = [];
@@ -1573,7 +1649,7 @@ describe("a session's own pass", () => {
     try {
       await launch();
       const throwing = createSessionEvents({
-        panes: () => Promise.resolve([{ id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" }]),
+        panes: () => Promise.resolve([{ id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, path: "/home" }]),
         exclaves: () => [],
         forward: () => {},
         ended: new EndedTasks(ledger),
@@ -1727,9 +1803,9 @@ describe("a session's own pass", () => {
         await launch();
         await ledger.record("t2");
         await send("%1", { pass: true, record: RECORD });
-        panes[0] = { id: "%1", pid: 10, dead: false, taskId: "t2", path: "/home" };
+        panes[0] = { id: "%1", pid: 10, dead: false, taskId: "t2", ours: true, path: "/home" };
         await send("%1", { state: "idle", turnEnded: true });
-        panes[0] = { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" };
+        panes[0] = { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, path: "/home" };
         // A pass-close for t1 now finds no entry of the pane's: it is made anew, and needs a later turn end.
         await events.armPassClose("t1");
         expect(closed).toEqual([]);
@@ -1741,9 +1817,9 @@ describe("a session's own pass", () => {
     test("a pass-close for a task no live pane carries is no_pane, and a stopped ingest arms nothing", async () => {
       const { panes, events } = setup();
       expect(await events.armPassClose("nobody")).toMatchObject({ ok: false, code: "no_pane" });
-      panes[0] = { id: "%1", pid: 10, dead: true, taskId: "t1", path: "/home" };
+      panes[0] = { id: "%1", pid: 10, dead: true, taskId: "t1", ours: true, path: "/home" };
       expect(await events.armPassClose("t1")).toMatchObject({ ok: false, code: "no_pane" });
-      panes[0] = { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" };
+      panes[0] = { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, path: "/home" };
       events.stop();
       // Not no_pane: that tells the leader the session is gone, which a stopping daemon cannot say.
       expect(await events.armPassClose("t1")).toMatchObject({ ok: false, code: "unsupported" });
@@ -1799,8 +1875,8 @@ describe("the drain ask's hooks", () => {
     const ledger = LaunchLedger.memory();
     const ended = new EndedTasks(ledger);
     const panes: BoundPane[] = [
-      { id: "%1", pid: 10, dead: false, taskId: "t1", path: "/home" },
-      { id: "%2", pid: 20, dead: false, taskId: null, path: "/home" },
+      { id: "%1", pid: 10, dead: false, taskId: "t1", ours: true, path: "/home" },
+      { id: "%2", pid: 20, dead: false, taskId: null, ours: true, path: "/home" },
     ];
     const states: State[] = [];
     const passes: SessionPass[] = [];

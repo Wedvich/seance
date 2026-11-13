@@ -574,7 +574,14 @@ export type ReapOrigin = "cli" | "schedule" | "harvest";
 
 export interface ReapAudit {
   readonly start: (repos: number) => Promise<void>;
-  readonly removedWorktree: (repo: string, path: string, branch: string | null, head: string) => Promise<void>;
+  /** `how` is the nothing-lost rule's fixed passing reason (a merge kind, `origin` or `pr`): a removal is not always a merge. */
+  readonly removedWorktree: (
+    repo: string,
+    path: string,
+    branch: string | null,
+    head: string,
+    how: string,
+  ) => Promise<void>;
   /** The full tip sha is the recovery: `git branch <name> <sha>` brings the branch back. */
   readonly deletedBranch: (repo: string, name: string, sha: string, reason: string) => Promise<void>;
   readonly closedPane: (paneId: string, window: string, reason: string) => Promise<void>;
@@ -603,9 +610,9 @@ export function reapAudit(origin: ReapOrigin, sink: AuditSink): ReapAudit {
   };
   return {
     start: (repos) => emit(`start repos=${repos}`),
-    removedWorktree: (repo, path, branch, head) =>
+    removedWorktree: (repo, path, branch, head, how) =>
       emit(
-        `removed-worktree repo=${quote(repo)} path=${quote(path)} branch=${quote(branch ?? "(detached)")} head=${head}`,
+        `removed-worktree repo=${quote(repo)} path=${quote(path)} branch=${quote(branch ?? "(detached)")} head=${head} reason=${how}`,
       ),
     deletedBranch: (repo, name, sha, reason) =>
       emit(`deleted-branch repo=${quote(repo)} branch=${quote(name)} sha=${sha} reason=${reason}`),

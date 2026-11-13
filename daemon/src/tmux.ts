@@ -58,6 +58,12 @@ export const FIELD_SEP = "|";
 export const PANE_TITLED = "#{?pane_title,#{?#{==:#{pane_title},#{host}},0,1},0}";
 
 /**
+ * `1` for a pane séance started: its start command carries `--remote-control`. Reduced to 0/1 inside tmux:
+ * the raw command carries wire-supplied values (model, effort).
+ */
+export const OURS = "#{m:*--remote-control*,#{pane_start_command}}";
+
+/**
  * Pane user option holding the spawn's `taskId`. On the pane, not in daemon
  * state: it lives exactly as long as the session, so a restarted daemon reads
  * it back with the session list and nothing can outlive the pane it names.

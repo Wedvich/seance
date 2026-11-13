@@ -22,8 +22,13 @@ export interface Config {
    * from `name`, which is a display string and makes an ugly tag.
    */
   readonly machineTag?: string;
-  /** `seanced reap`'s settings; absent means the defaults, with the schedule off. */
+  /**
+   * `seanced reap`'s settings; absent means the defaults, with the schedule off. Always set under `custodian`, whose
+   * defaults (`CUSTODIAN_REAP_DEFAULTS`) fill the fields the key leaves out.
+   */
   readonly reap?: ReapConfig;
+  /** Present when the machine's config carries a `custodian` key (docs/custodian.md, C2). */
+  readonly custodian?: CustodianConfig;
   /** The `/usage` refresh's settings; absent means the defaults. */
   readonly quota?: QuotaConfig;
   /** Auth health's settings (`auth-health.ts`); absent means the defaults. */
@@ -228,16 +233,31 @@ export interface ReapConfig {
 }
 
 export const REAP_DEFAULTS: ReapConfig = { intervalHours: 0, minAgeDays: 4 };
+/** With a custodian configured (custodian C35): old worktrees are reap's, so the timer is on and the age gate short. */
+export const CUSTODIAN_REAP_DEFAULTS: ReapConfig = { intervalHours: 6, minAgeDays: 1 };
 
-function parseReap(raw: unknown, path: string): ReapConfig | undefined {
+/**
+ * docs/custodian.md's seat config (C2). Only the key's presence is read so far — it moves reap's defaults — so no
+ * field is parsed yet; the seat's own parser fills this in.
+ */
+export type CustodianConfig = Readonly<Record<string, never>>;
+
+function parseCustodian(raw: unknown, path: string): CustodianConfig | undefined {
   if (raw === undefined) return undefined;
+  if (!isRecord(raw)) throw new TypeError(`config at ${path}: "custodian" must be an object`);
+  return {};
+}
+
+/** Per field: a `reap` key naming only some keeps `defaults` for the rest, a custodian's included. */
+function parseReap(raw: unknown, path: string, defaults: ReapConfig): ReapConfig | undefined {
+  if (raw === undefined) return defaults === REAP_DEFAULTS ? undefined : defaults;
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new TypeError(`config at ${path}: "reap" must be an object`);
   }
   const obj = raw as Record<string, unknown>;
   const number = (key: keyof ReapConfig): number => {
     // Absent takes the default; present-but-null is a mistake worth naming.
-    const value = key in obj ? obj[key] : REAP_DEFAULTS[key];
+    const value = key in obj ? obj[key] : defaults[key];
     if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
       throw new TypeError(`config at ${path}: "reap.${key}" must be a number ≥ 0`);
     }
@@ -287,12 +307,14 @@ export async function loadConfig(path: string = configPath()): Promise<Config> {
   if (!Array.isArray(roots) || roots.length === 0 || roots.some((r) => typeof r !== "string")) {
     throw new TypeError(`config at ${path}: "repoRoots" must be a non-empty array of strings`);
   }
-  const reap = parseReap(obj["reap"], path);
+  const custodian = parseCustodian(obj["custodian"], path);
+  const reap = parseReap(obj["reap"], path, custodian === undefined ? REAP_DEFAULTS : CUSTODIAN_REAP_DEFAULTS);
   const quota = parseQuota(obj["quota"], path);
   const authHealth = parseAuthHealth(obj["authHealth"], path);
   const traits = parseTraits(obj["traits"], path);
   return {
     ...(reap === undefined ? {} : { reap }),
+    ...(custodian === undefined ? {} : { custodian }),
     ...(quota === undefined ? {} : { quota }),
     ...(authHealth === undefined ? {} : { authHealth }),
     ...(traits === undefined ? {} : { traits }),

@@ -38,7 +38,16 @@ import { markClosed } from "./exit-status.ts";
 import { mcpFleetChecks } from "./fleet.ts";
 import { platformFsmonitor } from "./fsmonitor.ts";
 import { mcpChecks, runMcpServer } from "./mcp.ts";
-import { configDir, configPath, logPath, pruneLogPath, socketPath, statePath, tildify } from "./paths.ts";
+import {
+  configDir,
+  configPath,
+  logPath,
+  pruneLogPath,
+  reapRefusalsPath,
+  socketPath,
+  statePath,
+  tildify,
+} from "./paths.ts";
 import { installExtension, raycastChecks, uninstallExtension } from "./raycast.ts";
 import { availablePskStore, pskStoreChecks, type PskStore } from "./psk-store.ts";
 import {
@@ -537,6 +546,7 @@ export async function cmdReap(argv: readonly string[]): Promise<void> {
         minAgeMs: minAgeDays * DAY_MS,
         audit: reapAudit("cli", cliSink),
         pruneLogPath: pruneLogPath(),
+        refusalsPath: reapRefusalsPath(),
         attachments: attachmentsRoot(),
         fsmonitor: platformFsmonitor(),
       }),
