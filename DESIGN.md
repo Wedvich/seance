@@ -7934,7 +7934,7 @@ running sessions finish in place. The drain (moving the work off) is later items
   nothing is answered with the current state. The reply is `{ ok: true, closed }`, `closed` being the
   close time or null. Audited `audit availability origin=relay open=<true|false|-> outcome=<closed|
   reopened|unchanged|refused|invalid_request|unsupported|internal_error>`; no payload beyond that.
-  `now?` (the drain's grace) arrives with the drain.
+  `now?` (the drain's grace) arrives with the drain; until then it is accepted and ignored.
 - **`MachineStatus.cl`** is the close time in unix ms. It rides the sealed status, so the relay learns
   nothing, and `fitStatus` never trims it: a trimmed `cl` would read as open. A set or cleared `cl`
   asks the status loop for a fresh status (`StatusLoop.refresh`, as `drn` does), so the leader hears it
@@ -7946,14 +7946,21 @@ running sessions finish in place. The drain (moving the work off) is later items
   the leader sealed with `routesClosed: true` is answered `machine_closed` (the leader's `verdict` settles
   it as undelivered: the task is `ready` again at once, never `failed`, and the next pass routes it
   afresh); a spawn without the flag, from a leader that predates this, is answered `internal_error`,
-  unrecorded, the code every older leader already settles at the TTL. The gate first looks up a live pane
+  unrecorded: an older leader settles an unknown refusal code `failed` (`verdict`, `settle.ts`), which is why
+  the flag exists, and `internal_error` is a transport code that keeps the task reserved until the TTL, when
+  `sessions` proves it never landed and it returns to `ready` (and may be routed back to the closed box
+  once per TTL, holding a cap slot there meanwhile). The gate first looks up a live pane
   for the task and answers `task_running`, so a retry of a launch whose reply was lost never reads as
   closed. `routesClosed` is accepted only as `true` and only from the scheduler.
-- **Direct spawns still run.** A spawn the person aimed at this machine (`seanced spawn --now`, MCP
-  `spawn_session` with a machine, the PWA's picks) is their explicit choice, and the spawn sheet shows
-  the machine as closed. Closing is about what the scheduler does, not about locking the box.
+- **Direct spawns still run.** A spawn that bypasses the scheduler (`seanced spawn --now`, Raycast, the
+  local socket) is the person's explicit choice and is not gated. A pin is not one: the PWA's Machine
+  pick, `seanced spawn --machine` and MCP `spawn_session { machine }` all enqueue a pinned task, which
+  waits ("closed to new work") until the machine reopens. Closing is about what the scheduler does, not
+  about locking the box.
 - **Capabilities.** `CAPABILITIES.close` (a daemon answers `availability`) and `CAPABILITIES.drain` (a
-  leader routes around `cl` and sends `routesClosed`; named for the feature, though item 1 only closes).
+  leader routes around `cl` and sends `routesClosed`; named for the feature, though item 1 only closes: in
+  this build `drain` means exactly that, and the drain's outside pass and session ask each add a capability of their own, so
+  a client can tell the builds apart).
   A close is offered only to a target advertising `close` under a verified leader advertising `drain`; a
   reopen needs only `close`.
 - **Surfaces.** The PWA's Machines screen has an "Open for work" switch in the machine's menu, a Closed
@@ -7961,7 +7968,7 @@ running sessions finish in place. The drain (moving the work off) is later items
   reopens" and the picker prefixes "closed to scheduled work". `seanced close|open [<machine>]` act on
   this machine when none is named; MCP `set_machine_open { machine, open }` and a `closed` ISO time or
   null on `list_machines`. The tool ends nothing and sends no keys, but, like `pass_task`, it changes
-  what the fleet does, so it belongs on an explicit allowlist, never a default one (docs/psk.md).
+  what the fleet does, so it stays behind Claude Code's per-tool approval and is never allowlisted (docs/psk.md).
   The archivist and the relay are unchanged: `status` is sealed to the app, and the archivist's
   `parseMachineStatus` ignores `cl`.
 - **Threat model.** No new power: closing every machine stops the queue, as `pause` does. The op is
