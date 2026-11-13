@@ -10,6 +10,7 @@ import {
   type SessionsView,
 } from "../src/state.ts";
 import {
+  deriveCloseAvailability,
   derivePinProblem,
   deriveReportedAvailability,
   deriveView,
@@ -326,6 +327,29 @@ describe("banner and button", () => {
 
   test("no footnote when every entry decrypts", () => {
     expect(deriveView(state(), NOW).ignoredNote).toBeNull();
+  });
+
+  test("a pin on a closed machine still queues; the status line and the picker say it waits until reopened", () => {
+    const closed = machine({ exclaves: [exclave("default")], status: { at: 1, scan: 1, cl: NOW - 1_000 } });
+    const view = deriveView(state({ relay: relay({ machines: [closed] }) }, { machine: "dev-1" }), NOW);
+    expect(view.button.enabled).toBe(true);
+    expect(view.formStatus).toBe("MacBook Pro is closed: this waits until it reopens");
+    expect(view.machineChoices[0]?.sub.startsWith("closed to scheduled work · ")).toBe(true);
+    expect(view.machineChoices[0]?.disabled).toBe(false);
+  });
+
+  test("a close is offered only to a machine that answers it under a verified drain-capable leader", () => {
+    const target = machine({ capabilities: [CAPABILITIES.close] });
+    const leading = (capabilities: string[]): RelayState =>
+      relay({
+        machines: [target, machine({ deviceId: "dev-2", name: "Lead", capabilities })],
+        scheduler: { kind: "ready", deviceId: "dev-2", term: 1 },
+      });
+    expect(deriveCloseAvailability(leading([CAPABILITIES.drain]), target)).toBe(true);
+    expect(deriveCloseAvailability(leading([]), target)).toBe(false);
+    expect(deriveCloseAvailability(relay({ machines: [target] }), target)).toBe(false);
+    const mute = machine({ capabilities: [] });
+    expect(deriveCloseAvailability(leading([CAPABILITIES.drain]), mute)).toBe(false);
   });
 
   // The task waits for it, so an offline pin is a note, never a block.

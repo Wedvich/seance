@@ -40,7 +40,7 @@ import type { ServerWebSocket } from "bun";
 import { pollUntil } from "./poll.ts";
 import { failureReasonText, RelayClient, RequestFailure, type RelayState } from "@seance/shared";
 import { startFakeDaemon } from "./daemon.ts";
-import { DEFAULT_FORM, RESCAN_IDLE, type PersistedForm } from "../src/state.ts";
+import { AVAILABILITY_IDLE, DEFAULT_FORM, RESCAN_IDLE, type PersistedForm } from "../src/state.ts";
 import { Store } from "../src/store.ts";
 import type { AppState } from "../src/view.ts";
 import { installBrowserGlobals } from "./stubs.ts";
@@ -2147,6 +2147,68 @@ describe("store", () => {
       await store.rescan(deviceId);
       expect(store.getState().rescan).toEqual(RESCAN_IDLE);
       expect(scanTime()).toBe(scannedAt);
+    } finally {
+      stop();
+      daemon.close();
+    }
+  });
+
+  test("a reopen sends availability to the machine; a refusal is kept as the machine's failure note", async () => {
+    const deviceId = await newDeviceId();
+    const asked: unknown[] = [];
+    let refuse = false;
+    const daemon = await startFakeDaemon(
+      relay,
+      key,
+      deviceId,
+      { ...machineInfo("Closable"), capabilities: ["close"] },
+      {
+        sessions: () => ({ sessions: [], at: Date.now() }),
+        availability: (payload) => {
+          asked.push(payload);
+          return refuse ? { ok: false, code: "unsupported", message: "cannot" } : { ok: true, closed: null };
+        },
+      },
+    );
+    const { store, waitForApp, stop } = startStore({ machine: deviceId });
+    try {
+      await waitForApp(online(deviceId), "machine online");
+      await store.setMachineOpen(deviceId, true);
+      expect(asked).toEqual([{ open: true }]);
+      expect(store.getState().availability).toEqual(AVAILABILITY_IDLE);
+      refuse = true;
+      await store.setMachineOpen(deviceId, true);
+      const failed = store.getState().availability;
+      expect(failed).toMatchObject({ kind: "failed", deviceId });
+      expect(failed.kind === "failed" ? failed.text : "").toContain("cannot");
+    } finally {
+      stop();
+      daemon.close();
+    }
+  });
+
+  test("a close without a verified drain-capable leader is never sent", async () => {
+    const deviceId = await newDeviceId();
+    const asked: unknown[] = [];
+    const daemon = await startFakeDaemon(
+      relay,
+      key,
+      deviceId,
+      { ...machineInfo("Unled"), capabilities: ["close"] },
+      {
+        sessions: () => ({ sessions: [], at: Date.now() }),
+        availability: (payload) => {
+          asked.push(payload);
+          return { ok: true, closed: 1 };
+        },
+      },
+    );
+    const { store, waitForApp, stop } = startStore({ machine: deviceId });
+    try {
+      await waitForApp(online(deviceId), "machine online");
+      await store.setMachineOpen(deviceId, false);
+      expect(store.getState().availability).toMatchObject({ kind: "failed", deviceId });
+      expect(asked).toEqual([]);
     } finally {
       stop();
       daemon.close();
