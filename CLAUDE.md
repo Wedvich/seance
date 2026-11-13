@@ -55,8 +55,9 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   "Session messages"; Claude Code mods; MCP server; Threat model item 6). What is left in the file is
   cross-machine routing (PR 2), the adapter seam (PR 3), the open questions and the spike evidence.
   Read it before adding a leader event op or an adapter.
-- **docs/custodian.md** — spec, two parts built (the nothing-lost rule in `reap`, C32–C36, in DESIGN.md,
-  Reap, "Nothing lost"; per-pane state and screen tracking, C15, in DESIGN.md, "Session events"): the
+- **docs/custodian.md** — spec, three parts built (the nothing-lost rule in `reap`, C32–C36, in DESIGN.md,
+  Reap, "Nothing lost"; per-pane state and screen tracking, C15, in DESIGN.md, "Session events"; the seat
+  and the round, C1–C4 and C8–C21, in DESIGN.md, "The custodian's seat", held behind `ROUNDS_LIVE` until the verbs exist): the
   custodian, one seat per machine whose daemon
   starts a fresh, fenced Claude session per round to close finished sessions (removing a worktree
   when nothing would be lost), nudge and interrupt stuck ones through `seanced custodian` verbs the
@@ -181,6 +182,7 @@ green:
   the daemon's reap timer, `probe` for the daemon's trait probes, `harvest` for the daemon closing a dead task pane after noting its exit
   status, `handoff` for the daemon closing a session that handed its PR off (`hand_off_task`),
   `drain` for the daemon typing its constant drain prompt, or the Escape before it, into a pane of a closed machine,
+  `custodian` for the daemon's seat starting, closing or ending a custodian round,
   `message` for a session's message to another task on this machine (one `dir=out` and one `dir=in` line per message: task ids, kind, byte count and outcome, never text),
   `successor` for the daemon pushing a task's branch on its own session's `pass_to_successor` and closing
   that session once the leader confirmed it,
@@ -378,8 +380,8 @@ green:
   `get_queue`).
   While this machine is closed, a bound, tasked frame's state, `turnEnded` and `reason` also time the drain ask's
   constant keys for that pane (`onState`), and never choose what is typed or which pane.
-  Keeping each `ours` pane's last state and `turnEnded`, tasked or not, in memory (`pane-activity.ts`, for the
-  custodian) is retention of what ingest bound, not an act: nothing there is run, sent or persisted, no reply
+  Keeping each `ours` pane's last state and `turnEnded`, tasked or not, in memory (`pane-activity.ts`, only while a
+  custodian seat runs) is retention of what ingest bound, not an act: nothing there is run, sent or persisted, no reply
   depends on it, and its screen sampler keeps only a hash of `capture-pane` and timestamps, never the text.
   Giving it any other act, or taking a session or task id from the frame to bind by, is the same
   kind of change too.
@@ -402,6 +404,19 @@ green:
   Nothing reachable from `seanced mcp` imports `log.ts` (`send-message.ts`, `message-frame.ts`), and
   `inbox-cli.ts` is silent because its stdout is the mod's data channel. Giving either frame any
   other act, or binding by a field, is a threat-model change.
+- **The custodian's round is a fenced reader of untrusted text and never a session** (DESIGN.md, "The
+  custodian's seat"). Its pane carries the tmux pane option `@seance-custodian`, every pane reader skips it
+  through its format-field parse (`listClaudeSessions`, `listPanes`, `parsePanePids`, `despawnSession`), only
+  `despawnRound` closes it (a pane id and nothing else, no option a wire frame can set), and it starts only
+  while the daemon is not draining. A `custodian` config key lives only in the machine's own `config.json`.
+  Its fence (`custodian-fence.ts`) is generated: the deny list comes from constants and the one `COMMANDS`
+  table, so a new `seanced` command is denied to a round by default, and it is for a cheap model's mistakes,
+  never a boundary — what bounds an injected round is the daemon's own verbs. The daemon reads an exclave's
+  `.claude.json` for the round dir's trust and never writes it. The round dir and the tmp dir are made 0700, the tmp
+  dir under the literal `/tmp/seance-cu-` (never `tmpdir()`, whose length makes Claude Code fall back to a shared
+  `/tmp`), and the seat record in `state.json` is validated (`custodianSeatOf`) before the daemon closes a pane
+  or removes a path it names. Nothing read from a pane, the seed, the notes or the agent's text is logged or
+  audited; the lines carry an exclave id, a pane id, a reason and an outcome.
 - **`raycast/` layering: nothing under `raycast/src/lib/` may import `@raycast/api`.** It throws
   outside the Raycast host, so such a module could not run under `bun test` and would take every
   test in the directory down at import time. Views are `.tsx` at `src/`, logic is `.ts` at
