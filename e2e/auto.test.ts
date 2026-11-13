@@ -907,7 +907,18 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
   }, 60_000);
 
   test("a machine closed from the app is rejected `closed` for a pinned task, which waits; reopening is the way back", async () => {
-    const closable = await stack.startSecondDaemon({ name: "ClosedBox" });
+    // Signed in, so `closed` is the one thing keeping a pinned task off it and reopening alone lets it run.
+    const closable = await stack.startSecondDaemon({
+      name: "ClosedBox",
+      exclaves: [
+        {
+          id: "default",
+          observedAtMs: Date.now() - 10 * 60_000,
+          fiveHourPct: 20,
+          account: { organizationUuid: "e2e-org-c", accountUuid: "closable", emailAddress: "closable@e2e.test" },
+        },
+      ],
+    });
     const app = startApp(stack, { prompt: "not here, not now" });
     let taskId: string | null = null;
     let closed = false;
@@ -924,7 +935,7 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       );
       await app.store.setMachineOpen(closable.deviceId, false);
       closed = true;
-      expect(app.store.getState().availability.kind).toBe("idle");
+      expect(app.store.getState().availability[closable.deviceId]).toEqual({ kind: "sent", open: false });
       // A refresh waits out the relay's 10s status floor since the machine's register-time sample.
       await pollUntil(
         () =>
@@ -946,13 +957,22 @@ describe("auto: app ↔ relay ↔ leader ↔ the machine it chose", () => {
       taskId = decided.verdict.task.id;
       expect(decided.verdict.task.state).toBe("ready");
       expect(decided.verdict.task.failure).toBeUndefined();
+      // The way back: once the reopened machine's status drops cl, the waiting task is routed there and runs.
+      await app.store.setMachineOpen(closable.deviceId, true);
+      closed = false;
+      const id = taskId;
+      await pollUntil(
+        async () => (await stack.queue().get(id))?.body?.state === "running",
+        "the pinned task to run once the machine reopened",
+        40_000,
+      );
     } finally {
       if (taskId !== null) await cancelTask(app.client, taskId);
       if (closed) await app.store.setMachineOpen(closable.deviceId, true);
       app.stop();
       await closable.stop();
     }
-  }, 60_000);
+  }, 90_000);
 
   // The reason a pinned task waits is the news: the only machine it may use is over its line,
   // and every other machine's rejection is the pin itself, which the owner already knows.

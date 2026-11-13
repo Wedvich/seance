@@ -7,6 +7,7 @@ import {
   BRANCH_MAX_LENGTH,
   METRIC_NAMES,
   parseMetricsReply,
+  RequestFailure,
   REPLY_JSON_BUDGET,
   SCHEDULER_CLIENT,
   SCHEDULER_ID,
@@ -14,6 +15,7 @@ import {
   type MetricsReply,
   type OpName,
   type Plain,
+  type RelayState,
   type RepoEntry,
   type SessionEntry,
   type SessionsResponse,
@@ -22,6 +24,7 @@ import {
   type TaskProgress,
   parseTaskProgressList,
 } from "@seance/shared";
+import type { AppRelay } from "./app-relay.ts";
 import type { AuditSink } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
 import { SpawnFailure, type Continuation, type SessionBackend } from "./backend.ts";
@@ -34,6 +37,7 @@ import {
   type MachineAvailability,
   type TaskLaunches,
 } from "./handlers.ts";
+import { termFleet } from "./leader-adapters.ts";
 import { LaunchLedger } from "./launch-ledger.ts";
 import { MetricsStore, type Sample } from "./metrics-store.ts";
 import { EndedTasks, LaunchesClosed } from "./session-events.ts";
@@ -1500,6 +1504,53 @@ describe("a closed machine", () => {
     });
     expect(local).toMatchObject({ ok: false, code: "machine_closed" });
     expect(logged()).toContain("audit spawn origin=leader failed code=machine_closed");
+    expect(spawns).toBe(0);
+    expect(ledger.ids()).toEqual([]);
+  });
+
+  test("the leader's fleet carries routesClosed to this machine's gate and to a remote's wire, so a closed refusal is never a TTL wait", async () => {
+    let spawns = 0;
+    const { built, ledger } = closedCtx(() => (spawns += 1));
+    const sent: unknown[] = [];
+    const unused = (): Promise<never> => Promise.reject(new Error("unexpected relay call"));
+    const relay: AppRelay = {
+      start: () => {},
+      stop: () => {},
+      getState: (): RelayState => {
+        throw new Error("unexpected getState");
+      },
+      subscribe: () => () => {},
+      request: (_deviceId, _op, payload) => {
+        sent.push(payload);
+        return Promise.reject(new RequestFailure("offline", "not here"));
+      },
+      createTask: unused,
+      queue: unused,
+      cancel: unused,
+      runNow: unused,
+      pass: unused,
+      getTask: unused,
+      amend: unused,
+      listAccounts: unused,
+      onStoreChanged: () => () => {},
+    };
+    const fleet = termFleet({
+      relay,
+      selfDeviceId: "self",
+      local: createLocalOps(built, "leader"),
+      live: () => true,
+      demote: () => {},
+    });
+    const spawn = {
+      repo: "myrepo",
+      mode: "here",
+      taskId: "t-fleet",
+      client: SCHEDULER_CLIENT,
+      routesClosed: true,
+    } as const;
+    expect(await fleet.spawn("self", spawn)).toMatchObject({ ok: false, code: "machine_closed" });
+    await fleet.spawn("other", spawn);
+    expect(sent).toEqual([expect.objectContaining({ routesClosed: true })]);
     expect(spawns).toBe(0);
     expect(ledger.ids()).toEqual([]);
   });
