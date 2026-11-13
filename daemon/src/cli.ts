@@ -351,24 +351,31 @@ export async function cmdPass(argv: readonly string[]): Promise<void> {
   return cmdPassAuto(parsePassArgs(argv));
 }
 
-/** Exported for tests. `close` and `open` take at most the one machine they act on; none means this one. */
+/**
+ * Exported for tests. `close` and `open` take at most the one machine they act on; none means this one.
+ * `close` alone takes `--wait`: block until the machine is empty.
+ */
 export function parseAvailabilityArgs(
   argv: readonly string[],
   verb: "close" | "open",
-): { readonly machine: string | null } {
-  const [machine] = argv;
-  if (argv.length > 1 || machine?.startsWith("-") === true) throw new Error(`usage: seanced ${verb} [<machine>]`);
-  return { machine: machine ?? null };
+): { readonly machine: string | null; readonly wait: boolean } {
+  const usage = verb === "close" ? "usage: seanced close [<machine>] [--wait]" : "usage: seanced open [<machine>]";
+  const wait = verb === "close" && argv.includes("--wait");
+  const words = argv.filter((arg) => !(verb === "close" && arg === "--wait"));
+  const [machine] = words;
+  if (words.length > 1 || machine?.startsWith("-") === true) throw new Error(usage);
+  return { machine: machine ?? null, wait };
 }
 
-/** Closes a machine to new scheduled work (default: this one); running work finishes where it is. Over the relay (`cli-auto.ts`). */
+/** Closes a machine to new scheduled work (default: this one); the scheduler passes its running tasks on, and `--wait` blocks until it is empty. Over the relay (`cli-auto.ts`). */
 export async function cmdClose(argv: readonly string[]): Promise<void> {
-  return cmdAvailabilityAuto(parseAvailabilityArgs(argv, "close").machine, false);
+  const { machine, wait } = parseAvailabilityArgs(argv, "close");
+  return cmdAvailabilityAuto(machine, false, wait);
 }
 
 /** Reopens a closed machine. */
 export async function cmdOpen(argv: readonly string[]): Promise<void> {
-  return cmdAvailabilityAuto(parseAvailabilityArgs(argv, "open").machine, true);
+  return cmdAvailabilityAuto(parseAvailabilityArgs(argv, "open").machine, true, false);
 }
 
 const AMEND_USAGE =

@@ -3918,3 +3918,148 @@ describe("pass_to_successor", () => {
     expect(result.queueReads).toBe(0);
   });
 });
+
+describe("list_machines drain and set_machine_open's wording under a drainPass leader", () => {
+  const CL = 1_763_000_000_000;
+  const LEADER = machine({ capabilities: ["drain", "drainPass"] });
+  const LEADS = { kind: "ready", deviceId: "device-1", term: 3 } as const;
+  const closedBox = machine({
+    deviceId: "device-2",
+    name: "homelab",
+    capabilities: ["close"],
+    status: { at: 1, scan: 1, cl: CL },
+  });
+  const mkTask = (id: string, fields: Partial<Task> = {}): Task => ({
+    id,
+    spec: { repo: "github.com/m/seance", mode: "worktree", prompt: "x" },
+    state: "running",
+    createdAt: 1,
+    assignment: { deviceId: "device-2", exclave: "main", clone: "seance" },
+    ...fields,
+  });
+  const pane = (taskId?: string): { window: string; repo: string; path: string; taskId?: string } => ({
+    window: "w",
+    repo: "seance",
+    path: "/x",
+    ...(taskId === undefined ? {} : { taskId }),
+  });
+
+  interface Listed {
+    readonly name: string;
+    readonly drain?: {
+      readonly moving: number;
+      readonly waitingOnYou: number;
+      readonly moved: number;
+      readonly stuck: readonly { readonly taskId?: string; readonly reason: string }[];
+      readonly empty: boolean | null;
+    };
+  }
+
+  async function list(fake: FakeRelay, local: LocalMachine | null = null): Promise<readonly Listed[]> {
+    const lazy = new LazyRelay({ create: () => fake });
+    try {
+      const client = await connectedClient(lazy, local);
+      return JSON.parse(toolText(await client.callTool({ name: "list_machines", arguments: {} })));
+    } finally {
+      lazy.stop();
+    }
+  }
+
+  const drainRelay = (machines: readonly Machine[], queue: () => unknown, sessions: () => unknown): FakeRelay => {
+    const fake = fakeRelay(machines, (op) => {
+      if (op === "queue") return queue();
+      if (op === "sessions") return sessions();
+      return {};
+    });
+    fake.setState({ scheduler: LEADS });
+    return fake;
+  };
+
+  test("a closed machine carries its drain's counts, stuck reasons and emptiness", async () => {
+    const fake = drainRelay(
+      [LEADER, closedBox],
+      () => ({
+        tasks: [
+          mkTask("t1"),
+          mkTask("t2", { state: "needs-input" }),
+          mkTask("t3", { spec: { repo: "github.com/m/seance", mode: "here", prompt: "x" } }),
+          mkTask("t4", { successor: "s1" }),
+        ],
+        at: 1,
+      }),
+      () => ({ sessions: [pane("t1"), pane("t2"), pane("t3"), pane()], at: 1 }),
+    );
+    const listed = await list(fake);
+    expect(listed.find((m) => m.name === "homelab")?.drain).toEqual({
+      moving: 2,
+      waitingOnYou: 1,
+      moved: 1,
+      stuck: [{ taskId: "t3", reason: "Can't move: runs in the clone" }, { reason: "Not a task: close it yourself" }],
+      empty: false,
+    });
+    expect(listed.find((m) => m.name === "MacBook Pro")).not.toHaveProperty("drain");
+  });
+
+  test("a closed machine whose sessions cannot be read says empty is unknown", async () => {
+    const fake = drainRelay(
+      [LEADER, closedBox],
+      () => ({ tasks: [mkTask("t1")], at: 1 }),
+      () => ({ ok: false, code: "internal_error", message: "no" }),
+    );
+    expect((await list(fake)).find((m) => m.name === "homelab")?.drain).toMatchObject({ moving: 1, empty: null });
+  });
+
+  test("no drain under a leader without drainPass, for an open machine, or when the queue cannot be read", async () => {
+    const old = drainRelay(
+      [machine({ capabilities: ["drain"] }), closedBox],
+      () => ({ tasks: [], at: 1 }),
+      () => ({ sessions: [], at: 1 }),
+    );
+    expect((await list(old)).every((m) => m.drain === undefined)).toBe(true);
+    const open = drainRelay(
+      [LEADER, { ...closedBox, status: { at: 1, scan: 1 } }],
+      () => ({ tasks: [], at: 1 }),
+      () => ({ sessions: [], at: 1 }),
+    );
+    expect((await list(open)).every((m) => m.drain === undefined)).toBe(true);
+    const unreadable = drainRelay(
+      [LEADER, closedBox],
+      () => ({ ok: false, code: "internal_error", message: "no" }),
+      () => ({ sessions: [], at: 1 }),
+    );
+    expect((await list(unreadable)).every((m) => m.drain === undefined)).toBe(true);
+  });
+
+  test("this machine's own sessions are read from its local daemon, never as a relay request to itself", async () => {
+    const own = machine({
+      capabilities: ["drain", "drainPass", "close"],
+      status: { at: 1, scan: 1, cl: CL },
+    });
+    const fake = drainRelay(
+      [own],
+      () => ({
+        tasks: [mkTask("t1", { assignment: { deviceId: "device-1", exclave: "main", clone: "seance" } })],
+        at: 1,
+      }),
+      () => ({ sessions: [pane("never")], at: 1 }),
+    );
+    const local = fakeLocal((op) => (op === "sessions" ? { sessions: [], at: 1 } : {}));
+    const listed = await list(fake, local);
+    expect(listed[0]?.drain?.empty).toBe(true);
+    expect(local.requests.map((r) => r.op)).toEqual(["sessions"]);
+    expect(fake.requests.some((r) => r.op === "sessions")).toBe(false);
+  });
+
+  test("a close under a drainPass leader says the running tasks will be passed on", async () => {
+    const target = machine({ deviceId: "device-2", name: "homelab", capabilities: ["close"] });
+    const fake = fakeRelay([LEADER, target], () => ({ ok: true, closed: CL }));
+    fake.setState({ scheduler: LEADS });
+    const lazy = new LazyRelay({ create: () => fake });
+    const client = await connectedClient(lazy, fakeLocal());
+    const result = await client.callTool({ name: "set_machine_open", arguments: { machine: "homelab", open: false } });
+    lazy.stop();
+    expect(toolText(result)).toBe(
+      "homelab is closed to new work; its running tasks will be passed to other machines in 10 minutes unless you reopen it",
+    );
+  });
+});

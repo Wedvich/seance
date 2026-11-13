@@ -19,6 +19,7 @@ import {
 import { startBrokerDouble } from "../test/broker-double.ts";
 import { fakeRelay, machine } from "../test/fake-app-relay.ts";
 import { LazyRelay } from "./app-relay.ts";
+import { queueTasksFor, waitForDrain } from "./availability-client.ts";
 import { brokerFail, brokerOk } from "./broker-protocol.ts";
 import {
   autoFleet,
@@ -1023,5 +1024,253 @@ describe("seanced close / open", () => {
     } finally {
       await double.stop();
     }
+  });
+});
+
+describe("seanced close --wait", () => {
+  const CL = 9_000;
+  const closedBox = (fields: Partial<Machine> = {}): Machine =>
+    machine({
+      capabilities: ["close", "drain", "drainPass"],
+      status: { at: 1, scan: 1, cpu: 0, mem: 0, free: 1, cl: CL },
+      ...fields,
+    });
+  const task = (id: string, fields: Partial<Task> = {}): Task => ({
+    id,
+    spec: { repo: ORIGIN, mode: "worktree", prompt: "x" },
+    state: "running",
+    createdAt: 1,
+    assignment: { deviceId: "device-1", exclave: "main", clone: "seance" },
+    ...fields,
+  });
+  const pane = (taskId?: string): { window: string; repo: string; path: string; taskId?: string } => ({
+    window: "w",
+    repo: "seance",
+    path: "/x",
+    ...(taskId === undefined ? {} : { taskId }),
+  });
+
+  /** A relay whose `sessions` and `queue` answers come from what the test says for each poll. */
+  function polled(box: Machine, script: { sessions: () => unknown; queue: (payload: unknown) => unknown }) {
+    const fake = fakeRelay([box], (op, payload) => {
+      if (op === "sessions") return script.sessions();
+      if (op === "queue") return script.queue(payload);
+      return {};
+    });
+    fake.setState({ scheduler: LEADING });
+    return fake;
+  }
+
+  async function wait(
+    fake: ReturnType<typeof fakeRelay>,
+    pollMs = 1,
+    offlineGraceMs = 30,
+  ): Promise<{ code: number; text: string; printed: string[] }> {
+    const lazy = new LazyRelay({ create: () => fake });
+    const printed: string[] = [];
+    try {
+      const outcome = await waitForDrain({
+        fleet: relayFleet(lazy),
+        deviceId: "device-1",
+        closedAt: CL,
+        pollMs,
+        offlineGraceMs,
+        print: (line) => printed.push(line),
+      });
+      return { ...outcome, printed };
+    } finally {
+      lazy.stop();
+    }
+  }
+
+  test("under a leader without drainPass it refuses before anything is sent", async () => {
+    const old = closedBox({ capabilities: ["close", "drain"], status: undefined });
+    const fake = fakeRelay([old], () => ({ ok: true, closed: CL }));
+    fake.setState({ scheduler: LEADING });
+    const lazy = new LazyRelay({ create: () => fake });
+    try {
+      const outcome = await availabilityViaFleet(
+        null,
+        false,
+        relayFleet(lazy),
+        () => Promise.resolve("device-1"),
+        true,
+      );
+      expect(outcome.ok).toBe(false);
+      expect(outcome.text).toContain("--wait");
+      expect(fake.requests).toEqual([]);
+    } finally {
+      lazy.stop();
+    }
+  });
+
+  test("a close under a drainPass leader names the machine and its cl, and says tasks are passed in 10 minutes", async () => {
+    const open = closedBox({ status: undefined });
+    const fake = fakeRelay([open], () => ({ ok: true, closed: CL }));
+    fake.setState({ scheduler: LEADING });
+    const lazy = new LazyRelay({ create: () => fake });
+    try {
+      const outcome = await availabilityViaFleet(
+        null,
+        false,
+        relayFleet(lazy),
+        () => Promise.resolve("device-1"),
+        true,
+      );
+      expect(outcome).toMatchObject({ ok: true, closed: { deviceId: "device-1", at: CL } });
+      expect(outcome.text).toContain("passed to other machines in 10 minutes unless you reopen it");
+    } finally {
+      lazy.stop();
+    }
+  });
+
+  test("exits 0 once the sessions are empty, printing progress only when it changes", async () => {
+    let polls = 0;
+    const fake = polled(closedBox(), {
+      sessions: () => {
+        polls += 1;
+        return { sessions: polls < 4 ? [pane("t1")] : [], at: 1 };
+      },
+      queue: () => ({ tasks: [task("t1")], at: 1 }),
+    });
+    const outcome = await wait(fake);
+    expect(outcome.code).toBe(0);
+    expect(outcome.text).toBe("MacBook Pro is empty");
+    expect(outcome.printed).toEqual(["MacBook Pro: moving 1"]);
+  });
+
+  test("exits 2 listing what cannot move, one line each", async () => {
+    const fake = polled(closedBox(), {
+      sessions: () => ({ sessions: [pane("t1"), pane()], at: 1 }),
+      queue: () => ({ tasks: [task("t1", { spec: { repo: ORIGIN, mode: "here", prompt: "x" } })], at: 1 }),
+    });
+    const outcome = await wait(fake);
+    expect(outcome.code).toBe(2);
+    expect(outcome.text).toBe(
+      "MacBook Pro still runs:\nt1 Can't move: runs in the clone\n- Not a task: close it yourself",
+    );
+  });
+
+  test("keeps waiting while a task is moving, even beside stuck ones", async () => {
+    let polls = 0;
+    const fake = polled(closedBox(), {
+      sessions: () => {
+        polls += 1;
+        return { sessions: polls < 3 ? [pane("t1"), pane()] : [pane()], at: 1 };
+      },
+      // Once its pane is gone the task has settled as superseded.
+      queue: () => ({ tasks: [task("t1", polls < 3 ? {} : { state: "superseded" })], at: 1 }),
+    });
+    const outcome = await wait(fake);
+    expect(polls).toBeGreaterThanOrEqual(3);
+    expect(outcome.code).toBe(2);
+  });
+
+  test("a failed sessions read is tried again, never an exit", async () => {
+    let polls = 0;
+    const fake = polled(closedBox(), {
+      sessions: () => {
+        polls += 1;
+        return polls === 1 ? { ok: false, code: "internal_error", message: "no" } : { sessions: [], at: 1 };
+      },
+      queue: () => ({ tasks: [], at: 1 }),
+    });
+    const outcome = await wait(fake);
+    expect(outcome.code).toBe(0);
+    expect(outcome.printed[0]).toContain("could not read its sessions");
+  });
+
+  test("a status that has not shown the close yet is not a reopen; one that shows it gone is", async () => {
+    let polls = 0;
+    const fake = polled(closedBox({ status: undefined }), {
+      sessions: () => {
+        polls += 1;
+        // The close lands in status on the second poll, and is lifted on the fourth.
+        if (polls === 2) fake.setState({ machines: [closedBox()] });
+        if (polls === 4) fake.setState({ machines: [closedBox({ status: undefined })] });
+        return { sessions: [pane("t1")], at: 1 };
+      },
+      queue: () => ({ tasks: [task("t1")], at: 1 }),
+    });
+    const outcome = await wait(fake);
+    expect(polls).toBe(4);
+    expect(outcome).toMatchObject({ code: 1, text: "MacBook Pro was reopened; the drain stopped" });
+  });
+
+  test("a disconnect shorter than the offline grace is a blip, not an exit", async () => {
+    const fake = polled(closedBox({ connected: false }), {
+      sessions: () => ({ sessions: [], at: 1 }),
+      queue: () => ({ tasks: [], at: 1 }),
+    });
+    setTimeout(() => fake.setState({ machines: [closedBox()] }), 25);
+    expect((await wait(fake, 5, 2_000)).code).toBe(0);
+  });
+
+  test("a status sampled after the close that carries no cl is a reopen, though this close never showed", async () => {
+    const fake = polled(closedBox({ status: { at: CL / 1000 + 5, scan: 1, cpu: 0, mem: 0, free: 1 } }), {
+      sessions: () => ({ sessions: [pane("t1")], at: 1 }),
+      queue: () => ({ tasks: [task("t1")], at: 1 }),
+    });
+    expect(await wait(fake)).toMatchObject({ code: 1, text: "MacBook Pro was reopened; the drain stopped" });
+  });
+
+  test("the by-id queue ask is skipped on a leg that cannot carry it, and sent on one that can", async () => {
+    const asked: unknown[] = [];
+    const queue = (request?: { tasks?: readonly string[] }): Promise<{ tasks: Task[]; at: number }> => {
+      asked.push(request);
+      return Promise.resolve({ tasks: request?.tasks === undefined ? [] : [task("old-t")], at: 1 });
+    };
+    expect(await queueTasksFor({ queue, queueByIdUnsupported: true }, ["old-t"])).toEqual([]);
+    expect(asked).toEqual([undefined]);
+    asked.length = 0;
+    expect(await queueTasksFor({ queue }, ["old-t"])).toEqual([task("old-t")]);
+    expect(asked).toEqual([undefined, { tasks: ["old-t"] }]);
+  });
+
+  test("an older close's cl is not a reopen", async () => {
+    let polls = 0;
+    const older = { at: 1, scan: 1, cpu: 0, mem: 0, free: 1, cl: CL - 1 };
+    const fake = polled(closedBox({ status: older }), {
+      sessions: () => {
+        polls += 1;
+        if (polls === 2) fake.setState({ machines: [closedBox()] });
+        return { sessions: polls < 4 ? [pane("t1")] : [], at: 1 };
+      },
+      queue: () => ({ tasks: [task("t1")], at: 1 }),
+    });
+    expect((await wait(fake)).code).toBe(0);
+    expect(polls).toBe(4);
+  });
+
+  test("a machine that goes offline ends the wait with 1", async () => {
+    const fake = polled(closedBox({ connected: false }), {
+      sessions: () => ({ sessions: [], at: 1 }),
+      queue: () => ({ tasks: [], at: 1 }),
+    });
+    expect(await wait(fake)).toMatchObject({ code: 1, text: "MacBook Pro went offline while draining" });
+  });
+
+  test("a pane's task the capped queue left out is asked for by id, so it still counts as moving", async () => {
+    const asked: unknown[] = [];
+    let polls = 0;
+    const fake = polled(closedBox(), {
+      sessions: () => {
+        polls += 1;
+        return { sessions: polls < 3 ? [pane("old-t")] : [], at: 1 };
+      },
+      queue: (payload) => {
+        asked.push(payload);
+        const wanted = isRecord(payload) ? payload["tasks"] : undefined;
+        return {
+          tasks: Array.isArray(wanted) ? [task("old-t", { spec: { repo: ORIGIN, mode: "here", prompt: "x" } })] : [],
+          at: 1,
+        };
+      },
+    });
+    const outcome = await wait(fake);
+    expect(asked).toContainEqual({ tasks: ["old-t"] });
+    // Found by id as a `here` task, it is stuck rather than guessed moving: exit 2 on the first poll.
+    expect(outcome.code).toBe(2);
+    expect(outcome.text).toContain("old-t Can't move: runs in the clone");
   });
 });

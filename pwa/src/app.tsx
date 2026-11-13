@@ -7,14 +7,14 @@ import { SpawnScreen, type SpawnActions } from "./components/spawn-screen.tsx";
 import { VerdictView } from "./components/verdict.tsx";
 import type { PushClient } from "./push.ts";
 import { readRelayUrl } from "./relay/keys.ts";
-import { deriveArchivist, deriveMachines } from "./machines-view.ts";
+import { deriveArchivist, deriveCloseSheet, deriveMachines } from "./machines-view.ts";
 import { deriveOlder } from "./older-view.ts";
 import { archiveCharts } from "./state.ts";
 import { deriveAfterSheet, deriveQueue } from "./queue-view.ts";
 import "./screen.css";
 import type { Store } from "./store.ts";
 import { screenKey, TransitionRunner } from "./transition.ts";
-import { deriveView, type AppState } from "./view.ts";
+import { deriveDrainAvailability, deriveView, type AppState } from "./view.ts";
 
 export function App(props: { store: Store; push: PushClient }): JSX.Element {
   const { store, push } = props;
@@ -130,6 +130,11 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
         state.relay.fleetQuota,
         archiveCharts(state.relay.archivist, state.accounts.nameable),
         state.relay.status === "open",
+        {
+          passes: deriveDrainAvailability(state.relay),
+          tasks: state.queueView?.kind === "ok" ? state.queueView.tasks : null,
+          sessions: state.sessions,
+        },
       )}
       archivist={deriveArchivist(state.relay.archivist, state.archiveStatus, now)}
       relayLine={view.relayLine}
@@ -138,6 +143,15 @@ export function App(props: { store: Store; push: PushClient }): JSX.Element {
       history={state.history}
       accounts={state.accounts}
       availability={state.availability}
+      closeSheet={(machine) =>
+        deriveCloseSheet(machine, {
+          passes: deriveDrainAvailability(state.relay),
+          tasks: state.queueView?.kind === "ok" ? state.queueView.tasks : null,
+          sessions: state.sessions,
+        })
+      }
+      machines={state.relay.machines}
+      onReadDrain={(deviceId) => store.readDrain(deviceId)}
       onSetOpen={(deviceId, open) => void store.setMachineOpen(deviceId, open)}
       onDismiss={onDismiss}
       onShowHistory={(target, range) => void store.showHistory(target, range)}

@@ -84,6 +84,7 @@ import { startPushEndpoint } from "./push-endpoint.ts";
 
 const PSK = toBase64(new Uint8Array(32).fill(5));
 const TOKEN = "leader-bearer";
+const EXITED_DESPAWN = { ok: true, window: "w9", outcome: "exited", sessions: [] };
 let base: string;
 let key: CryptoKey;
 let privateTmux: PrivateTmux | undefined;
@@ -2952,7 +2953,7 @@ describe("pass", () => {
 
     async function passScenario(
       fields: Partial<Task>,
-      despawnAnswer: unknown = { ok: true, window: "w9", outcome: "exited", sessions: [] },
+      despawnAnswer: unknown = EXITED_DESPAWN,
     ): Promise<{
       readonly relay: TestRelay;
       readonly store: MemoryQueueStore;

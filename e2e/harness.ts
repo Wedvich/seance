@@ -13,7 +13,7 @@ import { dirname, join } from "node:path";
 import { createBackend } from "../daemon/src/backend-default.ts";
 import type { Config, TraitsConfig } from "../daemon/src/config.ts";
 import { DEFAULT_EXCLAVE } from "../daemon/src/exclaves.ts";
-import type { QueueStore, Task } from "../daemon/src/leader.ts";
+import { DEFAULT_CONFIG, type QueueStore, type Task } from "../daemon/src/leader.ts";
 import { createQueueStore, type StoreLeg } from "../daemon/src/queue-store.ts";
 import { startDaemon, type DaemonHandle } from "../daemon/src/run.ts";
 import { identityOfState, loadOrInitState, readState } from "../daemon/src/state.ts";
@@ -59,6 +59,9 @@ Object.defineProperty(globalThis, "history", {
   value: { state: null, pushState(): void {}, replaceState(): void {}, back(): void {}, go(): void {} },
   configurable: true,
 });
+
+/** What a stack's leader waits after a close before it passes a machine's tasks on, when `StackOptions.drainMs` asks (`drainSelfPassMs`). */
+export const DRAIN_GRACE_MS = 1_500;
 
 export const TOKEN = "e2e-bearer";
 export const PSK = toBase64(new Uint8Array(32).fill(5));
@@ -205,6 +208,12 @@ export interface StackOptions {
   readonly leaders?: readonly string[];
   /** The relay's ARCHIVIST — one id minted by `newDeviceId` — fixed at boot like the leaders. */
   readonly archivist?: string;
+  /**
+   * The leader's drain wait and retry (`drainSelfPassMs`, `drainRetryMs`) in ms. Default: the product's
+   * 10 and 5 minutes, so a test that closes a machine does not see its tasks passed on; only the stack of
+   * the one file that tests the drain shortens it.
+   */
+  readonly drainMs?: number;
 }
 
 /** A second daemon's directory, from its name: where its state is pre-seeded and where it later boots. */
@@ -301,7 +310,14 @@ export async function startStack(
       fleetQuota: { intervalMs: 500 },
       httpFetch: pushGuardFetch(pushAttempts),
       // A failed takeover still retries promptly: only the regular tick waits the hour.
-      ...(quiet ? { telemetryIntervalMs: QUIET_MS, leader: { tickIntervalMs: QUIET_MS, takeoverRetryMs: 200 } } : {}),
+      ...(quiet ? { telemetryIntervalMs: QUIET_MS } : {}),
+      leader: {
+        config:
+          stackOpts.drainMs === undefined
+            ? DEFAULT_CONFIG
+            : { ...DEFAULT_CONFIG, drainSelfPassMs: stackOpts.drainMs, drainRetryMs: stackOpts.drainMs },
+        ...(quiet ? { tickIntervalMs: QUIET_MS, takeoverRetryMs: 200 } : {}),
+      },
     });
 
   let daemon = await startTestDaemon().catch(failed);

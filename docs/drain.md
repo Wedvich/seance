@@ -1,10 +1,10 @@
 # Closing a machine and draining it — spec
 
-**Status: build order item 1 (Close) is built** and recorded in DESIGN.md, "Closing a machine";
-§1, §2 and §7's reopen half below are pointers to it. Items 2 and 3 (the drain itself) are spec,
-nothing built. Drafted 2026-11-13. Like docs/leaving.md, this file is the working record until the
-code lands; each part folds into DESIGN.md (Scheduler, "The library"; Daemon; "Passing to a
-successor"; PWA; MCP server) as it is built, and its text here goes.
+**Status: build order items 1 (Close) and 2 (the leader's outside pass and the report) are built** and
+recorded in DESIGN.md, "Closing a machine" and "The drain's outside pass"; §1, §2, §3, §4 steps B and C,
+§5, §7, the PWA/CLI/MCP half of §8, §10 and §12's measure are pointers to them. Item 3 (step A, the
+session ask) is spec only. Drafted 2026-11-13. Like docs/leaving.md, this file is the working record
+until the code lands; each part folds into DESIGN.md as it is built, and its text here goes.
 
 ## Problem
 
@@ -29,21 +29,21 @@ happens when the box actually goes, and the two are complementary (§11).
 
 ## Names
 
-| Concept                          | Name                                                                     |
-| -------------------------------- | ------------------------------------------------------------------------ |
-| The machine's state              | **open** / **closed** (closed = takes no new scheduled work)             |
-| Setting it                       | **close**, **reopen**                                                    |
-| Moving the work off a closed box | **drain** (the act); a task moved by it is **drained**                   |
-| Status key                       | `MachineStatus.cl` (unix ms the machine was closed)                      |
-| Route reason                     | `closed`                                                                 |
-| Daemon refusal of a spawn        | `machine_closed` (`SPAWN_ERROR_CODES`)                                   |
-| App → daemon request op          | `availability` (payload `{ open: boolean; now?: boolean }`)              |
-| Successor trigger                | `succeeds.trigger: "drain"`                                              |
-| Capabilities                     | `CAPABILITIES.close` (daemon), `CAPABILITIES.drain` (leader); see below  |
-| Audit origin (typed prompt)      | `drain`                                                                  |
-| CLI                              | `seanced close [<machine>] [--now] [--wait]`, `seanced open [<machine>]` |
-| MCP                              | `set_machine_open { machine, open, now? }`                               |
-| PWA                              | "Open for work" switch in the machine's menu                             |
+| Concept                          | Name                                                                                                            |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| The machine's state              | **open** / **closed** (closed = takes no new scheduled work)                                                    |
+| Setting it                       | **close**, **reopen**                                                                                           |
+| Moving the work off a closed box | **drain** (the act); a task moved by it is **drained**                                                          |
+| Status key                       | `MachineStatus.cl` (unix ms the machine was closed)                                                             |
+| Route reason                     | `closed`                                                                                                        |
+| Daemon refusal of a spawn        | `machine_closed` (`SPAWN_ERROR_CODES`)                                                                          |
+| App → daemon request op          | `availability` (payload `{ open: boolean; now?: boolean }`)                                                     |
+| Successor trigger                | `succeeds.trigger: "drain"`                                                                                     |
+| Capabilities                     | `close` (daemon), `drain` (leader routes), `drainPass` (leader passes; built), `drainAsk` (daemon asks; item 3) |
+| Audit origin (typed prompt)      | `drain`                                                                                                         |
+| CLI                              | `seanced close [<machine>] [--now] [--wait]`, `seanced open [<machine>]`                                        |
+| MCP                              | `set_machine_open { machine, open, now? }`                                                                      |
+| PWA                              | "Open for work" switch in the machine's menu                                                                    |
 
 Not "unavailable": offline and asleep machines already read as unavailable, and closed is a
 choice, not a condition. Not "draining" for the state: `drn` is the restart's launch gate
@@ -83,8 +83,8 @@ closed.
 
 ### 3. Closing drains
 
-One switch, as the owner asked: closing a machine also drains it. There is no "close but let
-finish" in v1 (open question 1). Reopening stops a drain in progress (§7).
+**Built:** one switch; closing also drains, after the grace (DESIGN.md, "The drain's outside pass"). There
+is no "close but let finish" in v1 (open question 1). Reopening stops a drain in progress (§7).
 
 ### 4. The drain: ask, then pass, then report
 
@@ -122,50 +122,21 @@ so that the leader writes `succeeds.trigger: "drain"`, not `"session"`.
   waiting on in its record, so the successor asks it again. The self path already accepts a pass
   from a `needs-input` task.
 
-**Step B: pass from outside (leader).** A task on a closed machine that is still `running` with no
-`successor` `DRAIN_SELF_PASS_MS` (10 min) after `cl`, or at once when step A cannot run (the
-machine lacks `successorSelf`), gets the existing `pass` with `trigger: "drain"`. It goes through
-the in-flight guard (D15), so it joins a self-pass already under way rather than racing it. This
-catches a session that committed but never called the tool, and one idle on a clean tree. Passes
-run one at a time per machine, to keep that box's pushes and the relay's write floor bounded. A box
-with eight tasks takes eight pushes of a few seconds each.
+**Step B: pass from outside (leader).** **Built** (item 2): DESIGN.md, "The drain's outside pass" holds
+the trigger, the 10-minute grace on every machine (the first draft's "at once when the machine lacks
+`successorSelf`" was not built), `needs-input` and every autonomy level, placement not gating the pass,
+one pass at a time per machine, the `Task.drained` stamp with its retry and `held`.
 
-- **Placement does not gate the pass.** The quota trigger passes only when routing would place the
-  successor now. A drain passes regardless: the box is going away, and a successor waiting `ready`
-  for a free machine is better than a session that gets killed. The report (step C) says
-  "waiting for a machine" when that happens.
-- **`needs-input` too (N4).** `trigger: "drain"` lifts the outside paths' `needs_input` refusal
-  (D11). Step A has normally moved such a task already; step B covers one whose Esc never brought it
-  back to idle. Every other trigger keeps the refusal.
-- **Every autonomy level.** The quota trigger moves only `auto` tasks unasked. A drain is the
-  person's own act, so `checkpoint` and `steer` tasks are passed too (`successorSpec` already maps
-  `steer` to `checkpoint`).
-- **Takeover.** The leader stamps `Task.drained { at }` (the close time) before it passes, as it
-  stamps `quotaExhausted`, so a new leader does not pass the task twice; the stamp is dropped when the
-  task finishes. The guard and step 5's `ok`-with-the-successor already make a second pass harmless.
-  The stamp only saves the push.
-
-**Step C: report what did not move.** Nothing below is moved. The person decides: cancel, or shut
-down anyway. After a reboot such tasks settle "interrupted" (leaving.md §4) and Continue
-resumes them from their worktree once the box is back and reopened.
-
-| Left behind                       | Why                                                                  | Shown as                        |
-| --------------------------------- | -------------------------------------------------------------------- | ------------------------------- |
-| `mode: "here"`                    | No branch of its own to pass                                         | "Can't move: runs in the clone" |
-| A session with no task            | Interactive or direct spawn; nothing to pass                         | "Not a task: close it yourself" |
-| A pass refused                    | `dirty_worktree`, `push_rejected`, `default_branch`, … (D11's codes) | the code's existing wording     |
-| Successor created, not yet placed | No open machine can take it now                                      | "Moved, waiting for a machine"  |
+**Step C: report what did not move.** **Built** (item 2): the same section; what is left behind (`here`,
+an untasked pane, a refused pass, a successor `unplaced`) is shown by the close sheet, the machine's
+row, `seanced close --wait` and `list_machines`. After a reboot such tasks settle "interrupted"
+(leaving.md §4) and Continue resumes them from their worktree once the box is back and reopened.
 
 ### 5. Progress, and "empty"
 
-- **One rule for every client.** `drainView(machine, tasks, sessions)` in `shared/src/drain.ts`
-  (beside `passOffer`) derives `{ moving, moved, stuck: [{ taskId?, reason }], empty }` from the
-  queue reply and the machine's `sessions` reply. The PWA, MCP and the CLI cannot disagree, and the
-  leader exposes nothing new.
-- **Empty** means no live pane on the machine, tasked or not. That is the bar for "safe to shut down
-  or restart tmux"; a closed machine that is empty says so.
-- **`seanced close --wait`** blocks until the machine is empty (exit 0) or only stuck items remain
-  (exit 2, listing them), so `seanced close --wait && sudo reboot` does what it reads as.
+**Built:** `drainView` in `shared/src/drain.ts`, one rule for the PWA, MCP and `seanced close --wait`
+(exits 0 empty, 2 stuck, 1 failure); DESIGN.md, "The drain's outside pass". **Empty** means no live pane
+on the machine, tasked or not: the bar for "safe to shut down or restart tmux".
 
 ### 6. Leadership
 
@@ -179,31 +150,19 @@ running through the outage.
 ### 7. Reopening
 
 The switch back sends `availability { open: true }`, which clears `closed` and `cl`, and routing
-places work there again (built: item 1). Tasks already passed stay passed. Reopening mid-drain stops steps A and B
-for every task not yet passed: the daemon drops pending prompts and the leader stops on `cl`'s
-absence. A prompt already typed stays typed. If that session goes on to pass itself, its successor
-may land anywhere, this box included. Harmless.
+places work there again (built: item 1). Tasks already passed stay passed. The leader's half (built:
+item 2) stops on `cl`'s absence, and a reopen inside the grace stops the drain before any session is
+touched. Item 3's daemon half: reopening drops pending prompts; a prompt already typed stays typed. If
+that session goes on to pass itself, its successor may land anywhere, this box included. Harmless.
 
 ### 8. Surfaces
 
-- **PWA.** The machine row's menu gets a `MenuSwitchItem` "Open for work" (checked = open), beside
-  History. Switching it off opens a confirm sheet that lists, from `drainView`, what will happen:
-  "3 running tasks will be passed to other machines, 1 waiting on you will have its question
-  dismissed and be passed on, 1 session isn't a task". The
-  sheet offers Close (5-min grace) or Drain now. The row then reads "Closed · moving 3 · 1 stuck",
-  then "Closed · empty". Offered only when the machine advertises `close` and the verified
-  leader advertises `drain`. (Item 1 built the switch, the Closed badge and a note on a pin to a
-  closed machine; the confirm sheet lists no counts yet, and a reopen is offered whenever the
-  machine advertises `close`.)
-- **CLI.** `seanced close [<machine>] [--now] [--wait]` and `seanced open [<machine>]`. With no
-  machine argument they act on this machine. They go through the relay as app-role, like
-  `seanced pass`, so you can close Thad from the Mac. A keyless box (a daemon key delivered by the
-  service) has no app-role path, and neither the local socket nor the fleet broker carries
-  `availability`: the command refuses and points to the PWA (owner decision, 2026-11-13).
-- **MCP.** `set_machine_open { machine, open, now? }`, plus `closed` and the `drainView` counts on
-  `list_machines`. Closing ends other sessions, so the tool stays behind Claude Code's per-tool
-  approval and is never allowlisted.
-- **Raycast:** none (spawn-only).
+**Built** (items 1 and 2; DESIGN.md, "Closing a machine" and "The drain's outside pass"): the PWA's
+"Open for work" switch, confirm sheet with counts, and a closed machine's drain row; `seanced close
+[<machine>] [--wait]` and `seanced open`; MCP `set_machine_open` with `closed` and `drain` on
+`list_machines`. What the sheet still lacks of the first draft: a separate "N waiting on you will have
+its question dismissed" line (item 3's Esc) and the "Drain now" button (`now`, with item 3). `--now`
+on the CLI and MCP's `now` arrive with item 3 too. Raycast: none (spawn-only).
 
 ### 9. Threat model
 
@@ -222,15 +181,11 @@ may land anywhere, this box included. Harmless.
 
 ### 10. Skew
 
-| Combination                       | Behaviour                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| New daemon, old leader            | Routing ignores `cl`. The gate answers a spawn without `routesClosed` `internal_error`, unrecorded: an older leader would fail the task on an unknown code, so the gate answers `internal_error`: the task stays reserved until the TTL, then `sessions` proves it never landed and it is `ready` again, and may be routed back to the closed box once per TTL, holding a cap slot there meanwhile. The PWA hides the close, offers the reopen. |
-| Old daemon, new leader            | No `close` capability, so no switch; routing never sees `cl`.                                                                                                                                                                                                                                                                                                                                                                                   |
-| Old PWA                           | `parseMachineStatus` drops `cl`, so a closed machine looks open. Display only: routing is the leader's job.                                                                                                                                                                                                                                                                                                                                     |
-| Successor with `trigger: "drain"` | An older leader's `parseSucceeds` holds it unreadable, as with `"quota"`. Only a drain-capable leader writes one.                                                                                                                                                                                                                                                                                                                               |
+**Built:** DESIGN.md, "Closing a machine" (item 1's rows: new daemon with an old leader, old daemon
+with a new leader, old PWA) and "The drain's outside pass" ("Skew": a `trigger: "drain"` successor, a
+leader rollback). Item 3 adds the daemon's side: `drainAsk` is advertised by nobody until it lands.
 
-Deploy order: daemons, then PWA/CLI. No relay change: the op rides the existing request path and
-`cl` rides the sealed status.
+Deploy order: daemons, then PWA/CLI. No relay change.
 
 ### 11. Relation to docs/leaving.md
 
@@ -244,8 +199,9 @@ for the restart, and reopens it closed.
 
 From audit and leader logs, with no new storage: drains per week (`availability` request lines with
 `open=false`); tasks moved per drain by step (`trigger=drain` pass lines, with the self path told
-apart by the daemon's `origin=successor` push); stuck items by reason; time from close to empty
-(logged by the daemon when `drainView` first reads empty after a close).
+apart by the daemon's `origin=successor` push); stuck items by reason. **Not built:** time from close to
+empty (logged by the daemon when `drainView` first reads empty after a close); only the first three read
+from lines that exist.
 
 ## Build order
 
@@ -259,8 +215,8 @@ Each PR lands on its own; ship without a soak in between.
 1. **Close (built).** Daemon state and `availability` op, `cl` in status, the `closed` filter and
    `machine_closed` gate, PWA switch and badge, CLI `close`/`open`, MCP. Useful alone: no new work
    lands, and running work finishes in place.
-2. **Drain, step B and C.** Leader outside pass with `trigger: "drain"`, `Task.drained`,
-   `drainView`, the confirm sheet's list, `--wait`.
+2. **Drain, step B and C (built).** Leader outside pass with `trigger: "drain"`, `Task.drained`,
+   `drainView`, the confirm sheet's list, `--wait`; recorded in DESIGN.md, "The drain's outside pass".
 3. **Drain, step A.** `DRAIN_PROMPT`, the turn-end typing and the interrupt, the `session-pass`
    drain mark, the `needs-input` Esc, the audit origin. Spike first, on a live session: typed text
    plus Enter at a `turnEnded` idle is taken as a new turn; the draft-clearing sequence never exits;

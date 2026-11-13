@@ -9,7 +9,7 @@ import {
   type HistoryTarget,
   type HistoryView,
 } from "../state.ts";
-import { ACCOUNT_ALIAS_MAX_LENGTH } from "@seance/shared";
+import { ACCOUNT_ALIAS_MAX_LENGTH, type Machine } from "@seance/shared";
 import type { ConnectionState } from "../view.ts";
 import { StrokeIcon } from "./icons.tsx";
 import { Menu, MenuDivider, MenuItem, MenuSwitchItem, MoreTrigger, useMenu } from "./menu.tsx";
@@ -43,6 +43,12 @@ export function MachinesScreen(props: {
   availability: AvailabilityState;
   /** Asks a machine to close (false) or reopen (true); the confirm sheet for a close is this screen's. */
   onSetOpen: (deviceId: string, open: boolean) => void;
+  /** The registry, which the confirm sheet's words are derived from (`closeSheet`). */
+  machines: readonly Machine[];
+  /** The confirm sheet's lines for a machine (`deriveCloseSheet`). */
+  closeSheet: (machine: Machine) => readonly string[];
+  /** Reads a machine's sessions and the queue afresh: asked as the confirm sheet opens. */
+  onReadDrain: (deviceId: string) => void;
   /** Absent in the desktop layout, where the screen is a column rather than a layer. */
   onDismiss?: () => void;
   onShowHistory: (target: HistoryTarget, range?: HistoryRange) => void;
@@ -63,6 +69,9 @@ export function MachinesScreen(props: {
     accounts,
     availability,
     onSetOpen,
+    machines,
+    closeSheet,
+    onReadDrain,
     onDismiss,
     onShowHistory,
     onHideHistory,
@@ -73,6 +82,7 @@ export function MachinesScreen(props: {
   const { renaming } = accounts;
   const [closing, setClosing] = useState<string | null>(null);
   const closingCard = closing === null ? undefined : view.cards.find((card) => card.deviceId === closing);
+  const closingMachine = closing === null ? undefined : machines.find((machine) => machine.deviceId === closing);
   // Kept while the account is briefly unreported (a sign-out in between), so a typed draft survives; Cancel or Save closes it.
   const seen = useRef<AccountCard | undefined>(undefined);
   const found = view.accounts.find((account) => account.accountId === renaming);
@@ -113,7 +123,11 @@ export function MachinesScreen(props: {
             availability={availability}
             onShowHistory={onShowHistory}
             onHideHistory={onHideHistory}
-            onToggleOpen={(open) => (open ? onSetOpen(card.deviceId, true) : setClosing(card.deviceId))}
+            onToggleOpen={(open) => {
+              if (open) return onSetOpen(card.deviceId, true);
+              onReadDrain(card.deviceId);
+              setClosing(card.deviceId);
+            }}
           />
         ))}
         {archivist !== null && <ArchivistCardView card={archivist} />}
@@ -134,9 +148,10 @@ export function MachinesScreen(props: {
           />
         ))}
       </div>
-      {closingCard !== undefined && (
+      {closingCard !== undefined && closingMachine !== undefined && (
         <CloseMachineDialog
           name={closingCard.name}
+          lines={closeSheet(closingMachine)}
           onClose={() => setClosing(null)}
           onConfirm={() => {
             setClosing(null);
@@ -231,6 +246,16 @@ function MachineCardView(props: {
         <p className="fleet-note fleet-warn" role="alert">
           {here.text}
         </p>
+      )}
+      {card.drain !== null && closed && (
+        <div className="fleet-note">
+          <p>Draining: {card.drain.summary}</p>
+          {keyed(card.drain.stuck).map(({ key, line }) => (
+            <p key={key} className="fleet-warn">
+              {line}
+            </p>
+          ))}
+        </div>
       )}
       {card.note !== null && <p className="fleet-note">{card.note}</p>}
       {card.updateNote !== null && <p className="fleet-note fleet-warn">{card.updateNote}</p>}
@@ -457,13 +482,32 @@ function RenameDialog(props: {
   );
 }
 
+/** Lines made unique for keys: two panes can read the same ("Not a task: close it yourself"). */
+function keyed(lines: readonly string[]): { readonly key: string; readonly line: string }[] {
+  const seen = new Map<string, number>();
+  return lines.map((line) => {
+    const nth = (seen.get(line) ?? 0) + 1;
+    seen.set(line, nth);
+    return { key: `${line}#${nth}`, line };
+  });
+}
+
 /** A close needs a yes: it stops the scheduler's new work landing there. Reopening needs none. */
-function CloseMachineDialog(props: { name: string; onClose: () => void; onConfirm: () => void }): JSX.Element {
-  const { name, onClose, onConfirm } = props;
+function CloseMachineDialog(props: {
+  name: string;
+  lines: readonly string[];
+  onClose: () => void;
+  onConfirm: () => void;
+}): JSX.Element {
+  const { name, lines, onClose, onConfirm } = props;
   return (
     <Sheet title={`Close ${name}?`} variant="dialog" onClose={onClose}>
       <div className="rename">
-        <p className="rename-hint">Closing {name} stops new work landing on it. Running work finishes where it is.</p>
+        {keyed(lines).map(({ key, line }) => (
+          <p key={key} className="rename-hint">
+            {line}
+          </p>
+        ))}
         <div className="rename-actions">
           <button type="button" className="quiet" onClick={onClose}>
             Cancel

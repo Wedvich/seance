@@ -1,8 +1,9 @@
-import { withAutonomy, type AmendDraft } from "@seance/shared";
-import { setMachineOpen } from "./availability-client.ts";
+import { CAPABILITIES, withAutonomy, type AmendDraft } from "@seance/shared";
+import { setMachineOpen, waitForDrain, type AvailabilityOutcome } from "./availability-client.ts";
 import { appRelayClient, importAppKeys, LazyRelay } from "./app-relay.ts";
 import { cliSink, traitRefusalAudit, type AuditSink } from "./audit.ts";
 import {
+  advertises,
   continueAuto,
   enqueueAuto,
   passAuto,
@@ -326,7 +327,8 @@ export async function availabilityViaFleet(
   open: boolean,
   fleet: Fleet,
   self: () => Promise<string | null> = ownDeviceId,
-): Promise<AutoEnqueued> {
+  wait = false,
+): Promise<AvailabilityOutcome> {
   const verb = open ? "open" : "close";
   let lease: FleetLease;
   try {
@@ -336,22 +338,49 @@ export async function availabilityViaFleet(
     return failed(`${verb}: not sent — ${why}`);
   }
   try {
+    // Before anything is sent, so a command that cannot wait never closes the machine.
+    if (
+      wait &&
+      lease.scheduler !== null &&
+      !advertises(lease.machines, lease.scheduler.availability(), CAPABILITIES.drainPass)
+    ) {
+      return failed(NO_WAIT_TEXT);
+    }
+    if (wait && lease.scheduler === null) return failed(NO_WAIT_TEXT);
     return await setMachineOpen({ ref: machine, selfId: machine === null ? await self() : null, open, lease });
   } finally {
     lease.release();
   }
 }
 
-export async function cmdAvailabilityAuto(machine: string | null, open: boolean): Promise<void> {
+const NO_WAIT_TEXT =
+  "not closed — --wait needs the scheduler's leader to drain closed machines; update seanced on the leader's machine";
+
+export async function cmdAvailabilityAuto(machine: string | null, open: boolean, wait: boolean): Promise<void> {
   const config = await loadConfig();
   const built = await autoFleet(config);
-  const outcome = await availabilityViaFleet(machine, open, built.fleet).finally(() => built.fleet.stop());
+  const outcome = await availabilityViaFleet(machine, open, built.fleet, undefined, wait).catch((err: unknown) => {
+    built.fleet.stop();
+    throw err;
+  });
   if (!outcome.ok) {
+    built.fleet.stop();
     console.error(outcome.text);
     process.exit(1);
   }
   console.log(outcome.text);
-  process.exit(0);
+  if (!wait || outcome.closed === undefined) {
+    built.fleet.stop();
+    process.exit(0);
+  }
+  const drained = await waitForDrain({
+    fleet: built.fleet,
+    deviceId: outcome.closed.deviceId,
+    closedAt: outcome.closed.at,
+    print: (line) => console.log(line),
+  }).finally(() => built.fleet.stop());
+  (drained.code === 0 ? console.log : console.error)(drained.text);
+  process.exit(drained.code);
 }
 
 export async function cmdPassAuto(args: PassCliArgs): Promise<void> {

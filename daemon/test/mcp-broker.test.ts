@@ -216,6 +216,42 @@ describe("the MCP tools, direct and brokered", () => {
     }
   });
 
+  test("a closed machine's drain reads the same direct or brokered, this machine's own sessions through the local socket", async () => {
+    const closed = { at: 1, scan: 1, cl: 1_763_000_000_000 };
+    const own = { ...LOCAL, status: closed, capabilities: ["close", "drain"] };
+    const leader = { ...REMOTE, status: closed, capabilities: [...(REMOTE.capabilities ?? []), "drainPass"] };
+    const create = (): FakeRelay => {
+      const fake = fakeRelay([own, leader], respond);
+      fake.setState({ scheduler: { kind: "ready", deviceId: leader.deviceId, term: 1 } });
+      return fake;
+    };
+    const drainBroker = createBroker({
+      selfDeviceId: LOCAL.deviceId,
+      relay: new LazyRelay({ create }),
+      auditSink: () => {},
+    });
+    const drainSocket = await startLocalSocket({
+      path: join(base, "drain.sock"),
+      handle: () => Promise.reject(new Error("no Plain op belongs on this socket in these tests")),
+      broker: drainBroker.handle,
+    });
+    try {
+      const path = drainSocket.path;
+      if (path === null) throw new Error("the op socket did not bind");
+      const direct = await connect(relayFleet(new LazyRelay({ create })));
+      const brokered = await connect(brokerOnly(path));
+      const viaRelay = await direct("list_machines");
+      const viaBroker = await brokered("list_machines");
+      expect(viaBroker).toBe(viaRelay);
+      const listed = JSON.parse(viaBroker) as { name: string; drain?: { moving: number; empty: boolean | null } }[];
+      for (const entry of listed) expect(entry.drain).toMatchObject({ empty: false });
+      expect(listed).toHaveLength(2);
+    } finally {
+      drainSocket.stop();
+      drainBroker.stop();
+    }
+  });
+
   test("auto, queue_batch, get_queue and cancel_task: the same answers, the same stored tasks, the same audit — direct or brokered", async () => {
     const directRelays: FakeRelay[] = [];
     const brokerRelays: FakeRelay[] = [];

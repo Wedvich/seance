@@ -369,12 +369,20 @@ describe("parseAmendArgs", () => {
 
 describe("parseAvailabilityArgs", () => {
   test("takes at most the one machine; none means this one", () => {
-    expect(parseAvailabilityArgs([], "close")).toEqual({ machine: null });
-    expect(parseAvailabilityArgs(["Thad"], "open")).toEqual({ machine: "Thad" });
+    expect(parseAvailabilityArgs([], "close")).toEqual({ machine: null, wait: false });
+    expect(parseAvailabilityArgs(["Thad"], "open")).toEqual({ machine: "Thad", wait: false });
     for (const argv of [["a", "b"], ["--now"]]) {
-      expect(() => parseAvailabilityArgs(argv, "close")).toThrow("usage: seanced close [<machine>]");
+      expect(() => parseAvailabilityArgs(argv, "close")).toThrow("usage: seanced close [<machine>] [--wait]");
       expect(() => parseAvailabilityArgs(argv, "open")).toThrow("usage: seanced open [<machine>]");
     }
+  });
+
+  test("close takes --wait, in either position; open refuses it", () => {
+    expect(parseAvailabilityArgs(["--wait"], "close")).toEqual({ machine: null, wait: true });
+    expect(parseAvailabilityArgs(["Thad", "--wait"], "close")).toEqual({ machine: "Thad", wait: true });
+    expect(parseAvailabilityArgs(["--wait", "Thad"], "close")).toEqual({ machine: "Thad", wait: true });
+    expect(() => parseAvailabilityArgs(["--wait"], "open")).toThrow("usage: seanced open [<machine>]");
+    expect(() => parseAvailabilityArgs(["--wait", "-x"], "close")).toThrow("usage: seanced close");
   });
 });
 

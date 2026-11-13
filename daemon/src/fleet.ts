@@ -11,6 +11,7 @@ import {
   type ErrorResponse,
   type Machine,
   type QueueReply,
+  type QueueRequest,
   type SchedulerAvailability,
   type StoreRefusal,
   type Task,
@@ -66,9 +67,12 @@ export interface SchedulerLeg {
    * so the task would queue unrestricted, and its stripped registry view would make every trait read unknown.
    */
   readonly staleDaemonRequires?: string;
+  /** Set only by the broker leg, whose `queue` carries no request: a by-id read is not worth asking for. */
+  readonly queueByIdUnsupported?: true;
   readonly enqueue: (task: Task) => Promise<TaskCreated | StoreRefusal | null>;
   readonly availability: () => SchedulerAvailability;
-  readonly queue: () => Promise<QueueReply | null>;
+  /** `request.tasks` narrows the reply to those ids; the broker leg carries no request and answers its newest. */
+  readonly queue: (request?: QueueRequest) => Promise<QueueReply | null>;
   readonly cancel: (taskId: string) => Promise<TaskReply | null>;
   /** `run-now`: only to a leader advertising `CAPABILITIES.runNow`, which the caller checks. */
   readonly runNow: (taskId: string) => Promise<TaskReply | null>;
@@ -129,7 +133,7 @@ export function relayFleet(relay: LazyRelay): Fleet {
         scheduler: {
           enqueue: (task) => client.createTask(task),
           availability: () => client.getState().scheduler,
-          queue: () => client.queue(),
+          queue: (request) => client.queue(request),
           cancel: (taskId) => client.cancel(taskId),
           runNow: (taskId) => client.runNow(taskId),
           pass: (taskId) => client.pass(taskId),
@@ -209,6 +213,7 @@ export function brokerScheduler(
   };
   return {
     availability: () => availability,
+    queueByIdUnsupported: true,
     ...(staleDaemonRequires === undefined ? {} : { staleDaemonRequires }),
     enqueue: (task) => {
       // The gates refuse first; this keeps a caller that skipped them from sending a `requires` the daemon would drop.

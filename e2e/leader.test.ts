@@ -4,6 +4,7 @@ import { basename, join } from "node:path";
 import {
   AT_REST_OPS,
   CAPABILITIES,
+  drainView,
   openAtRest,
   parseSettingsRecord,
   parseStoreReply,
@@ -12,6 +13,7 @@ import {
   SETTINGS_KEY,
   STORE_TIMEOUT_MS,
   type SessionEntry,
+  type SessionsResponse,
   type SettingsRecord,
   type SpawnResponse,
 } from "@seance/shared";
@@ -22,6 +24,7 @@ import { tmux, tmuxOk } from "../daemon/src/tmux.ts";
 import { pollUntil } from "../daemon/test/fixtures.ts";
 import {
   cancelTask,
+  DRAIN_GRACE_MS,
   killWindow,
   listRegisteredWindows,
   listWindows,
@@ -41,7 +44,7 @@ let daemonStore: Mock<DaemonRelayClient["store"]> | undefined;
 
 beforeAll(async () => {
   daemonStore = spyOn(DaemonRelayClient.prototype, "store");
-  suite = await startSuite("e2e-leader");
+  suite = await startSuite("e2e-leader", { drainMs: DRAIN_GRACE_MS });
   ({ base, stack } = suite);
 });
 
@@ -934,6 +937,128 @@ describe("pass: an app's pass ↔ leader ↔ the machine's push and close", () =
       if (window !== undefined) await killWindow(window);
     }
   }, 60_000);
+});
+
+describe("drain: a closed machine ↔ leader ↔ the machine's push and close", () => {
+  // The outside drain no unit test joins: the app's `availability` close, the leader's pass loop seeing `cl`
+  // in the real status after the (shortened) grace, the real push of the real worktree, the successor held
+  // back by the `closed` filter on the only machine, and the old pane's close. Only the session is a stand-in.
+  test("a close passes the running task on: pushed, successor queued, old pane closed, drainView empty", async () => {
+    const taskId = "e2e-drain-task";
+    const branch = "drain-e2e";
+    const audit = spyOn(console, "log");
+    const lines = (needle: string): string[] =>
+      audit.mock.calls.map((args) => args.join(" ")).filter((l) => l.includes(needle));
+    const app = startApp(stack);
+    let window: string | undefined;
+    let successorId: string | undefined;
+    let closed = false;
+    try {
+      await pollUntil(() => stack.daemon.leader.term() !== null, "the suite's daemon to lead", 10_000);
+      await stack.daemon.leader.settled();
+      const ready = await app.waitForApp(
+        (state) =>
+          state.relay.scheduler.kind === "ready" &&
+          state.relay.machines.some(
+            (m) =>
+              m.deviceId === stack.deviceId &&
+              m.connected &&
+              m.repos.length > 0 &&
+              m.capabilities?.includes(CAPABILITIES.close) === true &&
+              m.capabilities.includes(CAPABILITIES.drainPass),
+          ),
+        "the leader verified and the machine advertising close and drainPass",
+      );
+      const origin = fixtureOrigin(ready);
+      if (origin === null) throw new Error("the fixture machine lists no repo origin");
+      expect(
+        await app.client.createTask({
+          id: taskId,
+          spec: { repo: origin, mode: "worktree" },
+          state: "queued",
+          createdAt: Date.now(),
+        }),
+      ).toEqual({ ok: true, landedEarlier: false });
+      await pollUntil(
+        async () => (await stack.queue().get(taskId))?.body?.state === "running",
+        "the task to run",
+        20_000,
+      );
+      window = (await stack.queue().get(taskId))?.body?.assignment?.window;
+      const worktree = await realWorktree(taskId, branch);
+      await Bun.write(join(worktree, "drain.txt"), "work\n");
+      expect((await exec(["git", "add", "drain.txt"], { cwd: worktree })).exitCode).toBe(0);
+      const committed = await exec(
+        [
+          "git",
+          "-c",
+          "user.email=e2e@seance.test",
+          "-c",
+          "user.name=e2e",
+          "commit",
+          "-q",
+          "--no-gpg-sign",
+          "-m",
+          "drain",
+        ],
+        { cwd: worktree },
+      );
+      expect(committed.exitCode).toBe(0);
+      const tip = (await exec(["git", "rev-parse", "HEAD"], { cwd: worktree })).stdout.trim();
+
+      const reply = await app.client.request<{ ok?: boolean; closed?: number | null }>(stack.deviceId, "availability", {
+        open: false,
+      });
+      closed = true;
+      expect(reply).toMatchObject({ closed: expect.any(Number) });
+
+      await pollUntil(
+        () => lines("audit pass task=").some((l) => l.includes(`task="${taskId}"`) && l.includes("trigger=drain")),
+        "the drain's pass audit line",
+        60_000,
+      );
+      expect(await originRef(`refs/heads/${branch}`)).toBe(tip);
+      await pollUntil(
+        async () => {
+          const old = (await stack.queue().get(taskId))?.body;
+          successorId = old?.successor;
+          return old?.state === "superseded" && successorId !== undefined;
+        },
+        "the old task to be superseded, naming the successor",
+        20_000,
+      );
+      const successor = (await stack.queue().get(successorId ?? ""))?.body;
+      expect(successor?.spec.succeeds).toMatchObject({ task: taskId, trigger: "drain" });
+      // The only machine is closed: the successor waits, never lands on it.
+      expect(successor?.state === "ready" || successor?.state === "blocked").toBe(true);
+
+      await pollUntil(
+        async () => !(await tmuxOk(["list-panes", "-a", "-F", "#{@seance-task}"])).split("\n").includes(taskId),
+        "the old task's pane to close",
+        20_000,
+      );
+      const tasks = (await stack.queue().list()).flatMap((entry) =>
+        "body" in entry && entry.body ? [entry.body] : [],
+      );
+      const sessions = await app.client.request<SessionsResponse>(stack.deviceId, "sessions", {});
+      if ("ok" in sessions) throw new Error(`sessions refused: ${sessions.code}`);
+      const machine = app.client.getState().machines.find((m) => m.deviceId === stack.deviceId);
+      if (machine === undefined) throw new Error("the machine left the registry");
+      const view = drainView(machine, tasks, sessions.sessions);
+      // No other machine to place it on, so the successor reads as waiting for one: stuck, not moved.
+      expect(view.stuck).toEqual([{ taskId: successorId, reason: "unplaced" }]);
+      expect(view.moving).toEqual([]);
+      expect(view.empty).toBe(true);
+    } finally {
+      audit.mockRestore();
+      // While closed, so the waiting successor is ended where it stands rather than dispatched on reopen.
+      if (successorId !== undefined) await cancelTask(app.client, successorId);
+      await cancelTask(app.client, taskId);
+      if (closed) await app.client.request(stack.deviceId, "availability", { open: true });
+      app.stop();
+      if (window !== undefined) await killWindow(window);
+    }
+  }, 120_000);
 });
 
 describe("hand-off: a successor's inherited PR ↔ the leader's dispatch ↔ the daemon's hand-off", () => {

@@ -441,6 +441,11 @@ export function deriveCloseAvailability(relay: RelayState, machine: Machine): bo
   );
 }
 
+/** Whether the verified leader passes a closed machine's tasks (`drainPass`): the Machines screen then shows the drain's progress. */
+export function deriveDrainAvailability(relay: RelayState): boolean {
+  return verifiedLeaderAdvertises(relay, CAPABILITIES.drainPass);
+}
+
 /** Whether the verified leader answers `run-now`; an older one refuses it as an op it does not know. */
 export function deriveRunNowAvailability(relay: RelayState): boolean {
   return verifiedLeaderAdvertises(relay, CAPABILITIES.runNow);

@@ -11,6 +11,7 @@ import {
 } from "../src/state.ts";
 import {
   deriveCloseAvailability,
+  deriveDrainAvailability,
   derivePinProblem,
   deriveReportedAvailability,
   deriveView,
@@ -347,6 +348,8 @@ describe("banner and button", () => {
       });
     expect(deriveCloseAvailability(leading([CAPABILITIES.drain]), target)).toBe(true);
     expect(deriveCloseAvailability(leading([]), target)).toBe(false);
+    expect(deriveDrainAvailability(leading([CAPABILITIES.drain]))).toBe(false);
+    expect(deriveDrainAvailability(leading([CAPABILITIES.drainPass]))).toBe(true);
     expect(deriveCloseAvailability(relay({ machines: [target] }), target)).toBe(false);
     const mute = machine({ capabilities: [] });
     expect(deriveCloseAvailability(leading([CAPABILITIES.drain]), mute)).toBe(false);

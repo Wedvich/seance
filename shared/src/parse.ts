@@ -18,6 +18,7 @@ import {
   BRANCH_MAX_LENGTH,
   CANDIDATE_MAX_REASONS,
   DECISION_MAX_CANDIDATES,
+  DRAIN_REFUSALS,
   DEP_AFTER,
   DONE_SIGNALS,
   EXIT_STATUS_MAX,
@@ -113,6 +114,7 @@ import {
   type PauseReply,
   type PauseRequest,
   type ContinuedBy,
+  type DrainedStamp,
   type PrAlertStamp,
   type QuotaExhaustedStamp,
   type PrStatus,
@@ -1586,6 +1588,23 @@ export function parseQuotaExhaustedStamp(value: unknown): QuotaExhaustedStamp | 
   };
 }
 
+/** The stamp of the leader's last drain pass, built field by field; null when malformed. */
+export function parseDrainedStamp(value: unknown): DrainedStamp | null {
+  const keys = new Set(["at", "tried", "refused", "held"]);
+  if (!isRecord(value) || !Object.keys(value).every((key) => keys.has(key))) return null;
+  const { at, tried, refused, held } = value;
+  if (!isFiniteNumber(at) || at <= 0 || !isFiniteNumber(tried) || tried < 0) return null;
+  if (held !== undefined && held !== true) return null;
+  const known = DRAIN_REFUSALS.find((r) => r === refused);
+  if (refused !== undefined && known === undefined) return null;
+  return {
+    at,
+    tried,
+    ...(known === undefined ? {} : { refused: known }),
+    ...(held === undefined ? {} : { held }),
+  };
+}
+
 /** The leader's pointer to a task's newest landed continuation, built field by field; null when malformed. */
 export function parseContinuedBy(value: unknown): ContinuedBy | null {
   if (!isRecord(value) || !Object.keys(value).every((key) => key === "task" || key === "createdAt" || key === "live")) {
@@ -1666,6 +1685,8 @@ export function parseTask(value: unknown): Task | null {
   // Dropped, never fatal, like `prAlert`: a lost stamp costs one repeated alert.
   const quotaExhausted =
     value["quotaExhausted"] === undefined ? null : parseQuotaExhaustedStamp(value["quotaExhausted"]);
+  // Dropped, never fatal: a lost stamp costs one repeated drain attempt.
+  const drained = value["drained"] === undefined ? null : parseDrainedStamp(value["drained"]);
   // Apart from `progress` too: the leader rewrites it on its next pass, so a lost one costs a pass.
   const continuedBy = value["continuedBy"] === undefined ? null : parseContinuedBy(value["continuedBy"]);
   // Dropped, never fatal, and only a `running` task's: a lost one costs a release until the next `idle`.
@@ -1690,6 +1711,7 @@ export function parseTask(value: unknown): Task | null {
     ...(prs === null ? {} : { prs }),
     ...(prAlert === null ? {} : { prAlert }),
     ...(quotaExhausted === null ? {} : { quotaExhausted }),
+    ...(drained === null ? {} : { drained }),
     ...(continuedBy === null ? {} : { continuedBy }),
     ...(idleRelease === null ? {} : { idleRelease }),
     // Dropped, never fatal, like `pr`: a link is display-only.

@@ -7,6 +7,7 @@ import {
   type AccountListing,
   type ErrorResponse,
   type QueueReply,
+  type QueueRequest,
   type PassReply,
   type AmendRequest,
   type TaskLookup,
@@ -43,7 +44,7 @@ export interface AppRelay {
   readonly request: <T>(deviceId: string, op: RequestOp, payload: unknown) => Promise<T | ErrorResponse>;
   /** As `RelayClient.createTask`: a store-put the relay answers itself, so no leader is needed. */
   readonly createTask: (task: Task) => Promise<TaskCreated | StoreRefusal | null>;
-  readonly queue: () => Promise<QueueReply | null>;
+  readonly queue: (request?: QueueRequest) => Promise<QueueReply | null>;
   readonly cancel: (taskId: string) => Promise<TaskReply | null>;
   readonly runNow: (taskId: string) => Promise<TaskReply | null>;
   readonly pass: (taskId: string) => Promise<PassReply | null>;

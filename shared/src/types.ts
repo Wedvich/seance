@@ -1122,6 +1122,11 @@ export interface MachineInfo {
  * `drain`: as a leader, routes around `cl` and routes a `machine_closed` refusal again; a
  * client closes a machine only while the verified leader advertises it, since an older
  * leader fails the task.
+ * `drainPass`: as a leader, passes the work off a closed machine (`trigger: "drain"`) and writes
+ * `Task.drained`; what a client checks of the verified leader before showing a drain's per-task
+ * counts or offering `seanced close --wait`.
+ * `drainAsk`: as a daemon, asks its sessions to pass themselves when closed (docs/drain.md, step A,
+ * build-order item 3). Advertised by no daemon yet; the leader does not read it yet.
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -1144,6 +1149,8 @@ export const CAPABILITIES = {
   amend: "amend",
   close: "close",
   drain: "drain",
+  drainPass: "drainPass",
+  drainAsk: "drainAsk",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -2428,8 +2435,11 @@ export const SUCCESSOR_CHAIN_MAX = 8;
 /** How long the leader waits, after a pass's commit point, before it closes the old session itself (the backstop). */
 export const PASS_CLOSE_GRACE_MS = 120_000;
 
-/** What set a pass off; a reader refuses any other value. `quota` is written only by the leader's automatic trigger (`CAPABILITIES.successorAuto`). */
-export const SUCCESSOR_TRIGGERS = ["session", "manual", "quota"] as const;
+/**
+ * What set a pass off; a reader refuses any other value. `quota` is written only by the leader's automatic
+ * trigger (`CAPABILITIES.successorAuto`); `drain` only by the leader's drain pass (`CAPABILITIES.drainPass`).
+ */
+export const SUCCESSOR_TRIGGERS = ["session", "manual", "quota", "drain"] as const;
 
 export type SuccessorTrigger = (typeof SUCCESSOR_TRIGGERS)[number];
 
@@ -2844,6 +2854,42 @@ export interface QuotaExhaustedStamp {
   readonly waiting?: true;
 }
 
+/** The pass refusals a drain stamp records: a `pass` code a client can word (`schedulerErrorText`). */
+export const DRAIN_REFUSALS = [
+  "dispatching",
+  "not_running",
+  "needs_input",
+  "here",
+  "offline",
+  "successor_unsupported",
+  "account_unknown",
+  "pr_unreadable",
+  "pr_not_open",
+  "branch_mismatch",
+  "dirty_worktree",
+  "detached_head",
+  "default_branch",
+  "push_rejected",
+  "push_failed",
+  "not_launched",
+  "pass_failed",
+] as const satisfies readonly SchedulerErrorCode[];
+export type DrainRefusal = (typeof DRAIN_REFUSALS)[number];
+
+/**
+ * `Task.drained`: the leader's write-ahead record of its drain pass. `at`: the machine's `cl` the attempt
+ * was for (a stamp for an older close never suppresses a new one). `tried`: the leader's clock (ms) of
+ * the last attempt, what the retry waits `drainRetryMs` from. `refused`: that attempt's refusal, what
+ * clients show as stuck. `held`: the pass answered `conflict` or `unrecorded`, which can follow the
+ * successor's create, so it is never retried for this `at`.
+ */
+export interface DrainedStamp {
+  readonly at: number;
+  readonly tried: number;
+  readonly refused?: DrainRefusal;
+  readonly held?: true;
+}
+
 /**
  * One PR a task's session reported (`Task.prs`). `closed`: the leader's poller last read it
  * closed, so it is not the task's primary while a later or earlier one is not; a reopen clears it.
@@ -2988,6 +3034,11 @@ export interface Task {
    * repeated alert), and on finishing.
    */
   readonly quotaExhausted?: QuotaExhaustedStamp;
+  /**
+   * Written by the leader before its drain pass so a new term does not repeat it; `refused` is the last
+   * attempt's refusal, what clients show as stuck. Dropped, never fatal, when malformed, and on finishing.
+   */
+  readonly drained?: DrainedStamp;
   /** The newest landed continuation of an `awaiting-merge` task's chain, the leader's pointer (`ContinuedBy`). */
   readonly continuedBy?: ContinuedBy;
   /**
