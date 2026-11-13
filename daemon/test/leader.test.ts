@@ -345,7 +345,7 @@ describe("queue-changed", () => {
     }
   });
 
-  test("an idle release, which writes nothing, is named in a nudge and listed by queue; busy ends it the same way", async () => {
+  test("an idle release is stamped on the record, named in a nudge and listed by queue; busy ends it the same way", async () => {
     const relay = startTestRelay(TOKEN);
     relay.schedulerTerm = 1;
     const store = new MemoryQueueStore();
@@ -380,12 +380,60 @@ describe("queue-changed", () => {
       const before = (await store.get("t-b"))?.version;
       await event("idle");
       expect(parseQueueChanged((await nextNudge(relay)).change)?.tasks).toEqual(["t-b"]);
-      expect(await listed()).toEqual([{ taskId: "t-b", since: expect.any(Number) }]);
-      expect((await store.get("t-b"))?.version).toBe(before);
+      const listing = await listed();
+      expect(listing).toEqual([{ taskId: "t-b", since: expect.any(Number) }]);
+      // One write as the release begins, so a new leader holds it released too.
+      const stamped = await store.get("t-b");
+      expect(stamped?.version).toBe((before ?? 0) + 1);
+      expect(stamped?.body?.idleRelease).toEqual({ since: expect.any(Number), deviceId: "b" });
+      expect(stamped?.body?.idleRelease?.since).toBe(listing?.[0]?.since);
 
       await event("busy");
       expect(parseQueueChanged((await nextNudge(relay)).change)?.tasks).toEqual(["t-b"]);
       expect(await listed()).toBeUndefined();
+      const cleared = await store.get("t-b");
+      expect(cleared?.version).toBe((before ?? 0) + 2);
+      expect(cleared?.body?.idleRelease).toBeUndefined();
+    } finally {
+      leader.stop();
+      relay.stop();
+    }
+  });
+
+  test("an idle release whose stamp the store refuses is still named in a nudge and listed: the release is the clock's, not the write's", async () => {
+    const relay = startTestRelay(TOKEN);
+    relay.schedulerTerm = 1;
+    const store = new MemoryQueueStore();
+    const assignment = { deviceId: "b", ...target, pane: "%3" };
+    const { leader, replies } = leaderOver(relay, store, undefined, undefined, undefined, undefined, undefined, {
+      ...DEFAULT_CONFIG,
+      idleReleaseAfterMs: 0,
+    });
+    try {
+      leader.lead(1);
+      await leader.settled();
+      await nextNudge(relay);
+      await enqueueQueued(store, leader, "t-b", { state: "running", assignment });
+      expect(parseQueueChanged((await nextNudge(relay)).change)?.tasks).toEqual(["t-b"]);
+
+      const before = (await store.get("t-b"))?.version;
+      store.failNext({ code: "refused" });
+      const payload = { session: "%3", taskId: "t-b", exclave: "default", state: "idle", at: Date.now() };
+      leader.deliver(
+        await seal(
+          key,
+          { to: SCHEDULER_ID, from: "b" },
+          { id: crypto.randomUUID(), ts: Date.now(), op: "session-event", payload },
+        ),
+      );
+      expect(parseQueueChanged((await nextNudge(relay)).change)?.tasks).toEqual(["t-b"]);
+      leader.deliver(await appRequest("queue"));
+      expect(queueReply((await replies.next()).response.payload).idle).toEqual([
+        { taskId: "t-b", since: expect.any(Number) },
+      ]);
+      const unstamped = await store.get("t-b");
+      expect(unstamped?.version).toBe(before);
+      expect(unstamped?.body?.idleRelease).toBeUndefined();
     } finally {
       leader.stop();
       relay.stop();

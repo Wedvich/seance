@@ -1062,6 +1062,25 @@ describe("tasks and their records", () => {
     }
   });
 
+  test("a running task's idleRelease survives a parse; a malformed one, or one on another state, is dropped and the task stays readable", () => {
+    const released: Task = { ...task, state: "running", idleRelease: { since: 9, deviceId: "a" } };
+    expect(parseTask(released)).toEqual(released);
+    const { idleRelease: _idleRelease, ...bare } = released;
+    for (const bad of [
+      { since: "now", deviceId: "a" },
+      { since: Number.NaN, deviceId: "a" },
+      { since: 9 },
+      { since: 9, deviceId: "" },
+      { since: 9, deviceId: "a", extra: 1 },
+      9,
+      null,
+    ]) {
+      expect(parseTask({ ...released, idleRelease: bad })).toEqual(bare);
+    }
+    const { idleRelease: _waiting, ...waiting } = { ...released, state: "needs-input" as const };
+    expect(parseTask({ ...waiting, idleRelease: { since: 9, deviceId: "a" } })).toEqual(waiting);
+  });
+
   test("a progress field that is not exactly its shape nulls the task", () => {
     for (const bad of [
       { ...task, prUrl: "javascript:alert(1)" },
@@ -1537,6 +1556,18 @@ describe("store", () => {
     };
     expect(parseTask(waiting)).toEqual(waiting);
     expect(await sealedLength(waiting)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
+  });
+
+  test("a running record carrying its idle release stamp, the deviceId at its bound, fits beside eight candidates", async () => {
+    const { failure: _failure, ...unfailed } = written;
+    const running: Task = {
+      ...unfailed,
+      state: "running",
+      idleRelease: { since: 1_760_000_000_000, deviceId: "d".repeat(ROUTING_ID_MAX_LENGTH) },
+      decision: { at: 1_760_000_000_000, chosen: target, candidates: Array.from({ length: 8 }, () => candidate) },
+    };
+    expect(parseTask(running)).toEqual(running);
+    expect(await sealedLength(running)).toBeLessThanOrEqual(STORE_MAX_CT_LENGTH);
   });
 
   test("a PR list at its bound, its primary as prUrl, costs no more than a prUrl at its own: the same record fits", async () => {

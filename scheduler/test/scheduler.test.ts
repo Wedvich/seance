@@ -39,7 +39,7 @@ import {
   unreachable,
 } from "./fixtures.ts";
 
-function setup(fleet = new FakeFleet([machine("a")]), config = DEFAULT_CONFIG) {
+function setup(fleet = new FakeFleet([machine("a")]), config = DEFAULT_CONFIG, onError?: (e: unknown) => void) {
   const store = new MemoryQueueStore();
   const clock = { now: NOW };
   const idleChanges: string[] = [];
@@ -49,6 +49,7 @@ function setup(fleet = new FakeFleet([machine("a")]), config = DEFAULT_CONFIG) {
     config,
     now: () => clock.now,
     onIdleChange: (id) => idleChanges.push(id),
+    ...(onError === undefined ? {} : { onError }),
   });
   return { store, fleet, clock, scheduler, idleChanges };
 }
@@ -862,10 +863,12 @@ describe("a machine asleep past slotReleaseAfterMs", () => {
 
 describe("a session idle past idleReleaseAfterMs", () => {
   const GRACE = DEFAULT_CONFIG.idleReleaseAfterMs;
+  /** `STAMP_RETRY_MS`: how long a refused stamp write waits. */
+  const STAMP_RETRY = 5 * 60_000;
 
   /** One task running on `a` under a global max of 1, a second waiting behind it. */
-  async function holdingTheSlot() {
-    const env = setup(new FakeFleet([machine("a"), machine("b")]), { ...DEFAULT_CONFIG, globalMax: 1 });
+  async function holdingTheSlot(onError?: (e: unknown) => void) {
+    const env = setup(new FakeFleet([machine("a"), machine("b")]), { ...DEFAULT_CONFIG, globalMax: 1 }, onError);
     const first = await enqueue(env.store, env.scheduler, spec({ pin: { deviceId: "a" } }));
     await pass(env.scheduler);
     const pane = env.scheduler.task(first.id)?.assignment?.pane;
@@ -1011,6 +1014,231 @@ describe("a session idle past idleReleaseAfterMs", () => {
     await report("busy", "b");
     await at(env, NOW + GRACE);
     expect(scheduler.task(second.id)?.state).toBe("running");
+  });
+
+  describe("across a leader change", () => {
+    /** A new leader over the same store and fleet, taken over at `now` and through its first pass. */
+    async function newLeader(env: Awaited<ReturnType<typeof holdingTheSlot>>, now: number): Promise<Scheduler> {
+      env.clock.now = now;
+      env.fleet.beat(now);
+      const next = new Scheduler({
+        store: readerChecked(env.store, () => env.clock.now),
+        fleet: env.fleet,
+        config: { ...DEFAULT_CONFIG, globalMax: 1 },
+        now: () => env.clock.now,
+      });
+      await next.takeover();
+      await pass(next);
+      return next;
+    }
+
+    test("a release is stamped on the record once, and a new leader holds it released with no new event", async () => {
+      const env = await holdingTheSlot();
+      const { store, first, second, report } = env;
+      await report("idle");
+      const before = (await stored(store, first.id))?.version ?? 0;
+      await at(env, NOW + GRACE - 1);
+      expect((await stored(store, first.id))?.body.idleRelease).toBeUndefined();
+
+      await at(env, NOW + GRACE);
+      expect(env.scheduler.task(second.id)?.state).toBe("running");
+      expect((await stored(store, first.id))?.body.idleRelease).toEqual({ since: NOW, deviceId: "a" });
+      await at(env, NOW + GRACE * 2);
+      expect((await stored(store, first.id))?.version).toBe(before + 1);
+
+      const next = await newLeader(env, NOW + GRACE * 2 + 1);
+      expect(next.idle()).toEqual([{ taskId: first.id, since: NOW }]);
+      // The second alone counts: a third waits at 1 of 1, not 2.
+      const third = await enqueue(store, next, spec());
+      await pass(next);
+      capped(next, third.id, 1);
+    });
+
+    test("a leader change inside the grace loses the clock: the new leader counts the task until its next idle", async () => {
+      const env = await holdingTheSlot();
+      const { store, first, second, report } = env;
+      await report("idle");
+      await at(env, NOW + GRACE - 1);
+      const next = await newLeader(env, NOW + GRACE);
+      expect(next.idle()).toEqual([]);
+      expect((await stored(store, first.id))?.body.idleRelease).toBeUndefined();
+      capped(next, second.id, 1);
+    });
+
+    test("a stamp naming a machine the task does not run on frees nothing, and the leader drops it", async () => {
+      const env = await holdingTheSlot();
+      const { store, first, report } = env;
+      await report("idle");
+      await at(env, NOW + GRACE);
+      const held = await stored(store, first.id);
+      if (held === undefined) throw new Error("first is not stored");
+      const moved = await store.put(first.id, held.version, {
+        ...held.body,
+        idleRelease: { since: NOW, deviceId: "b" },
+      });
+      expect(moved.ok).toBe(true);
+
+      const next = await newLeader(env, NOW + GRACE + 1);
+      expect(next.idle()).toEqual([]);
+      const third = await enqueue(store, next, spec());
+      await pass(next);
+      capped(next, third.id, 2);
+      expect((await stored(store, first.id))?.body.idleRelease).toBeUndefined();
+    });
+
+    test("a busy after the release clears the stamp, so a new leader counts the task again", async () => {
+      const env = await holdingTheSlot();
+      const { store, first, report } = env;
+      await report("idle");
+      await at(env, NOW + GRACE);
+      const released = (await stored(store, first.id))?.version ?? 0;
+
+      await report("busy");
+      const after = await stored(store, first.id);
+      expect(after?.body.idleRelease).toBeUndefined();
+      expect(after?.body.state).toBe("running");
+      expect(after?.version).toBe(released + 1);
+
+      const next = await newLeader(env, NOW + GRACE + 1);
+      expect(next.idle()).toEqual([]);
+      const third = await enqueue(store, next, spec());
+      await pass(next);
+      capped(next, third.id, 2);
+    });
+
+    test("another machine's events neither stamp a release nor clear one", async () => {
+      const env = await holdingTheSlot();
+      const { store, first, report } = env;
+      await report("idle", "b");
+      await at(env, NOW + GRACE);
+      expect((await stored(store, first.id))?.body.idleRelease).toBeUndefined();
+
+      const later = NOW + GRACE + 1;
+      env.clock.now = later;
+      await report("idle");
+      await at(env, later + GRACE);
+      const stamp = { since: later, deviceId: "a" };
+      expect((await stored(store, first.id))?.body.idleRelease).toEqual(stamp);
+      await report("busy", "b");
+      await report("needs-input", "b");
+      expect((await stored(store, first.id))?.body.idleRelease).toEqual(stamp);
+      expect(env.scheduler.idle()).toEqual([{ taskId: first.id, since: later }]);
+    });
+
+    test("a busy whose clearing write is refused leaves no stamp standing: the pass drops it, and a new leader counts the task", async () => {
+      const errors: unknown[] = [];
+      const env = await holdingTheSlot((e) => errors.push(e));
+      const { store, first, report } = env;
+      await report("idle");
+      await at(env, NOW + GRACE);
+      expect((await stored(store, first.id))?.body.idleRelease).toBeDefined();
+
+      // The event's own write and the retry right behind it are both refused.
+      store.failNext({ code: "refused" });
+      store.failNext({ code: "refused" });
+      await report("busy");
+      expect((await stored(store, first.id))?.body.idleRelease).toBeDefined();
+      await at(env, NOW + GRACE + 1);
+      expect((await stored(store, first.id))?.body.idleRelease).toBeDefined();
+
+      await at(env, NOW + GRACE + STAMP_RETRY + 1);
+      expect((await stored(store, first.id))?.body.idleRelease).toBeUndefined();
+      const next = await newLeader(env, NOW + GRACE + STAMP_RETRY + 2);
+      expect(next.idle()).toEqual([]);
+    });
+
+    test("a stamp the clock no longer backs is dropped when the session goes idle again, so a new leader never seeds the old since", async () => {
+      const errors: unknown[] = [];
+      const env = await holdingTheSlot((e) => errors.push(e));
+      const { store, first, report } = env;
+      await report("idle");
+      await at(env, NOW + GRACE);
+      store.failNext({ code: "refused" });
+      store.failNext({ code: "refused" });
+      await report("busy");
+      const again = NOW + GRACE + 1;
+      env.clock.now = again;
+      await report("idle");
+      expect((await stored(store, first.id))?.body.idleRelease).toBeDefined();
+      await at(env, again + STAMP_RETRY + 1);
+      expect((await stored(store, first.id))?.body.idleRelease).toBeUndefined();
+    });
+
+    test("a stamp write the store refuses is not repeated every pass, and lands once the wait is over", async () => {
+      const errors: unknown[] = [];
+      const env = await holdingTheSlot((e) => errors.push(e));
+      const { store, first, report } = env;
+      await report("idle");
+      store.failNext({ code: "refused" });
+      await at(env, NOW + GRACE);
+      expect((await stored(store, first.id))?.body.idleRelease).toBeUndefined();
+      await at(env, NOW + GRACE + 1);
+      expect((await stored(store, first.id))?.body.idleRelease).toBeUndefined();
+      expect(errors).toHaveLength(1);
+      await at(env, NOW + GRACE + STAMP_RETRY);
+      expect((await stored(store, first.id))?.body.idleRelease).toEqual({ since: NOW, deviceId: "a" });
+    });
+
+    test("a stamp from a clock ahead of this leader's is capped: the release stands at once, not after the skew", async () => {
+      const env = await holdingTheSlot();
+      const { store, first, report } = env;
+      await report("idle");
+      await at(env, NOW + GRACE);
+      const held = await stored(store, first.id);
+      if (held === undefined) throw new Error("first is not stored");
+      const skewed = await store.put(first.id, held.version, {
+        ...held.body,
+        idleRelease: { since: NOW + GRACE * 3, deviceId: "a" },
+      });
+      expect(skewed.ok).toBe(true);
+
+      const now = NOW + GRACE + 1;
+      const next = await newLeader(env, now);
+      expect(next.idle()).toEqual([{ taskId: first.id, since: now - GRACE }]);
+      expect((await stored(store, first.id))?.body.idleRelease).toEqual({ since: now - GRACE, deviceId: "a" });
+    });
+
+    test("a task that leaves running, as lost, keeps no stamp, and back in running starts its grace over", async () => {
+      const env = await holdingTheSlot();
+      const { fleet, store, first, report } = env;
+      await report("idle");
+      await at(env, NOW + GRACE);
+      expect((await stored(store, first.id))?.body.idleRelease).toBeDefined();
+
+      fleet.fleet = [machine("a", { connected: false }), machine("b")];
+      await at(env, NOW + GRACE + 1);
+      await at(env, NOW + GRACE + 1 + DEFAULT_CONFIG.lostAfterMs);
+      expect(env.scheduler.task(first.id)?.state).toBe("lost");
+      expect(env.scheduler.task(first.id)?.idleRelease).toBeUndefined();
+      expect((await stored(store, first.id))?.body.idleRelease).toBeUndefined();
+
+      fleet.fleet = [machine("a"), machine("b")];
+      env.clock.now = NOW + GRACE + 2 + DEFAULT_CONFIG.lostAfterMs;
+      await report("busy");
+      expect(env.scheduler.task(first.id)).toMatchObject({ state: "running" });
+      expect(env.scheduler.task(first.id)?.idleRelease).toBeUndefined();
+    });
+
+    test("a task cancelled while released keeps no stamp", async () => {
+      const env = await holdingTheSlot();
+      const { store, first, report } = env;
+      await report("idle");
+      await at(env, NOW + GRACE);
+      expect(await env.scheduler.cancel(first.id)).toMatchObject({ ok: true });
+      expect(env.scheduler.task(first.id)?.idleRelease).toBeUndefined();
+      expect((await stored(store, first.id))?.body.idleRelease).toBeUndefined();
+    });
+
+    test("a write out of running drops the stamp with the clock", async () => {
+      const env = await holdingTheSlot();
+      const { store, first, report } = env;
+      await report("idle");
+      await at(env, NOW + GRACE);
+      await report("needs-input");
+      const after = await stored(store, first.id);
+      expect(after?.body.state).toBe("needs-input");
+      expect(after?.body.idleRelease).toBeUndefined();
+    });
   });
 });
 

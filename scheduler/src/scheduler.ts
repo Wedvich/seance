@@ -16,6 +16,7 @@ import {
   type AmendRequest,
   type BranchState,
   type FleetQuotaEntry,
+  type IdleRelease,
   type IdleTaskRef,
   type PrAlertStamp,
   type PassResponse,
@@ -95,6 +96,8 @@ export const SCHEDULER_CLIENT = "scheduler";
  * worked off a few at a time.
  */
 const LEAN_PER_PASS = 8;
+/** How long a stamp write the store refused outright waits before `#stampIdle` tries it again. */
+const STAMP_RETRY_MS = 5 * 60_000;
 
 export interface SchedulerOptions {
   readonly store: QueueStore;
@@ -304,10 +307,14 @@ export class Scheduler {
    * Task id → when its session went idle at its prompt, and on which machine:
    * what `#released` frees an idle task's slot by. Set only by an `idle` from
    * the machine the task runs on, cleared by any other state it reports, and
-   * pruned once the task is not `running` there. Memory only: a new leader
-   * counts an idle task until its next `idle`, which can only delay a release.
+   * pruned once the task is not `running` there. Once a release begins it is
+   * stamped on the record (`Task.idleRelease`, `#stampIdle`), which `load`
+   * seeds this from, so a release outlives the term; a clock still inside its
+   * grace is memory only, and a new leader counts that task until its next `idle`.
    */
-  readonly #idleSince = new Map<string, { readonly since: number; readonly deviceId: string }>();
+  readonly #idleSince = new Map<string, IdleRelease>();
+  /** Task id → the stamp write the store last refused outright, and when: `#stampIdle` holds off repeating it. */
+  readonly #stampRefused = new Map<string, { readonly key: string; readonly at: number }>();
   /** The idle releases last told to the host (`onIdleChange`): what `#syncIdle` diffs against. */
   #idleTold: ReadonlySet<string> = new Set();
   /**
@@ -439,6 +446,16 @@ export class Scheduler {
     // Windows an earlier term alerted, so this one does not alert an ongoing spill once more.
     for (const { task } of this.#held.values())
       if (task.spillAlert !== undefined) this.#spills.seed(task.spillAlert, this.#now());
+    // Releases an earlier term stamped, so this one does not count them until their next `idle`.
+    for (const { task } of this.#held.values()) {
+      const stamp = task.idleRelease;
+      if (stamp !== undefined && idleHere(task, stamp.deviceId) && !this.#idleSince.has(task.id))
+        // The stamp proves the grace passed, but its `since` is another leader's wall clock: capped, so skew never withholds the release.
+        this.#idleSince.set(task.id, {
+          since: Math.min(stamp.since, this.#now() - this.#config.idleReleaseAfterMs),
+          deviceId: stamp.deviceId,
+        });
+    }
     await this.#pause.load();
   }
 
@@ -728,6 +745,53 @@ export class Scheduler {
     for (const id of new Set([...now, ...told])) if (now.has(id) !== told.has(id)) this.#onIdleChange(id);
   }
 
+  /**
+   * Keeps each `running` record's `Task.idleRelease` equal to the clock's release: stamps one as a
+   * release begins (once, never per turn, so the next term seeds it), and drops a stamp the
+   * clock no longer backs. The drop is retried on every pass, since a clearing write that failed
+   * must not leave a stamp the next leader would free a working session on. Judged again inside the
+   * write against the clock, so a write queued behind an event that moved it writes nothing
+   * (`onSession` stops the clock before its write). A write the store refused outright is not
+   * repeated for `STAMP_RETRY_MS`, so a persistent refusal costs an error line per interval, not per event.
+   * `only` narrows it to one task, for an event that can have moved no other.
+   */
+  async #stampIdle(only?: string): Promise<void> {
+    const target = (task: Task): IdleRelease | undefined => {
+      const clock = this.#idleSince.get(task.id);
+      const due =
+        clock !== undefined &&
+        idleHere(task, clock.deviceId) &&
+        this.#now() - clock.since >= this.#config.idleReleaseAfterMs;
+      return due ? clock : undefined;
+    };
+    const same = (a: IdleRelease | undefined, b: IdleRelease | undefined): boolean =>
+      a?.since === b?.since && a?.deviceId === b?.deviceId;
+    for (const id of this.#stampRefused.keys()) if (!this.#held.has(id)) this.#stampRefused.delete(id);
+    await Promise.all(
+      [...this.#held.values()].flatMap(({ task }) => {
+        if (task.state !== "running" || (only !== undefined && task.id !== only)) return [];
+        const want = target(task);
+        if (same(task.idleRelease, want)) return [];
+        const key = want === undefined ? "clear" : `${want.since}/${want.deviceId}`;
+        const refused = this.#stampRefused.get(task.id);
+        if (refused !== undefined && refused.key === key && this.#now() - refused.at < STAMP_RETRY_MS) return [];
+        return [
+          this.#update(
+            task.id,
+            (current) => {
+              const now = target(current);
+              if (current.state !== "running" || same(current.idleRelease, now)) return null;
+              if (now !== undefined) return { ...current, idleRelease: { since: now.since, deviceId: now.deviceId } };
+              const { idleRelease: _stamp, ...rest } = current;
+              return rest;
+            },
+            () => this.#stampRefused.set(task.id, { key, at: this.#now() }),
+          ),
+        ];
+      }),
+    );
+  }
+
   #fleetQuota(): readonly FleetQuotaEntry[] {
     return this.#fleet.fleetQuota?.() ?? [];
   }
@@ -793,14 +857,17 @@ export class Scheduler {
     const awaitsExit = from !== undefined && this.#reportsExit(from.deviceId);
     let defers = false;
     let asked = false;
+    // Before the write, so a release stamp queued on the task's chain finds its clock gone (`#stampIdle`).
+    const before = this.#held.get(taskId)?.task;
+    if (before !== undefined && stopsIdle(before, state, from)) this.#idleSince.delete(taskId);
     const written = await this.#update(taskId, (task) => {
       defers = waitsForExit(task, state, from, prUrl, awaitsExit);
       const moved = this.#yieldToCancel(task, sessionChange(task, state, from, prUrl, awaitsExit));
-      if (state !== "needs-input" || from?.reason !== "question") return moved;
+      if (state !== "needs-input" || from?.reason !== "question") return idleEnded(task, moved, state, from);
       const alerted = questionAlert(task, moved, from.deviceId, this.#now(), this.#config.needsInputEscalateMs);
       // Set on every run that gets here: a version conflict applies the change again to what the store holds.
       asked = alerted !== null;
-      return alerted ?? moved;
+      return idleEnded(task, alerted ?? moved, state, from);
     });
     // From the written record: `inputClock` stamped the stay's start as it landed.
     if (asked && written?.inputAlerted === true && written.needsInputSince !== undefined) {
@@ -815,6 +882,7 @@ export class Scheduler {
     }
     this.#idleClock(taskId, state, from);
     this.#syncIdle();
+    await this.#stampIdle(taskId);
     if (!defers) return;
     const held = this.#held.get(taskId)?.task;
     if (held === undefined || !PLACED.includes(held.state)) return;
@@ -835,11 +903,11 @@ export class Scheduler {
   #idleClock(taskId: string, state: SessionState, from: SessionSource | undefined): void {
     const task = this.#held.get(taskId)?.task;
     if (task === undefined) return;
-    if (from !== undefined && task.assignment?.deviceId !== from.deviceId) return;
-    if (state !== "idle" || from === undefined || task.state !== "running") {
+    if (stopsIdle(task, state, from)) {
       this.#idleSince.delete(taskId);
       return;
     }
+    if (state !== "idle" || from === undefined || task.assignment?.deviceId !== from.deviceId) return;
     if (!this.#idleSince.has(taskId)) this.#idleSince.set(taskId, { since: this.#now(), deviceId: from.deviceId });
   }
 
@@ -1565,6 +1633,7 @@ export class Scheduler {
       if (task === undefined || !idleHere(task, deviceId)) this.#idleSince.delete(id);
     }
     this.#syncIdle();
+    await this.#stampIdle();
     await this.#settleEndings();
     await this.#markAbsent();
     this.#checkOut(this.#due());
@@ -2207,7 +2276,7 @@ export class Scheduler {
    * read the same way, except that the one version after ours is ours. A record
    * past the store's bound is written again with its decision cut to the
    * winner, never the task cut. An idle clock (`#idleSince`) ends on any write
-   * into or out of `running`. The needs-input clock (`inputClock`) rides
+   * into or out of `running`, and its release stamp with it (`idleBound`). The needs-input clock (`inputClock`) rides
    * whatever state a write lands, so no path can enter or leave `needs-input`
    * without it, and the merge clock (`endClock`) rides entering `awaiting-merge` the same way.
    * A forge reading (`pr`) is dropped when the write moves `prUrl` (`prBound`).
@@ -2230,13 +2299,15 @@ export class Scheduler {
         const proposed = change(held.task);
         if (proposed === null) return null;
         const now = this.#now();
-        const changed = lean(endClock(held.task, inputClock(prBound(held.task, proposed), now), now));
+        const changed = lean(
+          endClock(held.task, inputClock(idleBound(held.task, prBound(held.task, proposed)), now), now),
+        );
         const next = trim ? trimmed(changed) : changed;
         // oxlint-disable-next-line no-await-in-loop -- each attempt follows the refresh before it
         const write = await this.#store.put(id, held.version, next);
         if (write.ok) {
           this.#held.set(id, { version: write.version, task: next });
-          // A stay at the prompt ends with `running`: one back from `lost` starts its grace over.
+          // A stay at the prompt ends with `running`: one back from `lost` starts its grace over. Its stamp went in `idleBound`.
           if (held.task.state !== "running" || next.state !== "running") this.#idleSince.delete(id);
           this.#noteSuccessor(held.task, next);
           return next;
@@ -2258,6 +2329,7 @@ export class Scheduler {
         // lost reply, is our write — adopted as written, or the change would decline itself.
         if (write.code === "indeterminate" && fresh.body !== undefined && fresh.version === held.version + 1) {
           this.#held.set(id, { version: fresh.version, task: next });
+          if (held.task.state !== "running" || next.state !== "running") this.#idleSince.delete(id);
           this.#noteSuccessor(held.task, next);
           return next;
         }
@@ -2356,6 +2428,30 @@ function passPushFailure(code: string): PassFailure {
 /** Whether an idle clock started on `deviceId` still speaks for `task`: running there, as it was. */
 function idleHere(task: Task, deviceId: string): boolean {
   return task.state === "running" && task.assignment?.deviceId === deviceId;
+}
+
+/**
+ * Whether a session event ends `task`'s idle stay: any state but `idle` from its own machine, or
+ * any from a sender naming none. Another machine's event touches nothing, or any machine could
+ * hold a slot by resetting the clock. The one rule for the clock (`#idleClock`) and its stamp.
+ */
+function stopsIdle(task: Task, state: SessionState, from: SessionSource | undefined): boolean {
+  if (from !== undefined && task.assignment?.deviceId !== from.deviceId) return false;
+  return state !== "idle" || from === undefined || task.state !== "running";
+}
+
+/** An event's change without the release stamp its event ended: a write of its own when the event moves nothing. */
+function idleEnded(task: Task, change: Task | null, state: SessionState, from: SessionSource | undefined): Task | null {
+  if (task.idleRelease === undefined || !stopsIdle(task, state, from)) return change;
+  const { idleRelease: _stamp, ...rest } = change ?? task;
+  return rest;
+}
+
+/** A write into or out of `running` ends the idle stay, so it drops the stay's release stamp. */
+function idleBound(before: Task, after: Task): Task {
+  if (after.idleRelease === undefined || (before.state === "running" && after.state === "running")) return after;
+  const { idleRelease: _stamp, ...rest } = after;
+  return rest;
 }
 
 /** At most `DECISION_MAX_CANDIDATES`, cut from the end — the rejected trail — and counted in `trimmed`. */

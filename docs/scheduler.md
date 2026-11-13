@@ -1726,7 +1726,9 @@ same PR, with the reason.
     unchanged — the "done, want a follow-up?" session that was never settled. Its next state counts it
     again, over a cap or not, as item 18's do on return. `needs-input` keeps its slot: a dialog is
     mid-task, so work resumes for certain when it is answered. Detected from the mod's `idle`, never
-    from what the session wrote. DESIGN.md "Routing caps" has the rule and the residuals.
+    from what the session wrote. A release outlives a leader change (2026-11-13): the leader stamps
+    it on the task record once it begins, and a new leader reads the stamp on takeover. DESIGN.md
+    "Routing caps" has the rule and the residuals.
 
 21. **A pinned task `ready` over 30 days fails `pin_expired`** (`pinExpiryMs`, owner, 2026-10-27).
     A pin (`pin.deviceId` or `pin.account`) to a machine retired or re-keyed, or an account signed out for

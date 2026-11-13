@@ -2620,11 +2620,12 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
   off `REPLY_JSON_BUDGET` before any task, since a reader refuses a reply whose holds do not
   parse — 32 at every bound still seal under the envelope. It carries the idle releases too
   (`QueueResponse.idle`, `{ taskId, since }` for each `running` task "Routing caps" releases
-  for sitting idle at its prompt, whatever `tasks` named): the release is the leader's memory, on
-  no record, so the reply is the only place an app can learn it. Off the budget first as well, at
-  most one per task; a reader drops a bad entry alone and shows that task as running, which it is.
-  A release beginning or ending writes nothing, so the scheduler tells the host
-  (`SchedulerOptions.onIdleChange`) and the leader nudges `queue-changed` naming the task, as a
+  for sitting idle at its prompt, whatever `tasks` named): the release is the leader's clock,
+  which the record's `idleRelease` stamp only seeds, so the reply is where an app learns it. Off the
+  budget first as well, at most one per task; a reader drops a bad entry alone and shows that task
+  as running, which it is. A release beginning or ending also writes or drops that stamp, but
+  the scheduler tells the host of each regardless (`SchedulerOptions.onIdleChange`), since the
+  release is the clock's and not the write's, and the leader nudges `queue-changed` naming the task, as a
   write would. **All five are audited** (`queueAudit`
   in `audit.ts`) as `audit queue origin=relay op=cancel|mark-done|run-now|pause|resume id=<request>`, with
   `task=<task>` or `account=<account>` where one applies, and `ok` or `refused
@@ -3307,15 +3308,33 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   from": main turn ended, no dialog open) from the machine it runs on, with no other state since,
   counts toward neither cap nor projected usage once `idleReleaseAfterMs` (10 min) has passed;
   `route` takes it in the same `released` set, which carries task ids so routing need not know why.
-  The clock is the leader's in-memory `#idleSince`: a repeated `idle` keeps it, any other state
-  from that machine clears it, another machine's event touches it no more than it moves the task
-  (or any machine could hold a slot by resetting it), and any write into or out of `running` ends
-  it, so a task back from `lost` starts its grace over. No task state:
-  `busy`/`idle` flip every turn, and a stored state would cost two writes per turn per task. Why: a
-  session that finished and asked "want a follow-up?" but was never settled held a slot for good,
-  and nothing bills while it waits. `needs-input` keeps its slot — a dialog is mid-task, so work
-  resumes for certain when it is answered. Detection reads the mod's state, never the session's
-  text: classifying the reply would be guesswork and would put transcript content on the wire.
+  The clock is the leader's `#idleSince`, in memory first: a repeated `idle` keeps it, any other
+  state from that machine clears it, another machine's event touches it no more than it moves the
+  task (or any machine could hold a slot by resetting it), and any write into or out of `running`
+  ends it, so a task back from `lost` starts its grace over. No task state: `busy`/`idle` flip
+  every turn, and a stored state would cost two writes per turn per task. Why: a session that
+  finished and asked "want a follow-up?" but was never settled held a slot for good, and nothing
+  bills while it waits. `needs-input` keeps its slot — a dialog is mid-task, so work resumes for
+  certain when it is answered. Detection reads the mod's state, never the session's text:
+  classifying the reply would be guesswork and would put transcript content on the wire.
+  **The release outlives the term** (2026-11-13): once a clock passes the grace the leader stamps
+  `Task.idleRelease` (`{ since, deviceId }`, its own write, never a frame's) on the record, and the
+  event or write that ends the stay drops it in the same write, or in one of its own for a `busy`
+  that moves nothing — at most two writes per release, none per turn. A clearing write that fails
+  is not left: every pass drops a stamp on a `running` record that the clock no longer backs, since
+  a stale stamp would have the next leader free a working session, the wrong way to err. A write
+  the store refused outright waits five minutes before the same one is tried again. `load()` (so
+  takeover) seeds the clock from a stamp on a task still `running` on the machine it names, its
+  `since` capped at now less the grace (the stamp proves the grace passed, and `since` is another
+  leader's wall clock, so skew cannot withhold the release); a stamp on any other record frees
+  nothing; the parser keeps it on `running` only and drops a malformed one, never the task. Why:
+  leadership moved several times one night on relay socket drops, and each new leader counted
+  three sessions parked at their prompts as busy for hours — the fleet read 9/8 running and a
+  `ready` task could not dispatch — since a parked session never sends another `idle`. An older
+  leader's parser drops the field (`parseTask` builds field by field), so no sentinel is needed: on
+  its own rewrite the stamp is gone, today's behaviour. Rejected: daemons remembering each pane's
+  last state and telling a new leader — a fleet update restarts every daemon just as leadership
+  changes, so that memory is lost exactly when it is needed.
   Accepted: (a) answering released sessions overcommits — answer six with eight new running and
   fourteen draw on the caps — handled as a return from sleep is: nothing killed, nothing placed
   until the count falls under. The `queue` reply lists the releases and the Queue screen shows
@@ -3324,9 +3343,16 @@ it through the store: an app's `store-put` create, read by the leader on `store-
   mid-turn until its next turn event ("Where the states come from"), so long background work can
   be released while it runs. (c) A `busy` lost on the way (a hooks-worker or relay hiccup) leaves
   a working session released until its next event; `sessions` cannot see busy from idle, so
-  nothing else corrects it. (d) A new leader starts no clock until the next `idle`: on takeover
-  every released task counts again at once, an over-cap fleet that drains as in (a). (e) An
-  `idle` from a sender naming no machine frees nothing.
+  nothing else corrects it. A `busy` sent while no leader runs is lost the same way, and that is
+  the likeliest case, since it falls around a takeover: the new leader seeds the stamp the old one
+  left and keeps the task released until its next event, with nothing to say it is working. The
+  harm is bounded by that one turn (one more task dispatched into a fleet at its cap, as in (a));
+  the rejected daemon-side memory is the only cure, and it fails when a fleet update restarts every
+  daemon. (d) A clock inside its grace is memory
+  only: a leader change in a stay's first `idleReleaseAfterMs` loses it, and the new leader counts
+  the task until its next `idle`. In a mixed-version fleet an older leader leaves a stamp it never
+  rewrites — a `busy` writes nothing under it — so a newer leader after it may seed a release for
+  a session that went busy meanwhile, until that session's next event, as in (c). (e) An `idle` from a sender naming no machine frees nothing.
 - **Pause** (`pause.ts`, M3 item 5). `queue:pause` holds the holds (`PauseHold`): one on the
   whole queue, one per account, at most `MAX_PAUSE_HOLDS` — account holds stop one short of
   it, so a whole-queue pause always fits. The library reads it on `load()` —
