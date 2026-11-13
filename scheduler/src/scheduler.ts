@@ -1835,7 +1835,9 @@ export class Scheduler {
       const { deviceId } = machine;
       const run = this.#drainPass(task.id, deviceId, cl)
         .catch(this.#onError)
-        .finally(() => this.#drainPasses.delete(deviceId));
+        .finally(() => {
+          if (this.#drainPasses.get(deviceId)?.taskId === task.id) this.#drainPasses.delete(deviceId);
+        });
       this.#drainPasses.set(deviceId, { taskId: task.id, run });
     }
   }
@@ -1865,6 +1867,8 @@ export class Scheduler {
     }
     if (result.ok) {
       // The successor waits on the old task's `superseded`, which the pass has written: place it now, not in 30 s.
+      // The machine is free for its next task from here, so that tick may start it.
+      if (this.#drainPasses.get(deviceId)?.taskId === id) this.#drainPasses.delete(deviceId);
       await this.tick();
       return;
     }

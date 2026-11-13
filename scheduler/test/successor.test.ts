@@ -2246,8 +2246,7 @@ describe("the drain pass", () => {
     expect(s.fleet.pushes).toHaveLength(1);
     release();
     await s.scheduler.drain();
-    // The first pass's own tick still saw the machine taken; the next tick starts the second.
-    await tick(s.scheduler);
+    // The first pass frees the machine before its own tick, which starts the second.
     expect(s.fleet.pushes).toHaveLength(2);
   });
 
@@ -2269,12 +2268,17 @@ describe("the drain pass", () => {
     await s.scheduler.refresh(second.id);
     await tick(s.scheduler);
     await s.scheduler.onSession("old2", "busy", { deviceId: "a", pane: "%2" }, PR);
+    const answer = s.fleet.pushReply;
+    s.fleet.pushReply = (request) => {
+      // Reopened while the first task's pass is out.
+      close(s, "a", null);
+      return answer(request);
+    };
     close(s, "a");
     later(s, WAIT);
     await s.scheduler.tick();
     await s.scheduler.drain();
     expect(s.fleet.pushes).toHaveLength(1);
-    close(s, "a", null);
     later(s, 10 * RETRY);
     await tick(s.scheduler);
     expect(s.fleet.pushes).toHaveLength(1);
