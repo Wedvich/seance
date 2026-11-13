@@ -49,6 +49,8 @@ export interface DespawnResult {
 export interface SpawnOutcome {
   readonly window: string;
   readonly path: string;
+  /** A continuation put its reaped worktree back (`readdWorktree`): the audit line says so, for an owner asking why it reappeared. */
+  readonly readded?: true;
   readonly note?: string;
   /**
    * Whether the session had shown up in `sessions` by the time spawn returned.

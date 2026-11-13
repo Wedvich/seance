@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, realpath, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, realpath, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +17,7 @@ import { scanRepos } from "../src/scan.ts";
 import { LaunchLedger } from "../src/launch-ledger.ts";
 import { reapAudit } from "../src/audit.ts";
 import { despawnSession } from "../src/despawn.ts";
+import { withReapLock } from "../src/reap.ts";
 import { markClosed, tmuxHarvestPanes } from "../src/exit-status.ts";
 import { EndedTasks } from "../src/session-events.ts";
 import { listClaudeSessions, paneInfo } from "../src/sessions.ts";
@@ -57,6 +58,8 @@ beforeAll(async () => {
   // suite runs inside a séance session — which no window may inherit.
   process.env["SEANCE_MACHINE_TAG"] = "outer";
   process.env["CLAUDE_CONFIG_DIR"] = join(base, "claude-config");
+  // A continuation's re-add takes reap's lock under `stateDir()/run`: never the developer's own, where a live daemon reaps.
+  process.env["SEANCE_STATE_DIR"] = join(base, "state");
   home = join(base, "home");
   await mkdir(home, { recursive: true });
   WAIT = { tmuxSession: "main", waitMs: 5_000, home };
@@ -73,6 +76,7 @@ afterAll(async () => {
   delete process.env["SEANCE_CLAUDE_BIN"];
   delete process.env["SEANCE_MACHINE_TAG"];
   delete process.env["CLAUDE_CONFIG_DIR"];
+  delete process.env["SEANCE_STATE_DIR"];
   await rm(base, { recursive: true, force: true });
 });
 
@@ -1155,14 +1159,18 @@ describe("spawnSession continuing a failed task's session", () => {
       async (how) => {
         const wt = await makeWorktree();
         const tip = await workOn(wt);
-        if (how === "worktree remove") await git(fixture.repoPath, ["worktree", "remove", wt.path]);
+        if (how === "worktree remove")
+          expect((await git(fixture.repoPath, ["worktree", "remove", wt.path])).exitCode).toBe(0);
         // Removed by hand: still registered, which `worktree add` refuses until cleared.
         else await rm(wt.path, { recursive: true, force: true });
+        expect(await stat(wt.path).catch(() => null)).toBeNull();
         await rm(stub.argvFile, { force: true });
         let outcome: SpawnOutcome | undefined;
         try {
           outcome = await continuingOn(wt, `Cont Readd ${how}`, `wt-${wt.name}`);
           expect(outcome.path).toBe(wt.path);
+          expect(outcome.readded).toBe(true);
+          expect((await stat(join(wt.path, ".git"))).isFile()).toBe(true);
           expect(await headOf(wt.path)).toBe(tip);
           expect((await git(wt.path, ["symbolic-ref", "HEAD"])).stdout.trim()).toBe(`refs/heads/wt-${wt.name}`);
           const argv = await stub.argv();
@@ -1197,6 +1205,74 @@ describe("spawnSession continuing a failed task's session", () => {
       const refused = await continuingOn(wt, "Cont Unnoted").catch((err: unknown) => err);
       expect(refused).toMatchObject({ code: "not_continuable", message: expect.stringContaining("no branch") });
       expect(await stat(wt.path).catch(() => null)).toBeNull();
+    });
+
+    test("a dead claude's lock on the missing, still registered tree is released and the tree re-added", async () => {
+      const wt = await makeWorktree();
+      const tip = await workOn(wt);
+      await git(fixture.repoPath, [
+        "worktree",
+        "lock",
+        "--reason",
+        `claude session ${wt.name} (pid 99999999)`,
+        wt.path,
+      ]);
+      await rm(wt.path, { recursive: true, force: true });
+      let outcome: SpawnOutcome | undefined;
+      try {
+        outcome = await continuingOn(wt, "Cont Readd Locked", `wt-${wt.name}`);
+        expect(await headOf(wt.path)).toBe(tip);
+        expect(await lockedOf(wt)).toBe(false);
+      } finally {
+        if (outcome !== undefined) await killWindow(outcome.window);
+        await dropWorktree(wt);
+      }
+    });
+
+    test("anyone else's lock on the missing, still registered tree is refused and the registration stays", async () => {
+      const wt = await makeWorktree();
+      await git(fixture.repoPath, ["worktree", "lock", "--reason", "on a usb disk", wt.path]);
+      await rm(wt.path, { recursive: true, force: true });
+      try {
+        const refused = await continuingOn(wt, "Cont Readd Foreign", `wt-${wt.name}`).catch((err: unknown) => err);
+        expect(refused).toMatchObject({ code: "not_continuable", message: expect.stringContaining("is locked") });
+        expect((await git(fixture.repoPath, ["worktree", "list", "--porcelain"])).stdout).toContain(wt.path);
+        expect(await stat(wt.path).catch(() => null)).toBeNull();
+      } finally {
+        await git(fixture.repoPath, ["worktree", "unlock", wt.path]);
+        await dropWorktree(wt);
+      }
+    });
+
+    test("is refused while a reap holds its lock, and adds nothing", async () => {
+      const wt = await makeWorktree();
+      await git(fixture.repoPath, ["worktree", "remove", wt.path]);
+      try {
+        // This process's own pid: a live holder, as the daemon's reap timer is.
+        const refused = await withReapLock(() => continuingOn(wt, "Cont Reaping", `wt-${wt.name}`)).catch(
+          (err: unknown) => err,
+        );
+        expect(refused).toMatchObject({ code: "not_continuable", message: expect.stringContaining("reap is already") });
+        expect(await stat(wt.path).catch(() => null)).toBeNull();
+      } finally {
+        await git(fixture.repoPath, ["branch", "-D", `wt-${wt.name}`]);
+      }
+    });
+
+    test("a symlink that appeared at the gone path is refused, and nothing is written through it", async () => {
+      const wt = await makeWorktree();
+      await git(fixture.repoPath, ["worktree", "remove", wt.path]);
+      const target = await mkdtemp(join(tmpdir(), "readd-link-"));
+      await symlink(target, wt.path);
+      try {
+        const refused = await continuingOn(wt, "Cont Link", `wt-${wt.name}`).catch((err: unknown) => err);
+        expect(refused).toMatchObject({ code: "not_continuable" });
+        expect(await readdir(target)).toEqual([]);
+      } finally {
+        await rm(wt.path, { force: true });
+        await rm(target, { recursive: true, force: true });
+        await git(fixture.repoPath, ["branch", "-D", `wt-${wt.name}`]);
+      }
     });
 
     test("is refused when its branch is checked out in another worktree", async () => {

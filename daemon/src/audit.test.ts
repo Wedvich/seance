@@ -225,6 +225,22 @@ describe("broker audit lines", () => {
   });
 });
 
+describe("spawnAudit ok", () => {
+  test("a re-added worktree says so, and any other spawn's line carries nothing extra", async () => {
+    const lines: string[] = [];
+    const audit = spawnAudit("local", (line) => {
+      lines.push(line);
+      return Promise.resolve();
+    });
+    await audit.ok({ window: "W", path: "/repos/myrepo/.claude/worktrees/w", registered: true });
+    await audit.ok({ window: "W", path: "/repos/myrepo/.claude/worktrees/w", registered: true, readded: true });
+    expect(lines).toEqual([
+      'audit spawn origin=local ok window="W" path="/repos/myrepo/.claude/worktrees/w"',
+      'audit spawn origin=local ok window="W" path="/repos/myrepo/.claude/worktrees/w" readded=true',
+    ]);
+  });
+});
+
 describe("cliSink", () => {
   test("appends to the same log the daemon writes, in the daemon's format", async () => {
     await spawnAudit("cli", cliSink).request({ repo: "myrepo", mode: "here", title: "Local" });

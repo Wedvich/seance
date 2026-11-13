@@ -1460,6 +1460,49 @@ describe("a scheduler spawn that continues a failed task", () => {
     });
   });
 
+  describe("a gone worktree whose .claude/worktrees directory is itself gone or a link", () => {
+    // `clone` is what the rig's repo scan and ledger note hold; each test points it at a clone of its own.
+    const inFreshClone = async (prepare: (fresh: string) => Promise<void>, run: (gone: string) => Promise<void>) => {
+      const saved = clone;
+      const fresh = await realpath(await mkdtemp(join(tmpdir(), "seance-continue-fresh-")));
+      clone = fresh;
+      try {
+        await prepare(fresh);
+        await run(join(fresh, ".claude", "worktrees", "reaped"));
+      } finally {
+        clone = saved;
+        await rm(fresh, { recursive: true, force: true });
+      }
+    };
+
+    test("a missing directory still reaches the backend, for the re-add to create it", () =>
+      inFreshClone(
+        () => Promise.resolve(),
+        async (gone) => {
+          const { calls, handlerCtx } = await rig({ path: gone, branch: "wt-reaped" });
+          const reply = await createHandler(handlerCtx)(continuation(), SCHEDULER_ID);
+          expect(reply?.payload).toMatchObject({ ok: true, path: gone });
+          expect(calls[0]?.continuation?.path).toBe(gone);
+        },
+      ));
+
+    test("a directory that is a symlink out of the clone is refused", () =>
+      inFreshClone(
+        async (fresh) => {
+          const elsewhere = join(fresh, "elsewhere");
+          await mkdir(elsewhere, { recursive: true });
+          await mkdir(join(fresh, ".claude"), { recursive: true });
+          await symlink(elsewhere, join(fresh, ".claude", "worktrees"));
+        },
+        async (gone) => {
+          const { calls, handlerCtx } = await rig({ path: gone, branch: "wt-reaped" });
+          const reply = await createHandler(handlerCtx)(continuation(), SCHEDULER_ID);
+          expect(reply?.payload).toMatchObject({ ok: false, code: "not_continuable" });
+          expect(calls).toEqual([]);
+        },
+      ));
+  });
+
   test("a gone worktree with a noted branch reaches the backend with that branch, for it to re-add", async () => {
     const gone = join(clone, ".claude", "worktrees", "reaped");
     const { calls, handlerCtx } = await rig({ path: gone, branch: "wt-reaped" });

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { autonomyOf, DEFAULT_EFFORT, DEFAULT_MODEL, isTaskId, type RepoEntry, type SpawnRequest } from "@seance/shared";
@@ -12,6 +12,7 @@ import { canonical } from "./gitdir.ts";
 import { hardenedGit, repoConfigRefusal } from "./git-hardened.ts";
 import { log } from "./log.ts";
 import { parseWorktreeList, parseWorktreeLock } from "./reap-git.ts";
+import { ReapBusy, withReapLock } from "./reap.ts";
 import { isRegistered, listPanes, paneRunningTask, type PaneInfo } from "./sessions.ts";
 import {
   capturePane,
@@ -626,7 +627,8 @@ const READD_TIMEOUT_MS = 60_000;
  * Puts a worktree reap removed back at its noted path, on the local branch the ledger last saw it on
  * (DESIGN.md, Daemon, "Continuing a session"): never origin's, so nothing on the spawn path goes to the
  * network and no ref anyone with push access can move is checked out. `path` and `branch` are this machine's
- * ledger's, the path's parent already checked canonical by the handler.
+ * ledger's, the path's parent already checked canonical by the handler. Under reap's lock: its branch sweep
+ * deletes with `update-ref -d`, which does not refuse a branch checked out in a worktree.
  */
 async function readdWorktree(repo: RepoEntry, path: string, branch: string | undefined): Promise<void> {
   if (branch === undefined) {
@@ -635,6 +637,15 @@ async function readdWorktree(repo: RepoEntry, path: string, branch: string | und
       `its worktree ${path} is gone, and no branch of it was noted to re-add it from`,
     );
   }
+  try {
+    await withReapLock(() => readdLocked(repo, path, branch));
+  } catch (err) {
+    if (!(err instanceof ReapBusy)) throw err;
+    throw new SpawnFailure("not_continuable", `its worktree ${path} is gone and ${err.message}; try again shortly`);
+  }
+}
+
+async function readdLocked(repo: RepoEntry, path: string, branch: string): Promise<void> {
   // A checkout runs the filters repo-local config names, which a session can write.
   const refused = await repoConfigRefusal(repo.path);
   if (refused !== null) {
@@ -643,10 +654,15 @@ async function readdWorktree(repo: RepoEntry, path: string, branch: string | und
       `its worktree ${path} is gone, and re-adding it is refused: repo-local ${refused}`,
     );
   }
-  // The exact ref: no revision syntax, no tag or remote branch of the same name standing in. Without it,
-  // `worktree add` would make a branch tracking a remote one of that name.
-  const kept = await hardenedGit(repo.path, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]);
-  if (kept.exitCode !== 0) {
+  // Anything at the leaf now, a symlink included, is not the gone worktree the handler saw: git would write
+  // the checkout through a link into an empty directory.
+  if ((await lstat(path).catch(() => null)) !== null) {
+    throw new SpawnFailure("not_continuable", `its worktree ${path} reappeared`);
+  }
+  // The exact ref: no revision syntax, no tag or remote branch of the same name standing in.
+  const kept = await hardenedGit(repo.path, ["show-ref", "--verify", "-s", `refs/heads/${branch}`]);
+  const tip = kept.stdout.trim();
+  if (kept.exitCode !== 0 || tip === "") {
     throw new SpawnFailure(
       "not_continuable",
       `its worktree ${path} and its branch are both gone (merged and swept by reap, or deleted)`,
@@ -654,7 +670,6 @@ async function readdWorktree(repo: RepoEntry, path: string, branch: string | und
   }
   // A directory removed by hand stays registered, which `worktree add` refuses and which keeps the branch "in use".
   if (await releaseStaleLock(repo, path)) {
-    if (await isDirectory(path)) throw new SpawnFailure("not_continuable", `its worktree ${path} reappeared`);
     const cleared = await hardenedGit(repo.path, ["worktree", "remove", path]);
     if (cleared.exitCode !== 0) {
       throw new SpawnFailure(
@@ -663,16 +678,31 @@ async function readdWorktree(repo: RepoEntry, path: string, branch: string | und
       );
     }
   }
-  const added = await hardenedGit(repo.path, ["worktree", "add", "--", path, branch], READD_TIMEOUT_MS);
+  // Detached at the sha just read, then switched onto the branch: `worktree add <path> <branch>` on a branch
+  // deleted meanwhile would make one tracking `origin/<branch>`, or detach at a tag of that name. A full oid
+  // names no ref, and `--no-guess` is switch's own refusal of that remote lookup.
+  const added = await hardenedGit(repo.path, ["worktree", "add", "--detach", "--", path, tip], READD_TIMEOUT_MS);
   if (added.exitCode !== 0) {
     throw new SpawnFailure(
       "not_continuable",
       `its worktree ${path} is gone and could not be re-added: ${added.stderr.trim()}`,
     );
   }
-  if ((await canonical(path)) !== path) {
-    throw new SpawnFailure("not_continuable", `its re-added worktree ${path} is not where it was noted`);
+  const undo = async (why: string): Promise<never> => {
+    // Clean and unlocked, so no `--force`: what this call added and nothing else.
+    await hardenedGit(repo.path, ["worktree", "remove", path]);
+    throw new SpawnFailure("not_continuable", `its worktree ${path} could not be re-added: ${why}`);
+  };
+  const switched = await hardenedGit(path, ["switch", "--no-guess", "--", branch]);
+  if (switched.exitCode !== 0) return undo(`its branch could not be checked out: ${switched.stderr.trim()}`);
+  const [head, onBranch] = await Promise.all([
+    hardenedGit(path, ["rev-parse", "HEAD"]),
+    hardenedGit(path, ["symbolic-ref", "HEAD"]),
+  ]);
+  if (head.stdout.trim() !== tip || onBranch.stdout.trim() !== `refs/heads/${branch}`) {
+    return undo("its branch moved while it was re-added");
   }
+  if ((await canonical(path)) !== path) return undo("it is not where it was noted");
   log.info(`re-added ${path} from its local branch for a continuation`);
 }
 
@@ -741,6 +771,10 @@ async function continueLocked(
   }
   // After the pane checks: nothing is written to git while a session may still hold the conversation.
   if (!present) await readdWorktree(repo, path, continuation.branch);
+  // The handler checked a present path canonical, and a gone one only by its parent: a link may have appeared since.
+  else if ((await canonical(path)) !== path) {
+    throw new SpawnFailure("not_continuable", `its noted path ${path} is not a worktree of ${repo.name}`);
+  }
   await releaseStaleLock(repo, path);
 
   // The worktree, not the clone root, is where claude starts, so trust is asked for the worktree's own path.
@@ -757,7 +791,8 @@ async function continueLocked(
     allowBypass,
     attachments,
   );
-  return launchWindow(prepared, inner, windowName, request, opts);
+  const outcome = await launchWindow(prepared, inner, windowName, request, opts);
+  return present ? outcome : { ...outcome, readded: true };
 }
 
 async function spawnUntracked(
