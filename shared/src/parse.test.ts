@@ -2980,7 +2980,7 @@ describe("archive-tasks", () => {
   });
 
   test("machines stay absent from an older archivist, drop a bad entry, and refuse the reply when not a bounded list", () => {
-    const reply = { ok: true, tasks: [], total: 0, next: null };
+    const reply = { ok: true, tasks: [], total: 0, next: null } as const;
     expect(parseArchiveTasksReply(reply)).toEqual(reply);
     const gone = { deviceId: "dev-gone", name: "old-box", lastSeen: 2_000 };
     const unnamed = { deviceId: "dev-x", name: null, lastSeen: 1_000 };
