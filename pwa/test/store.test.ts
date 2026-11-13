@@ -53,7 +53,8 @@ import { deriveQueue } from "../src/queue-view.ts";
 import { deriveView } from "../src/view.ts";
 import { describeVerdict } from "../src/verdict-view.ts";
 import { PREVIEW_DEBOUNCE_MS, PREVIEW_RETRY_MS, QUEUE_POLL_MS, QUEUE_POLLS } from "../src/scheduler-store.ts";
-import { OLDER_SEARCH_MS } from "../src/older-store.ts";
+import { OLDER_READ_ON_MAX, OLDER_SEARCH_MS } from "../src/older-store.ts";
+import { deriveOlder } from "../src/older-view.ts";
 import { Store, UNDO_WINDOW_MS } from "../src/store.ts";
 import { VERIFY_WAIT_MS } from "../src/upload-queue.ts";
 import { pollUntil } from "./poll.ts";
@@ -5025,6 +5026,205 @@ describe("task history", () => {
       fake.settle(store);
       expect(store.getState().queue).toBe(false);
       expect(store.getState().older).toMatchObject({ open: false, list: null });
+    } finally {
+      detach();
+    }
+  });
+
+  test("an answer for filters since replaced lands nowhere", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    const held: Array<() => void> = [];
+    client.onArchiveTasks = (request) =>
+      new Promise((resolve) => {
+        const id = request.outcome === "failed" ? "new" : "old";
+        held.push(() => resolve({ ok: true, tasks: [archivedRow(id)], total: 1, next: null }));
+      });
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openQueue();
+      store.toggleOlder();
+      await pollUntil(() => held.length === 1, "page one");
+      store.pickOlder({ outcome: "failed" });
+      await pollUntil(() => held.length === 2, "the filtered read");
+      held[1]?.();
+      await pollUntil(() => store.getState().older.list?.kind === "ok", "the filtered answer");
+      held[0]?.();
+      // A negative assertion: a stale answer is dropped, which no state change shows.
+      await Bun.sleep(20);
+      const list = store.getState().older.list;
+      expect(list?.kind === "ok" ? list.tasks.map((row) => row.task.id) : list).toEqual(["new"]);
+    } finally {
+      detach();
+    }
+  });
+
+  test("a moved archivist seat drops the list and reads page one again", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openQueue();
+      store.toggleOlder();
+      await pollUntil(() => store.getState().older.list?.kind === "ok", "page one");
+      client.emit({ archivist: archivistEntry("arch-2") });
+      await pollUntil(() => client.archiveTaskAsks.length === 2, "the read at the new seat");
+      expect(store.getState().older.deviceId).toBe("arch-2");
+    } finally {
+      detach();
+    }
+  });
+
+  test("a pick while the socket is down waits for it to open", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openQueue();
+      store.toggleOlder();
+      await pollUntil(() => store.getState().older.list?.kind === "ok", "page one");
+      client.emit({ status: "retrying" });
+      store.pickOlder({ outcome: "failed" });
+      expect(store.getState().older.list).toBeNull();
+      expect(client.archiveTaskAsks).toHaveLength(1);
+      client.emit({ status: "open" });
+      await pollUntil(() => client.archiveTaskAsks.length === 2, "the read once open");
+      expect(client.archiveTaskAsks[1]).toEqual({ limit: 20, outcome: "failed" });
+    } finally {
+      detach();
+    }
+  });
+
+  test("a pick cancels a search still waiting on typing", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openQueue();
+      store.toggleOlder();
+      await pollUntil(() => client.archiveTaskAsks.length === 1, "page one");
+      store.searchOlder("fix");
+      store.pickOlder({ outcome: "failed" });
+      await pollUntil(() => client.archiveTaskAsks.length === 2, "the pick's read");
+      // A negative assertion: the search's timer was cancelled, so no second read follows.
+      await Bun.sleep(OLDER_SEARCH_MS + 50);
+      expect(client.archiveTaskAsks).toEqual([{ limit: 20 }, { limit: 20, outcome: "failed", title: "fix" }]);
+    } finally {
+      detach();
+    }
+  });
+
+  test("closing the section drops its list, and reopening reads with the filters as they stand", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openQueue();
+      store.toggleOlder();
+      await pollUntil(() => client.archiveTaskAsks.length === 1, "page one");
+      store.searchOlder("deploy");
+      store.toggleOlder();
+      expect(store.getState().older).toMatchObject({ open: false, list: null });
+      store.toggleOlder();
+      await pollUntil(() => client.archiveTaskAsks.length === 2, "the reopen's read");
+      expect(client.archiveTaskAsks[1]).toEqual({ limit: 20, title: "deploy" });
+      // A negative assertion: the closed section's timer was cancelled.
+      await Bun.sleep(OLDER_SEARCH_MS + 50);
+      expect(client.archiveTaskAsks).toHaveLength(2);
+    } finally {
+      detach();
+    }
+  });
+
+  test("a read-on that fails partway keeps Load older on offer with nothing shown", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    client.onQueue = async () => ({ tasks: [{ ...QUEUED, id: "a-0", state: "done" }], at: 1 });
+    const cursor = { endedAt: 1, createdAt: 0, id: "a-0" };
+    client.onArchiveTasks = async (request) =>
+      request.before === undefined
+        ? { ok: true, tasks: rows("a", 1), total: 5, next: cursor }
+        : { ok: false, code: "internal_error", message: "boom" };
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openQueue();
+      await pollUntil(() => store.getState().queueView?.kind === "ok", "the live queue");
+      store.toggleOlder();
+      await pollUntil(() => {
+        const list = store.getState().older.list;
+        return list?.kind === "ok" && list.moreError !== null;
+      }, "the read-on's failure");
+      const view = deriveOlder(store.getState(), Date.now());
+      expect(view?.rows).toEqual([]);
+      expect(view?.more).toEqual({ loading: false });
+      expect(view?.moreError).toBe("The archivist couldn't read its task history.");
+    } finally {
+      detach();
+    }
+  });
+
+  test("the read-on stops at its cap, and at a page that adds nothing", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    client.onQueue = async () => ({
+      tasks: Array.from({ length: 30 }, (_, i) => ({ ...QUEUED, id: `a-${i}`, state: "done" as const })),
+      at: 1,
+    });
+    let page = 0;
+    client.onArchiveTasks = async () => {
+      const at = page;
+      page += 1;
+      return {
+        ok: true,
+        tasks: [archivedRow(`a-${at}`)],
+        total: 50,
+        next: { endedAt: 1, createdAt: 0, id: `a-${at}` },
+      };
+    };
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.openQueue();
+      await pollUntil(() => store.getState().queueView?.kind === "ok", "the live queue");
+      store.toggleOlder();
+      await pollUntil(() => store.getState().older.list?.kind === "ok", "the capped read");
+      expect(client.archiveTaskAsks).toHaveLength(OLDER_READ_ON_MAX + 1);
+      expect(deriveOlder(store.getState(), Date.now())?.more).toEqual({ loading: false });
+
+      client.onArchiveTasks = async () => ({
+        ok: true,
+        tasks: [],
+        total: 50,
+        next: { endedAt: 1, createdAt: 0, id: "x" },
+      });
+      client.archiveTaskAsks.length = 0;
+      store.refreshOlder();
+      await pollUntil(() => store.getState().older.list?.kind === "ok", "the empty page");
+      expect(client.archiveTaskAsks).toHaveLength(1);
+    } finally {
+      detach();
+    }
+  });
+
+  test("an Older sheet left up when the layout changes is closed through history", async () => {
+    fake = fakeHistory();
+    const client = new ScriptedClient(ONLINE);
+    const store = new Store(client);
+    const detach = store.attach();
+    try {
+      store.setWide(true);
+      store.toggleOlder();
+      await pollUntil(() => store.getState().older.list?.kind === "ok", "page one");
+      store.openOlderSheet("dates");
+      store.setWide(false);
+      fake.settle(store);
+      expect(store.getState().older.sheet).toBeNull();
     } finally {
       detach();
     }

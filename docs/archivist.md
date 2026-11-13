@@ -311,9 +311,13 @@ the long ones. Only a 90d or 1y chart falls back to 24h when the archivist leave
 already open stays.
 
 Settled at item 9 (DESIGN.md, "Archivist", "The PWA's task history"): a row the leader's queue
-still lists is dropped, and its count comes off `total`; a page made only of such rows reads on.
+still lists, in any section, is dropped (not only one in Finished: a task the live list holds
+must not show twice, and the archive and the leader may disagree on its state), and its count
+comes off `total`; a page made only of such rows reads on, at most six pages in a row and never
+past a page that added nothing, then "Load older" takes over.
 The Machine, Repo and Account sheets offer the registry's values plus those of the rows read,
 since the archive has no listing op; a retired machine's "last seen" is the newest archived end
 among its rows. An account shows by its live display name through the store key this install
-derives, else the archived alias. Older resets when the Queue screen closes, and the title
+derives, else the archived alias. Older resets when the Queue screen closes, and closing the
+section drops its list, so reopening reads again with the filters as they stand. The title
 search waits 300 ms.

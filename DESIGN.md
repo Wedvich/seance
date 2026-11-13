@@ -10782,9 +10782,11 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   is a preset (7, 30, 90 days, a year, any time), sent as `since` from the app's clock. Filters
   apply to Older only. It reads `archiveTasks` 20 at a time, the search debounced 300 ms, and
   pages on `next` with a quiet "Load older". A row whose id the leader's queue still lists is
-  dropped (dedup by id), and so is its count: "Showing 20 of N" takes the duplicates already
-  read off `total`. A page made only of such rows reads on by itself rather than showing an
-  empty page. An archived card is a Queue card with every action off: no ⋯ menu, no Continue,
+  dropped (dedup by id, against the whole live queue, whichever section lists it), and so is
+  its count: "Showing 20 of N" takes the duplicates already read off `total`. A page made only
+  of such rows reads on by itself rather than showing an empty page, at most six pages in a
+  row and never past a page that added nothing; "Load older" is offered whenever a cursor
+  remains, even with nothing shown. An archived card is a Queue card with every action off: no ⋯ menu, no Continue,
   the PR chip in its last archived state with no checks icon. Its machine is the registry's
   current name, else the archive's last-known one. Its account is the live account's display
   name, matched by the `account:` store key this install derives, else the archived alias, else
@@ -10796,7 +10798,8 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   failure wording ("No answer — the archivist may be offline." for a timeout or an unsent ask;
   a later page's failure keeps the rows). With no archivist connected nothing of Older shows
   (A35): the registry push that drops it resets the section and closes an open sheet. Closing
-  the Queue screen resets it too, so it reopens closed and unread.
+  the Queue screen resets it too, so it reopens closed and unread, and closing the section
+  drops its list, so a reopen reads afresh.
 - **The read leg.** A second, app-role socket from `appRelayClient` with the PSK's key and the
   account key derived from it, as the leader's own app leg reads (A7); `archivist/src/collect.ts`
   reads the store through it, and `archivist/src/metrics-collect.ts` the registry's `status`

@@ -244,6 +244,12 @@ describe("Older (docs/archivist.md A34–A36j)", () => {
       NOW,
     );
     expect(reading).toMatchObject({ status: "Loading…", more: null });
+    // Rows that turned live after the read leave nothing shown but a cursor: Load older stays on offer.
+    const stranded = deriveOlder(
+      state({ list: page([archived("t-1")], { next: CURSOR }) }, { queueView: live(["t-1"]) }),
+      NOW,
+    );
+    expect(stranded).toMatchObject({ rows: [], more: { loading: false } });
   });
 
   test("a narrowed read that finds nothing offers to clear; an unnarrowed one just says so", () => {

@@ -262,6 +262,7 @@ export function QueueScreen(props: {
             </section>
           );
         })}
+        {view.partial !== null && <p className="fleet-note">{view.partial}</p>}
         {props.older !== null && (
           <OlderSection
             older={props.older}
@@ -283,7 +284,6 @@ export function QueueScreen(props: {
             )}
           />
         )}
-        {view.partial !== null && <p className="fleet-note">{view.partial}</p>}
       </div>
 
       {/* Between list and footer, in flow: shown however the list is scrolled, and never covering its last card. */}

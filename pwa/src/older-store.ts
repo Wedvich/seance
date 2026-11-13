@@ -14,6 +14,12 @@ import type { AppState } from "./view.ts";
 /** How long the search waits on typing before it asks: one read per pause, not per keystroke. */
 export const OLDER_SEARCH_MS = 300;
 
+/**
+ * Pages one read may chain past pages of live duplicates. The live list holds at most
+ * `QUEUE_MAX_TASKS` (100) rows, so five 20-row pages cover it; beyond that Load older takes over.
+ */
+export const OLDER_READ_ON_MAX = 6;
+
 const ARCHIVE_TASKS_ERRORS: Record<ArchiveTasksErrorCode, string> = {
   invalid_request: "The archivist refused the request. Update the archivist and the app to matching versions.",
   internal_error: "The archivist couldn't read its task history.",
@@ -79,23 +85,28 @@ export class OlderStore {
       this.#set({ list: null, deviceId: null });
     }
     const shown = state.queue || state.wide;
-    if (this.#older.open && this.#older.list === null && shown && state.relay.status === "open") {
-      void this.#first();
-    }
+    if (!this.#older.open) return;
+    // Here, not only on open: the registry may settle, or an account sign in, while Older stays open.
+    void this.#keyAccounts();
+    if (this.#older.list === null && shown && state.relay.status === "open") void this.#first();
   }
 
   toggle(): void {
     const open = !this.#older.open;
-    this.#set({ open });
-    if (!open) return;
-    void this.#keyAccounts();
-    this.sync();
+    if (open) {
+      this.#set({ open });
+      this.sync();
+      return;
+    }
+    // Closed, Older keeps nothing: a list kept would answer filters that have since moved on.
+    this.#drop();
+    this.#set({ open, list: null, deviceId: null });
   }
 
   /** The search field's text: shown at once, asked for once typing pauses. */
   search(title: string): void {
     this.#set({ filters: { ...this.#older.filters, title } });
-    if (this.#searchTimer !== null) clearTimeout(this.#searchTimer);
+    this.#clearSearchTimer();
     this.#searchTimer = setTimeout(() => {
       this.#searchTimer = null;
       void this.#first();
@@ -151,7 +162,14 @@ export class OlderStore {
   async #first(): Promise<void> {
     const archivist = this.#getState().relay.archivist;
     if (archivist === null || !archivist.connected || !this.#older.open) return;
+    this.#clearSearchTimer();
     this.#generation += 1;
+    // A socket re-dialling leaves the registry entry connected; `sync` reads once it opens.
+    if (this.#getState().relay.status !== "open") {
+      this.#base = null;
+      this.#set({ list: null });
+      return;
+    }
     const base = olderRequest(this.#older.filters, Date.now());
     this.#base = base;
     this.#set({ list: { kind: "loading" }, deviceId: archivist.deviceId });
@@ -163,7 +181,7 @@ export class OlderStore {
    * lists shows nothing, so the next is read at once: the live Finished list
    * holds the newest finished tasks, so those pages come first and are few.
    */
-  async #page(generation: number, request: ArchiveTasksRequest, held: Ok | null): Promise<void> {
+  async #page(generation: number, request: ArchiveTasksRequest, held: Ok | null, chained = 0): Promise<void> {
     if (held !== null) this.#set({ list: { ...held, loadingMore: true, moreError: null } });
     // A first page's failure replaces the list; a later one's keeps the rows already read.
     const fail = (message: string): void =>
@@ -191,8 +209,10 @@ export class OlderStore {
     const tasks: readonly ArchivedTask[] = [...(held?.tasks ?? []), ...added];
     const list: Ok = { kind: "ok", tasks, total: reply.total, next: reply.next, loadingMore: false, moreError: null };
     const live = liveTaskIds(this.#getState());
-    if (reply.next !== null && added.every((row) => live.has(row.task.id))) {
-      await this.#page(generation, { ...request, before: reply.next }, list);
+    // Only a page that added rows and showed none reads on: an empty or repeated page means a cursor that goes nowhere.
+    const duplicates = added.length > 0 && added.every((row) => live.has(row.task.id));
+    if (reply.next !== null && duplicates && chained < OLDER_READ_ON_MAX) {
+      await this.#page(generation, { ...request, before: reply.next }, list, chained + 1);
       return;
     }
     this.#set({ list });

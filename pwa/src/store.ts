@@ -666,6 +666,8 @@ export class Store {
     if (wide === this.#state.wide) return;
     // The dialog is drawn only by the Machines screen, which the other layout may not show.
     this.closeAccountRename();
+    // Likewise: only the Queue screen draws it, and the narrow layout may not be showing that.
+    this.closeOlderSheet();
     this.#patch({ wide });
     if (wide) void this.refreshQueue();
   }
