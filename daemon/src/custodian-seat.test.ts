@@ -565,6 +565,85 @@ describe("the seat's lifecycle", () => {
     r.seat.stop();
   });
 
+  test("a stop during the start audit closes the pane the record never got", async () => {
+    const r = rig({
+      audit: {
+        start: (e, p, outcome) => {
+          r.log.push(`start ${e} ${p ?? "-"} ${outcome}`);
+          r.state.stopped = true;
+          return Promise.resolve();
+        },
+        kill: (p, reason, outcome) => {
+          r.log.push(`kill ${p} ${reason} ${outcome}`);
+          return Promise.resolve();
+        },
+        end: () => Promise.resolve(),
+      },
+    });
+    await r.seat.start();
+    await r.seat.tick();
+    expect(r.log).toContain("kill %1 stray exited");
+    expect(r.log).toContain(`rm ${TMP}`);
+    expect(r.live.size).toBe(0);
+    r.seat.stop();
+  });
+
+  test("a pick that throws backs off like one that found nothing, and warns once per back-off", async () => {
+    let picks = 0;
+    const r = rig({
+      pick: () => {
+        picks += 1;
+        return Promise.reject(new Error("EACCES"));
+      },
+    });
+    await r.seat.start();
+    await r.seat.tick();
+    r.clock.now += EVERY - 1;
+    await r.seat.tick();
+    expect(picks).toBe(1);
+    expect(r.warnings).toHaveLength(1);
+    r.clock.now += 1;
+    await r.seat.tick();
+    expect(picks).toBe(2);
+    r.seat.stop();
+  });
+
+  test("a close that throws while recording a started round keeps the pane on the record, and a write-ahead record's tick sweeps it", async () => {
+    let closes = 0;
+    const r = rig({
+      audit: {
+        start: () => Promise.reject(new Error("disk full")),
+        kill: (p, reason, outcome) => {
+          r.log.push(`kill ${p} ${reason} ${outcome}`);
+          return Promise.resolve();
+        },
+        end: (p, reason) => {
+          r.log.push(`end ${p ?? "-"} ${reason}`);
+          return Promise.resolve();
+        },
+      },
+      close: (id) => {
+        closes += 1;
+        if (closes === 1) return Promise.reject(new Error("tmux gone"));
+        r.live.delete(id);
+        return Promise.resolve("exited");
+      },
+    });
+    await r.seat.start();
+    await r.seat.tick();
+    expect(r.live.size).toBe(1);
+    expect(r.state.record.round).toEqual({ pane: "%1", startedAt: NOW, tmpDir: TMP, exclave: "default" });
+    expect(r.warnings.join("\n")).toContain("closing the round's pane failed");
+
+    // The record write failing too leaves the write-ahead `pane: null`: the next tick sweeps the live pane.
+    r.state.record = { round: { pane: null, startedAt: NOW, tmpDir: TMP, exclave: "default" } };
+    r.log.length = 0;
+    await r.seat.tick();
+    expect(r.log).toEqual(["kill %1 stray exited", `rm ${TMP}`, "end - lost", `save ${JSON.stringify({ lastEndedAt: NOW })}`]);
+    expect(r.live.size).toBe(0);
+    r.seat.stop();
+  });
+
   test("the no-exclave warning fires once for repeated identical skips, and again when the reason changes", async () => {
     const r = rig();
     r.fail.pick = "a: signed-out";
@@ -633,7 +712,9 @@ describe("the seat's lifecycle", () => {
     const adopted = rig({}, { round: { pane: "%1", startedAt: NOW, tmpDir: TMP, exclave: "default" } });
     adopted.lingering.rounds.push({ pane: "%1", dead: true });
     await adopted.seat.start();
-    expect(adopted.log[0]).toBe("kill %1 exited gone");
+    expect(adopted.log.slice(0, 2)).toEqual(["kill %1 exited gone", `rm ${TMP}`]);
+    expect(adopted.log).toContain("end %1 exited");
+    expect(adopted.log).not.toContain("end %1 lost");
     adopted.seat.stop();
 
     const ticked = rig({ paneAlive: () => Promise.resolve("dead") });

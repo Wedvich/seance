@@ -256,9 +256,10 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
 
   // A reload's second `startDaemon` writes `state` too: the outgoing instance saving over it would clobber it
   // (the guard `reapSchedule` keeps). The next process's `adopt` covers what is left.
-  const persist = async (record: SeatRecord): Promise<void> => {
-    if (d.stopped()) return;
+  const persist = async (record: SeatRecord): Promise<boolean> => {
+    if (d.stopped()) return false;
     await d.save(record);
+    return true;
   };
 
   const finish = async (
@@ -270,23 +271,45 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
     await persist({ lastEndedAt: d.now() });
   };
 
+  /** Closes every round pane but `kept`; the recorded round's own dead pane is `exited`, any other is stray. */
+  const sweep = async (
+    panes: readonly { readonly pane: string; readonly dead: boolean }[],
+    recorded: string | null,
+    kept: string | null,
+  ): Promise<void> => {
+    for (const pane of panes) {
+      if (pane.pane === kept) continue;
+      const reason = pane.pane === recorded ? "exited" : "stray";
+      // oxlint-disable-next-line no-await-in-loop -- one pane at a time: each close is a graceful exit
+      await d.audit.kill(pane.pane, reason, await d.close(pane.pane));
+    }
+  };
+
   /** C4: the round a restart or reload left is adopted with its original deadline; any other round pane is stray. */
   const adopt = async (): Promise<void> => {
     const round = d.record().round;
     const panes = await d.listRounds();
-    const kept = panes.find((pane) => round?.pane === pane.pane && !pane.dead);
-    for (const pane of panes) {
-      if (pane === kept) continue;
-      // The recorded round's own pane, found dead, is no stray.
-      const reason = pane.pane === round?.pane ? "exited" : "stray";
-      // oxlint-disable-next-line no-await-in-loop -- one pane at a time: each close is a graceful exit
-      await d.audit.kill(pane.pane, reason, await d.close(pane.pane));
-    }
-    if (round !== undefined && kept === undefined) await finish(round, "lost");
+    const recorded = round?.pane == null ? undefined : panes.find((pane) => pane.pane === round.pane);
+    const kept = recorded !== undefined && !recorded.dead ? recorded.pane : null;
+    await sweep(panes, round?.pane ?? null, kept);
+    if (round === undefined || kept !== null) return;
+    await finish(round, recorded === undefined ? "lost" : "exited");
+  };
+
+  const closeStray = async (launched: { readonly pane: string; readonly tmpDir: string }): Promise<void> => {
+    await d.audit.kill(launched.pane, "stray", await d.close(launched.pane));
+    await d.removeTmp(launched.tmpDir);
   };
 
   const launch = async (): Promise<void> => {
-    const picked = await d.pick();
+    let picked: PickResult;
+    try {
+      picked = await d.pick();
+    } catch (err) {
+      // A pick that throws has read every exclave's `.claude.json` too: back off like a `none`.
+      pickAfter = d.now() + everyMs;
+      throw err;
+    }
     if ("none" in picked) {
       pickAfter = d.now() + everyMs;
       if (picked.none !== lastNone) d.warn(`custodian: no exclave can host a round: ${picked.none}`);
@@ -303,7 +326,9 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
     });
     let launched: { readonly pane: string; readonly tmpDir: string };
     try {
-      launched = await d.launch(exclave, (tmpDir) => persist(ahead(null, tmpDir)));
+      launched = await d.launch(exclave, async (tmpDir) => {
+        await persist(ahead(null, tmpDir));
+      });
     } catch (err) {
       await d.audit.start(exclave.id, null, "launch_failed");
       // A broken launch retries only after `everyMinutes`, never every tick.
@@ -313,18 +338,28 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
     }
     if (d.stopped()) {
       // Nothing saved this pane, so the incoming instance cannot adopt it: close it here.
-      await d.audit.kill(launched.pane, "stray", await d.close(launched.pane));
-      await d.removeTmp(launched.tmpDir);
+      await closeStray(launched);
       return;
     }
     try {
       await d.audit.start(exclave.id, launched.pane, "started");
-      await persist(ahead(launched.pane, launched.tmpDir));
+      // A stop that landed during the audit append makes `persist` write nothing, and the incoming instance may have
+      // adopted the write-ahead record already, finding no pane: nobody else will close this one.
+      if (!(await persist(ahead(launched.pane, launched.tmpDir)))) await closeStray(launched);
     } catch (err) {
       // The pane exists but its record may not: a round nothing tracks has no deadline and no reader can reach it
       // (C10), so close it here and count it as ended.
       d.warn(`custodian: recording a started round failed, closing it: ${String(err)}`);
-      const outcome = await d.close(launched.pane);
+      let outcome: CloseOutcome;
+      try {
+        outcome = await d.close(launched.pane);
+      } catch (closeErr) {
+        // Not closed: keep the pane on the record so its deadline closes it, or, failing that, the write-ahead
+        // record's `step` sweeps it.
+        d.warn(`custodian: closing the round's pane failed: ${String(closeErr)}`);
+        await persist(ahead(launched.pane, launched.tmpDir)).catch(() => {});
+        return;
+      }
       await d.removeTmp(launched.tmpDir);
       await d.audit.kill(launched.pane, "stray", outcome).catch(() => {});
       await persist({ lastEndedAt: d.now() }).catch(() => {});
@@ -349,7 +384,9 @@ export function createCustodianSeat(d: SeatDeps): CustodianSeat {
       return;
     }
     // A write-ahead record with no pane outside a launch (ticks never overlap one): a crash's, which `adopt` could not clear.
+    // A close that threw after the pane existed leaves it running: close whatever round panes there are first.
     if (round.pane === null) {
+      await sweep(await d.listRounds(), null, null);
       await finish(round, "lost");
       return;
     }

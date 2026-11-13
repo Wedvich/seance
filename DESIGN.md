@@ -8769,14 +8769,16 @@ PR (custodian 4), and `docs/custodian.md` keeps the rest of the spec. Decisions 
   reads as none, and the stray sweep below still closes an orphan. `parseState` keeps unknown keys, so an older
   daemon's rewrite keeps the field. On start (a process restart or a config reload) the seat **adopts** the
   recorded round when its pane is still there, with its original deadline, and closes any other round pane as
-  `stray` (`reason=stray`; the recorded round's own pane, found dead, is `reason=exited`); a recorded round whose
-  pane is gone ends `lost`, and a record with no pane that a later tick still finds (adoption failed to clear it)
-  ends `lost` there. **Never save after `stopped()`**: a
+  `stray` (`reason=stray`; the recorded round's own pane, found dead, is `reason=exited` and the round ends `exited`);
+  a recorded round whose pane is not there ends `lost`, and a record with no pane that a later tick still finds
+  (adoption failed to clear it) sweeps every round pane as `stray` and ends `lost` there. **Never save after `stopped()`**: a
   reload starts the next `startDaemon` while the old one is stopping, and the outgoing instance writing over the
   incoming one's state is the race `reapSchedule` already guards; a launch finishing after the stop closes its
-  own pane, and the incoming instance's sweep is the backstop. A failure after the pane exists (the start audit
+  own pane, and the incoming instance's sweep is the backstop; so does one whose record write the stop
+  skipped. A failure after the pane exists (the start audit
   line or the record's write) closes that pane and counts the round as ended, `kill reason=stray`: a round no
-  record names has no deadline and no reader can reach it (C10). Stopping a seat never closes its round, so a
+  record names has no deadline and no reader can reach it (C10); if that close throws too, the pane is put on
+  the record for its deadline. A pick that throws backs off like one that found nothing. Stopping a seat never closes its round, so a
   reload does not cost one. A daemon that was started for a seat (`RunOpts.custodian`) whose seat is off (no key,
   an unsupported platform, or rounds not live) closes whatever round is left (`reason=off`), removes its tmp
   dir, audits `end reason=lost` and saves `{ lastEndedAt }`.
