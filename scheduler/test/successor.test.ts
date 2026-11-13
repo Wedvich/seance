@@ -2219,6 +2219,33 @@ describe("the drain pass", () => {
     expect(s.scheduler.task("old")?.state).toBe("superseded");
   });
 
+  test("a conflict before this attempt's create is retried even when an earlier pass left a successor", async () => {
+    const s = setup(twoMachines());
+    const old = await running(s, true);
+    const made = s.create;
+    s.create = async (task) => {
+      const result = await made(task);
+      s.create = made;
+      await placeOn(s, "b");
+      return result;
+    };
+    expect(await s.scheduler.pass(old.id)).toEqual({ ok: false, code: "conflict" });
+    await placeOn(s, "a");
+    expect(s.creates).toHaveLength(1);
+
+    const answer = s.fleet.pushReply;
+    s.fleet.pushReply = async (request) => {
+      s.fleet.pushReply = answer;
+      await placeOn(s, "b");
+      return answer(request);
+    };
+    close(s, "a");
+    later(s, WAIT);
+    await tick(s.scheduler);
+    await placeOn(s, "a");
+    expect(s.scheduler.task("old")?.drained).toEqual({ at: CL, tried: s.clock.now });
+  });
+
   test("one push at a time per machine", async () => {
     const s = setup();
     await running(s, true);

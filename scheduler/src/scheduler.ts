@@ -237,16 +237,19 @@ type PassFailure = Extract<PassResult, { readonly ok: false }>;
 
 /**
  * What a drain pass's refusal writes into the stamp: null for a settled race (`finished`, `not_found`),
- * `held` for the two answers that can follow the successor's create, else the refusal itself. A `switch`
- * with no default, so a new `PassResult` code fails the build here.
+ * for `unrecorded` (the term ended mid-commit: nothing can be written, the next term retries) and for a
+ * `conflict` before this attempt's create (the task moved during the push: looked at again after
+ * `drainRetryMs`); `held` for a `conflict` after it (a retry would leave a second successor); else the
+ * refusal itself. `created` is whether this attempt reached the successor's create. A `switch` with no
+ * default, so a new `PassResult` code fails the build here.
  */
-function drainOutcome(code: PassFailure["code"]): DrainRefusal | "held" | null {
+function drainOutcome(code: PassFailure["code"], created: boolean): DrainRefusal | "held" | null {
   switch (code) {
     case "finished":
     case "not_found":
       return null;
     case "conflict":
-      return "held";
+      return created ? "held" : null;
     case "unrecorded":
       return null;
     case "dispatching":
@@ -400,6 +403,8 @@ export class Scheduler {
    * pass makes a fresh id, and the orphan ends with its task (`pass_abandoned`, or `done` if it merges).
    */
   readonly #unsureSuccessors = new Map<string, string>();
+  /** Task ids whose latest `#runPass` reached the successor's create: read by `#drainPass` per attempt, not per task. */
+  readonly #reachedCreate = new Set<string>();
   /** Task id → its automatic quota pass (`#autoPass`), detached from the tick that began it: `drain` waits for it. */
   readonly #autoPasses = new Map<string, Promise<void>>();
   /** One drain pass at a time per closed machine (by deviceId), detached from the tick: it waits on a push. */
@@ -1348,6 +1353,7 @@ export class Scheduler {
     session?: SessionPassInput,
     since?: number,
   ): Promise<PassResult> {
+    this.#reachedCreate.delete(taskId);
     const task = this.task(taskId);
     if (task === undefined) return { ok: false, code: "not_found" };
     if (task.successor !== undefined) {
@@ -1453,6 +1459,7 @@ export class Scheduler {
       ...(current.prUrl === undefined ? {} : { prUrl: current.prUrl }),
       ...(current.prs === undefined ? {} : { prs: current.prs }),
     };
+    this.#reachedCreate.add(taskId);
     if (!(await this.#createSuccessor(create, successor, taskId))) return { ok: false, code: "pass_failed" };
 
     // Entered before the commit: no pass may see a task carrying `successor` that no entry covers.
@@ -1873,10 +1880,9 @@ export class Scheduler {
       return;
     }
     this.#log(`audit pass refused task=${quote(id)} trigger=drain outcome=${result.code}`);
-    // A `conflict` before the create (the task moved during the push, a cancel is out) leaves the plain stamp:
-    // looked at again after `drainRetryMs`, like the quota path. Only one that follows the create is held.
-    const created = this.tasks().some((t) => t.spec.succeeds?.task === id) || this.#unsureSuccessors.has(id);
-    const outcome = result.code === "conflict" && !created ? null : drainOutcome(result.code);
+    // Per attempt, not per task: an orphan from an earlier cut-off pass must not make a pre-create conflict `held`.
+    const created = this.#reachedCreate.delete(id);
+    const outcome = drainOutcome(result.code, created);
     if (outcome === null) return;
     await this.#update(id, (c) => stampDrainRefusal(c, cl, outcome));
   }
