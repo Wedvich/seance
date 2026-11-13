@@ -1,7 +1,9 @@
 import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { isRecord } from "@seance/shared";
 import { execFailure, type ExecResult } from "./exec.ts";
+import { askGithub } from "./gh.ts";
 import { hardenedGit, networkGit, refusalDetail, repoConfigRefusal, type TerminalProbe } from "./git-hardened.ts";
 
 /** At most one `fetch --prune` per clone per day. */
@@ -330,6 +332,212 @@ export async function pendingChanges(worktree: string): Promise<number | null> {
   ]);
   if (result.exitCode !== 0) return null;
   return result.stdout.split("\n").filter((line) => line !== "").length;
+}
+
+/** The repository `origin` names on GitHub, which binds the merged-PR read; lowercase, as GitHub compares. */
+export interface GithubRepo {
+  readonly owner: string;
+  readonly name: string;
+}
+
+const GITHUB_KEY = /^github\.com\/([a-z0-9-]{1,39})\/([a-z0-9._-]{1,100})$/u;
+
+/** From `normalizeOrigin`'s key; null for any other host or shape, where the PR check cannot be evaluated. */
+export function githubRepoOf(originKey: string | null): GithubRepo | null {
+  const match = originKey === null ? null : GITHUB_KEY.exec(originKey);
+  const [, owner, name] = match ?? [];
+  return owner === undefined || name === undefined ? null : { owner, name };
+}
+
+/**
+ * Why the rule could not be evaluated, which keeps a worktree without failing it (custodian C33): git status failed,
+ * origin could not be asked or a needed object fetched, `gh` gave no usable answer, or origin is not on GitHub.
+ */
+export type NothingLostUnknown = "status" | "remote" | "forge" | "not-github";
+
+/**
+ * The nothing-lost rule's verdict (DESIGN.md, Reap, "Nothing lost"). `safe` names the way the tip passed: one of
+ * `classifyTip`'s merges, `origin` (it is, or is an ancestor of, its branch's tip there) or `pr` (a merged PR's head
+ * contains it). `fails` is work that exists only here; `unknown` is the rule not answering, never a failure.
+ */
+export type NothingLost =
+  | { readonly kind: "safe"; readonly how: Merged | "origin" | "pr" }
+  | { readonly kind: "fails"; readonly why: "dirty"; readonly changes: number }
+  | { readonly kind: "fails"; readonly why: "unpushed" }
+  | { readonly kind: "unknown"; readonly why: NothingLostUnknown };
+
+export interface NothingLostInput {
+  /** The main clone: every network call and object lookup runs there. */
+  readonly repoPath: string;
+  readonly worktree: string;
+  readonly tip: string;
+  /** The worktree's own branch; null (detached) has nothing on origin or GitHub to bind to. */
+  readonly branch: string | null;
+  readonly github: GithubRepo | null;
+  /** A merge `classifyTip` already found: a further way to pass, checked after the clean tree. */
+  readonly merged?: Merged;
+  /** False in a dry run: a missing object is then not fetched, and the check that needed it is unknown. */
+  readonly fetch: boolean;
+  /** The `gh` binary; `SEANCE_GH_BIN` then the PATH when absent. */
+  readonly gh?: string;
+  readonly terminal?: TerminalProbe;
+}
+
+const GH_TIMEOUT_MS = 15_000;
+/** Merged PRs read per branch; past it, a tip none of them holds is unknown rather than failed. */
+const MERGED_PR_PAGE = 20;
+const MAX_PR_NUMBER = 2_147_483_647;
+const COMMIT_OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
+
+const MERGED_PRS_QUERY = `query($o:String!,$r:String!,$h:String!){ repository(owner:$o,name:$r){ pullRequests(headRefName:$h,states:MERGED,first:${MERGED_PR_PAGE},orderBy:{field:UPDATED_AT,direction:DESC}){ totalCount nodes{ number headRefOid isCrossRepository } } } }`;
+
+interface MergedHeads {
+  readonly heads: readonly { readonly number: number; readonly oid: string }[];
+  /** Every merged PR on the branch was read. */
+  readonly complete: boolean;
+}
+
+/**
+ * Merged, same-repository PRs whose head branch is `branch`, read by this machine's own `gh` (custodian C36): owner,
+ * name and branch reach it only as GraphQL variables (`-f`, never `-F`, which reads `@file`), the query text is
+ * constant, and nothing of the answer is logged. A fork's PR from a branch of the same name is not this branch.
+ * Null when `gh` gave nothing usable.
+ */
+async function readMergedHeads(
+  github: GithubRepo,
+  branch: string,
+  gh: string | undefined,
+): Promise<MergedHeads | null> {
+  const answer = await askGithub({ ...(gh === undefined ? {} : { gh }), timeoutMs: GH_TIMEOUT_MS }, MERGED_PRS_QUERY, [
+    "-f",
+    `o=${github.owner}`,
+    "-f",
+    `r=${github.name}`,
+    "-f",
+    `h=${branch}`,
+  ]);
+  if (answer.kind !== "ok") return null;
+  const repository = answer.data["repository"];
+  const prs = isRecord(repository) ? repository["pullRequests"] : undefined;
+  if (!isRecord(prs)) return null;
+  const { totalCount, nodes } = prs;
+  if (typeof totalCount !== "number" || !Array.isArray(nodes)) return null;
+  const heads: { number: number; oid: string }[] = [];
+  for (const node of nodes) {
+    if (!isRecord(node)) return null;
+    const { number, headRefOid, isCrossRepository } = node;
+    if (
+      typeof number !== "number" ||
+      !Number.isInteger(number) ||
+      number < 1 ||
+      number > MAX_PR_NUMBER ||
+      typeof headRefOid !== "string" ||
+      !COMMIT_OID.test(headRefOid) ||
+      typeof isCrossRepository !== "boolean"
+    ) {
+      return null;
+    }
+    if (!isCrossRepository) heads.push({ number, oid: headRefOid });
+  }
+  return { heads, complete: totalCount <= nodes.length };
+}
+
+async function isAncestor(repoPath: string, tip: string, of: string): Promise<boolean | null> {
+  const result = await hardenedGit(repoPath, ["merge-base", "--is-ancestor", tip, of]);
+  if (result.exitCode === 0) return true;
+  return result.exitCode === 1 ? false : null;
+}
+
+/**
+ * Whether commit `sha` is in the clone, fetching `source` from origin when it is not and `fetch` allows. Null when
+ * that fetch was not allowed or failed. Lazy fetch off: a partial clone's lookup would reach the network unbounded.
+ */
+async function haveCommit(input: NothingLostInput, sha: string, source: readonly string[]): Promise<boolean | null> {
+  const local = (): Promise<ExecResult> =>
+    hardenedGit(input.repoPath, ["cat-file", "-e", `${sha}^{commit}`], 15_000, undefined, { GIT_NO_LAZY_FETCH: "1" });
+  if ((await local()).exitCode === 0) return true;
+  if (!input.fetch) return null;
+  const fetched = await networkGit(
+    input.repoPath,
+    ["fetch", "--quiet", "--no-recurse-submodules", "--no-write-fetch-head", "origin", ...source],
+    FETCH_TIMEOUT_MS,
+    {},
+    input.terminal,
+  );
+  if (!("exitCode" in fetched) || fetched.exitCode !== 0) return null;
+  return (await local()).exitCode === 0;
+}
+
+/**
+ * Asked of origin itself (`ls-remote`), not of the refs reap's daily fetch left: its branch's tip there now. `absent`
+ * is origin answering it has no such branch (exit 2); null is no answer.
+ */
+async function originHolds(input: NothingLostInput, branch: string): Promise<boolean | "absent" | null> {
+  const ref = `refs/heads/${branch}`;
+  const listed = await networkGit(
+    input.repoPath,
+    ["ls-remote", "--exit-code", "origin", ref],
+    FETCH_TIMEOUT_MS,
+    {},
+    input.terminal,
+  );
+  if (!("exitCode" in listed)) return null;
+  if (listed.exitCode === 2) return "absent";
+  if (listed.exitCode !== 0) return null;
+  // A pattern matches any ref ending in it (`refs/heads/x/refs/heads/<b>`): only the exact one counts.
+  const sha = listed.stdout
+    .split("\n")
+    .map((line) => line.split("\t"))
+    .find(([, name]) => name === ref)?.[0];
+  if (sha === undefined) return "absent";
+  if (!COMMIT_OID.test(sha)) return null;
+  if (sha === input.tip) return true;
+  const have = await haveCommit(input, sha, [`+${ref}:refs/remotes/origin/${branch}`]);
+  if (have !== true) return null;
+  return isAncestor(input.repoPath, input.tip, sha);
+}
+
+/** Whether a merged PR's head contains the tip: the head's object comes from GitHub's `refs/pull/<n>/head`, kept after the branch is deleted. */
+async function prHolds(
+  input: NothingLostInput,
+  github: GithubRepo,
+  branch: string,
+): Promise<true | false | NothingLostUnknown> {
+  const merged = await readMergedHeads(github, branch, input.gh);
+  if (merged === null) return "forge";
+  let unknown: NothingLostUnknown | null = null;
+  for (const head of merged.heads) {
+    if (head.oid === input.tip) return true;
+    // oxlint-disable-next-line no-await-in-loop -- rarely more than one merged PR per branch
+    const have = await haveCommit(input, head.oid, [`refs/pull/${head.number}/head`]);
+    // oxlint-disable-next-line no-await-in-loop
+    const contains = have === true ? await isAncestor(input.repoPath, input.tip, head.oid) : null;
+    if (contains === true) return true;
+    if (contains === null) unknown ??= "remote";
+  }
+  if (!merged.complete) return "forge";
+  return unknown ?? false;
+}
+
+/**
+ * Whether the worktree can be removed with nothing lost (custodian C32): its tree is clean — no modified, staged or
+ * untracked files; ignored ones don't count — and its tip is safe elsewhere, by `merged`, on its branch on `origin`,
+ * or in a merged GitHub PR's head. Kept either way when it fails or can't be told; only `fails` is a finding.
+ */
+export async function nothingLost(input: NothingLostInput): Promise<NothingLost> {
+  const changes = await pendingChanges(input.worktree);
+  if (changes === null) return { kind: "unknown", why: "status" };
+  if (changes > 0) return { kind: "fails", why: "dirty", changes };
+  if (input.merged !== undefined) return { kind: "safe", how: input.merged };
+  if (input.branch === null) return { kind: "fails", why: "unpushed" };
+  const origin = await originHolds(input, input.branch);
+  if (origin === true) return { kind: "safe", how: "origin" };
+  const remote: NothingLostUnknown | null = origin === null ? "remote" : null;
+  if (input.github === null) return { kind: "unknown", why: remote ?? "not-github" };
+  const pr = await prHolds(input, input.github, input.branch);
+  if (pr === true) return { kind: "safe", how: "pr" };
+  const why = remote ?? (pr === false ? null : pr);
+  return why === null ? { kind: "fails", why: "unpushed" } : { kind: "unknown", why };
 }
 
 export async function gitDirOf(worktree: string): Promise<string | null> {
