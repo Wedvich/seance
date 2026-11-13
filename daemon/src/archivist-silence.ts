@@ -34,10 +34,16 @@ export function archivistSilenceStep(
   // Never held: a fleet that has not run an archivist is not missing one.
   if (held === undefined && entry === null) return UNCHANGED;
   if (held?.state === "alerted") return UNCHANGED;
-  // The relay stamps `lastSeen` at register and close, so a kept entry says when it left; clamped, since
-  // the relay's clock is not this one. With no entry the leader's own reading is the earliest it knows.
+  // Only a record with no field (a leader that never saw it present) trusts the relay's `lastSeen`, clamped
+  // since the relay's clock is not this one. After an observed `present` the absence began after this
+  // record's last write, and `lastSeen` can be the register of days ago when sockets drop without a close
+  // stamp (a relay redeploy), so the leader's own clock is the earliest it knows. Same with no entry.
   const since =
-    held?.state === "absent" ? held.since : entry === null ? now : Math.min(Math.max(0, entry.lastSeen), now);
+    held?.state === "absent"
+      ? held.since
+      : held === undefined && entry !== null
+        ? Math.min(Math.max(0, entry.lastSeen), now)
+        : now;
   if (now - since < ARCHIVIST_SILENCE_MS) {
     return held?.state === "absent" ? UNCHANGED : { alerts: [], next: { state: "absent", since } };
   }

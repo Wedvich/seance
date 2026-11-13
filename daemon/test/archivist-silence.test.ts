@@ -52,13 +52,13 @@ describe("archivistSilenceStep", () => {
   });
 
   test("absent under 24 h alerts nothing; past 24 h alerts once, and later checks repeat nothing", () => {
-    const left = NOW + HOUR;
+    const left = NOW + HOUR + 1000;
     const { alerts, writes, held } = run([
       { entry: seat(true), at: NOW },
-      { entry: seat(false, left), at: left + 1000 },
-      { entry: seat(false, left), at: left + ARCHIVIST_SILENCE_MS - 1 },
-      { entry: seat(false, left), at: left + ARCHIVIST_SILENCE_MS },
-      { entry: seat(false, left), at: left + 2 * ARCHIVIST_SILENCE_MS },
+      { entry: seat(false, NOW + HOUR), at: left },
+      { entry: seat(false, NOW + HOUR), at: left + ARCHIVIST_SILENCE_MS - 1 },
+      { entry: seat(false, NOW + HOUR), at: left + ARCHIVIST_SILENCE_MS },
+      { entry: seat(false, NOW + HOUR), at: left + 2 * ARCHIVIST_SILENCE_MS },
       { entry: null, at: left + 3 * ARCHIVIST_SILENCE_MS },
     ]);
     expect(alerts).toEqual([left]);
@@ -104,7 +104,24 @@ describe("archivistSilenceStep", () => {
   });
 
   test("a relay lastSeen ahead of this clock is clamped to it", () => {
-    const { writes } = run([{ entry: seat(false, NOW + 10 * HOUR), at: NOW }], { state: "present" });
+    const { writes } = run([{ entry: seat(false, NOW + 10 * HOUR), at: NOW }]);
     expect(writes).toEqual([{ state: "absent", since: NOW }]);
+  });
+
+  test("after an observed present, a stale lastSeen (a relay redeploy dropped the sockets) does not alert at once", () => {
+    const registered = NOW - 3 * 24 * HOUR;
+    const { alerts, writes } = run(
+      [
+        { entry: seat(false, registered), at: NOW },
+        { entry: seat(false, registered), at: NOW + ARCHIVIST_SILENCE_MS - 1 },
+        { entry: seat(false, registered), at: NOW + ARCHIVIST_SILENCE_MS },
+      ],
+      { state: "present" },
+    );
+    expect(writes).toEqual([
+      { state: "absent", since: NOW },
+      { state: "alerted", since: NOW },
+    ]);
+    expect(alerts).toEqual([NOW]);
   });
 });

@@ -3010,20 +3010,29 @@ entry to it, `leader-adapters.ts` holds the fenced store and the term's `Fleet`,
     open). The record's `archivistSilence` holds `{state: "present"}`, `{state: "absent", since}` or
     `{state: "alerted", since}`. Its existence is the "a registry held an archivist" fact, so a fleet
     whose registry never held one is never alerted, by any leader, while a new leader of a fleet whose
-    archivist died before it took over still is. `since` is when the absence began: the entry's
-    relay-stamped `lastSeen` (written at register and at close, so about the disconnect; clamped to the
-    leader's clock), else the leader's clock when no entry is left; persisted, so every leader measures
+    archivist died before it took over still is. `since` is when the absence began: the leader's own clock
+    at the check that first reads the seat absent after a recorded `present` (the relay's `lastSeen` is the
+    time of the register while a socket is listed, and a relay redeploy can drop sockets with no close
+    stamp, so it can be days old and would alert at once on a seconds-old disconnect), and the entry's
+    `lastSeen` (clamped to the leader's clock) only for a record with no field, where nothing else says
+    when it left; persisted, so every leader measures
     24 h (`ARCHIVIST_SILENCE_MS`) from the same instant, and the tick catches the threshold with no
     registry change. Past it the step writes `alerted` and the push goes once that write landed; nothing
     more while it stays absent; a connected entry writes `present` again, which re-arms it. A record with
     no field but a kept, disconnected flagged entry counts as held, measured from that `lastSeen`. A lost
     write is settled as the other alerts' are: the next check's re-read record holding `alerted` at the
-    alert's own `since` raises it. The leader re-checks on a registry push whose seat entry changed, but
+    alert's own `since` raises it, unless the archivist is connected again by then (no push for one that
+    is back). The step waits for a first registry push (`registrySize > 0`, the leader's own entry always
+    being in one): before it a missing seat entry is "no push yet", not "vanished". The leader re-checks on a registry push whose seat entry changed, but
     does not run the scheduler pass for it: nothing in routing, placement or the pass reads the archivist
     (A4). One log line, `scheduler: archivist silent: since=<ISO time>`. The push payload is `{v: 1,
     kind: "archivist", at, since}`, no id (one seat per fleet); the service worker shows the fixed "The
     archivist has been offline for 24 hours." under the tag `archivist` and a click opens the Machines
-    screen. No "restored" push or line. Rollout: a leader from before `archivistSilence` drops it at its
+    screen. No "restored" push or line. Retiring the archivist on purpose (unsetting `ARCHIVIST`, forgetting its
+    entry) is read as an absence: one push 24 h later, and the field then stays `alerted`, with nothing to
+    clear it (the relay's push does not say whether a seat is configured, and a wire change for a
+    once-per-retirement push is not worth it). Accepted. The parser holds `since` to a non-negative integer a `Date` can
+    format (the log line formats it) and refuses extra keys. Rollout: a leader from before `archivistSilence` drops it at its
     next write; a later leader then reads a still-down archivist's kept entry as held and absent since its
     `lastSeen`, so it pushes once more (as for `authAlerts`), and one whose entry has left the registry
     altogether reads as never held and is not alerted for that absence. Accepted.

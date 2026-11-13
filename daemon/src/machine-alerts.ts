@@ -1,5 +1,5 @@
 import type { ArchivistEntry, AuthAlerted, Machine, PushAlert, SettingsRecord } from "@seance/shared";
-import { archivistSilenceStep } from "./archivist-silence.ts";
+import { type ArchivistSilenceStep, archivistSilenceStep } from "./archivist-silence.ts";
 import { authAlertStep } from "./auth-alerts.ts";
 import { diskAlertStep } from "./disk-alerts.ts";
 import type { TermSettings } from "./settings.ts";
@@ -11,6 +11,11 @@ export interface MachineAlertWatchOpts {
   readonly machines: () => readonly Machine[];
   /** The registry's archivist seat entry, flagged by the relay (`RelayState.archivist`). */
   readonly archivist: () => ArchivistEntry | null;
+  /**
+   * True once a registry push has landed (the leader's own entry is always in one). Before it a null seat
+   * entry means "no push yet", not "vanished", so the archivist step waits rather than record an absence.
+   */
+  readonly registryKnown: () => boolean;
   /** Called for each alert whose list write landed. */
   readonly onAlert: (alert: PushAlert) => void;
   /** Called for each held login alert whose exclave reads `ok` again, once the write clearing it landed. */
@@ -21,6 +26,8 @@ export interface MachineAlertWatchOpts {
   /** A debounced check runs at most this often, so a burst of status pushes is one write at most. */
   readonly minGapMs: number;
 }
+
+const NO_SILENCE: ArchivistSilenceStep = { alerts: [], next: null };
 
 export interface MachineAlertWatch {
   /** One step over the registry. `debounce` skips it when one ran less than `minGapMs` ago. */
@@ -52,13 +59,16 @@ export function createMachineAlertWatch(o: MachineAlertWatchOpts): MachineAlertW
   let checkedAt = Number.NEGATIVE_INFINITY;
   let pending: readonly PushAlert[] = [];
   let pendingRestored: readonly AuthAlerted[] = [];
+  const silenceStep = (record: SettingsRecord, at: number): ArchivistSilenceStep =>
+    o.registryKnown() ? archivistSilenceStep(o.archivist(), record.archivistSilence, at) : NO_SILENCE;
   const holds = (record: SettingsRecord, alert: PushAlert): boolean => {
     if (alert.kind === "disk") {
       return (record.diskAlerts ?? []).some((e) => e.deviceId === alert.deviceId && e.at === alert.at);
     }
     if (alert.kind === "archivist") {
       const held = record.archivistSilence;
-      return held?.state === "alerted" && held.since === alert.since;
+      // An archivist back by the time a lost write is settled is not "offline for 24 hours" any more.
+      return held?.state === "alerted" && held.since === alert.since && o.archivist()?.connected !== true;
     }
     if (alert.kind !== "auth") return false;
     return (record.authAlerts ?? []).some(
@@ -84,7 +94,7 @@ export function createMachineAlertWatch(o: MachineAlertWatchOpts): MachineAlertW
         pendingRestored.length === 0 &&
         diskAlertStep(o.machines(), held.diskAlerts ?? [], at).next === null &&
         authAlertStep(o.machines(), held.authAlerts ?? [], at).next === null &&
-        archivistSilenceStep(o.archivist(), held.archivistSilence, at).next === null
+        silenceStep(held, at).next === null
       ) {
         return;
       }
@@ -104,7 +114,7 @@ export function createMachineAlertWatch(o: MachineAlertWatchOpts): MachineAlertW
           const machines = o.machines();
           const disk = diskAlertStep(machines, record.diskAlerts ?? [], at);
           const auth = authAlertStep(machines, record.authAlerts ?? [], at);
-          const silence = archivistSilenceStep(o.archivist(), record.archivistSilence, at);
+          const silence = silenceStep(record, at);
           raised = [...disk.alerts, ...auth.alerts, ...silence.alerts];
           restored = auth.restored;
           const { version: _version, ...body } = record;

@@ -606,6 +606,7 @@ function startTerm(term: number, opts: LeaderOpts, demote: (demotion: Demotion) 
     ready: () => settingsState === "ready",
     machines: () => relay.getState().machines,
     archivist: () => relay.getState().archivist,
+    registryKnown: () => relay.getState().registrySize > 0,
     onAlert: (alert) => {
       if (alert.kind === "disk") log.warn(`scheduler: disk nearly full: device=${quote(alert.deviceId)}`);
       if (alert.kind === "auth") {

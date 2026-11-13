@@ -143,6 +143,7 @@ function leaderOver(
   httpFetch?: Fetch,
   storeTimeoutMs?: number,
   config?: SchedulerConfig,
+  now?: () => number,
 ) {
   const legs: RelayClient[] = [];
   const replies = new AsyncQueue<{ readonly to: string; readonly response: Plain }>("replies");
@@ -164,6 +165,7 @@ function leaderOver(
     ...(settings === undefined ? {} : { settings }),
     ...(httpFetch === undefined ? {} : { httpFetch }),
     ...(config === undefined ? {} : { config }),
+    ...(now === undefined ? {} : { now }),
     createRelay: (term, onEvent) => {
       const leg = new RelayClient({
         url: appRelayUrl(relay.url),
@@ -2066,6 +2068,61 @@ describe("leader disk alerts", () => {
       }
     });
     expect(lines.filter((line) => line.includes("scheduler: archivist silent: since="))).toHaveLength(1);
+  });
+
+  test("a registry push that changes only the archivist re-checks the alerts, with no tick to do it", async () => {
+    const relay = startTestRelay(TOKEN);
+    const push = startPushEndpoint();
+    const settings = await heldSettings();
+    const clock = { now: Date.now() };
+    const seatEntry = async (connected: boolean, lastSeen: number): Promise<RegistryView> => ({
+      deviceId: "arch",
+      info: await seal(
+        key,
+        { to: APP_ID, from: "arch" },
+        {
+          id: crypto.randomUUID(),
+          ts: Date.now(),
+          op: "machine-info",
+          payload: { archivist: true, name: "archive-box", platform: "linux" },
+        },
+      ),
+      lastSeen,
+      connected,
+      archivist: true,
+    });
+    const machine = await routableEntry("b");
+    relay.setRegistry([machine, await seatEntry(true, clock.now)]);
+    // A tick interval no test waits out: only a registry push can run the check.
+    const { leader } = leaderOver(
+      relay,
+      new MemoryQueueStore(),
+      600_000,
+      undefined,
+      settings.store,
+      (input, init) => fetch(push.endpoint(new URL(String(input)).pathname.split("/").at(-1) ?? ""), init),
+      undefined,
+      undefined,
+      () => clock.now,
+    );
+    try {
+      leader.lead(1);
+      await leader.settled();
+      await pollUntil(() => settings.archivistSilence()?.state === "present", "the seat recorded present");
+
+      clock.now += 60 * 60 * 1000;
+      relay.setRegistry([machine, await seatEntry(false, clock.now)]);
+      await pollUntil(() => settings.archivistSilence()?.state === "absent", "the absence from the push alone");
+
+      clock.now += 25 * 60 * 60 * 1000;
+      relay.setRegistry([machine, await seatEntry(false, clock.now - 1)]);
+      await push.waitForRequests(1);
+      expect(settings.archivistSilence()?.state).toBe("alerted");
+    } finally {
+      leader.stop();
+      relay.stop();
+      await push.stop();
+    }
   });
 });
 

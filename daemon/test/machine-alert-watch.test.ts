@@ -106,6 +106,7 @@ function watchOver(
   machines: { current: readonly Machine[] },
   ready = () => true,
   archivist?: { current: ArchivistEntry | null },
+  registryKnown?: { current: boolean },
 ) {
   const raised: PushAlert[] = [];
   const restored: AuthAlerted[] = [];
@@ -115,6 +116,7 @@ function watchOver(
     ready,
     machines: () => machines.current,
     archivist: () => archivist?.current ?? null,
+    registryKnown: () => registryKnown?.current ?? true,
     onAlert: (alert) => raised.push(alert),
     onRestored: (entry) => restored.push(entry),
     onError: (err) => {
@@ -392,16 +394,16 @@ describe("createMachineAlertWatch: the archivist's silence", () => {
     clock.now = NOW + 2000;
     watch.check(false);
     await pollUntil(() => record().archivistSilence?.state === "absent", "the absence recorded");
-    clock.now = NOW + 1000 + ARCHIVIST_SILENCE_MS - 1;
+    clock.now = NOW + 2000 + ARCHIVIST_SILENCE_MS - 1;
     watch.check(false);
     await Bun.sleep(20);
     expect(raised).toEqual([]);
 
-    clock.now = NOW + 1000 + ARCHIVIST_SILENCE_MS;
+    clock.now = NOW + 2000 + ARCHIVIST_SILENCE_MS;
     watch.check(false);
     await pollUntil(() => raised.length === 1, "the silence alert");
-    expect(raised).toEqual([{ v: 1, kind: "archivist", at: clock.now, since: NOW + 1000 }]);
-    expect(record().archivistSilence).toEqual({ state: "alerted", since: NOW + 1000 });
+    expect(raised).toEqual([{ v: 1, kind: "archivist", at: clock.now, since: NOW + 2000 }]);
+    expect(record().archivistSilence).toEqual({ state: "alerted", since: NOW + 2000 });
     // The vapid pair rides the same write untouched.
     expect(record().vapid).toBeDefined();
 
@@ -461,5 +463,38 @@ describe("createMachineAlertWatch: the archivist's silence", () => {
     watch.check(false);
     await Bun.sleep(20);
     expect(raised).toHaveLength(1);
+  });
+
+  test("a lost write that landed is not pushed once the archivist is back", async () => {
+    const { settings, record } = await setup(0, 1, true);
+    const seatNow: { current: ArchivistEntry | null } = { current: seat(false, NOW - ARCHIVIST_SILENCE_MS) };
+    const { watch, raised, clock } = watchOver(settings, { current: [] }, () => true, seatNow);
+    watch.check(false);
+    await pollUntil(() => record().archivistSilence?.state === "alerted", "the write whose answer was lost");
+
+    seatNow.current = seat(true, NOW + 1000);
+    clock.now += 1000;
+    watch.check(false);
+    await pollUntil(() => record().archivistSilence?.state === "present", "the return recorded");
+    await Bun.sleep(20);
+    expect(raised).toEqual([]);
+  });
+
+  test("before a registry push lands, a missing seat entry records nothing", async () => {
+    const { settings, record } = await setup();
+    const seatNow: { current: ArchivistEntry | null } = { current: seat(true) };
+    const known = { current: true };
+    const { watch, clock } = watchOver(settings, { current: [] }, () => true, seatNow, known);
+    watch.check(false);
+    await pollUntil(() => record().archivistSilence?.state === "present", "the seat recorded present");
+    const version = record().version;
+
+    known.current = false;
+    seatNow.current = null;
+    clock.now += 60_000;
+    watch.check(false);
+    await Bun.sleep(30);
+    expect(record().archivistSilence).toEqual({ state: "present" });
+    expect(record().version).toBe(version);
   });
 });
