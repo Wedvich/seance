@@ -1,7 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import type { NeedsInputReason, SessionState } from "@seance/shared";
 import type { DrainAskOutcome } from "./audit.ts";
-import { createDrainAsk, createLateDrainAsk, DRAIN_PROMPT, inputBoxShows, type DrainAsk } from "./drain-ask.ts";
+import {
+  createDrainAsk,
+  createLateDrainAsk,
+  DRAIN_PROMPT,
+  inputBoxShows,
+  inputBoxText,
+  type DrainAsk,
+} from "./drain-ask.ts";
 import type { BoundPane } from "./session-events.ts";
 
 const CL = 1_000_000;
@@ -793,5 +800,24 @@ describe("createLateDrainAsk", () => {
     late.closed(CL, true);
     await settle();
     expect(argsOf(r)).toEqual([["Escape"]]);
+  });
+});
+
+describe("inputBoxText", () => {
+  const RULE = "─".repeat(60);
+  const screen = (...box: string[]): string => ["transcript", RULE, ...box, RULE, "  ? for shortcuts"].join("\n");
+
+  test("an empty box is the empty string", () => {
+    expect(inputBoxText(screen("❯ "))).toBe("");
+    expect(inputBoxText(screen("❯"))).toBe("");
+  });
+
+  test("a box with a draft returns it, wrapped lines joined", () => {
+    expect(inputBoxText(screen("❯ half a   reply", "  that wraps"))).toBe("half a reply that wraps");
+  });
+
+  test("no box, or a dialog in its place, is null", () => {
+    expect(inputBoxText("just a transcript")).toBeNull();
+    expect(inputBoxText([RULE, " Bash command", " Do you want to proceed?", RULE].join("\n"))).toBeNull();
   });
 });

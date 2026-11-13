@@ -43,25 +43,33 @@ const NORMALIZE = /\s+/gu;
 const RULE = /^─{8,}$/u;
 
 /**
- * Whether the screen's input box (the text between the last two full-width `─` rules, as Claude Code draws
- * it) holds exactly `prompt`: a `❯`, then the text wrapped over any number of lines. A permission dialog, a
- * question or the Rewind menu replaces the box, and the prompt only in the transcript above an empty box is
- * not in it. Read in memory, never returned, logged or audited.
+ * The text in the screen's input box (between the last two full-width `─` rules, as Claude Code draws it), after the
+ * `❯`, wrapped lines joined and whitespace collapsed; `""` for an empty box. Null when there is no box: a permission
+ * dialog, a question or the Rewind menu replaces it. Read in memory, never returned to a wire, logged or audited.
  */
-export function inputBoxShows(screen: string, prompt: string): boolean {
+export function inputBoxText(screen: string): string | null {
   const lines = screen.split("\n").map((line) => line.trimEnd());
   const rules: number[] = [];
   for (const [index, line] of lines.entries()) if (RULE.test(line.trim())) rules.push(index);
   const open = rules.at(-2);
   const close = rules.at(-1);
-  if (open === undefined || close === undefined) return false;
+  if (open === undefined || close === undefined) return null;
   const box = lines
     .slice(open + 1, close)
     .join(" ")
     .replace(NORMALIZE, " ")
     .trim();
-  if (!box.startsWith("❯")) return false;
-  return box.slice("❯".length).replace(NORMALIZE, " ").trim() === prompt.replace(NORMALIZE, " ").trim();
+  if (!box.startsWith("❯")) return null;
+  return box.slice("❯".length).replace(NORMALIZE, " ").trim();
+}
+
+/**
+ * Whether the screen's input box holds exactly `prompt`: a `❯`, then the text wrapped over any number of lines. A
+ * permission dialog, a question or the Rewind menu replaces the box, and the prompt only in the transcript above an
+ * empty box is not in it.
+ */
+export function inputBoxShows(screen: string, prompt: string): boolean {
+  return inputBoxText(screen) === prompt.replace(NORMALIZE, " ").trim();
 }
 
 /** Production `keys`: one `send-keys` with constant arguments; true when tmux accepted it. */

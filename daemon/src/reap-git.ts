@@ -147,6 +147,35 @@ export function parseWorktreeLock(raw: string, path: string): { readonly reason:
   return null;
 }
 
+/**
+ * Claude Code's own lock on a worktree it made, held for its process's life: `claude session
+ * <name> (pid N start <procStart>)`, the ` start …` part absent on Windows. Its own parser's
+ * grammar, bounds included. The start time is not compared, so a live pid (even a reused one)
+ * stays a refusal: fail closed.
+ */
+const CLAUDE_LOCK = /^claude (?:agent|session) .{1,255} \(pid (\d{1,10})(?: start .{1,255})?\)$/u;
+
+/** A pid this process may not signal (EPERM) is alive; only ESRCH says gone. */
+function pidGone(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (err) {
+    return err instanceof Error && "code" in err && err.code === "ESRCH";
+  }
+}
+
+/**
+ * Whether a lock's reason is Claude Code's own and its process is gone: the one shape a killed claude leaves, and the
+ * only lock a continuation or the custodian's close clears. Any other reason, a live pid or an unparseable one is
+ * someone's. Never throws.
+ */
+export function staleClaudeLock(reason: string): boolean {
+  const pid = CLAUDE_LOCK.exec(reason)?.[1];
+  return pid !== undefined && pidGone(Number(pid));
+}
+
 export async function listWorktrees(repoPath: string): Promise<readonly WorktreeRecord[] | null> {
   const result = await hardenedGit(repoPath, ["worktree", "list", "--porcelain", "-z"]);
   return result.exitCode === 0 ? parseWorktreeList(result.stdout) : null;
