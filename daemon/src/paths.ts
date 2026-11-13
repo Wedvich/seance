@@ -70,6 +70,11 @@ export function pruneLogPath(): string {
   return join(stateDir(), "reap-fetch.json");
 }
 
+/** The worktrees reap's last acting run kept, and why (`ReapRefusals`). */
+export function reapRefusalsPath(): string {
+  return join(stateDir(), "reap-refusals.json");
+}
+
 export function logPath(): string {
   return logPathIn(stateDir());
 }

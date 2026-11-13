@@ -1010,6 +1010,17 @@ nothing checked it. The last is the gap they leave.
   `github.com`'s pull-request shape. The residual: a session can make the leader read any PR
   in any repo the operator's token can see, and the result lands only in a sealed record, so the worst
   case is a session settling its own task early by naming a merged PR. `gh`'s stderr is never logged.
+- **A daemon reads a forge only for reap's nothing-lost rule** (2026-11-13, Reap, "Nothing lost";
+  docs/custodian.md C36; `CLAUDE.md` carries the requirement). Until then only the leader read GitHub.
+  The read is this machine's own `gh` through `askGithub` (`daemon/src/gh.ts`), argv-array, one constant
+  query whose owner, name and head branch reach it only as GraphQL variables (`-f`, never `-F`, which
+  reads `@file`), bound to the worktree's own branch name and to `origin`'s URL as the clone's config
+  says, merged same-repository PRs only, its output and stderr never logged and nothing of it in the
+  report but a fixed reason code. It is read-only and decides one thing: whether a worktree on this
+  machine is removed, and only when the head it names contains the tip by local git ancestry, the
+  head's object fetched from that origin's `refs/pull/<n>/head`. The residual: a session that rewrites
+  `remote.origin.url` can bind the read to another repo, but a pass still needs a commit containing the
+  tip to exist there, and a session that can rewrite its clone's config can already lose its own work.
 - **Closing is the owner's act, sealed, and never reachable without the app role** (2026-11-13, Daemon,
   "Closing a machine"). The daemon answers `availability` only when sealed `from: "app"` on the relay leg,
   parsed by `parseAvailabilityRequest`, audited without a payload; neither `LOCAL_OPS` nor `BROKER_OPS`
@@ -7157,7 +7168,9 @@ fields carry over), under the same gates.
   predating `continueSession`: "resume it by hand", and no `--continue` fallback, since that is what
   missed the conversation); the noted repo not being the clone `repo` resolved to; a
   noted path that is not canonical (a symlink anywhere on it) or not under
-  `<clone>/.claude/worktrees/`; the path gone; and `repo_not_found` for a repo the scan set no longer
+  `<clone>/.claude/worktrees/`; the path gone (reap removes an idle worktree once nothing in it would be
+  lost — pushed is enough, Reap, "Nothing lost" — so this includes a pushed, unmerged task left past
+  reap's age gate; re-adding the worktree from its kept branch is follow-up work); and `repo_not_found` for a repo the scan set no longer
   holds. _After it_ (`spawnContinued`, the new id already written ahead): the repo or the path gone
   again by then; the old task still having a live pane; any live pane whose cwd is inside the
   worktree (a second claude in one worktree would race the first on its transcript and its git
@@ -8248,14 +8261,73 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
   archived from the app or not) and a stuck one are reported with the pane id
   `seanced despawn` takes, never acted on.
 - **A worktree is removed only if all hold**: not locked; no tmux pane's cwd
-  inside it (any pane, hand-started included); its branch — or detached HEAD —
-  merged by the rules below; untouched for `reap.minAgeDays` (default 4, 7 until 2026-10-27); and
-  clean — reap's `status` pins `--untracked-files=normal`, because git's own
+  inside it (any pane, hand-started included); untouched for `reap.minAgeDays` (default 4, 7 until
+  2026-10-27; 1 under a custodian, below); and nothing would be lost by the rule below — clean, and its
+  tip merged by the branch rules or safe on origin or GitHub. Reap's `status` pins
+  `--untracked-files=normal`, because git's own
   clean check honours `status.showUntrackedFiles=no` and would delete
   untracked files unseen. Removal is `git worktree remove` without `--force`,
   so git's own refusal (changes, submodules) is a second gate, reported as a
   failure. Ignored files don't count as dirty and are lost — a copied `.env`
   among them, accepted. Dirty worktrees are reported, never removed.
+- **Nothing lost** (added 2026-11-13, docs/custodian.md C32–C36; `nothingLost` in `reap-git.ts`, one
+  function the custodian's close will share). In order: the tree is clean (`pendingChanges`; ignored
+  files don't count), else `dirty`; a merge the branch rules found (`classifyTip`: `ancestor`, `squash`,
+  `gone`) passes with no network; a detached tip with none is `unpushed`; else the tip is, or is an
+  ancestor of, its branch's tip on `origin` — asked of origin itself (`ls-remote --exit-code origin
+  refs/heads/<b>`, the exact ref only, since a pattern matches any ref ending in it; exit 2 is "no such
+  branch", an answer), not of the refs reap's daily fetch left, and a newer tip not yet local fetched into
+  `refs/remotes/origin/<b>` first; else a merged GitHub PR from that branch whose head contains the tip.
+  The last is what squash merging needs: it trusts the PR, not ancestry or a patch-id match, so it holds
+  when the default branch has moved on and the remote branch is deleted.
+  - _The lookup's shape._ One `gh api graphql` read by this machine's own `gh` (`daemon/src/gh.ts`, the
+    leader's PR poller's exec, moved there to be shared): `pullRequests(headRefName: $h, states: MERGED,
+    first: 20)` on `repository(owner: $o, name: $r)`, each with `number`, `headRefOid` and
+    `isCrossRepository`. A fork's PR from a branch of the same name is not this branch and is skipped.
+    Containment is local git: a head equal to the tip needs nothing; otherwise the head's object, local
+    already or fetched from GitHub's `refs/pull/<n>/head` (kept after the head branch is deleted, written
+    to no ref, `--no-write-fetch-head`), and `merge-base --is-ancestor tip head`. Owner and name come from
+    `remote.origin.url` read fresh (`readOriginUrl`, `normalizeOrigin`), and only a
+    `github.com/<owner>/<name>` key binds; any other origin means the PR check cannot be evaluated.
+    Rejected: matching the tip against the PR's `commits` over GraphQL (no fetch, but paginated past 250,
+    and a second account of what the head holds); the patch-id and tree checks alone (C32 says they must
+    not be the only way).
+  - _Fails vs. cannot be evaluated_ (C33). `dirty` and `unpushed` (origin and GitHub both answered, and
+    neither holds the tip) are failures; `git status` failing, origin unreachable or refused
+    (`networkGit`) or a fetch it needed failing, `gh` missing, unauthenticated, timing out or answering
+    unusably (a body carrying `errors` beside its `data` included: a partial answer is no negative), more
+    than 20 merged PRs on the branch none of the 20 read holding the tip, or a dry run needing a fetch
+    it does not make (`fetch-skipped`), are `unknown`. A non-GitHub origin that answered without the tip
+    is `unpushed`: no merged PR can hold it, so it exists only in the worktree, and `unknown` would hide
+    exactly the unpushed work on a GitLab clone. A `gh` failure on a GitHub origin stays `unknown`: a
+    merged PR might hold the tip. Both keep the worktree; only a failure is a finding a later custodian
+    PR may flag. An unknown one is reported `unchecked` and judged again next run. A dry run makes the
+    read-only calls (`ls-remote`, `gh`) but fetches nothing, so a check needing a missing object is
+    `fetch-skipped` there.
+  - _The window around the check._ The rule's network reads can take minutes, so reap lists the panes
+    again immediately before `git worktree remove` and keeps a worktree a session has since started in
+    (a continuation opens its path) as in use. Once one worktree of a repo comes back `unknown remote`,
+    or the repo's own fetch failed, or the run is stopping, the rest of that repo's unmerged worktrees
+    are `unknown remote` without a call (a hung network would otherwise cost every old worktree its
+    timeouts under the reap lock); a dirty tree and a merge `classifyTip` found are still judged, being local.
+  - _The branch name binds the read_ (C36). Origin and GitHub are asked under the worktree's own branch
+    name; work pushed under another name (a configured upstream with a different name, or a
+    `pass_to_successor` push to the PR's head) reads `unpushed`, a failure in the safe direction: kept,
+    and a false finding at worst. Following the upstream's name would let repo config a session can write
+    choose what the daemon's one forge read names; left to a decision before the custodian flags `unpushed`.
+  - _The audit line_ for a removal carries `reason=` (`ancestor`, `squash`, `gone`, `origin` or `pr`), since a
+    removal is no longer always a merge.
+  - _The local branch is left_ (C34) for the branch pass below, which deletes it only once merged by its
+    own rules. A continuation of a task whose worktree reap removed is refused `not_continuable` today
+    (Daemon, "Continuing a session": the path gone), so a pushed, unmerged worktree idle past the age gate
+    can no longer be continued in place; the owner accepted that (2026-11-13: pushed is enough).
+    Re-adding the worktree from the kept branch on a continuation is follow-up work.
+  - _What it kept_ (C23): each acting run replaces `reap-refusals.json` in the state dir (0600,
+    `ReapRefusals`, read by `readReapRefusals`) with every worktree kept `dirty` (with its change count),
+    `unpushed` (with its kept-worktree reason), `unevaluated` (with the unknown reason) or `locked` (with
+    its branch, null when detached), so the custodian's `sessions` verb can say what holds disk. A repo the
+    run skipped (stopped before it, no `origin/HEAD`) keeps the previous file's rows. A file, not daemon
+    memory: the CLI's reap is another process. A dry run writes none; a failed write fails nothing.
 - **"Untouched"** is the newest mtime among the worktree's git-dir `HEAD`,
   `index` and reflog, the worktree root, and the newest Claude transcript for
   its path (`~/.claude/projects/<path, non-alphanumerics as dashes>`). It is
@@ -8294,8 +8366,10 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
   branch, on an unmerged branch with no upstream at all (never pushed), or
   detached with commits past the default branch, is listed as a kept worktree —
   its branch is skipped by the branch pass while checked out, so it would show
-  nowhere else; one on a branch whose upstream is still live is only counted
-  (`active`). A never-pushed branch no worktree holds is not reported: a plain
+  nowhere else; a young one on a branch whose upstream is still live is only counted
+  (`active`). Once old enough, an unmerged worktree goes through "Nothing lost" instead: removed when
+  origin or a merged PR holds its tip, kept as `unpushed` (or its reason above) when neither does,
+  `unchecked` when that can't be told. A never-pushed branch no worktree holds is not reported: a plain
   local branch is normal, and listing each would flood the report. Deletion is
   `update-ref -d <ref> <sha>`, a compare-and-delete that refuses a branch that
   moved since it was judged, then its config section, as `git branch -D` would.
@@ -8350,7 +8424,7 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
   or a daemon per worktree), hooks (`reference-transaction` fires on the
   ref updates reap makes) and the `ext::` transport (it runs its URL) are off for every call (`-c core.fsmonitor=false -c
   core.hooksPath=/dev/null -c protocol.ext.allow=never`). Every network call —
-  reap's fetch and `set-head`, the base fetch, the emitter's fetch, self-update's
+  reap's fetch and `set-head`, the nothing-lost rule's `ls-remote` and fetches, the base fetch, the emitter's fetch, self-update's
   `set-head` and fetch — goes through `networkGit` (`git-hardened.ts`), and
   `classifyTip`'s `merge-tree` checks the same thing first: `repoConfigRefusal`
   reads `git config --list --show-scope` and `info/attributes`, and refuses the
@@ -8415,15 +8489,21 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
 - **Surfaces**: `seanced reap [--dry-run] [--min-age-days <n>]`, audited
   `origin=cli`, and a timer inside the daemon, audited `origin=schedule`, which
   logs its report one `reap:` line at a time. The schedule is off unless
-  `reap.intervalHours` is set; it checks every 10 minutes against `lastReapAt`
+  `reap.intervalHours` is set, or the machine's config carries a `custodian` key (C35: old worktrees
+  with no session are reap's, not the custodian's, so there the defaults are every 6 hours and a one-day
+  age gate, `CUSTODIAN_REAP_DEFAULTS`; a `reap` key still wins, per field, as it already merges with
+  the defaults — whole-key would make naming `minAgeDays` alone turn the timer back off; only the key's
+  presence is read so far); it checks every 10 minutes against `lastReapAt`
   in state.json rather than running on an interval from start, which the
   daemon's frequent restarts (updates, config reloads) would keep deferring,
   and a stop aborts it between repos. Not on MCP, deliberately: a local session
   can already run the CLI through Bash, so a tool would add discoverability
   but no authority, and leaving it out keeps the local socket's allowlist at
-  the three ops it has. No relay op, no PWA. Rejected: `--force` removal, a
-  `gh`-based merge check (network and an auth dependency for what the local
-  objects answer), and an MCP tool (above).
+  the three ops it has. No relay op, no PWA. Rejected: `--force` removal, and an MCP tool (above). A
+  `gh`-based merge check was rejected here until 2026-11-13 (network and an auth dependency for what the
+  local objects answer); squash merges with the default branch since edited were what the local checks
+  missed often enough that worktrees piled up, so "Nothing lost" adds one, as a further way to pass whose
+  failure only keeps.
 
 ## Self-update (added 2026-08-02)
 

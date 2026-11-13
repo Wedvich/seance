@@ -1,6 +1,8 @@
 # The custodian — spec
 
-**Status: spec; build order item 2 (C15) built 2026-11-13 and folded into DESIGN.md.** Decided with the owner on 2026-11-12 and 2026-11-13. Like
+**Status: spec; build order items 1 (the nothing-lost rule in `reap` and reap's defaults under a
+custodian, now DESIGN.md, Reap, "Nothing lost") and 2 (C15, now DESIGN.md, "Session events") built
+2026-11-13 and folded into DESIGN.md.** Decided with the owner on 2026-11-12 and 2026-11-13. Like
 docs/messaging.md and docs/leaving.md, this file is the working record until the code lands; each
 part folds into DESIGN.md as it is built, and its text here goes.
 
@@ -223,30 +225,20 @@ moment of the act.
 
 - **C31.** A close removes the session's worktree when nothing would be lost. The owner cannot
   recall wanting a closed session's worktree back; the disk is the point.
-- **C32. The rule**, one function used by the custodian's close and by `reap`:
-  1. the tree is clean: no modified, staged or untracked files (ignored files do not count); and
-  2. the local tip is safe elsewhere, by either of:
-     - it is the tip, or an ancestor of the tip, of its branch on `origin` (fetched first); or
-     - GitHub reports a **merged** PR for that branch whose head contains the local tip.
-
-  The second is what squash merging needs: it trusts the PR, not ancestry or a patch-id match, so
-  it holds when the default branch has moved on and the remote branch is deleted. `reap`'s existing
-  checks (`ancestor`, `squash`, `gone` in `daemon/src/reap-git.ts`) stay as further ways to pass,
-  never as the only ones.
-
+- **C32. The rule** is built: `nothingLost` in `daemon/src/reap-git.ts`, used by `reap` and, from
+  PR 4, by the close. Its record, the `gh` lookup's shape included, is DESIGN.md, Reap, "Nothing
+  lost".
 - **C33.** When the rule fails, the worktree is kept, the session is still closed, and the daemon
-  flags it `dirty` or `unpushed`. When the rule cannot be evaluated (no network, `gh` failing), the
-  worktree is kept and nothing is flagged; `reap` tries again later.
-- **C34.** The local branch is left for `reap`'s merged-branch sweep. A later `continue` of the
-  task then still finds it.
+  flags it `dirty` or `unpushed`. When the rule cannot be evaluated, the worktree is kept and
+  nothing is flagged; `reap` tries again later. _Built:_ the rule's three-way verdict and `reap`'s
+  keeping (DESIGN.md, Reap, "Nothing lost"). _Not built:_ the close and its flags (PRs 4 and 6).
+- **C34.** The local branch is left for `reap`'s merged-branch sweep (built). A `continue` of a task
+  whose worktree was removed is refused `not_continuable` today; re-adding the worktree from the
+  kept branch is follow-up work (DESIGN.md, Reap, "Nothing lost").
 - **C35.** Old worktrees with no session in them are `reap`'s, not the agent's: the check is code
-  and needs no model. On a machine with the custodian configured, `reap`'s timer defaults to on
-  (every 6 hours) and its untouched age to 1 day instead of 4; an explicit `reap` key still wins.
-- **C36.** _Derived, and a threat-model change._ The merged-PR check is a daemon reading a forge,
-  which today only the leader does (`readPrHead`, bound to a task's `prUrl`). The daemon's read is
-  its own `gh`, argv-array, bound to the worktree's own branch name and `origin`, its values passed
-  as variables, its output never logged; it is read-only and decides only whether a worktree on
-  this machine is removed. DESIGN.md's threat model gains the entry when it is built.
+  and needs no model. _Built:_ reap's defaults under a `custodian` key (DESIGN.md, Reap, "Surfaces").
+- **C36.** _Built:_ the daemon's forge read (DESIGN.md, Threat model, "A daemon reads a forge only
+  for reap's nothing-lost rule").
 
 ### 7. Notes
 
@@ -321,7 +313,6 @@ To be folded into DESIGN.md's as each part lands.
   messaging's wrapper, and it is local to the machine.
 - **The shell fence is for mistakes** (C21).
 - **Notes persist model-written text** (C39).
-- **The daemon reads a forge** (C36).
 - **Peer binding.** Only the round's own pane may call the verbs. A same-user process that can
   make itself a descendant of that pane can call them; that process could already type into any
   pane.
@@ -364,8 +355,8 @@ delivery); nothing else here does.
 
 **Milestone 1 — close and clean**
 
-1. The nothing-lost rule (C32–C34, C36) in `reap-git.ts`, used by `reap`, with the new defaults
-   under a configured custodian (C35).
+1. _Built._ The nothing-lost rule (C32–C34, C36) in `reap-git.ts`, used by `reap`, with the new
+   defaults under a configured custodian (C35).
 2. ~~Per-pane state and screen-change tracking for every `ours` pane (C15).~~ Built 2026-11-13
    (`daemon/src/pane-activity.ts`); its read API is `activity(paneId)`.
 3. The seat: config, `CAPABILITIES.custodian`, the due check, the exclave pick, the round's launch
@@ -564,7 +555,5 @@ you trust?", which nobody answers, and Remote Control never came up.
   transcript), moves the hash while the session is hung, so C27's `interrupt` would read it as moving:
   it fails to fire, never fires wrongly. Worth checking against a live busy session when PR 3 or 5 builds
   on it. A resize (another client attaching at another size) moves it too.
-- **The `gh` lookup's shape** for C32: by head branch, and how the PR's head is fetched to test
-  that it contains the local tip once the remote branch is deleted.
 - **A closed machine.** Whether rounds run while a machine is draining. C7 already keeps the
   custodian off any pane the drain has marked.

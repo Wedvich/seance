@@ -359,7 +359,7 @@ describe("every network call takes one environment", () => {
       if (name !== "git-hardened.ts" && text.includes("GCM_INTERACTIVE")) offenders.push(`${name}: GCM_INTERACTIVE`);
     }
     expect(offenders).toEqual([]);
-    // reap's fetch and set-head, the base fetch, self-update's set-head and fetch, a pass's push, its no-upstream fetch and the ls-remote that tells an absent branch from a failed fetch.
-    expect(sites).toBe(8);
+    // reap's fetch and set-head, the base fetch, self-update's set-head and fetch, a pass's push, its no-upstream fetch and the ls-remote that tells an absent branch from a failed fetch, the nothing-lost rule's fetch of a commit it lacks and its ls-remote of the branch.
+    expect(sites).toBe(10);
   });
 });

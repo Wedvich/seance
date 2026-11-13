@@ -94,6 +94,31 @@ describe("loadConfig", () => {
     expect((await loadConfig(partial)).reap).toEqual({ intervalHours: 24, minAgeDays: 4 });
   });
 
+  test("a custodian key turns reap's timer on at 6h with a one-day age gate; an explicit reap field still wins", async () => {
+    const dir = await tempDir();
+    const bare = join(dir, "custodian.json");
+    await writeFile(bare, JSON.stringify({ ...VALID, custodian: {} }));
+    const loaded = await loadConfig(bare);
+    expect(loaded.custodian).toEqual({});
+    expect(loaded.reap).toEqual({ intervalHours: 6, minAgeDays: 1 });
+
+    const partial = join(dir, "custodian-reap.json");
+    await writeFile(partial, JSON.stringify({ ...VALID, custodian: { model: "haiku" }, reap: { minAgeDays: 4 } }));
+    expect((await loadConfig(partial)).reap).toEqual({ intervalHours: 6, minAgeDays: 4 });
+
+    const off = join(dir, "custodian-off.json");
+    await writeFile(off, JSON.stringify({ ...VALID, custodian: {}, reap: { intervalHours: 0 } }));
+    expect((await loadConfig(off)).reap).toEqual({ intervalHours: 0, minAgeDays: 1 });
+
+    for (const custodian of [true, null, [], "on"]) {
+      const path = join(dir, `bad-custodian-${JSON.stringify(custodian)}.json`);
+      // oxlint-disable-next-line no-await-in-loop
+      await writeFile(path, JSON.stringify({ ...VALID, custodian }));
+      // oxlint-disable-next-line no-await-in-loop
+      await expect(loadConfig(path)).rejects.toThrow('"custodian" must be an object');
+    }
+  });
+
   test("a reap value that isn't a non-negative number is a config error, not a silent default", async () => {
     const dir = await tempDir();
     for (const reap of [{ minAgeDays: -1 }, { intervalHours: "daily" }, { minAgeDays: null }, "weekly"]) {
