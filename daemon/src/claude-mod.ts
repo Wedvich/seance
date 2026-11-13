@@ -170,34 +170,64 @@ export function modChecksFrom(market: Marketplace, root: string, listed: unknown
   });
 }
 
-/** Doctor's mod lines, per exclave, rendered in the binaries section beside the MCP ones. */
-export async function modChecks(): Promise<readonly Check[]> {
+/** What `claude plugin list --json` said for one config dir, or why it could not be read. */
+type Listing =
+  | { readonly label: string; readonly listed: unknown }
+  | { readonly label: string; readonly problem: string };
+
+type Listed =
+  | { readonly market: Marketplace; readonly root: string; readonly listings: readonly Listing[] }
+  | { readonly problem: string };
+
+async function listPerTarget(): Promise<Listed> {
   const claude = Bun.which("claude");
-  if (claude === null)
-    return [{ level: "warn", message: "claude not on PATH — `seanced mod install` needs Claude Code" }];
+  if (claude === null) return { problem: "claude not on PATH — `seanced mod install` needs Claude Code" };
   const root = await realCheckoutRoot();
   let market: Marketplace;
   try {
     market = await readMarketplace(root);
   } catch (err) {
     // doctor gathers checks with Promise.all: a throw here would abort the whole report
-    return [{ level: "warn", message: `Claude mods: ${errorText(err)}` }];
+    return { problem: `Claude mods: ${errorText(err)}` };
   }
   const { present } = await userScopeTargets();
-  const checks = await Promise.all(
-    present.map(async ({ label, env }): Promise<readonly Check[]> => {
+  const listings = await Promise.all(
+    present.map(async ({ label, env }): Promise<Listing> => {
       const result = await exec([claude, "plugin", "list", "--json"], { timeoutMs: 15_000, env });
-      if (result.exitCode !== 0) {
-        return [{ level: "warn", message: `claude plugin list (${label}): ${execFailure(result)}` }];
-      }
-      let listed: unknown;
+      if (result.exitCode !== 0) return { label, problem: `claude plugin list (${label}): ${execFailure(result)}` };
       try {
-        listed = JSON.parse(result.stdout);
+        return { label, listed: JSON.parse(result.stdout) };
       } catch {
-        return [{ level: "warn", message: `claude plugin list --json (${label}) printed something other than JSON` }];
+        return { label, problem: `claude plugin list --json (${label}) printed something other than JSON` };
       }
-      return modChecksFrom(market, root, listed, label);
     }),
   );
-  return checks.flat();
+  return { market, root, listings };
+}
+
+/** Doctor's mod lines, per exclave, rendered in the binaries section beside the MCP ones. */
+export async function modChecks(): Promise<readonly Check[]> {
+  const found = await listPerTarget();
+  if ("problem" in found) return [{ level: "warn", message: found.problem }];
+  return found.listings.flatMap((entry): readonly Check[] =>
+    "problem" in entry
+      ? [{ level: "warn", message: entry.problem }]
+      : modChecksFrom(found.market, found.root, entry.listed, entry.label),
+  );
+}
+
+/**
+ * The exclaves where the named mod is not installed from this checkout and enabled: what a feature that depends on it
+ * (the custodian's `close` needs `session-events`) warns about. A dir whose list could not be read is not named —
+ * `modChecks` says so — and neither is a host without `claude`.
+ */
+export async function modMissing(pluginName: string): Promise<readonly string[]> {
+  const found = await listPerTarget();
+  if ("problem" in found) return [];
+  const only: Marketplace = { ...found.market, plugins: found.market.plugins.filter((p) => p.name === pluginName) };
+  return found.listings.flatMap((entry): readonly string[] =>
+    "problem" in entry || modChecksFrom(only, found.root, entry.listed, entry.label).every((c) => c.level === "ok")
+      ? []
+      : [entry.label],
+  );
 }

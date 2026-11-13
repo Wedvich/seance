@@ -31,7 +31,6 @@ const run = (deps: Partial<CustodianCheckDeps>, platform: NodeJS.Platform = "lin
     config: { custodian: CUSTODIAN_DEFAULTS },
     home: HOME,
     platform,
-    live: true,
     deps: {
       scan: () => Promise.resolve(scan(["work"])),
       trusted: () => Promise.resolve(true),
@@ -39,32 +38,12 @@ const run = (deps: Partial<CustodianCheckDeps>, platform: NodeJS.Platform = "lin
       planted: () => Promise.resolve(false),
       sandboxProblem: () => Promise.resolve(null),
       weakerNested: () => Promise.resolve(false),
+      sessionEventsMissing: () => Promise.resolve([]),
       ...deps,
     },
   });
 
 describe("custodianChecks", () => {
-  test("while rounds are held it is one ok line and probes nothing, so doctor cannot fail on the key", async () => {
-    const probed: string[] = [];
-    const checks = await custodianChecks({
-      config: { custodian: CUSTODIAN_DEFAULTS },
-      home: HOME,
-      platform: "linux",
-      deps: {
-        scan: () => {
-          probed.push("scan");
-          return Promise.resolve(scan());
-        },
-        sandboxProblem: () => {
-          probed.push("sandbox");
-          return Promise.resolve("bwrap and socat must be on PATH");
-        },
-      },
-    });
-    expect(checks).toEqual([{ level: "ok", message: expect.stringContaining("held until custodian 4") }]);
-    expect(probed).toEqual([]);
-  });
-
   test("another platform fails at once", async () => {
     expect(await run({}, "win32")).toEqual([{ level: "fail", message: "the custodian runs only on macOS and Linux" }]);
   });
@@ -86,6 +65,18 @@ describe("custodianChecks", () => {
         { level: "fail", message: "no exclave can host a round" },
       ]);
     }
+  });
+
+  test("an exclave without the session-events mod warns that close can never see a session", async () => {
+    const checks = await run({ sessionEventsMissing: () => Promise.resolve(["~/.claude-work"]) });
+    expect(checks).toEqual([
+      { level: "ok", message: "exclave work: round dir ~/work/.seance-custodian trusted" },
+      {
+        level: "warn",
+        message: expect.stringContaining("~/.claude-work: the session-events mod is not installed or enabled"),
+      },
+    ]);
+    expect(checks[1]?.message).toContain("seanced mod install");
   });
 
   test("a sandbox problem fails with its own words", async () => {

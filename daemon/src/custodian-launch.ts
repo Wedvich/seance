@@ -4,6 +4,7 @@ import type { CustodianConfig } from "./config.ts";
 import { roundSeed, NOTES_MAX } from "./custodian-agent.ts";
 import { custodianFence, procSysReadOnly } from "./custodian-fence.ts";
 import { PANE_ID } from "./pane-id.ts";
+import { resolvedBun, resolvedMain } from "./link.ts";
 import { ROUND_TMP, ROUND_TMP_PREFIX } from "./seat-record.ts";
 import { DEFAULT_EXCLAVE, type Exclave } from "./exclaves.ts";
 import { exec } from "./exec.ts";
@@ -77,6 +78,23 @@ export async function listRoundPanes(): Promise<readonly { readonly pane: string
     if (pane === undefined || custodian !== "1" || !PANE_ID.test(pane) || seen.has(pane)) continue;
     seen.add(pane);
     panes.push({ pane, dead: dead === "1" });
+  }
+  return panes;
+}
+
+/**
+ * Pid → pane for every live pane carrying `@seance-custodian`: what the `custodian` frame binds a peer against.
+ * `listRoundPanes` has no pid, and `parsePanePids` skips round panes on purpose, so the one reader that wants them
+ * is this. Throws when tmux cannot be read: an unreadable list must not read as "no round pane".
+ */
+export async function listRoundPanePids(): Promise<ReadonlyMap<number, string>> {
+  const raw = await listAllPanes(["#{pane_id}", "#{pane_pid}", "#{pane_dead}", CUSTODIAN_FIELD].join(FIELD_SEP));
+  const panes = new Map<number, string>();
+  for (const line of raw.split("\n")) {
+    const [pane, pid, dead, custodian] = line.split(FIELD_SEP);
+    if (pane === undefined || pid === undefined || custodian !== "1" || dead === "1" || !PANE_ID.test(pane)) continue;
+    if (!/^[1-9]\d{0,9}$/u.test(pid)) continue;
+    panes.set(Number(pid), pane);
   }
   return panes;
 }
@@ -183,10 +201,22 @@ export async function launchRound(o: LaunchOptions): Promise<{ readonly pane: st
       writeFile(fencePath, JSON.stringify(fence), { mode: 0o600 }),
       writeFile(seedPath, roundSeed(o.notes), { mode: 0o600 }),
     ]);
+    // The fence allows `Bash(seanced custodian *)` by name, and nothing guarantees the tmux server's PATH holds a
+    // `seanced` of this checkout (linking is opt-in and nothing re-points it on a pull): the round gets its own, first
+    // on PATH, running this process's main. Like the fence, it is not writable from the round's sandbox.
+    const binDir = join(tmpDir, "bin");
+    await mkdir(binDir, { mode: 0o700 });
+    await writeFile(
+      join(binDir, "seanced"),
+      `#!/bin/sh\nexec ${shq(resolvedBun())} ${shq(await resolvedMain())} "$@"\n`,
+      {
+        mode: 0o700,
+      },
+    );
     const claude = process.env["SEANCE_CLAUDE_BIN"] ?? "claude";
     const caffeinate = o.platform === "darwin" ? "caffeinate -is " : "";
     const command =
-      `export CLAUDE_CODE_TMPDIR=${shq(tmpDir)} CLAUDE_CODE_DISABLE_CLAUDE_MDS=1; ` +
+      `export CLAUDE_CODE_TMPDIR=${shq(tmpDir)} CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 PATH=${shq(binDir)}:"$PATH"; ` +
       `exec ${caffeinate}${claude} -n ${shq(sessionName("custodian", o.machineTag))} --remote-control ` +
       `--agents ${shq(o.agents)} --agent custodian --settings ${shq(fencePath)} --setting-sources project ` +
       `--permission-mode dontAsk --strict-mcp-config --model ${shq(o.settings.model)} --effort ${shq(o.settings.effort)} ` +

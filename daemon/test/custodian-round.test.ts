@@ -10,6 +10,7 @@ import { CUSTODIAN_DEFAULTS, type Config } from "../src/config.ts";
 import { loadAgent } from "../src/custodian-agent.ts";
 import { ensureRoundDir, launchRound, listRoundPanes, removeRoundTmp } from "../src/custodian-launch.ts";
 import { ROUND_SEED } from "../src/custodian-agent.ts";
+import type { RoundEntry } from "../src/custodian-rounds.ts";
 import {
   createCustodianSeat,
   custodianPlatform,
@@ -79,6 +80,7 @@ interface Rig {
   readonly seat: CustodianSeat;
   readonly clock: { now: number };
   readonly audit: string[];
+  readonly rounds: RoundEntry[];
   readonly saved: { record: SeatRecord };
 }
 
@@ -89,6 +91,7 @@ interface Rig {
 function seatOver(record: SeatRecord = {}, given?: { now: number }): Rig {
   const clock = given ?? { now: Date.now() };
   const audit: string[] = [];
+  const rounds: RoundEntry[] = [];
   const saved = { record };
   const tracked = (): readonly TrackedActivity[] => [
     {
@@ -110,6 +113,10 @@ function seatOver(record: SeatRecord = {}, given?: { now: number }): Rig {
     checkIntervalMs: 3_600_000,
     activity: tracked,
     untouchable: () => false,
+    appendRound: (entry) => {
+      rounds.push(entry);
+      return Promise.resolve();
+    },
     draining: () => false,
     stopped: () => false,
     record: () => saved.record,
@@ -148,7 +155,7 @@ function seatOver(record: SeatRecord = {}, given?: { now: number }): Rig {
     audit: sink,
     warn: () => {},
   });
-  return { seat, clock, audit, saved };
+  return { seat, clock, audit, saved, rounds };
 }
 
 async function tmpExists(path: string): Promise<boolean> {
@@ -339,12 +346,8 @@ describe("the capability bit", () => {
   const PSK = toBase64(new Uint8Array(32).fill(9));
   const TOKEN = "test-bearer";
 
-  async function advertised(
-    custodian: Config["custodian"],
-    opts: { readonly live: boolean },
-  ): Promise<readonly string[]> {
+  async function advertised(custodian: Config["custodian"]): Promise<readonly string[]> {
     const booted = await boot(custodian, {
-      live: opts.live,
       // A seat that starts must find nothing to do and nothing to launch: the sandbox check fails it first.
       sandboxProblem: () => Promise.resolve("test: no sandbox"),
     });
@@ -359,7 +362,7 @@ describe("the capability bit", () => {
 
   async function boot(
     custodian: Config["custodian"],
-    opts: { readonly live: boolean; readonly sandboxProblem: () => Promise<string | null> },
+    opts: { readonly sandboxProblem: () => Promise<string | null> },
   ): Promise<{ readonly relay: ReturnType<typeof startTestRelay>; readonly stop: () => void }> {
     const home = await mkdtemp(join(base, "cap-home-"));
     await mkdir(join(home, ".claude"), { recursive: true });
@@ -387,7 +390,6 @@ describe("the capability bit", () => {
         baseBackoffMs: 20,
         telemetryIntervalMs: 100_000,
         custodian: {
-          live: opts.live,
           checkIntervalMs: 3_600_000,
           sandboxProblem: opts.sandboxProblem,
           weakerNested: () => Promise.resolve(false),
@@ -415,15 +417,15 @@ describe("the capability bit", () => {
     return pane;
   }
 
-  for (const [label, live, problem] of [
-    ["is off", false, null],
-    ["is declined by the host's checks", true, "test: no sandbox"],
+  for (const [label, custodian, problem] of [
+    ["is off", undefined, null],
+    ["is declined by the host's checks", CUSTODIAN_DEFAULTS, "test: no sandbox"],
   ] as const) {
     test(`a seat that ${label} closes a round the last process left, audited reason=off`, async () => {
       const stray = await strayRound();
       let booted: Awaited<ReturnType<typeof boot>> | undefined;
       const lines = await captureLog(async () => {
-        booted = await boot(CUSTODIAN_DEFAULTS, { live, sandboxProblem: () => Promise.resolve(problem) });
+        booted = await boot(custodian, { sandboxProblem: () => Promise.resolve(problem) });
         await pollUntil(async () => (await paneInfo(stray)) === null, "the stray round pane to close");
         await Bun.sleep(50);
       });
@@ -434,15 +436,11 @@ describe("the capability bit", () => {
     });
   }
 
-  test("a daemon with the key and a live seat advertises custodian", async () => {
-    expect(await advertised(CUSTODIAN_DEFAULTS, { live: true })).toContain(CAPABILITIES.custodian);
+  test("a daemon with the key and a seat advertises custodian", async () => {
+    expect(await advertised(CUSTODIAN_DEFAULTS)).toContain(CAPABILITIES.custodian);
   });
 
   test("without the key it does not", async () => {
-    expect(await advertised(undefined, { live: true })).not.toContain(CAPABILITIES.custodian);
-  });
-
-  test("rounds are held in production: the key alone advertises nothing", async () => {
-    expect(await advertised(CUSTODIAN_DEFAULTS, { live: false })).not.toContain(CAPABILITIES.custodian);
+    expect(await advertised(undefined)).not.toContain(CAPABILITIES.custodian);
   });
 });
