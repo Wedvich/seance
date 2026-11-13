@@ -328,7 +328,7 @@ describe("reap: worktrees and branches (real git)", () => {
     expect(await git(repo.path, "rev-parse", "wip")).toBe(tip);
   });
 
-  test("old unmerged worktrees: pushed ones go, detached ones are kept, ones the rule can't judge are unchecked — and recorded", async () => {
+  test("old unmerged worktrees: pushed ones go, unpushed and detached ones are kept — and recorded", async () => {
     const repo = await freshRepo();
     const gone = join(repo.path, ".claude", "worktrees", "gone");
     const detached = join(repo.path, ".claude", "worktrees", "detached");
@@ -363,16 +363,19 @@ describe("reap: worktrees and branches (real git)", () => {
     }
 
     const preview = formatReport(await reap(repo, { dryRun: true })).join("\n");
-    // Origin here is a local path: what isn't on it can't be asked of GitHub either.
+    // Origin here is a local path, not GitHub: what it lacks exists only in the worktree, so these fail rather than go unchecked.
     expect(preview).toContain(
-      `unchecked worktree ${gone}   wt-gone   not on origin, which is not on GitHub to ask for a merged PR — kept, checked next run`,
+      `kept worktree      ${gone}   wt-gone   upstream gone, 2 commits not on the default branch`,
+    );
+    expect(preview).toContain(
+      `kept worktree      ${local}   wt-local   never pushed, 1 commit not on the default branch`,
     );
     expect(preview).toContain(`kept worktree      ${detached}   detached, 1 commit not on the default branch`);
     expect(preview).toContain(
       `kept worktree      ${fresh}   wt-fresh   never pushed, 1 commit not on the default branch`,
     );
     expect(preview).toContain(`would remove worktree ${active}   wt-active (origin), idle 10d`);
-    expect(preview).toContain("2 kept worktrees · 2 unchecked · 0 active");
+    expect(preview).toContain("4 kept worktrees · 0 active");
     expect(await exists(active)).toBe(true);
     expect(await readReapRefusals(repo.refusals)).toBeNull();
 
@@ -385,15 +388,12 @@ describe("reap: worktrees and branches (real git)", () => {
       byPath([
         { path: detached, branch: null, why: "detached", ahead: 1 },
         { path: fresh, branch: "wt-fresh", why: "never-pushed", ahead: 1 },
+        { path: gone, branch: "wt-gone", why: "upstream-gone", ahead: 2 },
+        { path: local, branch: "wt-local", why: "never-pushed", ahead: 1 },
       ]),
     );
-    expect(byPath(result?.unevaluated)).toEqual(
-      byPath([
-        { path: gone, branch: "wt-gone", why: "not-github" },
-        { path: local, branch: "wt-local", why: "not-github" },
-      ]),
-    );
-    expect(result?.locked).toEqual([locked]);
+    expect(result?.unevaluated).toEqual([]);
+    expect(result?.locked).toEqual([{ path: locked, branch: "wt-locked" }]);
     expect(result?.active).toBe(0);
     expect(result?.removedWorktrees).toEqual([{ path: active, branch: "wt-active", why: "origin", idleDays: 10 }]);
     expect(await exists(active)).toBe(false);
@@ -411,9 +411,9 @@ describe("reap: worktrees and branches (real git)", () => {
       byPath([
         { repo: "myrepo", path: detached, branch: null, why: "unpushed", detail: "detached" },
         { repo: "myrepo", path: fresh, branch: "wt-fresh", why: "unpushed", detail: "never-pushed" },
-        { repo: "myrepo", path: gone, branch: "wt-gone", why: "unevaluated", detail: "not-github" },
-        { repo: "myrepo", path: local, branch: "wt-local", why: "unevaluated", detail: "not-github" },
-        { repo: "myrepo", path: locked, branch: null, why: "locked" },
+        { repo: "myrepo", path: gone, branch: "wt-gone", why: "unpushed", detail: "upstream-gone" },
+        { repo: "myrepo", path: local, branch: "wt-local", why: "unpushed", detail: "never-pushed" },
+        { repo: "myrepo", path: locked, branch: "wt-locked", why: "locked" },
       ]),
     );
   });
@@ -452,6 +452,29 @@ describe("reap: worktrees and branches (real git)", () => {
     expect(await exists(dirty)).toBe(true);
     expect(result?.removedWorktrees.map((w) => w.path)).toEqual([ignored]);
     expect(await exists(ignored)).toBe(false);
+  });
+
+  test("a removal is audited with the way the rule passed it; a stopped run keeps the refusals of the repos it never reached", async () => {
+    const repo = await freshRepo();
+    const pushed = join(repo.path, ".claude", "worktrees", "pushed");
+    const dirty = join(repo.path, ".claude", "worktrees", "dirty");
+    await addWorktree(repo.path, pushed);
+    await commit(pushed, "work.txt");
+    await git(pushed, "push", "-q", "-u", "origin", "wt-pushed");
+    await addWorktree(repo.path, dirty);
+    await writeFile(join(dirty, "notes.txt"), "half done\n");
+    await age(pushed);
+    await age(dirty);
+
+    lines.length = 0;
+    await reap(repo);
+    expect(lines.some((line) => line.includes("removed-worktree ") && line.endsWith(" reason=origin"))).toBe(true);
+    const before = await readReapRefusals(repo.refusals);
+    expect(before?.worktrees).toEqual([{ repo: "myrepo", path: dirty, branch: "wt-dirty", why: "dirty", detail: "1" }]);
+
+    const stopped = (await reap(repo, { signal: AbortSignal.abort() })).repos;
+    expect(stopped[0]?.skipped).toBeDefined();
+    expect((await readReapRefusals(repo.refusals))?.worktrees).toEqual(before?.worktrees);
   });
 
   test("a worktree younger than the age gate is kept — and a fresh Claude transcript makes an old one young", async () => {
@@ -500,7 +523,7 @@ describe("reap: worktrees and branches (real git)", () => {
     await age(locked);
 
     const [result] = (await reap(repo)).repos;
-    expect(result?.locked).toEqual([locked]);
+    expect(result?.locked).toEqual([{ path: locked, branch: "wt-locked" }]);
     expect(result?.deletedBranches).toEqual([]);
     expect(await branchExists(repo, "main")).toBe(true);
     expect(await branchExists(repo, "wt-locked")).toBe(true);

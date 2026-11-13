@@ -114,7 +114,7 @@ describe("nothingLost (real git, stub gh)", () => {
     await git(other, "push", "-q", "origin", s.branch);
     await gh.setReply(merged([]), 0);
 
-    expect(await nothingLost(input(s, tip, { fetch: false }))).toEqual({ kind: "unknown", why: "remote" });
+    expect(await nothingLost(input(s, tip, { fetch: false }))).toEqual({ kind: "unknown", why: "fetch-skipped" });
     expect(await nothingLost(input(s, tip))).toEqual({ kind: "safe", how: "origin" });
   });
 
@@ -194,7 +194,7 @@ describe("nothingLost (real git, stub gh)", () => {
     expect(await nothingLost(input(s, tip))).toEqual({ kind: "unknown", why: "remote" });
   });
 
-  test("gh failing, unauthenticated or with merged PRs it didn't list is unknown; a non-GitHub origin can't be asked", async () => {
+  test("gh failing, unauthenticated, partial or with merged PRs it didn't list is unknown", async () => {
     const s = await setup("forge");
     const tip = await commit(s.worktree, "work.txt");
 
@@ -204,16 +204,73 @@ describe("nothingLost (real git, stub gh)", () => {
     expect(await nothingLost(input(s, tip))).toEqual({ kind: "unknown", why: "forge" });
     await gh.setReply(merged([], 25), 0);
     expect(await nothingLost(input(s, tip))).toEqual({ kind: "unknown", why: "forge" });
+    // Errors beside data: the empty `nodes` is not a complete negative.
+    await gh.setReply(
+      JSON.stringify({
+        data: { repository: { pullRequests: { totalCount: 0, nodes: [] } } },
+        errors: [{ message: "timeout on a sub-field" }],
+      }),
+      0,
+    );
+    expect(await nothingLost(input(s, tip))).toEqual({ kind: "unknown", why: "forge" });
     await gh.setReply(JSON.stringify({ data: { repository: null } }), 1);
     expect(await nothingLost(input(s, tip))).toEqual({ kind: "unknown", why: "forge" });
     expect(await nothingLost(input(s, tip, { gh: join(base, "no-such-gh") }))).toEqual({
       kind: "unknown",
       why: "forge",
     });
+  });
 
-    const calls = await gh.calls();
-    expect(await nothingLost(input(s, tip, { github: null }))).toEqual({ kind: "unknown", why: "not-github" });
-    expect(await gh.calls()).toBe(calls);
+  test("a non-GitHub origin has no PR to ask: what it lacks fails unpushed, what it can't answer is unknown", async () => {
+    const s = await setup("gitlab");
+    const tip = await commit(s.worktree, "work.txt");
+    await gh.setReply(merged([]), 0);
+
+    expect(await nothingLost(input(s, tip, { github: null }))).toEqual({ kind: "fails", why: "unpushed" });
+    await git(s.fixture.repoPath, "remote", "set-url", "origin", join(base, "no-such-origin.git"));
+    expect(await nothingLost(input(s, tip, { github: null }))).toEqual({ kind: "unknown", why: "remote" });
+    expect(await gh.calls()).toBe(0);
+  });
+
+  test("remote: false skips origin and GitHub for an unmerged tip but still fails a dirty tree", async () => {
+    const s = await setup("down");
+    const tip = await commit(s.worktree, "work.txt");
+    await git(s.worktree, "push", "-q", "-u", "origin", s.branch);
+
+    expect(await nothingLost(input(s, tip, { remote: false }))).toEqual({ kind: "unknown", why: "remote" });
+    expect(await nothingLost(input(s, tip, { remote: false, merged: "ancestor" }))).toEqual({
+      kind: "safe",
+      how: "ancestor",
+    });
+    await writeFile(join(s.worktree, "notes.txt"), "untracked\n");
+    expect(await nothingLost(input(s, tip, { remote: false }))).toEqual({ kind: "fails", why: "dirty", changes: 1 });
+    expect(await gh.calls()).toBe(0);
+  });
+
+  test("a merged PR whose refs/pull/<n>/head can't be fetched is unknown, never a failure; a dry run says it skipped the fetch", async () => {
+    const s = await setup("nopull");
+    const tip = await commit(s.worktree, "work.txt");
+    await gh.setReply(merged([{ number: 5, oid: "1".repeat(40) }]), 0);
+
+    expect(await nothingLost(input(s, tip))).toEqual({ kind: "unknown", why: "remote" });
+    expect(await nothingLost(input(s, tip, { fetch: false }))).toEqual({ kind: "unknown", why: "fetch-skipped" });
+  });
+
+  test("only the exact refs/heads/<branch> on origin counts, not a ref that merely ends in it", async () => {
+    const s = await setup("exact");
+    const tip = await commit(s.worktree, "work.txt");
+    await git(s.worktree, "push", "-q", "origin", `${tip}:refs/heads/x/refs/heads/${s.branch}`);
+    await gh.setReply(merged([]), 0);
+
+    expect(await nothingLost(input(s, tip))).toEqual({ kind: "fails", why: "unpushed" });
+  });
+
+  test("more than one page of merged PRs: a matching head among those read still passes", async () => {
+    const s = await setup("paged");
+    const tip = await commit(s.worktree, "work.txt");
+    await gh.setReply(merged([{ number: 11, oid: tip }], 25), 0);
+
+    expect(await nothingLost(input(s, tip))).toEqual({ kind: "safe", how: "pr" });
   });
 });
 

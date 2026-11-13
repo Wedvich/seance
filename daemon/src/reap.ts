@@ -142,7 +142,7 @@ export interface RepoReport {
   }[];
   /** Worktrees whose pane is open in tmux — someone is in them. */
   readonly inUse: readonly string[];
-  readonly locked: readonly string[];
+  readonly locked: readonly { readonly path: string; readonly branch: string | null }[];
   /** Merged and clean, but touched more recently than the age gate. */
   readonly young: number;
   /** Unmerged worktrees on a branch whose upstream is still live: in-flight work, counted only. */
@@ -161,9 +161,9 @@ const KEPT_WORKTREE_TEXT: Readonly<Record<KeptWorktreeWhy, string>> = {
 
 const UNEVALUATED_TEXT: Readonly<Record<NothingLostUnknown, string>> = {
   status: "git status failed",
-  remote: "origin could not be asked",
+  remote: "origin or GitHub could not be asked",
+  "fetch-skipped": "needs a fetch, which a dry run does not make",
   forge: "gh gave no usable answer",
-  "not-github": "not on origin, which is not on GitHub to ask for a merged PR",
 };
 
 /**
@@ -232,7 +232,7 @@ function refusalsOf(repos: readonly RepoReport[]): ReapRefusal[] {
       why: "unevaluated" as const,
       detail: w.why,
     })),
-    ...repo.locked.map((path) => ({ repo: repo.repo, path, branch: null, why: "locked" as const })),
+    ...repo.locked.map((w) => ({ repo: repo.repo, path: w.path, branch: w.branch, why: "locked" as const })),
   ]);
 }
 
@@ -392,9 +392,13 @@ export async function runReap(opts: ReapOptions): Promise<ReapReport> {
       // Unwritten, the next run fetches again — never worth failing a run that already reaped.
       await writeAtomic(opts.pruneLogPath, next).catch(() => {});
     }
-    // Replaced whole each run: a worktree since removed or settled must not linger in it. Unwritten, a reader sees the
-    // previous run's — never worth failing a run that already reaped.
-    const refusals: ReapRefusals = { at: now, worktrees: refusalsOf(repos) };
+    // Replaced each run: a worktree since removed or settled must not linger in it. A repo this run skipped (stopped
+    // before it, no origin/HEAD, …) keeps the previous run's rows, since nothing was learned there. Unwritten, a
+    // reader sees the previous run's — never worth failing a run that already reaped.
+    const skippedRepos = new Set(repos.flatMap((repo) => (repo.skipped === undefined ? [] : [repo.repo])));
+    const previous = skippedRepos.size === 0 ? null : await readReapRefusals(opts.refusalsPath);
+    const carried = (previous?.worktrees ?? []).filter((w) => skippedRepos.has(w.repo));
+    const refusals: ReapRefusals = { at: now, worktrees: [...refusalsOf(repos), ...carried] };
     await writeAtomic(opts.refusalsPath, refusals).catch(() => {});
     await opts.audit.done({
       worktrees: repos.reduce((sum, repo) => sum + repo.removedWorktrees.length, 0),
@@ -737,6 +741,8 @@ async function reapRepo(
   const report = emptyLists();
   let young = 0;
   let active = 0;
+  // A fetch that just failed says origin is unreachable before the rule asks it per worktree.
+  let remoteDown = fetch?.kind === "failed";
 
   const byName = new Map(branches.map((branch) => [branch.name, branch]));
   const verdicts = new Map<string, BranchVerdict>();
@@ -786,7 +792,7 @@ async function reapRepo(
 
   for (const worktree of linked.filter((candidate) => !candidate.prunable)) {
     if (worktree.locked) {
-      report.locked.push(worktree.path);
+      report.locked.push({ path: worktree.path, branch: worktree.branch });
       continue;
     }
     // oxlint-disable-next-line no-await-in-loop -- one worktree at a time within a repo; repos run in parallel
@@ -815,6 +821,7 @@ async function reapRepo(
     // Old enough: a merge `classifyTip` found passes locally; anything else asks origin, then GitHub.
     // oxlint-disable-next-line no-await-in-loop
     const rule = await nothingLost({
+      remote: !remoteDown && opts.signal?.aborted !== true,
       repoPath: repo.path,
       worktree: worktree.path,
       tip: worktree.head,
@@ -825,6 +832,8 @@ async function reapRepo(
       ...(opts.gh === undefined ? {} : { gh: opts.gh }),
     });
     if (rule.kind === "unknown") {
+      // One network failure stands for the repo: each further worktree would wait out the same timeouts under the lock.
+      if (rule.why === "remote") remoteDown = true;
       report.unevaluated.push({ path: worktree.path, branch: worktree.branch, why: rule.why });
       continue;
     }
@@ -836,6 +845,16 @@ async function reapRepo(
       continue;
     }
     const idleDays = Math.floor((now - touched) / DAY_MS);
+    if (!opts.dryRun) {
+      // The rule's network reads can take minutes since the run's pane snapshot: a session started in this worktree
+      // meanwhile (a continuation) must find it still there.
+      // oxlint-disable-next-line no-await-in-loop
+      const liveDirs = await Promise.all((await listPanes()).map((pane) => canonical(pane.path)));
+      if (liveDirs.some((dir) => inside(real, dir))) {
+        report.inUse.push(worktree.path);
+        continue;
+      }
+    }
     // oxlint-disable-next-line no-await-in-loop
     if (monitors !== null) await stopMonitor(monitors, worktree.path, real, opts);
     if (!opts.dryRun) {
@@ -846,7 +865,7 @@ async function reapRepo(
         continue;
       }
       // oxlint-disable-next-line no-await-in-loop
-      await opts.audit.removedWorktree(repo.name, worktree.path, worktree.branch, worktree.head);
+      await opts.audit.removedWorktree(repo.name, worktree.path, worktree.branch, worktree.head, rule.how);
     }
     report.removedWorktrees.push({ path: worktree.path, branch: worktree.branch, why: rule.how, idleDays });
     released.add(worktree.path);
@@ -956,7 +975,7 @@ export function formatReport(report: ReapReport): readonly string[] {
       rows.push(row("unchecked worktree", `${tildify(unchecked.path)}   ${branch}   ${why} — kept, checked next run`));
     }
     for (const path of repo.inUse) rows.push(row("in use", `${tildify(path)}   a tmux pane is inside it`));
-    for (const path of repo.locked) rows.push(row("locked worktree", tildify(path)));
+    for (const locked of repo.locked) rows.push(row("locked worktree", tildify(locked.path)));
     for (const failure of repo.failed) rows.push(row("failed", `${failure.what}: ${failure.detail}`));
     if (rows.length > 0) lines.push(repo.repo, ...rows);
   }

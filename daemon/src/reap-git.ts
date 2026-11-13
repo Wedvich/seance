@@ -351,9 +351,10 @@ export function githubRepoOf(originKey: string | null): GithubRepo | null {
 
 /**
  * Why the rule could not be evaluated, which keeps a worktree without failing it (custodian C33): git status failed,
- * origin could not be asked or a needed object fetched, `gh` gave no usable answer, or origin is not on GitHub.
+ * origin could not be asked or a needed object fetched, a dry run did not fetch one (`fetch-skipped`), or `gh` gave
+ * no usable answer.
  */
-export type NothingLostUnknown = "status" | "remote" | "forge" | "not-github";
+export type NothingLostUnknown = "status" | "remote" | "fetch-skipped" | "forge";
 
 /**
  * The nothing-lost rule's verdict (DESIGN.md, Reap, "Nothing lost"). `safe` names the way the tip passed: one of
@@ -378,6 +379,8 @@ export interface NothingLostInput {
   readonly merged?: Merged;
   /** False in a dry run: a missing object is then not fetched, and the check that needed it is unknown. */
   readonly fetch: boolean;
+  /** False once this run found origin unreachable, or is stopping: the network checks are skipped, `unknown remote`. Default true. */
+  readonly remote?: boolean;
   /** The `gh` binary; `SEANCE_GH_BIN` then the PATH when absent. */
   readonly gh?: string;
   readonly terminal?: TerminalProbe;
@@ -417,6 +420,9 @@ async function readMergedHeads(
     `h=${branch}`,
   ]);
   if (answer.kind !== "ok") return null;
+  // `errors` beside `data` is a partial answer: an empty `nodes` in it is not a complete negative.
+  const errors = answer.body["errors"];
+  if (errors !== undefined && !(Array.isArray(errors) && errors.length === 0)) return null;
   const repository = answer.data["repository"];
   const prs = isRecord(repository) ? repository["pullRequests"] : undefined;
   if (!isRecord(prs)) return null;
@@ -450,13 +456,18 @@ async function isAncestor(repoPath: string, tip: string, of: string): Promise<bo
 
 /**
  * Whether commit `sha` is in the clone, fetching `source` from origin when it is not and `fetch` allows. Null when
- * that fetch was not allowed or failed. Lazy fetch off: a partial clone's lookup would reach the network unbounded.
+ * that fetch failed, `skipped` when it was not allowed (a dry run). Lazy fetch off: a partial clone's lookup would
+ * reach the network unbounded.
  */
-async function haveCommit(input: NothingLostInput, sha: string, source: readonly string[]): Promise<boolean | null> {
+async function haveCommit(
+  input: NothingLostInput,
+  sha: string,
+  source: readonly string[],
+): Promise<boolean | "skipped" | null> {
   const local = (): Promise<ExecResult> =>
     hardenedGit(input.repoPath, ["cat-file", "-e", `${sha}^{commit}`], 15_000, undefined, { GIT_NO_LAZY_FETCH: "1" });
   if ((await local()).exitCode === 0) return true;
-  if (!input.fetch) return null;
+  if (!input.fetch) return "skipped";
   const fetched = await networkGit(
     input.repoPath,
     ["fetch", "--quiet", "--no-recurse-submodules", "--no-write-fetch-head", "origin", ...source],
@@ -472,7 +483,7 @@ async function haveCommit(input: NothingLostInput, sha: string, source: readonly
  * Asked of origin itself (`ls-remote`), not of the refs reap's daily fetch left: its branch's tip there now. `absent`
  * is origin answering it has no such branch (exit 2); null is no answer.
  */
-async function originHolds(input: NothingLostInput, branch: string): Promise<boolean | "absent" | null> {
+async function originHolds(input: NothingLostInput, branch: string): Promise<boolean | "absent" | "skipped" | null> {
   const ref = `refs/heads/${branch}`;
   const listed = await networkGit(
     input.repoPath,
@@ -493,7 +504,7 @@ async function originHolds(input: NothingLostInput, branch: string): Promise<boo
   if (!COMMIT_OID.test(sha)) return null;
   if (sha === input.tip) return true;
   const have = await haveCommit(input, sha, [`+${ref}:refs/remotes/origin/${branch}`]);
-  if (have !== true) return null;
+  if (have !== true) return have;
   return isAncestor(input.repoPath, input.tip, sha);
 }
 
@@ -513,7 +524,7 @@ async function prHolds(
     // oxlint-disable-next-line no-await-in-loop
     const contains = have === true ? await isAncestor(input.repoPath, input.tip, head.oid) : null;
     if (contains === true) return true;
-    if (contains === null) unknown ??= "remote";
+    if (contains === null) unknown ??= have === "skipped" ? "fetch-skipped" : "remote";
   }
   if (!merged.complete) return "forge";
   return unknown ?? false;
@@ -530,10 +541,14 @@ export async function nothingLost(input: NothingLostInput): Promise<NothingLost>
   if (changes > 0) return { kind: "fails", why: "dirty", changes };
   if (input.merged !== undefined) return { kind: "safe", how: input.merged };
   if (input.branch === null) return { kind: "fails", why: "unpushed" };
+  if (input.remote === false) return { kind: "unknown", why: "remote" };
   const origin = await originHolds(input, input.branch);
   if (origin === true) return { kind: "safe", how: "origin" };
-  const remote: NothingLostUnknown | null = origin === null ? "remote" : null;
-  if (input.github === null) return { kind: "unknown", why: remote ?? "not-github" };
+  const remote: NothingLostUnknown | null = origin === null ? "remote" : origin === "skipped" ? "fetch-skipped" : null;
+  // Origin answered and is not on GitHub: no merged PR can hold the tip, so what origin lacks exists only here.
+  if (input.github === null) {
+    return remote === null ? { kind: "fails", why: "unpushed" } : { kind: "unknown", why: remote };
+  }
   const pr = await prHolds(input, input.github, input.branch);
   if (pr === true) return { kind: "safe", how: "pr" };
   const why = remote ?? (pr === false ? null : pr);

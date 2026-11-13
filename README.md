@@ -750,8 +750,8 @@ continued. It deletes merged branches, closes séance windows
 that are dead or sitting on claude's "keep or remove this worktree?" prompt, and
 reports what it left: dirty worktrees, branches and worktrees whose upstream is gone but
 which hold unpushed commits, worktrees on a never-pushed branch, detached worktrees with
-commits on no branch, worktrees it could not check (no network, `gh` failing, an origin
-not on GitHub), a count of young worktrees on a branch whose upstream is still live, and live sessions with the id `despawn` takes. Where git runs
+commits on no branch, worktrees it could not check (no network, `gh` failing, a dry run that
+would need a fetch), a count of young worktrees on a branch whose upstream is still live, and live sessions with the id `despawn` takes. Where git runs
 `core.fsmonitor=true` daemons (macOS), it also stops every one with no tmux pane in its
 checkout and an hour unused, and any on a directory gone or no longer a repo, reporting
 the memory freed; git starts a new one when a repo next needs it. It also removes a task's fetched

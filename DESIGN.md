@@ -8295,10 +8295,28 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
   - _Fails vs. cannot be evaluated_ (C33). `dirty` and `unpushed` (origin and GitHub both answered, and
     neither holds the tip) are failures; `git status` failing, origin unreachable or refused
     (`networkGit`) or a fetch it needed failing, `gh` missing, unauthenticated, timing out or answering
-    unusably, more than 20 merged PRs on the branch, or a non-GitHub origin with the tip not on it, are
-    `unknown`. Both keep the worktree; only a failure is a finding a later custodian PR may flag. An
-    unknown one is reported `unchecked` and judged again next run. A dry run makes the read-only calls
-    (`ls-remote`, `gh`) but fetches nothing, so a check needing a missing object is unknown there.
+    unusably (a body carrying `errors` beside its `data` included: a partial answer is no negative), more
+    than 20 merged PRs on the branch none of the 20 read holding the tip, or a dry run needing a fetch
+    it does not make (`fetch-skipped`), are `unknown`. A non-GitHub origin that answered without the tip
+    is `unpushed`: no merged PR can hold it, so it exists only in the worktree, and `unknown` would hide
+    exactly the unpushed work on a GitLab clone. A `gh` failure on a GitHub origin stays `unknown`: a
+    merged PR might hold the tip. Both keep the worktree; only a failure is a finding a later custodian
+    PR may flag. An unknown one is reported `unchecked` and judged again next run. A dry run makes the
+    read-only calls (`ls-remote`, `gh`) but fetches nothing, so a check needing a missing object is
+    `fetch-skipped` there.
+  - _The window around the check._ The rule's network reads can take minutes, so reap lists the panes
+    again immediately before `git worktree remove` and keeps a worktree a session has since started in
+    (a continuation opens its path) as in use. Once one worktree of a repo comes back `unknown remote`,
+    or the repo's own fetch failed, or the run is stopping, the rest of that repo's unmerged worktrees
+    are `unknown remote` without a call (a hung network would otherwise cost every old worktree its
+    timeouts under the reap lock); a dirty tree and a merge `classifyTip` found are still judged, being local.
+  - _The branch name binds the read_ (C36). Origin and GitHub are asked under the worktree's own branch
+    name; work pushed under another name (a configured upstream with a different name, or a
+    `pass_to_successor` push to the PR's head) reads `unpushed`, a failure in the safe direction: kept,
+    and a false finding at worst. Following the upstream's name would let repo config a session can write
+    choose what the daemon's one forge read names; left to a decision before the custodian flags `unpushed`.
+  - _The audit line_ for a removal carries `reason=` (`ancestor`, `squash`, `gone`, `origin` or `pr`), since a
+    removal is no longer always a merge.
   - _The local branch is left_ (C34) for the branch pass below, which deletes it only once merged by its
     own rules. A continuation of a task whose worktree reap removed is refused `not_continuable` today
     (Daemon, "Continuing a session": the path gone), so a pushed, unmerged worktree idle past the age gate
@@ -8306,9 +8324,10 @@ it judges by the refs on disk. Code: `reap.ts` (orchestration, report, lock),
     Re-adding the worktree from the kept branch on a continuation is follow-up work.
   - _What it kept_ (C23): each acting run replaces `reap-refusals.json` in the state dir (0600,
     `ReapRefusals`, read by `readReapRefusals`) with every worktree kept `dirty` (with its change count),
-    `unpushed` (with its kept-worktree reason), `unevaluated` (with the unknown reason) or `locked`, so
-    the custodian's `sessions` verb can say what holds disk. A file, not daemon memory: the CLI's reap is
-    another process. A dry run writes none; a failed write fails nothing.
+    `unpushed` (with its kept-worktree reason), `unevaluated` (with the unknown reason) or `locked` (with
+    its branch, null when detached), so the custodian's `sessions` verb can say what holds disk. A repo the
+    run skipped (stopped before it, no `origin/HEAD`) keeps the previous file's rows. A file, not daemon
+    memory: the CLI's reap is another process. A dry run writes none; a failed write fails nothing.
 - **"Untouched"** is the newest mtime among the worktree's git-dir `HEAD`,
   `index` and reflog, the worktree root, and the newest Claude transcript for
   its path (`~/.claude/projects/<path, non-alphanumerics as dashes>`). It is
