@@ -9,7 +9,7 @@ import {
   type SessionEntry,
 } from "@seance/shared";
 import { exclaveOf, type ExclaveScan } from "./exclaves.ts";
-import type { Sample } from "./metrics-store.ts";
+import { quotaSamples, type Sample } from "./metrics-tiers.ts";
 import type { CpuTimes, HostProbe, Registered, Snapshot, TelemetrySources } from "./telemetry.ts";
 
 /**
@@ -223,19 +223,12 @@ function quotaCollector(): Collect {
     const scan = tick.registered.exclaves;
     const cached = await Promise.all(scan.exclaves.map((exclave, x) => quotaReader(exclave.configFile, x, tick.nowMs)));
     const observations = cached.filter((q): q is QuotaObservation => q !== null);
-    // At the reading's own stamp, not the tick's: a cache an hour old is an hour-old point.
     const samples: Sample[] = [];
     for (const q of observations) {
       const exclave = scan.exclaves[q.x];
       if (exclave === undefined) continue;
       const account = scan.info[q.x]?.accountId ?? null;
-      const labels = { exclave: exclave.id, ...(account === null ? {} : { account }) };
-      if (q.h !== undefined) samples.push({ metric: METRIC_NAMES.h, labels, ts: q.at, value: q.h });
-      if (q.d !== undefined) samples.push({ metric: METRIC_NAMES.d, labels, ts: q.at, value: q.d });
-      for (const window of q.w ?? []) {
-        samples.push({ metric: METRIC_NAMES.w, labels: { ...labels, model: window.m }, ts: q.at, value: window.p });
-      }
-      if (q.c !== undefined) samples.push({ metric: METRIC_NAMES.c, labels, ts: q.at, value: q.c });
+      samples.push(...quotaSamples(q, { exclave: exclave.id, ...(account === null ? {} : { account }) }));
     }
     return { fields: observations.length === 0 ? {} : { quota: observations }, samples };
   };

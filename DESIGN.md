@@ -1374,7 +1374,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | op `despawn`                                                        | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                                                 | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                                                                                                                                                                                                                                                                                                                  |
 | `status` (daemon→relay)                                             | `daemon/src/run-collectors.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register (`ax`/`ae`/`au` from `daemon/src/auth-health.ts` through the `auth` collector, `tf`/`tu` from `daemon/src/trait-probes.ts` through the `traits` collector)                                                                                                                     | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest on the socket attachment, kept in the entry on close/sweep until the next register                                                                                                                                                                                                                                                   |
 | `status` (relay→app)                                                | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`                                                                                                                                                                                                                                                                                               | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped                                                                                                                                                                                                                                                                                                  |
-| op `metrics`                                                        | `pwa/src/store.ts` via `shared/src/app-client.ts` `metrics()`, gated and parsed                                                                                                                                                                                                                                                                                                    | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts`; sized at the transport (`#sealReply`, `daemon/src/relay-client.ts`)                                                                                                                                                                                                                                                      |
+| op `metrics`                                                        | `pwa/src/store.ts` and `archivist/src/metrics-collect.ts` via `shared/src/app-client.ts` `metrics()`, gated and parsed                                                                                                                                                                                                                                                             | `daemon/src/handlers.ts` → the metrics store in `daemon/src/metrics-store.ts` (tiers in `metrics-tiers.ts`); sized at the transport (`#sealReply`, `daemon/src/relay-client.ts`)                                                                                                                                                                                                                        |
 | op `session-event` (→`"scheduler"`)                                 | `daemon/src/session-events.ts` via `sendToScheduler()` in `daemon/src/relay-client.ts`; on the leader's own machine, `Leader.onSession` in process                                                                                                                                                                                                                                 | `daemon/src/leader.ts`: opened by the term's leg (`onEvent` in `shared/src/app-client.ts`, under the daemon's one scheduler `ReplayGuard`), validated by `parseSessionEvent`, applied by `Scheduler.onSession`                                                                                                                                                                                          |
 | `store-list` / `store-get` / `store-put` / `store-delete`           | apps via `shared/src/app-client.ts` (list/get/create); the leader's daemon socket via `daemon/src/queue-store.ts` and `daemon/src/settings-store.ts`, with `term` on writes; the fleet broker's enqueue (`daemon/src/broker.ts`)                                                                                                                                                   | parsed and bounded in `relay/src/wire.ts`, rules in `relay/src/store.ts`, dispatched by `relay/src/hub.ts` `#onStoreFrame`                                                                                                                                                                                                                                                                              |
 | `store-listed` / `store-record` / `store-written` / `store-refused` | `relay/src/hub.ts` `#onStoreFrame`, answering from `relay/src/store.ts`                                                                                                                                                                                                                                                                                                            | `parseStoreReply` in `shared/src/parse.ts`; correlated on `re` by the app-client, which settles a reply it cannot read as `null` at once, and by the queue and settings stores                                                                                                                                                                                                                          |
@@ -6217,7 +6217,7 @@ of this section built.
   line (`sealMachineInfo`), since the relay would drop the whole registration unseen; a
   blob still over after that logs an error line saying the relay will refuse it. Both log
   once per size-deciding content (the repos and exclaves, not the scan time), not per register.
-- **Telemetry** (`daemon/src/telemetry.ts`, `daemon/src/metrics-store.ts`, added
+- **Telemetry** (`daemon/src/telemetry.ts`, `daemon/src/metrics-store.ts`, `daemon/src/metrics-tiers.ts`, added
   2026-10-15 for the scheduler): every `STATUS_INTERVAL_MS` the daemon samples
   cpu, memory and disk pressure as whole percent, disk free and I/O rates,
   running sessions per exclave (by pane path, so a session outside every
@@ -6261,6 +6261,14 @@ of this section built.
   `METRICS_STEPS`. No sample carries the machine's name: the store is its
   machine's alone, so the label said nothing, and a rename split every series in
   two. Tiers are raw 30s for 48h, 5-min averages for 30d, hourly forever.
+  The tiers — the series table, the rollup formula, the prune horizons and the
+  label-matching query — are one module, `daemon/src/metrics-tiers.ts`
+  (`TieredMetrics`, retention a parameter), which the archivist runs its own
+  `metrics.sqlite` on too (Archivist, "Metrics"); `metrics-store.ts` is the
+  daemon's path, migrations and 48h/30d keep. In `daemon/`, not `shared/`: the
+  relay and the PWA bundle `shared/`, and `bun:sqlite` must reach neither. The
+  quota label scheme (`quotaSamples`) lives there too, so the archivist's live
+  ingest writes the series the daemon does.
   Each tier is keyed `(ts, series)`, because every rollup, prune and query is a
   time range — keyed series-first, each rollup was a full scan plus a sort, ~3 ms
   and ~150 KiB of WAL a tick. A schema change is an entry in `MIGRATIONS`,
@@ -6306,7 +6314,8 @@ of this section built.
   `metrics` op's. Nothing routes from this store — the scheduler reads only the
   latest `status` — so a Prometheus + Grafana stack later is one more consumer
   (an exposition endpoint, or remote write, since daemons dial out and laptops
-  roam), not a redesign. Not built: PSI and cgroup v2 views in an LXC, the
+  roam), not a redesign; the archivist is the first such consumer, pulling the
+  `metrics` op into a longer-lived copy without changing this store. Not built: PSI and cgroup v2 views in an LXC, the
   Proxmox node view (docs/scheduler.md, M4), macOS I/O rates. Rejected: the 1-min load average as cpu (counts runnable
   tasks, so it exceeds 100% and on Linux includes I/O wait); `os.freemem()` on
   macOS (free pages only, a fraction of what is reclaimable); a fixed EMA alpha
@@ -10626,8 +10635,8 @@ are tmux-rename's, except where they say mods.
 
 The fleet's optional history service (docs/archivist.md is the spec; each part lands here as it
 is built). Build order item 2 is the workspace and its two relay legs; item 3 (2026-11-12) is
-`archive.sqlite` and what it collects into it: finished tasks, accounts and fleet events. Metrics
-are item 4. Its trust entry is the Threat model, item 2 ("The archivist, a PSK holder
+`archive.sqlite` and what it collects into it: finished tasks, accounts and fleet events; item 4
+(2026-11-12) is metrics, in `metrics.sqlite` beside it. Its trust entry is the Threat model, item 2 ("The archivist, a PSK holder
 that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archivist's seat").
 
 - **A workspace of its own, reusing the daemon by import.** `archivist/`, command
@@ -10667,7 +10676,8 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   Every op that reaches it is dropped with a warning and no reply. No `status`, no store frame.
 - **The read leg.** A second, app-role socket from `appRelayClient` with the PSK's key and the
   account key derived from it, as the leader's own app leg reads (A7); `archivist/src/collect.ts`
-  reads through it (below). A 4401 on it is
+  reads the store through it, and `archivist/src/metrics-collect.ts` the registry's `status`
+  snapshots and each daemon's `metrics` op (below). A 4401 on it is
   permanent for that client, so the seat leg's `/daemon` upgrade succeeding — proof the token works
   now — redials it. The seat leg's `onConnect` fires when the register has left, not when it is
   accepted (the relay sends no ack), so `runtime.json` and `status` can say "connected" for a seat
@@ -10680,8 +10690,10 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   in the closure. A second scan forbids every write method either
   client offers (dotted, bracketed or destructured), and `execPath`, in the archivist's own source. Transitive because an allowed
   module that later grows an edge to a forbidden one must fail here, not in review. A third holds
-  `bun:sqlite` to `archive.ts` alone, and that file to no `DELETE`, `DROP`, `TRUNCATE` or
-  replacing insert (A23).
+  `bun:sqlite` to `archive.ts` and `metrics-archive.ts`, and both to no `DELETE`, `DROP`,
+  `TRUNCATE` or replacing insert (A23); a fourth holds the shared tiers'
+  (`daemon/src/metrics-tiers.ts`) removing statements to their two horizon prunes, the one way a
+  metrics row leaves (A22).
 - **`archive.sqlite`** (item 3), in the state dir beside `state.json`: created empty at 0600
   before SQLite opens it, so the WAL and shared-memory files take that mode (as
   `metrics-store.ts` does), `journal_mode = WAL`, and migrations keyed on `PRAGMA user_version`,
@@ -10757,8 +10769,71 @@ that never acts"); its seat on the relay is Scheduler, "Leadership" ("The archiv
   waits up to 2 s on a lock (`busy_timeout`; a purge in `sqlite3` is expected, A23), and a write
   that still fails is logged and tried again on the next registry change, never thrown into the
   client's listener.
+- **Metrics** (item 4; A17, A19, A20, A22, A33). `metrics.sqlite` in the state dir, beside
+  `archive.sqlite` and opened like it (0600 before SQLite, WAL, `busy_timeout`, `user_version`, a
+  newer schema refuses start), on the daemon's own tiered store (`daemon/src/metrics-tiers.ts`,
+  Daemon, "Telemetry") at the archive's retention: raw 30 s for 48 h, 5-min for a year, hourly
+  forever, each tier the average of the one below. A file of its own, not tables in
+  `archive.sqlite`: retention prunes these tiers while that file is append-only (A23), and each
+  file's schema moves alone. `archivist/src/metrics-archive.ts` holds it, `metrics-collect.ts`
+  fills it.
+  - **Series per observer**, unmerged (A33): every series carries `machine`, the observing
+    machine's device id (its name would split a series at a rename; a daemon's own series name no
+    machine, its store being its own). An `account` label is the `account:<hex>` store key
+    (`accountStoreKey`, A15), never the raw id the daemon labels with; `exclave` and `model` are
+    kept as the daemon writes them.
+  - **Live.** Each `Machine.status` the app leg holds (already bound to the blob it indexes) with
+    an `at` newer than the last ingested from that machine (and no more than 5 minutes ahead of
+    the archivist's clock: a daemon with a wrong clock is not kept, and is not remembered, so
+    fixing it does not leave it silent until real time catches up) becomes raw samples the way the daemon
+    wrote its own: the six gauges at `at`, `sessions` per exclave, and each quota observation at
+    its own stamp through the daemon's `quotaSamples`. A live sample never replaces a row.
+  - **Pulled.** Every connected machine advertising `CAPABILITIES.metrics` (never the seat) is
+    pulled through `RelayClient.metrics`, one machine and one request at a time: every 5 minutes
+    (`METRICS_TIMINGS.pullMs`; live frames already arrive every 30 s, so the pull fills what they
+    missed and replaces their whole-percent values with the daemon's one-decimal ones, and one
+    small request a machine a round is the steady cost), at the leg's ready and when a machine
+    (re)connects. A pulled raw sample replaces a live one at the same `(series, ts)`; a pulled
+    5-min or hourly row is flagged (`pulled`, a column only the archive's rolled tiers carry) and
+    no rollup in the archive re-averages it — a re-roll crosses every series from its oldest new
+    sample, so a bound on where it starts could not protect one machine's imported bucket from
+    another's late sample. Buckets no pull supplied roll up as the daemon's do.
+  - **Watermarks.** `pull_marks` holds the newest pulled point per machine, tier and series. A
+    tier's next pull starts at the laggiest series' mark (a quota reading is stamped at its fetch
+    time, so lags the gauges), but never more than `lateS` (15 min, past the quota refresh's
+    default 10) behind the newest, so a series that stopped (an exclave removed) cannot drag
+    every round back to it. Raw is pulled each round from its mark (at most the daemon's 48 h
+    back). When that mark is older than the daemon's raw keep (less an hour for clock skew) —
+    never pulled (the first start, A19), asleep, or this archivist down (A20) — the 5-min tier is
+    pulled too, from the later of its own and raw's mark, at most the daemon's 30 d back; and when
+    that start is older than 30 d, the hourly tier, from `METRICS_HISTORY_START_S` (2026-10-15, the
+    daemon tiers' recreation) on a first start. Rolled tiers are pulled only to the last bucket
+    closed 15 minutes ago (`settleS` = `lateS`: a quota sample stamped that far back re-rolls
+    its bucket, and a flagged row is never re-averaged here), so a bucket the daemon may still
+    re-roll is never fixed. What a daemon
+    pruned or rolled past in between is lost (A20). A machine whose store answers empty keeps its
+    marks where they were, so the last whole pull's end (in memory, less `lateS`) floors the
+    next start: it is not caught up again every round.
+  - **Paging.** Contiguous pages of at most `METRICS_MAX_POINTS` steps, oldest first, each
+    starting a second past the last (a raw sample sits at its tick's second). A reply too large
+    for an envelope (`too_large`) is asked again one `METRIC_NAMES` name at a time, then halved by
+    the second; a name this build does not know is not split out. A page is written whole, its
+    pieces together and its marks with them, in one transaction (one re-roll a page): marks per
+    series moved piece by piece would let the `lateS` cap skip what a failed piece's series
+    missed. Points outside the page's requested range are dropped before the write, and a mark
+    is the newest in-range point, never the last one a reply lists. The first failure ends that
+    machine's round with its marks where the last whole page left them; it is warned once per
+    streak and its recovery logged. The relay's `store-list` floors do not apply: the op is an envelope
+    to a daemon, which the relay neither reads nor rate-limits.
 
 ## Accepted trade-offs
+
+- Each archivist pull is one audit line on a daemon (`origin=relay op=metrics`, like any app
+  request: the relay is blind and the archivist is an app-role client, so nothing tells its
+  requests apart). That is about 300 a day a machine in steady state and a few hundred at a first
+  start or catch-up, a constant background to the "something enumerated" trail. Accepted rather
+  than exempting the op from the audit or the archivist from it, which would hide a stolen key
+  reading the same op; `METRICS_TIMINGS.pullMs` is the dial.
 
 - A task with `requires` is invisible to an app or CLI older than traits (its leader-side record is
   refused by an older leader, and an older app drops what it cannot read), as with `attachments`;

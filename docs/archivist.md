@@ -4,7 +4,8 @@
 DESIGN.md, Scheduler, "Leadership" ("The archivist's seat"); item 2 (the `archivist/` workspace)
 built 2026-11-12, recorded in DESIGN.md, "Archivist", and its trust entry in the Threat model,
 item 2; item 3 (tasks and fleet events in `archive.sqlite`) built 2026-11-12, recorded in
-DESIGN.md, "Archivist".** Decided with the owner on 2026-11-12. Like docs/scheduler.md and
+DESIGN.md, "Archivist"; item 4 (metrics in `metrics.sqlite`) built 2026-11-12, recorded in
+DESIGN.md, "Archivist", "Metrics", and Daemon, "Telemetry".** Decided with the owner on 2026-11-12. Like docs/scheduler.md and
 docs/leaving.md, this file is the working record until the code lands; each part folds into
 DESIGN.md as it is built, and its text here goes.
 
@@ -49,7 +50,7 @@ Each is the owner's, 2026-11-12, unless marked _derived_.
   `ARCHIVIST` secret, every other claim refused (DESIGN.md, Scheduler, "Leadership", "The
   archivist's seat", which is now the record).
 - **A7, A8.** Built: a second, app-role connection for reading (store reads arrived with
-  item 3; live `status` frames and the `metrics` op arrive with item 4), and read-only by its own code, held by
+  item 3; live `status` frames and the `metrics` op with item 4), and read-only by its own code, held by
   `archivist/test/layering.test.ts` (DESIGN.md, "Archivist", which is now the record).
 - **A9.** Built: `RelayClient` skips the seat's entry as a machine, for every reader at once
   (DESIGN.md, as A5).
@@ -84,22 +85,27 @@ Each is the owner's, 2026-11-12, unless marked _derived_.
 - **A17. Metrics.** Two sources into one store: live `status` frames, and timed pulls from each
   daemon's `metrics` op with a watermark per series. Where both cover a timestamp the pulled
   sample wins. Rollups use the daemon's own formula (`metrics-store.ts`: each tier is the average
-  of the tier below per bucket), from one module both import, not a copy.
+  of the tier below per bucket), from one module both import, not a copy. Built: the module is
+  `daemon/src/metrics-tiers.ts`, pulls run every 5 minutes, and a pulled 5-min or hourly row is
+  never re-averaged by the archive (DESIGN.md, "Archivist", "Metrics", which is now the record).
 - **A18. Fleet events.** From registry pushes: a machine first seen, connected, gone, its build
   changed, the scheduler leader's term changed. Built (DESIGN.md, "Archivist").
 - **A19. First start.** It pulls every machine's existing hourly and 5-minute history once, then
-  continues from the watermark. Task history starts from what the store holds that day.
+  continues from the watermark. Task history starts from what the store holds that day. Built
+  for metrics (DESIGN.md, "Archivist", "Metrics").
 - **A20. Outages.** After its own downtime, or a machine's sleep, it backfills from the relay
   store and from the daemons' local history. What was pruned or rolled past in between is lost;
-  that is accepted (A2, A3).
+  that is accepted (A2, A3). Built for metrics: the first start's rule, from each tier's watermark
+  (DESIGN.md, as A19).
 
 ### 5. Retention
 
 - **A21.** Tasks and fleet events: forever. Built: nothing prunes either table.
-- **A22.** Metrics: 30 s for 48 h, 5 min for 1 year, hourly forever.
+- **A22.** Metrics: 30 s for 48 h, 5 min for 1 year, hourly forever. Built
+  (`ARCHIVE_RETENTION`, `archivist/src/metrics-archive.ts`).
 - **A23.** Append-only. Nothing on the wire removes or changes history; a purge is SQL on the box.
   Built for tasks and events, held by `archivist/test/layering.test.ts` (no removing statement in
-  `archive.ts`).
+  `archive.ts` or `metrics-archive.ts`; A22's prunes are the shared tiers' two horizon deletes).
 - **A24.** A retired machine's and a removed account's history stays, keyed by its stable id with
   the last known name. Built for machines and accounts (DESIGN.md, "Archivist").
 
@@ -109,7 +115,10 @@ Each is the owner's, 2026-11-12, unless marked _derived_.
   `install --system`, `update`, `status`; the workspace, `run` and `status` built 2026-11-12,
   DESIGN.md, "Archivist"), unit `seance-archivist.service`, database
   `archive.sqlite` in its state dir (0600, WAL, migrations on `PRAGMA user_version` as
-  `metrics-store.ts` does). Bun and `bun:sqlite`; no other database, no Node.
+  `metrics-store.ts` does). Bun and `bun:sqlite`; no other database, no Node. _Derived_ at item
+  4: metrics live in a second file beside it, `metrics.sqlite`, opened the same way — retention
+  prunes them (A22) while `archive.sqlite` is append-only (A23), and each file's schema moves
+  alone. A30's queries `ATTACH` it.
 - **A26.** It runs from the same git checkout layout as `seanced` and follows the fleet's update
   announce: an archivist that cannot parse a newer task record would archive nothing, silently.
 - **A27.** The archivist runs on any Linux box or container a daemon can run on (an unprivileged
@@ -234,7 +243,7 @@ One stack of PRs, each based on the one before, merged together.
 3. Tasks and fleet events: schema, migrations, the store reader, upsert by version (A13–A16, A18,
    A21). **Built 2026-11-12.**
 4. Metrics: the shared rollup module, live `status` ingest, `metrics` pulls with watermarks, the
-   first-start import, retention (A17, A19, A20, A22).
+   first-start import, retention (A17, A19, A20, A22). **Built 2026-11-12.**
 5. `install --system`, update on the announce, and the docs: README setup, the move-the-seat
    runbook, schema and example queries (A26–A30).
 6. The archive status op and the Machines screen's health card (A31, A36–A36c).
@@ -254,11 +263,6 @@ One stack of PRs, each based on the one before, merged together.
 
 - Whether two system units on one box can each load the same `seance-psk` blob, or the archivist
   needs one sealed under a name of its own (A27b).
-
-- Where the shared rollup module lives. `shared/` is bundled by the relay and the PWA, and
-  `bun:sqlite` must not reach either bundle.
-- The pull timer and the page size against `METRICS_MAX_POINTS` (720) and the relay's
-  `store-list` floors (4 per minute per socket per prefix).
 - **The flag is per push.** The relay stores the signed claim and derives `archivist` against
   `ARCHIVIST` as it is at each push. Moving the seat (A29, the runbook in item 5) turns the old
   id's kept entry into an ordinary offline entry. With the seat's blob (not a `MachineInfo`;
@@ -266,5 +270,9 @@ One stack of PRs, each based on the one before, merged together.
   row, so the PWA counts it as skewed and offers no forget button; the runbook must say to
   forget it by id (`RelayClient.forget`, or a raw `forget` frame from an app socket). Item 6's health card and item 10's silence alert read the flag, so
   they follow the seat, not the old entry.
-- The label an archived series carries for its observer, since a daemon's own series name no
-  machine.
+
+Settled at item 4 (DESIGN.md, "Archivist", "Metrics"): the shared rollup module is
+`daemon/src/metrics-tiers.ts`, imported by path (not `shared/`, which the relay and PWA bundle);
+pulls run every 5 minutes in pages of at most `METRICS_MAX_POINTS` steps, split by metric then
+halved on `too_large`, and the relay's `store-list` floors do not apply (the op is an envelope
+to a daemon); the observer label is `machine`, the device id.

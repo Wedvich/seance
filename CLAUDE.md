@@ -41,7 +41,7 @@ Read the docs before changing behavior — this file deliberately doesn't repeat
   away: update, restart, reboot, shutdown, sleep, unknown), how the relay keeps it, what clients
   and the leader do with it, macOS sleep/DarkWake, and the shutdown drain on a dying box. Read it
   before touching shutdown, presence or the systemd unit.
-- **docs/archivist.md** — spec, nothing built: the archivist, an optional single-seat service in
+- **docs/archivist.md** — spec, partly built (its "Build order" says which items): the archivist, an optional single-seat service in
   its own workspace that keeps long-term task, metrics and fleet history in SQLite (the seat and
   the `ARCHIVIST` secret, what it collects and never stores, retention, how the PWA reads it, the
   build order). Read it before touching history, retention, registry roles or the Machines
@@ -257,7 +257,10 @@ green:
   from its prompt), its account only as the
   `account:` store key, and only over a row at a lower store version; an account row only from
   `openAccountRecord` or a key `accountStoreKey` made; and no statement there removes a row
-  (`archivist/test/layering.test.ts`). Don't let changes drift from them.
+  (`archivist/test/layering.test.ts`), and its `metrics.sqlite` (`archivist/src/metrics-archive.ts`)
+  labels an account only by the `account:` store key and removes rows only through the shared
+  tiers' two horizon prunes (`daemon/src/metrics-tiers.ts`, the daemon's own rollup, imported,
+  never copied). Don't let changes drift from them.
 - The daemon's local op socket (`daemon/src/local-socket.ts`) is what makes MCP's `get_sessions` and
   `despawn_session` aimed at this machine skip the relay (`spawn` stays on its allowlist only for a
   `seanced mcp` started before spawns became tasks). Its access control is the **0700 `stateDir()/run` directory**, not
