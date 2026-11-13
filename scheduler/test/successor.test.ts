@@ -2166,25 +2166,57 @@ describe("the drain pass", () => {
     expect(s.fleet.pushes).toHaveLength(2);
   });
 
+  /** `old` is placed on `deviceId` in the store and the leader's view. */
+  async function placeOn(s: Setup, deviceId: string): Promise<void> {
+    const entry = await s.store.get("old");
+    const seen = s.scheduler.task("old");
+    if (seen?.assignment === undefined || entry === null || !("body" in entry)) throw new Error("not held");
+    await s.store.put("old", entry.version, { ...seen, assignment: { ...seen.assignment, deviceId } });
+    await s.scheduler.refresh("old");
+  }
+
   test("a conflict after the create is held: never retried for that close, one successor", async () => {
-    const s = setup();
+    const s = setup(twoMachines());
     await running(s, true);
-    const state = { moved: false };
-    s.create = async () => {
-      // The task is cancelled under the pass between the create and its commit.
-      if (!state.moved) {
-        state.moved = true;
-        await s.scheduler.cancel("old");
-      }
-      return { ok: true };
+    const made = s.create;
+    s.create = async (task) => {
+      const result = await made(task);
+      // Moved under the pass between the create and its commit.
+      s.create = made;
+      await placeOn(s, "b");
+      return result;
     };
     close(s, "a");
     later(s, WAIT);
     await tick(s.scheduler);
+    expect(s.creates).toHaveLength(1);
+    await placeOn(s, "a");
+    expect(s.scheduler.task("old")?.drained).toEqual({ at: CL, tried: s.clock.now, held: true });
     later(s, 10 * RETRY);
     await tick(s.scheduler);
-    expect(s.creates.length).toBeLessThanOrEqual(1);
-    expect(s.fleet.pushes.length).toBeLessThanOrEqual(1);
+    expect(s.creates).toHaveLength(1);
+    expect(s.fleet.pushes).toHaveLength(1);
+  });
+
+  test("a conflict before the create is retried after the retry wait", async () => {
+    const s = setup(twoMachines());
+    await running(s, true);
+    const answer = s.fleet.pushReply;
+    s.fleet.pushReply = async (request) => {
+      s.fleet.pushReply = answer;
+      await placeOn(s, "b");
+      return answer(request);
+    };
+    close(s, "a");
+    later(s, WAIT);
+    await tick(s.scheduler);
+    expect(s.creates).toEqual([]);
+    await placeOn(s, "a");
+    expect(s.scheduler.task("old")?.drained).toEqual({ at: CL, tried: s.clock.now });
+    later(s, RETRY);
+    await tick(s.scheduler);
+    expect(s.creates).toHaveLength(1);
+    expect(s.scheduler.task("old")?.state).toBe("superseded");
   });
 
   test("one push at a time per machine", async () => {
@@ -2229,7 +2261,27 @@ describe("the drain pass", () => {
     expect(s.scheduler.task("old")?.drained).toBeUndefined();
   });
 
-  test("a manual pass already out is joined, one successor", async () => {
+  test("reopening stops the drain: no pass is started for the second task", async () => {
+    const s = setup();
+    await running(s, true);
+    const second: Task = { id: "old2", spec: spec({}), state: "queued", createdAt: NOW + 1 };
+    await s.store.put(second.id, 0, second);
+    await s.scheduler.refresh(second.id);
+    await tick(s.scheduler);
+    await s.scheduler.onSession("old2", "busy", { deviceId: "a", pane: "%2" }, PR);
+    close(s, "a");
+    later(s, WAIT);
+    await s.scheduler.tick();
+    await s.scheduler.drain();
+    expect(s.fleet.pushes).toHaveLength(1);
+    close(s, "a", null);
+    later(s, 10 * RETRY);
+    await tick(s.scheduler);
+    expect(s.fleet.pushes).toHaveLength(1);
+    expect(s.scheduler.task("old2")?.state).toBe("running");
+  });
+
+  test("a manual pass already out is left alone: no stamp, one successor", async () => {
     const s = setup();
     const old = await running(s, true);
     let release: () => void = () => undefined;
@@ -2245,6 +2297,7 @@ describe("the drain pass", () => {
     close(s, "a");
     later(s, WAIT);
     await s.scheduler.tick();
+    expect(s.scheduler.task(old.id)?.drained).toBeUndefined();
     release();
     ok(await manual);
     await s.scheduler.drain();

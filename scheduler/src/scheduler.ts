@@ -246,8 +246,9 @@ function drainOutcome(code: PassFailure["code"]): DrainRefusal | "held" | null {
     case "not_found":
       return null;
     case "conflict":
-    case "unrecorded":
       return "held";
+    case "unrecorded":
+      return null;
     case "dispatching":
     case "not_running":
     case "needs_input":
@@ -1843,8 +1844,9 @@ export class Scheduler {
    * One drain pass. Write-ahead: the stamp is written before `pass`, so a new term does not repeat the
    * attempt within `drainRetryMs`. A refusal the pass returns before it creates anything goes into the
    * stamp (what clients show as stuck) and is retried after `drainRetryMs` while the machine stays closed;
-   * `conflict` and `unrecorded` can follow the successor's create, so they write `held` and are never
-   * retried for this close, or a second successor would follow.
+   * a `conflict` that follows the successor's create writes `held` and is never retried for this close, or a
+   * second successor would follow. `unrecorded` (the term ended mid-commit) cannot write anything, so the next
+   * term retries it after `drainRetryMs`: the first successor is an orphan, as for any pass cut off there.
    */
   async #drainPass(id: string, deviceId: string, cl: number): Promise<void> {
     const now = this.#now();
@@ -1866,9 +1868,12 @@ export class Scheduler {
       await this.tick();
       return;
     }
-    const outcome = drainOutcome(result.code);
-    if (outcome === null) return;
     this.#log(`audit pass refused task=${quote(id)} trigger=drain outcome=${result.code}`);
+    // A `conflict` before the create (the task moved during the push, a cancel is out) leaves the plain stamp:
+    // looked at again after `drainRetryMs`, like the quota path. Only one that follows the create is held.
+    const created = this.tasks().some((t) => t.spec.succeeds?.task === id) || this.#unsureSuccessors.has(id);
+    const outcome = result.code === "conflict" && !created ? null : drainOutcome(result.code);
+    if (outcome === null) return;
     await this.#update(id, (c) => stampDrainRefusal(c, cl, outcome));
   }
 
