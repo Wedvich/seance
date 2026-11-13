@@ -26,7 +26,14 @@ import type { AuditSink } from "./audit.ts";
 import { createBackend } from "./backend-default.ts";
 import { SpawnFailure, type Continuation, type SessionBackend } from "./backend.ts";
 import type { Config } from "./config.ts";
-import { createHandler, createLocalOps, fitProgress, type HandlerContext, type TaskLaunches } from "./handlers.ts";
+import {
+  createHandler,
+  createLocalOps,
+  fitProgress,
+  type HandlerContext,
+  type MachineAvailability,
+  type TaskLaunches,
+} from "./handlers.ts";
 import { LaunchLedger } from "./launch-ledger.ts";
 import { MetricsStore, type Sample } from "./metrics-store.ts";
 import { EndedTasks, LaunchesClosed } from "./session-events.ts";
@@ -1440,5 +1447,189 @@ describe("a scheduler spawn that continues a failed task", () => {
     expect(reply?.payload).toMatchObject({ ok: false, code: "repo_not_found" });
     expect(calls).toEqual([]);
     expect(ledger.ids()).toEqual([OLD]);
+  });
+});
+
+describe("a closed machine", () => {
+  /** A plain object stub: the injected seam, not mocked package code. */
+  function availabilityStub(initial: number | null = null): MachineAvailability {
+    let closed = initial;
+    return {
+      closed: () => closed,
+      set: (open) => {
+        const was = closed;
+        if (open ? was === null : was !== null) return Promise.resolve({ closed: was, changed: false });
+        closed = open ? null : Date.now();
+        return Promise.resolve({ closed, changed: true });
+      },
+    };
+  }
+  const dispatch = (taskId: string, extra: Record<string, unknown> = {}): Plain =>
+    request("spawn", { repo: "myrepo", mode: "here", taskId, client: SCHEDULER_CLIENT, ...extra });
+
+  function closedCtx(onSpawn: () => void = () => {}) {
+    const ledger = LaunchLedger.memory();
+    const { backend, live } = taskBackend(() => {
+      onSpawn();
+      return Promise.resolve();
+    });
+    const built: HandlerContext = {
+      ...ctx,
+      backend,
+      tasks: new EndedTasks(ledger),
+      availability: availabilityStub(5_000),
+    };
+    return { built, ledger, live };
+  }
+
+  test("a scheduler spawn that routes closed machines is refused machine_closed: nothing ran, nothing recorded, audited", async () => {
+    let spawns = 0;
+    const { built, ledger } = closedCtx(() => (spawns += 1));
+    const reply = await createHandler(built)(dispatch("t-1", { routesClosed: true }), SCHEDULER_ID);
+    expect(reply?.payload).toMatchObject({ ok: false, code: "machine_closed" });
+    expect(spawns).toBe(0);
+    expect(ledger.ids()).toEqual([]);
+    expect(logged()).toContain("audit spawn origin=relay failed code=machine_closed");
+    // The leader's own machine, in process.
+    const local = await createLocalOps(built, "leader").spawn({
+      repo: "myrepo",
+      mode: "here",
+      taskId: "t-2",
+      client: SCHEDULER_CLIENT,
+      routesClosed: true,
+    });
+    expect(local).toMatchObject({ ok: false, code: "machine_closed" });
+    expect(logged()).toContain("audit spawn origin=leader failed code=machine_closed");
+    expect(spawns).toBe(0);
+    expect(ledger.ids()).toEqual([]);
+  });
+
+  test("an older leader's spawn (no routesClosed) is answered internal_error, unrecorded, as the restart gate answers", async () => {
+    const { built, ledger } = closedCtx();
+    const reply = await createHandler(built)(dispatch("t-old"), SCHEDULER_ID);
+    expect(reply?.payload).toMatchObject({ ok: false, code: "internal_error" });
+    expect(ledger.ids()).toEqual([]);
+    expect(logged()).toContain("audit spawn origin=relay failed code=internal_error");
+  });
+
+  test("routesClosed is only ever true", async () => {
+    const { built } = closedCtx();
+    await createHandler(built)(dispatch("t-1", { routesClosed: false }), SCHEDULER_ID);
+    expect(logged()).toContain("audit spawn origin=relay rejected");
+  });
+
+  test("direct spawns still run: an app's, and a local socket's", async () => {
+    let spawns = 0;
+    const { built } = closedCtx(() => (spawns += 1));
+    const app = await createHandler(built)(request("spawn", { repo: "myrepo", mode: "here", client: "pwa" }), APP_ID);
+    expect(app?.payload).toMatchObject({ ok: true });
+    const local = await createHandler(
+      built,
+      "local",
+    )(request("spawn", { repo: "myrepo", mode: "here", client: "cli" }));
+    expect(local?.payload).toMatchObject({ ok: true });
+    expect(spawns).toBe(2);
+  });
+
+  test("a scheduler spawn for a task already running answers task_running, never machine_closed, so it is not routed into a twin", async () => {
+    const { built, live } = closedCtx();
+    // Running here, though this ledger holds no launch of it: the live pane is looked for whatever the ledger says.
+    live.push({ id: "%9", window: "w", repo: "myrepo", path: "/p", taskId: "t-run" });
+    for (const extra of [{ routesClosed: true }, {}]) {
+      const reply = await createHandler(built)(dispatch("t-run", extra), SCHEDULER_ID);
+      expect(reply?.payload).toMatchObject({ ok: false, code: "task_running", id: "%9" });
+    }
+  });
+
+  test("a task the ledger holds as launched still answers task_launched, ahead of the closed gate", async () => {
+    const { built, ledger, live } = closedCtx();
+    // Launched while open, its session since gone; then closed.
+    const open = availabilityStub();
+    expect(
+      (await createHandler({ ...built, availability: open })(dispatch("t-done"), SCHEDULER_ID))?.payload,
+    ).toMatchObject({
+      ok: true,
+    });
+    live.length = 0;
+    const reply = await createHandler(built)(dispatch("t-done", { routesClosed: true }), SCHEDULER_ID);
+    expect(reply?.payload).toMatchObject({ ok: false, code: "task_launched" });
+    expect(ledger.ids()).toEqual(["t-done"]);
+  });
+
+  test("a continuation is refused and records nothing", async () => {
+    const { built, ledger } = closedCtx();
+    const reply = await createHandler(built)(
+      request("spawn", {
+        repo: "myrepo",
+        mode: "continue",
+        continues: "t-before",
+        taskId: "t-next",
+        client: SCHEDULER_CLIENT,
+        routesClosed: true,
+      }),
+      SCHEDULER_ID,
+    );
+    expect(reply?.payload).toMatchObject({ ok: false, code: "machine_closed" });
+    expect(ledger.ids()).toEqual([]);
+  });
+
+  describe("the availability op", () => {
+    const ask = (open: unknown, extra: Record<string, unknown> = {}): Plain =>
+      request("availability", { open, ...extra });
+    const trail = (): string[] => lines.filter((l) => l.startsWith("audit availability"));
+
+    test("an app closes it, a second close keeps the first time, and a reopen opens it", async () => {
+      const availability = availabilityStub();
+      const handle = createHandler({ ...ctx, availability });
+      const first = await handle(ask(false), APP_ID);
+      expect(first?.payload).toMatchObject({ ok: true, closed: expect.any(Number) });
+      const at = availability.closed();
+      const second = await handle(ask(false, { now: true }), APP_ID);
+      expect(second?.payload).toEqual({ ok: true, closed: at });
+      const reopened = await handle(ask(true), APP_ID);
+      expect(reopened?.payload).toEqual({ ok: true, closed: null });
+      expect(logged()).toContain('audit request origin=relay op="availability"');
+      expect(trail()).toEqual([
+        "audit availability origin=relay open=false outcome=closed",
+        "audit availability origin=relay open=false outcome=unchanged",
+        "audit availability origin=relay open=true outcome=reopened",
+      ]);
+    });
+
+    test("anyone but an app is refused: the scheduler, an unsealed caller, the local socket", async () => {
+      const availability = availabilityStub();
+      const handle = createHandler({ ...ctx, availability });
+      expect((await handle(ask(false), SCHEDULER_ID))?.payload).toMatchObject({ ok: false, code: "refused" });
+      expect((await handle(ask(false)))?.payload).toMatchObject({ ok: false, code: "refused" });
+      expect((await createHandler({ ...ctx, availability }, "local")(ask(false), APP_ID))?.payload).toMatchObject({
+        ok: false,
+        code: "refused",
+      });
+      expect(availability.closed()).toBeNull();
+      expect(trail()).toEqual([
+        "audit availability origin=relay open=- outcome=refused",
+        "audit availability origin=relay open=- outcome=refused",
+        "audit availability origin=local open=- outcome=refused",
+      ]);
+    });
+
+    test("the leader's in-process ops carry no availability op", () => {
+      expect(Object.keys(createLocalOps(ctx, "leader"))).not.toContain("availability");
+    });
+
+    test("a malformed payload is invalid_request; no support is unsupported; a failed save is internal_error", async () => {
+      const handle = createHandler({ ...ctx, availability: availabilityStub() });
+      for (const bad of [undefined, "false", 1]) {
+        expect((await handle(ask(bad), APP_ID))?.payload).toMatchObject({ ok: false, code: "invalid_request" });
+      }
+      expect((await handle(ask(false, { now: 1 }), APP_ID))?.payload).toMatchObject({ code: "invalid_request" });
+      expect((await createHandler(ctx)(ask(false), APP_ID))?.payload).toMatchObject({ code: "unsupported" });
+      const broken: MachineAvailability = { closed: () => null, set: () => Promise.reject(new Error("disk full")) };
+      expect((await createHandler({ ...ctx, availability: broken })(ask(false), APP_ID))?.payload).toMatchObject({
+        ok: false,
+        code: "internal_error",
+      });
+      expect(trail().at(-1)).toBe("audit availability origin=relay open=false outcome=internal_error");
+    });
   });
 });

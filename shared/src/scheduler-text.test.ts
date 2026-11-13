@@ -101,6 +101,10 @@ describe("reasonText", () => {
     expect(reasonText({ code: "draining" })).toBe("its daemon is restarting, so it takes no new tasks");
   });
 
+  test("a closed machine says a person closed it", () => {
+    expect(reasonText({ code: "closed" })).toBe("closed to new work");
+  });
+
   test("a continuation says why a candidate is not the one it resumes on", () => {
     expect(reasonText({ code: "continue_elsewhere" })).toBe("the session it continues ran elsewhere");
     expect(reasonText({ code: "continue_unsupported" })).toContain("seanced update");

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  closedAt,
   exclaveAuth,
   exclaveTraitHealth,
   exclaveTraitUnchecked,
@@ -39,6 +40,15 @@ const status: MachineStatus = {
   sess: [1, 0],
   quota: [observation(0), observation(1)],
 };
+
+describe("closedAt", () => {
+  test("reads the newest status's close, kept or live; null without one", () => {
+    const asleep = { connected: false, status: { ...status, cl: NOW_MS - 1_000 } };
+    expect(closedAt(asleep)).toBe(NOW_MS - 1_000);
+    expect(closedAt({ connected: true, status })).toBeNull();
+    expect(closedAt({ connected: true })).toBeNull();
+  });
+});
 
 describe("sanitizeStatus", () => {
   test("a consistent status comes back as itself", () => {

@@ -219,6 +219,7 @@ describe("mcp tools", () => {
     expect(listed).toEqual([
       {
         name: "MacBook Pro",
+        closed: null,
         deviceId: "device-1",
         platform: "darwin",
         connected: true,
