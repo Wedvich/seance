@@ -8567,7 +8567,8 @@ PR (custodian 4), and `docs/custodian.md` keeps the rest of the spec. Decisions 
 - **Rounds are held until custodian 4: `ROUNDS_LIVE = false` (owner decision, 2026-11-13).** No verb exists
   yet, so a round could only look at the session list and then idle to its deadline, re-running every ~25
   minutes on any machine whose `custodian` key was set for reap's defaults (C35). In production the seat is
-  therefore off: no capability bit, no seat, no sampler, no retention, exactly today's behaviour, and the key
+  therefore off: no capability bit, no seat, no sampler, no retention (the sampler and C15's retention, once always
+  on, now run only with a seat, so a held daemon keeps no pane facts), `doctor` quiet, and the key
   moves reap's defaults only (`CUSTODIAN_REAP_DEFAULTS`, unchanged). Custodian 4 flips the constant with `done`
   and `close`. `CustodianSeatOpts.live` is the test seam that turns it on. The cleanup path below still runs
   whenever the seat is not live, so a rollback from custodian 4 closes the round it left.
@@ -8576,7 +8577,7 @@ PR (custodian 4), and `docs/custodian.md` keeps the rest of the spec. Decisions 
   `shared/src/types.ts` with `isEffort`, so the PWA, Raycast and the daemon validate against one list; Claude
   Code falls back to `medium` with user settings off, so a round always passes one), `everyMinutes` (15),
   `closeAfterMinutes` (15), `roundTimeoutMinutes` (10), `maxNudges` (3), `interruptAfterMinutes` (30), each a
-  whole number of 1–1440. Anything else is refused at load, naming the allowed keys (`parseCustodian`,
+  whole number of 1–1440 (`maxNudges`: 0–20, `CUSTODIAN_LIMITS`). Anything else is refused at load, naming the allowed keys (`parseCustodian`,
   `daemon/src/config.ts`). The close, nudge and interrupt fields are read by the verbs of custodian 4 and later.
 - **When a round is due (C14, `roundDue`).** Once a minute (`CHECK_INTERVAL_MS`), over the per-pane facts
   `pane-activity.ts` keeps: some `ours` pane has stood `idle`, or unchanged on screen, for `everyMinutes`; the
@@ -8772,7 +8773,9 @@ PR (custodian 4), and `docs/custodian.md` keeps the rest of the spec. Decisions 
 - **Doctor.** `seanced doctor` has a `custodian` section on a machine whose config carries the key
   (`custodian-checks.ts`): the platform, `bwrap`/`socat` and the sandbox probe, the weaker nested mode's warning,
   and per exclave signed out, trusted, or untrusted with the fix. `fail` when no exclave can host a round. It
-  never creates a round dir.
+  never creates a round dir. While rounds are held (`ROUNDS_LIVE`) it is one `ok` line saying so and probes
+  nothing: the key then only sets reap's defaults, and a machine that carries it for that must not start failing
+  `doctor` (and, on Linux, running a `bwrap` probe) for rounds that cannot start.
 - **Rejected, and why:** a registry role and relay secret as the archivist has (per machine and local: the
   relay has nothing to enforce); writing the trust entry ourselves (races `.claude.json`); counting a round as a session
   slot or skipping it when quota is tight (a full machine is when stuck sessions cost most); and growing
