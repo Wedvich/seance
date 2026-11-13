@@ -7974,6 +7974,45 @@ running sessions finish in place. The drain (moving the work off) is later items
 - **Threat model.** No new power: closing every machine stops the queue, as `pause` does. The op is
   sealed and replay-guarded, answered only for an app, and audited.
 
+### The drain's outside pass — built (drain 2/3)
+
+A closed machine's work is passed off by the leader (docs/drain.md is the spec; this is what item 2
+decided). Capability `CAPABILITIES.drainPass`, advertised by every daemon since any may lead; a client
+shows counts, `--wait` and the new texts only under a verified leader that advertises it, and otherwise
+keeps item 1's behaviour. `CAPABILITIES.drainAsk` is defined for item 3 and advertised by nobody.
+
+- **One pass per task, through the existing pass.** The leader's pass loop finds a task `running` or
+  `needs-input` on a machine whose status carries `cl`, and calls `Scheduler.pass(id, "drain")`: the
+  push through `pushTaskBranch`, the successor's create, the `pass-close`, all as a manual pass does,
+  audited `pass … trigger=drain` under origin `leader`. The successor's `succeeds.trigger` is `"drain"`
+  and it keeps the predecessor's `steer` (`successorSpec`: a drain is not the task's own judgement call,
+  unlike a quota pass). `trigger: "drain"` is the one trigger that lifts the `needs_input` refusal;
+  manual passes still refuse a `needs-input` task. Not gated on placement: the successor is routed by
+  the ordinary pass, never onto the closed machine (the `closed` filter).
+- **Grace.** The leader waits `drainSelfPassMs` (10 minutes) after `cl` on every machine, its own
+  included, through the one predicate `drainWaitMs`: a reopen inside it stops the drain before any
+  session is touched. The texts a client shows say "10 minutes".
+- **One at a time per machine, detached.** `#drainPasses` holds the in-flight pass per machine; the
+  scheduler pass never awaits a push.
+- **`Task.drained { at, tried, refused?, held? }`** is the write-ahead stamp, written before the push:
+  `at` is the `cl` it was for, so a later close of the same machine is a new drain. A stamp whose
+  pass did not finish is retried after `drainRetryMs` (5 minutes). `conflict` and `unrecorded` write
+  `held` and are never retried for the same `cl`; any other refusal is `refused: <code>`, shown by
+  clients and retried after the same delay. A finished task drops the stamp (`advance`).
+- **Progress is `drainView`** (`shared/src/drain.ts`), pure, the one rule the PWA, MCP `list_machines`
+  and `seanced close --wait` share. It reads a queue reply's tasks and the machine's `sessions` and
+  returns `moving`, `moved`, `stuck` (`here`, `untasked`, `unplaced`, `refused`) and `empty`. A pane
+  whose task the (capped) queue reply does not list counts as moving; `--wait` asks for it by id.
+- **Surfaces.** The PWA's close sheet counts the tasks that will be passed and lists what cannot move
+  (runs in the clone, not a task); a closed machine's row shows "Draining: moving N · M stuck" and
+  re-reads its sessions on `queue-changed`, when the Machines screen opens and when its status's session
+  counts change. `seanced close [--wait]` exits 0 when empty, 2 when only stuck work is left, 1 on a
+  failure, reopen or offline; it uses the close reply's `closed` as the drain's `cl` since status lags.
+  MCP `list_machines` adds `drain` to a closed machine, reading this machine's own sessions through
+  `local.request` (the broker refuses `self_target`).
+- **Threat model.** No new frame. The pass is the manual pass's, so its invariants (CLAUDE.md) hold;
+  the stamp is written only by the leader through the one task sealer, never from a frame.
+
 ## Reap (`seanced reap`) — designed 2026-10-09
 
 Remote sessions leave residue: linked worktrees, the branches they were on,
@@ -9306,7 +9345,7 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   machine to new scheduled work or reopens it. Gated like the PWA: a close needs the target to advertise
   `close` and the verified leader `drain`, a reopen only `close`. It goes over the relay as app-role,
   even for this machine; a keyless server (the broker) refuses and names the PWA, since `availability`
-  is not a brokered op. `list_machines` gains `closed`, an ISO time or null.
+  is not a brokered op. `list_machines` gains `closed`, an ISO time or null, and, under a leader advertising `drainPass`, `drain` on a closed machine (`moving`, `waitingOnYou`, `moved`, `stuck`, `empty`; DESIGN.md, "The drain's outside pass"); this machine's own sessions come through the local socket, since the broker refuses a request aimed at its own daemon.
 - **`pass_task { taskId }`** (built 2026-11-12; Scheduler, "Passing to a successor").
   Passes a running task to a successor: its machine's daemon pushes the branch and the session is
   ended, as the PWA's "Pass to successor" does. Gated on `leaderAdvertises(lease,

@@ -136,7 +136,7 @@ schema of record; where a sketch here disagrees with it, `types.ts` wins. What M
 
 ## Daemon changes
 
-What M1–M3 built is DESIGN.md's: _Daemon_ (exclaves, telemetry), Local op socket ("Session
+What M1–M3 built (and the drain's outside pass, "The drain's outside pass" under "Closing a machine") is DESIGN.md's: _Daemon_ (exclaves, telemetry), Local op socket ("Session
 events"), and _Scheduler_ ("The leader", "The queue store", "Branch state"). M4 adds:
 
 - `daemon/src/usage-refresh.ts` (not `shared/src/quota.ts`, the fleet fold readers share): runs

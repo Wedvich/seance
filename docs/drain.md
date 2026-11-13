@@ -259,8 +259,8 @@ Each PR lands on its own; ship without a soak in between.
 1. **Close (built).** Daemon state and `availability` op, `cl` in status, the `closed` filter and
    `machine_closed` gate, PWA switch and badge, CLI `close`/`open`, MCP. Useful alone: no new work
    lands, and running work finishes in place.
-2. **Drain, step B and C.** Leader outside pass with `trigger: "drain"`, `Task.drained`,
-   `drainView`, the confirm sheet's list, `--wait`.
+2. **Drain, step B and C (built).** Leader outside pass with `trigger: "drain"`, `Task.drained`,
+   `drainView`, the confirm sheet's list, `--wait`; recorded in DESIGN.md, "The drain's outside pass".
 3. **Drain, step A.** `DRAIN_PROMPT`, the turn-end typing and the interrupt, the `session-pass`
    drain mark, the `needs-input` Esc, the audit origin. Spike first, on a live session: typed text
    plus Enter at a `turnEnded` idle is taken as a new turn; the draft-clearing sequence never exits;

@@ -1216,14 +1216,14 @@ describe("passing a running task to a successor", () => {
   });
 
   test("a drain's successor says its machine closed", () => {
-    const placedAt = { deviceId: "d", exclave: "main", clone: "seance" };
-    const old = task("old", { spec: { repo: ORIGIN, mode: "worktree", title: "Old work" }, assignment: placedAt });
+    const placed = { deviceId: "d", exclave: "main", clone: "seance" };
+    const old = task("old", { spec: { repo: ORIGIN, mode: "worktree", title: "Old work" }, assignment: placed });
     const next = task("next", {
       state: "blocked",
       spec: {
         repo: ORIGIN,
         mode: "worktree",
-        succeeds: { task: "old", account: "acct", at: placedAt, trigger: "drain", since: 5 },
+        succeeds: { task: "old", account: "acct", at: placed, trigger: "drain", since: 5 },
       },
     });
     expect(rowOf([old, next], "next", CAN)?.carriesOn).toBe("Carries on Old work after its machine closed");
