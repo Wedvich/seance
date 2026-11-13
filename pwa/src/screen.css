@@ -3122,6 +3122,11 @@
   position: fixed;
   inset: auto;
   margin: 0;
+  /* Layout lives here, not under :popover-open: the close transition keeps
+     `display: flex` for its length, and anything set only while open snaps
+     back on the first closing frame. */
+  flex-direction: column;
+  gap: 2px;
   min-width: 236px;
   padding: 6px;
   border: 1px solid var(--line);
@@ -3151,8 +3156,6 @@
 
 .menu:popover-open {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
   opacity: 1;
   transform: none;
 }
