@@ -2021,3 +2021,233 @@ describe("the automatic quota trigger", () => {
     });
   });
 });
+
+describe("the drain pass", () => {
+  const WAIT = DEFAULT_CONFIG.drainSelfPassMs;
+  const RETRY = DEFAULT_CONFIG.drainRetryMs;
+  const CL = NOW;
+
+  const twoMachines = (): ReturnType<typeof machine>[] => [
+    machine("a", { capabilities: CAPABLE }),
+    machine("b", { capabilities: CAPABLE }),
+  ];
+
+  /** `deviceId` reads closed since `cl`, or open again when `cl` is null. */
+  function close(s: Setup, deviceId: string, cl: number | null = CL): void {
+    s.fleet.fleet = s.fleet.fleet.map((m) =>
+      m.deviceId === deviceId ? { ...m, status: status(cl === null ? {} : { cl }) } : m,
+    );
+  }
+
+  function later(s: Setup, ms: number): void {
+    s.clock.now += ms;
+    s.fleet.beat(s.clock.now);
+  }
+
+  async function until(condition: () => boolean): Promise<void> {
+    for (let i = 0; i < 2_000 && !condition(); i += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- polling a condition
+      await Bun.sleep(1);
+    }
+    if (!condition()) throw new Error("condition never held");
+  }
+
+  test("a running task is passed once the wait is over, not before", async () => {
+    const s = setup();
+    await running(s, true);
+    close(s, "a");
+    await tick(s.scheduler);
+    expect(s.fleet.pushes).toEqual([]);
+
+    later(s, WAIT);
+    await tick(s.scheduler);
+    const old = s.scheduler.task("old");
+    expect(old).toMatchObject({ state: "superseded" });
+    const successor = s.scheduler.task(old?.successor ?? "");
+    expect(successor?.spec.succeeds).toMatchObject({ task: "old", trigger: "drain" });
+    expect(successor).toMatchObject({ state: "ready" });
+    await tick(s.scheduler);
+    expect(
+      s.scheduler.lastDecision(successor?.id ?? "")?.candidates.find((c) => c.deviceId === "a")?.rejected,
+    ).toContainEqual({ code: "closed" });
+    expect(s.lines).toContain(`audit pass task="old" successor="${successor?.id}" trigger=drain`);
+    expect(s.fleet.despawns).toHaveLength(1);
+  });
+
+  test("the successor is placed on another machine when one can take it", async () => {
+    const s = setup(twoMachines());
+    await running(s, true);
+    close(s, "a");
+    later(s, WAIT);
+    await tick(s.scheduler);
+    const successor = s.scheduler.task(s.scheduler.task("old")?.successor ?? "");
+    expect(successor).toMatchObject({ state: "running", assignment: { deviceId: "b" } });
+  });
+
+  test.each(["auto", "checkpoint", "steer"] as const)("a %s task is passed", async (autonomy) => {
+    const s = setup();
+    await running(s, true, { autonomy });
+    close(s, "a");
+    later(s, WAIT);
+    await tick(s.scheduler);
+    expect(s.scheduler.task("old")?.state).toBe("superseded");
+  });
+
+  test("a steer task's successor keeps steer; a manual pass still makes it checkpoint", async () => {
+    const drained = setup();
+    await running(drained, true, { autonomy: "steer" });
+    close(drained, "a");
+    later(drained, WAIT);
+    await tick(drained.scheduler);
+    const kept = drained.scheduler.task(drained.scheduler.task("old")?.successor ?? "");
+    expect(kept?.spec.autonomy).toBe("steer");
+
+    const manual = setup();
+    const old = await running(manual, true, { autonomy: "steer" });
+    const result = ok(await manual.scheduler.pass(old.id));
+    expect(manual.scheduler.task(result.successorId)?.spec.autonomy).toBe("checkpoint");
+  });
+
+  test("a needs-input task is passed by the drain, and still refused a manual pass", async () => {
+    const s = setup();
+    const old = await running(s, true);
+    await s.scheduler.onSession(old.id, "needs-input", { deviceId: "a", pane: "%1" });
+    expect(await s.scheduler.pass(old.id)).toEqual({ ok: false, code: "needs_input" });
+    close(s, "a");
+    later(s, WAIT);
+    await tick(s.scheduler);
+    expect(s.scheduler.task("old")?.state).toBe("superseded");
+    expect(s.lines.some((l) => l.endsWith("trigger=drain"))).toBe(true);
+  });
+
+  test("reopening inside the wait means nothing is ever passed", async () => {
+    const s = setup();
+    await running(s, true);
+    close(s, "a");
+    later(s, WAIT - 1_000);
+    await tick(s.scheduler);
+    close(s, "a", null);
+    later(s, 10 * WAIT);
+    await tick(s.scheduler);
+    expect(s.fleet.pushes).toEqual([]);
+    expect(s.scheduler.task("old")?.state).toBe("running");
+  });
+
+  test("a task run in place is left alone", async () => {
+    const s = setup();
+    await running(s, false, { mode: "here" });
+    close(s, "a");
+    later(s, WAIT);
+    await tick(s.scheduler);
+    expect(s.fleet.pushes).toEqual([]);
+  });
+
+  test("a dirty worktree stamps the refusal, is not retried inside the retry wait, is after it, and survives a new term", async () => {
+    const s = setup();
+    await running(s, true);
+    s.fleet.pushReply = () => ({ ok: false, code: "dirty_worktree", message: "no" });
+    close(s, "a");
+    later(s, WAIT);
+    await tick(s.scheduler);
+    expect(s.fleet.pushes).toHaveLength(1);
+    expect(s.scheduler.task("old")?.drained).toEqual({ at: CL, tried: s.clock.now, refused: "dirty_worktree" });
+    expect(s.lines).toContain(`audit pass refused task="old" trigger=drain outcome=dirty_worktree`);
+
+    later(s, RETRY - 1_000);
+    await tick(s.scheduler);
+    expect(s.fleet.pushes).toHaveLength(1);
+    const next = s.another();
+    await next.load();
+    await tick(next);
+    expect(s.fleet.pushes).toHaveLength(1);
+
+    later(s, 2_000);
+    await tick(next);
+    expect(s.fleet.pushes).toHaveLength(2);
+  });
+
+  test("a conflict after the create is held: never retried for that close, one successor", async () => {
+    const s = setup();
+    await running(s, true);
+    const state = { moved: false };
+    s.create = async () => {
+      // The task is cancelled under the pass between the create and its commit.
+      if (!state.moved) {
+        state.moved = true;
+        await s.scheduler.cancel("old");
+      }
+      return { ok: true };
+    };
+    close(s, "a");
+    later(s, WAIT);
+    await tick(s.scheduler);
+    later(s, 10 * RETRY);
+    await tick(s.scheduler);
+    expect(s.creates.length).toBeLessThanOrEqual(1);
+    expect(s.fleet.pushes.length).toBeLessThanOrEqual(1);
+  });
+
+  test("one push at a time per machine", async () => {
+    const s = setup();
+    await running(s, true);
+    const second: Task = { id: "old2", spec: spec({}), state: "queued", createdAt: NOW + 1 };
+    await s.store.put(second.id, 0, second);
+    await s.scheduler.refresh(second.id);
+    await tick(s.scheduler);
+    await s.scheduler.onSession("old2", "busy", { deviceId: "a", pane: "%2" }, PR);
+    expect(s.scheduler.task("old2")?.state).toBe("running");
+
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const answer = s.fleet.pushReply;
+    s.fleet.pushReply = async (request) => {
+      await held;
+      return answer(request);
+    };
+    close(s, "a");
+    later(s, WAIT);
+    await s.scheduler.tick();
+    await until(() => s.fleet.pushes.length === 1);
+    await s.scheduler.tick();
+    expect(s.fleet.pushes).toHaveLength(1);
+    release();
+    await s.scheduler.drain();
+    // The first pass's own tick still saw the machine taken; the next tick starts the second.
+    await tick(s.scheduler);
+    expect(s.fleet.pushes).toHaveLength(2);
+  });
+
+  test("the stamp is dropped when the task settles", async () => {
+    const s = setup();
+    await running(s, true);
+    close(s, "a");
+    later(s, WAIT);
+    await tick(s.scheduler);
+    expect(s.scheduler.task("old")).toMatchObject({ state: "superseded" });
+    expect(s.scheduler.task("old")?.drained).toBeUndefined();
+  });
+
+  test("a manual pass already out is joined, one successor", async () => {
+    const s = setup();
+    const old = await running(s, true);
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const answer = s.fleet.pushReply;
+    s.fleet.pushReply = async (request) => {
+      await held;
+      return answer(request);
+    };
+    const manual = s.scheduler.pass(old.id);
+    close(s, "a");
+    later(s, WAIT);
+    await s.scheduler.tick();
+    release();
+    ok(await manual);
+    await s.scheduler.drain();
+    expect(s.creates).toHaveLength(1);
+  });
+});

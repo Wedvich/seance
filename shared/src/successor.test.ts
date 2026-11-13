@@ -193,6 +193,14 @@ describe("successorSpec", () => {
     expect(of({ autonomy: "auto", plan: true })).toMatchObject({ autonomy: "auto", plan: true });
     expect(of({ autonomy: "checkpoint" })).toMatchObject({ autonomy: "checkpoint" });
   });
+
+  test("a drain keeps a steered task's autonomy and plan: nobody approved the plan it was at", () => {
+    const of = (spec: Partial<TaskSpec>, trigger: "drain" | "quota"): TaskSpec =>
+      successorSpec({ ...running({}, spec), assignment }, "org:a", trigger);
+    expect(of({ autonomy: "steer", plan: true }, "drain")).toMatchObject({ autonomy: "steer", plan: true });
+    expect(of({ plan: true }, "drain")).toMatchObject({ plan: true });
+    expect(of({ autonomy: "steer", plan: true }, "quota")).toMatchObject({ autonomy: "checkpoint" });
+  });
 });
 
 describe("successorPrompt", () => {
@@ -410,6 +418,7 @@ describe("a successor's record", () => {
       // `since` is a quota pass's alone, and a time.
       { ...successorTask().spec, succeeds: { ...succeeds, since: 5 } },
       { ...successorTask().spec, succeeds: { ...succeeds, trigger: "session", since: 5 } },
+      { ...successorTask().spec, succeeds: { ...succeeds, trigger: "drain", since: 5 } },
       { ...successorTask().spec, succeeds: { ...succeeds, trigger: "quota", since: -1 } },
       { ...successorTask().spec, succeeds: { ...succeeds, trigger: "quota", since: Number.NaN } },
       { ...successorTask().spec, succeeds: { ...succeeds, trigger: "quota", since: "5" } },
@@ -418,6 +427,11 @@ describe("a successor's record", () => {
     ]) {
       expect(parseTaskSpec(spec)).toBeNull();
     }
+  });
+
+  test("a drain pass parses and reads back as it was", () => {
+    const spec = successorTask({ succeeds: { ...succeeds, trigger: "drain" } }).spec;
+    expect(parseTaskSpec(spec)).toEqual(spec);
   });
 
   test("a quota pass round-trips with or without its since, and nothing is invented on a reseal", () => {

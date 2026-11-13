@@ -9,6 +9,7 @@ import {
   parseAccountRecord,
   parseFleetQuotaRecord,
   parseContinuedBy,
+  parseDrainedStamp,
   parsePrAlertStamp,
   parseQuotaExhaustedStamp,
   parsePushAlert,
@@ -1050,6 +1051,31 @@ describe("tasks and their records", () => {
     ]) {
       expect(parseTask({ ...stamped, quotaExhausted: bad })).toEqual(bare);
       expect(parseQuotaExhaustedStamp(bad)).toBeNull();
+    }
+  });
+
+  test("a task's drained stamp survives a parse, and a malformed one is dropped while the task stays readable", () => {
+    const stamp = { at: 9, tried: 12 };
+    const stamped: Task = { ...task, state: "running", drained: stamp };
+    expect(parseTask(stamped)).toEqual(stamped);
+    const refused: Task = { ...stamped, drained: { ...stamp, refused: "dirty_worktree" } };
+    const held: Task = { ...stamped, drained: { ...stamp, held: true } };
+    expect(parseTask(refused)).toEqual(refused);
+    expect(parseTask(held)).toEqual(held);
+    const { drained: _stamp, ...bare } = stamped;
+    for (const bad of [
+      { ...stamp, extra: 1 },
+      { ...stamp, refused: "nope" },
+      { ...stamp, held: false },
+      { ...stamp, at: 0 },
+      { ...stamp, tried: -1 },
+      { ...stamp, tried: Number.NaN },
+      { at: 9 },
+      "9",
+      null,
+    ]) {
+      expect(parseTask({ ...stamped, drained: bad })).toEqual(bare);
+      expect(parseDrainedStamp(bad)).toBeNull();
     }
   });
 

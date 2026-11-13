@@ -17,6 +17,7 @@ import {
   type BranchState,
   type FleetQuotaEntry,
   type IdleRelease,
+  type DrainRefusal,
   type IdleTaskRef,
   type PrAlertStamp,
   type PassResponse,
@@ -29,6 +30,7 @@ import {
   type SpillStamp,
   type SuccessorTrigger,
   type Target,
+  closedAt,
 } from "@seance/shared";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -63,6 +65,7 @@ import {
 } from "./ports.ts";
 import { codeUnitOrder } from "./order.ts";
 import { prunable, unprunable } from "./prune.ts";
+import { drainDue, stampDrain, stampDrainRefusal } from "./drain-trigger.ts";
 import { quotaDue, spillAlerted, stampQuota } from "./quota-trigger.ts";
 import { accountOfPlacement, accountResetAt, exhaustion, route, type Decision, type Exhaustion } from "./route.ts";
 import {
@@ -233,6 +236,40 @@ export type PassResult =
 type PassFailure = Extract<PassResult, { readonly ok: false }>;
 
 /**
+ * What a drain pass's refusal writes into the stamp: null for a settled race (`finished`, `not_found`),
+ * `held` for the two answers that can follow the successor's create, else the refusal itself. A `switch`
+ * with no default, so a new `PassResult` code fails the build here.
+ */
+function drainOutcome(code: PassFailure["code"]): DrainRefusal | "held" | null {
+  switch (code) {
+    case "finished":
+    case "not_found":
+      return null;
+    case "conflict":
+    case "unrecorded":
+      return "held";
+    case "dispatching":
+    case "not_running":
+    case "needs_input":
+    case "here":
+    case "offline":
+    case "successor_unsupported":
+    case "account_unknown":
+    case "pr_unreadable":
+    case "pr_not_open":
+    case "branch_mismatch":
+    case "dirty_worktree":
+    case "detached_head":
+    case "default_branch":
+    case "push_rejected":
+    case "push_failed":
+    case "not_launched":
+    case "pass_failed":
+      return code;
+  }
+}
+
+/**
  * What a session's own pass (`session-pass`) brings: the machine that sent it (the leader acts only for the
  * task's own), the branch its daemon pushed and the commit it holds (so the push is not asked again), and
  * what the session wrote for its successor, which is prompt text: never logged.
@@ -364,6 +401,8 @@ export class Scheduler {
   readonly #unsureSuccessors = new Map<string, string>();
   /** Task id → its automatic quota pass (`#autoPass`), detached from the tick that began it: `drain` waits for it. */
   readonly #autoPasses = new Map<string, Promise<void>>();
+  /** One drain pass at a time per closed machine (by deviceId), detached from the tick: it waits on a push. */
+  readonly #drainPasses = new Map<string, { readonly taskId: string; readonly run: Promise<void> }>();
   /** What each detached automatic pass's successor is about to take (`#slotKeys`), until the pass is over. */
   readonly #autoTargets = new Map<string, readonly string[]>();
   /** Tasks whose session's own refused pass was alerted this term (`pass-refused`): once each, in memory, since a refusal is rare. */
@@ -825,6 +864,7 @@ export class Scheduler {
       const out = [
         ...this.#dispatches.values(),
         ...this.#autoPasses.values(),
+        ...[...this.#drainPasses.values()].map((p) => p.run),
         ...this.#checks.values(),
         ...(this.#ticking === null ? [] : [this.#ticking]),
       ];
@@ -1320,7 +1360,9 @@ export class Scheduler {
     if (task.state === "reserved") return { ok: false, code: "dispatching" };
     // The session's own pass is let through a `needs-input` task: its caller is waiting on nobody, and the
     // leader's view can lag the answer by an event, which would silently drop a pass already pushed.
-    if (task.state === "needs-input" && session === undefined) return { ok: false, code: "needs_input" };
+    // The drain is the person's own act on the machine they closed (N4): it passes a task waiting on them too.
+    const waits = session !== undefined || trigger === "drain";
+    if (task.state === "needs-input" && !waits) return { ok: false, code: "needs_input" };
     const { assignment } = task;
     if ((task.state !== "running" && task.state !== "needs-input") || assignment === undefined) {
       return { ok: false, code: "not_running" };
@@ -1385,7 +1427,7 @@ export class Scheduler {
     if (current?.successor !== undefined) return this.#passed(current, current.successor);
     if (
       current === undefined ||
-      (current.state !== "running" && !(session !== undefined && current.state === "needs-input")) ||
+      (current.state !== "running" && !(waits && current.state === "needs-input")) ||
       at === undefined ||
       at.deviceId !== assignment.deviceId ||
       this.#stopping.has(taskId)
@@ -1417,7 +1459,7 @@ export class Scheduler {
     let committed: Task | null = null;
     try {
       committed = await this.#update(taskId, (c) =>
-        (c.state === "running" || (session !== undefined && c.state === "needs-input")) &&
+        (c.state === "running" || (waits && c.state === "needs-input")) &&
         c.successor === undefined &&
         c.assignment?.deviceId === assignment.deviceId &&
         !this.#stopping.has(taskId)
@@ -1642,6 +1684,7 @@ export class Scheduler {
     await this.#alertInput();
     await this.#escalate();
     await this.#closePasses();
+    await this.#triggerDrain();
     await this.#triggerQuota();
     // A check ticks again once its answer is settled, so a predecessor it settled releases or fails its dependents then.
     await this.#admit();
@@ -1713,6 +1756,7 @@ export class Scheduler {
       if (task.state !== "running") continue;
       if (this.#passInFlight.has(task.id) || this.#passing.has(task.id) || this.#stopping.has(task.id)) continue;
       if (this.#autoPasses.has(task.id)) continue;
+      if ([...this.#drainPasses.values()].some((p) => p.taskId === task.id)) continue;
       const ex = exhaustion(task, machines, now, config, fleetQuota);
       const due = quotaDue(task, ex, now, config);
       if (ex === null || due === null) continue;
@@ -1760,6 +1804,72 @@ export class Scheduler {
         this.#alertQuota(task.id, ex);
       }),
     );
+  }
+
+  /**
+   * The drain's outside pass (docs/drain.md §4 step B; DESIGN.md, "Closing a machine"): each machine whose
+   * status carries `cl` has the tasks placed on it passed to a successor, one at a time, once `drainWaitMs`
+   * has gone by (`drainDue`). Not gated on placement: the successor waits `ready` when no machine can take
+   * it, which is what routing's `closed` filter says. Detached (`#drainPasses`), like the quota trigger's
+   * passes. Named so it never reads as `drain()`, the test quiescence helper.
+   */
+  async #triggerDrain(): Promise<void> {
+    const now = this.#now();
+    const config = this.#config;
+    const running = this.tasks()
+      .filter((t) => t.state === "running" || t.state === "needs-input")
+      .toSorted((a, b) => a.createdAt - b.createdAt || codeUnitOrder(a.id, b.id));
+    for (const machine of this.#fleet.machines()) {
+      const cl = closedAt(machine);
+      if (cl === null || this.#drainPasses.has(machine.deviceId)) continue;
+      const task = running.find(
+        (t) =>
+          drainDue(t, machine, now, config) &&
+          !this.#passInFlight.has(t.id) &&
+          !this.#passing.has(t.id) &&
+          !this.#stopping.has(t.id) &&
+          !this.#autoPasses.has(t.id),
+      );
+      if (task === undefined) continue;
+      const { deviceId } = machine;
+      const run = this.#drainPass(task.id, deviceId, cl)
+        .catch(this.#onError)
+        .finally(() => this.#drainPasses.delete(deviceId));
+      this.#drainPasses.set(deviceId, { taskId: task.id, run });
+    }
+  }
+
+  /**
+   * One drain pass. Write-ahead: the stamp is written before `pass`, so a new term does not repeat the
+   * attempt within `drainRetryMs`. A refusal the pass returns before it creates anything goes into the
+   * stamp (what clients show as stuck) and is retried after `drainRetryMs` while the machine stays closed;
+   * `conflict` and `unrecorded` can follow the successor's create, so they write `held` and are never
+   * retried for this close, or a second successor would follow.
+   */
+  async #drainPass(id: string, deviceId: string, cl: number): Promise<void> {
+    const now = this.#now();
+    const config = this.#config;
+    const written = await this.#update(id, (c) => {
+      const machine = this.#fleet.machines().find((m) => m.deviceId === deviceId);
+      return machine === undefined ? null : stampDrain(c, machine, now, config);
+    });
+    if (written?.drained?.tried !== now) return;
+    let result: PassResult;
+    try {
+      result = await this.pass(id, "drain");
+    } catch (err) {
+      this.#onError(err);
+      return;
+    }
+    if (result.ok) {
+      // The successor waits on the old task's `superseded`, which the pass has written: place it now, not in 30 s.
+      await this.tick();
+      return;
+    }
+    const outcome = drainOutcome(result.code);
+    if (outcome === null) return;
+    this.#log(`audit pass refused task=${quote(id)} trigger=drain outcome=${result.code}`);
+    await this.#update(id, (c) => stampDrainRefusal(c, cl, outcome));
   }
 
   #alertQuota(taskId: string, ex: Exhaustion, reason?: QuotaAlertReason, outcome?: string): void {

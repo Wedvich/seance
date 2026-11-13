@@ -109,6 +109,7 @@ export function advance(task: Task, to: TaskState, fields: TaskFields = {}): Tas
     remoteSession,
     prAlert,
     quotaExhausted,
+    drained,
     continuedBy,
     successor,
     ...rest
@@ -126,6 +127,8 @@ export function advance(task: Task, to: TaskState, fields: TaskFields = {}): Tas
     ...(prAlert !== undefined && TASK_PHASES[to] !== "finished" ? { prAlert } : {}),
     // The per-window dedupe of the automatic quota trigger: only a running task is looked at, so a finished one keeps none.
     ...(quotaExhausted !== undefined && TASK_PHASES[to] !== "finished" ? { quotaExhausted } : {}),
+    // The drain pass's write-ahead stamp: only a task on a closed machine is looked at, so a finished one keeps none.
+    ...(drained !== undefined && TASK_PHASES[to] !== "finished" ? { drained } : {}),
     // Only an `awaiting-merge` task is offered from, and a finished record stays lean.
     ...(continuedBy !== undefined && TASK_PHASES[to] !== "finished" ? { continuedBy } : {}),
     // The link of a pass whose close has not landed: any other way out (a merge, a report, a cancel) wins

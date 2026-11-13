@@ -70,7 +70,8 @@ export function passOffer(task: Task, machines: readonly Machine[], leaderSucces
  *
  * A `steer` task's successor runs at `checkpoint`, without plan mode: the plan was approved. `auto`
  * and `checkpoint` stay as they are, so an unattended failover does not stop at its first choice.
- * The caller stamps `client`.
+ * The exception is a drain: it passes `steer` tasks unasked, often at the plan-approval prompt, so
+ * the successor keeps `steer` and plans again for approval. The caller stamps `client`.
  */
 export function successorSpec(
   task: Task & { readonly assignment: Assignment },
@@ -80,7 +81,7 @@ export function successorSpec(
   since?: number,
 ): TaskSpec {
   const { spec, assignment } = task;
-  const steered = autonomyOf(spec) === "steer";
+  const steered = autonomyOf(spec) === "steer" && trigger !== "drain";
   return {
     repo: spec.repo,
     mode: "worktree",

@@ -20,5 +20,6 @@ export * from "./pr-blocked.ts";
 export * from "./slot-timer.ts";
 export * from "./traits.ts";
 export * from "./successor.ts";
+export * from "./drain.ts";
 export * from "./amend.ts";
 export * from "./amend-client.ts";

@@ -154,6 +154,18 @@ export interface SchedulerConfig {
    * it the retry would fire on the next tick, into the same failure.
    */
   readonly quotaPassRetryMs: number;
+  /**
+   * How long after a machine's `cl` the leader leaves its sessions alone before it passes their tasks off
+   * (docs/drain.md `DRAIN_SELF_PASS_MS`): the window in which a reopen stops the drain before any session is
+   * ended, and in which a session may pass itself. `drainWaitMs` is the one predicate that reads it.
+   */
+  readonly drainSelfPassMs: number;
+  /**
+   * How long after a drain pass attempt on a task the leader tries it again while the machine stays closed.
+   * A refusal is often a tree its session has yet to commit; without the wait the retry would fire on the
+   * next tick, into the same refusal, and one push per tick is the cost it bounds.
+   */
+  readonly drainRetryMs: number;
 }
 
 export const DEFAULT_CONFIG: SchedulerConfig = {
@@ -200,4 +212,6 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
   pruneAt: 96,
   // docs/scheduler.md, Settled defaults 22.
   quotaPassRetryMs: 5 * 60_000,
+  drainSelfPassMs: 10 * 60_000,
+  drainRetryMs: 5 * 60_000,
 };
