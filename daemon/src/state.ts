@@ -9,6 +9,10 @@ import {
   type RepoEntry,
   type UpdateReport,
 } from "@seance/shared";
+import { ROUND_TMP } from "./custodian-launch.ts";
+import type { SeatRecord } from "./custodian-seat.ts";
+import { PANE_ID } from "./despawn.ts";
+import { DEFAULT_EXCLAVE, EXCLAVE_NAME } from "./exclaves.ts";
 import { log } from "./log.ts";
 import { runtimePath, statePath } from "./paths.ts";
 
@@ -46,6 +50,11 @@ export interface State {
    * restarts (updates, config reloads) neither repeat a run nor keep deferring one.
    */
   readonly lastReapAt?: number;
+  /**
+   * The custodian seat's last round end and its running round (`SeatRecord`), so a restart or reload adopts the
+   * round rather than starting a second. Read only through `custodianSeatOf`; an older daemon ignores the field.
+   */
+  readonly custodian?: SeatRecord;
 }
 
 async function mintIdentity(): Promise<{ readonly seed: string; readonly identity: Identity }> {
@@ -111,6 +120,33 @@ export function closedOf(state: State): number | null {
   if (typeof closed !== "object" || closed === null) return null;
   const at: unknown = (closed as { at?: unknown }).at;
   return typeof at === "number" && Number.isFinite(at) && at > 0 ? at : null;
+}
+
+const finiteMs = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
+
+/**
+ * The seat's record, field by field: anything unreadable is dropped, so a damaged record reads as `{}` and the
+ * next pass's stray sweep still closes an orphan round pane. Every value that reaches tmux or `rm` is held to its
+ * own pattern here, since the file is the daemon's but is not a wire frame and need not be trusted whole.
+ */
+export function custodianSeatOf(state: State): SeatRecord {
+  const raw: unknown = state.custodian;
+  if (typeof raw !== "object" || raw === null) return {};
+  const { lastEndedAt, round } = raw as { lastEndedAt?: unknown; round?: unknown };
+  const ended = finiteMs(lastEndedAt) ? { lastEndedAt } : {};
+  if (typeof round !== "object" || round === null) return ended;
+  const { pane, startedAt, tmpDir, exclave } = round as Record<string, unknown>;
+  if (
+    !(pane === null || (typeof pane === "string" && PANE_ID.test(pane))) ||
+    !finiteMs(startedAt) ||
+    typeof tmpDir !== "string" ||
+    !ROUND_TMP.test(tmpDir) ||
+    typeof exclave !== "string" ||
+    !(exclave === DEFAULT_EXCLAVE || EXCLAVE_NAME.test(exclave))
+  ) {
+    return ended;
+  }
+  return { ...ended, round: { pane, startedAt, tmpDir, exclave } };
 }
 
 /** State without its close, for a reopen. */

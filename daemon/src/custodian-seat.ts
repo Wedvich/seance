@@ -1,0 +1,373 @@
+import { quotaPressure, quotaWindows, windowAppliesTo, type QuotaReading } from "@seance/shared";
+import type { Config, CustodianConfig } from "./config.ts";
+import { exclaveOf, type Exclave, type ExclaveScan } from "./exclaves.ts";
+import type { TrackedActivity } from "./pane-activity.ts";
+
+/**
+ * The custodian seat (docs/custodian.md C1–C4, C12–C16; DESIGN.md, "The custodian's seat"): once a minute, with no
+ * model call, decide whether a round is due, pick the exclave to run it, start it, close it at its deadline and
+ * audit each step. Logic over injected deps, so it runs without tmux; `run-capabilities.ts` wires the real ones.
+ * Nothing here reads a pane's text, and nothing it logs or audits holds any.
+ */
+
+/**
+ * Rounds are held until custodian PR 4. No verb exists yet, so a round could only look and then idle to its
+ * deadline, re-running every ~25 minutes on any machine whose `custodian` key was set for reap's defaults. PR 4 flips
+ * it with `done`/`close`. Owner decision, 2026-11-13.
+ */
+export const ROUNDS_LIVE = false;
+
+/** `RunOpts.custodian`: the seat's seams. Production passes `{}`; the rest is for tests, which must never launch a real round. */
+export interface CustodianSeatOpts {
+  /** Tests only: `true` turns the seat on where `ROUNDS_LIVE` holds it. */
+  readonly live?: boolean;
+  readonly checkIntervalMs?: number;
+  /** The graceful exit's grace before a round is killed. */
+  readonly graceMs?: number;
+  readonly sandboxProblem?: () => Promise<string | null>;
+  readonly weakerNested?: () => Promise<boolean>;
+}
+
+export function seatLive(opts: CustodianSeatOpts): boolean {
+  return opts.live ?? ROUNDS_LIVE;
+}
+
+export function custodianPlatform(platform: NodeJS.Platform): "darwin" | "linux" | null {
+  return platform === "darwin" || platform === "linux" ? platform : null;
+}
+
+/**
+ * Whether this daemon holds a seat: the machine's own config carries the key, the process was started for one
+ * (`RunOpts.custodian`), rounds are live, and the platform has a fence. One predicate for the capability bit and the
+ * seat, so they cannot disagree.
+ */
+export function seatEnabled(
+  config: Pick<Config, "custodian">,
+  opts: CustodianSeatOpts | null | undefined,
+  platform: NodeJS.Platform,
+): boolean {
+  return (
+    config.custodian !== undefined &&
+    opts !== null &&
+    opts !== undefined &&
+    seatLive(opts) &&
+    custodianPlatform(platform) !== null
+  );
+}
+
+const MINUTE_MS = 60_000;
+export const CHECK_INTERVAL_MS = MINUTE_MS;
+
+/**
+ * C14 minus pause (PR 5): some tracked pane has stood `idle`, or unchanged on screen, for `everyMs`; the last round
+ * ended at least that long ago; none is running; the daemon is not draining for a restart. A pane counts only when C7
+ * lets the custodian act on it: its last state is not `needs-input`, and it carries no drain, hand-off or pass mark
+ * (`untouchable`) — else a pane no verb may touch would keep a round due forever (DESIGN.md records the narrowing).
+ */
+export function roundDue(o: {
+  readonly now: number;
+  readonly everyMs: number;
+  readonly lastEndedAt: number | undefined;
+  readonly running: boolean;
+  readonly draining: boolean;
+  readonly panes: readonly TrackedActivity[];
+  readonly untouchable: (pane: string) => boolean;
+}): boolean {
+  if (o.running || o.draining) return false;
+  if (o.lastEndedAt !== undefined && o.now - o.lastEndedAt < o.everyMs) return false;
+  return o.panes.some((pane) => {
+    if (pane.state === "needs-input" || o.untouchable(pane.pane)) return false;
+    const idle = pane.state === "idle" && pane.stateSince !== null && o.now - pane.stateSince >= o.everyMs;
+    const still = pane.screenSince !== null && o.now - pane.screenSince >= o.everyMs;
+    return idle || still;
+  });
+}
+
+/** Why an exclave cannot host a round before its round dir is looked at, null when it might. */
+export function exclaveSkip(
+  info: ExclaveScan["info"][number],
+  expired: (id: string) => boolean,
+): "signed-out" | "lapsed" | null {
+  if (!info.authOk || info.accountId === null) return "signed-out";
+  return expired(info.id) ? "lapsed" : null;
+}
+
+/**
+ * C12, C13: the exclave to run a round in. `eligible` holds the ids whose round dir is trusted, unplanted and
+ * resolves to that exclave. Lowest quota pressure wins; unknown quota ranks after known but stays eligible; ties go to
+ * scan order. `readings` is keyed by account id (`newestReadings`), not exclave id. `added` is 0: a round is not a
+ * task, and the per-task estimate is the leader's.
+ */
+export function pickExclave(o: {
+  readonly scan: ExclaveScan;
+  readonly readings: ReadonlyMap<string, QuotaReading>;
+  readonly expired: (id: string) => boolean;
+  readonly eligible: ReadonlySet<string>;
+  readonly model: string;
+  readonly now: number;
+}): Exclave | null {
+  const ranked: { readonly exclave: Exclave; readonly pressure: number | null }[] = [];
+  o.scan.exclaves.forEach((exclave, at) => {
+    const info = o.scan.info[at];
+    if (info === undefined || info.id !== exclave.id) return;
+    if (exclaveSkip(info, o.expired) !== null || !o.eligible.has(exclave.id)) return;
+    const reading = info.accountId === null ? undefined : o.readings.get(info.accountId);
+    ranked.push({
+      exclave,
+      pressure:
+        reading === undefined
+          ? null
+          : quotaPressure(
+              quotaWindows(reading).filter((window) => windowAppliesTo(window, o.model)),
+              () => 0,
+              o.now,
+            ),
+    });
+  });
+  const known = ranked
+    .filter((entry) => entry.pressure !== null)
+    .toSorted((a, b) => (a.pressure ?? 0) - (b.pressure ?? 0));
+  const unknown = ranked.filter((entry) => entry.pressure === null);
+  return [...known, ...unknown][0]?.exclave ?? null;
+}
+
+export type PickResult = { readonly exclave: Exclave } | { readonly none: string };
+
+/** The I/O the pick needs, injected: the real ones are `isDirTrusted`, `roundDirPlanted`, `ensureRoundDir`. */
+export interface PickDeps {
+  readonly scan: () => ExclaveScan;
+  readonly readings: () => ReadonlyMap<string, QuotaReading>;
+  readonly expired: (id: string) => boolean;
+  readonly model: string;
+  readonly now: () => number;
+  readonly roundDirFor: (exclave: Exclave) => string;
+  readonly rootExists: (root: string) => Promise<boolean>;
+  readonly trusted: (dir: string, configFile: string) => Promise<boolean>;
+  readonly planted: (dir: string) => Promise<boolean>;
+  /** mkdir 0700 and realpath, for the one exclave picked. */
+  readonly ensureDir: (dir: string) => Promise<string>;
+}
+
+/**
+ * Touches no disk but reads until the pick: each candidate's round dir is checked at its uncreated path (trust walks
+ * the path and its ancestors; a missing dir is unplanted), and only the exclave picked has its dir made. An
+ * exclave root that does not exist is ineligible; a root is never invented. A null pick says why, as ids and fixed
+ * reasons, for the seat's one warning.
+ */
+export function createPick(d: PickDeps): () => Promise<PickResult> {
+  return async () => {
+    const scan = d.scan();
+    const eligible = new Set<string>();
+    const reasons: string[] = [];
+    for (const [at, exclave] of scan.exclaves.entries()) {
+      const info = scan.info[at];
+      if (info === undefined || info.id !== exclave.id) continue;
+      const skip = exclaveSkip(info, d.expired);
+      if (skip !== null) {
+        reasons.push(`${exclave.id}: ${skip}`);
+        continue;
+      }
+      const dir = d.roundDirFor(exclave);
+      // oxlint-disable-next-line no-await-in-loop -- a handful of exclaves, one small read each
+      if (!(await d.rootExists(exclave.root))) reasons.push(`${exclave.id}: root missing`);
+      else if (exclaveOf(dir, scan.exclaves) !== exclave.id)
+        reasons.push(`${exclave.id}: round dir is in another exclave`);
+      // oxlint-disable-next-line no-await-in-loop
+      else if (!(await d.trusted(dir, exclave.configFile))) reasons.push(`${exclave.id}: round dir untrusted`);
+      // oxlint-disable-next-line no-await-in-loop
+      else if (await d.planted(dir)) reasons.push(`${exclave.id}: round dir holds settings or agents`);
+      else eligible.add(exclave.id);
+    }
+    const exclave = pickExclave({
+      scan,
+      readings: d.readings(),
+      expired: d.expired,
+      eligible,
+      model: d.model,
+      now: d.now(),
+    });
+    if (exclave === null) return { none: reasons.length === 0 ? "no exclave" : reasons.join("; ") };
+    const real = await d.ensureDir(d.roundDirFor(exclave));
+    if (exclaveOf(real, scan.exclaves) !== exclave.id)
+      return { none: `${exclave.id}: round dir resolves to another exclave` };
+    return { exclave };
+  };
+}
+
+export interface SeatRecord {
+  /** When the last round ended; due checks wait `everyMinutes` after it. */
+  readonly lastEndedAt?: number;
+  /** The running round, written ahead of its launch (`pane` null until it exists) so a restart or reload adopts it. */
+  readonly round?: {
+    readonly pane: string | null;
+    readonly startedAt: number;
+    readonly tmpDir: string;
+    readonly exclave: string;
+  };
+}
+
+export type CloseOutcome = "exited" | "killed" | "gone";
+
+export interface CustodianAuditLike {
+  readonly start: (exclave: string, pane: string | null, outcome: "started" | "launch_failed") => Promise<void>;
+  readonly kill: (pane: string, reason: "deadline" | "stray" | "off", outcome: CloseOutcome) => Promise<void>;
+  readonly end: (pane: string | null, reason: "deadline" | "exited" | "lost") => Promise<void>;
+}
+
+export interface SeatDeps {
+  readonly settings: CustodianConfig;
+  readonly now: () => number;
+  readonly checkIntervalMs?: number;
+  /** Tests: the round's deadline in ms, in place of `roundTimeoutMinutes`. */
+  readonly roundTimeoutMs?: number;
+  readonly activity: () => readonly TrackedActivity[];
+  /** A pane a hand-off, pass or drain ask marked: C7 keeps the custodian off it. */
+  readonly untouchable: (pane: string) => boolean;
+  readonly draining: () => boolean;
+  /** The capability was stopped: nothing is saved, and a late launch closes its own pane. */
+  readonly stopped: () => boolean;
+  readonly record: () => SeatRecord;
+  readonly save: (record: SeatRecord) => Promise<void>;
+  readonly pick: () => Promise<PickResult>;
+  readonly launch: (
+    exclave: Exclave,
+    onTmp: (tmpDir: string) => Promise<void>,
+  ) => Promise<{ readonly pane: string; readonly tmpDir: string }>;
+  readonly listRounds: () => Promise<readonly { readonly pane: string; readonly dead: boolean }[]>;
+  readonly paneAlive: (pane: string) => Promise<"live" | "dead" | "gone">;
+  readonly close: (pane: string) => Promise<CloseOutcome>;
+  readonly removeTmp: (tmpDir: string) => Promise<void>;
+  readonly audit: CustodianAuditLike;
+  readonly warn: (line: string) => void;
+}
+
+export function createCustodianSeat(d: SeatDeps): { readonly start: () => void; readonly stop: () => void } {
+  const everyMs = d.settings.everyMinutes * MINUTE_MS;
+  const timeoutMs = d.roundTimeoutMs ?? d.settings.roundTimeoutMinutes * MINUTE_MS;
+  let timer: ReturnType<typeof setInterval> | null = null;
+  let busy = false;
+  let lastNone: string | null = null;
+
+  // A reload's second `startDaemon` writes `state` too: the outgoing instance saving over it would clobber it
+  // (the guard `reapSchedule` keeps). The next process's `adopt` covers what is left.
+  const persist = async (record: SeatRecord): Promise<void> => {
+    if (d.stopped()) return;
+    await d.save(record);
+  };
+
+  const finish = async (
+    round: NonNullable<SeatRecord["round"]>,
+    reason: "deadline" | "exited" | "lost",
+  ): Promise<void> => {
+    await d.removeTmp(round.tmpDir);
+    await d.audit.end(round.pane, reason);
+    await persist({ lastEndedAt: d.now() });
+  };
+
+  /** C4: the round a restart or reload left is adopted with its original deadline; any other round pane is stray. */
+  const adopt = async (): Promise<void> => {
+    const round = d.record().round;
+    const panes = await d.listRounds();
+    const kept = panes.find((pane) => round?.pane === pane.pane && !pane.dead);
+    for (const pane of panes) {
+      if (pane === kept) continue;
+      // oxlint-disable-next-line no-await-in-loop -- one pane at a time: each close is a graceful exit
+      await d.audit.kill(pane.pane, "stray", await d.close(pane.pane));
+    }
+    if (round !== undefined && kept === undefined) await finish(round, "lost");
+  };
+
+  const launch = async (): Promise<void> => {
+    const picked = await d.pick();
+    if ("none" in picked) {
+      if (picked.none !== lastNone) d.warn(`custodian: no exclave can host a round: ${picked.none}`);
+      lastNone = picked.none;
+      return;
+    }
+    lastNone = null;
+    const { exclave } = picked;
+    const startedAt = d.now();
+    const lastEndedAt = d.record().lastEndedAt;
+    const ahead = (pane: string | null, tmpDir: string): SeatRecord => ({
+      ...(lastEndedAt === undefined ? {} : { lastEndedAt }),
+      round: { pane, startedAt, tmpDir, exclave: exclave.id },
+    });
+    try {
+      const launched = await d.launch(exclave, (tmpDir) => persist(ahead(null, tmpDir)));
+      if (d.stopped()) {
+        // Nothing saved this pane, so the incoming instance cannot adopt it: close it here.
+        await d.audit.kill(launched.pane, "stray", await d.close(launched.pane));
+        await d.removeTmp(launched.tmpDir);
+        return;
+      }
+      await d.audit.start(exclave.id, launched.pane, "started");
+      await persist(ahead(launched.pane, launched.tmpDir));
+    } catch (err) {
+      await d.audit.start(exclave.id, null, "launch_failed");
+      // A broken launch retries only after `everyMinutes`, never every tick.
+      await persist({ lastEndedAt: d.now() });
+      d.warn(`custodian: round launch failed: ${String(err)}`);
+    }
+  };
+
+  const step = async (): Promise<void> => {
+    const now = d.now();
+    const record = d.record();
+    const round = record.round;
+    if (round === undefined) {
+      const due = roundDue({
+        now,
+        everyMs,
+        lastEndedAt: record.lastEndedAt,
+        running: false,
+        draining: d.draining(),
+        panes: d.activity(),
+        untouchable: d.untouchable,
+      });
+      if (due) await launch();
+      return;
+    }
+    if (round.pane === null) return;
+    if (now >= round.startedAt + timeoutMs) {
+      await d.audit.kill(round.pane, "deadline", await d.close(round.pane));
+      await finish(round, "deadline");
+      return;
+    }
+    const alive = await d.paneAlive(round.pane);
+    if (alive === "live") return;
+    if (alive === "dead") await d.close(round.pane);
+    await finish(round, "exited");
+  };
+
+  const tick = async (): Promise<void> => {
+    if (busy || d.stopped()) return;
+    busy = true;
+    try {
+      await step();
+    } catch (err) {
+      d.warn(`custodian: seat pass failed: ${String(err)}`);
+    } finally {
+      busy = false;
+    }
+  };
+
+  return {
+    start: (): void => {
+      if (timer !== null) return;
+      busy = true;
+      void adopt()
+        .catch((err: unknown) => d.warn(`custodian: adopting a round failed: ${String(err)}`))
+        .finally(() => {
+          busy = false;
+        });
+      timer = setInterval(() => void tick(), d.checkIntervalMs ?? CHECK_INTERVAL_MS);
+      // The daemon's stop clears it; a handle dropped without one must not hold the process open.
+      timer.unref();
+    },
+    // Never closes the round: a reload or restart adopts it (C4).
+    stop: (): void => {
+      if (timer !== null) clearInterval(timer);
+      timer = null;
+    },
+  };
+}

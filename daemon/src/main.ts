@@ -3,51 +3,12 @@
 // in every Claude session on the machine (the session-events mod, in every
 // exclave), and a static `cli.ts` would load the MCP SDK and zod into each of
 // those runs — 47 ms against 11. `inbox` is the second: the inbox mod starts one per session and it lives for the
-// session's life, so loading the MCP SDK and zod into every session's listener would be pure cost. Every other
-// command imports what it needs once picked.
+// session's life, so loading the MCP SDK and zod into every session's listener would be pure cost. `custodian` is the
+// third: the round runs its verbs many times a turn. Every other command imports what it needs once picked.
+import { USAGE, type CommandName } from "./commands.ts";
+import { cmdCustodian } from "./custodian-cli.ts";
 import { cmdInbox } from "./inbox-cli.ts";
 import { cmdSessionEvent } from "./session-event-cli.ts";
-
-const USAGE = `seanced — séance daemon
-
-usage: seanced [command]
-
-  (none)      run the daemon in the foreground (launchd/systemd supervises)
-  init        write config skeleton + generate deviceId (never the PSK)
-  psk-import  store the PSK in the platform store — macOS login keychain, WSL DPAPI blob, or Linux TPM-sealed blob (prompts, or reads a pipe; never argv)
-  install     install and start the service (macOS launchd plist; Linux/WSL systemd user unit + linger, plus a logon pin task on WSL)
-              --system: the root-owned systemd unit that gets the TPM-sealed PSK delivered to it, needs sudo (docs/psk.md)
-  uninstall   stop the service and remove it, plus any symlink from link (--system for the system unit)
-  link        put seanced on PATH — a symlink to this file, so it tracks git pull: seanced link [dir]
-  unlink      remove the PATH symlink (only ones pointing at this checkout)
-  restart     restart the service (after git pull)
-  update      what a fleet update announce does, by hand: fast-forward the daemon's own checkout, bun install, restart
-              (refuses a dirty, re-branched or diverged checkout; restarts a daemon still on an older sha even when current)
-  doctor      preflight checks: config, binaries, roots, relay, service
-  status      service / socket / scan status
-  scan        discover repos now; caches for the next start unless a daemon is running
-  sessions    list running claude tmux windows, each with the id despawn takes
-  spawn       queue a session for the scheduler: seanced spawn <repo> [--here] [-t <title>] [[-p] <task>] (needs the relay, and a PSK this shell or its daemon holds)
-              --machine <name|here> / --account <alias|email|id>: pin it; --not <machine|here>: keep it off (repeatable)
-              --requires <trait>: (repeatable) only place it where every named trait is declared (traits in config.json; list_machines shows them)
-              --start: once the scheduler admits it, start it past the concurrency cap (as seanced start)
-              --autonomy <steer|checkpoint|auto>: how much the session decides on its own (default checkpoint; steer is plan mode)
-              --now: spawn on this machine right away instead: no relay, key, leader or daemon needed; takes no pin flags, --requires or --start
-  continue    resume a failed or cancelled task's, or a blocked awaiting-merge task's, session in its worktree, as a new queued task: seanced continue <task-id> [-p <note>] (needs the relay, and a PSK this shell or its daemon holds)
-  start       start a queued task now, past the concurrency cap (the app's Start now): seanced start <task-id> (needs the relay, and a PSK this shell or its daemon holds)
-  close       close a machine to new scheduled work; a leader that supports it passes its running tasks to other machines after 10 minutes (--wait blocks until the machine is empty; exit 2 when only work that can't move is left): seanced close [<machine>] [--now] [--wait] (--now interrupts its sessions at once instead of after 5 minutes; default: this one; over the relay, so needs a PSK this shell can read — a keyless box uses the PWA)
-  open        reopen a closed machine: seanced open [<machine>]
-  pass        pass a running task to a successor (the app's Pass to successor): pushes its branch, ends its session, queues the task that carries on: seanced pass <task-id> (needs the relay, and a PSK this shell or its daemon holds)
-  amend       change a task still waiting in the queue: seanced amend <task-id> [text…] appends to its prompt; --replace makes the text the prompt; --title, --model, --effort set those (needs the relay, and a PSK this shell or its daemon holds)
-  despawn     end a session: seanced despawn <id> [--force] — asks claude to exit (keeping its worktree), kills the pane after ~5s
-  reap        clean up after sessions: merged, clean, idle worktrees, merged branches, dead windows — [--dry-run] [--min-age-days <n>]
-  mcp         serve MCP over stdio for a local Claude Code; mcp install / mcp uninstall wire it into Claude's config
-  mod         mod install / mod uninstall — install this checkout's Claude Code mods (claude-mods/) into Claude
-  session-event  read one event as JSON on stdin and hand it to the local daemon (the session-events mod's call; silent)
-  inbox       hold this session's inbox listener open on the local daemon and print each message as a JSON line (the inbox mod's child; silent)
-  raycast     raycast install / raycast uninstall — build this checkout's Raycast extension and import it (macOS)
-  help        this text
-`;
 
 async function runForeground(): Promise<void> {
   const [
@@ -70,7 +31,12 @@ async function runForeground(): Promise<void> {
   // Self-update only under the supervisor that can actually relaunch us.
   const supervised = startedBySupervisor();
   if (!supervised) log.info("not started by a service manager — self-update is off for this run");
-  const daemon = await startSupervisor({ authHealth: {}, usageRefresh: {}, ...(supervised ? { selfUpdate: {} } : {}) });
+  const daemon = await startSupervisor({
+    authHealth: {},
+    custodian: {},
+    usageRefresh: {},
+    ...(supervised ? { selfUpdate: {} } : {}),
+  });
   const stopPower = startPowerLoop();
   const shutdown = createShutdown({
     info: (message) => log.info(message),
@@ -84,86 +50,50 @@ async function runForeground(): Promise<void> {
   await new Promise(() => {}); // run until signalled
 }
 
+type Cli = typeof import("./cli.ts");
+
+/** Typed against `COMMANDS`: a command with no entry here, or one that is not a command, does not compile. */
+const RUN: Record<
+  Exclude<CommandName, "session-event" | "inbox" | "custodian" | "help">,
+  (cli: Cli, rest: readonly string[]) => Promise<void>
+> = {
+  init: (cli) => cli.cmdInit(),
+  "psk-import": (cli) => cli.cmdPskImport(),
+  install: (cli, rest) => cli.cmdInstall(rest),
+  uninstall: (cli, rest) => cli.cmdUninstall(rest),
+  link: (cli, rest) => cli.cmdLink(rest),
+  unlink: (cli) => cli.cmdUnlink(),
+  restart: (cli) => cli.cmdRestart(),
+  update: (cli, rest) => cli.cmdUpdate(rest),
+  doctor: (cli) => cli.cmdDoctor(),
+  status: (cli) => cli.cmdStatus(),
+  scan: (cli) => cli.cmdScan(),
+  sessions: (cli) => cli.cmdSessions(),
+  spawn: (cli, rest) => cli.cmdSpawn(rest),
+  continue: (cli, rest) => cli.cmdContinue(rest),
+  start: (cli, rest) => cli.cmdStart(rest),
+  close: (cli, rest) => cli.cmdClose(rest),
+  open: (cli, rest) => cli.cmdOpen(rest),
+  pass: (cli, rest) => cli.cmdPass(rest),
+  amend: (cli, rest) => cli.cmdAmend(rest),
+  despawn: (cli, rest) => cli.cmdDespawn(rest),
+  reap: (cli, rest) => cli.cmdReap(rest),
+  mcp: (cli, rest) => cli.cmdMcp(rest),
+  mod: (cli, rest) => cli.cmdMod(rest),
+  raycast: (cli, rest) => cli.cmdRaycast(rest),
+};
+
+function isRunnable(command: string): command is keyof typeof RUN {
+  return Object.keys(RUN).includes(command);
+}
+
 async function runCommand(command: string, rest: readonly string[]): Promise<void> {
-  const cli = await import("./cli.ts");
-  switch (command) {
-    case "init":
-      await cli.cmdInit();
-      break;
-    case "psk-import":
-      await cli.cmdPskImport();
-      break;
-    case "install":
-      await cli.cmdInstall(rest);
-      break;
-    case "uninstall":
-      await cli.cmdUninstall(rest);
-      break;
-    case "link":
-      await cli.cmdLink(rest);
-      break;
-    case "unlink":
-      await cli.cmdUnlink();
-      break;
-    case "restart":
-      await cli.cmdRestart();
-      break;
-    case "update":
-      await cli.cmdUpdate(rest);
-      break;
-    case "doctor":
-      await cli.cmdDoctor();
-      break;
-    case "status":
-      await cli.cmdStatus();
-      break;
-    case "scan":
-      await cli.cmdScan();
-      break;
-    case "sessions":
-      await cli.cmdSessions();
-      break;
-    case "spawn":
-      await cli.cmdSpawn(rest);
-      break;
-    case "continue":
-      await cli.cmdContinue(rest);
-      break;
-    case "start":
-      await cli.cmdStart(rest);
-      break;
-    case "close":
-      await cli.cmdClose(rest);
-      break;
-    case "open":
-      await cli.cmdOpen(rest);
-      break;
-    case "pass":
-      await cli.cmdPass(rest);
-      break;
-    case "amend":
-      await cli.cmdAmend(rest);
-      break;
-    case "despawn":
-      await cli.cmdDespawn(rest);
-      break;
-    case "reap":
-      await cli.cmdReap(rest);
-      break;
-    case "mcp":
-      await cli.cmdMcp(rest);
-      break;
-    case "mod":
-      await cli.cmdMod(rest);
-      break;
-    case "raycast":
-      await cli.cmdRaycast(rest);
-      break;
-    default:
-      console.error(`unknown command "${command}"\n`);
-      console.log(USAGE);
-      process.exit(1);
+  if (!isRunnable(command)) {
+    console.error(`unknown command "${command}"\n`);
+    console.log(USAGE);
+    process.exit(1);
   }
+  await RUN[command](await import("./cli.ts"), rest);
 }
 
 const [command, ...rest] = process.argv.slice(2);
@@ -175,6 +105,9 @@ try {
       break;
     case "inbox":
       await cmdInbox();
+      break;
+    case "custodian":
+      await cmdCustodian(rest);
       break;
     case undefined:
       await runForeground();

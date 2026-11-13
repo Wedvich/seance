@@ -279,8 +279,21 @@ export const CUSTODIAN_LIMITS = {
   maxNudges: 20,
 } as const;
 
-const CUSTODIAN_MINUTE_FIELDS = ["everyMinutes", "closeAfterMinutes", "roundTimeoutMinutes", "interruptAfterMinutes"] as const;
-const CUSTODIAN_KEYS = ["model", "effort", "everyMinutes", "closeAfterMinutes", "roundTimeoutMinutes", "maxNudges", "interruptAfterMinutes"];
+const CUSTODIAN_MINUTE_FIELDS = [
+  "everyMinutes",
+  "closeAfterMinutes",
+  "roundTimeoutMinutes",
+  "interruptAfterMinutes",
+] as const;
+const CUSTODIAN_KEYS = [
+  "model",
+  "effort",
+  "everyMinutes",
+  "closeAfterMinutes",
+  "roundTimeoutMinutes",
+  "maxNudges",
+  "interruptAfterMinutes",
+];
 
 /** The key's fields are read here; an unknown key or a bad value throws, naming it. */
 function parseCustodian(raw: unknown, path: string): CustodianConfig | undefined {

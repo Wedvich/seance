@@ -1,11 +1,34 @@
-import type { RepoEntry } from "@seance/shared";
+import { stat } from "node:fs/promises";
+import type { QuotaReading, RepoEntry } from "@seance/shared";
 import { attachmentsRoot } from "./attachments.ts";
-import { daemonSink, drainAskAudit, messageAudit, pushAudit, reapAudit } from "./audit.ts";
-import type { SessionBackend } from "./backend.ts";
+import { custodianAudit, daemonSink, drainAskAudit, messageAudit, pushAudit, reapAudit } from "./audit.ts";
+import { DespawnFailure, type SessionBackend } from "./backend.ts";
 import { createBranchStates, type BranchStateDeps } from "./branch-state.ts";
 import { brokerRelay, createBroker } from "./broker.ts";
 import { REAP_DEFAULTS, type Config, type ResolvedPsk } from "./config.ts";
 import type { AuthHealth } from "./auth-health.ts";
+import { loadAgent } from "./custodian-agent.ts";
+import {
+  ensureRoundDir,
+  launchRound,
+  listRoundPanes,
+  readNotes,
+  removeRoundTmp,
+  roundDirFor,
+  roundDirPlanted,
+  sandboxProblem,
+  weakerNestedNeeded,
+} from "./custodian-launch.ts";
+import {
+  createCustodianSeat,
+  createPick,
+  custodianPlatform,
+  seatEnabled,
+  type CloseOutcome,
+  type CustodianSeatOpts,
+  type SeatRecord,
+} from "./custodian-seat.ts";
+import { despawnRound } from "./despawn.ts";
 import type { ExclaveScan } from "./exclaves.ts";
 import { platformFsmonitor } from "./fsmonitor.ts";
 import { createDrainAsk, drainInputShows, sendKeys, type DrainAsk } from "./drain-ask.ts";
@@ -30,6 +53,7 @@ import {
 } from "./session-events.ts";
 import type { Fetch } from "./seams.ts";
 import { capturePane, paneWindowName } from "./tmux.ts";
+import { isDirTrusted } from "./trust.ts";
 import type { TraitProbes } from "./trait-probes.ts";
 import type { UsageRefresh } from "./usage-refresh.ts";
 
@@ -59,6 +83,13 @@ export interface WiringCtx {
   readonly traitProbes: TraitProbes | null;
   /** Null unless `RunOpts.usageRefresh` enabled it; session events poke it, its own capability runs its timer. */
   readonly usageRefresh: UsageRefresh | null;
+  /** `RunOpts.custodian`: null in a test that did not ask for a seat, so it never starts a round in a developer's tmux. */
+  readonly custodian: CustodianSeatOpts | null;
+  /** The newest raw quota reading per account id (`newestReadings`): the seat ranks exclaves by it. */
+  readonly quotaReadings: () => ReadonlyMap<string, QuotaReading>;
+  /** The seat's record from the daemon's one `state` (`custodianSeatOf`), and where it is persisted. */
+  readonly custodianSeat: () => SeatRecord;
+  readonly custodianSaved: (record: SeatRecord) => Promise<void>;
   readonly rescan: () => Promise<unknown>;
   readonly lastReapAt: () => number | undefined;
   /** Persists `lastReapAt` through the daemon's one `state`. */
@@ -113,15 +144,22 @@ const fleetBroker: DaemonCapability = (ctx) => {
 
 /**
  * The custodian's per-pane facts (C15), one per process like `endedTasksFor`: a config reload restarts the daemon in
- * process, and a tracker per instance would forget every pane's state at each one. No reader yet: the due check and
- * its `sessions` verb are later PRs. Instances share its timer by count, so an outgoing instance's stop never
- * halts the incoming one's sampling.
+ * process, and a tracker per instance would forget every pane's state at each one. Its reader is the seat's due check
+ * (`custodianSeat`); instances share its timer by count, so an outgoing instance's stop never halts the incoming
+ * one's sampling.
  */
 const paneActivity = createPaneActivity({
   panes: readPanePids,
   capture: (paneId) => capturePane(paneId, { history: false }),
 });
 let paneActivityUsers = 0;
+
+/**
+ * Per daemon instance: the seat running (retention is on only then — without a reader nothing would prune the facts,
+ * which only a sampler pass does), and the session-events instance whose marks the due check reads.
+ */
+const seated = new WeakSet<WiringCtx>();
+const eventsOf = new WeakMap<WiringCtx, SessionEvents>();
 
 const sessionEvents: DaemonCapability = (ctx) => {
   // Where the kernel cannot name a socket's peer, an event's pane is its own
@@ -221,16 +259,15 @@ const sessionEvents: DaemonCapability = (ctx) => {
     onActivity: (exclave) => ctx.usageRefresh?.poke(exclave),
     onEnded: messages.onEnded,
     ...(drainAsk === undefined ? {} : { onState: drainAsk.observe, drainMark: (): boolean => ctx.closed() !== null }),
-    retain: paneActivity.observe,
+    retain: (pane, state, turnEnded): void => {
+      if (seated.has(ctx)) paneActivity.observe(pane, state, turnEnded);
+    },
   });
   late.events = events;
+  eventsOf.set(ctx, events);
   drainAsk?.start();
-  paneActivityUsers += 1;
-  paneActivity.start();
   return {
     stop: (): void => {
-      paneActivityUsers -= 1;
-      if (paneActivityUsers === 0) paneActivity.stop();
       drainAsk?.stop();
       events.stop();
       messages.stop();
@@ -238,6 +275,135 @@ const sessionEvents: DaemonCapability = (ctx) => {
     local: { sessionEvents: events.handle, messages },
     armPassClose: events.armPassClose,
     ...(drainAsk === undefined ? {} : { drainAsk }),
+  };
+};
+
+const closeOutcome = async (pane: string, graceMs: number | undefined): Promise<CloseOutcome> => {
+  try {
+    return (await despawnRound(pane, graceMs === undefined ? {} : { graceMs })).outcome;
+  } catch (err) {
+    if (err instanceof DespawnFailure && err.code === "session_not_found") return "gone";
+    throw err;
+  }
+};
+
+/**
+ * The custodian seat (docs/custodian.md; DESIGN.md, "The custodian's seat"). A daemon whose process was started for
+ * one (`RunOpts.custodian`) always cleans up after a seat that is off — a round left by a seat the config or a
+ * rollback turned off is closed, never orphaned — and holds a seat only where `seatEnabled` says so, the one
+ * predicate the `custodian` capability bit reads too.
+ */
+const custodianSeat: DaemonCapability = (ctx) => {
+  const opts = ctx.custodian;
+  if (opts === null) return { stop: (): void => {} };
+  const audit = custodianAudit(daemonSink);
+  const platform = custodianPlatform(process.platform);
+  const settings = ctx.config.custodian;
+
+  if (!seatEnabled(ctx.config, opts, process.platform) || settings === undefined || platform === null) {
+    // Whatever the seat left: the record's round, and any other round pane (a stray).
+    const sweep = async (): Promise<void> => {
+      const round = ctx.custodianSeat().round;
+      const panes = await listRoundPanes();
+      for (const { pane } of panes) {
+        // oxlint-disable-next-line no-await-in-loop -- one pane at a time: each close is a graceful exit
+        await audit.kill(pane, "off", await closeOutcome(pane, opts.graceMs));
+      }
+      if (round === undefined && panes.length === 0) return;
+      if (round !== undefined) await removeRoundTmp(round.tmpDir);
+      await audit.end(round?.pane ?? panes[0]?.pane ?? null, "lost");
+      if (!ctx.stopped()) await ctx.custodianSaved({ lastEndedAt: ctx.now() });
+    };
+    void sweep().catch((err: unknown) => log.warn(`custodian: closing a leftover round failed: ${String(err)}`));
+    return { stop: (): void => {} };
+  }
+
+  // The checks are async and `Started` is sync: the seat starts once they pass, and `stop` before that cancels it.
+  let seat: ReturnType<typeof createCustodianSeat> | null = null;
+  let cancelled = false;
+  let counted = false;
+  const release = (): void => {
+    if (!counted) return;
+    counted = false;
+    paneActivityUsers -= 1;
+    if (paneActivityUsers === 0) paneActivity.stop();
+    seated.delete(ctx);
+  };
+  const begin = async (): Promise<void> => {
+    const problem = await (opts.sandboxProblem ?? ((): Promise<string | null> => sandboxProblem(platform)))();
+    if (problem !== null) {
+      log.warn(`custodian: no rounds on this host — ${problem}`);
+      return;
+    }
+    const agents = await loadAgent();
+    if (cancelled) return;
+    const weakerNested = opts.weakerNested ?? weakerNestedNeeded;
+    paneActivityUsers += 1;
+    counted = true;
+    seated.add(ctx);
+    paneActivity.start();
+    seat = createCustodianSeat({
+      settings,
+      now: ctx.now,
+      ...(opts.checkIntervalMs === undefined ? {} : { checkIntervalMs: opts.checkIntervalMs }),
+      activity: paneActivity.all,
+      untouchable: (pane) => eventsOf.get(ctx)?.marked(pane) ?? false,
+      draining: () => ctx.endedTasks.draining,
+      stopped: ctx.stopped,
+      record: ctx.custodianSeat,
+      save: ctx.custodianSaved,
+      pick: createPick({
+        scan: ctx.exclaveScan,
+        readings: ctx.quotaReadings,
+        expired: (id) => ctx.authHealth?.expired(id) ?? false,
+        model: settings.model,
+        now: ctx.now,
+        roundDirFor,
+        rootExists: (root) =>
+          stat(root).then(
+            (info) => info.isDirectory(),
+            () => false,
+          ),
+        trusted: isDirTrusted,
+        planted: roundDirPlanted,
+        ensureDir: ensureRoundDir,
+      }),
+      launch: async (exclave, onTmp) =>
+        launchRound({
+          exclave,
+          roundDir: await ensureRoundDir(roundDirFor(exclave)),
+          settings,
+          agents,
+          notes: await readNotes(),
+          tmuxSession: ctx.config.tmuxSession,
+          ...(ctx.config.machineTag === undefined ? {} : { machineTag: ctx.config.machineTag }),
+          weakerNested: await weakerNested(),
+          platform,
+          onTmp,
+        }),
+      listRounds: listRoundPanes,
+      paneAlive: async (pane) => {
+        const found = (await listRoundPanes()).find((entry) => entry.pane === pane);
+        if (found === undefined) return "gone";
+        return found.dead ? "dead" : "live";
+      },
+      close: (pane) => closeOutcome(pane, opts.graceMs),
+      removeTmp: removeRoundTmp,
+      audit,
+      warn: (line) => log.warn(line),
+    });
+    seat.start();
+  };
+  void begin().catch((err: unknown) => {
+    log.warn(`custodian: the seat did not start: ${String(err)}`);
+    release();
+  });
+  return {
+    stop: (): void => {
+      cancelled = true;
+      seat?.stop();
+      release();
+    },
   };
 };
 
@@ -355,6 +521,7 @@ export const DAEMON_CAPABILITIES: readonly DaemonCapability[] = [
   branchStates,
   rescanSchedule,
   reapSchedule,
+  custodianSeat,
 ];
 
 export interface StartedCapabilities {

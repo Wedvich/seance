@@ -1137,6 +1137,8 @@ export interface MachineInfo {
  * `now`; clients gate `now`/"Drain now" on it, and the leader reads it in reconcile (`#asksItsDaemon`).
  * `messages`: as a daemon, binds `inbox` listeners by peer pid and delivers `message` frames to its own tasked panes
  * (docs/messaging.md); advertised only where the host names a socket's peer.
+ * `custodian`: as a daemon, holds a custodian seat (docs/custodian.md) — its config carries `custodian`. Nothing reads
+ * it yet; the Machines row will (custodian PR 5).
  */
 export const CAPABILITIES = {
   metrics: "metrics",
@@ -1162,6 +1164,7 @@ export const CAPABILITIES = {
   drainPass: "drainPass",
   drainAsk: "drainAsk",
   messages: "messages",
+  custodian: "custodian",
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];

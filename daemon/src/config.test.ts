@@ -4,7 +4,14 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll } from "bun:test";
 import { toBase64 } from "@seance/shared";
-import { configSkeleton, CUSTODIAN_DEFAULTS, loadConfig, loadPsk, type Config, type CustodianConfig } from "./config.ts";
+import {
+  configSkeleton,
+  CUSTODIAN_DEFAULTS,
+  loadConfig,
+  loadPsk,
+  type Config,
+  type CustodianConfig,
+} from "./config.ts";
 import { importDpapiPskValue } from "./dpapi.ts";
 import { importTpmPskValue, tpmAvailable } from "./tpmcreds.ts";
 import { pskImportCommand, readKeychainPsk } from "./keychain.ts";
