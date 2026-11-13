@@ -1,6 +1,15 @@
 import type { RelayClient } from "@seance/shared";
 import type { AppState } from "./view.ts";
 
+/** The archive's failures, worded like the daemon's: the one place a chart or the task history says which side answered (A36e). */
+export const ARCHIVE_NO_ANSWER = "No answer — the archivist may be offline.";
+
+/** Any other transport failure (`unknown`, `dropped`, ...): their shared lines name a machine, and a read has nothing to land. */
+export const ARCHIVE_UNDELIVERED = "The relay couldn't deliver the request to the archivist.";
+
+export const ARCHIVE_UNREADABLE =
+  "Couldn't read the archivist's answer. Update the archivist and the app to matching versions.";
+
 /** How often the card's counts are read again while the Machines screen is on screen. */
 export const ARCHIVE_STATUS_REFRESH_MS = 60_000;
 

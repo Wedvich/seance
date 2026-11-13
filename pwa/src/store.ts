@@ -61,7 +61,7 @@ import {
   type Verdict,
 } from "./state.ts";
 import { AccountStore } from "./account-store.ts";
-import { ArchiveStore } from "./archivist-store.ts";
+import { ARCHIVE_NO_ANSWER, ARCHIVE_UNDELIVERED, ARCHIVE_UNREADABLE, ArchiveStore } from "./archivist-store.ts";
 import { admitFiles, manifestOf, notAttachedText } from "./attachments.ts";
 import type { ReceivedShare } from "./share-inbox.ts";
 import { accountSeries } from "./chart.ts";
@@ -125,15 +125,6 @@ const HISTORY_ERRORS: Record<MetricsErrorCode, string> = {
   invalid_request: "The machine refused the request. Update seanced and the app to matching versions.",
   internal_error: "The machine couldn't read its history store.",
 };
-
-/** The archive's failures, worded like the daemon's: the one place a chart says which side answered (A36e). */
-const ARCHIVE_NO_ANSWER = "No answer — the archivist may be offline.";
-
-/** Any other transport failure (`unknown`, `dropped`, ...): their shared lines name a machine, and a read has nothing to land. */
-const ARCHIVE_UNDELIVERED = "The relay couldn't deliver the request to the archivist.";
-
-const ARCHIVE_UNREADABLE =
-  "Couldn't read the archivist's answer. Update the archivist and the app to matching versions.";
 
 const ARCHIVE_ERRORS: Record<MetricsErrorCode, string> = {
   too_large: "Too much history for one answer. A shorter range asks for fewer points.",
