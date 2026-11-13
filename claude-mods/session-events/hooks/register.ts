@@ -336,9 +336,12 @@ export const register: Register = (on) => {
       const ran = await settled(next(e));
       let prUrl: string | undefined;
       try {
-        const stdout: unknown = ran.result.stdout;
-        if (ran.deny === undefined && ran.isError !== true && typeof stdout === "string") {
-          prUrl = prUrlFrom(e.command, stdout) ?? undefined;
+        // An errored call still counts: `gh pr create && gh pr merge --auto` that fails at the
+        // merge has opened the PR, and losing it refuses the session's hand-off. Core gives an
+        // errored call no record, only the output as the model read it, stderr merged in.
+        const output: unknown = ran.isError === true ? ran.text : ran.result.stdout;
+        if (ran.deny === undefined && typeof output === "string") {
+          prUrl = prUrlFrom(e.command, output) ?? undefined;
         }
       } catch {
         // A result of a shape this mod does not know: no PR to report.

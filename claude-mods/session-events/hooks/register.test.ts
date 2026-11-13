@@ -252,6 +252,18 @@ describe("reports", () => {
     expect(sent.map((s) => s.report)).toEqual([{ state: "busy", prUrl: "https://github.com/acme/app/pull/12" }]);
   });
 
+  test("a PR opened by a command that then failed is still reported", async ($, on) => {
+    const sent = record(on);
+    on("tool.call", async () => ({
+      isError: true,
+      result: undefined,
+      text: "Exit code 1\nhttps://github.com/acme/app/pull/12\nGraphQL: Something went wrong",
+    }));
+    await $.tool.call({ tool: "Bash", command: "gh pr create --fill && gh pr merge --auto --squash" });
+    await settled(sent, 1);
+    expect(sent.map((s) => s.report)).toEqual([{ state: "busy", prUrl: "https://github.com/acme/app/pull/12" }]);
+  });
+
   test("a tool's error reaches the session as the tool gave it, and the turn goes on", async ($, on) => {
     const sent = record(on);
     on("tool.check", (_$, e) => ({ decision: e.approver === undefined ? "allow" : "ask" }));
