@@ -722,7 +722,8 @@ Séance's noise is cover for a real intruder.
    also report its own state and PR. That too is a claim about itself, bound to
    its own pane (Local op socket, "Session events"); its only other effect is
    asking for its exclave's `/usage` refresh, which runs only on a stale reading
-   (Daemon, "Usage refresh"). It can also report its
+   (Daemon, "Usage refresh"), and, while the owner has closed the machine, timing
+   the constant keys the daemon types into that pane (The drain's session ask). It can also report its
    own task `done` (#21, built 2026-10-23), which settles an `until: "reported"` task and releases
    `after: "done"` dependents. A session that lies about being done can do no more than one
    that exits. The
@@ -846,7 +847,10 @@ nothing checked it. The last is the gap they leave.
   formatter (`despawnAudit`), under the same origins. Reap destroys
   things — worktrees, branches, windows, fsmonitor daemons — and audits each one (`reapAudit`)
   under `cli` or under `schedule`, the fourth origin, which is the daemon's own
-  timer: a 3am cleanup must not read as someone at the desk. `successor` (2026-11-12) is the daemon pushing a task's branch on its session's own
+  timer: a 3am cleanup must not read as someone at the desk. `drain` (2026-11-13) is the daemon typing its
+  constant drain prompt, or the Escape that precedes it, into a pane of a machine its owner closed (Daemon,
+  "The drain's session ask"): one line per act, `outcome=typed|interrupted|skipped`, never the text.
+  `successor` (2026-11-12) is the daemon pushing a task's branch on its session's own
   `pass` frame and closing that session at its turn's end, once the scheduler confirmed the successor
   (`pass-close`), on the push and despawn lines: the session's own ask, as `handoff` is. A
   `push-branch` from the scheduler audits under `relay` (or `leader` in process), as every other
@@ -1012,6 +1016,19 @@ nothing checked it. The last is the gap they leave.
   carries it. A `closed` it cannot read in `state.json` loads as closed (fail closed, in
   `loadOrInitState` only; `readState` never logs). `cl` is never trimmed from `status`, a closed
   daemon's gate runs before any fetch or ledger write, and `routesClosed` is accepted only as `true`.
+  `now` is `true` only, honoured only by a daemon advertising `drainAsk`, offered only to such a target and never
+  persisted: it moves a deadline earlier and grants nothing else.
+- **The drain's session ask is constant keys, into ledger-bound panes, while closed** (2026-11-13, Daemon, "The
+  drain's session ask"; `CLAUDE.md` carries the requirement). The only keys `daemon/src/drain-ask.ts` sends are
+  `DRAIN_PROMPT` (`send-keys -l`), Enter, Escape and Ctrl+C, never a field of any frame, a task or a record.
+  Only into a live pane whose launch ledger holds a worktree launch of its task (`EndedTasks.askable`: not
+  reported done, not being closed, no hand-off or pass mark), only while this machine is closed at the `cl` the
+  ask began under. The text goes in only after that pane's `idle` carrying `turnEnded` and never while its last
+  frame is `needs-input`, so the drain can deny a permission and never grant one; Ctrl+C is sent once, never
+  twice (a second exits Claude Code), and no Escape belongs to the draft clear. Enter goes in only after every
+  re-check, the screen's own input box showing exactly the prompt among them. A `session-pass` carries `drain`
+  only while its machine is closed, and the leader writes `trigger: "drain"` for it only while that machine's
+  status carries `cl`. Audited `origin=drain` with the task id and outcome, never the text.
 - **A pass** (built 2026-11-12, the outside path and the session's own, its `pass` frame,
   `pass-close` and the `successor` origin; `CLAUDE.md` carries those requirements; Scheduler,
   "Passing to a successor"):
@@ -1388,7 +1405,7 @@ Who owns each frame in code — the place to change when a frame changes:
 | envelope `seal`/`open`, AAD, replay                                 | `shared/src/crypto.ts`                                                                                                                                                                                                                                                                                                                                                             | same file — both ends share it, or nothing decrypts                                                                                                                                                                                                                                                                                                                                                     |
 | ops `sessions` / `spawn`                                            | `sessions`: `pwa/src/store.ts` via `shared/src/app-client.ts`; `spawn`: no PWA sender since M4 PR 2 (older apps, `seanced spawn --now`)                                                                                                                                                                                                                                            | `daemon/src/handlers.ts` → backend in `daemon/src/backend-default.ts`; a `mode: "continue"` spawn (the leader's dispatch of a continue task, sealed `from: "scheduler"`) resolves its worktree from the launch ledger first (Daemon, "Continuing a session")                                                                                                                                            |
 | op `rescan`                                                         | `pwa/src/store.ts` via `shared/src/app-client.ts`, from a Machine-sheet row                                                                                                                                                                                                                                                                                                        | `daemon/src/handlers.ts` → the scan closure in `daemon/src/run.ts`; never reaches the backend                                                                                                                                                                                                                                                                                                           |
-| op `availability` (built 2026-11-13)                                | `pwa/src/store.ts` `setMachineOpen`, `daemon/src/availability-client.ts` (`seanced close`/`open`, MCP `set_machine_open`), over the relay as app-role only                                                                                                                                                                                                                         | `daemon/src/handlers.ts` `handleAvailability` → `MachineAvailability` in `daemon/src/run.ts`; sealed `from: "app"` only; writes `state.json` and refreshes `status` (Daemon, "Closing a machine")                                                                                                                                                                                                       |
+| op `availability` (built 2026-11-13; `now?` with drain 3/3)         | `pwa/src/store.ts` `setMachineOpen`, `daemon/src/availability-client.ts` (`seanced close`/`open`, MCP `set_machine_open`), over the relay as app-role only                                                                                                                                                                                                                         | `daemon/src/handlers.ts` `handleAvailability` → `MachineAvailability` in `daemon/src/run.ts`; sealed `from: "app"` only; writes `state.json` and refreshes `status` (Daemon, "Closing a machine")                                                                                                                                                                                                       |
 | op `despawn`                                                        | `daemon/src/mcp.ts` via `shared/src/app-client.ts`                                                                                                                                                                                                                                                                                                                                 | `daemon/src/handlers.ts` → `daemon/src/despawn.ts` through the backend                                                                                                                                                                                                                                                                                                                                  |
 | `status` (daemon→relay)                                             | `daemon/src/run-collectors.ts` via `daemon/src/relay-client.ts`: every 30s, and after each register (`ax`/`ae`/`au` from `daemon/src/auth-health.ts` through the `auth` collector, `tf`/`tu` from `daemon/src/trait-probes.ts` through the `traits` collector; `cl` through the `closed` collector, from `state.json`)                                                             | `relay/src/hub.ts` (bounds-checked in `relay/src/wire.ts`): latest on the socket attachment, kept in the entry on close/sweep until the next register                                                                                                                                                                                                                                                   |
 | `status` (relay→app)                                                | `relay/src/hub.ts`, forwarded as it arrives; latest per daemon also rides `registry`                                                                                                                                                                                                                                                                                               | `shared/src/app-client.ts` — opened like `machine-info`, bound to its `deviceId`, replay guard skipped                                                                                                                                                                                                                                                                                                  |
@@ -1744,7 +1761,7 @@ Layer 2 (end-to-end encrypted ops, PWA→daemon request/response):
   nothing and needs to. The daemon's transport allowlists it — any other op
   arriving group-addressed is dropped before dispatch.
 - `rescan {}` → `{ repos, scannedAt }`; daemon re-registers if the set changed.
-- `availability { open }` → `{ ok: true, closed: number | null } | { ok: false, code, message }`; app-sealed only (Daemon, "Closing a machine").
+- `availability { open, now? }` → `{ ok: true, closed: number | null } | { ok: false, code, message }`; app-sealed only (Daemon, "Closing a machine"). `now` is `true` only: a daemon advertising `drainAsk` skips the session ask's wait before its interrupt (Daemon, "The drain's session ask").
   The app folds the reply into the machine it came from, overriding that
   machine's register blob until a later one carries the scan: an unchanged set
   produces no register, so the reply is the only report the scan ever gets.
@@ -1865,10 +1882,11 @@ leader (Scheduler, "The leader"), each `T | SchedulerError`:
   a transport code (`PassCloseResponse`), scheduler → daemon, 10 s timeout. It answers at once and
   never waits for the close, so `despawn`'s reply semantics and its 20 s timeout are untouched
   (built 2026-11-12; Local op socket, "Session events", `pass`).
-- `session-pass { session, taskId, exclave, remoteBranch, tip, record?, at }` (`SessionPass`), an
+- `session-pass { session, taskId, exclave, remoteBranch, tip, record?, drain?, at }` (`SessionPass`), an
   `EventOp` daemon → scheduler, fire-and-forget like `session-event`. Every field is the daemon's own
   except `record`, the session's claim: at most `SUCCESSOR_RECORD_MAX` (7 168) UTF-16 units, never
-  logged (built 2026-11-12).
+  logged (built 2026-11-12). `drain` is `true` only, set while the sending daemon's machine is closed; the
+  leader reads it only beside a status of that machine carrying `cl` (Daemon, "The drain's session ask").
 - `pause { until, account? }` (`PauseRequest`) and `resume { account? }` (`ResumeRequest`) →
   `{ holds }` (`PauseResponse`), every hold in force after the change (M3 item 5; Scheduler,
   "Pause"). `queue` replies carry the same `holds`.
@@ -7650,7 +7668,8 @@ docs/scheduler.md, "Successor", has the stages and is where each is marked done.
   longer is `running`, `needs-input` or `lost` carrying `successor`. It never acts on `idle` events.
   **Reconcile:** from the first tick after takeover (which the host runs at once) and on every tick, each `running`, `needs-input` or connected `lost`
   task carrying `successor`, in neither `#passing` nor `#passInFlight`, gets an entry with a fresh
-  deadline and: when its successor's `succeeds.trigger` is `"session"`, or the successor cannot be
+  deadline and: when its successor's `succeeds.trigger` is `"session"` (or `"drain"` on a machine that also
+  advertises `drainAsk`, where the daemon's ask made the pass), or the successor cannot be
   read, and its machine advertises `successorSelf`, `pass-close` is re-sent (idempotent; a close at
   the next turn's end is the gentler error); otherwise it is closed at once through `#endSession`.
   Only the leader-written `successor` and the leader's own `pass-close` ever close a session for a
@@ -7916,9 +7935,9 @@ waiting task's prompt, title, model and effort in place, under its own id.
 
 docs/drain.md is the spec of the whole feature; this section is what its first build-order item
 decided. Closing stops the scheduler placing new work on a machine. What already runs there is passed to
-other machines after a grace, by the leader (item 2, "The drain's outside pass" below); asking the
-session to pass itself first (item 3) is spec only, so until it lands a session may still be passed
-with an uncommitted tree refused (`dirty_worktree`).
+other machines after a grace, by the leader (item 2, "The drain's outside pass" below), and each session is
+first asked to commit and pass itself, by its daemon (item 3, "The drain's session ask" below), since an
+outside pass of an uncommitted tree is refused (`dirty_worktree`).
 
 - **State is the daemon's own and sticky.** `state.json` carries `closed: { at }` (absent when
   open); it survives restarts, tmux restarts and reboots until reopened. `loadOrInitState` fails
@@ -7929,14 +7948,17 @@ with an uncommitted tree refused (`dirty_worktree`).
   threat-model entry, to close a machine that takes no work offline anyway), a `config.json` field (the
   operator's file, out of reach from a phone) and reopening on a new boot id (reopens a box taken down
   because it was broken).
-- **`availability { open }`** is a request op, answered only when sealed `from: "app"` on the relay
+- **`availability { open, now? }`** is a request op, answered only when sealed `from: "app"` on the relay
   leg (`origin` `relay`); the local socket and the fleet broker carry neither it nor any widening
   (`LOCAL_OPS` and `BROKER_OPS` are unchanged, owner decision), so the CLI and MCP go over the relay as
   app-role and a keyless box refuses and points to the PWA. It is idempotent: a request that changes
   nothing is answered with the current state. The reply is `{ ok: true, closed }`, `closed` being the
   close time or null. Audited `audit availability origin=relay open=<true|false|-> outcome=<closed|
   reopened|unchanged|refused|invalid_request|unsupported|internal_error>`; no payload beyond that.
-  `now?` (the drain's grace) arrives with the drain; until then it is accepted and ignored.
+  `now?` (`true` only; any other value is dropped) skips the session ask's wait before the interrupt
+  (below). A daemon advertising `drainAsk` honours it, on a fresh close and on an already-closed machine
+  alike, and appends ` now=true` to the audit line only when it was set, so existing lines stay byte-identical;
+  an older daemon drops it unread. It is never persisted.
 - **`MachineStatus.cl`** is the close time in unix ms. It rides the sealed status, so the relay learns
   nothing, and `fitStatus` never trims it: a trimmed `cl` would read as open. A set or cleared `cl`
   asks the status loop for a fresh status (`StatusLoop.refresh`, as `drn` does), so the leader hears it
@@ -7961,19 +7983,20 @@ with an uncommitted tree refused (`dirty_worktree`).
   about locking the box.
 - **Capabilities.** `CAPABILITIES.close` (a daemon answers `availability`) and `CAPABILITIES.drain` (a
   leader routes around `cl` and sends `routesClosed`; named for the feature: `drain` means exactly that, and
-  the drain's outside pass (`CAPABILITIES.drainPass`, built) and the session ask (`CAPABILITIES.drainAsk`,
-  not built) each have a capability of their own, so a client can tell the builds apart).
+  the drain's outside pass (`CAPABILITIES.drainPass`) and the session ask (`CAPABILITIES.drainAsk`)
+  each have a capability of their own, so a client can tell the builds apart).
   A close is offered only to a target advertising `close` under a verified leader advertising `drain`; a
   reopen needs only `close`.
 - **Surfaces.** The PWA's Machines screen has an "Open for work" switch in the machine's menu, a Closed
   badge and a confirm sheet; a pin on a closed machine says "<name> is closed: this waits until it
   reopens" and the picker prefixes "closed to scheduled work". `seanced close|open [<machine>]` act on
-  this machine when none is named; MCP `set_machine_open { machine, open }` and a `closed` ISO time or
+  this machine when none is named, `seanced close --now` sending `now`; MCP `set_machine_open { machine,
+  open, now? }` and a `closed` ISO time or
   null on `list_machines`. The tool ends nothing and sends no keys, but, like `pass_task`, it changes
   what the fleet does, so it stays behind Claude Code's per-tool approval and is never allowlisted (docs/psk.md).
   The archivist and the relay are unchanged: `status` is sealed to the app, and the archivist's
   `parseMachineStatus` ignores `cl`. Item 2 adds the confirm sheet's counts, a closed machine's drain
-  row, `--wait` and `list_machines`' `drain` (below).
+  row, `--wait` and `list_machines`' `drain` (below); item 3 adds `now` and the ask's wording.
 - **Threat model.** No new power: closing every machine stops the queue, as `pause` does. The op is
   sealed and replay-guarded, answered only for an app, and audited.
 
@@ -7982,7 +8005,7 @@ with an uncommitted tree refused (`dirty_worktree`).
 A closed machine's work is passed off by the leader (docs/drain.md is the spec; this is what item 2
 decided). Capability `CAPABILITIES.drainPass`, advertised by every daemon since any may lead; a client
 shows counts, `--wait` and the new texts only under a verified leader that advertises it, and otherwise
-keeps item 1's behaviour. `CAPABILITIES.drainAsk` is defined for item 3 and advertised by nobody.
+keeps item 1's behaviour. `CAPABILITIES.drainAsk` is item 3's (below).
 
 - **One pass per task, through the existing pass.** The leader's pass loop finds a task `running` or
   `needs-input` on a machine whose status carries `cl`, and calls `Scheduler.pass(id, "drain")`: the
@@ -8004,7 +8027,8 @@ keeps item 1's behaviour. `CAPABILITIES.drainAsk` is defined for item 3 and adve
   close` and MCP `set_machine_open`, noted beside `drainSelfPassMs`, since a client cannot read the
   leader's config. docs/drain.md's "pass at once when the machine lacks `successorSelf`" is not built:
   every machine gets the grace, so a mistaken close is recoverable and a session may pass itself
-  meanwhile. `drainAsk` is defined and advertised by nobody; this leader does not read it.
+  meanwhile. The leader reads `drainAsk` in one place only: `#asksItsDaemon` (below, "The drain's session
+  ask").
 - **One at a time per machine, detached.** `#drainPasses` holds the in-flight pass per machine; the
   scheduler pass never awaits a push. A finished pass frees its machine before its own `tick`, which
   starts the next task, so a drain costs one push per task rather than one per tick. A task under a
@@ -8038,8 +8062,8 @@ keeps item 1's behaviour. `CAPABILITIES.drainAsk` is defined for item 3 and adve
   re-reads its sessions on `queue-changed` (at most once per ten seconds, a nudge inside the spacing read when it ends: a box parked closed for days
   must not cost a read per nudge), when the Machines screen opens and when its status's session
   counts change; a sessions read not yet answered reads "reading", an unanswered one "unknown". The
-  sheet folds a `needs-input` task into "N running tasks" where docs/drain.md §8 wanted a separate
-  "waiting on you" line, and lists an untasked pane per line rather than counting it. `seanced close
+  sheet folds a `needs-input` task into "N running tasks" (on a `drainAsk` target it adds a separate
+  "waiting on you" line, below), and lists an untasked pane per line rather than counting it. `seanced close
   [--wait]` exits 0 when empty (a successor still `unplaced` is listed after "is empty" and does not
   block it), 2 when only stuck work is left, 1 on a failure; it uses the close reply's `closed` as the
   drain's `cl` since status lags. Exit 1 also covers a reopen (a status without `cl` that was sampled after
@@ -8054,11 +8078,124 @@ keeps item 1's behaviour. `CAPABILITIES.drainAsk` is defined for item 3 and adve
   (it fails their `parseSucceeds`), as for `"quota"`; an older leader nominee holds such a record
   unreadable and never places it, and a rolled-back leader neither reads `Task.drained` nor drains at all. A new client against an older leader shows item 1's
   behaviour (no `drainPass`). Deploy order: daemons, then PWA/CLI.
-- **Deferred.** docs/drain.md's step A (the session ask, item 3), §6 (a closed leader keeps leading; the
-  sheet's warning about the only nominee) and §12's time-from-close-to-empty measure are not built; the
-  pass's own `audit pass … trigger=drain` line is the one measure.
+- **Deferred.** docs/drain.md's §6 (a closed leader keeps leading; the sheet's warning about the only
+  nominee) and §12's time-from-close-to-empty measure are not built; the pass's own `audit pass …
+  trigger=drain` line is the one measure.
 - **Threat model.** No new frame. The pass is the manual pass's, so its invariants (CLAUDE.md) hold;
   the stamp is written only by the leader through the one task sealer, never from a frame.
+
+### The drain's session ask — built (drain 3/3)
+
+A closed machine's sessions are asked to move themselves before the leader moves them (docs/drain.md is the spec's
+remainder; this is what item 3 decided). Capability `CAPABILITIES.drainAsk`, advertised by every daemon of this
+build: `now`, "Drain now", `seanced close --now`, MCP `now`, the close sheet's ask wording and its "N waiting on
+you will have its question dismissed" line are all gated on the target advertising it, never on `close` or
+`drain`. The ask is the daemon's, since it owns the panes (`daemon/src/drain-ask.ts`); the leader needs no new
+frame, only a mark on a frame it already takes.
+
+- **What is typed.** One constant, `DRAIN_PROMPT`: why (the machine is closing for new work), what to do
+  (stop where you are, commit everything, a WIP commit is fine, call the seance MCP tool `pass_to_successor`
+  with a record of where you stand and what comes next, the question you were waiting on included, and end
+  your turn) and what not to (start anything new). One line, no digit (a permission dialog takes number keys as
+  choices), no leading `-` (tmux would read a flag), no `\n` or `\r` (a newline in `send-keys -l` text submits
+  early); a test asserts all of it. It is constant on purpose: nothing from any frame, the task or the record
+  reaches `send-keys`, so the daemon types no private text and no peer chooses any. The earlier rejection of
+  `send-keys` for the _seed_ prompt (Daemon, spawn) does not apply: that text was private and raced the TUI's
+  startup, and this is public and the session is live. The session's own pass (`pass_to_successor`) is then the
+  existing path: the daemon pushes, the leader creates the successor, the daemon closes the pane at its turn end.
+  The exclave's Claude permissions must allow `mcp__seance__pass_to_successor` (README, step 6's `pass_to_successor` paragraph), or
+  the session stops at a permission dialog the drain will not answer; the interrupt at the deadline then ends it.
+- **Spike, 2026-11-13, Claude Code 2.1.323** (a live session in a private tmux server, `-f /dev/null`, manual
+  permission mode, a throwaway mod logging `turn.start`, `turn.complete`, `tool.check` and `tool.call`, the events
+  the session-events mod reads). Held: typed text plus Enter at a turn-ended idle starts a new turn (a one-line
+  508-character prompt, non-ASCII included, reached `turn.start` unchanged); Esc on a permission dialog rejects the
+  call and `turn.complete` follows at once (`reason=answer`, reported as `idle` with `turnEnded`); Esc on an
+  AskUserQuestion likewise; Esc on a busy turn ends it (`reason=aborted`, also a turn-ended idle); Esc on an idle
+  box raises no event. **Spike 2** (same day, same version) ran the whole sequence (Esc on a busy turn, the
+  turn-ended idle, a draft clear, the prompt, Enter) and found what changed the design: the graceful despawn's
+  `Escape` then `C-c`, 150 ms apart, is right for a box holding a draft, but two Escapes that close together on an
+  _empty_ box open Claude Code's Rewind menu, which drops the typed text and turns Enter into a restore. So the
+  draft clear is `C-c` alone, which clears a single- and a multi-line draft and an empty box alike, and arms "Press
+  Ctrl-C again to exit", disarmed by the typed text. It is sent once and never twice: a second Ctrl+C exits Claude
+  Code.
+- **When.** On a close the daemon enumerates its live panes and keeps those `EndedTasks.askable` accepts: a
+  launch of the pane's task is in its ledger, a worktree one (never `here`: it has no branch to push), no `done`
+  report noted, no close under way, and the pane carries no hand-off or pass mark (`SessionEvents.marked`). For
+  each: a pane whose last frame is a turn-ended `idle` (an `idle` carrying `turnEnded`; a respawn's plain idle
+  never counts) is typed into at once; a pane that is not waits for one. If none comes by `cl +
+  DRAIN_INTERRUPT_MS` (5 minutes) the daemon sends Escape, which ends the turn, and the turn-ended idle that
+  follows is typed into; `now` sets the deadline to the moment of the request. Once interrupted, a pane with no
+  turn-ended idle within `DRAIN_SKIP_MS` (30 seconds) is skipped (audited) and left to the leader's pass.
+  **`needs-input`:** the owner asked that nothing in a drain wait on them, but the mod also reports an
+  _approved_ call as `needs-input` for as long as it runs (Session events, "The wait reason"), so an Escape at
+  once would kill running commands. So only `reason: "question"` (an open AskUserQuestion, which nobody is
+  waiting on a result of) is Escaped at once, on the close or when the pane turns to one; a `permission` wait or
+  one with no reason is treated as busy and interrupted at the deadline, so nothing waits on the person beyond 5
+  minutes (none with `now`). **The text is never typed while the pane's last frame is `needs-input`, of any
+  reason**: Enter on a permission dialog can approve it, so the drain can deny a permission and never grant one.
+- **The typing.** Re-read the panes (still live, still that task, not marked, still `askable`, no frame from the
+  pane since the one that triggered this); `C-c`; one `KEY_GAP_MS`; `send-keys -l DRAIN_PROMPT`; one gap; then,
+  with no `await` between the last check and the key, re-check that this machine is still closed at the same
+  `cl`, that the pane has sent no frame since, that it is neither marked nor closing, and that **the screen's input
+  box holds exactly the prompt** (`inputBoxShows`: the text between the last two full-width `─` rules, a leading
+  `❯`, whitespace-normalised, equal to the prompt; a permission dialog, a question, the Rewind menu or the prompt
+  only in the transcript above an empty box fail it; read in memory, never returned or logged). Only then Enter.
+  There is no abort between `C-c` and the text: an abort there would leave "Ctrl-C again to exit" armed for the
+  next attempt's `C-c`. A text send that tmux refuses drops the entry (`skipped`) for the same reason. A
+  turn-ended idle that arrives while a sequence runs is tried again once it settles. The graceful despawn's
+  `Escape`/`C-c` pair is not reused for the clear (above); its `KEY_GAP_MS` and pane-id check are.
+- **Residual race.** The screen check is a snapshot: between it and Enter a dialog could still open (a
+  background subagent finishing, a tool call that had not reported needs-input yet). The re-checks narrow the
+  window to the two tmux round trips of the check and the key; they do not close it, and a frame cannot prove
+  the absence of a dialog it has not yet sent. Accepted: the keys are constant, the person is the owner of the
+  box they closed, and the worst case is one Enter on a dialog (an approval of a call the session had already
+  asked for). A session with a background subagent running reads idle between turns; the drain asks it anyway,
+  and the session's own commit and pass are what matter.
+- **The mark.** The daemon sends its `session-pass` with `drain: true` whenever this machine is closed
+  (`SessionEventDeps.drainMark`), for any session's pass, asked or not. The leader writes `succeeds.trigger:
+  "drain"` for it only when the sending machine's status carries `cl` (`closedAt(machine)`; otherwise `"session"`
+  as before), so a daemon's claim only chooses a label for a pass the session itself asked for, and a machine
+  whose status says it is open never gets one. The leader's audit line reads `trigger=drain`; `drainView`
+  counts the successor as moved, and it keeps `steer` as any drain successor does.
+- **Who closes the pane.** A drain successor from a session pass is closed by its daemon at the turn end, as a
+  session pass always is. `#asksItsDaemon` therefore also holds for `trigger: "drain"` on a machine advertising
+  both `successorSelf` and `drainAsk`: reconcile re-sends `pass-close` instead of despawning at once. The cost:
+  an outside drain pass (step B) whose successor then waits on that daemon's close keeps the predecessor's pane
+  until its turn ends or the 2-minute close deadline (`#closePasses`) despawns it, where it used to be closed at
+  once. Without `drainAsk` the rule is unchanged. A session pass that joins an outside pass already in flight
+  (the leader's drain pass, started 10 minutes after `cl`) is no longer swallowed by it: if the outside pass was
+  refused before the successor's create (the dirty tree it read before the session committed), the session's
+  runs as its own, with the commit and the record; one that succeeded answers it, as before.
+- **Reopen, restart.** A reopen that changes state drops every entry and timer; a prompt already typed stays
+  typed, and a session that goes on to pass itself may land anywhere, this box included. Nothing is persisted:
+  a restart while closed re-enumerates (`start`), one ask per pane per `cl` per process, so a pane asked and
+  still working gets one more prompt after a restart. A pane reused for another task, an `ended` frame or a
+  pane that is marked drops its entry.
+- **Where it sits.** `SessionEventDeps.onState` is called for every bound, tasked frame with its state,
+  `turnEnded`, reason and whether a hand-off or pass close began on this very frame (the outbox coalesces; this
+  does not). That is the only effect of a session's state on the ask: it times the constant keys, and no frame
+  field chooses what is typed or which pane. `SessionEvents.marked` also holds while a hand-off's or a pass's own
+  close keys are going in (a `closing` set), which a mark alone did not cover once the mark was consumed.
+- **Skew.** A daemon without `drainAsk` asks nothing; the PWA, `seanced` and MCP show item 1 and 2's wording for
+  it and refuse `now` locally, naming `seanced update`, and an old daemon would have ignored `now` anyway. An
+  older leader reads `drain` on a `session-pass` as nothing (its parser drops unknown keys) and writes `session`,
+  so the successor is not counted as moved by `drainView` but is otherwise the same. A new leader with an old
+  daemon never sees a mark. Deploy order: daemons, then PWA/CLI.
+- **Rejected.** _Typing at a plain `idle`:_ a respawn sends one mid-work. _Enter while `needs-input`:_ approves a
+  permission. _Persisting what was asked:_ a restart re-asking is one extra prompt; a record would be a new
+  file and a new thing to go stale. _A new frame kind for the ask, or a separate `trigger` for the marked pass:_
+  the mark on `session-pass` is one bit the leader checks against `cl`, and `drain` already names the outside
+  pass's trigger. _Making the leader shorten step B on `now`:_ the leader never sees `now` (it is the daemon's
+  request, not a frame it takes), and step B stays the backstop at least 5 minutes after the interrupt. A known
+  cost of that: with `now`, a session that has not passed itself within the leader's 10-minute grace meets the
+  outside pass, which may pre-empt a session still committing.
+- **Threat model.** The new power is a daemon typing into a pane, so it gets its own invariant (CLAUDE.md;
+  "Threat model", invariants): constant text and keys only; only into a pane its own launch ledger binds to a
+  worktree task (`askable`); only while closed; the text only at a turn-ended idle and never while
+  `needs-input`; the Enter re-check; audited `audit drain origin=drain task=<quoted id>
+  outcome=<typed|interrupted|skipped>` (and ` now=true` on `availability`'s line), never the text. It is prompt
+  text for a session the same person runs, so it sits under the prompt-injection item (Threat model, item 6),
+  like the successor record. No new frame, no relay or archivist change.
 
 ## Reap (`seanced reap`) — designed 2026-10-09
 
@@ -9388,11 +9525,13 @@ and receives registry pushes. Zero relay/DO changes; every channel property
   boxes broker it ("Fleet broker"). `get_queue` shows `continues` on a continuation and `continuable:
   true` on a task that can be continued. Needs `mcp__seance__continue_task` allowed where an agent calls
   it, as `report_task_done` does.
-- **`set_machine_open { machine, open }`** (built 2026-11-13; Daemon, "Closing a machine"). Closes a
+- **`set_machine_open { machine, open, now? }`** (built 2026-11-13; Daemon, "Closing a machine"). Closes a
   machine to new scheduled work or reopens it. Gated like the PWA: a close needs the target to advertise
   `close` and the verified leader `drain`, a reopen only `close`. It goes over the relay as app-role,
   even for this machine; a keyless server (the broker) refuses and names the PWA, since `availability`
-  is not a brokered op. `list_machines` gains `closed`, an ISO time or null, and, under a leader advertising `drainPass`, `drain` on a closed machine (`moving`, `waitingOnYou`, `moved`, `stuck`, `empty`; DESIGN.md, "The drain's outside pass"); this machine's own sessions come through the local socket, since the broker refuses a request aimed at its own daemon.
+  is not a brokered op. `now` (a close only) skips the session ask's wait before its interrupt and is refused,
+  before anything is sent, for a target not advertising `drainAsk`; the reply says whether the target's
+  sessions are asked to pass themselves, and names the 10-minute outside pass only under a `drainPass` leader. `list_machines` gains `closed`, an ISO time or null, and, under a leader advertising `drainPass`, `drain` on a closed machine (`moving`, `waitingOnYou`, `moved`, `stuck`, `empty`; DESIGN.md, "The drain's outside pass"); this machine's own sessions come through the local socket, since the broker refuses a request aimed at its own daemon.
 - **`pass_task { taskId }`** (built 2026-11-12; Scheduler, "Passing to a successor").
   Passes a running task to a successor: its machine's daemon pushes the branch and the session is
   ended, as the PWA's "Pass to successor" does. Gated on `leaderAdvertises(lease,
@@ -10313,6 +10452,12 @@ a third frame kind on the op socket, and a widening of what the socket takes in.
   screen (an alert for it is that same _Later_ item). _Decided: a `pass-close` answered `no_pane` sets the
   task's close deadline to now_ (the session is gone, so no turn's end will close it, and the 2-minute
   grace only holds the successor blocked), and reconcile's re-ask is not awaited by the tick.
+- **The drain ask's hook** (built 2026-11-13; "The drain's session ask"). While this machine is closed, a bound,
+  tasked frame's state, `turnEnded` and reason are also handed to the daemon's drain ask (`onState`), once per
+  frame and before any coalescing, and a pass the session sends then carries `drain: true`. That is the whole
+  effect: the state times the constant keys the daemon types into that pane (and the Escape after the deadline),
+  and no frame field chooses what is typed or which pane. The pane is still the kernel's answer, the task the
+  pane's own.
 - **Every field is untrusted; the pane is the kernel's answer.** The 0700 run
   directory admits any process of this user, and every session is this user, so a
   frame could name any pane or task. The daemon asks the kernel who connected. Bun
